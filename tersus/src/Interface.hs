@@ -20,7 +20,7 @@ import Modules (ModuleId (..), renderModuleId)
 import Syntax
 import Types
 import TypeCheck (ImportEnv (..), emptyImportEnv)
-import TypeCheckCore (TcState (..), Template, functionType, isRefType)
+import TypeCheckCore (TcState (..), Template (..), functionType, isRefType)
 import Utils (Result (..))
 
 data InterfaceFunction = InterfaceFunction
@@ -75,6 +75,8 @@ extractLibInterface modu = extractInterfaceWith (const True) True modu
 
 extractInterfaceWith :: (Name -> Bool) -> Bool -> ModuleId -> [Statement] -> [Statement] -> TcState -> Result ModuleInterface String
 extractInterfaceWith inModule isLib modu original elaborated state
+    | hasValueProjection (original ++ elaborated) || any (hasValueProjection . tmplBody) (Map.elems (tcTemplates state)) = Error "Unmodeled: checked declaration-backed value projections"
+    | any unsupportedTemplateDeclaration (original ++ elaborated) || any (\template -> borrowedResult (templateOrigins template) || hasBorrowedResult (tmplBody template)) (Map.elems (tcTemplates state)) = Error "Unmodeled: checked borrowed whole-value return places in bounded templates"
     | not isLib && not (null boundedNames) =
         Error
             ( "in module "
@@ -96,7 +98,7 @@ extractInterfaceWith inModule isLib modu original elaborated state
                             else Map.empty
                         )
                 , ifGenerics = genericStructs
-                , ifInvariants = Map.fromList [(name, invariant) | StructDef name _ _ invariant <- elaborated, not (null invariant)]
+                , ifInvariants = Map.fromList [(name, invariant) | StructDef name _ _ spec <- elaborated, let invariant = structInvariant spec, not (null invariant)]
                 , ifTraits = Map.fromList [(name, functions) | TraitDef name _ functions <- original]
                 , ifTraitParams = Map.fromList [(name, params) | TraitDef name params _ <- original]
                 , ifFunctions = Map.fromList [(name, interfaceFunction params ins outs signature termination exported) | Assign name (Val (VFunct params ins outs (NativeFunct signature termination _) exported)) <- elaborated, name `Set.member` declaredFunctions]
@@ -120,6 +122,7 @@ extractInterfaceWith inModule isLib modu original elaborated state
                         else Map.filterWithKey (\name _ -> name `elem` boundedNames) (tcCompanions state)
                 }
   where
+    templateOrigins template = let Signature _ _ _ _ _ origins = tmplSignature template in origins
     boundedNames = [name | BoundedDef _ (Assign name _) <- original]
     genericStructs = Map.fromList [(name, (params, fields)) | StructDef name params fields _ <- elaborated, not (null params)]
     ownNames = Set.fromList (concatMap declaredTypeOrTrait original)
@@ -191,9 +194,9 @@ interfaceImportEnv iface =
                     | (trait, functions) <- Map.toList (ifTraits iface)
                     , fn <- functions
                     , let Signature params result _ _ _ fromNames = traitFnSignature fn
-                    , let froms = if not (null fromNames) then fromNames else case [param | (param, ty) <- zip (traitFnParams fn) params, isRefType ty] of [only] -> [only]; _ -> []
+                    , let froms = if not (null fromNames) then fromNames else case [param | (param, ty) <- zip (traitFnParams fn) params, isRefType ty] of [only] -> [ReferenceOrigin only]; _ -> []
                     , not (null froms)
-                    , isRefType result
+                    , isRefType result || borrowedResult fromNames
                     ]
                 )
                 ( Map.fromList

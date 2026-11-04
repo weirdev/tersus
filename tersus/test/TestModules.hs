@@ -1064,7 +1064,7 @@ testFileProtocol = TestList "file-protocol"
                 Error err -> Just ("reply reader failed: " ++ err)
                 Ok (actual, ds) -> testAssertEq actual parsedFile <> sameDecls ds decls
         | decls <- [emptyDecls, protocolDecls]
-        , parsedFile <- [ParsedFile [] [], ParsedFile imports [Mark 7 9, StructDef "pkg$geo$Vec" ["T"] [("x", TRef (TParam "T"))] [], Return (Val (VInt 77))]]
+        , parsedFile <- [ParsedFile [] [], ParsedFile imports [Mark 7 9, StructDef "pkg$geo$Vec" ["T"] [("x", TRef (TParam "T"))] (StructSpec [] Nothing), Return (Val (VInt 77))]]
         ]
     , testCase "exact-request-wire" $ case writeFileRequest emptyDecls "λ" of
         Error err -> Just err
@@ -1123,26 +1123,26 @@ testFileProtocol = TestList "file-protocol"
             , "import 1 1 1 \"app\" none none extra", "import 1 1 1 \"app\" none none\r"
             ]
         ]
-    , testCase "strict-ast-control" $ case readParsedFile (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nMark 1 1\nStatementsCons 1 0\nroot 2\n") of
+    , testCase "strict-ast-control" $ case readParsedFile (replyWithAst "tersus-ast 2 parsed\nStatementsEnd\nMark 1 1\nStatementsCons 1 0\nroot 2\n") of
         Ok (pf, _) -> testAssertEq (fileBody pf) [Mark 1 1]
         Error err -> Just ("valid AST control failed: " ++ err)
     , testCaseSeq "strict-ast"
         [ protocolRefuses (readParsedFile (replyWithAst ast))
         | ast <-
-            [ "tersus-ast 1 elaborated\nStatementsEnd\nroot 0\n"
-            , "tersus-ast 2 parsed\nStatementsEnd\nroot 0\n"
-            , "tersus-ast 1 parsed\nStatementsEnd\nroot 0\ntrailing\n"
-            , "tersus-ast 1 parsed\nStatementsEnd\nStatementsEnd\nroot 1\n"
-            , "tersus-ast 1 parsed\nBlock 0\nStatementsCons 0 0\nroot 1\n"
-            , "tersus-ast 1 parsed\nStatementsEnd\nMark 1 1\nStatementsCons 1 0\nBlock 2\nStatementsCons 3 2\nroot 4\n"
-            , "tersus-ast 1 parsed\nStatementsEnd\nStatementsCons -1 0\nroot 1\n"
+            [ "tersus-ast 2 elaborated\nStatementsEnd\nroot 0\n"
+            , "tersus-ast 3 parsed\nStatementsEnd\nroot 0\n"
+            , "tersus-ast 2 parsed\nStatementsEnd\nroot 0\ntrailing\n"
+            , "tersus-ast 2 parsed\nStatementsEnd\nStatementsEnd\nroot 1\n"
+            , "tersus-ast 2 parsed\nBlock 0\nStatementsCons 0 0\nroot 1\n"
+            , "tersus-ast 2 parsed\nStatementsEnd\nMark 1 1\nStatementsCons 1 0\nBlock 2\nStatementsCons 3 2\nroot 4\n"
+            , "tersus-ast 2 parsed\nStatementsEnd\nStatementsCons -1 0\nroot 1\n"
             ]
         ]
-    , testCase "reply-wrong-header" (protocolRefuses (readParsedFile (replaceRecord "tersus-file 1" "tersus-file 2" (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n"))))
-    , testCase "reply-negative-import-count" (protocolRefuses (readParsedFile (replaceRecord "imports 0" "imports -1" (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n"))))
-    , testCase "reply-extra-ast-marker-token" (protocolRefuses (readParsedFile (replaceRecord "ast" "ast -1" (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n"))))
-    , testCase "reply-trailing-byte" (protocolRefuses (readParsedFile (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n" ++ "x")))
-    , testCase "reply-truncated-ast" (protocolRefuses (readParsedFile (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot\n")))
+    , testCase "reply-wrong-header" (protocolRefuses (readParsedFile (replaceRecord "tersus-file 1" "tersus-file 2" (replyWithAst "tersus-ast 2 parsed\nStatementsEnd\nroot 0\n"))))
+    , testCase "reply-negative-import-count" (protocolRefuses (readParsedFile (replaceRecord "imports 0" "imports -1" (replyWithAst "tersus-ast 2 parsed\nStatementsEnd\nroot 0\n"))))
+    , testCase "reply-extra-ast-marker-token" (protocolRefuses (readParsedFile (replaceRecord "ast" "ast -1" (replyWithAst "tersus-ast 2 parsed\nStatementsEnd\nroot 0\n"))))
+    , testCase "reply-trailing-byte" (protocolRefuses (readParsedFile (replyWithAst "tersus-ast 2 parsed\nStatementsEnd\nroot 0\n" ++ "x")))
+    , testCase "reply-truncated-ast" (protocolRefuses (readParsedFile (replyWithAst "tersus-ast 2 parsed\nStatementsEnd\nroot\n")))
     , testCase "writer-rejects-negative-type-count" (protocolRefuses (writeFileRequest emptyDecls{declSelfType = Just (TVar (-1))} ""))
     , testCase "writer-rejects-empty-import-path" (protocolRefuses (writeParsedFile (ParsedFile [Import [] Nothing Nothing 1 1] []) emptyDecls))
     ]
@@ -1154,7 +1154,7 @@ testFileProtocol = TestList "file-protocol"
         , Import ["app", "geo"] (Just "alias") (Just ["Point"]) 8 9
         ]
     replyWithImport imp =
-        let ast = "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n"
+        let ast = "tersus-ast 2 parsed\nStatementsEnd\nroot 0\n"
          in "tersus-file 1\nimports 1\n" ++ imp ++ "\n" ++ emptyDeclRecords ++ "ast\n" ++ ast
     replyWithAst ast = "tersus-file 1\nimports 0\n" ++ emptyDeclRecords ++ "ast\n" ++ ast
 
@@ -1165,14 +1165,14 @@ injectedFileParser decls source
         if Map.member "NativePoint" (declCtors decls)
             then Right (ParsedFile [Import ["app", "geo", "NativePoint"] (Just "p") Nothing 2 3] [Mark 7 9, Return (Val (VInt 77))], decls)
             else Left "native seed missing"
-    | source == "@native-type@" = Right (ParsedFile [] [Mark 11 13, StructDef "NativePoint" [] [] []], decls{declCtors = Map.insert "NativePoint" [] (declCtors decls)})
+    | source == "@native-type@" = Right (ParsedFile [] [Mark 11 13, StructDef "NativePoint" [] [] (StructSpec [] Nothing)], decls{declCtors = Map.insert "NativePoint" [] (declCtors decls)})
     | source == "@need-final@" =
         if Map.member "finalGate" (declCtors decls)
             then Right (ParsedFile [] [Return (Val (VInt 88))], decls)
             else Left "iterative callback state missing"
     | source == "@promote@" =
         let key = if Map.member "seedGate" (declCtors decls) then "finalGate" else "seedGate"
-         in Right (ParsedFile [] [StructDef "Gate" [] [] []], decls{declCtors = Map.insert key [] (declCtors decls)})
+         in Right (ParsedFile [] [StructDef "Gate" [] [] (StructSpec [] Nothing)], decls{declCtors = Map.insert key [] (declCtors decls)})
     | otherwise = Left "injected refusal sentinel"
 
 testLoaderInjection :: Test
@@ -1549,13 +1549,13 @@ testCrossPackageBoundaries = TestList "cross-package-boundaries"
        ])
   where
     deleteCallback decls source
-        | source == "@incoming@" = Right (ParsedFile [] [StructDef "Gate" [] [("new", TBool)] []], decls{declCtors = Map.insert "Gate" ["new"] (declCtors decls)})
-        | source == "@gate@" = Right (ParsedFile [] [StructDef "Gate" [] [("old", TInt)] []], decls{declCtors = Map.insert "Gate" ["old"] (declCtors decls)})
+        | source == "@incoming@" = Right (ParsedFile [] [StructDef "Gate" [] [("new", TBool)] (StructSpec [] Nothing)], decls{declCtors = Map.insert "Gate" ["new"] (declCtors decls)})
+        | source == "@gate@" = Right (ParsedFile [] [StructDef "Gate" [] [("old", TInt)] (StructSpec [] Nothing)], decls{declCtors = Map.insert "Gate" ["old"] (declCtors decls)})
         | source == "import dep { Gate };\n@delete@" = Right (ParsedFile [Import ["dep"] Nothing (Just ["Gate"]) 1 1] [], decls{declCtors = Map.insert "deleted" [] (Map.delete "Gate" (declCtors decls))})
         | source == "@deleted@", Map.member "deleted" (declCtors decls), Map.notMember "Gate" (declCtors decls) = Right (ParsedFile [] [Return (Val (VInt 88))], decls)
         | otherwise = Left "callback deletion was not preserved"
     callback decls source
-        | source == "@seed@" = Right (ParsedFile [] [StructDef "Seed" [] [] []], decls)
+        | source == "@seed@" = Right (ParsedFile [] [StructDef "Seed" [] [] (StructSpec [] Nothing)], decls)
         | source == "import dep;\n@promote@" = do
             (parsedFile, returned) <- injectedFileParser decls "@promote@"
             Right (parsedFile{fileImports = [Import ["dep"] Nothing Nothing 1 1]}, returned)

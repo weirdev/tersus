@@ -16,7 +16,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirOwnership (Role (..), isProjection, operandLocal, roles)
-import Types (Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
+import Types (resultOriginNames, Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
 -- is wanted, and the local it came from holds nothing after. So a program cannot use it again, and this checks that it does not.
@@ -661,7 +661,7 @@ resultFromPlaces :: Cx -> St -> Operand -> [Operand] -> [Place]
 resultFromPlaces cx st callee args = case calleeName of
     Just name | Just f <- Map.lookup name (progFunctions (cxProgram cx)) ->
         let names = [maybe Nothing localName (Map.lookup p (fnLocals f)) | p <- fnParams f]
-         in concat [argumentPlaces (args !! i) | (i, Just n) <- zip [0 ..] names, n `elem` specFrom (fnSpec f), i < length args]
+         in concat [argumentPlaces (args !! i) | (i, Just n) <- zip [0 ..] names, n `elem` resultOriginNames (specFrom (fnSpec f)), i < length args]
     _ -> []
   where
     calleeName = case callee of

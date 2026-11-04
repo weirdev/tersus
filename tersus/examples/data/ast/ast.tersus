@@ -68,7 +68,7 @@ enum AstStatement {
     Let { n: Int, e: Int },
     Return { e: Int },
     ValidationStatement { v: Int },
-    StructDef { n: Int, ps: Int, fs: Int, vs: Int },
+    StructDef { n: Int, ps: Int, fs: Int, vs: Int, model: Int },
     EnumDef { n: Int, vs: Int },
     AxiomDef { n: Int, ps: Int, ins: Int, outs: Int },
     ProofDef { n: Int, ps: Int, ins: Int, outs: Int, body: Int },
@@ -138,6 +138,9 @@ impl Clone for AstBuiltin { };
 enum AstNames { End, Cons { head: Int, tail: Int } };
 impl Clone for AstNames { };
 
+enum AstOrigins { End, Reference { head: Int, tail: Int }, Borrowed { head: Int, tail: Int } };
+impl Clone for AstOrigins { };
+
 enum AstValues { End, Cons { head: Int, tail: Int } };
 impl Clone for AstValues { };
 
@@ -200,6 +203,7 @@ enum AstNode {
     OptTermination { value: AstOptTermination },
     Builtin { value: AstBuiltin },
     Names { value: AstNames },
+    Origins { value: AstOrigins },
     Values { value: AstValues },
     Statements { value: AstStatements },
     Expressions { value: AstExpressions },
@@ -301,7 +305,7 @@ fn printNode(node: &AstNode) -> Int ~ {
                 AstStatement::Let { n: n, e: e } => { bytesWritten = "Let".print() + printInt(n) + printInt(e); },
                 AstStatement::Return { e: e } => { bytesWritten = "Return".print() + printInt(e); },
                 AstStatement::ValidationStatement { v: v } => { bytesWritten = "ValidationStatement".print() + printInt(v); },
-                AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs } => { bytesWritten = "StructDef".print() + printInt(n) + printInt(ps) + printInt(fs) + printInt(vs); },
+                AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs, model: model } => { bytesWritten = "StructDef".print() + printInt(n) + printInt(ps) + printInt(fs) + printInt(vs) + printInt(model); },
                 AstStatement::EnumDef { n: n, vs: vs } => { bytesWritten = "EnumDef".print() + printInt(n) + printInt(vs); },
                 AstStatement::AxiomDef { n: n, ps: ps, ins: ins, outs: outs } => { bytesWritten = "AxiomDef".print() + printInt(n) + printInt(ps) + printInt(ins) + printInt(outs); },
                 AstStatement::ProofDef { n: n, ps: ps, ins: ins, outs: outs, body: body } => { bytesWritten = "ProofDef".print() + printInt(n) + printInt(ps) + printInt(ins) + printInt(outs) + printInt(body); },
@@ -356,6 +360,11 @@ fn printNode(node: &AstNode) -> Int ~ {
             };
         },
         AstNode::Names { value: v } => { match v { AstNames::End => { bytesWritten = "NamesEnd".print(); }, AstNames::Cons { head: h, tail: t } => { bytesWritten = "NamesCons".print() + printInt(h) + printInt(t); }, }; },
+        AstNode::Origins { value: v } => { match v {
+            AstOrigins::End => { bytesWritten = "OriginsEnd".print(); },
+            AstOrigins::Reference { head: h, tail: t } => { bytesWritten = "ReferenceOriginsCons".print() + printInt(h) + printInt(t); },
+            AstOrigins::Borrowed { head: h, tail: t } => { bytesWritten = "BorrowedOriginsCons".print() + printInt(h) + printInt(t); },
+        }; },
         AstNode::Values { value: v } => { match v { AstValues::End => { bytesWritten = "ValuesEnd".print(); }, AstValues::Cons { head: h, tail: t } => { bytesWritten = "ValuesCons".print() + printInt(h) + printInt(t); }, }; },
         AstNode::Statements { value: v } => { match v { AstStatements::End => { bytesWritten = "StatementsEnd".print(); }, AstStatements::Cons { head: h, tail: t } => { bytesWritten = "StatementsCons".print() + printInt(h) + printInt(t); }, }; },
         AstNode::Expressions { value: v } => { match v { AstExpressions::End => { bytesWritten = "ExpressionsEnd".print(); }, AstExpressions::Cons { head: h, tail: t } => { bytesWritten = "ExpressionsCons".print() + printInt(h) + printInt(t); }, }; },
@@ -376,7 +385,7 @@ fn printNode(node: &AstNode) -> Int ~ {
 fn printBool(b: Bool) -> Int [{ }] [{ }] { if b { return " true".print(); }; return " false".print(); };
 
 fn printAst(p: &AstProgram) -> Int ~ {
-    n = "tersus-ast 1".print();
+    n = "tersus-ast 2".print();
     if p.elaborated { n = n + " elaborated".print(); } else { n = n + " parsed".print(); };
     n = n + newLine();
     for node in &p.nodes { n = n + printNode(node); };

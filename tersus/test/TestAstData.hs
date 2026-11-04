@@ -84,10 +84,10 @@ dataElaborated tree = case A.writeElaborated tree of
 
 writerLimits :: TestResult
 writerLimits = firstFailure
-    [ rejected (A.writeParsed [StructDef "TooBig" [] [("x", TArrayOf TInt (SizeConst (2 ^ (63 :: Int))))] []])
-    , rejected (A.writeParsed [StructDef "TooSmall" [] [("x", TArrayOf TInt (SizeConst (negate (2 ^ (63 :: Int)) - 1)))] []])
+    [ rejected (A.writeParsed [StructDef "TooBig" [] [("x", TArrayOf TInt (SizeConst (2 ^ (63 :: Int))))] (StructSpec [] Nothing)])
+    , rejected (A.writeParsed [StructDef "TooSmall" [] [("x", TArrayOf TInt (SizeConst (negate (2 ^ (63 :: Int)) - 1)))] (StructSpec [] Nothing)])
     , rejected (A.writeElaborated (Elaborated [] [TWord True 64]))
-    , rejected (A.writeParsed [StructDef "TooLong" [] [("x", TNamed (replicate 1000000 'a') [])] []])
+    , rejected (A.writeParsed [StructDef "TooLong" [] [("x", TNamed (replicate 1000000 'a') [])] (StructSpec [] Nothing)])
     ]
   where
     rejected (Error _) = Nothing
@@ -173,7 +173,7 @@ types =
     ] ++ [TWord s b | (s, b) <- [(True, 8), (True, 16), (True, 32), (False, 16), (False, 32)]]
 
 signature :: Signature
-signature = Signature types (TRef TInt) ["n"] ["T"] ["out"] ["input"]
+signature = Signature types (TRef TInt) ["n"] ["T"] ["out"] [ReferenceOrigin "input"]
 
 builtins :: [BuiltinFunct]
 builtins = concatMap entryInstances builtinRegistry ++
@@ -194,7 +194,7 @@ values =
 fixtures :: [Statement]
 fixtures =
     [ Assign "x" (Val (VInt 1)), AssignDeref (Var "p") (Val (VInt 2)), Let "y" (Var "x"), Return (F (Var "f") [Var "x"])
-    , StructDef "Packet" ["T", "n"] [("field", t) | t <- types] validations
+    , StructDef "Packet" ["T", "n"] [("field", t) | t <- types] (StructSpec validations Nothing)
     , EnumDef "E" [("E::V", [("field", TInt)]), ("E::Empty", [])]
     , AxiomDef "axiom" ["x"] validations validations, ProofDef "proof" ["x"] validations validations validations
     , Block [Mark 4 8, Dissolve "x"], If (Val (VBool True)) [] [Return (Val (VInt 1))]
@@ -226,12 +226,12 @@ longNames = [Assign (concat (replicate 3000 "café\NUL\n\"\\𐀀")) (Var ""), Re
 refusals :: [(String, String, String)]
 refusals = structural ++ mutations
   where
-    header = "tersus-ast 1 parsed\n"
+    header = "tersus-ast 2 parsed\n"
     empty = dataParsed []
     named = dataParsed [Return (Var "NAME")]
     marked = dataParsed [Mark 1 2]
-    typed = dataParsed [StructDef "Holder" [] [("x", TFn [TInt] TInt)] []]
-    zeroArgs = dataParsed [StructDef "Holder" [] [("x", TFn [] TInt)] []]
+    typed = dataParsed [StructDef "Holder" [] [("x", TFn [TInt] TInt)] (StructSpec [] Nothing)]
+    zeroArgs = dataParsed [StructDef "Holder" [] [("x", TFn [] TInt)] (StructSpec [] Nothing)]
     sized = dataParsed [Return (Val (builtinSymbol (Ctor "C" [ArgSize (SizeConst 4)] [])))]
     integerValue = dataParsed [Return (Val (VInt 7))]
     booleanValue = dataParsed [Return (Val (VBool True))]
@@ -241,7 +241,7 @@ refusals = structural ++ mutations
     ifAlias = header ++ "VBool true\nVal 0\nStatementsEnd\nIf 1 2 2\nStatementsEnd\nStatementsCons 3 4\nroot 5\n"
     structural =
         [ ("missing header", empty, "")
-        , ("unknown version", empty, change "tersus-ast 1" "tersus-ast 2" empty)
+        , ("unknown version", empty, change "tersus-ast 2" "tersus-ast 3" empty)
         , ("unknown stage", empty, change "parsed" "unknown" empty)
         , ("missing root", empty, unlines (init (lines empty)))
         , ("unknown node", empty, change "StatementsEnd" "Unknown" empty)

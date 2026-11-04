@@ -59,6 +59,8 @@ elaborateAfter (PreparedPrefix ctx env prefix prefixTypes state) stmts =
         Right (elaborated, _) -> Ok elaborated
   where
     checked = do
+        before <- getState
+        putState before{tcRefResults = Map.union (gatheredResultOrigins stmts) (tcRefResults before)}
         (_, stmts', types) <- checkStatements True ctx env stmts
         resolved <- mapM zonk (prefixTypes ++ types)
         return (Elaborated (prefix ++ stmts') resolved)
@@ -79,7 +81,7 @@ data ImportEnv = ImportEnv
     , ieImplBounds :: Map (Name, Name) [Bound]
     , ieLinear :: Set.Set Name
     , ieDrops :: Set.Set Name
-    , ieRefResults :: Map Name ([Variable], [Variable])
+    , ieRefResults :: Map Name ([Variable], [ResultOrigin])
     , ieTemplates :: Map Name Template
     , ieCompanions :: Map Name [Name]
     , iePredeclareOwn :: Bool
@@ -124,6 +126,8 @@ checkProgram stmts = checkProgramWith emptyImportEnv stmts
 
 checkProgramWith :: ImportEnv -> [Statement] -> TC ([Statement], [Type])
 checkProgramWith env stmts = do
+    before <- getState
+    putState before{tcRefResults = Map.union (gatheredResultOrigins stmts) (tcRefResults before)}
     when (iePredeclareOwn env) $ do
         predeclareOwn stmts
         checkOwnFinite stmts
@@ -212,12 +216,31 @@ checkInvariant ctx fields invariant = do
     (_, checked) <- checkValidations ctx [Map.fromList fields] invariant
     return checked
 
+withCallableOriginScope :: TC (Env, [Statement], [Type]) -> TC (Env, [Statement], [Type])
+withCallableOriginScope action = do
+    before <- getState
+    result@(scopes, _, _) <- action
+    after <- getState
+    let locals = case scopes of scope : _ -> Map.keysSet scope; [] -> Set.empty
+        emittedOrigins = gatheredResultOrigins [statement | (statement, _) <- tcEmitted after]
+        restoredLocals = Map.restrictKeys (tcRefResults before) locals
+        updatedOuter = Map.withoutKeys (tcRefResults after) locals
+    putState after{tcRefResults = Map.union emittedOrigins (Map.union restoredLocals updatedOuter)}
+    return result
+
+joinCallableOrigins :: Map Variable ([Variable], [ResultOrigin]) -> Map Variable ([Variable], [ResultOrigin]) -> Map Variable ([Variable], [ResultOrigin])
+joinCallableOrigins left right = Map.filterWithKey (\name origin -> Map.lookup name right == Just origin) left
+
 -- The signature of every function defined at the top is known before any body is checked, so a function
 -- can call the ones defined after it (and they can call it back). A name the language itself gives a
 -- meaning (a builtin, or a ghost function of proofs such as `filled`) is not gathered: in a proof
 -- before its definition such a name is the language's, as it was when it was only seen after it.
 gatheredSignatures :: [Statement] -> Map Variable Type
 gatheredSignatures stmts = Map.fromList [(var, functionType sizes types ptys rty) | Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _)) <- stmts, not (Map.member var stdLibCtx), ghostFunction var == Nothing]
+
+gatheredResultOrigins :: [Statement] -> Map Variable ([Variable], [ResultOrigin])
+gatheredResultOrigins stmts = Map.fromList
+    [(name, (params, origins)) | Assign name (Val (VFunct params _ _ (NativeFunct (Signature _ _ _ _ _ origins) _ _) _)) <- stmts, not (null origins), not (Map.member name stdLibCtx), ghostFunction name == Nothing]
 
 -- Statements run in order; a top-level function is visible to the functions after it, and the
 -- returned environment holds the variables the statements defined in the innermost scope.
@@ -260,12 +283,12 @@ checkItem top ctx env stmt =
                     when (Set.member typeName (tcDrops s)) $
                         failTc ("Type error: impl Clone for " ++ typeName ++ ": " ++ typeName ++ " has a drop, and a copy of a value with a drop would be dropped twice")
                 (ctx', env', functions', ftypes) <- checkImpl ctx env trait traitArgs typeName selfType bounds functions
-                return (ctx', env', functions', ftypes)
+                return (ctx', env', functions' ++ [stmt | unsupportedTemplateDeclaration stmt], ftypes)
             | otherwise -> failTc "Type error: an impl can only be written at the top of the program"
         BoundedDef bounds (Assign name (Val (VFunct params ins outs (NativeFunct signature term body) _)))
             | top -> do
                 declareTemplate ctx name bounds params signature ins outs term body
-                return (ctx, env, [], [])
+                return (ctx, env, [stmt | unsupportedTemplateDeclaration stmt], [])
             | otherwise -> failTc "Type error: a function with bounds on its types can only be defined at the top of the program"
         BoundedDef{} -> failTc "Type error: only a function can have bounds on its types"
         _ -> do
@@ -329,18 +352,24 @@ checkStatement top ctx env stmt =
         Let var expr -> do
             notSize var
             texpr <- inferExprR ctx env expr
-            recordAlias var (tType texpr) (tExpr texpr)
+            beforeBinding <- getState
+            let resolved = case tExpr texpr of Var name -> Map.lookup name (tcRefResults beforeBinding); _ -> Nothing
+            putState beforeBinding{tcRefResults = Map.delete var (tcRefResults beforeBinding)}
+            recordAliasFrom resolved var (tType texpr) (tExpr texpr)
             recordOrigins ctx env var (tType texpr) (tExpr texpr)
             case env of
                 scope : outer -> return (ctx, Map.insert var (tType texpr) scope : outer, Let var (tExpr texpr), tTypes texpr)
                 [] -> return (ctx, [Map.singleton var (tType texpr)], Let var (tExpr texpr), tTypes texpr)
         Return expr -> do
+            returnState <- getState
+            let origins = fromMaybe [] (tcResultFrom returnState)
+                returnsView = borrowedResult origins
             inferred0 <- inferExprR ctx env expr
             -- (a reference parameter returned is the reference: in the body the parameter is the value it is to,
             -- and returning it is returning a reference to the caller's place, which `from` names)
             inferred <- case (ctxReturn ctx, inferred0, expr) of
                 (Just rty, texpr@(TExpr _ _ _), Var v)
-                    | Just rt <- refTarget rty -> do
+                    | Just rt <- refTarget rty, not returnsView -> do
                         tz <- zonk (tType texpr)
                         st <- getState
                         if isRefType tz || (v `elem` tcReadOnly st || v `elem` tcMutParams st)
@@ -355,11 +384,11 @@ checkStatement top ctx env stmt =
                     -- (a reference that is returned has to be from a parameter the signature names)
                     st <- getState
                     case tcResultFrom st of
-                        Just froms -> do
+                        Just froms | not returnsView -> do
                             origins <- exprRefOrigins ctx env expr
-                            unless (not (null origins) && all (`elem` froms) origins) $
-                                failTc ("Type error: the value returned is not a reference from " ++ intercalate ", " froms ++ ", which the signature names: return a reference to a place of one of them")
-                        Nothing -> return ()
+                            unless (not (null origins) && all (`elem` resultOriginNames froms) origins) $
+                                failTc ("Type error: the value returned is not a reference from " ++ intercalate ", " (resultOriginNames froms) ++ ", which the signature names: return a reference to a place of one of them")
+                        _ -> return ()
                 -- the program has no declared type: every return in it has the type of the first
                 Nothing -> do
                     when (isRefType t) $ failTc "Type error: the program cannot return a reference: a reference is from a place in the program, and no place outlives it"
@@ -367,22 +396,31 @@ checkStatement top ctx env stmt =
                     case tcProgramReturn s of
                         Nothing -> putState s{tcProgramReturn = Just t}
                         Just first -> expect "returned value of the program" first t
-            return (ctx, env, Return (tExpr texpr), tTypes texpr)
+            if returnsView
+                then do
+                    unless (placeForm (tExpr texpr)) $ failTc "Type error: a borrowed value result must return a place, not an owning expression"
+                    owners <- borrowedPlaceOrigins (tExpr texpr)
+                    state <- getState
+                    unless (not (null owners) && all (\owner -> owner `elem` resultOriginNames origins && owner `elem` tcReadOnly state) owners) $
+                        failTc "Type error: every borrowed return place must be from a declared read-borrowed parameter"
+                    let pointer = TExpr (TRef t) (F (Val (builtinFunct BorrowOf)) [tExpr texpr]) [texpr]
+                    return (ctx, env, Return (tExpr pointer), tTypes pointer)
+                else return (ctx, env, Return (tExpr texpr), tTypes texpr)
         ValidationStatement vs -> do
             (env', vs') <- checkValidation ctx env vs
             return (ctx, env', ValidationStatement vs', [])
-        StructDef name params fields invariant
+        StructDef name params fields spec
             | not (null params) -> do
                 declareGeneric name params fields
-                invariant' <- withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (checkInvariant ctx fields invariant)
-                return (ctx, env, StructDef name params fields invariant', [])
-        StructDef name _ fields invariant -> do
+                invariant' <- withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (checkInvariant ctx fields (structInvariant spec))
+                return (ctx, env, StructDef name params fields spec{structInvariant = invariant'}, [])
+        StructDef name _ fields spec -> do
             declareType name
             mapM_ (checkFieldType . snd) fields
             registerCtors name [(name, fields)]
             checkFinite name [fields]
-            invariant' <- checkInvariant ctx fields invariant
-            return (ctx, env, StructDef name [] fields invariant', [])
+            invariant' <- checkInvariant ctx fields (structInvariant spec)
+            return (ctx, env, StructDef name [] fields spec{structInvariant = invariant'}, [])
         EnumDef name variants -> do
             -- the type is known before its fields are checked, so a variant may hold the enum itself
             declareTypeWith name (map fst variants)
@@ -404,24 +442,32 @@ checkStatement top ctx env stmt =
         ImplDef{} -> failTc "Type error: an impl can only be written at the top of the program"
         BoundedDef{} -> failTc "Type error: a function with bounds on its types cannot be written in an impl or a block"
         Block stmts -> do
-            (_, stmts', types) <- checkStatements False ctx (Map.empty : env) stmts
+            (_, stmts', types) <- withCallableOriginScope (checkStatements False ctx (Map.empty : env) stmts)
             return (ctx, env, Block stmts', types)
         If cond thenStmts elseStmts -> do
             cond' <- inferExprR ctx env cond
             expect "condition of if" TBool (tType cond')
-            (_, thenStmts', thenTypes) <- checkStatements False ctx (Map.empty : env) thenStmts
-            (_, elseStmts', elseTypes) <- checkStatements False ctx (Map.empty : env) elseStmts
+            beforeBranches <- getState
+            (_, thenStmts', thenTypes) <- withCallableOriginScope (checkStatements False ctx (Map.empty : env) thenStmts)
+            afterThen <- getState
+            putState afterThen{tcRefResults = tcRefResults beforeBranches}
+            (_, elseStmts', elseTypes) <- withCallableOriginScope (checkStatements False ctx (Map.empty : env) elseStmts)
+            afterElse <- getState
+            putState afterElse{tcRefResults = joinCallableOrigins (tcRefResults afterThen) (tcRefResults afterElse)}
             return (ctx, env, If (tExpr cond') thenStmts' elseStmts', tTypes cond' ++ thenTypes ++ elseTypes)
         While cond invariant term body -> do
             cond' <- inferExprR ctx env cond
             expect "condition of while" TBool (tType cond')
             (_, invariant') <- checkValidations ctx env invariant
             term' <- resolveTermination ctx env term
-            (_, body', bodyTypes) <- checkStatements False ctx (Map.empty : env) body
+            beforeLoop <- getState
+            (_, body', bodyTypes) <- withCallableOriginScope (checkStatements False ctx (Map.empty : env) body)
+            afterLoop <- getState
+            putState afterLoop{tcRefResults = joinCallableOrigins (tcRefResults beforeLoop) (tcRefResults afterLoop)}
             return (ctx, env, While (tExpr cond') invariant' term' body', tTypes cond' ++ bodyTypes)
 
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
-checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> [Variable] -> [Variable] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [ValidationStatement], [ValidationStatement], [Statement], [Type], [Variable])
+checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> [Variable] -> [ResultOrigin] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [ValidationStatement], [ValidationStatement], [Statement], [Type], [ResultOrigin])
 checkFunction ctx name params ptys rty sizes types ins outs writes fromNames term body = do
     outer <- getState
     -- the sizes and types the function declares are the names its types may use, and the sizes are the last parameters (Ints)
@@ -440,7 +486,7 @@ checkFunction ctx name params ptys rty sizes types ins outs writes fromNames ter
         paramEnv = [Map.fromList (zip params (map unref ptys))]
     -- (a parameter that is borrowed is only read; one that may update is assigned only through it)
     withBorrowed <- getState
-    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty, tcResultFrom = if null from then Nothing else Just from, tcParams = params, tcRefOrigins = Map.empty}
+    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty, tcResultFrom = if null from then Nothing else Just from, tcParams = params, tcRefOrigins = Map.empty, tcRefResults = Map.withoutKeys (if null from then tcRefResults withBorrowed else Map.insert name (params, from) (tcRefResults withBorrowed)) (Set.fromList params)}
     -- (writes(...) names update parameters, whole or by a field)
     forM_ writes $ \w -> do
         let (root, field) = case break (== '.') w of
@@ -461,7 +507,8 @@ checkFunction ctx name params ptys rty sizes types ins outs writes fromNames ter
     (_, body', bodyTypes) <- checkStatements False bodyCtx (Map.empty : paramEnv) body
     -- (the sizes of the function end with it)
     after <- getState
-    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer, tcMutParams = tcMutParams outer, tcWrites = tcWrites outer, tcRefAliases = tcRefAliases outer, tcResultFrom = tcResultFrom outer, tcParams = tcParams outer, tcRefOrigins = tcRefOrigins outer, tcCurrent = tcCurrent outer}
+    let emittedOrigins = gatheredResultOrigins [statement | (statement, _) <- tcEmitted after]
+    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer, tcMutParams = tcMutParams outer, tcWrites = tcWrites outer, tcRefAliases = tcRefAliases outer, tcResultFrom = tcResultFrom outer, tcParams = tcParams outer, tcRefOrigins = tcRefOrigins outer, tcCurrent = tcCurrent outer, tcRefResults = Map.union emittedOrigins (tcRefResults outer)}
     return (term', ins', outs', body', bodyTypes, from)
   where
     nub' = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
@@ -533,8 +580,34 @@ checkValidation ctx env vs =
 
 -- The type of an expression, and the expression with each call of a function that belongs to a type resolved: x.f(a) and
 -- Trait::f(x, a) are calls of Type::f for the type of x, and nothing after the checker sees anything else.
+placeForm :: Expression -> Bool
+placeForm expr = case expr of
+    Var _ -> True
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeForm sub
+    F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _] -> placeForm sub
+    F (Var "get") [sub, _] -> placeForm sub
+    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [_] -> True
+    _ -> False
+
+borrowedPlaceOrigins :: Expression -> TC [Variable]
+borrowedPlaceOrigins expression = case expression of
+    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [reference] -> exprOriginCandidates reference
+    _ -> do
+        state <- getState
+        return (case placeSteps expression of Just (root, steps) -> [fst (resolveRefPlace state root steps)]; Nothing -> [])
+
 inferExprR :: Ctx -> Env -> Expression -> TC TExpr
-inferExprR ctx env expr =
+inferExprR ctx env expr = do
+    typed@(TExpr ty expression children) <- inferExprRaw ctx env expr
+    state <- getState
+    case expression of
+        F (Var name) _ | Just (_, origins) <- Map.lookup name (tcRefResults state), borrowedResult origins ->
+            let pointer = TExpr (TRef ty) expression children
+             in return (TExpr ty (F (Val (builtinFunct DerefOf)) [expression]) [pointer])
+        _ -> return typed
+
+inferExprRaw :: Ctx -> Env -> Expression -> TC TExpr
+inferExprRaw ctx env expr =
     case expr of
         Val value -> (\t -> tLeaf t expr) <$> valueType value
         Var var -> do
@@ -832,13 +905,6 @@ inferExprR ctx env expr =
                         _ -> return ()
                 _ -> return ()
         return (TExpr (if mutable then TMutRef ptz else TRef ptz) (F (Val (builtinFunct (if mutable then BorrowMutOf else BorrowOf))) [place']) [placeT])
-    placeForm expr = case expr of
-        Var _ -> True
-        F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeForm sub
-        F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _] -> placeForm sub
-        F (Var "get") [sub, _] -> placeForm sub
-        F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [_] -> True
-        _ -> False
     placeRoot expr = case expr of
         Var var -> Just var
         F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeRoot sub
@@ -1160,11 +1226,12 @@ checkTrait name params functions = do
             ctx = Ctx Map.empty (Just rty)
             paramEnv = [Map.fromList (zip (traitFnParams f) (map unref ptys))]
         mapM_ checkType (rty : ptys)
+        when (borrowedResult _from) $ void (refResultFrom (name ++ "::" ++ traitFnName f) (traitFnParams f) ptys rty _from)
         (inEnv, _) <- checkValidations ctx paramEnv (traitFnRequires f)
         _ <- checkValidations ctx (Map.insert "return" rty (head inEnv) : tail inEnv) (traitFnEnsures f)
         return ()
     s' <- getState
-    let refResults = [(name ++ "::" ++ traitFnName f, (traitFnParams f, froms)) | f <- functions, let Signature ptys rty _ _ _ fromNames = traitFnSignature f, let froms = if not (null fromNames) then fromNames else case [p | (p, t) <- zip (traitFnParams f) ptys, isRefType t] of [only] -> [only]; _ -> [], not (null froms), isRefType rty || False]
+    let refResults = [(name ++ "::" ++ traitFnName f, (traitFnParams f, froms)) | f <- functions, let Signature ptys rty _ _ _ fromNames = traitFnSignature f, let froms = if not (null fromNames) then fromNames else case [p | (p, t) <- zip (traitFnParams f) ptys, isRefType t] of [only] -> [ReferenceOrigin only]; _ -> [], not (null froms), isRefType rty || borrowedResult fromNames]
     putState s'{tcTypes = Map.delete "Self" (tcTypes s'), tcTraits = Map.insert name functions (tcTraits s'), tcTraitParams = Map.insert name params (tcTraitParams s'), tcTraitSelf = Nothing, tcRefResults = Map.union (Map.fromList refResults) (tcRefResults s')}
 
 -- The types of a trait replaced by the types an impl gives it
@@ -1200,6 +1267,14 @@ substSelf owner (TRef t) = TRef (substSelf owner t)
 substSelf owner (TMutRef t) = TMutRef (substSelf owner t)
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
 substSelf _ t = t
+
+checkBorrowedConformance :: Name -> TraitFn -> [Variable] -> Signature -> TC ()
+checkBorrowedConformance here required actualParams (Signature _ _ _ _ _ actual) = do
+    let Signature _ _ _ _ _ expected = traitFnSignature required
+        positions params origins = [lookup name (zip params [0 :: Int ..]) | name <- resultOriginNames origins]
+    when (borrowedResult expected || borrowedResult actual) $
+        unless (borrowedResult expected == borrowedResult actual && positions (traitFnParams required) expected == positions actualParams actual) $
+            failTc ("Type error: " ++ here ++ ": " ++ traitFnName required ++ " must preserve the trait's borrowed result mode and origins")
 
 -- The functions of an impl are checked as definitions at the top of the program, in order. For a trait impl they are then
 -- compared with the trait: the same functions, with the types the trait gives with Self replaced by the type. Each trait
@@ -1262,6 +1337,7 @@ checkImpl ctx env trait traitArgs typeName selfTypeInput bounds functions
                         expected = Signature (map inImpl ptys) (inImpl rty) [] [] [] []
                     case lookup (traitFnName f) defined of
                         Just (implParams, signature@(Signature aptys arty asizes _ _ _)) -> do
+                            checkBorrowedConformance here f implParams signature
                             let actual = Signature (take (length aptys - length asizes) aptys) arty [] [] [] []
                             when (actual /= expected) $
                                 failTc ("Type error: " ++ here ++ ": " ++ traitFnName f ++ " is " ++ renderType (TFn (take (length aptys - length asizes) aptys) arty) ++ ", but " ++ traitName ++ " declares " ++ renderType (TFn (map inImpl ptys) (inImpl rty)))
@@ -1344,7 +1420,8 @@ checkImpl ctx env trait traitArgs typeName selfTypeInput _bounds functions = do
                 let Signature ptys rty _ _ _writes _from = traitFnSignature f
                     expected = Signature (map inImpl ptys) (inImpl rty) [] [] [] []
                 case lookup (traitFnName f) defined of
-                    Just (implParams, Signature aptys arty asizes atypes _writes _from, term) -> do
+                    Just (implParams, signature@(Signature aptys arty asizes atypes _writes _from), term) -> do
+                        checkBorrowedConformance here f implParams signature
                         -- (the sizes of the type, and any of the function, are given to it as its last parameters, which the
                         -- trait does not declare, so they are not part of the type the trait asks for)
                         let actual = Signature (take (length aptys - length asizes) aptys) arty [] [] [] []

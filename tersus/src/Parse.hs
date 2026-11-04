@@ -576,7 +576,7 @@ structStatement = do
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
     when (name `elem` ["Int", "Bool", "Array", "Self", "Addr", "Block", "Uninit", "I8", "I16", "I32", "I64", "U8", "U16", "U32"] || isJust (tupleGeneric name)) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (shadowedCtors name d), declTypes = Map.insert name [name] (declTypes d), declFieldTypes = Map.insert name fields (declFieldTypes d)})
-    return (StructDef name params fields invariant)
+    return (StructDef name params fields (StructSpec invariant Nothing))
   where
     nubFields = foldr (\(f, t) rest -> if f `elem` map fst rest then rest else (f, t) : rest) []
 
@@ -926,7 +926,7 @@ functStatement = do
     nested = void (char '<') >> skipMany (void (noneOf "<>") <|> nested) >> void (char '>')
 
 -- (parameters) -> Type [{ input contract }] [{ output contract }], the part of a function before its termination clause
-functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement], [Variable], [Variable])
+functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement], [Variable], [ResultOrigin])
 functHeader = do
     void (char '(')
     whitespace
@@ -937,7 +937,7 @@ functHeader = do
     returnType <- string "->" >> whitespace >> typeAnnotation
     whitespace
     writes <- option [] writesClause
-    fromNames <- option [] fromClause
+    fromNames <- (keyword "borrowed" >> whitespace >> map BorrowedOrigin <$> fromClause) <|> (map ReferenceOrigin <$> option [] fromClause)
     inputReqs <- option [] functContractReqs
     whitespace
     outputReqs <- option [] functContractReqs
@@ -989,8 +989,8 @@ traitStatement = do
         whitespace
         fname <- variable
         whitespace
-        (params, returnType, inputReqs, outputReqs, _, _) <- functHeader
-        return (TraitFn fname (map fst params) (Signature (map snd params) returnType [] [] [] []) inputReqs outputReqs)
+        (params, returnType, inputReqs, outputReqs, writes, origins) <- functHeader
+        return (TraitFn fname (map fst params) (Signature (map snd params) returnType [] [] writes origins) inputReqs outputReqs)
 
 -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are named <Type>::f and <Type as Trait>::f (see
 -- implFunctionName), and the checker resolves Type::f and x.f(...) to the one that is meant. Self stands for Type in them.

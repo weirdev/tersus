@@ -52,7 +52,7 @@ import Text.ParserCombinators.ReadP (readS_to_P)
 import Text.ParserCombinators.ReadPrec (lift)
 import Text.Read (readPrec)
 import qualified Data.Set as Set
-import Types (Arg (..), Name, Rel (..), Type (..), Variable, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray, pattern TList, pattern TBox)
+import Types (Arg (..), ResultOrigin, Name, Rel (..), Type (..), Variable, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray, pattern TList, pattern TBox)
 import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, exprToProof)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
@@ -252,7 +252,7 @@ data FunctionSpec = FunctionSpec
     , specEnv :: Env -- the parameters, and the functions defined at the top of the program before this one
     , specWrites :: [Variable] -- the places an update parameter may change (`writes(n.field)`), as the program wrote them; empty means every update parameter whole (REFERENCES.md)
     , specMutParams :: [Variable] -- the parameters lent for updating (&mut T): a call gives the caller a new version of what they are to
-    , specFrom :: [Variable] -- the parameters a reference result is from (`-> &T from xs`): a call's result is a reference to a place of one of them (REFERENCES.md)
+    , specFrom :: [ResultOrigin] -- the parameters a reference result is from (`-> &T from xs`): a call's result is a reference to a place of one of them (REFERENCES.md)
     }
     deriving (Show, Eq, Read)
 

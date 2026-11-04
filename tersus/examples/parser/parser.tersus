@@ -1,7 +1,7 @@
 import data::codec::codec { Token, Parsed, Size, Type, hexValue, quoted, catStrings, renderTypeForName, printInt, printName, printNames, newLine, printType };
-import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst };
+import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstOrigins, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst };
 
-// The Tersus parser, written in Tersus: reads source segments and writes the AST as data (`tersus-ast 1 parsed`, AST_DATA.md), byte for byte as AstData.writeParsed of the Haskell parser (src/Parse.hs) writes it. The host protocol is documented in AST_DATA.md.
+// The Tersus parser, written in Tersus: reads source segments and writes the AST as data (`tersus-ast 2 parsed`, AST_DATA.md), byte for byte as AstData.writeParsed of the Haskell parser (src/Parse.hs) writes it. The host protocol is documented in AST_DATA.md.
 
 // ---- parser state ----
 
@@ -107,7 +107,7 @@ impl Clone for IdPair { };
 impl Clone for Arm { };
 struct MatchHead { scrutinee: Int };
 impl Clone for MatchHead { };
-struct HeaderOut { names: List<String>, types: List<Type>, ret: Type, ins: List<Int>, outs: List<Int>, writes: List<String>, froms: List<String> };
+struct HeaderOut { names: List<String>, types: List<Type>, ret: Type, ins: List<Int>, outs: List<Int>, writes: List<String>, froms: List<String>, borrowed: Bool };
 impl Clone for HeaderOut { };
 struct ParamOut { names: List<String>, types: List<Type> };
 impl Clone for ParamOut { };
@@ -3944,7 +3944,7 @@ fn parameters(sourceText: &Input, st: St) -> Res<ParamOut> ~ {
 };
 
 fn functHeader(sourceText: &Input, st: St) -> Res<HeaderOut> ~ {
-    empty = HeaderOut { names: [], types: [], ret: Type::TInt, ins: [], outs: [], writes: [], froms: [] };
+    empty = HeaderOut { names: [], types: [], ret: Type::TInt, ins: [], outs: [], writes: [], froms: [], borrowed: false };
     s = skipWs(sourceText, st);
     if byteAt(sourceText, s, s.pos) != 40 { return fail( s, empty, "expected ("); };
     ps = parameters(sourceText, s); Res { st: resultPartspsState, v: resultPartspsValue, ok: resultPartspsOk } = ps;
@@ -3977,6 +3977,8 @@ fn functHeader(sourceText: &Input, st: St) -> Res<HeaderOut> ~ {
         s = skipWs(sourceText, s);
     } else { s = resultPartswkState; };
     froms = [];
+    bk = eatKeyword(sourceText, s, "borrowed"); Res { st: borrowedState, v: borrowed, ok: borrowedOk } = bk;
+    s = skipWs(sourceText, borrowedState);
     fk = eatKeyword(sourceText, s, "from"); Res { st: resultPartsfkState, v: resultPartsfkValue, ok: resultPartsfkOk } = fk;
     if resultPartsfkValue {
         s = skipWs(sourceText, resultPartsfkState);
@@ -4001,14 +4003,17 @@ fn functHeader(sourceText: &Input, st: St) -> Res<HeaderOut> ~ {
             s = skipWs(sourceText, resultPartsvState);
             froms = push([], resultPartsvValue);
         };
-    } else { s = resultPartsfkState; };
+    } else {
+        s = resultPartsfkState;
+        if borrowed { return fail(s, empty, "borrowed result requires from"); };
+    };
     ins = optContract(sourceText, s); Res { st: resultPartsinsState, v: resultPartsinsValue, ok: resultPartsinsOk } = ins;
     if !resultPartsinsOk { return Res<HeaderOut> { st: resultPartsinsState, v: empty, ok: false }; };
     s = resultPartsinsState;
     outs = optContract(sourceText, s); Res { st: resultPartsoutsState, v: resultPartsoutsValue, ok: resultPartsoutsOk } = outs;
     if !resultPartsoutsOk { return Res<HeaderOut> { st: resultPartsoutsState, v: empty, ok: false }; };
     s = resultPartsoutsState;
-    return ok( s, HeaderOut { names: resultPartspsValue.names, types: resultPartspsValue.types, ret: resultPartsrtValue, ins: resultPartsinsValue, outs: resultPartsoutsValue, writes: writes, froms: froms });
+    return ok( s, HeaderOut { names: resultPartspsValue.names, types: resultPartspsValue.types, ret: resultPartsrtValue, ins: resultPartsinsValue, outs: resultPartsoutsValue, writes: writes, froms: froms, borrowed: borrowed });
 };
 
 fn writePlace(sourceText: &Input, st: St) -> Res<String> ~ {
@@ -4054,7 +4059,29 @@ fn terminationClause(sourceText: &Input, st: St) -> Res<Int> ~ {
     return emit( resultPartskState, AstNode::OptTermination { value: AstOptTermination::NoTermination });
 };
 
-fn signatureNode(st: St, types: &List<Type>, ret: Type, sizes: &List<String>, tps: &List<String>, writes: &List<String>, froms: &List<String>) -> Res<Int> ~ {
+fn originsList(st: St, names: &List<String>, borrowed: Bool) -> Res<Int> ~ {
+    end = emit(st, AstNode::Origins { value: AstOrigins::End });
+    Res { st: initial, v: tail, ok: endOk } = end;
+    if !endOk { return Res<Int> { st: initial, v: 0, ok: false }; };
+    state = initial;
+    result = tail;
+    reversed = reversedStrings(names);
+    for name in reversed {
+        named = putName(state, name);
+        Res { st: namedState, v: head, ok: namedOk } = named;
+        if !namedOk { return Res<Int> { st: namedState, v: 0, ok: false }; };
+        origin = AstOrigins::Reference { head: head, tail: result };
+        if borrowed { origin = AstOrigins::Borrowed { head: head, tail: result }; };
+        emitted = emit(namedState, AstNode::Origins { value: origin });
+        Res { st: nextState, v: next, ok: nextOk } = emitted;
+        if !nextOk { return Res<Int> { st: nextState, v: 0, ok: false }; };
+        state = nextState;
+        result = next;
+    };
+    return ok(state, result);
+};
+
+fn signatureNode(st: St, types: &List<Type>, ret: Type, sizes: &List<String>, tps: &List<String>, writes: &List<String>, froms: &List<String>, borrowed: Bool) -> Res<Int> ~ {
     ts = putTypesNodes( st, types); Res { st: resultPartstsState, v: resultPartstsValue, ok: resultPartstsOk } = ts;
     if !resultPartstsOk { return Res<Int> { st: resultPartstsState, v: resultPartstsValue, ok: resultPartstsOk }; };
     rt = putTypeNode( resultPartstsState, ret); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
@@ -4065,7 +4092,7 @@ fn signatureNode(st: St, types: &List<Type>, ret: Type, sizes: &List<String>, tp
     if !resultPartspsOk { return Res<Int> { st: resultPartspsState, v: resultPartspsValue, ok: resultPartspsOk }; };
     ws = namesList( resultPartspsState, writes); Res { st: resultPartswsState, v: resultPartswsValue, ok: resultPartswsOk } = ws;
     if !resultPartswsOk { return Res<Int> { st: resultPartswsState, v: resultPartswsValue, ok: resultPartswsOk }; };
-    fs = namesList( resultPartswsState, froms); Res { st: resultPartsfsState, v: resultPartsfsValue, ok: resultPartsfsOk } = fs;
+    fs = originsList( resultPartswsState, froms, borrowed); Res { st: resultPartsfsState, v: resultPartsfsValue, ok: resultPartsfsOk } = fs;
     if !resultPartsfsOk { return Res<Int> { st: resultPartsfsState, v: resultPartsfsValue, ok: resultPartsfsOk }; };
     return emit( resultPartsfsState, AstNode::Signature { value: AstSignature { ts: resultPartstsValue, ret: resultPartsrtValue, ss: resultPartsssValue, ps: resultPartspsValue, ws: resultPartswsValue, fs: resultPartsfsValue } });
 };
@@ -4244,7 +4271,7 @@ fn linearStatements(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     if n is AstNode::Statement {
         v = (n as AstNode::Statement).value;
         match v {
-            AstStatement::StructDef { n: a, ps: b, fs: c, vs: d } => { name = nameText( s, a); isStruct = true; },
+            AstStatement::StructDef { n: a, ps: b, fs: c, vs: d, model: projection } => { name = nameText( s, a); isStruct = true; },
             AstStatement::EnumDef { n: a, vs: b } => { name = nameText( s, a); isStruct = true; },
             AstStatement::Assign { n: a, e: b } => { isStruct = false; },
             AstStatement::AssignDeref { a: a, b: b } => { isStruct = false; },
@@ -4367,7 +4394,7 @@ fn stmtNameNode(st: St, kind: Int, name: &String) -> Res<Int> ~ {
 
 fn functAssign(st: St, name: &String, h: HeaderOut, termNode: Int, body: &List<Int>) -> Res<Int> ~ {
     // Assign name (Val (VFunct names ins outs (NativeFunct sig term body) []))
-    sig = signatureNode( st, &h.types, h.ret, [], [], &h.writes, &h.froms); Res { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk } = sig;
+    sig = signatureNode( st, &h.types, h.ret, [], [], &h.writes, &h.froms, h.borrowed); Res { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk } = sig;
     if !resultPartssigOk { return Res<Int> { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk }; };
     s = resultPartssigState;
     stmts = statementsList( s, body); Res { st: resultPartsstmtsState, v: resultPartsstmtsValue, ok: resultPartsstmtsOk } = stmts;
@@ -5172,7 +5199,7 @@ fn assignsVar(st: &St, var: &String, stmts: &List<Int>) -> Bool ~ {
                 AstStatement::Let { n: a, e: b } => { found = false; },
                 AstStatement::Return { e: a } => { found = false; },
                 AstStatement::ValidationStatement { v: a } => { found = false; },
-                AstStatement::StructDef { n: a, ps: b, fs: c, vs: d } => { found = false; },
+                AstStatement::StructDef { n: a, ps: b, fs: c, vs: d, model: projection } => { found = false; },
                 AstStatement::EnumDef { n: a, vs: b } => { found = false; },
                 AstStatement::AxiomDef { n: a, ps: b, ins: c, outs: d } => { found = false; },
                 AstStatement::ProofDef { n: a, ps: b, ins: c, outs: d, body: e } => { found = false; },
@@ -5680,7 +5707,9 @@ fn structStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = resultPartsfsState;
     vs = validationsList( s, inv); Res { st: resultPartsvsState, v: resultPartsvsValue, ok: resultPartsvsOk } = vs;
     if !resultPartsvsOk { return Res<Int> { st: resultPartsvsState, v: resultPartsvsValue, ok: resultPartsvsOk }; };
-    return stmtNode( resultPartsvsState, AstStatement::StructDef { n: resultPartsnnValue, ps: resultPartspsValue, fs: resultPartsfsValue, vs: resultPartsvsValue });
+    model = namesList(resultPartsvsState, []); Res { st: modelState, v: modelId, ok: modelOk } = model;
+    if !modelOk { return Res<Int> { st: modelState, v: modelId, ok: false }; };
+    return stmtNode( modelState, AstStatement::StructDef { n: resultPartsnnValue, ps: resultPartspsValue, fs: resultPartsfsValue, vs: resultPartsvsValue, model: modelId });
 };
 
 fn isBuiltinTypeName(name: &String) -> Bool ~ {
@@ -5924,7 +5953,7 @@ fn traitFunction(sourceText: &Input, st: St) -> Res<Int> ~ {
     hnames = resultPartshValue.names;
     hins = resultPartshValue.ins;
     houts = resultPartshValue.outs;
-    sig = signatureNode( s, &resultPartshValue.types, resultPartshValue.ret, [], [], [], []); Res { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk } = sig;
+    sig = signatureNode( s, &resultPartshValue.types, resultPartshValue.ret, [], [], &resultPartshValue.writes, &resultPartshValue.froms, resultPartshValue.borrowed); Res { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk } = sig;
     if !resultPartssigOk { return Res<Int> { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk }; };
     s = resultPartssigState;
     nn = putName( s, fname); Res { st: resultPartsnnState, v: resultPartsnnValue, ok: resultPartsnnOk } = nn;
@@ -6087,7 +6116,7 @@ fn functStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     allNames = clone(resultPartshValue.names);
     allTypesList = clone(resultPartshValue.types);
     for sz in allSizes { allNames = push(allNames, clone(sz)); allTypesList = push(allTypesList, Type::TInt); };
-    header2 = HeaderOut { names: allNames, types: allTypesList, ret: resultPartshValue.ret, ins: resultPartshValue.ins, outs: resultPartshValue.outs, writes: resultPartshValue.writes, froms: resultPartshValue.froms };
+    header2 = HeaderOut { names: allNames, types: allTypesList, ret: resultPartshValue.ret, ins: resultPartshValue.ins, outs: resultPartshValue.outs, writes: resultPartshValue.writes, froms: resultPartshValue.froms, borrowed: resultPartshValue.borrowed };
     assign = functAssignFull( s, var, header2, resultPartstermValue, resultPartsbodyValue, allSizes, allTypes); Res { st: resultPartsassignState, v: resultPartsassignValue, ok: resultPartsassignOk } = assign;
     if !resultPartsassignOk { return Res<Int> { st: resultPartsassignState, v: resultPartsassignValue, ok: resultPartsassignOk }; };
     s = resultPartsassignState;
@@ -6103,7 +6132,7 @@ fn functStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
 };
 
 fn functAssignFull(st: St, name: &String, h: HeaderOut, termNode: Int, body: &List<Int>, sizes: &List<String>, tps: &List<String>) -> Res<Int> ~ {
-    sig = signatureNode( st, &h.types, h.ret, sizes, tps, &h.writes, &h.froms); Res { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk } = sig;
+    sig = signatureNode( st, &h.types, h.ret, sizes, tps, &h.writes, &h.froms, h.borrowed); Res { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk } = sig;
     if !resultPartssigOk { return Res<Int> { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk }; };
     s = resultPartssigState;
     stmts = statementsList( s, body); Res { st: resultPartsstmtsState, v: resultPartsstmtsValue, ok: resultPartsstmtsOk } = stmts;
@@ -6452,7 +6481,7 @@ fn statementAssignParts(st: &St, id: Int) -> List<Int> ~ {
             AstStatement::Let { n: a, e: b } => { out = []; },
             AstStatement::Return { e: a } => { out = []; },
             AstStatement::ValidationStatement { v: a } => { out = []; },
-            AstStatement::StructDef { n: a, ps: b, fs: c, vs: d } => { out = []; },
+            AstStatement::StructDef { n: a, ps: b, fs: c, vs: d, model: projection } => { out = []; },
             AstStatement::EnumDef { n: a, vs: b } => { out = []; },
             AstStatement::AxiomDef { n: a, ps: b, ins: c, outs: d } => { out = []; },
             AstStatement::ProofDef { n: a, ps: b, ins: c, outs: d, body: e } => { out = []; },
@@ -6787,6 +6816,11 @@ fn chainOf(old: &List<AstNode>, id: Int) -> List<Int> ~ {
     loop = true;
     while loop ~ {
         node = nodeAtList(old, cur);
+        if node is AstNode::Origins { v = (node as AstNode::Origins).value; match v {
+            AstOrigins::End => { endId = cur; loop = false; },
+            AstOrigins::Reference { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; },
+            AstOrigins::Borrowed { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; },
+        }; } else {
         if node is AstNode::Names { v = (node as AstNode::Names).value; match v { AstNames::End => { endId = cur; loop = false; }, AstNames::Cons { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; }, }; } else {
         if node is AstNode::Values { v = (node as AstNode::Values).value; match v { AstValues::End => { endId = cur; loop = false; }, AstValues::Cons { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; }, }; } else {
         if node is AstNode::Statements { v = (node as AstNode::Statements).value; match v { AstStatements::End => { endId = cur; loop = false; }, AstStatements::Cons { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; }, }; } else {
@@ -6814,11 +6848,13 @@ fn chainOf(old: &List<AstNode>, id: Int) -> List<Int> ~ {
         };
         };
         };
+        };
     };
     out = push([], endId); i = 0; for h in heads { out = push(out, h); out = push(out, intAtOr(cons, i, 0)); i = i + 1; }; return out;
 };
 
 fn isListNode(node: &AstNode) -> Bool ~ {
+    if node is AstNode::Origins { return true; };
     if node is AstNode::Names { return true; };
     if node is AstNode::Values { return true; };
     if node is AstNode::Statements { return true; };
@@ -6909,7 +6945,7 @@ fn nodeChildren(node: &AstNode) -> List<Int> ~ {
             AstStatement::Let { n: n, e: e } => { out = push(push([], n), e); },
             AstStatement::Return { e: e } => { out = push([], e); },
             AstStatement::ValidationStatement { v: v } => { out = push([], v); },
-            AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs } => { out = push(push(push(push([], n), ps), fs), vs); },
+            AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs, model: model } => { out = push(push(push(push(push([], n), ps), fs), vs), model); },
             AstStatement::EnumDef { n: n, vs: vs } => { out = push(push([], n), vs); },
             AstStatement::AxiomDef { n: n, ps: ps, ins: ins, outs: outs } => { out = push(push(push(push([], n), ps), ins), outs); },
             AstStatement::ProofDef { n: n, ps: ps, ins: ins, outs: outs, body: body } => { out = push(push(push(push(push([], n), ps), ins), outs), body); },
@@ -6980,6 +7016,7 @@ fn nodeChildren(node: &AstNode) -> List<Int> ~ {
     };
     if node is AstNode::Type { out = []; };
     if node is AstNode::Size { out = []; };
+    if node is AstNode::Origins { out = []; };
     if node is AstNode::Names { out = []; };
     if node is AstNode::Values { out = []; };
     if node is AstNode::Statements { out = []; };
@@ -7070,7 +7107,7 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
             AstStatement::Let { n: n, e: e } => { result = AstNode::Statement { value: AstStatement::Let { n: intAtOr(map, n, n), e: intAtOr(map, e, e) } }; },
             AstStatement::Return { e: e } => { result = AstNode::Statement { value: AstStatement::Return { e: intAtOr(map, e, e) } }; },
             AstStatement::ValidationStatement { v: v } => { result = AstNode::Statement { value: AstStatement::ValidationStatement { v: intAtOr(map, v, v) } }; },
-            AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs } => { result = AstNode::Statement { value: AstStatement::StructDef { n: intAtOr(map, n, n), ps: intAtOr(map, ps, ps), fs: intAtOr(map, fs, fs), vs: intAtOr(map, vs, vs) } }; },
+            AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs, model: model } => { result = AstNode::Statement { value: AstStatement::StructDef { n: intAtOr(map, n, n), ps: intAtOr(map, ps, ps), fs: intAtOr(map, fs, fs), vs: intAtOr(map, vs, vs), model: intAtOr(map, model, model) } }; },
             AstStatement::EnumDef { n: n, vs: vs } => { result = AstNode::Statement { value: AstStatement::EnumDef { n: intAtOr(map, n, n), vs: intAtOr(map, vs, vs) } }; },
             AstStatement::AxiomDef { n: n, ps: ps, ins: ins, outs: outs } => { result = AstNode::Statement { value: AstStatement::AxiomDef { n: intAtOr(map, n, n), ps: intAtOr(map, ps, ps), ins: intAtOr(map, ins, ins), outs: intAtOr(map, outs, outs) } }; },
             AstStatement::ProofDef { n: n, ps: ps, ins: ins, outs: outs, body: body } => { result = AstNode::Statement { value: AstStatement::ProofDef { n: intAtOr(map, n, n), ps: intAtOr(map, ps, ps), ins: intAtOr(map, ins, ins), outs: intAtOr(map, outs, outs), body: intAtOr(map, body, body) } }; },
@@ -7139,6 +7176,11 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
     if node is AstNode::Elaborated { v = clone((node as AstNode::Elaborated).value);
         result = AstNode::Elaborated { value: AstElaborated { statements: intAtOr(map, v.statements, v.statements), types: intAtOr(map, v.types, v.types) } };
     };
+    if node is AstNode::Origins { v = clone((node as AstNode::Origins).value); match v {
+        AstOrigins::End => { result = clone(node); },
+        AstOrigins::Reference { head: h, tail: t } => { result = AstNode::Origins { value: AstOrigins::Reference { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; },
+        AstOrigins::Borrowed { head: h, tail: t } => { result = AstNode::Origins { value: AstOrigins::Borrowed { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; },
+    }; };
     if node is AstNode::Names { v = clone((node as AstNode::Names).value); match v { AstNames::End => { result = clone(node); }, AstNames::Cons { head: h, tail: t } => { result = AstNode::Names { value: AstNames::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Values { v = clone((node as AstNode::Values).value); match v { AstValues::End => { result = clone(node); }, AstValues::Cons { head: h, tail: t } => { result = AstNode::Values { value: AstValues::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Statements { v = clone((node as AstNode::Statements).value); match v { AstStatements::End => { result = clone(node); }, AstStatements::Cons { head: h, tail: t } => { result = AstNode::Statements { value: AstStatements::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };

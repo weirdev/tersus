@@ -73,6 +73,15 @@ data ValidationStatement
       -- `tersus assumptions` lists: what a program takes on trust, such as what a C function did to memory (POINTERS.md).
       Assume VariableProof
     deriving (Show, Eq, Ord, Read)
+data ValueProjection = InitializedPrefix Variable Variable | StoredPayload Variable
+    deriving (Show, Eq, Ord, Read)
+
+data StructSpec = StructSpec
+    { structInvariant :: [ValidationStatement]
+    , structProjection :: Maybe ValueProjection
+    }
+    deriving (Show, Eq, Ord, Read)
+
 data Statement
     = Assign Variable Expression
     | -- `*place = expression;`: the place a reference is to is given a new value (REFERENCES.md, stage 3). The first
@@ -86,7 +95,7 @@ data Statement
     | -- struct Name<sizes> { field: Type, ... }; it only matters to the type checker. A struct with sizes (`struct Packet<n> { body:
       -- Array<Int, n> }`) is a type for each list of sizes, `Packet<4>`: see TNamed. The last field is the invariant, `struct Vec<T> {
       -- data: Box<Array<T>>, len: Int } invariant [{ affirm len >= 0; }]`, which every value of the struct meets.
-      StructDef Name [Variable] [(Variable, Type)] [ValidationStatement]
+      StructDef Name [Variable] [(Variable, Type)] StructSpec
     | -- enum Name { Variant { field: Type, ... }, ... } with the variants' full names (Name::Variant)
       EnumDef Name [(Name, [(Variable, Type)])]
     | AxiomDef Variable [Variable] [ValidationStatement] [ValidationStatement]
@@ -128,6 +137,35 @@ data Statement
       -- the reads of the fields and this): it is used up, so a drop it has is not run. Only native code needs it (MirGhost).
       Dissolve Variable
     deriving (Show, Eq, Ord, Read) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
+
+hasValueProjection :: [Statement] -> Bool
+hasValueProjection = any has
+  where
+    has (StructDef _ _ _ spec) = structProjection spec /= Nothing
+    has (Block body) = hasValueProjection body
+    has (If _ yes no) = hasValueProjection (yes ++ no)
+    has (While _ _ _ body) = hasValueProjection body
+    has (ImplDef _ _ _ _ _ body) = hasValueProjection body
+    has (BoundedDef _ statement) = has statement
+    has (Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _))) = hasValueProjection body
+    has _ = False
+
+hasBorrowedResult :: [Statement] -> Bool
+hasBorrowedResult = any has
+  where
+    has (Assign _ (Val (VFunct _ _ _ (NativeFunct (Signature _ _ _ _ _ origins) _ body) _))) = borrowedResult origins || hasBorrowedResult body
+    has (Block body) = hasBorrowedResult body
+    has (If _ yes no) = hasBorrowedResult (yes ++ no)
+    has (While _ _ _ body) = hasBorrowedResult body
+    has (ImplDef _ _ _ _ _ body) = hasBorrowedResult body
+    has (BoundedDef _ body) = has body
+    has _ = False
+
+unsupportedTemplateDeclaration :: Statement -> Bool
+unsupportedTemplateDeclaration statement = case statement of
+    BoundedDef _ body -> hasBorrowedResult [body] || hasValueProjection [body]
+    ImplDef _ _ _ _ bounds body -> not (null bounds) && (hasBorrowedResult body || hasValueProjection body)
+    _ -> False
 
 -- A bound on a type parameter of a function: the parameter, the trait its type has to implement and the types it is given
 -- (`S: Sequence<Int>`)

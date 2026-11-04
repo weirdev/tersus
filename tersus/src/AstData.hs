@@ -28,7 +28,7 @@ writeElaborated (Elaborated ss ts) =
 finish :: String -> (Int, Build) -> Result String String
 finish stage (root, (_, records)) =
     checkRecords records `bindResult` \() ->
-        Ok (unlines (("tersus-ast 1 " ++ stage) : reverse records ++ ["root " ++ show root]))
+        Ok (unlines (("tersus-ast 2 " ++ stage) : reverse records ++ ["root " ++ show root]))
   where
     checkRecords [] = Ok ()
     checkRecords (line : rest)
@@ -84,6 +84,7 @@ data Node = NName String | NType Type | NSize Size | NElaborated Elaborated
     | NOptName (Maybe Name)
     | NOptTermination (Maybe Termination)
     | NBuiltin (BuiltinFunct)
+    | NOrigins ([ResultOrigin])
     | NNames ([String])
     | NValues ([Value])
     | NStatements ([Statement])
@@ -239,12 +240,13 @@ putStatement value b0 = case value of
     ValidationStatement v ->
         let (r0, b1) = putValidation v b0
          in emit "ValidationStatement" [show r0] b1
-    StructDef n ps fs vs ->
+    StructDef n ps fs spec ->
         let (r0, b1) = putName n b0
             (r1, b2) = putNames ps b1
             (r2, b3) = putFields fs b2
-            (r3, b4) = putValidations vs b3
-         in emit "StructDef" [show r0, show r1, show r2, show r3] b4
+            (r3, b4) = putValidations (structInvariant spec) b3
+            (r4, b5) = putNames (projectionNames (structProjection spec)) b4
+         in emit "StructDef" [show r0, show r1, show r2, show r3, show r4] b5
     EnumDef n vs ->
         let (r0, b1) = putName n b0
             (r1, b2) = putVariants vs b1
@@ -318,7 +320,7 @@ putSignature value b0 = case value of
             (r2, b3) = putNames ss b2
             (r3, b4) = putNames ps b3
             (r4, b5) = putNames ws b4
-            (r5, b6) = putNames fs b5
+            (r5, b6) = putOrigins fs b5
          in emit "Signature" [show r0, show r1, show r2, show r3, show r4, show r5] b6
 
 putTraitFn :: TraitFn -> Build -> (Int, Build)
@@ -407,6 +409,19 @@ putBuiltin value b0 = case value of
     ToWord signed bits -> emit "ToWord" [(if signed then "true" else "false"), show bits] b0
     Rel r -> emit "Rel" [show r] b0
     b -> emit "Primitive" [quote (show b)] b0
+
+projectionNames :: Maybe ValueProjection -> [String]
+projectionNames Nothing = []
+projectionNames (Just (InitializedPrefix block lengthField)) = ["prefix", block, lengthField]
+projectionNames (Just (StoredPayload block)) = ["payload", block]
+
+putOrigins :: [ResultOrigin] -> Build -> (Int, Build)
+putOrigins origins b = foldl' cons (emit "OriginsEnd" [] b) (reverse origins)
+  where
+    cons (tailId, state) origin =
+        let (headId, state') = putName (head (resultOriginNames [origin])) state
+            tag = if borrowedResult [origin] then "BorrowedOriginsCons" else "ReferenceOriginsCons"
+         in emit tag [show headId, show tailId] state'
 
 putNames :: [String] -> Build -> (Int, Build)
 putNames xs b = foldl' cons (emit "NamesEnd" [] b) (reverse xs)
@@ -511,7 +526,7 @@ readElaborated text = decode "elaborated" text `bindResult` \n -> case n of
 
 decode :: String -> String -> Result Node String
 decode stage text = case lines text of
-    header : rest | header == "tersus-ast 1 " ++ stage -> case reverse rest of
+    header : rest | header == "tersus-ast 2 " ++ stage -> case reverse rest of
         root : reversed -> doResult (reverse reversed) root
         _ -> Error "AstData: missing root"
     _ -> Error "AstData: unknown header"
@@ -686,7 +701,13 @@ nodeP nodes = word >>= \tag -> case tag of
         (ps, r1) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (fs, r2) <- ref nodes (\node -> case node of NFields payload -> Just payload; _ -> Nothing)
         (vs, r3) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
-        pure (NStatement (StructDef n ps fs vs), [r0, r1, r2, r3])
+        (model, r4) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
+        projection <- case model of
+            [] -> pure Nothing
+            ["prefix", block, lengthField] -> pure (Just (InitializedPrefix block lengthField))
+            ["payload", block] -> pure (Just (StoredPayload block))
+            _ -> failP "invalid declaration projection"
+        pure (NStatement (StructDef n ps fs (StructSpec vs projection)), [r0, r1, r2, r3, r4])
     "EnumDef" -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (vs, r1) <- ref nodes (\node -> case node of NVariants payload -> Just payload; _ -> Nothing)
@@ -760,7 +781,7 @@ nodeP nodes = word >>= \tag -> case tag of
         (ss, r2) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (ps, r3) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (ws, r4) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
-        (fs, r5) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
+        (fs, r5) <- ref nodes (\node -> case node of NOrigins payload -> Just payload; _ -> Nothing)
         pure (NSignature (Signature ts ret ss ps ws fs), [r0, r1, r2, r3, r4, r5])
     "TraitFn" -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
@@ -828,6 +849,15 @@ nodeP nodes = word >>= \tag -> case tag of
     "Rel" -> do
         r <- relP
         pure (NBuiltin (Rel r), [])
+    "OriginsEnd" -> pure (NOrigins [], [])
+    "ReferenceOriginsCons" -> do
+        (name, a) <- ref nodes (\node -> case node of NName v -> Just v; _ -> Nothing)
+        (rest, b) <- ref nodes (\node -> case node of NOrigins v -> Just v; _ -> Nothing)
+        if borrowedResult rest then failP "mixed result origin modes" else pure (NOrigins (ReferenceOrigin name : rest), [a, b])
+    "BorrowedOriginsCons" -> do
+        (name, a) <- ref nodes (\node -> case node of NName v -> Just v; _ -> Nothing)
+        (rest, b) <- ref nodes (\node -> case node of NOrigins v -> Just v; _ -> Nothing)
+        if any (\origin -> case origin of ReferenceOrigin _ -> True; _ -> False) rest then failP "mixed result origin modes" else pure (NOrigins (BorrowedOrigin name : rest), [a, b])
     "NamesEnd" -> pure (NNames [], [])
     "NamesCons" -> do
         (x, a) <- ref nodes (\node -> case node of NName v -> Just v; _ -> Nothing)

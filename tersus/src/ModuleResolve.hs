@@ -455,11 +455,11 @@ rewriteStatements maps bound typeParams (stmt : rest) = do
 
 rewriteStatement :: Maps -> Set.Set Variable -> Set.Set Name -> Statement -> Either String (Statement, Set.Set Variable)
 rewriteStatement maps bound typeParams stmt = case stmt of
-    StructDef name params fields invariant -> do
+    StructDef name params fields spec -> do
         let typeParams' = typeParams `Set.union` Set.fromList params
         fields' <- mapM (\(field, ty) -> (,) field <$> rewriteType maps typeParams' ty) fields
-        invariant' <- rewriteValidations maps (bound `Set.union` Set.fromList (map fst fields)) typeParams' invariant
-        Right (StructDef name params fields' invariant', bound)
+        invariant' <- rewriteValidations maps (bound `Set.union` Set.fromList (map fst fields)) typeParams' (structInvariant spec)
+        Right (StructDef name params fields' spec{structInvariant = invariant'}, bound)
     EnumDef name variants -> do
         variants' <- mapM (\(variant, fields) -> (,) variant <$> mapM (\(field, ty) -> (,) field <$> rewriteType maps typeParams ty) fields) variants
         Right (EnumDef name variants', bound)

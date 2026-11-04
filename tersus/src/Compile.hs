@@ -29,9 +29,9 @@ import Link (linkPrograms)
 import Modules (ModuleId (..))
 import Parse (Decls, ParsedFile (..), emptyDecls, importPath, locating, parseFileWith, parseStatementBlockWith, renderPath)
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource, typesSource)
-import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Statement (..), Termination (..), TraitFn (..), ValidationStatement (..), Value (..))
+import Syntax (StructSpec (..), Expression (..), FunctBody (..), Proof (..), RwRule (..), Statement (..), Termination (..), TraitFn (..), ValidationStatement (..), Value (..))
 import TypeCheck (elaborate, elaborateWith)
-import Types (Arg (..), BuiltinFunct (..), Signature (..), Size (..), Type (..), pattern TList, pattern TBox)
+import Types (Arg (..), BuiltinFunct (..), Signature (..), Size (..), Type (..), resultOriginNames, pattern TList, pattern TBox)
 import Utils
 
 -- The front of the pipeline of Pipeline, split out so that MirHousekeeping can compile the checker and the
@@ -205,7 +205,7 @@ hasStringLiteral = any statementLiteral
         Let _ e -> expressionLiteral e
         Return e -> expressionLiteral e
         ValidationStatement v -> validationLiteral v
-        StructDef _ _ _ invariant -> any validationLiteral invariant
+        StructDef _ _ _ spec -> any validationLiteral (structInvariant spec)
         AxiomDef _ _ ins outs -> any validationLiteral (ins ++ outs)
         ProofDef _ _ ins outs body -> any validationLiteral (ins ++ outs ++ body)
         Block body -> any statementLiteral body
@@ -255,7 +255,7 @@ statementNames stmt = case stmt of
     Let name e -> nameParts name ++ expressionNames e
     Return e -> expressionNames e
     ValidationStatement v -> validationNames v
-    StructDef name params fields invariant -> nameParts name ++ params ++ concatMap field fields ++ concatMap validationNames invariant
+    StructDef name params fields spec -> nameParts name ++ params ++ concatMap field fields ++ concatMap validationNames (structInvariant spec)
       where field (f, t) = nameParts f ++ typeNames t
     EnumDef name variants -> nameParts name ++ concatMap variant variants
       where variant (v, fields) = nameParts v ++ concatMap field fields
@@ -280,7 +280,7 @@ traitFnNames :: TraitFn -> [String]
 traitFnNames fn = nameParts (traitFnName fn) ++ traitFnParams fn ++ signatureNames (traitFnSignature fn) ++ concatMap validationNames (traitFnRequires fn ++ traitFnEnsures fn)
 
 signatureNames :: Signature -> [String]
-signatureNames (Signature params result sizes types writes fromNames) = concatMap typeNames (result : params) ++ sizes ++ types ++ writes ++ fromNames
+signatureNames (Signature params result sizes types writes fromNames) = concatMap typeNames (result : params) ++ sizes ++ types ++ writes ++ resultOriginNames fromNames
 
 terminationNames :: Maybe Termination -> [String]
 terminationNames term = case term of

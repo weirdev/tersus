@@ -1718,11 +1718,9 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
     let _ = (reassignedNames, ensuredNames)
     case M.specFrom (M.fnSpec callee) of
         [] -> Just ()
-        [from] -> if from `elem` map fst paramNameLocals then Just () else Nothing
-        -- (a shared reference from one of several parameters is a value read
-        -- from one of them, of which nothing more is known)
-        froms -> case M.fnReturns callee of
-            Just (TRef _) | all (`elem` map fst paramNameLocals) froms -> Just ()
+        [ReferenceOrigin from] -> if from `elem` map fst paramNameLocals then Just () else Nothing
+        origins -> case M.fnReturns callee of
+            Just (TRef _) | not (borrowedResult origins) && all (`elem` map fst paramNameLocals) (resultOriginNames origins) -> Just ()
             _ -> Nothing
     case M.fnReturns callee of Just _ -> Just (); Nothing -> Nothing
     (snapshots, b1) <- foldM snapshot ([], b0) args
@@ -1766,8 +1764,8 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
     let argumentRefs = [record "ValueRef::Local" [("local", MInt (toInteger n))] | (M.Local n, _) <- snapshots] ++ tagRefs
         applyResult = step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList argumentRefs)]
         result = case M.specFrom (M.fnSpec callee) of
-            [from] | Just (_, postLocal, _snapLocal) <- find (\(name, _, _) -> name == from) postLocals -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum postLocal)))])]
-            [from] | Just snapLocal <- lookup from (zip (map fst paramNameLocals) [local | (local, _) <- snapshots]) -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum snapLocal)))])]
+            [ReferenceOrigin from] | Just (_, postLocal, _snapLocal) <- find (\(name, _, _) -> name == from) postLocals -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum postLocal)))])]
+            [ReferenceOrigin from] | Just snapLocal <- lookup from (zip (map fst paramNameLocals) [local | (local, _) <- snapshots]) -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum snapLocal)))])]
             _ -> applyResult
     pure ([save | (_, save) <- snapshots] ++ postSteps ++ sizeChecks ++ checks ++ variantSteps ++ [result] ++ assumptions, [(name, record "ValueRef::Local" [("local", MInt (toInteger (localNum post)))]) | (name, post, _) <- postLocals], b4)
   where
@@ -2055,7 +2053,7 @@ borrowsOf functions fn = loop Map.empty
         [ (dest, src)
         | M.Call (M.Const (M.CFn name)) args dest _ <- terms
         , Just callee <- [Map.lookup name functions]
-        , [from] <- [M.specFrom (M.fnSpec callee)]
+        , [ReferenceOrigin from] <- [M.specFrom (M.fnSpec callee)]
         , Just idx <- [lookup from (zip (paramNamesOf callee) [0 ..])]
         , idx < length args
         , M.Copy src <- [args !! idx]
@@ -2921,7 +2919,10 @@ encodeNoted :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))
 -- makes them for native code after validation there; the validator
 -- written in Tersus is given the same copies, so a call of a generic
 -- function names the copy of it the call decides).
-encodeNoted program0 = encodeMono withTemplates
+encodeNoted program0
+    | Just fn <- find (borrowedResult . M.specFrom . M.fnSpec) (M.progMain program0 : Map.elems (M.progFunctions program0)) =
+        Left ("checked borrowed whole-value return places in " ++ M.fnName fn)
+    | otherwise = encodeMono withTemplates
   where
     mono = monomorphizeForValidation program0
     -- A contract can name a generic function nothing calls (a method

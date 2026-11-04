@@ -1247,6 +1247,16 @@ return *r;   // 10; ys cannot be assigned or moved while r is live
 - **In a contract, `return` is what the reference is to** (`*return` is the same thing written as a place), so a promise about the result is a promise about the caller's place.
 - A reference result is a local like any other reference: it can be read through, given on to a lent parameter, and returned by another function whose `from` it satisfies. An update reference (`&mut T`) can be returned too (`-> &mut T from xs`), and the caller may then assign through it. The origin of a result may come through a trait method (`Trait::getr(...)` uses the trait's own `from`) and through a function value that is a named function held by a local (`g = headOf; r = g(ys);`); through any other function value it cannot be told and is refused. It cannot be returned by the program. Native code returns a reference as the address of the place, since a borrowed parameter is passed by address. A reference to an unsized value (`&Array<T>`, made by borrowing through a `Box`, as in `&*b` for `b: Box<Array<Int>>`) works in the interpreter — its size is the size of what it is to — but native code does not carry the size with the address yet and refuses it.
 
+#### Draft borrowed whole-value results
+
+The isolated draft parses `-> T borrowed from owner` as a borrowed-value result,
+distinct from a reference-valued result or an owned struct containing references.
+It retains the source type `T` and lowers a checked return place to an internal
+pointer. Plain function types cannot erase that result mode. This annotation is a
+reversible draft, not an approved public API: native validation currently rejects
+borrowed-result mode as unmodeled until checked field/slot return contracts and
+runtime/lifetime tests are complete. No standard trait or library API is changed.
+
 #### Holding references in a struct
 
 A field of a struct may be a read reference, so a value can hold the ends of what it looks at:

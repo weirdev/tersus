@@ -63,13 +63,13 @@ No `Iota`, solver, term table, rule environment or proof-engine execution state
 is serialized. Syntactic axioms and proofs are `AxiomDef` and `ProofDef`, not
 an execution `RuleContext`.
 
-## Version 1
+## Version 2
 
 The first record is exactly one of:
 
 ```
-tersus-ast 1 parsed
-tersus-ast 1 elaborated
+tersus-ast 2 parsed
+tersus-ast 2 elaborated
 ```
 
 Each subsequent line is one node. Its zero-based ID is its position after the
@@ -101,7 +101,7 @@ an AST; this bridge does not change that behavior.
 Example: the syntax `[Return (Val (VInt 7))]` is:
 
 ```
-tersus-ast 1 parsed
+tersus-ast 2 parsed
 StatementsEnd
 NameEnd
 NamePart "7" 1
@@ -117,7 +117,19 @@ the complete occurrence-type list. All other syntax node tags are their
 Haskell constructor names, with fields in constructor order. `FieldBuiltin`
 is the builtin `Field`; `Field` is the `(name, Type)` field declaration.
 `Bound`, `Variant`, `ValueField` and `Signature` follow their Haskell tuple or
-constructor order. Options are `NoName`/`SomeName NAME` and
+constructor order. `StructDef` has five references: name, parameters, fields,
+invariants and projection names. Projection names are exactly `[]`,
+`["prefix", blockField, lengthField]` or `["payload", blockField]`; other forms
+are rejected. Ordinary authored structs have no projection. Unsupported
+programmatic projection metadata is rejected before lowering or interface export.
+
+A signature's final reference is an origin list, not a names list:
+`OriginsEnd`, `ReferenceOriginsCons NAME TAIL` or `BorrowedOriginsCons NAME TAIL`.
+An origin list cannot mix reference and borrowed-value modes. The tagged origin
+channel distinguishes an owned result containing references from a borrowed
+whole-value result. Version 1 layouts and unknown modes are rejected.
+
+Options are `NoName`/`SomeName NAME` and
 `NoTermination`/`SomeTermination TERMINATION`. Booleans are `true`/`false`;
 relations are `Eq`, `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq`.
 
@@ -144,7 +156,7 @@ integer **value** literals have no such numeric limit.
 
 `examples/parser/parser.tersus` is a hand-written parser over bytes (in the manner of
 `examples/mir_reader.tersus`) for the whole language. It builds the arena of
-this document directly and writes `tersus-ast 1 parsed` for it, byte for byte
+this document directly and writes `tersus-ast 2 parsed` for it, byte for byte
 as `AstData.writeParsed` writes the Haskell parse of the same program,
 including every desugaring (a `match` becomes an `if` chain of `Is` and
 `Project`, a `for` becomes a `while`, struct literals become `Ctor`
@@ -192,7 +204,7 @@ decls
 ... final declarations ...
 endDecls
 ast
-tersus-ast 1 parsed
+tersus-ast 2 parsed
 ... AST records ...
 root <id>
 ```

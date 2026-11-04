@@ -65,8 +65,8 @@ data TcState = TcState
     , tcDrops :: Set.Set Name -- the structs and enums that have a drop
     , tcGhost :: Bool -- whether the expression being checked is the validator's (of a `define`), where what is known of a permission can be read
     , tcRefAliases :: Map Variable (Variable, [Maybe Variable]) -- each local that holds a reference, and the place it is to: a root and its steps (a field, or an element)
-    , tcRefResults :: Map Name ([Variable], [Variable]) -- each function that returns a reference: its parameters, and the ones the result is from
-    , tcResultFrom :: Maybe [Variable] -- the parameters the result of the function being checked is from, when it is a reference
+    , tcRefResults :: Map Name ([Variable], [ResultOrigin]) -- each function that returns a reference: its parameters, and the ones the result is from
+    , tcResultFrom :: Maybe [ResultOrigin] -- the parameters the result of the function being checked is from, when it is a reference
     , tcParams :: [Variable] -- the parameters of the function being checked
     , tcRefOrigins :: Map Variable [Variable] -- what each local that holds references (or a value that holds them) is from: the roots of its places
     , tcImplBounds :: Map (Name, Name) [Bound] -- for a trait and a type whose impl of it has bounds (`impl<T: Eq> Eq for List<T>`), the bounds
@@ -260,6 +260,14 @@ coerce wanted texpr = do
         expr = tExpr texpr
     w <- zonk wanted
     a <- zonk actual
+    state <- getState
+    let origins = case expr of
+            Var name -> maybe [] snd (Map.lookup name (tcRefResults state))
+            Val (VFnRef name) -> maybe [] snd (Map.lookup name (tcRefResults state))
+            Val (VFunct _ _ _ (NativeFunct (Signature _ _ _ _ _ from) _ _) _) -> from
+            _ -> []
+    when (case w of TFn _ _ -> borrowedResult origins; _ -> False) $
+        failTc "Type error: a borrowed-result function cannot be erased into a plain function value; call a checked named function or alias"
     case (w, a) of
         (TBox (TArrayOf x SizeAny), TBox (TArrayOf y size)) | size /= SizeAny -> do
             same <- unify x y
@@ -740,26 +748,40 @@ checkCallWrites expr = do
 -- The parameters a reference result is from: those written (`from xs`, `from (a, b)`), or the one reference
 -- parameter when there is only one. A reference result with no reference parameter, or with several and
 -- none named, is refused; so is an update reference as a result, for now (REFERENCES.md, stage 4)
-refResultFrom :: Variable -> [Variable] -> [Type] -> Type -> [Variable] -> TC [Variable]
-refResultFrom name params ptys rty fromNames = do
-    isRefResult <- case rty of
-        TMutRef inner -> checkType inner >> return True
-        TRef inner -> checkType inner >> return True
-        _ -> holdsRef rty
-    if not isRefResult
-        then case fromNames of
-            [] -> return []
-            _ -> failTc ("Type error: " ++ name ++ " is written from " ++ intercalate ", " fromNames ++ ", but its result is not a reference")
-        else case fromNames of
-            _ : _ -> do
-                forM_ fromNames $ \p -> case lookup p (zip params ptys) of
-                    Just t | isRefType t -> return ()
-                    _ -> failTc ("Type error: " ++ name ++ " is written from " ++ p ++ ", which is not a reference parameter of it")
-                return fromNames
-            [] -> case [p | (p, t) <- zip params ptys, isRefType t] of
-                [only] -> return [only]
-                [] -> failTc ("Type error: " ++ name ++ " returns a reference, but no parameter of it is a reference for the result to be from: write the result as -> &T from <parameter>")
-                _ -> failTc ("Type error: " ++ name ++ " returns a reference and has more than one reference parameter: say which the result is from, as in -> &T from (a, b)")
+refResultFrom :: Variable -> [Variable] -> [Type] -> Type -> [ResultOrigin] -> TC [ResultOrigin]
+refResultFrom name params ptys rty origins
+    | borrowedResult origins = do
+        when (any (\origin -> case origin of ReferenceOrigin _ -> True; _ -> False) origins) $ failTc "Type error: a result cannot mix reference and borrowed-value origins"
+        forM_ fromNames $ \p -> case lookup p (zip params ptys) of
+            Just (TRef owner) -> do
+                runtime <- ownsRuntime owner
+                unless runtime $ failTc "Type error: a borrowed value needs a runtime borrowed owner"
+            _ -> failTc ("Type error: borrowed result of " ++ name ++ " is from " ++ p ++ ", which is not a read-borrowed parameter")
+        return origins
+    | otherwise = map ReferenceOrigin <$> referenceNames
+  where
+    fromNames = resultOriginNames origins
+    ownsRuntime (TBlock _) = return False
+    ownsRuntime _ = return True
+    referenceNames = do
+        isRefResult <- case rty of
+            TMutRef inner -> checkType inner >> return True
+            TRef inner -> checkType inner >> return True
+            _ -> holdsRef rty
+        if not isRefResult
+            then case fromNames of
+                [] -> return []
+                _ -> failTc ("Type error: " ++ name ++ " is written from " ++ intercalate ", " fromNames ++ ", but its result is not a reference")
+            else case fromNames of
+                _ : _ -> do
+                    forM_ fromNames $ \p -> case lookup p (zip params ptys) of
+                        Just t | isRefType t -> return ()
+                        _ -> failTc ("Type error: " ++ name ++ " is written from " ++ p ++ ", which is not a reference parameter of it")
+                    return fromNames
+                [] -> case [p | (p, t) <- zip params ptys, isRefType t] of
+                    [only] -> return [only]
+                    [] -> failTc ("Type error: " ++ name ++ " returns a reference, but no parameter of it is a reference for the result to be from: write the result as -> &T from <parameter>")
+                    _ -> failTc ("Type error: " ++ name ++ " returns a reference and has more than one reference parameter: say which the result is from, as in -> &T from (a, b)")
 
 -- What a value that is or holds references is from, as the roots its places start from, where that can be
 -- told: a borrow of a place, a local that holds references (whose own origins are recorded), a field of one,
@@ -792,9 +814,9 @@ exprReturnOrigin expr = do
         F (Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _)) [place] -> return (fmap (fst . uncurry (resolveRefPlace st)) (placeSteps place))
         Var var -> return (Just (fst (resolveRefPlace st var [])))
         F (Var name) args -> case Map.lookup name (tcRefResults st) of
-            Just (params, froms) -> firstOrigin st params froms args
+            Just (params, froms) -> firstOrigin st params (resultOriginNames froms) args
             Nothing
-                | Just name == tcCurrent st -> firstOrigin st (tcParams st) (fromMaybe [] (tcResultFrom st)) args
+                | Just name == tcCurrent st && name `notElem` tcParams st -> firstOrigin st (tcParams st) (resultOriginNames (fromMaybe [] (tcResultFrom st))) args
                 | otherwise -> return Nothing
         _ -> return Nothing
   where
@@ -811,9 +833,9 @@ exprOriginCandidates expr = do
     st <- getState
     case expr of
         F (Var name) args -> case Map.lookup name (tcRefResults st) of
-            Just (params, froms) -> concat <$> mapM (argCandidates st) [arg | (p, arg) <- zip params args, p `elem` froms]
+            Just (params, froms) -> concat <$> mapM (argCandidates st) [arg | (p, arg) <- zip params args, p `elem` resultOriginNames froms]
             Nothing
-                | Just name == tcCurrent st -> concat <$> mapM (argCandidates st) [arg | (p, arg) <- zip (tcParams st) args, p `elem` fromMaybe [] (tcResultFrom st)]
+                | Just name == tcCurrent st && name `notElem` tcParams st -> concat <$> mapM (argCandidates st) [arg | (p, arg) <- zip (tcParams st) args, p `elem` resultOriginNames (fromMaybe [] (tcResultFrom st))]
                 | otherwise -> single
         _ -> single
   where
@@ -825,10 +847,19 @@ exprOriginCandidates expr = do
 -- What a binding makes the variable an alias of, when it is made by &place or &mut place, and forgetting it otherwise
 recordAlias :: Variable -> Type -> Expression -> TC ()
 recordAlias var ty expr = do
+    before <- getState
+    let resolved = case expr of Var name -> Map.lookup name (tcRefResults before); _ -> Nothing
+    recordAliasFrom resolved var ty expr
+
+recordAliasFrom :: Maybe ([Variable], [ResultOrigin]) -> Variable -> Type -> Expression -> TC ()
+recordAliasFrom resolved var ty expr = do
     st0 <- getState
-    case expr of
-        Var fname | Just entry <- Map.lookup fname (tcRefResults st0) -> putState st0{tcRefResults = Map.insert var entry (tcRefResults st0)}
-        _ -> return ()
+    let oldMode = maybe False (borrowedResult . snd) (Map.lookup var (tcRefResults st0))
+    when (oldMode && case ty of TFn _ _ -> True; _ -> False) $
+        failTc "Type error: a checked borrowed-result alias cannot be reassigned without preserving its callable mode and origins"
+    case resolved of
+        Just entry -> putState st0{tcRefResults = Map.insert var entry (tcRefResults st0)}
+        Nothing -> putState st0{tcRefResults = Map.delete var (tcRefResults st0)}
     st <- getState
     tyz <- zonk ty
     let alias = if not (isRefType tyz)

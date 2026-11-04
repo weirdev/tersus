@@ -388,5 +388,13 @@ namedField name field
 
 -- The declared parameter types and return type of a user function, its size parameters, which are the last parameters (of type Int),
 -- given by the call and not written in it, and its type parameters, which a call gives too
-data Signature = Signature [Type] Type [Variable] [Variable] [Variable] [Variable] deriving (Show, Eq, Ord, Read) -- parameter types, return type, size parameters, type parameters, writes footprint, and the parameters a reference result is from (REFERENCES.md)
+data ResultOrigin = ReferenceOrigin Variable | BorrowedOrigin Variable deriving (Show, Eq, Ord, Read)
+
+resultOriginNames :: [ResultOrigin] -> [Variable]
+resultOriginNames = map (\origin -> case origin of ReferenceOrigin name -> name; BorrowedOrigin name -> name)
+
+borrowedResult :: [ResultOrigin] -> Bool
+borrowedResult = any (\origin -> case origin of BorrowedOrigin _ -> True; _ -> False)
+
+data Signature = Signature [Type] Type [Variable] [Variable] [Variable] [ResultOrigin] deriving (Show, Eq, Ord, Read)
 

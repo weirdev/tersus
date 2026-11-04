@@ -56,7 +56,7 @@ seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
         { lsTypes = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map interfaceTypeDecls ifaces))
         , lsFunctions = stubs
         , lsNames = Set.union (Set.fromList (Map.keys stubs)) (Set.singleton "main")
-        , lsGlobals = Map.fromList [(name, (mirName, functionType sizes types ptys rty)) | (name, mirName, fn) <- stubList, let Signature ptys rty sizes types _ _ = fnSignature fn]
+        , lsGlobals = Map.fromList [(name, (mirName, signatureRuntimeType (fnSignature fn))) | (name, mirName, fn) <- stubList]
         , lsGenerics = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map ifGenerics ifaces))
         , lsInvariants = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map ifInvariants ifaces))
         , lsCopies = Set.unions (map ifCopies ifaces)
@@ -81,9 +81,15 @@ seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
         | otherwise = name
     stubs = Map.fromList [(mirName, stubFunction mirName fn) | (_, mirName, fn) <- stubList]
 
+signatureRuntimeType :: Signature -> Type
+signatureRuntimeType (Signature params result sizes types _ origins) =
+    functionType sizes types params (if borrowedResult origins then TRef result else result)
+
 stubFunction :: Name -> InterfaceFunction -> M.Function
 stubFunction mirName fn =
-    let Signature ptys rty sizes types _ _ = fnSignature fn
+    let Signature ptys sourceReturn sizes types _ origins = fnSignature fn
+        rty = if borrowedResult origins then TRef sourceReturn else sourceReturn
+        froms = resultOriginNames origins
         params = [M.Local (i + 1) | i <- [0 .. length ptys - 1]]
         locals = Map.fromList ((M.Local 0, M.LocalDecl rty Nothing) : [(l, M.LocalDecl ty (Just v)) | (l, ty, v) <- zip3 params ptys (fnParams fn)])
      in M.Function
@@ -97,11 +103,8 @@ stubFunction mirName fn =
             , M.fnMutBorrowed = [l | (l, ty) <- zip params ptys, isMutRefType ty]
             , M.fnFrom = [l | (l, v) <- zip params (fnParams fn), v `elem` froms]
             , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)
-            , M.fnSpec = M.emptySpec{M.specRequires = fnRequires fn, M.specEnsures = fnEnsures fn, M.specTermination = fnTermination fn, M.specMutParams = [v | (v, ty) <- zip (fnParams fn) ptys, isMutRefType ty], M.specFrom = froms}
+            , M.fnSpec = M.emptySpec{M.specRequires = fnRequires fn, M.specEnsures = fnEnsures fn, M.specTermination = fnTermination fn, M.specMutParams = [v | (v, ty) <- zip (fnParams fn) ptys, isMutRefType ty], M.specFrom = origins}
             }
-  where
-    Signature _ _ _ _ _ froms = fnSignature fn
-
 interfaceTypeDecls :: ModuleInterface -> Map Name M.TypeDecl
 interfaceTypeDecls iface =
     Map.fromList
@@ -311,15 +314,17 @@ registerTopLevel stmts = do
     modifyS (\s -> s{lsExterns = Set.union (lsExterns s) (Set.fromList [name | ExternDef name <- stmts])})
     mapM_ register stmts
   where
-    register (Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _))) = do
+    register (Assign var (Val (VFunct _ _ _ (NativeFunct signature@(Signature _ _ sizes _ _ _) _ _) _))) = do
         extern <- Set.member var . lsExterns <$> getS
         assigned <- (\s -> Set.member var (lsAssigned s) && null sizes) <$> getS
         name <- uniqueName (if extern then "extern " ++ var else var)
-        modifyS (\s -> s{lsPrereg = Map.insertWith (\new old -> old ++ new) var [name] (lsPrereg s), lsGlobals = if assigned then lsGlobals s else Map.insert var (name, functionType sizes types ptys rty) (lsGlobals s)})
+        modifyS (\s -> s{lsPrereg = Map.insertWith (\new old -> old ++ new) var [name] (lsPrereg s), lsGlobals = if assigned then lsGlobals s else Map.insert var (name, signatureRuntimeType signature) (lsGlobals s)})
     register _ = return ()
 
 program :: [Statement] -> L M.Program
 program stmts = do
+    when (hasValueProjection stmts) $ failL "Unmodeled: checked declaration-backed value projections"
+    when (any unsupportedTemplateDeclaration stmts) $ failL "Unmodeled: checked borrowed whole-value return places in bounded templates"
     registerTopLevel stmts
     lowerStatements stmts
     -- the definitions past a return of the program are lowered too: a function defined there can be called
@@ -538,11 +543,13 @@ lowerStatement stmt =
         Mark line column -> do
             modifyB (\b -> b{bPlace = Just (line, column)})
             emit (M.Ghost Map.empty (M.GhostPosition line column))
-        StructDef name sizes fields invariant | not (null sizes) -> do
-            modifyS (\s -> s{lsGenerics = Map.insert name (sizes, fields) (lsGenerics s), lsInvariants = withInvariant name invariant (lsInvariants s)})
-        StructDef name _ fields invariant -> do
+        StructDef name sizes fields spec | not (null sizes) -> do
+            unless (structProjection spec == Nothing) $ failL "Unmodeled: checked declaration-backed value projections"
+            modifyS (\s -> s{lsGenerics = Map.insert name (sizes, fields) (lsGenerics s), lsInvariants = withInvariant name (structInvariant spec) (lsInvariants s)})
+        StructDef name _ fields spec -> do
+            unless (structProjection spec == Nothing) $ failL "Unmodeled: checked declaration-backed value projections"
             addType name (M.StructDecl fields)
-            modifyS (\s -> s{lsInvariants = withInvariant name invariant (lsInvariants s)})
+            modifyS (\s -> s{lsInvariants = withInvariant name (structInvariant spec) (lsInvariants s)})
         EnumDef name variants -> do
             addType name (M.EnumDecl variants)
         -- (the checker takes a trait apart and hands an impl back as the functions it defines)
@@ -685,7 +692,9 @@ lowerWhile cond invariant term body = do
 -- parameters and the functions at the top, so there is nothing to capture). One defined at the top of the program is
 -- found by name from the bodies of the functions after it, and from itself; any other is a name in its scope.
 defineFunction :: Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Signature -> Maybe Termination -> [Statement] -> L ()
-defineFunction var params ins outs (Signature ptys rty sizes types writes sigFrom) term body = do
+defineFunction var params ins outs (Signature ptys sourceReturn sizes types writes origins) term body = do
+    let rty = if borrowedResult origins then TRef sourceReturn else sourceReturn
+        sigFrom = resultOriginNames origins
     enclosing <- builder
     let atTop = bIsMain enclosing && length (bScopes enclosing) == 1
         fnTy = functionType sizes types ptys rty
@@ -724,7 +733,7 @@ defineFunction var params ins outs (Signature ptys rty sizes types writes sigFro
     inner <- builder
     modifyB (const outer)
     let fn0 = buildFunction ins outs term env inner
-        fn = fn0{M.fnSpec = (M.fnSpec fn0){M.specWrites = writes, M.specMutParams = [p | (p, TMutRef _) <- zip params ptys], M.specFrom = sigFrom}, M.fnFrom = [l | (p, l, _) <- paramLocals, p `elem` sigFrom]}
+        fn = fn0{M.fnSpec = (M.fnSpec fn0){M.specWrites = writes, M.specMutParams = [p | (p, TMutRef _) <- zip params ptys], M.specFrom = origins}, M.fnFrom = [l | (p, l, _) <- paramLocals, p `elem` sigFrom]}
     modifyS (\s -> s{lsFunctions = Map.insert name fn (lsFunctions s)})
 
 unrefType :: Type -> Type
@@ -786,7 +795,7 @@ lowerLast expr = do
 -- A last step whose expression's type has been taken already
 lowerLastWith :: Expression -> Type -> L (Pending, Type)
 lowerLastWith (Val v) ty = (\(o, _) -> (PRvalue (M.Use o), ty)) <$> valueOperand v ty
-lowerLastWith (Var name) ty = (\(o, _) -> (PRvalue (M.Use o), ty)) <$> varOperand name ty
+lowerLastWith (Var name) ty = (\(o, physical) -> (PRvalue (M.Use o), physical)) <$> varOperand name ty
 lowerLastWith expr ty | Just (b, [_, _]) <- connective expr, b `elem` [And, Or] = lowerValueOfConnective expr ty
 lowerLastWith (F funct args) ty = do
     target <- resolveHead funct
@@ -1159,10 +1168,10 @@ varOperand name ty = do
     binding <- lookupBinding name
     s <- getS
     case binding of
-        Just (BLocal l _) -> return (M.Copy l, ty)
-        Just (BFn fn _) -> return (M.Const (M.CFn fn), ty)
+        Just (BLocal l physical) -> return (M.Copy l, physical)
+        Just (BFn fn physical) -> return (M.Const (M.CFn fn), physical)
         Nothing -> case Map.lookup name (lsGlobals s) of
-            Just (fn, _) -> return (M.Const (M.CFn fn), ty)
+            Just (fn, physical) -> return (M.Const (M.CFn fn), physical)
             Nothing -> case Map.lookup name stdLibCtx of
                 Just builtin -> valueOperand builtin ty
                 Nothing -> failL ("Undefined variable: " ++ name)

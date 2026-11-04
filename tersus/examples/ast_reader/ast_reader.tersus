@@ -1,5 +1,5 @@
 import data::codec::codec { Token, Parsed, Size, Type, failed, done, noInts, quoted, tokenize, parseInt, wordAt, nameAt, intAt, sizeAt, catStrings, typeAt, isWord, indexOf };
-import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, relationWords, printAst };
+import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstOrigins, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, relationWords, printAst };
 
 
 fn nodeKind(node: &AstNode) -> Int [{ }] [{ }] {
@@ -25,6 +25,7 @@ fn nodeKind(node: &AstNode) -> Int [{ }] [{ }] {
         AstNode::OptName { value: v } => 19,
         AstNode::OptTermination { value: v } => 20,
         AstNode::Builtin { value: v } => 21,
+        AstNode::Origins { value: v } => 36,
         AstNode::Names { value: v } => 22,
         AstNode::Values { value: v } => 23,
         AstNode::Statements { value: v } => 24,
@@ -371,13 +372,15 @@ fn nodeAt(ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }
         if !v.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::ValidationStatement { v: v.value } }, size(ts));
     };
-    if tag.value = "StructDef" && size(ts) = 5 {
+    if tag.value = "StructDef" && size(ts) = 6 {
         n = refAt(ts, 1, nodes, 1);
         ps = refAt(ts, 2, nodes, 22);
         fs = refAt(ts, 3, nodes, 28);
         vs = refAt(ts, 4, nodes, 26);
-        if !n.ok || !ps.ok || !fs.ok || !vs.ok { return bad; };
-        return done(AstNode::Statement { value: AstStatement::StructDef { n: n.value, ps: ps.value, fs: fs.value, vs: vs.value } }, size(ts));
+        model = refAt(ts, 5, nodes, 22);
+        if !n.ok || !ps.ok || !fs.ok || !vs.ok || !model.ok { return bad; };
+        if !validProjection(nodes, model.value) { return bad; };
+        return done(AstNode::Statement { value: AstStatement::StructDef { n: n.value, ps: ps.value, fs: fs.value, vs: vs.value, model: model.value } }, size(ts));
     };
     if tag.value = "EnumDef" && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
@@ -482,7 +485,7 @@ fn nodeAt(ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }
         ss = refAt(ts, 3, nodes, 22);
         ps = refAt(ts, 4, nodes, 22);
         ws = refAt(ts, 5, nodes, 22);
-        fs = refAt(ts, 6, nodes, 22);
+        fs = refAt(ts, 6, nodes, 36);
         if !params.ok || !ret.ok || !ss.ok || !ps.ok || !ws.ok || !fs.ok { return bad; };
         return done(AstNode::Signature { value: AstSignature { ts: params.value, ret: ret.value, ss: ss.value, ps: ps.value, ws: ws.value, fs: fs.value } }, size(ts));
     };
@@ -585,6 +588,18 @@ fn nodeAt(ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }
         r = relAt(ts, 1);
         if !r.ok { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::Rel { r: r.value } }, size(ts));
+    };
+    if tag.value = "OriginsEnd" && size(ts) = 1 { return done(AstNode::Origins { value: AstOrigins::End }, size(ts)); };
+    if (tag.value = "ReferenceOriginsCons" || tag.value = "BorrowedOriginsCons") && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 1);
+        t = refAt(ts, 2, nodes, 36);
+        if !h.ok || !t.ok { return bad; };
+        tailNode = get(nodes, t.value) as AstNode::Origins;
+        if tag.value = "BorrowedOriginsCons" && tailNode.value is AstOrigins::Reference { return bad; };
+        if tag.value = "ReferenceOriginsCons" && tailNode.value is AstOrigins::Borrowed { return bad; };
+        origin = AstOrigins::Reference { head: h.value, tail: t.value };
+        if tag.value = "BorrowedOriginsCons" { origin = AstOrigins::Borrowed { head: h.value, tail: t.value }; };
+        return done(AstNode::Origins { value: origin }, size(ts));
     };
     if tag.value = "NamesEnd" && size(ts) = 1 { return done(AstNode::Names { value: AstNames::End }, size(ts)); };
     if tag.value = "NamesCons" && size(ts) = 3 {
@@ -758,7 +773,7 @@ fn nodeRefs(node: &AstNode) -> List<Int> [{ }] [{ }] {
                 AstStatement::Let { n: n, e: e } => { refs = push(refs, n); refs = push(refs, e); },
                 AstStatement::Return { e: e } => { refs = push(refs, e); },
                 AstStatement::ValidationStatement { v: v } => { refs = push(refs, v); },
-                AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs } => { refs = push(refs, n); refs = push(refs, ps); refs = push(refs, fs); refs = push(refs, vs); },
+                AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs, model: model } => { refs = push(refs, n); refs = push(refs, ps); refs = push(refs, fs); refs = push(refs, vs); refs = push(refs, model); },
                 AstStatement::EnumDef { n: n, vs: vs } => { refs = push(refs, n); refs = push(refs, vs); },
                 AstStatement::AxiomDef { n: n, ps: ps, ins: ins, outs: outs } => { refs = push(refs, n); refs = push(refs, ps); refs = push(refs, ins); refs = push(refs, outs); },
                 AstStatement::ProofDef { n: n, ps: ps, ins: ins, outs: outs, body: body } => { refs = push(refs, n); refs = push(refs, ps); refs = push(refs, ins); refs = push(refs, outs); refs = push(refs, body); },
@@ -812,6 +827,11 @@ fn nodeRefs(node: &AstNode) -> List<Int> [{ }] [{ }] {
                 AstBuiltin::Primitive { name: n } => { },
             };
         },
+        AstNode::Origins { value: v } => { match v {
+            AstOrigins::End => { },
+            AstOrigins::Reference { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); },
+            AstOrigins::Borrowed { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); },
+        }; },
         AstNode::Names { value: v } => { match v { AstNames::End => { }, AstNames::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
         AstNode::Values { value: v } => { match v { AstValues::End => { }, AstValues::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
         AstNode::Statements { value: v } => { match v { AstStatements::End => { }, AstStatements::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
@@ -828,6 +848,29 @@ fn nodeRefs(node: &AstNode) -> List<Int> [{ }] [{ }] {
         AstNode::Elaborated { value: v } => { refs = push(refs, v.statements); refs = push(refs, v.types); },
     };
     return refs;
+};
+
+fn validProjection(nodes: &List<AstNode>, start: Int) -> Bool [{ }] [{ }] {
+    names = [];
+    id = start;
+    while id >= 0 && id < size(nodes) ~ {
+        node = get(nodes, id);
+        if !(node is AstNode::Names) { return false; };
+        value = (node as AstNode::Names).value;
+        match value {
+            AstNames::End => {
+                if size(names) = 0 { return true; };
+                if size(names) = 3 && get(names, 0) = "prefix" { return true; };
+                return size(names) = 2 && get(names, 0) = "payload";
+            },
+            AstNames::Cons { head: head, tail: tail } => {
+                if size(names) >= 3 { return false; };
+                names = push(names, nameValue(nodes, head));
+                id = tail;
+            },
+        };
+    };
+    return false;
 };
 
 fn nameValue(nodes: &List<AstNode>, start: Int) -> String [{ }] [{ }] {
@@ -884,8 +927,8 @@ fn readRecord() -> Parsed<String> [{ }] [{ }] {
 fn readAst() -> Parsed<AstProgram> ~ {
     header = readRecord();
     if !header.ok || header.pos = 0 { return badAst(); };
-    elaborated = header.value = "tersus-ast 1 elaborated";
-    if !elaborated && header.value != "tersus-ast 1 parsed" { return badAst(); };
+    elaborated = header.value = "tersus-ast 2 elaborated";
+    if !elaborated && header.value != "tersus-ast 2 parsed" { return badAst(); };
     nodes = [];
     uses = noInts();
     while true [{ }] ~ {

@@ -49,6 +49,8 @@ import TestBuiltinRegistry
 import TestSharedCache
 import TestScheduling
 import TestAstData
+import TestCanonicalAst
+import TestBorrowedReviewRegressions
 import TestModules
 import TestParity
 import TestParser
@@ -189,6 +191,8 @@ originalGroups =
     , testSharedCacheProbe
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
+    , testCanonicalAst
+    , testBorrowedReviewRegressions
     , testParser
     , testParserBootstrap
     , testParserUnicode
