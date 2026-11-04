@@ -204,6 +204,21 @@ A syntax refusal returns `1` and writes its diagnostic to stderr. The runtime
 prints `1\n`; its process exit may still be successful. A nonzero process exit
 is always a tool failure, even when stdout resembles an AST.
 
+The native parser also accepts `tersus-import-prefix 1` and
+`tersus-declaration-names 1` in place of the file request header. Both use
+exactly the same declaration envelope, UTF-8 byte count and EOF checks;
+the host supplies `emptyDecls`. Import-prefix mode reads only the leading
+imports and does not parse the body. Declaration-name mode reads the same
+headers as `Parse.parseDeclarationNames`, skipping balanced braces,
+quoted strings and line comments without requiring body types or grammar.
+
+Import-prefix replies contain `tersus-imports 1`, followed by the counted
+`imports` section above. Declaration-name replies contain `tersus-names 1`,
+`names <count>`, then one `name <quoted name>` record per name. Enum names
+include the owner and its source-spelled `Owner::Variant` names, in order.
+Both replies end after the last LF-terminated record; extra records are
+rejected. These modes do not change file or AST replies.
+
 The small `tersus-parse 1` interface remains for raw AST tests:
 
 ```

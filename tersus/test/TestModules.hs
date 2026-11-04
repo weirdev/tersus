@@ -1072,6 +1072,37 @@ testFileProtocol = TestList "file-protocol"
     , testCase "exact-reply-wire" $ case (writeParsedFile (ParsedFile [Import ["app", "geo"] (Just "g") (Just ["Point"]) 2 3] []) emptyDecls, AstData.writeParsed []) of
         (Ok wire, Ok ast) -> testAssertEq wire ("tersus-file 1\nimports 1\nimport 2 3 2 \"app\" \"geo\" some \"g\" some 1 \"Point\"\n" ++ emptyDeclRecords ++ "ast\n" ++ ast)
         _ -> Just "reply or AST writer failed"
+    , testCaseSeq "metadata-request-headers"
+        [ case writer "λ" of
+            Error err -> Just err
+            Ok wire -> testAssertEq wire (tag ++ "\n" ++ emptyDeclRecords ++ "source 2\n\xCE\xBB")
+        | (writer, tag) <- [(writeImportPrefixRequest, "tersus-import-prefix 1"), (writeDeclarationNamesRequest, "tersus-declaration-names 1")]
+        ]
+    , testCase "metadata-import-reply" $ testAssertEq
+        (readImportPrefix "tersus-imports 1\nimports 1\nimport 2 9 2 \"data\" \"codec\" some \"c\" some 1 \"Size\"\n")
+        (Ok [Import ["data", "codec"] (Just "c") (Just ["Size"]) 2 9])
+    , testCase "metadata-name-reply" $ testAssertEq
+        (readDeclarationNames "tersus-names 1\nnames 2\nname \"E\"\nname \"E::A\"\n") (Ok ["E", "E::A"])
+    , testCaseSeq "metadata-name-refusals"
+        [ protocolRefuses (readDeclarationNames wire)
+        | wire <-
+            [ "tersus-names 2\nnames 0\n", "tersus-names 1\nnames -1\n"
+            , "tersus-names 1\nnames 9223372036854775808\n", "tersus-names 1\nnames 1\n"
+            , "tersus-names 1\nnames 0\nname \"extra\"\n", "tersus-names 1\nnames 1\nname bare\n"
+            , "tersus-names 1\nnames 1\nname \"X\" extra\n", "tersus-names 1\nnames 1\nname \"X\""
+            , "tersus-names 1\nnames 1\nname \"\xFF\"\n"
+            ]
+        ]
+    , testCaseSeq "metadata-import-refusals"
+        [ protocolRefuses (readImportPrefix wire)
+        | wire <-
+            [ "tersus-imports 1\nimports -1\n", "tersus-imports 1\nimports 1\n"
+            , "tersus-imports 1\nimports 0\nextra\n"
+            , "tersus-imports 1\nimports 1\nimport 0 1 1 \"x\" none none\n"
+            , "tersus-imports 1\nimports 1\nimport 1 1 0 none none\n"
+            , "tersus-imports 1\nimports 1\nimport 1 1 1 \"x\" none some 0\n"
+            ]
+        ]
     , testCaseSeq "strict-declarations"
         [ protocolRefuses (readFileRequest ("tersus-file-parse 1\n" ++ replaceRecord old new emptyDeclRecords ++ "source 0\n"))
         | (old, new) <-
