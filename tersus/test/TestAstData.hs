@@ -47,8 +47,8 @@ corpus = do
             Right _ -> [(entry, Error "AST corpus tool is not a package")]
     pure ([(path, parseCorpusFile path source) | (path, source) <- fromFiles ++ generated] ++ concatMap packageTrees packages)
   where
-    parseCorpusFile path source = case [name | name <- Lib.nativeStorageModules, path == "lib/" ++ name ++ ".tersus"] of
-        name : _ -> case Lib.nativeLibParsed of
+    parseCorpusFile path source = case [name | name <- Lib.libModuleNames ++ Lib.nativeStorageModules, path == "lib/" ++ name ++ ".tersus"] of
+        name : _ -> case if name `elem` Lib.nativeStorageModules then Lib.nativeLibParsed else Lib.libParsed of
             Left e -> Error e
             Right parsed ->
                 let closure [] done = done

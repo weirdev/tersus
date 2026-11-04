@@ -1,3 +1,8 @@
+import tersuslib::types;
+import tersuslib::prelude;
+import tersuslib::eq;
+import tersuslib::clone;
+
 // The library a program has when it mentions `HashMap` and does not declare it itself (see Pipeline.parseSource): it is parsed
 // before the program, after the prelude and the string library, so the program's line numbers are its own.
 //

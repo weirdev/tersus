@@ -16,22 +16,19 @@ import Parse (Decls, Import (..), ParsedFile (..), declsFromStatements, emptyDec
 import PreludeSource (boxSource, cloneSource, eqSource, listsSource, mapSource, preludeSource, setSource, stringSource, typesSource)
 import Syntax (Statement)
 
--- Compiler-owned modules retain bare names. The implicit modules' imports
--- are synthesized here; native storage files carry their imports in source.
+-- Compiler-owned modules retain bare names.
 libModules :: [(String, String, String)]
 libModules =
     [ ("types", "the list and Box types", typesSource)
-    , ("clone", "the clone library", importing ["types"] cloneSource)
-    , ("eq", "the equality library", importing ["types"] eqSource)
-    , ("prelude", "the prelude", importing ["types", "clone"] preludeSource)
-    , ("string", "the string library", importing ["types", "prelude", "eq", "clone"] stringSource)
-    , ("map", "the map library", importing ["types", "prelude", "eq", "clone"] mapSource)
-    , ("set", "the set library", importing ["types", "map", "prelude", "eq", "clone"] setSource)
+    , ("clone", "the clone library", cloneSource)
+    , ("eq", "the equality library", eqSource)
+    , ("prelude", "the prelude", preludeSource)
+    , ("string", "the string library", stringSource)
+    , ("map", "the map library", mapSource)
+    , ("set", "the set library", setSource)
     , ("lists", "the native list helpers", listsSource)
     , ("box", "the native Box helpers", boxSource)
     ]
-  where
-    importing deps text = concat ["import tersuslib::" ++ dep ++ "; " | dep <- deps] ++ text
 
 nativeStorageModules :: [String]
 nativeStorageModules = ["lists", "box"]

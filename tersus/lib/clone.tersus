@@ -1,3 +1,5 @@
+import tersuslib::types;
+
 // What makes a copy of a value explicit: the trait `Clone` that `clone(x)` and `x.clone()` call. A program has this library in
 // front of it unless it declares a trait `Clone` of its own (see Pipeline.libraries), as with Eq. A value is moved to where it is
 // wanted, and a program that needs it again says `clone(x)`, which has the value of x.
