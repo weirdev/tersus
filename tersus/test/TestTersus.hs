@@ -40,6 +40,7 @@ import TestMirReader
 import TestMirVerify
 import TestMirErase
 import TestMirEmit
+import TestMirSupport
 import TestBootstrap
 import TestEq
 import TestHashMap
@@ -194,6 +195,7 @@ originalGroups =
     , testParity
     , testLibModules
     , testNativeStorageModules
+    , testMirSupport
     ]
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)

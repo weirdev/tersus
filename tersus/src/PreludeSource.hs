@@ -138,6 +138,7 @@ mirPackageFiles = dataPackageFiles ++
         let paths =
                 [ "examples/mir/package.tersus"
                 , "examples/mir/reader/reader.tersus"
+                , "examples/mir/support/support.tersus"
                 , "examples/mir/emit/emit.tersus"
                 , "examples/mir/mir_reader/mir_reader.tersus"
                 , "examples/mir/mir_verify/mir_verify.tersus"
