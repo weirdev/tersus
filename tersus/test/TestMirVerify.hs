@@ -73,7 +73,7 @@ testMirVerifyPrograms =
 
 borrowedLookups :: IO TestResult
 borrowedLookups = do
-    loaded <- validatedFromFile "examples/mir/mir_verify/mir_verify.tersus"
+    loaded <- linkedFromFile "examples/mir/mir_verify/mir_verify.tersus"
     pure $ case loaded of
         Error e -> Just e
         Ok program ->
@@ -103,7 +103,7 @@ holderSource = "struct Holder<T> { x: T }; fn take2(h: Holder<Array<Int, 2>>) ->
 -- The verifier compiled once for every interpreted case: compiling it is the expensive part, and every case
 -- runs the same program over a different input (the pattern of TestMirEmit's emitterProgram).
 verifierProgram :: IO (Result Program String)
-verifierProgram = programFromFile "examples/mir/mir_verify/mir_verify.tersus"
+verifierProgram = bootstrapFromFile "examples/mir/mir_verify/mir_verify.tersus"
 
 -- Whether the host's check accepts the program, as MirData writes it
 referenceAccepts :: Program -> Bool

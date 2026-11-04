@@ -9,9 +9,10 @@ module MirHousekeeping
     , emitterEntry
     , mirVerifyEntry
     , mirEraseEntry
-    , toolValidatedProgram
+    , toolProgram
     , toolOwnedProgram
     , emitterOwnedProgram
+    , ownedProgramOf
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
@@ -33,11 +34,11 @@ import MirData (readProgram, writeProgram, writeProgramWithGhosts)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
-import MirValidate (validateContainerLibrary)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import Seed (cachedSeed, emitterHash)
+import Compile (lowerSource)
 import Modules (ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
-import PackageCompile (compileModulesValidated)
+import PackageCompile (compileModulesLinked)
 import PreludeSource (mirPackageFiles, toolPackageFiles)
 import Types (Type (..))
 import Utils
@@ -63,7 +64,7 @@ import Utils
 -- and gives the type of the local that receives it), as examples/mir/mir_verify/mir_verify.tersus checks it over the data
 -- of the program. The check of a specification that only the program itself holds (that a loop is at a
 -- block that is there, that a name of a specification stands for a declared local) is not in the data, and
--- is the validator's (MirValidate), which runs after this in the pipeline.
+-- is the validator's (the validator written in Tersus), which runs after this in the pipeline.
 verifyProgram :: Program -> Result () String
 verifyProgram program = unsafePerformIO (verifyIO program)
 
@@ -182,7 +183,7 @@ interpretedTools = pure $ case (interpretedTool mirVerifyEntry, interpretedTool 
     (Ok checker, Ok eraser) -> Tools (ToolInterpreted checker) (ToolInterpreted eraser)
 
 interpretedTool :: FilePath -> Result Program String
-interpretedTool = toolValidatedProgram
+interpretedTool = toolProgram
 
 -- An executable of a program written in Tersus, in the cache: made by the stage 1 emitter if it is not there
 cachedTool :: String -> String -> IO (Either String FilePath)
@@ -245,20 +246,21 @@ mirVerifyEntry = "examples/mir/mir_verify/mir_verify.tersus"
 mirEraseEntry :: FilePath
 mirEraseEntry = "examples/mir/mir_erase/mir_erase.tersus"
 
--- A program of the mir package compiled through the module pipeline from
--- the embedded package files: linked and validated, as the single-file
--- programs the host compiled itself were. It is not erased first: the
--- host's own programs hold no permission at runtime (their ghosts are the
--- statements of their proofs, which the executor and the data writer alike
--- pass over), and erasing one to make the eraser would need the eraser made
--- already.
-{-# NOINLINE validatedPrograms #-}
-validatedPrograms :: MVar (Map.Map FilePath Program)
-validatedPrograms = unsafePerformIO (newMVar Map.empty)
+-- A program of the mir package compiled through the module pipeline from the
+-- embedded package files: linked, and not validated. The validator is itself
+-- one of the programs the host makes (ValidatorNative), so the host's programs
+-- are the bootstrap, each validated as any program is by its own tests
+-- (testHostValidation). It is not erased first: the host's own programs hold
+-- no permission at runtime (their ghosts are the statements of their proofs,
+-- which the executor and the data writer alike pass over), and erasing one to
+-- make the eraser would need the eraser made already.
+{-# NOINLINE linkedPrograms #-}
+linkedPrograms :: MVar (Map.Map FilePath Program)
+linkedPrograms = unsafePerformIO (newMVar Map.empty)
 
-{-# NOINLINE toolValidatedProgram #-}
-toolValidatedProgram :: FilePath -> Result Program String
-toolValidatedProgram entry = unsafePerformIO $ modifyMVar validatedPrograms $ \made ->
+{-# NOINLINE toolProgram #-}
+toolProgram :: FilePath -> Result Program String
+toolProgram entry = unsafePerformIO $ modifyMVar linkedPrograms $ \made ->
     case Map.lookup entry made of
         Just program -> pure (made, Ok program)
         Nothing -> case compileToolProgram entry of
@@ -268,15 +270,22 @@ toolValidatedProgram entry = unsafePerformIO $ modifyMVar validatedPrograms $ \m
 compileToolProgram :: FilePath -> Result Program String
 compileToolProgram entry = case loadFromEntry (resolverFromFiles toolPackageFiles) entry of
     Left e -> Error e
-    Right (PackageResult pkg) -> compileModulesValidated pkg
+    Right (PackageResult pkg) -> compileModulesLinked pkg
     Right (StandaloneResult _ _) -> Error ("internal: " ++ entry ++ " is not in an embedded tool package")
 
 -- The program that native code is made of, for a program of the mir package
--- the host compiles itself (the emitter, the checker, the eraser): validated,
--- with the lists of the library, ready for insertOwnership.
+-- the host compiles itself (the emitter, the checker, the eraser): with the
+-- lists of the library, ready for insertOwnership.
 toolOwnedProgram :: FilePath -> Result Program String
 toolOwnedProgram entry =
-    toolValidatedProgram entry `bindResult` \program ->
+    toolProgram entry `bindResult` \program ->
+        mapResult insertOwnership (nativeProgram program)
+
+-- The same for a single source the host compiles itself (the validator, with
+-- its driver): lowered, not validated, with the lists of the library.
+ownedProgramOf :: String -> Result Program String
+ownedProgramOf source =
+    lowerSource True source `bindResult` \program ->
         mapResult insertOwnership (nativeProgram program)
 
 nativeProgram :: Program -> Result Program String
@@ -285,11 +294,14 @@ nativeProgram = lowerLists listLibrary . expandRefWrites
 emitterOwnedProgram :: Result Program String
 emitterOwnedProgram = toolOwnedProgram emitterEntry
 
+-- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus) as the
+-- units native code is linked with. Native code of every program, the
+-- validator's included, is made with it, so it is not validated here (see
+-- ownedProgramOf).
 validatedStorage :: Result ([(ModuleId, Program)], Program) String
 validatedStorage = nativeStorageUnits `bindResult` \modules ->
     let units = [(modu, program) | (modu, _, program) <- modules]
-     in linkPrograms units `bindResult` \program ->
-        stage "Native storage validation: " (validateContainerLibrary program) `bindResult` \_ -> Ok (units, program)
+     in linkPrograms units `bindResult` \program -> Ok (units, program)
 
 validatedListLibrary :: Program
 validatedListLibrary = case validatedStorage of

@@ -104,7 +104,8 @@ nativeOnly i name source expected = do
                 Error e -> pure (Just e)
                 Ok text -> buildAndRun "" [] ("c_program_" ++ show i) name text (ExitSuccess, expected, "")
 
--- Every example that validates
+-- Every example that validates, but for the compiler's own programs (testHostValidation validates those, and the
+-- groups that run them build them as the host does)
 nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
@@ -114,7 +115,9 @@ nativeExamples =
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text"
         ]
-    ] ++ ["examples/mir/mir_reader/mir_reader.tersus", "examples/mir/emit/emit.tersus"]
+    ]
+-- (the compiler's own programs, the MIR reader and the emitter, are left out: validating them takes
+-- far longer than the rest, and testHostValidation does it)
 
 testNativeProgram :: FilePath -> Test
 testNativeProgram path = TestCase path $ do

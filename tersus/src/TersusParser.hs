@@ -27,7 +27,7 @@ import LlvmRuntime (runtimeSource)
 import Mir (Program)
 import MirData (writeProgram)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
-import MirHousekeeping (cachedEmitter, nativeProgram, toolValidatedProgram)
+import MirHousekeeping (cachedEmitter, nativeProgram, toolProgram)
 import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import PreludeSource (parserPackageFiles)
@@ -229,7 +229,7 @@ buildTool output = do
 {-# NOINLINE validatedParserProgram #-}
 validatedParserProgram :: Result Program String
 validatedParserProgram =
-    toolValidatedProgram "examples/parser/parser.tersus"
+    toolProgram "examples/parser/parser.tersus"
 
 ownedParserProgram :: Result Program String
 ownedParserProgram = validatedParserProgram `bindResult` \program ->

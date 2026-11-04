@@ -5,7 +5,7 @@ module PackageCompile
     , CompiledPackage (..)
     , compileModules
     , lowerCompiledPackage
-    , compileModulesValidated
+    , compileModulesLinked
     , assumptionsOfPackage
     ) where
 
@@ -22,7 +22,6 @@ import ModuleResolve (rewriteFileReferences)
 import qualified Modules as Mod
 import Parse (ParsedFile (..))
 import MirLower (lowerModuleWith)
-import MirValidate (validateProgram)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
 import TypeCheck (Elaborated (..), elaborateWith)
@@ -222,10 +221,11 @@ orphanCheck modu statements = case [message | ImplDef (Just trait) _ typeName _ 
         | otherwise = Just ("in module " ++ Mod.renderModuleId modu ++ ": orphan impl: impl " ++ trait ++ " for " ++ typeName ++ " defines neither a trait nor a type of this module; an impl must live in the module of its trait or of its type")
     baseOf name = baseNameOf name
 
-compileModulesValidated :: Mod.LoadedPackage -> Result M.Program String
-compileModulesValidated pkg =
-    compileModules pkg `bindResult` lowerCompiledPackage pkg `bindResult` \linked ->
-        stage "Validation failed: " (validateProgram linked) `bindResult` \_ -> Ok linked
+-- The modules of a package lowered and linked into one program, not yet
+-- validated (Pipeline.compileModulesValidated validates it; the host's own
+-- programs are built from this, see MirHousekeeping.toolProgram)
+compileModulesLinked :: Mod.LoadedPackage -> Result M.Program String
+compileModulesLinked pkg = compileModules pkg `bindResult` lowerCompiledPackage pkg
 
 -- Callers must validate the linked program before erasure or execution.
 lowerCompiledPackage :: Mod.LoadedPackage -> CompiledPackage -> Result M.Program String

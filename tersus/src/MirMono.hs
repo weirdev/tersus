@@ -2,6 +2,7 @@
 
 module MirMono
     ( monomorphize
+    , monomorphizeForValidation
     ) where
 
 import Data.List (intercalate)
@@ -24,19 +25,40 @@ import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox,
 -- that one has replaced, so the copies there are to make are those that the program reaches, and there are finitely many (a size is
 -- never worked out from others). A program with no function of the kind is returned as it is.
 monomorphize :: Program -> Program
-monomorphize program
+monomorphize = monoWith unspecifiedFunction completeErasedInstances
+
+-- The copies a call decides, with the contracts and ghost statements
+-- kept: what a validator is given, since it checks the copies by the
+-- contracts the template declares (native code is given the copies
+-- with them stripped, by monomorphize).
+monomorphizeForValidation :: Program -> Program
+monomorphizeForValidation = monoWith id completeInstances
+
+-- A function with its contracts and ghost statements stripped, as
+-- native code is given a copy
+unspecifiedFunction :: Function -> Function
+unspecifiedFunction f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
+  where
+    isGhost s = case s of
+        Ghost _ _ -> True
+        _ -> False
+
+-- (native code is given its structs without their permissions, which the
+-- validator reads)
+monoWith :: (Function -> Function) -> (Program -> Program) -> Program -> Program
+monoWith finish completeTypes program
     | not (any generic (Map.elems (progFunctions program))) = program
     | otherwise =
         withInstances
             program
-                { progFunctions = Map.fromList [(fnName f, f) | f <- map unspecified (plain' ++ Map.elems instances)]
-                , progMain = unspecified main'
+                { progFunctions = Map.fromList [(fnName f, f) | f <- map finish (plain' ++ Map.elems instances)]
+                , progMain = finish main'
                 }
   where
     -- (the structs with sizes that the copies mention are declared, and those that only a function with sizes mentioned, whose sizes
     -- were names, are not there any more)
     withInstances p =
-        let complete = completeErasedInstances p
+        let complete = completeTypes p
          in complete{progTypes = Map.filterWithKey (\name _ -> not (symbolic name)) (progTypes complete)}
     symbolic name = maybe False mentionsParameter (Map.lookup name (namedTypesByName program))
     -- (what the validator was told names functions that are not there any more; nothing after it needs it)

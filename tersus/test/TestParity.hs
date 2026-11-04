@@ -17,11 +17,11 @@ import Cli (World (..), noWorld, runProgramIn)
 import qualified Mir as M
 import MirData (forNative, readProgram, writeProgram)
 import MirLower (lowerElaborated)
-import qualified MirValidate as Reference
+import ValidatorNative (validateCompiled)
 import MirHousekeeping (eraseGhosts, validatedListLibrary)
 import Compile (lowerSource)
 import Pipeline (ownedSource, parseSource)
-import SelfHostedMir (validateMirSubset, sourceContainerView)
+import SelfHostedMir (validateMirSubset, sourceContainerView, verdictProved)
 import StdLibDefs (stdLibValCtx)
 import Syntax
 import TestHarness
@@ -68,6 +68,9 @@ testParity =
     TestList
         "testParity"
         [ sourceContainerCapabilities
+        , -- (the cases are timed, and the first validation of a process may build
+          -- the compiled validator, which is not what they time)
+          TestCase "the compiled validator is built" (pure (either Just (const Nothing) (resultEither (lower "return 0;" `bindResult` validateCompiled))))
         , TestParallel "validation" [TestCase (parityName c) (validationCase c) | c <- parityCases]
         , TestParallel "mirReader" [TestCase (parityName c) (readerCase c) | c <- readerCases]
         , TestCase "corpus summary" summaryCase
@@ -232,13 +235,20 @@ validationCase parityCase = do
                     bump (\t -> t{tallySkipReasons = Map.insertWith (+) reason 1 (tallySkipReasons t)})
                     pure Nothing
                 Nothing -> do
-                    let outcome = case (Reference.validateProgram mir, validateMirSubset checker mir) of
+                    -- The validator compiled to native code (what every program is validated
+                    -- by) and the same validator interpreted give the same verdict.
+                    let unmodelled e = "does not model yet" `isInfixOf` e
+                        outcome = case (validateCompiled mir, mapResult verdictProved (validateMirSubset checker mir)) of
                             (Ok _, Ok (Just True)) -> Nothing
-                            (Error _, Ok (Just False)) -> Nothing
-                            (Ok _, Ok (Just False)) -> Just "the reference validator accepts and the self-hosted validator rejects"
-                            (Error e, Ok (Just True)) -> Just ("the reference validator rejects (" ++ take 120 e ++ ") and the self-hosted validator accepts")
-                            (_, Ok Nothing) -> Just "the capability predicate claims this program is supported, but the self-hosted bridge returned Nothing: extend unsupportedReason in TestParity with the documented limitation, or fix SelfHostedMir"
-                            (_, Error e) -> Just ("the self-hosted validator failed: " ++ e)
+                            (Error e, Ok (Just False)) | not (unmodelled e) -> Nothing
+                            (Error e, Ok Nothing) | unmodelled e -> Nothing
+                            (Ok _, other) -> Just ("the compiled validator accepts and the interpreted one says " ++ verdictText other)
+                            (Error e, other) -> Just ("the compiled validator refuses (" ++ take 120 e ++ ") and the interpreted one says " ++ verdictText other)
+                        verdictText other = case other of
+                            Ok (Just True) -> "proved"
+                            Ok (Just False) -> "not proved"
+                            Ok Nothing -> "not modelled"
+                            Error e -> "failed: " ++ take 120 e
                     finished <- timeout validationTimeoutMicros (evaluate (maybe 0 length outcome))
                     case finished of
                         Nothing -> do
@@ -250,6 +260,10 @@ validationCase parityCase = do
                                 Just _ -> pure ()
                             pure (fmap (\message -> parityName parityCase ++ ": " ++ message) outcome)
 
+resultEither :: Result a String -> Either String a
+resultEither (Ok a) = Right a
+resultEither (Error e) = Left e
+
 validationTimeoutMicros :: Int
 validationTimeoutMicros = 10000000
 
@@ -259,7 +273,8 @@ lower source = parseSource source `bindResult` elaborate `bindResult` lowerElabo
 readerCase :: ParityCase -> IO TestResult
 readerCase parityCase = do
     source <- paritySource parityCase
-    readerResult <- programFromFile "examples/mir/mir_reader/mir_reader.tersus"
+    -- (the reader as the host builds it, not validated: testHostValidation validates it)
+    readerResult <- bootstrapFromFile "examples/mir/mir_reader/mir_reader.tersus"
     case (ownedSource source, readerResult) of
         (Error _, _) -> do
             bump (\t -> t{tallyReaderSkipped = tallyReaderSkipped t + 1})

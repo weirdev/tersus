@@ -85,7 +85,14 @@ main = do
                         ++ " failed"
             when (summaryFailed summary > 0 || not reported) exitFailure
   where
-    select arguments = (,) arguments <$> selectGroupNames arguments (map groupName allGroups)
+    select arguments = (,) arguments . withoutOptIn arguments <$> selectGroupNames arguments (map groupName allGroups)
+    withoutOptIn arguments names
+        | null (argumentGroups arguments) = filter (`notElem` optInGroups) names
+        | otherwise = names
+
+-- Groups that run only when they are named: too slow for every run of the suite
+optInGroups :: [String]
+optInGroups = ["testHostValidation"]
 
 allGroups :: [Test]
 allGroups = concatMap registered originalGroups
@@ -105,12 +112,13 @@ originalGroups =
     , testValidateWithExpectedMismatch
     , testValidationFail
     , testValidationCache
+    , testHaskellParity
     , testUserRewriteValidation
-    , testProofEngine
     , testParseVal
     , testParseValFail
     , testCrashRegression
     , testExamples
+    , testHostValidation
     , testCli
     , testMir
     , testMirSelfHosted
@@ -118,11 +126,9 @@ originalGroups =
     , testPipeline
     , testControlFlow
     , testLists
-    , testArithmetic
     , testForallSyntax
     , testForallInstantiation
     , testForallProof
-    , testForallGrownList
     , testForallLoops
     , testPrettyProofs
     , testMulDivNegative

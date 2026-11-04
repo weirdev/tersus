@@ -31,7 +31,7 @@ import Seed (emitterHash)
 import LlvmRuntime (runtimeSource)
 import Hash (fingerprint)
 import System.Exit (ExitCode (..))
-import Pipeline (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesToOwned, compileModulesToProgram, compileSource)
+import Pipeline (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesToOwned, compileModulesToProgram, compileModulesValidated, compileSource)
 import Syntax
 import Types
 import TestHarness
@@ -1509,10 +1509,10 @@ testCrossPackageBoundaries = TestList "cross-package-boundaries"
       | (label, accepted, source) <- crossPackageSyntax]
     ++ [ testCase "owning package preserves nominal identity" $ case loadPkg (crossPackageFiles "import left as l; import right as r; fn bad(x: l::model::Twin) -> r::model::Twin { return x; }; return 0;") "pkgs/app/main.tersus" of
             Left err -> Just err
-            Right pkg -> testAssertErrorContains "right$model$Twin" (PackageCompile.compileModulesValidated pkg)
+            Right pkg -> testAssertErrorContains "right$model$Twin" (compileModulesValidated pkg)
        , testCase "unimported type cannot compile" $ case loadPkg (crossPackageFiles "fn f(s: left::a::E) -> Int { return 0; }; return 0;") "pkgs/app/main.tersus" of
             Left _ -> Nothing
-            Right pkg -> testAssertErrorContains "unknown type" (PackageCompile.compileModulesValidated pkg)
+            Right pkg -> testAssertErrorContains "unknown type" (compileModulesValidated pkg)
        , testCase "unused dependency root cannot introduce a cycle" $ case loadPkg
             [ ("pkgs/app/package.tersus", ""), ("pkgs/app/main.tersus", "import dep::core { Point }; p = Point { x: 1 }; return p.x;")
             , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "import dep::unused;")
@@ -1582,7 +1582,7 @@ testCrossPackageConstructors = testCaseSeq "cross-package-constructor-seeds"
         ]
     checked source = case loadPkg (files source) "pkgs/app/main.tersus" of
         Left err -> Error err
-        Right pkg -> PackageCompile.compileModulesValidated pkg
+        Right pkg -> compileModulesValidated pkg
     accepts source expected = case checked source of
         Error err -> Just err
         Ok program -> case runProgram program of

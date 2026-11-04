@@ -13,6 +13,7 @@ module Pipeline
     , CompiledPackage (..)
     , compileModules
     , compileModulesValidated
+    , compileModulesBootstrap
     , compileModulesToProgram
     , compileModulesToOwned
     , erasedModuleProgram
@@ -26,18 +27,19 @@ module Pipeline
     ) where
 
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Mir as M
 import Compile (SourceParts, lowerSourceParts, lowerStatements, parseWithEquality)
 import TersusParser (parseSource)
 import qualified TersusParser
-import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesValidated)
+import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked)
 import Link (pruneProgram)
 import qualified Modules as Mod
 import MirOwnership (expandRefWrites, insertOwnership)
 import MirHousekeeping (eraseGhosts, verifyProgram)
 import qualified MirHousekeeping as Housekeeping
 import MirEval (MirValue, runProgram)
-import MirValidate (Validated, validateProgram)
+import ValidatorNative (validateCompiled)
 import MirLists (lowerLists)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
@@ -47,7 +49,7 @@ import Utils
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
 --
 --   source -> AST (TersusParser.parseSourceParts; Compile stays the explicit Haskell oracle/bootstrap)
---          -> checked AST (elaborate) -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateProgram) -> executed (runProgram)
+--          -> checked AST (elaborate) -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateCompiled: the validator written in Tersus, compiled to native code) -> executed (runProgram)
 --                                                                    or -> owned MIR (ownedSource) -> LLVM IR (the emitter written in Tersus, see Bootstrap)
 --
 -- The validated MIR has its permissions (ghost values, POINTERS.md) taken out by `eraseGhosts` before anything runs it or makes native code of it.
@@ -96,7 +98,7 @@ validatedSourceWith :: (Bool -> String -> Result SourceParts String) -> String -
 validatedSourceWith readSource source =
     readSource True source `bindResult` lowerSourceParts True `bindResult` \program ->
         checkedLowered program `bindResult` \checked ->
-            stage "Validation failed: " (validateProgram checked) `bindResult` \_ ->
+            stage "Validation failed: " (validateCompiled checked) `bindResult` \_ ->
                 Ok checked
 
 -- The MIR of a program that passes every check
@@ -151,14 +153,14 @@ listLibrary :: Result [(Mod.ModuleId, M.Program)] String
 listLibrary = Housekeeping.validatedStorage `bindResult` \(_, program) ->
     checkedLowered program `bindResult` \_ -> Housekeeping.listLibrary
 
--- Checks and validates a program given as statements
-validateStatements :: [Statement] -> Result Validated String
+-- Checks and validates a program given as statements, with the validator written in Tersus
+validateStatements :: [Statement] -> Result () String
 validateStatements stmts =
     lowerStatements stmts `bindResult` \program ->
         (case verifyProgram program of
             Ok () -> Ok program
             Error e -> Error ("Lowering produced a malformed program: " ++ e))
-            `bindResult` validateProgram
+            `bindResult` validateCompiled
 
 -- Runs a program given as statements, once it type checks, without validating it
 runStatements :: [Statement] -> Result (Maybe MirValue) String
@@ -169,6 +171,40 @@ runStatements stmts =
             Error e -> Error ("Lowering produced a malformed program: " ++ e))
             `bindResult` eraseGhosts `bindResult` runProgram
 
+
+-- A package's modules lowered, linked and validated (by the validator
+-- written in Tersus, as a single-file program is)
+compileModulesValidated :: Mod.LoadedPackage -> Result M.Program String
+compileModulesValidated pkg =
+    compileModulesLinked pkg `bindResult` \linked ->
+        stage "Validation failed: " (validateCompiled (oneMarkerEach linked)) `bindResult` \_ -> Ok linked
+
+-- Linking makes one function of a definition several modules make alike (a
+-- library each module is given, an identical extern), and each module's
+-- marker of that definition stays: one of each is kept for the validator,
+-- which would take two for two definitions of one function.
+oneMarkerEach :: M.Program -> M.Program
+oneMarkerEach program =
+    let (seen, main') = dedupeFunction Set.empty (M.progMain program)
+        (_, functions') = Map.mapAccum dedupeFunction seen (M.progFunctions program)
+     in program{M.progMain = main', M.progFunctions = functions'}
+  where
+    dedupeFunction seen fn =
+        let (seen', blocks') = Map.mapAccum dedupeBlock seen (M.fnBlocks fn)
+         in (seen', fn{M.fnBlocks = blocks'})
+    dedupeBlock seen block =
+        let (kept, seen') = foldl keep ([], seen) (M.blockStatements block)
+         in (seen', block{M.blockStatements = reverse kept})
+    keep (acc, seen) statement = case statement of
+        M.Ghost _ (M.GhostFunction name _ _)
+            | Set.member name seen -> (acc, seen)
+            | otherwise -> (statement : acc, Set.insert name seen)
+        _ -> (statement : acc, seen)
+
+-- A package of the compiler's own programs as the host builds it: linked,
+-- its ghosts erased, not validated (see MirHousekeeping.toolProgram)
+compileModulesBootstrap :: Mod.LoadedPackage -> Result M.Program String
+compileModulesBootstrap pkg = mapResult pruneProgram (compileModulesLinked pkg `bindResult` eraseGhosts)
 
 compileModulesToProgram :: Mod.LoadedPackage -> Result M.Program String
 compileModulesToProgram pkg = compileModulesValidated pkg `bindResult` erasedModuleProgram

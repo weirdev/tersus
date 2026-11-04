@@ -56,7 +56,8 @@ corpus = do
                     closure (n : rest) done = closure (Map.findWithDefault [] n (Lib.lpDependencies parsed) ++ rest) (n : done)
                  in Ok (Lib.statementsForLibModules parsed (closure [name] []))
         [] -> parsed source
-    files dir = map ((dir ++ "/") ++) . filter (isSuffixOf ".tersus") . sort <$> listDirectory dir
+    -- (lib/validation_driver.tersus is read after lib/validation.tersus, not on its own)
+    files dir = map ((dir ++ "/") ++) . filter (\f -> isSuffixOf ".tersus" f && f /= "validation_driver.tersus") . sort <$> listDirectory dir
     generated =
         [ ("generated forward call", "fn a(n: Int) -> Int { return b(n); }; fn b(n: Int) -> Int { return n; }; return a(5);")
         , ("generated validation refusal", "affirm false; return 2;")
@@ -351,7 +352,7 @@ withAstReader use = do
                             case ir of
                                 Error e -> pure (Error e)
                                 Ok text -> buildExecutable output text
-                    built <- cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the validated AST reader" build
+                    built <- cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the AST reader" build
                     case built of
                         Error e -> pure (Just e)
                         Ok exe -> use exe

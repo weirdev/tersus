@@ -7,6 +7,7 @@ import System.Exit (ExitCode (..))
 
 import Bootstrap (emitterHash, llvmOfOwned, tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runProgramIn, runSourceIn)
+import MirHousekeeping (toolOwnedProgram)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Native (buildExecutable, cachedProgram)
@@ -52,7 +53,8 @@ sameText a b = trim a == trim b
 
 interpreted :: String -> IO TestResult
 interpreted source = do
-    reader <- programFromFile "examples/mir/mir_reader/mir_reader.tersus"
+    -- (the reader as the host builds it, not validated: testHostValidation validates it)
+    reader <- bootstrapFromFile "examples/mir/mir_reader/mir_reader.tersus"
     dataText <- dataOf source
     pure $ case (reader, dataText) of
         (Error e, _) -> Just e
@@ -64,7 +66,9 @@ interpreted source = do
                 | sameText output text -> Nothing
                 | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
 
--- A program of the examples as an executable, built once for the tests that need it (clang is needed, and the tests pass without it).
+-- One of the compiler's own programs (the reader, the emitter, the MIR checker and eraser) as an executable, built as the host builds
+-- them: lowered and owned without being validated (MirHousekeeping.ownedProgramOf), since whether each validates is testExamples' to
+-- say. Built once for the tests that need it (clang is needed, and the tests pass without it).
 -- The executable is kept in the cache directory of the user under a name made of the program and of what it is compiled with, so that the groups that need the same one
 -- (each in a process of its own) build it once between them; a build that failed is not remembered, so the case that asked for it
 -- reports why, and a build that is cut short leaves nothing at the name.
@@ -144,3 +148,4 @@ refusals = withReader $ \exe -> do
     refused exe (name, text) = do
         (_, output, errors) <- runExecutableBytes exe [] text
         pure [name ++ ": read as " ++ show output ++ " with " ++ show errors | output /= "1\n" || null errors]
+

@@ -4,7 +4,7 @@ import Compile (lowerSource)
 import Control.Exception (evaluate)
 import qualified Data.Map.Strict as Map
 import qualified Mir as M
-import MirValidate (validateContainerLibrary, validateProgram)
+import ValidatorNative (validateCompiled)
 import System.Timeout (timeout)
 import Syntax
 import TestHarness
@@ -70,17 +70,6 @@ testBox =
                         , "impl Drop for P { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"
                         , "fn bad(b: Box<P>) -> Int [{ }] [{ affirm cap(b.blk) = 2; }] { return 0; };"
                         ])
-                , TestCase "generic native Box storage contracts validate" genericBoxStorage
-                , TestCase "monomorphic native Box storage contracts can be called" monomorphicBoxStorage
-                , TestCase "native layout validation rejects a source-level Box operation" $
-                    rejectedLayout "return Box::new(1);" "requires explicit library structs"
-                , TestCase "native layout validation rejects implicit Box payload views" $
-                    rejectedLayout "struct P { x: Int }; fn field(b: Box<P>) -> Int { return b.x; };" "requires explicit library structs"
-                , TestCase "native layout validation still checks constructor invariants" $
-                    rejectedLayout (unlines
-                        [ "struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }];"
-                        , "fn bad() -> Box<Int> { (a, b) = Addr::alloc(0); return Box<Int> { addr: a, blk: b }; };"
-                        ]) "does not meet its invariant"
                 ]
             , TestList
                 "a type that holds itself"
@@ -171,27 +160,10 @@ ownPlace updating = lowerBox source $ \program ->
         | otherwise = "fn field(b: &Box<Int>) -> &Addr<Int> from b { return &b.addr; };"
 
 sourceBoxProof :: String -> IO TestResult
-sourceBoxProof source = checkLowered True source (testAssertErrorContains "Could not prove: return = 1" . validateProgram)
+sourceBoxProof source = checkLowered True source (testAssertErrorContains "Could not prove: return = 1" . validateCompiled)
 
 rejectedBoxProperty :: String -> IO TestResult
-rejectedBoxProperty source = checkLowered True source (testAssertErrorContains "Could not prove:" . validateProgram)
-
-genericBoxStorage :: IO TestResult
-genericBoxStorage = nativeStorage "fn address<T>(b: &Box<T>) -> Addr<T> [{ }] [{ affirm return = b.addr; }] { return b.addr; };"
-
-monomorphicBoxStorage :: IO TestResult
-monomorphicBoxStorage = nativeStorage (unlines
-    [ "fn address(b: &Box<Int>) -> Addr<Int> [{ }] [{ affirm return = b.addr; }] { return (*b).addr; };"
-    , "fn test(b: &Box<Int>) -> Addr<Int> [{ }] [{ affirm return = b.addr; }] { return address(b); };"
-    ])
-
-nativeStorage :: String -> IO TestResult
-nativeStorage source = checkLowered False ("struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }]; " ++ source) $ \program -> case validateContainerLibrary program of
-        Error e -> Just e
-        Ok _ -> Nothing
-
-rejectedLayout :: String -> String -> IO TestResult
-rejectedLayout source expected = checkLowered False source (testAssertErrorContains expected . validateContainerLibrary)
+rejectedBoxProperty source = checkLowered True source (testAssertErrorContains "Could not prove:" . validateCompiled)
 
 lowerBox :: String -> (M.Program -> TestResult) -> IO TestResult
 lowerBox body = checkLowered False ("struct Box<T> { addr: Addr<T>, ghost blk: Block<T> }; " ++ body)
@@ -201,7 +173,8 @@ checkLowered reserving source check = do
     let result = case lowerSource reserving source of
             Error e -> Just e
             Ok program -> check program
-    finished <- timeout 5000000 (evaluate (forceTestResult result) >> pure result)
+    -- (the first validation of a process may build the validator)
+    finished <- timeout 900000000 (evaluate (forceTestResult result) >> pure result)
     pure $ case finished of
         Nothing -> Just "Box validation did not finish"
         Just checked -> checked

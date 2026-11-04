@@ -260,18 +260,19 @@ written in Tersus" above.
 mutation (`7 + 2` becomes `7 - 2`, evaluated as `5` by Haskell), then native
 round trips over that whole corpus, the reader's own source, constructor
 fixtures and large/deep fixtures. Native refusal checks share the Haskell
-malformed-input corpus. `testExamples` also checks the new example with no
-input.
+malformed-input corpus. `testHostValidation` (run only when named) checks the
+new example with no input, which validates the reader.
 
-The native tests use the validated host-tool bootstrap route already used by
-`MirHousekeeping`: the reader goes through `compileOnce` (including production
-AST/proof validation), and `Pipeline.nativeProgram` supplies the canonical
-container library validated by `validateContainerLibrary` and erased by
-`MirHousekeeping`. The owned MIR is compiled by the pinned `Seed.cachedSeed`
-executable. The cache key is the actual owned MIR and seed hash. Every
-validation, erasure and code-generation result on this route must succeed;
-failures still fail the test. There is no separate AST-reader container
-validation policy. The reader itself also passes the production `check` command.
+The native tests use the host-tool bootstrap route already used by
+`MirHousekeeping`: the reader is one of the compiler's own programs, built
+through `programFromFiles` as the host builds it (linked, its ghosts erased,
+not validated: `MirHousekeeping.toolProgram`; `testHostValidation` validates
+it), and `Pipeline.nativeProgram` supplies the canonical container library
+erased by `MirHousekeeping`. The owned MIR is compiled by the pinned
+`Seed.cachedSeed` executable. The cache key is the actual owned MIR and seed
+hash. Every erasure and code-generation result on this route must succeed;
+failures still fail the test. The reader itself also passes the production
+`check` command.
 
 ```
 stack test --test-arguments='-j 2 testAstData testAstReader'
