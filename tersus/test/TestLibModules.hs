@@ -11,7 +11,7 @@ import qualified Modules
 import qualified Parse
 import PreludeSource (eqSource, listsSource, boxSource)
 import qualified Mir as M
-import ValidatorNative (validateCompiled)
+import ValidatorNative (validateCompiled, validateLibrary)
 import Interface (ModuleInterface (..), extractLibInterface, interfaceImportEnv, mergeInterfacesImportEnv, predeclareOwnEnv)
 import MirLower (lowerModuleWith)
 import TypeCheck (ImportEnv (..), Elaborated (..), elaborateWith)
@@ -29,7 +29,7 @@ import qualified PackageCompile as Package
 import PreludeSource (toolPackageFiles)
 import MirOwnership (expandRefWrites, insertOwnership)
 import MirData (forNative, readProgram, writeProgram)
-import MirHousekeeping (validatedStorage)
+import MirHousekeeping (nativeStorage, storageProgram)
 import Utils (Result (..), bindResult, flatResultMap, mapResult)
 
 -- The compiler libraries (lib/eq.tersus and the rest) compiled as modules
@@ -186,6 +186,9 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     , testCase "helper declarations use the authoritative type interfaces" $ inspectPackage $ \pkg ->
         let types = libPrograms pkg Map.! "types"
          in testAssertTrue (all (\name -> let p = libPrograms pkg Map.! name in M.progGenerics p == M.progGenerics types && M.progInvariants p == M.progInvariants types) ["lists", "box"])
+    , testCase "linked helper contracts meet physical-container proofs" $ case validateLibrary storageProgram of
+        Error e -> Just e
+        Ok _ -> Nothing
     , testCase "erased List and Box instances retain exact fields and offsets" runtimeLayout
     , testCase "native lowering is a no-op without storage and does not force helpers" $ case Compile.lowerSource True "return 7;" of
         Error e -> Just e
@@ -211,6 +214,8 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         let p = libPrograms pkg Map.! "lists"
             user = p{M.progFunctions = Map.restrictKeys (M.progFunctions p) (Set.singleton "listNew")}
          in rejectedResult "listNew" (linkPrograms [(libModuleId "lists", p), (Modules.ModuleId "app" Nothing, user)])
+    , testCase "an imported List invariant still rejects unfilled live slots" (badImportedLayout "fn bad() -> List<Int> { (a, b) = Addr::alloc(0); return List<Int> { addr: a, len: 1, cap: 0, blk: b }; };")
+    , testCase "an imported Box invariant still requires one filled slot" (badImportedLayout "fn bad() -> Box<Int> { (a, b) = Addr::alloc(0); return Box<Int> { addr: a, blk: b }; };")
     , testCase "helper declaration seeds and raw tool input share a native phase" $ case Compile.lowerSource True "fn probe<T>(xs: &Box<Array<T>>) -> Int { return size(xs); }; return 0;" of
         Error e -> Just e
         Ok p -> case erasedHelpers of
@@ -242,7 +247,7 @@ testNativeStorageModules = TestList "testNativeStorageModules"
                 }
     lowerNative source = erasedHelpers `bindResult` \units ->
         Compile.lowerSource False source `bindResult` lowerLists (Ok units)
-    erasedHelpers = validatedStorage `bindResult` \(units, _) ->
+    erasedHelpers = nativeStorage `bindResult` \(units, _) ->
         flatResultMap (\(modu, p) -> mapResult ((,) modu) (eraseStorageHelper p)) units
     selectedHelpers source present absent = case lowerNative source of
         Error e -> Just e
@@ -265,6 +270,9 @@ testNativeStorageModules = TestList "testNativeStorageModules"
                         Error e -> Just e
                         Ok restored -> testAssertEq restored (forNative owned)
         Right _ -> Just "bootstrap fixture is not a package"
+    badImportedLayout source = case fixtureModule source of
+        Error e -> Just e
+        Ok (_, p) -> rejectedResult "Could not prove" (validateLibrary p)
     fixtureModule source = libPackage `bindResult` \pkg ->
         let ifaces = [libInterfaces pkg Map.! name | name <- ["types", "prelude", "clone"]]
          in checkedModule ifaces source

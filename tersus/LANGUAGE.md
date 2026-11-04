@@ -1968,7 +1968,9 @@ struct List<T> {
 
 `lib/lists.tersus` and `lib/box.tersus` import their type and trait interfaces
 as compiler-owned modules of `tersuslib`. They are lowered separately and
-linked, and not validated: native code of the validator is made with them. Native helper bodies and Drop impls are
+linked. Native code of the validator is made with them, so they are built
+unvalidated, and the validator, once built, validates them, with their
+invariants, ghost permissions and function contracts, before it is used. Native helper bodies and Drop impls are
 not user-facing implicit libraries. User validation and ghost erasure finish
 before `MirLists` transforms the user program and links the needed erased
 helper units. Ordinary package impl coherence is unchanged; the native units

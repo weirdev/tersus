@@ -1,8 +1,8 @@
 module MirHousekeeping
     ( verifyProgram
     , eraseGhosts
-    , validatedListLibrary
-    , validatedStorage
+    , storageProgram
+    , nativeStorage
     , cachedEmitter
     , listLibrary
     , nativeProgram
@@ -294,22 +294,23 @@ nativeProgram = lowerLists listLibrary . expandRefWrites
 emitterOwnedProgram :: Result Program String
 emitterOwnedProgram = toolOwnedProgram emitterEntry
 
--- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus) as the
--- units native code is linked with. Native code of every program, the
--- validator's included, is made with it, so it is not validated here (see
--- ownedProgramOf).
-validatedStorage :: Result ([(ModuleId, Program)], Program) String
-validatedStorage = nativeStorageUnits `bindResult` \modules ->
+-- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus): its
+-- units as native code is linked with them, and the program they link to.
+-- Native code of every program, the validator's included, is made with it,
+-- so it is built here without being validated; the validator, once built,
+-- validates it before it is used (ValidatorNative.validatorExecutable).
+nativeStorage :: Result ([(ModuleId, Program)], Program) String
+nativeStorage = nativeStorageUnits `bindResult` \modules ->
     let units = [(modu, program) | (modu, _, program) <- modules]
      in linkPrograms units `bindResult` \program -> Ok (units, program)
 
-validatedListLibrary :: Program
-validatedListLibrary = case validatedStorage of
+storageProgram :: Program
+storageProgram = case nativeStorage of
     Error e -> error e
     Ok (_, program) -> program
 
 listLibrary :: Result [(ModuleId, Program)] String
-listLibrary = validatedStorage `bindResult` \(units, _) -> flatResultMap eraseUnit units
+listLibrary = nativeStorage `bindResult` \(units, _) -> flatResultMap eraseUnit units
   where
     eraseUnit (modu, program) = mapResult ((,) modu) (eraseGhosts program)
 
