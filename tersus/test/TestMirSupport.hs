@@ -12,7 +12,7 @@ import MirEval (MirValue (..), runNamedFunction)
 import MirLower (lowerModuleWith)
 import qualified Modules as Mod
 import qualified PackageCompile as Package
-import Parse (ParsedFile (..))
+import ParsedFile (ParsedFile (..))
 import qualified Syntax as S
 import PreludeSource (mirPackageFiles)
 import TestHarness (Test (..), TestResult, testAssertEq, testAssertErrorContains, testCase)
