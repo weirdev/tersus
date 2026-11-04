@@ -95,7 +95,7 @@ testHostValidation :: Test
 testHostValidation =
     TestList
         "testHostValidation"
-        [ testExampleFile "examples/ast_reader.tersus" (ExpectReturn (VInt 1))
+        [ testExampleFile "examples/ast_reader/ast_reader.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "examples/mir/mir_reader/mir_reader.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "examples/mir/mir_verify/mir_verify.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "examples/mir/mir_erase/mir_erase.tersus" (ExpectReturn (VInt 1))

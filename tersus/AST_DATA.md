@@ -3,7 +3,8 @@
 `AstData` and `examples/ast_reader/ast_reader.tersus` exchange syntax without
 running the proof engine. The parsed format is the production parser boundary.
 The elaborated format remains a bridge for the MIR lowering port in
-`REPLACING_HASKELL.md`; elaboration and validation still run in Haskell.
+`REPLACING_HASKELL.md`; elaboration remains in Haskell, while
+`ValidatorNative` runs the validator written in Tersus.
 
 ## APIs
 
