@@ -1,3 +1,5 @@
+-- Scoped retry actions must not share a forced unsafePerformIO pipeline failure.
+{-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 module TestSharedCache (testSharedCache, testSharedCacheProbe, testVerdictLocks) where
 
 import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
