@@ -22,7 +22,7 @@ fn driverReadAll() -> List<Int> [{ }] [{ }] {
     bytes = [];
     remaining = 2000000000;
     c = readByte();
-    while c >= 0 [{ affirm size(bytes) >= 0; }] shrinks remaining {
+    while c >= 0 && remaining > 0 [{ affirm size(bytes) >= 0; affirm remaining >= 0; }] shrinks remaining {
         bytes = push(bytes, c);
         remaining = remaining - 1;
         c = readByte();
@@ -35,22 +35,25 @@ fn driverSigned(sign: Int, negative: Int) -> Int {
     return 0 - negative;
 };
 
-fn driverSkipWs(bytes: &List<Int>, start: Int) -> Int {
+// (a position is from 0 to the end of the bytes, the end included)
+fn driverSkipWs(bytes: &List<Int>, start: Int) -> Int [{ affirm start >= 0; affirm start <= size(bytes); }] [{ affirm return >= start; affirm return <= size(bytes); }] {
     pos = start;
-    while pos < size(bytes) [{ affirm pos >= 0; }] shrinks size(bytes) - pos {
+    while pos < size(bytes) [{ affirm pos >= start; affirm pos <= size(bytes); }] shrinks size(bytes) - pos {
         if get(bytes, pos) > 32 { return pos; };
         pos = pos + 1;
     };
     return pos;
 };
 
-fn driverReadInt(bytes: &List<Int>, start: Int) -> DriverIntParsed {
+fn driverReadInt(bytes: &List<Int>, start: Int) -> DriverIntParsed [{ affirm start >= 0; affirm start <= size(bytes); }] [{ affirm return.pos >= start; affirm return.pos <= size(bytes); }] {
     pos = driverSkipWs(bytes, start);
     sign = 1;
-    if get(bytes, pos) = 45 { sign = 0 - 1; pos = pos + 1; };
+    if pos < size(bytes) {
+        if get(bytes, pos) = 45 { sign = 0 - 1; pos = pos + 1; };
+    };
     // accumulated negatively, so the least integer reads without overflow
     value = 0;
-    while pos < size(bytes) [{ affirm pos >= 0; }] shrinks size(bytes) - pos {
+    while pos < size(bytes) [{ affirm pos >= start; affirm pos <= size(bytes); }] shrinks size(bytes) - pos {
         c = get(bytes, pos);
         if c < 48 { return DriverIntParsed { value: driverSigned(sign, value), pos: pos }; };
         if c > 57 { return DriverIntParsed { value: driverSigned(sign, value), pos: pos }; };
@@ -60,19 +63,24 @@ fn driverReadInt(bytes: &List<Int>, start: Int) -> DriverIntParsed {
     return DriverIntParsed { value: driverSigned(sign, value), pos: pos };
 };
 
-fn driverParseItems(bytes: &List<Int>, start: Int, count: Int) -> DriverParsed [{ }] [{ }] {
+// (a value and the items of a list are read further on each time: a value
+// reads its tag before its items, so the two measures interleave)
+fn driverParseItems(bytes: &List<Int>, start: Int, count: Int) -> DriverParsed [{ affirm start >= 0; affirm start <= size(bytes); }] [{ affirm return.pos >= start; affirm return.pos <= size(bytes); }] shrinks 2 * (size(bytes) - start) + 1 {
     items = [];
     pos = start;
-    for i in 0..count {
+    i = 0;
+    while i < count [{ affirm pos >= start; affirm pos <= size(bytes); affirm i >= 0; }] shrinks count - i {
         parsed = driverParseValue(bytes, pos);
         pos = parsed.pos;
         items = push(items, parsed.value);
+        i = i + 1;
     };
     return DriverParsed { value: DriverValue::DriverList { items: items }, pos: pos };
 };
 
-fn driverParseValue(bytes: &List<Int>, start: Int) -> DriverParsed [{ }] [{ }] shrinks size(bytes) - start {
+fn driverParseValue(bytes: &List<Int>, start: Int) -> DriverParsed [{ affirm start >= 0; affirm start <= size(bytes); }] [{ affirm return.pos >= start; affirm return.pos <= size(bytes); }] shrinks 2 * (size(bytes) - start) {
     at = driverSkipWs(bytes, start);
+    if at >= size(bytes) { return DriverParsed { value: DriverValue::DriverInt { value: 0 }, pos: at }; };
     kind = get(bytes, at);
     if kind = 105 {
         parsed = driverReadInt(bytes, at + 1);
@@ -88,17 +96,28 @@ fn driverParseValue(bytes: &List<Int>, start: Int) -> DriverParsed [{ }] [{ }] s
     };
     if kind = 100 {
         nameStart = driverSkipWs(bytes, at + 1);
+        if nameStart >= size(bytes) { return DriverParsed { value: DriverValue::DriverInt { value: 0 }, pos: nameStart }; };
         lenParsed = driverReadInt(bytes, nameStart + 1);
         name = [];
         pos = lenParsed.pos;
         // the name follows its length after one space
-        if get(bytes, pos) = 32 { pos = pos + 1; };
-        for i in 0..lenParsed.value { name = push(name, get(bytes, pos + i)); };
-        countParsed = driverReadInt(bytes, pos + lenParsed.value);
+        if pos < size(bytes) {
+            if get(bytes, pos) = 32 { pos = pos + 1; };
+        };
+        length = lenParsed.value;
+        if length < 0 { length = 0; };
+        for i in 0..length {
+            if pos + i < size(bytes) { name = push(name, get(bytes, pos + i)); };
+        };
+        end = pos + length;
+        if end > size(bytes) { end = size(bytes); };
+        if end < pos { end = pos; };
+        countParsed = driverReadInt(bytes, end);
         items = driverParseItems(bytes, countParsed.pos, countParsed.value);
         if items.value is DriverValue::DriverList {
             return DriverParsed { value: DriverValue::DriverData { name: name, fields: clone((items.value as DriverValue::DriverList).items) }, pos: items.pos };
         };
+        return DriverParsed { value: DriverValue::DriverInt { value: 0 }, pos: items.pos };
     };
     return DriverParsed { value: DriverValue::DriverInt { value: 0 }, pos: at };
 };
@@ -129,7 +148,7 @@ fn driverItems(value: &DriverValue) -> List<DriverValue> {
 
 fn driverField(value: &DriverValue, index: Int) -> DriverValue {
     items = driverItems(value);
-    if index < size(items) { return clone(get(items, index)); };
+    if index >= 0 && index < size(items) { return clone(get(items, index)); };
     return DriverValue::DriverInt { value: 0 };
 };
 
@@ -330,9 +349,21 @@ fn driverState(value: &DriverValue) -> ExecutionState {
 };
 
 fn driverPrintInt(value: Int) -> Int [{ }] [{ }] {
-    if value < 0 { writeByte(toByte(45)); out = driverPrintInt(0 - value); return out; };
-    if value >= 10 { out = driverPrintInt(value / 10); };
-    writeByte(toByte(48 + value % 10));
+    if value < 0 { writeByte(toByte(45)); };
+    m = value;
+    if m < 0 { m = 0 - m; };
+    // the digits, the last first
+    digits = push([], toByte(48 + m % 10));
+    m = m / 10;
+    while m > 0 [{ affirm m >= 0; affirm size(digits) >= 1; }] shrinks m {
+        digits = push(digits, toByte(48 + m % 10));
+        m = m / 10;
+    };
+    j = size(digits);
+    while j > 0 [{ affirm j >= 0; affirm j <= size(digits); }] shrinks j {
+        j = j - 1;
+        writeByte(get(digits, j));
+    };
     return 0;
 };
 
@@ -353,7 +384,7 @@ countParsed = driverReadInt(bytes, 0);
 total = countParsed.value;
 at = countParsed.pos;
 index = 0;
-while index < total [{ affirm index >= 0; }] shrinks total - index {
+while index < total [{ affirm index >= 0; affirm at >= 0; affirm at <= size(bytes); }] shrinks total - index {
     entryParsed = driverReadInt(bytes, at);
     stateParsed = driverParseValue(bytes, entryParsed.pos);
     blocksParsed = driverParseValue(bytes, stateParsed.pos);
