@@ -18,7 +18,7 @@ import Modules (LoadResult (..))
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
-import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
 import TestHarness
 import Utils
 
@@ -145,40 +145,62 @@ pointersOf (VA values) = concatMap pointersOf values
 pointersOf _ = []
 
 cloneVal :: Val -> M Val
-cloneVal (VP a) = do
+cloneVal v = do
+    frame <- currentFrame
+    cloneIn (Just (fnName (frameFunction frame))) v
+
+cloneIn :: Maybe Name -> Val -> M Val
+cloneIn current v@(VS name _) = do
+    program <- stProgram <$> getSt
+    let owner = typeOfValue program name
+        returnsOwner fn = owner /= Nothing && case fnReturns fn of
+            Just (TNamed base args) -> Just (instanceName base args) == owner
+            Just (TVariant variant) -> ownerOf program variant == owner
+            _ -> False
+        clones = [fn | fn <- Map.elems (progFunctions program), " as Clone>::clone" `isInfixOf` fnName fn, not (null (fnParams fn)), returnsOwner fn]
+    case clones of
+        fn : _ | Just (fnName fn) /= current -> do
+            result <- callFunction program fn [v]
+            maybe (failM "a Clone implementation did not return a value") return result
+        _ -> cloneFields v
+cloneIn _ v = cloneFields v
+
+-- The self-copy guard belongs to CopyOf, not to copies of its fields.
+cloneFields :: Val -> M Val
+cloneFields (VP a) = do
     c <- cell a
     case cellObject c of
-        OList vs -> mapM cloneVal vs >>= alloc . OList
-        OBox v -> cloneVal v >>= alloc . OBox
+        OList vs -> mapM (cloneIn Nothing) vs >>= alloc . OList
+        OBox v -> cloneIn Nothing v >>= alloc . OBox
         OMem _ _ -> failM "memory is copied"
 -- (a copy of a list has memory of its own, with copies of the elements in use)
-cloneVal (VS name fs) | isListStruct name, Just a <- listCell fs = do
+cloneFields (VS name fs) | isListStruct name, Just a <- listCell fs = do
     c <- cell a
     used <- case lookup "len" fs of
         Just (VI n) -> return n
         _ -> failM "a list without its length"
     case cellObject c of
         OMem slots _ -> do
-            copies <- mapM (\(k, v) -> (,) k <$> cloneVal v) [(k, v) | (k, v) <- Map.toList slots, k < used]
+            copies <- mapM (\(k, v) -> (,) k <$> cloneIn Nothing v) [(k, v) | (k, v) <- Map.toList slots, k < used]
             copy <- alloc (OMem (Map.fromList copies) used)
             case copy of
                 VP b -> return (VS name [(f, if f == "addr" then VI (toInteger b * 2 ^ (32 :: Integer)) else if f == "cap" then VI used else v) | (f, v) <- fs])
                 _ -> failM "an allocation is not on the heap"
         _ -> failM "a list that is not in memory"
 -- (a copy of a Box of the library has room of its own, with a copy of the value)
-cloneVal (VS name fs) | isBoxStruct name, Just a <- listCell fs = do
+cloneFields (VS name fs) | isBoxStruct name, Just a <- listCell fs = do
     c <- cell a
     case cellObject c of
         OMem slots size -> do
-            copies <- mapM (\(k, v) -> (,) k <$> cloneVal v) (Map.toList slots)
+            copies <- mapM (\(k, v) -> (,) k <$> cloneIn Nothing v) (Map.toList slots)
             copy <- alloc (OMem (Map.fromList copies) size)
             case copy of
                 VP b -> return (VS name [(f, if f == "addr" then VI (toInteger b * 2 ^ (32 :: Integer)) else v) | (f, v) <- fs])
                 _ -> failM "an allocation is not on the heap"
         _ -> failM "a Box that is not in memory"
-cloneVal (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneVal v) fs
-cloneVal (VA values) = VA <$> mapM cloneVal values
-cloneVal v = return v
+cloneFields (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneIn Nothing v) fs
+cloneFields (VA values) = VA <$> mapM (cloneIn Nothing) values
+cloneFields v = return v
 
 -- How many places own the value: locals (not those that only look) and slots of values
 owners :: Int -> M Int
@@ -924,7 +946,16 @@ windowTests =
 
 referenceModelTests :: [Test]
 referenceModelTests =
-    [ testCase "an indexed reference captures its index" (onSource "indexed reference" "xs = [7, 9]; i = 0; r = &get(xs, i); i = 1; return *r;")
+    [ testCase "CopyOf dispatches a generic named Clone implementation" $ cloneCounter
+        [ Peek (Local 2) (ReadField (Copy (Local 1)) "Counter<Int>" "n")
+        , Assign (Local 3) (BinaryOp Add (Copy (Local 2)) (Const (CInt 1)))
+        , Assign (Local 0) (MakeData "Counter<Int>" [("n", Copy (Local 3))])
+        ] 8
+    , testCase "a Clone implementation's self-copy does not call itself" $
+        cloneCounter [Assign (Local 0) (CopyOf (Copy (Local 1)))] 7
+    , testCase "a structural self-copy still dispatches member Clone implementations" $
+        testAssertEq (runOwned clonedMembers) (Right (Just (MInt 4)))
+    , testCase "an indexed reference captures its index" (onSource "indexed reference" "xs = [7, 9]; i = 0; r = &get(xs, i); i = 1; return *r;")
     , testCase "an intermediate reference field is followed" (onSource "reference field" "struct W { r: &List<Int> }; xs = [7]; w = W { r: &xs }; z = &get(*w.r, 0); return *z;")
     , testCase "a reference copy keeps the same place" (onSource "reference copy" "xs = [7]; r = &xs; q = r; return get(*q, 0);")
     , testCase "a returned reference keeps its caller's frame" (onSource "returned reference" "fn head(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; xs = [7]; r = head(xs); return *r;")
@@ -953,6 +984,45 @@ referenceModelTests =
                 Right _ -> Just "the heap model accepted a reference to a returned frame"
     ]
   where
+    cloneCounter body expected =
+        let ty = TNamed "Counter" [ArgType TInt]
+            base = mainProgram [(Local 0, TInt), (Local 1, ty), (Local 2, ty)]
+                [ Assign (Local 1) (Use (Const (CData "Counter<Int>" [("n", CInt 7)])))
+                , Assign (Local 2) (CopyOf (Copy (Local 1)))
+                , Assign (Local 0) (ReadField (Copy (Local 2)) "Counter<Int>" "n")
+                ]
+            clone = (progMain base)
+                { fnName = "<Counter as Clone>::clone<Int>", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just ty
+                , fnLocals = Map.fromList [(Local 0, LocalDecl ty Nothing), (Local 1, LocalDecl ty Nothing), (Local 2, LocalDecl TInt Nothing), (Local 3, LocalDecl TInt Nothing)]
+                , fnBlocks = Map.singleton (BlockId 0) (BasicBlock body Return)
+                }
+            program = base{progTypes = Map.singleton "Counter<Int>" (StructDecl [("n", TInt)]), progFunctions = Map.singleton (fnName clone) clone}
+         in testAssertEq (runOwned program) (Right (Just (MInt expected)))
+    clonedMembers =
+        let node = TNamed "Node" []
+            kids = TList node
+            leaf = CData "Node" [("n", CInt 3), ("kids", CList [])]
+            base = mainProgram [(Local 0, TInt), (Local 1, node), (Local 2, node), (Local 3, kids), (Local 4, node)]
+                [ Assign (Local 1) (Use (Const (CData "Node" [("n", CInt 7), ("kids", CList [leaf])])))
+                , Assign (Local 2) (CopyOf (Copy (Local 1)))
+                , Peek (Local 3) (ReadField (Copy (Local 2)) "Node" "kids")
+                , Peek (Local 4) (ListOp Get [Copy (Local 3), Const (CInt 0)])
+                , Assign (Local 0) (ReadField (Copy (Local 4)) "Node" "n")
+                , Drop (Local 2), Drop (Local 1)
+                ]
+            clone = (progMain base)
+                { fnName = "<Node as Clone>::clone", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just node
+                , fnLocals = Map.fromList [(Local 0, LocalDecl node Nothing), (Local 1, LocalDecl node Nothing), (Local 2, LocalDecl node Nothing), (Local 3, LocalDecl TInt Nothing), (Local 4, LocalDecl TInt Nothing), (Local 5, LocalDecl kids Nothing)]
+                , fnBlocks = Map.singleton (BlockId 0) (BasicBlock
+                    [ Assign (Local 2) (CopyOf (Copy (Local 1)))
+                    , Peek (Local 3) (ReadField (Copy (Local 2)) "Node" "n")
+                    , Assign (Local 4) (BinaryOp Add (Copy (Local 3)) (Const (CInt 1)))
+                    , Assign (Local 5) (TakeField (Local 2) "Node" "kids")
+                    , Drop (Local 2)
+                    , Assign (Local 0) (MakeData "Node" [("n", Copy (Local 4)), ("kids", Move (Local 5))])
+                    ] Return)
+                }
+         in base{progTypes = Map.singleton "Node" (StructDecl [("n", TInt), ("kids", kids)]), progFunctions = Map.singleton (fnName clone) clone}
     heap = TBox (TArrayOf TInt SizeAny)
     rejects name ty stmts expected =
         let base = mainProgram [(Local 1, ty), (Local 2, TRef ty), (Local 3, TInt)] []
