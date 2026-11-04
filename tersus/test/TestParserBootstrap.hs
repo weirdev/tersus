@@ -21,7 +21,7 @@ import MirData (writeProgram)
 import MirEval (runProgram, MirValue (..))
 import Modules (LoadResult (..), resolverFromFiles)
 import qualified Modules
-import Pipeline (compileModulesValidated)
+import qualified PackageCompile
 import MirHousekeeping (listLibrary)
 import qualified MirHousekeeping as Housekeeping
 import MirLists (lowerLists)
@@ -216,10 +216,10 @@ coldStages = do
             emitter <- timed "E1+checker+eraser+ListBox" Bootstrap.cachedEmitter
             parser <- timed "P1" (TersusParser.parseFileNative emptyDecls "return 42;")
             source <- timed "source" (evaluate (Pipeline.compileSource "return 42;"))
-            package <- timed "embedded package" $ evaluate $ case Pipeline.loadFromEntry (resolver mirPackageFiles) "examples/mir/emit/emit.tersus" of
+            package <- timed "user package" $ evaluate $ case Pipeline.loadFromEntry (resolver userPackage) "bootstrap_probe/main.tersus" of
                 Left e -> Error e
                 Right (PackageResult pkg) -> Pipeline.compileModulesValidated pkg
-                Right _ -> Error "the embedded emitter is not a package"
+                Right _ -> Error "the importing user program is not a package"
             entries <- listDirectory home
             pure $ firstFailure
                 [ if null before then Nothing else Just ("cold worker started with " ++ show before)
@@ -227,12 +227,17 @@ coldStages = do
                 , case emitter of Error e -> Just e; Ok _ -> Nothing
                 , case parser of Left e -> Just e; Right (parsed, _) -> testAssertEq (fileBody parsed) [Return (Val (VInt 42))]
                 , case source `bindResult` runProgram of Error e -> Just e; Ok answer -> testAssertEq answer (Just (MInt 42))
-                , case package of Error e -> Just e; Ok _ -> Nothing
+                , case package `bindResult` runProgram of Error e -> Just e; Ok answer -> testAssertEq answer (Just (MInt 42))
                 , testAssertTrue (all (`elem` entries) ["parser-seed-" ++ parserSeedHash, "seed-" ++ seedHash, "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])
                 , testAssertTrue (all (\prefix -> any (prefix `isPrefixOf`) entries) ["mir-verify-", "mir-erase-", "tersus_rt_"])
                 ]
   where
     resolver = resolverFromFiles
+    userPackage =
+        [ ("bootstrap_probe/package.tersus", "")
+        , ("bootstrap_probe/main.tersus", "import bootstrap_probe::math { twice }; return twice(21);")
+        , ("bootstrap_probe/math/math.tersus", "fn twice(x: Int) -> Int ~ { return x + x; };")
+        ]
 
 warmStages :: IO TestResult
 warmStages = do
@@ -330,8 +335,8 @@ parserFixpoint = do
         Left e -> Error e
         Right (PackageResult pkg) -> Ok pkg
         Right _ -> Error "parser was not loaded as its current package"
-    ownPackage pkg = compileModulesValidated pkg `bindResult` \program ->
-        mapResult insertOwnership (lowerLists listLibrary (expandRefWrites program))
+    ownPackage pkg = PackageCompile.compileModulesLinked pkg `bindResult` \program ->
+        mapResult insertOwnership (Housekeeping.nativeProgram program)
     checkedParser current decls source = unsafePerformIO $ do
         p0 <- ParserSeed.parseFileNative decls source
         pn <- current decls source
