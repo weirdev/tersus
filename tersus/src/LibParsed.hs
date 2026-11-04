@@ -12,32 +12,13 @@ module LibParsed
 
 import qualified Data.Map.Strict as Map
 
-import Parse (Decls, Import (..), ParsedFile (..), declsFromStatements, emptyDecls, parseFileWith, parseImportPrefix)
-import PreludeSource (boxSource, cloneSource, eqSource, listsSource, mapSource, preludeSource, setSource, stringSource, typesSource)
+import ParsedFile (Decls, Import (..), ParsedFile (..), declsFromStatements, emptyDecls)
+import ParserSeed (parseFileWith, parseImportPrefix, toolFailure)
+import PreludeSource (libModules, nativeStorageModules, libPackageFiles)
 import Syntax (Statement)
-
--- Compiler-owned modules retain bare names.
-libModules :: [(String, String, String)]
-libModules =
-    [ ("types", "the list and Box types", typesSource)
-    , ("clone", "the clone library", cloneSource)
-    , ("eq", "the equality library", eqSource)
-    , ("prelude", "the prelude", preludeSource)
-    , ("string", "the string library", stringSource)
-    , ("map", "the map library", mapSource)
-    , ("set", "the set library", setSource)
-    , ("lists", "the native list helpers", listsSource)
-    , ("box", "the native Box helpers", boxSource)
-    ]
-
-nativeStorageModules :: [String]
-nativeStorageModules = ["lists", "box"]
 
 libModuleNames :: [String]
 libModuleNames = [name | (name, _, _) <- libModules, name `notElem` nativeStorageModules]
-
-libPackageFiles :: [(FilePath, String)]
-libPackageFiles = ("tersuslib/package.tersus", "") : [("tersuslib/" ++ name ++ "/" ++ name ++ ".tersus", text) | (name, _, text) <- libModules]
 
 data LibParsed = LibParsed
     { lpStatements :: Map.Map String [Statement]
@@ -59,7 +40,7 @@ parseLibModules names initial = foldl next (Right initial) [modu | modu@(name, _
   where
     next failed@(Left _) _ = failed
     next (Right parsed) (name, _, text) = do
-        imports <- either (Left . show) Right (parseImportPrefix text)
+        imports <- parseImportPrefix text
         deps <- mapM dependency imports
         case [dep | dep <- deps, dep `notElem` lpOrder parsed] of
             dep : _ -> Left ("lib module " ++ name ++ " imports " ++ dep ++ " before it is available")
@@ -70,7 +51,8 @@ parseLibModules names initial = foldl next (Right initial) [modu | modu@(name, _
                         dep : rest -> closure (Map.findWithDefault [] dep (lpDependencies parsed) ++ rest) (dep : done)
                     declarations = declsForLibModules parsed (closure deps [])
                 case parseFileWith declarations text of
-                    Left err -> Left ("Parse error in the " ++ name ++ " library: " ++ show err)
+                    Left err | toolFailure err -> Left err
+                             | otherwise -> Left ("Parse error in the " ++ name ++ " library: " ++ err)
                     Right (ParsedFile _ stmts, _) ->
                         let updated = parsed
                                 { lpStatements = Map.insert name stmts (lpStatements parsed)

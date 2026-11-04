@@ -27,7 +27,7 @@ import MirLower
 import MirHousekeeping (verifyProgram)
 import Pipeline
 import SelfHostedMir (validateMirSubset, verdictProved)
-import Parse
+import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
 import TypeCheck (Elaborated (..), elaborate)

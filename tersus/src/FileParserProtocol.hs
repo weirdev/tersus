@@ -15,7 +15,7 @@ import qualified Text.Parsec as Reader
 
 import qualified AstData
 import DataCodec
-import Parse (Decls (..), Import (..), ParsedFile (..), emptyDecls)
+import ParsedFile (Decls (..), Import (..), ParsedFile (..), emptyDecls)
 import Types
 import Utils (Result (..), bindResult, decodeUtf8, encodeUtf8, flatResultMap, mapResult)
 

@@ -38,9 +38,10 @@ import qualified Data.Set as Set
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
 
-import qualified Parse
+import qualified ParsedFile as Parse
+import qualified ParserSeed
 import LibParsed (LibParsed (..), libParsed)
-import Parse (Decls, Import (..), ParsedFile (..), emptyDecls, locating, renderPath)
+import ParsedFile (Decls, Import (..), ParsedFile (..), emptyDecls, locating, renderPath)
 import Syntax
 import Types hiding (baseNameOf)
 
@@ -491,10 +492,8 @@ data PModule = PModule
 
 type FileParser = Decls -> String -> Either String (ParsedFile, Decls)
 
-haskellFileParser :: FileParser
-haskellFileParser decls source = case Parse.parseFileWith decls source of
-    Left err -> Left (show err)
-    Right parsed -> Right parsed
+bootstrapFileParser :: FileParser
+bootstrapFileParser = ParserSeed.parseFileWith
 
 data LState = LState
     { lsFileParser :: FileParser
@@ -629,7 +628,7 @@ parseModule resolver entryPath layout moduleName = do
             Right () -> pureM (PFile entry parsedFile (declarationNames (fileBody parsedFile)) source)
     importSeedFor entry = do
         source <- maybe (failM ("file not found: " ++ fePath entry)) pureM (resolverReadFile resolver (fePath entry))
-        imports <- case Parse.parseImportPrefix source of
+        imports <- case ParserSeed.parseImportPrefix source of
             Left err -> failM ("parse error in file " ++ fePath entry ++ ": " ++ show err)
             Right found -> pureM found
         declarations <- mapM_M (seedImport entry) imports
@@ -710,19 +709,21 @@ parseModuleDeclarations resolver layout = do
   where
     readNames fileParser entry = do
         source <- maybe (failM ("file not found: " ++ fePath entry)) pureM (resolverReadFile resolver (fePath entry))
-        case fileParser (locating libraryDecls) source of
+        declared <- either failM pureM libraryDecls
+        case fileParser (locating declared) source of
             Right (parsed, _) -> pureM (PFile entry parsed (declarationNames (fileBody parsed)) source)
             Left err
                 | "Parser tool failure:" `isInfixOf` err -> failM err
-                | otherwise -> case Parse.parseDeclarationNames source of
+                | otherwise -> case ParserSeed.parseDeclarationNames source of
                     Left err' -> failM ("parse error in file " ++ fePath entry ++ ": " ++ show err')
                     Right names -> pureM (PFile entry (ParsedFile [] []) names source)
 
 parseModuleFiles :: FileParser -> Resolver -> Layout -> ModuleId -> [FileEntry] -> [(FilePath, Decls)] -> [(FileEntry, String)] -> Either String [ParsedFile]
-parseModuleFiles fileParser resolver layout moduleId ownEntries seeds ownTexts =
-    let seed = seedDecls fileParser resolver layout ownEntries seeds
+parseModuleFiles fileParser resolver layout moduleId ownEntries seeds ownTexts = do
+    declared <- libraryDecls
+    let seed = seedDecls fileParser resolver layout ownEntries seeds declared
         ordered = [entry | (entry, _) <- ownTexts]
-     in case iterateParses seed ownTexts [] of
+    case iterateParses seed ownTexts [] of
             Right done -> Right [parsedFile | entry <- ordered, Just parsedFile <- [lookup (fePath entry) done]]
             Left (entry, text) -> case fileParser (locating emptyDecls) text of
                 Left err -> Left ("parse error in module " ++ renderModuleId moduleId ++ " file " ++ fePath entry ++ ": " ++ err)
@@ -745,13 +746,11 @@ parseModuleFiles fileParser resolver layout moduleId ownEntries seeds ownTexts =
 -- (LibParsed): the seed every package file is read with, so a file can
 -- name a library type (a String literal, a HashMap) before the module's
 -- libraries are selected.
-libraryDecls :: Decls
-libraryDecls = case libParsed of
-    Right parsed -> lpDecls parsed
-    Left _ -> emptyDecls
+libraryDecls :: Either String Decls
+libraryDecls = lpDecls <$> libParsed
 
-seedDecls :: FileParser -> Resolver -> Layout -> [FileEntry] -> [(FilePath, Decls)] -> Decls
-seedDecls fileParser resolver layout ownEntries seeds = loop libraryDecls texts
+seedDecls :: FileParser -> Resolver -> Layout -> [FileEntry] -> [(FilePath, Decls)] -> Decls -> Decls
+seedDecls fileParser resolver layout ownEntries seeds initial = loop initial texts
   where
     layoutEntries = layRootFiles layout ++ concat (Map.elems (layModules layout))
     ordered = ownEntries ++ [entry | entry <- layoutEntries, fePath entry `notElem` map fePath ownEntries]
@@ -1221,7 +1220,7 @@ visitModule resolver entryPath stack moduleId layout moduleName = do
                 | otherwise -> failM ("internal: package " ++ pkg ++ " was resolved but its layout is missing")
 
 loadFromEntry :: Resolver -> FilePath -> Either String LoadResult
-loadFromEntry = loadFromEntryWith haskellFileParser
+loadFromEntry = loadFromEntryWith bootstrapFileParser
 
 loadFromEntryWith :: FileParser -> Resolver -> FilePath -> Either String LoadResult
 loadFromEntryWith fileParser resolver rawEntry = case discoverEntry resolver entryPath of
@@ -1308,7 +1307,7 @@ findPackageRootIO entry = go (takeDirectory entry)
                 if parent == dir then return Nothing else go parent
 
 loadFromFilesystem :: FilePath -> IO (Either String LoadResult)
-loadFromFilesystem = loadFromFilesystemWith haskellFileParser
+loadFromFilesystem = loadFromFilesystemWith bootstrapFileParser
 
 loadFromFilesystemWith :: FileParser -> FilePath -> IO (Either String LoadResult)
 loadFromFilesystemWith fileParser entry = do

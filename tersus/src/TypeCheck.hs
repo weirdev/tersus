@@ -42,8 +42,6 @@ typeCheck stmts = mapResult (const ()) (elaborate stmts)
 -- lowering visits those expressions: an expression, then the expression it applies when that is itself computed
 -- (not a name or a value), then its arguments, statement by statement (a function's body where it is defined).
 -- That is all the lowering needs to give every local and temporary its type, so it never infers a type itself.
-data Elaborated = Elaborated [Statement] [Type]
-    deriving (Show)
 
 data PreparedPrefix = PreparedPrefix Ctx Env [Statement] [Type] TcState
 

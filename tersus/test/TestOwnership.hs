@@ -15,7 +15,7 @@ import MirOwnership (Role (..), insertOwnership, needsDrop, operandLocal, roles)
 import MirHousekeeping (verifyProgram)
 import MirLower (lowerProgram)
 import Modules (LoadResult (..))
-import Parse (parseStatementBlock)
+import TestParserFragments (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
 import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)

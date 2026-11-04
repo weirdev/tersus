@@ -5,6 +5,10 @@ module Seed
     , emitterHash
     , stageZero
     , cachedSeed
+    , parserSeedHash
+    , parserSeedSha256
+    , parserSeedUrl
+    , cachedParserSeed
     ) where
 
 import Control.Exception (IOException, evaluate, try)
@@ -20,43 +24,46 @@ import System.Process (readProcessWithExitCode)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Native (buildExecutable, cachedProgram, cacheDirectory)
-import LibParsed (libPackageFiles)
-import PreludeSource (compilerSourceHash, mirPackageFiles, seedSha256, stdlibSource)
+import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, seedSha256, parserSeedSha256, stdlibSource)
 import Utils
 
--- The seed the emitter written in Tersus is bootstrapped from (see Bootstrap): its text is fetched, or read from where it is kept, and
--- checked against the digest the repository pins, and stage 0 is it built with clang. This is below both Bootstrap and MirHousekeeping,
--- which each build programs written in Tersus from it.
-
--- The release the seed is fetched from: one release per seed, tagged for the seed it holds, so a release is never reused for a different seed
 seedUrl :: String
-seedUrl = "https://github.com/weirdev/tersus/releases/download/bootstrap-" ++ take 12 seedSha256 ++ "/emitter.ll"
+seedUrl = assetUrl "emitter" seedSha256
 
--- What stage 0 is made of: the seed and the runtime it is linked with
+parserSeedUrl :: String
+parserSeedUrl = assetUrl "parser" parserSeedSha256
+
+assetUrl :: String -> String -> String
+assetUrl name digest = "https://github.com/weirdev/tersus/releases/download/bootstrap-" ++ take 12 digest ++ "/" ++ name ++ ".ll"
+
 seedHash :: String
 seedHash = fingerprint [seedSha256, runtimeSource]
 
--- What stage 1 is made of: stage 0, the emitter, and the library every program has
-emitterHash :: String
-emitterHash = fingerprint ([seedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
+parserSeedHash :: String
+parserSeedHash = fingerprint [parserSeedSha256, runtimeSource]
 
--- Stage 0: the seed built, at the path
+emitterHash :: String
+emitterHash = fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
+
 stageZero :: FilePath -> IO (Result () String)
-stageZero output = do
-    seed <- seedText
+stageZero = buildSeed "emitter" seedSha256 seedHash "TERSUS_SEED_FILE"
+
+buildSeed :: String -> String -> String -> String -> FilePath -> IO (Result () String)
+buildSeed name digest hash override output = do
+    seed <- seedText name digest hash override
     case seed of
         Error e -> pure (Error e)
         Ok text -> buildExecutable output text
 
-seedText :: IO (Result String String)
-seedText = do
-    override <- lookupEnv "TERSUS_SEED_FILE"
+seedText :: String -> String -> String -> String -> IO (Result String String)
+seedText name digest hash variable = do
+    override <- lookupEnv variable
     case override of
-        Just path -> verifiedText path
+        Just path -> verifiedText name digest path
         Nothing -> do
-            local <- firstExisting ["bootstrap" </> "emitter.ll", "tersus" </> "bootstrap" </> "emitter.ll"]
+            local <- firstExisting ["bootstrap" </> name ++ ".ll", "tersus" </> "bootstrap" </> name ++ ".ll"]
             case local of
-                Just path -> verifiedText path
+                Just path -> verifiedText name digest path
                 Nothing -> cachedText
   where
     firstExisting [] = pure Nothing
@@ -68,39 +75,40 @@ seedText = do
         case cache of
             Error e -> pure (Error e)
             Ok dir -> do
-                let path = dir </> ("seed-" ++ seedHash ++ ".ll")
+                let path = dir </> ((if name == "emitter" then "seed-" else "parser-seed-") ++ hash ++ ".ll")
                 present <- doesFileExist path
                 if present
-                    then verifiedText path
+                    then verifiedText name digest path
                     else do
-                        fetched <- downloadSeed dir path
+                        fetched <- downloadSeed name digest variable dir path
                         case fetched of
                             Error e -> pure (Error e)
-                            Ok () -> verifiedText path
+                            Ok () -> verifiedText name digest path
 
-downloadSeed :: FilePath -> FilePath -> IO (Result () String)
-downloadSeed dir path = do
-    (partial, handle) <- openTempFile dir "seed.ll.tmp"
+downloadSeed :: String -> String -> String -> FilePath -> FilePath -> IO (Result () String)
+downloadSeed name digest variable dir path = do
+    (partial, handle) <- openTempFile dir (name ++ ".ll.tmp")
     hClose handle
-    outcome <- try (readProcessWithExitCode "curl" ["-fsSL", "-o", partial, seedUrl] "") :: IO (Either IOException (ExitCode, String, String))
+    let url = assetUrl name digest
+    outcome <- try (readProcessWithExitCode "curl" ["-fsSL", "-o", partial, url] "") :: IO (Either IOException (ExitCode, String, String))
     case outcome of
-        Left e -> removeQuietly partial >> pure (Error ("Could not run curl to fetch the bootstrap seed from " ++ seedUrl ++ ": " ++ show e ++ ". Install curl, or set TERSUS_SEED_FILE to a seed file."))
-        Right (ExitFailure _, _, err) -> removeQuietly partial >> pure (Error ("Could not fetch the bootstrap seed from " ++ seedUrl ++ ": " ++ err ++ "Set TERSUS_SEED_FILE to a seed file to work without a network."))
+        Left e -> removeQuietly partial >> pure (Error ("Could not run curl to fetch the " ++ name ++ " bootstrap seed from " ++ url ++ ": " ++ show e ++ ". Install curl, or set " ++ variable ++ " to a seed file."))
+        Right (ExitFailure _, _, err) -> removeQuietly partial >> pure (Error ("Could not fetch the " ++ name ++ " bootstrap seed from " ++ url ++ ": " ++ err ++ "Set " ++ variable ++ " to a seed file to work without a network."))
         Right (ExitSuccess, _, _) -> do
-            verified <- verifyFile partial
+            verified <- verifyFile name digest partial
             case verified of
                 Error e -> removeQuietly partial >> pure (Error e)
                 Ok () -> renameFile partial path >> pure (Ok ())
 
-verifiedText :: FilePath -> IO (Result String String)
-verifiedText path = do
-    verified <- verifyFile path
+verifiedText :: String -> String -> FilePath -> IO (Result String String)
+verifiedText name digest path = do
+    verified <- verifyFile name digest path
     case verified of
         Error e -> pure (Error e)
         Ok () -> do
             read' <- try (readBytes path) :: IO (Either IOException String)
             pure $ case read' of
-                Left e -> Error ("Could not read the bootstrap seed " ++ path ++ ": " ++ show e)
+                Left e -> Error ("Could not read the " ++ name ++ " bootstrap seed " ++ path ++ ": " ++ show e)
                 Right text -> Ok text
   where
     readBytes p = do
@@ -111,8 +119,8 @@ verifiedText path = do
         hClose handle
         pure contents
 
-verifyFile :: FilePath -> IO (Result () String)
-verifyFile path = do
+verifyFile :: String -> String -> FilePath -> IO (Result () String)
+verifyFile name digest path = do
     outcome <- try (readProcessWithExitCode "sha256sum" [path] "") :: IO (Either IOException (ExitCode, String, String))
     bySum <- case outcome of
         Right (ExitSuccess, out, _) -> pure (Just out)
@@ -122,17 +130,18 @@ verifyFile path = do
                 Right (ExitSuccess, out, _) -> Just out
                 _ -> Nothing
     pure $ case bySum of
-        Nothing -> Error ("Could not run sha256sum or shasum to verify the bootstrap seed " ++ path ++ ".")
+        Nothing -> Error ("Could not run sha256sum or shasum to verify the " ++ name ++ " bootstrap seed " ++ path ++ ".")
         Just out
-            | takeWhile (/= ' ') out == seedSha256 && length seedSha256 == 64 && all isHexDigit seedSha256 -> Ok ()
-            | otherwise -> Error ("The bootstrap seed " ++ path ++ " does not match bootstrap/emitter.sha256 (" ++ seedSha256 ++ "): got " ++ takeWhile (/= ' ') out ++ ". Refusing to build it.")
+            | takeWhile (/= ' ') out == digest && length digest == 64 && all isHexDigit digest -> Ok ()
+            | otherwise -> Error ("The " ++ name ++ " bootstrap seed " ++ path ++ " does not match bootstrap/" ++ name ++ ".sha256 (" ++ digest ++ "): got " ++ takeWhile (/= ' ') out ++ ". Refusing to build it.")
 
 removeQuietly :: FilePath -> IO ()
 removeQuietly path = do
     _ <- try (removeFile path) :: IO (Either IOException ())
     pure ()
 
--- Stage 0 in the cache, built if it is not there yet
 cachedSeed :: IO (Result FilePath String)
 cachedSeed = cachedProgram "seed" seedHash "the seed of the emitter written in Tersus" stageZero
 
+cachedParserSeed :: IO (Result FilePath String)
+cachedParserSeed = cachedProgram "parser-seed" parserSeedHash "the pinned native parser seed" (buildSeed "parser" parserSeedSha256 parserSeedHash "TERSUS_PARSER_SEED_FILE")

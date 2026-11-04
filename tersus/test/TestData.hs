@@ -7,7 +7,7 @@ module TestData
     ) where
 
 import Data.List (isInfixOf)
-import Parse
+import TestParserFragments
 import StdLib
 import Types
 import Syntax
@@ -247,7 +247,7 @@ testEnums =
             , parseFailsWith (shape ++ "s = Shape::Circle { radius: 1 }; match s { Shape::Circle { diameter: d } => { }, Shape::Rect { width: w } => { }, Shape::Empty => { } };") "has no field diameter"
             , parseFailsWith (shape ++ "x = Shape::Circle { };") "lacks field radius"
             , parseFailsWith (shape ++ "x = Shape::Circle { radius: 1, ..y };") "copies nothing"
-            , parseFailsWith (shape ++ "x = Shape::Empty is Shape::Nope;") "unexpected"
+            , parseFailsWith (shape ++ "x = Shape::Empty is Shape::Nope;") "Unknown struct or variant Shape::Nope"
             , parseFailsWith "enum E { };" "has no variants"
             , parseFailsWith "enum E { A, A };" "repeats a variant"
             , parseFailsWith "enum Bool { A };" "builtin type"

@@ -1,22 +1,24 @@
 module TestBootstrap (testBootstrap) where
 
-import Control.Exception (finally)
+import Control.Exception (bracket)
 import Data.Char (isHexDigit)
-import Data.List (isPrefixOf, sort)
-import System.Directory (copyFile, createDirectoryIfMissing, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, doesDirectoryExist)
-import System.Environment (lookupEnv, setEnv, unsetEnv)
+import Data.List (sort)
+import System.Directory (createDirectory, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile)
+import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
+import System.Exit (ExitCode (..))
+import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
+import System.IO (hClose, openTempFile)
 import System.FilePath ((</>))
 
 import qualified TersusParser
+import Seed (parserSeedHash, parserSeedSha256, parserSeedUrl)
 import Bootstrap
 import Cli (Command (..), makesIr)
 import MirData (writeProgram)
-import MirHousekeeping (ownedProgramOf)
 import Pipeline (ownedSource)
 import Hash (fingerprint)
 import MirHousekeeping (emitterOwnedProgram)
-import LibParsed (libPackageFiles)
-import PreludeSource (compilerSourceHash, mirPackageFiles, stdlibSource)
+import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, stdlibSource)
 import TestHarness
 import TestNative (clangAvailable)
 import Utils
@@ -43,7 +45,7 @@ hashShape :: IO TestResult
 hashShape =
     pure $
         if all (\h -> length h == 16 && all isHexDigit h) [seedHash, emitterHash] && seedHash /= emitterHash
-            && emitterHash == fingerprint ([seedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
+            && emitterHash == fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
             then Nothing
             else Just ("the hashes are " ++ show (seedHash, emitterHash))
 
@@ -51,6 +53,8 @@ seedPin :: IO TestResult
 seedPin =
     pure $
         if length seedSha256 == 64 && all isHexDigit seedSha256 && seedUrl == "https://github.com/weirdev/tersus/releases/download/bootstrap-" ++ take 12 seedSha256 ++ "/emitter.ll"
+            && length parserSeedSha256 == 64 && all isHexDigit parserSeedSha256
+            && parserSeedUrl == "https://github.com/weirdev/tersus/releases/download/bootstrap-" ++ take 12 parserSeedSha256 ++ "/parser.ll"
             then Nothing
             else Just ("the seed pin is " ++ show seedSha256 ++ " and its release is " ++ seedUrl)
 
@@ -67,21 +71,30 @@ firstFailure results = case [failure | Just failure <- results] of
     failure : _ -> Just failure
     [] -> Nothing
 
--- A directory of the tests' own, emptied and made again
 withDirectory :: String -> (FilePath -> IO a) -> IO a
-withDirectory name use = do
-    tmp <- getTemporaryDirectory
-    let dir = tmp </> name
-    exists <- doesDirectoryExist dir
-    if exists then removeDirectoryRecursive dir else pure ()
-    createDirectoryIfMissing True dir
-    use dir `finally` removeDirectoryRecursive dir
+withDirectory name = bracket make removeDirectoryRecursive
+  where
+    make = do
+        tmp <- getTemporaryDirectory
+        (dir, handle) <- openTempFile tmp name
+        hClose handle
+        removeFile dir
+        createDirectory dir
+        pure dir
 
 coldBootstrap :: IO TestResult
-coldBootstrap = withDirectory "tersus-bootstrap-cold" $ \home -> do
-    saved <- lookupEnv "XDG_CACHE_HOME"
-    let restore = maybe (unsetEnv "XDG_CACHE_HOME") (setEnv "XDG_CACHE_HOME") saved
-    (setEnv "XDG_CACHE_HOME" home >> bootstrap) `finally` restore
+coldBootstrap = do
+    child <- lookupEnv "TERSUS_EMITTER_BOOTSTRAP_WORKER"
+    case child of
+        Just "1" -> bootstrap
+        _ -> withDirectory "tersus-bootstrap-cold" $ \home -> do
+            self <- getExecutablePath
+            inherited <- getEnvironment
+            let environment = [("TERSUS_EMITTER_BOOTSTRAP_WORKER", "1"), ("XDG_CACHE_HOME", home)] ++ [(key, value) | (key, value) <- inherited, key `notElem` ["TERSUS_EMITTER_BOOTSTRAP_WORKER", "XDG_CACHE_HOME"]]
+            (status, out, err) <- readCreateProcessWithExitCode (proc self ["testBootstrap", "--child", "+RTS", "-N1", "-RTS"]){env = Just environment} ""
+            pure $ case status of
+                ExitSuccess -> Nothing
+                _ -> Just ("fresh emitter bootstrap worker: " ++ out ++ err)
 
 bootstrap :: IO TestResult
 bootstrap = do
@@ -127,34 +140,30 @@ firstDifference output text = case [(n, a, b) | (n, a, b) <- zip3 [1 :: Int ..] 
     (n, a, b) : _ -> "; line " ++ show n ++ ": " ++ show a ++ " for " ++ show b
     [] -> ""
 
--- The emitters that are in the cache are used, and not built again: a program is compiled with the cache that holds a copy of each and nothing else, and the copies
--- have not been written to
 cache :: FilePath -> FilePath -> IO TestResult
-cache zero one = withDirectory "tersus-cache-test" $ \home -> do
-    saved <- lookupEnv "XDG_CACHE_HOME"
-    let restore = maybe (unsetEnv "XDG_CACHE_HOME") (setEnv "XDG_CACHE_HOME") saved
-        names = ["seed-" ++ seedHash, "emitter-" ++ emitterHash]
-        expectedNames = names ++ ["emitter-" ++ emitterHash ++ ".lock"]
-        -- (validating the program builds the validator and keeps its verdicts in the cache too)
-        emitterEntry entry = any (`isPrefixOf` entry) ["seed-", "emitter-"]
-        kept = [home </> "tersus" </> name | name <- names]
-    (do
-        createDirectoryIfMissing True (home </> "tersus")
-        mapM_ (uncurry copyFile) (zip [zero, one] kept)
-        setEnv "XDG_CACHE_HOME" home
-        before <- mapM getModificationTime kept
-        let source = "x = 6 * 7; return x;"
-        ir <- tersusLlvm source
-        expected <- case ownedSource source of
-            Error e -> pure (Error e)
-            Ok owned -> emitWith one (writeProgram owned)
-        after <- mapM getModificationTime kept
-        entries <- listDirectory (home </> "tersus")
-        pure $ case (ir, expected) of
-            (Ok text, Ok fromStage1)
-                | text /= fromStage1 -> Just "the IR is not what stage 1 writes"
-                | before /= after || sort (filter emitterEntry entries) /= sort expectedNames -> Just ("the cache was written to: " ++ show entries)
-                | otherwise -> Nothing
-            (Error e, _) -> Just e
-            (_, Error e) -> Just e)
-        `finally` restore
+cache zero one = do
+    selected <- lookupEnv "XDG_CACHE_HOME"
+    case selected of
+        Nothing -> pure (Just "cold cache directory was not set")
+        Just home -> do
+            let directory = home </> "tersus"
+            names <- sort <$> listDirectory directory
+            before <- mapM (getModificationTime . (directory </>)) names
+            reusedZero <- cachedSeed
+            reusedOne <- cachedEmitter
+            let source = "x = 6 * 7; return x;"
+            ir <- tersusLlvm source
+            expected <- case ownedSource source of
+                Error e -> pure (Error e)
+                Ok owned -> emitWith one (writeProgram owned)
+            afterNames <- sort <$> listDirectory directory
+            after <- mapM (getModificationTime . (directory </>)) names
+            pure $ case (ir, expected) of
+                (Ok text, Ok fromStage1) -> firstFailure
+                    [ if text == fromStage1 then Nothing else Just "the IR is not what stage 1 writes"
+                    , testAssertEq (reusedZero, reusedOne) (Ok zero, Ok one)
+                    , testAssertEq (afterNames, after) (names, before)
+                    , testAssertTrue (all (`elem` names) ["seed-" ++ seedHash, "parser-seed-" ++ parserSeedHash, "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])
+                    ]
+                (Error e, _) -> Just e
+                (_, Error e) -> Just e

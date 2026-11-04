@@ -10,7 +10,7 @@ module TestBasics
     , testControlFlow
     ) where
 
-import Parse
+import TestParserFragments
 import MirEval (fromMirValue)
 import Pipeline (parseWithEquality, runStatements, validateStatements)
 import StdLib

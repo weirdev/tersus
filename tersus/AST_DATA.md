@@ -1,9 +1,9 @@
 # AST as data
 
-`AstData` and `examples/ast_reader/ast_reader.tersus` exchange syntax without running the
-proof engine. This is a development-stage bridge for the frontend and MIR
-lowering ports in `REPLACING_HASKELL.md`, not a new CLI command or production
-frontend. Parsing, elaboration and validation are unchanged.
+`AstData` and `examples/ast_reader/ast_reader.tersus` exchange syntax without
+running the proof engine. The parsed format is the production parser boundary.
+The elaborated format remains a bridge for the MIR lowering port in
+`REPLACING_HASKELL.md`; elaboration and validation still run in Haskell.
 
 ## APIs
 
@@ -20,7 +20,7 @@ readElaborated  :: String -> Result Elaborated String
 kept locations. It also handles the resolved syntax inside `Elaborated`, but
 use `writeElaborated` to retain its expression-occurrence types. That API
 preserves **both** `[Statement]` and the complete ordered `[Type]` of
-`TypeCheck.Elaborated`. The types remain in the lowering's visit order; the
+`Syntax.Elaborated`. The types remain in the lowering's visit order; the
 bridge neither infers them again nor claims to validate an elaborated program.
 A parsed reader refuses an elaborated header, and vice versa.
 
@@ -96,7 +96,10 @@ Malformed escapes, missing separators and invalid UTF-8 are refused. No name
 is normalized. `VInt NAME` contains decimal text, so a constructed Haskell
 syntax value outside the runtime's signed-64-bit range is also lossless.
 The source parser still rejects out-of-range integer literals before producing
-an AST; this bridge does not change that behavior.
+an AST; this bridge does not change that behavior. Size arguments also have to
+fit the signed-64-bit AST/MIR representation, so the native parser refuses an
+oversized size before checking. The retired Haskell grammar could construct
+that unsupported AST and leave the rejection to the checker.
 
 Example: the syntax `[Return (Val (VInt 7))]` is:
 
@@ -145,25 +148,30 @@ integer **value** literals have no such numeric limit.
 `examples/parser/parser.tersus` is a hand-written parser over bytes (in the manner of
 `examples/mir_reader.tersus`) for the whole language. It builds the arena of
 this document directly and writes `tersus-ast 1 parsed` for it, byte for byte
-as `AstData.writeParsed` writes the Haskell parse of the same program,
+as `AstData.writeParsed` writes the decoded syntax,
 including every desugaring (a `match` becomes an `if` chain of `Is` and
 `Project`, a `for` becomes a `while`, struct literals become `Ctor`
 applications, a standard `Eq` or `Clone` impl is written out, and so on). The
 arena is built in parse order and renumbered at the end into the emission
 order above; nodes a failed speculation built are unreachable and dropped.
 
-The host (`src/TersusParser.hs`) loads `PreludeSource.parserPackageFiles` through
-the ordinary `Modules` resolver and `PackageCompile` Haskell bootstrap, then
-runs a native executable. The embedded snapshot includes the package markers,
-shared data modules and generated `unicode.tersus` root-module file, whose
-predicates use the serving Haskell compiler's Unicode categories. No native
-parser is called to build itself. The cache key covers every snapshot path and
-source, the emitter and runtime; source changes in an imported module rekey it.
-Its fingerprinted disk cache and cross-process lock are the existing
-`Native.cachedProgram` mechanism. Unset
-`TERSUS_PARSER` or `native` selects it. `interpreted` explicitly selects the MIR
-interpreter; `haskell` selects the one-release oracle. Build, process and
-protocol failures are errors, never fallback decisions.
+The host (`src/TersusParser.hs`) runs the current packaged parser as a native
+executable (P1). `ParserSeed` first verifies `bootstrap/parser.sha256` and builds
+its pinned LLVM seed with clang (P0). P0 parses `LibParsed`'s compiler libraries
+and the current parser/MIR packages through the ordinary `Modules` resolver
+and `PackageCompile` checker/lowering. The embedded snapshot includes package
+markers, shared data modules and generated `unicode.tersus`, whose predicates
+use the serving GHC's Unicode categories. The emitter seed builds current E1,
+which emits P1. `Native.cachedProgram` supplies the existing caches and build
+locks; imported source, parser pin, compiler and runtime changes rekey them.
+
+`TERSUS_PARSER` unset or `native` selects P1. `interpreted` explicitly runs the
+current parser's validated MIR, but still requires verified native P0 to read
+that parser's source. `haskell` is refused; `Parse.hs` and its grammar are gone.
+Build, process and protocol failures never select another parser. Building the
+Haskell package still requires neither clang nor network access; the first
+language parse now requires clang and verified P0. Native P1 also requires the
+emitter seed.
 
 Production source and module loading use the file protocol in
 `src/FileParserProtocol.hs`:
@@ -177,7 +185,7 @@ source <UTF-8 byte count>
 <exact source bytes, to EOF>
 ```
 
-The declarations carry all ten `Parse.Decls` fields: constructors, types,
+The declarations carry all ten `ParsedFile.Decls` fields: constructors, types,
 Self name/type, type parameters, generics, impl parameters, own-Clone status,
 location mode and field types. Records require LF terminators; duplicate keys,
 invalid counts, unsupported types and invalid UTF-8 are rejected.
@@ -208,8 +216,7 @@ The native parser also accepts `tersus-import-prefix 1` and
 `tersus-declaration-names 1` in place of the file request header. Both use
 exactly the same declaration envelope, UTF-8 byte count and EOF checks;
 the host supplies `emptyDecls`. Import-prefix mode reads only the leading
-imports and does not parse the body. Declaration-name mode reads the same
-headers as `Parse.parseDeclarationNames`, skipping balanced braces,
+imports and does not parse the body. Declaration-name mode reads top-level declaration headers, skipping balanced braces,
 quoted strings and line comments without requiring body types or grammar.
 
 Import-prefix replies contain `tersus-imports 1`, followed by the counted
@@ -218,6 +225,23 @@ Import-prefix replies contain `tersus-imports 1`, followed by the counted
 include the owner and its source-spelled `Owner::Variant` names, in order.
 Both replies end after the last LF-terminated record; extra records are
 rejected. These modes do not change file or AST replies.
+
+The native test fragment interface uses the same declaration/source records
+and file reply, with a different header and one kind record:
+
+```
+tersus-fragment-parse 1
+fragment expression
+... the same decls and counted source ...
+```
+
+`statement` is the other kind. The parser calls its existing expression or
+single-statement entry point and then requires EOF. It does not route a
+fragment through a statement block or add source text. An expression is carried
+in one `Return` AST node for the test helper to unwrap; error and nested AST
+positions still refer to the original source. Trailing semicolons or multiple
+fragments are refused, while trailing whitespace and comments remain valid.
+
 
 The small `tersus-parse 1` interface remains for raw AST tests:
 
@@ -231,23 +255,29 @@ tersus-parse 1
 
 `Pipeline.validatedSource` and `compileSource` lower the Tersus-parsed source
 AST through `Compile.lowerSourceParts`. A source-only native probe chooses
-libraries; their frozen ASTs and declarations come from `Compile`'s existing
-cache. The final native file parse receives those declarations. Keeping
+libraries; their frozen ASTs and declarations come from the shared lazy P0 cache in
+`SourceParse`. The final native file parse receives those declarations. Keeping
 library names, library AST and source AST separate preserves the prepared
 library-prefix cache. Package loading injects the same native file parser
 through `Pipeline.loadFromFilesystem`; imports are linked by the module
 pipeline. Standalone compilation still rejects unlinked imports.
 
-`Compile` and the default `Modules` loaders remain the one-way bootstrap and
-oracle path. Native parsing never uses Haskell to discover user declarations.
+`Compile` and the default `Modules` loaders use P0 only for bootstrap work.
+Production source and package loading use P1. `ParsedFile` holds only the file,
+import and declaration records; `AstData` depends on `Syntax`, not the checker.
+This keeps P0 below the compiler and prevents bootstrap calls from entering a
+P1 build already in progress.
+
 Immutable input is indexed once; consumed state uses lightweight checkpoints
 and append-only arena rollback. Flat arena-list emission is iterative.
-Identifier classifiers are generated as pure Tersus comparisons from the
-serving Haskell oracle's `Data.Char.isLetter`, `isUpper`, `isLower` and
-`isAlphaNum` predicates, so identifier grammar and named-type rendering agree
-without per-character tables or Haskell source parsing. These helpers are
-linked into the parser bootstrap and parser example build, not ordinary
-programs.
+`ParserUnicodeSource` generates pure Tersus comparisons from the serving GHC's
+`Data.Char.isLetter`, `isUpper`, `isLower` and `isAlphaNum` predicates. P1 includes
+those current classifiers in `PreludeSource.parserPackageFiles` and its fingerprint.
+P0 retains the classifier version recorded in its authenticated LLVM asset.
+The ASCII identifiers of the bootstrap corpus let P0 read a newer generated
+classifier without requiring the two Unicode versions to agree. New bootstrap
+identifiers must be accepted by P0 before they can be used. No names or source
+bytes are normalized.
 
 `testParser` enforces exact AST parity for every source under `examples/` and
 `lib/`, including rejected sources, plus generated/desugaring and large-arena
@@ -267,9 +297,40 @@ one fixture rejected by the parser itself, `rejected/for_assigns_counter.tersus`
 is counted separately with its exact expected parser error; it has no AST.
 Unexpected parser failures fail the corpus test.
 
-`testParser` checks the parser written in Tersus against the Haskell parser
-over the same corpus plus generated snippets, as described under "The parser
-written in Tersus" above.
+`testParser` compares P0 and P1 over the same corpus and generated snippets.
+The language tests keep their independent literal ASTs, verdicts and rejected
+fixtures, parsed through native test fragment wrappers. `TestParserUnicode`
+checks current GHC predicate boundaries and version-sensitive P1 identifiers.
+`testParserBootstrap` compares P0/P1 ASTs and all final declarations for the
+same prepared current parser source, then requires identical checked/lowered
+MIR and regenerated IR and tests P2 behavior. It does not require historical
+P0 seed IR to equal current IR.
+
+## Refreshing the parser seed
+
+Use the development seed driver, not `llvm examples/parser/parser.tersus`: the raw
+example omits the generated Unicode classifier that the serving parser uses.
+From `tersus/`, with the current pinned seeds available:
+
+```sh
+stack run parser-seed -- /tmp/parser.ll.new "$(git rev-parse HEAD)"
+sha256sum /tmp/parser.ll.new
+```
+
+The driver uses `TersusParser.emitParserIr` and the same owned program as P1's
+build. It writes provenance comments for the source commit, GHC version,
+classifier/source fingerprints and emitter seed pin. Only a successful emission
+and verified digest may replace a pin. Never redirect into a seed file used by
+the running compiler.
+
+Publish the exact verified bytes as `parser.ll` in a new release tagged
+`bootstrap-<first 12 digest characters>`, then put the full digest in
+`bootstrap/parser.sha256`. `TERSUS_PARSER_SEED_FILE` or the ignored
+`bootstrap/parser.ll` supplies local bytes instead; the same pin is verified.
+Parser pin changes invalidate P0, E1 and downstream tool caches. Keep the emitter
+pin unchanged unless its own fixpoint requires a new seed. The cold, concurrent,
+corrupt/missing-seed, cache-reuse and fixpoint gates must pass before release.
+
 
 `testAstReader` checks small interpreted round trips and the `Plus` to `Minus`
 mutation (`7 + 2` becomes `7 - 2`, evaluated as `5` by Haskell), then native

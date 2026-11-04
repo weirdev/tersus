@@ -23,8 +23,9 @@ import Interface
 import qualified Mir as M
 import MirEval (renderMirValue, runProgram)
 import Modules
-import Parse
-import qualified Parse as Oracle
+import TestParserFragments
+import ParsedFile
+import qualified ParserSeed as Oracle
 import qualified TersusParser as NativeParser
 import qualified Native
 import Seed (emitterHash)
@@ -1313,7 +1314,7 @@ nativeSourceRecordLf = do
 testNativeFiles :: Test
 testNativeFiles = TestList "native-file-transport"
     [ TestList "metadata-and-imports"
-        [ nativeFileCase label accepted decls source
+        ([ nativeFileCase label accepted decls source
         | (label, accepted, decls, source) <-
             [ ("empty", True, emptyDecls, "")
             , ("all ten seeded fields", True, protocolDecls, "")
@@ -1324,7 +1325,6 @@ testNativeFiles = TestList "native-file-transport"
             , ("alias and selected names", True, locating emptyDecls, "import app::geo::shapes as g { Point, area }; return 1;")
             , ("line and tab columns", True, locating emptyDecls, "// λ header\n\timport app::geo as g;\n  import app::other { A, B };\nreturn 1;")
             , ("unlocated body retains import positions", True, emptyDecls, "\n  import app::geo;\nreturn 1;")
-            , ("full library declarations and UTF-8 source", True, locating Compile.probeDecls, "// String in a comment is not a declaration\ns = \"λ🙂\"; return size(s.bytes);")
             , ("generic and impl scope restoration", True, locating emptyDecls, "struct Vec<T, n> { x: T, bytes: Array<Byte, n> }; impl<T, n> Vec<T, n> { fn get(self: &Self) -> &T from self [{ }] [{ }] { return &self.x; }; };")
             , ("empty selected names", False, locating emptyDecls, "import app::geo {};")
             , ("whitespace-only selected names", False, locating emptyDecls, "import app::geo { };")
@@ -1346,7 +1346,12 @@ testNativeFiles = TestList "native-file-transport"
             , ("misplaced import", False, locating emptyDecls, "return 0; import app::geo;")
             , ("malformed path", False, locating emptyDecls, "import app:::geo;")
             ]
-        ]
+        ] ++ [TestCase "full library declarations and UTF-8 source" $ case Compile.probeDecls of
+            Left e -> pure (Just e)
+            Right declared -> do
+                let source = "// String in a comment is not a declaration\ns = \"λ🙂\"; return size(s.bytes);"
+                actual <- NativeParser.parseFileNative (locating declared) source
+                pure (nativeFileVerdict True (locating declared) source actual)])
     , TestList "per-run-declaration-shadowing"
         [ nativeFileSequence "struct field order"
             [ (True, "struct S { x: Int, y: Int };")

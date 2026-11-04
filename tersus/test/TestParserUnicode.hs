@@ -5,12 +5,31 @@ import Data.Char (chr, isLetter, isUpper, isLower, isAlphaNum)
 import qualified Compile
 import MirEval (MirValue (..), runNamedFunction)
 import ParserUnicodeSource (parserUnicodeSource)
+import ParsedFile (emptyDecls, fileBody)
+import qualified ParserSeed
+import qualified TersusParser
+import Syntax (Expression (..), Statement (..), Value (..))
 import TestHarness
 import Utils
 
 testParserUnicode :: Test
 testParserUnicode = TestList "testParserUnicode"
-    [TestCase "generated predicates match the oracle at every Unicode category boundary" identity]
+    [ TestCase "generated predicates match the oracle at every Unicode category boundary" identity
+    , TestList "P1 identifiers follow the serving GHC Unicode version"
+        [ TestCase (show cp) (servingIdentifier cp)
+        | cp <- [0x1056f, 0x10570, 0x1057a, 0x10597, 0x16a6f, 0x16a70, 0x16abe, 0x1e28f, 0x1e290, 0x1e2ad, 0x11f01, 0x11f02, 0x1e4cf, 0x1e4d0]
+        ]
+    ]
+
+servingIdentifier :: Int -> IO TestResult
+servingIdentifier cp = do
+    let name = [chr cp]
+        source = name ++ " = 1; return " ++ name ++ ";"
+    answer <- TersusParser.parseFileNative emptyDecls source
+    pure $ case answer of
+        Left e | ParserSeed.toolFailure e -> Just e
+        Left _ -> testAssertTrue (not (isLetter (chr cp)))
+        Right (parsed, _) -> testAssertTrue (isLetter (chr cp)) <> testAssertEq (fileBody parsed) [Assign name (Val (VInt 1)), Return (Var name)]
 
 identity :: IO TestResult
 identity = pure $ case Compile.lowerSource False parserUnicodeSource of
