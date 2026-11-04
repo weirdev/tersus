@@ -173,6 +173,12 @@ Haskell package still requires neither clang nor network access; the first
 language parse now requires clang and verified P0. Native P1 also requires the
 emitter seed.
 
+Runtime entry points preflight verified seeds before forcing immutable library
+or tool compilation values. Transient IO failures are not cached as tools;
+a missing native executable is rebuilt through the existing cache lock.
+The pure cached library/program values are read after successful IO bootstrap,
+not used as a mutable-configuration or retry interface.
+
 Production source and module loading use the file protocol in
 `src/FileParserProtocol.hs`:
 

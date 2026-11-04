@@ -16,6 +16,7 @@ module TersusParser
     , parserHash
     ) where
 
+import Control.Exception (evaluate)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import System.Environment (lookupEnv)
 import System.Directory (doesFileExist, findExecutable)
@@ -36,7 +37,7 @@ import MirHousekeeping (cachedEmitter, nativeProgram, toolProgram)
 import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import PreludeSource (parserPackageFiles)
-import Seed (emitterHash, cachedParserSeed, cachedSeed)
+import Seed (emitterHash, cachedParserSeed)
 import Syntax (Statement)
 import Utils
 
@@ -95,7 +96,7 @@ parseFileInterpreted declarations source = case File.writeFileRequest declaratio
 -- The exact production source orchestration with the native parser.
 toolParseSource :: String -> IO (Either String String)
 toolParseSource source = do
-    let parsed = parseSourcePartsWith (\declared text -> unsafePerformIO (parseFileNative declared text)) True source
+    parsed <- evaluate (parseSourcePartsWith (\declared text -> unsafePerformIO (parseFileNative declared text)) True source)
     pure $ case parsed of
         Error e -> Left e
         Ok (_, library, body) -> case A.writeParsed (library ++ body) of
@@ -210,19 +211,12 @@ buildTool output = do
 
 emitParserIr :: IO (Result String String)
 emitParserIr = do
-    parser <- cachedParserSeed
-    zero <- case parser of
+    emitter <- cachedEmitter
+    case emitter of
         Error e -> pure (Error e)
-        Ok _ -> cachedSeed
-    case zero of
-        Error e -> pure (Error e)
-        Ok _ -> do
-            emitter <- cachedEmitter
-            case emitter of
-                Error e -> pure (Error e)
-                Ok exe -> case ownedParserProgram of
-                    Error e -> pure (Error e)
-                    Ok program -> runWithInput exe (writeProgram program)
+        Ok exe -> case ownedParserProgram of
+            Error e -> pure (Error e)
+            Ok program -> runWithInput exe (writeProgram program)
 
 {-# NOINLINE validatedParserProgram #-}
 validatedParserProgram :: Result Program String

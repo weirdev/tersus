@@ -23,6 +23,7 @@ import Modules (LoadResult (..), resolverFromFiles)
 import qualified Modules
 import PackageCompile (compileModulesValidated)
 import MirHousekeeping (listLibrary)
+import qualified MirHousekeeping as Housekeeping
 import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
 import Native (buildExecutable, cacheDirectory)
@@ -110,7 +111,9 @@ failureCase mode expected = inFreshWorker mode setup $ do
         _ -> fail ("unknown bootstrap control: " ++ mode)
 
 withSetting :: String -> Maybe String -> IO a -> IO a
-withSetting name value action = bracket (lookupEnv name) restore $ \_ -> restore value >> action
+withSetting name value action = bracket (lookupEnv name) restore $ \_ -> do
+    restore value
+    action >>= evaluate
   where
     restore Nothing = unsetEnv name
     restore (Just text) = setEnv name text
@@ -128,9 +131,9 @@ retryStages = inFreshWorker "repair" (const (pure [])) $ do
                     Right wire -> case AstData.readParsed wire of
                         Error e -> Just e
                         Ok body -> testAssertTrue (not (null body)) <> testAssertEq (last body) (Return (Val (VInt 43)))
-                refused answer = case answer of
+                refused label answer = case answer of
                     Left e -> testAssertTrue (ParserSeed.toolFailure e)
-                    Right _ -> Just "transient bootstrap error was not refused"
+                    Right _ -> Just (label ++ ": transient bootstrap error was not refused")
                 parsed answer = testAssertEq (fmap fst answer) (Right (ParsedFile [] [Return (Val (VInt 42))]))
             createDirectory bin
             mapM_ (\name -> do
@@ -144,7 +147,7 @@ retryStages = inFreshWorker "repair" (const (pure [])) $ do
             emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) (TersusParser.parseFileNative emptyDecls "return 42;")
             nativeReady <- TersusParser.parseFileNative emptyDecls "return 42;"
             sourceReady <- TersusParser.toolParseSource "return 43;"
-            case firstFailure [refused sourceFailed, refused nativeFailed, refused clangFailed, refused emitterFailed, parsed nativeReady, sourceValue sourceReady] of
+            case firstFailure [refused "source P0" sourceFailed, refused "native P0" nativeFailed, refused "clang" clangFailed, refused "emitter E0" emitterFailed, parsed nativeReady, sourceValue sourceReady] of
                 Just e -> pure (Just e)
                 Nothing -> do
                     executable <- TersusParser.parserExecutable
@@ -159,7 +162,36 @@ retryStages = inFreshWorker "repair" (const (pure [])) $ do
                                 (\_ -> renameFile (p0 ++ ".held") p0)
                                 (\_ -> withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.parseFileInterpreted emptyDecls "return 42;"))
                             interpretedReady <- TersusParser.parseFileInterpreted emptyDecls "return 42;"
-                            pure (firstFailure [parsed rebuilt, testAssertTrue present, refused interpretedFailed, parsed interpretedReady])
+                            pure (firstFailure [parsed rebuilt, testAssertTrue present, refused "interpreted P0" interpretedFailed, parsed interpretedReady])
+
+emitterRetryStages :: IO TestResult
+emitterRetryStages = inFreshWorker "emitter-repair" (const (pure [])) $ withDirectory $ \home -> do
+    let bin = home </> "bin"
+        refused label result = case result of
+            Error _ -> Nothing
+            Ok _ -> Just (label ++ ": direct emitter bootstrap error was not refused")
+    createDirectory bin
+    mapM_ (\name -> do
+        found <- findExecutable name
+        case found of
+            Nothing -> pure ()
+            Just path -> createFileLink path (bin </> name)) ["sha256sum", "shasum"]
+    parserFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just (home </> "missing-parser.ll")) Bootstrap.cachedEmitter
+    clangFailed <- withSetting "PATH" (Just bin) Bootstrap.cachedEmitter
+    emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) Bootstrap.cachedEmitter
+    ready <- Bootstrap.cachedEmitter
+    case firstFailure [refused "P0" parserFailed, refused "clang" clangFailed, refused "E0" emitterFailed] of
+        Just e -> pure (Just e)
+        Nothing -> case ready of
+            Error e -> pure (Just e)
+            Ok _ -> do
+                let checked = Compile.lowerSource True "return 42;" `bindResult` \program ->
+                        Housekeeping.verifyProgram program `bindResult` \_ -> Housekeeping.eraseGhosts program
+                case checked of
+                    Error e -> pure (Just e)
+                    Ok program -> do
+                        _ <- evaluate listLibrary
+                        pure (testAssertEq (runProgram program) (Ok (Just (MInt 42))))
 
 bootstrapLibraryHash :: IO TestResult
 bootstrapLibraryHash = pure $ testAssertEq emitterHash
@@ -325,6 +357,7 @@ testParserBootstrap = TestList "testParserBootstrap"
     , TestCase "fresh processes reuse every bootstrap cache entry without writes" cacheReuse
     , TestCase "concurrent empty-cache processes converge" concurrentCold
     , TestCase "same-process transient failures repair without stale library or executable caches" retryStages
+    , TestCase "public emitter bootstrap failures repair before tool and library CAF initialization" emitterRetryStages
     , TestCase "bootstrap fingerprints cover the complete compiler library manifest" bootstrapLibraryHash
     , TestCase "P0 P1 current-source fixpoint regenerates identical IR and P2 behavior" parserFixpoint
     ]

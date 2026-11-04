@@ -35,7 +35,7 @@ import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
-import Seed (cachedSeed, emitterHash)
+import Seed (cachedSeed, cachedParserSeed, emitterHash)
 import Compile (lowerSource)
 import Modules (ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
 import PackageCompile (compileModulesLinked)
@@ -139,18 +139,35 @@ toolsBox = unsafePerformIO (newMVar Nothing)
 buildingRef :: IORef Bool
 buildingRef = unsafePerformIO (newIORef False)
 
+-- Fail before forcing or memoizing any library/tool CAF on invalid seeds.
 housekeepingTools :: IO Tools
 housekeepingTools = do
-    building <- readIORef buildingRef
-    if building
-        then interpretedToolsOnce
-        else modifyMVar toolsBox $ \made ->
-            case made of
-                Just tools -> pure (made, tools)
-                Nothing -> do
-                    writeIORef buildingRef True
-                    tools <- nativeTools `finally` writeIORef buildingRef False
-                    pure (Just tools, tools)
+    parser <- cachedParserSeed
+    zero <- case parser of
+        Error e -> pure (Error e)
+        Ok _ -> cachedSeed
+    case zero of
+        Error e -> pure (Tools (ToolFailed e) (ToolFailed e))
+        Ok _ -> do
+            building <- readIORef buildingRef
+            if building
+                then interpretedToolsOnce
+                else modifyMVar toolsBox $ \made -> do
+                    live <- case made of
+                        Just tools@(Tools (ToolNative checker) (ToolNative eraser)) -> do
+                            checkerPresent <- doesFileExist checker
+                            eraserPresent <- doesFileExist eraser
+                            pure (if checkerPresent && eraserPresent then Just tools else Nothing)
+                        _ -> pure Nothing
+                    tools <- case live of
+                        Just ready -> pure ready
+                        Nothing -> do
+                            writeIORef buildingRef True
+                            nativeTools `finally` writeIORef buildingRef False
+                    let keep = case tools of
+                            Tools (ToolNative _) (ToolNative _) -> Just tools
+                            _ -> Nothing
+                    pure (keep, tools)
 
 -- The tools run by the executor, made once in this process (they are also what a call is answered with
 -- while the executables are being made, when making them erases a program itself)
@@ -164,7 +181,10 @@ interpretedToolsOnce = modifyMVar interpretedBox $ \made ->
         Just tools -> pure (made, tools)
         Nothing -> do
             tools <- interpretedTools
-            pure (Just tools, tools)
+            let keep = case tools of
+                    Tools (ToolInterpreted _) (ToolInterpreted _) -> Just tools
+                    _ -> Nothing
+            pure (keep, tools)
 
 -- The executables of the checker and the eraser, built from the seed as Bootstrap builds the emitter and
 -- kept beside it in the cache; the programs run by the executor when an executable cannot be built
@@ -198,7 +218,12 @@ cachedTool kind hash = do
 -- making native code of a host program, which is the pipeline's with no erasure first (see toolOwnedProgram)
 -- Making the emitter's list library needs the eraser; initialize the tools before taking the emitter lock.
 cachedEmitter :: IO (Result FilePath String)
-cachedEmitter = housekeepingTools >> cachedEmitterExe
+cachedEmitter = do
+    tools <- housekeepingTools
+    case (checkerOf tools, eraserOf tools) of
+        (ToolFailed e, _) -> pure (Error e)
+        (_, ToolFailed e) -> pure (Error e)
+        _ -> cachedEmitterExe
 
 cachedEmitterExe :: IO (Result FilePath String)
 cachedEmitterExe = cachedProgram "emitter" emitterHash "the emitter written in Tersus" $ \output -> do
