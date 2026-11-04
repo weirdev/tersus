@@ -5449,46 +5449,62 @@ fn evalTermValue(context: &ValidatorContext, term: Int, depth: Int) -> IntegerLo
     return IntegerLookup::Missing;
 };
 
+// A context with one more application (it is taken, not copied)
+fn contextWithApplication(context: ValidatorContext, app: ApplicationTerm) -> ValidatorContext {
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    return ValidatorContext { equalities: equalities, applications: push(applications, app), constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn contextWithConstant(context: ValidatorContext, constant: ConstantTerm) -> ValidatorContext {
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    return ValidatorContext { equalities: equalities, applications: applications, constants: push(constants, constant), orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn stateWithConstant(state: ExecutionState, constant: ConstantTerm) -> ExecutionState {
+    ExecutionState { context: context, locals: locals, templates: templates } = state;
+    return ExecutionState { context: contextWithConstant(context, constant), locals: locals, templates: templates };
+};
+
 // A term whose value concrete evaluation knows is recorded as a
 // constant, so the searches see it like any other known value.
-fn recordEvaluatedValue(state: &ExecutionState, term: Int) -> ExecutionState {
-    out = clone(state);
+fn recordEvaluatedValue(state: ExecutionState, term: Int) -> ExecutionState {
     if directIntegerValue(state.context, term) is IntegerLookup::Missing {
         value = evalTermValue(state.context, term, 6);
         if value is IntegerLookup::Found {
-            out = ExecutionState { context: ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: term, kind: 0, value: (value as IntegerLookup::Found).value }), ..clone(state.context) }, locals: clone(state.locals), templates: clone(state.templates) };
+            return recordEvaluatedSize(stateWithConstant(state, ConstantTerm { id: term, kind: 0, value: (value as IntegerLookup::Found).value }), term);
         };
     };
-    return recordEvaluatedSize(out, term);
+    return recordEvaluatedSize(state, term);
 };
 
 // The size of a list whose elements concrete evaluation can count is
 // recorded on the size application of the list, like a known value.
-fn recordEvaluatedSize(state: &ExecutionState, list: Int) -> ExecutionState {
+fn recordEvaluatedSize(state: ExecutionState, list: Int) -> ExecutionState {
     found = evalListSize(state.context, list, 6);
     if found is IntegerLookup::Found {
+        value = (found as IntegerLookup::Found).value;
         for appPosition in 0..size(state.context.applications) {
-            app = get(state.context.applications, appPosition);
-            if app.function = -13 {
-                if size(app.arguments) = 1 {
-                    if get(app.arguments, 0) = list {
-                        if integerValue(state.context, app.id) is IntegerLookup::Missing {
-                            context = ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: app.id, kind: 0, value: (found as IntegerLookup::Found).value }), ..clone(state.context) };
-                            return ExecutionState { context: context, locals: clone(state.locals), templates: clone(state.templates) };
+            if get(state.context.applications, appPosition).function = -13 {
+                if size(get(state.context.applications, appPosition).arguments) = 1 {
+                    if intAt(get(state.context.applications, appPosition).arguments, 0, 0) = list {
+                        id = get(state.context.applications, appPosition).id;
+                        if integerValue(state.context, id) is IntegerLookup::Missing {
+                            return stateWithConstant(state, ConstantTerm { id: id, kind: 0, value: value });
                         };
-                        return clone(state);
+                        return state;
                     };
                 };
             };
         };
         fresh = freshValue(state);
         if fresh is ValueLookup::Found {
-            app = ApplicationTerm { id: (fresh as ValueLookup::Found).term, function: -13, arguments: push([], list) };
-            context = ValidatorContext { applications: push(clone(state.context.applications), app), constants: push(clone(state.context.constants), ConstantTerm { id: (fresh as ValueLookup::Found).term, kind: 0, value: (found as IntegerLookup::Found).value }), ..clone(state.context) };
-            return ExecutionState { context: context, locals: clone(state.locals), templates: clone(state.templates) };
+            term = (fresh as ValueLookup::Found).term;
+            ExecutionState { context: context, locals: locals, templates: templates } = state;
+            sized = contextWithConstant(contextWithApplication(context, ApplicationTerm { id: term, function: -13, arguments: push([], list) }), ConstantTerm { id: term, kind: 0, value: value });
+            return ExecutionState { context: sized, locals: locals, templates: templates };
         };
     };
-    return clone(state);
+    return state;
 };
 
 // Every fact that mentions a term is dropped when the term is forgotten.
@@ -5554,10 +5570,10 @@ fn forgetTerm(context: &ValidatorContext, root: Int) -> ValidatorContext {
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
 };
 
-fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
+fn builtinFacts(context: ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
     if function = -40 {
         if size(args) = 1 { return forgetTerm(context, get(args, 0)); };
-        return clone(context);
+        return context;
     };
     // (a size is at least 0, as an order, so that a size known not to be 0 is
     // more than 0)
@@ -5567,14 +5583,14 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
             if c.kind = 0 && c.value = 0 {
                 for oPosition in 0..size(context.orders) {
                     o = get(context.orders, oPosition);
-                    if o.smaller = c.id && o.greater = result { return clone(context); };
+                    if o.smaller = c.id && o.greater = result { return context; };
                 };
-                return ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: c.id, greater: result, strict: false }), ..clone(context) };
+                return ValidatorContext { orders: push(context.orders, OrderFact { smaller: c.id, greater: result, strict: false }), ..context };
             };
         };
-        return clone(context);
+        return context;
     };
-    if size(args) != 2 { return clone(context); };
+    if size(args) != 2 { return context; };
     a = get(args, 0);
     b = get(args, 1);
     if function = -14 {
@@ -5600,8 +5616,8 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
             };
             // result = a - minInt implies a - result <= minInt even though
             // the opposite bound cannot be represented in an Int.
-            facts = push(clone(context.differences), DifferenceFact { left: a, right: result, bound: (bv as IntegerLookup::Found).value });
-            return ValidatorContext { differences: facts, ..clone(context) };
+            facts = push(context.differences, DifferenceFact { left: a, right: result, bound: (bv as IntegerLookup::Found).value });
+            return ValidatorContext { differences: facts, ..context };
         };
     };
     // Multiplication by zero or one and division by one preserve a known
@@ -5610,14 +5626,14 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
         av = integerValue(context, a);
         if av is IntegerLookup::Found {
             n = (av as IntegerLookup::Found).value;
-            if n = 0 { return ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: result, right: a }), ..clone(context) }; };
-            if n = 1 { return ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: result, right: b }), ..clone(context) }; };
+            if n = 0 { return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: a }), ..context }; };
+            if n = 1 { return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: b }), ..context }; };
             bv0 = integerValue(context, b);
             if bv0 is IntegerLookup::Found {
                 product = safeProduct(n, (bv0 as IntegerLookup::Found).value);
                 if product is SumResult::Sum {
                     constant = ConstantTerm { id: result, kind: 0, value: (product as SumResult::Sum).value };
-                    return ValidatorContext { constants: push(clone(context.constants), constant), ..clone(context) };
+                    return ValidatorContext { constants: push(context.constants, constant), ..context };
                 };
             };
             return addScaleOrders(context, result, b, n);
@@ -5625,13 +5641,13 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
         bv = integerValue(context, b);
         if bv is IntegerLookup::Found {
             n = (bv as IntegerLookup::Found).value;
-            if n = 0 { return ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: result, right: b }), ..clone(context) }; };
-            if n = 1 { return ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: result, right: a }), ..clone(context) }; };
+            if n = 0 { return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: b }), ..context }; };
+            if n = 1 { return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: a }), ..context }; };
             if av is IntegerLookup::Found {
                 product = safeProduct((av as IntegerLookup::Found).value, n);
                 if product is SumResult::Sum {
                     constant = ConstantTerm { id: result, kind: 0, value: (product as SumResult::Sum).value };
-                    return ValidatorContext { constants: push(clone(context.constants), constant), ..clone(context) };
+                    return ValidatorContext { constants: push(context.constants, constant), ..context };
                 };
             };
             return addScaleOrders(context, result, a, n);
@@ -5642,7 +5658,7 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
         if bv is IntegerLookup::Found {
             divisor = (bv as IntegerLookup::Found).value;
             if divisor = 1 {
-                return ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: result, right: a }), ..clone(context) };
+                return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: a }), ..context };
             };
             if divisor != 0 {
                 av = integerValue(context, a);
@@ -5654,7 +5670,7 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
                     };
                     if overflow = false {
                         constant = ConstantTerm { id: result, kind: 0, value: dividend / divisor };
-                        return ValidatorContext { constants: push(clone(context.constants), constant), ..clone(context) };
+                        return ValidatorContext { constants: push(context.constants, constant), ..context };
                     };
                 };
                 return addDivisionOrders(context, result, a, b);
@@ -5677,14 +5693,14 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
                     };
                     if special = false { remainder = dividend % divisor; };
                     constant = ConstantTerm { id: result, kind: 0, value: remainder };
-                    return ValidatorContext { constants: push(clone(context.constants), constant), ..clone(context) };
+                    return ValidatorContext { constants: push(context.constants, constant), ..context };
                 };
                 return addRemainderOrders(context, result, b);
             };
         };
         return addRemainderOrders(context, result, b);
     };
-    return clone(context);
+    return context;
 };
 
 // Apply is restricted to pure functions. The host must encode the operation's
@@ -5747,18 +5763,14 @@ fn localGoal(relation: Int, left: Int, right: Int) -> ValidatorGoal {
 };
 
 // Only the trusted MIR bridge may add an edge condition as an assumption.
-fn assumeRelation(context: &ValidatorContext, relation: Int, left: Int, right: Int) -> ValidatorContext {
-    if relation = 0 {
-        if hasEquality(context.equalities, left, right) { return clone(context); };
-        return ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: left, right: right }), ..clone(context) };
-    };
-    if relation = 1 {
-        return ValidatorContext { different: push(clone(context.different), DisequalityFact { left: left, right: right }), ..clone(context) };
-    };
-    if relation = 2 {
-        return ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: left, greater: right, strict: true }), ..clone(context) };
-    };
-    return ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: left, greater: right, strict: false }), ..clone(context) };
+fn assumeRelation(context: ValidatorContext, relation: Int, left: Int, right: Int) -> ValidatorContext {
+    if relation = 0 && hasEquality(context.equalities, left, right) { return context; };
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    if relation = 0 { equalities = push(equalities, EqualityFact { left: left, right: right }); };
+    if relation = 1 { different = push(different, DisequalityFact { left: left, right: right }); };
+    if relation = 2 { orders = push(orders, OrderFact { smaller: left, greater: right, strict: true }); };
+    if relation > 2 || relation < 0 { orders = push(orders, OrderFact { smaller: left, greater: right, strict: false }); };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
 };
 
 // A comparison result can be copied across blocks before it is branched on.
@@ -5797,15 +5809,18 @@ fn assumeComparison(context: &ValidatorContext, term: Int, truth: Bool) -> Valid
     return state;
 };
 
-fn assumeBooleanFact(context: &ValidatorContext, left: Int, right: Int) -> ValidatorContext {
-    state = clone(context);
-    for constantPosition in 0..size(context.constants) {
-        constant = get(context.constants, constantPosition);
-        if constant.kind = 1 {
-            if constant.id = left { state = assumeComparison(state, right, constant.value = 1); };
-            if constant.id = right { state = assumeComparison(state, left, constant.value = 1); };
+fn assumeBooleanFact(context: ValidatorContext, left: Int, right: Int) -> ValidatorContext {
+    // (the comparisons a literal on either side decides, found before the context changes)
+    terms = push([], 0);
+    truths = push([], false);
+    for cPosition in 0..size(context.constants) {
+        if get(context.constants, cPosition).kind = 1 {
+            if get(context.constants, cPosition).id = left { terms = push(terms, right); truths = push(truths, get(context.constants, cPosition).value = 1); };
+            if get(context.constants, cPosition).id = right { terms = push(terms, left); truths = push(truths, get(context.constants, cPosition).value = 1); };
         };
     };
+    state = context;
+    for k in 1..size(terms) { state = assumeComparison(state, get(terms, k), boolAt(truths, k, false)); };
     return state;
 };
 
@@ -6756,7 +6771,7 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
     for cPosition in 0..size(cases) {
         c = get(cases, cPosition);
         if allHold {
-            caseContext = assumeRelation(saturated.state.context, c.relation, c.left, c.right);
+            caseContext = assumeRelation(clone(saturated.state.context), c.relation, c.left, c.right);
             if c.relation = 0 { caseContext = assumeBooleanFact(caseContext, c.left, c.right); };
             caseSat = Saturation { state: ExecutionState { context: caseContext, ..clone(saturated.state) }, births: clone(saturated.births), done: clone(saturated.done), blocked: noBlocked(), closed: noClosed() };
             r = proveBySaturation(caseSat, relation, left, right, depth - 1, budget - used, deeperSplits);
@@ -6792,11 +6807,9 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                 if termInUse(state, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
                 if apply.result = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
                 if containsValue(terms, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                apps = push(clone(state.context.applications), ApplicationTerm { id: apply.result, function: apply.function, arguments: clone(terms) });
-                withApp = ValidatorContext { applications: apps, ..state.context };
-                context = builtinFacts(withApp, apply.function, apply.result, terms);
-                locals = bindLocal(state.locals, apply.local, apply.result);
-                state = recordEvaluatedValue(ExecutionState { context: context, locals: locals, ..state }, apply.result);
+                ExecutionState { context: applyContext, locals: applyLocals, templates: applyTemplates } = state;
+                context = builtinFacts(contextWithApplication(applyContext, ApplicationTerm { id: apply.result, function: apply.function, arguments: clone(terms) }), apply.function, apply.result, terms);
+                state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(applyLocals, apply.local, apply.result), templates: applyTemplates }, apply.result);
             } else {
                 return ExecutionResult { status: 2, failedAt: i, state: state };
             };
@@ -6815,10 +6828,9 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                     if a.id = literal.result && a.function = literal.function && a.arguments = terms { known = true; };
                 };
                 if known = false {
-                    apps = push(clone(state.context.applications), ApplicationTerm { id: literal.result, function: literal.function, arguments: clone(terms) });
-                    withApp = ValidatorContext { applications: apps, ..state.context };
-                    context = builtinFacts(withApp, literal.function, literal.result, terms);
-                    state = recordEvaluatedValue(ExecutionState { context: context, ..state }, literal.result);
+                    ExecutionState { context: literalContext, locals: literalLocals, templates: literalTemplates } = state;
+                    context = builtinFacts(contextWithApplication(literalContext, ApplicationTerm { id: literal.result, function: literal.function, arguments: clone(terms) }), literal.function, literal.result, terms);
+                    state = recordEvaluatedValue(ExecutionState { context: context, locals: literalLocals, templates: literalTemplates }, literal.result);
                 };
             } else {
                 return ExecutionResult { status: 2, failedAt: i, state: state };
@@ -6840,11 +6852,9 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                     resultId = (fresh as ValueLookup::Found).term;
                     if resultId = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
                     if containsValue(terms, resultId) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                    apps = push(clone(state.context.applications), ApplicationTerm { id: resultId, function: apply.function, arguments: clone(terms) });
-                    withApp = ValidatorContext { applications: apps, ..state.context };
-                    context = builtinFacts(withApp, apply.function, resultId, terms);
-                    locals = bindLocal(state.locals, apply.local, resultId);
-                    state = recordEvaluatedValue(ExecutionState { context: context, locals: locals, ..state }, resultId);
+                    ExecutionState { context: freshContext, locals: freshLocals, templates: freshTemplates } = state;
+                    context = builtinFacts(contextWithApplication(freshContext, ApplicationTerm { id: resultId, function: apply.function, arguments: clone(terms) }), apply.function, resultId, terms);
+                    state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(freshLocals, apply.local, resultId), templates: freshTemplates }, resultId);
                   } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
                 };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
@@ -6987,11 +6997,12 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                     if ok = false {
                         return ExecutionResult { status: 1, failedAt: i, state: state };
                     };
-                    context = assumeRelation(state.context, relation, a, b);
+                    ExecutionState { context: checkContext, locals: checkLocals, templates: checkTemplates } = state;
+                    context = assumeRelation(checkContext, relation, a, b);
                     if relation = 0 {
                         context = assumeBooleanFact(context, a, b);
                     };
-                    state = ExecutionState { context: context, ..state };
+                    state = ExecutionState { context: context, locals: checkLocals, templates: checkTemplates };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
@@ -7013,11 +7024,12 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
             right = resolveValue(state, assumed.right);
             if left is ValueLookup::Found {
                 if right is ValueLookup::Found {
-                    context = assumeRelation(state.context, assumed.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
+                    ExecutionState { context: assumeContext, locals: assumeLocals, templates: assumeTemplates } = state;
+                    context = assumeRelation(assumeContext, assumed.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
                     if assumed.relation = 0 {
                         context = assumeBooleanFact(context, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
                     };
-                    state = ExecutionState { context: context, ..state };
+                    state = ExecutionState { context: context, locals: assumeLocals, templates: assumeTemplates };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
@@ -7811,7 +7823,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                                                     if lv is ValueLookup::Found { if rv is ValueLookup::Found { ta = (lv as ValueLookup::Found).term; tb = (rv as ValueLookup::Found).term; resolved = true; }; };
                                                                     if resolved = false { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
                                                                     if done = false {
-                                                                        pathContext = assumeRelation(negContext, test.relation, ta, tb);
+                                                                        pathContext = assumeRelation(clone(negContext), test.relation, ta, tb);
                                                                         pathFacts = push(pathContext.equalities, EqualityFact { left: prior, right: prior });
                                                                         pathFacts = push(pathFacts, EqualityFact { left: priorOther, right: priorOther });
                                                                         pathState = ExecutionState { context: ValidatorContext { equalities: pathFacts, ..pathContext }, ..clone(headerState) };
@@ -7966,13 +7978,13 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                     yesKnown = yesAnswer.holds;
                     noKnown = entailsGoalCached(yesAnswer.cache, localGoal(inverse.relation, inverse.left, inverse.right)).holds;
                     if noKnown = false {
-                        yesContext = assumeRelation(run.state.context, condition.relation, a, b);
+                        yesContext = assumeRelation(clone(run.state.context), condition.relation, a, b);
                         yesState = ExecutionState { context: yesContext, ..clone(run.state) };
                         yesResult = walkExecution(blocks, condition.yes, yesState, fuel - 1, clone(loops));
                         if yesResult.status != 0 { return yesResult; };
                         if yesKnown { return yesResult; };
                     };
-                    noContext = assumeRelation(run.state.context, inverse.relation, inverse.left, inverse.right);
+                    noContext = assumeRelation(clone(run.state.context), inverse.relation, inverse.left, inverse.right);
                     noState = ExecutionState { context: noContext, ..run.state };
                     return walkExecution(blocks, condition.no, noState, fuel - 1, loops);
                 };
@@ -8006,13 +8018,13 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                 noState = ExecutionState { context: noContext, ..clone(run.state) };
                                 return walkExecution(blocks, branch.no, noState, fuel - 1, clone(loops));
                             };
-                            yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
+                            yesContext = assumeRelation(clone(run.state.context), 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                             yesState = ExecutionState { context: yesContext, ..clone(run.state) };
                             stopped = stopTableAtJoin(blocks, branch.join);
                             yesResult = walkExecution(stopped, branch.yes, yesState, fuel - 1, clone(loops));
                             if yesResult.status != 0 { return yesResult; };
-                            noContext = assumeRelation(run.state.context, 0, term, noLiteral);
+                            noContext = assumeRelation(clone(run.state.context), 0, term, noLiteral);
                             noContext = assumeBooleanFact(noContext, term, noLiteral);
                             noState = ExecutionState { context: noContext, ..clone(run.state) };
                             noResult = walkExecution(stopped, branch.no, noState, fuel - 1, clone(loops));
@@ -8026,20 +8038,20 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                         yesAnswer = booleanKnownCached(entailmentCache(run.state.context), term, yesLiteral, true);
                         yesKnown = yesAnswer.holds;
                         if yesKnown {
-                            yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
+                            yesContext = assumeRelation(clone(run.state.context), 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                             yesState = ExecutionState { context: yesContext, ..run.state };
                             return walkExecution(blocks, branch.yes, yesState, fuel - 1, loops);
                         };
                         noKnown = booleanKnownCached(yesAnswer.cache, term, noLiteral, false).holds;
                         if noKnown = false {
-                            yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
+                            yesContext = assumeRelation(clone(run.state.context), 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                             yesState = ExecutionState { context: yesContext, ..clone(run.state) };
                             yesResult = walkExecution(blocks, branch.yes, yesState, fuel - 1, clone(loops));
                             if yesResult.status != 0 { return yesResult; };
                         };
-                        noContext = assumeRelation(run.state.context, 0, term, noLiteral);
+                        noContext = assumeRelation(clone(run.state.context), 0, term, noLiteral);
                         noContext = assumeBooleanFact(noContext, term, noLiteral);
                         noState = ExecutionState { context: noContext, ..run.state };
                         return walkExecution(blocks, branch.no, noState, fuel - 1, loops);
