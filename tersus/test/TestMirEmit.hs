@@ -108,16 +108,16 @@ orderedTypeClosure = do
             ]
   where
     text s = Eval.MData "String" [("bytes", Eval.MList [Eval.MInt (toInteger (fromEnum c)) | c <- s])]
-    named n = Eval.MData "mir$reader$reader$Type::TNamed" [("name", text n), ("base", text n), ("argc", Eval.MInt 0), ("argTokens", Eval.MList [])]
-    int = Eval.MData "mir$reader$reader$Type::TInt" []
-    byte = Eval.MData "mir$reader$reader$Type::TByte" []
-    bool = Eval.MData "mir$reader$reader$Type::TBool" []
+    named n = Eval.MData "data$codec$codec$Type::TNamed" [("name", text n), ("base", text n), ("argc", Eval.MInt 0), ("argTokens", Eval.MList [])]
+    int = Eval.MData "data$codec$codec$Type::TInt" []
+    byte = Eval.MData "data$codec$codec$Type::TByte" []
+    bool = Eval.MData "data$codec$codec$Type::TBool" []
     field t = Eval.MData "mir$reader$reader$Field" [("name", text "value"), ("ty", t)]
     struct n t = Eval.MData "mir$reader$reader$TypeDecl::DStruct" [("name", text n), ("fields", Eval.MList [field t])]
-    variant = Eval.MData "mir$reader$reader$Type::TVariant" [("name", text "E::V")]
+    variant = Eval.MData "data$codec$codec$Type::TVariant" [("name", text "E::V")]
     enum = Eval.MData "mir$reader$reader$TypeDecl::DEnum" [("name", text "E"), ("variants", Eval.MList [Eval.MData "mir$reader$reader$Variant" [("name", text "E::V"), ("fields", Eval.MList [field bool])]])]
     node = named "Node"
-    addr = Eval.MData "mir$reader$reader$Type::TAddr" [("inner", node)]
+    addr = Eval.MData "data$codec$codec$Type::TAddr" [("inner", node)]
     cases =
         [ ([], [bool, int, bool, int], [bool, int])
         , ([struct "A" int, struct "B" byte], [named "A", named "B", named "A"], [named "A", int, named "B", byte])

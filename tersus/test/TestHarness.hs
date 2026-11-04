@@ -26,6 +26,7 @@ module TestHarness
     , ownedOnce
     , validatedOnce
     , programFromFile
+    , programFromFiles
     , validatedFromFile
     , ownedFromFile
     , ownedFromFiles
@@ -62,7 +63,7 @@ import System.Process (readProcessWithExitCode)
 
 import Mir (Program)
 import MirHousekeeping (toolValidatedProgram)
-import PreludeSource (mirPackageFiles)
+import PreludeSource (toolPackageFiles, mirPackageFiles)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
@@ -246,7 +247,10 @@ validatedOnce source = sharedProgram "validated" source (pure (validatedSource s
 -- pipeline (the same stages as compileOnce, ownedOnce and validatedOnce do
 -- for a single-file program given as text)
 programFromFile :: FilePath -> IO (Result Program String)
-programFromFile path = snapshotFromFilesystem path >>= cachedFromPackage "program" path
+programFromFile path = snapshotFromFilesystem path >>= programFromFiles path
+
+programFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
+programFromFiles = cachedFromPackage "program"
 
 validatedFromFile :: FilePath -> IO (Result Program String)
 validatedFromFile path = snapshotFromFilesystem path >>= cachedFromPackage "validated" path
@@ -263,10 +267,10 @@ packageCacheInput path files = show (normalizePath path,
 
 matchesEmbeddedPackage :: FilePath -> Modules.LoadedPackage -> Bool
 matchesEmbeddedPackage path actual
-    | normalizePath path `notElem` map fst mirPackageFiles = False
+    | normalizePath path `notElem` map fst toolPackageFiles = False
     -- The cached tool is compiled by the bootstrap/oracle loader. Compare
     -- against that exact input, not a second production-parser reading.
-    | otherwise = case Modules.loadFromEntry (resolverFromFiles mirPackageFiles) (normalizePath path) of
+    | otherwise = case Modules.loadFromEntry (resolverFromFiles toolPackageFiles) (normalizePath path) of
         Right (PackageResult embedded) -> show actual == show embedded
         _ -> False
 

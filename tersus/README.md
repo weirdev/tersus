@@ -3,7 +3,8 @@ Well typed implementation of ideas I wrote in black FB notebook.
 See [LANGUAGE.md](LANGUAGE.md) for the current syntax and language constructs.
 
 [AST_DATA.md](AST_DATA.md) describes the development-stage AST data bridge:
-checked Haskell readers/writers and a single-file Tersus typed AST reader/writer,
+checked Haskell readers/writers and a Tersus typed AST reader/writer built from
+shared data modules,
 including contracts, proofs, builtin metadata and elaborated occurrence types.
 It does not change the production frontend.
 
@@ -133,6 +134,14 @@ the existing validator and compares its answers against `ProofEngine` for every
 undirected equality graph of four identifiers, plus reversed and duplicate facts.
 Future work needs an encoding of MIR and proof state, richer reasoning and
 differential tests before the new validator can replace `MirValidate`.
+
+The native parser and AST reader import the shared token/type codec and AST
+arena writer from `examples/data`. Their package entries are
+`examples/parser/parser.tersus` and `examples/ast_reader/ast_reader.tersus`.
+`PreludeSource` embeds complete tool package snapshots; the parser snapshot
+includes a generated Unicode root-module file. The ordinary Haskell module
+loader/compiler builds those tools without invoking the native parser itself.
+Native tool fingerprints cover the snapshot paths and source contents.
 
 ## Interpreter flow
 

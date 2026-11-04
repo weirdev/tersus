@@ -1,3 +1,5 @@
+import data::codec::codec { Size, Type, done, quoted, parseInt };
+
 // The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
 // oracle. It reads the MIR as data from the standard input (what `tersus mir --data` prints) and writes the LLVM IR.
 //
@@ -15,7 +17,7 @@
 // - A function that goes through the types of the program calls itself on parts that are not smaller as a value (a struct holds another by name), so these are `~`.
 // - An error is a result with `ok: false` and the message that the Haskell gives (`Native code does not support ... yet`).
 
-import mir::reader::reader { Size, Type, Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, Function, Program, done, noOperand, parseInt, quoted, programAt, readLines };
+import mir::reader::reader { Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, Function, Program, noOperand, programAt, readLines };
 
 
 // ---- the emitter ----

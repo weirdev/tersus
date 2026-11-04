@@ -1,3 +1,5 @@
+import data::codec::codec { Size, Type, quoted, parseInt, wordOf };
+
 // The MIR as data, checked for well-formedness by a program in Tersus: what MirVerify checks of a
 // program in the form `tersus mir --data` prints, or a pre-erasure program written by MirData: its
 // shape, and the types of its operations. It reads the MIR as examples/mir/mir_reader/mir_reader.tersus does (both import the shared reader of the mir package), from
@@ -12,7 +14,7 @@
 // over the owned MIR go through again before native code is made of a program (MirVerify.verifyProgram
 // in Haskell, which has to agree with this on every program the format can carry).
 
-import mir::reader::reader { Size, Type, Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, listWords, wordOf, parseInt, quoted, programAt, readLines };
+import mir::reader::reader { Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, listWords, programAt, readLines };
 
 
 // ---- layout (the same as in examples/emit.tersus) ----

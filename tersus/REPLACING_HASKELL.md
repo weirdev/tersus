@@ -142,7 +142,7 @@ the serialization is deleted when the frontend lands.
 
 Status (2026-11-01): the bridge is implemented. `AstData` reads and writes
 parsed syntax and the complete `Elaborated` wrapper (including ordered
-expression-occurrence types); `examples/ast_reader.tersus` defines the
+expression-occurrence types); `examples/ast_reader/ast_reader.tersus` defines the
 syntax as typed arena payloads and reads/writes the same versioned records.
 It reuses the MIR `Type` and `Size`, preserves contracts and builtin
 metadata, and includes no solver or Iota state. The bridge is developmental:
@@ -162,7 +162,7 @@ test role is irreplaceable, so nothing about it changes.
 ### 6. The frontend in Tersus (deletes `TypeCheck` 2,241 and `Parse` 1,377, the largest files left)
 
 The aim is still to replace the frontend, but its data bridge is now in
-place: `examples/ast_reader.tersus` defines the syntax of `Syntax` and the
+place: `examples/ast_reader/ast_reader.tersus` defines the syntax of `Syntax` and the
 needed `Types` values as Tersus structs/enums, and exchanges parsed or
 elaborated syntax with `AstData` (`AST_DATA.md`). It is not a source parser
 or type checker.

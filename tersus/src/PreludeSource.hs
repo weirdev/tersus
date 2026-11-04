@@ -11,7 +11,9 @@ module PreludeSource
     , mapSource
     , setSource
     , mirPackageFiles
-    , parserSource
+    , parserPackageFiles
+    , astReaderPackageFiles
+    , toolPackageFiles
     , stdlibSource
     , compilerSourceHash
     , seedSha256
@@ -126,12 +128,10 @@ setSource =
         lift contents
      )
 
--- The files of the mir package (examples/mir): the shared reader and the
--- four programs that import it (the emitter, the MIR reader, the checker and
--- the eraser), embedded so the host can compile any of them through the
--- module pipeline (see MirHousekeeping) without reading the file system.
+-- The files of the mir package and its shared data dependencies, embedded
+-- so the host uses the same module resolver and compiler as filesystem packages.
 mirPackageFiles :: [(FilePath, String)]
-mirPackageFiles =
+mirPackageFiles = dataPackageFiles ++
     $( do
         let paths =
                 [ "examples/mir/package.tersus"
@@ -154,10 +154,29 @@ seedSha256 =
         lift (head (words contents))
      )
 
-parserSource :: String
-parserSource = parserUnicodeSource ++
+dataPackageFiles :: [(FilePath, String)]
+dataPackageFiles =
     $( do
-        addDependentFile "examples/parser.tersus"
-        contents <- runIO (readFile "examples/parser.tersus")
-        lift contents
+        let paths = ["examples/data/package.tersus", "examples/data/codec/codec.tersus", "examples/data/ast/ast.tersus"]
+        files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
+        lift files
      )
+
+parserPackageFiles :: [(FilePath, String)]
+parserPackageFiles = dataPackageFiles ++ [("examples/parser/unicode.tersus", parserUnicodeSource)] ++
+    $( do
+        let paths = ["examples/parser/package.tersus", "examples/parser/parser.tersus"]
+        files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
+        lift files
+     )
+
+astReaderPackageFiles :: [(FilePath, String)]
+astReaderPackageFiles = dataPackageFiles ++
+    $( do
+        let paths = ["examples/ast_reader/package.tersus", "examples/ast_reader/ast_reader.tersus"]
+        files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
+        lift files
+     )
+
+toolPackageFiles :: [(FilePath, String)]
+toolPackageFiles = mirPackageFiles ++ parserPackageFiles ++ astReaderPackageFiles

@@ -14,6 +14,7 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import qualified AstData
 import qualified PackageCompile
+import PreludeSource (parserPackageFiles, astReaderPackageFiles)
 import qualified Compile
 import FileParserProtocol
 import qualified FileParserProtocol as File
@@ -27,7 +28,6 @@ import qualified Parse as Oracle
 import qualified TersusParser as NativeParser
 import qualified Native
 import Seed (emitterHash)
-import PreludeSource (parserSource)
 import LlvmRuntime (runtimeSource)
 import Hash (fingerprint)
 import System.Exit (ExitCode (..))
@@ -1270,7 +1270,7 @@ nativeSourceRecordLf = do
         (_, Error err, _) -> pure (Just err)
         (_, _, Error err) -> pure (Just err)
         (Right _, Ok home, Ok request) -> do
-            let exe = home </> ("tersus-parser-" ++ fingerprint [emitterHash, parserSource, runtimeSource])
+            let exe = home </> ("tersus-parser-" ++ NativeParser.parserHash)
                 unterminated = take (length request - 1) request
             (code, out, err) <- Native.runWithInputFull exe unterminated
             pure $ case File.readFileRequest unterminated of
@@ -1454,6 +1454,11 @@ testNativeModuleLoader = TestList "native-module-loader"
             , "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus"
             , "examples/mir/reader/reader.tersus"
             ]
+        ]
+    , TestList "AST tool package snapshots"
+        [ nativeLoadCase path True (pure (loadFromEntry resolver path)) (\parser -> pure (loadFromEntryWith parser resolver path)) Nothing
+        | (path, files) <- [("examples/ast_reader/ast_reader.tersus", astReaderPackageFiles), ("examples/parser/parser.tersus", parserPackageFiles)]
+        , let resolver = resolverFromFiles files
         ]
     , testCase "loader tool failure is not a matching rejection" $
         testAssertEq (nativeLoadVerdict False (Left "parse error: Parser tool failure: sentinel") (Left "unknown import")) (Just "parse error: Parser tool failure: sentinel")

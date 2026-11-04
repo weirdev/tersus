@@ -9,6 +9,7 @@ module TersusParser
     , runParserToolInterpreted
     , parserToolInput
     , parserResponse
+    , parserHash
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
@@ -26,12 +27,11 @@ import LlvmRuntime (runtimeSource)
 import Mir (Program)
 import MirData (writeProgram)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
-import MirHousekeeping (cachedEmitter, listLibrary)
+import MirHousekeeping (cachedEmitter, listLibrary, toolValidatedProgram)
 import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
-import MirValidate (validateProgram)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
-import PreludeSource (parserSource)
+import PreludeSource (parserPackageFiles)
 import Seed (emitterHash)
 import Syntax (Statement)
 import Utils
@@ -230,8 +230,7 @@ buildTool output = do
 {-# NOINLINE validatedParserProgram #-}
 validatedParserProgram :: Result Program String
 validatedParserProgram =
-    Compile.lowerSource True parserSource `bindResult` \program ->
-        stage "Validation failed: " (validateProgram program) `bindResult` \_ -> Ok program
+    toolValidatedProgram "examples/parser/parser.tersus"
 
 ownedParserProgram :: Result Program String
 ownedParserProgram = validatedParserProgram `bindResult` \program ->
@@ -243,11 +242,7 @@ runInterpreted program input = case runProgramEnv RunEnv{envArgs = [], envInput 
     Ok outcome -> Ok (outStdout outcome, outStderr outcome, outValue outcome)
 
 parserHash :: String
-parserHash = fingerprint [emitterHash, parserSource, runtimeSource]
+parserHash = fingerprint ([emitterHash] ++ concatMap (\(path, contents) -> [path, contents]) parserPackageFiles ++ [runtimeSource])
 
 trimEnd :: String -> String
 trimEnd = reverse . dropWhile (== '\n') . reverse
-
-stage :: String -> Result a String -> Result a String
-stage _ (Ok a) = Ok a
-stage prefix (Error e) = Error (prefix ++ e)
