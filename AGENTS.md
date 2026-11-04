@@ -59,18 +59,21 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     the same synthetic `tersuslib` package. They import the types and traits
     they use; `types.tersus` alone owns the structs and layout invariants.
     `LibPackage` checks and lowers them separately, and `MirHousekeeping`
-    validates their physical-container proofs and erases their ghosts.
+    links them and erases their ghosts; they are not validated, since native
+    code of the validator is made with them.
     `MirLists` links only the helper units native lowering needs, after user
     validation. Their bodies and Drop impls are never implicit user imports.
   - `stdlib.tersus`: the standard library written in Tersus. Embedded by
     `PreludeSource` and parsed by `StdLibDefs`, which is where the builtins it
     declares get their contracts; it is not linked into user programs.
-  - `validation.tersus`: the validator written in Tersus, run by
-    `SelfHostedMir`/`SelfHostedProof` alongside the Haskell validator, which
-    remains the production path. It is not embedded by `PreludeSource`; tests
-    and hosts read it from `lib/` directly.
+  - `validation.tersus`: the validator written in Tersus, which is the
+    production validator: `SelfHostedMir` turns each function's MIR into the
+    data it reads, and `ValidatorNative` runs it compiled to native code (with
+    `validation_driver.tersus`, which reads that data from the standard
+    input). Embedded by `PreludeSource`.
 - `tersus/examples/`: example programs, all loaded and checked by
-  `testExamples` (see Testing Guidelines). `examples/mir/emit/emit.tersus` is the LLVM
+  `testExamples` (see Testing Guidelines), but for the compiler's own
+  programs below, which `testHostValidation` checks. `examples/mir/emit/emit.tersus` is the LLVM
   emitter written in Tersus, and `examples/mir/mir_reader/mir_reader.tersus` /
   `examples/mir/mir_verify/mir_verify.tersus` / `examples/mir/mir_erase/mir_erase.tersus` are the MIR
   reader, the MIR checker and the ghost erasure written in Tersus. The host
@@ -80,8 +83,6 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
 - `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
   emitter is bootstrapped from; the seed itself is a GitHub release asset
   (see Build, Test, and Development Commands).
-- `tersus/dev/parity/`: the `parity` executable, a development harness outside
-  the production library and CLI.
 - `tersus/test/`: regression tests. `TestTersus.hs` runs the test groups; the
   groups live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`,
   `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`,
@@ -96,8 +97,7 @@ Work from `tersus/`.
 - `stack build`: compile the Haskell package and surface warnings. CI
   (`.github/workflows/ci.yml`) runs `stack build --test --no-run-tests` and
   then `stack test`, both from `tersus/`.
-- The package builds two executables, `parity` and `tersus-exe`, and a bare
-  `stack run` runs the first of them (`parity`), so always name the CLI:
+- The package builds the executable `tersus-exe`:
   `stack run tersus-exe -- <command> <file>`. Commands (`src/Cli.hs`):
   - `check <file>`: parse and validate a program.
   - `run <file> [args]`: validate, compile to native code and run (needs
@@ -146,6 +146,9 @@ Work from `tersus/`.
   `testBootstrap` remains one private cold group. CI partitions the full suite
   across six runners, with four group worker processes per runner; the required
   aggregate check still requires every shard to pass.
+  `testHostValidation`, which validates the compiler's own programs (the MIR
+  reader, checker and eraser, and the emitter), runs only when named, since it
+  takes far longer than the rest of the suite (`TestTersus.optInGroups`).
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in
   `tersus/README.md`.
 
@@ -178,6 +181,5 @@ Recent history uses short, direct subjects such as `Minor cleanup` and feature-f
 
 ## Contributor Notes
 Keep experimental and development-only work out of the production Haskell
-library and the `tersus-exe` CLI; put it under `tersus/dev/` (as the `parity`
-harness is) or in examples, and wire it into `package.yaml` as its own
+library and the `tersus-exe` CLI; put it under `tersus/dev/` or in examples, and wire it into `package.yaml` as its own
 executable or test target rather than into the library.

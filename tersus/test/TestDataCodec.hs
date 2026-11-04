@@ -41,7 +41,8 @@ sharing entry = case Mod.loadFromEntry (Mod.resolverFromFiles toolPackageFiles) 
 codecRun :: String -> (Outcome -> TestResult) -> IO TestResult
 codecRun source check = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles (toolPackageFiles ++ [("examples/codec_test/package.tersus", ""), ("examples/codec_test/main.tersus", source)])) "examples/codec_test/main.tersus" of
     Left err -> Just err
-    Right (Mod.PackageResult pkg) -> case PackageCompile.compileModulesValidated pkg `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of
+    Right (Mod.PackageResult pkg) -> -- (the codec is the compiler's own code, built as the host builds it, not validated)
+        case PackageCompile.compileModulesLinked pkg `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of
         Error err -> Just err
         Ok outcome -> check outcome
     Right _ -> Just "codec fixture is standalone"

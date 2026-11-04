@@ -11,19 +11,17 @@ import qualified Modules
 import qualified Parse
 import PreludeSource (eqSource, listsSource, boxSource)
 import qualified Mir as M
-import MirValidate (validateContainerLibrary, validateProgram)
-import PackageCompile (compileModulesValidated)
+import ValidatorNative (validateCompiled)
 import Interface (ModuleInterface (..), extractLibInterface, interfaceImportEnv, mergeInterfacesImportEnv, predeclareOwnEnv)
 import MirLower (lowerModuleWith)
 import TypeCheck (ImportEnv (..), Elaborated (..), elaborateWith)
 import LibPackage (LibPackage (..), libPackage, libModuleId, libSelection, nativeStorageUnits)
 import LibParsed (LibParsed (..), libParsed, nativeLibParsed, libPackageFiles)
 import Link (linkPrograms)
-import MirHousekeeping (validatedListLibrary)
 import MirLists (lowerLists)
 import Types (Arg (..), Type (..), Size (..))
 import MirEval (fromMirValue, runProgram)
-import Pipeline (compileSource, ownedSource, erasedModuleProgram, ownedModuleProgram)
+import Pipeline (compileModulesValidated, compileSource, ownedSource, erasedModuleProgram, ownedModuleProgram)
 import Syntax (Value (..))
 import TestHarness (Test (..), forceTestResult, testAssertEq, testAssertTrue, testCase)
 import TestStorageOracle (eraseStorageHelper)
@@ -117,7 +115,7 @@ testLibModules =
         ]
   where
     checkedSource source = Compile.lowerSource True source `bindResult` \program ->
-        validateProgram program `bindResult` \_ -> Ok program
+        validateCompiled program `bindResult` \_ -> Ok program
     checkedPackage source = case Modules.loadFromEntry (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" of
         Left err -> Error err
         Right (Modules.PackageResult pkg) -> compileModulesValidated pkg
@@ -188,9 +186,6 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     , testCase "helper declarations use the authoritative type interfaces" $ inspectPackage $ \pkg ->
         let types = libPrograms pkg Map.! "types"
          in testAssertTrue (all (\name -> let p = libPrograms pkg Map.! name in M.progGenerics p == M.progGenerics types && M.progInvariants p == M.progInvariants types) ["lists", "box"])
-    , testCase "linked helper contracts meet physical-container proofs" $ case validateContainerLibrary validatedListLibrary of
-        Error e -> Just e
-        Ok _ -> Nothing
     , testCase "erased List and Box instances retain exact fields and offsets" runtimeLayout
     , testCase "native lowering is a no-op without storage and does not force helpers" $ case Compile.lowerSource True "return 7;" of
         Error e -> Just e
@@ -216,8 +211,6 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         let p = libPrograms pkg Map.! "lists"
             user = p{M.progFunctions = Map.restrictKeys (M.progFunctions p) (Set.singleton "listNew")}
          in rejectedResult "listNew" (linkPrograms [(libModuleId "lists", p), (Modules.ModuleId "app" Nothing, user)])
-    , testCase "an imported List invariant still rejects unfilled live slots" (badImportedLayout "fn bad() -> List<Int> { (a, b) = Addr::alloc(0); return List<Int> { addr: a, len: 1, cap: 0, blk: b }; };")
-    , testCase "an imported Box invariant still requires one filled slot" (badImportedLayout "fn bad() -> Box<Int> { (a, b) = Addr::alloc(0); return Box<Int> { addr: a, blk: b }; };")
     , testCase "helper declaration seeds and raw tool input share a native phase" $ case Compile.lowerSource True "fn probe<T>(xs: &Box<Array<T>>) -> Int { return size(xs); }; return 0;" of
         Error e -> Just e
         Ok p -> case erasedHelpers of
@@ -272,9 +265,6 @@ testNativeStorageModules = TestList "testNativeStorageModules"
                         Error e -> Just e
                         Ok restored -> testAssertEq restored (forNative owned)
         Right _ -> Just "bootstrap fixture is not a package"
-    badImportedLayout source = case fixtureModule source of
-        Error e -> Just e
-        Ok (_, p) -> rejectedResult "does not meet its invariant" (validateContainerLibrary p)
     fixtureModule source = libPackage `bindResult` \pkg ->
         let ifaces = [libInterfaces pkg Map.! name | name <- ["types", "prelude", "clone"]]
          in checkedModule ifaces source

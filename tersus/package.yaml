@@ -29,6 +29,7 @@ extra-source-files:
 - examples/mir/mir_verify/mir_verify.tersus
 - examples/mir/mir_erase/mir_erase.tersus
 - lib/validation.tersus
+- lib/validation_driver.tersus
 - lib/stdlib.tersus
 - lib/box.tersus
 - lib/map.tersus
@@ -75,11 +76,6 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
-    dependencies:
-    - tersus
-  parity:
-    main:                Parity.hs
-    source-dirs:         dev/parity
     dependencies:
     - tersus
 

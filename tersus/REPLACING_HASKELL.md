@@ -75,6 +75,113 @@ test program, with the Haskell validator kept for one release as the
 oracle behind a flag. Then the Haskell proof modules and both bridges
 are deleted together (the bridges exist only to feed a Haskell host).
 
+Status (2026-10-31, PR #94): the flip is made. `Pipeline` validates only
+through `lib/validation.tersus`, fed by `SelfHostedMir`; the Haskell
+validator, `SelfHostedProof` and `dev/parity` are deleted, and a program
+the bridge does not model is refused, never passed.
+
+Since then the three things master had gained have been modeled. For
+equality, a relation used as a value is the comparison application
+itself, a struct local is its constructor applied to its fields, a
+branch derives the relation from any comparison term equal to the
+branched one, and two relation applications are one boolean when their
+arguments match, both fail, or each gives the other. References are the
+version of their place: the bridge finds each reference local's borrow
+statically, gives a written root a new term (a construction with one
+field replaced, or a `set`), rebinds the borrows of a root after it
+changes, and gives update parameters fresh post-call terms with `old()`
+read from an entry snapshot; returned references are the argument's
+place. `testBorrow` passes outright.
+
+A `forall` over list elements is no longer assumed only for one fresh
+index. The bridge records it as one fact the checker instantiates:
+two lists elementwise equal (function -30, the offset on either side),
+elements different from a value (-31), elements equal to a value (-32),
+and elements shifted from another list's (-33). The checker
+instantiates a fact inside its range and at its end point, by a case
+split on the index, reading through a push where the list was built by
+one, and it proves a `get` of a list of known size from its elements.
+With that, the list and string `Eq` impls prove, and `String::concat`,
+`String::slice` and `String::find` check.
+
+Generic code is checked as the copies a call decides: the bridge is
+given the monomorphised program (`MirMono`'s copies with their
+contracts kept), with the templates beside the copies as the sources
+of contracts that name a function nothing calls. A call written in a
+proof carries its contract with it (the callee's requires are an
+obligation wherever the clause is used, its ensures are assumed of
+the application's term), and a function declared `~` may not be
+called in a proof at all. The function that checks an impl against
+its trait is checked as written, or a weaker impl would pass. With
+that, `HashMap` and `HashSet` check: their tests pass, including the
+spread past four entries. The checker's arithmetic no longer traps
+the compiled validator on values like the least integer: a linear
+combination whose bound is not representable is dropped rather than
+computed, and a size is known never negative. The validator's own
+self-check (`testMir` on `lib/validation.tersus`) has not finished in
+this environment; it is still unverified.
+
+The validator itself uses `HashMap` and `HashSet`, so every validation
+runs those libraries interpreted. Since the rebase the solver has been
+sped up without changing its verdicts (equality and difference
+searches work on class representatives, one context analysis serves
+every goal asked of a context at a branch, and the interpreter skips
+its reference bookkeeping at calls when the program makes no
+reference), and a joined term keeps the bounds both branches give it,
+including one that follows from a branch value (`0 <= 0 - n` from
+`n < 0`), which the `String::fromInt` shape needs.
+
+The validator no longer runs interpreted in production: it is compiled
+to native code once (with `lib/validation_driver.tersus` as its main
+program, which reads the bridge's encoded functions from standard
+input) and kept in the cache directory under a name made of the
+sources it is made of (`ValidatorNative`); `Pipeline` runs that
+program for every validation. It is compiled without being validated,
+as a bootstrap program is, and the interpreted validator remains only
+where the validator is itself the program under test
+(`TestPipeline`'s checks of `lib/validation.tersus`).
+
+Concrete evaluation is in the validator: a term whose parts are all
+known is recorded as the constant it evaluates to (arithmetic,
+`size` and `get` of literal, pushed and made lists), as the Haskell
+engine's constant values did, and loop invariants are inferred from
+what the entry state proves, in the families the reference infers.
+
+Addresses, permissions and uninitialised slots are modeled in the
+bridge: each `Addr`, `Block` and `Uninit` operation is an application
+with the contract `StdLib` gives it (what it needs is checked, what it
+promises is assumed), a write or an emptied slot is a `set` on the
+block's ghost arrays, whose size is the block's capacity, and an
+operation that makes a new address or permission is tagged so two are
+never one term. A `forall` that cannot be stated as one of the
+checker's range facts is checked but not assumed, and what a checked
+`forall` assumed of its index is forgotten after it: assuming the
+guards of an instance that cannot exist made every later goal pass.
+An `extern fn` is assumed at its calls to keep its contract, the
+narrowing conversions give a value in their type's range, and a loop
+test of several parts joined by `&&` (a call among them) or `||` is
+checked as written; after `||` the body knows only what every test
+gives, as LANGUAGE.md says. The solver canonicalises terms before
+linear arithmetic and splits a get of a written list on the written
+index. With that the pointer and connective tests pass.
+
+`String::fromInt` is still too slow to check: the literal it returns
+for the least integer puts twenty element facts in the entry context of
+the whole function, and every goal at its loops works over them. Every
+program that mentions `String` checks the whole library, so this blocks
+the string tests and the string cases of `TestEq`. Ordering the
+integer constants as a chain instead of pair by pair removes most of
+the cost of a long literal, but it changes one verdict of
+`testInferredInvariants` and is not in yet.
+
+Open soundness bug, older than the pointer work: a `for` loop whose
+body sets an element of a literal list, in a function that requires
+its bound to be positive, leaves a contradictory context after the
+loop (`affirm 1 = 2` validates after `for i in 0..n { out = set(out,
+0, 7); }` with `affirm n > 0` required); the same loop written with
+`while` is refused as it should be. `testInferredInvariants` 18 fails
+from it, and 16 fails to prove a get through a pushing loop.
+
 ### 2. Write the standard library as Tersus text (deletes `StdLib`, 839 lines)
 
 `StdLib.hs` defines the builtins in Haskell; its own TODO says to write

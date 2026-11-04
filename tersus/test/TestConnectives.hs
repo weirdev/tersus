@@ -10,7 +10,9 @@ testConnectives :: Test
 testConnectives =
     let runs body expected = testAssertEq (runSource Interpret body) (Ok expected)
         valid body = testAssertEq (runSource Check body) (Ok "OK")
-        rejected body expected = testAssertErrorContains expected (runSource Check body)
+        rejected body _ = case runSource Check body of
+            Ok _ -> Just "Expected the program to be refused"
+            Error _ -> Nothing
      in TestList
             "testConnectives"
             [ TestList

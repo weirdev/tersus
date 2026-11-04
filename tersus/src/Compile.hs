@@ -38,7 +38,7 @@ import Utils
 -- eraser written in Tersus without the pipeline that runs them: a program is parsed (with the libraries in
 -- front of it), type checked by `elaborate`, and lowered to the MIR. What the lowered program then goes
 -- through (the check of the MIR and the erasure of its ghosts, both written in Tersus and run by
--- MirHousekeeping, and the validation of MirValidate) is composed by Pipeline, so nothing here calls it.
+-- MirHousekeeping, and the validation of ValidatorNative) is composed by Pipeline, so nothing here calls it.
 
 parseSource :: String -> Result [Statement] String
 parseSource source = parseSourceWith True source

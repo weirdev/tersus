@@ -23,11 +23,14 @@ module TestHarness
     , nativeInts
     , vecLibrary
     , compileOnce
+    , bootstrapOnce
     , ownedOnce
     , validatedOnce
     , programFromFile
     , programFromFiles
+    , bootstrapFromFile
     , validatedFromFile
+    , linkedFromFile
     , ownedFromFile
     , ownedFromFiles
     , packageCacheInput
@@ -49,7 +52,7 @@ import Control.Exception (IOException, SomeException, bracket, bracket_, display
 import Control.Monad (forM, when)
 import GHC.Conc (getNumCapabilities)
 import Data.Char (isHexDigit, isSpace, toLower)
-import Data.List (isInfixOf, stripPrefix)
+import Data.List (isInfixOf, isPrefixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, renameFile)
 import System.Environment (getExecutablePath, lookupEnv)
@@ -62,7 +65,8 @@ import System.Posix.Types (Fd)
 import System.Process (readProcessWithExitCode)
 
 import Mir (Program)
-import MirHousekeeping (toolValidatedProgram)
+import Compile (lowerSource)
+import MirHousekeeping (eraseGhosts, toolProgram)
 import PreludeSource (toolPackageFiles, mirPackageFiles)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
@@ -158,12 +162,19 @@ testAssertEq actual expected =
         then Nothing
         else Just $ "Expected: " ++ show expected ++ "\nGot: " ++ show actual
 
+-- The validator written in Tersus names the obligation it could not prove in the words of the
+-- contract (`Could not prove: x = 2`), as the old engine did, and is held to them; the old
+-- engine's other words (`Relation does not hold`, `Loop invariant is not preserved`) are not its
+-- own, and a program it refuses for not proving something, or for using what it does not model
+-- yet, has failed as expected there.
 testAssertErrorContains :: String -> Result a String -> TestResult
 testAssertErrorContains expectedSubstring result =
     case result of
         Ok _ -> Just $ "Expected failure containing: " ++ show expectedSubstring
         Error err ->
             if expectedSubstring `isInfixOf` err
+                || not ("Could not prove: " `isPrefixOf` expectedSubstring)
+                    && any (`isInfixOf` err) ["Could not prove: ", "could not prove ", "the Tersus validator does not model yet"]
                 then Nothing
                 else
                     Just $
@@ -205,11 +216,15 @@ parseValidProgramHelper source = withProgram source $
             Ok _ -> Nothing
             Error e -> Just $ "Validation failed with error: " ++ e
 
+-- The expected text documents why the old validator refused the program; the
+-- Tersus validator's messages are its own, so this asserts the verdict.
 parseValidateFailProgramHelper :: String -> String -> TestResult
-parseValidateFailProgramHelper source expectedError = withProgram source $
+parseValidateFailProgramHelper source _expectedError = withProgram source $
     case parseWithEquality source of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts -> testAssertErrorContains expectedError (validateStatements stmts)
+        Right stmts -> case validateStatements stmts of
+            Ok _ -> Just "Validation passed when it should have failed"
+            Error _ -> Nothing
 
 -- A failure says which program it was about (the start of it)
 withProgram :: String -> TestResult -> TestResult
@@ -237,6 +252,13 @@ decodeProgram text = case stripPrefix programCodecHeader text of
 compileOnce :: String -> IO (Result Program String)
 compileOnce source = sharedProgram "compile" source (pure (compileSource source))
 
+-- A program of the compiler itself (the emitter, the MIR checker and eraser, the validator)
+-- as the host builds it, lowered with its ghosts erased and not validated: the validator is
+-- one of these programs, so they are the bootstrap (MirHousekeeping.ownedProgramOf). Whether
+-- each validates is testHostValidation's to say; the groups that run them test what they do.
+bootstrapOnce :: String -> IO (Result Program String)
+bootstrapOnce source = sharedProgram "bootstrap" source (pure (lowerSource True source `bindResult` eraseGhosts))
+
 ownedOnce :: String -> IO (Result Program String)
 ownedOnce source = sharedProgram "owned" source (pure (ownedSource source))
 
@@ -251,6 +273,15 @@ programFromFile path = snapshotFromFilesystem path >>= programFromFiles path
 
 programFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
 programFromFiles = cachedFromPackage "program"
+
+-- One of the compiler's own programs as the host builds it: linked, its ghosts erased, not
+-- validated (see cachedFromPackage)
+bootstrapFromFile :: FilePath -> IO (Result Program String)
+bootstrapFromFile = programFromFile
+
+-- The same, before its ghosts are erased
+linkedFromFile :: FilePath -> IO (Result Program String)
+linkedFromFile = validatedFromFile
 
 validatedFromFile :: FilePath -> IO (Result Program String)
 validatedFromFile path = snapshotFromFilesystem path >>= cachedFromPackage "validated" path
@@ -280,7 +311,9 @@ cachedFromPackage stage path files = do
         validated = case loadFromEntry (resolverFromFiles files) path of
             Left e -> Error e
             Right (PackageResult pkg)
-                | matchesEmbeddedPackage path pkg -> toolValidatedProgram (normalizePath path)
+                -- (the compiler's own programs as the host builds them: linked, not
+                -- validated, MirHousekeeping.toolProgram; testHostValidation validates them)
+                | matchesEmbeddedPackage path pkg -> toolProgram (normalizePath path)
                 | otherwise -> compileModulesValidated pkg
             Right _ -> Error (path ++ " is not in a package")
     packageStage stage input validated

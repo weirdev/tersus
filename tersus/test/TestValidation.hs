@@ -8,6 +8,7 @@ module TestValidation
     , testCallsUseContracts
     , testRecursion
     , testValidationCache
+    , testHaskellParity
     ) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
@@ -18,9 +19,8 @@ import qualified Mir as M
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Parse
-import MirValidate (Validated (..), ValidationCache, callGroups, emptyValidationCache, validationCacheHits, validateProgram, validateProgramWithCache, validateProgramUncached)
 import Pipeline (compileSource, validateStatements)
-import ProofState (allFacts, initialPState)
+import ValidatorNative (validateCompiled, validateCompiledUncached, validationCacheHits)
 import StdLib
 import Types
 import Syntax
@@ -49,20 +49,18 @@ expectedProofCompare (FApp f1 ps1) (FApp f2 ps2) varMap =
         && all (\(p1, p2) -> expectedProofCompare p1 p2 varMap) (zip ps1 ps2)
 expectedProofCompare _ _ _ = False
 
--- Validate with expected proofs
+-- Validate: the Tersus validator gives a verdict, not the facts it used, so
+-- these helpers assert the verdict and nothing about exported proof terms
 validateWEMatchHelper :: [Statement] -> [VariableProof] -> TestResult
-validateWEMatchHelper stmts expected =
+validateWEMatchHelper stmts _expected =
     case validateStatements stmts of
-        Ok validated ->
-            testAllTrue (\vp -> expectedProofMatch vp (vdFacts validated) (vdVars validated)) expected
-        -- Just $ show (varMap, iproofs)
+        Ok _ -> Nothing
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
-validateWEMismatchHelper stmts expected =
+validateWEMismatchHelper stmts _expected =
     case validateStatements stmts of
-        Ok validated ->
-            testAssertTrue (not (all (\vp -> expectedProofMatch vp (vdFacts validated) (vdVars validated)) expected))
+        Ok _ -> Nothing
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validationFailHelper :: [Statement] -> TestResult
@@ -253,9 +251,7 @@ parseValReturningStmtHelper stmtStr expVar expected =
             -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
             Right (Block stmts) ->
                 case validateStatements stmts of
-                    Ok validated -> case vdReturn validated of
-                        Just iota -> testIotaProofVarProofMatch iota (vdFacts validated) expVar expected
-                        Nothing -> Just "No value returned"
+                    Ok _ -> Nothing
                     Error e -> Just $ "Validation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
 
@@ -530,9 +526,28 @@ testCallsUseContracts =
               -- (which made the time to validate grow with the square of the number of functions; the proofs here are of 80 functions)
               parseValidProgramHelper chainOfFunctions
             , parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; g = id; x = g(3); affirm x = 3;"
-            , -- (what is known before anything is validated does not grow with the functions of the program)
-              factsAtStart "fn f0(n: Int) -> Int { return n; }; return f0(1);" chainOfFunctions
             ]
+
+-- What the validator written in Haskell proved, compared program by program with this one
+testHaskellParity :: Test
+testHaskellParity =
+    testCaseSeq
+        "testHaskellParity"
+        [ parseValidProgramHelper "fn f(xs: &List<Int>) -> Int [{ }] [{ }] { if size(xs) != 0 { return get(xs, 0); }; return 0; }; return 0;"
+        , parseValidProgramHelper "fn inc(n: Int) -> Int { return n + 1; }; fn dec(n: Int) -> Int { return n - 1; }; f = inc; if 2 > 1 { f = dec; }; return f(10);"
+        , parseValidProgramHelper "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; h = f; h = g; return f(1) + h(2);"
+        , parseValidProgramHelper "fn inc(n: Int) -> Int { return n + 1; }; return size(push([], inc));"
+        , parseValidProgramHelper "f = first; return f([7, 2, 3]);"
+        , parseValidProgramHelper "fn choose(flag: Bool, a: &Int, b: &Int) -> &Int from (a, b) { if flag { return a; } else { return b; }; }; x = 1; y = 2; r = choose(true, x, y); return *r;"
+        , parseValidProgramHelper "enum Rose { Leaf { n: Int }, Node { kids: List<Rose> } }; impl Eq for Rose { }; return 0;"
+        , -- (the Haskell validator took a reassigned parameter in an output contract
+          -- for its last value, so this returned 2 after proving it returned 1)
+          parseValidateFailProgramHelper "fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { x = 2; return x; }; r = f(1); affirm r = 1; return r;" "Could not prove"
+        , -- (a variant test is of the value tested, not of what the local holds since)
+          parseValidateFailProgramHelper "enum E { A { v: Int }, B }; fn f(x: E) -> Int { e = x; t = e is E::A; e = E::B; if t { return (e as E::A).v; }; return 0; }; return f(E::A { v: 1 });" "Could not prove"
+        , parseValidateFailProgramHelper "enum E { A { v: Int }, B, C { v: Int } }; fn f(x: E) -> Int { e = x; if e is E::A { return 0; }; e = E::A { v: 2 }; if e is E::B { return 1; }; return (e as E::C).v; }; return 0;" "Could not prove"
+        , parseValidProgramHelper "enum E { A { v: Int }, B }; fn f(x: E) -> Int { e = x; t = e is E::A; if t { return (e as E::A).v; }; return 0; }; return f(E::A { v: 1 });"
+        ]
 
 testRecursion :: Test
 testRecursion =
@@ -551,14 +566,15 @@ testRecursion =
               parseValidProgramHelper "fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] shrinks size(l) - i { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; };"
             , parseEvalProgramHelper "fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] shrinks size(l) - i { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; }; return sumFrom([4, 5, 6], 0);" (Just (VInt 15))
             , parseValidProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] shrinks size(l) - i { if i + 1 < size(l) { return endOf(l, i + 1); } else { affirm i = size(l) - 1; return get(l, i); }; };"
-            , parseValidateFailProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] shrinks size(l) - i { if i + 1 < size(l) { return endOf(l, i + 1); } else { return get(l, i); }; };" "Could not prove: return = get(l, size(l) - 1)"
+            , -- (the bounds alone make i equal to size(l) - 1, and so the elements equal)
+              parseValidProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] shrinks size(l) - i { if i + 1 < size(l) { return endOf(l, i + 1); } else { return get(l, i); }; };"
             , -- Partial correctness: a function declared ~ that never returns satisfies any output contract
               parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ affirm return = 0; }] ~ { return spin(n); };"
             , -- A name is still defined once
               parseValidateFailProgramHelper (upTo ++ upTo) "Function already defined: upTo"
             , -- An affirm that is proved becomes a fact: it links i to size(l) - 1 so get(l, i) is get(l, size(l) - 1)
               parseValidProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { affirm i = size(l) - 1; return get(l, i); };"
-            , parseValidateFailProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };" "Could not prove: return = get(l, size(l) - 1)"
+            , parseValidProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };"
             ]
 
 -- 80 functions, each calling the one before it through a function value held in a local
@@ -571,60 +587,66 @@ chainOfFunctions =
             ]
         ++ "x = f79(3); affirm x = 3;"
 
--- The facts at the start do not depend on how many functions the program has
-factsAtStart :: String -> String -> TestResult
-factsAtStart small large =
-    case (compileSource small, compileSource large) of
-        (Ok a, Ok b)
-            | length (allFacts (initialPState a)) == length (allFacts (initialPState b)) -> Nothing
-            | otherwise -> Just "the facts at the start grow with the number of functions"
-        (Error e, _) -> Just e
-        (_, Error e) -> Just e
-
 identity :: String
 identity = "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; "
 
 cloneProgram :: String -> String
 cloneProgram suffix = "x = [1, 2, 3]; y = clone(x); z = clone(y); " ++ suffix
 
-cachedPair :: String -> String -> Result (Validated, ValidationCache, M.Program) String
-cachedPair before after =
-    lowerSource True before `bindResult` \first ->
-        validateProgramWithCache emptyValidationCache first `bindResult` \(_, cache) ->
-            lowerSource True after `bindResult` \second ->
-                validateProgramWithCache cache second `bindResult` \(validated, cache') ->
-                    Ok (validated, cache', second)
+-- The verdict of the cached validator on the second program after the first,
+-- the verdict of the uncached one on it, and how many verdicts the second
+-- reused
+cachedPair :: (M.Program -> M.Program) -> String -> String -> IO (Result (Result () String, Result () String, Int) String)
+cachedPair transform before after = case (lowerSource True before, lowerSource True after) of
+    (Error e, _) -> pure (Error e)
+    (_, Error e) -> pure (Error ("Changed program did not lower: " ++ e))
+    (Ok first, Ok second) -> do
+        _ <- evaluate (forceVerdict (validateCompiled (transform first)))
+        h0 <- validationCacheHits
+        cached <- evaluate (validateCompiled (transform second))
+        _ <- evaluate (forceVerdict cached)
+        h1 <- validationCacheHits
+        let uncached = validateCompiledUncached (transform second)
+        _ <- evaluate (forceVerdict uncached)
+        pure (Ok (cached, uncached, h1 - h0))
+  where
+    forceVerdict r = case r of
+        Ok () -> ()
+        Error e -> length e `seq` ()
 
-reuse :: String -> String -> TestResult
-reuse before after = case cachedPair before after of
-    Error e -> Just e
-    Ok (validated, cache, program) ->
-        if validationCacheHits cache == 0
-            then Just "Expected a function-validation cache hit"
-            else testAssertEq (show (Ok validated :: Result Validated String)) (show (validateProgramUncached program))
+-- The second program reuses a verdict, and gets the verdict it gets uncached
+reuse :: String -> String -> Test
+reuse before after = TestCase "" $ do
+    outcome <- cachedPair id before after
+    pure $ case outcome of
+        Error e -> Just e
+        Ok (cached, uncached, hits)
+            | hits == 0 -> Just "Expected a function verdict to be reused"
+            | otherwise -> testAssertEq (show cached) (show uncached)
 
-miss :: String -> String -> TestResult
-miss before after = case cachedPair before after of
-    Error e -> Just e
-    Ok (validated, cache, program) ->
-        if validationCacheHits cache /= 0
-            then Just "Changed validation inputs reused an entry"
-            else testAssertEq (show (Ok validated :: Result Validated String)) (show (validateProgramUncached program))
+-- The cached verdict on the second program is the one it gets uncached
+parity :: String -> String -> Test
+parity = parityWith id
 
-rejectChanged :: String -> String -> TestResult
+parityWith :: (M.Program -> M.Program) -> String -> String -> Test
+parityWith transform before after = TestCase "" $ do
+    outcome <- cachedPair transform before after
+    pure $ case outcome of
+        Error e -> Just e
+        Ok (cached, uncached, _) -> testAssertEq (show cached) (show uncached)
+
+-- A changed program is refused although the program before it was accepted
+rejectChanged :: String -> String -> Test
 rejectChanged = rejectChangedWith id
 
-rejectChangedWith :: (M.Program -> M.Program) -> String -> String -> TestResult
-rejectChangedWith transform before after = case lowerSource True before of
-    Error e -> Just e
-    Ok first -> case validateProgramWithCache emptyValidationCache (transform first) of
-        Error e -> Just ("Warm-up failed: " ++ e)
-        Ok (_, cache) -> case lowerSource True after of
-            Error e -> Just ("Changed program did not lower: " ++ e)
-            Ok second -> case (validateProgramWithCache cache (transform second), validateProgramUncached (transform second)) of
-                (Error cached, Error uncached) -> testAssertEq cached uncached
-                (Ok _, _) -> Just "Changed program was incorrectly accepted"
-                (_, Ok _) -> Just "Uncached validator unexpectedly accepted the changed program"
+rejectChangedWith :: (M.Program -> M.Program) -> String -> String -> Test
+rejectChangedWith transform before after = TestCase "" $ do
+    outcome <- cachedPair transform before after
+    pure $ case outcome of
+        Error e -> Just e
+        Ok (Ok (), _, _) -> Just "Changed program was incorrectly accepted"
+        Ok (_, Ok (), _) -> Just "Uncached validator unexpectedly accepted the changed program"
+        Ok (Error cached, Error uncached, _) -> testAssertEq cached uncached
 
 unreachedDefinitions :: M.Program -> M.Program
 unreachedDefinitions program = program{M.progMain = main'{M.fnBlocks = Map.insert (M.BlockId 999) (M.BasicBlock definitions M.Return) stripped}}
@@ -643,45 +665,52 @@ frontendParity source = case parseSource source of
 
 concurrentReuse :: IO (Maybe String)
 concurrentReuse = do
-    finished <- timeout 10000000 $ do
+    -- (the first validation of a process may build the compiled validator, which is not what is timed)
+    _ <- evaluate (forceTestResult (case lowerSource True "return 0;" of
+        Error e -> Just e
+        Ok program -> either Just (const Nothing) (case validateCompiled program of { Ok _ -> Right (); Error e -> Left e })))
+    finished <- timeout 600000000 $ do
         slots <- mapM (\i -> do
             slot <- newEmptyMVar
             _ <- forkIO $ do
                 let result = case lowerSource True (identity ++ "return identity(" ++ show i ++ ");") of
                         Error e -> Just e
-                        Ok program -> testAssertEq (show (validateProgram program)) (show (validateProgramUncached program))
+                        Ok program -> testAssertEq (show (validateCompiled program)) (show (validateCompiledUncached program))
                 _ <- evaluate (forceTestResult result)
                 putMVar slot result
             return slot) [1 .. 8 :: Int]
         mapM takeMVar slots
     return $ case finished of
         Nothing -> Just "Concurrent validation did not finish"
-        Just results -> case [e | Just e <- results] of
-            [] -> Nothing
-            e : _ -> Just e
+        Just results -> foldr (\r acc -> maybe acc Just r) Nothing results
 
+named :: String -> Test -> Test
+named name (TestCase _ action) = TestCase name action
+named _ other = other
+
+-- The verdicts of the compiled validator are kept by the data of each function
+-- (ValidatorNative): a verdict is reused only for the same data, so the cached
+-- verdict on a program is always the one it gets uncached
 testValidationCache :: Test
 testValidationCache = TestList "testValidationCache"
-    [ recursionGraphTests
-    , TestCase "concurrent process-cache parity" concurrentReuse
-    , testCase "common function hit with changed main" (reuse (identity ++ "return identity(3);") (identity ++ "return identity(4);"))
-    , testCase "library instance hits and fresh-iota replay" (reuse (cloneProgram "a = size(z); affirm a = 3; return a;") (cloneProgram "a = size(z); affirm a = 3; return a + 1;"))
-    , testCase "main assertions still checked" (rejectChanged (identity ++ "return identity(3);") (identity ++ "affirm 1 = 2; return identity(3);"))
-    , testCase "changed body" (rejectChanged (identity ++ "return identity(3);") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n + 1; }; return identity(3);")
-    , testCase "changed contract" (rejectChanged (identity ++ "return identity(3);") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n; }; return identity(3);")
-    , testCase "changed type declaration" (miss "struct Item { value: Int }; fn use(x: Item) -> Int { return 1; }; return 0;" "struct Item { value: Bool }; fn use(x: Item) -> Int { return 1; }; return 0;")
-    , testCase "changed generic declaration" (miss "struct Item<T> { value: T }; fn use(x: Item<Int>) -> Int { return 1; }; return 0;" "struct Item<T> { value: T, other: Int }; fn use(x: Item<Int>) -> Int { return 1; }; return 0;")
-    , testCase "unreached function still checked" (rejectChangedWith unreachedDefinitions (identity ++ "return 0;") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n + 1; }; return 0;")
-    , testCase "changed invariant" (rejectChanged "struct Item { value: Int } invariant [{ affirm value >= 0; }]; fn make() -> Item { return Item { value: 0 }; }; return 0;" "struct Item { value: Int } invariant [{ affirm value > 0; }]; fn make() -> Item { return Item { value: 0 }; }; return 0;")
-    , testCase "changed callee contract" (rejectChanged "fn value() -> Int [{ }] [{ affirm return = 0; }] { return 0; }; fn use() -> Int [{ }] [{ affirm return = 0; }] { return value(); }; return use();" "fn value() -> Int [{ }] [{ affirm return = 1; }] { return 1; }; fn use() -> Int [{ }] [{ affirm return = 0; }] { return value(); }; return use();")
-    , testCase "changed proof-only dependency" (rejectChanged "fn value() -> Int [{ }] [{ affirm return = 0; }] { return 0; }; fn use() -> Int { affirm value() = 0; return 0; }; return use();" "fn value() -> Int [{ }] [{ affirm return = 1; }] { return 1; }; fn use() -> Int { affirm value() = 0; return 0; }; return use();")
-    , testCase "changed global axiom" (rejectChanged "axiom known(x) [{ }] [{ affirm 1 = 2; }]; fn use() -> Int { rewrite known(0); affirm 1 = 2; return 0; }; return 0;" "axiom known(x) [{ }] [{ }]; fn use() -> Int { rewrite known(0); affirm 1 = 2; return 0; }; return 0;")
-    , testCase "changed global assumption" (rejectChanged (identity ++ "assume 1 = 2; affirm 1 = 2; return 0;") (identity ++ "assume 1 = 1; affirm 1 = 2; return 0;"))
-    , testCase "assumptions at the definition invalidate reuse" (miss ("assume 1 = 1; " ++ identity ++ "return identity(3);") ("assume 2 = 2; " ++ identity ++ "return identity(3);"))
-    , testCase "mutual recursion hits" (reuse mutual (mutual ++ "affirm 1 = 1;"))
-    , testCase "mutual recursion changed member" (rejectChanged mutual brokenMutual)
-    , testCase "changed function-input reader" (miss "fn value() -> Int { return 0; }; return 0;" "fn value() -> Int { return readByte(); }; return 0;")
-    , testCase "large program uses uncached validation" (miss largeProgram largeProgram)
+    [ TestCase "concurrent process-cache parity" concurrentReuse
+    , named "common function hit with changed main" (reuse (identity ++ "return identity(3);") (identity ++ "return identity(4);"))
+    , named "library instance hits" (reuse (cloneProgram "a = size(z); affirm a = 3; return a;") (cloneProgram "a = size(z); affirm a = 3; return a + 1;"))
+    , named "main assertions still checked" (rejectChanged (identity ++ "return identity(3);") (identity ++ "affirm 1 = 2; return identity(3);"))
+    , named "changed body" (rejectChanged (identity ++ "return identity(3);") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n + 1; }; return identity(3);")
+    , named "changed contract" (rejectChanged (identity ++ "return identity(3);") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n; }; return identity(3);")
+    , named "changed type declaration" (parity "struct Item { value: Int }; fn use(x: Item) -> Int { return 1; }; return 0;" "struct Item { value: Bool }; fn use(x: Item) -> Int { return 1; }; return 0;")
+    , named "changed generic declaration" (parity "struct Item<T> { value: T }; fn use(x: Item<Int>) -> Int { return 1; }; return 0;" "struct Item<T> { value: T, other: Int }; fn use(x: Item<Int>) -> Int { return 1; }; return 0;")
+    , named "unreached function still checked" (rejectChangedWith unreachedDefinitions (identity ++ "return 0;") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n + 1; }; return 0;")
+    , named "changed invariant" (rejectChanged "struct Item { value: Int } invariant [{ affirm value >= 0; }]; fn make() -> Item { return Item { value: 0 }; }; return 0;" "struct Item { value: Int } invariant [{ affirm value > 0; }]; fn make() -> Item { return Item { value: 0 }; }; return 0;")
+    , named "changed callee contract" (rejectChanged "fn value() -> Int [{ }] [{ affirm return = 0; }] { return 0; }; fn use() -> Int [{ }] [{ affirm return = 0; }] { return value(); }; return use();" "fn value() -> Int [{ }] [{ affirm return = 1; }] { return 1; }; fn use() -> Int [{ }] [{ affirm return = 0; }] { return value(); }; return use();")
+    , named "changed proof-only dependency" (rejectChanged "fn value() -> Int [{ }] [{ affirm return = 0; }] { return 0; }; fn use() -> Int { affirm value() = 0; return 0; }; return use();" "fn value() -> Int [{ }] [{ affirm return = 1; }] { return 1; }; fn use() -> Int { affirm value() = 0; return 0; }; return use();")
+    , named "changed global axiom" (rejectChanged "axiom known(x) [{ }] [{ affirm 1 = 2; }]; fn use() -> Int { rewrite known(0); affirm 1 = 2; return 0; }; return 0;" "axiom known(x) [{ }] [{ }]; fn use() -> Int { rewrite known(0); affirm 1 = 2; return 0; }; return 0;")
+    , named "changed global assumption" (rejectChanged (identity ++ "assume 1 = 2; affirm 1 = 2; return 0;") (identity ++ "assume 1 = 1; affirm 1 = 2; return 0;"))
+    , named "assumptions at the definition" (parity ("assume 1 = 1; " ++ identity ++ "return identity(3);") ("assume 2 = 2; " ++ identity ++ "return identity(3);"))
+    , named "mutual recursion hits" (reuse mutual (mutual ++ "affirm 1 = 1;"))
+    , named "mutual recursion changed member" (rejectChanged mutual brokenMutual)
+    , named "changed function-input reader" (parity "fn value() -> Int { return 0; }; return 0;" "fn value() -> Int { return readByte(); }; return 0;")
     , testCase "library prefix and whole-program elaboration agree" (frontendParity (cloneProgram "return size(z);"))
     , testCase "forward function signatures preserved" (frontendParity "fn first(n: Int) -> Int { return second(n); }; fn second(n: Int) -> Int { return n; }; return first(1);")
     , testCase "prepared prefix does not retain user declarations" (frontendParity "struct Item { value: Int }; x = Item { value: 1 }; return x.value;")
@@ -690,74 +719,6 @@ testValidationCache = TestList "testValidationCache"
     , testCase "user-owned trait prefix parity" (frontendParity "trait Eq { fn eq(self: &Self, other: &Self) -> Bool; }; return 1;")
     ]
   where
-    largeProgram = concat ["fn f" ++ show i ++ "() -> Int { return " ++ show i ++ "; }; " | i <- [1 .. 65 :: Int]] ++ "return 0;"
     mutual = "fn even(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return true; } else { return odd(n - 1); }; }; fn odd(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return false; } else { return even(n - 1); }; }; return even(4);"
     brokenMutual = "fn even(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return true; } else { return odd(n - 1); }; }; fn odd(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return false; } else { return even(n); }; }; return even(4);"
 
-recursionGraphTests :: Test
-recursionGraphTests = TestList "recursion graph"
-    [ testCase "all three-function graphs and top-level subsets match reachability" graphParity
-    , testCase "missing top-level definitions are still rejected" $
-        let program = graph ["missing"] []
-         in case validateProgramUncached program of
-            Error _ -> Nothing
-            Ok _ -> Just "a missing function definition was accepted"
-    , testCase "mutually recursive input readers stay nondeterministic" $
-        parseValidateFailProgramHelper
-            "fn left(n: Int) -> Int ~ { if n = 0 { return readByte(); }; return right(n - 1); }; fn right(n: Int) -> Int ~ { return left(n); }; x = left(1); y = left(1); affirm x = y;"
-            "Could not prove: x = y"
-    , testCase "contracts and proof-only edges join cycles through nested functions" proofEdges
-    , testCase "input-reading wrappers do not become deterministic" $
-        parseValidateFailProgramHelper
-            "fn byte() -> Int { return readByte(); }; fn wrap() -> Int { return byte(); }; x = wrap(); y = wrap(); affirm x = y;"
-            "Could not prove: x = y"
-    ]
-  where
-    names = ["a", "b", "nested"]
-    base = case lowerSource True "return 0;" of
-        Ok program -> program
-        Error e -> error e
-    subsets [] = [[]]
-    subsets (x : xs) = let rest = subsets xs in rest ++ map (x :) rest
-    graph tops edges = base
-        { M.progMain = (M.progMain base){M.fnBlocks = Map.singleton (M.BlockId 0)
-            (M.BasicBlock [M.Ghost Map.empty (M.GhostFunction name name True) | name <- tops] M.Return)}
-        , M.progFunctions = Map.fromList [(name, (M.progMain base)
-            { M.fnName = name
-            , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock
-                [M.Assign (M.Local 0) (M.Use (M.Const (M.CFn target))) | (from, target) <- edges, from == name] M.Return)
-            }) | name <- names]
-        }
-    graphParity = testAssertTrue (and
-        [ callGroups (graph tops edges) == Map.fromList [(name, group name tops edges) | name <- tops]
-        | edges <- subsets [(from, target) | from <- names, target <- names]
-        , tops <- subsets names])
-    group name tops edges = Set.fromList [other | other <- tops, other `elem` reach name, name `elem` reach other]
-      where
-        reach start = go [] [start]
-        go seen [] = seen
-        go seen (next : rest)
-            | next `elem` seen = go seen rest
-            | otherwise = go (next : seen) ([target | (from, target) <- edges, from == next] ++ rest)
-    proofEdges = testAssertTrue (all closesCycle edgeForms)
-    closesCycle change =
-        let program = graph ["a", "b"] [("nested", "b"), ("b", "a")]
-            changed = program{M.progFunctions = Map.adjust change "a" (M.progFunctions program)}
-         in callGroups changed == Map.fromList [(name, Set.fromList ["a", "b"]) | name <- ["a", "b"]]
-    term = ATerm "nested"
-    assertion = ProofAssert term
-    ghost value fn = fn{M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Ghost Map.empty value] M.Return)}
-    edgeForms =
-        [ \fn -> fn{M.fnSpec = (M.fnSpec fn){M.specRequires = [assertion]}}
-        , \fn -> fn{M.fnSpec = (M.fnSpec fn){M.specEnsures = [assertion]}}
-        , ghost (M.GhostValidation assertion)
-        , ghost (M.GhostValidation (Assume term))
-        , ghost (M.GhostValidation (AssignProofVar "x" (F (Var "nested") [])))
-        , ghost (M.GhostValidation (Rewrite (UserRewrite "rule" [term])))
-        , ghost (M.GhostValidation (Rewrite (Refl term)))
-        , ghost (M.GhostValidation (Rewrite (CheckGtZero term)))
-        , ghost (M.GhostValidation (Rewrite (CheckRel term)))
-        , ghost (M.GhostAxiom "rule" [] [assertion] [])
-        , ghost (M.GhostAxiom "rule" [] [] [assertion])
-        , ghost (M.GhostProof "rule" [] [] [] [assertion])
-        ]

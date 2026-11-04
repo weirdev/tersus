@@ -718,9 +718,20 @@ toolValidationParity =
     let entry = MirHousekeeping.mirEraseEntry
         fresh = case Modules.loadFromEntry (Modules.resolverFromFiles mirPackageFiles) entry of
             Left e -> Error e
-            Right (Modules.PackageResult pkg) -> PackageCompile.compileModulesValidated pkg
+            Right (Modules.PackageResult pkg) -> PackageCompile.compileModulesLinked pkg
             Right _ -> Error "the frozen eraser is not a package"
-     in pure (testAssertEq (MirHousekeeping.toolValidatedProgram entry) fresh)
+     in pure (testAssertEq (MirHousekeeping.toolProgram entry) fresh)
+
+-- The compiled tools of a cache (the validator, the emitter, the MIR checker
+-- and eraser, the seed and the runtime), copied into another
+copyCompiledTools :: FilePath -> FilePath -> IO ()
+copyCompiledTools from to = do
+    createDirectoryIfMissing True to
+    names <- listDirectory from
+    mapM_ (\name -> do
+        regular <- doesFileExist (from </> name)
+        when (regular && any (`isPrefixOf` name) ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "tersus_rt_"] && not (".lock" `isInfixOf` name)) $
+            copyFile (from </> name) (to </> name)) names
 
 withCacheHome :: (FilePath -> IO a) -> IO a
 withCacheHome use = withNativeHome $ \home -> do
@@ -878,7 +889,17 @@ packageInputs = withCacheHome $ \home -> do
         other -> Just (show other)
 
 ciPackageProcesses :: Bool -> IO TestResult
-ciPackageProcesses concurrent = withCacheHome $ \home -> do
+ciPackageProcesses concurrent = do
+  -- (validation runs the validator written in Tersus, compiled once into the
+  -- cache: the fresh cache homes of the probes are given the compiled tools,
+  -- which are not what this test measures, so that each probe has 30 seconds
+  -- for the package)
+  warm <- compileOnce "return 0;"
+  original <- cacheDirectory
+  withCacheHome $ \home -> do
+    case (warm, original) of
+        (Ok _, Ok dir) -> copyCompiledTools dir (home </> "tersus")
+        _ -> pure ()
     (entry, _) <- ciPackageFixture home
     let markers = if concurrent then ["first" ++ show i | i <- [1 .. 4 :: Int]] else ["first"]
         extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_PARSER", "haskell")]

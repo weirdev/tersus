@@ -51,7 +51,7 @@ mutSource = "x = 4; r = &mut x; *r = 9; return *r;"
 -- The eraser compiled once for every interpreted case: compiling it is the expensive part, and every case
 -- runs the same program over a different input (the pattern of TestMirVerify's verifierProgram).
 eraserProgram :: IO (Result Program String)
-eraserProgram = programFromFile "examples/mir/mir_erase/mir_erase.tersus"
+eraserProgram = bootstrapFromFile "examples/mir/mir_erase/mir_erase.tersus"
 
 -- What the host makes of the program before its ghosts are erased, as version 1 of the data
 expectedOf :: String -> Result String String
@@ -204,7 +204,7 @@ everyProgram = withProgram "examples/mir/mir_erase/mir_erase.tersus" "mir-erase"
         bad -> Just (unlines (take 5 bad))
   where
     check exe (name, source) = do
-        validated <- if "examples/mir/" `isPrefixOf` name then validatedFromFile name else pure (validatedSource source)
+        validated <- if "examples/mir/" `isPrefixOf` name then linkedFromFile name else pure (validatedSource source)
         case validated of
             Error e -> pure [name ++ ": " ++ e]
             Ok program -> case eraseGhosts program of

@@ -9,6 +9,7 @@ module Native
     , runExecutable
     , runWithInput
     , runWithInputFull
+    , runCommandWithInputFull
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
@@ -138,7 +139,11 @@ runWithInput exe input = do
 -- written in Tersus says it refuses its input on the standard error and gives 1 as its value, which the runtime writes and still
 -- exits with success, so a caller that has to tell a refusal from an answer reads those, not the status.
 runWithInputFull :: FilePath -> String -> IO (ExitCode, String, String)
-runWithInputFull exe input = do
+runWithInputFull exe = runCommandWithInputFull exe []
+
+-- The same for an executable given arguments
+runCommandWithInputFull :: FilePath -> [String] -> String -> IO (ExitCode, String, String)
+runCommandWithInputFull exe args input = do
     outcome <- try run :: IO (Either IOException (ExitCode, String, String))
     pure $ case outcome of
         Left e -> (ExitFailure 1, "", "Could not run " ++ exe ++ ": " ++ show e)
@@ -157,7 +162,7 @@ runWithInputFull exe input = do
                 hSetEncoding errHandle char8
                 readHandle <- openFile inPath ReadMode
                 hSetEncoding readHandle char8
-                (_, _, _, process) <- createProcess (proc exe []){std_in = UseHandle readHandle, std_out = UseHandle outHandle, std_err = UseHandle errHandle}
+                (_, _, _, process) <- createProcess (proc exe args){std_in = UseHandle readHandle, std_out = UseHandle outHandle, std_err = UseHandle errHandle}
                 code <- waitForProcess process
                 hClose readHandle
                 hClose outHandle

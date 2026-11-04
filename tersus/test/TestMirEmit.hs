@@ -64,7 +64,7 @@ sharedReader = do
 -- The emitter of examples/mir/emit/emit.tersus, compiled once: the three interpreted cases each run it for a part of the IR, and its
 -- validation is the most expensive thing in this group.
 emitterProgram :: IO (Result Program String)
-emitterProgram = programFromFile "examples/mir/emit/emit.tersus"
+emitterProgram = bootstrapFromFile "examples/mir/emit/emit.tersus"
 
 runEmitter :: World -> Result Program String -> Result ((String, String), [(FilePath, String)]) String
 runEmitter world compiled = case compiled of
@@ -73,7 +73,7 @@ runEmitter world compiled = case compiled of
 
 borrowedTypeTable :: IO TestResult
 borrowedTypeTable = do
-    loaded <- validatedFromFile "examples/mir/emit/emit.tersus"
+    loaded <- linkedFromFile "examples/mir/emit/emit.tersus"
     pure $ case loaded of
         Error e -> Just e
         Ok program -> case Map.lookup "fieldOffset" (progFunctions (insertOwnership program)) of
@@ -85,7 +85,7 @@ borrowedTypeTable = do
 
 threadedGen :: IO TestResult
 threadedGen = do
-    loaded <- validatedFromFile "examples/mir/emit/emit.tersus"
+    loaded <- linkedFromFile "examples/mir/emit/emit.tersus"
     pure $ case loaded of
         Error e -> Just e
         Ok program ->
@@ -98,7 +98,7 @@ threadedGen = do
 
 orderedTypeClosure :: IO TestResult
 orderedTypeClosure = do
-    loaded <- validatedFromFile "examples/mir/emit/emit.tersus"
+    loaded <- linkedFromFile "examples/mir/emit/emit.tersus"
     pure $ case loaded of
         Error e -> Just e
         Ok program -> firstFailure
