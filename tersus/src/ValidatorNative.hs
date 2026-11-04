@@ -31,7 +31,7 @@ import LlvmRuntime (runtimeSource)
 import MirData (writeProgram)
 import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, nativeStorage, ownedProgramOf)
-import Native (buildExecutable, cacheDirectory, cacheLock, cachedProgram, runCommandWithInputFull, runWithInput)
+import Native (buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, runCommandWithInputFull, runWithInput)
 import PreludeSource (boxSource, listsSource, validationDriverSource, validationSource)
 import Seed (emitterHash)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
@@ -247,10 +247,14 @@ uncheckedValidator = cachedProgram "validator-unchecked" validatorHash "the vali
                 ir <- runWithInput exe (writeProgram program)
                 case ir of
                     Error e -> pure (Error e)
-                    Ok text -> buildExecutable output text
+                    -- The override applies to LLVM and runtime compilation; optimizing this CFG costs minutes.
+                    Ok text -> buildExecutableWith validatorBuildFlags output text
+
+validatorBuildFlags :: [String]
+validatorBuildFlags = ["-O0"]
 
 validatorHash :: String
-validatorHash = fingerprint [emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource]
+validatorHash = fingerprint ([emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource] ++ validatorBuildFlags)
 
 -- Run $0 with the largest stack the system allows (macOS caps it at 64 MB)
 raiseStack :: String

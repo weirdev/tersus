@@ -7,7 +7,7 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import PreludeSource (mirPackageFiles)
+import PreludeSource (mirPackageFiles, validationSource, validationDriverSource, listsSource, boxSource)
 import Seed (emitterHash)
 import qualified TersusParser
 import qualified Modules
@@ -97,6 +97,26 @@ testSharedCache =
             Left e -> pure (Just e)
             Right _ -> action
     requireParser test = test
+
+validatorFlagNamespace :: IO TestResult
+validatorFlagNamespace = withCacheHome $ \home -> do
+    let inputs = [emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource]
+        -- The optimization policy is pinned here so a flag change must move this namespace.
+        hashes = map (fingerprint . (inputs ++)) [["-O0"], ["-O2"], []]
+        text = "validator-build-flag-probe"
+        file hash = home </> "tersus" </> ("verdicts-" ++ hash) </> fingerprint [text]
+        stale = file (hashes !! 2)
+        body = "0 -1 -1\n" ++ text
+    createDirectoryIfMissing True (takeDirectory stale)
+    writeFile stale body
+    withVerdictLock text (pure ())
+    present <- mapM (doesFileExist . (++ ".lock") . file) hashes
+    retained <- readMarker stale
+    pure $ firstFailure
+        [ testAssertEq present [True, False, False]
+        , testAssertEq retained (Right body)
+        , testAssertEq (length (Map.fromList [(hash, ()) | hash <- hashes])) 3
+        ]
 
 rawNamedTruncation :: String -> String -> IO TestResult
 rawNamedTruncation name suffix = do
@@ -258,6 +278,7 @@ testVerdictLocks = TestList "testVerdictLocks"
     , TestCase "cancelling a lock holder releases the lock" verdictCancellation
     , TestCase "processes wait for the same verdict lock" verdictProcesses
     , TestCase "a killed process releases the verdict lock" verdictKilledProcess
+    , TestCase "validator build flags isolate the verdict namespace" validatorFlagNamespace
     ]
 
 withWorker :: IO () -> (ThreadId -> MVar (Either SomeException ()) -> IO TestResult) -> IO TestResult
