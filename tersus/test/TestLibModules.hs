@@ -9,7 +9,7 @@ import qualified Data.Set as Set
 import qualified Compile
 import qualified Modules
 import qualified Parse
-import PreludeSource (eqSource, listsSource, boxSource)
+import PreludeSource (typesSource, eqSource, cloneSource, preludeSource, stringSource, mapSource, setSource, listsSource, boxSource)
 import qualified Mir as M
 import ValidatorNative (validateCompiled, validateLibrary)
 import Interface (ModuleInterface (..), extractLibInterface, interfaceImportEnv, mergeInterfacesImportEnv, predeclareOwnEnv)
@@ -50,6 +50,17 @@ testLibModules =
                     _ <- evaluate (forceTestResult compiles)
                     pure compiles
             , testCase "it compiles" compiles
+            , testCase "implicit snapshots are the source files without an importing adapter" $
+                testAssertEq [lookup ("tersuslib/" ++ name ++ "/" ++ name ++ ".tersus") libPackageFiles | (name, _) <- implicitSources]
+                    [Just source | (_, source) <- implicitSources]
+            , testCase "implicit source imports preserve the dependency graph" $ case mapM (Parse.parseImportPrefix . snd) implicitSources of
+                Left e -> Just (show e)
+                Right imports -> case libParsed of
+                    Left e -> Just e
+                    Right parsed -> both
+                        (testAssertEq (map (map (\imp -> (Parse.importPath imp, Parse.importAlias imp, Parse.importNames imp))) imports)
+                            [[(["tersuslib", dep], Nothing, Nothing) | dep <- deps] | (_, deps) <- implicitDependencies])
+                        (testAssertEq (lpDependencies parsed) (Map.fromList implicitDependencies))
             , testCase "modules compile dependencies first" orderIsDependencyFirst
             , testCase "eq declares Eq and its impls" (interface "eq" (\iface -> Map.member "Eq" (ifTraits iface) && implsIn iface [("Eq", "List"), ("Eq", "Array"), ("Eq", "Box")]))
             , testCase "clone declares Clone and its impls" (interface "clone" (\iface -> Map.member "Clone" (ifTraits iface) && implsIn iface [("Clone", "List"), ("Clone", "Array"), ("Clone", "Box")]))
@@ -114,6 +125,11 @@ testLibModules =
              ])
         ]
   where
+    implicitSources = [("types", typesSource), ("clone", cloneSource), ("eq", eqSource),
+        ("prelude", preludeSource), ("string", stringSource), ("map", mapSource), ("set", setSource)]
+    implicitDependencies = [("types", []), ("clone", ["types"]), ("eq", ["types"]),
+        ("prelude", ["types", "clone"]), ("string", ["types", "prelude", "eq", "clone"]),
+        ("map", ["types", "prelude", "eq", "clone"]), ("set", ["types", "map", "prelude", "eq", "clone"])]
     checkedSource source = Compile.lowerSource True source `bindResult` \program ->
         validateCompiled program `bindResult` \_ -> Ok program
     checkedPackage source = case Modules.loadFromEntry (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" of
