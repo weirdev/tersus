@@ -125,37 +125,54 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         [] -> 0
         work -> maximum work
 
--- Run 41703123291 (2026-11-03): startup-inclusive wall priorities, not CPU estimates.
+-- Run 41878451096 (2026-11-04): startup-inclusive wall priorities, rounded to seconds with a minimum of one.
 groupWeight :: String -> Int
 groupWeight name = maybe 1 id (lookup name weights)
   where
     weights =
         [("testMirSelfHosted:" ++ show index ++ "/4", weight)
-            | (index, weight) <- zip [1 :: Int ..] [28, 481, 108, 51]]
+            | (index, weight) <- zip [1 :: Int ..] [41, 352, 104, 41]]
         ++ [(original ++ ":" ++ show index ++ "/4", weight)
             | (original, work) <-
-                [("testMirEmit", [510, 439, 564, 44]),
-                 ("testMirVerify", [19, 444, 375, 346]),
-                 ("testNative", [388, 498, 344, 280])],
+                [("testMirEmit", [387, 554, 404, 424]),
+                 ("testMirVerify", [68, 303, 460, 623]),
+                 ("testNative", [587, 593, 422, 606])],
               (index, weight) <- zip [1 :: Int ..] work]
-        ++ [ ("testExamples", 439)
-           , ("testStrings", 409)
-           , ("testBootstrap", 324)
-           , ("testMirErase", 368)
-           , ("testMirReader", 118)
-           , ("testAstReader", 268)
-           , ("testParity", 492)
-           , ("testAstData", 46)
-           , ("testOwnership", 368)
-           , ("testMirData", 174)
-           , ("testMirEmitPrograms", 120)
-           , ("testCopies", 7)
-           , ("testSequence", 7)
-           , ("testMirVerifyPrograms", 30)
-           , ("testSharedCache", 14)
-           , ("testScheduling", 11)
-           , ("testLibModules", 8)
-           , ("testModules", 6)
+        ++ [ ("testExamples", 351)
+           , ("testForallLoops", 5)
+           , ("testLinearArithmetic", 10)
+           , ("testIfJoin", 2)
+           , ("testForLoops", 3)
+           , ("testInferredInvariants", 23)
+           , ("testCfgValidation", 9)
+           , ("testOwnership", 468)
+           , ("testArrays", 7)
+           , ("testPointers", 46)
+           , ("testCopies", 4)
+           , ("testSequence", 5)
+           , ("testStrings", 404)
+           , ("testBytes", 2)
+           , ("testConnectives", 2)
+           , ("testMirData", 424)
+           , ("testMirReader", 466)
+           , ("testMirErase", 343)
+           , ("testMirVerifyPrograms", 303)
+           , ("testMirEmitPrograms", 560)
+           , ("testBootstrap", 469)
+           , ("testEq", 2)
+           , ("testHashMap", 9)
+           , ("testHashSet", 4)
+           , ("testModules", 175)
+           , ("testSharedCache", 420)
+           , ("testScheduling", 7)
+           , ("testAstData", 94)
+           , ("testParser", 48)
+           , ("testParserUnicode", 2)
+           , ("testAstReader", 492)
+           , ("testParity", 522)
+           , ("testLibModules", 11)
+           , ("testNativeStorageModules", 108)
+           , ("testMirSupport", 8)
            ]
 
 groupName :: Test -> String
@@ -246,7 +263,7 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq (assignShards 2 ["newA", "newB", "newC"]) [("newA", 1), ("newC", 1), ("newB", 2)]
     , testCase "largest measured registered groups are spread before small groups" $
         testAssertEq (assignShards 3 ["testNative:1/4", "testMirVerify:1/4", "testMirEmit:1/4", "testBootstrap"])
-            [("testMirEmit:1/4", 1), ("testNative:1/4", 2), ("testBootstrap", 3), ("testMirVerify:1/4", 3)]
+            [("testNative:1/4", 1), ("testBootstrap", 2), ("testMirEmit:1/4", 3), ("testMirVerify:1/4", 3)]
     , testCase "three shard estimated loads differ by at most one short group" $
         testAssertTrue (maximum loads - minimum loads <= 11)
     , testCase "CLI and cold bootstrap are covered exactly once" $
@@ -272,10 +289,10 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq
             [map (groupWeight . groupName) split | (original, split) <- batches,
                 groupName original `elem` ["testNative", "testMirEmit", "testMirVerify"]]
-            [[388,498,344,280], [510,439,564,44], [19,444,375,346]]
+            [[587,593,422,606], [387,554,404,424], [68,303,460,623]]
     , testCase "measured tail groups are not launched as unprofiled one-second work" $
-        testAssertEq (map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership"])
-            [268,492,174,368]
+        testAssertEq (map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms"])
+            [492,522,424,468,420,175,560]
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $
