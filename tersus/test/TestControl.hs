@@ -15,87 +15,101 @@ import Utils
 import TestHarness
 
 -- A call nested in an expression keeps its callee's output contract, and the join of an `if` tries the function's own
+data ControlVerdict = ControlValid | ControlFails String
+
 testCallsAndReturnJoin :: Test
 testCallsAndReturnJoin =
     let one = "fn one(x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + 1; }; "
-     in testCaseSeq
-            "testCallsAndReturnJoin"
-            [ -- Nested calls
-              parseValidProgramHelper (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(y) + 1; }; z = f(1);")
-            , parseValidProgramHelper (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(one(y)); }; z = f(1);")
-            , parseValidProgramHelper (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y; }] { x = 2 * one(y); affirm x > 2 * y; return y + 1; }; z = f(1);")
-            , parseValidProgramHelper "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l) + 2; }] { return push(push(l, 1), 2); }; z = f([1]);"
-            , parseValidateFailProgramHelper (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(y); }; z = f(1);") "Could not prove: return > y + 1"
-            , parseValidateFailProgramHelper "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l) + 3; }] { return push(push(l, 1), 2); }; z = f([1]);" "Could not prove: size(return) = size(l) + 3"
-            , parseValidProgramHelper "fn s(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] shrinks n { r = 0; if n < 1 { r = 0; } else { r = n + s(n - 1); }; return r; }; x = s(4);"
-            , -- Returning paths: the output contract holds if every path entails it
-              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 1; } else { return n + 1; }; }; x = f(3);"
-            , parseValidProgramHelper "fn s(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] shrinks n { if n < 1 { return 0; } else { return n + s(n - 1); }; }; x = s(4);"
-            , parseValidProgramHelper "fn b(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] shrinks n { if n < 1 { return 0; } else { return 1 + b(n / 2); }; }; x = b(9);"
-            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 0; } else { return n - 1; }; }; x = f(3);" "Could not prove: return >= n"
-            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return -1; } else { return n + 1; }; }; x = f(3);" "Could not prove: return >= n"
-            , -- A path that is not the end of the function
-              parseValidProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 1; }; if c > 0 { return n + 1; } else { return n + 2; }; }; x = f(3, 1);"
-            , -- An if that falls through, then a return
-              parseValidProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r; }; x = g(1, 2);"
-            , parseValidateFailProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { r = n; if c > 0 { r = r + 1; } else { r = r - 2; }; return r; }; x = g(1, 2);" "Could not prove: return > 0"
-            , parseValidProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > n; }] { r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; if c > 5 { r = r + 1; }; return r; }; x = g(1, 2);"
-            , -- What a rewrite in the contract needs is tried too: the check of a relation, a rule's input contract
-              parseValidProgramHelper "fn f(c: Int) -> Int [{ }] [{ rewrite checkRel return > 0; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);"
-            , parseValidProgramHelper "fn f(c: Int) -> Int [{ }] [{ rewrite checkGtZero return; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);"
-            , parseValidProgramHelper "axiom posIsSmall(i) [{ affirm i > 0; }] [{ affirm i > -1; }]; fn f(c: Int) -> Int [{ }] [{ rewrite posIsSmall return; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);"
-            , parseValidateFailProgramHelper "axiom posIsSmall(i) [{ affirm i > 0; }] [{ affirm i > -1; }]; fn f(c: Int) -> Int [{ }] [{ rewrite posIsSmall return; affirm return > -5; }] { if c > 0 { return 1; } else { return 0; }; }; x = f(1);" "Rewrite rule posIsSmall input validation failed: Could not prove: return > 0"
-            , parseValidProgramHelper "fn f(c: Int) -> Int [{ }] { x = 0; if c > 0 { x = 1; } else { x = 2; }; rewrite checkRel x > 0; return x; }; y = f(1);"
-            , -- A loop that returns from inside, with the contract on both its returns
-              parseValidProgramHelper "fn f(a: List<Int>) -> Int [{ }] [{ affirm return >= -1; affirm return < size(a); }] { for i in 0..size(a) { if get(a, i) > 2 { return i; }; }; return -1; }; x = f([1, 3]);"
+        rows :: [(String, String, ControlVerdict)]
+        rows =
+            [
+              -- Nested calls
+              ( "valid-one-fn-f-y-int-int-affirm-return-y-1", (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(y) + 1; }; z = f(1);"), ControlValid )
+            , ( "valid-one-fn-f-y-int-int-affirm-return-y-1-2", (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(one(y)); }; z = f(1);"), ControlValid )
+            , ( "valid-one-fn-f-y-int-int-affirm-return-y-x", (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y; }] { x = 2 * one(y); affirm x > 2 * y; return y + 1; }; z = f(1);"), ControlValid )
+            , ( "valid-fn-f-l-list-int-list-int-affirm-size-return", "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l) + 2; }] { return push(push(l, 1), 2); }; z = f([1]);", ControlValid )
+            , ( "fail-one-fn-f-y-int-int-affirm-return-y-1", (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(y); }; z = f(1);"), ControlFails "Could not prove: return > y + 1" )
+            , ( "fail-fn-f-l-list-int-list-int-affirm-size-return", "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l) + 3; }] { return push(push(l, 1), 2); }; z = f([1]);", ControlFails "Could not prove: size(return) = size(l) + 3" )
+            , ( "valid-fn-s-n-int-int-affirm-n-0-affirm-return", "fn s(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] shrinks n { r = 0; if n < 1 { r = 0; } else { r = n + s(n - 1); }; return r; }; x = s(4);", ControlValid )
+              -- Returning paths: the output contract holds if every path entails it
+            , ( "valid-fn-f-n-int-int-affirm-n-0-affirm-return", "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 1; } else { return n + 1; }; }; x = f(3);", ControlValid )
+            , ( "valid-fn-s-n-int-int-affirm-n-0-affirm-return-2", "fn s(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] shrinks n { if n < 1 { return 0; } else { return n + s(n - 1); }; }; x = s(4);", ControlValid )
+            , ( "valid-fn-b-n-int-int-affirm-n-0-affirm-return", "fn b(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] shrinks n { if n < 1 { return 0; } else { return 1 + b(n / 2); }; }; x = b(9);", ControlValid )
+            , ( "fail-fn-f-n-int-int-affirm-n-0-affirm-return", "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 0; } else { return n - 1; }; }; x = f(3);", ControlFails "Could not prove: return >= n" )
+            , ( "fail-fn-f-n-int-int-affirm-n-0-affirm-return-2", "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return -1; } else { return n + 1; }; }; x = f(3);", ControlFails "Could not prove: return >= n" )
+              -- A path that is not the end of the function
+            , ( "valid-fn-f-n-int-c-int-int-affirm-n-0", "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 1; }; if c > 0 { return n + 1; } else { return n + 2; }; }; x = f(3, 1);", ControlValid )
+              -- An if that falls through, then a return
+            , ( "valid-fn-g-n-int-c-int-int-affirm-n-0", "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r; }; x = g(1, 2);", ControlValid )
+            , ( "fail-fn-g-n-int-c-int-int-affirm-n-0", "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { r = n; if c > 0 { r = r + 1; } else { r = r - 2; }; return r; }; x = g(1, 2);", ControlFails "Could not prove: return > 0" )
+            , ( "valid-fn-g-n-int-c-int-int-affirm-n-0-2", "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > n; }] { r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; if c > 5 { r = r + 1; }; return r; }; x = g(1, 2);", ControlValid )
+              -- What a rewrite in the contract needs is tried too: the check of a relation, a rule's input contract
+            , ( "valid-fn-f-c-int-int-rewrite-checkrel-return-0-affirm", "fn f(c: Int) -> Int [{ }] [{ rewrite checkRel return > 0; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);", ControlValid )
+            , ( "valid-fn-f-c-int-int-rewrite-checkgtzero-return-affirm-return", "fn f(c: Int) -> Int [{ }] [{ rewrite checkGtZero return; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);", ControlValid )
+            , ( "valid-axiom-posissmall-i-affirm-i-0-affirm-i-1-fn", "axiom posIsSmall(i) [{ affirm i > 0; }] [{ affirm i > -1; }]; fn f(c: Int) -> Int [{ }] [{ rewrite posIsSmall return; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);", ControlValid )
+            , ( "fail-axiom-posissmall-i-affirm-i-0-affirm-i-1-fn", "axiom posIsSmall(i) [{ affirm i > 0; }] [{ affirm i > -1; }]; fn f(c: Int) -> Int [{ }] [{ rewrite posIsSmall return; affirm return > -5; }] { if c > 0 { return 1; } else { return 0; }; }; x = f(1);", ControlFails "Rewrite rule posIsSmall input validation failed: Could not prove: return > 0" )
+            , ( "valid-fn-f-c-int-int-x-0-if-c-0", "fn f(c: Int) -> Int [{ }] { x = 0; if c > 0 { x = 1; } else { x = 2; }; rewrite checkRel x > 0; return x; }; y = f(1);", ControlValid )
+              -- A loop that returns from inside, with the contract on both its returns
+            , ( "valid-fn-f-a-list-int-int-affirm-return-1-affirm", "fn f(a: List<Int>) -> Int [{ }] [{ affirm return >= -1; affirm return < size(a); }] { for i in 0..size(a) { if get(a, i) > 2 { return i; }; }; return -1; }; x = f([1, 3]);", ControlValid )
             ]
+        runRow (name, source, verdict) =
+            ( name
+            , case verdict of
+                ControlValid -> parseValidProgramHelper source
+                ControlFails err -> parseValidateFailProgramHelper source err
+            )
+     in testCaseNamedSeq "testCallsAndReturnJoin" (map runRow rows)
 
 -- The join of an `if` also tries what the program is about to need (see mergeStates in lib/validation.tersus)
 testIfJoin :: Test
 testIfJoin =
     let fn' body = "fn f(c: Int, y: Int) -> Int [{ affirm y > 0; }] [{ }] { " ++ body ++ " return 0; };"
-     in testCaseSeq
-            "testIfJoin"
-            [ -- An affirm after the if asks for a fact that both branches entail
-              parseValidProgramHelper (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x > 0;")
-            , parseValidProgramHelper (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x < 3; affirm x != 0;")
-            , parseValidateFailProgramHelper (fn' "x = 0; if c > 0 { x = 1; } else { x = -1; }; affirm x > 0;") "Could not prove: x > 0"
-            , parseValidateFailProgramHelper (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x = 1;") "Could not prove: x = 1"
-            , -- Facts from before the if about a variable it assigns, in terms of its new value
-              parseValidProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { x = x + 2; }; affirm x > 1;")
-            , parseValidProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { }; affirm x > 0;")
-            , parseValidateFailProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { x = 0; }; affirm x > 0;") "Could not prove: x > 0"
-            , -- A local joined from the value of a local that keeps it: the one that keeps it keeps what is known of it
-              parseValidProgramHelper "fn f(bytes: &List<Int>, p: Int) -> Int { limit = size(bytes); end = p; if end > limit { end = limit; }; affirm limit = size(bytes); affirm end <= size(bytes); return end; }; return 0;"
-            , parseValidProgramHelper "fn f(bytes: &List<Int>, p: Int) -> Int { end = p; if end > size(bytes) { end = size(bytes); }; affirm end <= size(bytes); return end; }; return 0;"
-            , -- Sequential conditional pushes, whose facts once multiplied at each join
-              parseValidProgramHelper ("fn f(c: Int, xs: List<Int>) -> List<Int> { facts = xs; " ++ concat ["if c > " ++ show i ++ " { facts = push(facts, " ++ show i ++ "); }; " | i <- [0 .. 9 :: Int]] ++ "return facts; }; return 0;")
-            , -- The branches' own facts still count, and so do the else branch's
-              parseValidProgramHelper (fn' "x = 0; if c > 0 { x = 5; } else { x = 5; affirm x = 5; }; affirm x = 5;")
-            , parseValidProgramHelper (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z;")
-            , -- Nested ifs
-              parseValidProgramHelper (fn' "x = 0; if c > 0 { if c > 5 { x = 2; } else { x = 1; }; } else { x = 3; }; affirm x > 0;")
-            , -- A loop body does not have to restate the invariant or the variant in each branch
-              parseValidProgramHelper "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] [{ affirm return = secret; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid < secret { lo = mid + 1; } else { hi = mid; }; }; return lo; }; x = f(617);"
-            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; c = 0; while i > 0 [{ affirm i >= 0; affirm c >= 0; }] shrinks i { if i > 5 { i = i - 2; c = c + 1; } else { i = i - 1; }; }; return c; };"
-            , parseValidateFailProgramHelper "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid < secret { lo = mid; } else { hi = mid; }; }; return lo; };" "Loop variant does not shrink"
-            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { if i > 5 { i = i - 2; } else { i = i + 1; }; }; return 0; };" "Loop variant does not shrink"
-            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { if i > 5 { i = i - 7; } else { i = i - 1; }; }; return 0; };" "Loop invariant is not preserved: Could not prove: i >= 0"
-            , -- The same when the loop body returns, which ends its path with the loop end check
-              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { lo = 0; hi = n; while lo < hi [{ affirm lo <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid > 100 { return mid; }; if mid < 7 { lo = mid + 1; } else { hi = mid; }; }; return lo; }; x = f(30);"
-            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { lo = 0; hi = n; while lo < hi [{ affirm lo <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid > 100 { return mid; }; if mid < 7 { lo = mid; } else { hi = mid; }; }; return lo; };" "Loop variant does not shrink"
-            , -- A fact that needs a forall is not looked for, and is not wrongly kept
-              parseValidateFailProgramHelper "fn f(a: List<Int>, c: Int) -> Int [{ affirm size(a) > 1; }] { l = a; if c > 0 { l = set(l, 0, 1); } else { l = set(l, 0, 2); }; affirm get(l, 0) = 1; return 0; };" "Could not prove: get(l, 0) = 1"
+        rows :: [(String, String, ControlVerdict)]
+        rows =
+            [
+              -- An affirm after the if asks for a fact that both branches entail
+              ( "valid-fn-x-0-if-c-0-x-1-else-x", (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x > 0;"), ControlValid )
+            , ( "valid-fn-x-0-if-c-0-x-1-else-x-2", (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x < 3; affirm x != 0;"), ControlValid )
+            , ( "fail-fn-x-0-if-c-0-x-1-else-x", (fn' "x = 0; if c > 0 { x = 1; } else { x = -1; }; affirm x > 0;"), ControlFails "Could not prove: x > 0" )
+            , ( "fail-fn-x-0-if-c-0-x-1-else-x-2", (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x = 1;"), ControlFails "Could not prove: x = 1" )
+              -- Facts from before the if about a variable it assigns, in terms of its new value
+            , ( "valid-fn-x-y-if-c-0-x-x-1-else", (fn' "x = y; if c > 0 { x = x + 1; } else { x = x + 2; }; affirm x > 1;"), ControlValid )
+            , ( "valid-fn-x-y-if-c-0-x-x-1-else-2", (fn' "x = y; if c > 0 { x = x + 1; } else { }; affirm x > 0;"), ControlValid )
+            , ( "fail-fn-x-y-if-c-0-x-x-1-else", (fn' "x = y; if c > 0 { x = x + 1; } else { x = 0; }; affirm x > 0;"), ControlFails "Could not prove: x > 0" )
+            , ( "joined-local-keeps-source-size-fact", "fn f(bytes: &List<Int>, p: Int) -> Int { limit = size(bytes); end = p; if end > limit { end = limit; }; affirm limit = size(bytes); affirm end <= size(bytes); return end; }; return 0;", ControlValid )
+            , ( "joined-local-keeps-borrowed-size-bound", "fn f(bytes: &List<Int>, p: Int) -> Int { end = p; if end > size(bytes) { end = size(bytes); }; affirm end <= size(bytes); return end; }; return 0;", ControlValid )
+            , ( "sequential-conditional-push-facts", "fn f(c: Int, xs: List<Int>) -> List<Int> { facts = xs; " ++ concat ["if c > " ++ show i ++ " { facts = push(facts, " ++ show i ++ "); }; " | i <- [0 .. 9 :: Int]] ++ "return facts; }; return 0;", ControlValid )
+              -- The branches' own facts still count, and so do the else branch's
+            , ( "valid-fn-x-0-if-c-0-x-5-else-x", (fn' "x = 0; if c > 0 { x = 5; } else { x = 5; affirm x = 5; }; affirm x = 5;"), ControlValid )
+            , ( "valid-fn-x-0-z-0-if-c-0-x-1", (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z;"), ControlValid )
+              -- Nested ifs
+            , ( "valid-fn-x-0-if-c-0-if-c-5-x", (fn' "x = 0; if c > 0 { if c > 5 { x = 2; } else { x = 1; }; } else { x = 3; }; affirm x > 0;"), ControlValid )
+              -- A loop body does not have to restate the invariant or the variant in each branch
+            , ( "valid-fn-f-secret-int-int-affirm-secret-0-affirm-secret", "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] [{ affirm return = secret; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid < secret { lo = mid + 1; } else { hi = mid; }; }; return lo; }; x = f(617);", ControlValid )
+            , ( "valid-fn-f-n-int-int-affirm-n-0-i-n", "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; c = 0; while i > 0 [{ affirm i >= 0; affirm c >= 0; }] shrinks i { if i > 5 { i = i - 2; c = c + 1; } else { i = i - 1; }; }; return c; };", ControlValid )
+            , ( "fail-fn-f-secret-int-int-affirm-secret-0-affirm-secret", "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid < secret { lo = mid; } else { hi = mid; }; }; return lo; };", ControlFails "Loop variant does not shrink" )
+            , ( "fail-fn-f-n-int-int-affirm-n-0-i-n", "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { if i > 5 { i = i - 2; } else { i = i + 1; }; }; return 0; };", ControlFails "Loop variant does not shrink" )
+            , ( "fail-fn-f-n-int-int-affirm-n-0-i-n-2", "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { if i > 5 { i = i - 7; } else { i = i - 1; }; }; return 0; };", ControlFails "Loop invariant is not preserved: Could not prove: i >= 0" )
+              -- The same when the loop body returns, which ends its path with the loop end check
+            , ( "valid-fn-f-n-int-int-affirm-n-0-lo-0", "fn f(n: Int) -> Int [{ affirm n >= 0; }] { lo = 0; hi = n; while lo < hi [{ affirm lo <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid > 100 { return mid; }; if mid < 7 { lo = mid + 1; } else { hi = mid; }; }; return lo; }; x = f(30);", ControlValid )
+            , ( "fail-fn-f-n-int-int-affirm-n-0-lo-0", "fn f(n: Int) -> Int [{ affirm n >= 0; }] { lo = 0; hi = n; while lo < hi [{ affirm lo <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid > 100 { return mid; }; if mid < 7 { lo = mid; } else { hi = mid; }; }; return lo; };", ControlFails "Loop variant does not shrink" )
+              -- A fact that needs a forall is not looked for, and is not wrongly kept
+            , ( "fail-fn-f-a-list-int-c-int-int-affirm-size", "fn f(a: List<Int>, c: Int) -> Int [{ affirm size(a) > 1; }] { l = a; if c > 0 { l = set(l, 0, 1); } else { l = set(l, 0, 2); }; affirm get(l, 0) = 1; return 0; };", ControlFails "Could not prove: get(l, 0) = 1" )
             ]
+        runRow (name, source, verdict) =
+            ( name
+            , case verdict of
+                ControlValid -> parseValidProgramHelper source
+                ControlFails err -> parseValidateFailProgramHelper source err
+            )
+     in testCaseNamedSeq "testIfJoin" (map runRow rows)
 
 -- for i in lo..hi counts a loop variable, and the validator is given its bounds, its termination and (see
 -- testInferredInvariants) what grows in step with it
 testForLoops :: Test
 testForLoops =
     let sumList = "fn total(a: List<Int>) -> Int { s = 0; for i in 0..size(a) { s = s + get(a, i); }; return s; };"
-        parseFailsWith source expected = case parseStatementBlock source of
-            Left err -> testAssertErrorContains expected (Error (show err) :: Result () String)
-            Right _ -> Just ("Expected a parse error for: " ++ source)
+        parseFailsWith = parseFailsWithHelper
      in testCaseSeq
             "testForLoops"
             [ -- Evaluation: the range is half open, hi is read once, and the variable is hi afterwards
@@ -191,14 +205,14 @@ testInferredInvariants =
             , -- The first elements of a list stay as they were when the loop only pushes
               parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 1) = size(p); }] { out = push(push([], v), size(p)); for x in p { out = push(out, x); }; return out; };"
             , parseValidProgramHelper "fn f(p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 0) = 5; affirm get(return, 1) = 6; }] { out = [5, 6]; for x in p { out = push(out, x); }; return out; };"
-            , parseValidateFailProgramHelper "fn f(p: List<Int>) -> List<Int> [{ affirm size(p) > 0; }] [{ affirm get(return, 1) = 6; }] { out = [5, 6]; for i in 0..size(p) { out = set(out, 1, get(p, i)); }; return out; };" "Could not prove: get(return, 1) = 6"
+            , parseValidateFailProgramHelper "fn f(p: List<Int>) -> List<Int> [{ affirm size(p) > 0; }] [{ affirm get(return, 1) = 6; }] { out = [5, 6]; for i in 0..size(p) { out = set(out, 1, get(p, i)); }; return out; };" "Could not prove: index < size(list) (in f)"
             , -- The elements of literal lists do not push a counter or a comparison out of the candidates
               parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm i = n; return 0; }; x = f(3);"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm get(a, 1) = 2; return 0; }; x = f(3);"
             , -- A loop that returns infers its invariants too, one candidate at a time
               parseValidProgramHelper "fn f(a: List<Int>) -> Int { out = []; for i in 0..size(a) { if get(a, i) > 2 { return i; }; out = push(out, 0); }; return -1; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = size(a); return -1; };"
-            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = 0; return -1; };" "Could not prove: i = 0"
+            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = 0; return -1; };" "Could not prove: index >= 0 (in f)"
             , -- Starting from something that is not a number: a copy of an argument, or a counter bounded by a parameter
               parseValidProgramHelper "fn f(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); }] { out = clone(a); for i in 0..size(a) { out = set(out, i, 0); }; return out; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { c = clone(a); i = 0; while i < size(a) shrinks size(a) - i { c = set(c, i, 1); i = i + 1; }; affirm size(c) = size(a); return 0; };"

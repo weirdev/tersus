@@ -33,6 +33,17 @@ testCopies =
         accepted source = case compileSource source of
             Ok _ -> Nothing
             Error e -> Just ("Expected to be accepted, got: " ++ e)
+        placesCases =
+            [ ("the error has the line of the statement / and the line where it was moved", "xs = [1];\nys = xs;\nn = size(xs);\nreturn n;", ["line 3:1", "moved at line 2:1"], False)
+            , ("in a function", "fn f(xs: List<Int>) -> Int {\n    ys = xs;\n    return size(xs);\n};\nreturn f([1]);", ["in f, line 3:5"], False)
+            , ("in a branch", "fn f(c: Bool, xs: List<Int>) -> Int {\n    if c {\n        ys = xs;\n    };\n    return size(xs);\n};\nreturn f(true, [1]);", ["in f, line 5:5"], False)
+            , ("and the name of a variable that is read", "rows = push([], [1]);\nrow = get(rows, 0);\nrow = push(row, 2);\nreturn 0;", ["cannot move row (rows[..]) out of a list"], False)
+            , ("a program that is fine is accepted", "xs = [1];\nys = clone(xs);\nreturn size(xs) + size(ys);", [], True)
+            , ("several errors are reported", "xs = [1];\nys = xs;\nzs = xs;\nn = size(xs);\nreturn n;", ["line 4:1"], False)
+            ]
+        placedAll source expecteds = case [err | Just err <- [placed source expected | expected <- expecteds]] of
+            [] -> Nothing
+            err : _ -> Just err
      in TestList
             "testCopies"
             [ TestList
@@ -190,13 +201,7 @@ testCopies =
                 ]
             , TestList
                 "places"
-                [ testCase "the error has the line of the statement" (placed "xs = [1];\nys = xs;\nn = size(xs);\nreturn n;" "line 3:1")
-                , testCase "and the line where it was moved" (placed "xs = [1];\nys = xs;\nn = size(xs);\nreturn n;" "moved at line 2:1")
-                , testCase "in a function" (placed "fn f(xs: List<Int>) -> Int {\n    ys = xs;\n    return size(xs);\n};\nreturn f([1]);" "in f, line 3:5")
-                , testCase "in a branch" (placed "fn f(c: Bool, xs: List<Int>) -> Int {\n    if c {\n        ys = xs;\n    };\n    return size(xs);\n};\nreturn f(true, [1]);" "in f, line 5:5")
-                , testCase "and the name of a variable that is read" (placed "rows = push([], [1]);\nrow = get(rows, 0);\nrow = push(row, 2);\nreturn 0;" "cannot move row (rows[..]) out of a list")
-                , testCase "a program that is fine is accepted" (accepted "xs = [1];\nys = clone(xs);\nreturn size(xs) + size(ys);")
-                , testCase "several errors are reported" (placed "xs = [1];\nys = xs;\nzs = xs;\nn = size(xs);\nreturn n;" "line 4:1")
+                [ TestList "table" [ testCase name (if acceptedRow then accepted source else placedAll source expecteds) | (name, source, expecteds, acceptedRow) <- placesCases ]
                 ]
             ]
 

@@ -16,15 +16,34 @@ testGenerics =
             _ -> Just ("Expected a parse error for: " ++ source)
         pairBox = "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn first(self: &Self) -> T { return clone(self.a); }; fn swap(self: Self) -> Self { return Self { a: self.b, b: self.a }; }; }; "
         lead = "fn lead<T>(a: &List<T>) -> T [{ define s = size(a); rewrite eqToGtZero s; affirm s > 0; }] [{ }] { return clone(get(a, 0)); }; "
+        leadCases =
+            [ ("an Int", (lead ++ "return lead(push([], 7)) + 1;"), (VInt 8))
+            , ("a Bool", (lead ++ "return lead(push([], true));"), (VBool True))
+            , ("a list", (lead ++ "return lead(push([], push([], 3)));"), (VList [VInt 3]))
+            , ("a struct", (lead ++ "struct P { x: Int }; return lead(push([], P { x: 4 })).x;"), (VInt 4))
+            , ("several types in one program", (lead ++ "return lead(push([], 7)) + size(lead(push([], push([], 1)))) + 10;"), (VInt 18))
+            ]
+        pairCases =
+            [ ("a struct for a type", "struct Pair<T> { a: T, b: T };  p = Pair<Int> { a: 1, b: 2 }; return p.a + p.b;", Right (VInt 3))
+            , ("a value is printed as the struct", "struct Pair<T> { a: T, b: T };  return Pair<Bool> { a: true, b: false };", Right (VData "Pair" [("a", VBool True), ("b", VBool False)]))
+            , ("structs of two types in one program", "struct Pair<T> { a: T, b: T };  x = Pair<Int> { a: 1, b: 2 }; y = Pair<List<Int>> { a: push([], 5), b: [] }; return size(y.a) + x.b;", Right (VInt 3))
+            , ("the first field is an empty list and the second decides its type", "struct Pair<T> { a: T, b: T };  y = Pair<List<Int>> { a: [], b: push([], 5) }; return size(y.a) + get(y.b, 0);", Right (VInt 5))
+            , ("a returned instance has an empty list field", "struct Pair<T> { a: T, b: T };  fn none() -> Pair<List<Int>> { return Pair<List<Int>> { a: [], b: [] }; }; return size(none().a);", Right (VInt 0))
+            , ("an instance is made by pushing to an empty list in a generic function", "struct Pair<T> { a: T, b: T };  fn wrap<T>(x: T) -> Pair<List<T>> { return Pair<List<T>> { a: push([], x), b: [] }; }; return get(wrap(3).a, 0);", Right (VInt 3))
+            , ("a type is a type of its own", "struct Pair<T> { a: T, b: T };  fn f(p: Pair<Int>) -> Int { return p.a; }; return f(Pair<Bool> { a: true, b: false });", Left "argument 1 of f: expected Pair<Int>, got Pair<Bool>")
+            , ("the fields have the type", "struct Pair<T> { a: T, b: T };  x = Pair<Int> { a: 1, b: true }; return 0;", Left "field b of Pair<Int>: expected Int, got Bool")
+            , ("structs of one type are compared", "struct Pair<T> { a: T, b: T }; impl<T> Eq for Pair<T> { }; return Pair<Int> { a: 1, b: 2 } = Pair<Int> { a: 1, b: 2 };", Right (VBool True))
+            , ("a function over any type of one", "struct Pair<T> { a: T, b: T };  fn swap<U>(p: &Pair<U>) -> Pair<U> { return Pair<U> { a: clone(p.b), b: clone(p.a) }; }; q = swap(Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }); return q;", Right (VData "Pair" [("a", VList [VInt 2, VInt 3]), ("b", VList [VInt 1])]))
+            , ("its type is the type of the struct", "struct Pair<T> { a: T, b: T };  fn first<U>(p: Pair<U>) -> U { return p.a; }; return first(Pair<Bool> { a: true, b: false });", Right (VBool True))
+            , ("an update keeps the type", "struct Pair<T> { a: T, b: T };  a = Pair<Int> { a: 1, b: 2 }; b = Pair<Int> { b: 9, ..a }; return b.a + b.b;", Right (VInt 10))
+            , ("a struct that holds another of its type", "struct Pair<T> { a: T, b: T };  struct Wrap<T> { inner: Pair<T>, tag: Int }; fn mk<T>(x: T, y: T) -> Wrap<T> { return Wrap<T> { inner: Pair<T> { a: x, b: y }, tag: 7 }; }; return mk(true, false).tag;", Right (VInt 7))
+            , ("in a list, an array and a Box", "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct Pair<T> { a: T, b: T }; impl<T> Clone for Pair<T> { }; l = push([], Pair<Int> { a: 1, b: 2 }); a = array(2, Pair<Bool> { a: true, b: true }); b = Box::new(Pair<Int> { a: 5, b: 6 }); return get(l, 0).b + b.a + size(a);", Right (VInt 9))
+            ]
      in TestList
             "testGenerics"
             [ TestList
                 "one function for any type"
-                [ testCase "an Int" (runs (lead ++ "return lead(push([], 7)) + 1;") (VInt 8))
-                , testCase "a Bool" (runs (lead ++ "return lead(push([], true));") (VBool True))
-                , testCase "a list" (runs (lead ++ "return lead(push([], push([], 3)));") (VList [VInt 3]))
-                , testCase "a struct" (runs (lead ++ "struct P { x: Int }; return lead(push([], P { x: 4 })).x;") (VInt 4))
-                , testCase "several types in one program" (runs (lead ++ "return lead(push([], 7)) + size(lead(push([], push([], 1)))) + 10;") (VInt 18))
+                [ TestList "lead<T> over types" [ testCase name (runs source expected) | (name, source, expected) <- leadCases ]
                 , testCase "the type is a parameter and a result" (runs "fn id<T>(a: T) -> T { return a; }; l = id(push([], 3)); return id(l);" (VList [VInt 3]))
                 , testCase "two arguments of one type" (runs "fn same<T: Eq>(a: T, b: T) -> Bool { return a = b; }; return same(1, 1) = same(true, false);" (VBool False))
                 , testCase "two types" (runs "fn pick<A, B>(a: A, b: B) -> B { return b; }; return pick(1, push([], 3));" (VList [VInt 3]))
@@ -63,20 +82,7 @@ testGenerics =
                 ]
             , TestList
                 "structs with types"
-                [ testCase "a struct for a type" (runs "struct Pair<T> { a: T, b: T };  p = Pair<Int> { a: 1, b: 2 }; return p.a + p.b;" (VInt 3))
-                , testCase "a value is printed as the struct" (runs "struct Pair<T> { a: T, b: T };  return Pair<Bool> { a: true, b: false };" (VData "Pair" [("a", VBool True), ("b", VBool False)]))
-                , testCase "structs of two types in one program" (runs "struct Pair<T> { a: T, b: T };  x = Pair<Int> { a: 1, b: 2 }; y = Pair<List<Int>> { a: push([], 5), b: [] }; return size(y.a) + x.b;" (VInt 3))
-                , testCase "the first field is an empty list and the second decides its type" (runs "struct Pair<T> { a: T, b: T };  y = Pair<List<Int>> { a: [], b: push([], 5) }; return size(y.a) + get(y.b, 0);" (VInt 5))
-                , testCase "a returned instance has an empty list field" (runs "struct Pair<T> { a: T, b: T };  fn none() -> Pair<List<Int>> { return Pair<List<Int>> { a: [], b: [] }; }; return size(none().a);" (VInt 0))
-                , testCase "an instance is made by pushing to an empty list in a generic function" (runs "struct Pair<T> { a: T, b: T };  fn wrap<T>(x: T) -> Pair<List<T>> { return Pair<List<T>> { a: push([], x), b: [] }; }; return get(wrap(3).a, 0);" (VInt 3))
-                , testCase "a type is a type of its own" (rejected "struct Pair<T> { a: T, b: T };  fn f(p: Pair<Int>) -> Int { return p.a; }; return f(Pair<Bool> { a: true, b: false });" "argument 1 of f: expected Pair<Int>, got Pair<Bool>")
-                , testCase "the fields have the type" (rejected "struct Pair<T> { a: T, b: T };  x = Pair<Int> { a: 1, b: true }; return 0;" "field b of Pair<Int>: expected Int, got Bool")
-                , testCase "structs of one type are compared" (runs "struct Pair<T> { a: T, b: T }; impl<T> Eq for Pair<T> { }; return Pair<Int> { a: 1, b: 2 } = Pair<Int> { a: 1, b: 2 };" (VBool True))
-                , testCase "a function over any type of one" (runs "struct Pair<T> { a: T, b: T };  fn swap<U>(p: &Pair<U>) -> Pair<U> { return Pair<U> { a: clone(p.b), b: clone(p.a) }; }; q = swap(Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }); return q;" (VData "Pair" [("a", VList [VInt 2, VInt 3]), ("b", VList [VInt 1])]))
-                , testCase "its type is the type of the struct" (runs "struct Pair<T> { a: T, b: T };  fn first<U>(p: Pair<U>) -> U { return p.a; }; return first(Pair<Bool> { a: true, b: false });" (VBool True))
-                , testCase "an update keeps the type" (runs "struct Pair<T> { a: T, b: T };  a = Pair<Int> { a: 1, b: 2 }; b = Pair<Int> { b: 9, ..a }; return b.a + b.b;" (VInt 10))
-                , testCase "a struct that holds another of its type" (runs "struct Pair<T> { a: T, b: T };  struct Wrap<T> { inner: Pair<T>, tag: Int }; fn mk<T>(x: T, y: T) -> Wrap<T> { return Wrap<T> { inner: Pair<T> { a: x, b: y }, tag: 7 }; }; return mk(true, false).tag;" (VInt 7))
-                , testCase "in a list, an array and a Box" (runs "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct Pair<T> { a: T, b: T }; impl<T> Clone for Pair<T> { }; l = push([], Pair<Int> { a: 1, b: 2 }); a = array(2, Pair<Bool> { a: true, b: true }); b = Box::new(Pair<Int> { a: 5, b: 6 }); return get(l, 0).b + b.a + size(a);" (VInt 9))
+                [ TestList "Pair<T> cases" [ testCase name (case outcome of Left expected -> rejected source expected; Right value -> runs source value) | (name, source, outcome) <- pairCases ]
                 , testCase "a type and a size" (runs "struct Vec<T, n> { cells: Array<T, n>, used: Int }; fn capacity<T, m>(v: &Vec<T, m>) -> Int { return m + v.used; }; return capacity(Vec<Int, 3> { cells: #[1, 2, 3], used: 1 }) * 10 + capacity(Vec<Bool, 2> { cells: #[true, false], used: 0 });" (VInt 42))
                 , testCase "an array of the type and the size is known" (valid "struct Vec<T, n> { cells: Array<T, n>, used: Int }; v = Vec<Int, 3> { cells: #[1, 2, 3], used: 0 }; affirm size(v.cells) = 3; return get(v.cells, 2);")
                 , testCase "a Box of an array of the type" (runs "struct Holder<T> { items: Box<Array<T>>, len: Int }; h = Holder<List<Int>> { items: Array::boxed(2, push([], 1)), len: 2 }; return clone(get(h.items, 1));" (VList [VInt 1]))

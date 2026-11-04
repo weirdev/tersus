@@ -779,8 +779,12 @@ sameOnModel what program = case mapResult insertOwnership (nativeProgram program
             (Right a, Error e) -> Just (what ++ ": the model returns " ++ show a ++ " where the executor stops with " ++ e)
 
 -- A program lowered and run on the model, with the answer of the executor, as source
-onSource :: String -> String -> TestResult
-onSource name source = onProgram name (compileSource source)
+-- (through TestHarness.compileOnce, so validated programs are compiled once and shared with other groups;
+-- only successful compiles are cached by the harness)
+onSource :: String -> String -> IO TestResult
+onSource name source = do
+    compiled <- compileOnce source
+    pure (onProgram name compiled)
 
 onProgram :: String -> Result Program String -> TestResult
 onProgram name compiled =
@@ -788,20 +792,27 @@ onProgram name compiled =
         Error e -> Just (name ++ " does not compile: " ++ e)
         Ok program -> sameOnModel name program
 
+-- Array-using examples are excluded at list construction, not silently passed in onFile: the heap model
+-- holds values of the heap and has no array heap model, so running these would be a blind spot (see the
+-- explicit blind-spot case in testOwnership). This list is the usesArrays match over nativeExamples.
+arrayExamples :: [FilePath]
+arrayExamples =
+    [ "examples/array_data.tersus", "examples/array_owners.tersus", "examples/array_sizes.tersus", "examples/arrays.tersus"
+    , "examples/borrowing.tersus", "examples/box_array.tersus", "examples/generic_structs.tersus", "examples/list_methods.tersus"
+    , "examples/sized_structs.tersus", "examples/type_parameters.tersus", "examples/vec.tersus"
+    ]
+
+ownershipExamples :: [FilePath]
+ownershipExamples = [path | path <- nativeExamples, path `notElem` arrayExamples]
+
 onFile :: FilePath -> IO TestResult
 onFile path = do
     loaded <- loadFromFilesystem path
     case loaded of
         Right (PackageResult _) -> do
-            source <- readFile path
-            if usesArrays source
-                then pure Nothing
-                else do
-                    compiled <- programFromFile path
-                    pure (onProgram path compiled)
-        _ -> do
-            source <- readFile path
-            pure (if usesArrays source then Nothing else onSource path source)
+            compiled <- programFromFile path
+            pure (onProgram path compiled)
+        _ -> readFile path >>= onSource path
 
 -- The same for a program that is lowered without being validated
 onLowered :: String -> String -> TestResult
@@ -830,40 +841,39 @@ functionText name text = unlines (takeWhile (/= "}") (dropWhile (not . isInfixOf
 -- What the pass decides, for programs where the answer is clear
 planTests :: [Test]
 planTests =
-    [ TestCase "a list pushed to in a loop is changed in place" . pure $
-        withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue ("listPush<Int>(move _1" `isInfixOf` m))
-    , -- an array is held inline and has nothing in it to free, so the pass leaves it alone (the model of the heap holds values of the
-      -- heap, and the programs with arrays are not run on it)
-      TestCase "an array is not owned: no copy, no move, nothing to free" . pure $
-        withOwned "a = array(3, 0); b = set(a, 0, 1); return get(b, 0) + get(a, 1) + size(a);" (\t -> testAssertEq (count "clone" t, count "move" t, count "drop" t, count "peek" t) (0, 0, 0, 0))
-    , TestCase "an array beside a list: only the list is freed" . pure $
-        withOwned "l = [1]; a = array(2, 0); a = set(a, 1, size(l)); return get(a, 1);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue (not ("drop _2" `isInfixOf` m) && "drop _1" `isInfixOf` m))
-    , TestCase "a list that is cloned for a push is copied once" . pure $
-        withOwned "x = [1]; y = push(clone(x), 2); return size(x) + size(y);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
-    , TestCase "a match takes the fields out of the value" . pure $
-        withOwned "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));" (\t -> let f = functionText "sum" t in testAssertEq (count "clone" f, count "take " f) (0, 2))
-    , TestCase "a part that is only read is looked at" . pure $
-        withOwned "rows = [[1], [2, 3]]; return size(get(rows, 1));" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m, count "peek Get" m) (0, 1))
-    , TestCase "a part that is kept is copied" . pure $
-        withOwned "rows = [[1], [2, 3]]; row = clone(get(rows, 1)); rows = set(rows, 0, clone(row)); return size(row);" (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1))
-    , TestCase "a call with a clone of an argument that is used after it copies the argument" . pure $
-        withOwned "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(clone(l)) + n(l);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
-    , TestCase "a cast is read from the value itself" . pure $
-        withOwned "enum S { A { r: Int }, C }; x = S::A { r: 4 }; return (x as S::A).r;" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue (not (" as S::A;" `isInfixOf` t)))
-    , TestCase "a parameter that is assigned a part is freed first" . pure $
-        withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "copy" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
-    , TestCase "a copy of a parameter is one copy" . pure $
-        withOwned "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);" (\t -> testAssertEq (count "clone" (functionText "f" t)) 1)
-    , TestCase "a value moved on every path is not dropped at the return" . pure $
-        withOwned "l = [1]; m = l; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (not ("drop _1" `isInfixOf` m) && "drop _2" `isInfixOf` m))
-    , TestCase "a value moved on one path is dropped under a test of its flag" . pure $
-        withOwned "l = [1, 2]; m = [0]; if size(l) = 2 { m = l; }; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (count "drop _1" m == 1 && "drop _2;" `isInfixOf` m && "const false;" `isInfixOf` m))
-    , TestCase "a value that is overwritten is dropped before the assignment" . pure $
-        withOwned "x = [1]; x = [1, 2]; return size(x);" (\t -> let m = functionText "main" t in testAssertEq (count "drop _1" m) 2)
-    , TestCase "a field taken on one path is dropped under a test of its flag" . pure $
-        withOwned "struct S { a: List<Int>, b: List<Int> }; s = S { a: [1, 2], b: [3, 4] }; n = 0; if size(s.b) = 2 { x = s.a; n = size(x); }; return n + size(s.b);" (\t -> let m = functionText "main" t in testAssertTrue ("take (_" `isInfixOf` m && "drop _" `isInfixOf` m && count "const false;" m >= 2))
-    ]
+    [TestCase label . pure $ withOwned source (\t -> testAssertEq (map (\needle -> count needle (scopeText t scope)) needles) expected) | (label, source, scope, needles, expected) <- countCases]
+        ++ [ TestCase "a list pushed to in a loop is changed in place" . pure $
+                withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue ("listPush<Int>(move _1" `isInfixOf` m))
+           , TestCase "an array beside a list: only the list is freed" . pure $
+                withOwned "l = [1]; a = array(2, 0); a = set(a, 1, size(l)); return get(a, 1);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue (not ("drop _2" `isInfixOf` m) && "drop _1" `isInfixOf` m))
+           , TestCase "a part that is kept is copied" . pure $
+                withOwned "rows = [[1], [2, 3]]; row = clone(get(rows, 1)); rows = set(rows, 0, clone(row)); return size(row);" (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1))
+           , TestCase "a cast is read from the value itself" . pure $
+                withOwned "enum S { A { r: Int }, C }; x = S::A { r: 4 }; return (x as S::A).r;" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue (not (" as S::A;" `isInfixOf` t)))
+           , TestCase "a parameter that is assigned a part is freed first" . pure $
+                withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "copy" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
+           , TestCase "a value moved on every path is not dropped at the return" . pure $
+                withOwned "l = [1]; m = l; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (not ("drop _1" `isInfixOf` m) && "drop _2" `isInfixOf` m))
+           , TestCase "a value moved on one path is dropped under a test of its flag" . pure $
+                withOwned "l = [1, 2]; m = [0]; if size(l) = 2 { m = l; }; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (count "drop _1" m == 1 && "drop _2;" `isInfixOf` m && "const false;" `isInfixOf` m))
+           , TestCase "a field taken on one path is dropped under a test of its flag" . pure $
+                withOwned "struct S { a: List<Int>, b: List<Int> }; s = S { a: [1, 2], b: [3, 4] }; n = 0; if size(s.b) = 2 { x = s.a; n = size(x); }; return n + size(s.b);" (\t -> let m = functionText "main" t in testAssertTrue ("take (_" `isInfixOf` m && "drop _" `isInfixOf` m && count "const false;" m >= 2))
+           ]
   where
+    -- Pure count-tuple cases: (label, source, function scope or "" for whole text, needles, expected counts)
+    -- An array is held inline and has nothing in it to free, so the pass leaves it alone (the heap model
+    -- holds values of the heap, and programs with arrays are not run on it).
+    countCases =
+        [ ("an array is not owned: no copy, no move, nothing to free", "a = array(3, 0); b = set(a, 0, 1); return get(b, 0) + get(a, 1) + size(a);", "", ["clone", "move", "drop", "peek"], [0, 0, 0, 0])
+        , ("a list that is cloned for a push is copied once", "x = [1]; y = push(clone(x), 2); return size(x) + size(y);", "main", ["clone"], [1])
+        , ("a match takes the fields out of the value", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));", "sum", ["clone", "take "], [0, 2])
+        , ("a part that is only read is looked at", "rows = [[1], [2, 3]]; return size(get(rows, 1));", "main", ["clone", "peek Get"], [0, 1])
+        , ("a call with a clone of an argument that is used after it copies the argument", "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(clone(l)) + n(l);", "main", ["clone"], [1])
+        , ("a copy of a parameter is one copy", "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);", "f", ["clone"], [1])
+        , ("a value that is overwritten is dropped before the assignment", "x = [1]; x = [1, 2]; return size(x);", "main", ["drop _1"], [2])
+        ]
+    scopeText t "" = t
+    scopeText t scope = functionText scope t
     withOwned source check = either Just check (ownedText source)
     orElseT Nothing b = b
     orElseT a _ = a
@@ -933,12 +943,14 @@ mainProgram locals stmts =
 -- is looked at is only looked at by the statements that follow it in its block
 windowTests :: [Test]
 windowTests =
-    [ TestCase "a part is copied when what it is part of changes before it is read" . pure $
+    [ TestCase "a part is copied when what it is part of changes before it is read" $ do
         let source = "rows = [[1, 2], [3]]; part = get(rows, 0); rows = set(rows, 0, [9]); return size(part);"
-         in onSource "the part" source `orElseT` either Just (\t -> testAssertTrue (count "copy" (functionText "main" t) >= 1)) (ownedText source)
-    , TestCase "a part is looked at when nothing changes before it is read" . pure $
+        model <- onSource "the part" source
+        pure (model `orElseT` either Just (\t -> testAssertTrue (count "copy" (functionText "main" t) >= 1)) (ownedText source))
+    , TestCase "a part is looked at when nothing changes before it is read" $ do
         let source = "rows = [[1, 2], [3]]; n = size(get(rows, 0)); rows = set(rows, 0, [9]); return n + size(rows);"
-         in onSource "the part" source `orElseT` either Just (\t -> let m = functionText "main" t in testAssertEq (count "peek Get" m, count "copy" m) (1, 0)) (ownedText source)
+        model <- onSource "the part" source
+        pure (model `orElseT` either Just (\t -> let m = functionText "main" t in testAssertEq (count "peek Get" m, count "copy" m) (1, 0)) (ownedText source))
     ]
   where
     orElseT Nothing b = b
@@ -955,10 +967,10 @@ referenceModelTests =
         cloneCounter [Assign (Local 0) (CopyOf (Copy (Local 1)))] 7
     , testCase "a structural self-copy still dispatches member Clone implementations" $
         testAssertEq (runOwned clonedMembers) (Right (Just (MInt 4)))
-    , testCase "an indexed reference captures its index" (onSource "indexed reference" "xs = [7, 9]; i = 0; r = &get(xs, i); i = 1; return *r;")
-    , testCase "an intermediate reference field is followed" (onSource "reference field" "struct W { r: &List<Int> }; xs = [7]; w = W { r: &xs }; z = &get(*w.r, 0); return *z;")
-    , testCase "a reference copy keeps the same place" (onSource "reference copy" "xs = [7]; r = &xs; q = r; return get(*q, 0);")
-    , testCase "a returned reference keeps its caller's frame" (onSource "returned reference" "fn head(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; xs = [7]; r = head(xs); return *r;")
+    , TestCase "an indexed reference captures its index" (onSource "indexed reference" "xs = [7, 9]; i = 0; r = &get(xs, i); i = 1; return *r;")
+    , TestCase "an intermediate reference field is followed" (onSource "reference field" "struct W { r: &List<Int> }; xs = [7]; w = W { r: &xs }; z = &get(*w.r, 0); return *z;")
+    , TestCase "a reference copy keeps the same place" (onSource "reference copy" "xs = [7]; r = &xs; q = r; return get(*q, 0);")
+    , TestCase "a returned reference keeps its caller's frame" (onSource "returned reference" "fn head(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; xs = [7]; r = head(xs); return *r;")
     , rejects "a changed scalar loan cannot be refreshed by forwarding" TInt
         [ Assign (Local 1) (Use (Const (CInt 1)))
         , Assign (Local 2) (Borrow (Local 1) [] False)
@@ -1173,8 +1185,10 @@ testOwnership :: Test
 testOwnership =
     TestList
         "testOwnership"
-        [ TestList "examples" [TestCase path (onFile path) | path <- nativeExamples]
-        , TestList "programs" [TestCase name (pure (onSource name source)) | (name, source) <- validatedPrograms]
+        [ TestList "examples" [TestCase path (onFile path) | path <- ownershipExamples]
+        , TestCase "array examples are excluded: the heap model has no array model (blind spot)" . pure $
+            testAssertTrue (all (`notElem` ownershipExamples) arrayExamples && not (null arrayExamples) && usesArrays "a = array(3, 0); return get(a, 0);")
+        , TestList "programs" [TestCase name (onSource name source) | (name, source) <- validatedPrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests
         , TestList "what a part may be read after" windowTests

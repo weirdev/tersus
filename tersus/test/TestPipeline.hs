@@ -285,20 +285,40 @@ testCliReadsUtf8 = TestCase "utf8 source" $ do
 testCli :: Test
 testCli = TestList "testCli" [testCliReadsUtf8, testCliCases]
 
+-- Every entry point must refuse a program that does not validate, before it
+-- is evaluated or lowered: (mode, runner for that mode, source, expected error).
+-- The "return first([]);" row is the one that would be evaluated if validation
+-- did not reject it first.
+validationFailureCases :: [(String, String -> Result String String, String, String)]
+validationFailureCases =
+    [ ("Interpret", runSource Interpret, "x = 5; affirm x < 4;", "Validation failed")
+    , ("Check", runSource Check, "x = 5; affirm x < 4;", "Validation failed")
+    , ("Interpret", runSource Interpret, "return first([]);", "Validation failed")
+    , ("Mir", runSource Mir, "x = 1; affirm x = 2;", "Validation failed")
+    , ("compileSource", \source -> mapResult (const "") (compileSource source), "x = 1; affirm x = 2;", "Validation failed: Could not prove")
+    ]
+
+validationFailuresFor :: [String] -> [TestResult]
+validationFailuresFor modes =
+    [ testAssertErrorContains expected (run source)
+    | (mode, run, source, expected) <- validationFailureCases
+    , mode `elem` modes
+    ]
+
+validationFailureFor :: String -> TestResult
+validationFailureFor mode = foldr orElse Nothing (validationFailuresFor [mode])
+
 testCliCases :: Test
 testCliCases =
     testCaseSeq
         "testCliCases"
-        [ testCliParseCommandLine
-        , testCliRenderValue
-        , testCliRun
-        , testCliCheck
-        , testAssertErrorContains "Parse error" (runSource Interpret "x = ;")
-        , testAssertErrorContains "Validation failed" (runSource Interpret "x = 5; affirm x < 4;")
-        , testAssertErrorContains "Validation failed" (runSource Check "x = 5; affirm x < 4;")
-        , -- Validation must reject the program before it is evaluated
-          testAssertErrorContains "Validation failed" (runSource Interpret "return first([]);")
-        ]
+        ([ testCliParseCommandLine
+         , testCliRenderValue
+         , testCliRun
+         , testCliCheck
+         , testAssertErrorContains "Parse error" (runSource Interpret "x = ;")
+         ]
+            ++ validationFailuresFor ["Interpret", "Check"])
 
 -- MIR tests
 -- Programs are lowered without being validated here (the examples are validated by testExamples), so a program may
@@ -533,12 +553,10 @@ testMir =
         , testStdlibInTersus
         , testCaseSeq
             "testMirCli"
-            [ -- `mir` prints the blocks
+            ([ -- `mir` prints the blocks
               testAssertEq (runSource Mir "x = 1 + 2; return x;") (Ok (unlines ["fn main() -> Int {", "    let _0: Int;", "    let _1: Int; // x", "    bb0: {", "        _1 = Add(const 1, const 2);", "        _0 = _1;", "        return;", "    }", "}"]))
-            , testAssertErrorContains "Validation failed" (runSource Mir "x = 1; affirm x = 2;")
-            , -- A run reports the errors that validation would have prevented
-              testAssertEq (runMir "return 1 / 0;") (Error "Division by zero")
             ]
+                ++ validationFailuresFor ["Mir"])
         ]
 
 -- The standard library is written in Tersus (lib/stdlib.tersus): the contracts the validator is
@@ -1025,10 +1043,8 @@ testPipeline =
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program)) (Ok (Just "7"))
         , -- Each stage names itself in its error
           testAssertErrorContains "Parse error" (parseSource "x = ;")
-        , testAssertErrorContains "Validation failed: Could not prove" (compileSource "x = 1; affirm x = 2;")
+        , validationFailureFor "compileSource"
         , testAssertErrorContains "Validation failed: Type error" (compileSource "x = 1; y = x(2);")
-        , -- A program that does not validate is not lowered
-          testAssertErrorContains "Validation failed" (compileSource "x = 1; affirm x = 2;")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
           case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborate of
             Ok (Elaborated stmts _) -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))

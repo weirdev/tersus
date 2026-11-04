@@ -37,9 +37,6 @@ testMirReader =
         , TestCase "what is not the MIR is refused" refusals
         ]
 
-readerSource :: IO String
-readerSource = readFile "examples/mir/mir_reader/mir_reader.tersus"
-
 -- The data of a program, or the reason it has none (the harness's shared cache: these programs are compiled once
 -- between the groups that check them)
 dataOf :: String -> IO (Result String String)

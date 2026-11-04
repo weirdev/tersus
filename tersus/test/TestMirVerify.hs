@@ -195,7 +195,6 @@ callCases =
         , ("mutable reference returned", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return a;")
         , ("mutable reference returned through parameter", "fn f(x: &mut Int) -> &mut Int from x { return &mut *x; }; a = 1; r = f(&mut a); *r = 9; return a;")
         , ("mutable result read after write", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return *r;")
-        , ("native returned update reference", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return a;")
         , ("native update parameter", "fn inc(x: &mut Int) -> Int { *x = *x + 1; return *x; }; a = 41; inc(&mut a); return a;")
         , ("generic Block cast reaches erasure", "fn f<T>(p: Addr<T>, ghost b: Block<T>) -> Int [{ affirm base(b) = p; affirm whole(b); affirm cap(b) >= 1; affirm count(b) = 0; }] [{ }] { c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, 7, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c); }; (p, b) = Addr::alloc(1); return f(p, b);")
         ]

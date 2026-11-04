@@ -23,13 +23,8 @@ testMirSupport :: Test
 testMirSupport = TestList "testMirSupport"
     [ TestList "actual tool snapshots"
         [ TestList name
-            [ testCase "one loaded and compiled support dependency" (inspect snapshot dependencyGraph)
-            , testCase "shared definitions and Clone implementations have one owner" (inspect snapshot definitionOwners)
-            , testCase "canonical codec and reader types cross the interface" (inspect snapshot canonicalTypes)
-            , testCase "borrowed inputs and owned results survive lowering" (inspect snapshot borrowedMetadata)
-            , testCase "phase layout calls shared symbols directly without forwarding" (inspect snapshot directCalls)
-            , testCase "support unit identity deduplicates only identical units" (inspect snapshot supportUnitIdentity)
-            , testCase "phase-local helper declarations retain their real file owner" (inspect snapshot phaseLocalOwners)
+            [ testCase label (inspect snapshot inspector)
+            | (label, inspector) <- snapshotInspectors
             ]
         | (name, snapshot) <- toolSnapshots
         ]
@@ -40,28 +35,8 @@ testMirSupport = TestList "testMirSupport"
         , testCase "non-entry emitter files cannot execute" (emitterDeclarationRefusal)
         ]
     , TestList "rendering matches pre-extraction outputs"
-        ([ testCase ("size " ++ label) (callSupport "renderSize" [value] (text expected))
-         | (label, value, expected) <- sizeCases
-         ] ++
-         [ testCase ("type " ++ label) (callSupport "renderType" [value] (text expected))
-         | (label, value, expected) <- typeCases
-         ] ++
-         [ testCase ("escaped " ++ label) (callSupport "escaped" [value] (text expected))
-         | (label, value, expected) <- escapedCases
-         ] ++
-         [ testCase "noStrings empty" (callSupport "noStrings" [] (MList []))
-         , testCase "local String.then concatenates" (call (snd (head toolSnapshots)) "<String>::then" [text "a", text "b"] (text "ab"))
-         , testCase "showInt zero" (callSupport "showInt" [MInt 0] (text "0"))
-         , testCase "showInt minimum signed word" (callSupport "showInt" [MInt (-9223372036854775808)] (text "-9223372036854775808"))
-         , testCase "join empty" (callSupport "joinWith" [text ", ", MList []] (text ""))
-         , testCase "join preserves empty elements" (callSupport "joinWith" [text ", ", MList [text "", text "x", text ""]] (text ", x, "))
-         , testCase "beforeAngle empty" (callSupport "beforeAngle" [text ""] (text ""))
-         , testCase "beforeAngle generic" (callSupport "beforeAngle" [text "Vec<List<Int>, 3>"] (text "Vec"))
-         , testCase "beforeAngle plain" (callSupport "beforeAngle" [text "Vec"] (text "Vec"))
-         , testCase "withoutBackticks removes every backtick" (callSupport "withoutBackticks" [text "`Vec`<`Int`, 3>"] (text "Vec<Int, 3>"))
-         ] ++
-         [ testCase ("hex " ++ show n) (callSupport "hexUpper" [MInt n] (MInt (toInteger (ord digit))))
-         | (n, digit) <- zip [0..15] "0123456789ABCDEF"
+        ([ testCase label (call (snd (head toolSnapshots)) fn args expected)
+         | (fn, label, args, expected) <- renderingCases
          ] ++
          [ testCase (name ++ " local LLVM global escaping") (call snapshot "global" [text "fn.", bytes [34, 92, 0, 195, 169]] (text "@\"fn.\\22\\5C\\00\\C3\\A9\""))
          | (name, snapshot) <- take 2 toolSnapshots
@@ -129,9 +104,8 @@ testMirSupport = TestList "testMirSupport"
              | (label, ty, outcomes) <- layoutCases
              , let (size, align) = outcomes !! phase
              ] ++
-             [ testCase "fieldsLayout padding" (call snapshot "fieldsLayout" [declarations, pairFields] (layout 12 4))
-             , testCase "fieldsLayout empty" (call snapshot "fieldsLayout" [declarations, MList []] (layout 0 1))
-             , testCase "fieldsLayout follows this phase's Block rule" (call snapshot "fieldsLayout" [declarations, MList [field "flag" byteType, field "permission" (unary "TBlock" intType), field "tail" byteType]] (if phase == 1 then layout 24 8 else layout 2 1))
+             [ testCase label (call snapshot "fieldsLayout" [declarations, fields] (expectedForPhase phase))
+             | (label, fields, expectedForPhase) <- fieldsLayoutCases
              ])
         | (phase, (name, snapshot)) <- zip [0..] toolSnapshots
         ]
@@ -190,6 +164,54 @@ emitterDeclarationRefusal = case Mod.loadFromEntry (Mod.resolverFromFiles change
     Right _ -> Just "a non-entry emitter file executed"
   where
     changed = [(path, if path == "examples/mir/emit/helpers.tersus" then source ++ "\nreturn 0;\n" else source) | (path, source) <- mirPackageFiles]
+
+snapshotInspectors :: [(String, (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult)]
+snapshotInspectors =
+    [ ("one loaded and compiled support dependency", dependencyGraph)
+    , ("shared definitions and Clone implementations have one owner", definitionOwners)
+    , ("canonical codec and reader types cross the interface", canonicalTypes)
+    , ("borrowed inputs and owned results survive lowering", borrowedMetadata)
+    , ("phase layout calls shared symbols directly without forwarding", directCalls)
+    , ("support unit identity deduplicates only identical units", supportUnitIdentity)
+    , ("phase-local helper declarations retain their real file owner", phaseLocalOwners)
+    ]
+
+-- (function, case name, arguments, expected) on the first tool snapshot;
+-- support functions are named through supportName, local ones in full.
+renderingCases :: [(String, String, [MirValue], MirValue)]
+renderingCases =
+    [ (supportName "renderSize", "size " ++ label, [value], text expected)
+    | (label, value, expected) <- sizeCases
+    ]
+        ++ [ (supportName "renderType", "type " ++ label, [value], text expected)
+           | (label, value, expected) <- typeCases
+           ]
+        ++ [ (supportName "escaped", "escaped " ++ label, [value], text expected)
+           | (label, value, expected) <- escapedCases
+           ]
+        ++ [ (supportName "noStrings", "noStrings empty", [], MList [])
+           , ("<String>::then", "local String.then concatenates", [text "a", text "b"], text "ab")
+           , (supportName "showInt", "showInt zero", [MInt 0], text "0")
+           , (supportName "showInt", "showInt minimum signed word", [MInt (-9223372036854775808)], text "-9223372036854775808")
+           , (supportName "joinWith", "join empty", [text ", ", MList []], text "")
+           , (supportName "joinWith", "join preserves empty elements", [text ", ", MList [text "", text "x", text ""]], text ", x, ")
+           , (supportName "beforeAngle", "beforeAngle empty", [text ""], text "")
+           , (supportName "beforeAngle", "beforeAngle generic", [text "Vec<List<Int>, 3>"], text "Vec")
+           , (supportName "beforeAngle", "beforeAngle plain", [text "Vec"], text "Vec")
+           , (supportName "withoutBackticks", "withoutBackticks removes every backtick", [text "`Vec`<`Int`, 3>"], text "Vec<Int, 3>")
+           ]
+        ++ [ (supportName "hexUpper", "hex " ++ show n, [MInt n], MInt (toInteger (ord digit)))
+           | (n, digit) <- zip [0 .. 15] "0123456789ABCDEF"
+           ]
+
+-- (case name, fields, expected layout for the phase): the Block row stays
+-- phase-conditional, as the phases disagree on what a Block is.
+fieldsLayoutCases :: [(String, MirValue, Int -> MirValue)]
+fieldsLayoutCases =
+    [ ("fieldsLayout padding", pairFields, const (layout 12 4))
+    , ("fieldsLayout empty", MList [], const (layout 0 1))
+    , ("fieldsLayout follows this phase's Block rule", MList [field "flag" byteType, field "permission" (unary "TBlock" intType), field "tail" byteType], \phase -> if phase == 1 then layout 24 8 else layout 2 1)
+    ]
 
 supportId :: Mod.ModuleId
 supportId = Mod.ModuleId "mir" (Just "support")

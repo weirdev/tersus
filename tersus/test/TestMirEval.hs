@@ -15,7 +15,7 @@ import TestHarness
 import Utils
 
 testMirEvalLists :: Test
-testMirEvalLists = TestList "testMirEvalLists"
+testMirEvalLists = TestList "testMirEvalLists" $
     [ testCase "host list construction, matching, equality and Show" hostLists
     , runs "append, endpoints and pop" "xs = push([1, 2], 3); a = first(xs); b = last(xs); xs = pop(xs); return a * 100 + b * 10 + size(xs);" (Eval.MInt 132)
     , runs "an indexed update does not change its snapshot" "xs = [1, 2, 3]; ys = set(clone(xs), 1, 9); return get(xs, 1) * 10 + get(ys, 1);" (Eval.MInt 29)
@@ -25,15 +25,19 @@ testMirEvalLists = TestList "testMirEvalLists"
     , runs "concrete generic fields keep reference roots across a call" "struct Wrap<T> { value: T }; fn read(w: &Wrap<&Int>) -> Int { r = w.value; return *r; }; x = 21; w = Wrap<&Int> { value: &x }; return read(w);" (Eval.MInt 21)
     , runs "a recursive enum still finds references after its recursive edge" "enum Node { Next { child: Box<Node> }, Ref { value: &Int } }; fn read(node: Node) -> Int { if node is Node::Ref { r = (node as Node::Ref).value; return *r; }; return 0; }; x = 31; node = Node::Ref { value: &x }; return read(node);" (Eval.MInt 31)
     , runs "repeated array elements have independent updates" "xs = array(3, [1, 2]); ys = set(xs, 1, [9]); return size(get(ys, 0)) * 100 + first(get(ys, 1)) * 10 + size(get(ys, 2));" (Eval.MInt 292)
-    , fails "negative index" "return get([1], -1);" "Get index out of range"
-    , fails "past-end index" "return get([1], 1);" "Get index out of range"
-    , fails "negative update index" "return set([1], -1, 2);" "Set index out of range"
-    , fails "past-end update index" "return set([1], 1, 2);" "Set index out of range"
-    , fails "first of an empty list" "xs = []; return first(xs);" "First requires a non-empty list"
-    , fails "last of an empty list" "xs = []; return last(xs);" "Last requires a non-empty list"
-    , fails "pop of an empty list" "xs = []; return pop(xs);" "Pop requires a non-empty list"
-    , TestCase "growing and indexing a large list has bounded allocation" boundedGrowth
     ]
+    ++ [ fails name source expected
+       | (name, source, expected) <-
+           [ ("negative index", "return get([1], -1);", "Get index out of range")
+           , ("past-end index", "return get([1], 1);", "Get index out of range")
+           , ("negative update index", "return set([1], -1, 2);", "Set index out of range")
+           , ("past-end update index", "return set([1], 1, 2);", "Set index out of range")
+           , ("first of an empty list", "xs = []; return first(xs);", "First requires a non-empty list")
+           , ("last of an empty list", "xs = []; return last(xs);", "Last requires a non-empty list")
+           , ("pop of an empty list", "xs = []; return pop(xs);", "Pop requires a non-empty list")
+           ]
+       ]
+    ++ [ TestCase "growing and indexing a large list has bounded allocation" boundedGrowth ]
 
 hostLists :: TestResult
 hostLists =

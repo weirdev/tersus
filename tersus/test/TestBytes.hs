@@ -4,6 +4,14 @@ import Cli (Command (..), runSource)
 import TestHarness
 import Utils
 
+named :: String -> TestResult -> TestResult
+named label = fmap ((label ++ ": ") ++)
+
+firstFailure :: [TestResult] -> TestResult
+firstFailure results = case [message | Just message <- results] of
+    message : _ -> Just message
+    [] -> Nothing
+
 -- The type Byte: an Int from 0 to 255 that is a type of its own. toByte(x) asks for a proof of the range, toInt(b) is the Int, and the validator
 -- knows the range of every Byte, wherever it came from.
 testBytes :: Test
@@ -17,9 +25,11 @@ testBytes =
                 "conversions"
                 [ testCase "an Int is a Byte, and a Byte an Int" (runs "b = toByte(200); return toInt(b) + 1;" "201")
                 , testCase "the ends of the range" (runs "return toInt(toByte(0)) * 1000 + toInt(toByte(255));" "255")
-                , testCase "an Int above the range is refused" (rejected "b = toByte(256); return 0;" "Could not prove")
-                , testCase "and one below it" (rejected "b = toByte(0 - 1); return 0;" "Could not prove")
-                , testCase "an Int that is not known to be in the range is refused" (rejected "x = readByte(); b = toByte(x); return 0;" "Could not prove")
+                , testCase "Ints outside the range are refused" (firstFailure
+                    [ named "above the range" (rejected "b = toByte(256); return 0;" "Could not prove")
+                    , named "below the range" (rejected "b = toByte(0 - 1); return 0;" "Could not prove")
+                    , named "not known to be in the range" (rejected "x = readByte(); b = toByte(x); return 0;" "Could not prove")
+                    ])
                 , testCase "and is accepted where it has been tested" (valid "x = readByte(); if x >= 0 { b = toByte(x); return toInt(b); }; return 0 - 1;")
                 , testCase "a value assigned in a branch keeps its range" (valid "x = readByte(); y = 1; if x < 5 { y = 2; }; affirm y >= 1;")
                 , testCase "a parameter that is tested" (valid "fn f(x: Int) -> Byte [{ }] [{ }] { if x < 0 { return toByte(0); }; if x > 255 { return toByte(255); }; return toByte(x); }; return toInt(f(300));")

@@ -204,9 +204,8 @@ summaryCase = do
             else Nothing
 
 -- The self-hosted validator, lowered once for this group. It is not validated
--- again here: that lib/validation.tersus itself validates is checked with
--- compileSource by testSelfHostedEquality in TestPipeline, and validating it
--- with the reference validator costs more than every case below together.
+-- again here: validating it with the reference validator costs more than
+-- every case below together.
 {-# NOINLINE checkerResult #-}
 checkerResult :: MVar (Maybe (Result M.Program String))
 checkerResult = unsafePerformIO (newMVar Nothing)

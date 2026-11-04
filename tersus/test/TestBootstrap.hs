@@ -9,6 +9,7 @@ import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.IO (hClose, openTempFile)
 import System.FilePath ((</>))
+import System.Posix.Process (getProcessID)
 
 import qualified TersusParser
 import Seed (parserSeedHash, parserSeedSha256, parserSeedUrl)
@@ -77,7 +78,8 @@ withDirectory name = bracket make removeDirectoryRecursive
   where
     make = do
         tmp <- getTemporaryDirectory
-        (dir, handle) <- openTempFile tmp name
+        pid <- getProcessID
+        (dir, handle) <- openTempFile tmp (name ++ "-" ++ show pid)
         hClose handle
         removeFile dir
         createDirectory dir
