@@ -10,6 +10,42 @@ eventual: source -> AST -> MIR -> validation -> lowering to LLVM IR -> compilati
 
 The MIR is to Tersus what Rust's MIR is to Rust: a typed control-flow graph that has no `if`, `while`, `match`, `for` or nested expressions left, only blocks of simple statements ending in a jump. The AST is what the programmer wrote and the validator reasons about; the MIR is what the machine will do.
 
+## Native paired-binding stage
+
+The native validator has one `ExecutionState.locals` map of `ValueBinding` records:
+`semantic: Int` and `storage: ValueLookup` (`Missing` or `Found { term: Int }`).
+`Local` selects the semantic term; `StorageLocal` selects storage from that same
+binding and is unsupported when it is missing. `Assign` copies the whole binding,
+including old values, contract/header exports and captured views. `AssignSemantic`
+keeps only the semantic term for an operation whose storage behavior is not modeled.
+A scalar constant can have a diagonal binding because its word value is established.
+An aggregate, opaque parameter or unmodeled result does not acquire storage from its
+name, content equality or a fresh logical result identifier.
+
+Joins use the existing term-normalization mechanism independently for both
+components. Missing storage on either path remains missing; different storage
+identities get their own joined term. Fresh logical identifiers account for both
+components, and exhausting the signed identifier range fails closed. No allocation
+disequality or permission is established by identifier freshness.
+
+The wire locals are `LocalBinding { local, value: ValueBinding }` entries or the
+existing HashMap layout with paired entry values. Integer-only local values,
+duplicate local keys and malformed pair/reference records are rejected. A
+`ValueRef::Binding` transports already-present identities, not an allocation or
+an equality fact. `ProjectBinding` is a protocol-only field observation through
+existing `fieldFunctions`: it applies the field independently to the two terms.
+It is not emitted for source declarations or used to activate List/Box projections.
+
+This stage preserves the existing source semantic validator. It does not validate
+ordinary raw List bodies, model selected Clone/Box/Unbox storage behavior, activate
+borrowed whole-value results or replace builtin List operations. Declaration-backed
+`InitializedPrefix(block, len)` and `StoredPayload(block)` need a checked consumer
+in the existing `StructSpec`/`progInvariants` authority before those changes. The
+canonical-layout filter in `SelfHostedMir.sourceContainerView` remains in place.
+Structured native protocol tests cover pairs, field wrappers, old/header captures,
+forall storage captures, mixed joins and initialized length versus spare capacity;
+they are not a raw lexical-decoder validity claim.
+
 ## What the MIR has to represent
 
 Facts about Tersus that decide the shape (from `Parse` and the semantics of the language):

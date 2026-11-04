@@ -3899,16 +3899,29 @@ fn validateFlow(blocks: &List<FlowBlock>, entry: Int, initial: &ValidatorContext
 
 // Locals are names for immutable symbolic terms. A copy changes the binding,
 // not the term or the facts that describe it.
-enum ValueRef { Local { local: Int }, Term { term: Int } };
-
-impl Clone for ValueRef { };
-
-impl Copy for ValueRef { };
 enum ValueLookup { Missing, Found { term: Int } };
 
 impl Clone for ValueLookup { };
 
 impl Copy for ValueLookup { };
+
+struct ValueBinding { semantic: Int, storage: ValueLookup };
+
+impl Clone for ValueBinding { };
+
+impl Copy for ValueBinding { };
+
+enum BindingLookup { Missing, Found { value: ValueBinding } };
+
+impl Clone for BindingLookup { };
+
+impl Copy for BindingLookup { };
+
+enum ValueRef { Local { local: Int }, StorageLocal { local: Int }, Term { term: Int }, Binding { value: ValueBinding }, Unsupported };
+
+impl Clone for ValueRef { };
+
+impl Copy for ValueRef { };
 enum ArgumentsLookup { Missing, Found { terms: List<Int> } };
 
 impl Clone for ArgumentsLookup { };
@@ -3931,7 +3944,7 @@ impl Clone for ForallTemplate { };
 
 fn noTemplates() -> List<ForallTemplate> { return []; };
 
-struct ExecutionState { context: ValidatorContext, locals: HashMap<Int, Int>, templates: List<ForallTemplate> };
+struct ExecutionState { context: ValidatorContext, locals: HashMap<Int, ValueBinding>, templates: List<ForallTemplate> };
 
 impl Clone for ExecutionState { };
 
@@ -3945,29 +3958,79 @@ enum StateMergeLookup { Missing, Found { state: ExecutionState } };
 
 impl Clone for StateMergeLookup { };
 
-fn lookupLocal(locals: &HashMap<Int, Int>, local: Int) -> ValueLookup {
+fn semanticBinding(term: Int) -> ValueBinding {
+    return ValueBinding { semantic: term, storage: ValueLookup::Missing };
+};
+
+fn emptyBindings() -> HashMap<Int, ValueBinding> { return HashMap::new(); };
+
+fn lookupBinding(locals: &HashMap<Int, ValueBinding>, local: Int) -> BindingLookup {
     if locals.contains(local) {
-        return ValueLookup::Found { term: locals.lookup(local, 0) };
+        return BindingLookup::Found { value: locals.lookup(local, semanticBinding(0)) };
+    };
+    return BindingLookup::Missing;
+};
+
+fn lookupLocal(locals: &HashMap<Int, ValueBinding>, local: Int) -> ValueLookup {
+    value = lookupBinding(locals, local);
+    if value is BindingLookup::Found {
+        return ValueLookup::Found { term: (value as BindingLookup::Found).value.semantic };
     };
     return ValueLookup::Missing;
 };
 
-fn bindLocal(locals: HashMap<Int, Int>, local: Int, term: Int) -> HashMap<Int, Int> {
-    return locals.insert(local, term);
+fn bindBinding(locals: HashMap<Int, ValueBinding>, local: Int, value: ValueBinding) -> HashMap<Int, ValueBinding> {
+    return locals.insert(local, value);
 };
 
-fn forgetLocal(locals: HashMap<Int, Int>, local: Int) -> HashMap<Int, Int> {
+fn bindLocal(locals: HashMap<Int, ValueBinding>, local: Int, term: Int) -> HashMap<Int, ValueBinding> {
+    return bindBinding(locals, local, semanticBinding(term));
+};
+
+fn forgetLocal(locals: HashMap<Int, ValueBinding>, local: Int) -> HashMap<Int, ValueBinding> {
     return locals.remove(local);
 };
 
-// Term references are supplied by the host's term interner; a Local reference
-// must already be bound on this path. Unknown variants and locals fail closed.
-fn resolveValue(state: &ExecutionState, value: ValueRef) -> ValueLookup {
+fn resolveBinding(state: &ExecutionState, value: ValueRef) -> BindingLookup {
     if value is ValueRef::Local {
-        return lookupLocal(state.locals, (value as ValueRef::Local).local);
+        return lookupBinding(state.locals, (value as ValueRef::Local).local);
+    };
+    if value is ValueRef::StorageLocal {
+        binding = lookupBinding(state.locals, (value as ValueRef::StorageLocal).local);
+        if binding is BindingLookup::Found {
+            storage = (binding as BindingLookup::Found).value.storage;
+            if storage is ValueLookup::Found {
+                term = (storage as ValueLookup::Found).term;
+                return BindingLookup::Found { value: ValueBinding { semantic: term, storage: ValueLookup::Found { term: term } } };
+            };
+        };
+        return BindingLookup::Missing;
     };
     if value is ValueRef::Term {
-        return ValueLookup::Found { term: (value as ValueRef::Term).term };
+        term = (value as ValueRef::Term).term;
+        binding = semanticBinding(term);
+        for constant in state.context.constants {
+            if constant.id = term && (constant.kind = 0 || constant.kind = 1) {
+                binding = ValueBinding { semantic: term, storage: ValueLookup::Found { term: term } };
+            };
+        };
+        return BindingLookup::Found { value: binding };
+    };
+    if value is ValueRef::Binding {
+        binding = (value as ValueRef::Binding).value;
+        if termInUse(state, binding.semantic) = false { return BindingLookup::Missing; };
+        if binding.storage is ValueLookup::Found {
+            if termInUse(state, (binding.storage as ValueLookup::Found).term) = false { return BindingLookup::Missing; };
+        };
+        return BindingLookup::Found { value: binding };
+    };
+    return BindingLookup::Missing;
+};
+
+fn resolveValue(state: &ExecutionState, value: ValueRef) -> ValueLookup {
+    binding = resolveBinding(state, value);
+    if binding is BindingLookup::Found {
+        return ValueLookup::Found { term: (binding as BindingLookup::Found).value.semantic };
     };
     return ValueLookup::Missing;
 };
@@ -3988,7 +4051,12 @@ fn resolveArguments(state: &ExecutionState, values: &List<ValueRef>) -> Argument
 
 // A fresh result must not alias any term already present on this path.
 fn termInUse(state: &ExecutionState, term: Int) -> Bool {
-    for binding in state.locals.entries() { if binding.value = term { return true; }; };
+    for binding in state.locals.entries() {
+        if binding.value.semantic = term { return true; };
+        if binding.value.storage is ValueLookup::Found {
+            if (binding.value.storage as ValueLookup::Found).term = term { return true; };
+        };
+    };
     for factPosition in 0..size(state.context.equalities) {
         fact = get(state.context.equalities, factPosition);
         if fact.left = term { return true; }; if fact.right = term { return true; };
@@ -4039,10 +4107,30 @@ fn goalSides(goal: &ValidatorGoal) -> List<Int> {
 // inner there, a new read), each case perhaps split again. Only reads the
 // goal is about are split (a side, or an argument of one), at most depth
 // times along a path.
-struct SplitResult { holds: Bool, used: Int };
+struct ClosedFacts { contradictory: Bool, reps: List<Representative>, edges: List<DifferenceFact>, different: List<DisequalityFact> };
+
+impl Clone for ClosedFacts { };
+
+struct DoneKey { kind: Int, owner: Int, index: Int };
+
+impl Clone for DoneKey { };
+
+struct BlockedGuard { relation: Int, left: Int, right: Int, index: Int };
+
+impl Clone for BlockedGuard { };
+
+struct Saturation { state: ExecutionState, births: HashMap<Int, Int>, done: List<DoneKey>, blocked: List<BlockedGuard>, closed: List<ClosedFacts>, exhausted: Bool };
+
+impl Clone for Saturation { };
+
+struct StateTerm { state: ExecutionState, term: ValueLookup, created: Bool, next: ValueLookup };
+
+impl Clone for StateTerm { };
+
+struct SplitResult { holds: Bool, used: Int, exhausted: Bool };
 
 fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, budget: Int) -> SplitResult {
-    if depth <= 0 || budget <= 0 { return SplitResult { holds: false, used: 0 }; };
+    if depth <= 0 || budget <= 0 { return SplitResult { holds: false, used: 0, exhausted: false }; };
     used = 0;
     context = clone(state.context);
     analysis = analyzeContext(context);
@@ -4110,6 +4198,7 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
                                         // (the value may itself be read from a write: a node set from the node there)
                                         if atOk = false && used < budget {
                                             deeper = splitReadOverWrite(ExecutionState { context: clone(atIdx), ..clone(state) }, clone(goal), depth - 1, budget - used);
+                                            if deeper.exhausted { return SplitResult { holds: false, used: used + deeper.used, exhausted: true }; };
                                             used = used + deeper.used;
                                             atOk = deeper.holds;
                                         };
@@ -4117,25 +4206,24 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
                                     if atOk {
                                         elseOk = sameIndex;
                                         if elseOk = false {
-                                            fresh = freshValue(state);
-                                            if fresh is ValueLookup::Found {
-                                                newRead = (fresh as ValueLookup::Found).term;
-                                                apps = push(clone(context.applications), ApplicationTerm { id: newRead, function: -14, arguments: push(push([], inner), k) });
-                                                elsewhere = ValidatorContext { applications: apps, equalities: push(clone(context.equalities), EqualityFact { left: app.id, right: newRead }), different: push(clone(context.different), DisequalityFact { left: k, right: idx }), ..clone(context) };
-                                                if pushed {
-                                                    elsewhere = ValidatorContext { orders: push(clone(elsewhere.orders), OrderFact { smaller: k, greater: idx, strict: true }), ..clone(elsewhere) };
-                                                };
-                                                elseState = ExecutionState { context: clone(elsewhere), ..clone(state) };
-                                                elseOk = analyzeContext(elsewhere).contradictory;
-                                                if elseOk = false { used = used + 1; elseOk = entailsGoal(elsewhere, clone(goal)); };
-                                                if elseOk = false {
-                                                    deeper = splitReadOverWrite(elseState, clone(goal), depth - 1, budget - used);
-                                                    used = used + deeper.used;
-                                                    elseOk = deeper.holds;
-                                                };
+                                            read = applicationTerm(state, -14, push(push([], inner), k), freshValue(state));
+                                            if read.term is ValueLookup::Missing { return SplitResult { holds: false, used: used, exhausted: true }; };
+                                            newRead = (read.term as ValueLookup::Found).term;
+                                            elsewhere = ValidatorContext { equalities: push(clone(read.state.context.equalities), EqualityFact { left: app.id, right: newRead }), different: push(clone(read.state.context.different), DisequalityFact { left: k, right: idx }), ..clone(read.state.context) };
+                                            if pushed {
+                                                elsewhere = ValidatorContext { orders: push(clone(elsewhere.orders), OrderFact { smaller: k, greater: idx, strict: true }), ..clone(elsewhere) };
+                                            };
+                                            elseState = ExecutionState { context: clone(elsewhere), ..clone(state) };
+                                            elseOk = analyzeContext(elsewhere).contradictory;
+                                            if elseOk = false { used = used + 1; elseOk = entailsGoal(elsewhere, clone(goal)); };
+                                            if elseOk = false {
+                                                deeper = splitReadOverWrite(elseState, clone(goal), depth - 1, budget - used);
+                                                if deeper.exhausted { return SplitResult { holds: false, used: used + deeper.used, exhausted: true }; };
+                                                used = used + deeper.used;
+                                                elseOk = deeper.holds;
                                             };
                                         };
-                                        if elseOk { return SplitResult { holds: true, used: used }; };
+                                        if elseOk { return SplitResult { holds: true, used: used, exhausted: false }; };
                                     };
                                 };
                             };
@@ -4166,25 +4254,31 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
                                     if linearEntails(context, bound, k, 0) = false && linearEntails(context, k, bound, -1) = false {
                                         rangeTried = rangeTried + 1;
                                         below = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: k, greater: bound, strict: true }), ..clone(context) };
-                                        below = withInstances(state, below);
+                                        belowInstances = withInstances(state, below);
+                                        if belowInstances.exhausted { return SplitResult { holds: false, used: used, exhausted: true }; };
+                                        below = belowInstances.state.context;
                                         belowOk = analyzeContext(below).contradictory;
                                         if belowOk = false { used = used + 1; belowOk = entailsGoal(below, clone(goal)); };
                                         if belowOk = false {
                                             deeper = splitReadOverWrite(ExecutionState { context: clone(below), ..clone(state) }, clone(goal), depth - 1, budget - used);
+                                            if deeper.exhausted { return SplitResult { holds: false, used: used + deeper.used, exhausted: true }; };
                                             used = used + deeper.used;
                                             belowOk = deeper.holds;
                                         };
                                         if belowOk {
                                             above = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: bound, greater: k, strict: false }), ..clone(context) };
-                                            above = withInstances(state, above);
+                                            aboveInstances = withInstances(state, above);
+                                            if aboveInstances.exhausted { return SplitResult { holds: false, used: used, exhausted: true }; };
+                                            above = aboveInstances.state.context;
                                             aboveOk = analyzeContext(above).contradictory;
                                             if aboveOk = false { used = used + 1; aboveOk = entailsGoal(above, clone(goal)); };
                                             if aboveOk = false {
                                                 deeper = splitReadOverWrite(ExecutionState { context: clone(above), ..clone(state) }, clone(goal), depth - 1, budget - used);
+                                                if deeper.exhausted { return SplitResult { holds: false, used: used + deeper.used, exhausted: true }; };
                                                 used = used + deeper.used;
                                                 aboveOk = deeper.holds;
                                             };
-                                            if aboveOk { return SplitResult { holds: true, used: used }; };
+                                            if aboveOk { return SplitResult { holds: true, used: used, exhausted: false }; };
                                         };
                                     };
                                 };
@@ -4195,17 +4289,28 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
             };
         };
     };
-    return SplitResult { holds: false, used: used };
+    return SplitResult { holds: false, used: used, exhausted: false };
 };
 
 // (below every term the state mentions, found in one pass over it)
+fn precedingTerm(term: Int) -> ValueLookup {
+    if term = -9223372036854775808 { return ValueLookup::Missing; };
+    return ValueLookup::Found { term: term - 1 };
+};
+
 fn freshValue(state: &ExecutionState) -> ValueLookup {
-    return ValueLookup::Found { term: leastTermInUse(state) - 1 };
+    return precedingTerm(leastTermInUse(state));
 };
 
 fn leastTermInUse(state: &ExecutionState) -> Int {
     least = -999;
-    for binding in state.locals.entries() { if binding.value < least { least = binding.value; }; };
+    for binding in state.locals.entries() {
+        if binding.value.semantic < least { least = binding.value.semantic; };
+        if binding.value.storage is ValueLookup::Found {
+            storage = (binding.value.storage as ValueLookup::Found).term;
+            if storage < least { least = storage; };
+        };
+    };
     for factPosition in 0..size(state.context.equalities) {
         fact = get(state.context.equalities, factPosition);
         if fact.left < least { least = fact.left; };
@@ -4599,13 +4704,13 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
         };
         firstLocal = size(mergedCandidates);
         for binding in result.locals.entries() {
-            if binding.value != pair.joined {
+            if binding.value.semantic != pair.joined {
                 lc = lookupLocal(left.locals, binding.key);
                 rc = lookupLocal(right.locals, binding.key);
                 if lc is ValueLookup::Found {
                     if rc is ValueLookup::Found {
-                        if containsValue(mergedCandidates, binding.value) = false {
-                            mergedCandidates = push(mergedCandidates, binding.value);
+                        if containsValue(mergedCandidates, binding.value.semantic) = false {
+                            mergedCandidates = push(mergedCandidates, binding.value.semantic);
                             leftCandidates = push(leftCandidates, (lc as ValueLookup::Found).term);
                             rightCandidates = push(rightCandidates, (rc as ValueLookup::Found).term);
                         };
@@ -4701,53 +4806,69 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
     return result;
 };
 
+struct MergeComponent { term: ValueLookup, pool: ExecutionState, pairs: List<MergePair> };
+
+fn mergeComponent(fork: &ExecutionState, pool: ExecutionState, pairs: List<MergePair>, left: Int, right: Int) -> MergeComponent {
+    kept = pairs;
+    if left = right && (left >= 0 || termInUse(fork, left)) {
+        known = false;
+        for pair in kept { if pair.left = left && pair.right = right { known = true; }; };
+        if left < 0 && known = false { kept = push(kept, MergePair { left: left, right: right, joined: left, ambiguous: false }); };
+        return MergeComponent { term: ValueLookup::Found { term: left }, pool: pool, pairs: kept };
+    };
+    for pair in kept {
+        if pair.left = left && pair.right = right {
+            return MergeComponent { term: ValueLookup::Found { term: pair.joined }, pool: pool, pairs: kept };
+        };
+    };
+    fresh = freshValue(pool);
+    if fresh is ValueLookup::Found {
+        joined = (fresh as ValueLookup::Found).term;
+        kept = push(kept, MergePair { left: left, right: right, joined: joined, ambiguous: left < 0 && left = right });
+        context = ValidatorContext { equalities: push(clone(pool.context.equalities), EqualityFact { left: joined, right: joined }), ..pool.context };
+        return MergeComponent { term: fresh, pool: ExecutionState { context: context, ..pool }, pairs: kept };
+    };
+    return MergeComponent { term: ValueLookup::Missing, pool: pool, pairs: kept };
+};
+
 fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
     poolContext = unionContexts(left.context, right.context);
     poolEqualities = clone(poolContext.equalities);
-    for binding in left.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
-    for binding in right.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
+    for binding in left.locals.entries() {
+        poolEqualities = push(poolEqualities, EqualityFact { left: binding.value.semantic, right: binding.value.semantic });
+        if binding.value.storage is ValueLookup::Found {
+            storage = (binding.value.storage as ValueLookup::Found).term;
+            poolEqualities = push(poolEqualities, EqualityFact { left: storage, right: storage });
+        };
+    };
+    for binding in right.locals.entries() {
+        poolEqualities = push(poolEqualities, EqualityFact { left: binding.value.semantic, right: binding.value.semantic });
+        if binding.value.storage is ValueLookup::Found {
+            storage = (binding.value.storage as ValueLookup::Found).term;
+            poolEqualities = push(poolEqualities, EqualityFact { left: storage, right: storage });
+        };
+    };
     poolContext = ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) };
     pool = ExecutionState { context: clone(poolContext), locals: HashMap::new(), templates: noTemplates() };
     pairs = emptyMergePairs();
-    locals = emptyIntMap();
+    locals = emptyBindings();
     for binding in left.locals.entries() {
-        other = lookupLocal(right.locals, binding.key);
-        if other is ValueLookup::Found {
-            rightTerm = (other as ValueLookup::Found).term;
-            if binding.value >= 0 && binding.value = rightTerm {
-                locals = bindLocal(locals, binding.key, binding.value);
-            } else if binding.value = rightTerm && termInUse(fork, binding.value) {
-                // (a term the checker made before the branch, as size(digits)
-                // from a contract, is the same on both sides: it is kept as
-                // itself, and the joined state keeps what both sides know of
-                // it; the same number made separately on each side after the
-                // branch is two values, and is joined)
-                locals = bindLocal(locals, binding.key, binding.value);
-                known = false;
-                for pair in pairs { if pair.left = binding.value && pair.right = binding.value { known = true; }; };
-                if known = false { pairs = push(pairs, MergePair { left: binding.value, right: binding.value, joined: binding.value, ambiguous: false }); };
-            } else {
-                joined = 0;
-                found = false;
-                for pairPosition in 0..size(pairs) {
-                    pair = get(pairs, pairPosition);
-                    if pair.left = binding.value && pair.right = rightTerm {
-                        joined = pair.joined;
-                        found = true;
-                    };
-                };
-                if found = false {
-                    fresh = freshValue(pool);
-                    if fresh is ValueLookup::Found {
-                        joined = (fresh as ValueLookup::Found).term;
-                        pairs = push(pairs, MergePair { left: binding.value, right: rightTerm, joined: joined, ambiguous: binding.value < 0 && binding.value = rightTerm });
-                        poolEqualities = push(clone(poolEqualities), EqualityFact { left: joined, right: joined });
-                        pool = ExecutionState { context: ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) }, locals: HashMap::new(), templates: noTemplates() };
-                        found = true;
-                    } else { return StateMergeLookup::Missing; };
-                };
-                if found { locals = bindLocal(locals, binding.key, joined); };
+        other = lookupBinding(right.locals, binding.key);
+        if other is BindingLookup::Found {
+            rightValue = (other as BindingLookup::Found).value;
+            semantic = mergeComponent(fork, pool, pairs, binding.value.semantic, rightValue.semantic);
+            pool = semantic.pool;
+            pairs = semantic.pairs;
+            if semantic.term is ValueLookup::Missing { return StateMergeLookup::Missing; };
+            storage = ValueLookup::Missing;
+            if binding.value.storage is ValueLookup::Found && rightValue.storage is ValueLookup::Found {
+                merged = mergeComponent(fork, pool, pairs, (binding.value.storage as ValueLookup::Found).term, (rightValue.storage as ValueLookup::Found).term);
+                pool = merged.pool;
+                pairs = merged.pairs;
+                if merged.term is ValueLookup::Missing { return StateMergeLookup::Missing; };
+                storage = merged.term;
             };
+            locals = bindBinding(locals, binding.key, ValueBinding { semantic: (semantic.term as ValueLookup::Found).term, storage: storage });
         };
     };
     // (a term that is also joined on one side keeps that mapping alone)
@@ -5502,6 +5623,8 @@ enum ExecutionStep {
     Unsupported,
     AdmitProofCall { function: Int },
     Assign { local: Int, value: ValueRef },
+    AssignSemantic { local: Int, value: ValueRef },
+    ProjectBinding { local: Int, function: Int, object: ValueRef },
     Apply { local: Int, result: Int, function: Int, arguments: List<ValueRef> },
     ApplyFresh { local: Int, function: Int, arguments: List<ValueRef> },
     Literal { result: Int, function: Int, arguments: List<ValueRef> },
@@ -6087,23 +6210,11 @@ fn commonTemplates(left: &List<ForallTemplate>, right: &List<ForallTemplate>) ->
 // leads to) is used there once and does not feed itself. An instance missing
 // exactly one guard is blocked on it: a case split on that guard may let it
 // be used (proveBySaturation).
-struct ClosedFacts { contradictory: Bool, reps: List<Representative>, edges: List<DifferenceFact>, different: List<DisequalityFact> };
-
-impl Clone for ClosedFacts { };
-
-struct DoneKey { kind: Int, owner: Int, index: Int };
-
-impl Clone for DoneKey { };
-
 fn noDoneKeys() -> List<DoneKey> { return []; };
 
 struct TermRelation { relation: Int, left: Int, right: Int };
 
 impl Clone for TermRelation { };
-
-struct BlockedGuard { relation: Int, left: Int, right: Int, index: Int };
-
-impl Clone for BlockedGuard { };
 
 fn noBlocked() -> List<BlockedGuard> { return []; };
 
@@ -6114,11 +6225,6 @@ struct SatInstance { key: DoneKey, guards: List<TermRelation>, body: TermRelatio
 
 impl Clone for SatInstance { };
 
-// (closed: the closure of the state's facts, when it is known)
-struct Saturation { state: ExecutionState, births: HashMap<Int, Int>, done: List<DoneKey>, blocked: List<BlockedGuard>, closed: List<ClosedFacts> };
-
-impl Clone for Saturation { };
-
 fn knownClosure(given: &Saturation) -> ClosedFacts {
     if size(given.closed) > 0 { return clone(get(given.closed, 0)); };
     return closedFacts(given.state.context);
@@ -6127,6 +6233,10 @@ fn knownClosure(given: &Saturation) -> ClosedFacts {
 struct RoundResult { saturation: Saturation, accepted: Int };
 
 impl Clone for RoundResult { };
+
+fn exhaustedRound(given: &Saturation, state: ExecutionState, births: HashMap<Int, Int>, done: List<DoneKey>) -> RoundResult {
+    return RoundResult { saturation: Saturation { state: state, births: births, done: done, exhausted: true, ..clone(given) }, accepted: 0 };
+};
 
 fn generationOf(births: &HashMap<Int, Int>, term: Int) -> Int {
     if births.contains(term) { return births.lookup(term, 0); };
@@ -6163,30 +6273,33 @@ fn templateDepends(template: &ForallTemplate) -> List<Bool> {
 
 // The term of an application, made (as the next fresh term) if the state
 // has none, with what its builtin is known to give
-struct StateTerm { state: ExecutionState, term: Int, created: Bool, next: Int };
-
-impl Clone for StateTerm { };
-
-fn applicationTerm(given: &ExecutionState, function: Int, args: List<Int>, next: Int) -> StateTerm {
+fn applicationTerm(given: &ExecutionState, function: Int, args: List<Int>, next: ValueLookup) -> StateTerm {
     state = clone(given);
     existing = existingApplication(state.context, function, args);
     if existing is ValueLookup::Found {
-        return StateTerm { state: state, term: (existing as ValueLookup::Found).term, created: false, next: next };
+        return StateTerm { state: state, term: existing, created: false, next: next };
     };
-    apps = push(clone(state.context.applications), ApplicationTerm { id: next, function: function, arguments: clone(args) });
+    if next is ValueLookup::Missing {
+        return StateTerm { state: state, term: ValueLookup::Missing, created: false, next: next };
+    };
+    result = (next as ValueLookup::Found).term;
+    if termInUse(state, result) || result = function || containsValue(args, result) {
+        return StateTerm { state: state, term: ValueLookup::Missing, created: false, next: ValueLookup::Missing };
+    };
+    apps = push(clone(state.context.applications), ApplicationTerm { id: result, function: function, arguments: clone(args) });
     withApp = ValidatorContext { applications: apps, ..clone(state.context) };
-    context = builtinFacts(withApp, function, next, args);
-    return StateTerm { state: ExecutionState { context: context, ..state }, term: next, created: true, next: next - 1 };
+    context = builtinFacts(withApp, function, result, args);
+    return StateTerm { state: ExecutionState { context: context, ..state }, term: next, created: true, next: precedingTerm(result) };
 };
 
 // The terms of a template's nodes at an index: those made of the index
 // (dependent) from the others' terms, given; or those not made of it. The
 // terms made are of the generation given.
-struct NodeTerms { state: ExecutionState, terms: List<Int>, found: Bool, next: Int, births: HashMap<Int, Int> };
+struct NodeTerms { state: ExecutionState, terms: List<Int>, found: Bool, exhausted: Bool, next: ValueLookup, births: HashMap<Int, Int> };
 
 impl Clone for NodeTerms { };
 
-fn templateTerms(state: &ExecutionState, template: &ForallTemplate, index: Int, given: &List<Int>, depends: &List<Bool>, dependent: Bool, next: Int, births: &HashMap<Int, Int>, generation: Int) -> NodeTerms {
+fn templateTerms(state: &ExecutionState, template: &ForallTemplate, index: Int, given: &List<Int>, depends: &List<Bool>, dependent: Bool, next: ValueLookup, births: &HashMap<Int, Int>, generation: Int) -> NodeTerms {
     current = clone(state);
     counter = next;
     born = clone(births);
@@ -6206,10 +6319,13 @@ fn templateTerms(state: &ExecutionState, template: &ForallTemplate, index: Int, 
                 for a in node.arguments { if a >= 0 && a < size(terms) { args = push(args, get(terms, a)); } else { found = false; }; };
                 if found {
                     made = applicationTerm(current, node.function, args, counter);
-                    current = made.state;
                     counter = made.next;
-                    term = made.term;
+                    if made.term is ValueLookup::Missing {
+                        return NodeTerms { state: made.state, terms: terms, found: false, exhausted: true, next: counter, births: born };
+                    };
+                    term = (made.term as ValueLookup::Found).term;
                     if made.created { born = born.insert(term, generation); };
+                    current = made.state;
                 };
             };
         } else {
@@ -6220,7 +6336,7 @@ fn templateTerms(state: &ExecutionState, template: &ForallTemplate, index: Int, 
         };
         terms = push(terms, term);
     };
-    return NodeTerms { state: current, terms: terms, found: found, next: counter, births: born };
+    return NodeTerms { state: current, terms: terms, found: found, exhausted: false, next: counter, births: born };
 };
 
 fn saturationRound(given: &Saturation) -> RoundResult {
@@ -6240,13 +6356,14 @@ fn saturationRound(given: &Saturation) -> RoundResult {
     };
     pending = noDoneKeys();
     instances = [];
-    nextTerm = leastTermInUse(state) - 1;
+    nextTerm = freshValue(state);
     count = size(state.templates);
     for back in 0..count {
         if back < 16 {
             template = clone(get(state.templates, count - 1 - back));
             depends = templateDepends(template);
             free = templateTerms(state, template, 0, [], depends, false, nextTerm, births, 0);
+            if free.exhausted { return exhaustedRound(given, free.state, free.births, done); };
             freeTerms = clone(free.terms);
             freeFound = free.found;
             nextTerm = free.next;
@@ -6270,6 +6387,7 @@ fn saturationRound(given: &Saturation) -> RoundResult {
                                         pending = push(pending, DoneKey { kind: 0, owner: template.id, index: k });
                                         generation = generationOf(births, k) + 1;
                                         made = templateTerms(state, template, k, freeTerms, depends, true, nextTerm, births, generation);
+                                        if made.exhausted { return exhaustedRound(given, made.state, made.births, done); };
                                         madeTerms = clone(made.terms);
                                         madeFound = made.found;
                                         nextTerm = made.next;
@@ -6322,9 +6440,11 @@ fn saturationRound(given: &Saturation) -> RoundResult {
                                 function = -1;
                                 if side = 1 { function = -2; };
                                 shifted = applicationTerm(state, function, push(push([], k), base), nextTerm);
-                                if shifted.created { births = births.insert(shifted.term, generation); };
+                                if shifted.term is ValueLookup::Missing { return exhaustedRound(given, shifted.state, births, done); };
+                                shiftedTerm = (shifted.term as ValueLookup::Found).term;
+                                if shifted.created { births = births.insert(shiftedTerm, generation); };
                                 nextTerm = shifted.next;
-                                if side = 0 { otherIndex = shifted.term; } else { rangeIndex = shifted.term; otherIndex = shifted.term; };
+                                if side = 0 { otherIndex = shiftedTerm; } else { rangeIndex = shiftedTerm; otherIndex = shiftedTerm; };
                                 state = shifted.state;
                                 if shifted.created {
                                     offsetContext = state.context;
@@ -6335,7 +6455,8 @@ fn saturationRound(given: &Saturation) -> RoundResult {
                             otherList = fa;
                             if side = 1 { otherList = fb; };
                             read = applicationTerm(state, -14, push(push([], otherList), otherIndex), nextTerm);
-                            readTerm = read.term;
+                            if read.term is ValueLookup::Missing { return exhaustedRound(given, read.state, births, done); };
+                            readTerm = (read.term as ValueLookup::Found).term;
                             if read.created { births = births.insert(readTerm, generation); };
                             nextTerm = read.next;
                             state = read.state;
@@ -6365,11 +6486,13 @@ fn saturationRound(given: &Saturation) -> RoundResult {
                         inner = get(w.arguments, 0);
                         generation = generationOf(births, k) + 1;
                         sized = applicationTerm(state, -13, push([], inner), nextTerm);
-                        sizeTerm = sized.term;
+                        if sized.term is ValueLookup::Missing { return exhaustedRound(given, sized.state, births, done); };
+                        sizeTerm = (sized.term as ValueLookup::Found).term;
                         if sized.created { births = births.insert(sizeTerm, generation); };
                         sizedNext = sized.next;
                         read = applicationTerm(sized.state, -14, push(push([], inner), k), sizedNext);
-                        readTerm = read.term;
+                        if read.term is ValueLookup::Missing { return exhaustedRound(given, read.state, births, done); };
+                        readTerm = (read.term as ValueLookup::Found).term;
                         if read.created { births = births.insert(readTerm, generation); };
                         nextTerm = read.next;
                         state = read.state;
@@ -6410,7 +6533,7 @@ fn saturationRound(given: &Saturation) -> RoundResult {
         };
     };
     after = closedFacts(context);
-    next = Saturation { state: ExecutionState { context: context, ..state }, births: births, done: done, blocked: blocked, closed: push([], after) };
+    next = Saturation { state: ExecutionState { context: context, ..state }, births: births, done: done, blocked: blocked, closed: push([], after), exhausted: false };
     return RoundResult { saturation: next, accepted: accepted };
 };
 
@@ -6458,14 +6581,15 @@ fn closedHolds(closed: &ClosedFacts, relation: Int, left: Int, right: Int) -> Bo
 };
 
 // A case's context with the instances of the path's foralls that hold in it
-fn withInstances(state: &ExecutionState, context: ValidatorContext) -> ValidatorContext {
-    if size(state.templates) = 0 { return context; };
-    saturated = saturate(Saturation { state: ExecutionState { context: context, ..clone(state) }, births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() });
-    return saturated.state.context;
+fn withInstances(state: &ExecutionState, context: ValidatorContext) -> Saturation {
+    initial = Saturation { state: ExecutionState { context: context, ..clone(state) }, births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed(), exhausted: false };
+    if size(state.templates) = 0 { return initial; };
+    return saturate(initial);
 };
 
 fn saturate(given: &Saturation) -> Saturation {
     current = clone(given);
+    if current.exhausted { return current; };
     going = true;
     for round in 0..12 {
         if going {
@@ -6508,12 +6632,13 @@ fn goalReadIndexes(context: &ValidatorContext, closed: &ClosedFacts, left: Int, 
 // that blocked an instance (one guard a level, those at the indexes the goal
 // reads first), within a depth and a budget of saturations
 fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, depth: Int, budget: Int, splits: &List<BlockedGuard>) -> SplitResult {
-    if budget <= 0 { return SplitResult { holds: false, used: 0 }; };
+    if budget <= 0 { return SplitResult { holds: false, used: 0, exhausted: false }; };
     saturated = saturate(given);
     used = 1;
+    if saturated.exhausted { return SplitResult { holds: false, used: used, exhausted: true }; };
     closed = knownClosure(saturated);
-    if closed.contradictory { return SplitResult { holds: true, used: used }; };
-    if closedHolds(closed, relation, left, right) { return SplitResult { holds: true, used: used }; };
+    if closed.contradictory { return SplitResult { holds: true, used: used, exhausted: false }; };
+    if closedHolds(closed, relation, left, right) { return SplitResult { holds: true, used: used, exhausted: false }; };
     indexes = goalReadIndexes(saturated.state.context, closed, left, right);
     chosen = -1;
     firstFresh = -1;
@@ -6540,11 +6665,11 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
     if chosen < 0 { chosen = firstFresh; };
     // (where no case is left to split, the goal is asked with every heuristic)
     if chosen < 0 || depth <= 0 {
-        if entailsGoal(saturated.state.context, localGoal(relation, left, right)) { return SplitResult { holds: true, used: used }; };
+        if entailsGoal(saturated.state.context, localGoal(relation, left, right)) { return SplitResult { holds: true, used: used, exhausted: false }; };
         if relation <= 1 {
-            if booleanCheck(saturated.state.context, relation, left, right) { return SplitResult { holds: true, used: used }; };
+            if booleanCheck(saturated.state.context, relation, left, right) { return SplitResult { holds: true, used: used, exhausted: false }; };
         };
-        return SplitResult { holds: false, used: used };
+        return SplitResult { holds: false, used: used, exhausted: false };
     };
     guard = clone(get(saturated.blocked, chosen));
     cases = [];
@@ -6560,13 +6685,14 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
         if allHold {
             caseContext = assumeRelation(saturated.state.context, c.relation, c.left, c.right);
             if c.relation = 0 { caseContext = assumeBooleanFact(caseContext, c.left, c.right); };
-            caseSat = Saturation { state: ExecutionState { context: caseContext, ..clone(saturated.state) }, births: clone(saturated.births), done: clone(saturated.done), blocked: noBlocked(), closed: noClosed() };
+            caseSat = Saturation { state: ExecutionState { context: caseContext, ..clone(saturated.state) }, births: clone(saturated.births), done: clone(saturated.done), blocked: noBlocked(), closed: noClosed(), exhausted: false };
             r = proveBySaturation(caseSat, relation, left, right, depth - 1, budget - used, deeperSplits);
+            if r.exhausted { return SplitResult { holds: false, used: used + r.used, exhausted: true }; };
             used = used + r.used;
             if r.holds = false { allHold = false; };
         };
     };
-    return SplitResult { holds: allHold, used: used };
+    return SplitResult { holds: allHold, used: used, exhausted: false };
 };
 
 fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
@@ -6582,13 +6708,41 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
         if step is ExecutionStep::Assign {
             handled = true;
             assign = step as ExecutionStep::Assign;
-            value = resolveValue(state, assign.value);
-            if value is ValueLookup::Found {
-                locals = bindLocal(state.locals, assign.local, (value as ValueLookup::Found).term);
+            value = resolveBinding(state, assign.value);
+            if value is BindingLookup::Found {
+                locals = bindBinding(state.locals, assign.local, (value as BindingLookup::Found).value);
                 state = ExecutionState { locals: locals, ..state };
             } else {
                 return ExecutionResult { status: 2, failedAt: i, state: state };
             };
+        };
+        if step is ExecutionStep::AssignSemantic {
+            handled = true;
+            assign = step as ExecutionStep::AssignSemantic;
+            value = resolveValue(state, assign.value);
+            if value is ValueLookup::Found {
+                state = ExecutionState { locals: bindLocal(state.locals, assign.local, (value as ValueLookup::Found).term), ..state };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::ProjectBinding {
+            handled = true;
+            project = step as ExecutionStep::ProjectBinding;
+            if containsValue(state.context.fieldFunctions, project.function) = false { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            object = resolveBinding(state, project.object);
+            if object is BindingLookup::Found {
+                value = (object as BindingLookup::Found).value;
+                semantic = applicationTerm(state, project.function, push([], value.semantic), freshValue(state));
+                if semantic.term is ValueLookup::Missing { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                binding = semanticBinding((semantic.term as ValueLookup::Found).term);
+                state = semantic.state;
+                if value.storage is ValueLookup::Found {
+                    storage = applicationTerm(state, project.function, push([], (value.storage as ValueLookup::Found).term), freshValue(state));
+                    if storage.term is ValueLookup::Missing { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                    binding = ValueBinding { semantic: binding.semantic, storage: storage.term };
+                    state = clone(storage.state);
+                };
+                state = ExecutionState { locals: bindBinding(state.locals, project.local, binding), ..state };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
         if step is ExecutionStep::Apply {
             handled = true;
@@ -6783,13 +6937,17 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                         // prove is given up after fewer of them)
                         saturations = 40;
                         if size(state.context.applications) > 150 { saturations = 12; };
-                        ok = proveBySaturation(Saturation { state: clone(state), births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() }, relation, a, b, 8, saturations, noBlocked()).holds;
+                        saturationProof = proveBySaturation(Saturation { state: clone(state), births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed(), exhausted: false }, relation, a, b, 8, saturations, noBlocked());
+                        if saturationProof.exhausted { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                        ok = saturationProof.holds;
                     };
                     if ok = false && quiet = false {
                         // (a small context affords more cases: each costs about its size)
                         budget = 8;
                         if size(state.context.applications) < 200 { budget = 24; };
-                        ok = splitReadOverWrite(state, localGoal(relation, a, b), 3, budget).holds;
+                        readProof = splitReadOverWrite(state, localGoal(relation, a, b), 3, budget);
+                        if readProof.exhausted { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                        ok = readProof.holds;
                     };
                     if ok = false {
                         return ExecutionResult { status: 1, failedAt: i, state: state };
@@ -7082,11 +7240,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         if binding.key >= 0 {
             if containsValue(havoc, binding.key) {
                 if size(assigned) < 8 {
-                    assigned = push(assigned, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value, kind: 0, indexTerm: 0 });
+                    assigned = push(assigned, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value.semantic, kind: 0, indexTerm: 0 });
                 };
             } else {
                 if size(anchors) < 12 {
-                    anchors = push(anchors, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value, kind: 0, indexTerm: 0 });
+                    anchors = push(anchors, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value.semantic, kind: 0, indexTerm: 0 });
                 };
             };
         };

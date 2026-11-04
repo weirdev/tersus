@@ -168,9 +168,38 @@ fn driverInts(value: &DriverValue) -> List<Int> {
     return out;
 };
 
+fn driverRecord(value: &DriverValue, name: String, count: Int) -> Bool {
+    return driverNameIs(driverName(value), name) && size(driverItems(value)) = count;
+};
+
+fn driverIsInt(value: &DriverValue) -> Bool { return value is DriverValue::DriverInt; };
+
+fn driverStorageValid(value: &DriverValue) -> Bool {
+    if driverRecord(value, "ValueLookup::Missing", 0) { return true; };
+    return driverRecord(value, "ValueLookup::Found", 1) && driverIsInt(driverField(value, 0));
+};
+
+fn driverStorage(value: &DriverValue) -> ValueLookup {
+    if driverRecord(value, "ValueLookup::Found", 1) && driverIsInt(driverField(value, 0)) {
+        return ValueLookup::Found { term: driverInt(driverField(value, 0)) };
+    };
+    return ValueLookup::Missing;
+};
+
+fn driverBindingValid(value: &DriverValue) -> Bool {
+    return driverRecord(value, "ValueBinding", 2) && driverIsInt(driverField(value, 0)) && driverStorageValid(driverField(value, 1));
+};
+
+fn driverBinding(value: &DriverValue) -> ValueBinding {
+    return ValueBinding { semantic: driverInt(driverField(value, 0)), storage: driverStorage(driverField(value, 1)) };
+};
+
 fn driverValueRef(value: &DriverValue) -> ValueRef {
-    if driverNameIs(driverName(value), "ValueRef::Local") { return ValueRef::Local { local: driverInt(driverField(value, 0)) }; };
-    return ValueRef::Term { term: driverInt(driverField(value, 0)) };
+    if driverRecord(value, "ValueRef::Local", 1) && driverIsInt(driverField(value, 0)) { return ValueRef::Local { local: driverInt(driverField(value, 0)) }; };
+    if driverRecord(value, "ValueRef::StorageLocal", 1) && driverIsInt(driverField(value, 0)) { return ValueRef::StorageLocal { local: driverInt(driverField(value, 0)) }; };
+    if driverRecord(value, "ValueRef::Term", 1) && driverIsInt(driverField(value, 0)) { return ValueRef::Term { term: driverInt(driverField(value, 0)) }; };
+    if driverRecord(value, "ValueRef::Binding", 1) && driverBindingValid(driverField(value, 0)) { return ValueRef::Binding { value: driverBinding(driverField(value, 0)) }; };
+    return ValueRef::Unsupported;
 };
 
 fn driverValueRefs(value: &DriverValue) -> List<ValueRef> {
@@ -209,7 +238,15 @@ fn driverStep(value: &DriverValue) -> ExecutionStep {
         };
         return ExecutionStep::Unsupported;
     };
-    if driverNameIs(name, "ExecutionStep::Assign") { return ExecutionStep::Assign { local: driverInt(driverField(value, 0)), value: driverValueRef(driverField(value, 1)) }; };
+    if driverNameIs(name, "ExecutionStep::Assign") || driverNameIs(name, "ExecutionStep::AssignSemantic") {
+        if size(driverItems(value)) != 2 || driverIsInt(driverField(value, 0)) = false { return ExecutionStep::Unsupported; };
+        if driverNameIs(name, "ExecutionStep::AssignSemantic") { return ExecutionStep::AssignSemantic { local: driverInt(driverField(value, 0)), value: driverValueRef(driverField(value, 1)) }; };
+        return ExecutionStep::Assign { local: driverInt(driverField(value, 0)), value: driverValueRef(driverField(value, 1)) };
+    };
+    if driverNameIs(name, "ExecutionStep::ProjectBinding") {
+        if size(driverItems(value)) != 3 || driverIsInt(driverField(value, 0)) = false || driverIsInt(driverField(value, 1)) = false { return ExecutionStep::Unsupported; };
+        return ExecutionStep::ProjectBinding { local: driverInt(driverField(value, 0)), function: driverInt(driverField(value, 1)), object: driverValueRef(driverField(value, 2)) };
+    };
     if driverNameIs(name, "ExecutionStep::Literal") { return ExecutionStep::Literal { result: driverInt(driverField(value, 0)), function: driverInt(driverField(value, 1)), arguments: driverValueRefs(driverField(value, 2)) }; };
     if driverNameIs(name, "ExecutionStep::Apply") { return ExecutionStep::Apply { local: driverInt(driverField(value, 0)), result: driverInt(driverField(value, 1)), function: driverInt(driverField(value, 2)), arguments: driverValueRefs(driverField(value, 3)) }; };
     if driverNameIs(name, "ExecutionStep::ApplyFresh") { return ExecutionStep::ApplyFresh { local: driverInt(driverField(value, 0)), function: driverInt(driverField(value, 1)), arguments: driverValueRefs(driverField(value, 2)) }; };
@@ -360,20 +397,33 @@ fn driverContext(value: &DriverValue) -> ValidatorContext {
     };
 };
 
-fn driverLocals(value: &DriverValue) -> HashMap<Int, Int> {
-    out = HashMap::new();
+struct DriverBindings { locals: HashMap<Int, ValueBinding>, valid: Bool };
+
+fn driverLocals(value: &DriverValue) -> DriverBindings {
+    out = emptyBindings();
+    entries = driverItems(value);
     if value is DriverValue::DriverData {
-        for bucket in driverItems(driverField(value, 0)) {
-            for entry in driverItems(bucket) {
-                out = out.insert(driverInt(driverField(entry, 0)), driverInt(driverField(entry, 1)));
-            };
+        if driverRecord(value, "HashMap", 2) = false { return DriverBindings { locals: out, valid: false }; };
+        buckets = driverField(value, 0);
+        if (buckets is DriverValue::DriverList) = false { return DriverBindings { locals: out, valid: false }; };
+        if driverIsInt(driverField(value, 1)) = false { return DriverBindings { locals: out, valid: false }; };
+        entries = [];
+        for bucket in driverItems(buckets) {
+            if (bucket is DriverValue::DriverList) = false { return DriverBindings { locals: out, valid: false }; };
+            for entry in driverItems(bucket) { entries = push(entries, clone(entry)); };
         };
-        return out;
+        if size(entries) != driverInt(driverField(value, 1)) { return DriverBindings { locals: out, valid: false }; };
+    } else {
+        if (value is DriverValue::DriverList) = false { return DriverBindings { locals: out, valid: false }; };
     };
-    for entry in driverItems(value) {
-        out = out.insert(driverInt(driverField(entry, 0)), driverInt(driverField(entry, 1)));
+    for entry in entries {
+        if driverRecord(entry, "Entry", 2) = false && driverRecord(entry, "LocalBinding", 2) = false { return DriverBindings { locals: out, valid: false }; };
+        if driverIsInt(driverField(entry, 0)) = false || driverBindingValid(driverField(entry, 1)) = false { return DriverBindings { locals: out, valid: false }; };
+        local = driverInt(driverField(entry, 0));
+        if out.contains(local) { return DriverBindings { locals: out, valid: false }; };
+        out = bindBinding(out, local, driverBinding(driverField(entry, 1)));
     };
-    return out;
+    return DriverBindings { locals: out, valid: true };
 };
 
 fn driverTemplateNode(value: &DriverValue) -> TemplateNode {
@@ -393,7 +443,8 @@ fn driverTemplate(value: &DriverValue) -> ForallTemplate {
 };
 
 fn driverState(value: &DriverValue) -> ExecutionState {
-    return ExecutionState { context: driverContext(driverField(value, 0)), locals: driverLocals(driverField(value, 1)), templates: noTemplates() };
+    bindings = driverLocals(driverField(value, 1));
+    return ExecutionState { context: driverContext(driverField(value, 0)), locals: bindings.locals, templates: noTemplates() };
 };
 
 fn driverPrintInt(value: Int) -> Int [{ }] [{ }] {
@@ -441,6 +492,11 @@ while index < total [{ affirm index >= 0; }] shrinks total - index {
         return 0;
     };
     at = blocksParsed.pos;
+    bindings = driverLocals(driverField(stateParsed.value, 1));
+    if driverRecord(stateParsed.value, "ExecutionState", 3) = false || bindings.valid = false {
+        printed = driverPrintVerdict(2, entryParsed.value, -1, index);
+        return 0;
+    };
     result = validateExecution(driverBlocks(blocksParsed.value), entryParsed.value, driverState(stateParsed.value));
     if result.status != 0 {
         printed = driverPrintVerdict(result.status, result.block, result.step, index);

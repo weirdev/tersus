@@ -18,6 +18,7 @@ import TestBasics
 import TestValidation
 import TestProofs
 import TestNativeRules
+import TestNativePaired
 import TestNativeAdmission
 import TestControl
 import TestData
@@ -133,6 +134,7 @@ originalGroups =
     , testLists
     , testForallSyntax
     , testNativeRules
+    , testNativePaired
     , testNativeAdmission
     , testForallInstantiation
     , testForallProof

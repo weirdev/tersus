@@ -31,6 +31,9 @@ emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Ma
 record :: String -> [(String, MirValue)] -> MirValue
 record = MData
 
+semanticBinding :: Integer -> MirValue
+semanticBinding term = record "ValueBinding" [("semantic", MInt term), ("storage", record "ValueLookup::Missing" [])]
+
 localNum :: M.Local -> Integer
 localNum (M.Local n) = toInteger n
 
@@ -1354,17 +1357,22 @@ builtinSpecOf funct = case builtinFunct funct of
     VFunct params ins outs _ extra -> Just (params, ins, outs ++ map ProofAssert extra)
     _ -> Nothing
 
+semanticAssignment :: M.Local -> M.Operand -> Build -> Maybe ([MirValue], Build)
+semanticAssignment dest source b = do
+    (value, b') <- operand source b
+    pure ([step "AssignSemantic" [("local", MInt (localNum dest)), ("value", value)]], b')
+
 statement :: Rules -> M.Statement -> Build -> Maybe ([MirValue], Build)
 statement rules (M.Assign (M.Local dest) (M.Use source)) b = do
     (v, b') <- operand source b
     pure ([step "Assign" [("local", MInt (toInteger dest)), ("value", v)]], b')
--- Boxes and unsizing preserve the proof value, as in the reference MIR
--- validator. Ownership and representation are handled by later passes.
-statement rules (M.Assign dest (M.MakeBox source)) b = statement rules (M.Assign dest (M.Use source)) b
-statement rules (M.Assign dest (M.Unbox source)) b = statement rules (M.Assign dest (M.Use source)) b
-statement rules (M.Assign dest (M.Unsize source)) b = statement rules (M.Assign dest (M.Use source)) b
-statement rules (M.Assign dest (M.CopyOf source)) b = statement rules (M.Assign dest (M.Use source)) b
-statement rules (M.Assign dest (M.ListOp M.FromList [source])) b = statement rules (M.Assign dest (M.Use source)) b
+-- These operations still have only a semantic model; they cannot inherit
+-- storage from their source until their checked representation is modeled.
+statement rules (M.Assign dest (M.MakeBox source)) b = semanticAssignment dest source b
+statement rules (M.Assign dest (M.Unbox source)) b = semanticAssignment dest source b
+statement rules (M.Assign dest (M.Unsize source)) b = semanticAssignment dest source b
+statement rules (M.Assign dest (M.CopyOf source)) b = semanticAssignment dest source b
+statement rules (M.Assign dest (M.ListOp M.FromList [source])) b = semanticAssignment dest source b
 -- A reference to a whole local has the value of what it is to, as in the reference MIR validator; a reference
 -- to a part of one, a read through one and an assignment through one are outside this bridge's subset for now
 statement rules (M.Assign dest (M.Borrow root [] _)) b = statement rules (M.Assign dest (M.Use (M.Copy root))) b
@@ -2771,7 +2779,7 @@ encodeRule program rules (_, rule) = do
         start = emptyBuild{buildFunctions = functions, buildRules = available,
             buildReaders = M.readersOfInput program,
             buildInputReaders = inputReadersOf functions}
-        alloc (bindings, b) (_, i) = let (term, b') = fresh b in (bindings ++ [record "LocalBinding" [("local", MInt (toInteger i)), ("term", MInt term)]], b')
+        alloc (bindings, b) (_, i) = let (term, b') = fresh b in (bindings ++ [record "LocalBinding" [("local", MInt (toInteger i)), ("value", semanticBinding term)]], b')
         (paramBindings, b0) = foldl alloc ([], start) indexed
     (inSteps, b1, env1, next1) <- genericClauses available True env0 (ruleInputs rule) b0 (length params)
     (bodySteps, b2, _, next2) <- genericClauses available False env1 body b1 next1
@@ -2861,7 +2869,7 @@ encodeFunction types invariants functions rules allowCalls fn
     -- and the first insert past four entries spreads it into the usual shape.
     localsMap bindings =
         record "HashMap"
-            [ ("buckets", MList [MList [record "Entry" [("key", MInt local), ("value", MInt term)] | (local, term) <- bindings]])
+            [ ("buckets", MList [MList [record "Entry" [("key", MInt local), ("value", semanticBinding term)] | (local, term) <- bindings]])
             , ("count", MInt (toInteger (length bindings)))
             ]
     addType (steps, b) local = do
