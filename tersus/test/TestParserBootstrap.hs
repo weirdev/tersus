@@ -1,7 +1,8 @@
 module TestParserBootstrap (testParserBootstrap) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (bracket, evaluate)
+import Control.Concurrent (MVar, forkIO, newEmptyMVar, newMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (modifyMVar)
+import Control.Exception (SomeAsyncException, SomeException, bracket, displayException, evaluate, fromException, throwIO, try)
 import Control.Monad (forM)
 import Data.List (isPrefixOf, sort)
 import GHC.Clock (getMonotonicTime)
@@ -250,26 +251,57 @@ warmStages = do
     ir <- Bootstrap.tersusLlvm "return 42;"
     pure $ firstFailure [either Just (const Nothing) answer, case ir of Error e -> Just e; Ok _ -> Nothing]
 
+{-# NOINLINE coldReuseResults #-}
+coldReuseResults :: MVar (Maybe (TestResult, TestResult))
+coldReuseResults = unsafePerformIO (newMVar Nothing)
+
+coldAndReuse :: IO (TestResult, TestResult)
+coldAndReuse = modifyMVar coldReuseResults $ \saved -> case saved of
+    Just results -> pure (saved, results)
+    Nothing -> do
+        results <- withDirectory $ \home -> do
+            first <- try (worker "cold" home []) :: IO (Either SomeException (ExitCode, String, String))
+            cold <- case first of
+                Left ex -> synchronousFailure ex
+                Right (ExitSuccess, _, _) -> pure Nothing
+                Right (_, out, err) -> pure (Just ("fresh cold worker: " ++ out ++ err))
+            case cold of
+                Just err -> pure (cold, Just ("cache reuse requires a successful cold worker: " ++ err))
+                Nothing -> do
+                    reused <- try (reuse home) :: IO (Either SomeException TestResult)
+                    result <- either synchronousFailure pure reused
+                    pure (Nothing, result)
+        pure (Just results, results)
+  where
+    reuse home = do
+        let cache = home </> "tersus"
+        names <- sort <$> listDirectory cache
+        before <- mapM (getModificationTime . (cache </>)) names
+        second <- worker "reuse" home []
+        afterNames <- sort <$> listDirectory cache
+        after <- mapM (getModificationTime . (cache </>)) names
+        pure $ case second of
+            (ExitSuccess, _, _) -> testAssertEq (afterNames, after) (names, before)
+            (_, out, err) -> Just (out ++ err)
+    synchronousFailure ex = case fromException ex :: Maybe SomeAsyncException of
+        Just _ -> throwIO ex
+        Nothing -> pure (Just (displayException ex))
+
+coldProcess :: IO TestResult
+coldProcess = do
+    mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
+    case mode of
+        Just "cold" -> coldStages
+        Just _ -> pure Nothing
+        Nothing -> fst <$> coldAndReuse
+
 cacheReuse :: IO TestResult
 cacheReuse = do
     mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
     case mode of
         Just "reuse" -> warmStages
         Just _ -> pure Nothing
-        Nothing -> withDirectory $ \home -> do
-            first <- worker "cold" home []
-            case first of
-                (ExitSuccess, _, _) -> do
-                    let cache = home </> "tersus"
-                    names <- sort <$> listDirectory cache
-                    before <- mapM (getModificationTime . (cache </>)) names
-                    second <- worker "reuse" home []
-                    afterNames <- sort <$> listDirectory cache
-                    after <- mapM (getModificationTime . (cache </>)) names
-                    pure $ case second of
-                        (ExitSuccess, _, _) -> testAssertEq (afterNames, after) (names, before)
-                        (_, out, err) -> Just (out ++ err)
-                (_, out, err) -> pure (Just (out ++ err))
+        Nothing -> snd <$> coldAndReuse
 
 concurrentCold :: IO TestResult
 concurrentCold = do
@@ -362,7 +394,7 @@ testParserBootstrap = TestList "testParserBootstrap"
     , TestCase "interpreted parser still requires verified native P0" (failureCase "interpreted-corrupt" "bootstrap/parser.sha256")
     , TestCase "no clang is an explicit P0 tool failure" (failureCase "clang-missing" "Could not run clang")
     , TestCase "retired haskell backend is refused" (failureCase "haskell-refused" "expected native or interpreted")
-    , TestCase "cold process reaches P0 E1 P1 source and package" (inFreshWorker "cold" (const (pure [])) coldStages)
+    , TestCase "cold process reaches P0 E1 P1 source and package" coldProcess
     , TestCase "fresh processes reuse every bootstrap cache entry without writes" cacheReuse
     , TestCase "concurrent empty-cache processes converge" concurrentCold
     , TestCase "same-process transient failures repair without stale library or executable caches" retryStages
