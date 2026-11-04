@@ -329,11 +329,11 @@ withAstReader use = do
             files <- Mod.snapshotFromFilesystem readerPath
             checked <- programFromFiles readerPath files
             seed <- cachedSeed
-            case (checked, seed) of
+            case (checked `bindResult` nativeProgram, seed) of
                 (Error e, _) -> pure (Just e)
                 (_, Error e) -> pure (Just e)
                 (Ok program, Ok compiler) -> do
-                    let native = insertOwnership (nativeProgram program)
+                    let native = insertOwnership program
                         dataText = writeProgram native
                         build output = do
                             ir <- runWithInput compiler dataText

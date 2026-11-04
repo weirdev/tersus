@@ -11,17 +11,8 @@
 // The runtime and the emitter know this struct by its name and its fields, which have to stay as they are: `addr` first (an element is read
 // from a list at the address that is its first field), then `len`, then `cap`; the runtime prints, compares and copies a List as a list of
 // its first `len` elements. It is freed by its drop, at the end.
-struct List<T> {
-    addr: Addr<T>,
-    len: Int,
-    cap: Int,
-    ghost blk: Block<T>,
-} invariant [{
-    affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len;
-    affirm len >= 0; affirm len <= cap;
-    affirm forall j in 0..len: filled(blk, j) = true;
-    affirm forall j in len..cap: filled(blk, j) = false;
-}];
+import tersuslib::types;
+import tersuslib::prelude;
 
 fn listNew<T>() -> List<T> [{ }] [{ affirm return.len = 0; }] {
     (a, b) = Addr::alloc(0);

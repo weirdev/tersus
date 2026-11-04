@@ -15,7 +15,7 @@ import MirOwnership (insertOwnership)
 import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
 import Pipeline (nativeProgram)
-import PreludeSource (boxSource, listsSource)
+import MirHousekeeping (validatedListLibrary)
 import Types (Type (..), pattern TList, pattern TBox)
 import TestHarness
 import TestMirReader (sameText, withProgram)
@@ -137,7 +137,7 @@ interpretedWithMessage message source mutate expected = do
     verdict False = "refusal"
 
 rawLibrary :: Result String String
-rawLibrary = mapResult writeProgram (lowerSource False (listsSource ++ "\n" ++ boxSource))
+rawLibrary = Ok (writeProgram validatedListLibrary)
 
 rawInterpreted :: Bool -> Result String String -> IO TestResult
 rawInterpreted expected input = do
@@ -297,7 +297,7 @@ functionCases =
         Nothing -> Error ("no function program named " ++ name)
         Just source -> case parseStatementBlock source of
             Left e -> Error (show e)
-            Right stmts -> mapResult (writeProgram . insertOwnership . nativeProgram) (lowerProgram stmts)
+            Right stmts -> mapResult (writeProgram . insertOwnership) (lowerProgram stmts `bindResult` nativeProgram)
     ordinary = ("fn(Int) -> Int", "fn 1 int int")
     borrowedArg = ("fn(&List<Int>) -> Int", "fn 1 ref list int int")
     namedArg = ("fn(Integer) -> Int", "fn 1 named \"Integer\" 0 int")

@@ -9,7 +9,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
-import MirHousekeeping (verifyProgram, validatedListLibrary)
+import LibPackage (LibPackage (..), libPackage)
+import MirHousekeeping (verifyProgram)
 import StdLib (builtinFunct)
 import StdLibDefs (stdLibValCtx)
 import Types
@@ -788,8 +789,10 @@ sourceContainerView program = program
     layouts = Set.fromList
         [ name
         | name <- ["List", "Box"]
-        , Just generic <- [Map.lookup name (M.progGenerics validatedListLibrary)]
-        , Just invariant <- [Map.lookup name (M.progInvariants validatedListLibrary)]
+        , Ok pkg <- [libPackage]
+        , Just types <- [Map.lookup "types" (libPrograms pkg)]
+        , Just generic <- [Map.lookup name (M.progGenerics types)]
+        , Just invariant <- [Map.lookup name (M.progInvariants types)]
         , Map.lookup name (M.progGenerics program) == Just generic
         , Map.lookup name (M.progInvariants program) == Just invariant
         ]

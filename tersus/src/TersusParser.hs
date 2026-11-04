@@ -27,9 +27,8 @@ import LlvmRuntime (runtimeSource)
 import Mir (Program)
 import MirData (writeProgram)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
-import MirHousekeeping (cachedEmitter, listLibrary, toolValidatedProgram)
-import MirLists (lowerLists)
-import MirOwnership (expandRefWrites, insertOwnership)
+import MirHousekeeping (cachedEmitter, nativeProgram, toolValidatedProgram)
+import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import PreludeSource (parserPackageFiles)
 import Seed (emitterHash)
@@ -234,7 +233,7 @@ validatedParserProgram =
 
 ownedParserProgram :: Result Program String
 ownedParserProgram = validatedParserProgram `bindResult` \program ->
-    Ok (insertOwnership (lowerLists listLibrary (expandRefWrites program)))
+    mapResult insertOwnership (nativeProgram program)
 
 runInterpreted :: Program -> String -> Result (String, String, Maybe MirValue) String
 runInterpreted program input = case runProgramEnv RunEnv{envArgs = [], envInput = input, envFile = const Nothing} program of

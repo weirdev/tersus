@@ -55,9 +55,13 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   - `set.tersus`: the struct `HashSet`, made of a map, imported for a program
     that mentions `HashSet`. It imports `map`, `prelude`, `eq` and `clone`.
     Embedded by `PreludeSource`.
-  - `lists.tersus`: the list that native code is made of (`List`), and
-    `box.tersus`: the Box that native code is made of (`Box`). Both embedded
-    by `PreludeSource` and lowered with the lists library.
+  - `lists.tersus` and `box.tersus`: native-only List/Box helper modules of
+    the same synthetic `tersuslib` package. They import the types and traits
+    they use; `types.tersus` alone owns the structs and layout invariants.
+    `LibPackage` checks and lowers them separately, and `MirHousekeeping`
+    validates their physical-container proofs and erases their ghosts.
+    `MirLists` links only the helper units native lowering needs, after user
+    validation. Their bodies and Drop impls are never implicit user imports.
   - `stdlib.tersus`: the standard library written in Tersus. Embedded by
     `PreludeSource` and parsed by `StdLibDefs`, which is where the builtins it
     declares get their contracts; it is not linked into user programs.

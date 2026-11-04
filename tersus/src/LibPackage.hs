@@ -1,6 +1,7 @@
 module LibPackage
     ( LibPackage (..)
     , libPackage
+    , nativeStorageUnits
     , libModuleNames
     , libModuleId
     , libModuleOfDisplay
@@ -21,29 +22,23 @@ import qualified LibParsed
 import qualified Mir as M
 import MirLower (lowerModuleWith)
 import Modules (ModuleId (..), renderModuleId)
-import TypeCheck (Elaborated (..), elaborateWith)
-import Utils (Result (..))
+import TypeCheck (ImportEnv (..), Elaborated (..), elaborateWith)
+import Utils (Result (..), bindResult, flatResultMap)
 
--- The libraries of Compile.librariesFor as a synthetic package: one
--- module per lib file, built in memory from the PreludeSource texts (the
--- import lines exist only in the in-memory copies LibParsed parses, so
--- the embedded texts, and with them emitterHash, are unchanged). A
--- library module's declarations keep their bare names, as the entry
--- module's do: the checker, the parser, MIR and the emitter all match
--- those names as strings. The package is compiled once per process from
--- the libraries' one parse (LibParsed).
+-- The implicit libraries and native storage helpers share one compiler-owned
+-- package and one parse. Native units never enter user-facing selection.
 
 libModuleNames :: [String]
 libModuleNames = LibParsed.libModuleNames
 
 -- The display names Compile.librariesFor selects by.
 libModuleOfDisplay :: String -> Maybe String
-libModuleOfDisplay display = lookup display [(shown, name) | (name, shown, _, _) <- libModules]
+libModuleOfDisplay display = lookup display [(shown, name) | (name, shown, _) <- libModules, name `elem` libModuleNames]
 
 libDependencies :: String -> [String]
-libDependencies name = case [deps | (candidate, _, _, deps) <- libModules, candidate == name] of
-    deps : _ -> deps
-    [] -> []
+libDependencies name = case libParsed of
+    Right parsed -> Map.findWithDefault [] name (lpDependencies parsed)
+    Left _ -> []
 
 -- A library unit lowered against the types its fellow libraries declare
 -- carries those types' declarations and invariants seeded from their
@@ -77,29 +72,39 @@ data LibPackage = LibPackage
 compileLibPackage :: Result LibPackage String
 compileLibPackage = case libParsed of
     Left err -> Error ("the lib package does not parse: " ++ err)
-    Right parsed -> go libCompileOrder (lpStatements parsed) Map.empty Map.empty []
+    Right parsed -> go (lpOrder parsed) (lpStatements parsed) Map.empty Map.empty []
   where
-    libCompileOrder = ["types", "eq", "clone", "prelude", "string", "map", "set"]
     go [] _ ifaces programs done = Ok (LibPackage ifaces programs (reverse done))
-    go (name : rest) statements ifaces programs done = case compileOne ifaces name (Map.findWithDefault [] name statements) of
+    go (name : rest) statements ifaces programs done = case compileLibModule ifaces (libDependencies name) name (Map.findWithDefault [] name statements) of
         Error err -> Error err
         Ok (iface, program) -> go rest statements (Map.insert name iface ifaces) (Map.insert name program programs) (name : done)
-    compileOne ifaces name statements =
-        let moduId = libModuleId name
-            -- (every library module is compiled with the List and Box types in
-            -- front of it, as the texts are read together on the old path; the
-            -- types module itself is only linked where librariesFor selects it)
-            depNames = (if name == "types" then [] else ["types"]) ++ [dep | dep <- libDependencies name, dep /= "types"]
-            depIfaces = [ifaces Map.! dep | dep <- depNames]
-            importEnv = mergeInterfacesImportEnv depIfaces
-            env = predeclareOwnEnv importEnv
-         in case elaborateWith env statements of
-                Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
-                Ok (elaborated@(Elaborated elaboratedStatements _), state) -> case extractLibInterface moduId statements elaboratedStatements state of
-                    Error err -> Error err
-                    Ok iface -> case lowerModuleWith importEnv depIfaces elaborated of
-                        Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
-                        Ok program -> Ok (iface, program)
+
+compileLibModule :: Map.Map String ModuleInterface -> [String] -> String -> [Statement] -> Result (ModuleInterface, M.Program) String
+compileLibModule ifaces deps name statements =
+    let moduId = libModuleId name
+        depIfaces = [ifaces Map.! dep | dep <- deps]
+        imported = mergeInterfacesImportEnv depIfaces
+        -- Generic constructor owners are compiler-only physical views, not
+        -- additions to user import visibility or the logical List/Box API.
+        owners = Map.fromList [(owner, [ctor]) | iface <- depIfaces, (ctor, (owner, _)) <- Map.toList (ifCtors iface), ctor == owner]
+        importEnv = imported{ieTypes = Map.union (ieTypes imported) owners}
+        env = predeclareOwnEnv importEnv
+     in case elaborateWith env statements of
+            Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
+            Ok (elaborated@(Elaborated elaboratedStatements _), state) -> case extractLibInterface moduId statements elaboratedStatements state of
+                Error err -> Error err
+                Ok iface -> case lowerModuleWith importEnv depIfaces elaborated of
+                    Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
+                    Ok program -> Ok (iface, program)
+
+nativeStorageUnits :: Result [(ModuleId, ModuleInterface, M.Program)] String
+nativeStorageUnits = libPackage `bindResult` \pkg -> case LibParsed.nativeLibParsed of
+    Left err -> Error err
+    Right parsed -> flatResultMap (compileNative pkg parsed) LibParsed.nativeStorageModules
+  where
+    compileNative pkg parsed name =
+        compileLibModule (libInterfaces pkg) (Map.findWithDefault [] name (lpDependencies parsed)) name (lpStatements parsed Map.! name)
+            `bindResult` \(iface, program) -> Ok (libModuleId name, iface, program)
 
 {-# NOINLINE libPackageCache #-}
 libPackageCache :: MVar (Maybe (Result LibPackage String))
@@ -146,8 +151,8 @@ libSelectionFor pkg names statements =
 
 libSelection :: LibPackage -> [String] -> ([ModuleInterface], [(ModuleId, M.Program)])
 libSelection pkg names =
-    let wanted = closure names
-        ordered = [name | name <- ["types", "clone", "eq", "prelude", "string", "map", "set"], name `elem` wanted]
+    let wanted = [name | name <- closure names, name /= "types" || "types" `elem` names]
+        ordered = [name | name <- libOrder pkg, name `elem` wanted]
      in ( [libInterfaces pkg Map.! name | name <- ordered]
         , [(libModuleId name, libPrograms pkg Map.! name) | name <- ordered]
         )

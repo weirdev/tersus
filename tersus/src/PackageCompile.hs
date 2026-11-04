@@ -13,7 +13,7 @@ import Data.Ord (comparing)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (librariesFor)
+import Compile (librariesFor, reservedHelperName, reservedError)
 import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv, withoutDeclaredNames)
 import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
@@ -61,6 +61,7 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
                 else
                     case prepareModule pkg modu of
                         Left err -> Error err
+                        Right prepared | Just name <- reservedHelperName prepared -> Error (reservedError name)
                         Right prepared -> case orphanCheck moduId prepared of
                             Left err -> Error err
                             Right () -> case libPackage of

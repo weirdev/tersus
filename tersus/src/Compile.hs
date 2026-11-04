@@ -12,6 +12,7 @@ module Compile
     , lowerSource
     , lowerStatements
     , reservedName
+    , reservedHelperName
     , reservedError
     ) where
 
@@ -130,7 +131,16 @@ probeDecls = case libParsed of
 
 -- A name the program declares that native code uses for lists (see MirLists)
 reservedName :: [Statement] -> Maybe String
-reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved name] of
+reservedName = reservedAmong (["List", "Box"] ++ nativeHelperNames)
+
+reservedHelperName :: [Statement] -> Maybe String
+reservedHelperName = reservedAmong nativeHelperNames
+
+nativeHelperNames :: [String]
+nativeHelperNames = ["listNew", "listLen", "listGet", "listFirst", "listLast", "listPop", "listSet", "listPush", "listFilled", "boxNew", "boxUnbox"]
+
+reservedAmong :: [String] -> [Statement] -> Maybe String
+reservedAmong names stmts = case [name | stmt <- stmts, name <- declared stmt, name `elem` names] of
     name : _ -> Just name
     [] -> Nothing
   where
@@ -141,7 +151,6 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
         TraitDef name _ _ -> [name]
         BoundedDef _ (Assign name _) -> [name]
         _ -> []
-    reserved name = name `elem` ["List", "Box", "listNew", "listLen", "listGet", "listFirst", "listLast", "listPop", "listSet", "listPush", "listFilled", "boxNew", "boxUnbox"]
 
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
 -- unchanged: lib/eq.tersus (the trait `Eq` that `=` calls, whose impls are made only for the types a program compares) unless it declares a trait `Eq`, lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`, with `hashCombine`) if it mentions any of them (or

@@ -746,15 +746,15 @@ runOwned program =
 
 -- The ownership pass runs on a program that is lowered, and the result checks out on the model with the answer of the executor
 sameOnModel :: String -> Program -> TestResult
-sameOnModel what program =
-    let owned = insertOwnership (nativeProgram program)
-     in case verifyProgram owned of
-            Error e -> Just (what ++ ": the owned MIR is ill formed: " ++ e)
-            Ok () -> case (runOwned owned, runProgram program) of
-                (Right a, Ok b) -> testAssertEq a b
-                (Left e, Error e') | e == e' -> Nothing
-                (Left e, _) -> Just (what ++ ": " ++ e)
-                (Right a, Error e) -> Just (what ++ ": the model returns " ++ show a ++ " where the executor stops with " ++ e)
+sameOnModel what program = case mapResult insertOwnership (nativeProgram program) of
+    Error e -> Just (what ++ ": " ++ e)
+    Ok owned -> case verifyProgram owned of
+        Error e -> Just (what ++ ": the owned MIR is ill formed: " ++ e)
+        Ok () -> case (runOwned owned, runProgram program) of
+            (Right a, Ok b) -> testAssertEq a b
+            (Left e, Error e') | e == e' -> Nothing
+            (Left e, _) -> Just (what ++ ": " ++ e)
+            (Right a, Error e) -> Just (what ++ ": the model returns " ++ show a ++ " where the executor stops with " ++ e)
 
 -- A program lowered and run on the model, with the answer of the executor, as source
 onSource :: String -> String -> TestResult

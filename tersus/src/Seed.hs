@@ -20,7 +20,8 @@ import System.Process (readProcessWithExitCode)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Native (buildExecutable, cachedProgram, cacheDirectory)
-import PreludeSource (boxSource, cloneSource, compilerSourceHash, eqSource, listsSource, mirPackageFiles, preludeSource, seedSha256, stdlibSource, stringSource)
+import LibParsed (libPackageFiles)
+import PreludeSource (compilerSourceHash, mirPackageFiles, seedSha256, stdlibSource)
 import Utils
 
 -- The seed the emitter written in Tersus is bootstrapped from (see Bootstrap): its text is fetched, or read from where it is kept, and
@@ -37,7 +38,7 @@ seedHash = fingerprint [seedSha256, runtimeSource]
 
 -- What stage 1 is made of: stage 0, the emitter, and the library every program has
 emitterHash :: String
-emitterHash = fingerprint ([seedHash] ++ concatMap (\(path, contents) -> [path, contents]) mirPackageFiles ++ [preludeSource, listsSource, stringSource, cloneSource, eqSource, boxSource, stdlibSource, compilerSourceHash])
+emitterHash = fingerprint ([seedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
 
 -- Stage 0: the seed built, at the path
 stageZero :: FilePath -> IO (Result () String)

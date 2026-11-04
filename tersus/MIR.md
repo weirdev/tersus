@@ -163,6 +163,25 @@ A program compiled from a package (LANGUAGE.md, Modules) reaches the MIR as one 
 
 Each module is lowered separately (`MirLower.lowerModuleWith`, seeded with stub functions and type declarations from the interfaces of its direct imports, `Interface`), and `Link.linkPrograms` merges the units: type, generic-struct and invariant maps and the function map are keyed by canonical name, `progMain` is the entry module's, and the `GhostFunction` statements of the dependency units are prepended to the entry `progMain`, so the validator learns an imported function at a definition before the entry program that calls it. The same name defined by two units with different definitions is a link error naming both modules. Two copies of the same unit (a compiler-library unit selected by several modules) are deduplicated by unit identity; a definition identical to the one already linked merges, as does an `extern fn` whose signature and contract agree (compared by signature, not body). Compiler-library units keep their bare names (`String`, `HashMap`, `<String>::concat` and the like), so a user declaration colliding with a library name is such a link error. `Link.pruneProgram` then keeps only what the entry program reaches: functions and types named from `progMain` through calls (including function values), fields, locals and returns, the functions a kept contract names, and the drop and trait-impl functions of kept types. That is what a selective import links: visibility is limited at the import site, and linking is limited by reachability. Monomorphization (`MirMono`), validation, ghost erasure and the later passes run once on the linked program, unchanged.
 
+The native helper sources are parsed and compiled lazily against the imported
+interfaces, outside the user-library compilation result. Parsing a helper
+seeds declarations only from its import closure, not from the other files in
+snapshot order. Compiler-only generic constructor owners do not enter user
+import environments. No second loader or mutable cache is used.
+
+The native storage modules use the existing compiler-owned bare-name unit
+contract: they may declare their own checked impls for imported compiler
+types. Ordinary package impl coherence is unchanged. Moving these Drop impls
+into `types` would pull native bodies into user imports and form a cycle
+through `prelude`/`clone` back to `types`; replacing the `types` unit with a
+body-extended copy would violate its unit identity. Separate `lists` and `box`
+units instead carry the declarations seeded from the authoritative type
+interface. Exact declarations merge; a helper function from a different
+origin does not. `MirLists` transforms only the validated user program and
+links the needed erased helper units afterwards, leaving helper bodies in
+physical form. The stdlib builtin-contract extraction and
+`lib/validation.tersus` are not part of this migration.
+
 ## Executing it
 
 `MirEval.runProgram :: Program -> Result (Maybe MirValue) String` (and `runProgramOutput`, which also gives the bytes that `ListOp WriteByte` wrote, as characters from 0 to 255: the evaluator is a result that also collects them). A frame is the function's locals (a `Map`) and a current block; the loop is: run the statements, then follow the terminator; `Call` evaluates the callee operand (a `CFn name` is looked up in `progFunctions`) and recurses in Haskell. `MirValue` is `MInt | MBool | MList | MData | MFn Name`, so no value carries an AST. Run-time errors are `Division by zero`, `Get index out of range` and the like, which the validator is meant to make unreachable.
@@ -240,7 +259,9 @@ A copy of a value is made where the program writes `clone(x)`: the checker has a
 - **Copy** (`isCopyType`) is Int, Byte, Bool, functions, an array of Copy, and a struct or enum that `CopyDef` named (with Copy fields for an instance of a struct with parameters). It is never moved.
 - **Positions.** Lowering writes `GhostPosition line column` (from the parser's `Mark`) before the statements it comes from and at the start of every block, so each error has a line; `stripPositions` takes them out, and no other pass sees one.
 
-`lib/lists.tersus` is lowered with `lowerLibrary`, without the check.
+`lib/lists.tersus` and `lib/box.tersus` are compiler-owned module units,
+lowered with the same move and loan checks as other modules. Imported
+signature stubs remain present during those checks, then leave the unit.
 
 ## Ownership
 

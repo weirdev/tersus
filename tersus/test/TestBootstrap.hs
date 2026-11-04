@@ -14,7 +14,8 @@ import MirData (writeProgram)
 import Pipeline (ownedSource)
 import Hash (fingerprint)
 import MirHousekeeping (emitterOwnedProgram)
-import PreludeSource (boxSource, cloneSource, compilerSourceHash, eqSource, listsSource, mirPackageFiles, preludeSource, stdlibSource, stringSource)
+import LibParsed (libPackageFiles)
+import PreludeSource (compilerSourceHash, mirPackageFiles, stdlibSource)
 import TestHarness
 import TestNative (clangAvailable)
 import Utils
@@ -41,7 +42,7 @@ hashShape :: IO TestResult
 hashShape =
     pure $
         if all (\h -> length h == 16 && all isHexDigit h) [seedHash, emitterHash] && seedHash /= emitterHash
-            && emitterHash == fingerprint ([seedHash] ++ concatMap (\(path, contents) -> [path, contents]) mirPackageFiles ++ [preludeSource, listsSource, stringSource, cloneSource, eqSource, boxSource, stdlibSource, compilerSourceHash])
+            && emitterHash == fingerprint ([seedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
             then Nothing
             else Just ("the hashes are " ++ show (seedHash, emitterHash))
 
