@@ -2173,24 +2173,6 @@ fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) 
     return linContradiction(facts, vars);
 };
 
-
-// Whether a term is built by arithmetic (or is not an application at all):
-// the linear solver may prove equalities of those, but an equality between
-// data applications (a get, a field read) needs a congruence fact.
-
-// Equality of data applications by congruence over the stated equalities
-// alone: bounds that happen to pin two indices together do not make a get
-// of one a get of the other until the program states that equality.
-fn congruenceEqual(context: &ValidatorContext, left: Int, right: Int) -> Bool {
-    known = semanticFacts(context.equalities, context.applications, context.constants);
-    for round in 0..2 * size(context.equalities) + 8 * size(context.applications) + 8 {
-        next = applicationFactsWithConstructors(known, context.applications, context.constructorFunctions, context.constructorFields);
-        if size(next) = size(known) { return hasEquality(next, left, right); };
-        known = next;
-    };
-    return hasEquality(known, left, right);
-};
-
 // Two values of the same constructor with a pair of arguments that are
 // known to differ are themselves different: constructors are free.
 fn entailsConstructorArgumentDisequality(context: &ValidatorContext, equalities: &List<EqualityFact>, left: Int, right: Int) -> Bool {
@@ -2231,22 +2213,6 @@ fn entailsConstructorArgumentDisequality(context: &ValidatorContext, equalities:
         };
     };
     return false;
-};
-
-fn arithmeticTerm(context: &ValidatorContext, term: Int) -> Bool {
-    for appPosition in 0..size(context.applications) {
-        app = get(context.applications, appPosition);
-        if app.id = term {
-            if app.function = -1 { return true; };
-            if app.function = -2 { return true; };
-            if app.function = -3 { return true; };
-            if app.function = -4 { return true; };
-            if app.function = -5 { return true; };
-            if app.function = -13 { return true; };
-            return false;
-        };
-    };
-    return true;
 };
 
 fn recognizedGoal(goal: ValidatorGoal) -> Bool {
@@ -3595,14 +3561,9 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
     if analysis.contradictory { return true; };
     if goal is ValidatorGoal::Equal {
         g = goal as ValidatorGoal::Equal;
-        bothArithmetic = arithmeticTerm(context, g.left) && arithmeticTerm(context, g.right);
-        if bothArithmetic {
-            if contextEqual(analysis.equalities, analysis.differences, g.left, g.right) { return true; };
-        } else {
-            if congruenceEqual(context, g.left, g.right) { return true; };
-            // (the analysis's classes also hold what orders imply: a <= b and b <= a)
-            if contextEqual(analysis.equalities, analysis.differences, g.left, g.right) { return true; };
-        };
+        // (the analysis's classes hold what congruence gives and what orders
+        // imply: a <= b and b <= a)
+        if contextEqual(analysis.equalities, analysis.differences, g.left, g.right) { return true; };
         if forallEqual(context, analysis, g.left, g.right) { return true; };
         if forallConstant(context, analysis, g.left, g.right) { return true; };
         if forallShift(context, analysis, g.left, g.right) { return true; };
@@ -3619,7 +3580,6 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
             widerAnalysis = analyzeContext(wider);
             if widerAnalysis.contradictory { return true; };
             if contextEqual(widerAnalysis.equalities, widerAnalysis.differences, g.left, g.right) { return true; };
-            if congruenceEqual(wider, g.left, g.right) { return true; };
         };
         if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
         return false;
@@ -3629,12 +3589,15 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
         if entailsConstructorDisequality(analysis.equalities, context.applications, context.constructorFunctions, g.left, g.right) { return true; };
         if entailsVariantDisequality(analysis.equalities, context.variants, g.left, g.right) { return true; };
         if entailsConstructorArgumentDisequality(context, analysis.equalities, g.left, g.right) { return true; };
-        if contextWithin(context, g.left, g.right) { return true; };
-        if contextWithin(context, g.right, g.left) { return true; };
+        // (the analysis's equalities are closed and do not contradict its facts)
+        if hasDifference(analysis.equalities, analysis.differences, g.left, g.right, -1) { return true; };
+        if hasDifference(analysis.equalities, analysis.differences, g.right, g.left, -1) { return true; };
+        if closedDisequality(analysis.equalities, analysis.orders, context.different, g.left, g.right) { return true; };
+        if contextWithinUnder(context, analysis.equalities, g.left, g.right) { return true; };
+        if contextWithinUnder(context, analysis.equalities, g.right, g.left) { return true; };
         if entailsPartDisequality(context, analysis.equalities, analysis.orders, g.left, g.right) { return true; };
         if forallDifferent(context, analysis, g.left, g.right) { return true; };
-        if modDifferent(context, analysis, g.left, g.right) { return true; };
-        return contextDifferent(analysis.equalities, context.applications, analysis.orders, context.different, analysis.differences, g.left, g.right);
+        return modDifferent(context, analysis, g.left, g.right);
     };
     if goal is ValidatorGoal::Less {
         g = goal as ValidatorGoal::Less;
