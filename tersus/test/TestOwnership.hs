@@ -1128,6 +1128,47 @@ borrowedRootTests =
 usesArrays :: String -> Bool
 usesArrays source = any (`isInfixOf` source) ["Array<", "Array::", "array(", "#["]
 
+stateJoinTests :: [Test]
+stateJoinTests =
+    [ testCase "equal live branch states keep one whole drop" $
+        let owned = insertOwnership (branchProgram True [] [])
+         in testAssertEq (runOwned owned) (Right (Just (MInt 9)))
+            `orElseT` testAssertEq (length [() | block <- Map.elems (fnBlocks (progMain owned)), Drop (Local 1) <- blockStatements block]) 1
+    , testCase "equal empty branch states do not add a return drop" $
+        let owned = insertOwnership (branchProgram True [Drop (Local 1)] [Drop (Local 1)])
+         in testAssertEq (runOwned owned) (Right (Just (MInt 9)))
+            `orElseT` testAssertEq [() | Drop (Local 1) <- blockStatements (fnBlocks (progMain owned) Map.! BlockId 3)] []
+    , testCase "different branch states still guard the empty path" (mixed True)
+    , testCase "different branch states still free the live path" (mixed False)
+    , testCase "equal partial-field states retain empty-field overrides" $
+        let list = TNamed "List" [ArgType TInt]
+            base = mainProgram [(Local 0, TInt), (Local 1, TNamed "Holder" []), (Local 2, list)] []
+            fn = (progMain base){fnReturns = Just TInt, fnBlocks = Map.fromList
+                [ (BlockId 0, BasicBlock [Assign (Local 1) (Use (Const (CData "Holder" [("xs", CList [CInt 1]), ("ys", CList [CInt 2, CInt 3])]))), Assign (Local 2) (ReadField (Copy (Local 1)) "Holder" "xs")] (SwitchBool (Const (CBool True)) (BlockId 1) (BlockId 2)))
+                , (BlockId 1, BasicBlock [] (Goto (BlockId 3)))
+                , (BlockId 2, BasicBlock [] (Goto (BlockId 3)))
+                , (BlockId 3, BasicBlock [Assign (Local 0) (ListOp Length [Copy (Local 2)])] Return)
+                ]}
+            owned = insertOwnership base{progTypes = Map.singleton "Holder" (StructDecl [("xs", list), ("ys", list)]), progMain = fn}
+         in testAssertEq (runOwned owned) (Right (Just (MInt 1)))
+    ]
+  where
+    orElseT Nothing next = next
+    orElseT failure _ = failure
+    branchProgram condition left right =
+        let list = TNamed "List" [ArgType TInt]
+            base = mainProgram [(Local 0, TInt), (Local 1, list)] []
+         in base{progMain = (progMain base){fnReturns = Just TInt, fnBlocks = Map.fromList
+            [ (BlockId 0, BasicBlock [Assign (Local 1) (Use (Const (CList [CInt 7])))] (SwitchBool (Const (CBool condition)) (BlockId 1) (BlockId 2)))
+            , (BlockId 1, BasicBlock left (Goto (BlockId 3)))
+            , (BlockId 2, BasicBlock right (Goto (BlockId 3)))
+            , (BlockId 3, BasicBlock [Assign (Local 0) (Use (Const (CInt 9)))] Return)
+            ]}}
+    mixed condition =
+        let owned = insertOwnership (branchProgram condition [Drop (Local 1)] [])
+         in testAssertEq (runOwned owned) (Right (Just (MInt 9)))
+            `orElseT` testAssertTrue (any ((== TBool) . localType) (Map.elems (fnLocals (progMain owned))))
+
 testOwnership :: Test
 testOwnership =
     TestList
@@ -1139,5 +1180,6 @@ testOwnership =
         , TestList "what a part may be read after" windowTests
         , TestList "reference heap model" referenceModelTests
         , TestList "borrowed roots" borrowedRootTests
+        , TestList "joined ownership states" stateJoinTests
         , TestList "mistakes the model finds" mistakeTests
         ]

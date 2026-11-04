@@ -451,13 +451,15 @@ ownStates = Map.filterWithKey (\k state -> state /= Empty || isJust (snd k))
 -- (a part that is not in a state holds nothing in it, and a field that is not in it is as the whole of it is, so a
 -- join looks at every part that either side names, and asks for a field of the whole of the other side)
 joinOwnStates :: OwnStates -> OwnStates -> OwnStates
-joinOwnStates a b =
-    ownStates
-        ( Map.fromList
-            [ (k, joinOwn (look a k) (look b k))
-            | k <- Set.toList (Map.keysSet a `Set.union` Map.keysSet b)
-            ]
-        )
+joinOwnStates a b
+    | a == b = ownStates a
+    | otherwise =
+        ownStates
+            ( Map.fromList
+                [ (k, joinOwn (look a k) (look b k))
+                | k <- Set.toList (Map.keysSet a `Set.union` Map.keysSet b)
+                ]
+            )
   where
     look states (l, Nothing) = Map.findWithDefault Empty (l, Nothing) states
     look states (l, Just field) =
