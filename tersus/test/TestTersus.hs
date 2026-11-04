@@ -201,8 +201,12 @@ originalGroups =
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)
 runInProcess selected = do
-    summary <- foldr combineSummaries (testSummary 0 0) <$> mapM (runTest []) selected
+    summary <- foldr combineSummaries (testSummary 0 0) <$> mapM runGroup selected
     pure (summary, True)
+  where
+    runGroup group
+        | groupName group == "testParserBootstrap" = withParserBootstrapFixture (runTest [] group)
+        | otherwise = runTest [] group
 
 -- Each group runs in a process of its own, so that a group's temporary files, locale and environment are its own, and
 -- several groups make progress at once. A child is given one group, so it runs in its process and prints no summary;

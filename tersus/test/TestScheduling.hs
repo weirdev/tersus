@@ -138,6 +138,7 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         work -> maximum work
 
 -- Run 41878451096 (2026-11-04): startup-inclusive wall priorities, rounded to seconds with a minimum of one.
+-- Parser bootstrap: 4ac71ef8 full-group wall time 2663.6s (2026-11-04).
 groupWeight :: String -> Int
 groupWeight name = maybe 1 id (lookup name weights)
   where
@@ -171,6 +172,7 @@ groupWeight name = maybe 1 id (lookup name weights)
            , ("testMirVerifyPrograms", 303)
            , ("testMirEmitPrograms", 560)
            , ("testBootstrap", 469)
+           , ("testParserBootstrap", 2664)
            , ("testEq", 2)
            , ("testHashMap", 9)
            , ("testHashSet", 4)
@@ -367,8 +369,8 @@ testScheduling names batches = TestList "testScheduling"
                 groupName original `elem` ["testNative", "testMirEmit", "testMirVerify"]]
             [[587,593,422,606], [387,554,404,424], [68,303,460,623]]
     , testCase "measured tail groups are not launched as unprofiled one-second work" $
-        testAssertEq (map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms"])
-            [492,522,424,468,420,175,560]
+        testAssertEq (map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap"])
+            [492,522,424,468,420,175,560,2664]
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $

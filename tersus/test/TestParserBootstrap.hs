@@ -1,18 +1,21 @@
-module TestParserBootstrap (testParserBootstrap) where
+module TestParserBootstrap (testParserBootstrap, withParserBootstrapFixture) where
 
-import Control.Concurrent (MVar, forkIO, newEmptyMVar, newMVar, putMVar, takeMVar)
-import Control.Concurrent.MVar (modifyMVar)
-import Control.Exception (SomeAsyncException, SomeException, bracket, displayException, evaluate, fromException, throwIO, try)
-import Control.Monad (forM)
-import Data.List (isPrefixOf, sort)
+import Control.Concurrent (MVar, forkFinally, killThread, newEmptyMVar, newMVar, putMVar, readMVar, threadDelay)
+import Control.Concurrent.MVar (modifyMVar, swapMVar)
+import Control.Exception (IOException, SomeAsyncException, SomeException, bracket, displayException, evaluate, finally, fromException, mask, onException, throwIO, try)
+import Control.Monad (forM, when)
+import Data.List (isPrefixOf, isSuffixOf, sort)
 import GHC.Clock (getMonotonicTime)
-import System.Directory (createDirectory, createFileLink, doesFileExist, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile, renameFile)
-import System.Environment (getEnvironment, getExecutablePath, getEnv, lookupEnv, setEnv, unsetEnv)
+import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, createFileLink, doesFileExist, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile, renameFile)
+import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
-import System.IO (hClose, openTempFile)
-import System.FilePath ((</>))
+import System.Process (CreateProcess (..), StdStream (..), getPid, proc, waitForProcess, withCreateProcess)
+import System.IO (hClose, hGetContents, openTempFile)
+import System.IO.Error (isDoesNotExistError)
+import System.FilePath ((</>), takeDirectory)
 import System.IO.Unsafe (unsafePerformIO)
+import System.Posix.Signals (nullSignal, sigKILL, sigTERM, signalProcessGroup)
+import System.Timeout (timeout)
 
 import qualified AstData
 import qualified Bootstrap
@@ -56,13 +59,88 @@ withDirectory use = bracket make removeDirectoryRecursive use
         createDirectory home
         pure home
 
+{-# NOINLINE fixtureHome #-}
+fixtureHome :: MVar (Maybe FilePath)
+fixtureHome = unsafePerformIO (newMVar Nothing)
+
+withParserBootstrapFixture :: IO a -> IO a
+withParserBootstrapFixture action = do
+    mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
+    case mode of
+        Just name | name `elem` ["emitter-corrupt", "parser-corrupt", "parser-missing", "interpreted-corrupt",
+            "clang-missing", "haskell-refused", "cold", "concurrent", "reuse", "repair", "emitter-repair", "fixpoint"] -> action
+        Just name -> fail ("unknown parser bootstrap worker: " ++ name)
+        Nothing -> withDirectory $ \home ->
+            bracket (swapMVar fixtureHome (Just home)) restoreHome $ \_ ->
+                bracket (swapMVar coldReuseResults Nothing) restoreResults (const action)
+  where
+    restoreHome previous = swapMVar fixtureHome previous >> pure ()
+    restoreResults previous = swapMVar coldReuseResults previous >> pure ()
+
+coldCacheHome :: IO FilePath
+coldCacheHome = readMVar fixtureHome >>= maybe (fail "parser bootstrap group fixture is missing") pure
+
 worker :: String -> FilePath -> [(String, String)] -> IO (ExitCode, String, String)
-worker mode home overrides = do
+worker mode home overrides = timed ("worker " ++ mode) $ do
     self <- getExecutablePath
     inherited <- getEnvironment
     let changed = ("TERSUS_PARSER_BOOTSTRAP_WORKER", mode) : ("XDG_CACHE_HOME", home) : overrides
         environment = changed ++ [(key, value) | (key, value) <- inherited, key `notElem` map fst changed, key /= "TERSUS_PARSER"]
-    readCreateProcessWithExitCode (proc self ["testParserBootstrap", "--child", "+RTS", "-N1", "-RTS"]){env = Just environment} ""
+        command = (proc self ["testParserBootstrap", "--child", "+RTS", "-N1", "-RTS"])
+            {env = Just environment, create_group = True, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
+    withCreateProcess command $ \input output errors process -> mask $ \restore -> do
+        pid <- getPid process >>= maybe (fail "bootstrap worker has no process group") pure
+        let signal sig = do
+                sent <- try (signalProcessGroup sig pid) :: IO (Either IOException ())
+                case sent of
+                    Left e | not (isDoesNotExistError e) -> throwIO e
+                    _ -> pure ()
+            gone = do
+                present <- try (signalProcessGroup nullSignal pid) :: IO (Either IOException ())
+                case present of
+                    Left e | isDoesNotExistError e -> pure ()
+                           | otherwise -> throwIO e
+                    Right () -> threadDelay 10000 >> gone
+            stop = do
+                signal sigTERM
+                _ <- timeout 5000000 (waitForProcess process)
+                signal sigKILL
+                _ <- waitForProcess process
+                ended <- timeout 5000000 gone
+                case ended of
+                    Just () -> pure ()
+                    Nothing -> fail "bootstrap worker descendants did not exit"
+            readAll handle = do
+                text <- hGetContents handle
+                _ <- evaluate (length text)
+                pure text
+        restore (do
+            mapM_ hClose input
+            case (output, errors) of
+                (Just out, Just err) -> paired (readAll out) (readAll err) $ \readOut readErr -> do
+                    status <- waitForProcess process
+                    stdoutText <- readOut
+                    stderrText <- readErr
+                    pure (status, stdoutText, stderrText)
+                _ -> fail "bootstrap worker output pipes are missing") `finally` stop
+
+paired :: IO a -> IO b -> (IO a -> IO b -> IO c) -> IO c
+paired first second use = do
+    firstResult <- newEmptyMVar
+    secondResult <- newEmptyMVar
+    let start = do
+            one <- forkFinally first (putMVar firstResult)
+            two <- forkFinally second (putMVar secondResult)
+                `onException` (killThread one >> readMVar firstResult >> pure ())
+            pure (one, two)
+        stop (one, two) = do
+            killThread one
+            killThread two
+            _ <- readMVar firstResult
+            _ <- readMVar secondResult
+            pure ()
+        result slot = readMVar slot >>= either throwIO pure
+    bracket start stop $ \_ -> use (result firstResult) (result secondResult)
 
 inFreshWorker :: String -> (FilePath -> IO [(String, String)]) -> IO TestResult -> IO TestResult
 inFreshWorker mode setup action = do
@@ -76,6 +154,39 @@ inFreshWorker mode setup action = do
             pure $ case status of
                 ExitSuccess -> Nothing
                 _ -> Just ("fresh " ++ mode ++ " worker: " ++ out ++ err)
+
+inPrimedWorker :: String -> [String] -> IO TestResult -> IO TestResult
+inPrimedWorker mode evicted action = do
+    selected <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
+    case selected of
+        Just active | active == mode -> action
+                    | otherwise -> pure Nothing
+        Nothing -> do
+            (cold, _, _) <- coldAndReuse
+            case cold of
+                Just e -> pure (Just ("priming requires a successful cold worker: " ++ e))
+                Nothing -> withDirectory $ \home -> do
+                    source <- coldCacheHome
+                    let target = home </> "tersus"
+                    copyBootstrapTools (source </> "tersus") target
+                    names <- listDirectory target
+                    mapM_ (removeFile . (target </>))
+                        [name | name <- names, '.' `notElem` name, any (`isPrefixOf` name) evicted]
+                    (status, out, err) <- worker mode home []
+                    pure $ case status of
+                        ExitSuccess -> Nothing
+                        _ -> Just ("primed " ++ mode ++ " worker: " ++ out ++ err)
+
+copyBootstrapTools :: FilePath -> FilePath -> IO ()
+copyBootstrapTools source target = do
+    createDirectoryIfMissing True target
+    names <- listDirectory source
+    mapM_ (\name -> do
+        regular <- doesFileExist (source </> name)
+        when (regular && not (".lock" `isSuffixOf` name))
+            (copyFile (source </> name) (target </> name)))
+        [name | name <- names, any (`isPrefixOf` name)
+            ["parser-seed-", "tersus-parser-", "seed-", "emitter-", "mir-verify-", "mir-erase-", "validator-", "tersus_rt_"]]
 
 wrongSeed :: String -> FilePath -> IO [(String, String)]
 wrongSeed variable home = do
@@ -119,7 +230,7 @@ withSetting name value action = bracket (lookupEnv name) restore $ \_ -> do
     restore (Just text) = setEnv name text
 
 retryStages :: IO TestResult
-retryStages = inFreshWorker "repair" (const (pure [])) $ do
+retryStages = inPrimedWorker "repair" ["parser-seed-", "tersus-parser-", "seed-"] $ do
     directory <- cacheDirectory
     case directory of
         Error e -> pure (Just e)
@@ -165,7 +276,7 @@ retryStages = inFreshWorker "repair" (const (pure [])) $ do
                             pure (firstFailure [parsed rebuilt, testAssertTrue present, refused "interpreted P0" interpretedFailed, parsed interpretedReady])
 
 emitterRetryStages :: IO TestResult
-emitterRetryStages = inFreshWorker "emitter-repair" (const (pure [])) $ withDirectory $ \home -> do
+emitterRetryStages = inPrimedWorker "emitter-repair" ["parser-seed-", "seed-"] $ withDirectory $ \home -> do
     let bin = home </> "bin"
         refused label result = case result of
             Error _ -> Nothing
@@ -206,6 +317,24 @@ timed name action = do
     putStrLn ("[BOOT] " ++ name ++ " " ++ show (end - start) ++ "s")
     pure value
 
+waitForColdPeer :: FilePath -> IO ()
+waitForColdPeer cache = do
+    participant <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_PARTICIPANT"
+    (own, peer) <- case participant of
+        Just "A" -> pure ("A", "B")
+        Just "B" -> pure ("B", "A")
+        _ -> fail "cold bootstrap participant is missing"
+    let root = takeDirectory cache
+        ready name = root </> ("ready-" ++ name)
+        wait = do
+            present <- doesFileExist (ready peer)
+            if present then pure () else threadDelay 10000 >> wait
+    writeFile (ready own) "ready\n"
+    complete <- timeout 30000000 wait
+    case complete of
+        Just () -> pure ()
+        Nothing -> fail "cold bootstrap peer did not observe the empty cache"
+
 coldStages :: IO TestResult
 coldStages = do
     directory <- cacheDirectory
@@ -213,6 +342,7 @@ coldStages = do
         Error e -> pure (Just e)
         Ok home -> do
             before <- listDirectory home
+            waitForColdPeer home
             seed <- timed "P0" cachedParserSeed
             case ParserSeed.parseImportPrefix userMain of
                 Right [Import ["bootstrapprobe", "math"] Nothing (Just ["twice"]) 1 1] -> pure ()
@@ -252,27 +382,37 @@ warmStages = do
     pure $ firstFailure [either Just (const Nothing) answer, case ir of Error e -> Just e; Ok _ -> Nothing]
 
 {-# NOINLINE coldReuseResults #-}
-coldReuseResults :: MVar (Maybe (TestResult, TestResult))
+coldReuseResults :: MVar (Maybe (TestResult, TestResult, TestResult))
 coldReuseResults = unsafePerformIO (newMVar Nothing)
 
-coldAndReuse :: IO (TestResult, TestResult)
+coldAndReuse :: IO (TestResult, TestResult, TestResult)
 coldAndReuse = modifyMVar coldReuseResults $ \saved -> case saved of
     Just results -> pure (saved, results)
     Nothing -> do
-        results <- withDirectory $ \home -> do
-            first <- try (worker "cold" home []) :: IO (Either SomeException (ExitCode, String, String))
-            cold <- case first of
-                Left ex -> synchronousFailure ex
-                Right (ExitSuccess, _, _) -> pure Nothing
-                Right (_, out, err) -> pure (Just ("fresh cold worker: " ++ out ++ err))
-            case cold of
-                Just err -> pure (cold, Just ("cache reuse requires a successful cold worker: " ++ err))
-                Nothing -> do
-                    reused <- try (reuse home) :: IO (Either SomeException TestResult)
-                    result <- either synchronousFailure pure reused
-                    pure (Nothing, result)
+        home <- coldCacheHome
+        results <- paired
+            (worker "cold" home [("TERSUS_PARSER_BOOTSTRAP_PARTICIPANT", "A")])
+            (worker "concurrent" home [("TERSUS_PARSER_BOOTSTRAP_PARTICIPANT", "B")]) $ \readFirst readSecond -> do
+                first <- try readFirst :: IO (Either SomeException (ExitCode, String, String))
+                second <- try readSecond :: IO (Either SomeException (ExitCode, String, String))
+                cold <- workerResult "cold A" first
+                peer <- workerResult "cold B" second
+                names <- listDirectory (home </> "tersus")
+                let concurrent = firstFailure [cold, peer,
+                        testAssertTrue (all (`elem` names) ["parser-seed-" ++ parserSeedHash,
+                            "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])]
+                reused <- case cold of
+                    Just e -> pure (Just ("cache reuse requires a successful cold worker: " ++ e))
+                    Nothing -> do
+                        outcome <- try (reuse home) :: IO (Either SomeException TestResult)
+                        either synchronousFailure pure outcome
+                pure (cold, reused, concurrent)
         pure (Just results, results)
   where
+    workerResult label result = case result of
+        Left ex -> synchronousFailure ex
+        Right (ExitSuccess, _, _) -> pure Nothing
+        Right (_, out, err) -> pure (Just (label ++ ": " ++ out ++ err))
     reuse home = do
         let cache = home </> "tersus"
         names <- sort <$> listDirectory cache
@@ -293,7 +433,9 @@ coldProcess = do
     case mode of
         Just "cold" -> coldStages
         Just _ -> pure Nothing
-        Nothing -> fst <$> coldAndReuse
+        Nothing -> do
+            (cold, _, _) <- coldAndReuse
+            pure cold
 
 cacheReuse :: IO TestResult
 cacheReuse = do
@@ -301,72 +443,63 @@ cacheReuse = do
     case mode of
         Just "reuse" -> warmStages
         Just _ -> pure Nothing
-        Nothing -> snd <$> coldAndReuse
+        Nothing -> do
+            (_, reused, _) <- coldAndReuse
+            pure reused
 
 concurrentCold :: IO TestResult
 concurrentCold = do
     mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
     case mode of
-        Just "concurrent" -> warmStages
-        Just _ -> pure Nothing
-        Nothing -> withDirectory $ \home -> do
-            variables <- forM [1 :: Int, 2] $ \_ -> do
-                result <- newEmptyMVar
-                _ <- forkIO (worker "concurrent" home [] >>= putMVar result)
-                pure result
-            results <- mapM takeMVar variables
-            names <- listDirectory (home </> "tersus")
-            pure $ firstFailure
-                ([case result of (ExitSuccess, _, _) -> Nothing; (_, out, err) -> Just (out ++ err) | result <- results]
-                ++ [testAssertTrue (all (`elem` names) ["parser-seed-" ++ parserSeedHash, "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])])
-
-parserFixpoint :: IO TestResult
-parserFixpoint = do
-    mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
-    case mode of
+        Just "concurrent" -> coldStages
         Just _ -> pure Nothing
         Nothing -> do
-            emitter <- Bootstrap.cachedEmitter
-            let zeroPackage = loadPackage ParserSeed.parseFileWith
-                onePackage = loadPackage (checkedParser TersusParser.parseFileNative)
-                zeroOwned = zeroPackage `bindResult` ownPackage
-                oneOwned = onePackage `bindResult` ownPackage
-            case (emitter, zeroPackage, onePackage, zeroOwned, oneOwned) of
-                (Ok exe, Ok a, Ok b, Ok zero, Ok one)
-                    | show a /= show b -> pure (Just "P0/P1 prepared current PACKAGE AST/imports/Marks/identities differ")
-                    | writeProgram zero /= writeProgram one -> pure (Just "P0/P1 current checking/lowering/MIR differs")
-                    | otherwise -> do
-                        first <- Bootstrap.emitWith exe (writeProgram zero)
-                        second <- Bootstrap.emitWith exe (writeProgram one)
-                        case (first, second) of
-                            (Ok ir0, Ok ir1) | ir0 == ir1 -> withDirectory $ \home -> do
-                                let two = home </> "parser-two"
-                                built <- buildExecutable two ir1
-                                case built of
+            (_, _, concurrent) <- coldAndReuse
+            pure concurrent
+
+parserFixpoint :: IO TestResult
+parserFixpoint = inPrimedWorker "fixpoint" [] $ do
+    emitter <- Bootstrap.cachedEmitter
+    let zeroPackage = loadPackage ParserSeed.parseFileWith
+        onePackage = loadPackage (checkedParser TersusParser.parseFileNative)
+        zeroOwned = zeroPackage `bindResult` ownPackage
+        oneOwned = onePackage `bindResult` ownPackage
+    case (emitter, zeroPackage, onePackage, zeroOwned, oneOwned) of
+        (Ok exe, Ok a, Ok b, Ok zero, Ok one)
+            | show a /= show b -> pure (Just "P0/P1 prepared current PACKAGE AST/imports/Marks/identities differ")
+            | writeProgram zero /= writeProgram one -> pure (Just "P0/P1 current checking/lowering/MIR differs")
+            | otherwise -> do
+                first <- Bootstrap.emitWith exe (writeProgram zero)
+                second <- Bootstrap.emitWith exe (writeProgram one)
+                case (first, second) of
+                    (Ok ir0, Ok ir1) | ir0 == ir1 -> withDirectory $ \home -> do
+                        let two = home </> "parser-two"
+                        built <- buildExecutable two ir1
+                        case built of
+                            Error e -> pure (Just e)
+                            Ok () -> do
+                                let twoParser = ParserSeed.parseFileWithTool (pure (Ok two))
+                                    twoPackage = loadPackage (checkedParser twoParser)
+                                case twoPackage of
                                     Error e -> pure (Just e)
-                                    Ok () -> do
-                                        let twoParser = ParserSeed.parseFileWithTool (pure (Ok two))
-                                            twoPackage = loadPackage (checkedParser twoParser)
-                                        case twoPackage of
-                                            Error e -> pure (Just e)
-                                            Ok c | show b /= show c -> pure (Just "P1/P2 prepared current PACKAGE differs")
-                                            Ok _ -> case SourceParse.probeDecls of
-                                                Left e -> pure (Just e)
-                                                Right decls -> do
-                                                    results <- forM ["return 42;", "s = \"λ🙂\"; return size(s.bytes);", "enum E { A, B }; enum E { C }; return E::C;", "import app::geo as g { Point }; return 0;"] $ \source -> do
-                                                        p0 <- ParserSeed.parseFileNative (locating decls) source
-                                                        p1 <- TersusParser.parseFileNative (locating decls) source
-                                                        p2 <- twoParser (locating decls) source
-                                                        pure (sameFile p0 p1 <> sameFile p1 p2)
-                                                    pure (firstFailure results)
-                            (Error e, _) -> pure (Just e)
-                            (_, Error e) -> pure (Just e)
-                            _ -> pure (Just "regenerated current P1/P2 IR differs")
-                (Error e, _, _, _, _) -> pure (Just e)
-                (_, Error e, _, _, _) -> pure (Just e)
-                (_, _, Error e, _, _) -> pure (Just e)
-                (_, _, _, Error e, _) -> pure (Just e)
-                (_, _, _, _, Error e) -> pure (Just e)
+                                    Ok c | show b /= show c -> pure (Just "P1/P2 prepared current PACKAGE differs")
+                                    Ok _ -> case SourceParse.probeDecls of
+                                        Left e -> pure (Just e)
+                                        Right decls -> do
+                                            results <- forM ["return 42;", "s = \"λ🙂\"; return size(s.bytes);", "enum E { A, B }; enum E { C }; return E::C;", "import app::geo as g { Point }; return 0;"] $ \source -> do
+                                                p0 <- ParserSeed.parseFileNative (locating decls) source
+                                                p1 <- TersusParser.parseFileNative (locating decls) source
+                                                p2 <- twoParser (locating decls) source
+                                                pure (sameFile p0 p1 <> sameFile p1 p2)
+                                            pure (firstFailure results)
+                    (Error e, _) -> pure (Just e)
+                    (_, Error e) -> pure (Just e)
+                    _ -> pure (Just "regenerated current P1/P2 IR differs")
+        (Error e, _, _, _, _) -> pure (Just e)
+        (_, Error e, _, _, _) -> pure (Just e)
+        (_, _, Error e, _, _) -> pure (Just e)
+        (_, _, _, Error e, _) -> pure (Just e)
+        (_, _, _, _, Error e) -> pure (Just e)
   where
     loadPackage parser = case Modules.loadFromEntryWith parser (resolverFromFiles toolPackageFiles) "examples/parser/parser.tersus" of
         Left e -> Error e
@@ -386,19 +519,29 @@ parserFixpoint = do
     sameFile (Left e) _ = Just e
     sameFile _ (Left e) = Just e
 
+bootstrapCase :: String -> IO TestResult -> Test
+bootstrapCase name action = TestCase name $ do
+    mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
+    case mode of
+        Just _ -> action
+        Nothing -> timed name $ do
+            result <- action
+            _ <- evaluate (forceTestResult result)
+            pure result
+
 testParserBootstrap :: Test
 testParserBootstrap = TestList "testParserBootstrap"
-    [ TestCase "default whole Pipeline refuses failed native bootstrap" (failureCase "emitter-corrupt" "bootstrap/emitter.sha256")
-    , TestCase "corrupt parser seed is an explicit tool failure" (failureCase "parser-corrupt" "bootstrap/parser.sha256")
-    , TestCase "missing parser override is an explicit tool failure" (failureCase "parser-missing" "verify the parser bootstrap seed")
-    , TestCase "interpreted parser still requires verified native P0" (failureCase "interpreted-corrupt" "bootstrap/parser.sha256")
-    , TestCase "no clang is an explicit P0 tool failure" (failureCase "clang-missing" "Could not run clang")
-    , TestCase "retired haskell backend is refused" (failureCase "haskell-refused" "expected native or interpreted")
-    , TestCase "cold process reaches P0 E1 P1 source and package" coldProcess
-    , TestCase "fresh processes reuse every bootstrap cache entry without writes" cacheReuse
-    , TestCase "concurrent empty-cache processes converge" concurrentCold
-    , TestCase "same-process transient failures repair without stale library or executable caches" retryStages
-    , TestCase "public emitter bootstrap failures repair before tool and library CAF initialization" emitterRetryStages
-    , TestCase "bootstrap fingerprints cover the complete compiler library manifest" bootstrapLibraryHash
-    , TestCase "P0 P1 current-source fixpoint regenerates identical IR and P2 behavior" parserFixpoint
+    [ bootstrapCase "default whole Pipeline refuses failed native bootstrap" (failureCase "emitter-corrupt" "bootstrap/emitter.sha256")
+    , bootstrapCase "corrupt parser seed is an explicit tool failure" (failureCase "parser-corrupt" "bootstrap/parser.sha256")
+    , bootstrapCase "missing parser override is an explicit tool failure" (failureCase "parser-missing" "verify the parser bootstrap seed")
+    , bootstrapCase "interpreted parser still requires verified native P0" (failureCase "interpreted-corrupt" "bootstrap/parser.sha256")
+    , bootstrapCase "no clang is an explicit P0 tool failure" (failureCase "clang-missing" "Could not run clang")
+    , bootstrapCase "retired haskell backend is refused" (failureCase "haskell-refused" "expected native or interpreted")
+    , bootstrapCase "cold process reaches P0 E1 P1 source and package" coldProcess
+    , bootstrapCase "fresh processes reuse every bootstrap cache entry without writes" cacheReuse
+    , bootstrapCase "concurrent empty-cache processes converge" concurrentCold
+    , bootstrapCase "same-process transient failures repair without stale library or executable caches" retryStages
+    , bootstrapCase "public emitter bootstrap failures repair before tool and library CAF initialization" emitterRetryStages
+    , bootstrapCase "bootstrap fingerprints cover the complete compiler library manifest" bootstrapLibraryHash
+    , bootstrapCase "P0 P1 current-source fixpoint regenerates identical IR and P2 behavior" parserFixpoint
     ]
