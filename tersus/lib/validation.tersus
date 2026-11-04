@@ -6782,8 +6782,8 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
     return SplitResult { holds: allHold, used: used };
 };
 
-fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
-    state = clone(initial);
+fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
+    state = initial;
     for i in 0..size(steps) {
         step = get(steps, i);
         handled = false;
@@ -7165,7 +7165,7 @@ fn popLoopFrames(loops: List<LoopFrame>, target: Int) -> List<LoopFrame> [{ }] [
 // What an edge back to a loop's header has to show: the invariant holds again,
 // and the variant is smaller than it was when the iteration started.
 fn checkLoopBackEdge(initial: &ExecutionState, frame: &LoopFrame, id: Int) -> ExecutionFlowResult {
-    preserved = executeSteps(initial, frame.checks);
+    preserved = executeSteps(clone(initial), frame.checks);
     if preserved.status != 0 { return ExecutionFlowResult { status: preserved.status, block: id, step: preserved.failedAt, state: preserved.state }; };
     next = resolveValue(preserved.state, frame.variant);
     if next is ValueLookup::Found {
@@ -7302,7 +7302,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         if size(assigned) + size(extraAssigned) < 8 && hasSizeOf(work.context, subject.term) {
             temp = 0 - 7000000 - index * 4;
             index = index + 1;
-            made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) }));
+            made = executeSteps(clone(work), push([], ExecutionStep::ApplyFresh { local: temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) }));
             if made.status = 0 {
                 work = made.state;
                 term = resolveValue(work, ValueRef::Local { local: temp });
@@ -7319,7 +7319,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         if size(anchors) + size(extraAnchors) < 12 && hasSizeOf(work.context, subject.term) {
             temp = 0 - 7000000 - index * 4;
             index = index + 1;
-            made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) }));
+            made = executeSteps(clone(work), push([], ExecutionStep::ApplyFresh { local: temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) }));
             if made.status = 0 {
                 work = made.state;
                 term = resolveValue(work, ValueRef::Local { local: temp });
@@ -7352,7 +7352,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                         if kFound {
                             temp = 0 - 7000000 - index * 4;
                             index = index + 1;
-                            made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -14, arguments: push(push([], ValueRef::Local { local: subject.local }), ValueRef::Term { term: kTerm }) }));
+                            made = executeSteps(clone(work), push([], ExecutionStep::ApplyFresh { local: temp, function: -14, arguments: push(push([], ValueRef::Local { local: subject.local }), ValueRef::Term { term: kTerm }) }));
                             if made.status = 0 {
                                 work = made.state;
                                 term = resolveValue(work, ValueRef::Local { local: temp });
@@ -7447,7 +7447,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                                 if dFound {
                                     temp = 0 - 7100000 - candIndex * 4;
                                     candIndex = candIndex + 1;
-                                    made = executeSteps(work, appendSteps(dSteps, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(rhs)), clone(dRef)) })));
+                                    made = executeSteps(clone(work), appendSteps(dSteps, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(rhs)), clone(dRef)) })));
                                     if made.status = 0 {
                                         work = made.state;
                                         sumTerm = resolveValue(work, ValueRef::Local { local: temp });
@@ -7475,7 +7475,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                                             temp = 0 - 7100000 - candIndex * 4;
                                             candIndex = candIndex + 1;
                                             deltaSteps = push(push([], ExecutionStep::ApplyFresh { local: tempD, function: -2, arguments: push(push([], ValueRef::Term { term: c1 }), ValueRef::Term { term: c2 }) }), ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s2)), ValueRef::Local { local: tempD }) });
-                                            madeD = executeSteps(work, deltaSteps);
+                                            madeD = executeSteps(clone(work), deltaSteps);
                                             if madeD.status = 0 {
                                                 work = madeD.state;
                                                 sumTerm = resolveValue(work, ValueRef::Local { local: temp });
@@ -7531,7 +7531,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                         if size(goals) < 128 {
                             temp = 0 - 7100000 - candIndex * 4;
                             candIndex = candIndex + 1;
-                            made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
+                            made = executeSteps(clone(work), push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
                             if made.status = 0 {
                                 work = made.state;
                                 sumTerm = resolveValue(work, ValueRef::Local { local: temp });
@@ -7636,7 +7636,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                                 };
                                 if k = 0 {
                                     pairSteps = appendSteps(appendSteps(appendSteps(subjectSteps(subj), subjectSteps(other)), subjectSteps(anchorSubject)), push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(other)), innerRef) }));
-                                    made = executeSteps(work, pairSteps);
+                                    made = executeSteps(clone(work), pairSteps);
                                     if made.status = 0 {
                                         work = made.state;
                                         sumTerm = resolveValue(work, ValueRef::Local { local: temp });
@@ -7647,7 +7647,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                                 } else {
                                     if size(innerSteps) > 0 {
                                         pairSteps = appendSteps(appendSteps(appendSteps(appendSteps(subjectSteps(subj), subjectSteps(other)), subjectSteps(anchorSubject)), innerSteps), push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(other)), innerRef) }));
-                                        made = executeSteps(work, pairSteps);
+                                        made = executeSteps(clone(work), pairSteps);
                                         if made.status = 0 {
                                             work = made.state;
                                             sumTerm = resolveValue(work, ValueRef::Local { local: temp });
@@ -7688,7 +7688,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                             if sumFound {
                                 temp = 0 - 7100000 - candIndex * 4;
                                 candIndex = candIndex + 1;
-                                made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
+                                made = executeSteps(clone(work), push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
                                 if made.status = 0 {
                                     work = made.state;
                                     sumTerm = resolveValue(work, ValueRef::Local { local: temp });
@@ -7729,10 +7729,10 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
         block = blocks.lookupRef(id);
         if (*block).end is ExecutionEnd::Loop {
             loop = (*block).end as ExecutionEnd::Loop;
-            entry = executeSteps(initial, loop.checks);
+            entry = executeSteps(clone(initial), loop.checks);
             if entry.status != 0 { return ExecutionFlowResult { status: entry.status, block: id, step: entry.failedAt, state: entry.state }; };
         };
-        run = executeSteps(initial, (*block).steps);
+        run = executeSteps(clone(initial), (*block).steps);
         if run.status != 0 { return ExecutionFlowResult { status: run.status, block: id, step: run.failedAt, state: run.state }; };
         end = (*block).end;
         if end is ExecutionEnd::Done { return ExecutionFlowResult { status: 0, block: id, step: -1, state: run.state }; };
@@ -7767,7 +7767,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                     for localPosition in 0..size(loop.havoc) {
                         local = get(loop.havoc, localPosition);
                         if done = false {
-                            changed = executeSteps(arbitrary, push([], ExecutionStep::Havoc { local: local }));
+                            changed = executeSteps(clone(arbitrary), push([], ExecutionStep::Havoc { local: local }));
                             if changed.status != 0 { finalResult = ExecutionFlowResult { status: changed.status, block: id, step: -1, state: clone(changed.state) }; done = true; };
                             if done = false { arbitrary = changed.state; };
                         };
@@ -7943,7 +7943,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                         keep = ci != dropIndex;
                                         if keep {
                                             if ci > dropIndex {
-                                                tried = executeSteps(edgeState, quietSteps(get(survivors, ci).checks));
+                                                tried = executeSteps(clone(edgeState), quietSteps(get(survivors, ci).checks));
                                                 if tried.status != 0 { keep = false; } else { edgeState = tried.state; };
                                             };
                                         };
@@ -8062,7 +8062,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
         };
         if end is ExecutionEnd::Branch {
             branch = end as ExecutionEnd::Branch;
-            yes = executeSteps(run.state, branch.yesSteps);
+            yes = executeSteps(clone(run.state), branch.yesSteps);
             if yes.status != 0 { return ExecutionFlowResult { status: yes.status, block: id, step: yes.failedAt, state: yes.state }; };
             yesResult = walkExecution(blocks, branch.yes, yes.state, fuel - 1, clone(loops));
             if yesResult.status != 0 { return yesResult; };

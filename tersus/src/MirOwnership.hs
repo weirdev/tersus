@@ -918,7 +918,7 @@ rewriteStatement cx b k after st@(Assign d rv)
     -- part of one: it is looked at where it is for the whole loop, since nothing can change or free it during the call)
     | forLoopList, Just s <- operandLocal =<< listSource = do
         sources <- aliasSources
-        if heap cx (typeOf cx d) && stableChain sources s
+        if heap cx (typeOf cx d) && stableChain cx sources s
             then markAliasOf d b s >> pure [Peek d rv]
             else rewriteAssign cx b k after st
     | otherwise = rewriteAssign cx b k after st
@@ -928,10 +928,28 @@ rewriteStatement cx b k after st@(Assign d rv)
         Use o -> Just o
         ReadField o _ _ -> Just o
         _ -> Nothing
-    stableChain sources l
-        | l `Set.member` cxBorrowed cx = Map.findWithDefault 0 l (cxDefs cx) == 1
-        | Just (_, l') <- Map.lookup l sources = Map.findWithDefault 0 l (cxDefs cx) == 1 && stableChain sources l'
-        | otherwise = False
+
+-- Whether a local is a parameter that is lent and never given another value, or a look at a part of one, made once:
+-- nothing changes or frees what it is during the call
+stableChain :: Ctx -> Map Local (BlockId, Local) -> Local -> Bool
+stableChain cx sources l
+    | l `Set.member` cxBorrowed cx = Map.findWithDefault 0 l (cxDefs cx) == 1
+    | Just (_, l') <- Map.lookup l sources = Map.findWithDefault 0 l (cxDefs cx) == 1 && stableChain cx sources l'
+    | otherwise = False
+
+-- Whether a local is given a value once and only read after, by statements and by calls it is lent to
+readOnlyEverywhere :: Ctx -> Local -> Bool
+readOnlyEverywhere cx d =
+    Map.findWithDefault 0 d (cxDefs cx) == 1
+        && all (\(_, _, role) -> role == Read) (Map.findWithDefault [] d (cxUses cx))
+        && all lentOnly (Map.findWithDefault [] d (cxTerminatorUsers cx))
+  where
+    lentOnly blk = case Map.lookup blk (cxTerminators cx) of
+        Just (Call callee args dest _) ->
+            operandLocal callee /= Just d
+                && dest /= d
+                && and [lentHere | (a, (lentHere, _)) <- zip args (borrowedArguments cx callee (length args) ++ repeat (False, Nothing)), operandLocal a == Just d]
+        _ -> False
 
 rewriteAssign :: Ctx -> BlockId -> Int -> Live -> Statement -> R [Statement]
 rewriteAssign cx b k after (Assign d rv)
@@ -952,6 +970,8 @@ rewriteAssign cx b k after (Assign d rv)
                 sources <- aliasSources
                 case peekEnd cx b k d of
                     Just end | peekableIn cx b k d s end && chainUndisturbed sources end s -> markAliasOf d b s >> pure [Peek d rv]
+                    -- (a part of what nothing changes during the call, that is only read: looked at wherever it is used)
+                    _ | readOnlyEverywhere cx d && stableChain cx sources s -> markAliasOf d b s >> pure [Peek d rv]
                     _ -> copied
             _ -> copied
     -- (what s peeks at, if s is a peek, must stay as it is while d is used too)
