@@ -147,23 +147,27 @@ cache zero one = do
         Nothing -> pure (Just "cold cache directory was not set")
         Just home -> do
             let directory = home </> "tersus"
-            names <- sort <$> listDirectory directory
-            before <- mapM (getModificationTime . (directory </>)) names
-            reusedZero <- cachedSeed
-            reusedOne <- cachedEmitter
-            let source = "x = 6 * 7; return x;"
-            ir <- tersusLlvm source
-            expected <- case ownedSource source of
-                Error e -> pure (Error e)
-                Ok owned -> emitWith one (writeProgram owned)
-            afterNames <- sort <$> listDirectory directory
-            after <- mapM (getModificationTime . (directory </>)) names
-            pure $ case (ir, expected) of
-                (Ok text, Ok fromStage1) -> firstFailure
-                    [ if text == fromStage1 then Nothing else Just "the IR is not what stage 1 writes"
-                    , testAssertEq (reusedZero, reusedOne) (Ok zero, Ok one)
-                    , testAssertEq (afterNames, after) (names, before)
-                    , testAssertTrue (all (`elem` names) ["seed-" ++ seedHash, "parser-seed-" ++ parserSeedHash, "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])
-                    ]
-                (Error e, _) -> Just e
-                (_, Error e) -> Just e
+                source = "x = 6 * 7; return x;"
+            primed <- tersusLlvm source
+            case primed of
+                Error e -> pure (Just e)
+                Ok initial -> do
+                    names <- sort <$> listDirectory directory
+                    before <- mapM (getModificationTime . (directory </>)) names
+                    reusedZero <- cachedSeed
+                    reusedOne <- cachedEmitter
+                    ir <- tersusLlvm source
+                    expected <- case ownedSource source of
+                        Error e -> pure (Error e)
+                        Ok owned -> emitWith one (writeProgram owned)
+                    afterNames <- sort <$> listDirectory directory
+                    after <- mapM (getModificationTime . (directory </>)) names
+                    pure $ case (ir, expected) of
+                        (Ok text, Ok fromStage1) -> firstFailure
+                            [ if text == fromStage1 && text == initial then Nothing else Just "the IR is not what stage 1 writes"
+                            , testAssertEq (reusedZero, reusedOne) (Ok zero, Ok one)
+                            , testAssertEq (afterNames, after) (names, before)
+                            , testAssertTrue (all (`elem` names) ["seed-" ++ seedHash, "parser-seed-" ++ parserSeedHash, "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])
+                            ]
+                        (Error e, _) -> Just e
+                        (_, Error e) -> Just e
