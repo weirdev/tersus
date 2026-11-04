@@ -10,6 +10,7 @@ module MirOwnership
     , operandLocal
     ) where
 
+import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust, listToMaybe)
@@ -352,6 +353,7 @@ data Ctx = Ctx
     , cxUsedByTerminator :: Set Local
     , cxTerminatorUsers :: Map Local [BlockId] -- the blocks whose terminator uses a local
     , cxTerminators :: Map BlockId Terminator
+    , cxNames :: Map Local Variable
     , cxAfters :: Map BlockId [Live]
     , cxTakes :: Set (BlockId, Int) -- the statements that take a field out of a value
     , cxBorrowed :: Set Local -- the parameters that are lent: the function does not own them, so it never frees or moves them
@@ -403,6 +405,7 @@ ownFunction program fn0 =
                 , cxUsedByTerminator = byTerminator
                 , cxTerminatorUsers = terminatorUsers
                 , cxTerminators = Map.map blockTerminator (fnBlocks fn)
+                , cxNames = Map.mapMaybe localName (fnLocals fn)
                 , cxAfters = afters
                 , cxTakes = Set.empty
                 , cxBorrowed = Set.fromList (fnBorrowed fn)
@@ -910,7 +913,28 @@ rewriteStatement _ _ _ _ st@Peek{} = pure [st]
 rewriteStatement cx _ _ after (AssignRef root steps rv) = do
     (pre, post, operands) <- rewriteOperands cx after (roles rv)
     pure (pre ++ [AssignRef root steps (withOperands rv operands)] ++ post)
-rewriteStatement cx b k after (Assign d rv)
+rewriteStatement cx b k after st@(Assign d rv)
+    -- (the list a for loop goes through, read from a parameter that is lent and never given another value, or from a
+    -- part of one: it is looked at where it is for the whole loop, since nothing can change or free it during the call)
+    | forLoopList, Just s <- operandLocal =<< listSource = do
+        sources <- aliasSources
+        if heap cx (typeOf cx d) && stableChain sources s
+            then markAliasOf d b s >> pure [Peek d rv]
+            else rewriteAssign cx b k after st
+    | otherwise = rewriteAssign cx b k after st
+  where
+    forLoopList = maybe False ("$list " `isPrefixOf`) (Map.lookup d (cxNames cx))
+    listSource = case rv of
+        Use o -> Just o
+        ReadField o _ _ -> Just o
+        _ -> Nothing
+    stableChain sources l
+        | l `Set.member` cxBorrowed cx = Map.findWithDefault 0 l (cxDefs cx) == 1
+        | Just (_, l') <- Map.lookup l sources = Map.findWithDefault 0 l (cxDefs cx) == 1 && stableChain sources l'
+        | otherwise = False
+
+rewriteAssign :: Ctx -> BlockId -> Int -> Live -> Statement -> R [Statement]
+rewriteAssign cx b k after (Assign d rv)
     | isProjection rv && heap cx (typeOf cx d) = projection
     | otherwise = do
         (pre, post, operands) <- rewriteOperands cx after' (roles rv)
@@ -943,6 +967,7 @@ rewriteStatement cx b k after (Assign d rv)
                 alias <- freshLocal (typeOf cx d)
                 markAlias alias
                 pure (pre ++ [Peek alias (withOperands rv operands), Assign d (CopyOf (Copy alias))] ++ post)
+rewriteAssign _ _ _ _ st = pure [st]
 
 -- Whether a temporary can look at a part of a value instead of owning a copy: it is given a value once, only read, by
 -- statements after it in its block, and none of them takes or changes what it was read from or uses it in a way that
