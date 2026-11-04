@@ -12,6 +12,7 @@
 -- that test; nothing else runs it.
 module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits) where
 
+import Control.Concurrent.MVar (withMVar)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
@@ -30,7 +31,7 @@ import LlvmRuntime (runtimeSource)
 import MirData (writeProgram)
 import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, nativeStorage, ownedProgramOf)
-import Native (buildExecutable, cacheDirectory, cachedProgram, runCommandWithInputFull, runWithInput)
+import Native (buildExecutable, cacheDirectory, cacheLock, cachedProgram, runCommandWithInputFull, runWithInput)
 import PreludeSource (boxSource, listsSource, validationDriverSource, validationSource)
 import Seed (emitterHash)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
@@ -155,7 +156,11 @@ withVerdictLock text action = do
         Nothing -> action
         Just path -> do
             createDirectoryIfMissing True (takeDirectory path)
-            bracket (openFile (path ++ ".lock") ReadWriteMode) hClose (\handle -> hLock handle ExclusiveLock >> action)
+            -- (the threads of one process take turns first: a process may not open one file for writing twice, and
+            -- the second open fails instead of waiting)
+            lock <- cacheLock ("verdict " ++ path)
+            withMVar lock $ \_ ->
+                bracket (openFile (path ++ ".lock") ReadWriteMode) hClose (\handle -> hLock handle ExclusiveLock >> action)
 
 -- The compiled validator's verdicts over the functions given: each one up
 -- to the first refused is proved, the refused one has its own
