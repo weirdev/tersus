@@ -74,9 +74,9 @@ main = do
                 Just n -> pure n
                 Nothing -> min (length names) <$> getNumProcessors
             (summary, reported) <-
-                if jobs <= 1 || length names <= 1
-                    then runInProcess selected
-                    else runInParallel jobs names
+                if useWorkerProcesses arguments jobs (length names)
+                    then runInParallel jobs names
+                    else runInProcess selected
             unless (argumentChild arguments) $ do
                 putStrLn $
                     "Summary: "
