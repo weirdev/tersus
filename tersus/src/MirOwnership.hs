@@ -412,7 +412,7 @@ ownFunction program fn0 =
         cx = cx0{cxTakes = takes}
         start = 1 + maximum (0 : [n | Local n <- Map.keys (fnLocals fn)])
         (blocks, finalState) =
-            runR (mapM (rewriteBlock cx outs) (Map.toList (fnBlocks fn))) (RS start Map.empty Set.empty)
+            runR (mapM (rewriteBlock cx outs) (Map.toList (fnBlocks fn))) (RS start Map.empty Set.empty Map.empty)
         allLocals = Map.union (fnLocals fn) (rsNew finalState)
         owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState, l `Set.notMember` cxBorrowed cx, not (dropped l)]
         -- (the drop of a type is given the value to free: native code frees what its fields own after it, so the drop does not free it)
@@ -862,7 +862,7 @@ takesField cx (Assign d (ReadField (Copy s) name field)) after =
 takesField _ _ _ = False
 
 -- The state of the rewriting: the next local to make, the locals that were made, and the ones that own nothing
-data RS = RS {rsNext :: Int, rsNew :: Map Local LocalDecl, rsAlias :: Set Local}
+data RS = RS {rsNext :: Int, rsNew :: Map Local LocalDecl, rsAlias :: Set Local, rsAliasOf :: Map Local (BlockId, Local)}
 
 newtype R a = R {runR :: RS -> (a, RS)}
 
@@ -881,6 +881,13 @@ freshLocal ty = R (\s -> let l = Local (rsNext s) in (l, s{rsNext = rsNext s + 1
 
 markAlias :: Local -> R ()
 markAlias l = R (\s -> ((), s{rsAlias = Set.insert l (rsAlias s)}))
+
+-- (a local that peeks at a part of the local it names, in the block it names)
+markAliasOf :: Local -> BlockId -> Local -> R ()
+markAliasOf l b src = R (\s -> ((), s{rsAlias = Set.insert l (rsAlias s), rsAliasOf = Map.insert l (b, src) (rsAliasOf s)}))
+
+aliasSources :: R (Map Local (BlockId, Local))
+aliasSources = R (\s -> (rsAliasOf s, s))
 
 rewriteBlock :: Ctx -> Map BlockId Live -> (BlockId, BasicBlock) -> R (BlockId, BasicBlock)
 rewriteBlock cx outs (b, BasicBlock stmts term) = do
@@ -911,9 +918,20 @@ rewriteStatement cx b k after (Assign d rv)
         case (rv, projectionSource rv) of
             (ReadField (Copy s) name field, _)
                 | (b, k) `Set.member` cxTakes cx -> pure [Assign d (TakeField s name field)]
-            (_, Just (Copy s))
-                | peekable cx b k d s -> markAlias d >> pure [Peek d rv]
-            _ -> do
+            (_, Just (Copy s)) -> do
+                sources <- aliasSources
+                if peekableIn cx b k d s && chainUndisturbed sources s
+                    then markAliasOf d b s >> pure [Peek d rv]
+                    else copied
+            _ -> copied
+    -- (what s peeks at, if s is a peek, must stay as it is while d is used too)
+    chainUndisturbed sources s
+        | s `Set.notMember` cxProjected cx = True
+        | Just (b', s') <- Map.lookup s sources
+        , b' == b =
+            undisturbed cx b (k + 1) (lastUseIn cx k d) s' && chainUndisturbed sources s'
+        | otherwise = False
+    copied = do
                 -- a copy of the part: the part is read into a local that owns nothing, and that is cloned
                 (pre, post, operands) <- rewriteOperands cx after' (roles rv)
                 alias <- freshLocal (typeOf cx d)
@@ -923,18 +941,27 @@ rewriteStatement cx b k after (Assign d rv)
 -- Whether a temporary can look at a part of a value instead of owning a copy: it is given a value once, only read, by
 -- statements after it in its block, and none of them takes or changes what it was read from or uses it in a way that
 -- gives it away
-peekable :: Ctx -> BlockId -> Int -> Local -> Local -> Bool
-peekable cx b k t s =
+-- (a source that is a peek itself is the caller's to check: what it peeks at must stay as it is too)
+peekableIn :: Ctx -> BlockId -> Int -> Local -> Local -> Bool
+peekableIn cx b k t s =
     t /= s
         && Map.findWithDefault 0 t (cxDefs cx) == 1
-        && s `Set.notMember` cxProjected cx
         && t `Set.notMember` cxUsedByTerminator cx
         && all inBlockAfter uses
-        && not (any disturbed [k + 1 .. lastUse])
+        && undisturbed cx b (k + 1) (lastUseIn cx k t) s
   where
     uses = Map.findWithDefault [] t (cxUses cx)
     inBlockAfter (b', k', role) = b' == b && k' > k && role == Read
-    lastUse = maximum (k : [k' | (_, k', _) <- uses])
+
+-- The last statement that uses t, from statement k of its block on
+lastUseIn :: Ctx -> Int -> Local -> Int
+lastUseIn cx k t = maximum (k : [k' | (_, k', _) <- Map.findWithDefault [] t (cxUses cx)])
+
+-- Whether statements from .. to of a block leave s as it is: none gives it another value, gives it away, or takes a
+-- field out of it
+undisturbed :: Ctx -> BlockId -> Int -> Int -> Local -> Bool
+undisturbed cx b from to s = not (any disturbed [from .. to])
+  where
     statements = Map.findWithDefault [] b (cxStatements cx)
     disturbed j =
         (b, j) `Set.member` cxTakes cx && takesFrom (statements !! j)
