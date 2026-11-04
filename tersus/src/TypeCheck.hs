@@ -252,13 +252,10 @@ checkItem top ctx env stmt =
             | otherwise -> failTc "Type error: a trait can only be defined at the top of the program"
         ImplDef trait traitArgs typeName selfType bounds functions
             | top -> do
-                -- (a copy of a linear value would use it twice, and a copy of a value with a drop would be dropped twice)
                 when (trait == Just "Clone") $ do
                     s <- getState
                     when (Set.member typeName (tcLinear s)) $
                         failTc ("Type error: impl Clone for " ++ typeName ++ ": " ++ typeName ++ " is linear, so a value of it is used exactly once and is never copied")
-                    when (Set.member typeName (tcDrops s)) $
-                        failTc ("Type error: impl Clone for " ++ typeName ++ ": " ++ typeName ++ " has a drop, and a copy of a value with a drop would be dropped twice")
                 (ctx', env', functions', ftypes) <- checkImpl ctx env trait traitArgs typeName selfType bounds functions
                 return (ctx', env', functions', ftypes)
             | otherwise -> failTc "Type error: an impl can only be written at the top of the program"

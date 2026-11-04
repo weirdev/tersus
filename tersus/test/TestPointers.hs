@@ -132,7 +132,7 @@ testPointers =
             , testCase "a type with a drop holds a permission" (rejected "struct H { n: Int }; impl Drop for H { fn drop(self: Self) -> Int { return self.n; }; }; return 1;" "H holds no permission")
             , testCase "a drop is not called by the program" (rejected (dropper ++ "v = V::new(3); return v.drop();") "is a drop, which is called where a value goes out of scope")
             , testCase "a drop of the wrong type" (rejected (owner ++ "impl Drop for V { fn drop(self: Self) -> Bool { return true; }; }; return 0;") "but Drop declares fn(V) -> Int")
-            , testCase "a value with a drop is not copied" (rejected (dropper ++ "impl Clone for V { }; return 0;") "V has a drop")
+            , testCase "derived Clone of a drop owner cannot copy its permission" (rejected (dropper ++ "impl Clone for V { }; return 0;") "Block<Int> is a permission, which is never copied")
             ]
         , TestList
             "assumptions"

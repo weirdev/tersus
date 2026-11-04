@@ -27,6 +27,7 @@ import TestArrays
 import TestBorrow
 import TestAllocationRefs
 import TestCopies
+import TestCloneDropOrder
 import TestGenerics
 import TestBox
 import TestDeref
@@ -163,6 +164,7 @@ originalGroups =
     , testBorrow
     , testAllocationRefs
     , testCopies
+    , testCloneDropOrder
     , testGenerics
     , testSequence
     , testSequenceContracts
