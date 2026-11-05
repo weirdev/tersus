@@ -216,14 +216,27 @@ availableProcessors :: IO Int
 availableProcessors
     | os /= "linux" = getNumProcessors
     | otherwise = do
-        environment <- getEnvironment
-        let clean = filter (\(name, _) -> name `notElem` ["OMP_NUM_THREADS", "OMP_THREAD_LIMIT"]) environment
-        counted <- try (readCreateProcessWithExitCode (proc "nproc" []){env = Just clean} "") :: IO (Either IOException (ExitCode, String, String))
-        case counted of
-            Right (ExitSuccess, output, _) -> case reads output of
-                [(count, rest)] | count > 0 && all (`elem` " \t\r\n") rest -> pure count
+        status <- try (do text <- readFile "/proc/self/status"; _ <- evaluate (length text); pure text) :: IO (Either IOException String)
+        case status of
+            Right text -> case [drop (length "Cpus_allowed_list:") row | row <- lines text, take (length "Cpus_allowed_list:") row == "Cpus_allowed_list:"] of
+                [spec] -> case traverse range (commaParts (filter (`notElem` " \t\r\n") spec)) of
+                    Just counts | sum counts > 0 -> pure (sum counts)
+                    _ -> getNumProcessors
                 _ -> getNumProcessors
-            _ -> getNumProcessors
+            Left _ -> getNumProcessors
+  where
+    commaParts text = case break (== ',') text of
+        (part, []) -> [part]
+        (part, _ : rest) -> part : commaParts rest
+    number text = case reads text of
+        [(n, "")] | n >= 0 -> Just n
+        _ -> Nothing
+    range text = case break (== '-') text of
+        (one, []) -> (const 1) <$> number one
+        (low, _ : high) -> do
+            a <- number low
+            b <- number high
+            if b >= a then Just (b - a + 1) else Nothing
 
 {-# NOINLINE buildCapabilities #-}
 buildCapabilities :: MVar (Int, Int)

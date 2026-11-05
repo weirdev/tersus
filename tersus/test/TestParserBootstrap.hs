@@ -37,7 +37,7 @@ import qualified ParserSeed
 import qualified Pipeline
 import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, toolPackageFiles, mirPackageFiles)
 import Hash (fingerprint)
-import Seed (cachedParserSeed, parserSeedHash, seedHash, emitterHash)
+import Seed (cachedParserSeed, parserSeedHash, seedHash, compilerSnapshotHash)
 import qualified SourceParse
 import qualified TersusParser
 import TestHarness
@@ -217,7 +217,7 @@ copyBootstrapTools source target = do
         when (regular && not (".lock" `isSuffixOf` name))
             (copyFile (source </> name) (target </> name)))
         [name | name <- names, any (`isPrefixOf` name)
-            ["parser-seed-", "tersus-parser-", "seed-", "emitter-", "mir-verify-", "mir-erase-", "validator-", "tersus_rt_"]]
+            ["parser-seed-", "tersus-parser-", "seed-", "emitter-", "mir-verify-", "mir-erase-", "validator-", "tersus_rt_", "prepared-"]]
 
 wrongSeed :: String -> FilePath -> IO [(String, String)]
 wrongSeed variable home = do
@@ -376,11 +376,13 @@ emitterRetryStages = inPrimedWorker "emitter-repair" ["parser-seed-", "seed-"] $
                 case checked of
                     Error e -> pure (Just e)
                     Ok program -> do
-                        _ <- evaluate listLibrary
-                        pure (testAssertEq (runProgram program) (Ok (Just (MInt 42))))
+                        library <- listLibrary
+                        pure $ case library of
+                            Error e -> Just e
+                            Ok _ -> testAssertEq (runProgram program) (Ok (Just (MInt 42)))
 
 bootstrapLibraryHash :: IO TestResult
-bootstrapLibraryHash = pure $ testAssertEq emitterHash
+bootstrapLibraryHash = pure $ testAssertEq compilerSnapshotHash
     (fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, text) -> [path, text]) (mirPackageFiles ++ libPackageFiles)
         ++ [stdlibSource, compilerSourceHash]))
 
@@ -430,6 +432,11 @@ coldStages = do
                 Left e -> Error e
                 Right (PackageResult pkg) -> Pipeline.compileModulesValidated pkg
                 Right _ -> Error "the importing user program is not a package"
+            emitterIdentity <- Housekeeping.emitterKey
+            parserIdentity <- TersusParser.parserKey
+            case (emitterIdentity, parserIdentity) of
+                (Ok e, Ok p) -> putStrLn ("[BOOT-KEYS] " ++ e ++ " " ++ p)
+                _ -> pure ()
             entries <- listDirectory home
             pure $ firstFailure
                 [ if null before then Nothing else Just ("cold worker started with " ++ show before)
@@ -438,7 +445,11 @@ coldStages = do
                 , case parser of Left e -> Just e; Right (parsed, _) -> testAssertEq (fileBody parsed) [Return (Val (VInt 42))]
                 , case source `bindResult` runProgram of Error e -> Just e; Ok answer -> testAssertEq answer (Just (MInt 42))
                 , case package `bindResult` runProgram of Error e -> Just e; Ok answer -> testAssertEq answer (Just (MInt 42))
-                , testAssertTrue (all (`elem` entries) ["parser-seed-" ++ parserSeedHash, "seed-" ++ seedHash, "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])
+                , case (emitterIdentity, parserIdentity) of
+                    (Ok e, Ok p) -> testAssertTrue (all (`elem` entries)
+                        ["parser-seed-" ++ parserSeedHash, "seed-" ++ seedHash, "emitter-" ++ e, "tersus-parser-" ++ p])
+                    (Error e, _) -> Just e
+                    (_, Error e) -> Just e
                 , testAssertTrue (all (\prefix -> any (prefix `isPrefixOf`) entries) ["mir-verify-", "mir-erase-", "tersus_rt_"])
                 ]
   where
@@ -473,9 +484,17 @@ coldAndReuse = modifyMVar coldReuseResults $ \saved -> case saved of
                 second <- try readSecond :: IO (Either SomeException (ExitCode, String, String))
                 peer <- workerResult "cold B" second
                 names <- listDirectory (home </> "tersus")
-                let concurrent = firstFailure [cold, peer,
-                        testAssertTrue (all (`elem` names) ["parser-seed-" ++ parserSeedHash,
-                            "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])]
+                let identities outcome = case outcome of
+                        Right (ExitSuccess, out, _) -> case [words (drop (length "[BOOT-KEYS] ") line)
+                            | line <- lines out, "[BOOT-KEYS] " `isPrefixOf` line] of
+                                [[e, p]] -> Ok (e, p)
+                                _ -> Error "cold worker did not report its prepared executable identities"
+                        _ -> Error "cold worker did not complete"
+                    concurrent = firstFailure [cold, peer, case (identities first, identities second) of
+                        (Error e, _) -> Just e
+                        (_, Error e) -> Just e
+                        (Ok a@(e, p), Ok b) -> testAssertEq a b <> testAssertTrue (all (`elem` names)
+                            ["parser-seed-" ++ parserSeedHash, "emitter-" ++ e, "tersus-parser-" ++ p])]
                 reused <- case cold of
                     Just e -> pure (Just ("cache reuse requires a successful cold worker: " ++ e))
                     Nothing -> do

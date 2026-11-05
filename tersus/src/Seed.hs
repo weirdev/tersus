@@ -2,7 +2,7 @@ module Seed
     ( seedHash
     , seedSha256
     , seedUrl
-    , emitterHash
+    , compilerSnapshotHash
     , stageZero
     , cachedSeed
     , parserSeedHash
@@ -42,8 +42,8 @@ seedHash = fingerprint [seedSha256, runtimeSource]
 parserSeedHash :: String
 parserSeedHash = fingerprint [parserSeedSha256, runtimeSource]
 
-emitterHash :: String
-emitterHash = fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
+compilerSnapshotHash :: String
+compilerSnapshotHash = fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
 
 stageZero :: FilePath -> IO (Result () String)
 stageZero = buildSeed "emitter" seedSha256 seedHash "TERSUS_SEED_FILE"

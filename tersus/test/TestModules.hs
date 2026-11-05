@@ -28,7 +28,7 @@ import ParsedFile
 import qualified ParserSeed as Oracle
 import qualified TersusParser as NativeParser
 import qualified Native
-import Seed (emitterHash)
+import Seed (compilerSnapshotHash)
 import LlvmRuntime (runtimeSource)
 import Hash (fingerprint)
 import System.Exit (ExitCode (..))
@@ -1257,7 +1257,8 @@ nativeSourceRecordLf = do
         (_, Error err, _) -> pure (Just err)
         (_, _, Error err) -> pure (Just err)
         (Right _, Ok home, Ok request) -> do
-            let exe = home </> ("tersus-parser-" ++ NativeParser.parserHash)
+            identity <- NativeParser.parserKey >>= \result -> case result of Error e -> fail e; Ok key -> pure key
+            let exe = home </> ("tersus-parser-" ++ identity)
                 unterminated = take (length request - 1) request
             (code, out, err) <- Native.runWithInputFull exe unterminated
             pure $ case File.readFileRequest unterminated of

@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 
 module Pipeline
     ( parseSource
@@ -40,7 +41,9 @@ import MirHousekeeping (eraseGhosts, verifyProgram)
 import qualified MirHousekeeping as Housekeeping
 import MirEval (MirValue, runProgram)
 import ValidatorNative (validateCompiled)
-import MirLists (lowerLists)
+import MirLists (hasLists, lowerLists)
+import System.IO.Unsafe (unsafePerformIO)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import Types (Size (..), Type (..))
@@ -146,12 +149,35 @@ ownedOfProgram program =
 
 -- The program that native code is made of: a validated program with each list and Box made of the library's structs (see MirLists).
 -- Each Uninit<T> is already a T in it: the erasure makes it one (it is laid out as one: an empty one is the words of a T cleared, which own nothing)
+{-# NOINLINE nativeProgram #-}
 nativeProgram :: M.Program -> Result M.Program String
-nativeProgram = lowerLists listLibrary . expandRefWrites
+nativeProgram program = unsafePerformIO $ do
+    ready <- Housekeeping.prepareBootstrap
+    case ready of
+        Error e -> pure (Error e)
+        Ok () -> do
+            let expanded = expandRefWrites program
+            if not (hasLists expanded) then pure (Ok expanded) else do
+                library <- listLibrary
+                pure (lowerLists library expanded)
 
-listLibrary :: Result [(Mod.ModuleId, M.Program)] String
-listLibrary = Housekeeping.nativeStorage `bindResult` \(_, program) ->
-    checkedLowered program `bindResult` \_ -> Housekeeping.listLibrary
+{-# NOINLINE checkedStorageBox #-}
+checkedStorageBox :: MVar (Maybe [(Mod.ModuleId, M.Program)])
+checkedStorageBox = unsafePerformIO (newMVar Nothing)
+
+listLibrary :: IO (Result [(Mod.ModuleId, M.Program)] String)
+listLibrary = do
+    ready <- Housekeeping.prepareBootstrap
+    case ready of
+        Error e -> pure (Error e)
+        Ok () -> modifyMVar checkedStorageBox $ \saved -> case saved of
+            Just units -> pure (saved, Ok units)
+            Nothing -> do
+                result <- case Housekeeping.nativeStorage `bindResult` \(_, program) -> checkedLowered program of
+                    Error e -> pure (Error e)
+                    Ok _ -> Housekeeping.listLibrary
+                let keep = case result of Ok units -> Just units; Error _ -> Nothing
+                pure (keep, result)
 
 -- Checks and validates a program given as statements, with the validator written in Tersus
 validateStatements :: [Statement] -> Result () String
