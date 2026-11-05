@@ -1194,22 +1194,6 @@ fn pairKey(a: Int, b: Int) -> Int {
     return hashStep(hashStep(11, a), b);
 };
 
-// The strongly connected components of the difference edges (from right to
-// left), by Kosaraju's two walks: each node the edges name is mapped to the
-// first node of its component found by the second walk. Two classes are one
-// only if each is at distance at most 0 from the other, so both are in one
-// component, and a path between them stays in it.
-fn edgeAdjacency(edges: &List<DifferenceFact>, reversed: Bool) -> HashMap<Int, List<Int>> {
-    adjacency = emptyPositions();
-    for ePosition in 0..size(edges) {
-        from = get(edges, ePosition).right;
-        to = get(edges, ePosition).left;
-        if reversed { from = get(edges, ePosition).left; to = get(edges, ePosition).right; };
-        adjacency = adjacency.insert(from, push(adjacency.lookup(from, []), to));
-    };
-    return adjacency;
-};
-
 fn edgeNodes(edges: &List<DifferenceFact>) -> List<Int> {
     nodes = [];
     seen = HashSet::new();
@@ -1222,30 +1206,69 @@ fn edgeNodes(edges: &List<DifferenceFact>) -> List<Int> {
     return nodes;
 };
 
-// (the nodes in the order a depth-first walk from each of them in turn
-// finishes them; with reversed and a component map, the second walk instead,
-// which maps each node it reaches to the node it started from)
-fn walkOrder(nodes: &List<Int>, adjacency: &HashMap<Int, List<Int>>, steps: Int) -> List<Int> [{ affirm steps >= 0; }] [{ }] {
+// The edges as lists of node indexes: the edges out of node n are the
+// targets from starts(n) to starts(n + 1), from right to left (or left to
+// right, reversed)
+struct EdgeGraph { starts: List<Int>, targets: List<Int> };
+
+impl Clone for EdgeGraph { };
+
+fn edgeGraph(edges: &List<DifferenceFact>, index: &HashMap<Int, Int>, count: Int, reversed: Bool) -> EdgeGraph [{ affirm count >= 0; }] [{ }] {
+    starts = [];
+    for k in 0..count + 1 { starts = push(starts, 0); };
+    for ePosition in 0..size(edges) {
+        from = index.lookup(get(edges, ePosition).right, -1);
+        if reversed { from = index.lookup(get(edges, ePosition).left, -1); };
+        if from >= 0 && from + 1 < size(starts) { starts = set(starts, from + 1, get(starts, from + 1) + 1); };
+    };
+    for k in 0..count {
+        if k + 1 < size(starts) { starts = set(starts, k + 1, get(starts, k + 1) + get(starts, k)); };
+    };
+    targets = [];
+    for ePosition in 0..size(edges) { targets = push(targets, -1); };
+    fill = clone(starts);
+    for ePosition in 0..size(edges) {
+        from = index.lookup(get(edges, ePosition).right, -1);
+        to = index.lookup(get(edges, ePosition).left, -1);
+        if reversed {
+            from = index.lookup(get(edges, ePosition).left, -1);
+            to = index.lookup(get(edges, ePosition).right, -1);
+        };
+        if from >= 0 && from < size(fill) {
+            place = get(fill, from);
+            if place >= 0 && place < size(targets) {
+                targets = set(targets, place, to);
+                fill = set(fill, from, place + 1);
+            };
+        };
+    };
+    return EdgeGraph { starts: starts, targets: targets };
+};
+
+// (the node indexes in the order a depth-first walk from each of them in turn
+// finishes them)
+fn finishOrder(graph: &EdgeGraph, count: Int, steps: Int) -> List<Int> [{ affirm count >= 0; affirm steps >= 0; }] [{ }] {
     order = [];
-    visited = HashSet::new();
-    for startPosition in 0..size(nodes) {
-        start = get(nodes, startPosition);
-        if visited.contains(start) = false {
-            visited = visited.insert(start);
+    visited = [];
+    for k in 0..count { visited = push(visited, false); };
+    for start in 0..count {
+        if start < size(visited) && get(visited, start) = false {
+            visited = set(visited, start, true);
             stack = push([], start);
-            next = push([], 0);
+            next = push([], intAt(graph.starts, start, 0));
             for step in 0..steps {
                 if size(stack) > 0 && size(next) = size(stack) {
                     top = last(stack);
                     i = last(next);
-                    outs = adjacency.lookup(top, []);
-                    if i >= 0 && i < size(outs) {
+                    if i < intAt(graph.starts, top + 1, 0) {
                         next = set(next, size(next) - 1, i + 1);
-                        to = get(outs, i);
-                        if visited.contains(to) = false {
-                            visited = visited.insert(to);
-                            stack = push(stack, to);
-                            next = push(next, 0);
+                        to = intAt(graph.targets, i, -1);
+                        if to >= 0 && to < size(visited) {
+                            if get(visited, to) = false {
+                                visited = set(visited, to, true);
+                                stack = push(stack, to);
+                                next = push(next, intAt(graph.starts, to, 0));
+                            };
                         };
                     } else {
                         order = push(order, top);
@@ -1259,32 +1282,52 @@ fn walkOrder(nodes: &List<Int>, adjacency: &HashMap<Int, List<Int>>, steps: Int)
     return order;
 };
 
+// The strongly connected components of the difference edges, by Kosaraju's
+// two walks: each node the edges name is mapped to the first node of its
+// component the second walk finds
 fn edgeComponents(edges: &List<DifferenceFact>) -> HashMap<Int, Int> {
     nodes = edgeNodes(edges);
-    steps = 2 * size(edges) + 2 * size(nodes) + 2;
-    order = walkOrder(nodes, edgeAdjacency(edges, false), steps);
-    reversedAdjacency = edgeAdjacency(edges, true);
-    component = emptyIntMap();
+    count = size(nodes);
+    index = emptyIntMap();
+    for k in 0..count { index = index.insert(get(nodes, k), k); };
+    steps = 2 * size(edges) + 2 * count + 2;
+    order = finishOrder(edgeGraph(edges, index, count, false), count, steps);
+    reversed = edgeGraph(edges, index, count, true);
+    component = [];
+    for k in 0..count { component = push(component, -1); };
     for back in 0..size(order) {
-        start = intAt(order, size(order) - 1 - back, 0);
-        if component.contains(start) = false {
-            component = component.insert(start, start);
-            stack = push([], start);
-            for step in 0..steps {
-                if size(stack) > 0 {
-                    top = last(stack);
-                    stack = pop(stack);
-                    for to in reversedAdjacency.lookup(top, []) {
-                        if component.contains(to) = false {
-                            component = component.insert(to, start);
-                            stack = push(stack, to);
+        start = intAt(order, size(order) - 1 - back, -1);
+        if start >= 0 && start < size(component) {
+            if get(component, start) < 0 {
+                component = set(component, start, start);
+                stack = push([], start);
+                for step in 0..steps {
+                    if size(stack) > 0 {
+                        top = last(stack);
+                        stack = pop(stack);
+                        lo = intAt(reversed.starts, top, 0);
+                        hi = intAt(reversed.starts, top + 1, 0);
+                        if hi < lo { hi = lo; };
+                        for i in lo..hi {
+                            to = intAt(reversed.targets, i, -1);
+                            if to >= 0 && to < size(component) {
+                                if get(component, to) < 0 {
+                                    component = set(component, to, start);
+                                    stack = push(stack, to);
+                                };
+                            };
                         };
                     };
                 };
             };
         };
     };
-    return component;
+    result = emptyIntMap();
+    for k in 0..count {
+        c = intAt(component, k, -1);
+        if c >= 0 && c < count && k < count { result = result.insert(get(nodes, k), get(nodes, c)); };
+    };
+    return result;
 };
 
 fn boundEqualities(equalities: &List<EqualityFact>, differences: &List<DifferenceFact>, nodes: &List<Int>) -> List<EqualityFact> {
