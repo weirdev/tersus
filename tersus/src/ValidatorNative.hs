@@ -13,8 +13,7 @@
 -- that test; nothing else runs it.
 module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits, withVerdictLock, cachedBootstrapEmitter) where
 
-import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent.MVar (modifyMVar, newMVar, takeMVar, withMVar)
 import Data.List (sortOn)
 import Data.Ord (Down (..))
 import Control.Exception (IOException, bracket, try)
@@ -184,9 +183,7 @@ inParallel exe texts = do
                     checked <- runValidator exe [text]
                     modifyMVar found (\sofar -> pure (merge index checked sofar, ()))
                     worker
-    finished <- mapM (const newEmptyMVar) [1 .. max 1 workers]
-    mapM_ (\done -> forkIO (worker >> putMVar done ())) finished
-    mapM_ takeMVar finished
+    _ <- parallelBuilds (replicate (max 1 workers) worker)
     takeMVar found
   where
     merge _ _ (Error e) = Error e
