@@ -64,11 +64,12 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/tersus
-          # Immutable snapshots must change when any build/test input or the runner toolchain changes.
-          key: emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}-shard-${{ matrix.shard }}
+          # Restore this shard's previous inventory, not another shard's partial bootstrap cache.
+          # Prefer the same image; compatible-image fallback still stays within this shard.
+          key: emitter-${{ runner.os }}-shard-${{ matrix.shard }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}
           restore-keys: |
-            emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}-
-            emitter-${{ runner.os }}-
+            emitter-${{ runner.os }}-shard-${{ matrix.shard }}-${{ steps.runner-image.outputs.version }}-
+            emitter-${{ runner.os }}-shard-${{ matrix.shard }}-
 
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
       # reports "cannot find 'ld'". ld.bfd takes the same options, so let it answer to that name.
