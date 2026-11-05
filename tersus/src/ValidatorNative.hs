@@ -11,13 +11,12 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits, withVerdictLock) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits, withVerdictLock, cachedBootstrapEmitter) where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Data.List (sortOn)
 import Data.Ord (Down (..))
-import GHC.Conc (getNumProcessors)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
@@ -32,13 +31,10 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Mir as M
 import Hash (fingerprint)
-import LlvmRuntime (runtimeSource)
-import MirData (writeProgram)
 import MirEval (MirValue (..))
-import MirHousekeeping (cachedEmitter, nativeStorage, ownedProgramOf)
-import Native (buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, runCommandWithInputFull, runWithInput)
-import PreludeSource (boxSource, listsSource, validationDriverSource, validationSource)
-import Seed (emitterHash)
+import MirHousekeeping (cachedEmitter, cachedUncheckedValidator, nativeStorage, prepareBootstrap, validatorHash)
+import Native (cacheDirectory, cacheLock, cachedProgram, availableProcessors, parallelBuilds, runCommandWithInputFull)
+import PreludeSource (validationDriverSource, validationSource)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
 import Syntax (parseImplCheckName)
 import Utils (Result (..))
@@ -176,7 +172,7 @@ withVerdictLock text action = do
 -- the machine has processors, the longest first
 inParallel :: IO (Result FilePath String) -> [String] -> IO (Result (Map.Map Int (Int, Int, Int)) String)
 inParallel exe texts = do
-    workers <- getNumProcessors
+    workers <- availableProcessors
     queue <- newMVar (sortOn (Down . length . snd) (zip [0 :: Int ..] texts))
     found <- newMVar (Ok Map.empty)
     let next = modifyMVar queue (\pending -> pure (drop 1 pending, take 1 pending))
@@ -239,6 +235,20 @@ serializeValue value = case value of
     MEmpty -> Left "an empty value in the data for the validator"
     MRef _ _ -> Left "a reference value in the data for the validator"
 
+-- Overlap full validator self-validation with the other post-E1 tool builds.
+cachedBootstrapEmitter :: IO (Result FilePath String)
+cachedBootstrapEmitter = do
+    prepared <- prepareBootstrap
+    case prepared of
+        Error e -> pure (Error e)
+        Ok () -> do
+            results <- parallelBuilds [cachedEmitter, validatorExecutable]
+            pure $ case results of
+                [Ok emitter, Ok _] -> Ok emitter
+                [Error e, _] -> Error e
+                [_, Error e] -> Error e
+                _ -> Error "incomplete checked bootstrap"
+
 -- The compiled validator in the cache. It is built from its source without
 -- being validated (no validator is there yet: uncheckedValidator), and then
 -- it validates what it is made of: the native storage library its lists and
@@ -276,25 +286,7 @@ selfCheck exe = case (nativeStorage, lowerSource True (validationSource ++ "\n" 
 -- The validator built by the emitter in the cache from the validator and its
 -- driver, not yet validated
 uncheckedValidator :: IO (Result FilePath String)
-uncheckedValidator = cachedProgram "validator-unchecked" validatorHash "the validator written in Tersus" $ \output -> do
-    emitter <- cachedEmitter
-    case emitter of
-        Error e -> pure (Error e)
-        Ok exe -> case ownedProgramOf (validationSource ++ "\n" ++ validationDriverSource) of
-            Error e -> pure (Error ("the validator written in Tersus does not compile: " ++ e))
-            Ok program -> do
-                ir <- runWithInput exe (writeProgram program)
-                case ir of
-                    Error e -> pure (Error e)
-                    Ok text -> buildExecutableWith validatorBuildFlags output text
-
--- (optimized: it checks its own source before it is used, which takes about
--- five times as long unoptimized, and optimizing it takes seconds)
-validatorBuildFlags :: [String]
-validatorBuildFlags = ["-O2"]
-
-validatorHash :: String
-validatorHash = fingerprint ([emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource] ++ validatorBuildFlags)
+uncheckedValidator = cachedUncheckedValidator
 
 -- Run $0 with the largest stack the system allows (macOS caps it at 64 MB)
 raiseStack :: String

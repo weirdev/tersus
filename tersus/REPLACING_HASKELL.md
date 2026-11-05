@@ -230,8 +230,14 @@ original declarations before any function is erased.
 
 The host has moved: `MirHousekeeping` runs the two Tersus programs on
 the MIR as data (cached native executables built from the seed, as
-the emitter is built, with the MIR executor as fallback) wherever the
-pipeline checked or erased a program, and `MirVerify.hs` and
+the emitter is built) wherever the pipeline checked or erased a program.
+The MIR executor is used only for recursive erasure during tool construction;
+native build failures are explicit. After P0/E0 preflight and List/Box
+initialization, E1, checker, eraser, P1 and unchecked-validator frontends
+run concurrently. Derived tools wait for E1 only to emit, retaining one
+cross-process cache lock per executable. Full validator self-validation
+runs alongside the other post-E1 builds; its source and List/Box library
+must both pass before production use. `MirVerify.hs` and
 `MirGhost.hs` are deleted. The bridge keeps the Haskell signatures
 and verdicts, and puts back the parts of a program the data form
 does not carry (function specifications, generics, invariants and

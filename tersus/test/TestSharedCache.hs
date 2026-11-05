@@ -40,7 +40,7 @@ import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
-import Native (cacheDirectory, cachedProgram, runWithInputFull)
+import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runWithInputFull)
 import MirData (forNative)
 import TestHarness
 import Types (Type (..))
@@ -92,6 +92,10 @@ testSharedCache =
         , TestCase "native crashed builders release the lock for retry" (nativeRecovery "crash")
         , TestCase "native killed builders release the lock for retry" (nativeRecovery "hold")
         , TestCase "native threads still build once" nativeThreads
+        , TestCase "independent native builds overlap and restore capabilities" parallelOverlap
+        , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
+        , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
+        , TestCase "independent process threads do not form a false file-lock cycle" nativeThreadedProcesses
         , TestCase "package stages share lossless validated intermediates" packageStages
         , TestCase "package keys include dependency contents and module layout" packageInputs
         , TestCase "independent processes reuse package compilation" (ciPackageProcesses False)
@@ -245,6 +249,63 @@ binaryFailureRetry = withCacheHome $ \_ -> do
     present <- doesFileExist file
     pure $ firstFailure [testAssertEq first (Error "transient"), testAssertTrue absent, testAssertEq second (Ok richProgram), testAssertTrue present]
 
+parallelOverlap :: IO TestResult
+parallelOverlap = do
+    before <- getNumCapabilities
+    first <- newEmptyMVar
+    second <- newEmptyMVar
+    result <- timeout 2000000 $ parallelBuilds
+        [ putMVar first () >> takeMVar second >> getMaskingState
+        , takeMVar first >> putMVar second () >> getMaskingState
+        ]
+    after <- getNumCapabilities
+    pure (testAssertEq result (Just [Unmasked, Unmasked]) <> testAssertEq after before)
+
+parallelCapabilityOverlap :: IO TestResult
+parallelCapabilityOverlap = do
+    before <- getNumCapabilities
+    processors <- availableProcessors
+    heldA <- newEmptyMVar
+    heldB <- newEmptyMVar
+    releaseA <- newEmptyMVar
+    releaseB <- newEmptyMVar
+    overlapping <- withWorker (parallelBuilds [putMVar heldA () >> takeMVar releaseA] >> pure ()) $ \_ first -> do
+        awaitVerdict heldA
+        withWorker (parallelBuilds [putMVar heldB () >> takeMVar releaseB] >> pure ()) $ \_ second -> do
+            awaitVerdict heldB
+            putMVar releaseA ()
+            a <- workerResult first
+            during <- getNumCapabilities
+            putMVar releaseB ()
+            b <- workerResult second
+            pure (testAssertEq a (Just (Right ())) <> testAssertEq b (Just (Right ()))
+                <> testAssertEq during processors)
+    afterOverlap <- getNumCapabilities
+    nested <- parallelBuilds [parallelBuilds [getMaskingState]]
+    afterNested <- getNumCapabilities
+    pure (overlapping <> testAssertEq afterOverlap before
+        <> testAssertEq nested [[Unmasked]] <> testAssertEq afterNested before)
+
+parallelFailure :: IO TestResult
+parallelFailure = do
+    before <- getNumCapabilities
+    started <- newEmptyMVar
+    blocked <- newEmptyMVar
+    stopped <- newEmptyMVar
+    result <- timeout 2000000 (try (parallelBuilds
+        [ (putMVar started () >> takeMVar blocked) `finally` putMVar stopped ()
+        , takeMVar started >> throwIO (userError "parallel-build-failure")
+        ]) :: IO (Either SomeException [()]))
+    ended <- timeout 2000000 (takeMVar stopped)
+    after <- getNumCapabilities
+    pure $ firstFailure
+        [ case result of
+            Just (Left e) -> testAssertTrue ("parallel-build-failure" `isInfixOf` displayException e)
+            _ -> Just "parallel build did not propagate its sibling failure"
+        , testAssertEq ended (Just ())
+        , testAssertEq after before
+        ]
+
 validatorFlagNamespace :: IO TestResult
 validatorFlagNamespace = withCacheHome $ \home -> do
     let inputs = [emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource]
@@ -385,7 +446,52 @@ awaitNativeFile path = do
         present <- doesFileExist path
         if present then pure () else threadDelay 10000 >> loop
 
+nativeThreadedProcesses :: IO TestResult
+nativeThreadedProcesses = withNativeHome $ \home ->
+    withNativeChildren home [("A", "threaded-A"), ("B", "threaded-B")] $ \children -> do
+        mapM_ (awaitNativeFile . (home </>)) ["A.waiting", "B.waiting"]
+        early <- timeout 200000 $ let
+            watch = do
+                failed <- or <$> mapM (doesFileExist . (home </>)) ["A.failed", "B.failed"]
+                if failed then pure () else threadDelay 10000 >> watch
+            in watch
+        writeFile (home </> "release") ""
+        outcomes <- timeout 10000000 (mapM waitForProcess children)
+        acquired <- mapM (doesFileExist . (home </>)) ["A.acquired", "B.acquired"]
+        pure (testAssertEq early Nothing <> testAssertEq outcomes (Just [ExitSuccess, ExitSuccess])
+            <> testAssertEq acquired [True, True])
+
+nativeThreadedProbe :: String -> IO TestResult
+nativeThreadedProbe role = do
+    Just home <- lookupEnv "XDG_CACHE_HOME"
+    let peer = if role == "A" then "B" else "A"
+        marker suffix = home </> (role ++ suffix)
+        make who build = cachedProgram ("native-threaded-" ++ who) "key" "native threaded lock probe" build
+        owner = make role $ \output -> do
+            writeFile (marker ".held") ""
+            awaitNativeFile (home </> "release")
+            writeFile output role
+            pure (Ok ())
+        waiter = do
+            mapM_ (awaitNativeFile . (home </>)) [role ++ ".held", peer ++ ".held"]
+            writeFile (marker ".waiting") ""
+            answer <- make peer (\_ -> pure (Error "waiter duplicated its peer's build"))
+            case answer of
+                Ok _ -> writeFile (marker ".acquired") ""
+                Error _ -> pure ()
+            pure answer
+    result <- try (parallelBuilds [owner, waiter]) :: IO (Either SomeException [Result FilePath String])
+    let failure = case result of
+            Left e -> Just (displayException e)
+            Right answers -> firstFailure [case answer of Error e -> Just e; Ok _ -> Nothing | answer <- answers]
+    case failure of
+        Just e -> writeFile (marker ".failed") e
+        Nothing -> pure ()
+    pure failure
+
 nativeProbe :: String -> IO TestResult
+nativeProbe "threaded-A" = nativeThreadedProbe "A"
+nativeProbe "threaded-B" = nativeThreadedProbe "B"
 nativeProbe mode | mode `elem` ["verdict", "verdict-hold", "verdict-wait"] = do
     Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
     Just home <- lookupEnv "XDG_CACHE_HOME"

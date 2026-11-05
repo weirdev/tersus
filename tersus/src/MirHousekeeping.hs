@@ -13,10 +13,15 @@ module MirHousekeeping
     , toolOwnedProgram
     , emitterOwnedProgram
     , ownedProgramOf
+    , cachedParser
+    , parserHash
+    , cachedUncheckedValidator
+    , prepareBootstrap
+    , validatorHash
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
-import Control.Exception (finally)
+import Control.Exception (evaluate, finally)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -34,22 +39,17 @@ import MirData (readProgram, writeProgram, writeProgramWithGhosts)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
-import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
+import Native (buildExecutable, buildExecutableWith, cacheDirectory, cachedProgram, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (cachedSeed, cachedParserSeed, emitterHash)
 import Compile (lowerSource)
 import Modules (ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
 import PackageCompile (compileModulesLinked)
-import PreludeSource (mirPackageFiles, toolPackageFiles)
+import PreludeSource (boxSource, listsSource, mirPackageFiles, parserPackageFiles, toolPackageFiles, validationDriverSource, validationSource)
 import Types (Type (..))
 import Utils
 
--- The housekeeping of the MIR (REPLACING_HASKELL.md target 3) is done by the programs written in Tersus for
--- it: examples/mir/mir_verify/mir_verify.tersus checks that a program is well formed, and examples/mir/mir_erase/mir_erase.tersus takes
--- its ghosts out. This module is the host that runs them, as Bootstrap runs the emitter written in Tersus:
--- each is built with clang from the seed when it is first needed and kept in the cache of the user, and a
--- program is given to it as data (MirData) and read back from what it writes. Where an executable cannot be
--- built (there is no clang), the same program is run by the executor of the MIR instead, which needs no
--- compiler; the answers are the same, and slower.
+-- MIR checking and ghost erasure use the programs written in Tersus. Native
+-- builds are cached; recursive erasure during their bootstrap uses the MIR executor.
 --
 -- The data the two programs read and write does not carry everything a program holds (see MirData): a
 -- function's specification, the structs with sizes (progGenerics) and the invariants are not in it, and a
@@ -133,8 +133,8 @@ data Tools = Tools
 toolsBox :: MVar (Maybe Tools)
 toolsBox = unsafePerformIO (newMVar Nothing)
 
--- Whether the tools are being made: making them erases the programs they are made from (with the eraser
--- itself, run by the executor), so a call that comes while they are made is answered by the executor too
+-- Whether recursive storage erasure is initializing the tools' common library.
+-- That bootstrap reentry uses the interpreter, before taking any emitter lock.
 {-# NOINLINE buildingRef #-}
 buildingRef :: IORef Bool
 buildingRef = unsafePerformIO (newIORef False)
@@ -161,9 +161,7 @@ housekeepingTools = do
                         _ -> pure Nothing
                     tools <- case live of
                         Just ready -> pure ready
-                        Nothing -> do
-                            writeIORef buildingRef True
-                            nativeTools `finally` writeIORef buildingRef False
+                        Nothing -> nativeTools
                     let keep = case tools of
                             Tools (ToolNative _) (ToolNative _) -> Just tools
                             _ -> Nothing
@@ -186,15 +184,47 @@ interpretedToolsOnce = modifyMVar interpretedBox $ \made ->
                     _ -> Nothing
             pure (keep, tools)
 
--- The executables of the checker and the eraser, built from the seed as Bootstrap builds the emitter and
--- kept beside it in the cache; the programs run by the executor when an executable cannot be built
+-- Build the independent tool branches after initializing recursive storage erasure.
+{-# NOINLINE storageBox #-}
+storageBox :: MVar Bool
+storageBox = unsafePerformIO (newMVar False)
+
+prepareBootstrap :: IO (Result () String)
+prepareBootstrap = do
+    parser <- cachedParserSeed
+    zero <- case parser of Error e -> pure (Error e); Ok _ -> cachedSeed
+    case zero of
+        Error e -> pure (Error e)
+        Ok _ -> do
+            cache <- cacheDirectory
+            present <- case cache of
+                Error _ -> pure False
+                Ok dir -> and <$> mapM (doesFileExist . (dir </>))
+                    ["emitter-" ++ emitterHash, "mir-verify-" ++ mirVerifyHash, "mir-erase-" ++ mirEraseHash,
+                     "tersus-parser-" ++ parserHash, "validator-unchecked-" ++ validatorHash, "validator-" ++ validatorHash]
+            if present then pure (Ok ()) else modifyMVar storageBox $ \initialized ->
+                if initialized then pure (True, Ok ()) else do
+                    writeIORef buildingRef True
+                    result <- (case listLibrary of
+                        Error e -> pure (Error e)
+                        Ok units -> evaluate (sum [length (writeProgram program) | (_, program) <- units]) >> pure (Ok ()))
+                        `finally` writeIORef buildingRef False
+                    let keep = case result of Ok () -> True; Error _ -> False
+                    pure (keep, result)
+
 nativeTools :: IO Tools
 nativeTools = do
-    checker <- cachedTool "mir-verify" mirVerifyHash
-    eraser <- cachedTool "mir-erase" mirEraseHash
-    case (checker, eraser) of
-        (Right checkerExe, Right eraserExe) -> pure (Tools (ToolNative checkerExe) (ToolNative eraserExe))
-        _ -> interpretedToolsOnce
+    initialized <- prepareBootstrap
+    case initialized of
+        Error e -> pure (Tools (ToolFailed e) (ToolFailed e))
+        Ok () -> do
+            built <- parallelBuilds [cachedEmitterExe, cachedTool "mir-verify" mirVerifyHash mirVerifyEntry,
+                cachedTool "mir-erase" mirEraseHash mirEraseEntry, cachedParserExe, cachedUncheckedValidatorExe]
+            pure $ case built of
+                [Ok _, Ok checker, Ok eraser, Ok _, Ok _] -> Tools (ToolNative checker) (ToolNative eraser)
+                _ -> case [e | Error e <- built] of
+                    e : _ -> Tools (ToolFailed e) (ToolFailed e)
+                    [] -> Tools (ToolFailed "incomplete native tool build") (ToolFailed "incomplete native tool build")
 
 interpretedTools :: IO Tools
 interpretedTools = pure $ case (interpretedTool mirVerifyEntry, interpretedTool mirEraseEntry) of
@@ -206,12 +236,37 @@ interpretedTool :: FilePath -> Result Program String
 interpretedTool = toolProgram
 
 -- An executable of a program written in Tersus, in the cache: made by the stage 1 emitter if it is not there
-cachedTool :: String -> String -> IO (Either String FilePath)
-cachedTool kind hash = do
-    made <- cachedProgram kind hash "the housekeeping written in Tersus" (\output -> buildTool output (if kind == "mir-verify" then mirVerifyEntry else mirEraseEntry))
-    pure $ case made of
-        Error e -> Left e
-        Ok exe -> Right exe
+cachedTool :: String -> String -> FilePath -> IO (Result FilePath String)
+cachedTool kind hash entry = cachedProgram kind hash "the housekeeping written in Tersus"
+    (\output -> buildOwned [] output (toolOwnedProgram entry))
+
+cachedParser :: IO (Result FilePath String)
+cachedParser = do
+    ready <- cachedEmitter
+    case ready of
+        Error e -> pure (Error e)
+        Ok _ -> cachedParserExe
+
+cachedParserExe :: IO (Result FilePath String)
+cachedParserExe = cachedProgram "tersus-parser" parserHash "the parser written in Tersus"
+    (\output -> buildOwned [] output (toolOwnedProgram "examples/parser/parser.tersus"))
+
+cachedUncheckedValidator :: IO (Result FilePath String)
+cachedUncheckedValidator = do
+    ready <- prepareBootstrap
+    case ready of
+        Error e -> pure (Error e)
+        Ok _ -> cachedUncheckedValidatorExe
+
+cachedUncheckedValidatorExe :: IO (Result FilePath String)
+cachedUncheckedValidatorExe = cachedProgram "validator-unchecked" validatorHash "the validator written in Tersus"
+    (\output -> buildOwned ["-O2"] output (ownedProgramOf (validationSource ++ "\n" ++ validationDriverSource)))
+
+parserHash :: String
+parserHash = fingerprint ([emitterHash] ++ concatMap (\(path, contents) -> [path, contents]) parserPackageFiles ++ [runtimeSource])
+
+validatorHash :: String
+validatorHash = fingerprint ([emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource, "-O2"])
 
 -- Stage 1 (the emitter as it is now) in the cache, made from stage 0 in the cache as Bootstrap makes it, and under the
 -- same name, so the two hosts keep one emitter between them: the program it is made from is this module's own way of
@@ -240,20 +295,20 @@ cachedEmitterExe = cachedProgram "emitter" emitterHash "the emitter written in T
                         Error e -> pure (Error e)
                         Ok text -> buildExecutable output text
 
-buildTool :: FilePath -> FilePath -> IO (Result () String)
-buildTool output entry = do
-    emitter <- cachedEmitterExe
-    case emitter of
-        Error e -> pure (Error e)
-        Ok exe -> do
-            owned <- pure (toolOwnedProgram entry)
-            case owned of
-                Error e -> pure (Error e)
-                Ok program -> do
-                    ir <- runWithInput exe (writeProgram program)
-                    case ir of
-                        Error e -> pure (Error e)
-                        Ok text -> buildExecutable output text
+buildOwned :: [String] -> FilePath -> Result Program String -> IO (Result () String)
+buildOwned flags output owned = case owned of
+    Error e -> pure (Error e)
+    Ok program -> do
+        let input = writeProgram program
+        _ <- evaluate (length input)
+        emitter <- cachedEmitterExe
+        case emitter of
+            Error e -> pure (Error e)
+            Ok exe -> do
+                ir <- runWithInput exe input
+                case ir of
+                    Error e -> pure (Error e)
+                    Ok text -> buildExecutableWith flags output text
 
 mirVerifyHash :: String
 mirVerifyHash = fingerprint ([emitterHash] ++ concatMap (\(path, contents) -> [path, contents]) mirPackageFiles ++ [runtimeSource])
@@ -280,17 +335,22 @@ mirEraseEntry = "examples/mir/mir_erase/mir_erase.tersus"
 -- which the executor and the data writer alike pass over), and erasing one to
 -- make the eraser would need the eraser made already.
 {-# NOINLINE linkedPrograms #-}
-linkedPrograms :: MVar (Map.Map FilePath Program)
+linkedPrograms :: MVar (Map.Map FilePath (MVar (Maybe Program)))
 linkedPrograms = unsafePerformIO (newMVar Map.empty)
 
 {-# NOINLINE toolProgram #-}
 toolProgram :: FilePath -> Result Program String
-toolProgram entry = unsafePerformIO $ modifyMVar linkedPrograms $ \made ->
-    case Map.lookup entry made of
+toolProgram entry = unsafePerformIO $ do
+    slot <- modifyMVar linkedPrograms $ \made -> case Map.lookup entry made of
+        Just box -> pure (made, box)
+        Nothing -> do
+            box <- newMVar Nothing
+            pure (Map.insert entry box made, box)
+    modifyMVar slot $ \made -> case made of
         Just program -> pure (made, Ok program)
         Nothing -> case compileToolProgram entry of
             Error e -> pure (made, Error e)
-            Ok program -> pure (Map.insert entry program made, Ok program)
+            Ok program -> pure (Just program, Ok program)
 
 compileToolProgram :: FilePath -> Result Program String
 compileToolProgram entry = case loadFromEntry (resolverFromFiles toolPackageFiles) entry of

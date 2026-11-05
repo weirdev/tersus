@@ -7,7 +7,7 @@ import Control.Monad (forM, forM_, unless, when)
 import Data.List (foldl', isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
-import GHC.Conc (getNumProcessors)
+import Native (availableProcessors)
 import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (BufferMode (LineBuffering), hPutStr, hSetBuffering, stderr, stdout)
@@ -74,10 +74,10 @@ main = do
                 putStrLn ("[GROUPS] " ++ unwords names)
             jobs <- case argumentJobs arguments of
                 Just n -> pure n
-                Nothing -> min (length names) <$> getNumProcessors
+                Nothing -> min (length names) <$> availableProcessors
             isolated <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_ISOLATED"
             parent <- getParentProcessID
-            processors <- getNumProcessors
+            processors <- availableProcessors
             let overlap = bootstrapOverlapAllowed (argumentChild arguments) jobs processors names (isolated == Just (show parent))
             (summary, reported) <-
                 if useWorkerProcesses arguments jobs (length names)
@@ -227,7 +227,7 @@ runInParallel jobs names = do
     self <- getExecutablePath
     statistics <- lookupEnv "TERSUS_TEST_RTS_STATS"
     inherited <- getEnvironment
-    processors <- getNumProcessors
+    processors <- availableProcessors
     parent <- getProcessID
     let isolated = if bootstrapOverlapAllowed False jobs processors names False then show parent else ""
         environment = ("TERSUS_PARSER_BOOTSTRAP_ISOLATED", isolated) : [(key, value) | (key, value) <- inherited, key /= "TERSUS_PARSER_BOOTSTRAP_ISOLATED"]
