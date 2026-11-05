@@ -1,0 +1,10 @@
+{
+  "compiler": "GHC 8.10.7",
+  "cases": [
+    {"command": "ghc -e sharedProgramCacheFile", "approval": "unset", "result": "Nothing", "exit_code": 0},
+    {"command": "runghc InterpretedProbe.hs", "approval": "unset", "result": "Nothing", "exit_code": 0},
+    {"command": "ghc -e sharedProgramCacheFile", "approval": "explicit 64-hex build-time value", "result": "Nothing", "exit_code": 0},
+    {"command": "runghc InterpretedProbe.hs", "approval": "explicit 64-hex build-time value", "result": "Nothing", "exit_code": 0}
+  ],
+  "guard": "Actual executable basename plus process name/<interactive>, checked before approved manifests. No mocked names."
+}

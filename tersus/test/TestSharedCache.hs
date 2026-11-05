@@ -1,7 +1,14 @@
 -- Scoped retry actions must not share a forced unsafePerformIO pipeline failure.
 {-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
-module TestSharedCache (testSharedCache, testSharedCacheProbe, testVerdictLocks) where
+module TestSharedCache (testSharedCache, testSharedCacheCodec, testSharedCacheProbe, testVerdictLocks) where
 
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Char8 as BC
+import qualified TestProgramBinary as ProgramBinary
+import TestProgramBinaryChecks (binaryChecks, richProgram)
+import TestProgramBuildIdentity (concreteBuildIdentity)
+import Control.DeepSeq (force)
+import qualified Control.Exception as Exception
 import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (MaskingState (..), SomeException, bracket, displayException, finally, getMaskingState, throwIO, try)
 import Control.Monad (when)
@@ -53,7 +60,7 @@ testSharedCache :: Test
 testSharedCache =
     TestList
         "testSharedCache"
-        (map requireParser
+        (codecCases ++ map requireParser
         [ TestCase "truncated named List declaration is refused natively" (rawNamedTruncation "List" "")
         , TestCase "truncated named Box element is refused natively" (rawNamedTruncation "Box" " type")
         , TestCase "frozen tool reuse keeps the full freshly validated program" toolValidationParity
@@ -100,6 +107,143 @@ testSharedCache =
             Left e -> pure (Just e)
             Right _ -> action
     requireParser test = test
+
+testSharedCacheCodec :: Test
+testSharedCacheCodec = TestList "testSharedCacheCodec" codecCases
+
+codecCases :: [Test]
+codecCases =
+    [ TestCase "binary framing preserves all 27 lossless and malformed controls" (withNativeHome (\home -> binaryChecks home >> pure Nothing))
+    , TestCase "binary disk reuse reaches no fallback in a fresh process" binaryProcesses
+    , TestCase "changed source and stage actually reach the fallback" binaryKeyMisses
+    , TestCase "invalid binary and legacy entries recompute without decoder fallback" binaryRejects
+    , TestCase "runtime overrides cannot reuse process-local successes" binaryRuntimeScopes
+    , TestCase "failed binary-cache computations can be retried" binaryFailureRetry
+    ]
+
+binarySource :: String
+binarySource = "return 314159;"
+
+binaryProbe :: String -> IO TestResult
+binaryProbe mode = do
+    Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
+    source <- maybe binarySource id <$> lookupEnv "TERSUS_SHARED_BINARY_SOURCE"
+    stage <- maybe "binary-probe" id <$> lookupEnv "TERSUS_SHARED_BINARY_STAGE"
+    let compute = writeFile (marker ++ ".computed") "" >> pure (Ok richProgram)
+        unexpected = throwIO (userError "binary cache fallback reached")
+    if mode == "identity" then do
+        file <- sharedProgramCacheFile stage source
+        writeFile marker (unlines [maybe "<disabled>" id file, compilerIdentity, concreteBuildIdentity])
+        pure Nothing
+    else if mode == "miss" then do
+        outcome <- try (sharedProgram stage source unexpected) :: IO (Either SomeException (Result Program String))
+        pure $ case outcome of
+            Left e | "binary cache fallback reached" `isInfixOf` displayException e -> Nothing
+            _ -> Just "changed identity reused a cached Program"
+    else do
+        result <- sharedProgram stage source (if mode == "hit" then unexpected else compute)
+        case result of
+            Error e -> pure (Just e)
+            Ok program -> do
+                _ <- Exception.evaluate (force program)
+                writeFile marker (encodeProgram program)
+                pure $ firstFailure [testAssertEq program richProgram, testAssertEq (show program) (show richProgram)]
+
+runBinaryProbe :: FilePath -> String -> String -> [(String, String)] -> IO (Maybe ExitCode)
+runBinaryProbe home marker mode extra = bracket
+    (spawnProbe home ([("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_SHARED_BINARY_PROBE", mode)] ++ extra))
+    (\child -> terminateProcess child >> waitForProcess child >> pure ())
+    (waitChild 15)
+
+binaryProcesses :: IO TestResult
+binaryProcesses = withCacheHome $ \home -> do
+    seeded <- runBinaryProbe home "seed" "seed" []
+    Just file <- sharedProgramCacheFile "binary-probe" binarySource
+    before <- getModificationTime file
+    original <- readBinaryMarker file
+    reused <- runBinaryProbe home "hit" "hit" []
+    after <- getModificationTime file
+    bytes <- readBinaryMarker file
+    first <- readMarker (home </> "seed")
+    second <- readMarker (home </> "hit")
+    computed <- doesFileExist (home </> "seed.computed")
+    unexpected <- doesFileExist (home </> "hit.computed")
+    pure $ firstFailure
+        [ testAssertEq seeded (Just ExitSuccess), testAssertEq reused (Just ExitSuccess)
+        , testAssertTrue computed, testAssertTrue (not unexpected)
+        , testAssertEq after before, testAssertEq bytes original, testAssertEq second first
+        , case bytes of
+            Right entry -> case ProgramBinary.decodeEntry (takeFileName file) entry of
+                Right p -> testAssertEq (show p) (show richProgram)
+                Left e -> Just e
+            Left e -> Just (show e)
+        ]
+
+binaryKeyMisses :: IO TestResult
+binaryKeyMisses = withCacheHome $ \home -> do
+    seeded <- runBinaryProbe home "seed" "seed" []
+    sourceMiss <- runBinaryProbe home "source" "miss" [("TERSUS_SHARED_BINARY_SOURCE", binarySource ++ "\n")]
+    stageMiss <- runBinaryProbe home "stage" "miss" [("TERSUS_SHARED_BINARY_STAGE", "binary-other-stage")]
+    entries <- entryFiles home
+    pure $ firstFailure
+        [ testAssertEq seeded (Just ExitSuccess)
+        , testAssertEq sourceMiss (Just ExitSuccess), testAssertEq stageMiss (Just ExitSuccess)
+        , testAssertEq (length entries) 1
+        ]
+
+binaryRejects :: IO TestResult
+binaryRejects = withCacheHome $ \home -> do
+    seeded <- runBinaryProbe home "seed" "seed" []
+    Just file <- sharedProgramCacheFile "binary-probe" binarySource
+    Right original <- readBinaryMarker file
+    let key = takeFileName file
+        legacy = BL.fromStrict (BC.pack ("tersus-test-program 1\n" ++ key ++ "\n" ++ show richProgram ++ "\n"))
+        altered = BL.init original <> BL.singleton (if BL.last original == 0 then 1 else 0)
+        mutations = [("key", ProgramBinary.encodeEntry (replicate 64 '0') richProgram), ("truncated", BL.init original), ("trailing", original <> BL.singleton 0), ("header", BL.take 12 original), ("payload", altered), ("legacy", legacy)]
+    results <- mapM (\(label, bytes) -> do
+        BL.writeFile file bytes
+        code <- runBinaryProbe home label "repair" []
+        computed <- doesFileExist (home </> (label ++ ".computed"))
+        repaired <- readBinaryMarker file
+        pure (namedResult label (firstFailure [testAssertEq code (Just ExitSuccess), testAssertTrue computed, testAssertEq repaired (Right original)]))) mutations
+    pure (firstFailure (testAssertEq seeded (Just ExitSuccess) : results))
+
+withCacheVariable :: String -> String -> IO a -> IO a
+withCacheVariable variable value action = bracket (lookupEnv variable)
+    (maybe (unsetEnv variable) (setEnv variable))
+    (\_ -> setEnv variable value >> action)
+
+binaryRuntimeScopes :: IO TestResult
+binaryRuntimeScopes = withCacheHome $ \home -> do
+    let stage = "binary-runtime-scope"
+        source = "return 314160;"
+        refused = Error "expected changed override"
+    first <- sharedProgram stage source (pure (Ok richProgram))
+    writeFile (home </> "wrong-seed") "not a verified seed"
+    seedMiss <- withCacheVariable "TERSUS_PARSER_SEED_FILE" (home </> "wrong-seed") $ do
+        file <- sharedProgramCacheFile stage source
+        result <- sharedProgram stage source (pure refused)
+        pure (file, result)
+    backendMiss <- withCacheVariable "TERSUS_PARSER" "invalid-probe-backend" (sharedProgram stage source (pure refused))
+    path <- maybe "" id <$> lookupEnv "PATH"
+    pathMiss <- withCacheVariable "PATH" (path ++ ":" ++ home) (sharedProgram stage source (pure refused))
+    restored <- sharedProgram stage source (throwIO (userError "restored memory scope missed"))
+    pure $ firstFailure
+        [ testAssertEq first (Ok richProgram), testAssertEq seedMiss (Nothing, refused)
+        , testAssertEq backendMiss refused, testAssertEq pathMiss refused
+        , testAssertEq restored (Ok richProgram), testAssertEq (show restored) (show (Ok richProgram :: Result Program String))
+        ]
+
+binaryFailureRetry :: IO TestResult
+binaryFailureRetry = withCacheHome $ \_ -> do
+    let source = "return 314161;"
+        stage = "binary-retry"
+    first <- sharedProgram stage source (pure (Error "transient"))
+    Just file <- sharedProgramCacheFile stage source
+    absent <- not <$> doesFileExist file
+    second <- sharedProgram stage source (pure (Ok richProgram))
+    present <- doesFileExist file
+    pure $ firstFailure [testAssertEq first (Error "transient"), testAssertTrue absent, testAssertEq second (Ok richProgram), testAssertTrue present]
 
 validatorFlagNamespace :: IO TestResult
 validatorFlagNamespace = withCacheHome $ \home -> do
@@ -156,6 +300,11 @@ probe = do
 
 cacheProbe :: IO TestResult
 cacheProbe = do
+    binary <- lookupEnv "TERSUS_SHARED_BINARY_PROBE"
+    maybe ordinaryCacheProbe binaryProbe binary
+
+ordinaryCacheProbe :: IO TestResult
+ordinaryCacheProbe = do
     native <- lookupEnv "TERSUS_NATIVE_CACHE_PROBE"
     package <- lookupEnv "TERSUS_PACKAGE_CACHE_PROBE"
     case package of
@@ -563,17 +712,19 @@ staleBuildEntry = do
         entries <- entryFiles home
         case (firstCode, original, entries) of
             (Just ExitSuccess, Right expected, [entry]) -> do
-                Right text <- readMarker entry
-                let stale = unlines (head (lines text) : replicate 64 '0' : drop 2 (lines text))
-                writeFile entry stale
+                Right bytes <- readBinaryMarker entry
+                let stale = case decodeProgram expected of
+                        Ok program -> ProgramBinary.encodeEntry (replicate 64 '0') program
+                        Error e -> error e
+                BL.writeFile entry stale
                 child <- spawnProbe home []
                 code <- waitChild 300 child
                 got <- readMarker marker
-                repaired <- readMarker entry
+                repaired <- readBinaryMarker entry
                 pure $ firstFailure
                     [ testAssertEq code (Just ExitSuccess)
                     , testAssertEq got (Right expected)
-                    , testAssertEq repaired (Right text)
+                    , testAssertEq repaired (Right bytes)
                     ]
             _ -> pure (Just ("could not seed stale entry: " ++ show firstCode ++ show entries))
         ) `finally` removeDirectoryRecursive home
@@ -589,15 +740,14 @@ missingHashTools = do
             (Just path, Error expected, Ok wrong) -> do
                 let marker = home </> "marker"
                     entry = home </> "tersus" </> "test-programs" </> takeFileName path
-                    (header, body) = break (== '\n') (encodeProgram wrong)
-                    poisoned = header ++ "\n" ++ takeFileName path ++ body
+                    poisoned = ProgramBinary.encodeEntry (takeFileName path) wrong
                 createDirectoryIfMissing True (takeDirectory entry)
-                writeFile entry poisoned
+                BL.writeFile entry poisoned
                 child <- spawnProbe home [("PATH", home), ("TERSUS_SHARED_CACHE_PROBE_INVALID", "1")]
                 code <- waitChild 10 child
                 when (code == Nothing) (terminateProcess child >> waitForProcess child >> pure ())
                 got <- readMarker marker
-                after <- readMarker entry
+                after <- readBinaryMarker entry
                 afterEntries <- entryFiles home
                 pure $ firstFailure
                     [ testAssertEq code (Just ExitSuccess)
@@ -616,6 +766,9 @@ roundtrip = do
         (Ok v, Ok _) ->
             firstFailure
                 [ testAssertEq (decodeProgram (encodeProgram v)) (Ok v)
+                , case ProgramBinary.decodeEntry (replicate 64 'a') (ProgramBinary.encodeEntry (replicate 64 'a') v) of
+                    Left e -> Just e
+                    Right decoded -> firstFailure [testAssertEq decoded v, testAssertEq (show decoded) (show v)]
                 , testAssertTrue (not (Map.null (progGenerics v))) <? "generics were lost"
                 , testAssertTrue (not (Map.null (progInvariants v))) <? "invariants were lost"
                 , testAssertTrue (hasSpec v) <? "contracts were lost"
@@ -694,7 +847,7 @@ poisonedEntry = do
     case (other, file) of
         (Ok program, Just path) -> do
             createDirectoryIfMissing True (takeDirectory path)
-            writeFile path (encodeProgram program)
+            BL.writeFile path (ProgramBinary.encodeEntry (replicate 64 '0') program)
             result <- compileOnce source
             pure $ case result of
                 Ok got -> if got /= program then Nothing else Just "a program filed for another source was trusted"
@@ -862,6 +1015,9 @@ entryFiles home = do
 
 readMarker :: FilePath -> IO (Either IOError String)
 readMarker path = try (readFile path >>= \text -> length text `seq` pure text)
+
+readBinaryMarker :: FilePath -> IO (Either IOError BL.ByteString)
+readBinaryMarker = try . ProgramBinary.readEntryBytes
 
 toolValidationParity :: IO TestResult
 toolValidationParity =
