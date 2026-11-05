@@ -137,9 +137,12 @@ program, which reads the bridge's encoded functions from standard
 input) and kept in the cache directory under a name made of the
 sources it is made of (`ValidatorNative`); `Pipeline` runs that
 program for every validation. It is compiled without being validated,
-as a bootstrap program is, and the interpreted validator remains only
-where the validator is itself the program under test
-(`TestPipeline`'s checks of `lib/validation.tersus`).
+as a bootstrap program is, and is used only after it has validated
+what it is made of: the native storage library its lists and Boxes are
+built with, and its own source, each function by a process of its own,
+in parallel. The interpreted validator remains only where the
+validator is itself the program under test (`TestPipeline`'s checks of
+`lib/validation.tersus`).
 
 Concrete evaluation is in the validator: a term whose parts are all
 known is recorded as the constant it evaluates to (arithmetic,

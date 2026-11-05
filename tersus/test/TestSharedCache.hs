@@ -104,7 +104,7 @@ testSharedCache =
 validatorFlagNamespace :: IO TestResult
 validatorFlagNamespace = withCacheHome $ \home -> do
     let inputs = [emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource]
-        -- The optimization policy is pinned here so a flag change must move this namespace.
+        -- The optimization policy (-O2) is pinned here so a flag change must move this namespace.
         hashes = map (fingerprint . (inputs ++)) [["-O0"], ["-O2"], []]
         text = "validator-build-flag-probe"
         file hash = home </> "tersus" </> ("verdicts-" ++ hash) </> fingerprint [text]
@@ -116,7 +116,7 @@ validatorFlagNamespace = withCacheHome $ \home -> do
     present <- mapM (doesFileExist . (++ ".lock") . file) hashes
     retained <- readMarker stale
     pure $ firstFailure
-        [ testAssertEq present [True, False, False]
+        [ testAssertEq present [False, True, False]
         , testAssertEq retained (Right body)
         , testAssertEq (length (Map.fromList [(hash, ()) | hash <- hashes])) 3
         ]
