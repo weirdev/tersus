@@ -175,10 +175,34 @@ rawNative = withVerifier $ \exe -> case rawLibrary of
                 then Nothing
                 else Just (name ++ ": expected " ++ show expected ++ ", got " ++ show (code, output, errors))
 
+boxBorrowCases :: [(String, String, String, Bool)]
+boxBorrowCases =
+    [ ("a native nested Box slot borrows a Box handle", "ref named \"Box<Token>\" 0", "1 index const int 0", True)
+    , ("a native nested Box slot does not implicitly unwrap its payload", "ref named \"Token\" 0", "1 index const int 0", False)
+    , ("a native Box handle requires a slot step to borrow its payload", "ref named \"Box<Token>\" 0", "0", False)
+    , ("a native Box handle can be borrowed as itself", "ref named \"Box<Box<Token>>\" 0", "0", True)
+    ]
+
+boxBorrowFixture :: String -> String -> String
+boxBorrowFixture result steps = unlines
+    [ "tersus-mir 1"
+    , "struct \"Token\" 1 \"n\" int"
+    , "struct \"Box<Token>\" 1 \"addr\" addr named \"Token\" 0"
+    , "struct \"Box<Box<Token>>\" 1 \"addr\" addr named \"Box<Token>\" 0"
+    , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+    , "local 1 none named \"Box<Box<Token>>\" 0"
+    , "local 2 none " ++ result
+    , "block 0"
+    , "assign 2 borrow 1 " ++ steps
+    , "return"
+    , "end"
+    ]
+
 callCases :: [(String, Result String String, Bool)]
 callCases =
     [(name, mapResult writeProgram (lowerSource True source), True) | (name, source) <- sources]
         ++ [(name, mapResult (writeProgram . mutate) (lowerSource True source), False) | (name, source, mutate) <- negatives]
+        ++ [(name, Ok (boxBorrowFixture result steps), accepted) | (name, result, steps, accepted) <- boxBorrowCases]
         ++ [(name, Ok (blockCall expected actual borrowed), accepted) | (name, expected, actual, borrowed, accepted) <- blocks]
         ++ [(name, Ok (derefFixture parameter borrowed result operand), False) | (name, parameter, borrowed, result, operand) <- badDerefs]
   where
