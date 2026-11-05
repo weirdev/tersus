@@ -1,0 +1,30 @@
+[
+  {
+    "label": "seed actual sharedProgram",
+    "stdout": "/tmp/tersus-speed-fd20ab17/codec/tersus/dev/cache-codec/identity/cache-home/tersus/test-programs/820dd62fb5f473c3cf14d12cfd9454e170cdc23af6729eec97b6586101a88130"
+  },
+  {
+    "label": "fresh process disk hit with throwing fallback",
+    "stdout": "720"
+  },
+  {
+    "label": "source and stage changes actually miss",
+    "stdout": "PASS changed source fallback reached"
+  },
+  {
+    "label": "baseline compiler/harness/key",
+    "stdout": "7b2ff7ad761ae7a1 894e87134a08e5b7\n/tmp/tersus-speed-fd20ab17/codec/tersus/dev/cache-codec/identity/cache-home/tersus/test-programs/820dd62fb5f473c3cf14d12cfd9454e170cdc23af6729eec97b6586101a88130"
+  },
+  {
+    "label": "changed compiler source",
+    "stdout": "5d65be1fc8118061 894e87134a08e5b7\n/tmp/tersus-speed-fd20ab17/codec/tersus/dev/cache-codec/identity/cache-home/tersus/test-programs/0dd10a91975d2798e6e67ceb00fbd0e13bde6b26eb2e155867cbce44ce7618b3\nPASS changed identity fallback reached"
+  },
+  {
+    "label": "changed harness source",
+    "stdout": "b52132a75b6b2349 5b0456a6bdb9b810\n/tmp/tersus-speed-fd20ab17/codec/tersus/dev/cache-codec/identity/cache-home/tersus/test-programs/a966636ceb4bf0fe39fb37a765d63089c1bfcc880634b8d49b04a8f084d0e692\nPASS changed identity fallback reached"
+  },
+  {
+    "label": "restored identity disk hit",
+    "stdout": "720"
+  }
+]

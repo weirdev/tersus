@@ -93,6 +93,17 @@ executables:
     - -rtsopts
     dependencies:
     - tersus
+  cache-codec-probe:
+    main:                Main.hs
+    source-dirs:         dev/cache-codec/src
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    dependencies:
+    - tersus
+    - binary >= 0.8.8 && < 0.9
+    - bytestring >= 0.10.12 && < 0.13
+    - deepseq >= 1.4.4 && < 1.6
 
 tests:
   tersus-test:
