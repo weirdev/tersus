@@ -16,20 +16,24 @@ module Native
 import Control.Concurrent (forkIOWithUnmask, killThread)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, withMVar)
-import Control.Exception (IOException, SomeException, bracket, evaluate, finally, onException, throwIO, try)
+import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, onException, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities, getNumProcessors, setNumCapabilities)
 import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr)
+import System.IO (Handle, IOMode (..), hClose, hGetContents, hIsTerminalDevice, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr, stdin)
+import System.IO.Error (isDoesNotExistError)
+import System.Environment (getEnvironment)
+import System.Posix.Signals (sigKILL, signalProcessGroup)
+import System.Posix.Types (ProcessID)
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
 
 import qualified Data.Map.Strict as Map
-import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, readProcessWithExitCode, rawSystem, waitForProcess)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (..), getPid, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess, withCreateProcess)
 
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
@@ -58,11 +62,10 @@ buildWith opt flags output ir = do
         case runtime of
             Error e -> return (Error e)
             Ok object -> do
-                outcome <- try (readProcessWithExitCode "clang" ([opt, "-Wno-override-module"] ++ flags ++ ["-o", output, irFile, object]) "")
-                return $ case outcome of
-                    Left e -> Error ("Could not run clang: " ++ show (e :: IOException))
-                    Right (ExitSuccess, _, _) -> Ok ()
-                    Right (ExitFailure _, out, err) -> Error ("clang failed:\n" ++ out ++ err))
+                (code, out, err) <- runCommandWithInputFull "clang" ([opt, "-Wno-override-module"] ++ flags ++ ["-o", output, irFile, object]) ""
+                return $ case code of
+                    ExitSuccess -> Ok ()
+                    ExitFailure _ -> Error ("clang failed:\n" ++ out ++ err))
         `finally` removeFile irFile
 
 -- The runtime compiled once for a set of flags, kept in the cache directory of the user under a name made of what it is made
@@ -85,11 +88,10 @@ runtimeObject flags = do
                     (partial, handle) <- openTempFile dir "tersus_rt.tmp"
                     hClose handle
                     removeFile partial
-                    outcome <- try (readProcessWithExitCode "clang" (["-O2", "-Wno-override-module"] ++ flags ++ ["-c", "-o", partial, runtimeFile]) "") `finally` removeFile runtimeFile
-                    case outcome of
-                        Left e -> removeIfExists partial >> return (Error ("Could not run clang: " ++ show (e :: IOException)))
-                        Right (ExitSuccess, _, _) -> renameFile partial object >> return (Ok object)
-                        Right (ExitFailure _, out, err) -> removeIfExists partial >> return (Error ("clang failed:\n" ++ out ++ err))
+                    (code, out, err) <- runCommandWithInputFull "clang" (["-O2", "-Wno-override-module"] ++ flags ++ ["-c", "-o", partial, runtimeFile]) "" `finally` removeFile runtimeFile
+                    case code of
+                        ExitSuccess -> renameFile partial object >> return (Ok object)
+                        ExitFailure _ -> removeIfExists partial >> return (Error ("clang failed:\n" ++ out ++ err))
 
 -- Where the runtime objects are kept: the cache directory of the user, as for the emitter (see Bootstrap). There is no
 -- fallback to a shared directory such as /tmp, where another user could have put an object of their own under the name of
@@ -120,7 +122,9 @@ runExecutable ir args = do
         built <- buildExecutable exe ir
         case built of
             Error e -> return (Error e)
-            Ok () -> Ok <$> rawSystem exe args)
+            Ok () -> do
+                terminal <- hIsTerminalDevice stdin
+                Ok <$> waitOwnedProcess (proc exe args){create_group = not terminal})
         `finally` (try (removeFile exe) :: IO (Either IOException ()))
 
 -- What the executable at the path writes for the input: its output, or its reason (on the standard error) for refusing it. The bytes are read as they are.
@@ -143,48 +147,63 @@ runWithInputFull exe = runCommandWithInputFull exe []
 
 -- The same for an executable given arguments
 runCommandWithInputFull :: FilePath -> [String] -> String -> IO (ExitCode, String, String)
-runCommandWithInputFull exe args input = do
+runCommandWithInputFull exe args = runProcessWithInputFull exe (proc exe args)
+
+runProcessWithInputFull :: String -> CreateProcess -> String -> IO (ExitCode, String, String)
+runProcessWithInputFull exe command input = do
     outcome <- try run :: IO (Either IOException (ExitCode, String, String))
     pure $ case outcome of
         Left e -> (ExitFailure 1, "", "Could not run " ++ exe ++ ": " ++ show e)
         Right done -> done
   where
-    run = do
-        (inPath, inHandle) <- openTempFileAt "tersus-run-in.tmp"
-        (outPath, outHandle) <- openTempFileAt "tersus-run-out.tmp"
-        (errPath, errHandle) <- openTempFileAt "tersus-run-err.tmp"
-        finally
-            ( do
+    run = withTemporary "tersus-run-in.tmp" $ \(inPath, inHandle) ->
+        withTemporary "tersus-run-out.tmp" $ \(outPath, outHandle) ->
+            withTemporary "tersus-run-err.tmp" $ \(errPath, errHandle) -> do
                 hSetEncoding inHandle char8
                 hPutStr inHandle input
                 hClose inHandle
                 hSetEncoding outHandle char8
                 hSetEncoding errHandle char8
-                readHandle <- openFile inPath ReadMode
-                hSetEncoding readHandle char8
-                (_, _, _, process) <- createProcess (proc exe args){std_in = UseHandle readHandle, std_out = UseHandle outHandle, std_err = UseHandle errHandle}
-                code <- waitForProcess process
-                hClose readHandle
+                code <- bracket (openFile inPath ReadMode) hClose $ \readHandle -> do
+                    hSetEncoding readHandle char8
+                    waitOwnedProcess command{std_in = UseHandle readHandle, std_out = UseHandle outHandle,
+                        std_err = UseHandle errHandle, create_group = True}
                 hClose outHandle
                 hClose errHandle
                 out <- readBytes outPath
                 err <- readBytes errPath
                 pure (code, out, err)
-            )
-            (mapM_ removeFile [inPath, outPath, errPath])
-    openTempFileAt name = getTemporaryDirectory >>= \dir -> openTempFile dir name
-    readBytes path = do
-        handle <- openFile path ReadMode
+    withTemporary name = bracket (getTemporaryDirectory >>= \dir -> openTempFile dir name) cleanupTemporary
+    readBytes path = bracket (openFile path ReadMode) hClose $ \handle -> do
         hSetEncoding handle char8
         contents <- hGetContents handle
         _ <- evaluate (length contents)
-        hClose handle
         pure contents
+
+waitOwnedProcess :: CreateProcess -> IO ExitCode
+waitOwnedProcess command = withCreateProcess command{close_fds = True} $ \_ _ _ process -> do
+    pid <- getPid process
+    waitForProcess process `onException` case pid of
+        Just group | create_group command -> stopProcessGroup group process
+        _ -> terminateProcess process >> waitForProcess process >> pure ()
+
+stopProcessGroup :: ProcessID -> ProcessHandle -> IO ()
+stopProcessGroup group process = do
+    sent <- try (signalProcessGroup sigKILL group) :: IO (Either IOException ())
+    case sent of
+        Left e | not (isDoesNotExistError e) -> throwIO e
+        _ -> pure ()
+    _ <- waitForProcess process
+    pure ()
+
+cleanupTemporary :: (FilePath, Handle) -> IO ()
+cleanupTemporary (path, handle) = do
+    _ <- try (hClose handle) :: IO (Either IOException ())
+    removeIfExists path
 
 -- A new file named after the template, with its extension kept, that holds the text
 writeTemporary :: FilePath -> String -> String -> IO FilePath
-writeTemporary dir template text = do
-    (path, handle) <- openTempFile dir template
+writeTemporary dir template text = bracketOnError (openTempFile dir template) cleanupTemporary $ \(path, handle) -> do
     hPutStr handle text
     hClose handle
     return path
@@ -194,7 +213,9 @@ availableProcessors :: IO Int
 availableProcessors
     | os /= "linux" = getNumProcessors
     | otherwise = do
-        counted <- try (readProcessWithExitCode "nproc" [] "") :: IO (Either IOException (ExitCode, String, String))
+        environment <- getEnvironment
+        let clean = filter (\(name, _) -> name `notElem` ["OMP_NUM_THREADS", "OMP_THREAD_LIMIT"]) environment
+        counted <- try (readCreateProcessWithExitCode (proc "nproc" []){env = Just clean, close_fds = True} "") :: IO (Either IOException (ExitCode, String, String))
         case counted of
             Right (ExitSuccess, output, _) -> case reads output of
                 [(count, rest)] | count > 0 && all (`elem` " \t\r\n") rest -> pure count

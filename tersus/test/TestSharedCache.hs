@@ -10,7 +10,7 @@ import TestProgramBuildIdentity (concreteBuildIdentity)
 import Control.DeepSeq (force)
 import qualified Control.Exception as Exception
 import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (MaskingState (..), SomeException, bracket, displayException, finally, getMaskingState, throwIO, try)
+import Control.Exception (IOException, MaskingState (..), SomeException, bracket, displayException, finally, getMaskingState, throwIO, try)
 import Control.Monad (when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, sort)
@@ -40,7 +40,7 @@ import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
-import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runWithInputFull)
+import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runCommandWithInputFull, runWithInputFull)
 import MirData (forNative)
 import TestHarness
 import Types (Type (..))
@@ -95,6 +95,8 @@ testSharedCache =
         , TestCase "independent native builds overlap and restore capabilities" parallelOverlap
         , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
         , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
+        , TestCase "cancelled native subprocesses die and release the cache lock" nativeProcessCancellation
+        , TestCase "available CPU count ignores unrelated OpenMP policy" affinityIgnoresOpenMP
         , TestCase "independent process threads do not form a false file-lock cycle" nativeThreadedProcesses
         , TestCase "package stages share lossless validated intermediates" packageStages
         , TestCase "package keys include dependency contents and module layout" packageInputs
@@ -305,6 +307,58 @@ parallelFailure = do
         , testAssertEq ended (Just ())
         , testAssertEq after before
         ]
+
+nativeProcessCancellation :: IO TestResult
+nativeProcessCancellation = withCacheHome $ \home -> do
+    let marker = home </> "slow-native-child"
+        pidFiles = [marker ++ ".owner", marker ++ ".child"]
+        build = cachedProgram "native-cancellation" "key" "native cancellation probe"
+        script = "sleep 60 & child=$!; printf '%s\\n' \"$$\" > \"$1.owner\"; printf '%s\\n' \"$child\" > \"$1.child\"; : > \"$1.started\"; wait"
+        cleanup = do
+            owner <- readMarker (marker ++ ".owner")
+            case owner of
+                Left _ -> pure ()
+                Right text -> do
+                    (_, arguments, _) <- runCommandWithInputFull "ps" ["-p", head (words text), "-o", "args="] ""
+                    when (marker `isInfixOf` arguments) $ mapM_ (\path -> do
+                        record <- readMarker path
+                        case record of
+                            Right value -> do
+                                _ <- try (signalProcess sigKILL (read value)) :: IO (Either IOException ())
+                                pure ()
+                            Left _ -> pure ()) (reverse pidFiles)
+    (do
+        failed <- try (parallelBuilds
+            [ build $ \output -> do
+                (code, _, errors) <- runCommandWithInputFull "/bin/sh" ["-c", script, "native-process-cancellation", marker] ""
+                case code of
+                    ExitSuccess -> writeFile output "finished" >> pure (Ok ())
+                    _ -> pure (Error errors)
+            , awaitNativeFile (marker ++ ".started") >> throwIO (userError "cancel-native-branch")
+            ]) :: IO (Either SomeException [Result FilePath String])
+        pids <- mapM (fmap (head . words) . readFile) pidFiles
+        let stopped = do
+                statuses <- mapM (\pid -> do
+                    (code, output, errors) <- runCommandWithInputFull "ps" ["-p", pid, "-o", "stat="] ""
+                    pure ((code /= ExitSuccess && null errors) || case dropWhile (== ' ') output of 'Z' : _ -> True; _ -> False)) pids
+                if and statuses then pure () else threadDelay 10000 >> stopped
+        gone <- timeout 2000000 stopped
+        retried <- timeout 2000000 (build (\output -> writeFile output "retry" >> pure (Ok ())))
+        pure $ firstFailure
+            [ testAssertTrue (case failed of Left e -> "cancel-native-branch" `isInfixOf` displayException e; _ -> False)
+            , testAssertEq gone (Just ())
+            , testAssertTrue (case retried of Just (Ok _) -> True; _ -> False)
+            ]) `finally` cleanup
+
+affinityIgnoresOpenMP :: IO TestResult
+affinityIgnoresOpenMP = do
+    expected <- availableProcessors
+    let setting name value action = bracket (lookupEnv name) restore $ \_ -> setEnv name value >> action
+          where restore Nothing = unsetEnv name; restore (Just value) = setEnv name value
+    threads <- setting "OMP_NUM_THREADS" "32" availableProcessors
+    limited <- setting "OMP_THREAD_LIMIT" "1" availableProcessors
+    both <- setting "OMP_NUM_THREADS" "32" (setting "OMP_THREAD_LIMIT" "1" availableProcessors)
+    pure (testAssertEq [threads, limited, both] (replicate 3 expected))
 
 validatorFlagNamespace :: IO TestResult
 validatorFlagNamespace = withCacheHome $ \home -> do
