@@ -14,7 +14,7 @@ import System.IO (hClose, hGetContents, openTempFile)
 import System.IO.Error (isDoesNotExistError)
 import System.FilePath ((</>), takeDirectory)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Posix.Signals (nullSignal, sigKILL, sigTERM, signalProcessGroup)
+import System.Posix.Process (getProcessID, getProcessGroupID, getProcessGroupIDOf)
 import System.Timeout (timeout)
 
 import qualified AstData
@@ -30,7 +30,7 @@ import MirHousekeeping (listLibrary)
 import qualified MirHousekeeping as Housekeeping
 import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
-import Native (buildExecutable, cacheDirectory)
+import Native (buildExecutable, cacheDirectory, stopOwnedProcess, validSignalTarget)
 import Syntax (Expression (..), Statement (..), Value (..))
 import ParsedFile
 import qualified ParserSeed
@@ -100,29 +100,15 @@ worker mode home overrides = timed ("worker " ++ mode) $ do
         environment = changed ++ [(key, value) | (key, value) <- inherited, key `notElem` map fst changed, key /= "TERSUS_PARSER"]
         command = (proc self ["testParserBootstrap", "--child", "+RTS", "-N1", "-RTS"])
             {env = Just environment, create_group = True, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
-    withCreateProcess command $ \input output errors process -> mask $ \restore -> do
+    withCreateProcess command $ \input output errors process -> mask $ \restore -> (do
         pid <- getPid process >>= maybe (fail "bootstrap worker has no process group") pure
-        let signal sig = do
-                sent <- try (signalProcessGroup sig pid) :: IO (Either IOException ())
-                case sent of
-                    Left e | not (isDoesNotExistError e) -> throwIO e
-                    _ -> pure ()
-            gone = do
-                present <- try (signalProcessGroup nullSignal pid) :: IO (Either IOException ())
-                case present of
-                    Left e | isDoesNotExistError e -> pure ()
-                           | otherwise -> throwIO e
-                    Right () -> threadDelay 10000 >> gone
-            stop = do
-                signal sigTERM
-                _ <- timeout 5000000 (waitForProcess process)
-                signal sigKILL
-                _ <- waitForProcess process
-                ended <- timeout 5000000 gone
-                case ended of
-                    Just () -> pure ()
-                    Nothing -> fail "bootstrap worker descendants did not exit"
-            readAll handle = do
+        own <- getProcessID
+        ownGroup <- getProcessGroupID
+        group <- getProcessGroupIDOf pid
+        when (not (validSignalTarget own ownGroup pid) || group /= pid) $ do
+            stopOwnedProcess False process
+            fail "bootstrap worker did not create an owned private process group"
+        let readAll handle = do
                 text <- hGetContents handle
                 _ <- evaluate (length text)
                 pure text
@@ -134,7 +120,7 @@ worker mode home overrides = timed ("worker " ++ mode) $ do
                     stdoutText <- readOut
                     stderrText <- readErr
                     pure (status, stdoutText, stderrText)
-                _ -> fail "bootstrap worker output pipes are missing") `finally` stop
+                _ -> fail "bootstrap worker output pipes are missing")) `finally` stopOwnedProcess True process
 
 reportWorkerTimings :: String -> IO ()
 reportWorkerTimings output = mapM_ putStrLn

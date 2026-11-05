@@ -3,6 +3,8 @@ module Native
     , cacheLock
     , cachedProgram
     , cachedProgramIfPresent
+    , stopOwnedProcess
+    , validSignalTarget
     , parallelBuilds
     , availableProcessors
     , buildExecutable
@@ -17,7 +19,7 @@ module Native
 import Control.Concurrent (forkIOWithUnmask, killThread)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, withMVar)
-import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, mask, onException, throwIO, try)
+import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, mask, mask_, onException, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities, getNumProcessors, setNumCapabilities)
 import GHC.IO.Encoding (char8)
@@ -29,6 +31,7 @@ import System.IO.Error (isDoesNotExistError)
 import System.Environment (getEnvironment)
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
 import System.Posix.Types (ProcessID)
+import System.Posix.Process (getProcessID, getProcessGroupID, getProcessGroupIDOf)
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
@@ -185,20 +188,32 @@ runProcessWithInputFull exe command input = do
 waitOwnedProcess :: CreateProcess -> IO ExitCode
 waitOwnedProcess command = mask $ \restore ->
     withCreateProcess command $ \_ _ _ process ->
-        restore (waitForProcess process) `onException` do
-            pid <- getPid process
-            case pid of
-                Just child -> stopOwnedProcess (create_group command) child process
-                Nothing -> waitForProcess process >> pure ()
+        restore (waitForProcess process) `onException` stopOwnedProcess (create_group command) process
 
-stopOwnedProcess :: Bool -> ProcessID -> ProcessHandle -> IO ()
-stopOwnedProcess grouped child process = do
-    sent <- try (if grouped then signalProcessGroup sigKILL child else signalProcess sigKILL child) :: IO (Either IOException ())
-    case sent of
-        Left e | not (isDoesNotExistError e) -> throwIO e
-        _ -> pure ()
-    _ <- waitForProcess process
-    pure ()
+validSignalTarget :: ProcessID -> ProcessID -> ProcessID -> Bool
+validSignalTarget own ownGroup target = target > 1 && target /= own && target /= ownGroup
+
+stopOwnedProcess :: Bool -> ProcessHandle -> IO ()
+stopOwnedProcess grouped process = mask_ $ do
+    live <- getPid process
+    case live of
+        Nothing -> waitForProcess process >> pure ()
+        Just child -> do
+            own <- getProcessID
+            ownGroup <- getProcessGroupID
+            if not (validSignalTarget own ownGroup child)
+                then ioError (userError "refusing an unsafe owned-process signal target")
+                else do
+                    group <- (if grouped then try (getProcessGroupIDOf child) else pure (Right ownGroup)) :: IO (Either IOException ProcessID)
+                    let privateGroup = case group of Right actual -> grouped && actual == child && actual /= ownGroup; Left _ -> False
+                    sent <- try (if privateGroup then signalProcessGroup sigKILL child else signalProcess sigKILL child) :: IO (Either IOException ())
+                    case sent of
+                        Left e | not (isDoesNotExistError e) -> throwIO e
+                        _ -> pure ()
+                    _ <- waitForProcess process
+                    if grouped && not privateGroup
+                        then ioError (userError "owned child did not retain its distinct process group")
+                        else pure ()
 
 cleanupTemporary :: (FilePath, Handle) -> IO ()
 cleanupTemporary (path, handle) = do

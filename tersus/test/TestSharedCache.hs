@@ -10,10 +10,11 @@ import TestProgramBuildIdentity (concreteBuildIdentity)
 import Control.DeepSeq (force)
 import qualified Control.Exception as Exception
 import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (IOException, MaskingState (..), SomeException, bracket, displayException, finally, getMaskingState, throwIO, try)
+import Control.Concurrent.MVar (modifyMVar, readMVar)
+import Control.Exception (IOException, MaskingState (..), SomeException, bracket, bracketOnError, displayException, finally, getMaskingState, mask, throwIO, try)
 import Control.Monad (when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
-import Data.Char (ord)
+import Data.Char (isSpace, ord)
 import Numeric (showHex)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Data.List (isInfixOf, isPrefixOf, sort)
@@ -36,8 +37,8 @@ import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (IOMode (ReadMode, WriteMode), SeekMode (AbsoluteSeek), hClose, openTempFile, stdin, withFile)
 import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Process (exitImmediately, getProcessID)
-import System.Posix.Signals (nullSignal, sigKILL, signalProcess)
-import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle), createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
+import System.Posix.Types (ProcessID)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (NoStream, UseHandle), createProcess, getPid, getProcessExitCode, proc, readCreateProcessWithExitCode, waitForProcess)
 import System.Timeout (timeout)
 
 import GHC.Conc (getNumCapabilities)
@@ -46,7 +47,7 @@ import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
-import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runCommandWithInputFull, runExecutable, runWithInputFull)
+import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runCommandWithInputFull, runExecutable, runWithInputFull, stopOwnedProcess, validSignalTarget)
 import MirData (forNative, writeProgram)
 import MirOwnership (insertOwnership)
 import TestHarness
@@ -108,6 +109,13 @@ testSharedCache =
         , TestCase "content-key locators retain verified dependencies across cache homes" contentLocatorIntegrity
         , TestCase "prepared input aliases reuse verified bytes and repair corrupt or partial files" preparedAliasIntegrity
         , TestCase "proof-only changes invalidate checked certificates and verdict namespaces" proofCertificateNamespace
+        , testCase "signal targets reject self, process groups and malformed PID markers" $
+            firstFailure
+                [ testAssertTrue (all (not . validSignalTarget 20 10) [-1, 0, 1, 10, 20])
+                , testAssertTrue (validSignalTarget 20 10 23)
+                , testAssertEq (map readProcessID ["", "-1", "0", "1", "23 junk", "23 24", "9999999999999999999999"]) (replicate 7 Nothing)
+                , testAssertEq (readProcessID "23\n") (Just 23)
+                ]
         , TestCase "cancelled native subprocesses die and release the cache lock" nativeProcessCancellation
         , TestCase "cancelled captured tools are terminated and reaped directly" capturedProcessCancellation
         , TestCase "surviving children cannot retain close-on-exec cache locks" survivingChildLock
@@ -341,27 +349,54 @@ parallelFailure = do
         , testAssertEq after before
         ]
 
+readProcessID :: String -> Maybe ProcessID
+readProcessID text = case reads text :: [(Integer, String)] of
+    [(pid, rest)] | pid > 1 && pid <= toInteger (maxBound :: ProcessID) && all isSpace rest -> Just (fromInteger pid)
+    _ -> Nothing
+
+markerProcessID :: FilePath -> IO ProcessID
+markerProcessID path = do
+    text <- readFile path
+    case readProcessID text of
+        Just pid -> pure pid
+        Nothing -> ioError (userError ("invalid process marker: " ++ path))
+
+stopMarkedChild :: FilePath -> [ProcessHandle] -> IO ()
+stopMarkedChild path children = case children of
+    [child] -> do
+        declared <- markerProcessID path
+        live <- getPid child
+        if live == Just declared
+            then stopOwnedProcess False child
+            else ioError (userError "process marker does not name the still-owned child")
+    _ -> ioError (userError "process marker requires exactly one owned child")
+
 survivingChildLock :: IO TestResult
 survivingChildLock = withCacheHome $ \home -> do
-    let marker = home </> "surviving-child"
-        script = "sleep 60 & printf '%s\\n' \"$!\" > \"$1\""
+    childBox <- newMVar Nothing
+    let marker = home </> "surviving-grandchild"
         make = cachedProgram "native-cloexec" "key" "close-on-exec lock probe"
-    first <- make $ \output -> do
-        (code, _, errors) <- runCommandWithInputFull "/bin/sh" ["-c", script, "surviving-child", marker] ""
-        case code of
-            ExitSuccess -> writeFile output "built" >> pure (Ok ())
-            _ -> pure (Error errors)
-    pidText <- readFile marker
-    let pid = read pidText
-        cleanup = do
-            _ <- try (signalProcess sigKILL pid) :: IO (Either IOException ())
-            pure ()
-    (do
-        alive <- try (signalProcess nullSignal pid) :: IO (Either IOException ())
+        spawn = do
+            (_, _, _, child) <- createProcess (proc "/bin/sh"
+                ["-c", "/bin/sleep 60 & printf '%s\\n' \"$!\" > \"$1\"; wait", "surviving-grandchild", marker])
+                {create_group = True, std_in = NoStream, std_out = NoStream, std_err = NoStream}
+            pure child
+        cleanup = readMVar childBox >>= mapM_ (stopOwnedProcess True)
+    bracket (pure ()) (\_ -> cleanup) $ \_ -> do
+        first <- make $ \output -> mask $ \restore ->
+            bracketOnError spawn (stopOwnedProcess True) $ \child -> do
+                modifyMVar childBox (\_ -> pure (Just child, ()))
+                restore (writeFile output "built" >> pure (Ok ()))
+        awaitNativeFile marker
+        descendant <- markerProcessID marker
+        child <- readMVar childBox
+        owner <- maybe (pure Nothing) getPid child
+        alive <- maybe (pure (Just (ExitFailure 1))) getProcessExitCode child
+        (status, parent, _) <- runCommandWithInputFull "ps" ["-p", show descendant, "-o", "ppid="] ""
         reused <- timeout 2000000 (make (\_ -> pure (Error "surviving child forced a duplicate build")))
         pure (testAssertTrue (case first of Ok _ -> True; Error _ -> False)
-            <> testAssertTrue (case alive of Right () -> True; Left _ -> False)
-            <> testAssertEq reused (Just first))) `finally` cleanup
+            <> testAssertEq alive Nothing <> testAssertEq status ExitSuccess
+            <> testAssertEq (readProcessID parent) owner <> testAssertEq reused (Just first))
 
 contentLocatorIntegrity :: IO TestResult
 contentLocatorIntegrity = withCacheHome $ \home -> do
@@ -499,19 +534,6 @@ processCancellation isolatedCLI = withCacheHome $ \home -> do
         nonTerminal action = bracket (hDuplicate stdin) hClose $ \saved ->
             withFile "/dev/null" ReadMode $ \input ->
                 (hDuplicateTo input stdin >> action) `finally` hDuplicateTo saved stdin
-        cleanup = do
-            owner <- readMarker (marker ++ ".owner")
-            case owner of
-                Left _ -> pure ()
-                Right text -> do
-                    (_, arguments, _) <- runCommandWithInputFull "ps" ["-p", head (words text), "-o", "args="] ""
-                    when (marker `isInfixOf` arguments) $ mapM_ (\path -> do
-                        record <- readMarker path
-                        case record of
-                            Right value -> do
-                                _ <- try (signalProcess sigKILL (read value)) :: IO (Either IOException ())
-                                pure ()
-                            Left _ -> pure ()) (reverse pidFiles)
     (do
         failed <- try (parallelBuilds
             [ build $ \output -> do
@@ -527,10 +549,10 @@ processCancellation isolatedCLI = withCacheHome $ \home -> do
                     (_, errors) -> pure (Error errors)
             , awaitNativeFile (marker ++ ".started") >> throwIO (userError "cancel-native-branch")
             ]) :: IO (Either SomeException [Result FilePath String])
-        pids <- mapM (fmap (head . words) . readFile) pidFiles
+        pids <- mapM markerProcessID pidFiles
         let stopped = do
                 statuses <- mapM (\pid -> do
-                    (code, output, errors) <- runCommandWithInputFull "ps" ["-p", pid, "-o", "stat="] ""
+                    (code, output, errors) <- runCommandWithInputFull "ps" ["-p", show pid, "-o", "stat="] ""
                     pure ((code /= ExitSuccess && null errors) || case dropWhile (== ' ') output of 'Z' : _ -> True; _ -> False)) pids
                 if and statuses then pure () else threadDelay 10000 >> stopped
         gone <- timeout 2000000 stopped
@@ -539,7 +561,7 @@ processCancellation isolatedCLI = withCacheHome $ \home -> do
             [ testAssertTrue (case failed of Left e -> "cancel-native-branch" `isInfixOf` displayException e; _ -> False)
             , testAssertEq gone (Just ())
             , testAssertTrue (case retried of Just (Ok _) -> True; _ -> False)
-            ]) `finally` cleanup
+            ])
 
 affinityIgnoresOpenMP :: IO TestResult
 affinityIgnoresOpenMP = do
@@ -593,7 +615,13 @@ interactiveControlC = withNativeHome $ \home -> do
             , "        if p.poll() is not None: raise RuntimeError(bytes(output))"
             , "    os.write(master, b'\\n'); until(b'[CTRL-C-DELEGATED]')"
             , "    assert p.wait(timeout=5) == 0; print('PASS delegated terminal SIGINT')"
-            , "finally:", "    if p.poll() is None: os.killpg(p.pid, signal.SIGKILL)"
+            , "finally:"
+            , "    if p.poll() is None:"
+            , "        assert p.pid > 1 and p.pid != os.getpid() and p.pid != os.getpgrp()"
+            , "        group = os.getpgid(p.pid)"
+            , "        if group != p.pid:"
+            , "            p.kill(); p.wait(); raise RuntimeError('terminal child did not own its process group')"
+            , "        os.killpg(p.pid, signal.SIGKILL)"
             , "    p.wait(); os.close(master)"
             ]
     writeFile irPath ir
@@ -739,7 +767,7 @@ storageRetry :: IO TestResult
 storageRetry = withNativeHome $ \home -> do
     primeBootstrapTools home
     bracket (spawnProbe home [("TERSUS_STORAGE_RETRY_PROBE", "1")])
-        (\child -> terminateProcess child >> waitForProcess child >> pure ()) $ \child -> do
+        (\child -> stopOwnedProcess False child >> waitForProcess child >> pure ()) $ \child -> do
             code <- waitChild 300 child
             pure (testAssertEq code (Just ExitSuccess))
 
@@ -914,7 +942,7 @@ nativeProbe mode = do
 withNativeChildren :: FilePath -> [(String, String)] -> ([ProcessHandle] -> IO a) -> IO a
 withNativeChildren home children = bracket
     (mapM (\(marker, mode) -> spawnProbe home [("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_NATIVE_CACHE_PROBE", mode)]) children)
-    (mapM_ (\child -> terminateProcess child >> waitForProcess child >> pure ()))
+    (mapM_ (\child -> stopOwnedProcess False child >> waitForProcess child >> pure ()))
 
 testVerdictLocks :: Test
 testVerdictLocks = TestList "testVerdictLocks"
@@ -1020,7 +1048,7 @@ verdictKilledProcess :: IO TestResult
 verdictKilledProcess = withNativeHome $ \home ->
     withNativeChildren home [("owner", "verdict-hold")] $ \owners -> do
         awaitNativeFile (home </> "owner.entered")
-        killPidFile (home </> "owner.pid")
+        stopMarkedChild (home </> "owner.pid") owners
         ownerCodes <- mapM (waitChild 5) owners
         withNativeChildren home [("retry", "verdict")] $ \children -> do
             retryCodes <- mapM (waitChild 5) children
@@ -1071,7 +1099,7 @@ nativeRecovery mode = withNativeHome $ \home ->
         awaitNativeFile (home </> "owner.single.built")
         when (mode == "hold") $ do
             awaitNativeFile (home </> "owner.pid")
-            killPidFile (home </> "owner.pid")
+            stopMarkedChild (home </> "owner.pid") owners
         ownerCodes <- mapM (waitChild 15) owners
         absent <- not <$> doesFileExist entry
         withNativeChildren home [("retry", "retry")] $ \children -> do
@@ -1226,7 +1254,7 @@ missingHashTools = do
                 BL.writeFile entry poisoned
                 child <- spawnProbe home [("PATH", home), ("TERSUS_SHARED_CACHE_PROBE_INVALID", "1")]
                 code <- waitChild 10 child
-                when (code == Nothing) (terminateProcess child >> waitForProcess child >> pure ())
+                when (code == Nothing) (stopOwnedProcess False child >> waitForProcess child >> pure ())
                 got <- readMarker marker
                 after <- readBinaryMarker entry
                 afterEntries <- entryFiles home
@@ -1404,12 +1432,12 @@ killedOwnerReleases = do
         holding <- awaitFileWithin (holderMarker ++ ".holding") 100
         if not holding
             then do
-                terminateProcess holder
+                stopOwnedProcess False holder
                 pure (Just "the holder never took the lock")
             else do
                 waiter <- spawnProbe home [("TERSUS_SHARED_CACHE_PROBE", home </> "waiter-marker")]
                 threadDelay 1000000
-                terminateProcess holder
+                stopOwnedProcess False holder
                 code <- waitChild 300 waiter
                 entries <- entryFiles home
                 marker <- readMarker (home </> "waiter-marker")
@@ -1803,13 +1831,13 @@ ciPackageProcesses concurrent =
     let markers = if concurrent then ["first" ++ show i | i <- [1 .. 4 :: Int]] else ["first"]
         extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_PARSER", "native")]
     bracket (mapM (spawnProbe home . extra) markers)
-        (mapM_ (\child -> terminateProcess child >> waitForProcess child >> pure ())) $ \children -> do
+        (mapM_ (\child -> stopOwnedProcess False child >> waitForProcess child >> pure ())) $ \children -> do
         codes <- mapM (waitChild 30) children
         outputs <- mapM (readMarker . (home </>)) markers
         entries <- entryFiles home
         before <- mapM getModificationTime entries
         bracket (spawnProbe home (extra "warm"))
-            (\child -> terminateProcess child >> waitForProcess child >> pure ()) $ \child -> do
+            (\child -> stopOwnedProcess False child >> waitForProcess child >> pure ()) $ \child -> do
             warmCode <- waitChild 30 child
             warmOutput <- readMarker (home </> "warm")
             after <- mapM getModificationTime entries
