@@ -120,11 +120,19 @@ fn withRepresentative(facts: &List<EqualityFact>, reps: List<Representative>, te
 
 // A term no equality mentions is its own representative.
 fn equalityRepresentatives(facts: &List<EqualityFact>) -> List<Representative> {
+    classes = leastClasses(facts);
     reps = [];
+    seen = HashSet::new();
     for factPosition in 0..size(facts) {
         fact = get(facts, factPosition);
-        reps = withRepresentative(facts, reps, fact.left);
-        reps = withRepresentative(facts, reps, fact.right);
+        if seen.contains(fact.left) = false {
+            seen = seen.insert(fact.left);
+            reps = push(reps, Representative { term: fact.left, rep: canonicalIn(classes, fact.left) });
+        };
+        if seen.contains(fact.right) = false {
+            seen = seen.insert(fact.right);
+            reps = push(reps, Representative { term: fact.right, rep: canonicalIn(classes, fact.right) });
+        };
     };
     return reps;
 };
@@ -681,16 +689,6 @@ struct DifferenceFact { left: Int, right: Int, bound: Int };
 impl Clone for DifferenceFact { };
 
 impl Copy for DifferenceFact { };
-struct Distance { node: Int, value: Int };
-
-impl Clone for Distance { };
-
-impl Copy for Distance { };
-enum DistanceResult { Missing, Found { value: Int } };
-
-impl Clone for DistanceResult { };
-
-impl Copy for DistanceResult { };
 enum SumResult { Overflow, Sum { value: Int } };
 
 impl Clone for SumResult { };
@@ -714,6 +712,69 @@ fn safeBoundSum(a: Int, b: Int) -> SumResult {
     return SumResult::Sum { value: a + b };
 };
 
+// The difference facts with each term named by its class's least member
+fn canonicalDifferencesIn(classes: &HashMap<Int, Int>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
+    result = [];
+    for factPosition in 0..size(facts) {
+        fact = get(facts, factPosition);
+        result = push(result, DifferenceFact { left: canonicalIn(classes, fact.left), right: canonicalIn(classes, fact.right), bound: fact.bound });
+    };
+    return result;
+};
+
+// A potential of the difference graph: p(left) <= p(right) + bound for every
+// edge, found from a source joined to every node by an edge of bound 0. It is
+// valid when the search settles and no sum it needs overflows; a valid
+// potential means the graph has no negative cycle, and two nodes are at
+// distance at most 0 from each other, both ways, exactly when they have one
+// potential and are in one strongly connected component of the edges it
+// makes tight (p(left) = p(right) + bound).
+struct DifferencePotential { valid: Bool, potential: HashMap<Int, Int> };
+
+impl Clone for DifferencePotential { };
+
+fn differencePotential(edges: &List<DifferenceFact>) -> DifferencePotential {
+    nodes = edgeNodes(edges);
+    p = emptyIntMap();
+    for node in nodes { p = p.insert(node, 0); };
+    changed = true;
+    for round in 0..size(nodes) + 1 {
+        if changed {
+            changed = false;
+            for edgePosition in 0..size(edges) {
+                edge = get(edges, edgePosition);
+                sum = safeBoundSum(p.lookup(edge.right, 0), edge.bound);
+                if sum is SumResult::Sum {
+                    if (sum as SumResult::Sum).value < p.lookup(edge.left, 0) {
+                        p = p.insert(edge.left, (sum as SumResult::Sum).value);
+                        changed = true;
+                    };
+                };
+            };
+        };
+    };
+    if changed { return DifferencePotential { valid: false, potential: p }; };
+    for edgePosition in 0..size(edges) {
+        edge = get(edges, edgePosition);
+        if safeBoundSum(p.lookup(edge.right, 0), edge.bound) is SumResult::Overflow {
+            return DifferencePotential { valid: false, potential: p };
+        };
+    };
+    return DifferencePotential { valid: true, potential: p };
+};
+
+fn tightEdges(edges: &List<DifferenceFact>, p: &HashMap<Int, Int>) -> List<DifferenceFact> {
+    tight = [];
+    for edgePosition in 0..size(edges) {
+        edge = get(edges, edgePosition);
+        sum = safeBoundSum(p.lookup(edge.right, 0), edge.bound);
+        if sum is SumResult::Sum {
+            if (sum as SumResult::Sum).value = p.lookup(edge.left, 0) { tight = push(tight, edge); };
+        };
+    };
+    return tight;
+};
+
 fn canonicalDifferences(reps: &List<Representative>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
     result = [];
     for factPosition in 0..size(facts) {
@@ -723,119 +784,71 @@ fn canonicalDifferences(reps: &List<Representative>, facts: &List<DifferenceFact
     return result;
 };
 
-// The distances below are kept by class representative, so a node is found
-// by its integer.
-fn findPlainDistance(distances: &List<Distance>, node: Int) -> DistanceResult {
-    for dPosition in 0..size(distances) {
-        d = get(distances, dPosition);
-        if d.node = node {
-            return DistanceResult::Found { value: d.value };
-        };
-    };
-    return DistanceResult::Missing;
-};
-
-fn improvePlainDistance(distances: List<Distance>, node: Int, value: Int) -> List<Distance> {
-    for i in 0..size(distances) {
-        d = get(distances, i);
-        if d.node = node {
-            if value < d.value {
-                return set(distances, i, Distance { node: d.node, value: value });
-            };
-            return distances;
-        };
-    };
-    return push(distances, Distance { node: node, value: value });
-};
-
 // Search paths from right to left. A simple path has at most size(facts)
 // edges; omitting overflowed paths can lose a proof but cannot invent one.
 // Negative cycles are not yet used to prove unrelated goals. Equal terms are
 // one node, named by its class representative.
 // hasDifference over edges whose nodes are already class representatives.
 fn canonicalHasDifference(edges: &List<DifferenceFact>, target: Int, source: Int, bound: Int) -> Bool {
-    if bound >= 0 {
-        if target = source { return true; };
-    };
-    distances = push([], Distance { node: source, value: 0 });
-    finished = false;
+    if bound >= 0 && target = source { return true; };
+    distances = emptyIntMap();
+    distances = distances.insert(source, 0);
+    changed = true;
     for round in 0..size(edges) {
-      if finished = false {
-        changed = false;
-        for edgePosition in 0..size(edges) {
-            edge = get(edges, edgePosition);
-            found = findPlainDistance(distances, edge.right);
-            if found is DistanceResult::Found {
-                distance = (found as DistanceResult::Found).value;
-                sum = safeBoundSum(distance, edge.bound);
-                if sum is SumResult::Sum {
-                    candidate = (sum as SumResult::Sum).value;
-                    if candidate <= bound {
-                        if edge.left = target { return true; };
-                    };
-                    previous = findPlainDistance(distances, edge.left);
-                    if previous is DistanceResult::Found {
-                        if candidate < (previous as DistanceResult::Found).value {
-                            distances = improvePlainDistance(distances, edge.left, candidate);
+        if changed {
+            changed = false;
+            for edgePosition in 0..size(edges) {
+                edge = get(edges, edgePosition);
+                if distances.contains(edge.right) {
+                    sum = safeBoundSum(distances.lookup(edge.right, 0), edge.bound);
+                    if sum is SumResult::Sum {
+                        candidate = (sum as SumResult::Sum).value;
+                        if candidate <= bound && edge.left = target { return true; };
+                        if distances.contains(edge.left) = false || candidate < distances.lookup(edge.left, 0) {
+                            distances = distances.insert(edge.left, candidate);
                             changed = true;
                         };
-                    } else {
-                        distances = improvePlainDistance(distances, edge.left, candidate);
-                        changed = true;
                     };
                 };
             };
         };
-        if changed = false { finished = true; };
-      };
     };
-    found = findPlainDistance(distances, target);
-    if found is DistanceResult::Found {
-        return (found as DistanceResult::Found).value <= bound;
-    };
+    if distances.contains(target) { return distances.lookup(target, 0) <= bound; };
     return false;
 };
 
 fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
-    reps = equalityRepresentatives(equalities);
-    return canonicalHasDifference(canonicalDifferences(reps, facts), representativeOf(reps, left), representativeOf(reps, right), bound);
+    classes = leastClasses(equalities);
+    return canonicalHasDifference(canonicalDifferencesIn(classes, facts), canonicalIn(classes, left), canonicalIn(classes, right), bound);
 };
 
-struct DistanceTable { source: Int, distances: List<Distance> };
+struct DistanceTable { source: Int, distances: HashMap<Int, Int> };
 
 impl Clone for DistanceTable { };
 
 // The shortest distances from a source over edges whose nodes are class
 // representatives, as hasDifference finds them.
-fn canonicalDistances(edges: &List<DifferenceFact>, source: Int) -> List<Distance> {
-    distances = push([], Distance { node: source, value: 0 });
-    finished = false;
+fn canonicalDistances(edges: &List<DifferenceFact>, source: Int) -> HashMap<Int, Int> {
+    distances = emptyIntMap();
+    distances = distances.insert(source, 0);
+    changed = true;
     for round in 0..size(edges) {
-      if finished = false {
-        changed = false;
-        for edgePosition in 0..size(edges) {
-            edge = get(edges, edgePosition);
-            found = findPlainDistance(distances, edge.right);
-            if found is DistanceResult::Found {
-                distance = (found as DistanceResult::Found).value;
-                sum = safeBoundSum(distance, edge.bound);
-                if sum is SumResult::Sum {
-                    candidate = (sum as SumResult::Sum).value;
-                    previous = findPlainDistance(distances, edge.left);
-                    if previous is DistanceResult::Found {
-                        if candidate < (previous as DistanceResult::Found).value {
-                            distances = improvePlainDistance(distances, edge.left, candidate);
+        if changed {
+            changed = false;
+            for edgePosition in 0..size(edges) {
+                edge = get(edges, edgePosition);
+                if distances.contains(edge.right) {
+                    sum = safeBoundSum(distances.lookup(edge.right, 0), edge.bound);
+                    if sum is SumResult::Sum {
+                        candidate = (sum as SumResult::Sum).value;
+                        if distances.contains(edge.left) = false || candidate < distances.lookup(edge.left, 0) {
+                            distances = distances.insert(edge.left, candidate);
                             changed = true;
                         };
-                    } else {
-                        distances = improvePlainDistance(distances, edge.left, candidate);
-                        changed = true;
                     };
                 };
             };
         };
-        if changed = false { finished = true; };
-      };
     };
     return distances;
 };
@@ -850,11 +863,9 @@ fn hasDistanceTable(tables: &List<DistanceTable>, source: Int) -> Bool {
 
 fn tableDistanceAtMost(tables: &List<DistanceTable>, from: Int, to: Int, bound: Int) -> Bool {
     for tablePosition in 0..size(tables) {
-        table = get(tables, tablePosition);
-        if table.source = from {
-            found = findPlainDistance(table.distances, to);
-            if found is DistanceResult::Found {
-                return (found as DistanceResult::Found).value <= bound;
+        if get(tables, tablePosition).source = from {
+            if get(tables, tablePosition).distances.contains(to) {
+                return get(tables, tablePosition).distances.lookup(to, 0) <= bound;
             };
             return false;
         };
@@ -1078,8 +1089,8 @@ fn contradictoryDifferences(equalities: &List<EqualityFact>, facts: &List<Differ
         if fact.bound < 0 { negative = true; };
     };
     if negative = false { return false; };
-    reps = equalityRepresentatives(equalities);
-    edges = canonicalDifferences(reps, facts);
+    edges = canonicalDifferencesIn(leastClasses(equalities), facts);
+    if differencePotential(edges).valid { return false; };
     // Every negative cycle contains a negative edge. Checking only its
     // endpoints avoids repeating the same search for nonnegative edges, and
     // the endpoints of one class are one search.
@@ -1277,6 +1288,43 @@ fn edgeComponents(edges: &List<DifferenceFact>) -> HashMap<Int, Int> {
 };
 
 fn boundEqualities(equalities: &List<EqualityFact>, differences: &List<DifferenceFact>, nodes: &List<Int>) -> List<EqualityFact> {
+    classes = leastClasses(equalities);
+    edges = canonicalDifferencesIn(classes, differences);
+    potential = differencePotential(edges);
+    if potential.valid = false { return boundEqualitiesByTables(equalities, differences, nodes); };
+    // (a tight path from a to b weighs p(b) - p(a), and every other path
+    // more: the classes of one tight component with one potential are at
+    // distance 0 from each other both ways, and so are one class)
+    component = edgeComponents(tightEdges(edges, potential.potential));
+    known = clone(equalities);
+    first = emptyPositions();
+    joined = HashSet::new();
+    for nodePosition in 0..size(nodes) {
+        r = canonicalIn(classes, get(nodes, nodePosition));
+        if component.contains(r) && joined.contains(r) = false {
+            joined = joined.insert(r);
+            key = pairKey(component.lookup(r, r), potential.potential.lookup(r, 0));
+            if first.contains(key) = false {
+                first = first.insert(key, push([], r));
+            } else {
+                // (a key two groups share is told apart by both of its parts)
+                matched = false;
+                for other in first.lookup(key, []) {
+                    if matched = false && component.lookup(other, other) = component.lookup(r, r) && potential.potential.lookup(other, 0) = potential.potential.lookup(r, 0) {
+                        known = push(known, EqualityFact { left: other, right: r });
+                        matched = true;
+                    };
+                };
+                if matched = false { first = first.insert(key, push(first.lookup(key, []), r)); };
+            };
+        };
+    };
+    return known;
+};
+
+// (the same, by a table of distances from each class in a component of more
+// than one: for a graph with a negative cycle, or sums near the bounds of Int)
+fn boundEqualitiesByTables(equalities: &List<EqualityFact>, differences: &List<DifferenceFact>, nodes: &List<Int>) -> List<EqualityFact> {
     known = clone(equalities);
     reps = equalityRepresentatives(equalities);
     repMap = representativeMap(reps);
@@ -1308,9 +1356,8 @@ fn boundEqualities(equalities: &List<EqualityFact>, differences: &List<Differenc
         if sources.contains(r) = false && componentSize.lookup(component.lookup(r, r), 0) > 1 {
             sources = sources.insert(r);
             distances = canonicalDistances(inner, r);
-            for dPosition in 0..size(distances) {
-                d = get(distances, dPosition);
-                if d.value <= 0 { zeroPairs = zeroPairs.insert(pairKey(r, d.node)); };
+            for d in distances.entries() {
+                if d.value <= 0 { zeroPairs = zeroPairs.insert(pairKey(r, d.key)); };
             };
             tables = push(tables, DistanceTable { source: r, distances: distances });
         };
@@ -1320,9 +1367,8 @@ fn boundEqualities(equalities: &List<EqualityFact>, differences: &List<Differenc
     for tPosition in 0..size(tables) {
         ra = get(tables, tPosition).source;
         ds = get(tables, tPosition).distances;
-        for dPosition in 0..size(ds) {
-            d = get(ds, dPosition);
-            rb = d.node;
+        for d in ds.entries() {
+            rb = d.key;
             if d.value <= 0 && rb != ra && sources.contains(rb) {
                 if zeroPairs.contains(pairKey(rb, ra)) {
                     if mappedRepresentative(knownReps, ra) != mappedRepresentative(knownReps, rb) {
