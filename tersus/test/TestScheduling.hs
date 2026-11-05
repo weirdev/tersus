@@ -142,57 +142,113 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         [] -> 0
         work -> maximum work
 
--- Run 41878451096 (2026-11-04): startup-inclusive wall priorities, rounded to seconds with a minimum of one.
--- Parser bootstrap: 91fc7de8 full-group wall time 1575.6s on four CPUs (2026-11-04).
+-- Run 41978818567 (2026-11-05): startup-inclusive wall priorities, rounded to seconds with a minimum of one.
 groupWeight :: String -> Int
 groupWeight name = maybe 1 id (lookup name weights)
   where
     weights =
-        [("testMirSelfHosted:" ++ show index ++ "/4", weight)
-            | (index, weight) <- zip [1 :: Int ..] [41, 352, 104, 41]]
-        ++ [(original ++ ":" ++ show index ++ "/4", weight)
-            | (original, work) <-
-                [("testMirEmit", [387, 554, 404, 424]),
-                 ("testMirVerify", [68, 303, 460, 623]),
-                 ("testNative", [587, 593, 422, 606])],
-              (index, weight) <- zip [1 :: Int ..] work]
-        ++ [ ("testExamples", 351)
-           , ("testForallLoops", 5)
-           , ("testLinearArithmetic", 10)
-           , ("testIfJoin", 2)
-           , ("testForLoops", 3)
-           , ("testInferredInvariants", 23)
-           , ("testCfgValidation", 9)
-           , ("testOwnership", 468)
-           , ("testArrays", 7)
-           , ("testPointers", 46)
-           , ("testCopies", 4)
-           , ("testSequence", 5)
-           , ("testStrings", 404)
-           , ("testBytes", 2)
-           , ("testConnectives", 2)
-           , ("testMirData", 424)
-           , ("testMirReader", 466)
-           , ("testMirErase", 343)
-           , ("testMirVerifyPrograms", 303)
-           , ("testMirEmitPrograms", 560)
-           , ("testBootstrap", 469)
-           , ("testParserBootstrap", 1576)
-           , ("testEq", 2)
-           , ("testHashMap", 9)
-           , ("testHashSet", 4)
-           , ("testModules", 175)
-           , ("testSharedCache", 420)
-           , ("testScheduling", 7)
-           , ("testAstData", 94)
-           , ("testParser", 48)
-           , ("testParserUnicode", 2)
-           , ("testAstReader", 492)
-           , ("testParity", 522)
-           , ("testLibModules", 11)
-           , ("testNativeStorageModules", 108)
-           , ("testMirSupport", 8)
-           ]
+        [ ("testParse", 1)
+        , ("testParseEval", 1)
+        , ("testValidateWithExpectedMatch", 1)
+        , ("testValidateWithExpectedMismatch", 1)
+        , ("testValidationFail", 1)
+        , ("testValidationCache", 2)
+        , ("testHaskellParity", 1)
+        , ("testUserRewriteValidation", 1)
+        , ("testParseVal", 1)
+        , ("testParseValFail", 1)
+        , ("testCrashRegression", 1)
+        , ("testExamples", 10)
+        , ("testCli", 1)
+        , ("testMir", 1)
+        , ("testMirSelfHosted:1/4", 47)
+        , ("testMirSelfHosted:2/4", 43)
+        , ("testMirSelfHosted:3/4", 79)
+        , ("testMirSelfHosted:4/4", 32)
+        , ("testIntRange", 1)
+        , ("testPipeline", 1)
+        , ("testControlFlow", 2)
+        , ("testLists", 2)
+        , ("testForallSyntax", 1)
+        , ("testForallInstantiation", 1)
+        , ("testForallProof", 1)
+        , ("testForallLoops", 2)
+        , ("testPrettyProofs", 1)
+        , ("testMulDivNegative", 1)
+        , ("testCrlf", 1)
+        , ("testEnumCast", 1)
+        , ("testListProofs", 1)
+        , ("testEqualityByParts", 1)
+        , ("testEnums", 2)
+        , ("testStructs", 1)
+        , ("testGenericLists", 1)
+        , ("testTypeCheck", 1)
+        , ("testRecursion", 1)
+        , ("testSolverCache", 1)
+        , ("testTermination", 2)
+        , ("testRefinedArithmetic", 1)
+        , ("testLinearArithmetic", 2)
+        , ("testIfJoin", 1)
+        , ("testModulo", 1)
+        , ("testCallsAndReturnJoin", 1)
+        , ("testForLoops", 2)
+        , ("testInferredInvariants", 3)
+        , ("testCfgValidation", 3)
+        , ("testPrecedence", 1)
+        , ("testFirstLast", 1)
+        , ("testFunctionCalls", 1)
+        , ("testCallsUseContracts", 1)
+        , ("testNative:1/4", 357)
+        , ("testNative:2/4", 213)
+        , ("testNative:3/4", 232)
+        , ("testNative:4/4", 282)
+        , ("testOwnership", 222)
+        , ("testTraits", 4)
+        , ("testArrays", 3)
+        , ("testBox", 2)
+        , ("testDeref", 1)
+        , ("testPointers", 6)
+        , ("testBorrow", 2)
+        , ("testCopies", 5)
+        , ("testGenerics", 2)
+        , ("testSequence", 5)
+        , ("testStrings", 209)
+        , ("testBytes", 1)
+        , ("testConnectives", 1)
+        , ("testMirData", 348)
+        , ("testMirEvalLists", 1)
+        , ("testMirReader", 297)
+        , ("testMirVerify:1/4", 112)
+        , ("testMirVerify:2/4", 95)
+        , ("testMirVerify:3/4", 252)
+        , ("testMirVerify:4/4", 267)
+        , ("testMirErase", 65)
+        , ("testMirVerifyPrograms", 49)
+        , ("testMirEmit:1/4", 40)
+        , ("testMirEmit:2/4", 304)
+        , ("testMirEmit:3/4", 114)
+        , ("testMirEmit:4/4", 462)
+        , ("testMirEmitPrograms", 482)
+        , ("testBootstrap", 378)
+        , ("testEq", 2)
+        , ("testHashMap", 2)
+        , ("testHashSet", 2)
+        , ("testModules", 235)
+        , ("testBuiltinRegistry", 1)
+        , ("testSharedCache", 447)
+        , ("testVerdictLocks", 1)
+        , ("testSharedCacheProbe", 1)
+        , ("testScheduling", 10)
+        , ("testAstData", 322)
+        , ("testParser", 311)
+        , ("testParserBootstrap", 742)
+        , ("testParserUnicode", 8)
+        , ("testAstReader", 447)
+        , ("testParity", 429)
+        , ("testLibModules", 5)
+        , ("testNativeStorageModules", 201)
+        , ("testMirSupport", 61)
+        ]
 
 groupName :: Test -> String
 groupName (TestCase name _) = name
@@ -350,7 +406,7 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq (assignShards 2 ["newA", "newB", "newC"]) [("newA", 1), ("newC", 1), ("newB", 2)]
     , testCase "largest measured registered groups are spread before small groups" $
         testAssertEq (assignShards 3 ["testNative:1/4", "testMirVerify:1/4", "testMirEmit:1/4", "testBootstrap"])
-            [("testNative:1/4", 1), ("testBootstrap", 2), ("testMirEmit:1/4", 3), ("testMirVerify:1/4", 3)]
+            [("testBootstrap", 1), ("testNative:1/4", 2), ("testMirVerify:1/4", 3), ("testMirEmit:1/4", 3)]
     , testCase "three shard estimated loads differ by at most one short group" $
         testAssertTrue (maximum loads - minimum loads <= 11)
     , testCase "CLI and cold bootstrap are covered exactly once" $
@@ -377,6 +433,14 @@ testScheduling names batches = TestList "testScheduling"
                 ++ map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap"])
             && all (> 0) (map groupWeight names)
             && maximum loads - minimum loads <= 11)
+    , testCase "batch launch weights retain measured cold costs without dividing again" $
+        testAssertEq
+            [map (groupWeight . groupName) split | (original, split) <- batches,
+                groupName original `elem` ["testNative", "testMirEmit", "testMirVerify"]]
+            [[357,213,232,282], [40,304,114,462], [112,95,252,267]]
+    , testCase "measured tail groups are not launched as unprofiled one-second work" $
+        testAssertEq (map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap"])
+            [447,429,348,222,447,235,482,742]
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $
