@@ -18,12 +18,13 @@ import System.Directory (doesFileExist, removeFile, renameFile)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (..), hClose, hGetContents, hSetEncoding, openFile, openTempFile)
-import System.Process (readProcessWithExitCode)
+import System.IO (IOMode (..), hClose, hGetContents, hSetEncoding, openFile)
+import System.Process (proc)
 
+import CacheLock (openTempFileCloexec)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import Native (buildExecutable, cachedProgram, cacheDirectory)
+import Native (buildExecutable, cachedProgram, cacheDirectory, readProcessOutput)
 import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, seedSha256, parserSeedSha256, stdlibSource)
 import Utils
 
@@ -87,10 +88,10 @@ seedText name digest hash variable = do
 
 downloadSeed :: String -> String -> String -> FilePath -> FilePath -> IO (Result () String)
 downloadSeed name digest variable dir path = do
-    (partial, handle) <- openTempFile dir (name ++ ".ll.tmp")
+    (partial, handle) <- openTempFileCloexec dir (name ++ ".ll.tmp")
     hClose handle
     let url = assetUrl name digest
-    outcome <- try (readProcessWithExitCode "curl" ["-fsSL", "-o", partial, url] "") :: IO (Either IOException (ExitCode, String, String))
+    outcome <- try (readProcessOutput (proc "curl" ["-fsSL", "-o", partial, url]) "") :: IO (Either IOException (ExitCode, String, String))
     case outcome of
         Left e -> removeQuietly partial >> pure (Error ("Could not run curl to fetch the " ++ name ++ " bootstrap seed from " ++ url ++ ": " ++ show e ++ ". Install curl, or set " ++ variable ++ " to a seed file."))
         Right (ExitFailure _, _, err) -> removeQuietly partial >> pure (Error ("Could not fetch the " ++ name ++ " bootstrap seed from " ++ url ++ ": " ++ err ++ "Set " ++ variable ++ " to a seed file to work without a network."))
@@ -121,11 +122,11 @@ verifiedText name digest path = do
 
 verifyFile :: String -> String -> FilePath -> IO (Result () String)
 verifyFile name digest path = do
-    outcome <- try (readProcessWithExitCode "sha256sum" [path] "") :: IO (Either IOException (ExitCode, String, String))
+    outcome <- try (readProcessOutput (proc "sha256sum" [path]) "") :: IO (Either IOException (ExitCode, String, String))
     bySum <- case outcome of
         Right (ExitSuccess, out, _) -> pure (Just out)
         _ -> do
-            fallback <- try (readProcessWithExitCode "shasum" ["-a", "256", path] "") :: IO (Either IOException (ExitCode, String, String))
+            fallback <- try (readProcessOutput (proc "shasum" ["-a", "256", path]) "") :: IO (Either IOException (ExitCode, String, String))
             pure $ case fallback of
                 Right (ExitSuccess, out, _) -> Just out
                 _ -> Nothing

@@ -18,7 +18,8 @@ import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (delete, foldl', isInfixOf, isPrefixOf, minimumBy, sort, sortBy)
 import System.Environment (getEnvironment, getExecutablePath)
 import System.Exit (ExitCode (..))
-import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
+import System.Process (CreateProcess (..), proc)
+import Native (readProcessOutput)
 import System.Timeout (timeout)
 import Data.Ord (comparing)
 import System.Mem.StableName (makeStableName)
@@ -143,9 +144,9 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         [] -> 0
         work -> maximum work
 
--- Run 41978818567 (2026-11-05): startup-inclusive wall priorities, rounded to seconds with a minimum of one.
--- AstData/Parser/reader: four-CPU restored-cache measurements; parser-bootstrap A is genuinely cold,
--- B is the maximum of four warm paired trials after one-time source/artifact preparation. Other rows retain that CI run.
+-- Measured four-CPU warm-tool work on eb8bb49 (2026-11-05), rounded up.
+-- The native preparation prefix is measured separately; genuine cold A and
+-- Bootstrap include their cold work. Unmeasured rows retain run 41978818567.
 groupWeight :: String -> Int
 groupWeight name = maybe 1 id (lookup name weights)
   where
@@ -201,10 +202,10 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testFirstLast", 1)
         , ("testFunctionCalls", 1)
         , ("testCallsUseContracts", 1)
-        , ("testNative:1/4", 357)
-        , ("testNative:2/4", 213)
-        , ("testNative:3/4", 232)
-        , ("testNative:4/4", 282)
+        , ("testNative:1/4", 58)
+        , ("testNative:2/4", 55)
+        , ("testNative:3/4", 54)
+        , ("testNative:4/4", 57)
         , ("testOwnership", 222)
         , ("testTraits", 4)
         , ("testArrays", 3)
@@ -218,46 +219,47 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testStrings", 209)
         , ("testBytes", 1)
         , ("testConnectives", 1)
-        , ("testMirData", 348)
+        , ("testMirData", 51)
         , ("testMirEvalLists", 1)
-        , ("testMirReader", 297)
-        , ("testMirVerify:1/4", 112)
-        , ("testMirVerify:2/4", 95)
-        , ("testMirVerify:3/4", 252)
-        , ("testMirVerify:4/4", 267)
+        , ("testMirReader", 58)
+        , ("testMirVerify:1/4", 31)
+        , ("testMirVerify:2/4", 33)
+        , ("testMirVerify:3/4", 67)
+        , ("testMirVerify:4/4", 73)
         , ("testMirErase", 65)
         , ("testMirVerifyPrograms", 49)
-        , ("testMirEmit:1/4", 40)
-        , ("testMirEmit:2/4", 304)
-        , ("testMirEmit:3/4", 114)
-        , ("testMirEmit:4/4", 462)
-        , ("testMirEmitPrograms", 482)
-        , ("testBootstrap", 378)
+        , ("testMirEmit:1/4", 2)
+        , ("testMirEmit:2/4", 58)
+        , ("testMirEmit:3/4", 5)
+        , ("testMirEmit:4/4", 109)
+        , ("testMirEmitPrograms", 126)
+        , ("testBootstrap", 248)
         , ("testEq", 2)
         , ("testHashMap", 2)
         , ("testHashSet", 2)
-        , ("testModules", 235)
+        , ("testModules", 172)
+        , ("testDataCodec", 199)
         , ("testBuiltinRegistry", 1)
-        , ("testSharedCache", 447)
+        , ("testSharedCache", 190)
         , ("testVerdictLocks", 1)
         , ("testSharedCacheProbe", 1)
-        , ("testScheduling", 10)
-        , ("testAstData:1/4", 50)
-        , ("testAstData:2/4", 177)
-        , ("testAstData:3/4", 54)
-        , ("testAstData:4/4", 196)
-        , ("testParser:1/4", 79)
-        , ("testParser:2/4", 56)
-        , ("testParser:3/4", 188)
-        , ("testParser:4/4", 158)
-        , ("testParserBootstrap:1/2", 307)
-        , ("testParserBootstrap:2/2", 268)
+        , ("testScheduling", 16)
+        , ("testAstData:1/4", 35)
+        , ("testAstData:2/4", 150)
+        , ("testAstData:3/4", 16)
+        , ("testAstData:4/4", 6)
+        , ("testParser:1/4", 62)
+        , ("testParser:2/4", 39)
+        , ("testParser:3/4", 187)
+        , ("testParser:4/4", 203)
+        , ("testParserBootstrap:1/2", 315)
+        , ("testParserBootstrap:2/2", 265)
         , ("testParserUnicode", 8)
-        , ("testAstReader:1/4", 107)
-        , ("testAstReader:2/4", 145)
-        , ("testAstReader:3/4", 91)
-        , ("testAstReader:4/4", 157)
-        , ("testParity", 429)
+        , ("testAstReader:1/4", 155)
+        , ("testAstReader:2/4", 117)
+        , ("testAstReader:3/4", 61)
+        , ("testAstReader:4/4", 89)
+        , ("testParity", 170)
         , ("testLibModules", 5)
         , ("testNativeStorageModules", 201)
         , ("testMirSupport", 61)
@@ -321,7 +323,7 @@ routingProbe arguments capabilities worker summarized = do
     inherited <- getEnvironment
     let environment = [("TERSUS_TEST_ROUTING_PROBE", "1"), ("TERSUS_TEST_RTS_STATS", "1")]
             ++ [(key, value) | (key, value) <- inherited, key `notElem` ["TERSUS_TEST_ROUTING_PROBE", "TERSUS_TEST_RTS_STATS"]]
-    outcome <- timeout 30000000 (readCreateProcessWithExitCode
+    outcome <- timeout 30000000 (readProcessOutput
         (proc self (arguments ++ ["+RTS", "-N2", "-RTS"])){env = Just environment} "")
     pure $ case outcome of
         Nothing -> Just "routing probe did not finish"
@@ -464,7 +466,7 @@ testScheduling names batches = TestList "testScheduling"
             && all (\batch -> selectGroupNames (Arguments Nothing [groupName batch] True Nothing) names
                 == Right [groupName batch]) parserBootstrapGroups)
     , testCase "parser bootstrap launch weights retain measured cold and warm paired frontiers" $
-        testAssertEq (map (groupWeight . groupName) parserBootstrapGroups) [307,268]
+        testAssertEq (map (groupWeight . groupName) parserBootstrapGroups) [315,265]
     , testCase "all old leaf paths occur exactly once in the registered batches" $
         testAssertTrue (all (\(original, split) ->
             sort (leafPaths original) == sort (concatMap (map (drop 1) . leafPaths) split)) batches)
@@ -480,25 +482,26 @@ testScheduling names batches = TestList "testScheduling"
     -- the measured values themselves.
     , testCase "batched and measured tail groups retain weights above the unprofiled fallback" $
         testAssertTrue (all (> 1) ([groupWeight (groupName batch) | (_, split) <- batches, batch <- split]
-                ++ map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap"])
+                ++ map groupWeight ["testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms"]
+                ++ map (groupWeight . groupName) parserBootstrapGroups)
             && all (> 0) (map groupWeight names)
             && maximum loads - minimum loads <= 11)
-    , testCase "batch launch weights retain measured cold costs without dividing again" $
+    , testCase "batch launch weights retain measured warm work without dividing again" $
         testAssertEq
             [map (groupWeight . groupName) split | (original, split) <- batches,
                 groupName original `elem` ["testNative", "testMirEmit", "testMirVerify"]]
-            [[357,213,232,282], [40,304,114,462], [112,95,252,267]]
+            [[58,55,54,57], [2,58,5,109], [31,33,67,73]]
     , testCase "AST and parser launch weights use actual whole-batch measurements" $
         testAssertEq
             [map (groupWeight . groupName) split | (original, split) <- batches,
                 groupName original `elem` ["testAstData", "testParser"]]
-            [[50,177,54,196], [79,56,188,158]]
+            [[35,150,16,6], [62,39,187,203]]
     , testCase "AST reader launch weights retain actual whole-batch measurements" $
         testAssertEq [map (groupWeight . groupName) split | (original, split) <- batches,
-            groupName original == "testAstReader"] [[107,145,91,157]]
+            groupName original == "testAstReader"] [[155,117,61,89]]
     , testCase "measured tail groups are not launched as unprofiled one-second work" $
         testAssertEq (map groupWeight ["testAstReader:1/4", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap:2/2"])
-            [107,429,348,222,447,235,482,268]
+            [155,170,51,222,190,172,126,265]
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $

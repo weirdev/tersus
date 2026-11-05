@@ -6,8 +6,10 @@ import Data.List (sort)
 import System.Directory (createDirectory, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, doesDirectoryExist, doesFileExist)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
-import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
-import System.IO (hClose, openTempFile)
+import System.Process (CreateProcess (..), proc)
+import Native (readProcessOutput)
+import System.IO (hClose)
+import CacheLock (openTempFileCloexec)
 import System.FilePath (takeFileName, (</>))
 import System.Posix.Process (getProcessID)
 
@@ -79,7 +81,7 @@ withDirectory name = bracket make removeDirectoryRecursive
     make = do
         tmp <- getTemporaryDirectory
         pid <- getProcessID
-        (dir, handle) <- openTempFile tmp (name ++ "-" ++ show pid)
+        (dir, handle) <- openTempFileCloexec tmp (name ++ "-" ++ show pid)
         hClose handle
         removeFile dir
         createDirectory dir
@@ -108,7 +110,7 @@ coldBootstrap = do
             self <- getExecutablePath
             inherited <- getEnvironment
             let environment = [("TERSUS_EMITTER_BOOTSTRAP_WORKER", "1"), ("XDG_CACHE_HOME", home)] ++ [(key, value) | (key, value) <- inherited, key `notElem` ["TERSUS_EMITTER_BOOTSTRAP_WORKER", "XDG_CACHE_HOME"]]
-            (status, out, err) <- readCreateProcessWithExitCode (proc self ["testBootstrap", "--child", "+RTS", "-N1", "-RTS"]){env = Just environment} ""
+            (status, out, err) <- readProcessOutput (proc self ["testBootstrap", "--child", "+RTS", "-N1", "-RTS"]){env = Just environment} ""
             pure $ case status of
                 ExitSuccess -> Nothing
                 _ -> Just ("fresh emitter bootstrap worker: " ++ out ++ err)

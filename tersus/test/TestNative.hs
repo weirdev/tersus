@@ -16,9 +16,10 @@ import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileE
 import GHC.IO.Encoding (char8, getFileSystemEncoding, setFileSystemEncoding)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hSetEncoding, openTempFile, withBinaryFile)
+import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hSetEncoding, withBinaryFile)
+import CacheLock (openTempFileCloexec)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, readProcessWithExitCode, waitForProcess)
+import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess)
 
 import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
@@ -27,7 +28,7 @@ import MirEval (renderMirValue, runProgram)
 import MirLower (lowerProgram)
 import MirOwnership (insertOwnership)
 import MirHousekeeping (verifyProgram)
-import Native (buildExecutableFast, runExecutable)
+import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared)
 import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
 import Pipeline
@@ -924,7 +925,7 @@ memoryTests =
                             Error e -> pure (Just e)
                             Ok () -> do
                                 -- 150 MB of address space
-                                (code, out, err) <- readProcessWithExitCode "sh" ["-c", "ulimit -v 150000; " ++ exe] ""
+                                (code, out, err) <- readProcessOutput (proc "sh" ["-c", "ulimit -v 150000; " ++ exe]) ""
                                 pure (testAssertEq (code, out, err) (ExitSuccess, expected, ""))
 
 -- Builds the program, which tests the IR without running it
@@ -970,7 +971,7 @@ buildAndRun input args file name ir expectation = do
     let dir = tmp </> "tersus-native-test"
     createDirectoryIfMissing True dir
     -- (a name of this build only: cases of the same name in other groups build at the same time, and each has its own executable)
-    (exe, handle) <- openTempFile dir (file ++ ".")
+    (exe, handle) <- openTempFileCloexec dir (file ++ ".")
     hClose handle
     removeFile exe
     buildAndRunHere exe `finally` (removeQuietly exe >> removeQuietly (exe ++ "_plain"))
@@ -1077,7 +1078,7 @@ runProcessBytes directory exe args input = do
     (Just hin, Just hout, Just herr, process) <- withMVar spawnLock $ \_ -> do
         savedFs <- getFileSystemEncoding
         setFileSystemEncoding char8
-        createProcess (proc exe args){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, cwd = directory}
+        spawnShared (proc exe args){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, cwd = directory}
             `finally` setFileSystemEncoding savedFs
     mapM_ (`hSetEncoding` char8) [hin, hout, herr]
     _ <- forkIO (hPutStr hin input >> hClose hin)
@@ -1101,7 +1102,7 @@ probeOnce :: MVar (Maybe Bool) -> String -> IO Bool
 probeOnce cache exe = modifyMVar cache $ \known -> case known of
     Just available -> pure (known, available)
     Nothing -> do
-        outcome <- try (readProcessWithExitCode exe ["--version"] "")
+        outcome <- try (readProcessOutput (proc exe ["--version"]) "")
         let available = case outcome of
                 Left e -> const False (e :: IOException)
                 Right (code, _, _) -> code == ExitSuccess

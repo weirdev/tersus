@@ -74,13 +74,13 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, makeAbsolute, 
 import System.Environment (getExecutablePath, getProgName, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
-import System.IO (SeekMode (AbsoluteSeek), hClose, openBinaryTempFile)
+import System.IO (SeekMode (AbsoluteSeek), hClose)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.IO (FileLock, LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Types (Fd)
-import System.Process (readProcessWithExitCode)
+import System.Process (proc)
 
-import CacheLock (openLockFd)
+import CacheLock (openBinaryTempFileCloexec, openLockFd)
 import Mir (Program)
 import Compile (lowerSource)
 import MirHousekeeping (eraseGhosts, toolProgram)
@@ -89,7 +89,7 @@ import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
-import Native (cacheDirectory)
+import Native (cacheDirectory, readProcessOutput)
 import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
@@ -518,7 +518,7 @@ writeEntryAtomically :: FilePath -> FilePath -> BL.ByteString -> IO ()
 writeEntryAtomically dir file bytes = do
     size <- Exception.evaluate (BL.length bytes)
     when (size > ProgramBinary.maxEntryBytes) (ioError (userError "cache entry exceeds size limit"))
-    bracketOnError (openBinaryTempFile dir "entry.tmp")
+    bracketOnError (openBinaryTempFileCloexec dir "entry.tmp")
         (\(staging, handle) -> hClose handle >> removeFile staging)
         (\(staging, handle) -> BL.hPut handle bytes >> hClose handle >> renameFile staging file)
 
@@ -664,7 +664,7 @@ sha256 arguments input = do
         Nothing -> run "shasum" (["-a", "256"] ++ arguments)
   where
     run command args = do
-        outcome <- try (readProcessWithExitCode command args input) :: IO (Either IOException (ExitCode, String, String))
+        outcome <- try (readProcessOutput (proc command args) input) :: IO (Either IOException (ExitCode, String, String))
         pure $ case outcome of
             Right (ExitSuccess, out, _) -> case words out of
                 digest : _ | length digest == 64 && all isHexDigit digest -> Just (map toLower digest)

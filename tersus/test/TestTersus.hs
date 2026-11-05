@@ -7,11 +7,11 @@ import Control.Monad (forM, forM_, unless, when)
 import Data.List (foldl', isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
-import Native (availableProcessors)
+import Native (availableProcessors, readProcessOutput)
 import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (BufferMode (LineBuffering), hPutStr, hSetBuffering, stderr, stdout)
-import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
+import System.Process (CreateProcess (..), proc)
 import System.Posix.Process (getParentProcessID, getProcessID)
 
 import TestHarness
@@ -255,7 +255,7 @@ runInParallel jobs names = do
                         started <- getMonotonicTime
                         putStrLn ("[START] " ++ name)
                         let arguments = [name, "--child", "+RTS", "-N1"] ++ rtsOptions ++ ["-RTS"]
-                        outcome <- try (readCreateProcessWithExitCode (proc self arguments){env = Just environment} "")
+                        outcome <- try (readProcessOutput (proc self arguments){env = Just environment} "")
                         finished <- getMonotonicTime
                         putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
                         pure (name, finished - started, outcome)
