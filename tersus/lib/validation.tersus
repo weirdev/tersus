@@ -1672,24 +1672,43 @@ fn integerValue(context: &ValidatorContext, term: Int) -> IntegerLookup {
     return IntegerLookup::Missing;
 };
 
-fn knownNonnegative(context: &ValidatorContext, term: Int) -> Bool {
-    if isSizeTerm(context.applications, term) { return true; };
-    v = integerValue(context, term);
-    if v is IntegerLookup::Found {
-        if (v as IntegerLookup::Found).value >= 0 { return true; };
-    };
-    z = 0;
-    found = false;
-    for constantPosition in 0..size(context.constants) {
-        constant = get(context.constants, constantPosition);
-        if constant.kind = 0 {
-            if constant.value = 0 { z = constant.id; found = true; };
-        };
-    };
-    if found = false { return false; };
+// What the signs of terms are read from: the closed equalities, the orders
+// over them, and the constant 0 if there is one (they depend on the context
+// alone, so a search that asks of many terms makes them once)
+struct SignFacts { equalities: List<EqualityFact>, classes: HashMap<Int, Int>, orders: List<OrderFact>, zero: Int, zeroFound: Bool };
+
+impl Clone for SignFacts { };
+
+fn signFacts(context: &ValidatorContext) -> SignFacts {
     equalities = semanticFacts(context.equalities, context.applications, context.constants);
     orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
-    return hasOrder(equalities, orders, z, term, false);
+    zero = 0;
+    zeroFound = false;
+    for constantPosition in 0..size(context.constants) {
+        if get(context.constants, constantPosition).kind = 0 && get(context.constants, constantPosition).value = 0 {
+            zero = get(context.constants, constantPosition).id;
+            zeroFound = true;
+        };
+    };
+    return SignFacts { classes: leastClasses(equalities), equalities: equalities, orders: orders, zero: zero, zeroFound: zeroFound };
+};
+
+fn knownNonnegative(context: &ValidatorContext, term: Int) -> Bool {
+    return knownNonnegativeWith(context, signFacts(context), term);
+};
+
+fn knownNonnegativeWith(context: &ValidatorContext, signs: &SignFacts, term: Int) -> Bool {
+    if isSizeTerm(context.applications, term) { return true; };
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.kind = 0 && hasEquality(signs.equalities, constant.id, term) {
+            if constant.value >= 0 { return true; };
+            if signs.zeroFound = false { return false; };
+            return hasOrderIn(signs.classes, signs.orders, signs.zero, term, false);
+        };
+    };
+    if signs.zeroFound = false { return false; };
+    return hasOrderIn(signs.classes, signs.orders, signs.zero, term, false);
 };
 
 fn hasOrderFact(facts: &List<OrderFact>, smaller: Int, greater: Int) -> Bool {
@@ -1704,6 +1723,7 @@ fn hasOrderFact(facts: &List<OrderFact>, smaller: Int, greater: Int) -> Bool {
 // formed (a contract may state the sum before the signs) are derived when a
 // goal is checked, from whatever signs are known by then.
 fn deriveSumOrders(context: &ValidatorContext) -> ValidatorContext {
+    signs = signFacts(context);
     facts = clone(context.orders);
     for appPosition in 0..size(context.applications) {
         app = get(context.applications, appPosition);
@@ -1711,10 +1731,10 @@ fn deriveSumOrders(context: &ValidatorContext) -> ValidatorContext {
             if size(app.arguments) = 2 {
                 a = get(app.arguments, 0);
                 b = get(app.arguments, 1);
-                if knownNonnegative(context, a) {
+                if knownNonnegativeWith(context, signs, a) {
                     if hasOrderFact(facts, b, app.id) = false { facts = push(facts, OrderFact { smaller: b, greater: app.id, strict: false }); };
                 };
-                if knownNonnegative(context, b) {
+                if knownNonnegativeWith(context, signs, b) {
                     if hasOrderFact(facts, a, app.id) = false { facts = push(facts, OrderFact { smaller: a, greater: app.id, strict: false }); };
                 };
             };
@@ -2332,67 +2352,99 @@ fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
     return false;
 };
 
-// Prove left - right <= bound by contradiction with the context's facts.
+struct Joined { set: HashSet<Int>, grew: Bool };
+
+impl Clone for Joined { };
+
+// The relevant terms after a fact between a and b: each side joins when the
+// other is relevant (and not a constant, unless throughConstants); a fact
+// between two constants joins nothing when constantPairsApart
+fn joinRelevant(relevant: HashSet<Int>, constantIds: &HashSet<Int>, a: Int, b: Int, throughConstants: Bool, constantPairsApart: Bool) -> Joined {
+    set = relevant;
+    if constantPairsApart && constantIds.contains(a) && constantIds.contains(b) { return Joined { set: set, grew: false }; };
+    grew = false;
+    aJoins = set.contains(a) && (throughConstants || constantIds.contains(a) = false);
+    bJoins = set.contains(b) && (throughConstants || constantIds.contains(b) = false);
+    if bJoins && set.contains(a) = false { set = set.insert(a); grew = true; };
+    if aJoins && set.contains(b) = false { set = set.insert(b); grew = true; };
+    return Joined { set: set, grew: grew };
+};
+
 fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
     known = canonicalFacts(context);
     canon = canonicalContext(context, known);
     goalLeft = canonicalTerm(known, left);
     goalRight = canonicalTerm(known, right);
-    // Only the facts in the goal's own component of the term graph can
-    // bear on it; the rest would just spend the variable budget.
-    relevant = HashSet::new();
-    relevant = relevant.insert(goalLeft);
-    relevant = relevant.insert(goalRight);
     // (an order between two integer constants says nothing their values do
     // not, and the chain of them would join every constant to the goal)
     constantIds = HashSet::new();
     for c in canon.constants { if c.kind = 0 { constantIds = constantIds.insert(c.id); }; };
+    wide = linearAttempt(canon, linearRelevant(canon, constantIds, goalLeft, goalRight, true), goalLeft, goalRight, bound);
+    if wide != 2 { return wide = 1; };
+    // (past the budget, the facts are taken again without joining through a
+    // constant: x in 0 <= x brings every term with a bound into the goal's
+    // component, though only a contradiction there could bear on the goal)
+    return linearAttempt(canon, linearRelevant(canon, constantIds, goalLeft, goalRight, false), goalLeft, goalRight, bound) = 1;
+};
+
+// The terms in the goal's own component of the term graph: only the facts
+// over them can bear on it, and the rest would spend the variable budget.
+// A constant joins the terms it is tied to only when throughConstants.
+fn linearRelevant(canon: &ValidatorContext, constantIds: &HashSet<Int>, goalLeft: Int, goalRight: Int, throughConstants: Bool) -> HashSet<Int> {
+    relevant = HashSet::new();
+    relevant = relevant.insert(goalLeft);
+    relevant = relevant.insert(goalRight);
     growing = true;
     // (each round that grows the set adds a term of the context to it)
     for round in 0..2 * (size(canon.equalities) + size(canon.orders) + size(canon.differences)) + 2 * size(canon.applications) + 2 {
         if growing {
-        growing = false;
-        for fPosition in 0..size(canon.equalities) {
-            f = get(canon.equalities, fPosition);
-            if relevant.contains(f.left) || relevant.contains(f.right) {
-                if relevant.contains(f.left) = false { relevant = relevant.insert(f.left); growing = true; };
-                if relevant.contains(f.right) = false { relevant = relevant.insert(f.right); growing = true; };
-            };
-        };
-        for fPosition in 0..size(canon.orders) {
-            f = get(canon.orders, fPosition);
-            if constantIds.contains(f.smaller) = false || constantIds.contains(f.greater) = false {
-                if relevant.contains(f.smaller) || relevant.contains(f.greater) {
-                    if relevant.contains(f.smaller) = false { relevant = relevant.insert(f.smaller); growing = true; };
-                    if relevant.contains(f.greater) = false { relevant = relevant.insert(f.greater); growing = true; };
-                };
-            };
-        };
-        for fPosition in 0..size(canon.differences) {
-            f = get(canon.differences, fPosition);
-            if constantIds.contains(f.left) = false || constantIds.contains(f.right) = false {
-                if relevant.contains(f.left) || relevant.contains(f.right) {
-                    if relevant.contains(f.left) = false { relevant = relevant.insert(f.left); growing = true; };
-                    if relevant.contains(f.right) = false { relevant = relevant.insert(f.right); growing = true; };
-                };
-            };
-        };
-        // (only arithmetic gives linear facts that join a term to its
-        // arguments: through a get, every element of a literal would join)
-        for appPosition in 0..size(canon.applications) {
-            app = get(canon.applications, appPosition);
-            hit = false;
-            if app.function <= -1 && app.function >= -5 {
-                hit = relevant.contains(app.id);
-                for arg in app.arguments { if relevant.contains(arg) { hit = true; }; };
-            };
-            if hit {
-                if relevant.contains(app.id) = false { relevant = relevant.insert(app.id); growing = true; };
-                for arg in app.arguments { if relevant.contains(arg) = false { relevant = relevant.insert(arg); growing = true; }; };
-            };
-        };
+            Joined { set: relevant, grew: growing } = relevantRound(canon, constantIds, relevant, throughConstants);
         };
     };
+    return relevant;
+};
+
+fn relevantRound(canon: &ValidatorContext, constantIds: &HashSet<Int>, given: HashSet<Int>, throughConstants: Bool) -> Joined {
+    relevant = given;
+    grew = false;
+    for fPosition in 0..size(canon.equalities) {
+        Joined { set: relevant, grew: g } = joinRelevant(relevant, constantIds, get(canon.equalities, fPosition).left, get(canon.equalities, fPosition).right, throughConstants, false);
+        if g { grew = true; };
+    };
+    for fPosition in 0..size(canon.orders) {
+        Joined { set: relevant, grew: g } = joinRelevant(relevant, constantIds, get(canon.orders, fPosition).smaller, get(canon.orders, fPosition).greater, throughConstants, true);
+        if g { grew = true; };
+    };
+    for fPosition in 0..size(canon.differences) {
+        Joined { set: relevant, grew: g } = joinRelevant(relevant, constantIds, get(canon.differences, fPosition).left, get(canon.differences, fPosition).right, throughConstants, true);
+        if g { grew = true; };
+    };
+    // (only arithmetic gives linear facts that join a term to its
+    // arguments: through a get, every element of a literal would join)
+    for appPosition in 0..size(canon.applications) {
+        Joined { set: relevant, grew: g } = joinApplication(relevant, constantIds, get(canon.applications, appPosition), throughConstants);
+        if g { grew = true; };
+    };
+    return Joined { set: relevant, grew: grew };
+};
+
+fn joinApplication(given: HashSet<Int>, constantIds: &HashSet<Int>, app: &ApplicationTerm, throughConstants: Bool) -> Joined {
+    relevant = given;
+    if app.function > -1 || app.function < -5 { return Joined { set: relevant, grew: false }; };
+    hit = relevant.contains(app.id) && (throughConstants || constantIds.contains(app.id) = false);
+    for arg in app.arguments {
+        if relevant.contains(arg) && (throughConstants || constantIds.contains(arg) = false) { hit = true; };
+    };
+    if hit = false { return Joined { set: relevant, grew: false }; };
+    grew = false;
+    if relevant.contains(app.id) = false { relevant = relevant.insert(app.id); grew = true; };
+    for arg in app.arguments { if relevant.contains(arg) = false { relevant = relevant.insert(arg); grew = true; }; };
+    return Joined { set: relevant, grew: grew };
+};
+
+// 1 when the facts over the relevant terms and the goal's negation are
+// contradictory, 0 when they are not, 2 when they are past the budget
+fn linearAttempt(canon: &ValidatorContext, relevant: &HashSet<Int>, goalLeft: Int, goalRight: Int, bound: Int) -> Int {
     kept = [];
     for f in linFacts(canon) {
         use = true;
@@ -2401,7 +2453,7 @@ fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) 
     };
     facts = linDedup(kept);
     facts = push(facts, linFact2(goalLeft, -1, goalRight, 1, 0 - bound - 1));
-    if size(facts) > 160 { return false; };
+    if size(facts) > 160 { return 2; };
     vars = [];
     for fPosition in 0..size(facts) {
         f = get(facts, fPosition);
@@ -2410,8 +2462,9 @@ fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) 
             if containsValue(vars, t.term) = false { vars = push(vars, t.term); };
         };
     };
-    if size(vars) > 48 { return false; };
-    return linContradiction(facts, vars);
+    if size(vars) > 48 { return 2; };
+    if linContradiction(facts, vars) { return 1; };
+    return 0;
 };
 
 // Two values of the same constructor with a pair of arguments that are
@@ -5268,10 +5321,13 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
 // the sign of the known integer factor.
 
 fn addSumOrders(context: &ValidatorContext, result: Int, a: Int, b: Int) -> ValidatorContext {
+    signs = signFacts(context);
+    aNonnegative = knownNonnegativeWith(context, signs, a);
+    bNonnegative = knownNonnegativeWith(context, signs, b);
     facts = clone(context.orders);
-    if knownNonnegative(context, b) { facts = push(facts, OrderFact { smaller: a, greater: result, strict: false }); };
-    if knownNonnegative(context, a) { facts = push(facts, OrderFact { smaller: b, greater: result, strict: false }); };
-    if knownNonnegative(context, a) && knownNonnegative(context, b) {
+    if bNonnegative { facts = push(facts, OrderFact { smaller: a, greater: result, strict: false }); };
+    if aNonnegative { facts = push(facts, OrderFact { smaller: b, greater: result, strict: false }); };
+    if aNonnegative && bNonnegative {
         for constantPosition in 0..size(context.constants) {
             constant = get(context.constants, constantPosition);
             if constant.kind = 0 {
@@ -6902,15 +6958,62 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
     return SplitResult { holds: allHold, used: used };
 };
 
+// A closure the checks of a block share. It is made from the facts of one
+// state, and a later state of the block has those facts and more as long as
+// every step between only adds facts and binds locals (addsFactsOnly), so a
+// goal it proves holds there too; a goal it cannot prove is asked again of
+// the facts there are now. Any other step (a proof step, the application that
+// forgets a term) drops it.
+enum SharedEntailment { Missing, Found { cache: EntailmentCache } };
+
+impl Clone for SharedEntailment { };
+
+struct CheckedStep { result: ExecutionResult, shared: SharedEntailment };
+
+impl Clone for CheckedStep { };
+
 // The steps of a block in order, as far as the first that fails (a step of a kind not known fails as unsupported)
 fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
     state = initial;
+    shared = SharedEntailment::Missing;
     for i in 0..size(steps) {
-        result = executeStep(state, get(steps, i), i);
-        if result.status != 0 { return result; };
-        state = result.state;
+        if get(steps, i) is ExecutionStep::Check {
+            checked = stepCheckShared(state, get(steps, i), i, shared);
+            CheckedStep { result: result, shared: after } = checked;
+            if result.status != 0 { return result; };
+            state = result.state;
+            shared = after;
+        } else {
+            before = contextSizes(state.context);
+            result = executeStep(state, get(steps, i), i);
+            if result.status != 0 { return result; };
+            state = result.state;
+            // (and, should a step ever drop a fact, a list that got shorter drops it too)
+            if addsFactsOnly(get(steps, i)) = false || shrank(before, contextSizes(state.context)) { shared = SharedEntailment::Missing; };
+        };
     };
     return ExecutionResult { status: 0, failedAt: -1, state: state };
+};
+
+fn contextSizes(c: &ValidatorContext) -> List<Int> {
+    return push(push(push(push(push(push(push([], size(c.equalities)), size(c.applications)), size(c.constants)), size(c.orders)), size(c.different)), size(c.variants)), size(c.differences));
+};
+
+fn shrank(before: &List<Int>, after: &List<Int>) -> Bool {
+    for k in 0..size(before) { if intAt(before, k, 0) > intAt(after, k, 0) { return true; }; };
+    return false;
+};
+
+fn addsFactsOnly(step: &ExecutionStep) -> Bool {
+    // (an application of -40 forgets what is known of a term)
+    if step is ExecutionStep::Apply { return (step as ExecutionStep::Apply).function != -40; };
+    if step is ExecutionStep::ApplyFresh { return (step as ExecutionStep::ApplyFresh).function != -40; };
+    if step is ExecutionStep::Literal { return (step as ExecutionStep::Literal).function != -40; };
+    if step is ExecutionStep::Assign { return true; };
+    if step is ExecutionStep::Push || step is ExecutionStep::Last || step is ExecutionStep::Set || step is ExecutionStep::Pop || step is ExecutionStep::NewArray { return true; };
+    if step is ExecutionStep::Havoc || step is ExecutionStep::RequireDefined || step is ExecutionStep::Check || step is ExecutionStep::Assume { return true; };
+    if step is ExecutionStep::AssumeVariant || step is ExecutionStep::RequireVariant || step is ExecutionStep::CheckWithin || step is ExecutionStep::AssumeForall { return true; };
+    return false;
 };
 
 fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
@@ -7163,6 +7266,12 @@ fn stepRequireDefined(initial: ExecutionState, step: &ExecutionStep, i: Int) -> 
 };
 
 fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    CheckedStep { result: result, shared: after } = stepCheckShared(initial, step, i, SharedEntailment::Missing);
+    return result;
+};
+
+fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given: SharedEntailment) -> CheckedStep {
+    shared = given;
     state = initial;
     if step is ExecutionStep::Check {
         check0 = step as ExecutionStep::Check;
@@ -7171,8 +7280,8 @@ fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Execution
         quiet = check0.relation >= 10;
         relation = check0.relation;
         if quiet { relation = relation - 10; };
-        if relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        if relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        if relation < 0 { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
+        if relation > 3 { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
         left = resolveValue(state, check0.left);
         right = resolveValue(state, check0.right);
         if left is ValueLookup::Found {
@@ -7180,7 +7289,17 @@ fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Execution
                 a = (left as ValueLookup::Found).term;
                 b = (right as ValueLookup::Found).term;
                 g = localGoal(relation, a, b);
-                ok = entailsGoal(state.context, g);
+                ok = false;
+                if shared is SharedEntailment::Found {
+                    answer = entailsGoalCached((shared as SharedEntailment::Found).cache, clone(g));
+                    ok = answer.holds;
+                    shared = SharedEntailment::Found { cache: answer.cache };
+                };
+                if ok = false {
+                    fresh = entailsGoalCached(entailmentCache(state.context), clone(g));
+                    ok = fresh.holds;
+                    shared = SharedEntailment::Found { cache: fresh.cache };
+                };
                 if ok = false {
                     if relation = 0 { ok = booleanCheck(state.context, 0, a, b); };
                     if relation = 1 { ok = booleanCheck(state.context, 1, a, b); };
@@ -7199,7 +7318,7 @@ fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Execution
                     ok = splitReadOverWrite(state, localGoal(relation, a, b), 3, budget).holds;
                 };
                 if ok = false {
-                    return ExecutionResult { status: 1, failedAt: i, state: state };
+                    return CheckedStep { result: ExecutionResult { status: 1, failedAt: i, state: state }, shared: shared };
                 };
                 ExecutionState { context: checkContext, locals: checkLocals, templates: checkTemplates } = state;
                 context = assumeRelation(checkContext, relation, a, b);
@@ -7207,11 +7326,11 @@ fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Execution
                     context = assumeBooleanFact(context, a, b);
                 };
                 state = ExecutionState { context: context, locals: checkLocals, templates: checkTemplates };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+            } else { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
+        } else { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
+        return CheckedStep { result: ExecutionResult { status: 0, failedAt: -1, state: state }, shared: shared };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared };
 };
 
 fn stepAssumeForall(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
@@ -7519,11 +7638,49 @@ impl Clone for InferState { };
 
 fn noInferGoals() -> List<InferGoal> { return []; };
 
-fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<InferGoal> {
+// The terms the facts tie together, as pairs to join: an equality, order,
+// disequality or difference joins its two sides, and an application its
+// result and arguments. A constant joins nothing (every 0 would tie every
+// term with a 0 in it together).
+fn factLinks(context: &ValidatorContext) -> List<EqualityFact> {
+    constant = HashSet::new();
+    for c in context.constants { constant = constant.insert(c.id); };
+    links = [];
+    for f in context.equalities { if constant.contains(f.left) = false && constant.contains(f.right) = false { links = push(links, f); }; };
+    for o in context.orders { if constant.contains(o.smaller) = false && constant.contains(o.greater) = false { links = push(links, EqualityFact { left: o.smaller, right: o.greater }); }; };
+    for d in context.different { if constant.contains(d.left) = false && constant.contains(d.right) = false { links = push(links, EqualityFact { left: d.left, right: d.right }); }; };
+    for d in context.differences { if constant.contains(d.left) = false && constant.contains(d.right) = false { links = push(links, EqualityFact { left: d.left, right: d.right }); }; };
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        for arg in app.arguments {
+            if constant.contains(arg) = false { links = push(links, EqualityFact { left: app.id, right: arg }); };
+        };
+    };
+    return links;
+};
+
+// The locals a candidate invariant may relate a changed local to: those the
+// loop reads, and those whose values the facts at its entry tie to the value
+// of a local it changes or reads (n in s = n - i, with i = n at the entry)
+fn loopAnchors(initial: &ExecutionState, havoc: &List<Int>, mentioned: &HashSet<Int>) -> HashSet<Int> {
+    uf = unionOf(factLinks(initial.context));
+    roots = HashSet::new();
+    for binding in initial.locals.entries() {
+        if containsValue(havoc, binding.key) || mentioned.contains(binding.key) { roots = roots.insert(ufFind(uf, binding.value)); };
+    };
+    anchors = HashSet::new();
+    for binding in initial.locals.entries() {
+        if mentioned.contains(binding.key) || roots.contains(ufFind(uf, binding.value)) { anchors = anchors.insert(binding.key); };
+    };
+    return anchors;
+};
+
+fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>, mentioned: &HashSet<Int>) -> List<InferGoal> {
     work = clone(initial);
     assigned = [];
     anchors = [];
     index = 0;
+    related = loopAnchors(initial, havoc, mentioned);
     for binding in initial.locals.entries() {
         if binding.key >= 0 {
             if containsValue(havoc, binding.key) {
@@ -7531,7 +7688,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                     assigned = push(assigned, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value, kind: 0, indexTerm: 0 });
                 };
             } else {
-                if size(anchors) < 12 {
+                if size(anchors) < 12 && related.contains(binding.key) {
                     anchors = push(anchors, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value, kind: 0, indexTerm: 0 });
                 };
             };
@@ -8026,6 +8183,71 @@ fn inferPhase11(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> 
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
+// The locals a loop reads: in the steps and ends of the blocks of its region,
+// the header among them. A candidate invariant relates a local the loop
+// changes to one of these; a local the loop never reads is left out of them.
+fn loopMentions(blocks: &HashMap<Int, ExecutionBlock>, region: &List<Int>) -> HashSet<Int> {
+    mentioned = HashSet::new();
+    for id in region {
+        if blocks.contains(id) {
+            block = blocks.lookupRef(id);
+            mentioned = stepsMentions((*block).steps, mentioned);
+            mentioned = endMentions((*block).end, mentioned);
+        };
+    };
+    return mentioned;
+};
+
+fn refMention(r: &ValueRef, into: HashSet<Int>) -> HashSet<Int> {
+    if r is ValueRef::Local { return into.insert((r as ValueRef::Local).local); };
+    return into;
+};
+
+fn refsMentions(refs: &List<ValueRef>, into: HashSet<Int>) -> HashSet<Int> {
+    mentioned = into;
+    for rPosition in 0..size(refs) { mentioned = refMention(get(refs, rPosition), mentioned); };
+    return mentioned;
+};
+
+fn stepsMentions(steps: &List<ExecutionStep>, into: HashSet<Int>) -> HashSet<Int> {
+    mentioned = into;
+    for sPosition in 0..size(steps) { mentioned = stepMentions(get(steps, sPosition), mentioned); };
+    return mentioned;
+};
+
+fn stepMentions(step: &ExecutionStep, into: HashSet<Int>) -> HashSet<Int> {
+    if step is ExecutionStep::Assign { return refMention((step as ExecutionStep::Assign).value, into); };
+    if step is ExecutionStep::Apply { return refsMentions((step as ExecutionStep::Apply).arguments, into); };
+    if step is ExecutionStep::ApplyFresh { return refsMentions((step as ExecutionStep::ApplyFresh).arguments, into); };
+    if step is ExecutionStep::Literal { return refsMentions((step as ExecutionStep::Literal).arguments, into); };
+    if step is ExecutionStep::Push { return refMention((step as ExecutionStep::Push).value, refMention((step as ExecutionStep::Push).list, into)); };
+    if step is ExecutionStep::Last { return refMention((step as ExecutionStep::Last).list, into); };
+    if step is ExecutionStep::Set {
+        return refMention((step as ExecutionStep::Set).value, refMention((step as ExecutionStep::Set).index, refMention((step as ExecutionStep::Set).list, into)));
+    };
+    if step is ExecutionStep::Pop { return refMention((step as ExecutionStep::Pop).list, into); };
+    if step is ExecutionStep::NewArray { return refMention((step as ExecutionStep::NewArray).value, refMention((step as ExecutionStep::NewArray).length, into)); };
+    if step is ExecutionStep::RequireDefined { return refMention((step as ExecutionStep::RequireDefined).value, into); };
+    if step is ExecutionStep::Check { return refMention((step as ExecutionStep::Check).right, refMention((step as ExecutionStep::Check).left, into)); };
+    if step is ExecutionStep::Assume { return refMention((step as ExecutionStep::Assume).right, refMention((step as ExecutionStep::Assume).left, into)); };
+    if step is ExecutionStep::AssumeVariant { return refMention((step as ExecutionStep::AssumeVariant).object, into); };
+    if step is ExecutionStep::RequireVariant { return refMention((step as ExecutionStep::RequireVariant).object, into); };
+    if step is ExecutionStep::CheckWithin { return refMention((step as ExecutionStep::CheckWithin).outer, refMention((step as ExecutionStep::CheckWithin).inner, into)); };
+    return into;
+};
+
+fn endMentions(end: &ExecutionEnd, into: HashSet<Int>) -> HashSet<Int> {
+    if end is ExecutionEnd::Branch { return stepsMentions((end as ExecutionEnd::Branch).noSteps, stepsMentions((end as ExecutionEnd::Branch).yesSteps, into)); };
+    if end is ExecutionEnd::BooleanBranch { return refMention((end as ExecutionEnd::BooleanBranch).value, into); };
+    if end is ExecutionEnd::Condition { return refMention((end as ExecutionEnd::Condition).right, refMention((end as ExecutionEnd::Condition).left, into)); };
+    if end is ExecutionEnd::Loop {
+        mentioned = refMention((end as ExecutionEnd::Loop).right, refMention((end as ExecutionEnd::Loop).left, into));
+        mentioned = stepsMentions((end as ExecutionEnd::Loop).checks, mentioned);
+        return stepsMentions((end as ExecutionEnd::Loop).assumptions, mentioned);
+    };
+    return into;
+};
+
 fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     if fuel = 0 { return ExecutionFlowResult { status: 4, block: id, step: -1, state: clone(initial) }; };
     if size(loops) > 0 {
@@ -8056,7 +8278,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
             if loop.relation > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             if loop.variantMode < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             if loop.variantMode > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
-            inferredGoals = inferLoopCandidateGoals(initial, loop.havoc);
+            inferredGoals = inferLoopCandidateGoals(initial, loop.havoc, loopMentions(blocks, loop.region));
             survivors = clone(inferredGoals);
             finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) };
             done = false;
