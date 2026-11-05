@@ -1277,7 +1277,6 @@ fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRe
     ty = lt.ty;
     if ty is Type::TRef { ty = Box::unbox((ty as Type::TRef).inner); };
     if ty is Type::TMutRef { ty = Box::unbox((ty as Type::TMutRef).inner); };
-    if ty is Type::TBox { ty = Box::unbox((ty as Type::TBox).inner); };
     i = 0;
     while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
         step = get(steps, i);
@@ -1290,19 +1289,24 @@ fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRe
             if !found { return noTy(); };
         };
         if step is RefStep::Index {
+            if ty is Type::TBox { ty = Box::unbox((ty as Type::TBox).inner); };
             if ty is Type::TList { ty = Box::unbox((ty as Type::TList).elem); }
             else if ty is Type::TArray { ty = Box::unbox((ty as Type::TArray).elem); }
             else if ty is Type::TNamed {
-                iargs = instanceArgs((ty as Type::TNamed).name);
-                if size(iargs) = 1 {
-                    et = textAt(iargs, 0);
-                    if et.ok { ty = et.ty; } else { return noTy(); };
-                } else { return noTy(); };
+                // Native containers declare the exact slot type in addr, including nested Boxes.
+                fields = ctorFields(p, (ty as Type::TNamed).name);
+                found = false;
+                for fd in fields {
+                    if fd.name = "addr" && fd.ty is Type::TAddr {
+                        ty = clone(Box::unbox((fd.ty as Type::TAddr).inner));
+                        found = true;
+                    };
+                };
+                if !found { return noTy(); };
             } else { return noTy(); };
         };
         if ty is Type::TRef { ty = Box::unbox((ty as Type::TRef).inner); };
         if ty is Type::TMutRef { ty = Box::unbox((ty as Type::TMutRef).inner); };
-        if ty is Type::TBox { ty = Box::unbox((ty as Type::TBox).inner); };
         i = i + 1;
     };
     return TyRes { ok: true, ty: ty };
@@ -1474,7 +1478,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             wanted = noTy();
             if d is Type::TRef { wanted = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TRef).inner)) }; };
             if d is Type::TMutRef { wanted = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TMutRef).inner)) }; };
-            if pt.ok && held.ok && wanted.ok && typeEq(wanted.ty, held.ty) { pt = held; };
+            if pt.ok && pt.ty is Type::TBox && held.ok && wanted.ok && typeEq(wanted.ty, held.ty) { pt = held; };
             if !pt.ok { out = one("a reference is to a place that is not there"); }
             else if d is Type::TRef {
                 inner = Box::unbox((d as Type::TRef).inner);

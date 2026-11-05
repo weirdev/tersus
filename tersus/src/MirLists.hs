@@ -431,8 +431,31 @@ lowerFunction original fn =
             return (ReadField o' (renameName renames name) f)
         IsVariant o name -> return (IsVariant (renameOperand o) (renameName renames name))
         AsVariant o name -> return (AsVariant (renameOperand o) (renameName renames name))
-        Borrow root steps upd -> return (Borrow root (map renameBorrowStep steps) upd)
+        Borrow root steps upd -> do
+            rootTy <- fromMaybe TInt <$> localTypeOf root
+            return (Borrow root (nativeBorrowSteps rootTy steps (unref destTy)) upd)
         other -> return other
+
+    -- Source Box places are transparent. Native places follow storage at slot zero,
+    -- except when the field or final reference names the Box handle itself.
+    nativeBorrowSteps ty steps wanted = case ty of
+        TRef inner -> nativeBorrowSteps inner steps wanted
+        TMutRef inner -> nativeBorrowSteps inner steps wanted
+        TBox inner | RefField ctor _ : _ <- steps,
+            ctor /= instanceName "Box" [ArgType inner] ->
+                RefIndex (Const (CInt 0)) : nativeBorrowSteps inner steps wanted
+        _ -> case steps of
+            [] -> [RefIndex (Const (CInt 0)) | TBox inner <- [ty], inner == wanted]
+            RefField ctor field : rest -> renameBorrowStep (RefField ctor field) :
+                nativeBorrowSteps (fromMaybe TInt (lookup field (fieldTypesOf ctor))) rest wanted
+            RefIndex index : rest -> RefIndex (renameOperand index) : nativeBorrowSteps (case ty of
+                TList inner -> inner
+                TArrayOf inner _ -> inner
+                TBox (TArrayOf inner _) -> inner
+                _ -> TInt) rest wanted
+    unref (TRef ty) = ty
+    unref (TMutRef ty) = ty
+    unref ty = ty
 
     nonConstant o ty = case o of
         Const _ -> Nothing

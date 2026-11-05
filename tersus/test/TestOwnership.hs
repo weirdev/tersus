@@ -17,6 +17,7 @@ import MirLower (lowerProgram)
 import Modules (LoadResult (..))
 import TestParserFragments (parseStatementBlock)
 import Pipeline
+import TestCopies (boxedClonePrograms)
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
 import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
 import TestHarness
@@ -364,8 +365,8 @@ object :: Val -> M (Int, Obj)
 object (VP a) = do
     c <- cell a
     return (a, cellObject c)
--- (a list of native code is read where its elements are: the first field of the struct List is the Box of the array that holds them)
-object (VS name fs) | isListStruct name, Just a <- listCell fs = object (VP a)
+-- (a native list or Box is read at the slots its first addr field owns)
+object (VS name fs) | isListStruct name || isBoxStruct name, Just a <- listCell fs = object (VP a)
 object v = failM ("not a value of the heap: " ++ show v)
 
 isListStruct :: Name -> Bool
@@ -1189,6 +1190,7 @@ testOwnership =
         , TestCase "array examples are excluded: the heap model has no array model (blind spot)" . pure $
             testAssertTrue (all (`notElem` ownershipExamples) arrayExamples && not (null arrayExamples) && usesArrays "a = array(3, 0); return get(a, 0);")
         , TestList "programs" [TestCase name (onSource name source) | (name, source) <- validatedPrograms]
+        , TestList "boxed Clone" [TestCase name (onSource name source) | (name, source, _, _) <- boxedClonePrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests
         , TestList "what a part may be read after" windowTests
