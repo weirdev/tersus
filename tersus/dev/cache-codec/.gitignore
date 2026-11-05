@@ -9,3 +9,9 @@ cabal.config
 cabal-cache/
 cabal-store/
 cabal-build/
+integration-build/
+integration-tmp/
+interpreted-tmp/
+integration-probe
+scope-before
+scope-after

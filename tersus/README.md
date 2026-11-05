@@ -24,12 +24,18 @@ stay on one shard to avoid repeating that cold compilation on every runner;
 other batches remain individually shardable. The bootstrap test still runs as
 a single group with its own cold cache.
 
-Package test compilations use the same lossless cross-process cache, keyed by
-entry, the loader's complete filesystem snapshot, parser backend and executable
-identity. Only successful results are retained; failures can be retried. Test
-executables use the native cache's existing cross-process build lock. Group
-workers take the next heaviest group from one bounded queue; results are still
-printed in registration order.
+Package test compilations use a lossless generic binary cache, retaining every
+contract, proof, ghost, invariant and generic field. Keys include the complete
+package snapshot, compiler/harness/codec source and version, actual selected
+Haskell package identities, parser backend and runtime seed inputs. Unknown build
+options conservatively add the compiled executable's SHA256; cross-rebuild
+source-only reuse requires an explicitly approved build manifest. Interpreted
+GHC/runghc execution bypasses this cache. Malformed, truncated, miskeyed or trailing
+input is rejected, never tried with a legacy decoder. Only successful results are
+retained; failures can be retried. See `dev/cache-codec/README.md` for measurements,
+identity policy and scoped checks. Test executables use the native cache's existing
+cross-process build lock. Group workers take the next heaviest group from one
+bounded queue; results are still printed in registration order.
 
 CI uses a 16 MiB GHC nursery. `dev/ci_resources.py` records the runner's CPU
 and memory limits; `/usr/bin/time` records the unchanged test command's resource

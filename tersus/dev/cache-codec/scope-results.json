@@ -1,0 +1,18 @@
+{
+  "fixture": "36 MiB generated seed-sized byte fixture (not a native IR seed)",
+  "bytes": 37748736,
+  "cpu_affinity": 0,
+  "compiler": "GHC 8.10.7, -O0, +RTS -N1",
+  "implementation": "unconditional SHA256 verification; no digest memoization or watcher",
+  "measurements": [
+    {"operation": "cold-pin-verification", "wall_seconds": 0.033102927, "parent_cpu_seconds": 0.00025366, "accepted": true},
+    {"operation": "hot-pin-verification", "wall_seconds": 0.031871074, "parent_cpu_seconds": 0.00024022, "accepted": true},
+    {"operation": "changed-pin-rejection", "wall_seconds": 0.032683853, "parent_cpu_seconds": 0.000284868, "accepted": false}
+  ],
+  "caveats": [
+    "One measurement per operation, not a whole-suite estimate.",
+    "Parent CPU time excludes the sha256sum subprocess; wall time includes it.",
+    "Actual explicit/local seed files are rehashed on each cache-scope check, including memory hits, and before persistence.",
+    "The existing CI commands set no explicit seed overrides and do not install local bootstrap .ll files; the default scope does not read seed-sized files."
+  ]
+}

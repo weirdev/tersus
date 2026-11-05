@@ -123,11 +123,38 @@ executable cache-codec-probe
   main-is: Main.hs
   other-modules:
       TestProgramBinary
-      Paths_tersus
-  autogen-modules:
-      Paths_tersus
+      TestProgramBinaryChecks
   hs-source-dirs:
       dev/cache-codec/src
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
+  build-depends:
+      base >=4.7 && <5
+    , binary >=0.8.8 && <0.9
+    , bytestring >=0.10.12 && <0.13
+    , containers
+    , deepseq >=1.4.4 && <1.6
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+    , unix
+  default-language: Haskell2010
+
+executable cache-integration-probe
+  main-is: Main.hs
+  other-modules:
+      TestHarness
+      TestParserFragments
+      TestSharedCache
+      TestProgramBinary
+      TestProgramBinaryChecks
+      TestProgramBuildIdentity
+  hs-source-dirs:
+      dev/cache-codec/integration
+      test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
   build-depends:
       base >=4.7 && <5
@@ -227,6 +254,9 @@ test-suite tersus-test
       TestParserUnicode
       TestPipeline
       TestPointers
+      TestProgramBinary
+      TestProgramBinaryChecks
+      TestProgramBuildIdentity
       TestProofs
       TestScheduling
       TestSequence
@@ -243,7 +273,10 @@ test-suite tersus-test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is TestTersus
   build-depends:
       base >=4.7 && <5
+    , binary >=0.8.8 && <0.9
+    , bytestring >=0.10.12 && <0.13
     , containers
+    , deepseq >=1.4.4 && <1.6
     , directory
     , filepath
     , parsec

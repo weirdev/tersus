@@ -95,7 +95,33 @@ executables:
     - tersus
   cache-codec-probe:
     main:                Main.hs
-    source-dirs:         dev/cache-codec/src
+    source-dirs:
+    - dev/cache-codec/src
+    - test
+    other-modules:
+    - TestProgramBinary
+    - TestProgramBinaryChecks
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    dependencies:
+    - tersus
+    - binary >= 0.8.8 && < 0.9
+    - bytestring >= 0.10.12 && < 0.13
+    - deepseq >= 1.4.4 && < 1.6
+
+  cache-integration-probe:
+    main: Main.hs
+    source-dirs:
+    - dev/cache-codec/integration
+    - test
+    other-modules:
+    - TestHarness
+    - TestParserFragments
+    - TestSharedCache
+    - TestProgramBinary
+    - TestProgramBinaryChecks
+    - TestProgramBuildIdentity
     ghc-options:
     - -threaded
     - -rtsopts
@@ -117,3 +143,6 @@ tests:
     dependencies:
     - tersus
     - unix
+    - binary >= 0.8.8 && < 0.9
+    - bytestring >= 0.10.12 && < 0.13
+    - deepseq >= 1.4.4 && < 1.6

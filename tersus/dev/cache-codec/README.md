@@ -1,90 +1,86 @@
-# Lossless test-program codec experiment
+# Lossless test-program codec
 
-Retain this candidate for a separate cache integration. Fully forced decoding of the existing 58,487,149-byte entry fell from a median 17.401 seconds to 3.022 seconds (5.76×). This commit does **not** switch `TestHarness` to the new format or claim whole-suite savings.
+The binary codec is enabled in `TestHarness` for disk entries. It preserves the complete MIR Program through standalone generic instances in the normal test helper `test/TestProgramBinary.hs`; the textual `encodeProgram`/`decodeProgram` API remains only for test markers. Rejected new entries are misses/recomputations, never legacy-decoder attempts.
 
 Plan: https://artifacts.internalmeta.com/a/1135240875628977
 
-## Scope and implementation
+## Measured prototype
 
-Base: `29b52e967a116dd21f06531af8ba06faadec217b`.
-Branch: `speed-codec-experiment-fd20ab17`.
-All changes and generated fixtures stay in the isolated codec worktree. No children, publication, native bootstrap or full test suite.
+Prototype commit `257d5b3a1e29733bf193cf2f3beb682270a75b80`, base `29b52e967a116dd21f06531af8ba06faadec217b`. GHC 8.10.7; installed binary 0.8.8.0, bytestring 0.10.12.0, deepseq 1.4.4.0. The 33 reachable MIR/AST/type/proof types use standalone `Generic`, `Binary` and `NFData`; no duplicated field schema or production MIR changes.
 
-`src/TestProgramBinary.hs` is a development-only module. Its 33 standalone `Generic` derivations, with default `Binary` and `NFData` instances, cover every type reachable from `Mir.Program`. There is no duplicated constructor/field schema and no modification to the production MIR types. Adding a field is picked up structurally; a new unsupported field type fails compilation.
+Three fresh-process measurements per operation, warmed identical Program fixtures, CPU 0 selected from allowed affinity, `-O2 +RTS -N1 -T`. Every decoded Program and encoded output was fully forced before stopping the timer. Preparation and explicit pre/post GC are outside the interval. Allocation totals are not peak RSS.
 
-The envelope has a versioned header, an exact 64-digit cache key, an exact payload length, and an FNV-1a byte checksum. Decoding rejects trailing bytes both outside and inside the payload. The reader and decoder impose a 256 MiB entry limit; the reader checks file size before allocation and rejects size changes during reading. The checksum detects accidental corruption, **not hostile modification**. A file deliberately produced by someone who recomputes the checksum is not authenticated or semantically validated. No compression is used and no legacy decoder fallback exists in this module.
-
-Only the development executable depends on the newly declared packages. Measured installed versions: GHC 8.10.7, binary 0.8.8.0, bytestring 0.10.12.0, deepseq 1.4.4.0. `package.yaml` declares `binary >= 0.8.8 && < 0.9`, `bytestring >= 0.10.12 && < 0.13`, and `deepseq >= 1.4.4 && < 1.6`. `tersus.cabal` was regenerated with hpack 0.37.0, not edited manually. Other compiler/package versions are not benchmarked.
-
-## Measurements
-
-Each operation ran three times in a fresh process, pinned to CPU 0 (chosen from `os.sched_getaffinity(0)`), with `-O2`, `+RTS -N1 -T`, and warmed copied fixtures. Both decoded Programs were forced through every field with `NFData` **before** stopping the timer. Both encoders consumed the identical, already forced Program and fully materialized their output. Input preparation and explicit pre/post `performGC` are outside the reported interval. CPU time uses `getCPUTime`, wall time the monotonic clock, and allocations GHC RTS allocation counters. Allocation totals are not peak RSS.
-
-Raw byte reads are measured separately from each codec's actual input reader. The old `readFile` reader constructs and forces a `String`; the candidate reader produces strict bytes and performs its size checks. The large difference between these input-reader times is predominantly materialization, not disk throughput.
-
-Medians (wall / CPU / allocated bytes):
-
-| Fixture | Operation | Old | Binary |
+| Fixture | Operation | Old median wall / CPU / allocation | Binary median wall / CPU / allocation |
 |---|---|---|---|
-| Large | Raw disk byte read | 0.023680 s / 0.023439 s / 58,515,048 | 0.021747 s / 0.021554 s / 55,377,264 |
-| Large | Read + input materialization | 2.920332 s / 2.885988 s / 2,359,734,144 | 0.040050 s / 0.039644 s / 110,723,096 |
-| Large | Fully forced decode | 17.401445 s / 17.232577 s / 80,228,926,544 | 3.022363 s / 2.997643 s / 8,448,191,536 |
-| Large | Fully materialized encode | 4.540182 s / 4.507664 s / 7,416,907,264 | 1.450266 s / 1.438167 s / 1,673,000,320 |
-| Small | Raw disk byte read | 25.258 us / 24.047 us / 27,008 | 28.843 us / 28.363 us / 31,760 |
-| Small | Read + input materialization | 24.647 us / 24.126 us / 58,728 | 36.084 us / 35.544 us / 31,632 |
-| Small | Fully forced decode | 487.046 us / 480.071 us / 785,400 | 56.395 us / 55.944 us / 33,912 |
-| Small | Fully materialized encode | 43.084 us / 42.613 us / 106,392 | 55.545 us / 55.033 us / 31,080 |
+| Large | Raw disk bytes | 0.023680 s / 0.023439 s / 58,515,048 B | 0.021747 s / 0.021554 s / 55,377,264 B |
+| Large | Read + input materialization | 2.920332 s / 2.885988 s / 2,359,734,144 B | 0.040050 s / 0.039644 s / 110,723,096 B |
+| Large | Forced decode | 17.401445 s / 17.232577 s / 80,228,926,544 B | 3.022363 s / 2.997643 s / 8,448,191,536 B |
+| Large | Materialized encode | 4.540182 s / 4.507664 s / 7,416,907,264 B | 1.450266 s / 1.438167 s / 1,673,000,320 B |
+| Small | Raw disk bytes | 25.258 us / 24.047 us / 27,008 B | 28.843 us / 28.363 us / 31,760 B |
+| Small | Read + input materialization | 24.647 us / 24.126 us / 58,728 B | 36.084 us / 35.544 us / 31,632 B |
+| Small | Forced decode | 487.046 us / 480.071 us / 785,400 B | 56.395 us / 55.944 us / 33,912 B |
+| Small | Materialized encode | 43.084 us / 42.613 us / 106,392 B | 55.545 us / 55.033 us / 31,080 B |
 
-Large decode wall repetitions: old **17.182302 / 17.401445 / 17.437042** seconds; binary **3.046787 / 3.022363 / 2.991282** seconds. Decode allocation reduction: **89.47%**. Large encode median improves 3.13×. Small encode and reads have tiny regressions; do not infer end-to-end wins for all small tests.
+Large decode repetitions: old **17.182302 / 17.401445 / 17.437042 s**; binary **3.046787 / 3.022363 / 2.991282 s**. Median speedup **5.76x**, allocation reduction **89.47%**. File sizes: 58,487,149 → 55,344,610 B; small 785 → 337 B. Large input-reader improvement is primarily avoiding a `String`, not disk speed. No compression or whole-suite saving is claimed. Small encode/read regressions are recorded, not hidden. All 48 measurements are in `results.json`.
 
-File sizes: large 58,487,149 → 55,344,610 bytes (only 5.37% smaller); small 785 → 337 bytes. This candidate is primarily a lexical/allocation improvement, not a major space-saving codec.
+## Integration and semantics
 
-All 48 raw measurements, including CPU and allocation repetitions, are in `results.json`.
+- `test/TestProgramBinary.hs`: versioned header, exact 64-digit key, exact payload length, FNV-1a byte checksum, rejection of trailing bytes both inside/outside the payload, 256 MiB entry bound and bounded strict-byte file reads. FNV detects accidental corruption, **not hostile forgery**.
+- `test/TestHarness.hs`: binary disk reader/writer, full forcing before caching, unchanged thread/kernel locking, atomic writes with error cleanup, successful-result-only caching. Oversized persistence fails safely while retaining the complete computed Program.
+- `test/TestProgramBinaryChecks.hs`: all 27 prototype controls as a normal reusable test helper, not duplicated in the dev executable.
+- `test/TestSharedCache.hs`: six no-bootstrap helper cases are included in the existing `testSharedCache` group; existing stale/poisoned/missing-hash disk fixtures now use binary entries. No `TestTersus` registration, shard, workflow or production language changes.
+- `package.yaml`: binary/bytestring/deepseq added to the test component with ranges `>=0.8.8 && <0.9`, `>=0.10.12 && <0.13`, `>=1.4.4 && <1.6`. Development executables have those dependencies too. `tersus.cabal` is generated by hpack 0.37.0, never hand-edited.
 
-## Losslessness and rejection checks
+Both real fixtures passed Program equality **and exact full `show` equality**. The second comparison detects lost builtin contracts that custom `Syntax.Value` equality intentionally ignores. The rich fixture covers contracts, all ghost variants, axioms/proofs, quantified terms, nested builtin contracts, function/loop termination and environments, generics, invariants, mutable/borrowed/from parameters, references and arbitrary-size integers. String boundaries include NUL, Unicode limits and surrogate `Char` values without normalization.
 
-Both real copied fixtures passed `decoded == original` **and exact full `show` equality**. The second comparison matters: `Syntax.Value`'s custom equality deliberately ignores contracts on builtin function values.
+The 27 controls include valid-envelope reconstruction, invalid/mismatched keys, genuine legacy headers, outer/inner trailing data, nine truncations, framing/payload corruption, malformed binary with correct checksum, oversized declarations, partial disk input and sparse oversized-file rejection. Six integration cases exercise real `sharedProgram` fresh-process reuse with throwing fallback, actual source/stage misses, six rejection/repair paths (including legacy), runtime memory-scope changes and failed-computation retry. No existing oracle or corruption test was weakened.
 
-The rich structural fixture contains requirements, ensures, every ghost-statement variant, proof/axiom contents, quantified proof terms, nested builtin function contracts, function and loop termination, loop environments, generic declarations, invariants, mutable/borrowed/from parameters, reference steps, types and arbitrary-size positive/negative integers. An additional string fixture includes NUL, Unicode boundaries and surrogate `Char` values, without normalization. A valid-envelope reconstruction assertion ensures malformed/trailing payload tests actually reach the inner binary decoder.
+## Identity policy
 
-The probe checks invalid and mismatched keys; a genuine legacy header; outer and inner trailing data; nine truncation points; payload and framing corruption; malformed binary with a correct checksum; oversized declared payloads; truncated disk input; a successful bounded disk read; and a sparse oversized disk file rejected before materialization. No existing repository tests were edited or weakened.
+`compilerIdentity` includes compiler source and embedded inputs, harness/parser-fragment **and codec source**, codec version, package/Stack configuration, and concrete compiler/platform/package identity. `TestProgramBuildIdentity` records `compilerName`, exact `compilerVersion`, OS and architecture, and reifies actual GHC-selected package unit IDs for base, containers, binary, bytestring, deepseq, directory, process, unix, parsec and template-haskell. It does not guess dependency versions from YAML or invoke ghc-pkg to discover a potentially different package selection.
 
-## Actual cache reuse and identity
+**Default compiled builds use conservative actual executable SHA256 as well.** This covers unsupported/unknown full GHC option manifests (including CPP/TH and mixed builds); it deliberately sacrifices reuse after test-only executable changes. It does **not** claim the prior source-only “lever 1” optimization works by default. Touching or copying identical executable bytes does not change that identity. Unreadable/unknown executable identity bypasses the cache.
 
-`reuse.py` copies the flat compiler sources and the actual `TestHarness`/`TestParserFragments` into a disposable input mirror under `identity/`. Other required source inputs are read-only links. It runs the **actual unmodified `sharedProgram` implementation**, not `testStrings` or `testBytes`:
+`ghc -e`, ghci and runghc executions bypass both disk and memory caches **before** any approved-manifest branch. The guard checks `<interactive>`, process name and the actual executable basename. Real `ghc -e` and `runghc` tests returned `Nothing` in both default and approved environments (`interpreted-results.json`); no mock program-name test substitutes for this.
 
-- Seed one correctly keyed entry from the real small Program fixture through `sharedProgram`.
-- In a fresh process, invoke `sharedProgram` with a throwing fallback; the existing disk entry is returned and its full serialization forced.
-- Change the source argument and stage; keys differ, and changed source actually reaches the throwing fallback.
-- Recompile after changing an actual copied compiler source file and, separately, the actual copied harness file. Both produce new keys and reach the fallback.
-- Restore the source inputs; a fresh-process throwing-fallback lookup hits again.
+`TERSUS_PARSER` and actual `PATH` are runtime scope inputs. Explicit `TERSUS_PARSER_SEED_FILE` / `TERSUS_SEED_FILE`, and the local seed alternatives used by `Seed.seedText`, are checked against their compiled SHA256 pins using actual file bytes. Invalid/unreadable/unhashable seeds bypass both caches, including an already memorized success. These scopes are checked again before persistence. Other flag variables such as CFLAGS are not read by the production compiler; native clang flags are explicit in source. No claim is made that YAML captures arbitrary actual toolchain/build overrides.
 
-Exact identities and keys are in `identity-results.json`. The supported existing identity covers stage, source, compiler source/embedded libraries/seeds, harness/parser-fragment source, package/Stack configuration, format header, and raw `TERSUS_PARSER`. These checks do **not** establish identity for actual GHC/package/toolchain versions, build flags supplied outside package configuration, or all native tool/seed overrides.
+The seed verifier intentionally **does not memoize digests by mtime, FNV or filesystem watchers**. A 36 MiB generated seed-sized byte fixture (not native IR) measured **33.10 ms cold / 31.87 ms hot / 32.68 ms changed-and-rejected**, one sample per operation, pinned one CPU. Parent CPU excludes sha256sum; wall time includes it. Thus explicit/local seed profiles pay repeated hashing on scope checks, including memory hits; this is a documented conservative cost, not an optimized profile. The CI workflow sets no explicit seed override, and the default scope without local seed files reads no seed-sized files. See `scope-results.json`. A speculative watcher was removed rather than introducing symlink/permission/platform authority.
 
-Before production integration, wire the binary reader/writer into `TestHarness`, put its source in the harness dependency fingerprint, include the binary schema/version in the cache key, and explicitly handle unsupported toolchain/override identity. A corrupted new entry must be a rejected entry/recomputation, never a legacy-codec attempt. Retain the textual helper API only where existing tests use it, while adding binary disk-entry coverage. No lossy `MirData` representation is proposed.
+### Explicit approved-manifest reproduction
 
-## Reproduce
+Cross-rebuild source-only reuse is opt-in **only** after the owner has approved a complete actual build-options manifest. A SHA256 of YAML alone is not such a manifest. It must cover compiler/package selection, all compiler-component options, CPP/TH inputs, and external option/override injection. No automatic “normal CI” profile was invented and CI commands are unchanged.
 
-Work from `tersus/`. The fixture files, build outputs, and input mirror are ignored, not committed. Locate fixtures with a **single-level** cache metadata listing, copy only targeted files, and never scan the 11k+ cache entries recursively.
+1. Review the complete actual invocation/environment manifest for the intended build. Compute its SHA256.
+2. Set build-time `TERSUS_TEST_APPROVED_BUILD_IDENTITY` to that 64-hex digest and rebuild cleanly (or force-recompile the identity helper). Environment changes alone are not GHC dependency tracking: **clean/force-recompile when enabling, changing or removing approval**.
+3. Run that resulting compiled executable. Source, codec/version and concrete compiler/dependency identity remain independent key inputs; approval never makes interpreted execution eligible.
+4. For unknown, mixed, non-approved or uninspectable build modes, leave approval unset and retain executable-based conservative misses.
 
-Selected old files under `~/.cache/tersus/test-programs/`:
+`python3 dev/cache-codec/reuse.py` is the concrete controlled fixture reproduction: it copies only the flat compiler sources and required test helpers to the ignored `identity/` mirror; links read-only lib/example/bootstrap inputs; records `approved-manifest.json` with the exact direct-GHC flags, `ghc --info` and relevant package environment; and uses its digest only for this reviewed fixture build. The output executable name is deliberately immaterial to that controlled manifest. It never sets approval in the original worktree or CI.
 
-- Small: `01cd7b3bf6b28f0bf3798d15b68ffa447d419ed08ace28cd1a36b9d70ce1bcba`; SHA-256 `3be4e7dec71620e07e26d38a2eb1970abe4730dd73d621819c3f13b9fdd15a8f`.
-- Large: `f0407a286d0c7b69cdfc63575dc74da637b55ef9cbf1d692b4e58c778521258b`; SHA-256 `90d403d33007a4649566e07f06971ca8fc522db5a338142ca5fd53d34d8ea670`.
+Under one fixed controlled manifest, actual compiler-source, harness-source, codec-source-only, codec-version and compiler-metadata changes produce new keys and reach throwing fallback. A changed test-only assertion name preserves the key and hits in a fresh process. The baseline and renamed-test executable SHA256 differ (`b2972a29ad840249e5fd5c3556ae02aae261a0f57f582f034de00eed1cf7627e` vs `700bcd6a26d20e660eb6f81c7fa66ec0020baaee138b1944cb3e7d476651cc68`), making that control non-vacuous. Restored inputs hit again. An unapproved executable has a separate namespace and reuses only after its own entry is seeded. Results: `integration-identity-results.json` (historical prototype results remain in `identity-results.json`). Compiler metadata alteration is a controlled fixture, not a claim that a second installed GHC was tested.
+
+## Reproduction and verification
+
+Work from `tersus/`, with generated outputs and temporary cache homes in this isolated worktree:
 
 ```sh
-mkdir -p dev/cache-codec/build dev/cache-codec/fixtures
-ghc --make -O2 -threaded -rtsopts -Wall -isrc -idev/cache-codec/src \
-  -odir dev/cache-codec/build -hidir dev/cache-codec/build \
-  dev/cache-codec/src/Main.hs -o dev/cache-codec/probe
-# Copy the two targeted old entries to fixtures/small.show and fixtures/large.show.
-dev/cache-codec/probe checks +RTS -N1 -T
-dev/cache-codec/probe prepare dev/cache-codec/fixtures/small.show +RTS -N1 -T
-dev/cache-codec/probe prepare dev/cache-codec/fixtures/large.show +RTS -N1 -T
-python3 dev/cache-codec/benchmark.py
+mkdir -p dev/cache-codec/integration-build dev/cache-codec/integration-tmp
+ghc --make -O0 -w -threaded -rtsopts -isrc -itest \
+  -odir dev/cache-codec/integration-build -hidir dev/cache-codec/integration-build \
+  dev/cache-codec/integration/Main.hs -o dev/cache-codec/integration-probe
+TMPDIR="$PWD/dev/cache-codec/integration-tmp" \
+XDG_CACHE_HOME="$PWD/dev/cache-codec/integration-tmp/xdg" \
+  dev/cache-codec/integration-probe +RTS -N1 -T
 python3 dev/cache-codec/reuse.py
+runghc -w -isrc -itest dev/cache-codec/scope/InterpretedProbe.hs
 ```
 
-`prepare` verifies the full-state roundtrip before writing each `.binary` fixture. The driver selects an allowed single CPU. `checks` and `reuse.py` do not parse/compile language input, build native compiler tools, or run a cold bootstrap.
+For the serialization benchmark, compile `dev/cache-codec/src/Main.hs` with `-O2 -isrc -itest`, prepare the copied `.show` fixtures, then run `benchmark.py`. Never scan the large cache recursively; locate via single-level metadata and copy only targeted files. The selected old entries were:
 
-The first offline Cabal attempt failed while trying to initialize Hackage metadata (403); its newly created default `~/.cabal/config` was removed and its absence verified. The subsequent `cabal --config-file=dev/cache-codec/cabal.config v2-build --offline exe:cache-codec-probe`, with repositories disabled and cache/store paths in the worktree, passed using GHC 8.10.7 (`-O1`). Its built executable passed all **27 codec checks** too. Build outputs were moved under the ignored `cabal-build/` directory. The benchmark uses the separately compiled `-O2` executable, not this `-O1` build. Stack is not installed on this host, so the LTS-22.24 toolchain is not tested.
+- Small: `01cd7b3bf6b28f0bf3798d15b68ffa447d419ed08ace28cd1a36b9d70ce1bcba`; SHA256 `3be4e7dec71620e07e26d38a2eb1970abe4730dd73d621819c3f13b9fdd15a8f`.
+- Large: `f0407a286d0c7b69cdfc63575dc74da637b55ef9cbf1d692b4e58c778521258b`; SHA256 `90d403d33007a4649566e07f06971ca8fc522db5a338142ca5fd53d34d8ea670`.
+
+The final repository-disabled, worktree-local Cabal build passed for `test:tersus-test`, `exe:cache-integration-probe` and `exe:cache-codec-probe` (GHC 8.10.7, `-O1`). The built integration executable passed all six helper cases including the full 27 controls, and the built codec executable separately passed all 27 controls. The full test executable was **compiled, not run**. Direct `-O0` helper checks, independent invalidation controls, four real interpreted-mode checks, Python compilation and `git diff --check` also passed.
+
+The first generic offline Cabal attempt encountered Hackage metadata 403; its new default `~/.cabal/config` was removed and absence verified. Package checks use a worktree-local config with `active-repositories: :none` and worktree-local cache/store paths. No full suite, native bootstrap, native-heavy experiment or publication is performed here. Stack is absent; GHC 9.6.5/LTS-22.24 remains for the parent's consolidated verification.

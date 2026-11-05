@@ -3,7 +3,7 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module TestProgramBinary
-    ( encodeEntry, decodeEntry, readEntryBytes, maxEntryBytes ) where
+    ( encodeEntry, decodeEntry, readEntryBytes, maxEntryBytes, codecVersion ) where
 
 import Control.DeepSeq (NFData)
 import Data.Binary (Binary, encode)
@@ -122,8 +122,11 @@ deriving instance Generic S.RwRule
 instance Binary S.RwRule
 instance NFData S.RwRule
 
+codecVersion :: String
+codecVersion = "tersus-test-program binary 1\n"
+
 header :: BS.ByteString
-header = BC.pack "tersus-test-program binary 1\n"
+header = BC.pack codecVersion
 
 maxEntryBytes :: Int64
 maxEntryBytes = 256 * 1024 * 1024
