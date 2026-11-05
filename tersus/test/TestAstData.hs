@@ -438,9 +438,14 @@ nativeText exe text = do
     (code, out, err) <- runExecutableBytes exe [] text
     pure $ if code == ExitSuccess && null err && out == text then Nothing else Just ("exit " ++ show code ++ ", " ++ take 200 err ++ ", wrote " ++ show (length out) ++ " for " ++ show (length text))
 
-nativeCorpus :: IO TestResult
-nativeCorpus = withAstReader $ \exe -> do
-    sources <- corpus
+nativeCorpus :: Int -> IO TestResult
+nativeCorpus batch = withAstReader $ \exe -> do
+    units <- corpusUnits
+    let samples = [(unitIndex, fileIndex, name, tree)
+            | (unitIndex, unit) <- batchItems 4 batch (zip [0 :: Int ..] units)
+            , (fileIndex, (name, tree)) <- zip [0 :: Int ..] unit]
+        sources = [(name, tree) | (_, _, name, tree) <- samples]
+    putStrLn ("AST native corpus samples: " ++ show [(unitIndex, fileIndex, name) | (unitIndex, fileIndex, name, _) <- samples])
     results <- forM sources $ \(name, tree) -> case tree of
         Error e -> pure (if knownParserRejection name e then Nothing else Just (name ++ ": " ++ e), 0 :: Int, 0 :: Int)
         Ok ss -> do
@@ -451,9 +456,10 @@ nativeCorpus = withAstReader $ \exe -> do
                     result <- nativeText exe (dataElaborated tree)
                     pure (result, 1)
             pure (prefix name (firstFailure [p, e]), count, 1)
-    extra <- mapM (nativeText exe . dataParsed) [small, fixtures, deep, longNames]
+    let extras = batchItems 4 batch [small, fixtures, deep, longNames]
+    extra <- mapM (nativeText exe . dataParsed) extras
     let parsedCount = sum [n | (_, _, n) <- results]
-    putStrLn ("AST native corpus: " ++ show (length sources) ++ " sources, " ++ show parsedCount ++ " parsed, " ++ show (sum [n | (_, n, _) <- results]) ++ " elaborated wrappers, " ++ show (length sources - parsedCount) ++ " parser-rejected, 4 constructor/depth/name fixtures")
+    putStrLn ("AST native corpus: " ++ show (length sources) ++ " sources, " ++ show parsedCount ++ " parsed, " ++ show (sum [n | (_, n, _) <- results]) ++ " elaborated wrappers, " ++ show (length sources - parsedCount) ++ " parser-rejected, " ++ show (length extras) ++ " constructor/depth/name fixtures in batch " ++ show batch ++ "/4")
     pure (firstFailure ([result | (result, _, _) <- results] ++ extra))
 
 nativeChunkedIntegers :: IO TestResult
@@ -510,5 +516,6 @@ testAstReader = TestList "testAstReader"
     , TestCase "native malformed protocol" nativeRefusals
     , TestCase "native semantic mutation" nativeMutation
     , TestCase "packaged elaborated tools native round trip" nativeElaboratedPackages
-    , TestCase "whole corpus native round trip" nativeCorpus
+    , TestList "whole corpus native round trip"
+        [TestCase (show batch ++ "/4") (nativeCorpus batch) | batch <- [1 .. 4]]
     ]

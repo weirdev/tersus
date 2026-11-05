@@ -250,7 +250,10 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testParser:4/4", 158)
         , ("testParserBootstrap", 742)
         , ("testParserUnicode", 8)
-        , ("testAstReader", 447)
+        , ("testAstReader:1/4", 107)
+        , ("testAstReader:2/4", 145)
+        , ("testAstReader:3/4", 91)
+        , ("testAstReader:4/4", 157)
         , ("testParity", 429)
         , ("testLibModules", 5)
         , ("testNativeStorageModules", 201)
@@ -298,7 +301,7 @@ splitTestGroups count original
             | batch@(weight, index, leaves) <- batches]
     unitWeight :: Test -> Int
     unitWeight test = case concat (leafPaths test) of
-        path | "whole corpus parity" `elem` path || "whole parsed and elaborated source corpus" `elem` path -> 60
+        path | any (`elem` path) ["whole corpus parity", "whole parsed and elaborated source corpus", "whole corpus native round trip"] -> 60
         path | "examples/mir/emit/emit.tersus" `elem` path || "examples/mir/mir_reader/mir_reader.tersus" `elem` path -> 30
         path | "the IR of a loop, interpreted" `elem` path || "raw lists and Boxes library" `elem` path -> 30
         path | "MIR loops" `elem` path -> 32
@@ -433,8 +436,11 @@ testScheduling names batches = TestList "testScheduling"
             && null (batchItems 0 1 values) && null (batchItems 4 0 values) && null (batchItems 4 5 values))
     , testCase "AST and parser batches each retain one complete corpus chunk" $
         testAssertTrue (all (\(original, split) ->
-            if groupName original `elem` ["testAstData", "testParser"] then
-                let label = if groupName original == "testAstData" then "whole parsed and elaborated source corpus" else "whole corpus parity"
+            if groupName original `elem` ["testAstData", "testParser", "testAstReader"] then
+                let label = case groupName original of
+                        "testAstData" -> "whole parsed and elaborated source corpus"
+                        "testAstReader" -> "whole corpus native round trip"
+                        _ -> "whole corpus parity"
                     chunks batch = [last path | path <- leafPaths batch, label `elem` path]
                  in all ((== 1) . length . chunks) split
                     && sort (concatMap chunks split) == ["1/4", "2/4", "3/4", "4/4"]
@@ -467,9 +473,12 @@ testScheduling names batches = TestList "testScheduling"
             [map (groupWeight . groupName) split | (original, split) <- batches,
                 groupName original `elem` ["testAstData", "testParser"]]
             [[50,177,54,196], [79,56,188,158]]
+    , testCase "AST reader launch weights retain actual whole-batch measurements" $
+        testAssertEq [map (groupWeight . groupName) split | (original, split) <- batches,
+            groupName original == "testAstReader"] [[107,145,91,157]]
     , testCase "measured tail groups are not launched as unprofiled one-second work" $
-        testAssertEq (map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap"])
-            [447,429,348,222,447,235,482,742]
+        testAssertEq (map groupWeight ["testAstReader:1/4", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap"])
+            [107,429,348,222,447,235,482,742]
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $
