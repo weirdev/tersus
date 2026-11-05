@@ -1,9 +1,9 @@
-{-# LANGUAGE CPP #-}
-
 module Native
     ( cacheDirectory
     , cacheLock
     , cachedProgram
+    , parallelBuilds
+    , availableProcessors
     , buildExecutable
     , buildExecutableWith
     , buildExecutableFast
@@ -13,21 +13,20 @@ module Native
     , runCommandWithInputFull
     ) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
-import Control.Exception (IOException, bracket, evaluate, finally, try)
+import Control.Concurrent (forkIOWithUnmask, killThread)
+import Control.Concurrent.Chan (newChan, readChan, writeChan)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, withMVar)
+import Control.Exception (IOException, SomeException, bracket, evaluate, finally, onException, throwIO, try)
+import Control.Monad (forM)
+import GHC.Conc (getNumCapabilities, getNumProcessors, setNumCapabilities)
 import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (..), SeekMode (AbsoluteSeek), hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr)
-import System.Posix.IO (LockRequest (WriteLock), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
-#ifdef MIN_VERSION_unix
-# if MIN_VERSION_unix(2,8,0)
-import System.Posix.IO (OpenFileFlags (creat))
-# endif
-#endif
-import System.Posix.Types (Fd)
+import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr)
+import GHC.IO.Handle.Lock (LockMode (..), hLock)
 import System.IO.Unsafe (unsafePerformIO)
+import System.Info (os)
 
 import qualified Data.Map.Strict as Map
 import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, readProcessWithExitCode, rawSystem, waitForProcess)
@@ -190,6 +189,59 @@ writeTemporary dir template text = do
     hClose handle
     return path
 
+-- Older GHCs count the machine's CPUs rather than the process's Linux affinity.
+availableProcessors :: IO Int
+availableProcessors
+    | os /= "linux" = getNumProcessors
+    | otherwise = do
+        counted <- try (readProcessWithExitCode "nproc" [] "") :: IO (Either IOException (ExitCode, String, String))
+        case counted of
+            Right (ExitSuccess, output, _) -> case reads output of
+                [(count, rest)] | count > 0 && all (`elem` " \t\r\n") rest -> pure count
+                _ -> getNumProcessors
+            _ -> getNumProcessors
+
+{-# NOINLINE buildCapabilities #-}
+buildCapabilities :: MVar (Int, Int)
+buildCapabilities = unsafePerformIO (newMVar (0, 0))
+
+acquireBuildCapabilities :: IO ()
+acquireBuildCapabilities = modifyMVar buildCapabilities $ \(users, original) ->
+    if users > 0 then pure ((users + 1, original), ()) else do
+        previous <- getNumCapabilities
+        processors <- availableProcessors
+        setNumCapabilities processors
+        pure ((1, previous), ())
+
+releaseBuildCapabilities :: () -> IO ()
+releaseBuildCapabilities _ = modifyMVar buildCapabilities $ \(users, original) ->
+    if users > 1 then pure ((users - 1, original), ()) else do
+        setNumCapabilities original
+        pure ((0, 0), ())
+
+-- Use the allowed CPUs until the last nested or overlapping build region exits.
+parallelBuilds :: [IO a] -> IO [a]
+parallelBuilds actions = bracket acquireBuildCapabilities releaseBuildCapabilities $ \_ -> do
+    completed <- newChan
+    let start [] = pure []
+        start ((index, action) : rest) = do
+            slot <- newEmptyMVar
+            thread <- forkIOWithUnmask $ \unmask -> do
+                result <- try (unmask action)
+                putMVar slot result
+                writeChan completed (index, result)
+            others <- start rest `onException` stop [(thread, slot)]
+            pure ((thread, slot) : others)
+        stop running = do
+            mapM_ (killThread . fst) running
+            mapM_ (readMVar . snd) running
+    bracket (start (zip [0 :: Int ..] actions)) stop $ \running -> do
+        results <- forM running $ \_ -> do
+            (index, result) <- readChan completed
+            value <- either (\e -> throwIO (e :: SomeException)) pure result
+            pure (index, value)
+        pure (Map.elems (Map.fromList results))
+
 -- A program in the cache, named for what it is made of: made by the action if it is not there. It is made under another name and moved, so that a build that is cut
 -- short leaves nothing that looks like the program.
 -- One build of a cached program at a time in this process: callers that reach a cold cache together (the cases of a
@@ -206,17 +258,6 @@ cacheLock key = modifyMVar cacheLocks $ \locks -> case Map.lookup key locks of
         lock <- newMVar ()
         pure (Map.insert key lock locks, lock)
 
-openCacheLock :: FilePath -> IO Fd
-#ifdef MIN_VERSION_unix
-# if MIN_VERSION_unix(2,8,0)
-openCacheLock path = openFd path WriteOnly defaultFileFlags{creat = Just 0o600}
-# else
-openCacheLock path = openFd path WriteOnly (Just 0o600) defaultFileFlags
-# endif
-#else
-openCacheLock path = openFd path WriteOnly (Just 0o600) defaultFileFlags
-#endif
-
 cachedProgram :: String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
 cachedProgram kind hash what build = do
     lock <- cacheLock (kind ++ hash)
@@ -227,9 +268,10 @@ cachedProgram kind hash what build = do
             Ok dir -> do
                 let exe = dir </> (kind ++ "-" ++ hash)
                 -- Keep the lock file: unlinking it could give waiters different inodes.
-                -- The MVar must enclose the fd's lifetime: fcntl locks belong to processes, not threads.
-                bracket (openCacheLock (exe ++ ".lock")) closeFd $ \fd -> do
-                    waitToSetLock fd (WriteLock, AbsoluteSeek, 0, 0)
+                -- Handle locks belong to open descriptions, not the process: independent
+                -- build threads must not trigger fcntl's process-level deadlock detection.
+                bracket (openFile (exe ++ ".lock") ReadWriteMode) hClose $ \handle -> do
+                    hLock handle ExclusiveLock
                     present <- doesFileExist exe
                     if present
                         then pure (Ok exe)

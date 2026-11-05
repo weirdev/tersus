@@ -19,7 +19,7 @@ module TersusParser
 import Control.Exception (evaluate)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import System.Environment (lookupEnv)
-import System.Directory (doesFileExist, findExecutable)
+import System.Directory (doesFileExist)
 import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -28,17 +28,15 @@ import qualified FileParserProtocol as File
 import qualified ParsedFile as FileData
 import qualified ParserSeed
 import SourceParse (SourceParts, parseSourcePartsWith, parseWithEqualityWith)
-import Hash (fingerprint)
-import LlvmRuntime (runtimeSource)
 import Mir (Program)
 import MirData (writeProgram)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
-import MirHousekeeping (cachedEmitter, nativeProgram, toolProgram)
+import MirHousekeeping (cachedEmitter, cachedParser, nativeProgram, parserHash, toolProgram)
 import MirOwnership (insertOwnership)
-import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
-import PreludeSource (parserPackageFiles)
-import Seed (emitterHash, cachedParserSeed)
+import Native (runWithInput, runWithInputFull)
+import Seed (cachedParserSeed)
 import Syntax (Statement)
+import ValidatorNative (cachedBootstrapEmitter)
 import Utils
 
 parseSource :: String -> Result [Statement] String
@@ -193,21 +191,11 @@ nativeTool = do
     case seed of
         Error e -> pure (ToolFailed e)
         Ok _ -> do
-            made <- cachedProgram "tersus-parser" parserHash "the parser written in Tersus" buildTool
+            bootstrap <- cachedBootstrapEmitter
+            made <- case bootstrap of Error e -> pure (Error e); Ok _ -> cachedParser
             pure $ case made of
                 Ok exe -> ToolNative exe
                 Error e -> ToolFailed ("Native parser bootstrap failed: " ++ e)
-
-buildTool :: FilePath -> IO (Result () String)
-buildTool output = do
-    clang <- findExecutable "clang"
-    case clang of
-        Nothing -> pure (Error "Could not run clang: clang was not found")
-        Just _ -> do
-            ir <- emitParserIr
-            case ir of
-                Error e -> pure (Error e)
-                Ok text -> buildExecutable output text
 
 emitParserIr :: IO (Result String String)
 emitParserIr = do
@@ -230,9 +218,6 @@ runInterpreted :: Program -> String -> Result (String, String, Maybe MirValue) S
 runInterpreted program input = case runProgramEnv RunEnv{envArgs = [], envInput = input, envFile = const Nothing} program of
     Error e -> Error ("Evaluation failed: " ++ e)
     Ok outcome -> Ok (outStdout outcome, outStderr outcome, outValue outcome)
-
-parserHash :: String
-parserHash = fingerprint ([emitterHash] ++ concatMap (\(path, contents) -> [path, contents]) parserPackageFiles ++ [runtimeSource])
 
 trimEnd :: String -> String
 trimEnd = reverse . dropWhile (== '\n') . reverse
