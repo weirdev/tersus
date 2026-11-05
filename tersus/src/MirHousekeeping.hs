@@ -20,18 +20,20 @@ module MirHousekeeping
     , prepareValidator
     , ownedContentKey
     , cachedPreparedInput
+    , cachedContentKey
     , cachedUncheckedValidator
     , prepareBootstrap
     ) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar, withMVar)
 import Control.Exception (IOException, bracket, bracket_, evaluate, finally, try)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import System.Directory (doesFileExist, removeFile, renameFile)
-import System.FilePath ((</>))
-import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
+import System.Directory (doesFileExist, getFileSize, getModificationTime, removeFile, renameFile)
+import Data.Char (isHexDigit, isSpace)
+import System.FilePath (takeFileName, (</>))
+import System.IO (Handle, IOMode (ReadMode), hClose, hGetLine, hPutStr, hPutStrLn, openTempFile, stderr, withFile)
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
 import CacheLock (openLockHandle)
 import System.IO.Unsafe (unsafePerformIO)
@@ -46,7 +48,7 @@ import MirData (readProgram, writeProgram, writeProgramWithGhosts)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (hasLists, lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
-import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, parallelBuilds, runWithInput, runWithInputFull)
+import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (cachedSeed, cachedParserSeed, seedHash, parserSeedHash)
 import Compile (lowerSource)
 import Modules (ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
@@ -230,11 +232,20 @@ interpretedTool = toolProgram
 -- An executable of a program written in Tersus, in the cache: made by the stage 1 emitter if it is not there
 cachedTool :: String -> FilePath -> IO (Result FilePath String)
 cachedTool kind entry = do
-    prepared <- preparedDerived entry (toolProgram entry) []
-    case prepared of
+    key <- derivedKey entry (toolProgram entry) []
+    case key of
         Error e -> pure (Error e)
-        Ok (key, _, input) -> cachedProgram kind key "the housekeeping written in Tersus"
-            (\output -> buildPrepared [] output input)
+        Ok identity -> do
+            existing <- cachedProgramIfPresent kind identity
+            case existing of
+                Error e -> pure (Error e)
+                Ok (Just exe) -> pure (Ok exe)
+                Ok Nothing -> do
+                    prepared <- preparedDerived entry (toolProgram entry) []
+                    case prepared of
+                        Error e -> pure (Error e)
+                        Ok (actual, _, input) -> cachedProgram kind actual "the housekeeping written in Tersus"
+                            (\output -> buildPrepared [] output input)
 
 cachedParser :: IO (Result FilePath String)
 cachedParser = do
@@ -255,16 +266,90 @@ cachedUncheckedValidator = do
 
 cachedUncheckedValidatorExe :: IO (Result FilePath String)
 cachedUncheckedValidatorExe = do
-    prepared <- prepareValidator
-    case prepared of
+    key <- derivedKey "validator" (lowerSource True (validationSource ++ "\n" ++ validationDriverSource)) ["-O2"]
+    case key of
         Error e -> pure (Error e)
-        Ok (key, _, input) -> cachedProgram "validator-unchecked" key "the validator written in Tersus"
-            (\output -> buildPrepared ["-O2"] output input)
+        Ok identity -> do
+            existing <- cachedProgramIfPresent "validator-unchecked" identity
+            case existing of
+                Error e -> pure (Error e)
+                Ok (Just exe) -> pure (Ok exe)
+                Ok Nothing -> do
+                    prepared <- prepareValidator
+                    case prepared of
+                        Error e -> pure (Error e)
+                        Ok (actual, _, input) -> cachedProgram "validator-unchecked" actual "the validator written in Tersus"
+                            (\output -> buildPrepared ["-O2"] output input)
 
 {-# NOINLINE preparationSnapshot #-}
 preparationSnapshot :: String
 preparationSnapshot = fingerprint [show (compilerSourceHash, seedHash, parserSeedHash,
     toolPackageFiles, libPackageFiles, stdlibSource, validationSource, validationDriverSource, runtimeSource)]
+
+preparedInputPath :: FilePath -> FilePath -> [String] -> FilePath
+preparedInputPath dir entry flags = dir </> ("prepared-" ++ fingerprint [show (preparationSnapshot, entry, flags)])
+
+type InputStamp = (FilePath, Integer, String, String)
+
+{-# NOINLINE preparedStamps #-}
+preparedStamps :: MVar (Map.Map FilePath InputStamp)
+preparedStamps = unsafePerformIO (newMVar Map.empty)
+
+inputStamp :: FilePath -> IO InputStamp
+inputStamp path = do
+    size <- getFileSize path
+    modified <- getModificationTime path
+    header <- withFile path ReadMode hGetLine
+    pure (takeFileName path, size, take 19 (show modified), header)
+
+rememberInput :: FilePath -> String -> IO (Result String String)
+rememberInput path input = do
+    stamp <- inputStamp path
+    modifyMVar preparedStamps $ \known -> pure (Map.insert path stamp known, Ok input)
+
+cachedContentKey :: FilePath -> [String] -> [(FilePath, [String])] -> IO (Result String String) -> IO (Result String String)
+cachedContentKey entry flags dependencies make = do
+    cache <- cacheDirectory
+    case cache of
+        Error e -> pure (Error e)
+        Ok dir -> do
+            let identity = fingerprint [show (preparationSnapshot, entry, flags, os, arch)]
+                path = dir </> ("content-key-" ++ identity)
+                inputs = [preparedInputPath dir dependency options | (dependency, options) <- dependencies]
+                decode body = case break (== '\n') body of
+                    (header, '\n' : record) | header == fingerprint [identity, record] -> case reads record of
+                        [((key, stamps), rest)] | all isSpace rest && length key == 16 && all isHexDigit key
+                            && [file | (file, _, _, _) <- stamps] == map takeFileName inputs -> Just (key, stamps)
+                        _ -> Nothing
+                    _ -> Nothing
+            stored <- try (do body <- readFile path; _ <- evaluate (length body); pure body) :: IO (Either IOException String)
+            current <- try (mapM inputStamp inputs) :: IO (Either IOException [InputStamp])
+            case (stored, current) of
+                (Right body, Right stamps) | Just (key, expected) <- decode body, stamps == expected -> pure (Ok key)
+                _ -> do
+                    result <- make
+                    case result of
+                        Error e -> pure (Error e)
+                        Ok key -> do
+                            known <- readMVar preparedStamps
+                            case traverse (`Map.lookup` known) inputs of
+                                Nothing -> pure (Ok key)
+                                Just stamps -> do
+                                    let record = show (key, stamps)
+                                    mutex <- cacheLock ("content key " ++ path)
+                                    _ <- try (withMVar mutex $ \_ -> bracket (openLockHandle (path ++ ".lock")) hClose $ \lock -> do
+                                        hLock lock ExclusiveLock
+                                        bracket (openTempFile dir "content-key.tmp") cleanupPrepared $ \(temporary, handle) -> do
+                                            hPutStr handle (fingerprint [identity, record] ++ "\n" ++ record)
+                                            hClose handle
+                                            renameFile temporary path) :: IO (Either IOException ())
+                                    pure (Ok key)
+
+cleanupPrepared :: (FilePath, Handle) -> IO ()
+cleanupPrepared (path, handle) = do
+    _ <- try (hClose handle) :: IO (Either IOException ())
+    _ <- try (removeFile path) :: IO (Either IOException ())
+    pure ()
 
 cachedPreparedInput :: FilePath -> [String] -> (String -> Bool) -> IO (Result String String) -> IO (Result String String)
 cachedPreparedInput entry flags valid build = do
@@ -273,7 +358,7 @@ cachedPreparedInput entry flags valid build = do
         Error e -> pure (Error e)
         Ok dir -> do
             let key = fingerprint [show (preparationSnapshot, entry, flags)]
-                path = dir </> ("prepared-" ++ key)
+                path = preparedInputPath dir entry flags
             mutex <- cacheLock ("prepared " ++ path)
             withMVar mutex $ \_ -> bracket (openLockHandle (path ++ ".lock")) hClose $ \handle -> do
                 hLock handle ExclusiveLock
@@ -285,7 +370,7 @@ cachedPreparedInput entry flags valid build = do
                             _ -> Nothing
                         Left _ -> Nothing
                 case payload of
-                    Just input -> pure (Ok input)
+                    Just input -> rememberInput path input
                     Nothing -> do
                         result <- build
                         case result of
@@ -293,16 +378,11 @@ cachedPreparedInput entry flags valid build = do
                             Ok input -> do
                                 _ <- evaluate (length input)
                                 if not (valid input) then pure (Error "invalid prepared input") else do
-                                    bracket (openTempFile dir "prepared.tmp") cleanup $ \(temporary, output) -> do
+                                    bracket (openTempFile dir "prepared.tmp") cleanupPrepared $ \(temporary, output) -> do
                                         hPutStr output (fingerprint [key, input] ++ "\n" ++ input)
                                         hClose output
                                         renameFile temporary path
-                                    pure (Ok input)
-  where
-    cleanup (path, handle) = do
-        _ <- try (hClose handle) :: IO (Either IOException ())
-        _ <- try (removeFile path) :: IO (Either IOException ())
-        pure ()
+                                    rememberInput path input
 
 {-# NOINLINE preparedPrograms #-}
 preparedPrograms :: MVar (Map.Map FilePath (MVar (Maybe (Program, String))))
@@ -349,6 +429,10 @@ preparedContentKey entry producer input flags = modifyMVar preparedKeys $ \known
 prepareEmitterInput :: IO (Result (Program, String) String)
 prepareEmitterInput = prepareProgram emitterEntry (toolProgram emitterEntry)
 
+derivedKey :: FilePath -> Result Program String -> [String] -> IO (Result String String)
+derivedKey entry raw flags = cachedContentKey entry flags [(emitterEntry, []), (entry, [])] $
+    fmap (mapResult (\(key, _, _) -> key)) (preparedDerived entry raw flags)
+
 preparedDerived :: FilePath -> Result Program String -> [String] -> IO (Result (String, Program, String) String)
 preparedDerived entry raw flags = do
     parts <- parallelBuilds [prepareEmitterInput, prepareProgram entry raw]
@@ -366,7 +450,7 @@ emitterKey = do
     ready <- prepareBootstrap
     case ready of
         Error e -> pure (Error e)
-        Ok () -> do
+        Ok () -> cachedContentKey emitterEntry [] [(emitterEntry, [])] $ do
             prepared <- prepareEmitterInput
             case prepared of
                 Error e -> pure (Error e)
@@ -377,8 +461,7 @@ parserKey = do
     ready <- prepareBootstrap
     case ready of
         Error e -> pure (Error e)
-        Ok () -> fmap (mapResult (\(key, _, _) -> key))
-            (preparedDerived "examples/parser/parser.tersus" (toolProgram "examples/parser/parser.tersus") [])
+        Ok () -> derivedKey "examples/parser/parser.tersus" (toolProgram "examples/parser/parser.tersus") []
 
 prepareValidator :: IO (Result (String, Program, String) String)
 prepareValidator = do
@@ -401,20 +484,29 @@ cachedEmitter = do
 
 cachedEmitterExe :: IO (Result FilePath String)
 cachedEmitterExe = do
-    prepared <- prepareEmitterInput
-    case prepared of
+    key <- emitterKey
+    case key of
         Error e -> pure (Error e)
-        Ok (_, input) -> do
-            key <- preparedContentKey emitterEntry seedHash input []
-            cachedProgram "emitter" key "the emitter written in Tersus" $ \output -> do
-                zero <- cachedSeed
-                case zero of
-                    Error e -> pure (Error e)
-                    Ok compiler -> do
-                        ir <- runWithInput compiler input
-                        case ir of
-                            Error e -> pure (Error e)
-                            Ok text -> buildExecutable output text
+        Ok identity -> do
+            existing <- cachedProgramIfPresent "emitter" identity
+            case existing of
+                Error e -> pure (Error e)
+                Ok (Just exe) -> pure (Ok exe)
+                Ok Nothing -> do
+                    prepared <- prepareEmitterInput
+                    case prepared of
+                        Error e -> pure (Error e)
+                        Ok (_, input) -> do
+                            actual <- preparedContentKey emitterEntry seedHash input []
+                            cachedProgram "emitter" actual "the emitter written in Tersus" $ \output -> do
+                                zero <- cachedSeed
+                                case zero of
+                                    Error e -> pure (Error e)
+                                    Ok compiler -> do
+                                        ir <- runWithInput compiler input
+                                        case ir of
+                                            Error e -> pure (Error e)
+                                            Ok text -> buildExecutable output text
 
 buildPrepared :: [String] -> FilePath -> String -> IO (Result () String)
 buildPrepared flags output input = do

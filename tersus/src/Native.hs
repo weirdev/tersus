@@ -2,6 +2,7 @@ module Native
     ( cacheDirectory
     , cacheLock
     , cachedProgram
+    , cachedProgramIfPresent
     , parallelBuilds
     , availableProcessors
     , buildExecutable
@@ -295,8 +296,8 @@ cacheLock key = modifyMVar cacheLocks $ \locks -> case Map.lookup key locks of
         lock <- newMVar ()
         pure (Map.insert key lock locks, lock)
 
-cachedProgram :: String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
-cachedProgram kind hash what build = do
+withCachedProgram :: String -> String -> (FilePath -> FilePath -> IO (Result a String)) -> IO (Result a String)
+withCachedProgram kind hash use = do
     lock <- cacheLock (kind ++ hash)
     withMVar lock $ \_ -> do
         cache <- cacheDirectory
@@ -309,17 +310,26 @@ cachedProgram kind hash what build = do
                 -- build threads must not trigger fcntl's process-level deadlock detection.
                 bracket (openLockHandle (exe ++ ".lock")) hClose $ \handle -> do
                     hLock handle ExclusiveLock
-                    present <- doesFileExist exe
-                    if present
-                        then pure (Ok exe)
-                        else do
-                            hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
-                            (partial, handle) <- openTempFile dir (kind ++ ".tmp")
-                            hClose handle
-                            removeFile partial
-                            (do
-                                built <- build partial
-                                case built of
-                                    Error e -> pure (Error e)
-                                    Ok () -> renameFile partial exe >> pure (Ok exe))
-                                `finally` removeIfExists partial
+                    use dir exe
+
+cachedProgramIfPresent :: String -> String -> IO (Result (Maybe FilePath) String)
+cachedProgramIfPresent kind hash = withCachedProgram kind hash $ \_ exe -> do
+    present <- doesFileExist exe
+    pure (Ok (if present then Just exe else Nothing))
+
+cachedProgram :: String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
+cachedProgram kind hash what build = withCachedProgram kind hash $ \dir exe -> do
+    present <- doesFileExist exe
+    if present
+        then pure (Ok exe)
+        else do
+            hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
+            (partial, handle) <- openTempFile dir (kind ++ ".tmp")
+            hClose handle
+            removeFile partial
+            (do
+                built <- build partial
+                case built of
+                    Error e -> pure (Error e)
+                    Ok () -> renameFile partial exe >> pure (Ok exe))
+                `finally` removeIfExists partial

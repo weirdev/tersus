@@ -6,7 +6,7 @@ import Control.Exception (AsyncException (ThreadKilled), IOException, SomeAsyncE
 import Control.Monad (forM, when)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import GHC.Clock (getMonotonicTime)
-import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, createFileLink, doesFileExist, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile, renameFile)
+import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, createFileLink, doesFileExist, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (..), StdStream (..), getPid, proc, waitForProcess, withCreateProcess)
@@ -214,10 +214,12 @@ copyBootstrapTools source target = do
     names <- listDirectory source
     mapM_ (\name -> do
         regular <- doesFileExist (source </> name)
-        when (regular && not (".lock" `isSuffixOf` name))
-            (copyFile (source </> name) (target </> name)))
+        when (regular && not (".lock" `isSuffixOf` name)) $ do
+            copyFile (source </> name) (target </> name)
+            modified <- getModificationTime (source </> name)
+            setModificationTime (target </> name) modified)
         [name | name <- names, any (`isPrefixOf` name)
-            ["parser-seed-", "tersus-parser-", "seed-", "emitter-", "mir-verify-", "mir-erase-", "validator-", "tersus_rt_", "prepared-"]]
+            ["parser-seed-", "tersus-parser-", "seed-", "emitter-", "mir-verify-", "mir-erase-", "validator-", "tersus_rt_", "prepared-", "content-key-"]]
 
 wrongSeed :: String -> FilePath -> IO [(String, String)]
 wrongSeed variable home = do

@@ -105,6 +105,7 @@ testSharedCache =
         , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
         , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
         , TestCase "first storage demand retries after parser seed repair" storageRetry
+        , TestCase "content-key locators retain verified dependencies across cache homes" contentLocatorIntegrity
         , TestCase "prepared input aliases reuse verified bytes and repair corrupt or partial files" preparedAliasIntegrity
         , TestCase "proof-only changes invalidate checked certificates and verdict namespaces" proofCertificateNamespace
         , TestCase "cancelled native subprocesses die and release the cache lock" nativeProcessCancellation
@@ -362,6 +363,45 @@ survivingChildLock = withCacheHome $ \home -> do
             <> testAssertTrue (case alive of Right () -> True; Left _ -> False)
             <> testAssertEq reused (Just first))) `finally` cleanup
 
+contentLocatorIntegrity :: IO TestResult
+contentLocatorIntegrity = withCacheHome $ \home -> do
+    calls <- newIORef (0 :: Int)
+    let input = "verified locator input"
+        prepare = MirHousekeeping.cachedPreparedInput "locator-input" [] (== input) (pure (Ok input))
+        make = do
+            _ <- atomicModifyIORef' calls (\n -> (n + 1, ()))
+            fmap (mapResult (\text -> MirHousekeeping.ownedContentKey "producer" text [])) prepare
+        lookupKey = MirHousekeeping.cachedContentKey "locator-probe" [] [("locator-input", [])] make
+    first <- lookupKey
+    second <- lookupKey
+    names <- listDirectory (home </> "tersus")
+    copied <- withCacheHome $ \target -> do
+        createDirectoryIfMissing True (target </> "tersus")
+        mapM_ (\name -> copyCacheFile (home </> "tersus" </> name) (target </> "tersus" </> name))
+            [name | name <- names, not (".lock" `isInfixOf` name)]
+        lookupKey
+    reused <- readIORef calls
+    case ([home </> "tersus" </> name | name <- names, "prepared-" `isPrefixOf` name, not (".lock" `isInfixOf` name)],
+          [home </> "tersus" </> name | name <- names, "content-key-" `isPrefixOf` name, not (".lock" `isInfixOf` name)]) of
+        ([payload], [locator]) -> do
+            writeFile payload "changed-header\ncorrupt payload"
+            repaired <- lookupKey
+            writeFile locator "partial locator"
+            restored <- lookupKey
+            distinct <- MirHousekeeping.cachedContentKey "locator-probe" ["-O0"] [("locator-input", [])]
+                (pure (Error "different flags must miss"))
+            incomplete <- MirHousekeeping.cachedContentKey "locator-probe" [] [("locator-input", []), ("missing-input", [])]
+                (pure (Error "different dependencies must miss"))
+            rebuilt <- readIORef calls
+            pure $ firstFailure
+                [ testAssertTrue (case first of Ok _ -> True; _ -> False)
+                , testAssertEq [second, copied, repaired, restored] (replicate 4 first)
+                , testAssertEq reused 1, testAssertEq rebuilt 3
+                , testAssertEq distinct (Error "different flags must miss")
+                , testAssertEq incomplete (Error "different dependencies must miss")
+                ]
+        _ -> pure (Just "locator test did not publish one input and one key")
+
 preparedAliasIntegrity :: IO TestResult
 preparedAliasIntegrity = withCacheHome $ \home -> do
     count <- newIORef (0 :: Int)
@@ -613,6 +653,7 @@ probe = do
     terminal <- lookupEnv "TERSUS_TERMINAL_PROBE"
     routing <- lookupEnv "TERSUS_TEST_ROUTING_PROBE"
     content <- lookupEnv "TERSUS_CONTENT_RESTORE_PROBE"
+    warm <- lookupEnv "TERSUS_WARM_START_PROBE"
     case terminal of
         Just path -> do
             ir <- readFile path
@@ -620,11 +661,23 @@ probe = do
             case result of
                 Ok ExitSuccess -> putStrLn "[CTRL-C-DELEGATED]" >> pure Nothing
                 other -> pure (Just (show other))
-        Nothing -> case content of
-            Just directory -> contentRestoreProbe directory
-            Nothing -> case routing of
-                Just "1" -> getNumCapabilities >>= \count -> putStrLn ("[CAPABILITIES] " ++ show count) >> pure Nothing
-                _ -> cacheProbe
+        Nothing -> case warm of
+            Just "1" -> warmStartProbe
+            _ -> case content of
+                Just directory -> contentRestoreProbe directory
+                Nothing -> case routing of
+                    Just "1" -> getNumCapabilities >>= \count -> putStrLn ("[CAPABILITIES] " ++ show count) >> pure Nothing
+                    _ -> cacheProbe
+
+warmStartProbe :: IO TestResult
+warmStartProbe = do
+    start <- getMonotonicTime
+    result <- Bootstrap.tersusLlvm "return 42;"
+    elapsed <- (subtract start) <$> getMonotonicTime
+    putStrLn ("[WARM-START] " ++ show elapsed ++ "s")
+    pure $ case result of
+        Error e -> Just e
+        Ok ir -> testAssertTrue (not (null ir))
 
 contentRestoreProbe :: FilePath -> IO TestResult
 contentRestoreProbe directory = do
@@ -1399,7 +1452,7 @@ seedHome home = do
             mapM_ (\name -> do
                 let from = realCache </> name
                 isFile <- doesFileExist from
-                when isFile (copyFile from (home </> "tersus" </> name))) names
+                when isFile (copyCacheFile from (home </> "tersus" </> name))) names
         Nothing -> pure ()
 
 freshHome :: String -> IO FilePath
@@ -1458,6 +1511,12 @@ toolValidationParity =
 
 -- The compiled tools of a cache (the validator, the emitter, the MIR checker
 -- and eraser, the seed and the runtime), copied into another
+copyCacheFile :: FilePath -> FilePath -> IO ()
+copyCacheFile source target = do
+    copyFile source target
+    modified <- getModificationTime source
+    setModificationTime target modified
+
 copyCompiledTools :: FilePath -> FilePath -> IO ()
 copyCompiledTools from to = do
     createDirectoryIfMissing True to
@@ -1465,11 +1524,11 @@ copyCompiledTools from to = do
     mapM_ (\name -> do
         regular <- doesFileExist (from </> name)
         when (regular && compiledToolName name) $
-            copyFile (from </> name) (to </> name)) names
+            copyCacheFile (from </> name) (to </> name)) names
 
 compiledToolName :: String -> Bool
 compiledToolName name = any (`isPrefixOf` name)
-    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "parser-seed-", "tersus-parser-", "tersus_rt_", "prepared-"]
+    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "parser-seed-", "tersus-parser-", "tersus_rt_", "prepared-", "content-key-"]
     && not (".lock" `isInfixOf` name)
 
 withCacheHome :: (FilePath -> IO a) -> IO a
@@ -1576,9 +1635,9 @@ primeBootstrapTools home = do
                     mapM_ (\name -> do
                         let output = target </> name
                         exists <- doesFileExist output
-                        when (not exists) (copyFile (source </> name) output))
+                        when (not exists) (copyCacheFile (source </> name) output))
                         [name | name <- names, '.' `notElem` name,
-                            any (`isPrefixOf` name) ["seed-", "parser-seed-", "emitter-", "mir-verify-", "mir-erase-", "tersus-parser-", "validator-", "prepared-"]]
+                            any (`isPrefixOf` name) ["seed-", "parser-seed-", "emitter-", "mir-verify-", "mir-erase-", "tersus-parser-", "validator-", "prepared-", "content-key-"]]
 
 packageProcesses :: IO TestResult
 packageProcesses = do

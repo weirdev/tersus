@@ -242,8 +242,15 @@ production use.
 
 Prepared owned-MIR bytes and complete validator self-check transports are
 cached per compiler snapshot, entry and flags. Every read checks the stored
-fingerprint and format; corrupt or partial entries are rebuilt, and only
-successful preparation is published atomically. Executable identities use
+fingerprint and format when a payload is opened; corrupt or partial entries
+are rebuilt, and only successful preparation is published atomically.
+A compact locator remembers each derived content key and the validated
+inputs' checksum headers, sizes and modification times. Warm processes
+check that metadata without decoding every tool program. These are
+freshness checks, not revalidation of unread payload bytes; a build miss
+still prepares and validates its actual inputs outside the publication lock.
+Both payloads and locators remain specific to the full compiler snapshot.
+Executable identities use
 the actual prepared bytes, not the snapshot identity, so an unrelated host
 source change can reuse unchanged native tools. The checked-validator
 identity also binds both complete self-check transports: proof-only changes
