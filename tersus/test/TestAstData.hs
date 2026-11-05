@@ -1,10 +1,12 @@
 module TestAstData (testAstData, testAstReader) where
 
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Monad (forM)
 import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (listDirectory)
 import System.Exit (ExitCode (..))
+import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Modules as Mod
 import qualified PackageCompile as Package
@@ -95,20 +97,24 @@ writerLimits = firstFailure
     rejected (Ok _) = Just "writer silently accepted unsupported type data"
 
 roundTrip :: [Statement] -> TestResult
-roundTrip ss = case A.readParsed (dataParsed ss) of
-    Error e -> Just e
-    Ok back
-        | show ss /= show back -> Just "syntax or builtin metadata changed"
-        | dataParsed ss /= dataParsed back -> Just "reserialization changed"
-        | otherwise -> Nothing
+roundTrip ss =
+    let text = dataParsed ss
+     in case A.readParsed text of
+            Error e -> Just e
+            Ok back
+                | show ss /= show back -> Just "syntax or builtin metadata changed"
+                | text /= dataParsed back -> Just "reserialization changed"
+                | otherwise -> Nothing
 
 elaboratedRoundTrip :: Elaborated -> TestResult
-elaboratedRoundTrip e = case A.readElaborated (dataElaborated e) of
-    Error err -> Just err
-    Ok back
-        | show e /= show back -> Just "elaborated syntax, occurrence types or builtin metadata changed"
-        | dataElaborated e /= dataElaborated back -> Just "elaborated reserialization changed"
-        | otherwise -> Nothing
+elaboratedRoundTrip e =
+    let text = dataElaborated e
+     in case A.readElaborated text of
+            Error err -> Just err
+            Ok back
+                | show e /= show back -> Just "elaborated syntax, occurrence types or builtin metadata changed"
+                | text /= dataElaborated back -> Just "elaborated reserialization changed"
+                | otherwise -> Nothing
 
 knownParserRejection :: String -> String -> Bool
 knownParserRejection path message =
@@ -311,9 +317,22 @@ haskellRefused s = case A.readParsed s of
     Ok _ -> Just "accepted malformed AST"
 
 
+{-# NOINLINE readerProgramCache #-}
+readerProgramCache :: MVar (Maybe (Result M.Program String))
+readerProgramCache = unsafePerformIO (newMVar Nothing)
+
+readerProgram :: IO (Result M.Program String)
+readerProgram = modifyMVar readerProgramCache $ \cached -> case cached of
+    Just result -> pure (cached, result)
+    Nothing -> do
+        compiled <- programFromFile readerPath
+        pure $ case compiled of
+            Ok _ -> (Just compiled, compiled)
+            Error _ -> (Nothing, compiled)
+
 interpreted :: [Statement] -> [String] -> IO TestResult
 interpreted ss args = do
-    compiled <- programFromFile readerPath
+    compiled <- readerProgram
     pure $ case compiled `bindResult` runProgramIn noWorld{worldInput = dataParsed ss, worldArgs = args} of
         Error e -> Just e
         Ok ((out, err), _) ->
@@ -333,30 +352,47 @@ checkOutput _ _ out = case A.readParsed out of
         Error e -> Just e
         Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt 5))
 
+{-# NOINLINE astReaderExeCache #-}
+astReaderExeCache :: MVar (Maybe FilePath)
+astReaderExeCache = unsafePerformIO (newMVar Nothing)
+
+astReaderExe :: IO (Result FilePath String)
+astReaderExe = modifyMVar astReaderExeCache $ \cached -> case cached of
+    Just exe -> pure (cached, Ok exe)
+    Nothing -> do
+        built <- buildAstReaderExe
+        pure $ case built of
+            Ok exe -> (Just exe, built)
+            Error _ -> (Nothing, built)
+
+buildAstReaderExe :: IO (Result FilePath String)
+buildAstReaderExe = do
+    files <- Mod.snapshotFromFilesystem readerPath
+    checked <- programFromFiles readerPath files
+    seed <- cachedSeed
+    case (checked `bindResult` nativeProgram, seed) of
+        (Error e, _) -> pure (Error e)
+        (_, Error e) -> pure (Error e)
+        (Ok program, Ok compiler) -> do
+            let native = insertOwnership program
+                dataText = writeProgram native
+                build output = do
+                    ir <- runWithInput compiler dataText
+                    case ir of
+                        Error e -> pure (Error e)
+                        Ok text -> buildExecutable output text
+            cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the AST reader" build
+
 withAstReader :: (FilePath -> IO TestResult) -> IO TestResult
 withAstReader use = do
     available <- clangAvailable
     if not available
         then putStrLn "[SKIP] native AST reader: clang is unavailable" >> pure Nothing
         else do
-            files <- Mod.snapshotFromFilesystem readerPath
-            checked <- programFromFiles readerPath files
-            seed <- cachedSeed
-            case (checked `bindResult` nativeProgram, seed) of
-                (Error e, _) -> pure (Just e)
-                (_, Error e) -> pure (Just e)
-                (Ok program, Ok compiler) -> do
-                    let native = insertOwnership program
-                        dataText = writeProgram native
-                        build output = do
-                            ir <- runWithInput compiler dataText
-                            case ir of
-                                Error e -> pure (Error e)
-                                Ok text -> buildExecutable output text
-                    built <- cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the AST reader" build
-                    case built of
-                        Error e -> pure (Just e)
-                        Ok exe -> use exe
+            built <- astReaderExe
+            case built of
+                Error e -> pure (Just e)
+                Ok exe -> use exe
 
 nativeText :: FilePath -> String -> IO TestResult
 nativeText exe text = do
