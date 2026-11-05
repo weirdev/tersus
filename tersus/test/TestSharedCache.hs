@@ -9,7 +9,7 @@ import TestProgramBinaryChecks (binaryChecks, richProgram)
 import TestProgramBuildIdentity (concreteBuildIdentity)
 import Control.DeepSeq (force)
 import qualified Control.Exception as Exception
-import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay)
 import Control.Exception (IOException, MaskingState (..), SomeException, bracket, displayException, finally, getMaskingState, throwIO, try)
 import Control.Monad (when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
@@ -92,6 +92,7 @@ testSharedCache =
         , TestCase "native crashed builders release the lock for retry" (nativeRecovery "crash")
         , TestCase "native killed builders release the lock for retry" (nativeRecovery "hold")
         , TestCase "native threads still build once" nativeThreads
+        , TestCase "reader preparation retains successes and rebuilds evicted executables" readerPreparationCache
         , TestCase "independent native builds overlap and restore capabilities" parallelOverlap
         , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
         , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
@@ -251,6 +252,23 @@ binaryFailureRetry = withCacheHome $ \_ -> do
     second <- sharedProgram stage source (pure (Ok richProgram))
     present <- doesFileExist file
     pure $ firstFailure [testAssertEq first (Error "transient"), testAssertTrue absent, testAssertEq second (Ok richProgram), testAssertTrue present]
+readerPreparationCache :: IO TestResult
+readerPreparationCache = withNativeHome $ \home -> do
+    box <- newMVar Nothing
+    calls <- newIORef (0 :: Int)
+    let path = home </> "reader"
+        prepare = do
+            atomicModifyIORef' calls (\n -> (n + 1, ()))
+            writeFile path "prepared"
+            pure (Ok path)
+    refused <- memoizedTestExecutable box (pure (Error "prepare failed"))
+    first <- memoizedTestExecutable box prepare
+    hit <- memoizedTestExecutable box prepare
+    removeFile path
+    rebuilt <- memoizedTestExecutable box prepare
+    count <- readIORef calls
+    pure (testAssertEq refused (Error "prepare failed")
+        <> testAssertEq [first, hit, rebuilt] (replicate 3 (Ok path)) <> testAssertEq count 2)
 
 parallelOverlap :: IO TestResult
 parallelOverlap = do
