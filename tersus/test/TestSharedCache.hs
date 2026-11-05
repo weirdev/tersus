@@ -30,7 +30,7 @@ import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (IOMode (WriteMode), SeekMode (AbsoluteSeek), hClose, openTempFile, withFile)
 import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Process (exitImmediately, getProcessID)
-import System.Posix.Signals (sigKILL, signalProcess)
+import System.Posix.Signals (nullSignal, sigKILL, signalProcess)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle), createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
@@ -97,6 +97,7 @@ testSharedCache =
         , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
         , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
         , TestCase "cancelled native subprocesses die and release the cache lock" nativeProcessCancellation
+        , TestCase "surviving children cannot retain close-on-exec cache locks" survivingChildLock
         , TestCase "available CPU count ignores unrelated OpenMP policy" affinityIgnoresOpenMP
         , TestCase "interactive children retain their SIGINT handler" interactiveControlC
         , TestCase "independent process threads do not form a false file-lock cycle" nativeThreadedProcesses
@@ -326,6 +327,28 @@ parallelFailure = do
         , testAssertEq ended (Just ())
         , testAssertEq after before
         ]
+
+survivingChildLock :: IO TestResult
+survivingChildLock = withCacheHome $ \home -> do
+    let marker = home </> "surviving-child"
+        script = "sleep 60 & printf '%s\\n' \"$!\" > \"$1\""
+        make = cachedProgram "native-cloexec" "key" "close-on-exec lock probe"
+    first <- make $ \output -> do
+        (code, _, errors) <- runCommandWithInputFull "/bin/sh" ["-c", script, "surviving-child", marker] ""
+        case code of
+            ExitSuccess -> writeFile output "built" >> pure (Ok ())
+            _ -> pure (Error errors)
+    pidText <- readFile marker
+    let pid = read pidText
+        cleanup = do
+            _ <- try (signalProcess sigKILL pid) :: IO (Either IOException ())
+            pure ()
+    (do
+        alive <- try (signalProcess nullSignal pid) :: IO (Either IOException ())
+        reused <- timeout 2000000 (make (\_ -> pure (Error "surviving child forced a duplicate build")))
+        pure (testAssertTrue (case first of Ok _ -> True; Error _ -> False)
+            <> testAssertTrue (case alive of Right () -> True; Left _ -> False)
+            <> testAssertEq reused (Just first))) `finally` cleanup
 
 nativeProcessCancellation :: IO TestResult
 nativeProcessCancellation = withCacheHome $ \home -> do

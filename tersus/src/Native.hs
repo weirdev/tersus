@@ -35,6 +35,7 @@ import System.Info (os)
 import qualified Data.Map.Strict as Map
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (..), getPid, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess, withCreateProcess)
 
+import CacheLock (openLockHandle)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Utils
@@ -182,7 +183,7 @@ runProcessWithInputFull exe command input = do
 
 waitOwnedProcess :: CreateProcess -> IO ExitCode
 waitOwnedProcess command = mask $ \restore ->
-    withCreateProcess command{close_fds = True} $ \_ _ _ process -> do
+    withCreateProcess command $ \_ _ _ process -> do
         pid <- getPid process
         restore (waitForProcess process) `onException` case pid of
             Just group | create_group command -> stopProcessGroup group process
@@ -216,7 +217,7 @@ availableProcessors
     | otherwise = do
         environment <- getEnvironment
         let clean = filter (\(name, _) -> name `notElem` ["OMP_NUM_THREADS", "OMP_THREAD_LIMIT"]) environment
-        counted <- try (readCreateProcessWithExitCode (proc "nproc" []){env = Just clean, close_fds = True} "") :: IO (Either IOException (ExitCode, String, String))
+        counted <- try (readCreateProcessWithExitCode (proc "nproc" []){env = Just clean} "") :: IO (Either IOException (ExitCode, String, String))
         case counted of
             Right (ExitSuccess, output, _) -> case reads output of
                 [(count, rest)] | count > 0 && all (`elem` " \t\r\n") rest -> pure count
@@ -292,7 +293,7 @@ cachedProgram kind hash what build = do
                 -- Keep the lock file: unlinking it could give waiters different inodes.
                 -- Handle locks belong to open descriptions, not the process: independent
                 -- build threads must not trigger fcntl's process-level deadlock detection.
-                bracket (openFile (exe ++ ".lock") ReadWriteMode) hClose $ \handle -> do
+                bracket (openLockHandle (exe ++ ".lock")) hClose $ \handle -> do
                     hLock handle ExclusiveLock
                     present <- doesFileExist exe
                     if present

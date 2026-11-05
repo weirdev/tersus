@@ -25,10 +25,11 @@ import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, rena
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
-import System.IO (IOMode (..), hClose, hPutStr, openFile, openTempFile)
+import System.IO (hClose, hPutStr, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Mir as M
+import CacheLock (openLockHandle)
 import Hash (fingerprint)
 import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, cachedUncheckedValidator, nativeStorage, prepareBootstrap, validatorHash)
@@ -163,7 +164,7 @@ withVerdictLock text action = do
             -- the second open fails instead of waiting)
             lock <- cacheLock ("verdict " ++ path)
             withMVar lock $ \_ ->
-                bracket (openFile (path ++ ".lock") ReadWriteMode) hClose (\handle -> hLock handle ExclusiveLock >> action)
+                bracket (openLockHandle (path ++ ".lock")) hClose (\handle -> hLock handle ExclusiveLock >> action)
 
 -- The compiled validator's verdicts over the functions given: each one up
 -- to the first refused is proved, the refused one has its own
