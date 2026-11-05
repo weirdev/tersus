@@ -185,7 +185,14 @@ testLinearArithmetic =
         fails facts goal = parseValidateFailProgramHelper (given facts goal) ("Could not prove: " ++ goal)
      in testCaseSeq
             "testLinearArithmetic"
-            [ -- A sum bounded as a whole, or by its parts
+            [ -- Bounds both ways make terms one only at a distance of 0: on a cycle of weight 0, the
+              -- terms the same potential puts at one place
+              holds "affirm i <= j; affirm j <= n; affirm n <= i;" "i = n"
+            , fails "affirm i <= j; affirm j <= n + 1; affirm n <= i;" "i = n"
+            , holds "affirm i >= 0; affirm i < 100; affirm n = i + 1; affirm m = i + 1;" "n = m"
+            , fails "affirm i >= 0; affirm i < 100; affirm n = i + 1; affirm m = i + 2;" "n = m"
+            , fails "affirm i >= 0; affirm i < 100; affirm n = i + 1;" "n = i"
+            , -- A sum bounded as a whole, or by its parts
               holds "affirm i + j = n; affirm i >= 0;" "j <= n"
             , holds "affirm i + j <= n; affirm j >= 0;" "i <= n"
             , fails "affirm i + j <= n;" "i <= n"
