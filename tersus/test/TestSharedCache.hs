@@ -13,6 +13,9 @@ import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread,
 import Control.Exception (IOException, MaskingState (..), SomeException, bracket, displayException, finally, getMaskingState, throwIO, try)
 import Control.Monad (when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.Char (ord)
+import Numeric (showHex)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
@@ -27,7 +30,7 @@ import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist,
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
-import System.IO (IOMode (WriteMode), SeekMode (AbsoluteSeek), hClose, openTempFile, withFile)
+import System.IO (IOMode (ReadMode, WriteMode), SeekMode (AbsoluteSeek), hClose, openTempFile, stdin, withFile)
 import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Process (exitImmediately, getProcessID)
 import System.Posix.Signals (nullSignal, sigKILL, signalProcess)
@@ -97,6 +100,7 @@ testSharedCache =
         , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
         , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
         , TestCase "cancelled native subprocesses die and release the cache lock" nativeProcessCancellation
+        , TestCase "cancelled captured tools are terminated and reaped directly" capturedProcessCancellation
         , TestCase "surviving children cannot retain close-on-exec cache locks" survivingChildLock
         , TestCase "available CPU count ignores unrelated OpenMP policy" affinityIgnoresOpenMP
         , TestCase "interactive children retain their SIGINT handler" interactiveControlC
@@ -351,11 +355,34 @@ survivingChildLock = withCacheHome $ \home -> do
             <> testAssertEq reused (Just first))) `finally` cleanup
 
 nativeProcessCancellation :: IO TestResult
-nativeProcessCancellation = withCacheHome $ \home -> do
+nativeProcessCancellation = processCancellation True
+
+capturedProcessCancellation :: IO TestResult
+capturedProcessCancellation = processCancellation False
+
+processCancellation :: Bool -> IO TestResult
+processCancellation isolatedCLI = withCacheHome $ \home -> do
     let marker = home </> "slow-native-child"
-        pidFiles = [marker ++ ".owner", marker ++ ".child"]
+        pidFiles = [marker ++ ".owner"] ++ [marker ++ ".child" | isolatedCLI]
         build = cachedProgram "native-cancellation" "key" "native cancellation probe"
-        script = "sleep 60 & child=$!; printf '%s\\n' \"$$\" > \"$1.owner\"; printf '%s\\n' \"$child\" > \"$1.child\"; : > \"$1.started\"; wait"
+        script = if isolatedCLI
+            then "sleep 60 & child=$!; printf '%s\\n' \"$$\" > \"$1.owner\"; printf '%s\\n' \"$child\" > \"$1.child\"; : > \"$1.started\"; wait"
+            else "trap '' TERM; printf '%s\\n' \"$$\" > \"$1.owner\"; : > \"$1.started\"; exec sleep 60"
+        constant label text =
+            let bytes = encodeUtf8 text
+                hex character = let digits = showHex (ord character) "" in '\\' : replicate (2 - length digits) '0' ++ digits
+             in "@" ++ label ++ " = private constant [" ++ show (length bytes + 1) ++ " x i8] c\"" ++ concatMap hex bytes ++ "\\00\""
+        cliIr = unlines
+            [ constant "sh" "/bin/sh", constant "option" "-c", constant "script" script
+            , constant "role" "native-process-cancellation", constant "marker" marker
+            , "declare i32 @execl(ptr, ptr, ...)"
+            , "define i32 @main(i32 %argc, ptr %argv) {"
+            , "  %r = call i32 (ptr, ptr, ...) @execl(ptr @sh, ptr @sh, ptr @option, ptr @script, ptr @role, ptr @marker, ptr null)"
+            , "  ret i32 %r", "}"
+            ]
+        nonTerminal action = bracket (hDuplicate stdin) hClose $ \saved ->
+            withFile "/dev/null" ReadMode $ \input ->
+                (hDuplicateTo input stdin >> action) `finally` hDuplicateTo saved stdin
         cleanup = do
             owner <- readMarker (marker ++ ".owner")
             case owner of
@@ -372,10 +399,16 @@ nativeProcessCancellation = withCacheHome $ \home -> do
     (do
         failed <- try (parallelBuilds
             [ build $ \output -> do
-                (code, _, errors) <- runCommandWithInputFull "/bin/sh" ["-c", script, "native-process-cancellation", marker] ""
-                case code of
-                    ExitSuccess -> writeFile output "finished" >> pure (Ok ())
-                    _ -> pure (Error errors)
+                outcome <- if isolatedCLI
+                    then do
+                        result <- nonTerminal (runExecutable cliIr [])
+                        pure $ case result of Ok code -> (code, ""); Error e -> (ExitFailure 1, e)
+                    else do
+                        (code, _, errors) <- runCommandWithInputFull "/bin/sh" ["-c", script, "native-process-cancellation", marker] ""
+                        pure (code, errors)
+                case outcome of
+                    (ExitSuccess, _) -> writeFile output "finished" >> pure (Ok ())
+                    (_, errors) -> pure (Error errors)
             , awaitNativeFile (marker ++ ".started") >> throwIO (userError "cancel-native-branch")
             ]) :: IO (Either SomeException [Result FilePath String])
         pids <- mapM (fmap (head . words) . readFile) pidFiles

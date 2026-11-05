@@ -26,14 +26,14 @@ import System.FilePath ((</>))
 import System.IO (Handle, IOMode (..), hClose, hGetContents, hIsTerminalDevice, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr, stdin)
 import System.IO.Error (isDoesNotExistError)
 import System.Environment (getEnvironment)
-import System.Posix.Signals (sigKILL, signalProcessGroup)
+import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
 import System.Posix.Types (ProcessID)
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
 
 import qualified Data.Map.Strict as Map
-import System.Process (CreateProcess (..), ProcessHandle, StdStream (..), getPid, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess, withCreateProcess)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (..), getPid, proc, readCreateProcessWithExitCode, waitForProcess, withCreateProcess)
 
 import CacheLock (openLockHandle)
 import Hash (fingerprint)
@@ -168,7 +168,7 @@ runProcessWithInputFull exe command input = do
                 code <- bracket (openFile inPath ReadMode) hClose $ \readHandle -> do
                     hSetEncoding readHandle char8
                     waitOwnedProcess command{std_in = UseHandle readHandle, std_out = UseHandle outHandle,
-                        std_err = UseHandle errHandle, create_group = True}
+                        std_err = UseHandle errHandle}
                 hClose outHandle
                 hClose errHandle
                 out <- readBytes outPath
@@ -183,15 +183,16 @@ runProcessWithInputFull exe command input = do
 
 waitOwnedProcess :: CreateProcess -> IO ExitCode
 waitOwnedProcess command = mask $ \restore ->
-    withCreateProcess command $ \_ _ _ process -> do
-        pid <- getPid process
-        restore (waitForProcess process) `onException` case pid of
-            Just group | create_group command -> stopProcessGroup group process
-            _ -> terminateProcess process >> waitForProcess process >> pure ()
+    withCreateProcess command $ \_ _ _ process ->
+        restore (waitForProcess process) `onException` do
+            pid <- getPid process
+            case pid of
+                Just child -> stopOwnedProcess (create_group command) child process
+                Nothing -> waitForProcess process >> pure ()
 
-stopProcessGroup :: ProcessID -> ProcessHandle -> IO ()
-stopProcessGroup group process = do
-    sent <- try (signalProcessGroup sigKILL group) :: IO (Either IOException ())
+stopOwnedProcess :: Bool -> ProcessID -> ProcessHandle -> IO ()
+stopOwnedProcess grouped child process = do
+    sent <- try (if grouped then signalProcessGroup sigKILL child else signalProcess sigKILL child) :: IO (Either IOException ())
     case sent of
         Left e | not (isDoesNotExistError e) -> throwIO e
         _ -> pure ()
@@ -303,7 +304,9 @@ cachedProgram kind hash what build = do
                             (partial, handle) <- openTempFile dir (kind ++ ".tmp")
                             hClose handle
                             removeFile partial
-                            built <- build partial
-                            case built of
-                                Error e -> pure (Error e)
-                                Ok () -> renameFile partial exe >> pure (Ok exe)
+                            (do
+                                built <- build partial
+                                case built of
+                                    Error e -> pure (Error e)
+                                    Ok () -> renameFile partial exe >> pure (Ok exe))
+                                `finally` removeIfExists partial
