@@ -94,7 +94,9 @@ Names and decimal literal text are also linked: `NameEnd`, and
 values per part. Strings use the MIR escaping: printable ASCII bytes except
 `"` and `\` appear literally, and all other UTF-8 bytes are uppercase `\xHH`.
 Malformed escapes, missing separators and invalid UTF-8 are refused. No name
-is normalized. `VInt NAME` contains decimal text, so a constructed Haskell
+is normalized. The reader consumes its growing string when joining decimal
+chunks, preserving their byte order without cloning each accumulated prefix.
+`VInt NAME` contains decimal text, so a constructed Haskell
 syntax value outside the runtime's signed-64-bit range is also lossless.
 The source parser still rejects out-of-range integer literals before producing
 an AST; this bridge does not change that behavior. Size arguments also have to
@@ -152,8 +154,10 @@ this document directly and writes `tersus-ast 1 parsed` for it, byte for byte
 as `AstData.writeParsed` writes the decoded syntax,
 including every desugaring (a `match` becomes an `if` chain of `Is` and
 `Project`, a `for` becomes a `while`, struct literals become `Ctor`
-applications, a standard `Eq` or `Clone` impl is written out, and so on). The
-arena is built in parse order and renumbered at the end into the emission
+applications, a standard `Eq` or `Clone` impl is written out, and so on).
+Generated Eq/Clone text consumes owned field and variant accumulators; the
+shared `catStrings` helper still borrows both arguments.
+The arena is built in parse order and renumbered at the end into the emission
 order above; nodes a failed speculation built are unreachable and dropped.
 
 The host (`src/TersusParser.hs`) runs the current packaged parser as a native
