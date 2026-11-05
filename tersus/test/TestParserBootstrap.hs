@@ -1,10 +1,11 @@
-module TestParserBootstrap (testParserBootstrap, withParserBootstrapFixture) where
+module TestParserBootstrap (testParserBootstrap, withParserBootstrapFixture, bootstrapOverlapAllowed) where
 
-import Control.Concurrent (MVar, forkFinally, killThread, newEmptyMVar, newMVar, putMVar, readMVar, threadDelay)
+import Control.Concurrent (MVar, forkFinally, killThread, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (modifyMVar, swapMVar)
-import Control.Exception (IOException, SomeAsyncException, SomeException, bracket, displayException, evaluate, finally, fromException, mask, onException, throwIO, try)
+import Control.Concurrent.Chan (newChan, readChan, writeChan)
+import Control.Exception (AsyncException (ThreadKilled), IOException, SomeAsyncException, SomeException, bracket, bracket_, displayException, evaluate, finally, fromException, mask, onException, throwIO, try)
 import Control.Monad (forM, when)
-import Data.List (isPrefixOf, isSuffixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import GHC.Clock (getMonotonicTime)
 import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, createFileLink, doesFileExist, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile, renameFile)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
@@ -59,26 +60,38 @@ withDirectory use = bracket make removeDirectoryRecursive use
         createDirectory home
         pure home
 
+data BootstrapFixture = BootstrapFixture
+    { fixtureDirectory :: FilePath
+    , phasePairResults :: Maybe (MVar (Maybe (TestResult, TestResult)))
+    }
+
 {-# NOINLINE fixtureHome #-}
-fixtureHome :: MVar (Maybe FilePath)
+fixtureHome :: MVar (Maybe BootstrapFixture)
 fixtureHome = unsafePerformIO (newMVar Nothing)
 
-withParserBootstrapFixture :: IO a -> IO a
-withParserBootstrapFixture action = do
+-- An isolated group may use two N1 phase workers; a group sharing the runner stays serial.
+bootstrapOverlapAllowed :: Bool -> Int -> Int -> [String] -> Bool -> Bool
+bootstrapOverlapAllowed child jobs processors names parentDispatch =
+    processors >= 2 && names == ["testParserBootstrap"]
+        && (if child then parentDispatch else jobs >= 2)
+
+withParserBootstrapFixture :: Bool -> IO a -> IO a
+withParserBootstrapFixture overlap action = do
     mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
     case mode of
         Just name | name `elem` ["emitter-corrupt", "parser-corrupt", "parser-missing", "interpreted-corrupt",
             "clang-missing", "haskell-refused", "cold", "concurrent", "reuse", "repair", "emitter-repair", "fixpoint"] -> action
         Just name -> fail ("unknown parser bootstrap worker: " ++ name)
-        Nothing -> withDirectory $ \home ->
-            bracket (swapMVar fixtureHome (Just home)) restoreHome $ \_ ->
+        Nothing -> withDirectory $ \home -> do
+            results <- if overlap then Just <$> newMVar Nothing else pure Nothing
+            bracket (swapMVar fixtureHome (Just (BootstrapFixture home results))) restoreHome $ \_ ->
                 bracket (swapMVar coldReuseResults Nothing) restoreResults (const action)
   where
     restoreHome previous = swapMVar fixtureHome previous >> pure ()
     restoreResults previous = swapMVar coldReuseResults previous >> pure ()
 
 coldCacheHome :: IO FilePath
-coldCacheHome = readMVar fixtureHome >>= maybe (fail "parser bootstrap group fixture is missing") pure
+coldCacheHome = readMVar fixtureHome >>= maybe (fail "parser bootstrap group fixture is missing") (pure . fixtureDirectory)
 
 worker :: String -> FilePath -> [(String, String)] -> IO (ExitCode, String, String)
 worker mode home overrides = timed ("worker " ++ mode) $ do
@@ -124,6 +137,11 @@ worker mode home overrides = timed ("worker " ++ mode) $ do
                     pure (status, stdoutText, stderrText)
                 _ -> fail "bootstrap worker output pipes are missing") `finally` stop
 
+reportWorkerTimings :: String -> IO ()
+reportWorkerTimings output = mapM_ putStrLn
+    [line | line <- lines output, any (`isPrefixOf` line)
+        ["[BOOT] P0 ", "[BOOT] E1+checker+eraser+ListBox ", "[BOOT] P1 ", "[BOOT] source ", "[BOOT] user package "]]
+
 paired :: IO a -> IO b -> (IO a -> IO b -> IO c) -> IO c
 paired first second use = do
     firstResult <- newEmptyMVar
@@ -165,17 +183,19 @@ inPrimedWorker mode evicted action = do
             (cold, _, _) <- coldAndReuse
             case cold of
                 Just e -> pure (Just ("priming requires a successful cold worker: " ++ e))
-                Nothing -> withDirectory $ \home -> do
-                    source <- coldCacheHome
-                    let target = home </> "tersus"
-                    copyBootstrapTools (source </> "tersus") target
-                    names <- listDirectory target
-                    mapM_ (removeFile . (target </>))
-                        [name | name <- names, '.' `notElem` name, any (`isPrefixOf` name) evicted]
-                    (status, out, err) <- worker mode home []
-                    pure $ case status of
-                        ExitSuccess -> Nothing
-                        _ -> Just ("primed " ++ mode ++ " worker: " ++ out ++ err)
+                Nothing -> coldCacheHome >>= \source -> primedWorker source mode evicted
+
+primedWorker :: FilePath -> String -> [String] -> IO TestResult
+primedWorker source mode evicted = withDirectory $ \home -> do
+    let target = home </> "tersus"
+    copyBootstrapTools (source </> "tersus") target
+    names <- listDirectory target
+    mapM_ (removeFile . (target </>))
+        [name | name <- names, '.' `notElem` name, any (`isPrefixOf` name) evicted]
+    (status, out, err) <- worker mode home []
+    pure $ case status of
+        ExitSuccess -> Nothing
+        _ -> Just ("primed " ++ mode ++ " worker: " ++ out ++ err)
 
 copyBootstrapTools :: FilePath -> FilePath -> IO ()
 copyBootstrapTools source target = do
@@ -230,7 +250,52 @@ withSetting name value action = bracket (lookupEnv name) restore $ \_ -> do
     restore (Just text) = setEnv name text
 
 retryStages :: IO TestResult
-retryStages = inPrimedWorker "repair" ["parser-seed-", "tersus-parser-", "seed-"] $ do
+retryStages = sharedPhase fst retryStagesRecipe
+
+sharedPhase :: ((TestResult, TestResult) -> TestResult) -> IO TestResult -> IO TestResult
+sharedPhase select serial = do
+    role <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
+    fixture <- readMVar fixtureHome
+    case (role, fixture >>= phasePairResults) of
+        (Nothing, Just slot) -> do
+            outcome <- modifyMVar slot (\saved -> case saved of
+                Just results -> pure (saved, Right results)
+                Nothing -> do
+                    (cold, _, _) <- coldAndReuse
+                    answer <- try $ case cold of
+                        Just e -> pure (Just ("priming requires a successful cold worker: " ++ e), Just ("priming requires a successful cold worker: " ++ e))
+                        Nothing -> collectPhases retryStagesRecipe parserFixpointRecipe
+                    let results = case answer of
+                            Right values -> values
+                            Left ex -> let cancelled = Just ("repair/fixpoint pair interrupted: " ++ displayException (ex :: SomeException)) in (cancelled, cancelled)
+                    pure (Just results, answer))
+            either throwIO (pure . select) outcome
+        _ -> serial
+
+-- A one-slot completion mailbox can deadlock when both cancelled workers report.
+collectPhases :: IO TestResult -> IO TestResult -> IO (TestResult, TestResult)
+collectPhases first second = do
+    completed <- newChan
+    let checked isFirst action = do
+            answer <- try (action >>= \result -> evaluate (forceTestResult result) >> pure result)
+            writeChan completed (isFirst, answer)
+            pure answer
+        next = do
+            (isFirst, answer) <- readChan completed
+            value <- verdict answer
+            pure (isFirst, value)
+    paired (checked True first) (checked False second) $ \_ _ -> do
+        (isFirst, a) <- next
+        (_, b) <- next
+        pure (if isFirst then (a, b) else (b, a))
+  where
+    verdict (Right result) = pure result
+    verdict (Left ex) = case fromException ex :: Maybe SomeAsyncException of
+        Just _ -> throwIO ex
+        Nothing -> pure (Just (displayException (ex :: SomeException)))
+
+retryStagesRecipe :: IO TestResult
+retryStagesRecipe = inPrimedWorker "repair" ["parser-seed-", "tersus-parser-", "seed-"] $ do
     directory <- cacheDirectory
     case directory of
         Error e -> pure (Just e)
@@ -411,7 +476,7 @@ coldAndReuse = modifyMVar coldReuseResults $ \saved -> case saved of
   where
     workerResult label result = case result of
         Left ex -> synchronousFailure ex
-        Right (ExitSuccess, _, _) -> pure Nothing
+        Right (ExitSuccess, out, _) -> reportWorkerTimings out >> pure Nothing
         Right (_, out, err) -> pure (Just (label ++ ": " ++ out ++ err))
     reuse home = do
         let cache = home </> "tersus"
@@ -465,7 +530,10 @@ concurrentCold = do
             pure concurrent
 
 parserFixpoint :: IO TestResult
-parserFixpoint = inPrimedWorker "fixpoint" [] $ do
+parserFixpoint = sharedPhase snd parserFixpointRecipe
+
+parserFixpointRecipe :: IO TestResult
+parserFixpointRecipe = inPrimedWorker "fixpoint" [] $ do
     emitter <- Bootstrap.cachedEmitter
     let zeroPackage = loadPackage ParserSeed.parseFileWith
         onePackage = loadPackage (checkedParser TersusParser.parseFileNative)
@@ -526,6 +594,66 @@ parserFixpoint = inPrimedWorker "fixpoint" [] $ do
     sameFile (Left e) _ = Just e
     sameFile _ (Left e) = Just e
 
+overlapControls :: IO TestResult
+overlapControls = do
+    mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
+    case mode of
+        Just _ -> pure Nothing
+        Nothing -> do
+            failures <- collectPhases (pure (Just "repair failure")) (ioError (userError "fixpoint failure"))
+            firstHome <- newEmptyMVar
+            secondHome <- newEmptyMVar
+            let isolated own peer = withDirectory $ \home -> do
+                    let marker = home </> "retained"
+                    writeFile marker "kept"
+                    putMVar own home
+                    other <- readMVar peer
+                    present <- doesFileExist marker
+                    pure (firstFailure [testAssertTrue (home /= other), testAssertTrue present])
+            isolation <- timeout 5000000 (collectPhases (isolated firstHome secondHome) (isolated secondHome firstHome))
+            cancellation <- cancellationControl
+            pure $ firstFailure
+                [ testAssertEq (fst failures) (Just "repair failure")
+                , testAssertTrue (maybe False ("fixpoint failure" `isInfixOf`) (snd failures))
+                , testAssertEq isolation (Just (Nothing, Nothing))
+                , cancellation
+                , firstFailure [testAssertEq (bootstrapOverlapAllowed child jobs processors names marker) expected
+                    | (child, jobs, processors, names, marker, expected) <-
+                        [(False, 4, 4, ["testParserBootstrap"], False, True)
+                        , (False, 1, 4, ["testParserBootstrap"], True, False)
+                        , (False, 4, 1, ["testParserBootstrap"], False, False)
+                        , (False, 4, 4, ["testParserBootstrap", "testParser"], True, False)
+                        , (True, 4, 4, ["testParserBootstrap"], False, False)
+                        , (True, 1, 4, ["testParserBootstrap"], True, True)
+                        , (True, 1, 4, ["testParserBootstrap"], False, False)]]
+                ]
+
+cancellationControl :: IO TestResult
+cancellationControl = firstFailure <$> mapM cancellationCase ["parent", "first", "second"]
+
+cancellationCase :: String -> IO TestResult
+cancellationCase trigger = do
+    firstStarted <- newEmptyMVar
+    secondStarted <- newEmptyMVar
+    firstStopped <- newEmptyMVar
+    secondStopped <- newEmptyMVar
+    block <- newEmptyMVar
+    completed <- newEmptyMVar
+    let held name started peer stopped = bracket_ (putMVar started ()) (putMVar stopped ()) $ do
+            _ <- readMVar peer
+            if trigger == name then throwIO ThreadKilled else takeMVar block
+        run = collectPhases (held "first" firstStarted secondStarted firstStopped) (held "second" secondStarted firstStarted secondStopped)
+    bracket (forkFinally run (putMVar completed)) killThread $ \thread -> do
+        ready <- timeout 5000000 (readMVar firstStarted >> readMVar secondStarted)
+        case ready of
+            Nothing -> pure (Just "paired phases did not both start")
+            Just () -> do
+                when (trigger == "parent") (killThread thread)
+                cleaned <- timeout 5000000 (readMVar completed >>= \answer -> readMVar firstStopped >> readMVar secondStopped >> pure answer)
+                pure $ case cleaned of
+                    Just (Left ex) | Just _ <- (fromException ex :: Maybe SomeAsyncException) -> Nothing
+                    _ -> Just (trigger ++ ": paired cancellation did not propagate after both phase cleanups")
+
 bootstrapCase :: String -> IO TestResult -> Test
 bootstrapCase name action = TestCase name $ do
     mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
@@ -551,4 +679,5 @@ testParserBootstrap = TestList "testParserBootstrap"
     , bootstrapCase "public emitter bootstrap failures repair before tool and library CAF initialization" emitterRetryStages
     , bootstrapCase "bootstrap fingerprints cover the complete compiler library manifest" bootstrapLibraryHash
     , bootstrapCase "P0 P1 current-source fixpoint regenerates identical IR and P2 behavior" parserFixpoint
+    , bootstrapCase "isolated phase overlap retains failure attribution, private homes and cancellation" overlapControls
     ]
