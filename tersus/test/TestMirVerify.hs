@@ -223,11 +223,33 @@ boxBorrowFixture result steps = unlines
     , "end"
     ]
 
+sourceBoxBorrowFixture :: String -> String
+sourceBoxBorrowFixture result = unlines
+    [ "tersus-mir 1"
+    , "struct \"Token\" 1 \"n\" int"
+    , "struct \"Box<Token>\" 2 \"addr\" addr named \"Token\" 0 \"blk\" block named \"Token\" 0"
+    , "struct \"Box<Box<Token>>\" 2 \"addr\" addr named \"Box\" 1 type named \"Token\" 0 \"blk\" block named \"Box\" 1 type named \"Token\" 0"
+    , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+    , "local 1 none named \"Box\" 1 type named \"Box\" 1 type named \"Token\" 0"
+    , "local 2 none " ++ result
+    , "block 0"
+    , "assign 2 borrow 1 0"
+    , "return"
+    , "end"
+    ]
+
 callCases :: [(String, Result String String, Bool)]
 callCases =
     [(name, mapResult writeProgram (lowerSource True source), True) | (name, source) <- sources]
         ++ [(name, mapResult (writeProgram . mutate) (lowerSource True source), False) | (name, source, mutate) <- negatives]
         ++ [(name, Ok (boxBorrowFixture result steps), accepted) | (name, result, steps, accepted) <- boxBorrowCases]
+        ++ [(name, Ok (sourceBoxBorrowFixture result), accepted) | (name, result, accepted) <-
+            [ ("a named source Box borrows its payload once", "ref named \"Box\" 1 type named \"Token\" 0", True)
+            , ("a named source Box can borrow its handle", "ref named \"Box\" 1 type named \"Box\" 1 type named \"Token\" 0", True)
+            , ("a named source Box does not unwrap two payload levels", "ref named \"Token\" 0", False)
+            , ("a named source Box refuses the wrong payload type", "ref bool", False)
+            ]]
+        ++ [("a mismatched Box permission does not authorize a payload borrow", Ok (unlines [if line == "struct \"Box<Box<Token>>\" 2 \"addr\" addr named \"Box\" 1 type named \"Token\" 0 \"blk\" block named \"Box\" 1 type named \"Token\" 0" then "struct \"Box<Box<Token>>\" 2 \"addr\" addr named \"Box\" 1 type named \"Token\" 0 \"blk\" block bool" else line | line <- lines (sourceBoxBorrowFixture "ref named \"Box\" 1 type named \"Token\" 0")]), False)]
         ++ [(name, Ok (blockCall expected actual borrowed), accepted) | (name, expected, actual, borrowed, accepted) <- blocks]
         ++ [(name, Ok (derefFixture parameter borrowed result operand), False) | (name, parameter, borrowed, result, operand) <- badDerefs]
   where

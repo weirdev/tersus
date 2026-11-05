@@ -1488,7 +1488,15 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
             wanted = noTy();
             if d is Type::TRef { wanted = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TRef).inner)) }; };
             if d is Type::TMutRef { wanted = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TMutRef).inner)) }; };
-            if pt.ok && pt.ty is Type::TBox && held.ok && wanted.ok && typeEq(wanted.ty, held.ty) { pt = held; };
+            if pt.ok && held.ok && wanted.ok && typeEq(wanted.ty, held.ty) {
+                sourceBox = pt.ty is Type::TBox;
+                if pt.ty is Type::TNamed {
+                    for field in ctorFields(p, (pt.ty as Type::TNamed).name) {
+                        if field.name = "blk" && field.ty is Type::TBlock && typeEq(Box::unbox((field.ty as Type::TBlock).inner), held.ty) { sourceBox = true; };
+                    };
+                };
+                if sourceBox { pt = held; };
+            };
             if !pt.ok { out = one("a reference is to a place that is not there"); }
             else if d is Type::TRef {
                 inner = Box::unbox((d as Type::TRef).inner);
