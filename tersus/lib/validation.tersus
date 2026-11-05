@@ -7586,107 +7586,109 @@ fn inferPhase4(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
+// A distance between two subjects as a value: a constant of the program, or, for a small distance the program writes
+// no constant for, a sum of ones (a list that starts with two elements and grows with its counter), with the subjects
+// swapped when it is negative
+struct InferDistance { found: Bool, swapped: Bool, steps: List<ExecutionStep>, value: ValueRef };
+
+impl Clone for InferDistance { };
+
 fn inferPhase5(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
-    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
-    for i in 0..size(assigned) {
-        for j in 0..size(assigned) {
-            if i < j {
-                s1 = get(assigned, i);
-                s2 = get(assigned, j);
-                k1 = evalTermValue(work.context, s1.term, 6);
-                k2 = evalTermValue(work.context, s2.term, 6);
+    inferring = st;
+    count = size(inferring.assigned);
+    for i in 0..count {
+        for j in 0..count {
+            if i < j && j < size(inferring.assigned) && size(inferring.goals) < 128 {
+                s1 = clone(get(inferring.assigned, i));
+                s2 = clone(get(inferring.assigned, j));
+                k1 = evalTermValue(inferring.work.context, s1.term, 6);
+                k2 = evalTermValue(inferring.work.context, s2.term, 6);
                 if k1 is IntegerLookup::Found {
                     if k2 is IntegerLookup::Found {
-                        delta = (k1 as IntegerLookup::Found).value - (k2 as IntegerLookup::Found).value;
-                        if size(goals) < 128 {
-                            if delta = 0 {
-                                goals = push(goals, InferGoal { relation: 0, left: s1.term, right: s2.term, assumes: appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: subjectRef(s2) })), checks: appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: subjectRef(s2) })) });
-                            } else {
-                                dTerm = 0;
-                                dFound = false;
-                                for constantPosition in 0..size(work.context.constants) {
-                                    constant = get(work.context.constants, constantPosition);
-                                    if constant.kind = 0 {
-                                        if dFound = false { if constant.value = delta { dTerm = constant.id; dFound = true; }; };
-                                    };
-                                };
-                                // (a distance the program writes no constant for is made of ones:
-                                // a list that starts with two elements and grows with its counter)
-                                dSteps = [];
-                                dRef = ValueRef::Term { term: dTerm };
-                                lhs = clone(s1);
-                                rhs = clone(s2);
-                                magnitude = delta;
-                                if dFound = false && delta <= -2 && delta >= -6 {
-                                    lhs = clone(s2);
-                                    rhs = clone(s1);
-                                    magnitude = 0 - delta;
-                                };
-                                if dFound = false && magnitude >= 2 && magnitude <= 6 {
-                                    oneTerm = 0;
-                                    oneFound = false;
-                                    for constantPosition in 0..size(work.context.constants) {
-                                        constant = get(work.context.constants, constantPosition);
-                                        if constant.kind = 0 {
-                                            if oneFound = false { if constant.value = 1 { oneTerm = constant.id; oneFound = true; }; };
-                                        };
-                                    };
-                                    if oneFound {
-                                        previous = ValueRef::Term { term: oneTerm };
-                                        for m in 1..magnitude {
-                                            partial = 0 - 7400000 - candIndex * 8 - m;
-                                            dSteps = push(dSteps, ExecutionStep::ApplyFresh { local: partial, function: -1, arguments: push(push([], clone(previous)), ValueRef::Term { term: oneTerm }) });
-                                            previous = ValueRef::Local { local: partial };
-                                        };
-                                        dRef = previous;
-                                        dFound = true;
-                                    };
-                                };
-                                if dFound {
-                                    temp = 0 - 7100000 - candIndex * 4;
-                                    candIndex = candIndex + 1;
-                                    made = executeSteps(clone(work), appendSteps(dSteps, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(rhs)), clone(dRef)) })));
-                                    if made.status = 0 {
-                                        work = made.state;
-                                        sumTerm = resolveValue(work, ValueRef::Local { local: temp });
-                                        if sumTerm is ValueLookup::Found {
-                                            addSteps = appendSteps(dSteps, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(rhs)), clone(dRef)) }));
-                                            goals = push(goals, InferGoal { relation: 0, left: lhs.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(appendSteps(appendSteps(subjectSteps(lhs), subjectSteps(rhs)), addSteps), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(lhs), right: ValueRef::Local { local: temp } })), checks: appendSteps(appendSteps(appendSteps(subjectSteps(lhs), subjectSteps(rhs)), addSteps), push([], ExecutionStep::Check { relation: 0, left: subjectRef(lhs), right: ValueRef::Local { local: temp } })) });
-                                        };
-                                    };
-                                } else {
-                                    c1 = 0;
-                                    c1Found = false;
-                                    c2 = 0;
-                                    c2Found = false;
-                                    for constantPosition in 0..size(work.context.constants) {
-                                        constant = get(work.context.constants, constantPosition);
-                                        if constant.kind = 0 {
-                                            if c1Found = false { if constant.value = (k1 as IntegerLookup::Found).value { c1 = constant.id; c1Found = true; }; };
-                                            if c2Found = false { if constant.value = (k2 as IntegerLookup::Found).value { c2 = constant.id; c2Found = true; }; };
-                                        };
-                                    };
-                                    if c1Found {
-                                        if c2Found {
-                                            tempD = 0 - 7200000 - candIndex * 4;
-                                            candIndex = candIndex + 1;
-                                            temp = 0 - 7100000 - candIndex * 4;
-                                            candIndex = candIndex + 1;
-                                            deltaSteps = push(push([], ExecutionStep::ApplyFresh { local: tempD, function: -2, arguments: push(push([], ValueRef::Term { term: c1 }), ValueRef::Term { term: c2 }) }), ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s2)), ValueRef::Local { local: tempD }) });
-                                            madeD = executeSteps(clone(work), deltaSteps);
-                                            if madeD.status = 0 {
-                                                work = madeD.state;
-                                                sumTerm = resolveValue(work, ValueRef::Local { local: temp });
-                                                if sumTerm is ValueLookup::Found {
-                                                    goals = push(goals, InferGoal { relation: 0, left: s1.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), deltaSteps), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })), checks: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), deltaSteps), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })) });
-                                                };
-                                            };
-                                        };
-                                    };
-                                };
-                            };
-                        };
+                        inferring = inferPairGoal(inferring, s1, s2, (k1 as IntegerLookup::Found).value, (k2 as IntegerLookup::Found).value);
                     };
+                };
+            };
+        };
+    };
+    return inferring;
+};
+
+// The candidate that two subjects, of values v1 and v2 now, stay that far apart: equal, or one the other plus a
+// distance written as a constant or as a sum of ones
+fn inferPairGoal(st: InferState, s1: &InferSubject, s2: &InferSubject, v1: Int, v2: Int) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
+    delta = v1 - v2;
+    if delta = 0 {
+        goals = push(goals, InferGoal { relation: 0, left: s1.term, right: s2.term, assumes: appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: subjectRef(s2) })), checks: appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: subjectRef(s2) })) });
+        return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+    };
+    distance = inferDistance(work.context, delta, candIndex);
+    if distance.found = false { return inferPairByConstants(InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals }, s1, s2, v1, v2); };
+    lhs = clone(s1);
+    rhs = clone(s2);
+    if distance.swapped {
+        lhs = clone(s2);
+        rhs = clone(s1);
+    };
+    temp = 0 - 7100000 - candIndex * 4;
+    candIndex = candIndex + 1;
+    addSteps = appendSteps(distance.steps, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(rhs)), clone(distance.value)) }));
+    made = executeSteps(clone(work), addSteps);
+    if made.status = 0 {
+        work = made.state;
+        sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+        if sumTerm is ValueLookup::Found {
+            goals = push(goals, InferGoal { relation: 0, left: lhs.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(appendSteps(appendSteps(subjectSteps(lhs), subjectSteps(rhs)), addSteps), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(lhs), right: ValueRef::Local { local: temp } })), checks: appendSteps(appendSteps(appendSteps(subjectSteps(lhs), subjectSteps(rhs)), addSteps), push([], ExecutionStep::Check { relation: 0, left: subjectRef(lhs), right: ValueRef::Local { local: temp } })) });
+        };
+    };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferDistance(context: &ValidatorContext, delta: Int, candIndex: Int) -> InferDistance {
+    constant = constantTermWithValue(context, delta);
+    if constant is ValueLookup::Found {
+        return InferDistance { found: true, swapped: false, steps: [], value: ValueRef::Term { term: (constant as ValueLookup::Found).term } };
+    };
+    swapped = false;
+    magnitude = delta;
+    if delta <= -2 && delta >= -6 {
+        swapped = true;
+        magnitude = 0 - delta;
+    };
+    one = constantTermWithValue(context, 1);
+    if magnitude < 2 || magnitude > 6 || one is ValueLookup::Missing {
+        return InferDistance { found: false, swapped: false, steps: [], value: ValueRef::Term { term: 0 } };
+    };
+    oneTerm = (one as ValueLookup::Found).term;
+    steps = [];
+    previous = ValueRef::Term { term: oneTerm };
+    for m in 1..magnitude {
+        partial = 0 - 7400000 - candIndex * 8 - m;
+        steps = push(steps, ExecutionStep::ApplyFresh { local: partial, function: -1, arguments: push(push([], clone(previous)), ValueRef::Term { term: oneTerm }) });
+        previous = ValueRef::Local { local: partial };
+    };
+    return InferDistance { found: true, swapped: swapped, steps: steps, value: previous };
+};
+
+// The candidate s1 = s2 + (c1 - c2), with c1 and c2 the program's constants for the subjects' values now
+fn inferPairByConstants(st: InferState, s1: &InferSubject, s2: &InferSubject, v1: Int, v2: Int) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
+    c1 = constantTermWithValue(work.context, v1);
+    c2 = constantTermWithValue(work.context, v2);
+    if c1 is ValueLookup::Found {
+        if c2 is ValueLookup::Found {
+            tempD = 0 - 7200000 - candIndex * 4;
+            candIndex = candIndex + 1;
+            temp = 0 - 7100000 - candIndex * 4;
+            candIndex = candIndex + 1;
+            deltaSteps = push(push([], ExecutionStep::ApplyFresh { local: tempD, function: -2, arguments: push(push([], ValueRef::Term { term: (c1 as ValueLookup::Found).term }), ValueRef::Term { term: (c2 as ValueLookup::Found).term }) }), ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s2)), ValueRef::Local { local: tempD }) });
+            madeD = executeSteps(clone(work), deltaSteps);
+            if madeD.status = 0 {
+                work = madeD.state;
+                sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+                if sumTerm is ValueLookup::Found {
+                    goals = push(goals, InferGoal { relation: 0, left: s1.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), deltaSteps), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })), checks: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), deltaSteps), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })) });
                 };
             };
         };
