@@ -119,6 +119,31 @@ library
     , unix
   default-language: Haskell2010
 
+executable cache-codec-probe
+  main-is: Main.hs
+  other-modules:
+      TestProgramBinary
+      Paths_tersus
+  autogen-modules:
+      Paths_tersus
+  hs-source-dirs:
+      dev/cache-codec/src
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
+  build-depends:
+      base >=4.7 && <5
+    , binary >=0.8.8 && <0.9
+    , bytestring >=0.10.12 && <0.13
+    , containers
+    , deepseq >=1.4.4 && <1.6
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+    , unix
+  default-language: Haskell2010
+
 executable parser-seed
   main-is: Main.hs
   other-modules:
