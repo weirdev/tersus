@@ -59,6 +59,7 @@ library
       AstData
       Bootstrap
       BuiltinRegistry
+      CacheLock
       Cli
       Compile
       DataCodec

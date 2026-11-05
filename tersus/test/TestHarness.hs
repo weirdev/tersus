@@ -75,10 +75,11 @@ import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (SeekMode (AbsoluteSeek), hClose, openBinaryTempFile)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Posix.IO (FileLock, LockRequest (WriteLock), OpenFileFlags (..), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
+import System.Posix.IO (FileLock, LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Types (Fd)
 import System.Process (readProcessWithExitCode)
 
+import CacheLock (openLockFd)
 import Mir (Program)
 import Compile (lowerSource)
 import MirHousekeeping (eraseGhosts, toolProgram)
@@ -516,20 +517,8 @@ writeEntryAtomically dir file bytes = do
         (\(staging, handle) -> hClose handle >> removeFile staging)
         (\(staging, handle) -> BL.hPut handle bytes >> hClose handle >> renameFile staging file)
 
--- The one place the unix openFd version difference lives: unix before 2.8 takes the creation
--- mode as its own argument, and from 2.8 on it is the creat field of the flags. Without the
--- Cabal version macros (a direct ghc build of the tests on the older toolchain) the older
--- call is used.
 openEntryLockFile :: FilePath -> IO Fd
-#ifdef MIN_VERSION_unix
-# if MIN_VERSION_unix(2,8,0)
-openEntryLockFile path = openFd path WriteOnly defaultFileFlags{creat = Just 0o644}
-# else
-openEntryLockFile path = openFd path WriteOnly (Just 0o644) defaultFileFlags
-# endif
-#else
-openEntryLockFile path = openFd path WriteOnly (Just 0o644) defaultFileFlags
-#endif
+openEntryLockFile = openLockFd
 
 -- One process compiles an entry while the others wait in the kernel for its lock: a file
 -- lock on the entry's lock file, held from before the entry is re-read until after it is
