@@ -1,8 +1,7 @@
 module TestParserBootstrap (testParserBootstrap, withParserBootstrapFixture, bootstrapOverlapAllowed) where
 
-import Control.Concurrent (MVar, forkFinally, killThread, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
-import Control.Concurrent.MVar (modifyMVar, swapMVar)
-import Control.Concurrent.Chan (newChan, readChan, writeChan)
+import Control.Concurrent (MVar, forkFinally, killThread, myThreadId, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, threadDelay)
+import Control.Concurrent.MVar (modifyMVar, swapMVar, tryPutMVar, tryReadMVar)
 import Control.Exception (AsyncException (ThreadKilled), IOException, SomeAsyncException, SomeException, bracket, bracket_, displayException, evaluate, finally, fromException, mask, onException, throwIO, try)
 import Control.Monad (forM, when)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
@@ -143,12 +142,25 @@ reportWorkerTimings output = mapM_ putStrLn
         ["[BOOT] P0 ", "[BOOT] E1+checker+eraser+ListBox ", "[BOOT] P1 ", "[BOOT] source ", "[BOOT] user package "]]
 
 paired :: IO a -> IO b -> (IO a -> IO b -> IO c) -> IO c
-paired first second use = do
+paired first second use = pairedResults first second $ \firstResult secondResult _ ->
+    use (result firstResult) (result secondResult)
+  where
+    result slot = readMVar slot >>= either throwIO pure
+
+-- forkFinally publishes each terminal outcome under its mask. Each result slot
+-- has one writer and starts empty; the wake notification is nonblocking/coalesced.
+pairedResults :: IO a -> IO b -> (MVar (Either SomeException a) -> MVar (Either SomeException b) -> MVar () -> IO c) -> IO c
+pairedResults first second use = do
     firstResult <- newEmptyMVar
     secondResult <- newEmptyMVar
-    let start = do
-            one <- forkFinally first (putMVar firstResult)
-            two <- forkFinally second (putMVar secondResult)
+    completed <- newEmptyMVar
+    let publish slot answer = do
+            putMVar slot answer
+            _ <- tryPutMVar completed ()
+            pure ()
+        start = do
+            one <- forkFinally first (publish firstResult)
+            two <- forkFinally second (publish secondResult)
                 `onException` (killThread one >> readMVar firstResult >> pure ())
             pure (one, two)
         stop (one, two) = do
@@ -157,8 +169,7 @@ paired first second use = do
             _ <- readMVar firstResult
             _ <- readMVar secondResult
             pure ()
-        result slot = readMVar slot >>= either throwIO pure
-    bracket start stop $ \_ -> use (result firstResult) (result secondResult)
+    bracket start stop $ \_ -> use firstResult secondResult completed
 
 inFreshWorker :: String -> (FilePath -> IO [(String, String)]) -> IO TestResult -> IO TestResult
 inFreshWorker mode setup action = do
@@ -272,27 +283,26 @@ sharedPhase select serial = do
             either throwIO (pure . select) outcome
         _ -> serial
 
--- A one-slot completion mailbox can deadlock when both cancelled workers report.
+-- Observe the guaranteed terminal outcomes, including cancellation after an
+-- action finishes; no completion message is sent from inside a phase action.
 collectPhases :: IO TestResult -> IO TestResult -> IO (TestResult, TestResult)
-collectPhases first second = do
-    completed <- newChan
-    let checked isFirst action = do
-            answer <- try (action >>= \result -> evaluate (forceTestResult result) >> pure result)
-            writeChan completed (isFirst, answer)
-            pure answer
-        next = do
-            (isFirst, answer) <- readChan completed
-            value <- verdict answer
-            pure (isFirst, value)
-    paired (checked True first) (checked False second) $ \_ _ -> do
-        (isFirst, a) <- next
-        (_, b) <- next
-        pure (if isFirst then (a, b) else (b, a))
+collectPhases first second = pairedResults checkedFirst checkedSecond $ \a b completed ->
+    let next = do
+            firstAnswer <- tryReadMVar a
+            secondAnswer <- tryReadMVar b
+            firstValue <- traverse verdict firstAnswer
+            secondValue <- traverse verdict secondAnswer
+            case (firstValue, secondValue) of
+                (Just x, Just y) -> pure (x, y)
+                _ -> takeMVar completed >> next
+     in next
   where
+    checkedFirst = first >>= \result -> evaluate (forceTestResult result) >> pure result
+    checkedSecond = second >>= \result -> evaluate (forceTestResult result) >> pure result
     verdict (Right result) = pure result
     verdict (Left ex) = case fromException ex :: Maybe SomeAsyncException of
         Just _ -> throwIO ex
-        Nothing -> pure (Just (displayException (ex :: SomeException)))
+        Nothing -> pure (Just (displayException ex))
 
 retryStagesRecipe :: IO TestResult
 retryStagesRecipe = inPrimedWorker "repair" ["parser-seed-", "tersus-parser-", "seed-"] $ do
@@ -612,11 +622,13 @@ overlapControls = do
                     pure (firstFailure [testAssertTrue (home /= other), testAssertTrue present])
             isolation <- timeout 5000000 (collectPhases (isolated firstHome secondHome) (isolated secondHome firstHome))
             cancellation <- cancellationControl
+            publication <- terminalPublicationControl
             pure $ firstFailure
                 [ testAssertEq (fst failures) (Just "repair failure")
                 , testAssertTrue (maybe False ("fixpoint failure" `isInfixOf`) (snd failures))
                 , testAssertEq isolation (Just (Nothing, Nothing))
                 , cancellation
+                , publication
                 , firstFailure [testAssertEq (bootstrapOverlapAllowed child jobs processors names marker) expected
                     | (child, jobs, processors, names, marker, expected) <-
                         [(False, 4, 4, ["testParserBootstrap"], False, True)
@@ -628,8 +640,22 @@ overlapControls = do
                         , (True, 1, 4, ["testParserBootstrap"], False, False)]]
                 ]
 
+-- Fill the coalescing wake slot before terminal publication: neither terminal
+-- callback may block, and both guaranteed outcomes remain independently readable.
+terminalPublicationControl :: IO TestResult
+terminalPublicationControl = do
+    release <- newEmptyMVar
+    let action = readMVar release >> pure Nothing
+    result <- timeout 5000000 $ pairedResults action action $ \a b wake -> do
+        putMVar wake ()
+        putMVar release ()
+        first <- readMVar a
+        second <- readMVar b
+        pure (either (Just . displayException) id first, either (Just . displayException) id second)
+    pure (testAssertEq result (Just (Nothing, Nothing)))
+
 cancellationControl :: IO TestResult
-cancellationControl = firstFailure <$> mapM cancellationCase ["parent", "first", "second"]
+cancellationControl = firstFailure <$> mapM cancellationCase ["parent", "first", "second", "external-first", "external-second"]
 
 cancellationCase :: String -> IO TestResult
 cancellationCase trigger = do
@@ -639,16 +665,23 @@ cancellationCase trigger = do
     secondStopped <- newEmptyMVar
     block <- newEmptyMVar
     completed <- newEmptyMVar
-    let held name started peer stopped = bracket_ (putMVar started ()) (putMVar stopped ()) $ do
+    firstThread <- newEmptyMVar
+    secondThread <- newEmptyMVar
+    let held name threadSlot started peer stopped = bracket_ (do
+            thread <- myThreadId
+            putMVar threadSlot thread
+            putMVar started ()) (putMVar stopped ()) $ do
             _ <- readMVar peer
             if trigger == name then throwIO ThreadKilled else takeMVar block
-        run = collectPhases (held "first" firstStarted secondStarted firstStopped) (held "second" secondStarted firstStarted secondStopped)
+        run = collectPhases (held "first" firstThread firstStarted secondStarted firstStopped) (held "second" secondThread secondStarted firstStarted secondStopped)
     bracket (forkFinally run (putMVar completed)) killThread $ \thread -> do
         ready <- timeout 5000000 (readMVar firstStarted >> readMVar secondStarted)
         case ready of
             Nothing -> pure (Just "paired phases did not both start")
             Just () -> do
                 when (trigger == "parent") (killThread thread)
+                when (trigger == "external-first") (readMVar firstThread >>= killThread)
+                when (trigger == "external-second") (readMVar secondThread >>= killThread)
                 cleaned <- timeout 5000000 (readMVar completed >>= \answer -> readMVar firstStopped >> readMVar secondStopped >> pure answer)
                 pure $ case cleaned of
                     Just (Left ex) | Just _ <- (fromException ex :: Maybe SomeAsyncException) -> Nothing
