@@ -8,10 +8,11 @@ import Data.List (foldl', isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumProcessors)
-import System.Environment (getArgs, getExecutablePath, lookupEnv)
+import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (BufferMode (LineBuffering), hPutStr, hSetBuffering, stderr, stdout)
-import System.Process (proc, readCreateProcessWithExitCode)
+import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
+import System.Posix.Process (getParentProcessID, getProcessID)
 
 import TestHarness
 import TestBasics
@@ -73,10 +74,14 @@ main = do
             jobs <- case argumentJobs arguments of
                 Just n -> pure n
                 Nothing -> min (length names) <$> getNumProcessors
+            isolated <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_ISOLATED"
+            parent <- getParentProcessID
+            processors <- getNumProcessors
+            let overlap = bootstrapOverlapAllowed (argumentChild arguments) jobs processors names (isolated == Just (show parent))
             (summary, reported) <-
                 if useWorkerProcesses arguments jobs (length names)
                     then runInParallel jobs names
-                    else runInProcess selected
+                    else runInProcess overlap selected
             unless (argumentChild arguments) $ do
                 putStrLn $
                     "Summary: "
@@ -199,13 +204,13 @@ originalGroups =
     , testMirSupport
     ]
 
-runInProcess :: [Test] -> IO (TestSummary, Bool)
-runInProcess selected = do
+runInProcess :: Bool -> [Test] -> IO (TestSummary, Bool)
+runInProcess overlap selected = do
     summary <- foldr combineSummaries (testSummary 0 0) <$> mapM runGroup selected
     pure (summary, True)
   where
     runGroup group
-        | groupName group == "testParserBootstrap" = withParserBootstrapFixture (runTest [] group)
+        | groupName group == "testParserBootstrap" = withParserBootstrapFixture overlap (runTest [] group)
         | otherwise = runTest [] group
 
 -- Each group runs in a process of its own, so that a group's temporary files, locale and environment are its own, and
@@ -219,7 +224,12 @@ runInParallel :: Int -> [String] -> IO (TestSummary, Bool)
 runInParallel jobs names = do
     self <- getExecutablePath
     statistics <- lookupEnv "TERSUS_TEST_RTS_STATS"
-    let rtsOptions = ["-s" | statistics == Just "1"]
+    inherited <- getEnvironment
+    processors <- getNumProcessors
+    parent <- getProcessID
+    let isolated = if bootstrapOverlapAllowed False jobs processors names False then show parent else ""
+        environment = ("TERSUS_PARSER_BOOTSTRAP_ISOLATED", isolated) : [(key, value) | (key, value) <- inherited, key /= "TERSUS_PARSER_BOOTSTRAP_ISOLATED"]
+        rtsOptions = ["-s" | statistics == Just "1"]
     putStrLn ("Running " ++ show (length names) ++ " test groups in " ++ show jobs ++ " processes")
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
@@ -241,7 +251,7 @@ runInParallel jobs names = do
                         started <- getMonotonicTime
                         putStrLn ("[START] " ++ name)
                         let arguments = [name, "--child", "+RTS", "-N1"] ++ rtsOptions ++ ["-RTS"]
-                        outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
+                        outcome <- try (readCreateProcessWithExitCode (proc self arguments){env = Just environment} "")
                         finished <- getMonotonicTime
                         putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
                         pure (name, finished - started, outcome)
