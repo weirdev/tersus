@@ -1,4 +1,4 @@
-module TestCopies (testCopies, boxedClonePrograms) where
+module TestCopies (testCopies, boxedClonePrograms, boxedArrayClonePrograms) where
 
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
@@ -84,6 +84,8 @@ testCopies =
                 , testCase "an inactive enum variant does not clone fields" (cloneOutput "enum E { A { token: Token }, B }; impl Clone for E { }; e = E::B; copy = clone(e); if copy is E::B { return 7; }; return 0;" "" 7)
                 , testCase "a recursive Box field clones once" (cloneOutput "enum Node { End, Link { token: Token, next: Box<Node> } }; impl Clone for Node { }; e = Node::Link { token: Token { n: 7, xs: [1] }, next: Box::new(Node::End) }; copy = clone(e); return (copy as Node::Link).token.n;" "C" 7)
                 , TestList "boxed recursion" [testCase name (programOutput source output value) | (name, source, output, value) <- boxedClonePrograms]
+                , TestList "sized boxed arrays" [testCase name (programOutput source "" value) | (name, source, value) <- boxedArrayClonePrograms]
+                , TestCase "sized boxed arrays retain whole-array materialization" boxedArrayMaterialization
                 , TestCase "a recursive boxed child is lent without materialization" (ownedCloneCopies "<CloneChain as Clone>::clone" (snd4 (head boxedClonePrograms)) 0)
                 , testCase "recursive list fields clone each node once" (cloneOutput "struct Node { token: Token, kids: List<Node> }; impl Clone for Node { }; leaf = Node { token: Token { n: 7, xs: [1] }, kids: [] }; tree = Node { token: Token { n: 7, xs: [1] }, kids: push([], leaf) }; copy = clone(tree); return size(copy.kids);" "CC" 1)
                 , testCase "a wrong variant is not borrowed by clone" (rejected (tokenClone ++ "enum E { A { token: Token }, B }; e = E::B; t = clone((e as E::A).token); return t.n;") "Could not prove")
@@ -228,6 +230,37 @@ cloneBorrowCount source expected = do
 
 snd4 :: (a, b, c, d) -> b
 snd4 (_, value, _, _) = value
+
+boxedArrayClonePrograms :: [(String, String, Integer)]
+boxedArrayClonePrograms =
+    [ ("clone unbox preserves the second sized-array element", "b = Box::new(#[7, 13]); copy = clone(Box::unbox(b)); return get(copy, 1) + size(b) - 2;", 13)
+    , ("clone unbox mutates independently of the sized-array source", "b = Box::new(#[7, 13]); copy = clone(Box::unbox(b)); copy = set(copy, 0, 99); return get(b, 0) * 100 + get(copy, 0) + get(b, 1);", 812)
+    , ("clone Box mutates independently of the sized-array source", "b = Box::new(#[7, 13]); copy = clone(b); copy = set(copy, 0, 99); return get(b, 0) * 100 + get(copy, 0) + get(b, 1);", 812)
+    , ("clone unbox retains an empty sized array and its source", empty ++ "b = Box::new(empty()); copy = clone(Box::unbox(b)); return size(copy) + size(b);", 0)
+    , ("clone Box retains an empty sized array and its source", empty ++ "b = Box::new(empty()); copy = clone(b); copy = Box::new(empty()); return size(copy) + size(b);", 0)
+    , ("a terminal sized-array Box field is lent as a handle", "struct Holder { box: Box<Array<Int, 2>> }; h = Holder { box: Box::new(#[7, 13]) }; copy = clone(h.box); copy = set(copy, 0, 99); return get(h.box, 0) * 10 + get(copy, 0);", 169)
+    , ("a terminal empty sized-array Box variant field remains a handle", empty ++ "enum Holder { Present { box: Box<Array<Int, 0>> }, Empty }; h = Holder::Present { box: Box::new(empty()) }; copy = clone((h as Holder::Present).box); return size(copy) + size((h as Holder::Present).box);", 0)
+    , ("a terminal sized-array Box list element remains a handle", "boxes = push([], Box::new(#[7, 13])); copy = clone(get(boxes, 0)); return get(copy, 1) + size(get(boxes, 0));", 15)
+    , ("nested Box Clone preserves the sized-array payload", "b = Box::new(Box::new(#[7, 13])); copy = clone(b); array = Box::unbox(copy); array = set(array, 0, 99); original = Box::unbox(b); return get(original, 0) * 10 + get(array, 0);", 169)
+    , ("clone unbox of a nested Box borrows only the inner handle", "b = Box::new(Box::new(#[7, 13])); copy = clone(Box::unbox(b)); copy = set(copy, 0, 99); original = Box::unbox(b); return get(original, 0) * 10 + get(copy, 0);", 169)
+    , ("clone unbox of a sized array of arrays keeps all rows", "b = Box::new(array(2, #[7, 13])); copy = clone(Box::unbox(b)); copy = set(copy, 0, #[99, 100]); original = Box::unbox(b); return get(get(original, 0), 0) * 10 + get(get(copy, 0), 0);", 169)
+    ]
+  where
+    empty = "fn empty() -> Array<Int, 0> { return #[]; }; "
+
+boxedArrayMaterialization :: IO TestResult
+boxedArrayMaterialization = do
+    let source = "b = Box::new(#[7, 13]); copy = clone(b); return get(copy, 1) + size(b);"
+    result <- mapResult insertOwnership <$> compileOnce source
+    pure $ case result of
+        Error e -> Just e
+        Ok program ->
+            let functions = M.progMain program : Map.elems (M.progFunctions program)
+                statements = [(fn, dest, rv) | fn <- functions, M.BasicBlock stmts _ <- Map.elems (M.fnBlocks fn), M.Assign dest rv <- stmts]
+                unboxes = [() | (_, _, M.Unbox _) <- statements]
+                payloadBorrows = [() | (fn, dest, M.Borrow{}) <- statements, Just decl <- [Map.lookup dest (M.fnLocals fn)], TRef (TArrayOf _ _) <- [M.localType decl]]
+             in if null unboxes then Just "Expected the sized-array unbox materialization to remain"
+                else testAssertEq (length payloadBorrows) 0
 
 boxedClonePrograms :: [(String, String, String, Integer)]
 boxedClonePrograms =
