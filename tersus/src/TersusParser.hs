@@ -13,7 +13,7 @@ module TersusParser
     , emitParserIr
     , ownedParserProgram
     , parseWithEquality
-    , parserHash
+    , parserKey
     ) where
 
 import Control.Exception (evaluate)
@@ -31,7 +31,7 @@ import SourceParse (SourceParts, parseSourcePartsWith, parseWithEqualityWith)
 import Mir (Program)
 import MirData (writeProgram)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
-import MirHousekeeping (cachedEmitter, cachedParser, nativeProgram, parserHash, toolProgram)
+import MirHousekeeping (cachedEmitter, cachedParser, nativeProgram, parserKey, toolProgram)
 import MirOwnership (insertOwnership)
 import Native (runWithInput, runWithInputFull)
 import Seed (cachedParserSeed)

@@ -2,7 +2,7 @@ module Bootstrap
     ( seedHash
     , seedSha256
     , seedUrl
-    , emitterHash
+    , compilerSnapshotHash
     , stageZero
     , stageOne
     , cachedSeed
@@ -17,7 +17,7 @@ import MirData (writeProgram)
 import Native (buildExecutable, runWithInput)
 import MirHousekeeping (emitterOwnedProgram)
 import Pipeline (ownedSource)
-import Seed (cachedSeed, emitterHash, seedHash, seedSha256, seedUrl, stageZero)
+import Seed (cachedSeed, compilerSnapshotHash, seedHash, seedSha256, seedUrl, stageZero)
 import ValidatorNative (cachedBootstrapEmitter)
 import Utils
 

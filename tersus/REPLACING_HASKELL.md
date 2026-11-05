@@ -134,9 +134,9 @@ including one that follows from a branch value (`0 <= 0 - n` from
 The validator no longer runs interpreted in production: it is compiled
 to native code once (with `lib/validation_driver.tersus` as its main
 program, which reads the bridge's encoded functions from standard
-input) and kept in the cache directory under a name made of the
-sources it is made of (`ValidatorNative`); `Pipeline` runs that
-program for every validation. It is compiled without being validated,
+input) and kept in the cache directory under an identity derived from its exact
+owned-MIR input, emitter identity, runtime, target and compiler flags
+(`ValidatorNative`); `Pipeline` runs that program for every validation. It is compiled without being validated,
 as a bootstrap program is, and is used only after it has validated
 what it is made of: the native storage library its lists and Boxes are
 built with, and its own source, each function by a process of its own,
@@ -232,12 +232,24 @@ The host has moved: `MirHousekeeping` runs the two Tersus programs on
 the MIR as data (cached native executables built from the seed, as
 the emitter is built) wherever the pipeline checked or erased a program.
 The MIR executor is used only for recursive erasure during tool construction;
-native build failures are explicit. After P0/E0 preflight and List/Box
-initialization, E1, checker, eraser, P1 and unchecked-validator frontends
-run concurrently. Derived tools wait for E1 only to emit, retaining one
-cross-process cache lock per executable. Full validator self-validation
-runs alongside the other post-E1 builds; its source and List/Box library
-must both pass before production use. `MirVerify.hs` and
+native build failures are explicit. P0/E0 preflight precedes prepared-input
+lookup. Independent E1, checker, eraser, P1 and unchecked-validator frontends
+run concurrently; recursive List/Box erasure initializes only when needed.
+Derived tools wait for E1 only to emit, retaining one cross-process cache
+lock per executable. Full validator self-validation runs alongside the
+other post-E1 builds; its source and List/Box library must both pass before
+production use.
+
+Prepared owned-MIR bytes and complete validator self-check transports are
+cached per compiler snapshot, entry and flags. Every read checks the stored
+fingerprint and format; corrupt or partial entries are rebuilt, and only
+successful preparation is published atomically. Executable identities use
+the actual prepared bytes, not the snapshot identity, so an unrelated host
+source change can reuse unchanged native tools. The checked-validator
+identity also binds both complete self-check transports: proof-only changes
+must recheck even when executable bytes are unchanged. Both in-memory and
+disk verdicts use that checked identity. Source manifest fingerprints remain
+separate bootstrap audits. `MirVerify.hs` and
 `MirGhost.hs` are deleted. The bridge keeps the Haskell signatures
 and verdicts, and puts back the parts of a program the data form
 does not carry (function specifications, generics, invariants and

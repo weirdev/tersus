@@ -7,7 +7,7 @@ import Data.List (isPrefixOf)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 
-import Bootstrap (emitterHash, llvmOfOwned, tersusLlvm)
+import Bootstrap (compilerSnapshotHash, llvmOfOwned, tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runProgramIn, runSourceIn)
 import MirHousekeeping (toolOwnedProgram)
 import Hash (fingerprint)
@@ -86,8 +86,8 @@ programExecutable :: FilePath -> String -> IO (Result FilePath String)
 programExecutable path name = do
     files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
     backend <- lookupEnv "TERSUS_PARSER"
-    let hash = fingerprint [packageCacheInput path files, show backend, emitterHash, TersusParser.parserHash, runtimeSource]
-        build output = do
+    parser <- TersusParser.parserKey
+    let build output = do
             ir <- if "examples/mir/" `isPrefixOf` path
                 then ownedFromFiles path files >>= \owned -> case owned of
                     Error e -> pure (Error e)
@@ -98,7 +98,11 @@ programExecutable path name = do
             case ir of
                 Error e -> pure (Error e)
                 Ok text -> buildExecutable output text
-    cachedProgram ("test-" ++ name) hash ("the test " ++ name) build
+    case parser of
+        Error e -> pure (Error e)
+        Ok identity -> cachedProgram ("test-" ++ name)
+            (fingerprint [packageCacheInput path files, show backend, compilerSnapshotHash, identity, runtimeSource])
+            ("the test " ++ name) build
 
 {-# NOINLINE readerExecutable #-}
 readerExecutable :: MVar (Maybe FilePath)

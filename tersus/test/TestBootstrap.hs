@@ -8,7 +8,7 @@ import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.IO (hClose, openTempFile)
-import System.FilePath ((</>))
+import System.FilePath (takeFileName, (</>))
 import System.Posix.Process (getProcessID)
 
 import qualified TersusParser
@@ -46,10 +46,10 @@ testBootstrap =
 hashShape :: IO TestResult
 hashShape =
     pure $
-        if all (\h -> length h == 16 && all isHexDigit h) [seedHash, emitterHash] && seedHash /= emitterHash
-            && emitterHash == fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
+        if all (\h -> length h == 16 && all isHexDigit h) [seedHash, compilerSnapshotHash] && seedHash /= compilerSnapshotHash
+            && compilerSnapshotHash == fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
             then Nothing
-            else Just ("the hashes are " ++ show (seedHash, emitterHash))
+            else Just ("the hashes are " ++ show (seedHash, compilerSnapshotHash))
 
 seedPin :: IO TestResult
 seedPin =
@@ -169,6 +169,7 @@ cache zero one = do
             case primed of
                 Error e -> pure (Just e)
                 Ok initial -> do
+                    parserIdentity <- TersusParser.parserKey
                     names <- sort <$> listDirectory directory
                     before <- mapM (getModificationTime . (directory </>)) names
                     reusedZero <- cachedSeed
@@ -184,7 +185,10 @@ cache zero one = do
                             [ if text == fromStage1 && text == initial then Nothing else Just "the IR is not what stage 1 writes"
                             , testAssertEq (reusedZero, reusedOne) (Ok zero, Ok one)
                             , testAssertEq (afterNames, after) (names, before)
-                            , testAssertTrue (all (`elem` names) ["seed-" ++ seedHash, "parser-seed-" ++ parserSeedHash, "emitter-" ++ emitterHash, "tersus-parser-" ++ TersusParser.parserHash])
+                            , case parserIdentity of
+                                Error e -> Just e
+                                Ok key -> testAssertTrue (all (`elem` names)
+                                    ["seed-" ++ seedHash, "parser-seed-" ++ parserSeedHash, takeFileName one, "tersus-parser-" ++ key])
                             ]
                         (Error e, _) -> Just e
                         (_, Error e) -> Just e

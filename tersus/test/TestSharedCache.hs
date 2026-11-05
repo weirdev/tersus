@@ -20,9 +20,12 @@ import Data.List (isInfixOf, isPrefixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import PreludeSource (mirPackageFiles, validationSource, validationDriverSource, listsSource, boxSource)
-import Seed (emitterHash)
+import Seed (compilerSnapshotHash, parserSeedHash)
 import qualified TersusParser
 import qualified Modules
+import qualified Compile
+import qualified Bootstrap
+import GHC.Clock (getMonotonicTime)
 import qualified PackageCompile
 import qualified MirHousekeeping
 import qualified Data.Map.Strict as Map
@@ -44,11 +47,13 @@ import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), Loc
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
 import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runCommandWithInputFull, runExecutable, runWithInputFull)
-import MirData (forNative)
+import MirData (forNative, writeProgram)
+import MirOwnership (insertOwnership)
 import TestHarness
 import Types (Type (..))
 import Utils
 import ValidatorNative (withVerdictLock)
+import qualified ValidatorNative
 
 richSource :: String
 richSource = "struct Packet<n> { body: Array<Int, n> }; struct S { n: Int } invariant [{ affirm n >= 0; }]; fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; p = Packet<2> { body: #[1, 2] }; s = S { n: f(get(p.body, 0)) }; return s.n;"
@@ -99,6 +104,9 @@ testSharedCache =
         , TestCase "independent native builds overlap and restore capabilities" parallelOverlap
         , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
         , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
+        , TestCase "first storage demand retries after parser seed repair" storageRetry
+        , TestCase "prepared input aliases reuse verified bytes and repair corrupt or partial files" preparedAliasIntegrity
+        , TestCase "proof-only changes invalidate checked certificates and verdict namespaces" proofCertificateNamespace
         , TestCase "cancelled native subprocesses die and release the cache lock" nativeProcessCancellation
         , TestCase "cancelled captured tools are terminated and reaped directly" capturedProcessCancellation
         , TestCase "surviving children cannot retain close-on-exec cache locks" survivingChildLock
@@ -354,6 +362,74 @@ survivingChildLock = withCacheHome $ \home -> do
             <> testAssertTrue (case alive of Right () -> True; Left _ -> False)
             <> testAssertEq reused (Just first))) `finally` cleanup
 
+preparedAliasIntegrity :: IO TestResult
+preparedAliasIntegrity = withCacheHome $ \home -> do
+    count <- newIORef (0 :: Int)
+    let payload = "verified-owned-input"
+        build = atomicModifyIORef' count (\n -> (n + 1, ())) >> pure (Ok payload)
+        cached = MirHousekeeping.cachedPreparedInput "alias-probe" [] (== payload) build
+    first <- cached
+    second <- cached
+    names <- listDirectory (home </> "tersus")
+    case [home </> "tersus" </> name | name <- names, "prepared-" `isPrefixOf` name, not (".lock" `isInfixOf` name)] of
+        [path] -> do
+            writeFile path "partial"
+            repaired <- cached
+            writeFile path ("wrong-checksum\n" ++ payload)
+            corrected <- cached
+            let key = drop (length "prepared-") (takeFileName path)
+                rejected = "decoder-rejects-this"
+            writeFile path (fingerprint [key, rejected] ++ "\n" ++ rejected)
+            decoded <- cached
+            attempts <- readIORef count
+            invalid <- MirHousekeeping.cachedPreparedInput "invalid-alias" [] (== payload) (pure (Ok "invalid"))
+            failed <- MirHousekeeping.cachedPreparedInput "failed-alias" [] (== payload) (pure (Error "preparation failed"))
+            remaining <- listDirectory (home </> "tersus")
+            pure $ firstFailure
+                [testAssertEq [first, second, repaired, corrected, decoded] (replicate 5 (Ok payload))
+                , testAssertEq attempts 4, testAssertEq failed (Error "preparation failed")
+                , testAssertEq invalid (Error "invalid prepared input")
+                , testAssertEq (sort [name | name <- remaining, not (".lock" `isInfixOf` name)]) (sort [takeFileName path])]
+        _ -> pure (Just "prepared cache did not publish exactly one input")
+
+proofCertificateNamespace :: IO TestResult
+proofCertificateNamespace = do
+    let program post = Compile.lowerSource True ("fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return " ++ post ++ " 0; }] { return n; }; return f(3);")
+        owned raw = mapResult (writeProgram . insertOwnership) (MirHousekeeping.nativeProgram raw)
+    case (program ">", program "<") of
+        (Ok good, Ok bad) -> case (owned good, owned bad, ValidatorNative.prepareTexts False good, ValidatorNative.prepareTexts False bad) of
+            (Ok a, Ok b, Ok proofA, Ok proofB) -> withCacheHome $ \home -> do
+                let native input = MirHousekeeping.ownedContentKey "producer" input ["-O2"]
+                    checkedA = ValidatorNative.certificateKey (native a) [] (map snd proofA)
+                    checkedB = ValidatorNative.certificateKey (native b) [] (map snd proofB)
+                    query = "proof-namespace-probe"
+                    verdict key = home </> "tersus" </> ("verdicts-" ++ key) </> fingerprint [query]
+                    oldVerdict = verdict checkedA
+                createDirectoryIfMissing True (takeDirectory oldVerdict)
+                writeFile oldVerdict ("0 -1 -1\n" ++ query)
+                first <- cachedProgram "certificate-probe" checkedA "proof certificate probe"
+                    (\output -> writeFile output "checked" >> pure (Ok ()))
+                changed <- cachedProgram "certificate-probe" checkedB "proof certificate probe"
+                    (\_ -> pure (Error "changed proof must be checked"))
+                withVerdictLock checkedB query (pure ())
+                oldLock <- doesFileExist (oldVerdict ++ ".lock")
+                newLock <- doesFileExist (verdict checkedB ++ ".lock")
+                retained <- readFile oldVerdict
+                pure $ firstFailure
+                    [ testAssertEq a b, testAssertEq (native a) (native b)
+                    , testAssertTrue (map snd proofA /= map snd proofB && checkedA /= checkedB)
+                    , testAssertTrue (case first of Ok _ -> True; _ -> False)
+                    , testAssertEq changed (Error "changed proof must be checked")
+                    , testAssertEq (oldLock, newLock) (False, True)
+                    , testAssertEq retained ("0 -1 -1\n" ++ query)
+                    ]
+            (Error e, _, _, _) -> pure (Just e)
+            (_, Error e, _, _) -> pure (Just e)
+            (_, _, Error e, _) -> pure (Just e)
+            (_, _, _, Error e) -> pure (Just e)
+        (Error e, _) -> pure (Just e)
+        (_, Error e) -> pure (Just e)
+
 nativeProcessCancellation :: IO TestResult
 nativeProcessCancellation = processCancellation True
 
@@ -433,7 +509,8 @@ affinityIgnoresOpenMP = do
     threads <- setting "OMP_NUM_THREADS" "32" availableProcessors
     limited <- setting "OMP_THREAD_LIMIT" "1" availableProcessors
     both <- setting "OMP_NUM_THREADS" "32" (setting "OMP_THREAD_LIMIT" "1" availableProcessors)
-    pure (testAssertEq [threads, limited, both] (replicate 3 expected))
+    noPath <- setting "PATH" "" availableProcessors
+    pure (testAssertEq [threads, limited, both, noPath] (replicate 4 expected))
 
 interactiveControlC :: IO TestResult
 interactiveControlC = withNativeHome $ \home -> do
@@ -486,16 +563,15 @@ interactiveControlC = withNativeHome $ \home -> do
 
 validatorFlagNamespace :: IO TestResult
 validatorFlagNamespace = withCacheHome $ \home -> do
-    let inputs = [emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource]
-        -- The optimization policy (-O2) is pinned here so a flag change must move this namespace.
-        hashes = map (fingerprint . (inputs ++)) [["-O0"], ["-O2"], []]
+    let hashes = [ValidatorNative.certificateKey (MirHousekeeping.ownedContentKey "emitter-producer" "owned-input" flags) ["library-check"] ["source-check"]
+            | flags <- [["-O0"], ["-O2"], []]]
         text = "validator-build-flag-probe"
         file hash = home </> "tersus" </> ("verdicts-" ++ hash) </> fingerprint [text]
         stale = file (hashes !! 2)
         body = "0 -1 -1\n" ++ text
     createDirectoryIfMissing True (takeDirectory stale)
     writeFile stale body
-    withVerdictLock text (pure ())
+    withVerdictLock (hashes !! 1) text (pure ())
     present <- mapM (doesFileExist . (++ ".lock") . file) hashes
     retained <- readMarker stale
     pure $ firstFailure
@@ -507,10 +583,12 @@ validatorFlagNamespace = withCacheHome $ \home -> do
 rawNamedTruncation :: String -> String -> IO TestResult
 rawNamedTruncation name suffix = do
     cache <- cacheDirectory
-    case cache of
-        Error e -> pure (Just e)
-        Ok dir -> do
-            let exe = dir </> ("tersus-parser-" ++ TersusParser.parserHash)
+    key <- TersusParser.parserKey
+    case (cache, key) of
+        (Error e, _) -> pure (Just e)
+        (_, Error e) -> pure (Just e)
+        (Ok dir, Ok identity) -> do
+            let exe = dir </> ("tersus-parser-" ++ identity)
                 request ty = unlines
                     [ "tersus-file-parse 1", "decls", "ctors 0", "types 0", "self none"
                     , "selfType some " ++ ty, "typeParams 0", "generics 0", "implParams 0"
@@ -534,6 +612,7 @@ probe :: IO TestResult
 probe = do
     terminal <- lookupEnv "TERSUS_TERMINAL_PROBE"
     routing <- lookupEnv "TERSUS_TEST_ROUTING_PROBE"
+    content <- lookupEnv "TERSUS_CONTENT_RESTORE_PROBE"
     case terminal of
         Just path -> do
             ir <- readFile path
@@ -541,9 +620,40 @@ probe = do
             case result of
                 Ok ExitSuccess -> putStrLn "[CTRL-C-DELEGATED]" >> pure Nothing
                 other -> pure (Just (show other))
-        Nothing -> case routing of
-            Just "1" -> getNumCapabilities >>= \count -> putStrLn ("[CAPABILITIES] " ++ show count) >> pure Nothing
-            _ -> cacheProbe
+        Nothing -> case content of
+            Just directory -> contentRestoreProbe directory
+            Nothing -> case routing of
+                Just "1" -> getNumCapabilities >>= \count -> putStrLn ("[CAPABILITIES] " ++ show count) >> pure Nothing
+                _ -> cacheProbe
+
+contentRestoreProbe :: FilePath -> IO TestResult
+contentRestoreProbe directory = do
+    start <- getMonotonicTime
+    built <- Bootstrap.tersusLlvm "return 42;"
+    elapsed <- (subtract start) <$> getMonotonicTime
+    emitter <- MirHousekeeping.emitterKey
+    parser <- TersusParser.parserKey
+    checked <- ValidatorNative.validatorKey
+    validator <- MirHousekeeping.cachedPreparedInput "validator" [] (const True) (pure (Error "validator input was not prepared"))
+    emitterInput <- MirHousekeeping.cachedPreparedInput MirHousekeeping.emitterEntry [] (const True) (pure (Error "emitter input was not prepared"))
+    parserInput <- MirHousekeeping.cachedPreparedInput "examples/parser/parser.tersus" [] (const True) (pure (Error "parser input was not prepared"))
+    case (built, emitter, parser, checked, validator, emitterInput, parserInput) of
+        (Ok ir, Ok e, Ok p, Ok v, Ok validatorBytes, Ok emitterBytes, Ok parserBytes) -> do
+            createDirectoryIfMissing True directory
+            writeFile (directory </> "identity") (show (compilerSnapshotHash, e, p, v))
+            writeFile (directory </> "e1-owned.mir") emitterBytes
+            writeFile (directory </> "p1-owned.mir") parserBytes
+            writeFile (directory </> "validator-owned.mir") validatorBytes
+            writeFile (directory </> "result.ll") ir
+            putStrLn ("[CONTENT-READY] " ++ show elapsed ++ "s")
+            pure Nothing
+        (Error e, _, _, _, _, _, _) -> pure (Just e)
+        (_, Error e, _, _, _, _, _) -> pure (Just e)
+        (_, _, Error e, _, _, _, _) -> pure (Just e)
+        (_, _, _, Error e, _, _, _) -> pure (Just e)
+        (_, _, _, _, Error e, _, _) -> pure (Just e)
+        (_, _, _, _, _, Error e, _) -> pure (Just e)
+        (_, _, _, _, _, _, Error e) -> pure (Just e)
 
 cacheProbe :: IO TestResult
 cacheProbe = do
@@ -566,9 +676,35 @@ ordinaryCacheProbe = do
 sharedProbe :: IO TestResult
 sharedProbe = do
     retry <- lookupEnv "TERSUS_SHARED_CACHE_PARSER_RETRY"
-    case retry of
-        Just _ -> parserRetryProbe
-        Nothing -> regularSharedProbe
+    storage <- lookupEnv "TERSUS_STORAGE_RETRY_PROBE"
+    case (storage, retry) of
+        (Just _, _) -> storageRetryProbe
+        (_, Just _) -> parserRetryProbe
+        _ -> regularSharedProbe
+
+storageRetry :: IO TestResult
+storageRetry = withNativeHome $ \home -> do
+    primeBootstrapTools home
+    bracket (spawnProbe home [("TERSUS_STORAGE_RETRY_PROBE", "1")])
+        (\child -> terminateProcess child >> waitForProcess child >> pure ()) $ \child -> do
+            code <- waitChild 300 child
+            pure (testAssertEq code (Just ExitSuccess))
+
+storageRetryProbe :: IO TestResult
+storageRetryProbe = do
+    Just home <- lookupEnv "XDG_CACHE_HOME"
+    let broken = home </> "broken-parser.ll"
+    writeFile broken "not the pinned parser seed\n"
+    removeFile (home </> "tersus" </> ("parser-seed-" ++ parserSeedHash))
+    previous <- lookupEnv "TERSUS_PARSER_SEED_FILE"
+    let restore = maybe (unsetEnv "TERSUS_PARSER_SEED_FILE") (setEnv "TERSUS_PARSER_SEED_FILE") previous
+    failed <- bracket (setEnv "TERSUS_PARSER_SEED_FILE" broken) (\_ -> restore)
+        (\_ -> MirHousekeeping.listLibrary)
+    repaired <- MirHousekeeping.listLibrary
+    pure $ firstFailure
+        [ testAssertTrue (case failed of Error _ -> True; _ -> False)
+        , testAssertTrue (case repaired of Ok units -> not (null units); _ -> False)
+        ]
 
 regularSharedProbe :: IO TestResult
 regularSharedProbe = do
@@ -683,7 +819,7 @@ nativeProbe mode | mode `elem` ["verdict", "verdict-hold", "verdict-wait"] = do
     Just home <- lookupEnv "XDG_CACHE_HOME"
     writeFile (marker ++ ".started") ""
     when (mode == "verdict-wait") (awaitNativeFile (home </> "go"))
-    withVerdictLock "process-lock" $ do
+    withVerdictLock "lock-probe" "process-lock" $ do
         pid <- getProcessID
         writeFile (marker ++ ".pid") (show pid)
         writeFile (marker ++ ".entered") ""
@@ -772,10 +908,10 @@ verdictThreads same = withCacheHome $ \_ -> do
     held <- newEmptyMVar
     release <- newEmptyMVar
     started <- newEmptyMVar
-    withWorker (withVerdictLock "thread-lock" (putMVar held () >> takeMVar release)) $ \_ owner -> do
+    withWorker (withVerdictLock "lock-probe" "thread-lock" (putMVar held () >> takeMVar release)) $ \_ owner -> do
         awaitVerdict held
         let key = if same then "thread-lock" else "different-thread-lock"
-        withWorker (putMVar started () >> withVerdictLock key (pure ())) $ \_ waiter -> do
+        withWorker (putMVar started () >> withVerdictLock "lock-probe" key (pure ())) $ \_ waiter -> do
             awaitVerdict started
             early <- timeout (if same then 100000 else 2000000) (takeMVar waiter)
             putMVar release ()
@@ -789,8 +925,8 @@ verdictThreads same = withCacheHome $ \_ -> do
 
 verdictException :: IO TestResult
 verdictException = withCacheHome $ \_ -> do
-    failed <- try (withVerdictLock "exception-lock" (throwIO (userError "verdict lock exception"))) :: IO (Either SomeException ())
-    retried <- timeout 2000000 (withVerdictLock "exception-lock" (pure ()))
+    failed <- try (withVerdictLock "lock-probe" "exception-lock" (throwIO (userError "verdict lock exception"))) :: IO (Either SomeException ())
+    retried <- timeout 2000000 (withVerdictLock "lock-probe" "exception-lock" (pure ()))
     pure $ firstFailure
         [ testAssertTrue (either (isInfixOf "verdict lock exception" . displayException) (const False) failed)
         , testAssertEq retried (Just ())
@@ -800,11 +936,11 @@ verdictCancellation :: IO TestResult
 verdictCancellation = withCacheHome $ \_ -> do
     held <- newEmptyMVar
     release <- newEmptyMVar
-    withWorker (withVerdictLock "cancelled-lock" (putMVar held () >> takeMVar release)) $ \thread owner -> do
+    withWorker (withVerdictLock "lock-probe" "cancelled-lock" (putMVar held () >> takeMVar release)) $ \thread owner -> do
         awaitVerdict held
         killThread thread
         stopped <- workerResult owner
-        retried <- timeout 2000000 (withVerdictLock "cancelled-lock" (pure ()))
+        retried <- timeout 2000000 (withVerdictLock "lock-probe" "cancelled-lock" (pure ()))
         pure $ firstFailure
             [ testAssertTrue (case stopped of Just (Left _) -> True; _ -> False)
             , testAssertEq retried (Just ())
@@ -815,7 +951,7 @@ verdictProcesses = withCacheHome $ \home ->
     -- Start the child before opening the lock Handle so it cannot inherit that fd.
     withNativeChildren home [("waiter", "verdict-wait")] $ \children -> do
         awaitNativeFile (home </> "waiter.started")
-        enteredEarly <- withVerdictLock "process-lock" $ do
+        enteredEarly <- withVerdictLock "lock-probe" "process-lock" $ do
             writeFile (home </> "go") ""
             threadDelay 100000
             doesFileExist (home </> "waiter.entered")
@@ -1333,7 +1469,7 @@ copyCompiledTools from to = do
 
 compiledToolName :: String -> Bool
 compiledToolName name = any (`isPrefixOf` name)
-    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "parser-seed-", "tersus-parser-", "tersus_rt_"]
+    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "parser-seed-", "tersus-parser-", "tersus_rt_", "prepared-"]
     && not (".lock" `isInfixOf` name)
 
 withCacheHome :: (FilePath -> IO a) -> IO a
@@ -1442,7 +1578,7 @@ primeBootstrapTools home = do
                         exists <- doesFileExist output
                         when (not exists) (copyFile (source </> name) output))
                         [name | name <- names, '.' `notElem` name,
-                            any (`isPrefixOf` name) ["seed-", "parser-seed-", "emitter-", "mir-verify-", "mir-erase-", "tersus-parser-"]]
+                            any (`isPrefixOf` name) ["seed-", "parser-seed-", "emitter-", "mir-verify-", "mir-erase-", "tersus-parser-", "validator-", "prepared-"]]
 
 packageProcesses :: IO TestResult
 packageProcesses = do
@@ -1481,7 +1617,8 @@ parserRetryProbe = do
     case primed of
         Left e -> pure (Just e)
         Right _ -> do
-            let parser = home </> "tersus" </> ("tersus-parser-" ++ TersusParser.parserHash)
+            identity <- TersusParser.parserKey >>= \result -> case result of Error e -> fail e; Ok key -> pure key
+            let parser = home </> "tersus" </> ("tersus-parser-" ++ identity)
                 source = "return 987823;"
             permissions <- getPermissions parser
             modified <- getModificationTime parser
