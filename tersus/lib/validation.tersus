@@ -2379,12 +2379,15 @@ fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) 
     // not, and the chain of them would join every constant to the goal)
     constantIds = HashSet::new();
     for c in canon.constants { if c.kind = 0 { constantIds = constantIds.insert(c.id); }; };
-    wide = linearAttempt(canon, linearRelevant(canon, constantIds, goalLeft, goalRight, true), goalLeft, goalRight, bound);
+    wideTerms = linearRelevant(canon, constantIds, goalLeft, goalRight, true);
+    wide = linearAttempt(canon, wideTerms, goalLeft, goalRight, bound);
     if wide != 2 { return wide = 1; };
     // (past the budget, the facts are taken again without joining through a
     // constant: x in 0 <= x brings every term with a bound into the goal's
     // component, though only a contradiction there could bear on the goal)
-    return linearAttempt(canon, linearRelevant(canon, constantIds, goalLeft, goalRight, false), goalLeft, goalRight, bound) = 1;
+    narrowTerms = linearRelevant(canon, constantIds, goalLeft, goalRight, false);
+    if narrowTerms.size() >= wideTerms.size() { return false; };
+    return linearAttempt(canon, narrowTerms, goalLeft, goalRight, bound) = 1;
 };
 
 // The terms in the goal's own component of the term graph: only the facts
@@ -3991,6 +3994,17 @@ fn entailsAnyCached(cache: EntailmentCache, goals: &List<ValidatorGoal>) -> Cach
         };
     };
     return CachedAnswer { holds: false, cache: c };
+};
+
+// Whether the plain closure a cache already holds proves the goal (the
+// derived facts, and a closure not made yet, are left to a fresh ask)
+fn entailsPlainCached(cache: &EntailmentCache, goal: &ValidatorGoal) -> Bool {
+    if recognizedGoal(clone(goal)) = false { return false; };
+    if entailsGoalDirectly(cache.plain, clone(goal)) { return true; };
+    if cache.plainAnalysis is AnalysisLookup::Found {
+        return entailsGoalAnalyzed(cache.plain, (clone(cache.plainAnalysis) as AnalysisLookup::Found).analysis, clone(goal));
+    };
+    return false;
 };
 
 fn entailsGoalCached(cache: EntailmentCache, goal: ValidatorGoal) -> CachedAnswer {
@@ -7291,9 +7305,7 @@ fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given:
                 g = localGoal(relation, a, b);
                 ok = false;
                 if shared is SharedEntailment::Found {
-                    answer = entailsGoalCached((shared as SharedEntailment::Found).cache, clone(g));
-                    ok = answer.holds;
-                    shared = SharedEntailment::Found { cache: answer.cache };
+                    ok = entailsPlainCached((shared as SharedEntailment::Found).cache, g);
                 };
                 if ok = false {
                     fresh = entailsGoalCached(entailmentCache(state.context), clone(g));
@@ -7638,35 +7650,28 @@ impl Clone for InferState { };
 
 fn noInferGoals() -> List<InferGoal> { return []; };
 
-// The terms the facts tie together, as pairs to join: an equality, order,
-// disequality or difference joins its two sides, and an application its
-// result and arguments. A constant joins nothing (every 0 would tie every
-// term with a 0 in it together).
-fn factLinks(context: &ValidatorContext) -> List<EqualityFact> {
-    constant = HashSet::new();
-    for c in context.constants { constant = constant.insert(c.id); };
-    links = [];
-    for f in context.equalities { if constant.contains(f.left) = false && constant.contains(f.right) = false { links = push(links, f); }; };
-    for o in context.orders { if constant.contains(o.smaller) = false && constant.contains(o.greater) = false { links = push(links, EqualityFact { left: o.smaller, right: o.greater }); }; };
-    for d in context.different { if constant.contains(d.left) = false && constant.contains(d.right) = false { links = push(links, EqualityFact { left: d.left, right: d.right }); }; };
-    for d in context.differences { if constant.contains(d.left) = false && constant.contains(d.right) = false { links = push(links, EqualityFact { left: d.left, right: d.right }); }; };
-    for appPosition in 0..size(context.applications) {
-        app = get(context.applications, appPosition);
-        for arg in app.arguments {
-            if constant.contains(arg) = false { links = push(links, EqualityFact { left: app.id, right: arg }); };
-        };
-    };
-    return links;
-};
-
 // The locals a candidate invariant may relate a changed local to: those the
-// loop reads, and those whose values the facts at its entry tie to the value
-// of a local it changes or reads (n in s = n - i, with i = n at the entry)
+// loop reads, and those equal at its entry to a local it changes or to the
+// size of a list it changes (n in s = n - i, with i = n at the entry). Ties
+// through orders or other applications would bring in most of a large
+// function.
 fn loopAnchors(initial: &ExecutionState, havoc: &List<Int>, mentioned: &HashSet<Int>) -> HashSet<Int> {
-    uf = unionOf(factLinks(initial.context));
+    uf = unionOf(initial.context.equalities);
+    constant = HashSet::new();
+    for c in initial.context.constants { constant = constant.insert(ufFind(uf, c.id)); };
     roots = HashSet::new();
     for binding in initial.locals.entries() {
-        if containsValue(havoc, binding.key) || mentioned.contains(binding.key) { roots = roots.insert(ufFind(uf, binding.value)); };
+        // (a local that starts at a constant ties nothing: every other local
+        // that starts at 0 would be an anchor of every counter)
+        r = ufFind(uf, binding.value);
+        if containsValue(havoc, binding.key) && constant.contains(r) = false { roots = roots.insert(r); };
+    };
+    // (and so is a local equal to the size of a list the loop changes: i in
+    // size(l) = i, for a loop that sets the elements of l)
+    for app in initial.context.applications {
+        if app.function = -13 && size(app.arguments) = 1 {
+            if roots.contains(ufFind(uf, intAt(app.arguments, 0, 0))) { roots = roots.insert(ufFind(uf, app.id)); };
+        };
     };
     anchors = HashSet::new();
     for binding in initial.locals.entries() {
