@@ -40,7 +40,7 @@ import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
-import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runCommandWithInputFull, runWithInputFull)
+import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runCommandWithInputFull, runExecutable, runWithInputFull)
 import MirData (forNative)
 import TestHarness
 import Types (Type (..))
@@ -97,6 +97,7 @@ testSharedCache =
         , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
         , TestCase "cancelled native subprocesses die and release the cache lock" nativeProcessCancellation
         , TestCase "available CPU count ignores unrelated OpenMP policy" affinityIgnoresOpenMP
+        , TestCase "interactive children retain their SIGINT handler" interactiveControlC
         , TestCase "independent process threads do not form a false file-lock cycle" nativeThreadedProcesses
         , TestCase "package stages share lossless validated intermediates" packageStages
         , TestCase "package keys include dependency contents and module layout" packageInputs
@@ -360,6 +361,55 @@ affinityIgnoresOpenMP = do
     both <- setting "OMP_NUM_THREADS" "32" (setting "OMP_THREAD_LIMIT" "1" availableProcessors)
     pure (testAssertEq [threads, limited, both] (replicate 3 expected))
 
+interactiveControlC :: IO TestResult
+interactiveControlC = withNativeHome $ \home -> do
+    self <- getExecutablePath
+    let irPath = home </> "signal-handler.ll"
+        scriptPath = home </> "terminal.py"
+        ir = unlines
+            [ "@ci10_ready = private constant [6 x i8] c\"READY\\00\""
+            , "@ci10_irq = private constant [5 x i8] c\"INT\\0A\\00\""
+            , "@ci10_done = private constant [8 x i8] c\"IGNORED\\00\""
+            , "@ci10_buffer = global [1 x i8] zeroinitializer"
+            , "declare ptr @signal(i32, ptr)", "declare i32 @puts(ptr)"
+            , "declare i64 @write(i32, ptr, i64)", "declare i64 @read(i32, ptr, i64)"
+            , "define void @ci10_handle(i32 %signal) {"
+            , "  %w = call i64 @write(i32 1, ptr @ci10_irq, i64 4)", "  ret void", "}"
+            , "define i32 @main(i32 %argc, ptr %argv) {"
+            , "  %h = call ptr @signal(i32 2, ptr @ci10_handle)"
+            , "  %p = call i32 @puts(ptr @ci10_ready)", "  br label %waiting"
+            , "waiting:", "  %r = call i64 @read(i32 0, ptr @ci10_buffer, i64 1)"
+            , "  %ok = icmp eq i64 %r, 1", "  br i1 %ok, label %finished, label %waiting"
+            , "finished:", "  %q = call i32 @puts(ptr @ci10_done)", "  ret i32 0", "}"
+            ]
+        script = unlines
+            [ "import fcntl, os, pty, select, signal, subprocess, sys, termios, time"
+            , "master, slave = pty.openpty()"
+            , "settings = termios.tcgetattr(slave); settings[3] |= termios.ISIG | termios.ICANON"
+            , "settings[6][termios.VINTR] = b'\\x03'; termios.tcsetattr(slave, termios.TCSANOW, settings)"
+            , "def terminal():", "    os.setsid(); fcntl.ioctl(0, termios.TIOCSCTTY, 0)"
+            , "env = os.environ.copy(); env['TERSUS_TERMINAL_PROBE'] = sys.argv[2]"
+            , "p = subprocess.Popen([sys.argv[1], 'testSharedCacheProbe', '--child', '+RTS', '-N1', '-RTS'], stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=terminal)"
+            , "os.close(slave); output = bytearray()"
+            , "def until(marker):", "    deadline = time.monotonic() + 30"
+            , "    while marker not in output:"
+            , "        if time.monotonic() > deadline: raise RuntimeError(bytes(output))"
+            , "        if select.select([master], [], [], .1)[0]: output.extend(os.read(master, 65536))"
+            , "try:", "    until(b'READY'); os.write(master, b'\\x03'); until(b'INT')"
+            , "    deadline = time.monotonic() + .15"
+            , "    while time.monotonic() < deadline:"
+            , "        if select.select([master], [], [], .01)[0]: output.extend(os.read(master, 65536))"
+            , "        if p.poll() is not None: raise RuntimeError(bytes(output))"
+            , "    os.write(master, b'\\n'); until(b'[CTRL-C-DELEGATED]')"
+            , "    assert p.wait(timeout=5) == 0; print('PASS delegated terminal SIGINT')"
+            , "finally:", "    if p.poll() is None: os.killpg(p.pid, signal.SIGKILL)"
+            , "    p.wait(); os.close(master)"
+            ]
+    writeFile irPath ir
+    writeFile scriptPath script
+    (code, output, errors) <- runCommandWithInputFull "python3" [scriptPath, self, irPath] ""
+    pure (if code == ExitSuccess then Nothing else Just (output ++ errors))
+
 validatorFlagNamespace :: IO TestResult
 validatorFlagNamespace = withCacheHome $ \home -> do
     let inputs = [emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource]
@@ -408,10 +458,18 @@ testSharedCacheProbe = TestList "testSharedCacheProbe" [TestCase "probe" probe]
 
 probe :: IO TestResult
 probe = do
+    terminal <- lookupEnv "TERSUS_TERMINAL_PROBE"
     routing <- lookupEnv "TERSUS_TEST_ROUTING_PROBE"
-    case routing of
-        Just "1" -> getNumCapabilities >>= \count -> putStrLn ("[CAPABILITIES] " ++ show count) >> pure Nothing
-        _ -> cacheProbe
+    case terminal of
+        Just path -> do
+            ir <- readFile path
+            result <- runExecutable ir []
+            case result of
+                Ok ExitSuccess -> putStrLn "[CTRL-C-DELEGATED]" >> pure Nothing
+                other -> pure (Just (show other))
+        Nothing -> case routing of
+            Just "1" -> getNumCapabilities >>= \count -> putStrLn ("[CAPABILITIES] " ++ show count) >> pure Nothing
+            _ -> cacheProbe
 
 cacheProbe :: IO TestResult
 cacheProbe = do

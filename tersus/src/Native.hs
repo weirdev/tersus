@@ -16,7 +16,7 @@ module Native
 import Control.Concurrent (forkIOWithUnmask, killThread)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, withMVar)
-import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, onException, throwIO, try)
+import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, mask, onException, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities, getNumProcessors, setNumCapabilities)
 import GHC.IO.Encoding (char8)
@@ -124,7 +124,7 @@ runExecutable ir args = do
             Error e -> return (Error e)
             Ok () -> do
                 terminal <- hIsTerminalDevice stdin
-                Ok <$> waitOwnedProcess (proc exe args){create_group = not terminal})
+                Ok <$> waitOwnedProcess (proc exe args){create_group = not terminal, delegate_ctlc = terminal})
         `finally` (try (removeFile exe) :: IO (Either IOException ()))
 
 -- What the executable at the path writes for the input: its output, or its reason (on the standard error) for refusing it. The bytes are read as they are.
@@ -181,11 +181,12 @@ runProcessWithInputFull exe command input = do
         pure contents
 
 waitOwnedProcess :: CreateProcess -> IO ExitCode
-waitOwnedProcess command = withCreateProcess command{close_fds = True} $ \_ _ _ process -> do
-    pid <- getPid process
-    waitForProcess process `onException` case pid of
-        Just group | create_group command -> stopProcessGroup group process
-        _ -> terminateProcess process >> waitForProcess process >> pure ()
+waitOwnedProcess command = mask $ \restore ->
+    withCreateProcess command{close_fds = True} $ \_ _ _ process -> do
+        pid <- getPid process
+        restore (waitForProcess process) `onException` case pid of
+            Just group | create_group command -> stopProcessGroup group process
+            _ -> terminateProcess process >> waitForProcess process >> pure ()
 
 stopProcessGroup :: ProcessID -> ProcessHandle -> IO ()
 stopProcessGroup group process = do
