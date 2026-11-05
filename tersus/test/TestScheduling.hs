@@ -5,6 +5,7 @@ module TestScheduling
     , useWorkerProcesses
     , assignShards
     , groupWeight
+    , isSelfHosted
     , splitTestGroups
     , groupName
     , leafPaths
