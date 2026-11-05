@@ -6,17 +6,23 @@
 -- validator on it, and reads its verdict back. The validator is built as
 -- MirHousekeeping builds the checker and the eraser (by the emitter in the
 -- cache) and kept in the cache under a name made of everything it is made
--- of. It is built without being validated: it is the bootstrap, and its
--- own regression test validates it like any other program. The
+-- of. It is built without being validated: it is the bootstrap, and it is
+-- used only once it has validated its own source and the native storage
+-- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
 module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits, withVerdictLock) where
 
-import Control.Concurrent.MVar (withMVar)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Data.List (sortOn)
+import Data.Ord (Down (..))
+import GHC.Conc (getNumProcessors)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (nub)
+import Compile (lowerSource)
 import qualified Data.Map.Strict as Map
 import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, renameFile)
 import System.Exit (ExitCode (..))
@@ -114,7 +120,7 @@ verdicts exe caching texts = do
         missing = [(index, text) | (index, text) <- zip [0 :: Int ..] texts, Map.notMember text known]
         hits = length texts - length missing
     _ <- atomicModifyIORef' cacheHitCount (\n -> (n + hits, ()))
-    checked <- if null missing then pure (Ok Map.empty) else if caching then oneAtATime exe (map snd missing) Map.empty else runValidator exe (map snd missing)
+    checked <- if null missing then pure (Ok Map.empty) else if caching then oneAtATime exe (map snd missing) Map.empty else inParallel exe (map snd missing)
     case checked of
         Error e -> pure (Error e)
         Ok found -> do
@@ -164,6 +170,31 @@ withVerdictLock text action = do
 
 -- The compiled validator's verdicts over the functions given: each one up
 -- to the first refused is proved, the refused one has its own
+-- Every function checked, each by a process of its own, as many at once as
+-- the machine has processors, the longest first
+inParallel :: IO (Result FilePath String) -> [String] -> IO (Result (Map.Map Int (Int, Int, Int)) String)
+inParallel exe texts = do
+    workers <- getNumProcessors
+    queue <- newMVar (sortOn (Down . length . snd) (zip [0 :: Int ..] texts))
+    found <- newMVar (Ok Map.empty)
+    let next = modifyMVar queue (\pending -> pure (drop 1 pending, take 1 pending))
+        worker = do
+            item <- next
+            case item of
+                [] -> pure ()
+                (index, text) : _ -> do
+                    checked <- runValidator exe [text]
+                    modifyMVar found (\sofar -> pure (merge index checked sofar, ()))
+                    worker
+    finished <- mapM (const newEmptyMVar) [1 .. max 1 workers]
+    mapM_ (\done -> forkIO (worker >> putMVar done ())) finished
+    mapM_ takeMVar finished
+    takeMVar found
+  where
+    merge _ _ (Error e) = Error e
+    merge _ (Error e) _ = Error e
+    merge index (Ok answer) (Ok sofar) = Ok (Map.insert index (Map.findWithDefault (0, -1, -1) 0 answer) sofar)
+
 runValidator :: IO (Result FilePath String) -> [String] -> IO (Result (Map.Map Int (Int, Int, Int)) String)
 runValidator validator texts = do
     exe <- validator
@@ -208,8 +239,9 @@ serializeValue value = case value of
 
 -- The compiled validator in the cache. It is built from its source without
 -- being validated (no validator is there yet: uncheckedValidator), and then
--- it validates what it is made of, the native storage library its lists and
--- Boxes are built with; only a validator that has done so is used.
+-- it validates what it is made of: the native storage library its lists and
+-- Boxes are built with, and its own source; only a validator that has done
+-- so is used.
 validatorExecutable :: IO (Result FilePath String)
 validatorExecutable = cachedProgram "validator" validatorHash "the validator written in Tersus, checked" $ \output -> do
     unchecked <- uncheckedValidator
@@ -223,13 +255,18 @@ validatorExecutable = cachedProgram "validator" validatorHash "the validator wri
 
 -- What the validator validates of itself, run by the validator given
 selfCheck :: IO (Result FilePath String) -> IO (Result () String)
-selfCheck exe = case nativeStorage of
-    Error e -> pure (Error ("the native storage library: " ++ e))
-    Ok (_, library) -> do
+selfCheck exe = case (nativeStorage, lowerSource True (validationSource ++ "\n" ++ validationDriverSource)) of
+    (Error e, _) -> pure (Error ("the native storage library: " ++ e))
+    (_, Error e) -> pure (Error ("its own source: " ++ e))
+    (Ok (_, library), Ok own) -> do
         -- (not through the shared verdicts: a process that holds the lock of a
         -- function waits for this validator, so this build must not wait for it)
-        checked <- validateWithExe exe True False library
-        pure (either (\e -> Error ("the native storage library: " ++ e)) Ok (resultEither checked))
+        storage <- validateWithExe exe True False library
+        case storage of
+            Error e -> pure (Error ("the native storage library: " ++ e))
+            Ok () -> do
+                checked <- validateWithExe exe False False own
+                pure (either (\e -> Error ("its own source: " ++ e)) Ok (resultEither checked))
   where
     resultEither (Ok a) = Right a
     resultEither (Error e) = Left e
@@ -247,11 +284,12 @@ uncheckedValidator = cachedProgram "validator-unchecked" validatorHash "the vali
                 ir <- runWithInput exe (writeProgram program)
                 case ir of
                     Error e -> pure (Error e)
-                    -- The override applies to LLVM and runtime compilation; optimizing this CFG costs minutes.
                     Ok text -> buildExecutableWith validatorBuildFlags output text
 
+-- (optimized: it checks its own source before it is used, which takes about
+-- five times as long unoptimized, and optimizing it takes seconds)
 validatorBuildFlags :: [String]
-validatorBuildFlags = ["-O0"]
+validatorBuildFlags = ["-O2"]
 
 validatorHash :: String
 validatorHash = fingerprint ([emitterHash, validationSource, validationDriverSource, listsSource, boxSource, runtimeSource] ++ validatorBuildFlags)
