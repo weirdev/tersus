@@ -33,8 +33,8 @@ import qualified Mir as M
 import CacheLock (openLockHandle)
 import Hash (fingerprint)
 import MirEval (MirValue (..))
-import MirHousekeeping (cachedEmitter, cachedUncheckedValidator, nativeStorage, prepareBootstrap, prepareValidator, cachedPreparedInput)
-import Native (cacheDirectory, cacheLock, cachedProgram, availableProcessors, parallelBuilds, runCommandWithInputFull)
+import MirHousekeeping (cachedEmitter, cachedUncheckedValidator, nativeStorage, prepareBootstrap, prepareValidator, cachedPreparedInput, cachedContentKey, emitterEntry)
+import Native (cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, availableProcessors, parallelBuilds, runCommandWithInputFull)
 import PreludeSource (validationDriverSource, validationSource)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
 import Syntax (parseImplCheckName)
@@ -315,10 +315,28 @@ prepareCertificate = do
         Nothing -> False
 
 validatorKey :: IO (Result String String)
-validatorKey = fmap (mapResult (\(key, _, _, _, _) -> key)) prepareCertificate
+validatorKey = do
+    ready <- prepareBootstrap
+    case ready of
+        Error e -> pure (Error e)
+        Ok () -> cachedContentKey "validator-checked" ["-O2"]
+            [(emitterEntry, []), ("validator", []), ("validator-selfcheck", [])] $
+                fmap (mapResult (\(key, _, _, _, _) -> key)) prepareCertificate
 
 validatorExecutable :: IO (Result FilePath String)
 validatorExecutable = do
+    key <- validatorKey
+    case key of
+        Error e -> pure (Error e)
+        Ok identity -> do
+            existing <- cachedProgramIfPresent "validator" identity
+            case existing of
+                Error e -> pure (Error e)
+                Ok (Just exe) -> pure (Ok exe)
+                Ok Nothing -> buildCheckedValidator
+
+buildCheckedValidator :: IO (Result FilePath String)
+buildCheckedValidator = do
     prepared <- prepareCertificate
     case prepared of
         Error e -> pure (Error e)
