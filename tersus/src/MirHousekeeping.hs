@@ -15,6 +15,8 @@ module MirHousekeeping
     , emitterOwnedProgram
     , ownedProgramOf
     , cachedParser
+    , parserInput
+    , parserIr
     , emitterKey
     , parserKey
     , prepareValidator
@@ -32,12 +34,13 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.Directory (doesFileExist, getFileSize, getModificationTime, removeFile, renameFile)
 import Data.Char (isHexDigit, isSpace)
-import System.FilePath (takeFileName, (</>))
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO (Handle, IOMode (ReadMode), hClose, hGetLine, hPutStr, hPutStrLn, openTempFile, stderr, withFile)
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
 import CacheLock (openLockHandle)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os, arch)
+import System.Exit (ExitCode (..))
 
 import Hash (fingerprint)
 import LibPackage (nativeStorageUnits)
@@ -48,7 +51,7 @@ import MirData (readProgram, writeProgram, writeProgramWithGhosts)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (hasLists, lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
-import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, parallelBuilds, runWithInput, runWithInputFull)
+import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (cachedSeed, cachedParserSeed, seedHash, parserSeedHash)
 import Compile (lowerSource)
 import Modules (ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
@@ -112,8 +115,11 @@ eraseIO program = do
     erased <- case eraserOf tools of
         ToolFailed e -> pure (Error e)
         ToolNative exe -> do
-            (_, out, errors) <- runWithInputFull exe (writeProgramWithGhosts program)
-            pure (if trim out == "1" then Error ("Validation failed: " ++ trimEnd errors) else Ok out)
+            let input = writeProgramWithGhosts program
+            (code, out, errors) <- runWithInputFull exe input
+            pure $ case code of
+                ExitFailure n -> Error ("native eraser exited " ++ show n ++ ": " ++ trimEnd errors ++ "; input: " ++ show (take 80 input) ++ "; stdout: " ++ show (take 80 out))
+                ExitSuccess -> if trim out == "1" then Error ("Validation failed: " ++ trimEnd errors) else Ok out
         ToolInterpreted eraser -> pure $ case runInterpreted eraser (writeProgramWithGhosts program) of
             Error e -> Error e
             Ok (out, errors, value)
@@ -122,7 +128,7 @@ eraseIO program = do
     pure $ case erased of
         Error e -> Error e
         Ok text -> case readProgram text of
-            Error e -> Error ("the eraser written in Tersus wrote what cannot be read back: " ++ e)
+            Error e -> Error ("the eraser written in Tersus wrote what cannot be read back: " ++ e ++ "; stdout: " ++ show (take 80 text))
             Ok dataProgram -> Ok (mergeErased program dataProgram)
 
 -- A tool of the housekeeping: an executable of the program in the cache, or the program itself for the executor
@@ -255,7 +261,54 @@ cachedParser = do
         Ok _ -> cachedParserExe
 
 cachedParserExe :: IO (Result FilePath String)
-cachedParserExe = cachedTool "tersus-parser" "examples/parser/parser.tersus"
+cachedParserExe = do
+    key <- parserKey
+    case key of
+        Error e -> pure (Error e)
+        Ok identity -> do
+            existing <- cachedProgramIfPresentWithArtifacts [".ll"] "tersus-parser" identity
+            case existing of
+                Error e -> pure (Error e)
+                Ok (Just exe) -> pure (Ok exe)
+                Ok Nothing -> do
+                    prepared <- preparedDerived "examples/parser/parser.tersus" (toolProgram "examples/parser/parser.tersus") []
+                    case prepared of
+                        Error e -> pure (Error e)
+                        Ok (actual, _, input) -> cachedProgramWithArtifacts [".ll"] "tersus-parser" actual "the parser written in Tersus" $ \output -> do
+                            emitter <- cachedEmitterExe
+                            case emitter of
+                                Error e -> pure (Error e)
+                                Ok exe -> do
+                                    emitted <- runWithInput exe input
+                                    case emitted of
+                                        Error e -> pure (Error e)
+                                        Ok ir -> do
+                                            built <- buildExecutable output ir
+                                            case built of
+                                                Error e -> pure (Error e)
+                                                Ok () -> do
+                                                    let path = takeDirectory output </> ("tersus-parser-" ++ actual ++ ".ll")
+                                                    bracket (openTempFile (takeDirectory output) "parser-ir.tmp") cleanupPrepared $ \(temporary, handle) -> do
+                                                        hPutStr handle ir
+                                                        hClose handle
+                                                        renameFile temporary path
+                                                    pure (Ok ())
+
+parserInput :: IO (Result String String)
+parserInput = do
+    ready <- prepareBootstrap
+    case ready of
+        Error e -> pure (Error e)
+        Ok () -> fmap (mapResult snd) (prepareProgram "examples/parser/parser.tersus" (toolProgram "examples/parser/parser.tersus"))
+
+parserIr :: IO (Result String String)
+parserIr = do
+    parser <- cachedParser
+    case parser of
+        Error e -> pure (Error e)
+        Ok executable -> do
+            stored <- try (do text <- readFile (executable ++ ".ll"); _ <- evaluate (length text); pure text) :: IO (Either IOException String)
+            pure $ either (\e -> Error ("Could not read the successfully built parser IR: " ++ show e)) Ok stored
 
 cachedUncheckedValidator :: IO (Result FilePath String)
 cachedUncheckedValidator = do

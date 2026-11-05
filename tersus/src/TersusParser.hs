@@ -29,11 +29,10 @@ import qualified ParsedFile as FileData
 import qualified ParserSeed
 import SourceParse (SourceParts, parseSourcePartsWith, parseWithEqualityWith)
 import Mir (Program)
-import MirData (writeProgram)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
-import MirHousekeeping (cachedEmitter, cachedParser, nativeProgram, parserKey, toolProgram)
+import MirHousekeeping (cachedParser, nativeProgram, parserKey, parserIr, toolProgram)
 import MirOwnership (insertOwnership)
-import Native (runWithInput, runWithInputFull)
+import Native (runWithInputFull)
 import Seed (cachedParserSeed)
 import Syntax (Statement)
 import ValidatorNative (cachedBootstrapEmitter)
@@ -198,13 +197,7 @@ nativeTool = do
                 Error e -> ToolFailed ("Native parser bootstrap failed: " ++ e)
 
 emitParserIr :: IO (Result String String)
-emitParserIr = do
-    emitter <- cachedEmitter
-    case emitter of
-        Error e -> pure (Error e)
-        Ok exe -> case ownedParserProgram of
-            Error e -> pure (Error e)
-            Ok program -> runWithInput exe (writeProgram program)
+emitParserIr = parserIr
 
 {-# NOINLINE validatedParserProgram #-}
 validatedParserProgram :: Result Program String

@@ -104,9 +104,11 @@ optInGroups = ["testHostValidation"]
 allGroups :: [Test]
 allGroups = concatMap registered originalGroups
   where
-    registered original = case lookup (groupName original) [(groupName tree, split) | (tree, split) <- batchedGroups] of
-        Just split -> split
-        Nothing -> [original]
+    registered original
+        | groupName original == "testParserBootstrap" = parserBootstrapGroups
+        | otherwise = case lookup (groupName original) [(groupName tree, split) | (tree, split) <- batchedGroups] of
+            Just split -> split
+            Nothing -> [original]
 
 batchedGroups :: [(Test, [Test])]
 batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader]]
@@ -212,7 +214,7 @@ runInProcess overlap selected = do
     pure (summary, True)
   where
     runGroup group
-        | groupName group == "testParserBootstrap" = withParserBootstrapFixture overlap (runTest [] group)
+        | "testParserBootstrap:" `isPrefixOf` groupName group = withParserBootstrapFixture (groupName group) overlap (runTest [] group)
         | otherwise = runTest [] group
 
 -- Each group runs in a process of its own, so that a group's temporary files, locale and environment are its own, and

@@ -2,7 +2,9 @@ module Native
     ( cacheDirectory
     , cacheLock
     , cachedProgram
+    , cachedProgramWithArtifacts
     , cachedProgramIfPresent
+    , cachedProgramIfPresentWithArtifacts
     , stopOwnedProcess
     , validSignalTarget
     , parallelBuilds
@@ -328,16 +330,23 @@ withCachedProgram kind hash use = do
                     use dir exe
 
 cachedProgramIfPresent :: String -> String -> IO (Result (Maybe FilePath) String)
-cachedProgramIfPresent kind hash = withCachedProgram kind hash $ \_ exe -> do
-    present <- doesFileExist exe
+cachedProgramIfPresent = cachedProgramIfPresentWithArtifacts []
+
+cachedProgramIfPresentWithArtifacts :: [String] -> String -> String -> IO (Result (Maybe FilePath) String)
+cachedProgramIfPresentWithArtifacts artifacts kind hash = withCachedProgram kind hash $ \_ exe -> do
+    present <- and <$> mapM doesFileExist (exe : map (exe ++) artifacts)
     pure (Ok (if present then Just exe else Nothing))
 
 cachedProgram :: String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
-cachedProgram kind hash what build = withCachedProgram kind hash $ \dir exe -> do
-    present <- doesFileExist exe
+cachedProgram = cachedProgramWithArtifacts []
+
+cachedProgramWithArtifacts :: [String] -> String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
+cachedProgramWithArtifacts artifacts kind hash what build = withCachedProgram kind hash $ \dir exe -> do
+    present <- and <$> mapM doesFileExist (exe : map (exe ++) artifacts)
     if present
         then pure (Ok exe)
         else do
+            removeIfExists exe
             hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
             (partial, handle) <- openTempFile dir (kind ++ ".tmp")
             hClose handle
@@ -346,5 +355,8 @@ cachedProgram kind hash what build = withCachedProgram kind hash $ \dir exe -> d
                 built <- build partial
                 case built of
                     Error e -> pure (Error e)
-                    Ok () -> renameFile partial exe >> pure (Ok exe))
+                    Ok () -> do
+                        ready <- and <$> mapM doesFileExist (map (exe ++) artifacts)
+                        if ready then renameFile partial exe >> pure (Ok exe)
+                            else pure (Error "cached program did not publish its required artifacts"))
                 `finally` removeIfExists partial

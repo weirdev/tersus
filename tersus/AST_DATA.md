@@ -315,7 +315,18 @@ checks current GHC predicate boundaries and version-sensitive P1 identifiers.
 `testParserBootstrap` compares P0/P1 ASTs and all final declarations for the
 same prepared current parser source, then requires identical checked/lowered
 MIR and regenerated IR and tests P2 behavior. It does not require historical
-P0 seed IR to equal current IR.
+P0 seed IR to equal current IR. Within one fixpoint, successful P0 replies are
+reused only for byte-identical complete file requests. Full prepared packages
+must byte-compare before lowering once; the result must equal P1's actual
+prepared emitter input. Independent E1 emission must equal the LLVM saved by
+P1's successful build before P2 is built and checked. P1 and P2 parsing and all
+comparisons still execute.
+
+P1's executable and `.ll` sidecar share its compiled-input identity and
+publication lock. The sidecar is atomically replaced after clang succeeds and
+before the executable is published. A missing executable or sidecar rebuilds
+both from the prepared input, rather than treating regenerated IR as the
+previous build's output.
 
 ## Refreshing the parser seed
 
@@ -328,11 +339,11 @@ stack run parser-seed -- /tmp/parser.ll.new "$(git rev-parse HEAD)"
 sha256sum /tmp/parser.ll.new
 ```
 
-The driver uses `TersusParser.emitParserIr` and the same owned program as P1's
-build. It writes provenance comments for the source commit, GHC version,
-classifier/source fingerprints and emitter seed pin. Only a successful emission
-and verified digest may replace a pin. Never redirect into a seed file used by
-the running compiler.
+The driver uses `TersusParser.emitParserIr` to read the LLVM retained by P1's
+successful build from its exact prepared owned input. It writes provenance
+comments for the source commit, GHC version, classifier/source fingerprints
+and emitter seed pin. Only a successful build and verified digest may replace
+a pin. Never redirect into a seed file used by the running compiler.
 
 Publish the exact verified bytes as `parser.ll` in a new release tagged
 `bootstrap-<first 12 digest characters>`, then put the full digest in

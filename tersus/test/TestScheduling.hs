@@ -23,6 +23,7 @@ import System.Timeout (timeout)
 import Data.Ord (comparing)
 import System.Mem.StableName (makeStableName)
 import TestHarness (Test (..), TestResult, batchItems, testAssertEq, testAssertTrue, testCase)
+import TestParserBootstrap (testParserBootstrap, parserBootstrapGroups)
 import TestPipeline (selfHostedFamilyManifest)
 
 data Arguments = Arguments
@@ -104,7 +105,7 @@ assignShards count names
         ++ isolated
     | otherwise = [(name, index) | (_, index, assigned) <- balance bins, unit <- reverse assigned, name <- unit]
   where
-    isolated = [(name, index) | (name, index) <- [("testParserBootstrap", 5), ("testBootstrap", 6)], name `elem` names]
+    isolated = [(name, index) | (name, index) <- [("testParserBootstrap:1/2", 4), ("testParserBootstrap:2/2", 5), ("testBootstrap", 6)], name `elem` names]
     normalShards = [index | index <- [1 .. 6], index `notElem` map snd isolated]
     selfHosted = filter isSelfHosted names
     units = [selfHosted | not (null selfHosted)] ++ [[name] | name <- names, not (isSelfHosted name)]
@@ -143,7 +144,8 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         work -> maximum work
 
 -- Run 41978818567 (2026-11-05): startup-inclusive wall priorities, rounded to seconds with a minimum of one.
--- AstData/Parser: four-CPU restored-cache run on 2026-11-05; all other rows retain that CI run.
+-- AstData/Parser/reader: four-CPU restored-cache measurements; parser-bootstrap A is genuinely cold,
+-- B is the maximum of four warm paired trials after one-time source/artifact preparation. Other rows retain that CI run.
 groupWeight :: String -> Int
 groupWeight name = maybe 1 id (lookup name weights)
   where
@@ -248,7 +250,8 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testParser:2/4", 56)
         , ("testParser:3/4", 188)
         , ("testParser:4/4", 158)
-        , ("testParserBootstrap", 742)
+        , ("testParserBootstrap:1/2", 307)
+        , ("testParserBootstrap:2/2", 268)
         , ("testParserUnicode", 8)
         , ("testAstReader:1/4", 107)
         , ("testAstReader:2/4", 145)
@@ -384,25 +387,28 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "six CI shards reserve the sixth for cold bootstrap only" $
         let assigned = assignShards 6 names
          in testAssertTrue ([name | (name, shard) <- assigned, shard == 6] == ["testBootstrap"]
-            && [name | (name, shard) <- assigned, shard == 5] == ["testParserBootstrap"]
-            && [(name, shard) | (name, shard) <- assigned, name `notElem` ["testBootstrap", "testParserBootstrap"]]
-                == assignShards 4 (filter (\name -> name `notElem` ["testBootstrap", "testParserBootstrap"]) names))
+            && [name | (name, shard) <- assigned, shard == 5] == ["testParserBootstrap:2/2"]
+            && [name | (name, shard) <- assigned, shard == 4] == ["testParserBootstrap:1/2"]
+            && [(name, shard) | (name, shard) <- assigned, name `notElem` ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]]
+                == assignShards 3 (filter (\name -> name `notElem` ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]) names))
     , testCase "six-shard isolation retains aliases and filtered bootstrap selection" $
         testAssertTrue (all (\index ->
             selectGroupNames (Arguments Nothing ["testBootstrap"] False (Just (index, 6))) names
                 == Right ["testBootstrap" | index == 6]
             && selectGroupNames (Arguments Nothing ["testParserBootstrap"] False (Just (index, 6))) names
-                == Right ["testParserBootstrap" | index == 5]
+                == Right (["testParserBootstrap:1/2" | index == 4] ++ ["testParserBootstrap:2/2" | index == 5])
             && selectGroupNames (Arguments Nothing ["testNative"] False (Just (index, 6))) names
                 == Right [name | name <- names, "testNative:" `isPrefixOf` name,
                     lookup name (assignShards 6 names) == Just index]) [1 .. 6])
     , testCase "bootstrap isolation is limited to six shards and handles sparse inputs" $
         testAssertTrue
             ( assignShards 6 ["testBootstrap"] == [("testBootstrap", 6)]
-              && assignShards 6 ["testParserBootstrap"] == [("testParserBootstrap", 5)]
-              && assignShards 6 ["testParserBootstrap", "newA", "newB", "newC", "newD", "newE"]
-                  == [("newA", 1), ("newB", 2), ("newC", 3), ("newD", 4), ("newE", 6), ("testParserBootstrap", 5)]
-              && assignShards 6 ["testBootstrap", "testParserBootstrap"] == [("testParserBootstrap", 5), ("testBootstrap", 6)]
+              && assignShards 6 ["testParserBootstrap:2/2"] == [("testParserBootstrap:2/2", 5)]
+              && assignShards 6 ["testParserBootstrap:1/2"] == [("testParserBootstrap:1/2", 4)]
+              && assignShards 6 ["testParserBootstrap:2/2", "newA", "newB", "newC", "newD", "newE"]
+                  == [("newA", 1), ("newB", 2), ("newC", 3), ("newD", 4), ("newE", 6), ("testParserBootstrap:2/2", 5)]
+              && assignShards 6 ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]
+                  == [("testParserBootstrap:1/2", 4), ("testParserBootstrap:2/2", 5), ("testBootstrap", 6)]
               && assignShards 6 ["newA", "newB"] == [("newA", 1), ("newB", 2)]
               && assignShards 1 ["testBootstrap", "newA"] == [("testBootstrap", 1), ("newA", 1)]
               && sort (map snd (assignShards 2 ["testBootstrap", "newA"])) == [1, 2]
@@ -422,7 +428,7 @@ testScheduling names batches = TestList "testScheduling"
         testAssertTrue (maximum loads - minimum loads <= 11)
     , testCase "CLI and cold bootstrap are covered exactly once" $
         testAssertTrue (all (\name -> length (filter ((== name) . fst) assignments) == 1)
-            ["testCli", "testBootstrap", "testParserBootstrap"])
+            ["testCli", "testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"])
     , testCase "explicit filters intersect the full-suite shard assignment" $
         testAssertTrue (all filtered [1 .. 3])
     , testCase "unknown explicit groups fail even on an empty shard" $
@@ -445,6 +451,20 @@ testScheduling names batches = TestList "testScheduling"
                  in all ((== 1) . length . chunks) split
                     && sort (concatMap chunks split) == ["1/4", "2/4", "3/4", "4/4"]
             else True) batches)
+    , testCase "parser bootstrap partitions retain the original twelve cold and two primed cases" $
+        testAssertTrue (map (length . leafPaths) parserBootstrapGroups == [12,2]
+            && sort (concatMap (map (drop 1) . leafPaths) parserBootstrapGroups) == sort (leafPaths testParserBootstrap)
+            && map last (leafPaths (last parserBootstrapGroups))
+                == ["same-process transient failures repair without stale library or executable caches", "P0 P1 current-source fixpoint regenerates identical IR and P2 behavior"])
+    , TestCase "parser bootstrap partitioning keeps the original action objects" $ do
+        preserved <- sameActions (testParserBootstrap, parserBootstrapGroups)
+        pure (testAssertTrue preserved)
+    , testCase "parser bootstrap aliases and child names select the two registered partitions" $
+        testAssertTrue (aliasComplete (testParserBootstrap, parserBootstrapGroups)
+            && all (\batch -> selectGroupNames (Arguments Nothing [groupName batch] True Nothing) names
+                == Right [groupName batch]) parserBootstrapGroups)
+    , testCase "parser bootstrap launch weights retain measured cold and warm paired frontiers" $
+        testAssertEq (map (groupWeight . groupName) parserBootstrapGroups) [307,268]
     , testCase "all old leaf paths occur exactly once in the registered batches" $
         testAssertTrue (all (\(original, split) ->
             sort (leafPaths original) == sort (concatMap (map (drop 1) . leafPaths) split)) batches)
@@ -477,8 +497,8 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq [map (groupWeight . groupName) split | (original, split) <- batches,
             groupName original == "testAstReader"] [[107,145,91,157]]
     , testCase "measured tail groups are not launched as unprofiled one-second work" $
-        testAssertEq (map groupWeight ["testAstReader:1/4", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap"])
-            [107,429,348,222,447,235,482,742]
+        testAssertEq (map groupWeight ["testAstReader:1/4", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap:2/2"])
+            [107,429,348,222,447,235,482,268]
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $
