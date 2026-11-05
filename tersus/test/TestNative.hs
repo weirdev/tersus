@@ -32,7 +32,7 @@ import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
 import Pipeline
 import TestHarness
-import TestCopies (boxedClonePrograms)
+import TestCopies (boxedClonePrograms, boxedArrayClonePrograms)
 import Utils
 
 -- Native code: the LLVM IR of a program, and the executable clang builds from it. The executable has to do what the
@@ -63,6 +63,7 @@ testNative =
         , TestParallel "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestParallel "references" [TestCase name (sameAsMir name source) | (name, source) <- referencePrograms]
         , TestParallel "boxed Clone" [TestCase name (sameAsMir name source) | (name, source, _, _) <- boxedClonePrograms]
+        , TestParallel "sized boxed-array Clone" [TestCase name (sameAsMir name source) | (name, source, _) <- boxedArrayClonePrograms]
         , TestList "build" [testBuildKeepsFiles, testEveryExampleIsBuilt, testRunExecutable]
         , TestList "memory" memoryTests
         , TestParallel "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
@@ -958,7 +959,7 @@ valgrindCases =
     , "examples/termination.tersus", "examples/packet_parser.tersus"
     , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
     , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
-    ] ++ [name | (name, _, _, _) <- boxedClonePrograms]
+    ] ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms]
 
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to

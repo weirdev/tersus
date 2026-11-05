@@ -898,8 +898,11 @@ inferExprR ctx env expr =
         -- Only a lent Clone input may replace consuming unbox with a payload borrow.
         TExpr ty (F (Val (VFunct _ _ _ (BuiltinFunct UnBox) _)) [box]) [boxed]
             | clonePlace box -> do
+                payload <- zonk ty
+                -- Boxed arrays lower to List storage, not a Box slot containing an inline array.
+                let arrayPayload = case payload of TArrayOf{} -> True; _ -> False
                 crossesBox <- or <$> mapM throughBox (childrenOf boxed)
-                if crossesBox then return x else do
+                if arrayPayload || crossesBox then return x else do
                     let pointee = TExpr ty (F (Val (builtinFunct DerefOf)) [box]) [boxed]
                     return (TExpr (TRef ty) (F (Val (builtinFunct BorrowOf)) [tExpr pointee]) [pointee])
         _ -> do
