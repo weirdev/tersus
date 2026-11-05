@@ -127,27 +127,37 @@ fn noTy() -> TyRes [{ }] [{ }] {
     return TyRes { ok: false, ty: Type::TInt };
 };
 
-fn findLocal(f: &Function, id: Int) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(f.locals); }] {
-    locals = &f.locals;
+// Per-function positions are built once and shared by local typing and callee signatures.
+// Preserve the first declaration of duplicate IDs; never put recursive Type values in the index.
+struct FunctionIndex { names: List<String>, locals: List<HashMap<Int, Int>>, entry: HashMap<Int, Int> };
+
+fn emptyLocalIndex() -> HashMap<Int, Int> [{ }] [{ }] {
+    return HashMap::new();
+};
+
+fn indexLocals(f: &Function) -> HashMap<Int, Int> [{ }] [{ }] {
+    locals = emptyLocalIndex();
     i = 0;
-    while i < size(locals) [{ affirm i >= 0; affirm i <= size(locals); }] shrinks size(locals) - i {
-        l = &get(locals, i);
-        if localHasId(l, id) { return i; };
+    while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] shrinks size(f.locals) - i {
+        d = &get(f.locals, i);
+        if !locals.contains((*d).id) { locals = locals.insert((*d).id, i); };
         i = i + 1;
     };
-    return 0 - 1;
+    return locals;
 };
 
-fn localHasId(l: &LocalDecl, id: Int) -> Bool [{ }] [{ }] {
-    return l.id = id;
+fn findLocal(f: &Function, locals: &HashMap<Int, Int>, id: Int) -> Int [{ }] [{ affirm return >= -1; affirm return < size(f.locals); }] {
+    i = locals.lookup(id, -1);
+    if i >= 0 && i < size(f.locals) { return i; };
+    return -1;
 };
 
-fn declared(f: &Function, id: Int) -> Bool [{ }] [{ }] {
-    return findLocal(f, id) >= 0;
+fn declared(locals: &HashMap<Int, Int>, id: Int) -> Bool [{ }] [{ }] {
+    return locals.contains(id);
 };
 
-fn localTy(f: &Function, id: Int) -> TyRes [{ }] [{ }] {
-    i = findLocal(f, id);
+fn localTy(f: &Function, locals: &HashMap<Int, Int>, id: Int) -> TyRes [{ }] [{ }] {
+    i = findLocal(f, locals, id);
     if i >= 0 && i < size(f.locals) { return TyRes { ok: true, ty: clone(get(f.locals, i).ty) }; };
     return noTy();
 };
@@ -155,16 +165,16 @@ fn localTy(f: &Function, id: Int) -> TyRes [{ }] [{ }] {
 // The functions are searched by a list of their names made once (verifyProgram), the entry last: reading the name of
 // the function at a place with `get` copies the whole function there, so a search of the functions themselves copies
 // most of the program for every name it looks up, and a program the size of the emitter took minutes for that alone.
-fn findFunction(funcs: &List<String>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(funcs); }] {
+fn findFunction(funcs: &FunctionIndex, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(funcs.names); }] {
     i = 0;
-    while i < size(funcs) [{ affirm i >= 0; affirm i <= size(funcs); }] shrinks size(funcs) - i {
-        if get(funcs, i) = name { return i; };
+    while i < size(funcs.names) [{ affirm i >= 0; affirm i <= size(funcs.names); }] shrinks size(funcs.names) - i {
+        if get(funcs.names, i) = name { return i; };
         i = i + 1;
     };
     return 0 - 1;
 };
 
-fn functionKnown(funcs: &List<String>, name: &String) -> Bool [{ }] [{ }] {
+fn functionKnown(funcs: &FunctionIndex, name: &String) -> Bool [{ }] [{ }] {
     return findFunction(funcs, name) >= 0;
 };
 
@@ -640,10 +650,10 @@ fn wordInRange(signed: Bool, bits: Int, n: Int) -> Bool [{ }] [{ }] {
     return n >= 0 && n < bound;
 };
 
-fn functionTypeOf(p: &Program, f: &Function) -> Type [{ }] [{ }] {
+fn functionTypeOf(p: &Program, f: &Function, locals: &HashMap<Int, Int>) -> Type [{ }] [{ }] {
     args = [];
     for pid in f.params {
-        lt = localTy(f, pid);
+        lt = localTy(f, locals, pid);
         ty = Type::TVar { n: 0 };
         if lt.ok { ty = lt.ty; };
         borrowed = false;
@@ -663,15 +673,15 @@ fn functionTypeOf(p: &Program, f: &Function) -> Type [{ }] [{ }] {
     return Type::TForall { sizes: clone(f.sizeParams), types: clone(f.typeParams), body: Box::new(base) };
 };
 
-fn functionTypeOfName(p: &Program, funcs: &List<String>, name: &String) -> TyRes [{ }] [{ }] {
+fn functionTypeOfName(p: &Program, funcs: &FunctionIndex, name: &String) -> TyRes [{ }] [{ }] {
     i = findFunction(funcs, name);
     if i < 0 { return noTy(); };
-    if i = size(p.functions) { return TyRes { ok: true, ty: functionTypeOf(p, p.entry) }; };
-    if i >= 0 && i < size(p.functions) { return TyRes { ok: true, ty: functionTypeOf(p, get(p.functions, i)) }; };
+    if i = size(p.functions) { return TyRes { ok: true, ty: functionTypeOf(p, &p.entry, &funcs.entry) }; };
+    if i >= 0 && i < size(p.functions) && i < size(funcs.locals) { return TyRes { ok: true, ty: functionTypeOf(p, &get(p.functions, i), &get(funcs.locals, i)) }; };
     return noTy();
 };
 
-fn constantFits(p: &Program, funcs: &List<String>, wanted: &Type, c: &Constant) -> Bool ~ {
+fn constantFits(p: &Program, funcs: &FunctionIndex, wanted: &Type, c: &Constant) -> Bool ~ {
     if wanted is Type::TRef { return constantFits(p, funcs, Box::unbox((wanted as Type::TRef).inner), c); };
     if wanted is Type::TParam { return true; };
     r = false;
@@ -719,11 +729,11 @@ fn constantFits(p: &Program, funcs: &List<String>, wanted: &Type, c: &Constant) 
     return r;
 };
 
-fn operandTy(p: &Program, funcs: &List<String>, f: &Function, o: &Operand) -> TyRes [{ }] [{ }] {
+fn operandTy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, o: &Operand) -> TyRes [{ }] [{ }] {
     r = noTy();
     match o {
-        Operand::Copy { local: l } => { r = localTy(f, l); },
-        Operand::Move { local: l } => { r = localTy(f, l); },
+        Operand::Copy { local: l } => { r = localTy(f, locals, l); },
+        Operand::Move { local: l } => { r = localTy(f, locals, l); },
         Operand::Const { value: c } => {
             match c {
                 Constant::CInt { n: n } => { r = TyRes { ok: true, ty: Type::TInt }; },
@@ -741,15 +751,15 @@ fn operandTy(p: &Program, funcs: &List<String>, f: &Function, o: &Operand) -> Ty
     return r;
 };
 
-fn fits(p: &Program, funcs: &List<String>, f: &Function, wanted: &Type, o: &Operand) -> Bool ~ {
+fn fits(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, wanted: &Type, o: &Operand) -> Bool ~ {
     r = false;
     match o {
         Operand::Copy { local: l } => {
-            lt = localTy(f, l);
+            lt = localTy(f, locals, l);
             r = lt.ok && sub(p, wanted, lt.ty);
         },
         Operand::Move { local: l } => {
-            lt = localTy(f, l);
+            lt = localTy(f, locals, l);
             r = lt.ok && sub(p, wanted, lt.ty);
         },
         Operand::Const { value: c } => { r = constantFits(p, funcs, wanted, c); },
@@ -757,16 +767,16 @@ fn fits(p: &Program, funcs: &List<String>, f: &Function, wanted: &Type, o: &Oper
     return r;
 };
 
-fn renderOperand(p: &Program, f: &Function, o: &Operand) -> String ~ {
+fn renderOperand(p: &Program, f: &Function, locals: &HashMap<Int, Int>, o: &Operand) -> String ~ {
     r = "the constant";
     match o {
         Operand::Copy { local: l } => {
-            lt = localTy(f, l);
+            lt = localTy(f, locals, l);
             r = "_".then(String::fromInt(l));
             if lt.ok { r = r.then(" (").then(renderType(lt.ty)).then(")"); };
         },
         Operand::Move { local: l } => {
-            lt = localTy(f, l);
+            lt = localTy(f, locals, l);
             r = "_".then(String::fromInt(l));
             if lt.ok { r = r.then(" (").then(renderType(lt.ty)).then(")"); };
         },
@@ -787,8 +797,8 @@ fn pairOf<T>(x: &T, y: &T) -> List<T> [{ }] [{ affirm size(return) = 2; }] {
     return push(push([], clone(x)), clone(y));
 };
 
-fn expectedWhy(p: &Program, f: &Function, t: &Type, o: &Operand) -> List<String> ~ {
-    return one(renderOperand(p, f, o).then(" is not ").then(renderType(t)));
+fn expectedWhy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, t: &Type, o: &Operand) -> List<String> ~ {
+    return one(renderOperand(p, f, locals, o).then(" is not ").then(renderType(t)));
 };
 
 fn resultWhy(d: &Type, t: &Type) -> List<String> ~ {
@@ -796,10 +806,10 @@ fn resultWhy(d: &Type, t: &Type) -> List<String> ~ {
     return one("the result is ".then(renderType(t)).then(", not ").then(renderType(d)));
 };
 
-fn intWhys(p: &Program, funcs: &List<String>, f: &Function, os: &List<Operand>) -> List<String> ~ {
+fn intWhys(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, os: &List<Operand>) -> List<String> ~ {
     out = [];
     for o in os {
-        if !fits(p, funcs, f, Type::TInt, o) { out = push(out, renderOperand(p, f, o).then(" is not Int")); };
+        if !fits(p, funcs, f, locals, Type::TInt, o) { out = push(out, renderOperand(p, f, locals, o).then(" is not Int")); };
     };
     return out;
 };
@@ -872,9 +882,9 @@ fn textAt(args: &List<String>, i: Int) -> TyRes ~ {
     return noTy();
 };
 
-fn sequenceFits(p: &Program, funcs: &List<String>, f: &Function, e: &Type, o: &Operand) -> Bool ~ {
-    if fits(p, funcs, f, Type::TList { elem: Box::new(clone(e)) }, o) { return true; };
-    ot = operandTy(p, funcs, f, o);
+fn sequenceFits(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, e: &Type, o: &Operand) -> Bool ~ {
+    if fits(p, funcs, f, locals, Type::TList { elem: Box::new(clone(e)) }, o) { return true; };
+    ot = operandTy(p, funcs, f, locals, o);
     if ot.ok {
         t = ot.ty;
         if t is Type::TRef { t = Box::unbox(clone((t as Type::TRef).inner)); };
@@ -910,8 +920,8 @@ fn sequenceFits(p: &Program, funcs: &List<String>, f: &Function, e: &Type, o: &O
     return r;
 };
 
-fn listLike(p: &Program, funcs: &List<String>, f: &Function, o: &Operand) -> Bool ~ {
-    ot = operandTy(p, funcs, f, o);
+fn listLike(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, o: &Operand) -> Bool ~ {
+    ot = operandTy(p, funcs, f, locals, o);
     if ot.ok {
         t = ot.ty;
         inner = clone(t);
@@ -937,15 +947,15 @@ fn narrowType(op: Int) -> Type [{ }] [{ }] {
     return Type::TWord { signed: false, bits: 32 };
 };
 
-fn addressWhy(p: &Program, funcs: &List<String>, f: &Function, o: &Operand, d: &Type, rest: Int, resultCheck: Int) -> List<String> ~ {
+fn addressWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, o: &Operand, d: &Type, rest: Int, resultCheck: Int) -> List<String> ~ {
     // resultCheck: 0 none, 1 result is Int, 2 result sub element, 3 result fits address
-    ot = operandTy(p, funcs, f, o);
-    if !ot.ok || !(ot.ty is Type::TAddr) { return one(renderOperand(p, f, o).then(" is not an address")); };
+    ot = operandTy(p, funcs, f, locals, o);
+    if !ot.ok || !(ot.ty is Type::TAddr) { return one(renderOperand(p, f, locals, o).then(" is not an address")); };
     elem = Box::unbox((ot.ty as Type::TAddr).inner);
     out = [];
     if resultCheck = 1 { out = resultWhy(d, Type::TInt); };
     if resultCheck = 2 && !sub(p, d, elem) { out = one("the result is ".then(renderType(elem)).then(", not ").then(renderType(d))); };
-    if resultCheck = 3 && !fits(p, funcs, f, d, o) { out = one(renderOperand(p, f, o).then(" is not ").then(renderType(d))); };
+    if resultCheck = 3 && !fits(p, funcs, f, locals, d, o) { out = one(renderOperand(p, f, locals, o).then(" is not ").then(renderType(d))); };
     return out;
 };
 
@@ -960,89 +970,89 @@ fn argAt(args: &List<Operand>, i: Int) -> Operand [{ }] [{ }] {
     return Operand::Const { value: Constant::CInt { n: 0 } };
 };
 
-fn pointerWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int, args: &List<Operand>) -> List<String> ~ {
+fn pointerWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, d: &Type, op: Int, args: &List<Operand>) -> List<String> ~ {
     n = size(args);
     out = [];
     if op = 23 {
         if n != 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 3);
-        for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
+        out = addressWhy(p, funcs, f, locals, argAt(args, 0), d, 0, 3);
+        for w in intWhys(p, funcs, f, locals, single(argAt(args, 1))) { out = push(out, clone(w)); };
         return out;
     };
     if op = 24 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 0);
+        out = addressWhy(p, funcs, f, locals, argAt(args, 0), d, 0, 0);
         if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(d)).then(", not an address")); };
         return out;
     };
     if op = 25 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 1);
+        out = addressWhy(p, funcs, f, locals, argAt(args, 0), d, 0, 1);
         return out;
     };
     if op = 26 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, args);
+        out = intWhys(p, funcs, f, locals, args);
         if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(d)).then(", not an address")); };
         return out;
     };
     if op = 27 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, args);
+        out = intWhys(p, funcs, f, locals, args);
         if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(d)).then(", not an address")); };
         return out;
     };
     if op = 28 || op = 30 {
         if n < 2 || n > 3 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 2);
-        for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
+        out = addressWhy(p, funcs, f, locals, argAt(args, 0), d, 0, 2);
+        for w in intWhys(p, funcs, f, locals, single(argAt(args, 1))) { out = push(out, clone(w)); };
         return out;
     };
     if op = 29 {
         if n < 3 || n > 4 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        ot = operandTy(p, funcs, f, argAt(args, 0));
-        if !ot.ok || !(ot.ty is Type::TAddr) { return one(renderOperand(p, f, argAt(args, 0)).then(" is not an address")); };
+        ot = operandTy(p, funcs, f, locals, argAt(args, 0));
+        if !ot.ok || !(ot.ty is Type::TAddr) { return one(renderOperand(p, f, locals, argAt(args, 0)).then(" is not an address")); };
         elem = Box::unbox((ot.ty as Type::TAddr).inner);
-        if !fits(p, funcs, f, elem, argAt(args, 2)) { out = one(renderOperand(p, f, argAt(args, 2)).then(" is not ").then(renderType(elem))); };
-        for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
+        if !fits(p, funcs, f, locals, elem, argAt(args, 2)) { out = one(renderOperand(p, f, locals, argAt(args, 2)).then(" is not ").then(renderType(elem))); };
+        for w in intWhys(p, funcs, f, locals, single(argAt(args, 1))) { out = push(out, clone(w)); };
         for w in permissionOrZero(d, n - 3) { out = push(out, clone(w)); };
         return out;
     };
     if op = 31 {
         if n < 2 || n > 3 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 0);
-        for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
+        out = addressWhy(p, funcs, f, locals, argAt(args, 0), d, 0, 0);
+        for w in intWhys(p, funcs, f, locals, single(argAt(args, 1))) { out = push(out, clone(w)); };
         for w in permissionOrZero(d, n - 2) { out = push(out, clone(w)); };
         return out;
     };
     if op = 32 {
         if n < 3 || n > 4 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 0);
-        for w in intWhys(p, funcs, f, pairOf(argAt(args, 1), argAt(args, 2))) { out = push(out, clone(w)); };
+        out = addressWhy(p, funcs, f, locals, argAt(args, 0), d, 0, 0);
+        for w in intWhys(p, funcs, f, locals, pairOf(argAt(args, 1), argAt(args, 2))) { out = push(out, clone(w)); };
         for w in permissionOrZero(d, n - 3) { out = push(out, clone(w)); };
         return out;
     };
     if op = 33 {
         if n < 2 || n > 3 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 3);
-        for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
+        out = addressWhy(p, funcs, f, locals, argAt(args, 0), d, 0, 3);
+        for w in intWhys(p, funcs, f, locals, single(argAt(args, 1))) { out = push(out, clone(w)); };
         return out;
     };
     if op = 34 {
         if n < 1 || n > 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 1);
+        out = addressWhy(p, funcs, f, locals, argAt(args, 0), d, 0, 1);
         return out;
     };
     return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands"));
 };
 
-fn exactOperandWhy(p: &Program, funcs: &List<String>, f: &Function, wanted: &Type, o: &Operand) -> List<String> ~ {
-    actual = operandTy(p, funcs, f, o);
+fn exactOperandWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, wanted: &Type, o: &Operand) -> List<String> ~ {
+    actual = operandTy(p, funcs, f, locals, o);
     if actual.ok && typeEq(wanted, actual.ty) { return []; };
-    return expectedWhy(p, f, wanted, o);
+    return expectedWhy(p, f, locals, wanted, o);
 };
 
-fn blockOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int, args: &List<Operand>) -> List<String> ~ {
+fn blockOpWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, d: &Type, op: Int, args: &List<Operand>) -> List<String> ~ {
     n = size(args);
     wantN = 2;
     if op = 48 { wantN = 3; };
@@ -1051,41 +1061,41 @@ fn blockOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int
     if !(d is Type::TBlock) { return one("the result is ".then(renderType(clone(d))).then(", not a Block")); };
     elem = Box::unbox((d as Type::TBlock).inner);
     if op = 53 {
-        actual = operandTy(p, funcs, f, argAt(args, 0));
+        actual = operandTy(p, funcs, f, locals, argAt(args, 0));
         if actual.ok && actual.ty is Type::TBlock { return []; };
-        return one(renderOperand(p, f, argAt(args, 0)).then(" is not a Block"));
+        return one(renderOperand(p, f, locals, argAt(args, 0)).then(" is not a Block"));
     };
     firstType = clone(d);
     if op = 46 || op = 52 { firstType = Type::TAddr { inner: Box::new(clone(elem)) }; };
-    out = exactOperandWhy(p, funcs, f, firstType, argAt(args, 0));
+    out = exactOperandWhy(p, funcs, f, locals, firstType, argAt(args, 0));
     secondType = Type::TInt;
     if op = 48 { secondType = Type::TAddr { inner: Box::new(clone(elem)) }; };
     if op = 51 { secondType = clone(d); };
-    for w in exactOperandWhy(p, funcs, f, secondType, argAt(args, 1)) { out = push(out, clone(w)); };
+    for w in exactOperandWhy(p, funcs, f, locals, secondType, argAt(args, 1)) { out = push(out, clone(w)); };
     if op = 48 {
-        for w in exactOperandWhy(p, funcs, f, Type::TInt, argAt(args, 2)) { out = push(out, clone(w)); };
+        for w in exactOperandWhy(p, funcs, f, locals, Type::TInt, argAt(args, 2)) { out = push(out, clone(w)); };
     };
     return out;
 };
 
-fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int, args: &List<Operand>, inSet: Bool) -> List<String> ~ {
+fn listOpWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, d: &Type, op: Int, args: &List<Operand>, inSet: Bool) -> List<String> ~ {
     out = [];
     n = size(args);
     if op = 0 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !listLike(p, funcs, f, argAt(args, 0)) { out = one(renderOperand(p, f, argAt(args, 0)).then(" is not a list")); };
+        if !listLike(p, funcs, f, locals, argAt(args, 0)) { out = one(renderOperand(p, f, locals, argAt(args, 0)).then(" is not a list")); };
         for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op = 1 || op = 2 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !sequenceFits(p, funcs, f, d, argAt(args, 0)) { out = one(renderOperand(p, f, argAt(args, 0)).then(" is not ").then(renderType(Type::TList { elem: Box::new(clone(d)) }))); };
+        if !sequenceFits(p, funcs, f, locals, d, argAt(args, 0)) { out = one(renderOperand(p, f, locals, argAt(args, 0)).then(" is not ").then(renderType(Type::TList { elem: Box::new(clone(d)) }))); };
         return out;
     };
     if op = 3 {
         if n != 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !sequenceFits(p, funcs, f, d, argAt(args, 0)) { out = one(renderOperand(p, f, argAt(args, 0)).then(" is not ").then(renderType(Type::TList { elem: Box::new(clone(d)) }))); };
-        for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
+        if !sequenceFits(p, funcs, f, locals, d, argAt(args, 0)) { out = one(renderOperand(p, f, locals, argAt(args, 0)).then(" is not ").then(renderType(Type::TList { elem: Box::new(clone(d)) }))); };
+        for w in intWhys(p, funcs, f, locals, single(argAt(args, 1))) { out = push(out, clone(w)); };
         return out;
     };
     if op = 4 || op = 6 {
@@ -1103,18 +1113,18 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
             if inner is Type::TArray { elem = TyRes { ok: true, ty: clone(Box::unbox((inner as Type::TArray).elem)) }; };
         };
         if !elem.ok { return one("the result is ".then(renderType(d)).then(", not a list")); };
-        if !fits(p, funcs, f, d, argAt(args, 0)) { out = expectedWhy(p, f, d, argAt(args, 0)); };
+        if !fits(p, funcs, f, locals, d, argAt(args, 0)) { out = expectedWhy(p, f, locals, d, argAt(args, 0)); };
         xi = 1;
         if isSetOp {
-            for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
+            for w in intWhys(p, funcs, f, locals, single(argAt(args, 1))) { out = push(out, clone(w)); };
             xi = 2;
         };
-        if !fits(p, funcs, f, elem.ty, argAt(args, xi)) { out = push(out, renderOperand(p, f, argAt(args, xi)).then(" is not ").then(renderType(elem.ty))); };
+        if !fits(p, funcs, f, locals, elem.ty, argAt(args, xi)) { out = push(out, renderOperand(p, f, locals, argAt(args, xi)).then(" is not ").then(renderType(elem.ty))); };
         return out;
     };
     if op = 5 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !fits(p, funcs, f, d, argAt(args, 0)) { out = expectedWhy(p, f, d, argAt(args, 0)); };
+        if !fits(p, funcs, f, locals, d, argAt(args, 0)) { out = expectedWhy(p, f, locals, d, argAt(args, 0)); };
         return out;
     };
     if op = 7 {
@@ -1132,7 +1142,7 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
                 Operand::Move { local: l } => { if sz is Size::SParam { sizeOk = true; }; },
             };
             if !sizeOk { return one("array needs a result that is an array and a size that is a constant"); };
-            if !fits(p, funcs, f, e, argAt(args, 1)) { out = expectedWhy(p, f, e, argAt(args, 1)); };
+            if !fits(p, funcs, f, locals, e, argAt(args, 1)) { out = expectedWhy(p, f, locals, e, argAt(args, 1)); };
             return out;
         };
         return one("array needs a result that is an array and a size that is a constant");
@@ -1144,8 +1154,8 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
             inner = db.ty;
             if inner is Type::TArray && (inner as Type::TArray).size is Size::SAny {
                 e = Box::unbox((inner as Type::TArray).elem);
-                out = intWhys(p, funcs, f, single(argAt(args, 0)));
-                if !fits(p, funcs, f, e, argAt(args, 1)) { out = push(out, renderOperand(p, f, argAt(args, 1)).then(" is not ").then(renderType(e))); };
+                out = intWhys(p, funcs, f, locals, single(argAt(args, 0)));
+                if !fits(p, funcs, f, locals, e, argAt(args, 1)) { out = push(out, renderOperand(p, f, locals, argAt(args, 1)).then(" is not ").then(renderType(e))); };
                 return out;
             };
         };
@@ -1162,7 +1172,7 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
     };
     if op = 10 || op = 11 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !fits(p, funcs, f, Type::TByte, argAt(args, 0)) { out = expectedWhy(p, f, Type::TByte, argAt(args, 0)); };
+        if !fits(p, funcs, f, locals, Type::TByte, argAt(args, 0)) { out = expectedWhy(p, f, locals, Type::TByte, argAt(args, 0)); };
         for w in resultWhy(d, Type::TByte) { out = push(out, clone(w)); };
         return out;
     };
@@ -1172,43 +1182,43 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
     };
     if op = 14 {
         if n != 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, args);
+        out = intWhys(p, funcs, f, locals, args);
         for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op = 15 || op = 18 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !fits(p, funcs, f, Type::TByte, argAt(args, 0)) { out = expectedWhy(p, f, Type::TByte, argAt(args, 0)); };
+        if !fits(p, funcs, f, locals, Type::TByte, argAt(args, 0)) { out = expectedWhy(p, f, locals, Type::TByte, argAt(args, 0)); };
         for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op = 17 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, args);
+        out = intWhys(p, funcs, f, locals, args);
         for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op = 20 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, args);
+        out = intWhys(p, funcs, f, locals, args);
         for w in resultWhy(d, Type::TByte) { out = push(out, clone(w)); };
         return out;
     };
     if op = 21 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        okFrom = fits(p, funcs, f, Type::TByte, argAt(args, 0))
-            || fits(p, funcs, f, Type::TWord { signed: true, bits: 8 }, argAt(args, 0))
-            || fits(p, funcs, f, Type::TWord { signed: true, bits: 16 }, argAt(args, 0))
-            || fits(p, funcs, f, Type::TWord { signed: true, bits: 32 }, argAt(args, 0))
-            || fits(p, funcs, f, Type::TWord { signed: false, bits: 16 }, argAt(args, 0))
-            || fits(p, funcs, f, Type::TWord { signed: false, bits: 32 }, argAt(args, 0));
-        if !okFrom { out = expectedWhy(p, f, Type::TByte, argAt(args, 0)); };
+        okFrom = fits(p, funcs, f, locals, Type::TByte, argAt(args, 0))
+            || fits(p, funcs, f, locals, Type::TWord { signed: true, bits: 8 }, argAt(args, 0))
+            || fits(p, funcs, f, locals, Type::TWord { signed: true, bits: 16 }, argAt(args, 0))
+            || fits(p, funcs, f, locals, Type::TWord { signed: true, bits: 32 }, argAt(args, 0))
+            || fits(p, funcs, f, locals, Type::TWord { signed: false, bits: 16 }, argAt(args, 0))
+            || fits(p, funcs, f, locals, Type::TWord { signed: false, bits: 32 }, argAt(args, 0));
+        if !okFrom { out = expectedWhy(p, f, locals, Type::TByte, argAt(args, 0)); };
         for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op >= 40 && op <= 44 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, args);
+        out = intWhys(p, funcs, f, locals, args);
         for w in resultWhy(d, narrowType(op)) { out = push(out, clone(w)); };
         return out;
     };
@@ -1218,7 +1228,7 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
         return one("the result is ".then(renderType(d)).then(", not an address"));
     };
     if op = 23 || op = 24 || op = 25 || op = 26 || op = 27 || op = 28 || op = 29 || op = 30 || op = 31 || op = 32 || op = 33 || op = 34 {
-        return pointerWhy(p, funcs, f, d, op, args);
+        return pointerWhy(p, funcs, f, locals, d, op, args);
     };
     if op >= 35 && op <= 38 {
         if n != 1 && op != 35 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
@@ -1233,17 +1243,17 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
         if d is Type::TArray {
             e = clone(Box::unbox((d as Type::TArray).elem));
-            if !sequenceFits(p, funcs, f, e, argAt(args, 0)) { return expectedWhy(p, f, Type::TList { elem: Box::new(e) }, argAt(args, 0)); };
+            if !sequenceFits(p, funcs, f, locals, e, argAt(args, 0)) { return expectedWhy(p, f, locals, Type::TList { elem: Box::new(e) }, argAt(args, 0)); };
             return out;
         };
         return one("Array::fromList needs a result that is an array");
     };
-    if op >= 46 && op <= 53 { return blockOpWhy(p, funcs, f, d, op, args); };
+    if op >= 46 && op <= 53 { return blockOpWhy(p, funcs, f, locals, d, op, args); };
     return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands"));
 };
 
-fn valueOf(p: &Program, funcs: &List<String>, f: &Function, typeName: &String, o: &Operand) -> Bool ~ {
-    ot = operandTy(p, funcs, f, o);
+fn valueOf(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, typeName: &String, o: &Operand) -> Bool ~ {
+    ot = operandTy(p, funcs, f, locals, o);
     if !ot.ok { return false; };
     t = ot.ty;
     if t is Type::TBox { return sub(p, Type::TNamed { name: clone(typeName), base: clone(typeName), argc: 0, argTokens: [] }, Box::unbox((t as Type::TBox).inner)); };
@@ -1271,8 +1281,8 @@ fn ctorFields(p: &Program, ctor: &String) -> List<Field> ~ {
     return [];
 };
 
-fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRes ~ {
-    lt = localTy(f, root);
+fn placeWhy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, root: Int, steps: &List<RefStep>) -> TyRes ~ {
+    lt = localTy(f, locals, root);
     if !lt.ok { return noTy(); };
     ty = lt.ty;
     if ty is Type::TRef { ty = Box::unbox((ty as Type::TRef).inner); };
@@ -1312,11 +1322,11 @@ fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRe
     return TyRes { ok: true, ty: ty };
 };
 
-fn borrowedParameter(f: &Function, o: &Operand) -> Bool ~ {
-    locals = operandLocals(o);
-    if size(locals) != 1 { return false; };
-    id = get(locals, 0);
-    if !localTy(f, id).ok { return false; };
+fn borrowedParameter(f: &Function, locals: &HashMap<Int, Int>, o: &Operand) -> Bool ~ {
+    ids = operandLocals(o);
+    if size(ids) != 1 { return false; };
+    id = get(ids, 0);
+    if !localTy(f, locals, id).ok { return false; };
     parameter = false;
     for p in f.params { if p = id { parameter = true; }; };
     if !parameter { return false; };
@@ -1324,17 +1334,17 @@ fn borrowedParameter(f: &Function, o: &Operand) -> Bool ~ {
     return false;
 };
 
-fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rvalue) -> List<String> ~ {
+fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, d: &Type, rv: &Rvalue) -> List<String> ~ {
     out = [];
     match rv {
         Rvalue::Use { o: o } => {
-            if !fits(p, funcs, f, d, o) { out = expectedWhy(p, f, d, o); };
+            if !fits(p, funcs, f, locals, d, o) { out = expectedWhy(p, f, locals, d, o); };
         },
         Rvalue::BinaryOp { op: op, a: a, b: b } => {
             if op = 5 || op = 6 {
                 out = resultWhy(d, Type::TBool);
-                ta = operandTy(p, funcs, f, a);
-                tb = operandTy(p, funcs, f, b);
+                ta = operandTy(p, funcs, f, locals, a);
+                tb = operandTy(p, funcs, f, locals, b);
                 if ta.ok && tb.ok {
                     // (only words are compared: any other value is compared by its Eq, which the checker calls in its place)
                     if !isWordType(ta.ty) || !isWordType(tb.ty) { out = push(out, "only words are compared, and the operands are ".then(renderType(ta.ty)).then(" and ").then(renderType(tb.ty))); }
@@ -1343,31 +1353,31 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                     };
                 };
             } else if op >= 7 {
-                out = intWhys(p, funcs, f, pairOf(a, b));
+                out = intWhys(p, funcs, f, locals, pairOf(a, b));
                 for w in resultWhy(d, Type::TBool) { out = push(out, clone(w)); };
             } else {
-                out = intWhys(p, funcs, f, pairOf(a, b));
+                out = intWhys(p, funcs, f, locals, pairOf(a, b));
                 for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
             };
         },
         Rvalue::ListOp { op: op, args: args } => {
-            out = listOpWhy(p, funcs, f, d, op, args, false);
+            out = listOpWhy(p, funcs, f, locals, d, op, args, false);
         },
         Rvalue::MakeList { items: items } => {
             mle = listElemOf(d);
             if mle.ok {
                 e = mle.ty;
-                for o in items { if !fits(p, funcs, f, e, o) { out = push(out, renderOperand(p, f, o).then(" is not ").then(renderType(clone(e)))); }; };
+                for o in items { if !fits(p, funcs, f, locals, e, o) { out = push(out, renderOperand(p, f, locals, o).then(" is not ").then(renderType(clone(e)))); }; };
             } else { out = one("the result is ".then(renderType(d)).then(", not a list")); };
         },
         Rvalue::MakeBox { o: o } => {
             mb = boxInnerOf(d);
             if mb.ok {
                 held = mb.ty;
-                if !fits(p, funcs, f, held, o) { out = expectedWhy(p, f, held, o); };
+                if !fits(p, funcs, f, locals, held, o) { out = expectedWhy(p, f, locals, held, o); };
             } else if d is Type::TNamed && beforeAngle((d as Type::TNamed).name) = "List" {
                 iargs = instanceArgs((d as Type::TNamed).name);
-                ot = operandTy(p, funcs, f, o);
+                ot = operandTy(p, funcs, f, locals, o);
                 okBox = false;
                 if size(iargs) = 1 {
                     et = textAt(iargs, 0);
@@ -1376,11 +1386,11 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                         if o is Operand::Const && (o as Operand::Const).value is Constant::CArray { okBox = true; };
                     };
                 };
-                if !okBox { out = one(renderOperand(p, f, o).then(" is not an array")); };
+                if !okBox { out = one(renderOperand(p, f, locals, o).then(" is not an array")); };
             } else { out = one("the result is ".then(renderType(d)).then(", not a Box")); };
         },
         Rvalue::Unbox { o: o } => {
-            ot = operandTy(p, funcs, f, o);
+            ot = operandTy(p, funcs, f, locals, o);
             matched = false;
             ub = boxInnerOf(ot.ty);
             if ot.ok && ub.ok {
@@ -1397,10 +1407,10 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                 if !matched { out = one("the result is ".then(renderType(d)).then(", not an array")); };
                 matched = true;
             };
-            if !matched { out = one(renderOperand(p, f, o).then(" is not a Box")); };
+            if !matched { out = one(renderOperand(p, f, locals, o).then(" is not a Box")); };
         },
         Rvalue::Unsize { o: o } => {
-            ot = operandTy(p, funcs, f, o);
+            ot = operandTy(p, funcs, f, locals, o);
             okUn = false;
             dbu = boxInnerOf(d);
             obu = boxInnerOf(ot.ty);
@@ -1436,7 +1446,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                     while i < size(values) && i < size(info.fields) [{ affirm i >= 0; affirm i <= size(values); affirm i <= size(info.fields); }] ~ {
                         if i < size(info.fields) {
                             ft = get(info.fields, i).ty;
-                            if !fits(p, funcs, f, ft, get(values, i)) { out = push(out, renderOperand(p, f, get(values, i)).then(" is not ").then(renderType(ft))); };
+                            if !fits(p, funcs, f, locals, ft, get(values, i)) { out = push(out, renderOperand(p, f, locals, get(values, i)).then(" is not ").then(renderType(ft))); };
                         };
                         i = i + 1;
                     };
@@ -1447,7 +1457,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             info = ctorInfo(p, name);
             if !info.ok { out = one("there is no constructor ".then(name)); }
             else {
-                if !valueOf(p, funcs, f, info.typeName, o) { out = one(renderOperand(p, f, o).then(" is not a ").then(name)); };
+                if !valueOf(p, funcs, f, locals, info.typeName, o) { out = one(renderOperand(p, f, locals, o).then(" is not a ").then(name)); };
                 ft = fieldType(info.fields, field);
                 if !ft.ok { out = push(out, clone(name).then(" has no field ").then(field)); }
                 else if !sub(p, d, ft.ty) { out = push(out, "the field is ".then(renderType(ft.ty)).then(", not ").then(renderType(d))); };
@@ -1457,7 +1467,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             info = ctorInfo(p, name);
             if !info.ok { out = one("there is no constructor ".then(name)); }
             else {
-                if !valueOf(p, funcs, f, info.typeName, o) { out = one(renderOperand(p, f, o).then(" is not a ").then(info.typeName)); };
+                if !valueOf(p, funcs, f, locals, info.typeName, o) { out = one(renderOperand(p, f, locals, o).then(" is not a ").then(info.typeName)); };
                 for w in resultWhy(d, Type::TBool) { out = push(out, clone(w)); };
             };
         },
@@ -1465,15 +1475,15 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             info = ctorInfo(p, name);
             if !info.ok { out = one("there is no constructor ".then(name)); }
             else {
-                if !valueOf(p, funcs, f, info.typeName, o) { out = one(renderOperand(p, f, o).then(" is not a ").then(info.typeName)); };
+                if !valueOf(p, funcs, f, locals, info.typeName, o) { out = one(renderOperand(p, f, locals, o).then(" is not a ").then(info.typeName)); };
                 if !sub(p, d, Type::TVariant { name: clone(name) }) { out = push(out, "the result is ".then(renderType(d)).then(", not ").then(name)); };
             };
         },
         Rvalue::Copy { o: o } => {
-            if !fits(p, funcs, f, d, o) { out = expectedWhy(p, f, d, o); };
+            if !fits(p, funcs, f, locals, d, o) { out = expectedWhy(p, f, locals, d, o); };
         },
         Rvalue::Borrow { root: root, steps: steps, mutable: m } => {
-            pt = placeWhy(p, f, root, steps);
+            pt = placeWhy(p, f, locals, root, steps);
             held = boxInnerOf(pt.ty);
             wanted = noTy();
             if d is Type::TRef { wanted = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TRef).inner)) }; };
@@ -1490,9 +1500,9 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             } else { out = one("a reference is not ".then(renderType(d))); };
         },
         Rvalue::Deref { o: o } => {
-            ot = operandTy(p, funcs, f, o);
+            ot = operandTy(p, funcs, f, locals, o);
             if !ot.ok { out = one("a reference is read through a value that is not there"); }
-            else if borrowedParameter(f, o) {
+            else if borrowedParameter(f, locals, o) {
                 if !subType(p, d, ot.ty, true) { out = one("what a reference is to is ".then(renderType(ot.ty)).then(", not ").then(renderType(d))); };
             } else if ot.ty is Type::TRef {
                 inner = Box::unbox((ot.ty as Type::TRef).inner);
@@ -1503,7 +1513,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             } else { out = one("a value that is not a reference is read through"); };
         },
         Rvalue::TakeField { local: l, name: name, field: field } => {
-            out = rvalueWhy(p, funcs, f, d, Rvalue::ReadField { o: Operand::Copy { local: l }, name: clone(name), field: clone(field) });
+            out = rvalueWhy(p, funcs, f, locals, d, Rvalue::ReadField { o: Operand::Copy { local: l }, name: clone(name), field: clone(field) });
         },
     };
     return out;
@@ -1558,23 +1568,23 @@ fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
     return r;
 };
 
-fn sizeOfOperand(f: &Function, o: &Operand) -> Size [{ }] [{ }] {
+fn sizeOfOperand(f: &Function, locals: &HashMap<Int, Int>, o: &Operand) -> Size [{ }] [{ }] {
     r = Size::SAny;
     match o {
         Operand::Const { value: c } => { if c is Constant::CInt { r = Size::SConst { n: (c as Constant::CInt).n }; }; },
         Operand::Copy { local: l } => {
-            i = findLocal(f, l);
+            i = findLocal(f, locals, l);
             if i >= 0 && i < size(f.locals) && get(f.locals, i).named { r = Size::SParam { name: clone(get(f.locals, i).name) }; };
         },
         Operand::Move { local: l } => {
-            i = findLocal(f, l);
+            i = findLocal(f, locals, l);
             if i >= 0 && i < size(f.locals) && get(f.locals, i).named { r = Size::SParam { name: clone(get(f.locals, i).name) }; };
         },
     };
     return r;
 };
 
-fn fnTypeAfterSizes(f: &Function, t: &Type, args: &List<Operand>) -> TyRes ~ {
+fn fnTypeAfterSizes(f: &Function, locals: &HashMap<Int, Int>, t: &Type, args: &List<Operand>) -> TyRes ~ {
     if t is Type::TForall {
         sizes = (t as Type::TForall).sizes;
         body = Box::unbox((t as Type::TForall).body);
@@ -1582,7 +1592,7 @@ fn fnTypeAfterSizes(f: &Function, t: &Type, args: &List<Operand>) -> TyRes ~ {
         given = [];
         i = size(args) - size(sizes);
         while i < size(args) [{ affirm i >= 0; affirm i <= size(args); }] ~ {
-            given = push(given, sizeOfOperand(f, get(args, i)));
+            given = push(given, sizeOfOperand(f, locals, get(args, i)));
             i = i + 1;
         };
         return TyRes { ok: true, ty: substSizes(body, sizes, given) };
@@ -1590,20 +1600,20 @@ fn fnTypeAfterSizes(f: &Function, t: &Type, args: &List<Operand>) -> TyRes ~ {
     return TyRes { ok: true, ty: clone(t) };
 };
 
-fn callArgFits(p: &Program, funcs: &List<String>, f: &Function, wanted: &Type, o: &Operand) -> Bool ~ {
-    actual = operandTy(p, funcs, f, o);
+fn callArgFits(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, wanted: &Type, o: &Operand) -> Bool ~ {
+    actual = operandTy(p, funcs, f, locals, o);
     if wanted is Type::TMutRef { return actual.ok && actual.ty is Type::TMutRef && subType(p, wanted, actual.ty, true); };
     if wanted is Type::TBlock { return actual.ok && actual.ty is Type::TBlock && subType(p, wanted, actual.ty, true); };
     if wanted is Type::TRef && actual.ok && actual.ty is Type::TMutRef {
         return subType(p, Box::unbox((wanted as Type::TRef).inner), Box::unbox((actual.ty as Type::TMutRef).inner), true);
     };
-    return fits(p, funcs, f, wanted, o);
+    return fits(p, funcs, f, locals, wanted, o);
 };
 
-fn callWhy(p: &Program, funcs: &List<String>, f: &Function, callee: &Operand, args: &List<Operand>, dest: Int) -> List<String> ~ {
-    ct = operandTy(p, funcs, f, callee);
+fn callWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, callee: &Operand, args: &List<Operand>, dest: Int) -> List<String> ~ {
+    ct = operandTy(p, funcs, f, locals, callee);
     if !ct.ok { return one("the callee is not a function"); };
-    ctt = fnTypeAfterSizes(f, ct.ty, args);
+    ctt = fnTypeAfterSizes(f, locals, ct.ty, args);
     if !ctt.ok { return one("the callee is not a function"); };
     t = ctt.ty;
     if !(t is Type::TFn) { return one("the callee is not a function"); };
@@ -1614,13 +1624,13 @@ fn callWhy(p: &Program, funcs: &List<String>, f: &Function, callee: &Operand, ar
     i = 0;
     while i < size(args) && i < size(params) [{ affirm i >= 0; affirm i <= size(args); affirm i <= size(params); }] ~ {
         if i < size(params) {
-            if !callArgFits(p, funcs, f, get(params, i), get(args, i)) {
+            if !callArgFits(p, funcs, f, locals, get(params, i), get(args, i)) {
                 out = push(out, "argument ".then(String::fromInt(i + 1)).then(" is not ").then(renderType(get(params, i))));
             };
         };
         i = i + 1;
     };
-    dt = localTy(f, dest);
+    dt = localTy(f, locals, dest);
     if dt.ok && !sub(p, dt.ty, result) {
         out = push(out, "the result is ".then(renderType(result)).then(", not ").then(renderType(dt.ty)));
     };
@@ -1681,7 +1691,7 @@ fn terminatorFunctions(t: &Terminator) -> List<String> ~ {
     return out;
 };
 
-fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &List<String>, f: &Function) -> List<String> ~ {
+fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>) -> List<String> ~ {
     out = [];
     prefix = "In ".then(f.name).then(": ");
     if findBlock(f, 0) < 0 { out = push(out, clone(prefix).then("no entry block bb0")); };
@@ -1692,11 +1702,11 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &List<String>, f
         };
     };
     for pid in f.params {
-        if !declared(f, pid) { out = push(out, clone(prefix).then("parameter _").then(String::fromInt(pid)).then(" is not declared")); };
+        if !declared(locals, pid) { out = push(out, clone(prefix).then("parameter _").then(String::fromInt(pid)).then(" is not declared")); };
     };
     if f.hasReturn {
-        if !declared(f, 0) { out = push(out, clone(prefix).then("_0 is not declared")); };
-        z = localTy(f, 0);
+        if !declared(locals, 0) { out = push(out, clone(prefix).then("_0 is not declared")); };
+        z = localTy(f, locals, 0);
         if z.ok && !typeEq(z.ty, f.returns) {
             out = push(out, clone(prefix).then("_0 is ").then(renderType(z.ty)).then(" but the function returns ").then(renderType(f.returns)));
         };
@@ -1707,7 +1717,7 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &List<String>, f
         for st in b.stmts { for l in statementLocals(st) { used = push(used, l); }; };
         for l in terminatorLocals(b.term) { used = push(used, l); };
         for l in used {
-            if !declared(f, l) { out = push(out, clone(bp).then("uses the undeclared _").then(String::fromInt(l))); };
+            if !declared(locals, l) { out = push(out, clone(bp).then("uses the undeclared _").then(String::fromInt(l))); };
         };
         fnames = [];
         for st in b.stmts {
@@ -1739,9 +1749,9 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &List<String>, f
         };
         for st in b.stmts {
             match st {
-                Statement::Assign { local: dl, rv: rv } => { dst = localTy(f, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
-                Statement::Peek { local: dl, rv: rv } => { dst = localTy(f, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
-                Statement::AssignRef { local: dl, steps: steps, rv: rv } => { dst = placeWhy(p, f, dl, steps); if dst.ok { for w in rvalueWhy(p, funcs, f, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
+                Statement::Assign { local: dl, rv: rv } => { dst = localTy(f, locals, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
+                Statement::Peek { local: dl, rv: rv } => { dst = localTy(f, locals, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
+                Statement::AssignRef { local: dl, steps: steps, rv: rv } => { dst = placeWhy(p, f, locals, dl, steps); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
                 Statement::Drop { local: dl } => { },
                 Statement::Ghost => { },
                 Statement::Dissolve { local: dl } => { },
@@ -1749,10 +1759,10 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &List<String>, f
         };
         match b.term {
             Terminator::Switch { cond: c, yes: yes, no: no } => {
-                if !fits(p, funcs, f, Type::TBool, c) { out = push(out, clone(bp).then("is ill typed: the test is not a Bool")); };
+                if !fits(p, funcs, f, locals, Type::TBool, c) { out = push(out, clone(bp).then("is ill typed: the test is not a Bool")); };
             },
             Terminator::Call { callee: callee, args: args, dest: dest, next: next } => {
-                for w in callWhy(p, funcs, f, callee, args, dest) { out = push(out, clone(bp).then("is ill typed: ").then(w)); };
+                for w in callWhy(p, funcs, f, locals, callee, args, dest) { out = push(out, clone(bp).then("is ill typed: ").then(w)); };
             },
             Terminator::Goto { block: t } => { },
             Terminator::Return => { },
@@ -1764,14 +1774,24 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &List<String>, f
 
 // The first problem of the program, or the empty string when it is well formed
 fn verifyProgram(p: &Program) -> String ~ {
-    funcs = [];
-    for f in p.functions { funcs = push(funcs, clone(f.name)); };
-    funcs = push(funcs, clone(p.entry.name));
-    all = functionProblems(p.types, p, funcs, p.entry);
+    names = [];
+    indexes = [];
+    i = 0;
+    while i < size(p.functions) [{ affirm i >= 0; affirm i <= size(p.functions); }] shrinks size(p.functions) - i {
+        f = &get(p.functions, i);
+        names = push(names, clone((*f).name));
+        indexes = push(indexes, indexLocals(f));
+        i = i + 1;
+    };
+    names = push(names, clone(p.entry.name));
+    funcs = FunctionIndex { names: names, locals: indexes, entry: indexLocals(&p.entry) };
+    all = functionProblems(p.types, p, funcs, &p.entry, &funcs.entry);
     if size(all) > 0 { return clone(get(all, 0)); };
-    for f in p.functions {
-        ps = functionProblems(p.types, p, funcs, f);
+    i = 0;
+    while i < size(p.functions) && i < size(funcs.locals) [{ affirm i >= 0; affirm i <= size(p.functions); affirm i <= size(funcs.locals); }] shrinks size(p.functions) - i {
+        ps = functionProblems(p.types, p, funcs, &get(p.functions, i), &get(funcs.locals, i));
         if size(ps) > 0 { return clone(get(ps, 0)); };
+        i = i + 1;
     };
     return "";
 };

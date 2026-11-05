@@ -5,9 +5,11 @@ import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
 import qualified Data.Map.Strict as Map
-import Mir (BasicBlock (..), Function (..), Program (..), Statement (..))
+import Mir (BasicBlock (..), Function (..), Program (..), Statement (..), Rvalue (..), LocalDecl (..), ListOp (..))
 import MirData (writeProgram, writeProgramWithGhosts)
-import MirHousekeeping (eraseGhosts)
+import MirHousekeeping (eraseGhosts, toolProgram)
+import MirOwnership (insertOwnership)
+import Types (Type (..))
 import Pipeline (compileSource, validatedSource)
 import TestHarness
 import TestMirReader (sameText, withProgram)
@@ -22,7 +24,8 @@ testMirErase :: Test
 testMirErase =
     TestList
         "testMirErase"
-        [ TestList
+        [ TestCase "local metadata borrows recursive declarations" metadataBorrows
+        , TestList
             "interpreted"
             ( [ TestCase "a program with no ghosts is unchanged" (interpreted "return 1 + 2;")
               , TestCase "permissions are taken out" (interpretedGolden pointers pointersErased)
@@ -33,6 +36,9 @@ testMirErase =
               ]
                 ++ [TestCase label (castCase rewrite expected) | (label, rewrite, expected) <- castCases]
             )
+        , TestList "local IDs, interpreted"
+            [TestCase name (rawExact input output errors) | (name, input, output, errors) <- localCases]
+        , TestCase "local IDs, natively" localNative
         , TestCase "every example and program, natively" everyProgram
         ]
 
@@ -230,3 +236,110 @@ entryGhostsKept = pure $ case validatedSource "assume 1 = 1; return 1;" of
   where
     isGhost (Ghost _ _) = True
     isGhost _ = False
+
+-- Metadata construction must not reintroduce a whole LocalDecl/Type clone through a projection.
+metadataBorrows :: IO TestResult
+metadataBorrows =
+    pure $ case toolProgram "examples/mir/mir_erase/mir_erase.tersus" of
+        Error e -> Just e
+        Ok program ->
+            let owned = insertOwnership program
+                large ty = case ty of
+                    TNamed name _ -> name `elem` ["HashMap", "mir$reader$reader$Function", "mir$reader$reader$LocalDecl", "data$codec$codec$Type"]
+                    _ -> False
+                check name = case Map.lookup name (progFunctions owned) of
+                    Nothing -> ["missing " ++ name]
+                    Just fn ->
+                        [ name ++ " clones " ++ show dest
+                        | block <- Map.elems (fnBlocks fn)
+                        , Assign dest rv <- blockStatements block
+                        , copies rv
+                        , Just decl <- [Map.lookup dest (fnLocals fn)]
+                        , large (localType decl)
+                        ]
+                failures = concatMap check ["indexLocals", "localInfo", "castProblem", "eraseProgram"]
+             in if null failures then Nothing else Just (unlines failures)
+  where
+    copies (CopyOf _) = True
+    copies (ListOp Get _) = True
+    copies _ = False
+
+rawExact :: String -> String -> String -> IO TestResult
+rawExact input expected expectedErrors = do
+    eraser <- eraserProgram
+    pure $ case eraser of
+        Error e -> Just e
+        Ok program -> case runProgramIn noWorld{worldInput = input} program of
+            Error e -> Just e
+            Ok ((output, errors), _)
+                | output == expected && errors == expectedErrors -> Nothing
+                | otherwise -> Just ("expected " ++ show (expected, expectedErrors) ++ ", got " ++ show (output, errors))
+
+localNative :: IO TestResult
+localNative = withProgram "examples/mir/mir_erase/mir_erase.tersus" "mir-erase" $ \exe -> do
+    failures <- mapM (check exe) localCases
+    pure $ case [failure | Just failure <- failures] of
+        [] -> Nothing
+        bad -> Just (unlines bad)
+  where
+    check exe (name, input, expected, expectedErrors) = do
+        (code, output, errors) <- runExecutableBytes exe [] input
+        let nativeExpected = if expected == "1" then "1\n" else expected
+        pure $ if code == ExitSuccess && output == nativeExpected && errors == expectedErrors
+            then Nothing
+            else Just (name ++ ": expected " ++ show (nativeExpected, expectedErrors) ++ ", got " ++ show (code, output, errors))
+
+localCases :: [(String, String, String, String)]
+localCases =
+    [ ("sparse out-of-order duplicate and missing IDs", wire 2 [] header sparse, wire 1 [] header sparseErased, "")
+    , ("mixed ghost runtime and local zero retarget above maximum", wire 2 mixedTypes mixedHeader mixed, wire 1 erasedTypes erasedHeader mixedErased, "")
+    , ("negative and large signed IDs", wire 2 [] header signed, wire 1 [] header signed, "")
+    , ("empty local table", wire 2 [] header [], wire 1 [] header [], "")
+    , ("metadata survives HashMap growth", wire 2 [] header growth, wire 1 [] header keptGrowth, "")
+    , ("ghost type depth limit is unchanged", wire 2 deepTypes header deepLocals, wire 1 deepErasedTypes header deepKept, "")
+    , cast "sparse cast reports layout before erasure" ["local 90 none block array int c 2", "local 7 none block int"] "copy 7" sizeError
+    , cast "duplicate destination cast uses first declaration" ["local 90 none block array int c 2", "local 7 none block int", "local 90 none int"] "move 7" sizeError
+    , cast "duplicate source cast uses first declaration" ["local 90 none block array int c 2", "local 7 none block int", "local 7 none block array int c 2"] "copy 7" sizeError
+    , cast "cast reports unknown layout" ["local 90 none block int", "local 7 none block param \"T\""] "move 7" unknownError
+    , ("missing cast source remains non-ghost", wire 2 [] header ["local 90 none block int", "block 0", "assign 90 listop blockCast 1 copy 999", "return"], wire 1 [] header ["block 0", "return"], "")
+    , ("malformed local type is refused", wire 2 [] header ["local 7 none text"], "1", "the input is not the MIR as data\n")
+    ]
+  where
+    header = "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+    wire :: Int -> [String] -> String -> [String] -> String
+    wire version types h body = unlines (["tersus-mir " ++ show version] ++ types ++ [h] ++ body ++ ["end"])
+    sparse =
+        [ "local 42 none block int", "local 7 none int", "local 0 none int", "local 7 none block bool", "local 42 none int"
+        , "block 0", "assign 7 listop addrWrite 4 copy 42 move 7 copy 999 const int 3", "assign 999 use const int 5", "dissolve 42", "dissolve 999", "return"
+        ]
+    sparseErased =
+        [ "local 7 none int", "local 0 none int", "local 7 none block bool"
+        , "block 0", "assign 7 listop addrWrite 3 move 7 copy 999 const int 3", "assign 999 use const int 5", "peek 999 listop uninitEmpty 0", "return"
+        ]
+    mixedTypes = ["struct \"Ghost\" 1 \"g\" block int", "struct \"Mixed\" 2 \"g\" block int \"r\" int"]
+    erasedTypes = ["struct \"Ghost\" 0", "struct \"Mixed\" 1 \"r\" int"]
+    mixedHeader = "main \"main\" params 4 42 7 0 999 returns some block int sizeparams 0 typeparams 0 borrowed 3 42 7 0 mutborrowed 2 42 7 from 3 0 42 7"
+    erasedHeader = "main \"main\" params 2 7 999 returns some int sizeparams 0 typeparams 0 borrowed 1 7 mutborrowed 1 7 from 1 7"
+    mixed =
+        [ "local 1024 none int", "local 42 none named \"Ghost\" 0", "local 7 none named \"Mixed\" 0", "local 0 some \"result\" block int"
+        , "block 0", "assign 42 listop addrWrite 4 const int 1 const int 0 const int 3 copy 42"
+        , "assign 7 makedata \"Mixed\" 2 \"g\" copy 42 \"r\" const int 3"
+        , "assign 0 use copy 42", "assign 0 listop addrFree 2 const int 1 copy 0"
+        , "call const fn \"missing\" 3 copy 42 copy 7 copy 999 42 1", "block 1", "return"
+        ]
+    mixedErased =
+        [ "local 1024 none int", "local 7 none named \"Mixed\" 0", "local 0 some \"result\" int", "local 1025 none int", "local 1026 none int"
+        , "block 0", "assign 1025 listop addrWrite 3 const int 1 const int 0 const int 3"
+        , "assign 7 makedata \"Mixed\" 1 \"r\" const int 3", "assign 0 use const int 0", "assign 0 listop addrFree 1 const int 1"
+        , "call const fn \"missing\" 2 copy 7 copy 999 1026 1", "block 1", "return"
+        ]
+    signed = ["local -9223372036854775808 none int", "local 9223372036854775806 none int", "local -3 none int", "block 0", "assign -3 use copy -9223372036854775808", "return"]
+    growth = ["local " ++ show (i * 37) ++ " none " ++ if even i then "int" else "block int" | i <- [0..39 :: Int]] ++ ["block 0", "return"]
+    keptGrowth = ["local " ++ show (i * 37) ++ " none int" | i <- [0,2..38 :: Int]] ++ ["block 0", "return"]
+    deepTypes = ["struct \"G" ++ show i ++ "\" 1 \"g\" " ++ (if i == 16 then "block int" else "named \"G" ++ show (i + 1) ++ "\" 0") | i <- [0..16 :: Int]]
+    deepErasedTypes = ["struct \"G" ++ show i ++ "\" 0" | i <- [0..16 :: Int]]
+    deepLocals = ["local 8 none named \"G0\" 0", "local 9 none named \"G1\" 0", "block 0", "return"]
+    deepKept = ["local 8 none named \"G0\" 0", "block 0", "return"]
+    cast name locals operand errorText = (name, wire 2 [] header (locals ++ ["block 0", "assign 90 listop blockCast 1 " ++ operand, "return"]), "1", errorText)
+    sizeError = "in main: Block::cast from Int to Array<Int, 2>, whose slots are not the same size, or are aligned more strictly (8,8) and (16,8), as bytes and alignment)\n"
+    unknownError = "in main: Block::cast from 'T to Int, where the layout of a type parameter or a size parameter is not known\n"

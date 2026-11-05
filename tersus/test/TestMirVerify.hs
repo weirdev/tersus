@@ -10,7 +10,7 @@ import Cli (World (..), noWorld, runProgramIn)
 import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
-import MirHousekeeping (verifyProgram)
+import MirHousekeeping (verifyProgram, toolProgram)
 import MirOwnership (insertOwnership)
 import MirLower (lowerProgram)
 import TestParserFragments (parseStatementBlock)
@@ -31,7 +31,8 @@ testMirVerify :: Test
 testMirVerify =
     TestList
         "testMirVerify"
-        [ TestCase "constructor and block lookups borrow aggregates" borrowedLookups
+        [ TestCase "local lookup contexts are borrowed" contextMapsBorrowed
+        , TestCase "constructor and block lookups borrow aggregates" borrowedLookups
         , TestList
             "interpreted"
             [ TestCase "a well formed program is accepted" (interpreted goodSource id True)
@@ -57,6 +58,9 @@ testMirVerify =
             [TestCase name (rawInterpreted expected input) | (name, input, expected) <- functionCases]
         , TestList "call metadata, interpreted"
             [TestCase name (rawInterpreted expected input) | (name, input, expected) <- callCases]
+        , TestList "local IDs, interpreted"
+            [TestCase name (localExact input expected errors) | (name, input, expected, errors) <- localCases]
+        , TestCase "local IDs, natively" localNative
         , TestCase "pre-erasure and function-list cases, natively" rawNative
         , TestParallel
             "every example, natively"
@@ -71,6 +75,27 @@ testMirVerifyPrograms =
         "testMirVerifyPrograms"
         [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
 
+contextMapsBorrowed :: IO TestResult
+contextMapsBorrowed =
+    pure $ case toolProgram "examples/mir/mir_verify/mir_verify.tersus" of
+        Error e -> Just e
+        Ok program ->
+            let owned = insertOwnership program
+                large ty = case ty of
+                    TNamed name _ -> name `elem` ["HashMap", "FunctionIndex", "mir$reader$reader$Function"]
+                    _ -> False
+                check name = case Map.lookup name (progFunctions owned) of
+                    Nothing -> ["missing " ++ name]
+                    Just fn ->
+                        [ name ++ " clones its context into " ++ show dest
+                        | block <- Map.elems (fnBlocks fn)
+                        , Assign dest (CopyOf _) <- blockStatements block
+                        , Just decl <- [Map.lookup dest (fnLocals fn)]
+                        , large (localType decl)
+                        ]
+                failures = concatMap check ["indexLocals", "functionTypeOfName", "verifyProgram"]
+             in if null failures then Nothing else Just (unlines failures)
+
 borrowedLookups :: IO TestResult
 borrowedLookups = do
     loaded <- linkedFromFile "examples/mir/mir_verify/mir_verify.tersus"
@@ -84,7 +109,7 @@ borrowedLookups = do
                         let copied = [dest | block <- Map.elems (fnBlocks fn), Assign dest (ReadField _ actualOwner actualField) <- blockStatements block, actualOwner == owner, actualField == field, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == tableType]
                             elementCopies = [dest | Just raw <- [Map.lookup name (progFunctions program)], block <- Map.elems (fnBlocks raw), Assign dest (ListOp Get _) <- blockStatements block, Just decl <- [Map.lookup dest (fnLocals raw)], localType decl == elementType]
                          in if null (copied ++ elementCopies) then Nothing else Just (name ++ " clones its input aggregate into " ++ show (copied ++ elementCopies))
-                targets = [("ctorInfo", "mir$reader$reader$Program", "types", TList (TNamed "mir$reader$reader$TypeDecl" []), TNamed "mir$reader$reader$TypeDecl" []), ("findBlock", "mir$reader$reader$Function", "blocks", TList (TNamed "mir$reader$reader$MirBlock" []), TNamed "mir$reader$reader$MirBlock" []), ("findLocal", "mir$reader$reader$Function", "locals", TList (TNamed "mir$reader$reader$LocalDecl" []), TNamed "mir$reader$reader$LocalDecl" [])]
+                targets = [("ctorInfo", "mir$reader$reader$Program", "types", TList (TNamed "mir$reader$reader$TypeDecl" []), TNamed "mir$reader$reader$TypeDecl" []), ("findBlock", "mir$reader$reader$Function", "blocks", TList (TNamed "mir$reader$reader$MirBlock" []), TNamed "mir$reader$reader$MirBlock" []), ("indexLocals", "mir$reader$reader$Function", "locals", TList (TNamed "mir$reader$reader$LocalDecl" []), TNamed "mir$reader$reader$LocalDecl" [])]
                 errors = [message | Just message <- map check targets]
              in if null errors then Nothing else Just (unlines errors)
 
@@ -515,6 +540,87 @@ onEveryFunction change program =
 
 withVerifier :: (FilePath -> IO TestResult) -> IO TestResult
 withVerifier = withProgram "examples/mir/mir_verify/mir_verify.tersus" "mir-verify"
+
+localExact :: String -> String -> String -> IO TestResult
+localExact input expected expectedErrors = do
+    verifier <- verifierProgram
+    pure $ case verifier of
+        Error e -> Just e
+        Ok program -> case runProgramIn noWorld{worldInput = input} program of
+            Error e -> Just e
+            Ok ((output, errors), _)
+                | output == expected && errors == expectedErrors -> Nothing
+                | otherwise -> Just ("expected " ++ show (expected, expectedErrors) ++ ", got " ++ show (output, errors))
+
+localNative :: IO TestResult
+localNative = withVerifier $ \exe -> do
+    failures <- mapM (check exe) localCases
+    pure $ case [failure | Just failure <- failures] of
+        [] -> Nothing
+        bad -> Just (unlines bad)
+  where
+    check exe (name, input, expected, expectedErrors) = do
+        (code, output, errors) <- runExecutableBytes exe [] input
+        let nativeExpected = if expected == "1" then "1\n" else expected
+        pure $ if code == ExitSuccess && output == nativeExpected && errors == expectedErrors
+            then Nothing
+            else Just (name ++ ": expected " ++ show (nativeExpected, expectedErrors) ++ ", got " ++ show (code, output, errors))
+
+localCases :: [(String, String, String, String)]
+localCases =
+    [ good "sparse out-of-order signed local IDs" "2 7 -3" "some int"
+        ["local 7 none int", "local 0 none int", "local -3 none int"] ["assign 0 binary add copy 7 move -3"]
+    , good "duplicate local lookup uses first type" "0" "some int"
+        ["local 7 none int", "local 0 none int", "local 7 none bool"] ["assign 0 use copy 7"]
+    , bad "duplicate local first type still rejects" "0" "some int"
+        ["local 7 none bool", "local 0 none int", "local 7 none int"] ["assign 0 use move 7"] "bb0: is ill typed: _7 (Bool) is not Int"
+    , good "duplicate local zero uses first type" "0" "some int"
+        ["local 0 none int", "local 0 none bool"] ["assign 0 use const int 1"]
+    , bad "duplicate local zero mismatch is reported first" "0" "some int"
+        ["local 0 none bool", "local 0 none int"] ["assign 0 use const int 1"] "_0 is Bool but the function returns Int"
+    , bad "missing parameter keeps diagnostic order" "2 7 999" "some int"
+        ["local 0 none int", "local 7 none int"] ["assign 888 use copy 777"] "parameter _999 is not declared"
+    , bad "missing destination is not silently skipped" "0" "some int"
+        ["local 0 none int"] ["assign 999 use copy 888"] "bb0: uses the undeclared _999"
+    , bad "missing operand is not silently skipped" "0" "some int"
+        ["local 0 none int"] ["assign 0 use copy 888"] "bb0: uses the undeclared _888"
+    , bad "missing zero is reported before statements" "0" "some int"
+        ["local 7 none int"] ["assign 7 use copy 888"] "_0 is not declared"
+    , bad "later duplicate declarations are still validated" "0" "some int"
+        ["local 7 none int", "local 0 none int", "local 7 none var 0"] ["assign 0 use copy 7"] "_7 has no known type"
+    , good "empty local table" "0" "none" [] []
+    , good "minimum and maximum signed IDs" "0" "some int"
+        ["local 9223372036854775807 none int", "local 0 none int", "local -9223372036854775808 none int"] ["assign 0 binary add copy 9223372036854775807 move -9223372036854775808"]
+    , good "local index grows without losing declarations" "0" "some int"
+        ["local " ++ show (i * 37) ++ " none int" | i <- [39,38..0 :: Int]] ["assign 0 use copy 1443"]
+    , good "pre-erasure cast preserves ghost types" "0" "some block int"
+        ["local 90 none block array int c 2", "local 7 none block int", "local 0 none block int"] ["assign 90 listop blockCast 1 copy 7", "assign 0 use move 7"]
+    , bad "pre-erasure cast rejects runtime source" "0" "none"
+        ["local 90 none block int", "local 7 none int"] ["assign 90 listop blockCast 1 copy 7"] "bb0: is ill typed: _7 (Int) is not a Block"
+    , ("mixed ghost and runtime fields are checked before erasure", mixed, "OK\n", "")
+    , ("local IDs are isolated by function including callee parameters", separateFunctions, "OK\n", "")
+    , ("malformed local is refused", fixture "0" "none" ["local 7 none text"] [], "1", "the input is not the MIR as data\n")
+    ]
+  where
+    fixture params returns locals stmts = unlines $
+        ["tersus-mir 1", "main \"main\" params " ++ params ++ " returns " ++ returns ++ " sizeparams 0 typeparams 0 borrowed 0"]
+        ++ locals ++ ["block 0"] ++ stmts ++ ["return", "end"]
+    good name params returns locals stmts = (name, fixture params returns locals stmts, "OK\n", "")
+    bad name params returns locals stmts problem = (name, fixture params returns locals stmts, "1", "In main: " ++ problem ++ "\n")
+    mixed = unlines
+        [ "tersus-mir 1", "struct \"Mixed\" 2 \"g\" block int \"r\" int"
+        , "main \"main\" params 0 returns some int sizeparams 0 typeparams 0 borrowed 0"
+        , "local 42 none block int", "local 7 none named \"Mixed\" 0", "local 0 none int"
+        , "block 0", "assign 7 makedata \"Mixed\" 2 \"g\" copy 42 \"r\" const int 3", "assign 0 readfield copy 7 \"Mixed\" \"r\"", "return", "end"
+        ]
+    separateFunctions = unlines
+        [ "tersus-mir 1", "function \"probe\" params 1 7 returns some bool sizeparams 0 typeparams 0 borrowed 0"
+        , "local 7 none bool", "local 0 none bool", "block 0", "assign 0 use copy 7", "return", "end"
+        , "main \"main\" params 0 returns some int sizeparams 0 typeparams 0 borrowed 0"
+        , "local 7 none int", "local 88 none bool", "local 0 none int", "block 0", "assign 7 use const int 3"
+        , "call const fn \"probe\" 1 const bool true 88 1", "block 1", "assign 0 use copy 7", "return", "end"
+        ]
+
 
 -- One case per program, so the sweep runs at the harness's parallelism instead of one program after another
 -- inside a single case (withVerifier builds the verifier executable once for the process). The data comes from

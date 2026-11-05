@@ -221,7 +221,12 @@ the types `block` and `uninit` that version 1 already wrote, since a
 ghost statement's contents and a function's specification do not
 survive erasure and are not written. The eraser takes the permissions
 out, makes each `Uninit<T>` a `T`, refuses the `Block::cast`s whose
-slots do not lay out alike, and writes version 1.
+slots do not lay out alike, and writes version 1. Both tools build a
+per-function HashMap from explicit local IDs to declaration positions;
+the eraser also records each first declaration's ghost classification.
+Duplicate IDs keep first-match lookup behavior, while every declaration
+is still visited in its original order. Casts are checked against the
+original declarations before any function is erased.
 
 The host has moved: `MirHousekeeping` runs the two Tersus programs on
 the MIR as data (cached native executables built from the seed, as
