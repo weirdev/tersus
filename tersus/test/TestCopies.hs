@@ -244,7 +244,17 @@ boxedArrayClonePrograms =
     , ("nested Box Clone preserves the sized-array payload", "b = Box::new(Box::new(#[7, 13])); copy = clone(b); array = Box::unbox(copy); array = set(array, 0, 99); original = Box::unbox(b); return get(original, 0) * 10 + get(array, 0);", 169)
     , ("clone unbox of a nested Box borrows only the inner handle", "b = Box::new(Box::new(#[7, 13])); copy = clone(Box::unbox(b)); copy = set(copy, 0, 99); original = Box::unbox(b); return get(original, 0) * 10 + get(copy, 0);", 169)
     , ("clone unbox of a sized array of arrays keeps all rows", "b = Box::new(array(2, #[7, 13])); copy = clone(Box::unbox(b)); copy = set(copy, 0, #[99, 100]); original = Box::unbox(b); return get(get(original, 0), 0) * 10 + get(get(copy, 0), 0);", 169)
-    ]
+    ] ++ concat
+        [ [ (label ++ " nonempty", declaration ++ "b = Box::new(#[7, 13]); copy = dup(b); copy = set(copy, 0, 99); return get(b, 0) * 100 + get(copy, 0) + get(b, 1);", 812)
+          , (label ++ " empty", declaration ++ empty ++ "b = Box::new(empty()); copy = dup(b); return size(copy) + size(b);", 0)
+          ]
+        | (label, declaration) <-
+            [ ("bounded Box Clone specialization", "fn dup<T: Clone>(b: &Box<T>) -> Box<T> { return clone(b); }; ")
+            , ("bounded clone unbox specialization", "fn dup<T: Clone>(b: &Box<T>) -> T { return clone(Box::unbox(b)); }; ")
+            , ("size-generic Box Clone specialization", "fn dup<n>(b: &Box<Array<Int, n>>) -> Box<Array<Int, n>> { return clone(b); }; ")
+            , ("size-generic clone unbox specialization", "fn dup<n>(b: &Box<Array<Int, n>>) -> Array<Int, n> { return clone(Box::unbox(b)); }; ")
+            ]
+        ]
   where
     empty = "fn empty() -> Array<Int, 0> { return #[]; }; "
 
