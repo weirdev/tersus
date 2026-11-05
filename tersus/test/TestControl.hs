@@ -168,6 +168,10 @@ testInferredInvariants =
             , -- Counters keep their distance, and a lower bound they keep
               parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = 0; j = 5; while i < n [{ affirm i <= n; }] shrinks n - i { i = i + 1; j = j + 1; }; affirm j = i + 5; return 0; };"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 3; }] { i = 3; while i < n [{ affirm i <= n + 1; }] shrinks n - i { i = i + 2; }; affirm i >= 3; return 0; };"
+            , -- Locals the loop has nothing to do with change nothing: thirty of them, each with a bound
+              -- through x, neither crowd out k (tied to s at the entry) nor spend the arithmetic's budget
+              let unrelated = concat ["b" ++ show k ++ " = x + " ++ show k ++ "; " | k <- [0 .. 29 :: Int]]
+               in parseValidProgramHelper ("fn f(n: Int, x: Int, k: Int) -> Int [{ affirm n >= 0; affirm n < 1000; affirm x >= 0; affirm x < 1000; affirm k >= 0; affirm k < 1000; }] [{ affirm return = k + n; }] { " ++ unrelated ++ "s = k; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { s = s + 1; i = i + 1; }; return s; };")
             , -- set keeps the size
               parseValidProgramHelper "l = [1, 2, 3]; for i in 0..3 { l = set(l, i, 0); }; affirm size(l) = 3;"
             , -- Only what the body keeps is inferred
