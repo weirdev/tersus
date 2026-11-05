@@ -5,7 +5,7 @@ module TestParity
     , unsupportedReason
     ) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Exception (evaluate)
 import System.Timeout (timeout)
 import Data.List (isInfixOf, isPrefixOf, nub)
@@ -20,7 +20,7 @@ import MirLower (lowerElaborated)
 import ValidatorNative (validateCompiled)
 import MirHousekeeping (eraseGhosts, storageProgram)
 import Compile (lowerSource)
-import Pipeline (ownedSource, parseSource)
+import Pipeline (parseSource)
 import SelfHostedMir (validateMirSubset, sourceContainerView, verdictProved)
 import StdLibDefs (stdLibValCtx)
 import Syntax
@@ -218,6 +218,41 @@ checkerProgram = modifyMVar checkerResult $ \cached -> case cached of
         let result = parseSource source `bindResult` elaborate `bindResult` lowerElaborated `bindResult` eraseGhosts
         pure (Just result, result)
 
+{-# NOINLINE loweredPrograms #-}
+loweredPrograms :: MVar (Map.Map String (Result M.Program String))
+loweredPrograms = unsafePerformIO (newMVar Map.empty)
+
+{-# NOINLINE loweredLocks #-}
+loweredLocks :: MVar (Map.Map String (MVar ()))
+loweredLocks = unsafePerformIO (newMVar Map.empty)
+
+lowerOnce :: String -> IO (Result M.Program String)
+lowerOnce source = do
+    lock <- modifyMVar loweredLocks $ \locks -> case Map.lookup source locks of
+        Just existing -> pure (locks, existing)
+        Nothing -> do
+            fresh <- newMVar ()
+            pure (Map.insert source fresh locks, fresh)
+    withMVar lock $ \() -> do
+        cached <- modifyMVar loweredPrograms $ \cache -> pure (cache, Map.lookup source cache)
+        case cached of
+            Just result -> pure result
+            Nothing -> do
+                let result = lower source
+                _ <- modifyMVar loweredPrograms $ \cache -> pure (Map.insert source result cache, ())
+                pure result
+
+{-# NOINLINE readerResult #-}
+readerResult :: MVar (Maybe (Result M.Program String))
+readerResult = unsafePerformIO (newMVar Nothing)
+
+readerProgram :: IO (Result M.Program String)
+readerProgram = modifyMVar readerResult $ \cached -> case cached of
+    Just result -> pure (cached, result)
+    Nothing -> do
+        result <- bootstrapFromFile "examples/mir/mir_reader/mir_reader.tersus"
+        pure (Just result, result)
+
 validationCase :: ParityCase -> IO TestResult
 validationCase parityCase = do
     bump (\t -> t{tallyTotal = tallyTotal t + 1})
@@ -225,39 +260,41 @@ validationCase parityCase = do
     checkerResult' <- checkerProgram
     case checkerResult' of
         Error e -> pure (Just (parityName parityCase ++ ": the Tersus validator does not compile: " ++ e))
-        Ok checker -> case lower source of
-            Error _ -> do
-                bump (\t -> t{tallyNotMir = tallyNotMir t + 1})
-                pure Nothing
-            Ok mir -> case unsupportedReason mir of
-                Just reason -> do
-                    bump (\t -> t{tallySkipReasons = Map.insertWith (+) reason 1 (tallySkipReasons t)})
+        Ok checker -> do
+            lowered <- lowerOnce source
+            case lowered of
+                Error _ -> do
+                    bump (\t -> t{tallyNotMir = tallyNotMir t + 1})
                     pure Nothing
-                Nothing -> do
-                    -- The validator compiled to native code (what every program is validated
-                    -- by) and the same validator interpreted give the same verdict.
-                    let unmodelled e = "does not model yet" `isInfixOf` e
-                        outcome = case (validateCompiled mir, mapResult verdictProved (validateMirSubset checker mir)) of
-                            (Ok _, Ok (Just True)) -> Nothing
-                            (Error e, Ok (Just False)) | not (unmodelled e) -> Nothing
-                            (Error e, Ok Nothing) | unmodelled e -> Nothing
-                            (Ok _, other) -> Just ("the compiled validator accepts and the interpreted one says " ++ verdictText other)
-                            (Error e, other) -> Just ("the compiled validator refuses (" ++ take 120 e ++ ") and the interpreted one says " ++ verdictText other)
-                        verdictText other = case other of
-                            Ok (Just True) -> "proved"
-                            Ok (Just False) -> "not proved"
-                            Ok Nothing -> "not modelled"
-                            Error e -> "failed: " ++ take 120 e
-                    finished <- timeout validationTimeoutMicros (evaluate (maybe 0 length outcome))
-                    case finished of
-                        Nothing -> do
-                            bump (\t -> t{tallyTimedOut = tallyTimedOut t ++ [parityName parityCase]})
-                            pure Nothing
-                        Just _ -> do
-                            case outcome of
-                                Nothing -> bump (\t -> t{tallyExercised = tallyExercised t + 1})
-                                Just _ -> pure ()
-                            pure (fmap (\message -> parityName parityCase ++ ": " ++ message) outcome)
+                Ok mir -> case unsupportedReason mir of
+                    Just reason -> do
+                        bump (\t -> t{tallySkipReasons = Map.insertWith (+) reason 1 (tallySkipReasons t)})
+                        pure Nothing
+                    Nothing -> do
+                        -- The validator compiled to native code (what every program is validated
+                        -- by) and the same validator interpreted give the same verdict.
+                        let unmodelled e = "does not model yet" `isInfixOf` e
+                            outcome = case (validateCompiled mir, mapResult verdictProved (validateMirSubset checker mir)) of
+                                (Ok _, Ok (Just True)) -> Nothing
+                                (Error e, Ok (Just False)) | not (unmodelled e) -> Nothing
+                                (Error e, Ok Nothing) | unmodelled e -> Nothing
+                                (Ok _, other) -> Just ("the compiled validator accepts and the interpreted one says " ++ verdictText other)
+                                (Error e, other) -> Just ("the compiled validator refuses (" ++ take 120 e ++ ") and the interpreted one says " ++ verdictText other)
+                            verdictText other = case other of
+                                Ok (Just True) -> "proved"
+                                Ok (Just False) -> "not proved"
+                                Ok Nothing -> "not modelled"
+                                Error e -> "failed: " ++ take 120 e
+                        finished <- timeout validationTimeoutMicros (evaluate (maybe 0 length outcome))
+                        case finished of
+                            Nothing -> do
+                                bump (\t -> t{tallyTimedOut = tallyTimedOut t ++ [parityName parityCase]})
+                                pure Nothing
+                            Just _ -> do
+                                case outcome of
+                                    Nothing -> bump (\t -> t{tallyExercised = tallyExercised t + 1})
+                                    Just _ -> pure ()
+                                pure (fmap (\message -> parityName parityCase ++ ": " ++ message) outcome)
 
 resultEither :: Result a String -> Either String a
 resultEither (Ok a) = Right a
@@ -272,37 +309,40 @@ lower source = parseSource source `bindResult` elaborate `bindResult` lowerElabo
 readerCase :: ParityCase -> IO TestResult
 readerCase parityCase = do
     source <- paritySource parityCase
-    -- (the reader as the host builds it, not validated: testHostValidation validates it)
-    readerResult <- bootstrapFromFile "examples/mir/mir_reader/mir_reader.tersus"
-    case (ownedSource source, readerResult) of
-        (Error _, _) -> do
+    ownedResult <- ownedOnce source
+    case ownedResult of
+        Error _ -> do
             bump (\t -> t{tallyReaderSkipped = tallyReaderSkipped t + 1})
             pure Nothing
-        (_, Error e) -> pure (Just (parityName parityCase ++ ": the Tersus MIR reader does not compile: " ++ e))
-        (Ok owned, Ok reader) -> do
-            let text = writeProgram owned
-                haskellRoundTrip = case readProgram text of
-                    Error e -> Just ("the Haskell MIR reader refuses its own data: " ++ e)
-                    Ok back -> if back == forNative owned then Nothing else Just "the Haskell MIR reader reads back another program"
-            case haskellRoundTrip of
-                Just message -> pure (Just (parityName parityCase ++ ": " ++ message))
-                Nothing -> do
-                    let outcome = case runProgramIn noWorld{worldInput = text} reader of
-                            Error e -> Just ("the Tersus MIR reader failed: " ++ e)
-                            Ok ((output, errors), _)
-                                | not (null errors) -> Just ("the Tersus MIR reader reported: " ++ errors)
-                                | sameText output text -> Nothing
-                                | otherwise -> Just "the Tersus MIR reader wrote back different data"
-                    finished <- timeout validationTimeoutMicros (evaluate (maybe 0 length outcome))
-                    case finished of
+        Ok owned -> do
+            -- (the reader as the host builds it, not validated: testHostValidation validates it)
+            readerResult' <- readerProgram
+            case readerResult' of
+                Error e -> pure (Just (parityName parityCase ++ ": the Tersus MIR reader does not compile: " ++ e))
+                Ok reader -> do
+                    let text = writeProgram owned
+                        haskellRoundTrip = case readProgram text of
+                            Error e -> Just ("the Haskell MIR reader refuses its own data: " ++ e)
+                            Ok back -> if back == forNative owned then Nothing else Just "the Haskell MIR reader reads back another program"
+                    case haskellRoundTrip of
+                        Just message -> pure (Just (parityName parityCase ++ ": " ++ message))
                         Nothing -> do
-                            bump (\t -> t{tallyReaderTimedOut = tallyReaderTimedOut t ++ [parityName parityCase]})
-                            pure Nothing
-                        Just _ -> do
-                            case outcome of
-                                Nothing -> bump (\t -> t{tallyReader = tallyReader t + 1})
-                                Just _ -> pure ()
-                            pure (fmap (\message -> parityName parityCase ++ ": " ++ message) outcome)
+                            let outcome = case runProgramIn noWorld{worldInput = text} reader of
+                                    Error e -> Just ("the Tersus MIR reader failed: " ++ e)
+                                    Ok ((output, errors), _)
+                                        | not (null errors) -> Just ("the Tersus MIR reader reported: " ++ errors)
+                                        | sameText output text -> Nothing
+                                        | otherwise -> Just "the Tersus MIR reader wrote back different data"
+                            finished <- timeout validationTimeoutMicros (evaluate (maybe 0 length outcome))
+                            case finished of
+                                Nothing -> do
+                                    bump (\t -> t{tallyReaderTimedOut = tallyReaderTimedOut t ++ [parityName parityCase]})
+                                    pure Nothing
+                                Just _ -> do
+                                    case outcome of
+                                        Nothing -> bump (\t -> t{tallyReader = tallyReader t + 1})
+                                        Just _ -> pure ()
+                                    pure (fmap (\message -> parityName parityCase ++ ": " ++ message) outcome)
 
 unsupportedReason :: M.Program -> Maybe String
 unsupportedReason = unsupportedSourceReason . sourceContainerView

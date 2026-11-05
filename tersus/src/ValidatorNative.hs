@@ -21,7 +21,6 @@ import GHC.Conc (getNumProcessors)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
-import Data.List (nub)
 import Compile (lowerSource)
 import qualified Data.Map.Strict as Map
 import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, renameFile)
@@ -114,7 +113,9 @@ validationCacheHits = readIORef cacheHitCount
 verdicts :: IO (Result FilePath String) -> Bool -> [String] -> IO (Result [Maybe (Int, Int, Int)] String)
 verdicts exe caching texts = do
     inMemory <- if caching then readIORef verdictCache else pure Map.empty
-    onDisk <- if caching then fmap (Map.fromList . concat) (mapM (\text -> maybe [] (\v -> [(text, v)]) <$> diskVerdict text) [text | text <- nub texts, Map.notMember text inMemory]) else pure Map.empty
+    let textByIndex = Map.fromList (zip [0 :: Int ..] texts)
+        unknownTexts = Map.fromList [(text, ()) | text <- texts, Map.notMember text inMemory]
+    onDisk <- if caching then fmap (Map.fromList . concat) (mapM (\text -> maybe [] (\v -> [(text, v)]) <$> diskVerdict text) (Map.keys unknownTexts)) else pure Map.empty
     _ <- atomicModifyIORef' verdictCache (\cache -> (Map.union cache onDisk, ()))
     let known = Map.union inMemory onDisk
         missing = [(index, text) | (index, text) <- zip [0 :: Int ..] texts, Map.notMember text known]
@@ -125,8 +126,9 @@ verdicts exe caching texts = do
         Error e -> pure (Error e)
         Ok found -> do
             let fresh = Map.fromList [(index, verdict) | (position, (index, _)) <- zip [0 ..] missing, Just verdict <- [Map.lookup position found]]
-            _ <- atomicModifyIORef' verdictCache (\cache -> (Map.union cache (Map.fromList [(texts !! index, verdict) | (index, verdict) <- Map.toList fresh]), ()))
-            when caching $ mapM_ (\(index, verdict) -> storeVerdict (texts !! index) verdict) (Map.toList fresh)
+                freshByText = Map.foldlWithKey' (\byText index verdict -> Map.insertWith (\_new existing -> existing) (textByIndex Map.! index) verdict byText) Map.empty fresh
+            _ <- atomicModifyIORef' verdictCache (\cache -> (Map.union cache freshByText, ()))
+            when caching $ mapM_ (\(text, verdict) -> storeVerdict text verdict) (Map.toList freshByText)
             pure (Ok [if Map.member text known then Map.lookup text known else Map.lookup index fresh | (index, text) <- zip [0 ..] texts])
 
 -- The functions not known yet, checked one at a time in order, as far as

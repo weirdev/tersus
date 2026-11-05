@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE TemplateHaskell #-}
 -- Retries must not share a forced failure from the unsafePerformIO-backed pipeline.
 {-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 
@@ -61,7 +62,7 @@ import Data.Char (isHexDigit, isSpace, toLower)
 import Data.List (isInfixOf, isPrefixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, renameFile)
-import System.Environment (getExecutablePath, lookupEnv)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (SeekMode (AbsoluteSeek), hClose, hPutStr, openTempFile)
@@ -73,7 +74,9 @@ import System.Process (readProcessWithExitCode)
 import Mir (Program)
 import Compile (lowerSource)
 import MirHousekeeping (eraseGhosts, toolProgram)
-import PreludeSource (toolPackageFiles, mirPackageFiles)
+import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationDriverSource, validationSource)
+import Hash (fingerprint)
+import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
@@ -532,11 +535,10 @@ withKernelLock file produce = do
 sharedProgramCacheFile :: String -> String -> IO (Maybe FilePath)
 sharedProgramCacheFile stage source = do
     cache <- cacheDirectory
-    built <- binaryIdentity
     backend <- lookupEnv "TERSUS_PARSER"
-    case (cache, built) of
-        (Ok dir, Just identity) -> do
-            key <- sha256 [] (show (stage, source, identity, programCodecHeader, backend))
+    case cache of
+        Ok dir -> do
+            key <- sha256 [] (show (stage, source, compilerIdentity, programCodecHeader, backend))
             pure ((\digest -> dir </> "test-programs" </> digest) <$> key)
         _ -> pure Nothing
 
@@ -550,18 +552,32 @@ mirDataOf source = do
         Error e -> Error e
         Ok program -> Ok (writeProgram program)
 
--- The compiler, embedded libraries and housekeeping sources, harness and codec are
--- part of the executable. Cache its bytes, not filesystem metadata that a restore changes.
-{-# NOINLINE binaryIdentity #-}
-binaryIdentity :: IO (Maybe String)
-binaryIdentity = unsafePerformIO $ do
-    cache <- newMVar Nothing
-    pure $ modifyMVar cache $ \known -> case known of
-        Just identity -> pure (known, identity)
-        Nothing -> do
-            outcome <- try (getExecutablePath >>= executableDigest) :: IO (Either IOException (Maybe String))
-            let identity = either (const Nothing) id outcome
-            pure (Just identity, identity)
+-- Cache key identity (with stage, source and programCodecHeader above): the src
+-- compiler (compilerSourceHash), the TH-embedded texts below, this harness and
+-- TestParserFragments plus build config (harnessSourceHash), and the raw
+-- TERSUS_PARSER value. Other test files reach a cached entry only through the
+-- stage/source arguments, so their contents are excluded.
+compilerIdentity :: String
+compilerIdentity =
+    fingerprint $
+        [ compilerSourceHash
+        , harnessSourceHash
+        , stdlibSource
+        , validationSource
+        , validationDriverSource
+        , seedSha256
+        , parserSeedSha256
+        ]
+            ++ concatMap (\(path, contents) -> [path, contents]) libPackageFiles
+            ++ concatMap (\(path, contents) -> [path, contents]) toolPackageFiles
+
+harnessSourceHash :: String
+harnessSourceHash =
+    $( do
+        let paths = ["test/TestHarness.hs", "test/TestParserFragments.hs", "package.yaml", "stack.yaml", "stack.yaml.lock"]
+        inputs <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure [path, contents]) paths
+        lift (fingerprint (concat inputs))
+     )
 
 executableDigest :: FilePath -> IO (Maybe String)
 executableDigest path = sha256 [path] ""
