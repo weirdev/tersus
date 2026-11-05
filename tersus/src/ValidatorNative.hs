@@ -22,15 +22,15 @@ import Control.Monad (when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Compile (lowerSource)
 import qualified Data.Map.Strict as Map
-import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, renameFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
-import System.IO (hClose, hPutStr, openTempFile)
+import System.IO (hClose, hPutStr)
 import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Mir as M
-import CacheLock (openLockHandle)
+import CacheLock (copyFileCloexec, openLockHandle, openTempFileCloexec)
 import Hash (fingerprint)
 import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, cachedUncheckedValidator, nativeStorage, prepareBootstrap, prepareValidator, cachedPreparedInput, cachedContentKey, emitterEntry)
@@ -356,7 +356,7 @@ buildCheckedValidator = do
                                     Ok () -> Ok ()
                         case checked of
                             Error e -> pure (Error ("the validator written in Tersus does not validate " ++ e))
-                            Ok () -> copyFile exe output >> pure (Ok ())
+                            Ok () -> copyFileCloexec exe output >> pure (Ok ())
 
 -- The validator built by the emitter in the cache from the validator and its
 -- driver, not yet validated
@@ -411,7 +411,7 @@ storeVerdict namespace text (status, block, step) = do
             let dir = takeDirectory path
             outcome <- try (do
                 createDirectoryIfMissing True dir
-                (temporary, handle) <- openTempFile dir "verdict.tmp"
+                (temporary, handle) <- openTempFileCloexec dir "verdict.tmp"
                 hPutStr handle (unwords (map show [status, block, step]) ++ "\n" ++ text)
                 hClose handle
                 renameFile temporary path) :: IO (Either IOException ())

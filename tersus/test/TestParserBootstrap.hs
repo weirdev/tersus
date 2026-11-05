@@ -7,11 +7,12 @@ import Control.Monad (forM, when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import GHC.Clock (getMonotonicTime)
-import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, createFileLink, doesFileExist, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime)
+import System.Directory (createDirectory, createDirectoryIfMissing, createFileLink, doesFileExist, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.Process (CreateProcess (..), StdStream (..), getPid, proc, waitForProcess, withCreateProcess)
-import System.IO (hClose, hGetContents, openTempFile)
+import System.Process (CreateProcess (..), StdStream (..), getPid, proc, waitForProcess)
+import System.IO (hClose, hGetContents)
+import CacheLock (copyFileCloexec, openTempFileCloexec)
 import System.IO.Error (isDoesNotExistError)
 import System.FilePath ((</>), takeDirectory)
 import System.IO.Unsafe (unsafePerformIO)
@@ -31,7 +32,7 @@ import MirHousekeeping (listLibrary)
 import qualified MirHousekeeping as Housekeeping
 import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
-import Native (buildExecutable, cacheDirectory, stopOwnedProcess, validSignalTarget)
+import Native (buildExecutable, cacheDirectory, stopOwnedProcess, validSignalTarget, withSpawnedProcess)
 import Syntax (Expression (..), Statement (..), Value (..))
 import ParsedFile
 import qualified ParserSeed
@@ -54,7 +55,7 @@ withDirectory use = bracket make removeDirectoryRecursive use
   where
     make = do
         tmp <- getTemporaryDirectory
-        (home, handle) <- openTempFile tmp "tersus-parser-bootstrap-test"
+        (home, handle) <- openTempFileCloexec tmp "tersus-parser-bootstrap-test"
         hClose handle
         removeFile home
         createDirectory home
@@ -131,7 +132,7 @@ worker mode home overrides = timed ("worker " ++ mode) $ do
         environment = changed ++ [(key, value) | (key, value) <- inherited, key `notElem` map fst changed, key /= "TERSUS_PARSER"]
         command = (proc self ["testParserBootstrap", "--child", "+RTS", "-N1", "-RTS"])
             {env = Just environment, create_group = True, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
-    withCreateProcess command $ \input output errors process -> mask $ \restore -> (do
+    withSpawnedProcess command $ \(input, output, errors, process) -> mask $ \restore -> (do
         pid <- getPid process >>= maybe (fail "bootstrap worker has no process group") pure
         own <- getProcessID
         ownGroup <- getProcessGroupID
@@ -234,7 +235,7 @@ copyBootstrapTools source target = do
     mapM_ (\name -> do
         regular <- doesFileExist (source </> name)
         when (regular && not (".lock" `isSuffixOf` name)) $ do
-            copyFile (source </> name) (target </> name)
+            copyFileCloexec (source </> name) (target </> name)
             modified <- getModificationTime (source </> name)
             setModificationTime (target </> name) modified)
         [name | name <- names, any (`isPrefixOf` name)

@@ -6,6 +6,10 @@ module Native
     , cachedProgramIfPresent
     , cachedProgramIfPresentWithArtifacts
     , stopOwnedProcess
+    , spawnShared
+    , withSpawnedProcess
+    , readProcessOutput
+    , runProcessWithInputFull
     , validSignalTarget
     , parallelBuilds
     , availableProcessors
@@ -18,9 +22,9 @@ module Native
     , runCommandWithInputFull
     ) where
 
-import Control.Concurrent (forkIOWithUnmask, killThread)
+import Control.Concurrent (forkIO, forkIOWithUnmask, killThread)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
-import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, withMVar)
 import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, mask, mask_, onException, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities, getNumProcessors, setNumCapabilities)
@@ -28,8 +32,8 @@ import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (Handle, IOMode (..), hClose, hGetContents, hIsTerminalDevice, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr, stdin)
-import System.IO.Error (isDoesNotExistError)
+import System.IO (Handle, IOMode (..), hClose, hGetContents, hIsTerminalDevice, hPutStr, hPutStrLn, hSetEncoding, openFile, stderr, stdin)
+import System.IO.Error (isDoesNotExistError, isResourceVanishedError)
 import System.Environment (getEnvironment)
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
 import System.Posix.Types (ProcessID)
@@ -39,9 +43,9 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
 
 import qualified Data.Map.Strict as Map
-import System.Process (CreateProcess (..), ProcessHandle, StdStream (..), getPid, proc, readCreateProcessWithExitCode, waitForProcess, withCreateProcess)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (..), cleanupProcess, createProcess, getPid, proc, waitForProcess)
 
-import CacheLock (openLockHandle)
+import CacheLock (openLockHandle, openTempFileCloexec, withSpawnShared)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Utils
@@ -92,7 +96,7 @@ runtimeObject flags = do
                 else do
                     tmp <- getTemporaryDirectory
                     runtimeFile <- writeTemporary tmp "tersus_rt.c" runtimeSource
-                    (partial, handle) <- openTempFile dir "tersus_rt.tmp"
+                    (partial, handle) <- openTempFileCloexec dir "tersus_rt.tmp"
                     hClose handle
                     removeFile partial
                     (code, out, err) <- runCommandWithInputFull "clang" (["-O2", "-Wno-override-module"] ++ flags ++ ["-c", "-o", partial, runtimeFile]) "" `finally` removeFile runtimeFile
@@ -180,16 +184,51 @@ runProcessWithInputFull exe command input = do
                 out <- readBytes outPath
                 err <- readBytes errPath
                 pure (code, out, err)
-    withTemporary name = bracket (getTemporaryDirectory >>= \dir -> openTempFile dir name) cleanupTemporary
+    withTemporary name = bracket (getTemporaryDirectory >>= \dir -> openTempFileCloexec dir name) cleanupTemporary
     readBytes path = bracket (openFile path ReadMode) hClose $ \handle -> do
         hSetEncoding handle char8
         contents <- hGetContents handle
         _ <- evaluate (length contents)
         pure contents
 
+spawnShared :: CreateProcess -> IO (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
+spawnShared command = withSpawnShared (createProcess command)
+
+withSpawnedProcess :: CreateProcess -> ((Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO a) -> IO a
+withSpawnedProcess command = bracket (spawnShared command) cleanupProcess
+
+readProcessOutput :: CreateProcess -> String -> IO (ExitCode, String, String)
+readProcessOutput command input =
+    withSpawnedProcess command{std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe} $ \spawned ->
+        case spawned of
+            (Just toChild, Just fromChild, Just errors, process) -> do
+                out <- hGetContents fromChild
+                err <- hGetContents errors
+                withForkWait (() <$ evaluate (length out)) $ \waitOut ->
+                    withForkWait (() <$ evaluate (length err)) $ \waitErr -> do
+                        wrote <- try (hPutStr toChild input `finally` hClose toChild) :: IO (Either IOException ())
+                        case wrote of
+                            Left e | not (isResourceVanishedError e) -> throwIO e
+                            _ -> pure ()
+                        waitOut
+                        waitErr
+                hClose fromChild
+                hClose errors
+                code <- waitForProcess process
+                pure (code, out, err)
+            _ -> ioError (userError "the process did not give its pipes")
+
+withForkWait :: IO () -> (IO () -> IO a) -> IO a
+withForkWait action use = do
+    slot <- newEmptyMVar
+    mask $ \restore -> do
+        thread <- forkIO (try (restore action) >>= putMVar slot)
+        let joined = takeMVar slot >>= either (\e -> throwIO (e :: SomeException)) pure
+        restore (use joined) `onException` killThread thread
+
 waitOwnedProcess :: CreateProcess -> IO ExitCode
 waitOwnedProcess command = mask $ \restore ->
-    withCreateProcess command $ \_ _ _ process ->
+    withSpawnedProcess command $ \(_, _, _, process) ->
         restore (waitForProcess process) `onException` stopOwnedProcess (create_group command) process
 
 validSignalTarget :: ProcessID -> ProcessID -> ProcessID -> Bool
@@ -224,7 +263,7 @@ cleanupTemporary (path, handle) = do
 
 -- A new file named after the template, with its extension kept, that holds the text
 writeTemporary :: FilePath -> String -> String -> IO FilePath
-writeTemporary dir template text = bracketOnError (openTempFile dir template) cleanupTemporary $ \(path, handle) -> do
+writeTemporary dir template text = bracketOnError (openTempFileCloexec dir template) cleanupTemporary $ \(path, handle) -> do
     hPutStr handle text
     hClose handle
     return path
@@ -348,7 +387,7 @@ cachedProgramWithArtifacts artifacts kind hash what build = withCachedProgram ki
         else do
             removeIfExists exe
             hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
-            (partial, handle) <- openTempFile dir (kind ++ ".tmp")
+            (partial, handle) <- openTempFileCloexec dir (kind ++ ".tmp")
             hClose handle
             removeFile partial
             (do

@@ -35,9 +35,9 @@ import qualified Data.Set as Set
 import System.Directory (doesFileExist, getFileSize, getModificationTime, removeFile, renameFile)
 import Data.Char (isHexDigit, isSpace)
 import System.FilePath (takeDirectory, takeFileName, (</>))
-import System.IO (Handle, IOMode (ReadMode), hClose, hGetLine, hPutStr, hPutStrLn, openTempFile, stderr, withFile)
+import System.IO (Handle, IOMode (ReadMode), hClose, hGetLine, hPutStr, hPutStrLn, stderr, withFile)
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
-import CacheLock (openLockHandle)
+import CacheLock (openLockHandle, openTempFileCloexec, withExecutableTempFile)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os, arch)
 import System.Exit (ExitCode (..))
@@ -288,7 +288,7 @@ cachedParserExe = do
                                                 Error e -> pure (Error e)
                                                 Ok () -> do
                                                     let path = takeDirectory output </> ("tersus-parser-" ++ actual ++ ".ll")
-                                                    bracket (openTempFile (takeDirectory output) "parser-ir.tmp") cleanupPrepared $ \(temporary, handle) -> do
+                                                    withExecutableTempFile (takeDirectory output) "parser-ir.tmp" $ \(temporary, handle) -> do
                                                         hPutStr handle ir
                                                         hClose handle
                                                         renameFile temporary path
@@ -392,7 +392,7 @@ cachedContentKey entry flags dependencies make = do
                                     mutex <- cacheLock ("content key " ++ path)
                                     _ <- try (withMVar mutex $ \_ -> bracket (openLockHandle (path ++ ".lock")) hClose $ \lock -> do
                                         hLock lock ExclusiveLock
-                                        bracket (openTempFile dir "content-key.tmp") cleanupPrepared $ \(temporary, handle) -> do
+                                        bracket (openTempFileCloexec dir "content-key.tmp") cleanupPrepared $ \(temporary, handle) -> do
                                             hPutStr handle (fingerprint [identity, record] ++ "\n" ++ record)
                                             hClose handle
                                             renameFile temporary path) :: IO (Either IOException ())
@@ -431,7 +431,7 @@ cachedPreparedInput entry flags valid build = do
                             Ok input -> do
                                 _ <- evaluate (length input)
                                 if not (valid input) then pure (Error "invalid prepared input") else do
-                                    bracket (openTempFile dir "prepared.tmp") cleanupPrepared $ \(temporary, output) -> do
+                                    bracket (openTempFileCloexec dir "prepared.tmp") cleanupPrepared $ \(temporary, output) -> do
                                         hPutStr output (fingerprint [key, input] ++ "\n" ++ input)
                                         hClose output
                                         renameFile temporary path

@@ -9,15 +9,16 @@ import TestProgramBinaryChecks (binaryChecks, richProgram)
 import TestProgramBuildIdentity (concreteBuildIdentity)
 import Control.DeepSeq (force)
 import qualified Control.Exception as Exception
-import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay)
-import Control.Concurrent.MVar (modifyMVar, readMVar)
-import Control.Exception (IOException, MaskingState (..), SomeException, bracket, bracketOnError, displayException, finally, getMaskingState, mask, throwIO, try)
-import Control.Monad (when)
+import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, tryPutMVar)
+import Control.Concurrent.MVar (modifyMVar, readMVar, tryReadMVar)
+import Control.Exception (IOException, MaskingState (..), SomeException, bracket, bracketOnError, displayException, finally, getMaskingState, mask, mask_, throwIO, try)
+import Control.Monad (forever, when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.Maybe (isNothing)
 import Data.Char (isSpace, ord)
 import Numeric (showHex)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import Data.List (isInfixOf, isPrefixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import PreludeSource (mirPackageFiles, validationSource, validationDriverSource, listsSource, boxSource)
@@ -30,15 +31,17 @@ import GHC.Clock (getMonotonicTime)
 import qualified PackageCompile
 import qualified MirHousekeeping
 import qualified Data.Map.Strict as Map
-import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime, setPermissions)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime, setPermissions)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
-import System.IO (IOMode (ReadMode, WriteMode), SeekMode (AbsoluteSeek), hClose, openTempFile, stdin, withFile)
+import System.IO (Handle, IOMode (ReadMode, WriteMode), SeekMode (AbsoluteSeek), hClose, hSetBinaryMode, stdin, withFile)
+import CacheLock (copyFileCloexec, openTempFileCloexec, withExecutableTempFile, withExecutableWrite)
+import System.Posix.Files (setFileMode)
 import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Process (exitImmediately, getProcessID)
 import System.Posix.Types (ProcessID)
-import System.Process (CreateProcess (..), ProcessHandle, StdStream (NoStream, UseHandle), createProcess, getPid, getProcessExitCode, proc, readCreateProcessWithExitCode, waitForProcess)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (NoStream, UseHandle), getPid, getProcessExitCode, proc, waitForProcess)
 import System.Timeout (timeout)
 
 import GHC.Conc (getNumCapabilities)
@@ -47,7 +50,7 @@ import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
-import Native (availableProcessors, cacheDirectory, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresentWithArtifacts, parallelBuilds, runCommandWithInputFull, runExecutable, runWithInputFull, stopOwnedProcess, validSignalTarget)
+import Native (availableProcessors, cacheDirectory, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresentWithArtifacts, parallelBuilds, readProcessOutput, runCommandWithInputFull, runExecutable, runWithInputFull, spawnShared, stopOwnedProcess, validSignalTarget, withSpawnedProcess)
 import MirData (forNative, writeProgram)
 import MirOwnership (insertOwnership)
 import TestHarness
@@ -69,7 +72,10 @@ testSharedCache :: Test
 testSharedCache =
     TestList
         "testSharedCache"
-        (codecCases ++ map requireParser
+        (codecCases
+        ++ [ TestCase "atomic close-on-exec writes keep published tools executable across spawns" atomicExecutableWrites
+           , TestCase "captured process input closes on errors and preserves broken-pipe behavior" capturedInputErrors ]
+        ++ map requireParser
         [ TestCase "truncated named List declaration is refused natively" (rawNamedTruncation "List" "")
         , TestCase "truncated named Box element is refused natively" (rawNamedTruncation "Box" " type")
         , TestCase "frozen tool reuse keeps the full freshly validated program" toolValidationParity
@@ -183,7 +189,7 @@ binaryProbe mode = do
 runBinaryProbe :: FilePath -> String -> String -> [(String, String)] -> IO (Maybe ExitCode)
 runBinaryProbe home marker mode extra = bracket
     (spawnProbe home ([("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_SHARED_BINARY_PROBE", mode)] ++ extra))
-    (\child -> terminateProcess child >> waitForProcess child >> pure ())
+    (stopOwnedProcess False)
     (waitChild 15)
 
 binaryProcesses :: IO TestResult
@@ -398,7 +404,7 @@ survivingChildLock = withCacheHome $ \home -> do
     let marker = home </> "surviving-grandchild"
         make = cachedProgram "native-cloexec" "key" "close-on-exec lock probe"
         spawn = do
-            (_, _, _, child) <- createProcess (proc "/bin/sh"
+            (_, _, _, child) <- spawnShared (proc "/bin/sh"
                 ["-c", "/bin/sleep 60 & printf '%s\\n' \"$!\" > \"$1\"; wait", "surviving-grandchild", marker])
                 {create_group = True, std_in = NoStream, std_out = NoStream, std_err = NoStream}
             pure child
@@ -418,6 +424,211 @@ survivingChildLock = withCacheHome $ \home -> do
         pure (testAssertTrue (case first of Ok _ -> True; Error _ -> False)
             <> testAssertEq alive Nothing <> testAssertEq status ExitSuccess
             <> testAssertEq (readProcessID parent) owner <> testAssertEq reused (Just first))
+
+-- Two things must not overlap. A descriptor a child inherits keeps the file
+-- open for writing in that child, and the kernel refuses to execute a file
+-- open for writing anywhere (ETXTBSY); close-on-exec drops the descriptor, but
+-- only at the child's exec, so between clone and exec every descriptor this
+-- process holds is held by that child too. The spawn lock covers the second
+-- half and close-on-exec the first. These are controlled reproducers of that
+-- failure class, not an account of any past run: the warm paired parser worker
+-- was untraced and the historical erasure and runner shutdown failures remain
+-- unexplained. Every write here goes through the helpers production uses.
+capturedInputErrors :: IO TestResult
+capturedInputErrors = do
+    echo <- timeout 2000000 (readProcessOutput (proc "/bin/cat" []) "input λ\n")
+    broken <- timeout 2000000 (readProcessOutput (proc "/bin/true" []) (replicate 1048576 'x'))
+    invalid <- timeout 2000000 (try (readProcessOutput (proc "/bin/cat" []) "\xD800") :: IO (Either IOException (ExitCode, String, String)))
+    pure $ firstFailure
+        [ testAssertEq echo (Just (ExitSuccess, "input λ\n", ""))
+        , testAssertEq broken (Just (ExitSuccess, "", ""))
+        , case invalid of
+            Just (Left _) -> Nothing
+            _ -> Just "an input encoding error was hidden or left the child waiting for EOF"
+        ]
+
+atomicExecutableWrites :: IO TestResult
+atomicExecutableWrites = withNativeHome $ \home -> do
+    found <- findExecutable "true"
+    case found of
+        Nothing -> pure (Just "no 'true' to publish as a tool")
+        Just tool -> do
+            bytes <- BL.readFile tool
+            _ <- Exception.evaluate (BL.length bytes)
+            bulky <- publishPaddedTool home bytes
+            padded <- runPublishedTool bulky
+            held <- heldWriterSurvivesSpawn home bytes
+            copied <- copiesSurviveSpawnLoops home tool bulky
+            ordered <- spawnsWaitForExecutableWrites tool
+            abandoned <- abandonedRoundCleansUp home bulky
+            pure (firstFailure [namedResult "the padded tool itself" padded, held, copied, ordered, abandoned])
+
+removeIfPresent :: FilePath -> IO ()
+removeIfPresent path = do
+    _ <- try (removeFile path) :: IO (Either IOException ())
+    pure ()
+
+-- Padding an executable leaves it executable, and makes the copy last long
+-- enough for a spawn to fall inside it.
+publishPaddedTool :: FilePath -> BL.ByteString -> IO FilePath
+publishPaddedTool home bytes = do
+    let published = home </> "bulky-tool"
+    withExecutableTempFile home "bulky-tool.tmp" $ \(staging, handle) -> do
+        hSetBinaryMode handle True
+        BL.hPut handle (BL.append bytes (BL.replicate 8388608 0))
+        setFileMode staging 0o755
+        hClose handle
+        renameFile staging published
+        pure published
+
+discardStaging :: (FilePath, Handle) -> IO ()
+discardStaging (staging, handle) = hClose handle >> removeIfPresent staging
+
+-- Run it with nothing between the publication and the exec: anything in
+-- between is time for a child cloned during the write to reach its own exec,
+-- which is the very overlap this case has to catch.
+runPublishedTool :: FilePath -> IO TestResult
+runPublishedTool path = do
+    outcome <- try (withSpawnedProcess (proc path []){std_in = NoStream, std_out = NoStream, std_err = NoStream}
+        (\(_, _, _, child) -> waitForProcess child)) :: IO (Either IOException ExitCode)
+    pure $ case outcome of
+        Right ExitSuccess -> Nothing
+        Right code -> Just ("running " ++ takeFileName path ++ " gave " ++ show code)
+        Left e -> Just ("could not run " ++ takeFileName path ++ ": " ++ show e)
+
+-- Started the way the captured tools are: inheriting this process's
+-- descriptors, over the posix_spawn fast path.
+spawnSurvivingChild :: IO ProcessHandle
+spawnSurvivingChild = do
+    (_, _, _, child) <- spawnShared (proc "/bin/sleep" ["60"])
+        {std_in = NoStream, std_out = NoStream, std_err = NoStream}
+    pure child
+
+-- One owner for the child from the spawn to the end of the region: the slot is
+-- filled under the same mask as the spawn, so no outcome is dropped, and
+-- leaving the region kills the thread, joins the slot and stops a child that
+-- did start -- whether the body returned, failed or was cancelled.
+withSpawnedChild :: (MVar (Either SomeException ProcessHandle) -> IO a) -> IO a
+withSpawnedChild use = bracket start stop (use . snd)
+  where
+    start = do
+        slot <- newEmptyMVar
+        thread <- forkFinally
+            (mask_ (spawnSurvivingChild >>= putMVar slot . Right))
+            (either (\e -> tryPutMVar slot (Left e) >> pure ()) pure)
+        pure (thread, slot)
+    stop (thread, slot) = do
+        killThread thread
+        outcome <- readMVar slot
+        either (const (pure ())) (stopOwnedProcess False) outcome
+
+-- The writer is held open on this thread while a child is created on another:
+-- the only arrangement in which that child can inherit it. Publishing inside
+-- the exclusive region waits for every spawn in flight to have exec'd, so what
+-- is left to prove is that the exec dropped the descriptor.
+heldWriterSurvivesSpawn :: FilePath -> BL.ByteString -> IO TestResult
+heldWriterSurvivesSpawn home bytes = do
+    let published = home </> "held-tool"
+    bracketOnError (openTempFileCloexec home "held-tool.tmp") discardStaging $ \(staging, handle) -> do
+        hSetBinaryMode handle True
+        BL.hPut handle bytes
+        setFileMode staging 0o755
+        withSpawnedChild $ \slot -> do
+            spawned <- readMVar slot
+            case spawned of
+                Left e -> pure (Just ("the child did not start: " ++ displayException e))
+                Right child -> do
+                    withExecutableWrite (hClose handle >> renameFile staging published)
+                    ran <- runPublishedTool published
+                    living <- getProcessExitCode child
+                    pure $ firstFailure
+                        [ namedResult "a tool published while a child was spawned" ran
+                        , namedResult "the child that could have inherited the writer"
+                            (testAssertEq living Nothing)
+                        ]
+
+-- Processes are created on other threads throughout, while this one keeps
+-- copying, publishing and running a fresh executable. Without the spawn lock a
+-- child cloned during one of those copies is still short of its exec when the
+-- copy is run, and holds the copy's writer.
+copiesSurviveSpawnLoops :: FilePath -> FilePath -> FilePath -> IO TestResult
+copiesSurviveSpawnLoops home quick tool = withSpawnLoops quick 4 $ \loopsAlive -> do
+    outcome <- rounds (1 :: Int)
+    alive <- loopsAlive
+    pure (firstFailure [outcome, namedResult "the spawn loops" (testAssertTrue alive)])
+  where
+    rounds index
+        | index > 16 = pure Nothing
+        | otherwise = do
+            let published = home </> ("copied-tool-" ++ show index)
+            copyFileCloexec tool published
+            ran <- runPublishedTool published
+            case namedResult ("round " ++ show index) ran of
+                Just failure -> pure (Just failure)
+                Nothing -> removeIfPresent published >> rounds (index + 1)
+
+-- The loops own their children: each creation is bracketed, so killing a loop
+-- terminates and reaps whatever it had just started.
+withSpawnLoops :: FilePath -> Int -> (IO Bool -> IO TestResult) -> IO TestResult
+withSpawnLoops quick count use = bracket (mapM (const startOne) [1 .. count]) stop (use . alive)
+  where
+    quiet = (proc quick []){std_in = NoStream, std_out = NoStream, std_err = NoStream}
+    spin = forever (withSpawnedProcess quiet (\(_, _, _, child) -> () <$ waitForProcess child))
+    startOne = do
+        slot <- newEmptyMVar
+        thread <- forkFinally spin (putMVar slot)
+        pure (thread, slot)
+    stop = mapM_ (\(thread, slot) -> killThread thread >> readMVar slot >> pure ())
+    alive slots = all isNothing <$> mapM (tryReadMVar . snd) slots
+
+-- The lock's own invariant, which is what makes the overlap impossible rather
+-- than merely unlikely: a process creation that begins while an executable is
+-- being written cannot produce its child until that write has closed.
+spawnsWaitForExecutableWrites :: FilePath -> IO TestResult
+spawnsWaitForExecutableWrites quick = do
+    entered <- newEmptyMVar
+    spawnFinished <- newEmptyMVar
+    withWorker (do
+        takeMVar entered
+        withSpawnedProcess (proc quick []){std_in = NoStream, std_out = NoStream, std_err = NoStream}
+            (\(_, _, _, child) -> () <$ waitForProcess child)
+        getMonotonicTime >>= putMVar spawnFinished) $ \_ done -> do
+            writeEnded <- withExecutableWrite $ do
+                putMVar entered ()
+                threadDelay 200000
+                getMonotonicTime
+            outcome <- readMVar done
+            case outcome of
+                Left e -> pure (Just ("the spawn held under the write: " ++ displayException e))
+                Right () -> do
+                    spawnEnded <- readMVar spawnFinished
+                    pure $ namedResult "a spawn that began during an executable write"
+                        (testAssertTrue (spawnEnded >= writeEnded))
+
+-- Abandoning an exclusive write releases the lock and leaves no live child and
+-- no staging file: the copy after it must still publish and run.
+abandonedRoundCleansUp :: FilePath -> FilePath -> IO TestResult
+abandonedRoundCleansUp home tool = do
+    observed <- newEmptyMVar
+    failed <- try (withSpawnedChild $ \slot -> do
+        child <- readMVar slot >>= either throwIO pure
+        putMVar observed child
+        copyFileCloexec (home </> "no-such-tool") (home </> "abandoned-copy"))
+        :: IO (Either SomeException ())
+    child <- takeMVar observed
+    reaped <- getProcessExitCode child
+    let recovered = home </> "recovered-copy"
+    copyFileCloexec tool recovered
+    ran <- runPublishedTool recovered
+    names <- listDirectory home
+    pure $ firstFailure
+        [ namedResult "the abandoned copy" (testAssertTrue (either (const True) (const False) failed))
+        , namedResult "the abandoned child" (testAssertTrue (reaped /= Nothing))
+        , namedResult "the released exclusive lock" ran
+        , namedResult "the abandoned staging file" (testAssertTrue (not (any stagingName names)))
+        ]
+  where
+    stagingName name = "copy" `isPrefixOf` name && ".tmp" `isSuffixOf` name
 
 contentLocatorIntegrity :: IO TestResult
 contentLocatorIntegrity = withCacheHome $ \home -> do
@@ -846,7 +1057,7 @@ regularSharedProbe = do
 withNativeHome :: (FilePath -> IO a) -> IO a
 withNativeHome use = do
     tmp <- getTemporaryDirectory
-    (home, handle) <- openTempFile tmp "tersus-native-cache-test"
+    (home, handle) <- openTempFileCloexec tmp "tersus-native-cache-test"
     hClose handle
     removeFile home
     createDirectoryIfMissing True home
@@ -1207,9 +1418,9 @@ touchedExecutable = do
         self <- getExecutablePath
         let copied = home </> "tersus-test"
             marker = home </> "marker"
-        copyFile self copied
+        copyFileCloexec self copied
         env <- probeEnv home marker []
-        let runChild = readCreateProcessWithExitCode
+        let runChild = readProcessOutput
                 (proc copied ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just env} ""
         (code1, _, err1) <- runChild
         first <- readMarker marker
@@ -1404,7 +1615,7 @@ independentProcesses = do
         self <- getExecutablePath
         env0 <- getEnvironment
         let childEnv = ("XDG_CACHE_HOME", home) : ("TERSUS_SHARED_CACHE_PROBE", marker) : [(k, v) | (k, v) <- env0, k /= "XDG_CACHE_HOME", k /= "TERSUS_SHARED_CACHE_PROBE"]
-            runChild = readCreateProcessWithExitCode (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just childEnv} ""
+            runChild = readProcessOutput (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just childEnv} ""
         (code1, _, err1) <- runChild
         first <- try (readFile marker >>= \t -> length t `seq` pure t) :: IO (Either IOError String)
         entries <- entryFiles home
@@ -1527,7 +1738,7 @@ spawnProbe home extra = do
             Nothing -> home </> "marker"
     env <- probeEnv home marker extra
     withFile "/dev/null" WriteMode $ \sink -> do
-        (_, _, _, handle) <- createProcess (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just env, std_out = UseHandle sink, std_err = UseHandle sink}
+        (_, _, _, handle) <- spawnShared (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just env, std_out = UseHandle sink, std_err = UseHandle sink}
         pure handle
 
 waitChild :: Int -> ProcessHandle -> IO (Maybe ExitCode)
@@ -1562,7 +1773,7 @@ toolValidationParity =
 -- and eraser, the seed and the runtime), copied into another
 copyCacheFile :: FilePath -> FilePath -> IO ()
 copyCacheFile source target = do
-    copyFile source target
+    copyFileCloexec source target
     modified <- getModificationTime source
     setModificationTime target modified
 
@@ -1616,11 +1827,6 @@ stepResult name results = case lookup name results of
 namedResult :: String -> TestResult -> TestResult
 namedResult _ Nothing = Nothing
 namedResult name (Just message) = Just (name ++ ": " ++ message)
-
-killPidFile :: FilePath -> IO ()
-killPidFile path = do
-    pid <- read <$> readFile path
-    signalProcess sigKILL pid
 
 packageSnapshots :: IO TestResult
 packageSnapshots = do

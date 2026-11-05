@@ -240,6 +240,12 @@ lock per executable. Full validator self-validation runs alongside the
 other post-E1 builds; its source and List/Box library must both pass before
 production use.
 
+Compiled-tool copies and cache writes open writable descriptors atomically
+close-on-exec. A single reader/writer lock also excludes process creation from
+executable-writing regions until their descriptors close; waiting and output
+draining happen outside that lock. Neither safeguard alone closes both the
+inherited-descriptor lifetime and the clone-to-exec window.
+
 Prepared owned-MIR bytes and complete validator self-check transports are
 cached per compiler snapshot, entry and flags. Every read checks the stored
 fingerprint and format when a payload is opened; corrupt or partial entries
