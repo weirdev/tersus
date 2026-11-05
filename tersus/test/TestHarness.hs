@@ -14,6 +14,7 @@ module TestHarness
     , testCaseNamedSeq
     , parseFailsWithHelper
     , parseValidateEvalProgramHelper
+    , batchItems
     , forceTestResult
     , runTest
     , testAssertTrue
@@ -158,6 +159,10 @@ parseValidateEvalProgramHelper source expected = withProgram source $
             Ok _ -> case runStatements stmts of
                 Ok result -> testAssertEq (fmap fromMirValue result) expected
                 Error e -> Just $ "Evaluation failed with error: " ++ e
+batchItems :: Int -> Int -> [a] -> [a]
+batchItems count batch values
+    | count <= 0 || batch < 1 || batch > count = []
+    | otherwise = [value | (index, value) <- zip [0 :: Int ..] values, index `mod` count == batch - 1]
 
 forceTestResult :: TestResult -> ()
 forceTestResult Nothing = ()

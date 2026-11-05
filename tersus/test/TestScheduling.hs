@@ -22,7 +22,7 @@ import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import Data.Ord (comparing)
 import System.Mem.StableName (makeStableName)
-import TestHarness (Test (..), TestResult, testAssertEq, testAssertTrue, testCase)
+import TestHarness (Test (..), TestResult, batchItems, testAssertEq, testAssertTrue, testCase)
 import TestPipeline (selfHostedFamilyManifest)
 
 data Arguments = Arguments
@@ -143,6 +143,7 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         work -> maximum work
 
 -- Run 41978818567 (2026-11-05): startup-inclusive wall priorities, rounded to seconds with a minimum of one.
+-- AstData/Parser: four-CPU restored-cache run on 2026-11-05; all other rows retain that CI run.
 groupWeight :: String -> Int
 groupWeight name = maybe 1 id (lookup name weights)
   where
@@ -239,8 +240,14 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testVerdictLocks", 1)
         , ("testSharedCacheProbe", 1)
         , ("testScheduling", 10)
-        , ("testAstData", 322)
-        , ("testParser", 311)
+        , ("testAstData:1/4", 50)
+        , ("testAstData:2/4", 177)
+        , ("testAstData:3/4", 54)
+        , ("testAstData:4/4", 196)
+        , ("testParser:1/4", 79)
+        , ("testParser:2/4", 56)
+        , ("testParser:3/4", 188)
+        , ("testParser:4/4", 158)
         , ("testParserBootstrap", 742)
         , ("testParserUnicode", 8)
         , ("testAstReader", 447)
@@ -291,6 +298,7 @@ splitTestGroups count original
             | batch@(weight, index, leaves) <- batches]
     unitWeight :: Test -> Int
     unitWeight test = case concat (leafPaths test) of
+        path | "whole corpus parity" `elem` path || "whole parsed and elaborated source corpus" `elem` path -> 60
         path | "examples/mir/emit/emit.tersus" `elem` path || "examples/mir/mir_reader/mir_reader.tersus" `elem` path -> 30
         path | "the IR of a loop, interpreted" `elem` path || "raw lists and Boxes library" `elem` path -> 30
         path | "MIR loops" `elem` path -> 32
@@ -418,6 +426,22 @@ testScheduling names batches = TestList "testScheduling"
         testAssertTrue (isLeft (selectGroupNames (Arguments Nothing ["noSuchGroup"] False (Just (99, 99))) names))
     , testCase "huge valid shard counts do not allocate one bin per empty shard" $
         testAssertEq (selectGroupNames (Arguments Nothing [] False (Just (maxBound, maxBound))) names) (Right [])
+    , testCase "corpus batches retain every indexed occurrence, duplicates and source order" $
+        let values = zip [0 :: Int ..] ["same", "other", "same", "last", "same", "tail"]
+            parts = [batchItems 4 batch values | batch <- [1 .. 4]]
+         in testAssertTrue (sort (concat parts) == values && all (\part -> sort part == part) parts
+            && null (batchItems 0 1 values) && null (batchItems 4 0 values) && null (batchItems 4 5 values))
+    , testCase "AST and parser batches each retain one complete corpus chunk" $
+        testAssertTrue (all (\(original, split) ->
+            if groupName original `elem` ["testAstData", "testParser"] then
+                let label = if groupName original == "testAstData" then "whole parsed and elaborated source corpus" else "whole corpus parity"
+                    chunks batch = [last path | path <- leafPaths batch, label `elem` path]
+                 in all ((== 1) . length . chunks) split
+                    && sort (concatMap chunks split) == ["1/4", "2/4", "3/4", "4/4"]
+            else True) batches)
+    , testCase "all old leaf paths occur exactly once in the registered batches" $
+        testAssertTrue (all (\(original, split) ->
+            sort (leafPaths original) == sort (concatMap (map (drop 1) . leafPaths) split)) batches)
     , TestCase "batches keep the original case action objects" $ do
         preserved <- mapM sameActions batches
         pure (testAssertTrue (and preserved))
@@ -438,6 +462,11 @@ testScheduling names batches = TestList "testScheduling"
             [map (groupWeight . groupName) split | (original, split) <- batches,
                 groupName original `elem` ["testNative", "testMirEmit", "testMirVerify"]]
             [[357,213,232,282], [40,304,114,462], [112,95,252,267]]
+    , testCase "AST and parser launch weights use actual whole-batch measurements" $
+        testAssertEq
+            [map (groupWeight . groupName) split | (original, split) <- batches,
+                groupName original `elem` ["testAstData", "testParser"]]
+            [[50,177,54,196], [79,56,188,158]]
     , testCase "measured tail groups are not launched as unprofiled one-second work" $
         testAssertEq (map groupWeight ["testAstReader", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap"])
             [447,429,348,222,447,235,482,742]

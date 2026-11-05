@@ -39,7 +39,10 @@ readerPath :: FilePath
 readerPath = "examples/ast_reader/ast_reader.tersus"
 
 corpus :: IO [(String, Result [Statement] String)]
-corpus = do
+corpus = concat <$> corpusUnits
+
+corpusUnits :: IO [[(String, Result [Statement] String)]]
+corpusUnits = do
     paths <- concat <$> mapM files ["examples", "examples/rejected", "lib"]
     fromFiles <- mapM (\p -> (,) p <$> readFile p) paths
     let packages = ["examples/parser/parser.tersus", readerPath]
@@ -47,7 +50,7 @@ corpus = do
             Left err -> [(entry, Error err)]
             Right (Mod.PackageResult pkg) -> [(Mod.loadedFilePath file, Ok (fileBody (Mod.loadedParsed file))) | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
             Right _ -> [(entry, Error "AST corpus tool is not a package")]
-    pure ([(path, parseCorpusFile path source) | (path, source) <- fromFiles ++ generated] ++ concatMap packageTrees packages)
+    pure ([[(path, parseCorpusFile path source)] | (path, source) <- fromFiles ++ generated] ++ map packageTrees packages)
   where
     parseCorpusFile path source = case [name | name <- Lib.libModuleNames ++ Lib.nativeStorageModules, path == "lib/" ++ name ++ ".tersus"] of
         name : _ -> case if name `elem` Lib.nativeStorageModules then Lib.nativeLibParsed else Lib.libParsed of
@@ -121,16 +124,20 @@ knownParserRejection path message =
     path == "examples/rejected/for_assigns_counter.tersus"
         && "The body of a for loop cannot assign its loop variable i" `isInfixOf` message
 
-corpusHaskell :: IO TestResult
-corpusHaskell = do
-    sources <- corpus
+corpusHaskell :: Int -> IO TestResult
+corpusHaskell batch = do
+    units <- corpusUnits
+    let samples = [(unitIndex, fileIndex, name, tree)
+            | (unitIndex, unit) <- batchItems 4 batch (zip [0 :: Int ..] units)
+            , (fileIndex, (name, tree)) <- zip [0 :: Int ..] unit]
+    putStrLn ("AST corpus samples: " ++ show [(unitIndex, fileIndex, name) | (unitIndex, fileIndex, name, _) <- samples])
     pure $ firstFailure
         [ prefix name $ case tree of
             Error e -> if knownParserRejection name e then Nothing else Just e
             Ok ss -> firstFailure [roundTrip ss, case elaborate ss of
                 Error _ -> Nothing
                 Ok e -> elaboratedRoundTrip e]
-        | (name, tree) <- sources
+        | (_, _, name, tree) <- samples
         ]
 
 toolElaborated :: FilePath -> Result [Elaborated] String
@@ -488,7 +495,8 @@ testAstData = TestList "testAstData"
     , TestList "chunked decimal integers" [testCase n (haskellChunkedInteger text expected) | (n, text, expected) <- chunkedIntegers]
     , TestList "malformed protocol" [testCase n (firstFailure [haskellAccepted control, haskellRefused bad]) | (n, control, bad) <- refusals]
     , TestCase "packaged tools retain elaborated AST and occurrence types" packageElaboratedRoundTrips
-    , TestCase "whole parsed and elaborated source corpus" corpusHaskell
+    , TestList "whole parsed and elaborated source corpus"
+        [TestCase (show batch ++ "/4") (corpusHaskell batch) | batch <- [1 .. 4]]
     ]
 
 testAstReader :: Test

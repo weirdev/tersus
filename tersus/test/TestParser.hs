@@ -108,12 +108,18 @@ corpusPaths = (++) <$> files "examples" <*> files "lib"
             directory <- doesDirectoryExist path
             if directory then files path else pure [path | ".tersus" `isSuffixOf` entry]
 
-corpusParity :: IO TestResult
-corpusParity = do
+corpusParity :: Int -> IO TestResult
+corpusParity batch = do
     paths <- corpusPaths
-    sources <- forM paths $ \path -> do source <- readFile path; pure (path, source)
-    let resolver = Modules.resolverFromFiles (sources ++ toolPackageFiles)
-    emitter <- comparePreparedPackage resolver emitterCorpusEntry
+    allSources <- forM paths $ \path -> do source <- readFile path; pure (path, source)
+    let resolver = Modules.resolverFromFiles (allSources ++ toolPackageFiles)
+        emitterFiles = filter ((`elem` emitterCorpusFiles) . fst) allSources
+        units = emitterFiles : [[sample] | sample <- allSources, fst sample `notElem` emitterCorpusFiles]
+        selected = map fst (concat (batchItems 4 batch units))
+        sources = filter ((`elem` selected) . fst) allSources
+    emitter <- if any ((`elem` emitterCorpusFiles) . fst) sources
+        then comparePreparedPackage resolver emitterCorpusEntry
+        else pure ([], Nothing)
     results <- forM sources $ \(path, source) -> do
         putStrLn ("Native corpus file: " ++ path)
         result <- case Modules.discoverEntry resolver path of
@@ -126,7 +132,7 @@ corpusParity = do
                 wire <- compareFileRecords source
                 pure (firstFailure [ast, wire])
         pure (fmap ((path ++ ": ") ++) result)
-    putStrLn ("Native corpus parity: " ++ show (length paths) ++ " files, " ++ show (length [e | Just e <- results]) ++ " failures")
+    putStrLn ("Native corpus parity: " ++ show (length sources) ++ " files in batch " ++ show batch ++ "/4, " ++ show (length [e | Just e <- results]) ++ " failures")
     pure (firstFailure results)
 
 emitterCorpusEntry :: FilePath
@@ -429,5 +435,6 @@ testParser = TestList "testParser"
     , TestCase "generated snippet parity" snippetParity
     , TestCase "three interpreted smoke programs" interpretedSmoke
     , TestCase "emitter helper corpus uses its program entry and proves requested source observation" preparedEmitterHelper
-    , TestCase "whole corpus parity" corpusParity
+    , TestList "whole corpus parity"
+        [TestCase (show batch ++ "/4") (corpusParity batch) | batch <- [1 .. 4]]
     ]
