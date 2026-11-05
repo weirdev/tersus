@@ -1,5 +1,7 @@
 module TestMirReader (testMirReader, withProgram, sameText) where
 
+import Control.Concurrent.MVar (MVar, newMVar)
+import System.IO.Unsafe (unsafePerformIO)
 import qualified TersusParser
 import Data.List (isPrefixOf)
 import System.Environment (lookupEnv)
@@ -75,27 +77,42 @@ withProgram path name use = do
     if not available
         then pure Nothing
         else do
-            files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
-            backend <- lookupEnv "TERSUS_PARSER"
-            let hash = fingerprint [packageCacheInput path files, show backend, emitterHash, TersusParser.parserHash, runtimeSource]
-                build output = do
-                    ir <- if "examples/mir/" `isPrefixOf` path
-                        then ownedFromFiles path files >>= \owned -> case owned of
-                            Error e -> pure (Error e)
-                            Ok prog -> llvmOfOwned prog
-                        else case lookup (Modules.normalizePath path) files of
-                            Nothing -> pure (Error ("file not found: " ++ path))
-                            Just source -> tersusLlvm source
-                    case ir of
-                        Error e -> pure (Error e)
-                        Ok text -> buildExecutable output text
-            built <- cachedProgram ("test-" ++ name) hash ("the test " ++ name) build
+            built <- programExecutable path name
             case built of
                 Error e -> pure (Just e)
                 Ok exe -> use exe
 
+programExecutable :: FilePath -> String -> IO (Result FilePath String)
+programExecutable path name = do
+    files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
+    backend <- lookupEnv "TERSUS_PARSER"
+    let hash = fingerprint [packageCacheInput path files, show backend, emitterHash, TersusParser.parserHash, runtimeSource]
+        build output = do
+            ir <- if "examples/mir/" `isPrefixOf` path
+                then ownedFromFiles path files >>= \owned -> case owned of
+                    Error e -> pure (Error e)
+                    Ok prog -> llvmOfOwned prog
+                else case lookup (Modules.normalizePath path) files of
+                    Nothing -> pure (Error ("file not found: " ++ path))
+                    Just source -> tersusLlvm source
+            case ir of
+                Error e -> pure (Error e)
+                Ok text -> buildExecutable output text
+    cachedProgram ("test-" ++ name) hash ("the test " ++ name) build
+
+{-# NOINLINE readerExecutable #-}
+readerExecutable :: MVar (Maybe FilePath)
+readerExecutable = unsafePerformIO (newMVar Nothing)
+
 withReader :: (FilePath -> IO TestResult) -> IO TestResult
-withReader = withProgram "examples/mir/mir_reader/mir_reader.tersus" "mir-reader"
+withReader use = do
+    available <- clangAvailable
+    if not available then pure Nothing else do
+        built <- memoizedTestExecutable readerExecutable
+            (programExecutable "examples/mir/mir_reader/mir_reader.tersus" "mir-reader")
+        case built of
+            Error e -> pure (Just e)
+            Ok exe -> use exe
 
 -- One case per program, so the sweep runs at the harness's parallelism instead of one program after another
 -- inside a single case (withReader builds the reader executable once for the process).

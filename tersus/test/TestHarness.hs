@@ -52,6 +52,7 @@ module TestHarness
     , verifiedSeedIdentity
     , openEntryLockFile
     , executableDigest
+    , memoizedTestExecutable
     ) where
 
 import Control.DeepSeq (force)
@@ -97,6 +98,17 @@ import Solver
 import Utils
 
 type TestResult = Maybe String
+
+memoizedTestExecutable :: MVar (Maybe FilePath) -> IO (Result FilePath String) -> IO (Result FilePath String)
+memoizedTestExecutable box prepare = modifyMVar box $ \saved -> do
+    live <- case saved of
+        Just exe -> doesFileExist exe
+        Nothing -> pure False
+    result <- case saved of
+        Just exe | live -> pure (Ok exe)
+        _ -> prepare
+    let keep = case result of Ok exe -> Just exe; Error _ -> Nothing
+    pure (keep, result)
 
 data Test = TestCase String (IO TestResult) | TestList String [Test] | TestParallel String [Test]
 
