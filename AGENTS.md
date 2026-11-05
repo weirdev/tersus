@@ -161,9 +161,14 @@ Work from `tersus/`.
   Selecting an original name selects all its batches; shard filters intersect
   the full-suite assignment. Self-hosted batches share one shard and its full
   validated-program cache; Native memory-limit cases stay ordered in one batch.
-  `testBootstrap` remains one private cold group. CI partitions the full suite
-  across six runners, with four group worker processes per runner; the required
-  aggregate check still requires every shard to pass.
+  `testBootstrap` remains one private cold group. Parser bootstrap registers
+  `testParserBootstrap:1/2` for the genuine cold/refusal/reuse checks and
+  `testParserBootstrap:2/2` for repair and fixpoint checks from independent
+  private copies of the runner's ordinary tool cache. Ordinary preparation
+  is counted in the latter group and never credited to the cold pair.
+  CI reserves one runner for each of these three bootstrap groups; the
+  remaining groups use three runners, with four worker processes per runner.
+  The required aggregate check still requires every shard to pass.
   `testHostValidation`, which validates the compiler's own programs (the MIR
   reader, checker and eraser, and the emitter), runs only when named, since it
   takes far longer than the rest of the suite (`TestTersus.optInGroups`).

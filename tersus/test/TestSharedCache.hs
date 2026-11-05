@@ -47,7 +47,7 @@ import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
-import Native (availableProcessors, cacheDirectory, cachedProgram, parallelBuilds, runCommandWithInputFull, runExecutable, runWithInputFull, stopOwnedProcess, validSignalTarget)
+import Native (availableProcessors, cacheDirectory, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresentWithArtifacts, parallelBuilds, runCommandWithInputFull, runExecutable, runWithInputFull, stopOwnedProcess, validSignalTarget)
 import MirData (forNative, writeProgram)
 import MirOwnership (insertOwnership)
 import TestHarness
@@ -101,6 +101,7 @@ testSharedCache =
         , TestCase "native crashed builders release the lock for retry" (nativeRecovery "crash")
         , TestCase "native killed builders release the lock for retry" (nativeRecovery "hold")
         , TestCase "native threads still build once" nativeThreads
+        , TestCase "required compiler artifacts gate cached executable publication and reuse" requiredArtifactCache
         , TestCase "reader preparation retains successes and rebuilds evicted executables" readerPreparationCache
         , TestCase "independent native builds overlap and restore capabilities" parallelOverlap
         , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
@@ -274,6 +275,26 @@ binaryFailureRetry = withCacheHome $ \_ -> do
     second <- sharedProgram stage source (pure (Ok richProgram))
     present <- doesFileExist file
     pure $ firstFailure [testAssertEq first (Error "transient"), testAssertTrue absent, testAssertEq second (Ok richProgram), testAssertTrue present]
+requiredArtifactCache :: IO TestResult
+requiredArtifactCache = withCacheHome $ \home -> do
+    let artifact = home </> "tersus" </> "artifact-probe-key.ll"
+        executable = home </> "tersus" </> "artifact-probe-key"
+        make = cachedProgramWithArtifacts [".ll"] "artifact-probe" "key" "required artifact probe"
+        complete output = writeFile artifact "successful IR" >> writeFile output "executable" >> pure (Ok ())
+    first <- make complete
+    ready <- cachedProgramIfPresentWithArtifacts [".ll"] "artifact-probe" "key"
+    removeFile artifact
+    missing <- cachedProgramIfPresentWithArtifacts [".ll"] "artifact-probe" "key"
+    failed <- make (\output -> writeFile output "partial" >> pure (Ok ()))
+    published <- doesFileExist executable
+    repaired <- make complete
+    pure $ firstFailure
+        [ testAssertEq first (Ok executable), testAssertEq ready (Ok (Just executable))
+        , testAssertEq missing (Ok Nothing)
+        , testAssertEq failed (Error "cached program did not publish its required artifacts")
+        , testAssertTrue (not published), testAssertEq repaired first
+        ]
+
 readerPreparationCache :: IO TestResult
 readerPreparationCache = withNativeHome $ \home -> do
     box <- newMVar Nothing

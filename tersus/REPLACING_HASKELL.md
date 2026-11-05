@@ -346,7 +346,20 @@ The parser fixpoint uses the same prepared current source in P0 and P1. Its
 ASTs, final declarations, checked/lowered MIR and E1-emitted IR must agree,
 with P2 behavior checked too. Historical seed LLVM need not equal current LLVM.
 Cold-process, concurrent-process, cache-reuse and corrupt/missing-seed controls
-cover the bootstrap. `AST_DATA.md` documents provenance and seed regeneration.
+cover the bootstrap. The two registered parser-bootstrap groups retain the
+original checks: the first starts its cold and refusal workers in empty
+private homes; the second uses separate private primed copies for repair and
+fixpoint. Its ordinary tool-cache preparation is measured separately and does
+not satisfy or replace the first group's genuine cold pair. Repair and
+fixpoint overlap only when that second group has the runner to itself.
+Within a fixpoint, only byte-identical successful P0 requests are reused.
+Prepared package bytes must agree before lowering once; the resulting owned
+MIR must equal P1's actual prepared input. Independent E1 output must equal
+the LLVM retained by P1's successful build before the P2 checks run. A nonzero
+native-erasure exit reports its exit code, stderr and input/output prefixes.
+Five paired trials passed on 2026-11-05; the earlier isolated erasure failure
+remains unexplained, not dismissed or counted as diagnosed.
+`AST_DATA.md` documents provenance and seed regeneration.
 
 ### 7. The host glue, and a bootstrap with no GHC (deletes `Cli`, `Pipeline`, `Bootstrap`, `PreludeSource`, `LlvmRuntime`, `Native`, `Hash`, `Utils`, `Pretty`, `app/Main.hs`; ~1,600 lines)
 
