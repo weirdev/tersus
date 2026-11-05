@@ -109,7 +109,7 @@ allGroups = concatMap registered originalGroups
         Nothing -> [original]
 
 batchedGroups :: [(Test, [Test])]
-batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser]]
+batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader]]
 
 originalGroups :: [Test]
 originalGroups =
