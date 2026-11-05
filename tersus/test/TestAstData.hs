@@ -230,8 +230,40 @@ deep =
 longNames :: [Statement]
 longNames = [Assign (concat (replicate 3000 "café\NUL\n\"\\𐀀")) (Var ""), Return (Val (VFnRef "λ☃"))]
 
+chunkedInteger :: [String] -> String
+chunkedInteger chunks = unlines $
+    ["tersus-ast 1 parsed", "NameEnd"]
+    ++ ["NamePart " ++ show text ++ " " ++ show (i - 1) | (i, text) <- zip [1 :: Int ..] (reverse chunks)]
+    ++ ["VInt " ++ show n, "Val " ++ show (n + 1), "Return " ++ show (n + 2), "StatementsEnd"
+       , "StatementsCons " ++ show (n + 3) ++ " " ++ show (n + 4), "root " ++ show (n + 5)]
+  where
+    n = length chunks
+
+chunkedIntegers :: [(String, String, Integer)]
+chunkedIntegers =
+    [ ("distinct lossless large integer chunks", chunkedInteger large, read (concat large))
+    , ("empty integer chunks", chunkedInteger ["", "12", "", "34", ""], 1234)
+    , ("split minus sign", chunkedInteger ["", "-", "", "56", "78", ""], -5678)
+    , ("leading zero chunks", chunkedInteger ["00", "", "01", "02"], 102)
+    ]
+  where
+    large = [concat (replicate 64 "12345678"), concat (replicate 64 "87654321"), "2468013579"]
+
+chunkedIntegerRefusals :: [(String, String, String)]
+chunkedIntegerRefusals =
+    [ ("nondigit in an integer chunk", chunkedInteger ["12", "5", "34"], chunkedInteger ["12", "x", "34"])
+    , ("minus inside integer chunks", chunkedInteger ["12", "5", "34"], chunkedInteger ["12", "-", "34"])
+    , ("split bare minus", chunkedInteger ["", "-", "7", ""], chunkedInteger ["", "-", "", ""])
+    , ("only empty integer chunks", chunkedInteger ["", "0", ""], chunkedInteger ["", "", ""])
+    ]
+
+haskellChunkedInteger :: String -> Integer -> TestResult
+haskellChunkedInteger text expected = case A.readParsed text of
+    Error e -> Just e
+    Ok ss -> testAssertEq ss [Return (Val (VInt expected))]
+
 refusals :: [(String, String, String)]
-refusals = structural ++ mutations
+refusals = structural ++ mutations ++ chunkedIntegerRefusals
   where
     header = "tersus-ast 1 parsed\n"
     empty = dataParsed []
@@ -417,12 +449,19 @@ nativeCorpus = withAstReader $ \exe -> do
     putStrLn ("AST native corpus: " ++ show (length sources) ++ " sources, " ++ show parsedCount ++ " parsed, " ++ show (sum [n | (_, n, _) <- results]) ++ " elaborated wrappers, " ++ show (length sources - parsedCount) ++ " parser-rejected, 4 constructor/depth/name fixtures")
     pure (firstFailure ([result | (result, _, _) <- results] ++ extra))
 
+nativeChunkedIntegers :: IO TestResult
+nativeChunkedIntegers = withAstReader $ \exe -> do
+    results <- forM chunkedIntegers $ \(name, text, expected) -> do
+        exact <- nativeText exe text
+        pure (prefix name (firstFailure [haskellChunkedInteger text expected, exact]))
+    pure (firstFailure results)
+
 nativeRefusals :: IO TestResult
 nativeRefusals = withAstReader $ \exe -> do
     results <- forM refusals $ \(name, control, text) -> do
         accepted <- nativeText exe control
         (code, out, err) <- runExecutableBytes exe [] text
-        let rejected = if code == ExitSuccess && out == "1\n" && not (null err) then Nothing else Just ("did not refuse: " ++ show (code, take 200 out, take 200 err))
+        let rejected = if code == ExitSuccess && out == "1\n" && err == "not the AST as data\n" then Nothing else Just ("did not refuse: " ++ show (code, take 200 out, take 200 err))
         pure (prefix name (firstFailure [accepted, rejected]))
     pure (firstFailure results)
 
@@ -446,6 +485,7 @@ testAstData = TestList "testAstData"
     , testCase "elaborated wrapper preserves occurrence types" (elaboratedRoundTrip (Elaborated fixtures types))
     , testCase "deep expression arena" (roundTrip deep)
     , testCase "long UTF-8 names are chunked" (firstFailure [roundTrip longNames, testAssertTrue (all ((< 10000) . length) (lines (dataParsed longNames)))])
+    , TestList "chunked decimal integers" [testCase n (haskellChunkedInteger text expected) | (n, text, expected) <- chunkedIntegers]
     , TestList "malformed protocol" [testCase n (firstFailure [haskellAccepted control, haskellRefused bad]) | (n, control, bad) <- refusals]
     , TestCase "packaged tools retain elaborated AST and occurrence types" packageElaboratedRoundTrips
     , TestCase "whole parsed and elaborated source corpus" corpusHaskell
@@ -458,6 +498,7 @@ testAstReader = TestList "testAstReader"
     , TestCase "interpreted exact printed byte count" (interpreted small ["count"])
     , TestCase "interpreted semantic mutation" (interpreted small ["mutate"])
     , TestCase "native exact printed byte counts" nativeCount
+    , TestCase "native exact chunked decimal integers" nativeChunkedIntegers
     , TestCase "native malformed protocol" nativeRefusals
     , TestCase "native semantic mutation" nativeMutation
     , TestCase "packaged elaborated tools native round trip" nativeElaboratedPackages

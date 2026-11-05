@@ -6581,22 +6581,22 @@ fn standardEqText(st: &St, typeName: &String) -> String ~ {
         fields = fieldsOfVariant( st, nameAtOr(variants, 0, ""));
         i = 0;
         for f in fields {
-            body = catStrings(body, compareFieldText( st, typeName, i, clone(f), "self", "other"));
+            body = body.concat(compareFieldText( st, typeName, i, clone(f), "self", "other"));
             i = i + 1;
         };
-        body = catStrings(body, "return true;");
+        body = body.concat("return true;");
     } else {
         for v in variants {
             fields = fieldsOfVariant( st, v);
             inner = "";
             i = 0;
             for f in fields {
-                inner = catStrings(inner, compareFieldText( st, typeName, i, clone(f), cat3("(self as ", v, ")"), cat3("(other as ", v, ")")));
+                inner = inner.concat(compareFieldText( st, typeName, i, clone(f), cat3("(self as ", v, ")"), cat3("(other as ", v, ")")));
                 i = i + 1;
             };
-            body = catStrings(body, catStrings(cat3(cat3("if self is ", v, " { if other is "), v, " { "), catStrings(inner, "return true; }; return false; }; ")));
+            body = body.concat(catStrings(cat3(cat3("if self is ", v, " { if other is "), v, " { "), inner.concat("return true; }; return false; }; ")));
         };
-        body = catStrings(body, "return false;");
+        body = body.concat("return false;");
     };
     return cat3("fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] shrinks self { ", body, " };");
 };
@@ -6660,9 +6660,9 @@ fn standardCloneText(st: &St, typeName: &String) -> String ~ {
             built = clone(v);
             if size(fields) > 0 { built = cat3(catStrings(v, " { "), nameAtOr(parts, 1, ""), " }"); };
             if vi < size(variants) - 1 {
-                body = catStrings(body, catStrings(catStrings(cat3("if self is ", v, " { "), nameAtOr(parts, 0, "")), cat3("return ", built, "; }; ")));
+                body = body.concat(catStrings(catStrings(cat3("if self is ", v, " { "), nameAtOr(parts, 0, "")), cat3("return ", built, "; }; ")));
             } else {
-                body = catStrings(body, catStrings(nameAtOr(parts, 0, ""), cat3("return ", built, ";")));
+                body = body.concat(catStrings(nameAtOr(parts, 0, ""), cat3("return ", built, ";")));
             };
             vi = vi + 1;
         };
@@ -6677,9 +6677,9 @@ fn cloneParts(st: &St, typeName: &String, fields: &List<FieldInfo>, prefix: &Str
     for f in &fields {
         src = cat3(prefix, &f.name, "");
         part = fieldCloneText( st, typeName, i, clone(f), src);
-        pre = catStrings(pre, nameAtOr(part, 0, ""));
-        if i > 0 { assigns = catStrings(assigns, ", "); };
-        assigns = catStrings(assigns, cat3(cat3(&f.name, ": ", nameAtOr(part, 1, "")), "", ""));
+        pre = pre.concat(nameAtOr(part, 0, ""));
+        if i > 0 { assigns = assigns.concat(", "); };
+        assigns = assigns.concat(cat3(cat3(&f.name, ": ", nameAtOr(part, 1, "")), "", ""));
         i = i + 1;
     };
     return push(push([], pre), assigns);
@@ -6692,9 +6692,9 @@ fn clonePartsPrefixed(st: &St, typeName: &String, fields: &List<FieldInfo>, srcB
     for f in &fields {
         src = cat3(srcBase, ".", &f.name);
         part = fieldCloneText( st, typeName, i, clone(f), src);
-        pre = catStrings(pre, nameAtOr(part, 0, ""));
-        if i > 0 { assigns = catStrings(assigns, ", "); };
-        assigns = catStrings(assigns, cat3(&f.name, ": ", nameAtOr(part, 1, "")));
+        pre = pre.concat(nameAtOr(part, 0, ""));
+        if i > 0 { assigns = assigns.concat(", "); };
+        assigns = assigns.concat(cat3(&f.name, ": ", nameAtOr(part, 1, "")));
         i = i + 1;
     };
     return push(push([], pre), assigns);

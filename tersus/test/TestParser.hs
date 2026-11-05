@@ -286,6 +286,22 @@ snippets =
     , ("struct shadowed by a struct", "struct S { x: Int }; struct S { y: Int }; s = S { y: 2 }; return s.y;")
     ]
 
+accumulatingImplParity :: IO TestResult
+accumulatingImplParity = do
+    results <- forM sources $ \source -> case seedPlainData source of
+        Left e -> pure (Just ("P0 rejected the generated-impl control: " ++ e))
+        Right expected -> do
+            actual <- tersusPlain source
+            pure (testAssertEq actual (Right expected))
+    pure (firstFailure results)
+  where
+    sources =
+        [ "struct S { first: Int, middle: Bool, last: Byte }; impl Eq for S { }; impl Clone for S { }; return 0;"
+        , "enum E { Empty, Pair { left: Int, right: Bool }, Last { value: Byte } }; impl Eq for E { }; impl Clone for E { }; return 0;"
+        , "struct Tree { left: List<Tree>, right: List<Tree> }; impl Eq for Tree { }; impl Clone for Tree { }; return 0;"
+        , "enum Tree { Branch { left: List<Tree>, right: List<Tree> }, Leaf }; impl Eq for Tree { }; impl Clone for Tree { }; return 0;"
+        ]
+
 snippetParity :: IO TestResult
 snippetParity = do
     results <- forM snippets $ \(name, source) -> do
@@ -409,6 +425,7 @@ testParser = TestList "testParser"
     , TestCase "diagnostic observation borrows the parser state without copying its arena" noArenaCopies
     , TestCase "many known-constructor variables preserve exact fallback ASTs" largeConstructorFallback
     , TestCase "imports are not linked yet" importsVerdict
+    , TestCase "generated Eq and Clone retain ordered fields, variants and recursive prefixes" accumulatingImplParity
     , TestCase "generated snippet parity" snippetParity
     , TestCase "three interpreted smoke programs" interpretedSmoke
     , TestCase "emitter helper corpus uses its program entry and proves requested source observation" preparedEmitterHelper

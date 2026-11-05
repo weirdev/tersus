@@ -841,7 +841,7 @@ fn nameValue(nodes: &List<AstNode>, start: Int) -> String [{ }] [{ }] {
             v = node as AstNode::Name;
             match v.value {
                 AstName::End => { return out; },
-                AstName::Part { text: text, tail: tail } => { out = catStrings(out, text); id = tail; },
+                AstName::Part { text: text, tail: tail } => { out = out.concat(text); id = tail; },
             };
         } else { return out; };
         fuel = fuel - 1;
