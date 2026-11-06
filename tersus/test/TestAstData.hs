@@ -11,7 +11,8 @@ import System.IO.Unsafe (unsafePerformIO)
 import qualified Modules as Mod
 import qualified PackageCompile as Package
 import ParsedFile (fileBody)
-import PreludeSource (toolPackageFiles)
+import PreludeSource (toolPackageFiles, validationPackageFiles)
+import MirHousekeeping (validationEntry)
 import qualified LibParsed as Lib
 import qualified AstData as A
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
@@ -45,8 +46,8 @@ corpusUnits :: IO [[(String, Result [Statement] String)]]
 corpusUnits = do
     paths <- concat <$> mapM files ["examples", "examples/rejected", "lib"]
     fromFiles <- mapM (\p -> (,) p <$> readFile p) paths
-    let packages = ["examples/parser/parser.tersus", readerPath]
-        packageTrees entry = case Mod.loadFromEntry (Mod.resolverFromFiles toolPackageFiles) entry of
+    let packages = ["examples/parser/parser.tersus", readerPath, validationEntry]
+        packageTrees entry = case Mod.loadFromEntry (Mod.resolverFromFiles (if entry == validationEntry then validationPackageFiles else toolPackageFiles)) entry of
             Left err -> [(entry, Error err)]
             Right (Mod.PackageResult pkg) -> [(Mod.loadedFilePath file, Ok (fileBody (Mod.loadedParsed file))) | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
             Right _ -> [(entry, Error "AST corpus tool is not a package")]
@@ -61,8 +62,7 @@ corpusUnits = do
                     closure (n : rest) done = closure (Map.findWithDefault [] n (Lib.lpDependencies parsed) ++ rest) (n : done)
                  in Ok (Lib.statementsForLibModules parsed (closure [name] []))
         [] -> parsed source
-    -- (lib/validation_driver.tersus is read after lib/validation.tersus, not on its own)
-    files dir = map ((dir ++ "/") ++) . filter (\f -> isSuffixOf ".tersus" f && f /= "validation_driver.tersus") . sort <$> listDirectory dir
+    files dir = map ((dir ++ "/") ++) . filter (isSuffixOf ".tersus") . sort <$> listDirectory dir
     generated =
         [ ("generated forward call", "fn a(n: Int) -> Int { return b(n); }; fn b(n: Int) -> Int { return n; }; return a(5);")
         , ("generated validation refusal", "affirm false; return 2;")
@@ -141,7 +141,7 @@ corpusHaskell batch = do
         ]
 
 toolElaborated :: FilePath -> Result [Elaborated] String
-toolElaborated entry = case Mod.loadFromEntry (Mod.resolverFromFiles toolPackageFiles) entry of
+toolElaborated entry = case Mod.loadFromEntry (Mod.resolverFromFiles (if entry == validationEntry then validationPackageFiles else toolPackageFiles)) entry of
     Left err -> Error err
     Right (Mod.PackageResult pkg) -> Package.compileModules pkg `bindResult` \compiled ->
         Ok (map Package.compiledElaborated (Package.compiledModules compiled))
@@ -152,11 +152,11 @@ packageElaboratedRoundTrips = pure $ firstFailure
     [case toolElaborated entry of
         Error err -> Just err
         Ok modules -> firstFailure (map elaboratedRoundTrip modules)
-    | entry <- [readerPath, "examples/parser/parser.tersus"]]
+    | entry <- [readerPath, "examples/parser/parser.tersus", validationEntry]]
 
 nativeElaboratedPackages :: IO TestResult
 nativeElaboratedPackages = withAstReader $ \exe -> do
-    results <- forM [readerPath, "examples/parser/parser.tersus"] $ \entry -> case toolElaborated entry of
+    results <- forM [readerPath, "examples/parser/parser.tersus", validationEntry] $ \entry -> case toolElaborated entry of
         Error err -> pure (Just err)
         Ok modules -> firstFailure <$> mapM (nativeText exe . dataElaborated) modules
     pure (firstFailure results)

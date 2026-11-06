@@ -18,7 +18,7 @@ import qualified Mir as M
 import MirData (forNative, readProgram, writeProgram)
 import MirLower (lowerElaborated)
 import ValidatorNative (validateCompiled)
-import MirHousekeeping (eraseGhosts, storageProgram)
+import MirHousekeeping (eraseGhosts, storageProgram, validationEntry)
 import Compile (lowerSource)
 import Pipeline (parseSource)
 import SelfHostedMir (validateMirSubset, sourceContainerView, verdictProved)
@@ -214,8 +214,7 @@ checkerProgram :: IO (Result M.Program String)
 checkerProgram = modifyMVar checkerResult $ \cached -> case cached of
     Just result -> pure (cached, result)
     Nothing -> do
-        source <- readFile "lib/validation.tersus"
-        let result = parseSource source `bindResult` elaborate `bindResult` lowerElaborated `bindResult` eraseGhosts
+        result <- bootstrapFromFile validationEntry
         pure (Just result, result)
 
 {-# NOINLINE loweredPrograms #-}

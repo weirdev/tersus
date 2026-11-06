@@ -21,7 +21,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import PreludeSource (mirPackageFiles, validationSource, validationDriverSource, listsSource, boxSource)
+import PreludeSource (mirPackageFiles, listsSource, boxSource)
 import Seed (compilerSnapshotHash, parserSeedHash)
 import qualified TersusParser
 import qualified Modules

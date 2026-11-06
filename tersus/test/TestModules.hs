@@ -14,14 +14,15 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import qualified AstData
 import qualified PackageCompile
-import PreludeSource (parserPackageFiles, astReaderPackageFiles)
+import PreludeSource (parserPackageFiles, astReaderPackageFiles, validationPackageFiles)
+import qualified MirHousekeeping
 import qualified Compile
 import FileParserProtocol
 import qualified FileParserProtocol as File
 import Cli (Command (..), World (..), noWorld, runPackageFiles)
 import Interface
 import qualified Mir as M
-import MirEval (renderMirValue, runProgram)
+import MirEval (renderMirValue, runProgram, runNamedFunction, MirValue (..))
 import Modules
 import TestParserFragments
 import ParsedFile
@@ -620,6 +621,24 @@ testModuleCheckWithin =
     testCaseSeq
         "module-check-within"
         [ expectCompiles withinFiles "app/main.tersus"
+        , case compilePkg entryBoundedFiles "app/main.tersus" of
+            Left err -> Just ("entry-local bounded helper should compile: " ++ err)
+            Right compiled -> case compiledNamed compiled "app" of
+                Nothing -> Just "missing entry module"
+                Just modu ->
+                    let iface = compiledInterface modu in
+                    foldr (<>) Nothing
+                        [ testAssertTrue (Map.member "home" (ifTemplates iface))
+                        , testAssertTrue (not (null (ifAxioms iface)))
+                        , testAssertTrue ("unused" `elem` foldr (:) [] (ifExterns iface))
+                        ]
+        , expectCompileError
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; return geo::answer(7);")
+            , ("app/geo/core.tersus", "trait Mark { }; impl Mark for Int { }; fn home<T: Mark>(x: T) -> T { return x; }; fn answer(x: Int) -> Int { return home(x); };")
+            ]
+            "app/main.tersus"
+            "cannot be exported"
         , expectCompileError
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo; x = 1;")
@@ -630,6 +649,11 @@ testModuleCheckWithin =
             "holds itself"
         ]
   where
+    entryBoundedFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::core { answer }; return answer(7);")
+        , ("app/core.tersus", "trait Mark { }; impl Mark for Int { }; fn home<T: Mark>(x: T) -> T { return x; }; fn answer(x: Int) -> Int { return home(x); }; axiom origin(x) [{ }] [{ affirm x = x; }]; extern fn unused(x: Int) -> Int [{ }] [{ }];")
+        ]
     withinFiles =
         [ ("app/package.tersus", "")
         , ("app/main.tersus", "import app::geo; a = geo::shapes::make(3); b = geo::extra::makeOther(4); return geo::extra::area(a) + geo::extra::getOther(b) + geo::use::areaFull(a) + geo::a::fa(1);")
@@ -1584,5 +1608,31 @@ testCrossPackageConstructors = testCaseSeq "cross-package-constructor-seeds"
         Error _ -> Nothing
         Ok _ -> Just "unimported qualified constructor/type became visible"
 
+testValidatorPackage :: Test
+testValidatorPackage = TestCase "validator package keeps bare helpers and reference calls never run driver main" $ do
+    disk <- mapM (\(path, _) -> do source <- readFile path; pure (path, source)) validationPackageFiles
+    pure $ case loadPkg validationPackageFiles MirHousekeeping.validationEntry of
+        Left e -> Just e
+        Right pkg -> case PackageCompile.compileModulesLinked pkg of
+            Error e -> Just e
+            Ok raw -> case MirHousekeeping.eraseGhosts raw of
+                Error e -> Just e
+                Ok checker ->
+                    let files = concatMap loadedModuleFiles (packageModules pkg)
+                        trapped = checker{M.progMain = (M.progMain checker){M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Unreachable)}}
+                     in foldr (<>) Nothing
+                        [ testAssertEq disk validationPackageFiles
+                        , testAssertEq (map loadedFileStem files) ["driver", "validation"]
+                        , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 390
+                        , testAssertTrue (all (`Map.member` M.progFunctions checker) ["validateExecution", "noTemplates", "commonContext", "driverReadAll"])
+                        , testAssertTrue (all (not . isInfixOf "validation$") (Map.keys (M.progFunctions checker)))
+                        , testAssertEq (runNamedFunction trapped "noTemplates" []) (Ok (Just (MList [])))
+                        , case runProgram trapped of Error _ -> Nothing; Ok _ -> Just "driver-main trap did not fail"
+                        ]
+  where
+    definitions (Assign _ (Val VFunct{})) = 1 :: Int
+    definitions (BoundedDef _ statement) = definitions statement
+    definitions _ = 0
+
 testModules :: Test
-testModules = TestList "testModules" [testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
+testModules = TestList "testModules" [testValidatorPackage,testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]

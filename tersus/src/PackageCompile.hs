@@ -15,7 +15,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import Compile (librariesFor, reservedHelperName, reservedError)
-import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv, withoutDeclaredNames)
+import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, extractLibInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv, withoutDeclaredNames)
 import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
 import ModuleResolve (rewriteFileReferences)
@@ -54,6 +54,7 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
             Ok compiled -> go rest (Map.insert (Mod.loadedModuleId modu) (compiledInterface compiled) interfaces) (compiled : done)
     compileOne interfaces modu =
         let moduId = Mod.loadedModuleId modu
+            extract = if moduId == Mod.packageEntryModule pkg then extractLibInterface else extractInterface
             depInterfaces = [interfaces Map.! dep | dep <- Mod.loadedDependencies modu, Map.member dep interfaces]
             missing = [dep | dep <- Mod.loadedDependencies modu, not (Map.member dep interfaces)]
          in if not (null missing)
@@ -72,7 +73,7 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
                                         let env = predeclareOwnEnv (mergeInterfacesImportEnv (libIfaces ++ checkOnlyIfaces ++ depInterfaces))
                                          in case elaborateWith env prepared of
                                                 Error err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
-                                                Ok (elaborated@(Elaborated elaboratedStmts _), state) -> case extractInterface moduId prepared elaboratedStmts state of
+                                                Ok (elaborated@(Elaborated elaboratedStmts _), state) -> case extract moduId prepared elaboratedStmts state of
                                                     Error err -> Error err
                                                     Ok iface -> Ok (CompiledModule moduId elaboratedStmts elaborated iface (libIfaces ++ checkOnlyIfaces) libUnits)
 
