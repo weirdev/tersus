@@ -45,6 +45,20 @@ contracts. Tersus's proof checks and linear obligations can provide more.
 `assume`, axioms and foreign contracts remain explicit trust boundaries; a
 reference API must not introduce a hidden escape from them.
 
+## Reference-write implementation
+
+`examples/mir/ownership/refwrites.tersus` performs native reference-write
+expansion through `MirHousekeeping.expandRefWrites`. It runs after ghost erasure
+and before list lowering or monomorphization: symbolic types and sizes, generic
+struct templates and function metadata must still be present. Reference-typed
+roots stay `AssignRef` for the emitter. Value-root writes reconstruct logical
+fields and sequence elements using the accumulated temporary declarations and
+all fields of the selected enum variant, so nested sequence element types and
+unwritten sibling fields survive. `MirLists` lowers right-hand expressions and
+renames selectors on retained reference writes; `MirMono` substitutes their
+indices and concrete constructor names. The Haskell host returns explicit
+errors and restores proof metadata using numbered ghost identities (see `MIR.md`).
+
 ## Starting point and alpha migration
 
 `LANGUAGE.md` documents `&T` only on parameters, read-only views, explicit clones
@@ -152,8 +166,11 @@ observe(&*s);                // observe takes &Point
 
 Deriving a child loan through a parent is permitted for a disjoint place even
 while another child is live. The parent cannot otherwise access the borrowed
-portion. `&mut *r` reborrows rather than moves `r`; passing `r` directly to an
-update parameter transfers that reference value. A read reference can be copied;
+portion. `&mut *r` reborrows rather than moves `r`. An update parameter is given
+on to another function's update parameter as `&mut *r`: the MIR checker
+currently refuses `r` passed bare to an update parameter (a known limit, not a
+transfer of the reference). Giving it to a read parameter, bare or as `&*r`, is
+accepted. A read reference can be copied;
 an update reference cannot implement Copy or Clone. Reassigning the reference
 binding changes its target, whereas assigning through `*r` changes its referent.
 Ordinary access ends at the last dependent use, including uses stored elsewhere;

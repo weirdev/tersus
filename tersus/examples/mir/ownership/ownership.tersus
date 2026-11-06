@@ -1,0 +1,37 @@
+import data::codec::codec { Token, isWord };
+import mir::reader::reader { ghostProgramAt };
+import mir::writer::writer { printProgramWithGhosts };
+import mir::ownership::rewrite { insertOwnership };
+import mir::ownership::refwrites { expandRefWrites };
+import mir::ownership::common { blocksWellFormed };
+
+fn isOwnershipRequest(lines: &List<List<Token>>) -> Bool ~ {
+    return size(lines) > 0 && isWord(get(lines, 0), 0, "pass");
+};
+
+// A request is `pass ownership` or `pass expand` and then the MIR v2 with numbered ghosts; the MIR is written back
+fn runOwnership(read: &List<List<Token>>) -> Bool ~ {
+    if size(read) < 2 {
+        "the ownership input is not pass ownership|expand followed by MIR v2\n".printError();
+        return false;
+    };
+    header = get(read, 0);
+    if size(header) != 2 || !isWord(header, 0, "pass") || (!isWord(header, 1, "ownership") && !isWord(header, 1, "expand")) {
+        "the ownership pass selector is not ownership or expand\n".printError();
+        return false;
+    };
+    lines = [];
+    for i in 1..size(read) { lines = push(lines, clone(get(read, i))); };
+    program = ghostProgramAt(lines);
+    if !program.ok {
+        "the ownership input is not the MIR as data\n".printError();
+        return false;
+    };
+    if isWord(header, 1, "expand") { printProgramWithGhosts(expandRefWrites(program.value)); return true; };
+    if !blocksWellFormed(program.value) {
+        "the ownership input has a negative block id, no block 0, or a jump to a block that is not there\n".printError();
+        return false;
+    };
+    printProgramWithGhosts(insertOwnership(program.value));
+    return true;
+};

@@ -36,6 +36,7 @@ import TestStrings
 import TestBytes
 import TestConnectives
 import TestMirData
+import TestMirOwnership
 import TestMirEval
 import TestMirReader
 import TestMirVerify
@@ -179,6 +180,9 @@ originalGroups =
     , testBytes
     , testConnectives
     , testMirData
+    , testMirOwnership
+    , testOwnershipMetadata
+    , testOwnershipInterpreted
     , testMirEvalLists
     , testMirReader
     , testMirVerify

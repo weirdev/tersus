@@ -37,12 +37,10 @@ import qualified TersusParser
 import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked)
 import Link (pruneProgram)
 import qualified Modules as Mod
-import MirOwnership (expandRefWrites, insertOwnership)
-import MirHousekeeping (eraseGhosts, verifyProgram)
+import MirHousekeeping (eraseGhosts, insertOwnership, verifyProgram)
 import qualified MirHousekeeping as Housekeeping
 import MirEval (MirValue, runProgram)
 import ValidatorNative (validateCompiled)
-import MirLists (hasLists, lowerLists)
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Pretty (renderVarProof)
@@ -136,9 +134,8 @@ ownedOfProgram program =
     -- carry yet, so it is refused here rather than miscompiled)
     if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
         then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
-        else nativeProgram program `bindResult` \native ->
-            let owned = insertOwnership native
-             in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
+        else nativeProgram program `bindResult` insertOwnership `bindResult` \owned ->
+            stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
   where
     unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)
     hasUnsizedRef ty = case ty of
@@ -152,15 +149,7 @@ ownedOfProgram program =
 -- Each Uninit<T> is already a T in it: the erasure makes it one (it is laid out as one: an empty one is the words of a T cleared, which own nothing)
 {-# NOINLINE nativeProgram #-}
 nativeProgram :: M.Program -> Result M.Program String
-nativeProgram program = unsafePerformIO $ do
-    ready <- Housekeeping.prepareBootstrap
-    case ready of
-        Error e -> pure (Error e)
-        Ok () -> do
-            let expanded = expandRefWrites program
-            if not (hasLists expanded) then pure (Ok expanded) else do
-                library <- listLibrary
-                pure (lowerLists library expanded)
+nativeProgram program = unsafePerformIO (Housekeeping.nativeProgramWith listLibrary program)
 
 {-# NOINLINE checkedStorageBox #-}
 checkedStorageBox :: MVar (Maybe [(Mod.ModuleId, M.Program)])
@@ -246,9 +235,8 @@ ownedModuleProgram :: M.Program -> Result M.Program String
 ownedModuleProgram program =
     if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
         then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
-        else nativeProgram program `bindResult` \native ->
-            let owned = pruneProgram (insertOwnership native)
-             in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
+        else nativeProgram program `bindResult` insertOwnership `bindResult` \owned ->
+            stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok (pruneProgram owned)
   where
     unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)
     hasUnsizedRef ty = case ty of

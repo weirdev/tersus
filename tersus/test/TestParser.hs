@@ -143,8 +143,12 @@ corpusParity batch = do
 emitterCorpusEntry :: FilePath
 emitterCorpusEntry = "examples/mir/emit/emit.tersus"
 
+-- (the emitter's package load reads its own files and every file of the ownership passes and the MIR writer it imports, so one
+-- paired load observes all of them)
 emitterCorpusFiles :: [FilePath]
 emitterCorpusFiles = ["examples/mir/emit/" ++ name ++ ".tersus" | name <- ["emit", "types", "values", "operations", "functions", "helpers"]]
+    ++ ["examples/mir/ownership/" ++ name ++ ".tersus" | name <- ["ownership", "analysis", "common", "drops", "refwrites", "rewrite"]]
+    ++ ["examples/mir/writer/writer.tersus"]
 
 observedSource :: String -> ([String], TestResult) -> TestResult
 observedSource source (observations, result) = firstFailure

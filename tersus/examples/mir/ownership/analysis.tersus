@@ -1,0 +1,354 @@
+import data::codec::codec { Type };
+import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep };
+import mir::support::support { ownerOf, lookupDecl, variantsOf };
+import mir::ownership::common { Key, FieldName, TypeKind, noTypeKinds, variantKey, soleTypeArgument, Loan, LoanEntry, LoanSlot, LocalKinds, RefSearch, BlockLoans, emptyKeys, BlockLives, Count, Alias, keySetAdd, keySetUnion, loanLookup, loanPut, whole, fieldKey, getLocal, needsDrop, borrowKey, operandLocal, intSetHas, intSetAdd, roles, stmtDef, termDef, successors, forgetLocal, localsOf, singleton, noOwnershipAliases, statementRoles };
+
+// One search over the type graph: a declaration already searched holds no reference
+fn referenceSearch(p: &Program, t: &Type, seen: List<String>) -> RefSearch ~ {
+    if t is Type::TRef || t is Type::TMutRef || t is Type::TParam || t is Type::TVar { return RefSearch { found: true, seen: seen }; };
+    if t is Type::TList { return referenceSearch(p, Box::unbox((t as Type::TList).elem), seen); };
+    if t is Type::TBox { return referenceSearch(p, Box::unbox((t as Type::TBox).inner), seen); };
+    if t is Type::TArray { return referenceSearch(p, Box::unbox((t as Type::TArray).elem), seen); };
+    if t is Type::TNamed {
+        n = t as Type::TNamed;
+        if n.base = "List" || n.base = "Box" { arg = soleTypeArgument(t); if arg.ok { return referenceSearch(p, arg.value, seen); }; };
+    };
+    name = ""; found = false;
+    if t is Type::TNamed { name = clone((t as Type::TNamed).name); found = true; };
+    if t is Type::TVariant {
+        owner = ownerOf(p.types, (t as Type::TVariant).name);
+        if !owner.ok { return RefSearch { found: true, seen: seen }; };
+        name = owner.text; found = true;
+    };
+    if !found { return RefSearch { found: false, seen: seen }; };
+    for n in seen { if n = name { return RefSearch { found: false, seen: seen }; }; };
+    if lookupDecl(p.types, name) < 0 { return RefSearch { found: true, seen: seen }; };
+    searched = push(seen, clone(name));
+    for v in variantsOf(p.types, name) {
+        for f in v.fields {
+            r = referenceSearch(p, f.ty, searched);
+            if r.found { return r; };
+            searched = r.seen;
+        };
+    };
+    return RefSearch { found: false, seen: searched };
+};
+fn referenceType(p: &Program, t: &Type) -> Bool ~ { return referenceSearch(p, t, []).found; };
+// (most locals share a few types, so each type is classified once)
+fn localKinds(p: &Program, names: &List<FieldName>, locals: &List<LocalDecl>) -> LocalKinds ~ {
+    references = []; owners = []; seen = noTypeKinds();
+    for d in locals {
+        found = false; reference = false; owns = false;
+        for k in seen { if !found && k.ty = d.ty { found = true; reference = k.reference; owns = k.owns; }; };
+        if !found {
+            reference = referenceType(p, d.ty); owns = needsDrop(p, d.ty);
+            seen = push(seen, TypeKind { ty: clone(d.ty), reference: reference, owns: owns });
+        };
+        if reference { references = intSetAdd(references, d.id); };
+        if owns { owners = intSetAdd(owners, d.id); };
+    };
+    return LocalKinds { references: references, owners: owners, names: clone(names) };
+};
+fn borrowRoots(f: &Function, names: &List<FieldName>, loans: &List<Loan>, root: Int, steps: &List<RefStep>) -> List<Key> ~ {
+    origin = loanLookup(loans, root);
+    ty = getLocal(f, root).ty;
+    if ty is Type::TRef || ty is Type::TMutRef {
+        target = Type::TInt;
+        if ty is Type::TRef { target = clone(Box::unbox((ty as Type::TRef).inner)); }
+        else if ty is Type::TMutRef { target = clone(Box::unbox((ty as Type::TMutRef).inner)); };
+        out = [];
+        for key in origin.refs {
+            k = clone(key);
+            if k.kind = 0 && getLocal(f, k.local).ty = target { k = borrowKey(names, k.local, steps); };
+            out = keySetAdd(out, k);
+        };
+        return out;
+    };
+    out = keySetUnion(origin.refs, origin.view);
+    if !origin.isView { out = keySetAdd(out, borrowKey(names, root, steps)); };
+    return out;
+};
+fn placeOf(f: &Function, names: &List<FieldName>, loans: &List<Loan>, o: &Operand, steps: &List<RefStep>) -> List<Key> ~ {
+    l = operandLocal(o); if l < 0 { return []; }; return borrowRoots(f, names, loans, l, steps);
+};
+fn loanStatement(f: &Function, kinds: &LocalKinds, loans: List<Loan>, st: &Statement) -> List<Loan> ~ {
+    peek = st is Statement::Peek;
+    if !(st is Statement::Assign) && !peek { return loans; };
+    dest = stmtDef(st);
+    rv = Rvalue::Use { o: Operand::Copy { local: 0 } };
+    if st is Statement::Peek { rv = clone((st as Statement::Peek).rv); } else if st is Statement::Assign { rv = clone((st as Statement::Assign).rv); };
+    refs = [];
+    if intSetHas(kinds.references, dest) {
+        if rv is Rvalue::Borrow {
+            b = rv as Rvalue::Borrow;
+            refs = borrowRoots(f, kinds.names, loans, b.root, b.steps);
+        } else {
+            for ro in roles(rv) {
+                l = operandLocal(ro.operand);
+                if l >= 0 { refs = keySetUnion(refs, loanLookup(loans, l).refs); };
+            };
+        };
+    };
+    view = [];
+    // (a reference type owns nothing, so an owner is never a reference itself)
+    if intSetHas(kinds.owners, dest) {
+        if rv is Rvalue::ReadField { r = rv as Rvalue::ReadField; view = placeOf(f, kinds.names, loans, r.o, singleton(RefStep::Field { ctor: clone(r.name), field: clone(r.field) })); };
+        if rv is Rvalue::ListOp {
+            r = rv as Rvalue::ListOp;
+            if (r.op = 1 || r.op = 2 || r.op = 3) && size(r.args) > 0 { view = placeOf(f, kinds.names, loans, get(r.args, 0), []); };
+        };
+        if rv is Rvalue::Deref { view = placeOf(f, kinds.names, loans, (rv as Rvalue::Deref).o, []); };
+        if rv is Rvalue::Unbox { view = placeOf(f, kinds.names, loans, (rv as Rvalue::Unbox).o, []); };
+        if rv is Rvalue::AsVariant { view = placeOf(f, kinds.names, loans, (rv as Rvalue::AsVariant).o, []); };
+        if peek && rv is Rvalue::Use { view = placeOf(f, kinds.names, loans, (rv as Rvalue::Use).o, []); };
+    };
+    isView = size(view) > 0;
+    return loanPut(loans, Loan { local: dest, refs: refs, view: view, isView: isView });
+};
+fn loanTerminator(p: &Program, f: &Function, kinds: &LocalKinds, loans: List<Loan>, term: &Terminator) -> List<Loan> ~ {
+    if !(term is Terminator::Call) { return loans; };
+    c = term as Terminator::Call;
+    refs = [];
+    if intSetHas(kinds.references, c.dest) {
+        fromArgs = []; specific = false; found = false;
+        if c.callee is Operand::Const && (c.callee as Operand::Const).value is Constant::CFn {
+            name = ((c.callee as Operand::Const).value as Constant::CFn).name;
+            for target in p.functions {
+                if target.name = name {
+                    froms = clone(target.from);
+                    if size(froms) = 0 { for l in target.borrowed { froms = push(froms, l); }; for l in target.mutBorrowed { froms = push(froms, l); }; };
+                    for param in target.params { fromArgs = push(fromArgs, intSetHas(froms, param)); };
+                    specific = size(target.from) > 0; found = true;
+                };
+            };
+        };
+        if !found {
+            local = operandLocal(c.callee);
+            if local >= 0 {
+                ty = getLocal(f, local).ty;
+                if ty is Type::TFn {
+                    for a in (ty as Type::TFn).args { fromArgs = push(fromArgs, a is Type::TRef || a is Type::TMutRef); };
+                    found = true;
+                };
+            };
+        };
+        if !found { for a in c.args { fromArgs = push(fromArgs, false); }; };
+        if !specific {
+            for a in c.args { l = operandLocal(a); if l >= 0 { refs = keySetUnion(refs, loanLookup(loans, l).refs); }; };
+        };
+        for i in 0..size(c.args) {
+            l = operandLocal(get(c.args, i));
+            if i < size(fromArgs) && get(fromArgs, i) && l >= 0 { refs = keySetUnion(refs, borrowRoots(f, kinds.names, loans, l, [])); };
+        };
+    };
+    return loanPut(loans, Loan { local: c.dest, refs: refs, view: [], isView: false });
+};
+fn joinLoans(a: &List<Loan>, b: &List<Loan>) -> List<Loan> ~ {
+    ids = []; for l in a { ids = intSetAdd(ids, l.local); }; for l in b { ids = intSetAdd(ids, l.local); };
+    out = [];
+    for id in ids { x = loanLookup(a, id); y = loanLookup(b, id); out = push(out, Loan { local: id, refs: keySetUnion(x.refs, y.refs), view: keySetUnion(x.view, y.view), isView: x.isView && y.isView }); };
+    return out;
+};
+fn loansAt(entries: &List<LoanEntry>, id: Int) -> List<Loan> ~ { for e in entries { if e.block = id { return clone(e.loans); }; }; return []; };
+// The dataflow state is a slot per block number, so that a join rewrites one block's loans rather than every block's
+fn blockSpan(blocks: &List<MirBlock>) -> Int [{ }] [{ affirm return >= 1; }] ~ {
+    n = 1; i = 0;
+    while i < size(blocks) [{ affirm n >= 1; affirm i >= 0; }] ~ {
+        id = get(blocks, i).id;
+        if id >= n { n = id + 1; };
+        targets = successors(get(blocks, i).term); j = 0;
+        while j < size(targets) [{ affirm n >= 1; affirm j >= 0; }] ~ { s = get(targets, j); if s >= n { n = s + 1; }; j = j + 1; };
+        i = i + 1;
+    };
+    return n;
+};
+fn slotJoin(slots: List<LoanSlot>, id: Int, loans: List<Loan>) -> List<LoanSlot> ~ {
+    if id < 0 || id >= size(slots) { return slots; };
+    old = get(slots, id);
+    value = loans; if old.present { value = joinLoans(old.loans, value); };
+    return set(slots, id, LoanSlot { present: true, loans: value });
+};
+fn loanEntries(p: &Program, kinds: &LocalKinds, f: &Function) -> List<LoanEntry> ~ {
+    initial = [];
+    for l in f.borrowed { initial = loanPut(initial, Loan { local: l, refs: singleton(whole(l)), view: [], isView: false }); };
+    for l in f.mutBorrowed { initial = loanPut(initial, Loan { local: l, refs: singleton(whole(l)), view: [], isView: false }); };
+    span = blockSpan(f.blocks);
+    empty = []; for i in 0..span { empty = push(empty, LoanSlot { present: false, loans: [] }); };
+    known = slotJoin(clone(empty), 0, clone(initial)); done = false;
+    while done = false ~ {
+        next = clone(empty);
+        for b in f.blocks {
+            if b.id >= 0 && b.id < size(known) && get(known, b.id).present {
+                entry = get(known, b.id);
+                loans = clone(entry.loans);
+                for st in b.stmts { loans = loanStatement(f, kinds, loans, st); };
+                loans = loanTerminator(p, f, kinds, loans, b.term);
+                for id in successors(b.term) { next = slotJoin(next, id, clone(loans)); };
+            };
+        };
+        next = slotJoin(next, 0, clone(initial));
+        done = next = known; known = next;
+    };
+    out = [];
+    for i in 0..span { if i < size(known) { e = get(known, i); if e.present { out = push(out, LoanEntry { block: i, loans: clone(e.loans) }); }; }; };
+    return out;
+};
+fn rvalueUses(names: &List<FieldName>, rv: &Rvalue) -> List<Key> ~ {
+    if rv is Rvalue::ReadField && (rv as Rvalue::ReadField).o is Operand::Copy {
+        r = rv as Rvalue::ReadField; return singleton(fieldKey(names, operandLocal(r.o), r.name, r.field));
+    };
+    if rv is Rvalue::IsVariant && (rv as Rvalue::IsVariant).o is Operand::Copy {
+        return singleton(variantKey(operandLocal((rv as Rvalue::IsVariant).o)));
+    };
+    if rv is Rvalue::Borrow {
+        b = rv as Rvalue::Borrow; out = singleton(borrowKey(names, b.root, b.steps));
+        for s in b.steps { if s is RefStep::Index { l = operandLocal((s as RefStep::Index).o); if l >= 0 { out = keySetAdd(out, whole(l)); }; }; };
+        return out;
+    };
+    out = []; for r in roles(rv) { l = operandLocal(r.operand); if l >= 0 { out = keySetAdd(out, whole(l)); }; }; return out;
+};
+fn stmtUses(names: &List<FieldName>, st: &Statement) -> List<Key> ~ {
+    if st is Statement::Assign { return rvalueUses(names, (st as Statement::Assign).rv); };
+    if st is Statement::AssignRef {
+        a = st as Statement::AssignRef;
+        out = keySetAdd(rvalueUses(names, a.rv), whole(a.local));
+        for step in a.steps { if step is RefStep::Index { l = operandLocal((step as RefStep::Index).o); if l >= 0 { out = keySetAdd(out, whole(l)); }; }; };
+        return out;
+    };
+    return [];
+};
+fn termUses(t: &Terminator) -> List<Key> ~ {
+    if t is Terminator::Return { return singleton(whole(0)); };
+    out = [];
+    if t is Terminator::Switch { l = operandLocal((t as Terminator::Switch).cond); if l >= 0 { out = keySetAdd(out, whole(l)); }; };
+    if t is Terminator::Call { c = t as Terminator::Call; l = operandLocal(c.callee); if l >= 0 { out = keySetAdd(out, whole(l)); }; for a in c.args { l = operandLocal(a); if l >= 0 { out = keySetAdd(out, whole(l)); }; }; };
+    return out;
+};
+fn withLoanRoots(loans: &List<Loan>, live: &List<Key>) -> List<Key> ~ {
+    out = clone(live);
+    for k in live { for x in loans { if x.local = k.local && size(x.refs) > 0 { out = keySetUnion(out, x.refs); }; }; };
+    return out;
+};
+fn blockLoans(p: &Program, f: &Function, kinds: &LocalKinds, entries: &List<LoanEntry>, b: &MirBlock) -> BlockLoans ~ {
+    loans = loansAt(entries, b.id); states = [];
+    for st in b.stmts { states = push(states, clone(loans)); loans = loanStatement(f, kinds, loans, st); };
+    afterTerm = loanTerminator(p, f, kinds, clone(loans), b.term);
+    return BlockLoans { states: states, last: loans, afterTerm: afterTerm };
+};
+fn blockLiveness(names: &List<FieldName>, bl: &BlockLoans, b: &MirBlock, out: &List<Key>, withAfters: Bool) -> BlockLives ~ {
+    live = withLoanRoots(bl.last, keySetUnion(termUses(b.term), forgetLocal(withLoanRoots(bl.afterTerm, out), termDef(b.term))));
+    backwards = [];
+    i = size(b.stmts);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(b.stmts); }] ~ {
+        i = i - 1;
+        if withAfters { backwards = push(backwards, clone(live)); };
+        if i < size(bl.states) { live = withLoanRoots(get(bl.states, i), keySetUnion(stmtUses(names, get(b.stmts, i)), forgetLocal(live, stmtDef(get(b.stmts, i))))); };
+    };
+    afters = []; i = size(backwards);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(backwards); }] ~ { i = i - 1; afters = push(afters, clone(get(backwards, i))); };
+    return BlockLives { block: b.id, entry: live, out: clone(out), afters: afters };
+};
+fn livesAt(lives: &List<BlockLives>, id: Int) -> BlockLives ~ { for b in lives { if b.block = id { return clone(b); }; }; return BlockLives { block: id, entry: [], out: [], afters: [] }; };
+// The loans before each statement of each block, a slot per block number; they do not depend on liveness
+fn loanStates(p: &Program, names: &List<FieldName>, f: &Function) -> List<BlockLoans> ~ {
+    kinds = localKinds(p, names, f.locals);
+    entries = loanEntries(p, kinds, f);
+    loans = [];
+    for i in 0..blockSpan(f.blocks) { loans = push(loans, BlockLoans { states: [], last: [], afterTerm: [] }); };
+    for b in f.blocks { if b.id >= 0 && b.id < size(loans) { loans = set(loans, b.id, blockLoans(p, f, kinds, entries, b)); }; };
+    return loans;
+};
+fn liveness(f: &Function, names: &List<FieldName>, loans: &List<BlockLoans>) -> List<BlockLives> ~ {
+    noKeys = [];
+    for i in 0..size(loans) { noKeys = push(noKeys, emptyKeys()); };
+    outs = clone(noKeys);
+    done = false;
+    while done = false ~ {
+        ins = clone(noKeys);
+        for b in f.blocks { if b.id >= 0 && b.id < size(loans) && b.id < size(outs) && b.id < size(ins) { ins = set(ins, b.id, blockLiveness(names, get(loans, b.id), b, get(outs, b.id), false).entry); }; };
+        done = true;
+        for b in f.blocks {
+            out = []; for id in successors(b.term) { if id >= 0 && id < size(ins) { out = keySetUnion(out, get(ins, id)); }; };
+            if b.id >= 0 && b.id < size(outs) {
+                if get(outs, b.id) != out { done = false; };
+                outs = set(outs, b.id, out);
+            };
+        };
+    };
+    result = []; for b in f.blocks { if b.id >= 0 && b.id < size(loans) && b.id < size(outs) { result = push(result, blockLiveness(names, get(loans, b.id), b, get(outs, b.id), true)); }; }; return result;
+};
+// Whether local is source, or a place that source refers to or looks at (through the references local holds, when through is set),
+// by the loans before statement index of the block (the terminator after the last)
+fn reaches(loans: &List<BlockLoans>, block: Int, index: Int, local: Int, source: Int, through: Bool) -> Bool ~ {
+    if block < 0 || block >= size(loans) { return false; };
+    if index >= 0 && index < size(get(loans, block).states) { return reachesIn(get(get(loans, block).states, index), local, source, through); };
+    return reachesIn(get(loans, block).last, local, source, through);
+};
+fn reachesIn(loans: &List<Loan>, local: Int, source: Int, through: Bool) -> Bool ~ {
+    origin = loanLookup(loans, source);
+    reached = intSetAdd(localsOf(keySetUnion(origin.refs, origin.view)), source);
+    if intSetHas(reached, local) { return true; };
+    if through { for k in loanLookup(loans, local).refs { if intSetHas(reached, k.local) { return true; }; }; };
+    return false;
+};
+fn countOf(counts: &List<Count>, id: Int) -> Int ~ { for c in counts { if c.local = id { return c.count; }; }; return 0; };
+fn countAdd(counts: &List<Count>, id: Int) -> List<Count> ~ {
+    out = []; found = false;
+    for c in counts { if c.local = id { out = push(out, Count { local: id, count: c.count + 1 }); found = true; } else { out = push(out, clone(c)); }; };
+    if !found { out = push(out, Count { local: id, count: 1 }); };
+    return out;
+};
+fn definitions(f: &Function, includePeek: Bool) -> List<Count> ~ {
+    defs = []; for p in f.params { defs = countAdd(defs, p); };
+    for b in f.blocks {
+        for st in b.stmts { if st is Statement::Assign || (includePeek && st is Statement::Peek) { defs = countAdd(defs, stmtDef(st)); }; };
+        d = termDef(b.term); if d >= 0 { defs = countAdd(defs, d); };
+    };
+    return defs;
+};
+fn fuseCasts(f: &Function) -> Function ~ {
+    defs = definitions(f, false); fused = [];
+    for b in f.blocks {
+        subst = noOwnershipAliases(); stmts = [];
+        for st in b.stmts {
+            value = clone(st);
+            if st is Statement::Assign {
+                a = st as Statement::Assign; d = a.local; rv = clone(a.rv);
+                source = 0 - 1;
+                if rv is Rvalue::ReadField && (rv as Rvalue::ReadField).o is Operand::Copy { source = operandLocal((rv as Rvalue::ReadField).o); };
+                if rv is Rvalue::IsVariant && (rv as Rvalue::IsVariant).o is Operand::Copy { source = operandLocal((rv as Rvalue::IsVariant).o); };
+                for s in subst {
+                    if s.local = source {
+                        if rv is Rvalue::ReadField { r = rv as Rvalue::ReadField; rv = Rvalue::ReadField { o: Operand::Copy { local: s.source }, name: clone(r.name), field: clone(r.field) }; }
+                        else if rv is Rvalue::IsVariant { r = rv as Rvalue::IsVariant; rv = Rvalue::IsVariant { o: Operand::Copy { local: s.source }, name: clone(r.name) }; };
+                    };
+                };
+                kept = []; for s in subst { if s.local != d && s.source != d { kept = push(kept, clone(s)); }; }; subst = kept;
+                if rv is Rvalue::AsVariant && (rv as Rvalue::AsVariant).o is Operand::Copy {
+                    s = operandLocal((rv as Rvalue::AsVariant).o);
+                    if countOf(defs, d) = 1 && d != s { subst = push(subst, Alias { local: d, block: b.id, source: s }); };
+                };
+                value = Statement::Assign { local: d, rv: rv };
+            };
+            stmts = push(stmts, value);
+        };
+        base = clone(b);
+        fused = push(fused, MirBlock { stmts: stmts, ..base });
+    };
+    used = [];
+    for b in fused { used = keySetUnion(used, termUses(b.term)); for st in b.stmts { for ro in statementRoles(st) { l = operandLocal(ro.operand); if l >= 0 { used = keySetAdd(used, whole(l)); }; }; }; };
+    blocks = [];
+    for b in fused {
+        kept = []; for st in b.stmts {
+            dead = false;
+            if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::AsVariant && ((st as Statement::Assign).rv as Rvalue::AsVariant).o is Operand::Copy {
+                d = (st as Statement::Assign).local; dead = !intSetHas(localsOf(used), d) && countOf(defs, d) = 1;
+            };
+            if !dead { kept = push(kept, clone(st)); };
+        };
+        base = clone(b);
+        blocks = push(blocks, MirBlock { stmts: kept, ..base });
+    };
+    base = clone(f);
+    return Function { blocks: blocks, ..base };
+};

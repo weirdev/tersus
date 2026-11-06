@@ -1,0 +1,419 @@
+import data::codec::codec { Type, Size, Token, Parsed, typeAt };
+import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep, Field, Variant, TypeDecl };
+import mir::support::support { ownerOf, lookupDecl, variantsOf, beforeAngle, declName };
+
+fn noOwnershipBlocks() -> List<MirBlock> { return []; };
+fn noOwnershipLocals() -> List<LocalDecl> { return []; };
+fn singleton<T>(value: T) -> List<T> { return push([], value); };
+fn pair<T>(a: T, b: T) -> List<T> { return push(push([], a), b); };
+fn triple<T>(a: T, b: T, c: T) -> List<T> { return push(push(push([], a), b), c); };
+
+// A field is named by its place in the program's sorted list of (constructor, field) names, so keys order as their names do
+struct Key { local: Int, kind: Int, name: Int };
+impl Clone for Key { };
+impl Eq for Key { };
+struct FieldName { ctor: String, field: String };
+impl Clone for FieldName { };
+struct RoleOperand { operand: Operand, consume: Bool };
+impl Clone for RoleOperand { };
+struct Loan { local: Int, refs: List<Key>, view: List<Key>, isView: Bool };
+impl Clone for Loan { };
+impl Eq for Loan { };
+struct LoanEntry { block: Int, loans: List<Loan> };
+impl Clone for LoanEntry { };
+impl Eq for LoanEntry { };
+struct LoanSlot { present: Bool, loans: List<Loan> };
+impl Clone for LoanSlot { };
+impl Eq for LoanSlot { };
+struct Site { block: Int, index: Int };
+impl Clone for Site { };
+impl Eq for Site { };
+struct Count { local: Int, count: Int };
+impl Clone for Count { };
+struct UseSite { local: Int, block: Int, index: Int, consume: Bool };
+impl Clone for UseSite { };
+struct Alias { local: Int, block: Int, source: Int };
+impl Clone for Alias { };
+fn noOwnershipAliases() -> List<Alias> { return []; };
+struct Rewrite { next: Int, locals: List<LocalDecl>, aliases: List<Int>, sources: List<Alias> };
+impl Clone for Rewrite { };
+struct TypeKind { ty: Type, reference: Bool, owns: Bool };
+impl Clone for TypeKind { };
+fn noTypeKinds() -> List<TypeKind> { return []; };
+struct LocalKinds { references: List<Int>, owners: List<Int>, names: List<FieldName> };
+impl Clone for LocalKinds { };
+struct RefSearch { found: Bool, seen: List<String> };
+impl Clone for RefSearch { };
+struct BlockLoans { states: List<List<Loan>>, last: List<Loan>, afterTerm: List<Loan> };
+impl Clone for BlockLoans { };
+fn emptyKeys() -> List<Key> { return []; };
+struct BlockLives { block: Int, entry: List<Key>, out: List<Key>, afters: List<List<Key>> };
+impl Clone for BlockLives { };
+impl Eq for BlockLives { };
+struct Context { function: Function, names: List<FieldName>, projected: List<Int>, defs: List<Count>, uses: List<UseSite>, afters: List<BlockLives>, takes: List<Site>, loans: List<BlockLoans>, borrowRoots: List<Int> };
+impl Clone for Context { };
+
+fn whole(l: Int) -> Key { return Key { local: l, kind: 0, name: 0 }; };
+fn variantKey(l: Int) -> Key { return Key { local: l, kind: 1, name: 0 }; };
+// (every field a key names is in the table by construction; one that is not fails the pass through the error output)
+fn fieldKey(names: &List<FieldName>, l: Int, ctor: &String, field: &String) -> Key ~ {
+    id = fieldNameId(names, ctor, field);
+    if id < 0 { "the ownership pass met a field the program does not declare or use: ".concat(ctor).concat(".").concat(field).concat("\n").printError(); };
+    return Key { local: l, kind: 2, name: id };
+};
+fn stringLess(a: &String, b: &String) -> Bool ~ {
+    for i in 0..size(a.bytes) {
+        if i >= size(b.bytes) { return false; };
+        x = toInt(get(a.bytes, i)); y = toInt(get(b.bytes, i));
+        if x != y { return x < y; };
+    };
+    return size(a.bytes) < size(b.bytes);
+};
+fn nameLess(a: &String, b: &String, ctor: &String, field: &String) -> Bool ~ {
+    if a != ctor { return stringLess(a, ctor); };
+    return stringLess(b, field);
+};
+// The names are sorted and distinct; a name's number is its place, from 1
+fn fieldNameId(names: &List<FieldName>, ctor: &String, field: &String) -> Int ~ {
+    lo = 0; hi = size(names);
+    while lo < hi ~ {
+        mid = (lo + hi) / 2;
+        if nameLess(get(names, mid).ctor, get(names, mid).field, ctor, field) { lo = mid + 1; } else { hi = mid; };
+    };
+    if lo < size(names) && get(names, lo).ctor = ctor && get(names, lo).field = field { return lo + 1; };
+    return 0 - 1;
+};
+fn sortNames(xs: List<FieldName>) -> List<FieldName> ~ {
+    if size(xs) <= 1 { return xs; };
+    mid = size(xs) / 2;
+    left = []; right = [];
+    for i in 0..size(xs) { if i < mid { left = push(left, clone(get(xs, i))); } else { right = push(right, clone(get(xs, i))); }; };
+    return mergeNames(sortNames(left), sortNames(right));
+};
+fn mergeNames(a: &List<FieldName>, b: &List<FieldName>) -> List<FieldName> ~ {
+    out = []; i = 0; j = 0;
+    while i + j < size(a) + size(b) [{ affirm i >= 0; affirm j >= 0; affirm i <= size(a); affirm j <= size(b); }] ~ {
+        takeA = j >= size(b);
+        if i < size(a) && j < size(b) { takeA = nameLess(get(a, i).ctor, get(a, i).field, get(b, j).ctor, get(b, j).field); };
+        if takeA { out = pushName(out, get(a, i)); i = i + 1; } else { out = pushName(out, get(b, j)); j = j + 1; };
+    };
+    return out;
+};
+fn pushName(out: List<FieldName>, n: &FieldName) -> List<FieldName> ~ {
+    if size(out) > 0 { if last(out).ctor = n.ctor && last(out).field = n.field { return out; }; };
+    return push(out, clone(n));
+};
+fn stepNames(out: List<FieldName>, steps: &List<RefStep>) -> List<FieldName> ~ {
+    for s in steps { if s is RefStep::Field { f = s as RefStep::Field; out = push(out, FieldName { ctor: clone(f.ctor), field: clone(f.field) }); }; };
+    return out;
+};
+fn statementNames(out: List<FieldName>, f: &Function) -> List<FieldName> ~ {
+    for b in f.blocks { for st in b.stmts {
+        if st is Statement::AssignRef { out = stepNames(out, (st as Statement::AssignRef).steps); };
+        if st is Statement::Assign || st is Statement::Peek || st is Statement::AssignRef {
+            rv = Rvalue::Use { o: Operand::Copy { local: 0 } };
+            if st is Statement::Assign { rv = clone((st as Statement::Assign).rv); };
+            if st is Statement::Peek { rv = clone((st as Statement::Peek).rv); };
+            if st is Statement::AssignRef { rv = clone((st as Statement::AssignRef).rv); };
+            if rv is Rvalue::ReadField { r = rv as Rvalue::ReadField; out = push(out, FieldName { ctor: clone(r.name), field: clone(r.field) }); };
+            if rv is Rvalue::TakeField { r = rv as Rvalue::TakeField; out = push(out, FieldName { ctor: clone(r.name), field: clone(r.field) }); };
+            if rv is Rvalue::Borrow { out = stepNames(out, (rv as Rvalue::Borrow).steps); };
+        };
+    }; };
+    return out;
+};
+// Every (constructor, field) a key can be made of: the fields of the declared types and those the statements read, take and borrow
+fn fieldNames(p: &Program) -> List<FieldName> ~ {
+    out = [];
+    for d in p.types { for v in variantsOf(p.types, declName(d)) { for f in v.fields { out = push(out, FieldName { ctor: clone(v.name), field: clone(f.name) }); }; }; };
+    for f in p.functions { out = statementNames(out, f); };
+    return sortNames(statementNames(out, p.entry));
+};
+fn keyLess(a: &Key, b: &Key) -> Bool ~ {
+    if a.local != b.local { return a.local < b.local; };
+    if a.kind != b.kind { return a.kind < b.kind; };
+    return a.name < b.name;
+};
+fn keySetHas(xs: &List<Key>, x: &Key) -> Bool ~ {
+    for k in xs { if k = x { return true; }; };
+    return false;
+};
+fn keySetAdd(xs: &List<Key>, x: Key) -> List<Key> ~ {
+    out = []; added = false;
+    for k in xs {
+        if !added && !keyLess(k, x) { out = push(out, clone(x)); added = true; };
+        if k != x { out = push(out, clone(k)); };
+    };
+    if !added { out = push(out, x); };
+    return out;
+};
+fn keySetUnion(a: &List<Key>, b: &List<Key>) -> List<Key> ~ {
+    out = []; i = 0; j = 0;
+    while i + j < size(a) + size(b) [{ affirm i >= 0; affirm j >= 0; affirm i <= size(a); affirm j <= size(b); }] ~ {
+        takeA = j >= size(b);
+        if i < size(a) && j < size(b) { takeA = keyLess(get(a, i), get(b, j)); };
+        if takeA { out = push(out, clone(get(a, i))); i = i + 1; }
+        else {
+            if i < size(a) { if get(a, i) = get(b, j) { i = i + 1; }; };
+            out = push(out, clone(get(b, j))); j = j + 1;
+        };
+    };
+    return out;
+};
+fn forgetLocal(xs: &List<Key>, l: Int) -> List<Key> ~ {
+    out = [];
+    for k in xs { if k.local != l { out = push(out, clone(k)); }; };
+    return out;
+};
+fn intSetHas(xs: &List<Int>, x: Int) -> Bool ~ {
+    for k in xs { if k = x { return true; }; };
+    return false;
+};
+fn intSetAdd(xs: &List<Int>, x: Int) -> List<Int> ~ {
+    out = []; added = false;
+    for k in xs {
+        if !added && k >= x { out = push(out, x); added = true; };
+        if k != x { out = push(out, k); };
+    };
+    if !added { out = push(out, x); };
+    return out;
+};
+fn localsOf(xs: &List<Key>) -> List<Int> ~ {
+    out = []; for k in xs { out = intSetAdd(out, k.local); };
+    return out;
+};
+fn operandLocal(o: &Operand) -> Int {
+    return match o { Operand::Copy { local: l } => l, Operand::Move { local: l } => l, Operand::Const { value: c } => 0 - 1 };
+};
+fn role(o: Operand, consume: Bool) -> RoleOperand { return RoleOperand { operand: o, consume: consume }; };
+fn roles(rv: &Rvalue) -> List<RoleOperand> ~ {
+    out = [];
+    match rv {
+        Rvalue::Use { o: o } => { out = push(out, role(clone(o), true)); },
+        Rvalue::BinaryOp { op: op, a: a, b: b } => { out = push(push(out, role(clone(a), false)), role(clone(b), false)); },
+        Rvalue::ListOp { op: op, args: args } => {
+            for i in 0..size(args) {
+                consume = (op = 4 && size(args) = 2) || (op = 5 && size(args) = 1) || (op = 45 && size(args) = 1)
+                    || (op = 6 && size(args) = 3 && i != 1)
+                    || (op = 29 && size(args) >= 3 && i >= 2)
+                    || (op = 31 && size(args) = 3 && i = 2)
+                    || (op = 32 && size(args) = 4 && i = 3)
+                    || (op = 34 && size(args) = 2 && i = 1)
+                    || ((op = 47 || op = 48 || op = 50 || op = 53) && i = 0)
+                    || op = 51 || ((op = 36 || op = 38 || op = 39) && size(args) = 1);
+                out = push(out, role(clone(get(args, i)), consume));
+            };
+        },
+        Rvalue::MakeList { items: items } => { for o in items { out = push(out, role(clone(o), true)); }; },
+        Rvalue::MakeBox { o: o } => { out = push(out, role(clone(o), true)); },
+        Rvalue::Unbox { o: o } => { out = push(out, role(clone(o), true)); },
+        Rvalue::Unsize { o: o } => { out = push(out, role(clone(o), true)); },
+        Rvalue::MakeData { name: name, fields: fields, values: values } => { for o in values { out = push(out, role(clone(o), true)); }; },
+        Rvalue::ReadField { o: o, name: name, field: field } => { out = push(out, role(clone(o), false)); },
+        Rvalue::IsVariant { o: o, name: name } => { out = push(out, role(clone(o), false)); },
+        Rvalue::AsVariant { o: o, name: name } => { out = push(out, role(clone(o), true)); },
+        Rvalue::Copy { o: o } => { out = push(out, role(clone(o), false)); },
+        Rvalue::TakeField { local: l, name: name, field: field } => { out = push(out, role(Operand::Copy { local: l }, false)); },
+        Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => {
+            out = push(out, role(Operand::Copy { local: root }, false));
+            for step in steps { if step is RefStep::Index { out = push(out, role(clone((step as RefStep::Index).o), false)); }; };
+        },
+        Rvalue::Deref { o: o } => { out = push(out, role(clone(o), false)); },
+    };
+    return out;
+};
+fn statementRoles(st: &Statement) -> List<RoleOperand> ~ {
+    if st is Statement::Assign { return roles((st as Statement::Assign).rv); };
+    if st is Statement::AssignRef {
+        a = st as Statement::AssignRef;
+        out = singleton(role(Operand::Copy { local: a.local }, false));
+        for s in a.steps { if s is RefStep::Index { out = push(out, role(clone((s as RefStep::Index).o), false)); }; };
+        for ro in roles(a.rv) { out = push(out, clone(ro)); };
+        return out;
+    };
+    return [];
+};
+fn stmtDef(st: &Statement) -> Int {
+    if st is Statement::Assign { return (st as Statement::Assign).local; };
+    if st is Statement::Peek { return (st as Statement::Peek).local; };
+    return 0 - 1;
+};
+fn termDef(t: &Terminator) -> Int { if t is Terminator::Call { return (t as Terminator::Call).dest; }; return 0 - 1; };
+fn successors(t: &Terminator) -> List<Int> {
+    if t is Terminator::Goto { return singleton((t as Terminator::Goto).block); };
+    if t is Terminator::Switch { return pair((t as Terminator::Switch).yes, (t as Terminator::Switch).no); };
+    if t is Terminator::Call { return singleton((t as Terminator::Call).next); };
+    return [];
+};
+// Whether every block of every function has an id that is not negative, there is a block 0, and every jump goes to a block of the function
+fn functionBlocksWellFormed(f: &Function) -> Bool ~ {
+    ids = []; for b in f.blocks { if b.id < 0 { return false; }; ids = intSetAdd(ids, b.id); };
+    if !intSetHas(ids, 0) { return false; };
+    for b in f.blocks { for s in successors(b.term) { if !intSetHas(ids, s) { return false; }; }; };
+    return true;
+};
+fn blocksWellFormed(p: &Program) -> Bool ~ {
+    if !functionBlocksWellFormed(p.entry) { return false; };
+    for f in p.functions { if !functionBlocksWellFormed(f) { return false; }; };
+    return true;
+};
+fn localIn(locals: &List<LocalDecl>, l: Int) -> LocalDecl ~ {
+    for d in locals { if d.id = l { return clone(d); }; };
+    return LocalDecl { id: l, named: false, name: "", ty: Type::TInt };
+};
+fn localTypeIn(locals: &List<LocalDecl>, l: Int) -> Type ~ { return localIn(locals, l).ty; };
+fn getLocal(f: &Function, l: Int) -> LocalDecl ~ { return localIn(f.locals, l); };
+fn nextLocal(locals: &List<LocalDecl>) -> Int ~ {
+    n = 1; for d in locals { if d.id >= n { n = d.id + 1; }; }; return n;
+};
+fn nextBlock(blocks: &List<MirBlock>) -> Int ~ {
+    n = 1; for b in blocks { if b.id >= n { n = b.id + 1; }; }; return n;
+};
+fn freshLocal(r: &mut Rewrite, ty: Type) -> Int ~ {
+    n = (*r).next;
+    (*r).next = n + 1;
+    (*r).locals = push(clone((*r).locals), LocalDecl { id: n, named: false, name: "", ty: ty });
+    return n;
+};
+fn isDropFunction(name: &String) -> Bool ~ {
+    suffix = " as Drop>::drop";
+    n = size(name.bytes); s = size(suffix.bytes);
+    return n >= s && name.slice(n - s, n) = suffix;
+};
+fn hasDrop(p: &Program, name: &String) -> Bool ~ {
+    target = "<".concat(name).concat(" as Drop>::drop");
+    for f in p.functions { if f.name = target { return true; }; };
+    return false;
+};
+// The type argument of a `named "B" 1 type T` (a List or a Box as the data writes them)
+fn soleTypeArgument(t: &Type) -> Parsed<Type> ~ {
+    if t is Type::TNamed {
+        n = t as Type::TNamed;
+        if n.argc = 1 && size(n.argTokens) > 1 { if !get(n.argTokens, 0).quoted && get(n.argTokens, 0).text = "type" { return typeAt(n.argTokens, 1); }; };
+    };
+    return Parsed<Type> { value: Type::TInt, pos: 0, ok: false };
+};
+fn needsDrop(p: &Program, t: &Type) -> Bool ~ {
+    if t is Type::TBox { return true; };
+    if t is Type::TList { return true; };
+    if t is Type::TArray { return needsDrop(p, Box::unbox((t as Type::TArray).elem)); };
+    // (the data writes a Box as `named "Box" 1 type T`)
+    if t is Type::TNamed { if (t as Type::TNamed).base = "Box" && (t as Type::TNamed).argc = 1 { return true; }; };
+    name = ""; found = false;
+    if t is Type::TNamed { name = clone((t as Type::TNamed).name); found = true; };
+    if t is Type::TVariant { owner = ownerOf(p.types, (t as Type::TVariant).name); name = owner.text; found = owner.ok; };
+    if !found { return false; };
+    if beforeAngle(name) = "List" || hasDrop(p, name) { return true; };
+    for v in variantsOf(p.types, name) { for f in v.fields { if needsDrop(p, f.ty) { return true; }; }; };
+    return false;
+};
+fn fieldsOf(p: &Program, ctor: &String) -> List<Field> ~ {
+    owner = ownerOf(p.types, ctor);
+    if owner.ok { for v in variantsOf(p.types, owner.text) { if v.name = ctor { return clone(v.fields); }; }; };
+    return [];
+};
+fn stepsType(p: &Program, start: &Type, steps: &List<RefStep>) -> Type ~ {
+    ty = clone(start);
+    for step in steps {
+        if step is RefStep::Field {
+            f = step as RefStep::Field; result = Type::TInt;
+            for field in fieldsOf(p, f.ctor) { if field.name = f.field { result = clone(field.ty); }; };
+            ty = result;
+        } else {
+            result = Type::TInt;
+            if ty is Type::TList { result = clone(Box::unbox((ty as Type::TList).elem)); };
+            if ty is Type::TArray { result = clone(Box::unbox((ty as Type::TArray).elem)); };
+            // (an index of a Box is an element of the array it holds, or else the slot of its payload, which native places follow)
+            boxed = false; inner = Type::TInt;
+            if ty is Type::TBox { boxed = true; inner = clone(Box::unbox((ty as Type::TBox).inner)); };
+            if ty is Type::TNamed {
+                named = ty as Type::TNamed;
+                argument = soleTypeArgument(ty);
+                if argument.ok && named.base = "List" { result = clone(argument.value); };
+                if argument.ok && named.base = "Box" { boxed = true; inner = clone(argument.value); };
+            };
+            if boxed {
+                if inner is Type::TArray { result = clone(Box::unbox((inner as Type::TArray).elem)); } else { result = inner; };
+            };
+            ty = result;
+        };
+    };
+    return ty;
+};
+fn isProjection(rv: &Rvalue) -> Bool {
+    if rv is Rvalue::ReadField || rv is Rvalue::Deref { return true; };
+    if rv is Rvalue::ListOp { op = (rv as Rvalue::ListOp).op; return op = 1 || op = 2 || op = 3 || op = 28 || op = 37; };
+    return false;
+};
+fn projectionSource(rv: &Rvalue) -> Int ~ {
+    if rv is Rvalue::ReadField { return operandLocal((rv as Rvalue::ReadField).o); };
+    if rv is Rvalue::Deref { return operandLocal((rv as Rvalue::Deref).o); };
+    if rv is Rvalue::ListOp && size((rv as Rvalue::ListOp).args) > 0 { return operandLocal(get((rv as Rvalue::ListOp).args, 0)); };
+    return 0 - 1;
+};
+fn borrowKey(names: &List<FieldName>, root: Int, steps: &List<RefStep>) -> Key ~ {
+    if size(steps) > 0 && get(steps, 0) is RefStep::Field {
+        f = get(steps, 0) as RefStep::Field; return fieldKey(names, root, f.ctor, f.field);
+    };
+    return whole(root);
+};
+fn noLoan(l: Int) -> Loan { return Loan { local: l, refs: [], view: [], isView: false }; };
+fn loanLookup(loans: &List<Loan>, l: Int) -> Loan ~ { for x in loans { if x.local = l { return clone(x); }; }; return noLoan(l); };
+// (by value: a loan that is replaced in place, or one that is not kept and not there, copies nothing)
+fn loanPut(loans: List<Loan>, value: Loan) -> List<Loan> ~ {
+    keep = size(value.refs) + size(value.view) > 0;
+    i = 0;
+    while i < size(loans) && get(loans, i).local < value.local ~ { i = i + 1; };
+    present = i < size(loans) && get(loans, i).local = value.local;
+    if present && keep { return set(loans, i, value); };
+    if !present && !keep { return loans; };
+    out = []; added = false;
+    for x in loans {
+        if !added && x.local >= value.local { if keep { out = push(out, clone(value)); }; added = true; };
+        if x.local != value.local { out = push(out, clone(x)); };
+    };
+    if !added && keep { out = push(out, value); };
+    return out;
+};
+fn concatStatements(a: List<Statement>, b: &List<Statement>) -> List<Statement> ~ { out = a; for st in b { out = push(out, clone(st)); }; return out; };
+fn blockIn(blocks: &List<MirBlock>, id: Int) -> MirBlock ~ { for b in blocks { if b.id = id { return clone(b); }; }; return MirBlock { id: id, stmts: [], term: Terminator::Unreachable }; };
+fn blockIndex(blocks: &List<MirBlock>, id: Int) -> Int ~ { for i in 0..size(blocks) { if get(blocks, i).id = id { return i; }; }; return 0 - 1; };
+// The positions of the keys in ascending order, equal keys in their order (a merge sort)
+fn intAt(xs: &List<Int>, i: Int) -> Int ~ { if i >= 0 && i < size(xs) { return get(xs, i); }; return 0; };
+fn sortedOrder(keys: &List<Int>) -> List<Int> ~ {
+    order = []; for i in 0..size(keys) { order = push(order, i); };
+    n = size(order); width = 1;
+    while width < n [{ affirm width >= 1; affirm n >= 0; }] ~ {
+        next = []; lo = 0;
+        while lo < n [{ affirm lo >= 0; affirm lo <= n; affirm width >= 1; affirm width < n; }] ~ {
+            mid = n; if width < n - lo { mid = lo + width; };
+            hi = n; if width < n - mid { hi = mid + width; };
+            i = lo; j = mid;
+            while i + j < mid + hi [{ affirm i >= lo; affirm i <= mid; affirm j >= mid; affirm j <= hi; affirm hi <= n; affirm lo >= 0; }] ~ {
+                takeI = j >= hi;
+                if i < mid && j < hi { takeI = intAt(keys, intAt(order, i)) <= intAt(keys, intAt(order, j)); };
+                if takeI { next = push(next, intAt(order, i)); i = i + 1; } else { next = push(next, intAt(order, j)); j = j + 1; };
+            };
+            lo = hi;
+        };
+        order = next;
+        if width < n - width { width = width + width; } else { width = n; };
+    };
+    return order;
+};
+// Sorted by id; of blocks with one id the last is kept
+fn sortBlocks(blocks: &List<MirBlock>) -> List<MirBlock> ~ {
+    sorted = true;
+    if size(blocks) > 0 { for i in 1..size(blocks) { if get(blocks, i - 1).id >= get(blocks, i).id { sorted = false; }; }; };
+    if sorted { return clone(blocks); };
+    ids = []; for b in blocks { ids = push(ids, b.id); };
+    order = sortedOrder(ids);
+    out = noOwnershipBlocks();
+    for k in 0..size(order) {
+        i = get(order, k);
+        last = true;
+        if k < size(order) - 1 { if intAt(ids, get(order, k + 1)) = intAt(ids, i) { last = false; }; };
+        if last && i >= 0 && i < size(blocks) { out = push(out, clone(get(blocks, i))); };
+    };
+    return out;
+};

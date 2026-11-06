@@ -31,7 +31,7 @@ import qualified PackageCompile
 import MirHousekeeping (listLibrary)
 import qualified MirHousekeeping as Housekeeping
 import MirLists (lowerLists)
-import MirOwnership (expandRefWrites, insertOwnership)
+import MirHousekeeping (expandRefWrites, insertOwnership)
 import Native (buildExecutable, cacheDirectory, stopOwnedProcess, validSignalTarget, withSpawnedProcess)
 import Syntax (Expression (..), Statement (..), Value (..))
 import ParsedFile
@@ -646,7 +646,7 @@ parserFixpointRecipe = inPrimedWorker "fixpoint" [] $ do
         Right (PackageResult pkg) -> Ok pkg
         Right _ -> Error "parser was not loaded as its current package"
     ownPackage pkg = PackageCompile.compileModulesLinked pkg `bindResult` \program ->
-        mapResult insertOwnership (Housekeeping.nativeProgram program)
+        Housekeeping.nativeProgram program `bindResult` insertOwnership
     checkedParser reference current decls source = unsafePerformIO $ do
         p0 <- reference decls source
         pn <- current decls source

@@ -1,44 +1,72 @@
-# Replacing all Haskell with a fully Tersus native implementation
+# Replacing Haskell with Tersus
 
-The aim: the compiler is a Tersus program compiled to native code, and no
-Haskell remains in the repository. Step 31 (`STEP31.md`) did the first part:
-the lowering from the MIR to LLVM IR is `examples/mir/emit/emit.tersus`, built from
-the seed `bootstrap/emitter.ll` in two stages, and `LlvmEmit` is deleted.
-This is the plan for the rest, in the order to do it. Each target names the
-Haskell it deletes, why it comes where it does, and what blocks it.
+The goal is a native Tersus compiler and test suite with no Haskell dependency.
+The LLVM emitter was the first compiler stage to move (`STEP31.md`). This
+survey separates completed replacements from the next work; the numbers below
+are measured on GitHub master `a9e12e6cc8aa0337e1a44b6fff570e58ada5732b`
+(2026-11-05), not the earlier `751dcc9` snapshot.
 
-## Where things stand (measured 2026-10-30, at `751dcc9`)
+## Survey baseline
 
-The Haskell package `tersus/` is 61 `.hs` files, about 24,900 lines:
+At `a9e12e6`, `tersus/src/` had 45 Haskell files and 21,816 lines. The table
+records that baseline; ownership is now a Tersus pass, and the 51-line
+`MirOwnership.hs` retains only operand-role helpers for move checking.
 
-| Part | Lines | Modules |
-|---|---|---|
-| Frontend | 4,454 | `Parse` (1,377), `TypeCheck` (2,241), `StdLib` (839) |
-| Proof and validation | 3,997 | `ProofEngine` (1,363), `MirValidate` (812), `Ghost` (642), `MirVerify` (438), `MirGhost` (245), `ProofState`, `ProofHelpers`, `Linear` |
-| MIR and its passes | 4,116 | `Mir` (626), `MirLower` (867), `MirOwnership` (501), `MirData` (469), `MirLists` (450), `MirMoves` (426), `MirMono` (213), `MirEval` (572) |
-| Core types and utilities | 1,084 | `TersusTypes` (713), `Pretty` (209), `PreludeSource` (78), `Utils` (71), `Hash` (17) |
-| Self-hosted bridges | 977 | `SelfHostedMir` (782), `SelfHostedProof` (196) |
-| Native and bootstrap glue | 793 | `LlvmRuntime` (605), `Bootstrap` (134), `Native` (57) |
-| Pipeline and CLI | 371 | `Pipeline` (181), `Cli` (192), plus `app/Main.hs` (56) |
-| Tests | 8,399 | 25 files under `test/`, plus `dev/parity/Parity.hs` (101) |
+| Area | Main modules |
+|---|---|
+| Elaboration | `TypeCheck` (1,790), `TypeCheckCore` (1,663), `Types`, `Syntax`, `Solver` |
+| MIR and passes | `MirLower` (1,247), `MirMoves` (719), `Mir` (698), `MirLists` (515), `MirMono` (276); the former 1,196-line ownership transform is retained only as the frozen test oracle |
+| Parser and data bridges | `AstData`, `DataCodec`, `ParsedFile`, `TersusParser`, `SourceParse`, `FileParserProtocol`, `ParserSeed`, `MirData` |
+| Validation host | `SelfHostedMir` (3,090), `ValidatorNative` (349) |
+| Packages and linking | `Modules` (1,362), `ModuleResolve` (535), `Link` (347), `Interface` (269), `PackageCompile` (268), `LibPackage` (164) |
+| Runtime and host | `MirEval` (802), `MirHousekeeping`, `Native`, `Seed`, `Bootstrap`, `PreludeSource`, `LlvmRuntime`, `Pipeline`, `Cli`, utilities |
 
-Already in Tersus: the emitter (`examples/mir/emit/emit.tersus`, 3,698 lines), a
-reader and writer of the MIR as data (`examples/mir/mir_reader/mir_reader.tersus`) and a
-checker of it (`examples/mir/mir_verify/mir_verify.tersus`), the
-libraries every program gets (`lib/prelude.tersus`, `lib/lists.tersus`,
-`lib/box.tersus`, `lib/string.tersus`), and a validator that is not yet the
-production one (`lib/validation/validation.tersus`, 2,884 lines). The superseded
-Python prototype and the `stack/tersus/` starter snapshot are deleted
-(the second in PR #95), so everything below is the real remainder.
+At the same baseline, `test/*.hs` had 17,682 lines and the CLI entry had 81.
+They are separate from the source count. Reproduce current counts from
+`tersus/` with `wc -l src/*.hs test/*.hs app/Main.hs`.
 
-Dependencies are boot libraries only (`base`, `containers`, `directory`,
-`filepath`, `parsec`, `process`, `template-haskell`), which is what makes
-replacing the Haskell thinkable at all: nothing here needs a Haskell
-library that Tersus would have to grow first.
+## Implemented replacements
 
-## The targets, in order
+- **LLVM emission:** `examples/mir/emit/` is the production emitter.
+  `LlvmEmit.hs` is deleted. Bootstrap uses the release asset pinned by
+  `bootstrap/emitter.sha256`.
+- **Validation:** the `lib/validation/` package is the only production validator.
+  `SelfHostedMir` encodes its input and `ValidatorNative` builds and runs it;
+  an unmodelled program is refused, not sent to a Haskell fallback.
+  The old proof engine, validator and `SelfHostedProof` are deleted. The
+  bridge remains: replacing a validator is not the same as deleting its host.
+- **Builtin contracts:** `lib/stdlib.tersus` supplies them through
+  `StdLibDefs`. `StdLib.hs` still contains 207 lines of primitive signatures
+  and metadata; this is not an 839-line pending contract rewrite.
+- **MIR checking and ghost erasure:** `mir_verify` and `mir_erase` are
+  production Tersus tools hosted by `MirHousekeeping`. `MirVerify.hs` and
+  `MirGhost.hs` are deleted. The host restores metadata omitted by their
+  runtime data views. The MIR executor runs only the recursive erasure of the
+  List/Box library during tool construction. Cold tool builds (E1, checker,
+  eraser, P1 and the unchecked validator) run concurrently; their prepared
+  owned-MIR inputs are cached per compiler snapshot, entry and flags, and each
+  executable's identity is the actual prepared bytes.
+- **Parsing:** `examples/parser/` supplies native P1. `Parse.hs` and the
+  Haskell-parser selector are deleted. P0 is the pinned native parser seed;
+  the explicit interpreted selector executes the Tersus parser, not a
+  different grammar. `AST_DATA.md` describes the P0/P1/P2 evidence.
+- **Ownership and reference-write expansion:** `examples/mir/ownership/`
+  contains both transformations, and the emitter executable dispatches their
+  native requests. `MirHousekeeping` keeps the monomorphization adapter and
+  `MirOwnershipData` preserves omitted metadata. The replacement is implemented;
+  performance optimization and final verification are still in progress.
+- **AST data:** `AstData` and `examples/ast_reader/` exchange parsed syntax
+  and complete elaborated occurrence types, contracts and builtin metadata.
+  Parsed data is a production boundary; elaboration itself remains Haskell.
 
-### Validator package migration
+The validator keeps changing independently. PR #169 is on the survey base;
+its loop-state anchors and closure reuse reduce work unrelated to a loop's
+writes. PR #167 (test cleanup) and PR #168 (CI speed) landed after it; the
+ownership replacement is built on `de36319b1d370cd17dcf5cca2188b2424d143268`.
+Baseline counts above describe `a9e12e6`, not a current test total or
+performance result.
+
+## Validator package migration
 
 The validator core and native driver are one ordinary package under
 `lib/validation/`, with `driver.tersus` as the entry for native construction
@@ -90,364 +118,115 @@ requires uncached proofs of the full linked core/driver source and physical
 native List/Box storage. No algorithm, wire format or bootstrap trust gate
 changes with the move.
 
-### 1. Make the Tersus validator the production validator (deletes ~4,000 lines)
+## Ownership replacement
 
-`ProofEngine`, `Ghost`, `MirValidate`, `MirVerify`, `MirGhost`,
-`ProofState`, `ProofHelpers` and `Linear` go, replaced by
-`lib/validation/validation.tersus`. This comes first because it is the only target
-whose Tersus implementation is already substantially written, and because
-it deletes the largest single chunk.
+`insertOwnership` and `expandRefWrites` now run in Tersus through the shared
+MIR reader/writer and the emitter executable. The production Haskell
+`MirOwnership` module retains only the operand-role helpers `MirMoves` needs.
+The old transformation is frozen in `test/TestOwnershipOracle.hs` for
+regression comparisons and the explicit development seed-migration command.
 
-What exists: `SelfHostedProof` interns Haskell proof terms and answers
-supported relation and `Within` queries from a Tersus proof context;
-`SelfHostedMir` translates a subset of typed MIR (copies, boxing, plain
-structs, pure binary operations, list and array literals and operations,
-assertions, jumps and branches, loops by their declared invariant,
-direct calls with simple contracts) for the Tersus checker;
-`dev/parity` runs the two validators against each other. Both bridges
-return `Nothing` on anything unsupported, and unsupported facts are
-omitted, so a bridge can never invent a proof. `Pipeline.compileSource`
-still calls the Haskell `validateProgram`; the bridges are for
-comparison only. Their source-container view excludes the standard List/Box
-address/block layout declarations and invariants; those belong to the native
-container-library validator, not to the logical list and Box proof model.
-User declarations and invariants remain subject to the bridge's capability
-checks. Qualified Box storage selectors remain distinct from payload fields
-in the proof bridge.
+The native order is a correctness constraint:
 
-What blocks the flip, in the bridges' own terms: enums; `extern fn`;
-`Addr*`/`Block*` operations, `TBlock` and `TWord`; loop invariants the
-Haskell validator infers (such as a counter against the size of the list
-it pushes to) rather than reads from the source; and joining states at a
-merge instead of walking each path through the join separately.
+```
+validate -> eraseGhosts -> expandRefWrites -> lowerLists
+         -> monomorphize -> ownership -> verifyProgram -> emitter
+```
 
-Gate: `Pipeline` may call the Tersus validator when `dev/parity` and the
-differential checks in `TestPipeline` agree on every example and every
-test program, with the Haskell validator kept for one release as the
-oracle behind a flag. Then the Haskell proof modules and both bridges
-are deleted together (the bridges exist only to feed a Haskell host).
+The host's `insertOwnership` calls `MirMono.monomorphize` before invoking the
+Tersus ownership pass. The reference-write entry point runs earlier; moving
+monomorphization itself remains separate work. Reference-write expansion
+rebuilds logical fields and sequences before list operations become helper
+calls, while generic function bodies still contain symbolic types and sizes.
+Assignments through reference-typed roots remain reference writes for the
+emitter and retained Haskell adapters.
 
-Status (2026-10-31, PR #94): the flip is made. `Pipeline` validates only
-through `lib/validation/validation.tersus`, fed by `SelfHostedMir`; the Haskell
-validator, `SelfHostedProof` and `dev/parity` are deleted, and a program
-the bridge does not model is refused, never passed.
+The data contract must follow those phases:
 
-Since then the three things master had gained have been modeled. For
-equality, a relation used as a value is the comparison application
-itself, a struct local is its constructor applied to its fields, a
-branch derives the relation from any comparison term equal to the
-branched one, and two relation applications are one boolean when their
-arguments match, both fail, or each gives the other. References are the
-version of their place: the bridge finds each reference local's borrow
-statically, gives a written root a new term (a construction with one
-field replaced, or a `set`), rebinds the borrows of a root after it
-changes, and gives update parameters fresh post-call terms with `old()`
-read from an entry snapshot; returned references are the argument's
-place. `testBorrow` passes outright.
+- Before list lowering, preserve symbolic `Type`/`Size` values, type arguments,
+  function parameter metadata and declarations. The shared codec retains
+  `TNamed`'s original base and argument tokens; do not replace them with a
+  rendered-name-only representation.
+- Ownership runs on the monomorphized program and needs `borrowed`,
+  `mutBorrowed`, `from`, source local names, all type declarations and the
+  concrete Drop/Clone functions. Removing an apparently uncalled implementation
+  can change ownership or the code emitted for a clone/drop.
+- `MirData` v1 is a runtime view, not a lossless replacement for `Program`:
+  it omits `progGenerics`, `progInvariants`, function specifications and ghosts.
+  A host adapter must keep untouched metadata on the original program and
+  restore any ghost identities across statement expansion/block splitting.
+  Do not use `forNative` as the new pipeline result. Only the existing
+  normalization/erasure stages may discard metadata according to their contract.
+- `monomorphize` has a no-generic fast path that returns the original program,
+  including its proof metadata. Do not assume every ownership input has empty
+  specifications merely because it crossed that call.
 
-A `forall` over list elements is no longer assumed only for one fresh
-index. The bridge records it as one fact the checker instantiates:
-two lists elementwise equal (function -30, the offset on either side),
-elements different from a value (-31), elements equal to a value (-32),
-and elements shifted from another list's (-33). The checker
-instantiates a fact inside its range and at its end point, by a case
-split on the index, reading through a push where the list was built by
-one, and it proves a `get` of a list of known size from its elements.
-With that, the list and string `Eq` impls prove, and `String::concat`,
-`String::slice` and `String::find` check.
+Bootstrap for this replacement combines ownership with the emitter executable.
+The pinned stage-0 emitter seed runs `pass expand` and `pass ownership` on the
+sources the host builds for itself (the emitter, checker, eraser, parser and
+validator), so their prepared inputs need no stage 1 and are made concurrently;
+stage 1 emits the tools and owns and emits user programs. The bootstrap
+fixpoint makes stage 0 and stage 1 own the emitter alike. Ownership has no
+interpreted cold path or Haskell fallback. `dev/emitter-seed` provides an explicit migration
+command that uses the frozen test oracle only to make a prototype from the
+older seed; its production `emit` command checks independent stage-0/stage-1
+ownership and emission. The prototype is never the final seed. Publishing a PR
+requires a production-emitted seed that reproduces itself, its release asset
+and pin, and the full test evidence below.
 
-Generic code is checked as the copies a call decides: the bridge is
-given the monomorphised program (`MirMono`'s copies with their
-contracts kept), with the templates beside the copies as the sources
-of contracts that name a function nothing calls. A call written in a
-proof carries its contract with it (the callee's requires are an
-obligation wherever the clause is used, its ensures are assumed of
-the application's term), and a function declared `~` may not be
-called in a proof at all. The function that checks an impl against
-its trait is checked as written, or a weaker impl would pass. With
-that, `HashMap` and `HashSet` check: their tests pass, including the
-spread past four entries. The checker's arithmetic no longer traps
-the compiled validator on values like the least integer: a linear
-combination whose bound is not representable is dropped rather than
-computed, and a size is known never negative. The validator's own
-self-check (`testMir` on `lib/validation/validation.tersus`) has not finished in
-this environment; it is still unverified.
+Gate: exact differential MIR checks against the frozen Haskell oracle for
+corpus programs with neither reference construction nor reference writes; the independent heap model and native/
+reference parity for deliberate reference-write fixes; metadata and malformed-
+input checks; the complete suite and opt-in host validation; and independent
+stage-0/stage-1 ownership and emitter/parser bootstrap fixpoints. Cold bootstrap
+must also stay within the agreed performance budget against the same-host base.
 
-The validator itself uses `HashMap` and `HashSet`, so every validation
-runs those libraries interpreted. Since the rebase the solver has been
-sped up without changing its verdicts (equality and difference
-searches work on class representatives, one context analysis serves
-every goal asked of a context at a branch, and the interpreter skips
-its reference bookkeeping at calls when the program makes no
-reference), and a joined term keeps the bounds both branches give it,
-including one that follows from a branch value (`0 <= 0 - n` from
-`n < 0`), which the `String::fromInt` shape needs.
+## Next work, in priority order
 
-The validator no longer runs interpreted in production: it is compiled
-to native code once (with `lib/validation/driver.tersus` as its main
-program, which reads the bridge's encoded functions from standard
-input) and kept in the cache directory under an identity derived from its exact
-owned-MIR input, emitter identity, runtime, target and compiler flags
-(`ValidatorNative`); `Pipeline` runs that program for every validation. It is compiled without being validated,
-as a bootstrap program is, and is used only after it has validated
-what it is made of: the native storage library its lists and Boxes are
-built with, and its own source, each function by a process of its own,
-in parallel. The interpreted validator remains only where the
-validator is itself the program under test (`TestPipeline`'s checks of
-`lib/validation/validation.tersus`).
+### 1. Native monomorphization
 
-Concrete evaluation is in the validator: a term whose parts are all
-known is recorded as the constant it evaluates to (arithmetic,
-`size` and `get` of literal, pushed and made lists), as the Haskell
-engine's constant values did, and loop invariants are inferred from
-what the entry state proves, in the families the reference infers.
+Replace `MirMono.monomorphize` after the ownership gates pass. Its baseline is
+276 lines, but it needs a data
+contract for generic type templates and type/size substitution, reachable
+instances, and implicit Drop instantiation. `monomorphizeForValidation` preserves
+contracts and serves `SelfHostedMir`; moving the native path does not authorize
+stripping that validation metadata or deleting the validation path.
 
-Addresses, permissions and uninitialised slots are modeled in the
-bridge: each `Addr`, `Block` and `Uninit` operation is an application
-with the contract `StdLib` gives it (what it needs is checked, what it
-promises is assumed), a write or an emptied slot is a `set` on the
-block's ghost arrays, whose size is the block's capacity, and an
-operation that makes a new address or permission is tagged so two are
-never one term. A `forall` that cannot be stated as one of the
-checker's range facts is checked but not assumed, and what a checked
-`forall` assumed of its index is forgotten after it: assuming the
-guards of an instance that cannot exist made every later goal pass.
-An `extern fn` is assumed at its calls to keep its contract, the
-narrowing conversions give a value in their type's range, and a loop
-test of several parts joined by `&&` (a call among them) or `||` is
-checked as written; after `||` the body knows only what every test
-gives, as LANGUAGE.md says. The solver canonicalises terms before
-linear arithmetic and splits a get of a written list on the written
-index. With that the pointer and connective tests pass.
+### 2. Elaboration and the package frontend
 
-`String::fromInt` is still too slow to check: the literal it returns
-for the least integer puts twenty element facts in the entry context of
-the whole function, and every goal at its loops works over them. Every
-program that mentions `String` checks the whole library, so this blocks
-the string tests and the string cases of `TestEq`. Ordering the
-integer constants as a chain instead of pair by pair removes most of
-the cost of a long literal, but it changes one verdict of
-`testInferredInvariants` and is not in yet.
+Move `TypeCheck`/`TypeCheckCore` over the elaborated AST bridge, including
+interfaces, builtin typing, trait resolution and diagnostics. The parser is done;
+this is not a second parser rewrite. Keep occurrence typing and declaration
+ordering explicit (`AST_DATA.md`).
 
-Open soundness bug, older than the pointer work: a `for` loop whose
-body sets an element of a literal list, in a function that requires
-its bound to be positive, leaves a contradictory context after the
-loop (`affirm 1 = 2` validates after `for i in 0..n { out = set(out,
-0, 7); }` with `affirm n > 0` required); the same loop written with
-`while` is refused as it should be. `testInferredInvariants` 18 fails
-from it, and 16 fails to prove a get through a pushing loop.
+Package loading and linking are also compiler work, not incidental CLI glue:
+`Modules`, `ModuleResolve`, `Interface`, `LibPackage`, `PackageCompile` and `Link`
+resolve canonical names, compile interfaces and library units, reject collisions,
+and retain reachable implementations. Include them in the eventual frontend
+replacement instead of leaving them out of the roadmap.
 
-### 2. Write the standard library as Tersus text (deletes `StdLib`, 839 lines)
+### Deferred or coordinated work
 
-`StdLib.hs` defines the builtins in Haskell; its own TODO says to write
-the standard library as text to be parsed. `lib/*.tersus` and
-`PreludeSource` already prove the pattern of embedding Tersus source and
-parsing it in front of a program. Doing this early removes builtin
-definitions that the Tersus parser (target 6) would otherwise meet as
-special cases, and shrinks the surface the proof bridges must intern.
+Draft [PR #157](https://github.com/weirdev/tersus/pull/157) changes collection
+proof frames and overlaps moves, ownership and late list lowering. It remains
+open at this survey. Do not adopt its unlanded invariants or change its branch.
+Leave `MirLists`, `MirMoves` and `MirLower` replacements until that design settles;
+check fresh master before implementing each.
 
-Blocked by: builtins that read the world (`readByte`, the file and
-argument readers) have no proof representation yet; the Tersus proof
-context skips them (`SelfHostedProof` declines a goal that mentions
-one). Those stay as named primitives the validator knows by contract,
-as today.
+`SelfHostedMir` is large but still tracks active validator changes. Preserve it
+until a Tersus frontend can supply the validator's complete input. Retire
+`MirEval` rather than port it: it is the reference executor and cold-bootstrap
+runner until native replacements can build themselves without it.
 
-### 3. MIR housekeeping in Tersus (deleted `MirVerify` 438, `MirGhost` 245; `MirData` stays until target 6)
+## Final host and test replacement
 
-The MIR-as-data format is already defined twice in Tersus (the reader in
-`examples/mir/emit/emit.tersus` and `examples/mir/mir_reader/mir_reader.tersus`), and
-`TestMirData`, `TestMirReader` and `TestMirEmit` are ready-made oracles:
-a Tersus writer of the format must round-trip every example, and a
-Tersus well-formedness check must accept and refuse the same programs
-as `MirVerify`. Erasing ghosts (`MirGhost`) is a small pass over the
-same types. Mostly transcription; do it while the format is fresh from
-target 1's bridge work.
+A Tersus entry point must load files and packages, run the compiler stages,
+invoke clang and manage bootstrap/cache failures. Primitive OS/runtime symbols
+stay outside the language where required; `LlvmRuntime`'s remaining C surface is
+a separate runtime task, not an ownership rewrite.
 
-Status (2026-10-31): done. The writer and the reader were already
-Tersus; the check is `examples/mir/mir_verify/mir_verify.tersus` and the erasure is
-`examples/mir/mir_erase/mir_erase.tersus`. For the erasure the data gained a
-version 2 (`MirData.writeProgramWithGhosts`, printed by `tersus mir
---ghost-data` from a validated program before its ghosts are
-erased): the only records it adds are `ghost` and `dissolve L`, with
-the types `block` and `uninit` that version 1 already wrote, since a
-ghost statement's contents and a function's specification do not
-survive erasure and are not written. The eraser takes the permissions
-out, makes each `Uninit<T>` a `T`, refuses the `Block::cast`s whose
-slots do not lay out alike, and writes version 1. Both tools build a
-per-function HashMap from explicit local IDs to declaration positions;
-the eraser also records each first declaration's ghost classification.
-Duplicate IDs keep first-match lookup behavior, while every declaration
-is still visited in its original order. Casts are checked against the
-original declarations before any function is erased.
-
-The host has moved: `MirHousekeeping` runs the two Tersus programs on
-the MIR as data (cached native executables built from the seed, as
-the emitter is built) wherever the pipeline checked or erased a program.
-The MIR executor is used only for recursive erasure during tool construction;
-native build failures are explicit. P0/E0 preflight precedes prepared-input
-lookup. Independent E1, checker, eraser, P1 and unchecked-validator frontends
-run concurrently; recursive List/Box erasure initializes only when needed.
-Derived tools wait for E1 only to emit, retaining one cross-process cache
-lock per executable. Full validator self-validation runs alongside the
-other post-E1 builds; its source and List/Box library must both pass before
-production use.
-
-Compiled-tool copies and cache writes open writable descriptors atomically
-close-on-exec. A single reader/writer lock also excludes process creation from
-executable-writing regions until their descriptors close; waiting and output
-draining happen outside that lock. Neither safeguard alone closes both the
-inherited-descriptor lifetime and the clone-to-exec window.
-
-Prepared owned-MIR bytes and complete validator self-check transports are
-cached per compiler snapshot, entry and flags. Every read checks the stored
-fingerprint and format when a payload is opened; corrupt or partial entries
-are rebuilt, and only successful preparation is published atomically.
-A compact locator remembers each derived content key and the validated
-inputs' checksum headers, sizes and modification times. Warm processes
-check that metadata without decoding every tool program. These are
-freshness checks, not revalidation of unread payload bytes; a build miss
-still prepares and validates its actual inputs outside the publication lock.
-Both payloads and locators remain specific to the full compiler snapshot.
-Executable identities use
-the actual prepared bytes, not the snapshot identity, so an unrelated host
-source change can reuse unchanged native tools. The checked-validator
-identity also binds both complete self-check transports: proof-only changes
-must recheck even when executable bytes are unchanged. Both in-memory and
-disk verdicts use that checked identity. Source manifest fingerprints remain
-separate bootstrap audits. `MirVerify.hs` and
-`MirGhost.hs` are deleted. The bridge keeps the Haskell signatures
-and verdicts, and puts back the parts of a program the data form
-does not carry (function specifications, generics, invariants and
-ghost statements). `TestMirVerify` and `TestMirErase` now compare the
-Tersus programs against the bridge. `MirData`'s reader and writer
-stay until the data form itself goes (target 6).
-
-### 4. The MIR passes in Tersus (deletes `MirLower` 867, `MirOwnership` 501, `MirLists` 450, `MirMoves` 426, `MirMono` 213, and `Mir` 626)
-
-These feed the one part that is already native, the emitter, and every
-step can be checked by diffing `tersus mir --data` output against the
-Haskell pass it replaces, exactly as the emitter was checked against
-`LlvmEmit`. `STEP31.md` already names `MirOwnership` and `MirMono` as
-the next to move. The order inside the target follows the pipeline:
-`MirLower`, then moves and ownership, then list and Box lowering, then
-monomorphization.
-
-Blocked by: the passes take the elaborated AST, which is Haskell data.
-Either they wait for target 6, or the elaborated AST gets a
-serialization as data, like the MIR's, that both sides read and write.
-The second is the better course: it keeps this target independent, and
-the serialization is deleted when the frontend lands.
-
-Status (2026-11-01): the bridge is implemented. `AstData` reads and writes
-parsed syntax and the complete `Elaborated` wrapper (including ordered
-expression-occurrence types); `examples/ast_reader/ast_reader.tersus` defines the
-syntax as typed arena payloads and reads/writes the same versioned records.
-It reuses the MIR `Type` and `Size`, preserves contracts and builtin
-metadata, and includes no solver or Iota state. The bridge is developmental:
-the elaborated bridge is developmental; parsed AST data now carries the production native parser output. See `AST_DATA.md`
-for its checked APIs, format, explicit type/size limits and corpus tests.
-
-### 5. Retire `MirEval` (572 lines) instead of porting it
-
-`eval` is the reference interpreter that native code is tested against
-(`testNative`); a native compiler runs programs itself, so the
-interpreter is deleted, not rewritten. It comes late in the list for
-one reason: inside the Haskell host it is also the runner
-(`runNamedFunction`) that executes the self-hosted validator and the
-emitter. It can only go when the host does (target 7). Until then its
-test role is irreplaceable, so nothing about it changes.
-
-### 6. The frontend in Tersus (deletes `TypeCheck` 2,241 and `Parse` 1,377, the largest files left)
-
-The aim is still to replace the frontend, but its data bridge is now in
-place: `examples/ast_reader/ast_reader.tersus` defines the syntax of `Syntax` and the
-needed `Types` values as Tersus structs/enums, and exchanges parsed or
-elaborated syntax with `AstData` (`AST_DATA.md`). It is not a source parser
-or type checker.
-
-The parser was a set of Parsec combinators and is now a hand-written Tersus
-reader over bytes that produces the AST as data. The remaining frontend work
-is elaboration over that AST. Error messages are part of the target: tests
-name the stage that refused a program and often its reason, so a Tersus checker
-must preserve those verdicts or change them deliberately with the tests.
-
-Status (2026-11-03): the parser grammar is native-only. `Parse.hs` and the
-`TERSUS_PARSER=haskell` oracle are deleted. `TersusParser` supplies P1 ASTs to
-production source and package entry points; `ParsedFile` holds the shared data
-records, and `Syntax` owns `Elaborated`. The elaborator remains Haskell.
-
-A pinned parser LLVM seed provides P0 below the compiler. It verifies
-`bootstrap/parser.sha256`, links the existing runtime and builds with clang.
-P0 reads the standard library, sequential implicit-library contexts, current
-prepared parser source and embedded MIR package. The unchanged checker and
-lowering produce owned MIR; the existing emitter seed builds E1, which emits
-P1. `Compile` and the default `Modules` loaders are explicit P0 bootstrap
-consumers, so producing P1 never enters a P1 cache lock recursively.
-`SourceParse` shares the lazy library AST/declaration cache, source probe and
-selection with production. `Compile.lowerSourceParts` retains the
-library/source split and prepared-prefix cache.
-
-The first language parse now requires clang and verified native P0 even for
-`TERSUS_PARSER=interpreted`. Haskell package compilation remains clang- and
-network-free. Failed seed verification, native builds, processes or protocols
-are explicit tool errors, with no alternate grammar.
-
-`testParser` compares P0/P1 over the full source/rejection corpus and generated
-cases. File state, imports, all ten declaration fields, shadowing and refusal
-state remain covered; the language tests keep independent literal ASTs and
-verdicts through native fragment helpers. Current GHC predicates are generated
-into P1 and tested at their Unicode boundaries. P0 keeps its asset's baked
-classifier version, so Unicode-version-sensitive identifier tests target P1;
-the ASCII bootstrap corpus must still be accepted by P0.
-
-The parser fixpoint uses the same prepared current source in P0 and P1. Its
-ASTs, final declarations, checked/lowered MIR and E1-emitted IR must agree,
-with P2 behavior checked too. Historical seed LLVM need not equal current LLVM.
-Cold-process, concurrent-process, cache-reuse and corrupt/missing-seed controls
-cover the bootstrap. The two registered parser-bootstrap groups retain the
-original checks: the first starts its cold and refusal workers in empty
-private homes; the second uses separate private primed copies for repair and
-fixpoint. Its ordinary tool-cache preparation is measured separately and does
-not satisfy or replace the first group's genuine cold pair. Repair and
-fixpoint overlap only when that second group has the runner to itself.
-Within a fixpoint, only byte-identical successful P0 requests are reused.
-Prepared package bytes must agree before lowering once; the resulting owned
-MIR must equal P1's actual prepared input. Independent E1 output must equal
-the LLVM retained by P1's successful build before the P2 checks run. A nonzero
-native-erasure exit reports its exit code, stderr and input/output prefixes.
-Five paired trials passed on 2026-11-05; the earlier isolated erasure failure
-remains unexplained, not dismissed or counted as diagnosed.
-`AST_DATA.md` documents provenance and seed regeneration.
-
-### 7. The host glue, and a bootstrap with no GHC (deletes `Cli`, `Pipeline`, `Bootstrap`, `PreludeSource`, `LlvmRuntime`, `Native`, `Hash`, `Utils`, `Pretty`, `app/Main.hs`; ~1,600 lines)
-
-The endgame: a Tersus `main` that reads files and arguments (the
-language already has both, step 20 of the roadmap), runs the pipeline
-of targets 1-6, writes the MIR as data to its own emitter, and invokes
-clang. `LlvmRuntime`'s C becomes a standalone runtime file shipped with
-the compiler (or finishes moving into Tersus per step 30); the
-Template-Haskell embedding in `PreludeSource` is replaced by reading
-the library files at run time; `Bootstrap`'s stage 0/stage 1 caching
-becomes a build script. Done means: the emitter fixpoint
-(stage 1 writes the same IR for the emitter as stage 0) holds, and
-`grep` for GHC in the build finds nothing.
-
-### 8. The tests, alongside (deletes `test/`, 8,399 lines, and `dev/parity`)
-
-Not product code, but no target above can be deleted safely while the
-only tests are Haskell: the Haskell modules a target deletes are the
-ones its tests import. Port each test group to a Tersus or script
-runner as its subsystem flips (`TestPipeline` with target 1,
-`TestMir*` with targets 3-4, the frontend groups with target 6), and
-keep the Haskell harness running the unported groups until target 7.
-`TestNative`-style checks (build with clang, run, compare with the
-reference) need target 7's process surface, so they port last; until
-then `eval` (target 5) is their oracle.
-
-## What "done" is
-
-- `find . -name '*.hs'` in the repository finds nothing.
-- The compiler that builds the compiler is the stage-1 emitter and the
-  Tersus pipeline of targets 1-7, from the seed in
-  `bootstrap/emitter.ll`.
-- The full test suite, ported, passes with no GHC installed.
+Port test groups alongside their replacements. Until the host is replaced,
+keep the Haskell harness and independent native/heap-model checks. Done means:
+no `.hs` files remain, the compiler builds itself from pinned seeds without GHC,
+and the complete ported test suite passes. Check that state by enumerating the
+repository, not by assuming a deleted module implies its callers are gone.

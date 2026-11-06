@@ -10,6 +10,7 @@ module MirData
 import Control.Monad (replicateM)
 import DataCodec
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 
 import Mir
 import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
@@ -41,12 +42,11 @@ import Utils
 -- `const C`, a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. The statements are
 -- `assign L RVALUE`, `peek L RVALUE` and `drop L`; the terminators `goto B`, `switch O B B`, `call O N O... L B`, `return` and `unreachable`.
 --
--- `writeProgramWithGhosts` writes `tersus-mir 2` instead: the program as it is before its ghosts are erased, for the
--- eraser written in Tersus (examples/mir/mir_erase/mir_erase.tersus). The only records it adds are the statements of the validator's part that
--- the erasure acts on: `ghost` for a ghost statement (its contents do not survive erasure, and are not written), and
--- `dissolve L` for the taking apart of the value of _L. The contracts and the specification of a function are not written
--- either: the erasure only scrubs them, and the program it gives back is written as version 1. `readProgram` reads both
--- versions; a ghost statement it reads back stands for itself with no contents.
+-- `writeProgramWithGhosts` writes `tersus-mir 2` instead: the program before erasure, or the ownership tool's transport.
+-- Ordinary ghosts are `ghost`; ownership markers are `ghost N` with a nonnegative ID and round-trip as wire-only
+-- `GhostPosition (-1) N`. The ownership host replaces every original ghost (including dissolve) with a unique marker
+-- and restores its payload by identity, rather than statement offset. The eraser still receives `dissolve L` for a
+-- dissolve and writes version 1. Generic templates, invariants and function specifications stay in host sidecars.
 
 -- What native code uses of a program: the same without the validator's part
 forNative :: Program -> Program
@@ -136,6 +136,7 @@ statementText s = case s of
 
 statementTextWithGhosts :: Statement -> String
 statementTextWithGhosts s = case s of
+    Ghost _ (GhostPosition (-1) ident) | ident >= 0 -> "ghost " ++ show ident
     Ghost _ (GhostDissolve l) -> unwords ["dissolve", localText l]
     Ghost _ _ -> "ghost"
     _ -> statementText s
@@ -281,7 +282,7 @@ lineP = word >>= \w -> case w of
     "peek" -> LStatement <$> (Peek <$> local <*> rvalueP)
     "drop" -> LStatement . Drop <$> local
     "assignref" -> LStatement <$> (AssignRef <$> local <*> (int >>= \n -> replicateM n refStepP) <*> rvalueP)
-    "ghost" -> pure (LStatement (Ghost Map.empty (GhostPosition 0 0)))
+    "ghost" -> LStatement . Ghost Map.empty . GhostPosition (-1) <$> optionalGhostId
     "dissolve" -> LStatement . Ghost Map.empty . GhostDissolve <$> local
     "goto" -> LTerminator . Goto <$> block
     "switch" -> LTerminator <$> (SwitchBool <$> operandP <*> block <*> block)
@@ -292,6 +293,13 @@ lineP = word >>= \w -> case w of
     "return" -> pure (LTerminator Return)
     "unreachable" -> pure (LTerminator Unreachable)
     _ -> failP ("not a statement or a terminator: " ++ w)
+
+optionalGhostId :: P Int
+optionalGhostId = P (\ts -> case ts of
+    [] -> Ok ((-1), [])
+    _ -> runP (do
+        ident <- int
+        if ident < 0 then failP "a ghost ID must be nonnegative" else pure ident) ts)
 
 -- The header of a function, without the locals and blocks that follow it
 headerP :: P Function
@@ -343,7 +351,9 @@ readProgram text = case lines text of
 -- The records of the file, with the types, the functions and the main that were read (last first)
 fileFrom :: [[Token]] -> ([(Name, TypeDecl)], [Function], Maybe Function) -> Result Program String
 fileFrom [] (types, fns, Just mainFn) =
-    Ok (Program (Map.fromList (reverse types)) (Map.fromList [(fnName f, f) | f <- reverse fns]) mainFn Map.empty Map.empty)
+    unique "type" (map fst types) `bindResult` \_ ->
+        unique "function" (map fnName fns) `bindResult` \_ ->
+            Ok (Program (Map.fromList (reverse types)) (Map.fromList [(fnName f, f) | f <- reverse fns]) mainFn Map.empty Map.empty)
 fileFrom [] _ = Error "the program has no main"
 fileFrom (record : rest) (types, fns, mainFn) = case record of
     Word "struct" : ts -> parseLine structP ts `bindResult` \d -> fileFrom rest (d : types, fns, mainFn)
@@ -369,7 +379,14 @@ functionFrom header rest =
     parseLine headerP header `bindResult` \fn ->
         localsFrom rest `bindResult` \(decls, rest1) ->
             blocksFrom rest1 `bindResult` \(blocks, rest2) ->
-                Ok (fn{fnLocals = Map.fromList decls, fnBlocks = Map.fromList blocks}, rest2)
+                unique "local" (map fst decls) `bindResult` \_ ->
+                    unique "block" (map fst blocks) `bindResult` \_ ->
+                        Ok (fn{fnLocals = Map.fromList decls, fnBlocks = Map.fromList blocks}, rest2)
+
+unique :: Ord a => String -> [a] -> Result () String
+unique kind keys
+    | length keys == Set.size (Set.fromList keys) = Ok ()
+    | otherwise = Error ("duplicate " ++ kind ++ " records")
 
 localsFrom :: [[Token]] -> Result ([(Local, LocalDecl)], [[Token]]) String
 localsFrom (record : rest)

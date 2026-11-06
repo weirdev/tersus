@@ -3,6 +3,8 @@ module TestNative
     , nativeExamples
     , validatedPrograms
     , unvalidatedPrograms
+    , referenceWritePrograms
+    , nativeMirCase
     , clangAvailable
     , runExecutableBytes
     ) where
@@ -26,8 +28,7 @@ import Cli
 import qualified Mir as M
 import MirEval (renderMirValue, runProgram)
 import MirLower (lowerProgram)
-import MirOwnership (insertOwnership)
-import MirHousekeeping (verifyProgram)
+import MirHousekeeping (insertOwnership, verifyProgram)
 import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared)
 import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
@@ -244,6 +245,7 @@ dataPrograms =
     , ("struct field", "struct P { x: Int, y: Bool }; p = P { x: 7, y: false }; return p.x;")
     , ("struct with a list", "struct P { x: Int, y: List<Int> }; p = P { x: 1, y: [2, 3] }; return p;")
     , ("struct update", "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; q = P { y: 5, ..p }; return q;")
+    , ("generic mutable struct reference", "struct Holder<T> { payload: T, n: Int }; fn update<T>(c: &mut Holder<T>) -> Int writes(c.n) [{ }] [{ affirm return = 9; affirm (*c).n = 9; }] { (*c).n = 9; return (*c).n; }; c = Holder<Int> { payload: 7, n: 1 }; update(&mut c); return c.n;")
     , ("enum variants", "enum S { A { r: Int }, B { w: Int, h: List<Int> }, C }; return S::B { w: 2, h: [3] };")
     , ("fieldless variant", "enum S { A { r: Int }, C }; return S::C;")
     , ("variant tests", "enum S { A { r: Int }, C }; x = S::C; return x is S::C;")
@@ -788,6 +790,18 @@ referencePrograms =
     , ("a field reference is returned", "struct P { a: Int, b: Int }; fn getb(p: &P) -> &Int from p { return &p.b; }; p = P { a: 1, b: 41 }; r = getb(&p); return *r + 1;")
     , ("a holder is given to a function", "struct W { r: &Int }; fn rd(w: W) -> Int { return *w.r; }; a = 7; w = W { r: &a }; return rd(w);")
     , ("an update reference in a field is written through", "struct W { r: &mut Int }; a = 1; w = W { r: &mut a }; *w.r = 9; return a;")
+    ] ++ referenceWritePrograms
+
+-- Owned values written through references, and views of the places they write: native code frees each replaced value once
+-- and no view outlives what it looks at
+referenceWritePrograms :: [(String, String)]
+referenceWritePrograms =
+    [ ("an owned value replaced through a reference is released", "fn store(xs: &mut List<Int>, ys: List<Int>) -> Int writes(xs) { *xs = ys; return 0; }; a = [7]; b = [9, 10]; store(&mut a, b); return size(a);")
+    , ("a view of a place written through a reference keeps its value", "xs = [[7]]; a = get(xs, 0); r = &mut xs; *r = [[9, 10]]; return size(a);")
+    , ("a view of a place written through a reborrow keeps its value", "xs = [[7]]; r1 = &mut xs; a = *r1; old = get(a, 0); n = size(old); r2 = &mut *r1; *r2 = [[9, 10]]; return size(old) + n + size(get(xs, 0));")
+    , ("a view of a place written through a reference kept in a Box keeps its value", "xs = [[7]]; r = &mut xs; b = Box::new(r); t = get(xs, 0); r2 = Box::unbox(b); *r2 = [[9]]; return size(t);")
+    , ("an update parameter reborrowed for another is written through", "fn g(r: &mut List<Int>) -> Int writes(r) { *r = push(clone(*r), 1); return 0; }; fn f(r: &mut List<Int>) -> Int writes(r) { return g(&mut *r); }; xs = [7]; f(&mut xs); return size(xs);")
+    , ("an update parameter rebuilt from itself releases what it held", "fn put(xs: &mut List<List<Int>>) -> Int writes(xs) { *xs = push(clone(*xs), [9, 10]); return 0; }; a = [[7], [8]]; put(&mut a); return size(a);")
     ]
 
 -- Every program of these tests that validates, and every one that is lowered without being validated
@@ -960,13 +974,29 @@ valgrindCases =
     , "examples/termination.tersus", "examples/packet_parser.tersus"
     , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
     , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
-    ] ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms]
+    ] ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms
 
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to
 -- print what the executor prints, and have nothing to say to valgrind.
 buildAndRun :: String -> [String] -> String -> String -> String -> (ExitCode, String, String) -> IO TestResult
-buildAndRun input args file name ir expectation = do
+buildAndRun = buildAndRunWith False
+
+-- A program given as MIR (one the source checker refuses to write now, or one written as list lowering leaves it), owned,
+-- built and run natively with the memory checks of the runtime and under valgrind
+nativeMirCase :: String -> M.Program -> String -> IO TestResult
+nativeMirCase name program output = do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else do
+            ir <- emitUnvalidated program
+            case ir of
+                Error e -> pure (Just e)
+                Ok text -> buildAndRunWith True "" [] (map safeChar name) name text (ExitSuccess, output, "")
+
+buildAndRunWith :: Bool -> String -> [String] -> String -> String -> String -> (ExitCode, String, String) -> IO TestResult
+buildAndRunWith alwaysValgrind input args file name ir expectation = do
     tmp <- getTemporaryDirectory
     let dir = tmp </> "tersus-native-test"
     createDirectoryIfMissing True dir
@@ -988,7 +1018,7 @@ buildAndRun input args file name ir expectation = do
                 case testAssertEq plain expectation of
                     Just failure -> pure (Just failure)
                     Nothing -> do
-                        available <- if name `elem` valgrindCases then valgrindAvailable else pure False
+                        available <- if alwaysValgrind || name `elem` valgrindCases then valgrindAvailable else pure False
                         if not available
                             then pure Nothing
                             else do
@@ -1136,7 +1166,7 @@ sameAsUnvalidated name source = do
 -- The IR of a program that is lowered without being validated, written by the emitter in Tersus: who owns each value is
 -- made explicit and checked, and the emitter is given the owned MIR as data
 emitUnvalidated :: M.Program -> IO (Result String String)
-emitUnvalidated program = case mapResult insertOwnership (nativeProgram program) of
+emitUnvalidated program = case nativeProgram program `bindResult` insertOwnership of
     Error e -> pure (Error e)
     Ok owned -> case verifyProgram owned of
         Error e -> pure (Error e)

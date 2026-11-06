@@ -5,6 +5,7 @@ import mir::emit::helpers { cloneFunctions, dropFunctions, printFunctions };
 import mir::support::support { noStrings, showInt, renderType, isAggregate };
 import data::codec::codec { Type };
 import mir::reader::reader { TypeDecl, Function, Program, programAt, readLines };
+import mir::ownership::ownership { isOwnershipRequest, runOwnership };
 
 // The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
 // oracle. It reads the MIR as data from the standard input (what `tersus mir --data` prints) and writes the LLVM IR.
@@ -247,32 +248,37 @@ fn outline(program: &Program) -> Entry ~ {
 
 // The program is read from the standard input and its IR is written. The first argument says what: `ir` (or none) is all of it, `outline` the
 // declarations, the made functions and the entry point, and `bodies` the code of each function. What cannot be read or made is
-// reported on the standard error.
+// reported on the standard error. An input whose first line is `pass ownership` or `pass expand` asks for that ownership pass
+// instead (examples/mir/ownership), so that the seed of the emitter also has them.
 mode = String::arg(0, 100);
 read = readLines();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
     return 1;
 };
-program = programAt(read.value);
-if !program.ok {
-    "the input is not the MIR as data\n".printError();
-    return 1;
-};
-if mode = "bodies" {
-    printLines(bodies(program.value));
+if isOwnershipRequest(read.value) {
+    if !runOwnership(read.value) { return 1; };
 } else {
-    if mode = "outline" || mode = "ir" || mode = "" {
-        result = failedEntry("");
-        if mode = "outline" { result = outline(program.value); } else { result = ir(program.value); };
-        if !result.ok {
-            result.error.printError();
-            "\n".printError();
+    program = programAt(read.value);
+    if !program.ok {
+        "the input is not the MIR as data\n".printError();
+        return 1;
+    };
+    if mode = "bodies" {
+        printLines(bodies(program.value));
+    } else {
+        if mode = "outline" || mode = "ir" || mode = "" {
+            result = failedEntry("");
+            if mode = "outline" { result = outline(program.value); } else { result = ir(program.value); };
+            if !result.ok {
+                result.error.printError();
+                "\n".printError();
+                return 1;
+            };
+            printLines(result.lines);
+        } else {
+            "the first argument is ir, outline or bodies\n".printError();
             return 1;
         };
-        printLines(result.lines);
-    } else {
-        "the first argument is ir, outline or bodies\n".printError();
-        return 1;
     };
 };

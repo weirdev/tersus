@@ -20,7 +20,7 @@ import Cli (Command (..), makesIr)
 import MirData (writeProgram)
 import Pipeline (ownedSource)
 import Hash (fingerprint)
-import MirHousekeeping (emitterOwnedProgram)
+import MirHousekeeping (Tool (..), emitterEntry, emitterOwnedProgram, ownedToolWith, ownershipTool)
 import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, stdlibSource)
 import TestHarness
 import TestNative (clangAvailable)
@@ -140,19 +140,40 @@ bootstrap = do
                                     [] -> kept
                                     found -> Just (unlines (take 5 found))
   where
-    -- Stage 0 and stage 1 write the same IR for the emitter, so the emitter built by stage 1 would be stage 1 again
-    sameEmitter zero one = case emitterOwnedProgram of
-        Error e -> pure ["the emitter: " ++ e]
-        Ok owned -> do
-            fromZero <- emitWith zero (writeProgram owned)
-            fromOne <- emitWith one (writeProgram owned)
-            pure [ "the emitter: stage 1 " ++ describe fromOne fromZero | not (sameIr fromOne fromZero) ]
+    -- Stage 0 and stage 1 each expand and own the emitter's source and write its IR: the same owned MIR, the same IR, and that IR
+    -- is the pinned seed, so the emitter built by stage 1 would be stage 1 again
+    -- (the pipeline's owned emitter is stage 1's: its ownership tool is the stage 1 executable, which is checked first)
+    sameEmitter zero one = do
+        fromZero <- ownedToolWith zero emitterEntry
+        tool <- ownershipTool
+        case tool of
+            ToolNative path | path /= one -> pure ["the pipeline's ownership tool is not stage 1: " ++ path]
+            ToolNative _ -> compareOwned fromZero
+            ToolFailed e -> pure ["the pipeline's ownership tool: " ++ e]
+            ToolInterpreted _ -> pure ["the pipeline's ownership tool is interpreted, not stage 1"]
       where
+        compareOwned fromZero = case (fromZero, emitterOwnedProgram) of
+            (Error e, _) -> pure ["stage 0 owning the emitter: " ++ e]
+            (_, Error e) -> pure ["stage 1 owning the emitter: " ++ e]
+            (Ok owned0, Ok owned1)
+                | owned0 /= owned1 -> pure ["stage 0 and stage 1 own the emitter differently"]
+                | otherwise -> do
+                    irZero <- emitWith zero (writeProgram owned0)
+                    irOne <- emitWith one (writeProgram owned1)
+                    pinned <- case irOne of
+                        Ok text -> isPinnedSeed text
+                        Error _ -> pure True
+                    pure ([ "the emitter: stage 1 " ++ describe irOne irZero | not (sameIr irOne irZero) ] ++ [ "the emitter's IR is not the seed pinned by bootstrap/emitter.sha256" | not pinned ])
         sameIr (Ok a) (Ok b) = a == b
         sameIr _ _ = False
         describe (Ok text) (Ok expected) = "wrote " ++ show (length text) ++ " bytes for " ++ show (length expected) ++ firstDifference text expected
         describe (Error e) _ = "failed: " ++ take 300 e
         describe _ (Error e) = "stage 0 failed: " ++ take 300 e
+
+isPinnedSeed :: String -> IO Bool
+isPinnedSeed ir = do
+    (status, out, _) <- readProcessOutput (proc "sha256sum" []) ir
+    pure (status == ExitSuccess && takeWhile (/= ' ') out == seedSha256)
 -- Where the first line that differs is
 firstDifference :: String -> String -> String
 firstDifference output text = case [(n, a, b) | (n, a, b) <- zip3 [1 :: Int ..] (lines output) (lines text), a /= b] of

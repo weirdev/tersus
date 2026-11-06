@@ -18,10 +18,11 @@ import qualified AstData as A
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
 import Cli (World (..), noWorld, runProgramIn)
 import qualified ParserSeed
+import qualified TersusParser
 import Hash (fingerprint)
 import qualified Mir as M
 import MirData (writeProgram)
-import MirOwnership (insertOwnership)
+import MirHousekeeping (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput)
 import ParsedFile (emptyDecls, locating)
 import TestParserFragments (parseStatementBlockWith)
@@ -407,20 +408,26 @@ astReaderExe = modifyMVar astReaderExeCache $ \cached -> case cached of
 buildAstReaderExe :: IO (Result FilePath String)
 buildAstReaderExe = do
     files <- Mod.snapshotFromFilesystem readerPath
-    checked <- programFromFiles readerPath files
+    -- (the owned reader is kept in the shared cache, so the groups that need the executable do not each own it again)
+    parser <- TersusParser.parserKey
+    owned <- sharedProgram "ast-reader-owned" (show (packageCacheInput readerPath files, keyText parser)) $ do
+        checked <- programFromFiles readerPath files
+        pure (checked `bindResult` nativeProgram `bindResult` insertOwnership)
     seed <- cachedSeed
-    case (checked `bindResult` nativeProgram, seed) of
+    case (owned, seed) of
         (Error e, _) -> pure (Error e)
         (_, Error e) -> pure (Error e)
-        (Ok program, Ok compiler) -> do
-            let native = insertOwnership program
-                dataText = writeProgram native
+        (Ok native, Ok compiler) -> do
+            let dataText = writeProgram native
                 build output = do
                     ir <- runWithInput compiler dataText
                     case ir of
                         Error e -> pure (Error e)
                         Ok text -> buildExecutable output text
             cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the AST reader" build
+  where
+    keyText (Ok key) = key
+    keyText (Error e) = "error: " ++ e
 
 withAstReader :: (FilePath -> IO TestResult) -> IO TestResult
 withAstReader use = do

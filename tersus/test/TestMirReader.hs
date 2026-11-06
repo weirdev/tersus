@@ -1,4 +1,4 @@
-module TestMirReader (testMirReader, withProgram, sameText) where
+module TestMirReader (testMirReader, withProgram, programExecutable, sameText) where
 
 import Control.Concurrent.MVar (MVar, newMVar)
 import System.IO.Unsafe (unsafePerformIO)

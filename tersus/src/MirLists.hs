@@ -170,6 +170,7 @@ renamesForTypes tys = Map.fromList [(instanceName base args, instanceName base (
         TAddr u -> namedSubs u
         TUninit u -> namedSubs u
         TRef u -> namedSubs u
+        TMutRef u -> namedSubs u
         TFn as r -> concatMap namedSubs (r : as)
         TForall _ _ u -> namedSubs u
         _ -> []
@@ -302,6 +303,23 @@ lowerFunction original fn =
         Ghost{} -> return ()
         Assign dest rv | Map.member dest boxedFromLists -> return ()
         Assign dest rv -> lowerAssign dest rv
+        AssignRef root steps rv -> do
+            rootTy <- fromMaybe TInt <$> localTypeOf root
+            let inner ty = case ty of TRef t -> t; TMutRef t -> t; t -> t
+                stepType _ (RefField ctor field) = fromMaybe TInt (lookup field (fieldTypesOf ctor))
+                stepType ty (RefIndex _) = case inner ty of
+                    TList t -> t
+                    TArrayOf t _ -> t
+                    TBox (TArrayOf t _) -> t
+                    _ -> TInt
+                targetTy = foldl stepType (inner rootTy) steps
+            value <- case rv of
+                Use o -> operandFor targetTy o
+                _ -> do
+                    temp <- newTemp targetTy
+                    lowerAssign temp rv
+                    return (Copy temp)
+            emit (AssignRef root (map renameBorrowStep steps) (Use value))
         -- (a value taken apart is cleared where it is, and what it held is not freed: see the ghost erasure)
         Peek _ (ListOp UninitEmpty []) -> emit stmt
         Peek dest rv -> lowerAssign dest rv

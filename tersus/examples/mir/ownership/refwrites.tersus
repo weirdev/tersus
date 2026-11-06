@@ -1,0 +1,75 @@
+import data::codec::codec { Type };
+import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Rvalue, RefStep, Field, TypeDecl };
+import mir::support::support { lookupDecl, ownerOf, variantsOf };
+import mir::ownership::common { Rewrite, fieldsOf, stepsType, localTypeIn, getLocal, freshLocal, concatStatements, nextLocal, singleton, pair, triple };
+import mir::ownership::rewrite { sortLocals };
+
+fn placeType(p: &Program, locals: &List<LocalDecl>, root: Int, steps: &List<RefStep>) -> Type ~ { return stepsType(p, localTypeIn(locals, root), steps); };
+fn tailSteps(steps: &List<RefStep>) -> List<RefStep> ~ { out = []; if size(steps) > 0 { for i in 1..size(steps) { out = push(out, clone(get(steps, i))); }; }; return out; };
+fn expandPlace(p: &Program, root: Int, steps: &List<RefStep>, value: &Operand, r: &mut Rewrite) -> List<Statement> ~ {
+    if size(steps) = 0 { return singleton(Statement::Assign { local: root, rv: Rvalue::Use { o: clone(value) } }); };
+    step = get(steps, 0);
+    subTy = placeType(p, r.locals, root, singleton(clone(step)));
+    sub = freshLocal(&mut *r, subTy);
+    inner = expandPlace(p, sub, tailSteps(steps), value, &mut *r);
+    if step is RefStep::Field {
+        f = step as RefStep::Field;
+        fields = fieldsOf(p, f.ctor);
+        if size(fields) = 0 { fields = singleton(Field { name: clone(f.field), ty: localTypeIn(r.locals, sub) }); };
+        stmts = singleton(Statement::Assign { local: sub, rv: Rvalue::ReadField { o: Operand::Copy { local: root }, name: clone(f.ctor), field: clone(f.field) } });
+        stmts = concatStatements(stmts, inner);
+        names = []; values = [];
+        for field in fields {
+            names = push(names, clone(field.name));
+            if field.name = f.field { values = push(values, Operand::Copy { local: sub }); }
+            else {
+                temp = freshLocal(&mut *r, clone(field.ty));
+                stmts = push(stmts, Statement::Assign { local: temp, rv: Rvalue::ReadField { o: Operand::Copy { local: root }, name: clone(f.ctor), field: clone(field.name) } });
+                values = push(values, Operand::Copy { local: temp });
+            };
+        };
+        return push(stmts, Statement::Assign { local: root, rv: Rvalue::MakeData { name: clone(f.ctor), fields: names, values: values } });
+    };
+    index = (step as RefStep::Index).o;
+    stmts = concatStatements(singleton(Statement::Assign { local: sub, rv: Rvalue::ListOp { op: 3, args: pair(Operand::Copy { local: root }, clone(index)) } }), inner);
+    return push(stmts, Statement::Assign { local: root, rv: Rvalue::ListOp { op: 6, args: triple(Operand::Copy { local: root }, clone(index), Operand::Copy { local: sub }) } });
+};
+fn expandStatement(p: &Program, f: &Function, st: &Statement, r: &mut Rewrite) -> List<Statement> ~ {
+    if !(st is Statement::AssignRef) { return singleton(clone(st)); };
+    a = st as Statement::AssignRef; ty = getLocal(f, a.local).ty;
+    if ty is Type::TRef || ty is Type::TMutRef { return singleton(clone(st)); };
+    before = []; value = Operand::Copy { local: 0 };
+    if a.rv is Rvalue::Use { value = clone((a.rv as Rvalue::Use).o); }
+    else {
+        targetType = placeType(p, r.locals, a.local, a.steps);
+        temp = freshLocal(&mut *r, targetType);
+        value = Operand::Copy { local: temp }; before = singleton(Statement::Assign { local: temp, rv: clone(a.rv) });
+    };
+    return concatStatements(before, expandPlace(p, a.local, a.steps, value, &mut *r));
+};
+fn hasExpandableWrites(f: &Function) -> Bool ~ {
+    for b in f.blocks {
+        for st in b.stmts {
+            if st is Statement::AssignRef {
+                ty = getLocal(f, (st as Statement::AssignRef).local).ty;
+                if !(ty is Type::TRef) && !(ty is Type::TMutRef) { return true; };
+            };
+        };
+    };
+    return false;
+};
+fn expandFunction(p: &Program, f: &Function) -> Function ~ {
+    if !hasExpandableWrites(f) { return clone(f); };
+    r = Rewrite { next: nextLocal(f.locals), locals: clone(f.locals), aliases: [], sources: [] };
+    blocks = [];
+    for b in f.blocks {
+        stmts = []; for st in b.stmts { stmts = concatStatements(stmts, expandStatement(p, f, st, &mut r)); };
+        blocks = push(blocks, MirBlock { id: b.id, stmts: stmts, term: clone(b.term) });
+    };
+    base = clone(f);
+    return Function { locals: sortLocals(r.locals), blocks: blocks, ..base };
+};
+fn expandRefWrites(p: &Program) -> Program ~ {
+    functions = []; for f in p.functions { functions = push(functions, expandFunction(p, f)); };
+    return Program { types: clone(p.types), functions: functions, entry: expandFunction(p, p.entry) };
+};

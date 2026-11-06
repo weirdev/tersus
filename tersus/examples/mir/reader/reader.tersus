@@ -71,7 +71,7 @@ enum Rvalue {
 
 impl Clone for Rvalue { };
 
-enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int }, Ghost, Dissolve { local: Int }, AssignRef { local: Int, steps: List<RefStep>, rv: Rvalue } };
+enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int }, Ghost { id: Int }, Dissolve { local: Int }, AssignRef { local: Int, steps: List<RefStep>, rv: Rvalue } };
 
 impl Clone for Statement { };
 
@@ -500,7 +500,16 @@ fn lineAt(ts: &List<Token>, pos: Int, ghosts: Bool) -> Parsed<Line> [{ affirm po
     kw = w.value;
     if kw = "return" { return done(Line::LTerminator { t: Terminator::Return }, next); };
     if kw = "unreachable" { return done(Line::LTerminator { t: Terminator::Unreachable }, next); };
-    if ghosts && kw = "ghost" { return done(Line::LStatement { s: Statement::Ghost }, next); };
+    if ghosts && kw = "ghost" {
+        id = 0 - 1;
+        if next < size(ts) {
+            parsed = intAt(ts, next);
+            if !parsed.ok || parsed.value < 0 { return bad; };
+            id = parsed.value;
+            next = parsed.pos;
+        };
+        return done(Line::LStatement { s: Statement::Ghost { id: id } }, next);
+    };
     if next >= size(ts) { return bad; };
     if kw = "assign" || kw = "peek" {
         l = intAt(ts, next);

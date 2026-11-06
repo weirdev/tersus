@@ -309,6 +309,7 @@ completeInstancesWith erased program
         TBlock t -> namedArgs t
         TUninit t -> namedArgs t
         TRef t -> namedArgs t
+        TMutRef t -> namedArgs t
         TFn args ret -> concatMap namedArgs (ret : args)
         TForall _ _ t -> namedArgs t
         _ -> []

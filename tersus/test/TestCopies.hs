@@ -6,7 +6,8 @@ import qualified Data.Map.Strict as Map
 import qualified Compile
 import qualified Mir as M
 import MirEval (MirValue (MInt), runProgramOutput)
-import MirOwnership (insertOwnership, operandLocal)
+import MirHousekeeping (insertOwnership)
+import MirOwnership (operandLocal)
 import Pipeline (compileSource)
 import Syntax
 import TestHarness
@@ -94,7 +95,7 @@ testCopies =
                 , testCase "a borrow captures an earlier index before a later call" (loweredOutput "fn bump(i: &mut Int) -> Int [{ affirm *i = 0; }] [{ affirm *i = 1; affirm return = 0; }] { *i = 1; return 0; }; rows = [[[7]], [[9]]]; i = 0; r = &get(get(rows, i), bump(&mut i)); return first(*r);" "" 7)
                 , testCase "an owned boxed-array helper is not lent a field" (runs "trait Clone { fn clone(self: &Self) -> Self; }; fn cloneBoxedArray(b: Box<Array<Int>>) -> Box<Array<Int>> { return b; }; struct H { b: Box<Array<Int>> }; h = H { b: Array::boxed(1, 7) }; copy = clone(h.b); return size(copy);" (VInt 1))
                 , TestCase "a named intermediate keeps its materialization" $ do
-                    result <- mapResult insertOwnership <$> compileOnce (tokenClone ++ "xs = push([], Token { n: 7, xs: [1] }); tmp = get(xs, 0); copy = clone(tmp); return copy.n;")
+                    result <- (\compiled -> compiled `bindResult` insertOwnership) <$> compileOnce (tokenClone ++ "xs = push([], Token { n: 7, xs: [1] }); tmp = get(xs, 0); copy = clone(tmp); return copy.n;")
                     pure $ case result of
                         Error e -> Just e
                         Ok program ->
@@ -261,7 +262,7 @@ boxedArrayClonePrograms =
 boxedArrayMaterialization :: IO TestResult
 boxedArrayMaterialization = do
     let source = "b = Box::new(#[7, 13]); copy = clone(b); return get(copy, 1) + size(b);"
-    result <- mapResult insertOwnership <$> compileOnce source
+    result <- (\compiled -> compiled `bindResult` insertOwnership) <$> compileOnce source
     pure $ case result of
         Error e -> Just e
         Ok program ->
@@ -316,7 +317,7 @@ cloneDispatch label function body value materializations = TestList label
 
 ownedCloneCopies :: String -> String -> Int -> IO TestResult
 ownedCloneCopies name source expected = do
-    result <- mapResult insertOwnership <$> compileOnce source
+    result <- (\compiled -> compiled `bindResult` insertOwnership) <$> compileOnce source
     pure $ case result of
         Error e -> Just e
         Ok program -> case [fn | fn <- Map.elems (M.progFunctions program), name `isInfixOf` M.fnName fn] of

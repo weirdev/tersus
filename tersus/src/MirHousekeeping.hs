@@ -1,18 +1,24 @@
 {-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 module MirHousekeeping
     ( verifyProgram
+    , insertOwnership
+    , expandRefWrites
+    , ownershipTool
+    , Tool (..)
     , eraseGhosts
     , storageProgram
     , nativeStorage
     , cachedEmitter
     , listLibrary
     , nativeProgram
+    , nativeProgramWith
     , emitterEntry
     , mirVerifyEntry
     , mirEraseEntry
     , toolProgram
     , toolOwnedProgram
     , emitterOwnedProgram
+    , ownedToolWith
     , ownedProgramOf
     , cachedParser
     , parserInput
@@ -51,7 +57,8 @@ import Mir
 import MirData (readProgram, writeProgram, writeProgramWithGhosts)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (hasLists, lowerLists)
-import MirOwnership (expandRefWrites, insertOwnership)
+import MirMono (monomorphize)
+import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (cachedSeed, cachedParserSeed, seedHash, parserSeedHash)
 import Compile (lowerSource)
@@ -87,6 +94,65 @@ verifyProgram program = unsafePerformIO (verifyIO program)
 -- is refused, with the eraser's reason.
 eraseGhosts :: Program -> Result Program String
 eraseGhosts program = unsafePerformIO (eraseIO program)
+
+-- The ownership passes (OWNERSHIP in MIR.md) are run by the emitter's executable (examples/mir/emit/emit.tersus):
+-- stage 0 owns what the host builds for itself, stage 1 owns everything else; they never run in the executor.
+{-# NOINLINE insertOwnership #-}
+insertOwnership :: Program -> Result Program String
+insertOwnership program = unsafePerformIO (ownershipPassWith ownershipTool "ownership" (monomorphize program))
+
+{-# NOINLINE expandRefWrites #-}
+expandRefWrites :: Program -> Result Program String
+expandRefWrites program = unsafePerformIO (ownershipPassWith ownershipTool "expand" program)
+
+ownershipTool :: IO Tool
+ownershipTool = either' <$> cachedEmitter
+  where
+    either' (Ok exe) = ToolNative exe
+    either' (Error e) = ToolFailed e
+
+-- (the tool is only asked for when the pass has something to do)
+ownershipPassWith :: IO Tool -> String -> Program -> IO (Result Program String)
+ownershipPassWith _ "expand" program
+    | not (any expandable (progMain program : Map.elems (progFunctions program))) = pure (Ok program)
+  where
+    -- (the expansion rewrites only writes whose root is a value; one through a reference stays as it is)
+    expandable fn = or [not (isReference (Map.lookup root (fnLocals fn))) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), AssignRef root _ _ <- stmts]
+    isReference (Just (LocalDecl (TRef _) _)) = True
+    isReference (Just (LocalDecl (TMutRef _) _)) = True
+    isReference _ = False
+ownershipPassWith getTool pass program = do
+    tool <- getTool
+    output <- case tool of
+        ToolFailed e -> pure (Error e)
+        ToolNative exe -> do
+            (code, out, errors) <- runWithInputFull exe input
+            pure $ case code of
+                ExitFailure n -> Error ("the ownership tool exited with " ++ show n ++ ": " ++ trimEnd errors)
+                ExitSuccess
+                    | trim out == "1" -> Error ("the ownership tool refused " ++ pass ++ ": " ++ trimEnd errors)
+                    | not (null (trim errors)) -> Error ("the ownership tool reported: " ++ trimEnd errors)
+                    | otherwise -> Ok out
+        ToolInterpreted _ -> pure (Error "the ownership passes run natively only")
+    pure $ output `bindResult` \text ->
+        if take 1 (lines text) /= ["tersus-mir 2"]
+            then Error "the ownership tool did not write MIR version 2"
+            else stage "the ownership tool wrote unreadable MIR: " (readProgram text) `bindResult` restoreOwnership program
+  where
+    input = "pass " ++ pass ++ "\n" ++ writeProgramWithGhosts (ownershipInput program)
+
+-- A program expanded, lowered and owned by one emitter executable (the seed's, for what the host builds itself)
+ownedWith :: FilePath -> Program -> IO (Result Program String)
+ownedWith emitter program = do
+    native <- nativeProgramUsing (pure (ToolNative emitter)) listLibrary program
+    case native of
+        Error e -> pure (Error e)
+        Ok lowered -> ownershipPassWith (pure (ToolNative emitter)) "ownership" (monomorphize lowered)
+
+ownedToolWith :: FilePath -> FilePath -> IO (Result Program String)
+ownedToolWith emitter entry = case toolProgram entry of
+    Error e -> pure (Error e)
+    Ok program -> ownedWith emitter program
 
 verifyIO :: Program -> IO (Result () String)
 verifyIO program = do
@@ -452,8 +518,13 @@ prepareProgram entry raw = do
     modifyMVar slot $ \made -> case made of
         Just ready -> pure (made, Ok ready)
         Nothing -> do
-            input <- cachedPreparedInput entry [] valid $ pure $ raw `bindResult` \program ->
-                mapResult (writeProgram . insertOwnership) (nativeProgram program)
+            input <- cachedPreparedInput entry [] valid $ case raw of
+                Error e -> pure (Error e)
+                Ok program -> do
+                    zero <- cachedSeed
+                    case zero of
+                        Error e -> pure (Error e)
+                        Ok seed -> mapResult writeProgram <$> ownedWith seed program
             case input of
                 Error e -> pure (Nothing, Error e)
                 Ok text -> do
@@ -527,10 +598,10 @@ prepareValidator = do
         Error e -> pure (Error e)
         Ok () -> preparedDerived "validator" (toolProgram validationEntry) ["-O2"]
 
--- Stage 1 (the emitter as it is now) in the cache, made from stage 0 in the cache as Bootstrap makes it, and under the
--- same name, so the two hosts keep one emitter between them: the program it is made from is this module's own way of
--- making native code of a host program, which is the pipeline's with no erasure first (see toolOwnedProgram)
--- Making the emitter's list library needs the eraser; initialize the tools before taking the emitter lock.
+-- Stage 1 (the emitter as it is now) in the cache: stage 0 expands, owns and emits the emitter's source (prepareProgram,
+-- with no erasure first), so the prepared inputs of every host tool are made by stage 0 alone and concurrently; stage 1
+-- emits the other tools and owns user programs. Making the list library needs the eraser; initialize the tools before
+-- taking the emitter lock.
 cachedEmitter :: IO (Result FilePath String)
 cachedEmitter = do
     tools <- housekeepingTools
@@ -620,32 +691,44 @@ compileToolProgram entry = case loadFromEntry (resolverFromFiles files) entry of
   where
     files = if entry == validationEntry then validationPackageFiles else toolPackageFiles
 
--- The program that native code is made of, for a program of the mir package
--- the host compiles itself (the emitter, the checker, the eraser): with the
--- lists of the library, ready for insertOwnership.
+-- A program of the mir package the host compiles itself (the emitter, the checker, the eraser), with the lists of
+-- the library, owned by the production ownership tool (stage 1); the bootstrap owns these with stage 0 instead
+-- (ownedWith), and the bootstrap fixpoint makes the two the same.
 toolOwnedProgram :: FilePath -> Result Program String
 toolOwnedProgram entry =
     toolProgram entry `bindResult` \program ->
-        mapResult insertOwnership (nativeProgram program)
+        nativeProgram program `bindResult` insertOwnership
 
 -- The same for a single source the host compiles itself (the validator, with
 -- its driver): lowered, not validated, with the lists of the library.
 ownedProgramOf :: String -> Result Program String
 ownedProgramOf source =
     lowerSource True source `bindResult` \program ->
-        mapResult insertOwnership (nativeProgram program)
+        nativeProgram program `bindResult` insertOwnership
 
 {-# NOINLINE nativeProgram #-}
 nativeProgram :: Program -> Result Program String
-nativeProgram program = unsafePerformIO $ do
+nativeProgram program = unsafePerformIO (nativeProgramWith listLibrary program)
+
+-- The program native code is made of: its writes through places expanded, and each list and Box made of the
+-- structs of the given library (the pipeline gives the library it has validated)
+nativeProgramWith :: IO (Result [(ModuleId, Program)] String) -> Program -> IO (Result Program String)
+nativeProgramWith = nativeProgramUsing ownershipTool
+
+nativeProgramUsing :: IO Tool -> IO (Result [(ModuleId, Program)] String) -> Program -> IO (Result Program String)
+nativeProgramUsing tool library program = do
     ready <- prepareBootstrap
     case ready of
         Error e -> pure (Error e)
         Ok () -> do
-            let expanded = expandRefWrites program
-            if not (hasLists expanded) then pure (Ok expanded) else do
-                library <- listLibrary
-                pure (lowerLists library expanded)
+            expanded <- ownershipPassWith tool "expand" program
+            case expanded of
+                Error e -> pure (Error e)
+                Ok written
+                    | not (hasLists written) -> pure (Ok written)
+                    | otherwise -> do
+                        units <- library
+                        pure (lowerLists units written)
 
 emitterOwnedProgram :: Result Program String
 emitterOwnedProgram = toolOwnedProgram emitterEntry

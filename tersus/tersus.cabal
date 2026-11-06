@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.37.0.
+-- This file has been generated from package.yaml by hpack version 0.34.6.
 --
 -- see: https://github.com/sol/hpack
 
@@ -31,6 +31,13 @@ extra-source-files:
     examples/mir/emit/functions.tersus
     examples/mir/emit/helpers.tersus
     examples/mir/mir_reader/mir_reader.tersus
+    examples/mir/writer/writer.tersus
+    examples/mir/ownership/ownership.tersus
+    examples/mir/ownership/common.tersus
+    examples/mir/ownership/analysis.tersus
+    examples/mir/ownership/rewrite.tersus
+    examples/mir/ownership/refwrites.tersus
+    examples/mir/ownership/drops.tersus
     examples/data/package.tersus
     examples/data/codec/codec.tersus
     examples/data/ast/ast.tersus
@@ -93,6 +100,7 @@ library
       MirMono
       MirMoves
       MirOwnership
+      MirOwnershipData
       ModuleResolve
       Modules
       Native
@@ -186,6 +194,26 @@ executable cache-integration-probe
     , unix
   default-language: Haskell2010
 
+executable emitter-seed
+  main-is: Main.hs
+  other-modules:
+      TestOwnershipOracle
+  hs-source-dirs:
+      dev/emitter-seed
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
+  build-depends:
+      base >=4.7 && <5
+    , containers
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+    , unix
+  default-language: Haskell2010
+
 executable parser-seed
   main-is: Main.hs
   other-modules:
@@ -256,12 +284,14 @@ test-suite tersus-test
       TestMirEmit
       TestMirErase
       TestMirEval
+      TestMirOwnership
       TestMirReader
       TestMirSupport
       TestMirVerify
       TestModules
       TestNative
       TestOwnership
+      TestOwnershipOracle
       TestParity
       TestParser
       TestParserBootstrap

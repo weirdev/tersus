@@ -161,6 +161,46 @@ bare emitter identities and the single module-local foreign `String.then` method
 `PreludeSource.mirPackageFiles` embeds all six files; cache keys include their paths
 and contents. The CLI entry, MIR protocol and runtime ABI are unchanged.
 
+## Ownership host
+
+`examples/mir/ownership/` implements ownership and reference-write expansion
+in Tersus. `MirHousekeeping.insertOwnership` first runs the Haskell `MirMono`
+adapter; the transformation itself is Tersus. `MirOwnership.hs` keeps only the
+operand-role helpers used by the move checker. The heap model's `needsDrop`
+classification is in the frozen test oracle.
+
+The native order is:
+
+```
+validate -> eraseGhosts -> expandRefWrites -> lowerLists
+         -> insertOwnership (monomorphize, then Tersus ownership)
+         -> verifyProgram -> emitter
+```
+
+The tool reads `pass expand` or `pass ownership` on its first input line,
+then MIR version 2, and writes MIR version 2. Runtime headers, structural
+`Type`/`Size` arguments, source names and every function are retained, including
+implicit Drop/Clone implementations. `MirOwnershipData` preserves generic
+struct templates, invariants, specifications and full ghost payloads outside
+the runtime data. Numbered ghosts follow rewrites and block splits; missing,
+duplicate, unrecognized or cross-function IDs are errors. Before `pass
+ownership` changes anything it refuses a function with a negative block id, no
+block 0, or a jump to a block that is not there. This transport does
+not use `forNative` as its pipeline result.
+
+The emitter executable also dispatches `pass ownership` and `pass expand`.
+Its pinned stage-0 seed expands and owns every program the host builds for
+itself (the emitter, checker, eraser, parser and validator), so those prepared
+inputs are made concurrently; stage 0 emits the emitter to build stage 1, and
+stage 1 emits the other tools and owns and emits user programs. Ownership runs
+natively throughout that sequence. Only the recursive erasure of the List/Box
+library uses the interpreted eraser while the native tools are being built. The host
+names the compiler explicitly during builds to avoid re-entering owned-program
+CAFs or cache locks. Build, execution, protocol and metadata failures return
+`Error`; no production or bootstrap path calls the frozen Haskell ownership
+pass. `TestOwnershipOracle` is linked into the test executable and the explicit
+`dev/emitter-seed` migration executable, not the production library or CLI.
+
 ## Interpreter flow
 
 The native parser produces the AST; Haskell checks its types and lowers it to MIR, then the native Tersus validator checks it before execution (the stages are chained by `Pipeline`, which type checks the program once; steps 1 to 6 below):
@@ -317,7 +357,7 @@ Next steps, roughly in priority order:
 32. Allocators chosen by the code that calls
     The design is `ALLOCATORS.md`. A block `with a { ... }` makes `a` the allocator of what is made inside it, including what the functions it calls make. Where a value's memory comes from is a region in its type (`List<Token, arena>`), which the validator never sees; a region a program leaves out is the context, the region a function is called in (`System` at the top), decided at each call by unification; a borrow and `=` ignore regions, so `clone` copies into the region it is expected in; the context decides only where a value is made, and a value is grown and freed by the region in its type; and a value made in a local allocator cannot leave its `with` block, which drops it at every exit. Natively no container holds an allocator: a region is a hidden `&K` parameter, nothing for `System`, `MirMono` copies a function per kind of allocator and not per block, and a program that uses only `System` compiles to the IR of today. The library has `System`, `Arena`, `Checked` (the `TERSUS_CHECK` of step 30 (c) in Tersus) and `Fixed<n>`. It needs steps 25, 26, 29 and 30 (a)
 33. Replacing all Haskell with a fully Tersus native implementation
-    The plan, with what remains measured and the targets in order, is in `REPLACING_HASKELL.md`. Step 31 did the emitter; what is left is the validator first (it is already written in Tersus and compared against the Haskell one), then the standard library as text, the MIR passes, the frontend, and the host glue, with the tests ported alongside each part.
+    The current survey and priorities are in `REPLACING_HASKELL.md` (the pinned pre-replacement survey). The emitter, validator, MIR checker/eraser, parser, ownership and reference-write expansion are Tersus. Native monomorphization, elaboration and package resolution remain Haskell; the host and tests move alongside them. Reference-write expansion runs before list lowering; the Haskell monomorphization adapter runs before Tersus ownership. See Ownership host above for the transport and cold boundary.
 34. What equality in proofs means
     `=` in a proof is the validator's equality: structural, total over every type whether it implements Eq or not, and the meaning of `Eq::eq`'s contract (`return = (self = other)`), which is why an impl cannot compare in its own way (LANGUAGE.md, Equality). To revisit: whether a type that wants a coarser equality (a set kept as a list in any order, a value with a cache) should have `=` in its proofs mean its own Eq, whether `=` in a proof should be refused for a type without Eq, and how either would sit with the validator's congruence (equal arguments give equal results), which a coarser equality does not have for every function
 18. Validate calls of function values

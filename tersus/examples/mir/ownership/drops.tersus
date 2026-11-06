@@ -1,0 +1,645 @@
+import data::codec::codec { Type };
+import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, TypeDecl, Variant, Field };
+import mir::support::support { variantsOf, declName };
+import mir::ownership::common { Key, FieldName, Loan, LoanEntry, LocalKinds, whole, fieldKey, stringLess, keyLess, keySetAdd, keySetUnion, intSetHas, intSetAdd, roles, operandLocal, successors, localTypeIn, hasDrop, needsDrop, concatStatements, loanLookup, sortBlocks, noOwnershipLocals, singleton, pair };
+import mir::ownership::analysis { loanEntries, loanStatement, blockSpan, localKinds };
+
+enum OwnState { Empty, Owned, MaybeOwned };
+impl Clone for OwnState { };
+impl Eq for OwnState { };
+struct OwnPart { key: Key, state: OwnState };
+impl Clone for OwnPart { };
+impl Eq for OwnPart { };
+struct OwnEntry { block: Int, parts: List<OwnPart> };
+impl Clone for OwnEntry { };
+impl Eq for OwnEntry { };
+struct DropVariant { name: String, fields: List<Field> };
+impl Clone for DropVariant { };
+struct DropShape { variants: List<DropVariant>, hasDrop: Bool };
+impl Clone for DropShape { };
+enum DropPlan { NoDrop, WholeDrop, FieldsDrop { variants: List<DropVariant> } };
+impl Clone for DropPlan { };
+enum DropAct {
+    Act { conditional: Bool, key: Key, stmts: List<Statement> },
+    SpliceAct { sub: List<DropAct> },
+    GroupAct { key: Key, sub: List<DropAct> },
+    VariantAct { local: Int, ctor: String, sub: List<DropAct> },
+};
+impl Clone for DropAct { };
+struct LocalShape { local: Int, shape: DropShape };
+impl Clone for LocalShape { };
+// What drop elaboration reads for each owned local, found once per function
+struct DropCx { names: List<FieldName>, shapes: List<LocalShape> };
+impl Clone for DropCx { };
+struct DropFlag { key: Key, local: Int };
+impl Clone for DropFlag { };
+struct DropBuild { blocks: List<MirBlock>, nextBlock: Int, nextLocal: Int, decls: List<LocalDecl> };
+impl Clone for DropBuild { };
+struct Built { acc: DropBuild, block: Int };
+impl Clone for Built { };
+struct BuiltActs { acc: DropBuild, acts: List<DropAct> };
+impl Clone for BuiltActs { };
+
+fn joinOwn(a: &OwnState, b: &OwnState) -> OwnState {
+    if a = b { return clone(a); };
+    return OwnState::MaybeOwned;
+};
+fn ownPartHas(parts: &List<OwnPart>, key: &Key) -> Bool ~ {
+    for part in parts { if part.key = key { return true; }; };
+    return false;
+};
+fn ownPartState(parts: &List<OwnPart>, key: &Key) -> OwnState ~ {
+    for part in parts { if part.key = key { return clone(part.state); }; };
+    return OwnState::Empty;
+};
+// (by value, as loanPut: a part that is replaced in place, or one that is not kept and not there, copies nothing)
+fn ownPartPut(parts: List<OwnPart>, key: Key, state: OwnState) -> List<OwnPart> ~ {
+    keep = state != OwnState::Empty || key.kind = 2;
+    i = 0;
+    while i < size(parts) && keyLess(get(parts, i).key, key) ~ { i = i + 1; };
+    present = i < size(parts) && get(parts, i).key = key;
+    if present && keep { return set(parts, i, OwnPart { key: key, state: state }); };
+    if !present && !keep { return parts; };
+    out = []; added = false;
+    for part in parts {
+        if !added && !keyLess(part.key, key) {
+            if keep { out = push(out, OwnPart { key: clone(key), state: clone(state) }); };
+            added = true;
+        };
+        if part.key != key { out = push(out, clone(part)); };
+    };
+    if !added && keep { out = push(out, OwnPart { key: key, state: state }); };
+    return out;
+};
+fn ownJoinLook(parts: &List<OwnPart>, key: &Key) -> OwnState ~ {
+    if key.kind = 2 && !ownPartHas(parts, key) { return ownPartState(parts, whole(key.local)); };
+    return ownPartState(parts, key);
+};
+// The parts are sorted by key, so the keys of both are merged and each joined state is put after the last
+fn joinOwnStates(a: &List<OwnPart>, b: &List<OwnPart>) -> List<OwnPart> ~ {
+    keysA = []; for part in a { keysA = push(keysA, clone(part.key)); };
+    keysB = []; for part in b { keysB = push(keysB, clone(part.key)); };
+    out = [];
+    for key in keySetUnion(keysA, keysB) {
+        state = joinOwn(ownJoinLook(a, key), ownJoinLook(b, key));
+        if state != OwnState::Empty || key.kind = 2 { out = push(out, OwnPart { key: clone(key), state: state }); };
+    };
+    return out;
+};
+fn ownStateOf(tracked: &List<Int>, parts: &List<OwnPart>, key: &Key) -> OwnState ~ {
+    if intSetHas(tracked, key.local) { return ownPartState(parts, key); };
+    return OwnState::Empty;
+};
+fn ownFieldStateOf(tracked: &List<Int>, parts: &List<OwnPart>, key: &Key) -> OwnState ~ {
+    if ownPartHas(parts, key) { return ownPartState(parts, key); };
+    return ownStateOf(tracked, parts, whole(key.local));
+};
+fn ownSetState(tracked: &List<Int>, parts: List<OwnPart>, key: Key, state: OwnState) -> List<OwnPart> ~ {
+    if intSetHas(tracked, key.local) { return ownPartPut(parts, key, state); };
+    return parts;
+};
+fn ownClearFields(parts: List<OwnPart>, local: Int) -> List<OwnPart> ~ {
+    fields = false;
+    for part in parts { if part.key.local = local && part.key.kind != 0 { fields = true; }; };
+    if !fields { return parts; };
+    out = [];
+    for part in parts { if part.key.local != local || part.key.kind = 0 { out = push(out, clone(part)); }; };
+    return out;
+};
+fn dropStatementMoved(st: &Statement) -> List<Int> ~ {
+    if st is Statement::Assign { return rvalueMoves((st as Statement::Assign).rv); };
+    if st is Statement::Peek { return rvalueMoves((st as Statement::Peek).rv); };
+    if st is Statement::AssignRef { return rvalueMoves((st as Statement::AssignRef).rv); };
+    return [];
+};
+// The locals an rvalue moves from: its operands that are moves, in the order roles lists them
+fn rvalueMoves(rv: &Rvalue) -> List<Int> ~ {
+    out = [];
+    for r in roles(rv) { if r.operand is Operand::Move { out = push(out, (r.operand as Operand::Move).local); }; };
+    return out;
+};
+fn dropCallOperands(term: &Terminator) -> List<Operand> ~ {
+    out = [];
+    if term is Terminator::Call {
+        call = term as Terminator::Call;
+        out = push(out, clone(call.callee));
+        for arg in call.args { out = push(out, clone(arg)); };
+    };
+    return out;
+};
+fn dropTerminatorMoved(term: &Terminator) -> List<Int> ~ {
+    os = dropCallOperands(term);
+    if term is Terminator::Switch { os = push(os, clone((term as Terminator::Switch).cond)); };
+    out = [];
+    for o in os { if o is Operand::Move { out = push(out, (o as Operand::Move).local); }; };
+    return out;
+};
+fn ownConsume(tracked: &List<Int>, parts: List<OwnPart>, moved: &List<Int>) -> List<OwnPart> ~ {
+    out = parts;
+    for local in moved { out = ownSetState(tracked, ownClearFields(out, local), whole(local), OwnState::Empty); };
+    return out;
+};
+fn ownTransferStatement(dc: &DropCx, tracked: &List<Int>, parts: List<OwnPart>, st: &Statement) -> List<OwnPart> ~ {
+    consumed = ownConsume(tracked, parts, dropStatementMoved(st));
+    if st is Statement::Assign {
+        assign = st as Statement::Assign;
+        if assign.rv is Rvalue::TakeField {
+            take = assign.rv as Rvalue::TakeField;
+            consumed = ownSetState(tracked, consumed, fieldKey(dc.names, take.local, take.name, take.field), OwnState::Empty);
+        };
+        return ownSetState(tracked, ownClearFields(consumed, assign.local), whole(assign.local), OwnState::Owned);
+    };
+    if st is Statement::Drop {
+        local = (st as Statement::Drop).local;
+        return ownSetState(tracked, ownClearFields(consumed, local), whole(local), OwnState::Empty);
+    };
+    return consumed;
+};
+fn ownTransferTerminator(tracked: &List<Int>, parts: List<OwnPart>, term: &Terminator) -> List<OwnPart> ~ {
+    consumed = ownConsume(tracked, parts, dropTerminatorMoved(term));
+    if term is Terminator::Call {
+        local = (term as Terminator::Call).dest;
+        return ownSetState(tracked, ownClearFields(consumed, local), whole(local), OwnState::Owned);
+    };
+    return consumed;
+};
+fn ownTransferBlock(dc: &DropCx, tracked: &List<Int>, parts: List<OwnPart>, block: &MirBlock) -> List<OwnPart> ~ {
+    out = parts;
+    for st in block.stmts { out = ownTransferStatement(dc, tracked, out, st); };
+    return ownTransferTerminator(tracked, out, block.term);
+};
+fn ownEntryParts(entries: &List<OwnEntry>, block: Int) -> List<OwnPart> ~ {
+    for entry in entries { if entry.block = block { return clone(entry.parts); }; };
+    return [];
+};
+// As the loans: a slot per block number
+struct OwnSlot { present: Bool, parts: List<OwnPart> };
+impl Clone for OwnSlot { };
+impl Eq for OwnSlot { };
+fn ownBlockStates(dc: &DropCx, fn: &Function, tracked: &List<Int>, blocks: &List<MirBlock>) -> List<OwnEntry> ~ {
+    entry = [];
+    for local in fn.params { entry = ownSetState(tracked, entry, whole(local), OwnState::Owned); };
+    span = blockSpan(blocks);
+    empty = []; for i in 0..span { empty = push(empty, OwnSlot { present: false, parts: [] }); };
+    known = clone(empty); if span > 0 { known = set(known, 0, OwnSlot { present: true, parts: entry }); };
+    stable = false;
+    while stable = false ~ {
+        reached = clone(empty);
+        for block in blocks {
+            if block.id >= 0 && block.id < size(known) && get(known, block.id).present {
+                here = get(known, block.id);
+                parts = ownTransferBlock(dc, tracked, clone(here.parts), block);
+                for dest in successors(block.term) {
+                    if dest >= 0 && dest < size(reached) {
+                        merged = clone(parts);
+                        old = get(reached, dest);
+                        if old.present { merged = joinOwnStates(parts, old.parts); };
+                        reached = set(reached, dest, OwnSlot { present: true, parts: merged });
+                    };
+                };
+            };
+        };
+        next = clone(known);
+        for i in 0..span {
+            if i < size(reached) && i < size(known) && i < size(next) && get(reached, i).present {
+                r = get(reached, i);
+                merged = clone(r.parts);
+                old = get(known, i);
+                if old.present { merged = joinOwnStates(old.parts, r.parts); };
+                next = set(next, i, OwnSlot { present: true, parts: merged });
+            };
+        };
+        stable = next = known;
+        known = next;
+    };
+    out = [];
+    for i in 0..span { if i < size(known) { e = get(known, i); if e.present { out = push(out, OwnEntry { block: i, parts: clone(e.parts) }); }; }; };
+    return out;
+};
+fn dropNoTypeDecls() -> List<TypeDecl> { return []; };
+fn dropTypeDecls(types: &List<TypeDecl>) -> List<TypeDecl> ~ {
+    out = dropNoTypeDecls();
+    for decl in types {
+        next = []; added = false;
+        for prior in out {
+            if !added && stringLess(declName(decl), declName(prior)) { next = push(next, clone(decl)); added = true; };
+            next = push(next, clone(prior));
+        };
+        if !added { next = push(next, clone(decl)); };
+        out = next;
+    };
+    return out;
+};
+fn enumsWithVariant(types: &List<TypeDecl>, name: &String) -> List<TypeDecl> ~ {
+    out = dropNoTypeDecls();
+    for decl in types {
+        if decl is TypeDecl::DEnum {
+            matches = false;
+            for v in (decl as TypeDecl::DEnum).variants { if v.name = name { matches = true; }; };
+            if matches { out = push(out, clone(decl)); };
+        };
+    };
+    return out;
+};
+fn dropShape(p: &Program, locals: &List<LocalDecl>, local: Int) -> DropShape ~ {
+    ty = localTypeIn(locals, local);
+    variants = []; custom = false;
+    if ty is Type::TNamed {
+        name = (ty as Type::TNamed).name;
+        variants = variantsOf(p.types, name);
+        custom = hasDrop(p, name);
+    };
+    if ty is Type::TVariant {
+        name = (ty as Type::TVariant).name;
+        found = false;
+        for decl in dropTypeDecls(enumsWithVariant(p.types, name)) {
+            if decl is TypeDecl::DEnum {
+                enumDecl = decl as TypeDecl::DEnum;
+                matches = false;
+                for v in enumDecl.variants { if v.name = name { matches = true; }; };
+                if matches {
+                    if !found { custom = hasDrop(p, enumDecl.name); found = true; };
+                    for v in enumDecl.variants { variants = push(variants, clone(v)); };
+                };
+            };
+        };
+    };
+    out = [];
+    for v in variants {
+        fields = [];
+        for f in v.fields { if needsDrop(p, f.ty) { fields = push(fields, clone(f)); }; };
+        out = push(out, DropVariant { name: clone(v.name), fields: fields });
+    };
+    return DropShape { variants: out, hasDrop: custom };
+};
+fn shapeOf(dc: &DropCx, local: Int) -> DropShape ~ {
+    for s in dc.shapes { if s.local = local { return clone(s.shape); }; };
+    return DropShape { variants: [], hasDrop: false };
+};
+fn dropPlan(dc: &DropCx, p: &Program, locals: &List<LocalDecl>, tracked: &List<Int>, parts: &List<OwnPart>, local: Int) -> DropPlan ~ {
+    if ownStateOf(tracked, parts, whole(local)) = OwnState::Empty { return DropPlan::NoDrop; };
+    shape = shapeOf(dc, local);
+    allHeld = true;
+    for v in shape.variants {
+        for f in v.fields {
+            if ownFieldStateOf(tracked, parts, fieldKey(dc.names, local, v.name, f.name)) != OwnState::Owned { allHeld = false; };
+        };
+    };
+    if shape.hasDrop || size(shape.variants) = 0 || allHeld { return DropPlan::WholeDrop; };
+    out = [];
+    for v in shape.variants {
+        fields = [];
+        for f in v.fields {
+            if ownFieldStateOf(tracked, parts, fieldKey(dc.names, local, v.name, f.name)) != OwnState::Empty { fields = push(fields, clone(f)); };
+        };
+        out = push(out, DropVariant { name: clone(v.name), fields: fields });
+    };
+    return DropPlan::FieldsDrop { variants: out };
+};
+fn dropAssignNeeded(tracked: &List<Int>, parts: &List<OwnPart>, st: &Statement) -> Bool ~ {
+    if st is Statement::Assign {
+        dest = (st as Statement::Assign).local;
+        return intSetHas(tracked, dest) && ownStateOf(tracked, parts, whole(dest)) != OwnState::Empty && !intSetHas(dropStatementMoved(st), dest);
+    };
+    return false;
+};
+fn dropCallNeeded(tracked: &List<Int>, parts: &List<OwnPart>, term: &Terminator) -> Bool ~ {
+    if term is Terminator::Call {
+        dest = (term as Terminator::Call).dest;
+        return intSetHas(tracked, dest) && ownStateOf(tracked, parts, whole(dest)) != OwnState::Empty && !intSetHas(dropTerminatorMoved(term), dest);
+    };
+    return false;
+};
+fn dropNeededKeys(dc: &DropCx, tracked: &List<Int>, parts: &List<OwnPart>, local: Int, plan: &DropPlan) -> List<Key> ~ {
+    out = [];
+    if plan is DropPlan::NoDrop { return out; };
+    if ownStateOf(tracked, parts, whole(local)) = OwnState::MaybeOwned { out = keySetAdd(out, whole(local)); };
+    if plan is DropPlan::FieldsDrop {
+        for v in (plan as DropPlan::FieldsDrop).variants {
+            for f in v.fields {
+                key = fieldKey(dc.names, local, v.name, f.name);
+                if ownFieldStateOf(tracked, parts, key) = OwnState::MaybeOwned { out = keySetAdd(out, key); };
+            };
+        };
+    };
+    return out;
+};
+fn dropDiscoverFlags(dc: &DropCx, p: &Program, locals: &List<LocalDecl>, tracked: &List<Int>, blocks: &List<MirBlock>, entries: &List<OwnEntry>) -> List<Key> ~ {
+    out = [];
+    for block in blocks {
+        parts = ownEntryParts(entries, block.id);
+        for st in block.stmts {
+            if st is Statement::Assign && dropAssignNeeded(tracked, parts, st) {
+                local = (st as Statement::Assign).local;
+                out = keySetUnion(out, dropNeededKeys(dc, tracked, parts, local, dropPlan(dc, p, locals, tracked, parts, local)));
+            };
+            parts = ownTransferStatement(dc, tracked, parts, st);
+        };
+        if block.term is Terminator::Return {
+            for local in tracked { out = keySetUnion(out, dropNeededKeys(dc, tracked, parts, local, dropPlan(dc, p, locals, tracked, parts, local))); };
+        };
+        if block.term is Terminator::Call && dropCallNeeded(tracked, parts, block.term) {
+            local = (block.term as Terminator::Call).dest;
+            out = keySetUnion(out, dropNeededKeys(dc, tracked, parts, local, dropPlan(dc, p, locals, tracked, parts, local)));
+        };
+    };
+    return out;
+};
+fn dropFlagLocal(flags: &List<DropFlag>, key: &Key) -> Int ~ {
+    for flag in flags { if flag.key = key { return flag.local; }; };
+    return 0 - 1;
+};
+fn dropSetFlag(local: Int, value: Bool) -> Statement {
+    return Statement::Assign { local: local, rv: Rvalue::Use { o: Operand::Const { value: Constant::CBool { b: value } } } };
+};
+fn dropFlagsOf(flags: &List<DropFlag>, local: Int, value: Bool) -> List<Statement> ~ {
+    out = [];
+    for flag in flags { if flag.key.local = local { out = push(out, dropSetFlag(flag.local, value)); }; };
+    return out;
+};
+fn dropFlagClears(flags: &List<DropFlag>, moved: &List<Int>) -> List<Statement> ~ {
+    out = [];
+    for local in moved { out = concatStatements(out, dropFlagsOf(flags, local, false)); };
+    return out;
+};
+fn dropTakeClear(dc: &DropCx, flags: &List<DropFlag>, st: &Statement) -> List<Statement> ~ {
+    out = [];
+    if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::TakeField {
+        take = (st as Statement::Assign).rv as Rvalue::TakeField;
+        local = dropFlagLocal(flags, fieldKey(dc.names, take.local, take.name, take.field));
+        if local >= 0 { out = push(out, dropSetFlag(local, false)); };
+    };
+    return out;
+};
+fn dropWithStatementFlags(dc: &DropCx, flags: &List<DropFlag>, st: &Statement) -> List<Statement> ~ {
+    out = singleton(clone(st));
+    out = concatStatements(out, dropFlagClears(flags, dropStatementMoved(st)));
+    out = concatStatements(out, dropTakeClear(dc, flags, st));
+    if st is Statement::Assign { out = concatStatements(out, dropFlagsOf(flags, (st as Statement::Assign).local, true)); };
+    if st is Statement::Drop { out = concatStatements(out, dropFlagsOf(flags, (st as Statement::Drop).local, false)); };
+    return out;
+};
+// The build is passed by value, so that adding a block moves the list rather than copying it through a reference
+fn dropWithLocal(acc: DropBuild, ty: Type) -> DropBuild ~ {
+    local = acc.nextLocal;
+    return DropBuild { nextLocal: local + 1, decls: push(acc.decls, LocalDecl { id: local, named: false, name: "", ty: ty }), ..acc };
+};
+fn dropWithBlock(acc: DropBuild) -> DropBuild ~ {
+    block = acc.nextBlock;
+    return DropBuild { nextBlock: block + 1, ..acc };
+};
+fn dropAddBlock(acc: DropBuild, block: Int, stmts: List<Statement>, term: Terminator) -> Built ~ {
+    return Built { acc: DropBuild { blocks: push(acc.blocks, MirBlock { id: block, stmts: stmts, term: term }), ..acc }, block: block };
+};
+fn dropLocalActs(dc: &DropCx, tracked: &List<Int>, parts: &List<OwnPart>, local: Int, plan: &DropPlan, acc: DropBuild) -> BuiltActs ~ {
+    out = [];
+    if plan is DropPlan::NoDrop { return BuiltActs { acc: acc, acts: out }; };
+    maybeWhole = ownStateOf(tracked, parts, whole(local)) = OwnState::MaybeOwned;
+    if plan is DropPlan::WholeDrop {
+        return BuiltActs { acc: acc, acts: singleton(DropAct::Act { conditional: maybeWhole, key: whole(local), stmts: singleton(Statement::Drop { local: local }) }) };
+    };
+    if !(plan is DropPlan::FieldsDrop) { return BuiltActs { acc: acc, acts: out }; };
+    shape = (plan as DropPlan::FieldsDrop).variants;
+    for v in shape {
+        facts = [];
+        for f in v.fields {
+            temp = acc.nextLocal;
+            acc = dropWithLocal(acc, clone(f.ty));
+            key = fieldKey(dc.names, local, v.name, f.name);
+            conditional = ownFieldStateOf(tracked, parts, key) = OwnState::MaybeOwned;
+            stmts = pair(Statement::Assign { local: temp, rv: Rvalue::TakeField { local: local, name: clone(v.name), field: clone(f.name) } }, Statement::Drop { local: temp });
+            facts = push(facts, DropAct::Act { conditional: conditional, key: key, stmts: stmts });
+        };
+        if size(facts) > 0 {
+            if size(shape) = 1 { out = push(out, DropAct::SpliceAct { sub: facts }); }
+            else { out = push(out, DropAct::VariantAct { local: local, ctor: clone(v.name), sub: facts }); };
+        };
+    };
+    out = push(out, DropAct::Act { conditional: false, key: whole(local), stmts: singleton(Statement::Drop { local: local }) });
+    if maybeWhole { return BuiltActs { acc: acc, acts: singleton(DropAct::GroupAct { key: whole(local), sub: out }) }; };
+    return BuiltActs { acc: acc, acts: out };
+};
+fn dropBuildActs(acts: &List<DropAct>, index: Int, cont: Int, flags: &List<DropFlag>, acc: DropBuild) -> Built [{ affirm index >= 0; }] ~ {
+    if index >= size(acts) { return Built { acc: acc, block: cont }; };
+    act = get(acts, index);
+    built = dropBuildActs(acts, index + 1, cont, flags, acc);
+    rest = built.block;
+    acc = built.acc;
+    if act is DropAct::SpliceAct { return dropBuildActs((act as DropAct::SpliceAct).sub, 0, rest, flags, acc); };
+    if act is DropAct::GroupAct {
+        group = act as DropAct::GroupAct;
+        inner = dropBuildActs(group.sub, 0, rest, flags, acc);
+        sub = inner.block;
+        acc = inner.acc;
+        test = acc.nextBlock;
+        acc = dropWithBlock(acc);
+        return dropAddBlock(acc, test, [], Terminator::Switch { cond: Operand::Copy { local: dropFlagLocal(flags, group.key) }, yes: sub, no: rest });
+    };
+    if act is DropAct::Act {
+        simple = act as DropAct::Act;
+        bid = acc.nextBlock;
+        acc = dropWithBlock(acc);
+        added = dropAddBlock(acc, bid, clone(simple.stmts), Terminator::Goto { block: rest });
+        acc = added.acc;
+        if !simple.conditional { return Built { acc: acc, block: bid }; };
+        test = acc.nextBlock;
+        acc = dropWithBlock(acc);
+        return dropAddBlock(acc, test, [], Terminator::Switch { cond: Operand::Copy { local: dropFlagLocal(flags, simple.key) }, yes: bid, no: rest });
+    };
+    variant = act as DropAct::VariantAct;
+    inner = dropBuildActs(variant.sub, 0, rest, flags, acc);
+    sub = inner.block;
+    acc = inner.acc;
+    temp = acc.nextLocal;
+    acc = dropWithLocal(acc, Type::TBool);
+    test = acc.nextBlock;
+    acc = dropWithBlock(acc);
+    stmts = singleton(Statement::Assign { local: temp, rv: Rvalue::IsVariant { o: Operand::Copy { local: variant.local }, name: clone(variant.ctor) } });
+    return dropAddBlock(acc, test, stmts, Terminator::Switch { cond: Operand::Copy { local: temp }, yes: sub, no: rest });
+};
+fn dropRootsContain(aliases: &List<Loan>, operand: &Operand, dest: Int) -> Bool ~ {
+    local = operandLocal(operand);
+    if local < 0 { return false; };
+    if local = dest { return true; };
+    origin = loanLookup(aliases, local);
+    for key in origin.refs { if key.local = dest { return true; }; };
+    for key in origin.view { if key.local = dest { return true; }; };
+    return false;
+};
+fn dropStatementRouted(aliases: &List<Loan>, st: &Statement, dest: Int) -> Bool ~ {
+    if st is Statement::Assign {
+        for r in roles((st as Statement::Assign).rv) { if dropRootsContain(aliases, r.operand, dest) { return true; }; };
+    };
+    return false;
+};
+fn dropCallRouted(aliases: &List<Loan>, term: &Terminator, dest: Int) -> Bool ~ {
+    for o in dropCallOperands(term) { if dropRootsContain(aliases, o, dest) { return true; }; };
+    return false;
+};
+fn dropForgetAlias(aliases: &List<Loan>, local: Int) -> List<Loan> ~ {
+    out = [];
+    for alias in aliases { if alias.local != local { out = push(out, clone(alias)); }; };
+    return out;
+};
+fn dropLoanEntry(entries: &List<LoanEntry>, block: Int) -> List<Loan> ~ {
+    for entry in entries { if entry.block = block { return clone(entry.loans); }; };
+    return [];
+};
+fn dropPlainCall(bid: Int, stmts: List<Statement>, term: &Terminator, flags: &List<DropFlag>, acc: DropBuild) -> Built ~ {
+    if term is Terminator::Call {
+        call = term as Terminator::Call;
+        updates = concatStatements(dropFlagClears(flags, dropTerminatorMoved(term)), dropFlagsOf(flags, call.dest, true));
+        if size(updates) = 0 { return dropAddBlock(acc, bid, stmts, clone(term)); };
+        trampoline = acc.nextBlock;
+        acc = dropWithBlock(acc);
+        added = dropAddBlock(acc, trampoline, updates, Terminator::Goto { block: call.next });
+        return dropAddBlock(added.acc, bid, stmts, Terminator::Call { callee: clone(call.callee), args: clone(call.args), dest: call.dest, next: trampoline });
+    };
+    return dropAddBlock(acc, bid, stmts, clone(term));
+};
+fn dropFinishTerm(dc: &DropCx, p: &Program, locals: &List<LocalDecl>, tracked: &List<Int>, flags: &List<DropFlag>, bid: Int, stmts: List<Statement>, parts: &List<OwnPart>, aliases: &List<Loan>, term: &Terminator, acc: DropBuild) -> Built ~ {
+    if term is Terminator::Return {
+        acts = [];
+        for local in tracked {
+            more = dropLocalActs(dc, tracked, parts, local, dropPlan(dc, p, locals, tracked, parts, local), acc);
+            acc = more.acc;
+            for act in more.acts { acts = push(acts, clone(act)); };
+        };
+        if size(acts) = 0 { return dropAddBlock(acc, bid, stmts, Terminator::Return); };
+        finalBid = acc.nextBlock;
+        acc = dropWithBlock(acc);
+        built = dropBuildActs(acts, 0, finalBid, flags, acc);
+        entry = built.block;
+        added = dropAddBlock(built.acc, finalBid, [], Terminator::Return);
+        return dropAddBlock(added.acc, bid, stmts, Terminator::Goto { block: entry });
+    };
+    if term is Terminator::Call && dropCallNeeded(tracked, parts, term) {
+        call = term as Terminator::Call;
+        plan = dropPlan(dc, p, locals, tracked, parts, call.dest);
+        if dropCallRouted(aliases, term, call.dest) {
+            temp = acc.nextLocal;
+            acc = dropWithLocal(acc, localTypeIn(locals, call.dest));
+            assignBid = acc.nextBlock;
+            acc = dropWithBlock(acc);
+            made = dropLocalActs(dc, tracked, parts, call.dest, plan, acc);
+            built = dropBuildActs(made.acts, 0, assignBid, flags, made.acc);
+            entry = built.block;
+            acc = built.acc;
+            flagsBid = acc.nextBlock;
+            acc = dropWithBlock(acc);
+            assignment = singleton(Statement::Assign { local: call.dest, rv: Rvalue::Use { o: Operand::Move { local: temp } } });
+            assignment = concatStatements(assignment, dropFlagsOf(flags, call.dest, true));
+            added = dropAddBlock(acc, assignBid, assignment, Terminator::Goto { block: call.next });
+            added = dropAddBlock(added.acc, flagsBid, dropFlagClears(flags, dropTerminatorMoved(term)), Terminator::Goto { block: entry });
+            return dropAddBlock(added.acc, bid, stmts, Terminator::Call { callee: clone(call.callee), args: clone(call.args), dest: temp, next: flagsBid });
+        };
+        callBid = acc.nextBlock;
+        acc = dropWithBlock(acc);
+        made = dropLocalActs(dc, tracked, parts, call.dest, plan, acc);
+        built = dropBuildActs(made.acts, 0, callBid, flags, made.acc);
+        entry = built.block;
+        plain = dropPlainCall(callBid, [], term, flags, built.acc);
+        return dropAddBlock(plain.acc, bid, stmts, Terminator::Goto { block: entry });
+    };
+    if term is Terminator::Call { return dropPlainCall(bid, stmts, term, flags, acc); };
+    return dropAddBlock(acc, bid, stmts, clone(term));
+};
+fn dropProcessBlock(dc: &DropCx, p: &Program, fn: &Function, kinds: &LocalKinds, locals: &List<LocalDecl>, tracked: &List<Int>, flags: &List<DropFlag>, entries: &List<OwnEntry>, loans: &List<LoanEntry>, block: &MirBlock, acc: DropBuild) -> DropBuild ~ {
+    bid = block.id;
+    stmts = [];
+    if bid = 0 {
+        for flag in flags {
+            first = singleton(dropSetFlag(flag.local, intSetHas(fn.params, flag.key.local)));
+            stmts = concatStatements(first, stmts);
+        };
+    };
+    parts = ownEntryParts(entries, bid);
+    aliases = dropLoanEntry(loans, bid);
+    for st in block.stmts {
+        if !(st is Statement::Assign) || !dropAssignNeeded(tracked, parts, st) {
+            stmts = concatStatements(stmts, dropWithStatementFlags(dc, flags, st));
+            parts = ownTransferStatement(dc, tracked, parts, st);
+            aliases = loanStatement(fn, kinds, aliases, st);
+        } else {
+            assign = st as Statement::Assign;
+            dest = assign.local;
+            plan = dropPlan(dc, p, locals, tracked, parts, dest);
+            if dropStatementRouted(aliases, st, dest) {
+                temp = acc.nextLocal;
+                acc = dropWithLocal(acc, localTypeIn(locals, dest));
+                segA = singleton(Statement::Assign { local: temp, rv: clone(assign.rv) });
+                segA = concatStatements(segA, dropFlagClears(flags, dropStatementMoved(st)));
+                segA = concatStatements(segA, dropTakeClear(dc, flags, st));
+                contBid = acc.nextBlock;
+                acc = dropWithBlock(acc);
+                made = dropLocalActs(dc, tracked, parts, dest, plan, acc);
+                built = dropBuildActs(made.acts, 0, contBid, flags, made.acc);
+                entry = built.block;
+                acc = built.acc;
+                segABid = acc.nextBlock;
+                acc = dropWithBlock(acc);
+                added = dropAddBlock(acc, segABid, segA, Terminator::Goto { block: entry });
+                added = dropAddBlock(added.acc, bid, stmts, Terminator::Goto { block: segABid });
+                acc = added.acc;
+                bid = contBid;
+                stmts = singleton(Statement::Assign { local: dest, rv: Rvalue::Use { o: Operand::Move { local: temp } } });
+                stmts = concatStatements(stmts, dropFlagsOf(flags, dest, true));
+                parts = ownTransferStatement(dc, tracked, parts, st);
+            } else {
+                contBid = acc.nextBlock;
+                acc = dropWithBlock(acc);
+                made = dropLocalActs(dc, tracked, parts, dest, plan, acc);
+                built = dropBuildActs(made.acts, 0, contBid, flags, made.acc);
+                entry = built.block;
+                added = dropAddBlock(built.acc, bid, stmts, Terminator::Goto { block: entry });
+                acc = added.acc;
+                bid = contBid;
+                stmts = dropWithStatementFlags(dc, flags, st);
+                cleared = ownSetState(tracked, ownClearFields(parts, dest), whole(dest), OwnState::Empty);
+                parts = ownTransferStatement(dc, tracked, cleared, st);
+            };
+            aliases = dropForgetAlias(aliases, dest);
+        };
+    };
+    finished = dropFinishTerm(dc, p, locals, tracked, flags, bid, stmts, parts, aliases, block.term, acc);
+    return finished.acc;
+};
+fn dropSortLocals(locals: &List<LocalDecl>) -> List<LocalDecl> ~ {
+    sorted = true;
+    if size(locals) > 0 { for i in 1..size(locals) { if get(locals, i - 1).id >= get(locals, i).id { sorted = false; }; }; };
+    if sorted { return clone(locals); };
+    out = noOwnershipLocals();
+    for decl in locals {
+        next = []; added = false;
+        for prior in out {
+            if !added && prior.id >= decl.id { next = push(next, clone(decl)); added = true; };
+            if prior.id != decl.id { next = push(next, clone(prior)); };
+        };
+        if !added { next = push(next, clone(decl)); };
+        out = next;
+    };
+    return out;
+};
+fn elaborateDrops(names: &List<FieldName>, p: &Program, fn: &Function, tracked: &List<Int>, locals: List<LocalDecl>, blocks: List<MirBlock>, nextLocal: Int, nextBlock: Int) -> Function ~ {
+    ordered = sortBlocks(blocks);
+    owned = [];
+    for local in tracked { owned = intSetAdd(owned, local); };
+    shapes = []; for local in owned { shapes = push(shapes, LocalShape { local: local, shape: dropShape(p, locals, local) }); };
+    dc = DropCx { names: clone(names), shapes: shapes };
+    entries = ownBlockStates(dc, fn, owned, ordered);
+    flagged = dropDiscoverFlags(dc, p, locals, owned, ordered, entries);
+    flags = []; next = nextLocal; allLocals = clone(locals);
+    for key in flagged {
+        flags = push(flags, DropFlag { key: clone(key), local: next });
+        allLocals = push(allLocals, LocalDecl { id: next, named: false, name: "", ty: Type::TBool });
+        next = next + 1;
+    };
+    kinds = localKinds(p, names, locals);
+    input = Function { locals: clone(locals), blocks: clone(ordered), ..clone(fn) };
+    loans = loanEntries(p, kinds, input);
+    statementFn = Function { locals: clone(locals), ..clone(fn) };
+    acc = DropBuild { blocks: [], nextBlock: nextBlock, nextLocal: next, decls: [] };
+    for block in ordered { acc = dropProcessBlock(dc, p, statementFn, kinds, allLocals, owned, flags, entries, loans, block, acc); };
+    for decl in acc.decls { allLocals = push(allLocals, clone(decl)); };
+    return Function { locals: dropSortLocals(allLocals), blocks: sortBlocks(acc.blocks), ..clone(fn) };
+};

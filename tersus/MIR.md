@@ -256,7 +256,7 @@ The emitter written in Tersus (`examples/mir/emit/emit.tersus`, `Bootstrap`) low
 
 ## Moves
 
-A copy of a value is made where the program writes `clone(x)`: the checker has already turned that into a call of the type's `Clone` impl (or, for a type made of a type parameter of a function written for any type, into the one builtin that is left of it, which the lowering turns into the rvalue below). The copies the compiler itself makes are the rvalue `CopyOf x` (the same value, so the validator and the executor take it as a `Use`; it reads `x` and gives a deep copy that shares nothing with it, and no code of a `Clone` impl runs for it). Every other use of a value that is not Copy moves it. `MirMoves.checkMoves` (run by lowering, before validation, on the MIR it has just made) is the check that a program does not use what it has moved:
+The checker resolves source `clone(x)` calls to the type's `Clone` implementation. A clone left as a builtin over a type parameter becomes the MIR rvalue `CopyOf`. The validator and reference executor treat `CopyOf` as `Use` over the same immutable value; native code calls an available `Clone` implementation or copies the fields structurally. Inside a type's own `Clone` implementation, structural copying avoids a recursive call to that same implementation. `MirMoves.checkMoves` runs during lowering, before validation, and rejects uses of moved values:
 
 - **Places.** A place is a local with the fields (`SField`), the elements of a list (`SElem`) and the tag (`STag`) followed from it. The state along each path is the set of places that may have been moved out, with where and by which variable, and the places that a local is a *view* of on every path (a local that is a view on one path and not on another is taken for a value of its own, so a loop that rebuilds `bytes = push(bytes, x)` after `bytes = self.bytes` is not a second move of `self.bytes`). The blocks are walked to a fixed point, joining by union of the moves and intersection of the views, and the errors are collected from the last walk.
 - **Views.** `d = x.f`, `d = get(l, i)` (or `first`, `last`), `d = x as V`, `d = Box::unbox(b)`, and the hidden locals of a `for` (`$list ...`) and a `match` (`$match`) make `d` a view of the place they read, when its type is not Copy. Reading a view moves nothing. Taking one (a `Consume` operand: a call argument that is not lent, a field of a struct made, `push`, `return`) moves the place it is a view of, which is an error for an element of a list and for a part of a parameter that is lent.
@@ -270,7 +270,52 @@ signature stubs remain present during those checks, then leave the unit.
 
 ## Ownership
 
-Native code frees what a program makes and changes lists in place, so `MirOwnership.insertOwnership` (run by `emitProgram`, after validation, and printed by `tersus owned`) rewrites the MIR to say who owns every value that has something to free: a list, a `Box`, and a struct, an enum or an array that holds one (`needsDrop`). A value that owns nothing (a number, and a struct, an enum or an array of them) is plain, and is copied where it is wanted. The result still means the same thing: `MirEval` runs it and gives the same answers, with `Move` as a `Copy`, `CopyOf` as a `Use`, and `Drop` as nothing.
+The production transformations are `insertOwnership` and `expandRefWrites` in
+`examples/mir/ownership/`, hosted by `MirHousekeeping`. The order is ghost
+erasure, reference-write expansion, list lowering, Haskell `MirMono`
+monomorphization, Tersus ownership, verification, then emission. `MirOwnership`
+retains only shared operand-role classification for move checking; the heap
+model's drop classification remains in the frozen test oracle.
+
+The host retains metadata outside the runtime data: generic struct templates,
+struct invariants, function specifications and full ghost statements. For each
+pass, `MirOwnershipData` replaces ghosts with globally unique numbered markers,
+and MIR v2 carries them as `ghost N`. The returned marker must occur exactly
+once in its original function, including after block splitting. Missing,
+duplicate, unrecognized or unnumbered markers are errors, as are changed
+original local declarations, function headers, type declarations or function
+sets. Original block IDs are retained so loop specifications keep valid
+references. Uncalled Drop/Clone implementations are not pruned at this boundary.
+`forNative` still removes proof metadata only for emitter data.
+
+The emitter executable includes the ownership request dispatcher. The pinned
+stage-0 seed runs reference-write expansion and ownership on every program the
+host builds for itself (the emitter, checker, eraser, parser and validator) and
+emits the emitter to build stage 1. Stage 1 emits the other tools and runs the
+passes for user programs. Ownership has no interpreted cold path;
+only the recursive erasure of the List/Box library runs the eraser interpreted
+while the tools are built. Build or
+pass failures return `Error` without calling the frozen Haskell test oracle.
+`TestOwnership` checks exact equality with the frozen oracle for corpus programs
+that neither construct references nor write through them, and runs owned MIR
+on the independent heap model.
+Reference-write regressions cover deliberate fixes to the old implementation,
+so their required evidence is clean heap-model execution and native/reference
+parity rather than oracle equality. `TestMirOwnership` also covers transport,
+symbolic pre-mono inputs and protocol refusals; `testOwnershipMetadata` isolates
+pure metadata checks. The heap-model MIR fixtures are also owned by the
+production emitter, built with the runtime's memory checks and run under
+valgrind; their callees take a reference parameter by value there, because the
+native MIR checker gives a lent parameter the type of its referent. Two of them
+(a view lent to a callee that writes its source, a borrowed view whose source is
+replaced) are patterns the move checker now refuses in source, which a test
+asserts. Lowered fixtures name a list or a Box as its declared struct, and paired
+controls require the same ownership from the older `list`/`box` tokens.
+An update parameter (`fn f(xs: &mut List<Int>)`) is a borrowed value local in
+MIR, so `*xs = v` expands to an assignment of `xs`; native code stores over the
+caller's place, so the pass frees what it held first, as for a reference write.
+
+Native code frees what a program makes and changes lists in place, so `MirHousekeeping.insertOwnership` (run by `emitProgram`, after validation, and printed by `tersus owned`) rewrites the MIR to say who owns every value that has something to free: a list, a `Box`, and a struct, an enum or an array that holds one (`needsDrop`). A value that owns nothing (a number, and a struct, an enum or an array of them) is plain, and is copied where it is wanted. The result still means the same thing: `MirEval` runs it and gives the same answers, with `Move` as a `Copy`, `CopyOf` as a `Use`, and `Drop` as nothing.
 
 **The invariant** is that what a value owns (a list or a `Box`, which are on the heap) has exactly one owner: a local, a word of another value (a field, or an element of a list), or a temporary on its way somewhere. So the heap is a forest, a value is freed with what is in it, a copy is a deep copy that shares nothing, and `push` and `set` may change the list they are given when it is theirs. A struct or an enum that holds one is held inline and owns it through its words, so it is moved, copied and dropped like a list: a `Move` copies the words to where they go and clears them where they were, `CopyOf` is a deep copy, and a `Drop` frees what the words own. Where a value is wanted by two the program has to say so (`clone`, see Moves), and the pass makes that copy where `CopyOf` is; it still clones a part of a value that is read and then not used before the whole changes (a view that cannot look at the value in place), which a program cannot see.
 
@@ -281,19 +326,19 @@ Native code frees what a program makes and changes lists in place, so `MirOwners
 | reads the value: `size`, `==`, `is`, the list of a `get` | nothing |
 | takes it: `y = x`, the list and the element of `push`/`set`, a field of a list or struct that is made, an argument of a call, `_0` | `Move x` when it is not used again (`x` is left holding nothing), and otherwise a `CopyOf` of it |
 
-A local that is given a value frees the one it held (assigning null does nothing), and `Drop` frees all that a function owns when it returns. A local that holds nothing is a null pointer (or, for a value held inline, cleared words, which a drop frees nothing of), and the pass needs no analysis of which locals might have been moved from. Every parameter is owned by the function, which frees it unless it moved it, and a function returns what it owns, so a call looks the same whichever function it is, including one reached through a function value. Two arguments that are the same local are a copy for all but the last.
+A local is dropped before an assignment or call overwrites a value it still owns, and remaining owned values are dropped at return. Ownership tracks whole values and partial fields across control-flow joins and uses flags where cleanup is conditional. A parameter declared with `&` or `&mut` borrows its referent; a consuming argument transfers the value it owns. If the caller still needs an owning value, it supplies a clone.
 
 **A part of a value** (`get`, `first`, `last`, a field) is part of what contains it:
 
 - A field of a value that is not used again is taken out of it (`TakeField`; what is left of the value is freed with it). This is what makes a `match` on a tree not copy the tree: the fields are taken from the scrutinee one by one. The check is by field: a field is taken when neither it nor the whole value is used later (the tag, read by `is`, does not count).
-- A temporary that is only read, by statements that follow it in its block, with nothing in between that takes, changes or gives away what it was read from, `Peek`s: it holds the pointer and owns nothing, so it costs nothing and is not freed. `(x as V).f` and `size(get(rows, i))` are like this. A cast is first forwarded to the reads that follow it, so that they read the value itself.
+- A temporary used only by reads can `Peek` when its source and the source's loan/view origins stay live and undisturbed through those uses. Assignments, consumes, reference writes and call arguments are checked through their loan origins, not just the local named in the syntax. A temporary used as the root of a `Borrow` is copied instead of peeked, because that borrow can outlive its last direct use. Cross-block peeks and the hidden `$list` local of a `for` additionally require a chain to an unchanged read-only lent parameter; mutable parameters do not qualify. A cast is forwarded to subsequent reads so they read the original value directly.
 - Otherwise it is a `CopyOf` of the part, made where the part is read.
 
 **Borrowed places stay live through the reference's last use.** The ownership pass carries loan origins across the control-flow graph, including reborrows, reference copies and calls with `from` results. A read through a reference keeps its owner or top-level field live, so an earlier read cannot take that field out. A call that replaces an owner while reading a reference to it writes into a temporary and drops the old owner only after the call returns. Reassigning a reference replaces its old origins; joins keep the possible origins from each path.
 
 **Box payload borrows use the existing place and slot representations.** Before native storage lowering, `&b` has type `&Box<T>` and `&*b` has type `&T`; both refer to the same logical Box place because the interpreter and source validator treat a Box as its contents. The verifier recognizes a named source Box's matching ghost `blk` declaration when its requested reference target is exactly the payload, normalizing only one level. Erased native handles have no such declaration and require explicit slot steps. `MirLists` uses that target type to distinguish them and appends the existing slot-zero index step only for the payload borrow. Native code follows the Box address without taking its value or freeing its room. Stable `clone(Box::unbox(place))` calls to lent Clone implementations borrow non-array payloads, while a terminal Box field is lent as a Box. Sized boxed arrays retain whole-array materialization because their native List storage has element slots rather than one inline-array slot. The child's Clone returns an owned value, which is moved into fresh Box storage; the temporary loan keeps the original owner live through the call and does not own the result. Consuming `Unbox` is unchanged.
 
-**What this costs.** A call with an argument that is used afterwards copies the argument (every parameter is owned, so there is no way to lend a value yet), and a part that is kept (`row = get(rows, i)`) copies the part. `out = push(out, x)` in a loop, `set` in a loop, and a recursion that takes a value apart copy nothing. A list that is built by pushing costs time and memory in proportion to its length (50,000 pushes took 38 seconds and 9.8 GB when each copied the list, and 5 million take 40 ms in a process limited to 200 MB).
+**What this costs.** Borrowed parameters avoid copies of their referents. Last-use moves and undisturbed peeks also avoid copies; a clone or a view that must survive a mutation needs independent storage.
 
 **How it is checked.** `TestOwnership` runs the owned MIR on a model of the heap that fails on a value used after it is moved from or freed, freed twice, looked at after it changed, changed in place while another place holds it, or left on the heap when the program ends, and compares the answer with the executor's. It runs every example and every program of the native tests, and the model is shown to catch the mistakes it exists for (MIR written by hand with each). `TestNative` builds every program with `-DTERSUS_CHECK`, which makes the runtime record each block (a block that is freed twice or left at the end is an error, and one that is freed is filled with 0xDD and kept so that a use of it reads that), and runs some of them under valgrind as well. When this was written, a generator of random programs over lists, nested lists, structs and enums (a script that is not in the repository) found no difference on the model or natively.
 
@@ -318,7 +363,7 @@ differs from the normalizing AST/MIR round-trip writer.
 
 `tersus mir --data <file>` prints the MIR that native code is made from (the owned MIR of the Ownership section) as text that a program can read, and `MirData` reads and writes it (`readProgram (writeProgram p) = Ok (forNative p)`, for every example and every program of the native tests: `TestMirData`). It is what the lowering to LLVM IR written in Tersus is given (`STEP31.md`), and the emitter gives the same IR for the program read back from the data as for the program (`TestMirEmit`), so the data is all that the code made needs. Only what the emitter uses is in it: the ghost statements, the contracts and loop invariants, the structs with sizes and the invariants of structs are left out (`forNative`), since the validator is done with them and monomorphization has made their copies.
 
-The reader and writer in Tersus are `examples/mir/mir_reader/mir_reader.tersus`: the types of the MIR as enums and structs (`Type`, `Constant`, `Operand`, `Rvalue`, `Statement`, `Terminator`, `Block`, `Function`, `Program`; a binary or list operation is its index in the table of words `binaryWords` or `listWords`, the order of `MirData`), a tokenizer, a parser for each of them and a writer. `tersus mir --data p.tersus | tersus run examples/mir/mir_reader/mir_reader.tersus` prints the data again, byte for byte (`TestMirReader` does it natively for every example, every program of the native tests, and for the reader's own data, and has it refuse the texts that are not the data of a program). It reads the file that the writer of `MirData` makes: the types, then the functions, then `main`, a record to a line, and it stops at the first empty line. `examples/mir/emit/emit.tersus` is the lowering to LLVM IR written with that reader; it writes all of the IR of the program (`TestMirEmit`), and with the arguments `outline` and `bodies` the declarations with the descriptors and the entry point, and the code of each function.
+The shared MIR record declarations and parsers are in `examples/mir/reader/reader.tersus`; the normalizing writer is in `examples/mir/writer/writer.tersus`. `examples/mir/mir_reader/mir_reader.tersus` imports both and reads/writes version 1. The writer also exports `printProgramWithGhosts` for version 2, retaining numbered ghost IDs. The eraser keeps its phase-specific legacy type writer. `tersus mir --data p.tersus | tersus run examples/mir/mir_reader/mir_reader.tersus` prints the data again, byte for byte (`TestMirReader` does it natively for every example, every program of the native tests, and for the reader's own data, and has it refuse the texts that are not the data of a program). It reads the file that the writer of `MirData` makes: the types, then the functions, then `main`, a record to a line, and it stops at the first empty line. `examples/mir/emit/emit.tersus` is the lowering to LLVM IR written with that reader; it writes all of the IR of the program (`TestMirEmit`), and with the arguments `outline` and `bodies` the declarations with the descriptors and the entry point, and the code of each function.
 
 The first line is `tersus-mir 1`. Every other line is a record of words and numbers separated by one space, with names in quotes (the UTF-8 bytes of the name; printable ASCII as it is, and the others, `"` and `\` as `\xHH`), so the text is ASCII and a reader needs only a line, its words and its numbers. The order of the records is that of the maps they were in, which the emitter keeps: the types (`struct` and `enum`) by name, the functions by name, then `main`. A function is its `function` (or `main`) line, a `local` line for each local, a `block` line for each block followed by its statements and the line of its terminator, and `end`:
 

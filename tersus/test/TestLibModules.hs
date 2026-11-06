@@ -28,7 +28,7 @@ import TestHarness (Test (..), forceTestResult, testAssertEq, testAssertTrue, te
 import TestStorageOracle (eraseStorageHelper)
 import qualified PackageCompile as Package
 import PreludeSource (toolPackageFiles)
-import MirOwnership (expandRefWrites, insertOwnership)
+import MirHousekeeping (expandRefWrites, insertOwnership)
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (nativeStorage, storageProgram)
 import Utils (Result (..), bindResult, flatResultMap, mapResult)
@@ -281,13 +281,11 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         Left e -> Just e
         Right (Modules.PackageResult pkg) -> case Package.compileModules pkg `bindResult` Package.lowerCompiledPackage pkg of
             Error e -> Just e
-            Ok raw -> case erasedHelpers `bindResult` \units -> lowerLists (Ok units) (expandRefWrites raw) of
+            Ok raw -> case (erasedHelpers `bindResult` \units -> expandRefWrites raw `bindResult` lowerLists (Ok units)) `bindResult` insertOwnership of
                 Error e -> Just e
-                Ok native ->
-                    let owned = insertOwnership native
-                     in case readProgram (writeProgram owned) of
-                        Error e -> Just e
-                        Ok restored -> testAssertEq restored (forNative owned)
+                Ok owned -> case readProgram (writeProgram owned) of
+                    Error e -> Just e
+                    Ok restored -> testAssertEq restored (forNative owned)
         Right _ -> Just "bootstrap fixture is not a package"
     badImportedLayout source = case fixtureModule source of
         Error e -> Just e
