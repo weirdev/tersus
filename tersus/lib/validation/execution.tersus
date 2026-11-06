@@ -1,0 +1,879 @@
+import validation::context { closeContext, integerValue, knownVariant };
+import validation::differences { safeBoundDifference, safeBoundSum, semanticFacts };
+import validation::evaluation { addOffsetFacts, builtinFacts, contextWithApplication, readThroughSequence, recordEvaluatedSize, recordEvaluatedValue };
+import validation::joins { freshValue, splitReadOverWrite };
+import validation::model { ApplicationTerm, ArgumentsLookup, CheckedStep, ConstantTerm, DisequalityFact, EqualityFact, ExecutionResult, ExecutionState, ExecutionStep, IntegerLookup, OrderFact, Saturation, SharedEntailment, SumResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
+import validation::relations { boolAt, containsValue, emptyIntMap, equalArguments, hasEquality, intAt, leastClasses, sameIn };
+import validation::saturation { noBlocked, noClosed, noDoneKeys, proveBySaturation };
+import validation::state { bindLocal, booleanCheck, noTemplates, resolveArguments, resolveValue, termInUse };
+import validation::validation { entailmentCache, entailsGoal, entailsGoalCached, entailsPlainCached, runProofSteps };
+
+
+
+fn quietStep(given: &ExecutionStep) -> ExecutionStep {
+    if given is ExecutionStep::Check {
+        c = given as ExecutionStep::Check;
+        if c.relation >= 0 && c.relation <= 3 { return ExecutionStep::Check { relation: c.relation + 10, left: c.left, right: c.right }; };
+    };
+    return clone(given);
+};
+
+fn quietSteps(steps: &List<ExecutionStep>) -> List<ExecutionStep> {
+    result = [];
+    for s in steps { result = push(result, quietStep(s)); };
+    return result;
+};
+
+// relation: 0 is equality, 1 disequality, 2 strict less, 3 non-strict less.
+// Any other relation code is rejected rather than guessed.
+fn localGoal(relation: Int, left: Int, right: Int) -> ValidatorGoal {
+    if relation = 0 { return ValidatorGoal::Equal { left: left, right: right }; };
+    if relation = 1 { return ValidatorGoal::Different { left: left, right: right }; };
+    if relation = 2 { return ValidatorGoal::Less { left: left, right: right }; };
+    return ValidatorGoal::AtMost { left: left, right: right };
+};
+
+// Only the trusted MIR bridge may add an edge condition as an assumption.
+fn assumeRelation(context: ValidatorContext, relation: Int, left: Int, right: Int) -> ValidatorContext {
+    if relation = 0 && hasEquality(context.equalities, left, right) { return context; };
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    if relation = 0 { equalities = push(equalities, EqualityFact { left: left, right: right }); };
+    if relation = 1 { different = push(different, DisequalityFact { left: left, right: right }); };
+    if relation = 2 { orders = push(orders, OrderFact { smaller: left, greater: right, strict: true }); };
+    if relation > 2 || relation < 0 { orders = push(orders, OrderFact { smaller: left, greater: right, strict: false }); };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+// A comparison result can be copied across blocks before it is branched on.
+// Its arguments name the values captured when it was evaluated, so derive the
+// relation from those terms rather than from the current local bindings.
+fn assumeComparison(context: &ValidatorContext, term: Int, truth: Bool) -> ValidatorContext {
+    state = clone(context);
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if sameIn(equalitiesClasses, app.id, term) {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                if app.function = -6 {
+                    if truth { state = assumeRelation(state, 0, a, b); } else { state = assumeRelation(state, 1, a, b); };
+                };
+                if app.function = -7 {
+                    if truth { state = assumeRelation(state, 1, a, b); } else { state = assumeRelation(state, 0, a, b); };
+                };
+                if app.function = -8 {
+                    if truth { state = assumeRelation(state, 2, a, b); } else { state = assumeRelation(state, 3, b, a); };
+                };
+                if app.function = -9 {
+                    if truth { state = assumeRelation(state, 3, a, b); } else { state = assumeRelation(state, 2, b, a); };
+                };
+                if app.function = -10 {
+                    if truth { state = assumeRelation(state, 2, b, a); } else { state = assumeRelation(state, 3, a, b); };
+                };
+                if app.function = -11 {
+                    if truth { state = assumeRelation(state, 3, b, a); } else { state = assumeRelation(state, 2, a, b); };
+                };
+            };
+        };
+    };
+    return state;
+};
+
+fn assumeBooleanFact(context: ValidatorContext, left: Int, right: Int) -> ValidatorContext {
+    // (the comparisons a literal on either side decides, found before the context changes)
+    terms = push([], 0);
+    truths = push([], false);
+    for cPosition in 0..size(context.constants) {
+        if get(context.constants, cPosition).kind = 1 {
+            if get(context.constants, cPosition).id = left { terms = push(terms, right); truths = push(truths, get(context.constants, cPosition).value = 1); };
+            if get(context.constants, cPosition).id = right { terms = push(terms, left); truths = push(truths, get(context.constants, cPosition).value = 1); };
+        };
+    };
+    state = context;
+    for k in 1..size(terms) { state = assumeComparison(state, get(terms, k), boolAt(truths, k, false)); };
+    return state;
+};
+
+fn sequenceLength(state: &ExecutionState, list: Int) -> ValueLookup {
+    equalities = semanticFacts(state.context.equalities, state.context.applications, state.context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    for appPosition in 0..size(state.context.applications) {
+        app = get(state.context.applications, appPosition);
+        if app.function = -13 {
+            if size(app.arguments) = 1 {
+                if sameIn(equalitiesClasses, get(app.arguments, 0), list) {
+                    return ValueLookup::Found { term: app.id };
+                };
+            };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+// Trusted list construction: the new length is the old length plus one,
+// and the element at the old length is the appended value. The MIR bridge
+// supplies a validated list and a literal zero.
+fn pushSequence(initial: &ExecutionState, local: Int, list: Int, value: Int, zero: Int) -> ExecutionResult {
+    z = integerValue(initial.context, zero);
+    if z is IntegerLookup::Found {
+        if (z as IntegerLookup::Found).value != 0 { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
+    } else { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
+    state = clone(initial);
+    length = sequenceLength(state, list);
+    oldLength = zero;
+    if length is ValueLookup::Found {
+        oldLength = (length as ValueLookup::Found).term;
+    } else {
+        new = freshValue(state);
+        if new is ValueLookup::Found { oldLength = (new as ValueLookup::Found).term; }
+        else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+        app = ApplicationTerm { id: oldLength, function: -13, arguments: push([], list) };
+        context = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
+        state = ExecutionState { context: context, ..state };
+    };
+    nonnegative = assumeRelation(state.context, 3, zero, oldLength);
+    state = ExecutionState { context: nonnegative, ..state };
+    made = freshValue(state);
+    result = zero;
+    if made is ValueLookup::Found { result = (made as ValueLookup::Found).term; }
+    else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+    app = ApplicationTerm { id: result, function: -16, arguments: push(push([], list), value) };
+    context = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
+    state = ExecutionState { context: context, locals: bindLocal(state.locals, local, result), templates: clone(initial.templates) };
+    new = freshValue(state);
+    newLength = zero;
+    if new is ValueLookup::Found { newLength = (new as ValueLookup::Found).term; }
+    else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+    lengthApp = ApplicationTerm { id: newLength, function: -13, arguments: push([], result) };
+    elementApp = ApplicationTerm { id: value, function: -14, arguments: push(push([], result), oldLength) };
+    apps = push(push(clone(state.context.applications), lengthApp), elementApp);
+    // Every recorded read of the old list was checked before it was added.
+    // Appending preserves its value at that index.
+    equalities = semanticFacts(state.context.equalities, state.context.applications, state.context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    for previousPosition in 0..size(state.context.applications) {
+        previous = get(state.context.applications, previousPosition);
+        if previous.function = -14 {
+            if size(previous.arguments) = 2 {
+                if sameIn(equalitiesClasses, get(previous.arguments, 0), list) {
+                    kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) };
+                    apps = push(apps, kept);
+                };
+            };
+        };
+    };
+    context = ValidatorContext { applications: apps, ..state.context };
+    context = addOffsetFacts(context, newLength, oldLength, 1);
+    knownLength = integerValue(context, oldLength);
+    if knownLength is IntegerLookup::Found {
+        increment = safeBoundSum((knownLength as IntegerLookup::Found).value, 1);
+        if increment is SumResult::Sum {
+            known = ConstantTerm { id: newLength, kind: 0, value: (increment as SumResult::Sum).value };
+            context = ValidatorContext { constants: push(context.constants, known), ..context };
+        };
+    };
+    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, ..state } };
+};
+
+// Last is translated when the length is known. A nonempty check is still
+// required; unknown lengths remain unsupported by this particular encoding.
+fn lastSequence(initial: &ExecutionState, local: Int, list: Int, zero: Int) -> ExecutionResult {
+    z = integerValue(initial.context, zero);
+    if z is IntegerLookup::Found {
+        if (z as IntegerLookup::Found).value != 0 { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
+    } else { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
+    length = sequenceLength(initial, list);
+    if length is ValueLookup::Found {
+        lengthTerm = (length as ValueLookup::Found).term;
+        if entailsGoal(initial.context, ValidatorGoal::Less { left: zero, right: lengthTerm }) = false {
+            return ExecutionResult { status: 1, failedAt: -1, state: clone(initial) };
+        };
+        value = integerValue(initial.context, lengthTerm);
+        if value is IntegerLookup::Found {
+            index = safeBoundDifference((value as IntegerLookup::Found).value, 1);
+            if index is SumResult::Sum {
+                indexValue = (index as SumResult::Sum).value;
+                indexTerm = zero;
+                known = false;
+                for constantPosition in 0..size(initial.context.constants) {
+                    constant = get(initial.context.constants, constantPosition);
+                    if constant.kind = 0 {
+                        if constant.value = indexValue { indexTerm = constant.id; known = true; };
+                    };
+                };
+                state = clone(initial);
+                if known = false {
+                    symbol = freshValue(state);
+                    if symbol is ValueLookup::Found {
+                        indexTerm = (symbol as ValueLookup::Found).term;
+                        constant = ConstantTerm { id: indexTerm, kind: 0, value: indexValue };
+                        context = ValidatorContext { constants: push(clone(state.context.constants), constant), ..state.context };
+                        state = ExecutionState { context: context, ..state };
+                    } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+                };
+                fresh = freshValue(state);
+                if fresh is ValueLookup::Found {
+                    result = (fresh as ValueLookup::Found).term;
+                    app = ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) };
+                    withApp = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
+                    context = readThroughSequence(withApp, result, list, indexTerm);
+                    locals = bindLocal(state.locals, local, result);
+                    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals, templates: clone(initial.templates) } };
+                };
+            };
+        };
+        state = clone(initial);
+        oneTerm = zero;
+        knownOne = false;
+        for constantPosition in 0..size(initial.context.constants) {
+            constant = get(initial.context.constants, constantPosition);
+            if constant.kind = 0 {
+                if constant.value = 1 { oneTerm = constant.id; knownOne = true; };
+            };
+        };
+        if knownOne = false {
+            symbol = freshValue(state);
+            if symbol is ValueLookup::Found {
+                oneTerm = (symbol as ValueLookup::Found).term;
+                context = ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: oneTerm, kind: 0, value: 1 }), ..state.context };
+                state = ExecutionState { context: context, ..state };
+            } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+        };
+        idxFresh = freshValue(state);
+        if idxFresh is ValueLookup::Found {
+            indexTerm = (idxFresh as ValueLookup::Found).term;
+            subApp = ApplicationTerm { id: indexTerm, function: -2, arguments: push(push([], lengthTerm), oneTerm) };
+            context = ValidatorContext { applications: push(clone(state.context.applications), subApp), ..state.context };
+            context = addOffsetFacts(context, indexTerm, lengthTerm, -1);
+            state = ExecutionState { context: context, ..state };
+            fresh = freshValue(state);
+            if fresh is ValueLookup::Found {
+                result = (fresh as ValueLookup::Found).term;
+                app = ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) };
+                withApp = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
+                context = readThroughSequence(withApp, result, list, indexTerm);
+                locals = bindLocal(state.locals, local, result);
+                return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals, templates: clone(initial.templates) } };
+            };
+        };
+    };
+    return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) };
+};
+
+// The bridge checks the index first. The update preserves the length and
+// known reads at indices that are concretely different from the updated one.
+fn setSequence(initial: &ExecutionState, local: Int, list: Int, index: Int, value: Int) -> ExecutionResult {
+    length = sequenceLength(initial, list);
+    if length is ValueLookup::Found {
+        made = freshValue(initial);
+        if made is ValueLookup::Found {
+            result = (made as ValueLookup::Found).term;
+            update = ApplicationTerm { id: result, function: -17, arguments: push(push(push([], list), index), value) };
+            sizeApp = ApplicationTerm { id: (length as ValueLookup::Found).term, function: -13, arguments: push([], result) };
+            changed = ApplicationTerm { id: value, function: -14, arguments: push(push([], result), index) };
+            apps = push(push(push(clone(initial.context.applications), update), sizeApp), changed);
+            equalities = semanticFacts(initial.context.equalities, initial.context.applications, initial.context.constants);
+            equalitiesClasses = leastClasses(equalities);
+            updatedIndex = integerValue(initial.context, index);
+            for previousPosition in 0..size(initial.context.applications) {
+                previous = get(initial.context.applications, previousPosition);
+                if previous.function = -14 {
+                    if size(previous.arguments) = 2 {
+                        if sameIn(equalitiesClasses, get(previous.arguments, 0), list) {
+                            other = integerValue(initial.context, get(previous.arguments, 1));
+                            if updatedIndex is IntegerLookup::Found {
+                                if other is IntegerLookup::Found {
+                                    if (updatedIndex as IntegerLookup::Found).value != (other as IntegerLookup::Found).value {
+                                        kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) };
+                                        apps = push(apps, kept);
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+            context = ValidatorContext { applications: apps, ..clone(initial.context) };
+            locals = bindLocal(clone(initial.locals), local, result);
+            return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals, templates: clone(initial.templates) } };
+        };
+    };
+    return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) };
+};
+
+// The bridge checks nonemptiness first. For a known length, removing the
+// final element preserves every recorded read below the new length.
+fn popSequence(initial: &ExecutionState, local: Int, list: Int) -> ExecutionResult {
+    length = sequenceLength(initial, list);
+    if length is ValueLookup::Found {
+        oldLength = (length as ValueLookup::Found).term;
+        value = integerValue(initial.context, oldLength);
+        if value is IntegerLookup::Found {
+            shortened = safeBoundDifference((value as IntegerLookup::Found).value, 1);
+            if shortened is SumResult::Sum {
+                newLengthValue = (shortened as SumResult::Sum).value;
+                made = freshValue(initial);
+                if made is ValueLookup::Found {
+                    result = (made as ValueLookup::Found).term;
+                    popApp = ApplicationTerm { id: result, function: -18, arguments: push([], list) };
+                    context = ValidatorContext { applications: push(clone(initial.context.applications), popApp), ..clone(initial.context) };
+                    state = ExecutionState { context: context, locals: bindLocal(clone(initial.locals), local, result), templates: clone(initial.templates) };
+                    lengthTerm = oldLength;
+                    known = false;
+                    for constantPosition in 0..size(state.context.constants) {
+                        constant = get(state.context.constants, constantPosition);
+                        if constant.kind = 0 {
+                            if constant.value = newLengthValue { lengthTerm = constant.id; known = true; };
+                        };
+                    };
+                    if known = false {
+                        symbol = freshValue(state);
+                        if symbol is ValueLookup::Found {
+                            lengthTerm = (symbol as ValueLookup::Found).term;
+                            constant = ConstantTerm { id: lengthTerm, kind: 0, value: newLengthValue };
+                            context = ValidatorContext { constants: push(clone(state.context.constants), constant), ..state.context };
+                            state = ExecutionState { context: context, ..state };
+                        } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+                    };
+                    sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
+                    apps = push(clone(state.context.applications), sizeApp);
+                    equalities = semanticFacts(initial.context.equalities, initial.context.applications, initial.context.constants);
+                    equalitiesClasses = leastClasses(equalities);
+                    for previousPosition in 0..size(initial.context.applications) {
+                        previous = get(initial.context.applications, previousPosition);
+                        if previous.function = -14 {
+                            if size(previous.arguments) = 2 {
+                                if sameIn(equalitiesClasses, get(previous.arguments, 0), list) {
+                                    index = integerValue(initial.context, get(previous.arguments, 1));
+                                    if index is IntegerLookup::Found {
+                                        i = (index as IntegerLookup::Found).value;
+                                        if i >= 0 {
+                                            if i < newLengthValue {
+                                                kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) };
+                                                apps = push(apps, kept);
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                    context = ValidatorContext { applications: apps, ..state.context };
+                    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, ..state } };
+                };
+            };
+        };
+    };
+    // A length that is not a number: the result is one shorter, as a term
+    // (its size is size(list) - 1; the walk has checked size(list) > 0)
+    state = clone(initial);
+    oldLength = 0;
+    if length is ValueLookup::Found {
+        oldLength = (length as ValueLookup::Found).term;
+    } else {
+        sized = freshValue(state);
+        if sized is ValueLookup::Found { oldLength = (sized as ValueLookup::Found).term; } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+        sizeOfList = ApplicationTerm { id: oldLength, function: -13, arguments: push([], list) };
+        state = ExecutionState { context: ValidatorContext { applications: push(clone(state.context.applications), sizeOfList), ..clone(state.context) }, ..state };
+    };
+    oneTerm = 0;
+    haveOne = false;
+    for constantPosition in 0..size(state.context.constants) {
+        constant = get(state.context.constants, constantPosition);
+        if constant.kind = 0 { if constant.value = 1 { oneTerm = constant.id; haveOne = true; }; };
+    };
+    if haveOne = false {
+        symbol = freshValue(state);
+        if symbol is ValueLookup::Found {
+            oneTerm = (symbol as ValueLookup::Found).term;
+            state = ExecutionState { context: ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: oneTerm, kind: 0, value: 1 }), ..clone(state.context) }, ..state };
+        } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+    };
+    made = freshValue(state);
+    if made is ValueLookup::Missing { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+    result = (made as ValueLookup::Found).term;
+    popApp = ApplicationTerm { id: result, function: -18, arguments: push([], list) };
+    state = ExecutionState { context: ValidatorContext { applications: push(clone(state.context.applications), popApp), ..clone(state.context) }, locals: bindLocal(clone(state.locals), local, result), templates: clone(state.templates) };
+    shorter = freshValue(state);
+    if shorter is ValueLookup::Missing { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+    newLength = (shorter as ValueLookup::Found).term;
+    difference = ApplicationTerm { id: newLength, function: -2, arguments: push(push([], oldLength), oneTerm) };
+    sizeOfResult = ApplicationTerm { id: newLength, function: -13, arguments: push([], result) };
+    apps = push(push(clone(state.context.applications), difference), sizeOfResult);
+    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: ValidatorContext { applications: apps, ..clone(state.context) }, ..state } };
+};
+
+// Pure applications with the same function and exact arguments denote the
+// same value. Reusing that value avoids growing the context at every read.
+fn existingApplication(context: &ValidatorContext, function: Int, args: &List<Int>) -> ValueLookup {
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = function {
+            if equalArguments(emptyIntMap(), app.arguments, args) {
+                return ValueLookup::Found { term: app.id };
+            };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+// The steps of a block in order, as far as the first that fails (a step of a kind not known fails as unsupported)
+fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
+    state = initial;
+    shared = SharedEntailment::Missing;
+    for i in 0..size(steps) {
+        if get(steps, i) is ExecutionStep::Check {
+            checked = stepCheckShared(state, get(steps, i), i, shared);
+            CheckedStep { result: result, shared: after } = checked;
+            if result.status != 0 { return result; };
+            state = result.state;
+            shared = after;
+        } else {
+            before = contextSizes(state.context);
+            result = executeStep(state, get(steps, i), i);
+            if result.status != 0 { return result; };
+            state = result.state;
+            // (and, should a step ever drop a fact, a list that got shorter drops it too)
+            if addsFactsOnly(get(steps, i)) = false || shrank(before, contextSizes(state.context)) { shared = SharedEntailment::Missing; };
+        };
+    };
+    return ExecutionResult { status: 0, failedAt: -1, state: state };
+};
+
+fn contextSizes(c: &ValidatorContext) -> List<Int> {
+    return push(push(push(push(push(push(push([], size(c.equalities)), size(c.applications)), size(c.constants)), size(c.orders)), size(c.different)), size(c.variants)), size(c.differences));
+};
+
+fn shrank(before: &List<Int>, after: &List<Int>) -> Bool {
+    for k in 0..size(before) { if intAt(before, k, 0) > intAt(after, k, 0) { return true; }; };
+    return false;
+};
+
+fn addsFactsOnly(step: &ExecutionStep) -> Bool {
+    // (an application of -40 forgets what is known of a term)
+    if step is ExecutionStep::Apply { return (step as ExecutionStep::Apply).function != -40; };
+    if step is ExecutionStep::ApplyFresh { return (step as ExecutionStep::ApplyFresh).function != -40; };
+    if step is ExecutionStep::Literal { return (step as ExecutionStep::Literal).function != -40; };
+    if step is ExecutionStep::Assign { return true; };
+    if step is ExecutionStep::Push || step is ExecutionStep::Last || step is ExecutionStep::Set || step is ExecutionStep::Pop || step is ExecutionStep::NewArray { return true; };
+    if step is ExecutionStep::Havoc || step is ExecutionStep::RequireDefined || step is ExecutionStep::Check || step is ExecutionStep::Assume { return true; };
+    if step is ExecutionStep::AssumeVariant || step is ExecutionStep::RequireVariant || step is ExecutionStep::CheckWithin || step is ExecutionStep::AssumeForall { return true; };
+    return false;
+};
+
+fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    if step is ExecutionStep::Assign { return stepAssign(state, step, i); };
+    if step is ExecutionStep::Apply { return stepApply(state, step, i); };
+    if step is ExecutionStep::Literal { return stepLiteral(state, step, i); };
+    if step is ExecutionStep::ApplyFresh { return stepApplyFresh(state, step, i); };
+    if step is ExecutionStep::Push { return stepPush(state, step, i); };
+    if step is ExecutionStep::Last { return stepLast(state, step, i); };
+    if step is ExecutionStep::Set { return stepSet(state, step, i); };
+    if step is ExecutionStep::Pop { return stepPop(state, step, i); };
+    if step is ExecutionStep::NewArray { return stepNewArray(state, step, i); };
+    if step is ExecutionStep::Havoc { return stepHavoc(state, step, i); };
+    if step is ExecutionStep::RequireDefined { return stepRequireDefined(state, step, i); };
+    if step is ExecutionStep::Check { return stepCheck(state, step, i); };
+    if step is ExecutionStep::AssumeForall { return stepAssumeForall(state, step, i); };
+    if step is ExecutionStep::Assume { return stepAssume(state, step, i); };
+    if step is ExecutionStep::CheckWithin { return stepCheckWithin(state, step, i); };
+    if step is ExecutionStep::AssumeVariant { return stepAssumeVariant(state, step, i); };
+    if step is ExecutionStep::RequireVariant { return stepRequireVariant(state, step, i); };
+    if step is ExecutionStep::Proof { return stepProof(state, step, i); };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepAssign(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Assign {
+        assign = step as ExecutionStep::Assign;
+        value = resolveValue(state, assign.value);
+        if value is ValueLookup::Found {
+            locals = bindLocal(state.locals, assign.local, (value as ValueLookup::Found).term);
+            state = ExecutionState { locals: locals, ..state };
+        } else {
+            return ExecutionResult { status: 2, failedAt: i, state: state };
+        };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepApply(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Apply {
+        apply = step as ExecutionStep::Apply;
+        args = resolveArguments(state, apply.arguments);
+        if args is ArgumentsLookup::Found {
+            terms = (args as ArgumentsLookup::Found).terms;
+            if termInUse(state, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            if apply.result = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            if containsValue(terms, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            ExecutionState { context: applyContext, locals: applyLocals, templates: applyTemplates } = state;
+            context = builtinFacts(contextWithApplication(applyContext, ApplicationTerm { id: apply.result, function: apply.function, arguments: clone(terms) }), apply.function, apply.result, terms);
+            state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(applyLocals, apply.local, apply.result), templates: applyTemplates }, apply.result);
+        } else {
+            return ExecutionResult { status: 2, failedAt: i, state: state };
+        };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+// (what a list or array literal is, the same term everywhere: known
+// again where a block names it, and nothing new where it is known)
+fn stepLiteral(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Literal {
+        literal = step as ExecutionStep::Literal;
+        args = resolveArguments(state, literal.arguments);
+        if args is ArgumentsLookup::Found {
+            terms = (args as ArgumentsLookup::Found).terms;
+            known = false;
+            for aPosition in 0..size(state.context.applications) {
+                a = get(state.context.applications, aPosition);
+                if a.id = literal.result && a.function = literal.function && a.arguments = terms { known = true; };
+            };
+            if known = false {
+                ExecutionState { context: literalContext, locals: literalLocals, templates: literalTemplates } = state;
+                context = builtinFacts(contextWithApplication(literalContext, ApplicationTerm { id: literal.result, function: literal.function, arguments: clone(terms) }), literal.function, literal.result, terms);
+                state = recordEvaluatedValue(ExecutionState { context: context, locals: literalLocals, templates: literalTemplates }, literal.result);
+            };
+        } else {
+            return ExecutionResult { status: 2, failedAt: i, state: state };
+        };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepApplyFresh(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::ApplyFresh {
+        apply = step as ExecutionStep::ApplyFresh;
+        args = resolveArguments(state, apply.arguments);
+        if args is ArgumentsLookup::Found {
+            terms = (args as ArgumentsLookup::Found).terms;
+            existing = existingApplication(state.context, apply.function, terms);
+            if existing is ValueLookup::Found {
+                locals = bindLocal(state.locals, apply.local, (existing as ValueLookup::Found).term);
+                state = ExecutionState { locals: locals, ..state };
+            } else {
+              fresh = freshValue(state);
+              if fresh is ValueLookup::Found {
+                resultId = (fresh as ValueLookup::Found).term;
+                if resultId = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                if containsValue(terms, resultId) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                ExecutionState { context: freshContext, locals: freshLocals, templates: freshTemplates } = state;
+                context = builtinFacts(contextWithApplication(freshContext, ApplicationTerm { id: resultId, function: apply.function, arguments: clone(terms) }), apply.function, resultId, terms);
+                state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(freshLocals, apply.local, resultId), templates: freshTemplates }, resultId);
+              } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Push {
+        pushStep = step as ExecutionStep::Push;
+        list = resolveValue(state, pushStep.list);
+        value = resolveValue(state, pushStep.value);
+        zero = resolveValue(state, pushStep.zero);
+        if list is ValueLookup::Found {
+            if value is ValueLookup::Found {
+                if zero is ValueLookup::Found {
+                    pushed = pushSequence(state, pushStep.local, (list as ValueLookup::Found).term, (value as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
+                    if pushed.status != 0 { return ExecutionResult { status: pushed.status, failedAt: i, state: pushed.state }; };
+                    state = pushed.state;
+                    madeTerm = resolveValue(state, ValueRef::Local { local: pushStep.local });
+                    if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepLast(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Last {
+        last = step as ExecutionStep::Last;
+        list = resolveValue(state, last.list);
+        zero = resolveValue(state, last.zero);
+        if list is ValueLookup::Found {
+            if zero is ValueLookup::Found {
+                result = lastSequence(state, last.local, (list as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
+                if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
+                state = result.state;
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepSet(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Set {
+        setStep = step as ExecutionStep::Set;
+        list = resolveValue(state, setStep.list);
+        index = resolveValue(state, setStep.index);
+        value = resolveValue(state, setStep.value);
+        if list is ValueLookup::Found {
+            if index is ValueLookup::Found {
+                if value is ValueLookup::Found {
+                    result = setSequence(state, setStep.local, (list as ValueLookup::Found).term, (index as ValueLookup::Found).term, (value as ValueLookup::Found).term);
+                    if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
+                    state = result.state;
+                    madeTerm = resolveValue(state, ValueRef::Local { local: setStep.local });
+                    if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepPop(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Pop {
+        popStep = step as ExecutionStep::Pop;
+        list = resolveValue(state, popStep.list);
+        if list is ValueLookup::Found {
+            result = popSequence(state, popStep.local, (list as ValueLookup::Found).term);
+            if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
+            state = result.state;
+            madeTerm = resolveValue(state, ValueRef::Local { local: popStep.local });
+            if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepNewArray(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::NewArray {
+        array = step as ExecutionStep::NewArray;
+        length = resolveValue(state, array.length);
+        value = resolveValue(state, array.value);
+        if length is ValueLookup::Found {
+            if value is ValueLookup::Found {
+                fresh = freshValue(state);
+                if fresh is ValueLookup::Found {
+                    result = (fresh as ValueLookup::Found).term;
+                    lengthTerm = (length as ValueLookup::Found).term;
+                    valueTerm = (value as ValueLookup::Found).term;
+                    make = ApplicationTerm { id: result, function: -19, arguments: push(push([], lengthTerm), valueTerm) };
+                    sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
+                    apps = push(push(clone(state.context.applications), make), sizeApp);
+                    context = ValidatorContext { applications: apps, ..state.context };
+                    locals = bindLocal(state.locals, array.local, result);
+                    state = ExecutionState { context: context, locals: locals, ..state };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepHavoc(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Havoc {
+        havoc = step as ExecutionStep::Havoc;
+        fresh = freshValue(state);
+        if fresh is ValueLookup::Found {
+            locals = bindLocal(state.locals, havoc.local, (fresh as ValueLookup::Found).term);
+            state = ExecutionState { locals: locals, ..state };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepRequireDefined(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::RequireDefined {
+        required = step as ExecutionStep::RequireDefined;
+        value = resolveValue(state, required.value);
+        if value is ValueLookup::Missing {
+            return ExecutionResult { status: 2, failedAt: i, state: state };
+        };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    CheckedStep { result: result, shared: after } = stepCheckShared(initial, step, i, SharedEntailment::Missing);
+    return result;
+};
+
+fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given: SharedEntailment) -> CheckedStep {
+    shared = given;
+    state = initial;
+    if step is ExecutionStep::Check {
+        check0 = step as ExecutionStep::Check;
+        // (a relation code past 10 is a quiet check: a candidate invariant the
+        // inference tries, which is not worth case splits when it fails)
+        quiet = check0.relation >= 10;
+        relation = check0.relation;
+        if quiet { relation = relation - 10; };
+        if relation < 0 { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
+        if relation > 3 { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
+        left = resolveValue(state, check0.left);
+        right = resolveValue(state, check0.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found {
+                a = (left as ValueLookup::Found).term;
+                b = (right as ValueLookup::Found).term;
+                g = localGoal(relation, a, b);
+                ok = false;
+                if shared is SharedEntailment::Found {
+                    ok = entailsPlainCached((shared as SharedEntailment::Found).cache, g);
+                };
+                if ok = false {
+                    fresh = entailsGoalCached(entailmentCache(state.context), clone(g));
+                    ok = fresh.holds;
+                    shared = SharedEntailment::Found { cache: fresh.cache };
+                };
+                if ok = false {
+                    if relation = 0 { ok = booleanCheck(state.context, 0, a, b); };
+                    if relation = 1 { ok = booleanCheck(state.context, 1, a, b); };
+                };
+                if ok = false && quiet = false && size(state.templates) > 0 {
+                    // (each saturation of a large context is costly: a check it cannot
+                    // prove is given up after fewer of them)
+                    saturations = 40;
+                    if size(state.context.applications) > 150 { saturations = 12; };
+                    ok = proveBySaturation(Saturation { state: clone(state), births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() }, relation, a, b, 8, saturations, noBlocked()).holds;
+                };
+                if ok = false && quiet = false {
+                    // (a small context affords more cases: each costs about its size)
+                    budget = 8;
+                    if size(state.context.applications) < 200 { budget = 24; };
+                    ok = splitReadOverWrite(state, localGoal(relation, a, b), 3, budget).holds;
+                };
+                if ok = false {
+                    return CheckedStep { result: ExecutionResult { status: 1, failedAt: i, state: state }, shared: shared };
+                };
+                ExecutionState { context: checkContext, locals: checkLocals, templates: checkTemplates } = state;
+                context = assumeRelation(checkContext, relation, a, b);
+                if relation = 0 {
+                    context = assumeBooleanFact(context, a, b);
+                };
+                state = ExecutionState { context: context, locals: checkLocals, templates: checkTemplates };
+            } else { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
+        } else { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
+        return CheckedStep { result: ExecutionResult { status: 0, failedAt: -1, state: state }, shared: shared };
+    };
+    return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared };
+};
+
+fn stepAssumeForall(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::AssumeForall {
+        assumed = step as ExecutionStep::AssumeForall;
+        newTemplate = clone(assumed.template);
+        kept = noTemplates();
+        for t in state.templates { if t.id != newTemplate.id { kept = push(kept, clone(t)); }; };
+        kept = push(kept, newTemplate);
+        state = ExecutionState { templates: kept, ..state };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepAssume(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Assume {
+        assumed = step as ExecutionStep::Assume;
+        if assumed.relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        if assumed.relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        left = resolveValue(state, assumed.left);
+        right = resolveValue(state, assumed.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found {
+                ExecutionState { context: assumeContext, locals: assumeLocals, templates: assumeTemplates } = state;
+                context = assumeRelation(assumeContext, assumed.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
+                if assumed.relation = 0 {
+                    context = assumeBooleanFact(context, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
+                };
+                state = ExecutionState { context: context, locals: assumeLocals, templates: assumeTemplates };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepCheckWithin(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::CheckWithin {
+        cw = step as ExecutionStep::CheckWithin;
+        inner = resolveValue(state, cw.inner);
+        outer = resolveValue(state, cw.outer);
+        if inner is ValueLookup::Found {
+            if outer is ValueLookup::Found {
+                if entailsGoal(state.context, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
+                    return ExecutionResult { status: 1, failedAt: i, state: state };
+                };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepAssumeVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::AssumeVariant {
+        av = step as ExecutionStep::AssumeVariant;
+        object = resolveValue(state, av.object);
+        if object is ValueLookup::Found {
+            variants = push(clone(state.context.variants), VariantFact { object: (object as ValueLookup::Found).term, family: av.family, constructor: av.constructor, matches: av.matches });
+            context = ValidatorContext { variants: variants, ..state.context };
+            state = ExecutionState { context: context, ..state };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepRequireVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::RequireVariant {
+        rv = step as ExecutionStep::RequireVariant;
+        object = resolveValue(state, rv.object);
+        if object is ValueLookup::Found {
+            term = (object as ValueLookup::Found).term;
+            if knownVariant(leastClasses(closeContext(state.context)), state.context.variants, term, rv.family, rv.constructor) = 1 {
+                variants = push(clone(state.context.variants), VariantFact { object: term, family: rv.family, constructor: rv.constructor, matches: true });
+                context = ValidatorContext { variants: variants, ..state.context };
+                state = ExecutionState { context: context, ..state };
+            } else { return ExecutionResult { status: 1, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepProof(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Proof {
+        p = step as ExecutionStep::Proof;
+        result = runProofSteps(state.context, push([], p.step));
+        if result.valid = false { return ExecutionResult { status: 1, failedAt: i, state: state }; };
+        state = ExecutionState { context: result.state, ..state };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};

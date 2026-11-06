@@ -1,0 +1,654 @@
+import validation::context { canonicalContext, canonicalFacts, integerValueIn };
+import validation::differences { safeBoundSum, safeProduct, semanticFacts };
+import validation::model { ApplicationTerm, IntegerLookup, Joined, LinFact, LinTerm, SumResult, ValidatorContext };
+import validation::relations { canonicalIn, containsValue, hasEquality, leastClasses };
+
+
+
+fn linCoeff(terms: &List<LinTerm>, term: Int) -> Int {
+    for tPosition in 0..size(terms) {
+        t = get(terms, tPosition);
+        if t.term = term { return t.coeff; };
+    };
+    return 0;
+};
+
+fn linAddTerm(terms: &List<LinTerm>, term: Int, coeff: Int) -> List<LinTerm> {
+    if coeff = 0 { return clone(terms); };
+    result = [];
+    found = false;
+    for tPosition in 0..size(terms) {
+        t = get(terms, tPosition);
+        if t.term = term {
+            found = true;
+            if t.coeff + coeff != 0 { result = push(result, LinTerm { term: term, coeff: t.coeff + coeff }); };
+        } else { result = push(result, clone(t)); };
+    };
+    if found = false { result = push(result, LinTerm { term: term, coeff: coeff }); };
+    return result;
+};
+
+fn linScale(terms: &List<LinTerm>, factor: Int) -> List<LinTerm> {
+    result = [];
+    for t in terms { result = push(result, LinTerm { term: t.term, coeff: t.coeff * factor }); };
+    return result;
+};
+
+fn linGcdStep(x: Int, y: Int) -> Int [{ affirm x >= 0; affirm y >= 0; }] [{ }] shrinks y {
+    if y = 0 { return x; };
+    return linGcdStep(y, x % y);
+};
+
+fn linGcd(a: Int, b: Int) -> Int {
+    x = a;
+    if x < 0 { x = 0 - x; };
+    y = b;
+    if y < 0 { y = 0 - y; };
+    return linGcdStep(x, y);
+};
+
+fn linFloorDiv(a: Int, g: Int) -> Int {
+    if g = 0 { return a; };
+    // (/ is floor division, as the division facts say it is)
+    return a / g;
+};
+
+// Over integers a fact may be divided through by the gcd of its
+// coefficients, rounding the bound down: 2i - 2j <= 1 is i - j <= 0.
+fn linNormalize(fact: &LinFact) -> LinFact {
+    g = 0;
+    for t in fact.terms { g = linGcd(g, t.coeff); };
+    if g <= 1 { return clone(fact); };
+    terms = [];
+    for t in fact.terms { terms = push(terms, LinTerm { term: t.term, coeff: t.coeff / g }); };
+    return LinFact { terms: terms, bound: linFloorDiv(fact.bound, g) };
+};
+
+fn linCombine(a: &LinFact, scaleA: Int, b: &LinFact, scaleB: Int) -> LinFact {
+    // The reference reasons over mathematical integers; a running
+    // program cannot. A combination whose bound (or a coefficient) is
+    // not representable is dropped, by returning a fact that says
+    // nothing: 0 <= the greatest integer.
+    boundA = safeProduct(scaleA, a.bound);
+    if boundA is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+    boundB = safeProduct(scaleB, b.bound);
+    if boundB is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+    bound = safeBoundSum((boundA as SumResult::Sum).value, (boundB as SumResult::Sum).value);
+    if bound is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+    terms = [];
+    for tPosition in 0..size(a.terms) {
+        t = get(a.terms, tPosition);
+        p = safeProduct(t.coeff, scaleA);
+        if p is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+        terms = linAddTerm(terms, t.term, (p as SumResult::Sum).value);
+    };
+    for tPosition in 0..size(b.terms) {
+        t = get(b.terms, tPosition);
+        p = safeProduct(t.coeff, scaleB);
+        if p is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+        terms = linAddTerm(terms, t.term, (p as SumResult::Sum).value);
+    };
+    return linNormalize(LinFact { terms: terms, bound: (bound as SumResult::Sum).value });
+};
+
+fn linFact2(t1: Int, c1: Int, t2: Int, c2: Int, bound: Int) -> LinFact {
+    terms = linAddTerm([], t1, c1);
+    terms = linAddTerm(terms, t2, c2);
+    return LinFact { terms: terms, bound: bound };
+};
+
+fn linFacts(context: &ValidatorContext) -> List<LinFact> {
+    valueClasses = leastClasses(semanticFacts(context.equalities, context.applications, context.constants));
+    facts = [];
+    for orderPosition in 0..size(context.orders) {
+        order = get(context.orders, orderPosition);
+        bound = 0;
+        if order.strict { bound = -1; };
+        facts = push(facts, linFact2(order.smaller, 1, order.greater, -1, bound));
+    };
+    for dPosition in 0..size(context.differences) {
+        d = get(context.differences, dPosition);
+        facts = push(facts, linFact2(d.left, 1, d.right, -1, d.bound));
+    };
+    for ePosition in 0..size(context.equalities) {
+        e = get(context.equalities, ePosition);
+        facts = push(facts, linFact2(e.left, 1, e.right, -1, 0));
+        facts = push(facts, linFact2(e.left, -1, e.right, 1, 0));
+    };
+    for cPosition in 0..size(context.constants) {
+        c = get(context.constants, cPosition);
+        if c.kind = 0 {
+            facts = push(facts, linFact2(c.id, 1, c.id, 0, c.value));
+            // (the least integer has no negation a program can write;
+            // the fact it would give, that the term is at least that
+            // integer, says nothing, so it is left out)
+            if c.value > -9223372036854775807 - 1 {
+                facts = push(facts, linFact2(c.id, -1, c.id, 0, 0 - c.value));
+            };
+        };
+    };
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -13 {
+            if size(app.arguments) = 1 {
+                facts = push(facts, linFact2(app.id, -1, app.id, 0, 0));
+            };
+        };
+        if size(app.arguments) = 2 {
+            a = get(app.arguments, 0);
+            b = get(app.arguments, 1);
+            if app.function = -1 {
+                t = linAddTerm([], app.id, 1);
+                t = linAddTerm(t, a, -1);
+                t = linAddTerm(t, b, -1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+                t = linAddTerm([], app.id, -1);
+                t = linAddTerm(t, a, 1);
+                t = linAddTerm(t, b, 1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+            };
+            if app.function = -2 {
+                t = linAddTerm([], app.id, 1);
+                t = linAddTerm(t, a, -1);
+                t = linAddTerm(t, b, 1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+                t = linAddTerm([], app.id, -1);
+                t = linAddTerm(t, a, 1);
+                t = linAddTerm(t, b, -1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+            };
+            if app.function = -4 {
+                bv = integerValueIn(valueClasses, context.constants, b);
+                if bv is IntegerLookup::Found {
+                    divisor = (bv as IntegerLookup::Found).value;
+                    if divisor > 0 {
+                        t = linAddTerm([], app.id, divisor);
+                        t = linAddTerm(t, a, -1);
+                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                        t = linAddTerm([], a, 1);
+                        t = linAddTerm(t, app.id, 0 - divisor);
+                        facts = push(facts, LinFact { terms: t, bound: divisor - 1 });
+                    };
+                    if divisor < 0 {
+                        t = linAddTerm([], app.id, divisor);
+                        t = linAddTerm(t, a, -1);
+                        facts = push(facts, LinFact { terms: t, bound: 0 - divisor - 1 });
+                        t = linAddTerm([], a, 1);
+                        t = linAddTerm(t, app.id, 0 - divisor);
+                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                    };
+                };
+            };
+            if app.function = -5 {
+                bv = integerValueIn(valueClasses, context.constants, b);
+                if bv is IntegerLookup::Found {
+                    divisor = (bv as IntegerLookup::Found).value;
+                    if divisor > 0 {
+                        facts = push(facts, linFact2(app.id, 1, app.id, 0, divisor - 1));
+                        facts = push(facts, linFact2(app.id, -1, app.id, 0, 0));
+                    };
+                    if divisor < 0 {
+                        facts = push(facts, linFact2(app.id, 1, app.id, 0, 0));
+                        facts = push(facts, linFact2(app.id, -1, app.id, 0, 0 - divisor - 1));
+                    };
+                    if divisor != 0 {
+                        for otherPosition in 0..size(context.applications) {
+                            other = get(context.applications, otherPosition);
+                            if other.function = -4 {
+                                if size(other.arguments) = 2 {
+                                    if hasEquality(context.equalities, get(other.arguments, 0), a) {
+                                        if hasEquality(context.equalities, get(other.arguments, 1), b) {
+                                            t = linAddTerm([], a, 1);
+                                            t = linAddTerm(t, other.id, 0 - divisor);
+                                            t = linAddTerm(t, app.id, -1);
+                                            facts = push(facts, LinFact { terms: t, bound: 0 });
+                                            t = linAddTerm([], a, -1);
+                                            t = linAddTerm(t, other.id, divisor);
+                                            t = linAddTerm(t, app.id, 1);
+                                            facts = push(facts, LinFact { terms: t, bound: 0 });
+                                        };
+                                    };
+                                };
+                            };
+                            if divisor > 0 {
+                                if other.function = -5 {
+                                    if size(other.arguments) = 2 {
+                                        if hasEquality(context.equalities, get(other.arguments, 1), b) {
+                                            x = get(other.arguments, 0);
+                                            for sumAppPosition in 0..size(context.applications) {
+                                                sumApp = get(context.applications, sumAppPosition);
+                                                if sumApp.function = -1 {
+                                                    if size(sumApp.arguments) = 2 {
+                                                        if hasEquality(context.equalities, sumApp.id, a) {
+                                                            if hasEquality(context.equalities, get(sumApp.arguments, 0), x) {
+                                                                ry = get(sumApp.arguments, 1);
+                                                                for modYPosition in 0..size(context.applications) {
+                                                                    modY = get(context.applications, modYPosition);
+                                                                    if modY.function = -5 {
+                                                                        if size(modY.arguments) = 2 {
+                                                                            if hasEquality(context.equalities, get(modY.arguments, 0), ry) {
+                                                                                if hasEquality(context.equalities, get(modY.arguments, 1), b) {
+                                                                                    t = linAddTerm([], app.id, 1);
+                                                                                    t = linAddTerm(t, other.id, -1);
+                                                                                    t = linAddTerm(t, modY.id, -1);
+                                                                                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                                    t = linAddTerm([], app.id, -1);
+                                                                                    t = linAddTerm(t, other.id, 1);
+                                                                                    t = linAddTerm(t, modY.id, 1);
+                                                                                    facts = push(facts, LinFact { terms: t, bound: divisor });
+                                                                                    kvx = integerValueIn(valueClasses, context.constants, other.id);
+                                                                                    kvy = integerValueIn(valueClasses, context.constants, modY.id);
+                                                                                    if kvx is IntegerLookup::Found {
+                                                                                        if kvy is IntegerLookup::Found {
+                                                                                            if (kvx as IntegerLookup::Found).value + (kvy as IntegerLookup::Found).value >= divisor {
+                                                                                                t = linAddTerm([], app.id, 1);
+                                                                                                t = linAddTerm(t, other.id, -1);
+                                                                                                t = linAddTerm(t, modY.id, -1);
+                                                                                                facts = push(facts, LinFact { terms: t, bound: 0 - divisor });
+                                                                                            };
+                                                                                            if (kvx as IntegerLookup::Found).value + (kvy as IntegerLookup::Found).value < divisor {
+                                                                                                t = linAddTerm([], app.id, -1);
+                                                                                                t = linAddTerm(t, other.id, 1);
+                                                                                                t = linAddTerm(t, modY.id, 1);
+                                                                                                facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                                            };
+                                                                                        };
+                                                                                    };
+                                                                                };
+                                                                            };
+                                                                        };
+                                                                    };
+                                                                };
+                                                            };
+                                                            if hasEquality(context.equalities, get(sumApp.arguments, 1), x) {
+                                                                ry = get(sumApp.arguments, 0);
+                                                                for modYPosition in 0..size(context.applications) {
+                                                                    modY = get(context.applications, modYPosition);
+                                                                    if modY.function = -5 {
+                                                                        if size(modY.arguments) = 2 {
+                                                                            if hasEquality(context.equalities, get(modY.arguments, 0), ry) {
+                                                                                if hasEquality(context.equalities, get(modY.arguments, 1), b) {
+                                                                                    t = linAddTerm([], app.id, 1);
+                                                                                    t = linAddTerm(t, other.id, -1);
+                                                                                    t = linAddTerm(t, modY.id, -1);
+                                                                                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                                    t = linAddTerm([], app.id, -1);
+                                                                                    t = linAddTerm(t, other.id, 1);
+                                                                                    t = linAddTerm(t, modY.id, 1);
+                                                                                    facts = push(facts, LinFact { terms: t, bound: divisor });
+                                                                                    kvx = integerValueIn(valueClasses, context.constants, other.id);
+                                                                                    kvy = integerValueIn(valueClasses, context.constants, modY.id);
+                                                                                    if kvx is IntegerLookup::Found {
+                                                                                        if kvy is IntegerLookup::Found {
+                                                                                            if (kvx as IntegerLookup::Found).value + (kvy as IntegerLookup::Found).value >= divisor {
+                                                                                                t = linAddTerm([], app.id, 1);
+                                                                                                t = linAddTerm(t, other.id, -1);
+                                                                                                t = linAddTerm(t, modY.id, -1);
+                                                                                                facts = push(facts, LinFact { terms: t, bound: 0 - divisor });
+                                                                                            };
+                                                                                            if (kvx as IntegerLookup::Found).value + (kvy as IntegerLookup::Found).value < divisor {
+                                                                                                t = linAddTerm([], app.id, -1);
+                                                                                                t = linAddTerm(t, other.id, 1);
+                                                                                                t = linAddTerm(t, modY.id, 1);
+                                                                                                facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                                            };
+                                                                                        };
+                                                                                    };
+                                                                                };
+                                                                            };
+                                                                        };
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                                if sumApp.function = -2 {
+                                                    if size(sumApp.arguments) = 2 {
+                                                        if hasEquality(context.equalities, sumApp.id, a) {
+                                                            kv = integerValueIn(valueClasses, context.constants, get(sumApp.arguments, 1));
+                                                            if kv is IntegerLookup::Found {
+                                                                if (kv as IntegerLookup::Found).value % divisor = 0 {
+                                                                    if hasEquality(context.equalities, get(sumApp.arguments, 0), x) {
+                                                                        t = linAddTerm([], app.id, 1);
+                                                                        t = linAddTerm(t, other.id, -1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                        t = linAddTerm([], app.id, -1);
+                                                                        t = linAddTerm(t, other.id, 1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                            for sumAppPosition in 0..size(context.applications) {
+                                                sumApp = get(context.applications, sumAppPosition);
+                                                if sumApp.function = -1 {
+                                                    if size(sumApp.arguments) = 2 {
+                                                        if hasEquality(context.equalities, sumApp.id, a) {
+                                                            kv = integerValueIn(valueClasses, context.constants, get(sumApp.arguments, 1));
+                                                            if kv is IntegerLookup::Found {
+                                                                if (kv as IntegerLookup::Found).value % divisor = 0 {
+                                                                    if hasEquality(context.equalities, get(sumApp.arguments, 0), x) {
+                                                                        t = linAddTerm([], app.id, 1);
+                                                                        t = linAddTerm(t, other.id, -1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                        t = linAddTerm([], app.id, -1);
+                                                                        t = linAddTerm(t, other.id, 1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                    };
+                                                                };
+                                                            };
+                                                            kv = integerValueIn(valueClasses, context.constants, get(sumApp.arguments, 0));
+                                                            if kv is IntegerLookup::Found {
+                                                                if (kv as IntegerLookup::Found).value % divisor = 0 {
+                                                                    if hasEquality(context.equalities, get(sumApp.arguments, 1), x) {
+                                                                        t = linAddTerm([], app.id, 1);
+                                                                        t = linAddTerm(t, other.id, -1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                        t = linAddTerm([], app.id, -1);
+                                                                        t = linAddTerm(t, other.id, 1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+            if app.function = -3 {
+                av = integerValueIn(valueClasses, context.constants, a);
+                if av is IntegerLookup::Found {
+                    c = (av as IntegerLookup::Found).value;
+                    t = linAddTerm([], app.id, 1);
+                    t = linAddTerm(t, b, 0 - c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                    t = linAddTerm([], app.id, -1);
+                    t = linAddTerm(t, b, c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                };
+                bv = integerValueIn(valueClasses, context.constants, b);
+                if bv is IntegerLookup::Found {
+                    c = (bv as IntegerLookup::Found).value;
+                    t = linAddTerm([], app.id, 1);
+                    t = linAddTerm(t, a, 0 - c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                    t = linAddTerm([], app.id, -1);
+                    t = linAddTerm(t, a, c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                };
+            };
+        };
+    };
+    return facts;
+};
+
+fn linSameFact(a: &LinFact, b: &LinFact) -> Bool {
+    if a.bound != b.bound { return false; };
+    if size(a.terms) != size(b.terms) { return false; };
+    for tPosition in 0..size(a.terms) {
+        t = get(a.terms, tPosition);
+        if linCoeff(b.terms, t.term) != t.coeff { return false; };
+    };
+    return true;
+};
+
+fn linDedup(facts: &List<LinFact>) -> List<LinFact> {
+    result = [];
+    for fPosition in 0..size(facts) {
+        f = get(facts, fPosition);
+        seen = false;
+        for gPosition in 0..size(result) {
+            g = get(result, gPosition);
+            if linSameFact(f, g) { seen = true; };
+        };
+        if seen = false { result = push(result, clone(f)); };
+    };
+    return result;
+};
+
+fn linRemoveTerm(values: &List<Int>, value: Int) -> List<Int> {
+    result = [];
+    for xPosition in 0..size(values) {
+        x = get(values, xPosition);
+        if x != value { result = push(result, x); };
+    };
+    return result;
+};
+
+// Fourier-Motzkin elimination over the (small) fact sets a goal produces:
+// eliminating every variable either derives 0 <= a negative bound, proving
+// the facts inconsistent, or it does not.
+fn linContradictionOrdered(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
+    current = clone(facts);
+    for vPosition in 0..size(vars) {
+        v = get(vars, vPosition);
+        if size(current) > 600 { return false; };
+        pos = [];
+        neg = [];
+        zero = [];
+        for fPosition in 0..size(current) {
+            f = get(current, fPosition);
+            c = linCoeff(f.terms, v);
+            if c > 0 { pos = push(pos, clone(f)); };
+            if c < 0 { neg = push(neg, clone(f)); };
+            if c = 0 { zero = push(zero, clone(f)); };
+        };
+        next = zero;
+        for fPosition in 0..size(pos) {
+            f = get(pos, fPosition);
+            for gPosition in 0..size(neg) {
+                g = get(neg, gPosition);
+                cf = linCoeff(f.terms, v);
+                cg = linCoeff(g.terms, v);
+                next = push(next, linCombine(f, 0 - cg, g, cf));
+            };
+        };
+        current = next;
+        for fPosition in 0..size(current) {
+            f = get(current, fPosition);
+            if size(f.terms) = 0 {
+                if f.bound < 0 { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+// The same elimination, but each round first removes the variable whose
+// positive and negative facts combine into the fewest new facts. The order
+// matters to the integer reasoning: a variable that appears only in the
+// identity of a scaled term carries a divisibility constraint, and removing
+// it first would lose that constraint, so both orders are tried.
+fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
+    if linContradictionOrdered(facts, vars) { return true; };
+    current = clone(facts);
+    remaining = clone(vars);
+    for round in 0..size(vars) {
+        if size(current) > 600 { return false; };
+        best = 0;
+        bestCost = 0;
+        found = false;
+        for vPosition in 0..size(remaining) {
+            v = get(remaining, vPosition);
+            posCount = 0;
+            negCount = 0;
+            for fPosition in 0..size(current) {
+                f = get(current, fPosition);
+                c = linCoeff(f.terms, v);
+                if c > 0 { posCount = posCount + 1; };
+                if c < 0 { negCount = negCount + 1; };
+            };
+            if posCount + negCount > 0 {
+                cost = posCount * negCount;
+                if found = false || cost < bestCost {
+                    best = v;
+                    bestCost = cost;
+                    found = true;
+                };
+            };
+        };
+        if found = false { return false; };
+        v = best;
+        pos = [];
+        neg = [];
+        zero = [];
+        for fPosition in 0..size(current) {
+            f = get(current, fPosition);
+            c = linCoeff(f.terms, v);
+            if c > 0 { pos = push(pos, clone(f)); };
+            if c < 0 { neg = push(neg, clone(f)); };
+            if c = 0 { zero = push(zero, clone(f)); };
+        };
+        next = zero;
+        for fPosition in 0..size(pos) {
+            f = get(pos, fPosition);
+            for gPosition in 0..size(neg) {
+                g = get(neg, gPosition);
+                cf = linCoeff(f.terms, v);
+                cg = linCoeff(g.terms, v);
+                next = push(next, linCombine(f, 0 - cg, g, cf));
+            };
+        };
+        current = next;
+        for fPosition in 0..size(current) {
+            f = get(current, fPosition);
+            if size(f.terms) = 0 {
+                if f.bound < 0 { return true; };
+            };
+        };
+        nextVars = [];
+        for t in remaining { if t != v { nextVars = push(nextVars, t); }; };
+        remaining = nextVars;
+    };
+    return false;
+};
+
+// The relevant terms after a fact between a and b: each side joins when the
+// other is relevant (and not a constant, unless throughConstants); a fact
+// between two constants joins nothing when constantPairsApart
+fn joinRelevant(relevant: HashSet<Int>, constantIds: &HashSet<Int>, a: Int, b: Int, throughConstants: Bool, constantPairsApart: Bool) -> Joined {
+    set = relevant;
+    if constantPairsApart && constantIds.contains(a) && constantIds.contains(b) { return Joined { set: set, grew: false }; };
+    grew = false;
+    aJoins = set.contains(a) && (throughConstants || constantIds.contains(a) = false);
+    bJoins = set.contains(b) && (throughConstants || constantIds.contains(b) = false);
+    if bJoins && set.contains(a) = false { set = set.insert(a); grew = true; };
+    if aJoins && set.contains(b) = false { set = set.insert(b); grew = true; };
+    return Joined { set: set, grew: grew };
+};
+
+fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
+    return linearEntailsIn(context, leastClasses(canonicalFacts(context)), left, right, bound);
+};
+
+// The same, with the terms named by their classes under equalities the
+// context entails (the analysis's, which a caller with one has)
+fn linearEntailsIn(context: &ValidatorContext, classes: &HashMap<Int, Int>, left: Int, right: Int, bound: Int) -> Bool {
+    canon = canonicalContext(context, classes);
+    goalLeft = canonicalIn(classes, left);
+    goalRight = canonicalIn(classes, right);
+    // (an order between two integer constants says nothing their values do
+    // not, and the chain of them would join every constant to the goal)
+    constantIds = HashSet::new();
+    for c in canon.constants { if c.kind = 0 { constantIds = constantIds.insert(c.id); }; };
+    wideTerms = linearRelevant(canon, constantIds, goalLeft, goalRight, true);
+    wide = linearAttempt(canon, wideTerms, goalLeft, goalRight, bound);
+    if wide != 2 { return wide = 1; };
+    // (past the budget, the facts are taken again without joining through a
+    // constant: x in 0 <= x brings every term with a bound into the goal's
+    // component, though only a contradiction there could bear on the goal)
+    narrowTerms = linearRelevant(canon, constantIds, goalLeft, goalRight, false);
+    if narrowTerms.size() >= wideTerms.size() { return false; };
+    return linearAttempt(canon, narrowTerms, goalLeft, goalRight, bound) = 1;
+};
+
+// The terms in the goal's own component of the term graph: only the facts
+// over them can bear on it, and the rest would spend the variable budget.
+// A constant joins the terms it is tied to only when throughConstants.
+fn linearRelevant(canon: &ValidatorContext, constantIds: &HashSet<Int>, goalLeft: Int, goalRight: Int, throughConstants: Bool) -> HashSet<Int> {
+    relevant = HashSet::new();
+    relevant = relevant.insert(goalLeft);
+    relevant = relevant.insert(goalRight);
+    growing = true;
+    // (each round that grows the set adds a term of the context to it)
+    for round in 0..2 * (size(canon.equalities) + size(canon.orders) + size(canon.differences)) + 2 * size(canon.applications) + 2 {
+        if growing {
+            Joined { set: relevant, grew: growing } = relevantRound(canon, constantIds, relevant, throughConstants);
+        };
+    };
+    return relevant;
+};
+
+fn relevantRound(canon: &ValidatorContext, constantIds: &HashSet<Int>, given: HashSet<Int>, throughConstants: Bool) -> Joined {
+    relevant = given;
+    grew = false;
+    for fPosition in 0..size(canon.equalities) {
+        Joined { set: relevant, grew: g } = joinRelevant(relevant, constantIds, get(canon.equalities, fPosition).left, get(canon.equalities, fPosition).right, throughConstants, false);
+        if g { grew = true; };
+    };
+    for fPosition in 0..size(canon.orders) {
+        Joined { set: relevant, grew: g } = joinRelevant(relevant, constantIds, get(canon.orders, fPosition).smaller, get(canon.orders, fPosition).greater, throughConstants, true);
+        if g { grew = true; };
+    };
+    for fPosition in 0..size(canon.differences) {
+        Joined { set: relevant, grew: g } = joinRelevant(relevant, constantIds, get(canon.differences, fPosition).left, get(canon.differences, fPosition).right, throughConstants, true);
+        if g { grew = true; };
+    };
+    // (only arithmetic gives linear facts that join a term to its
+    // arguments: through a get, every element of a literal would join)
+    for appPosition in 0..size(canon.applications) {
+        Joined { set: relevant, grew: g } = joinApplication(relevant, constantIds, get(canon.applications, appPosition), throughConstants);
+        if g { grew = true; };
+    };
+    return Joined { set: relevant, grew: grew };
+};
+
+fn joinApplication(given: HashSet<Int>, constantIds: &HashSet<Int>, app: &ApplicationTerm, throughConstants: Bool) -> Joined {
+    relevant = given;
+    if app.function > -1 || app.function < -5 { return Joined { set: relevant, grew: false }; };
+    hit = relevant.contains(app.id) && (throughConstants || constantIds.contains(app.id) = false);
+    for arg in app.arguments {
+        if relevant.contains(arg) && (throughConstants || constantIds.contains(arg) = false) { hit = true; };
+    };
+    if hit = false { return Joined { set: relevant, grew: false }; };
+    grew = false;
+    if relevant.contains(app.id) = false { relevant = relevant.insert(app.id); grew = true; };
+    for arg in app.arguments { if relevant.contains(arg) = false { relevant = relevant.insert(arg); grew = true; }; };
+    return Joined { set: relevant, grew: grew };
+};
+
+// 1 when the facts over the relevant terms and the goal's negation are
+// contradictory, 0 when they are not, 2 when they are past the budget
+fn linearAttempt(canon: &ValidatorContext, relevant: &HashSet<Int>, goalLeft: Int, goalRight: Int, bound: Int) -> Int {
+    kept = [];
+    for f in linFacts(canon) {
+        use = true;
+        for t in f.terms { if relevant.contains(t.term) = false { use = false; }; };
+        if use { kept = push(kept, clone(f)); };
+    };
+    facts = linDedup(kept);
+    facts = push(facts, linFact2(goalLeft, -1, goalRight, 1, 0 - bound - 1));
+    if size(facts) > 160 { return 2; };
+    vars = [];
+    for fPosition in 0..size(facts) {
+        f = get(facts, fPosition);
+        for tPosition in 0..size(f.terms) {
+            t = get(f.terms, tPosition);
+            if containsValue(vars, t.term) = false { vars = push(vars, t.term); };
+        };
+    };
+    if size(vars) > 48 { return 2; };
+    if linContradiction(facts, vars) { return 1; };
+    return 0;
+};

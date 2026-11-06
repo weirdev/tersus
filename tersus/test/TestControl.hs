@@ -60,7 +60,7 @@ testCallsAndReturnJoin =
             )
      in testCaseNamedSeq "testCallsAndReturnJoin" (map runRow rows)
 
--- The join of an `if` also tries what the program is about to need (see mergeStates in lib/validation/validation.tersus)
+-- The join of an `if` also tries what the program is about to need (see mergeStates in lib/validation/joins.tersus)
 testIfJoin :: Test
 testIfJoin =
     let fn' body = "fn f(c: Int, y: Int) -> Int [{ affirm y > 0; }] [{ }] { " ++ body ++ " return 0; };"

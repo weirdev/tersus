@@ -644,7 +644,7 @@ lambdaInstances k b0 = foldl one ([], b0) (buildLambdas b0)
 -- A forall that holds is kept by the path (an AssumeForall step), with the
 -- values of the names it mentions copied where it is assumed (a later change
 -- to them does not change what it said), and the validator uses it at the
--- elements a check that fails reads (saturate, in lib/validation/validation.tersus). Its
+-- elements a check that fails reads (saturate, in lib/validation/saturation.tersus). Its
 -- terms are the template's nodes: the index, a copy or a literal, or a
 -- function of earlier nodes. A forall whose terms need more than that (a
 -- check of a divisor, a call that is not a function of its arguments) is not

@@ -1,0 +1,657 @@
+import validation::context { unionOf };
+import validation::differences { canonicalDifferencesIn, canonicalHasDifference };
+import validation::model { ApplicationTerm, BinaryTerm, ClosureRound, ConstantTerm, ConstructorField, DifferenceFact, DisequalityFact, EqualityFact, OrderFact, Representative, StrictOrderFact, UnionFind };
+
+
+
+fn emptyIntMap() -> HashMap<Int, Int> { return HashMap::new(); };
+
+fn containsValue(values: &List<Int>, value: Int) -> Bool {
+    for item in values {
+        if item = value {
+            return true;
+        };
+    };
+    return false;
+};
+
+// Equalities form an undirected graph. Starting at left, each pass visits every
+// edge and adds its other endpoint when one endpoint is already reachable.
+// A path never needs more edges than there are facts, so this many passes are
+// sufficient, including when the facts are ordered against the path; a pass
+// that adds nothing has reached the fixpoint, and reaching right decides the
+// question. Equivalence classes are small, so the reachable values are a list.
+fn hasEquality(facts: &List<EqualityFact>, left: Int, right: Int) -> Bool {
+    if left = right { return true; };
+    reachable = push([], left);
+    changed = true;
+    for round in 0..size(facts) {
+        if changed {
+            changed = false;
+            for factPosition in 0..size(facts) {
+                fact = get(facts, factPosition);
+                if containsValue(reachable, fact.left) {
+                    if containsValue(reachable, fact.right) = false {
+                        if fact.right = right { return true; };
+                        reachable = push(reachable, fact.right);
+                        changed = true;
+                    };
+                };
+                if containsValue(reachable, fact.right) {
+                    if containsValue(reachable, fact.left) = false {
+                        if fact.left = right { return true; };
+                        reachable = push(reachable, fact.left);
+                        changed = true;
+                    };
+                };
+            };
+        };
+    };
+    return containsValue(reachable, right);
+};
+
+// The equivalence class of a term under the equalities (the values hasEquality
+// reaches from it), and each class named by its least member, so a search
+// that asks many times whether two terms are equal compares two integers.
+fn equalityClass(facts: &List<EqualityFact>, start: Int) -> List<Int> {
+    reachable = push([], start);
+    changed = true;
+    for round in 0..size(facts) {
+        if changed {
+            changed = false;
+            for factPosition in 0..size(facts) {
+                fact = get(facts, factPosition);
+                if containsValue(reachable, fact.left) {
+                    if containsValue(reachable, fact.right) = false {
+                        reachable = push(reachable, fact.right);
+                        changed = true;
+                    };
+                };
+                if containsValue(reachable, fact.right) {
+                    if containsValue(reachable, fact.left) = false {
+                        reachable = push(reachable, fact.left);
+                        changed = true;
+                    };
+                };
+            };
+        };
+    };
+    return reachable;
+};
+
+fn representativeOf(reps: &List<Representative>, term: Int) -> Int {
+    for rPosition in 0..size(reps) {
+        r = get(reps, rPosition);
+        if r.term = term { return r.rep; };
+    };
+    return term;
+};
+
+fn withRepresentative(facts: &List<EqualityFact>, reps: List<Representative>, term: Int) -> List<Representative> {
+    for rPosition in 0..size(reps) {
+        r = get(reps, rPosition);
+        if r.term = term { return reps; };
+    };
+    members = equalityClass(facts, term);
+    least = term;
+    for mPosition in 0..size(members) {
+        m = get(members, mPosition);
+        if m < least { least = m; };
+    };
+    result = reps;
+    for mPosition in 0..size(members) {
+        m = get(members, mPosition);
+        result = push(result, Representative { term: m, rep: least });
+    };
+    return result;
+};
+
+// A term no equality mentions is its own representative.
+fn equalityRepresentatives(facts: &List<EqualityFact>) -> List<Representative> {
+    classes = leastClasses(facts);
+    reps = [];
+    seen = HashSet::new();
+    for factPosition in 0..size(facts) {
+        fact = get(facts, factPosition);
+        if seen.contains(fact.left) = false {
+            seen = seen.insert(fact.left);
+            reps = push(reps, Representative { term: fact.left, rep: canonicalIn(classes, fact.left) });
+        };
+        if seen.contains(fact.right) = false {
+            seen = seen.insert(fact.right);
+            reps = push(reps, Representative { term: fact.right, rep: canonicalIn(classes, fact.right) });
+        };
+    };
+    return reps;
+};
+
+// The representatives after an equality between a and b: their two classes
+// become one.
+fn mergeRepresentatives(reps: &List<Representative>, a: Int, b: Int) -> List<Representative> {
+    ra = representativeOf(reps, a);
+    rb = representativeOf(reps, b);
+    if ra = rb { return clone(reps); };
+    least = ra;
+    if rb < least { least = rb; };
+    result = [];
+    seenA = false;
+    seenB = false;
+    for rPosition in 0..size(reps) {
+        r = get(reps, rPosition);
+        if r.term = a { seenA = true; };
+        if r.term = b { seenB = true; };
+        if r.rep = ra || r.rep = rb {
+            result = push(result, Representative { term: r.term, rep: least });
+        } else {
+            result = push(result, r);
+        };
+    };
+    if seenA = false { result = push(result, Representative { term: a, rep: least }); };
+    if seenB = false { result = push(result, Representative { term: b, rep: least }); };
+    return result;
+};
+
+// Close equalities under congruence as well as symmetry and transitivity. Each
+// round adds equal applications whose operands were equal at the start of the
+// comparison. At most size(terms) rounds are needed to propagate equality
+// through a finite term graph. A malformed graph is the caller's responsibility.
+fn congruenceFacts(facts: &List<EqualityFact>, terms: &List<BinaryTerm>) -> List<EqualityFact> {
+    known = clone(facts);
+    for round in 0..size(terms) {
+        for aPosition in 0..size(terms) {
+            a = get(terms, aPosition);
+            for bPosition in 0..size(terms) {
+                b = get(terms, bPosition);
+                if a.op = b.op {
+                    if hasEquality(known, a.left, b.left) {
+                        if hasEquality(known, a.right, b.right) {
+                            if hasEquality(known, a.id, b.id) = false {
+                                known = push(known, EqualityFact { left: a.id, right: b.id });
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return known;
+};
+
+fn hasCongruence(facts: &List<EqualityFact>, terms: &List<BinaryTerm>, left: Int, right: Int) -> Bool {
+    return hasEquality(congruenceFacts(facts, terms), left, right);
+};
+
+fn containsEquivalent(classes: &HashMap<Int, Int>, values: &List<Int>, value: Int) -> Bool {
+    for itemPosition in 0..size(values) {
+        item = get(values, itemPosition);
+        if sameIn(classes, item, value) {
+            return true;
+        };
+    };
+    return false;
+};
+
+// Follow strict-order edges, allowing equality at either end of each edge.
+// Every discovered value has a path from left containing at least one strict
+// edge. A false answer means that these facts did not establish the goal.
+fn hasStrictOrder(classes: &HashMap<Int, Int>, orders: &List<StrictOrderFact>, left: Int, right: Int) -> Bool {
+    reached = [];
+    for round in 0..size(orders) {
+        for edgePosition in 0..size(orders) {
+            edge = get(orders, edgePosition);
+            connected = sameIn(classes, left, edge.smaller);
+            if containsEquivalent(classes, reached, edge.smaller) {
+                connected = true;
+            };
+            if connected {
+                if containsEquivalent(classes, reached, edge.greater) = false {
+                    reached = push(reached, edge.greater);
+                };
+            };
+        };
+    };
+    return containsEquivalent(classes, reached, right);
+};
+
+// Reachability keeps separate sets for paths with and without a strict edge.
+// Equalities act as zero-length edges. A path of at most twice the number of
+// comparisons suffices in the two-state graph, so two complete scans per round
+// reach a fixed point without trusting a program-supplied termination bound.
+fn hasOrder(equalities: &List<EqualityFact>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    return hasOrderIn(leastClasses(equalities), orders, left, right, strict);
+};
+
+fn hasOrderIn(classes: &HashMap<Int, Int>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    // Each term is named by the least member of its class under the
+    // equalities (what hasEquality relates), once; the reached terms are
+    // sets of those names, and the walk stops when a pass adds nothing.
+    smaller = [];
+    greater = [];
+    for edgePosition in 0..size(orders) {
+        edge = get(orders, edgePosition);
+        smaller = push(smaller, canonicalIn(classes, edge.smaller));
+        greater = push(greater, canonicalIn(classes, edge.greater));
+    };
+    weak = HashSet::new();
+    weak = weak.insert(canonicalIn(classes, left));
+    strong = HashSet::new();
+    changed = true;
+    // (each pass that changes anything adds a name to one of the two sets)
+    for round in 0..4 * size(orders) + 4 {
+        if changed {
+            changed = false;
+            for i in 0..size(orders) {
+                s = get(smaller, i);
+                g = get(greater, i);
+                if weak.contains(s) {
+                    if get(orders, i).strict {
+                        if strong.contains(g) = false { strong = strong.insert(g); changed = true; };
+                    } else {
+                        if weak.contains(g) = false { weak = weak.insert(g); changed = true; };
+                    };
+                };
+                if strong.contains(s) {
+                    if strong.contains(g) = false { strong = strong.insert(g); changed = true; };
+                };
+            };
+        };
+    };
+    target = canonicalIn(classes, right);
+    if strong.contains(target) { return true; };
+    if strict { return false; };
+    return weak.contains(target);
+};
+
+// A comparison may mention applications as well as atomic identifiers.
+fn hasOrderWithTerms(equalities: &List<EqualityFact>, terms: &List<BinaryTerm>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    return hasOrder(congruenceFacts(equalities, terms), orders, left, right, strict);
+};
+
+fn equalArguments(classes: &HashMap<Int, Int>, a: &List<Int>, b: &List<Int>) -> Bool {
+    if size(a) != size(b) {
+        return false;
+    };
+    for i in 0..size(a) {
+        if sameIn(classes, get(a, i), get(b, i)) = false {
+            return false;
+        };
+    };
+    return true;
+};
+
+fn ufFind(parent: &HashMap<Int, Int>, term: Int) -> Int {
+    current = term;
+    for step in 0..64 {
+        if parent.contains(current) {
+            next = parent.lookup(current, current);
+            if next = current { return current; };
+            current = next;
+        } else { return current; };
+    };
+    return current;
+};
+
+fn ufUnion(given: HashMap<Int, Int>, weights: HashMap<Int, Int>, a: Int, b: Int) -> UnionFind {
+    parent = given;
+    weight = weights;
+    ra = ufFind(parent, a);
+    rb = ufFind(parent, b);
+    if ra = rb { return UnionFind { parent: parent, weight: weight }; };
+    wa = 1;
+    if weight.contains(ra) { wa = weight.lookup(ra, 1); };
+    wb = 1;
+    if weight.contains(rb) { wb = weight.lookup(rb, 1); };
+    if wa < wb {
+        parent = parent.insert(ra, rb);
+        if parent.contains(rb) = false { parent = parent.insert(rb, rb); };
+        weight = weight.insert(rb, wa + wb);
+    } else {
+        parent = parent.insert(rb, ra);
+        if parent.contains(ra) = false { parent = parent.insert(ra, ra); };
+        weight = weight.insert(ra, wa + wb);
+    };
+    return UnionFind { parent: parent, weight: weight };
+};
+
+fn hashStep(h: Int, x: Int) -> Int {
+    p = 2147483629;
+    y = x % p;
+    if y < 0 { y = y + p; };
+    return (h * 1000003 + y) % p;
+};
+
+fn termSignature(uf: &HashMap<Int, Int>, term: &ApplicationTerm) -> Int {
+    h = hashStep(7, ufFind(uf, term.function));
+    h = hashStep(h, size(term.arguments));
+    for a in term.arguments { h = hashStep(h, ufFind(uf, a)); };
+    return h;
+};
+
+fn sameSignature(uf: &HashMap<Int, Int>, a: &ApplicationTerm, b: &ApplicationTerm) -> Bool {
+    if size(a.arguments) != size(b.arguments) { return false; };
+    if ufFind(uf, a.function) != ufFind(uf, b.function) { return false; };
+    for i in 0..size(a.arguments) {
+        if ufFind(uf, get(a.arguments, i)) != ufFind(uf, get(b.arguments, i)) { return false; };
+    };
+    return true;
+};
+
+fn signatureRound(parent: HashMap<Int, Int>, weights: HashMap<Int, Int>, terms: &List<ApplicationTerm>) -> ClosureRound {
+    uf = parent;
+    weight = weights;
+    changed = false;
+    // (equal functions of equal arguments)
+    signatures = emptyIntMap();
+    for i in 0..size(terms) {
+        a = get(terms, i);
+        h = termSignature(uf, a);
+        if signatures.contains(h) {
+            j = signatures.lookup(h, 0);
+            b = applicationAt(terms, j);
+            if sameSignature(uf, a, b) {
+                if ufFind(uf, a.id) != ufFind(uf, b.id) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, b.id); changed = true; };
+            } else {
+                for k in 0..i {
+                    c = get(terms, k);
+                    if sameSignature(uf, a, c) {
+                        if ufFind(uf, a.id) != ufFind(uf, c.id) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, c.id); changed = true; };
+                    };
+                };
+            };
+        } else { signatures = signatures.insert(h, i); };
+    };
+    return ClosureRound { parent: uf, weight: weight, changed: changed };
+};
+
+fn constructorRound(parent: HashMap<Int, Int>, weights: HashMap<Int, Int>, terms: &List<ApplicationTerm>, constructors: &List<Int>, constructorSet: &HashSet<Int>, constructorFields: &List<ConstructorField>) -> ClosureRound {
+    uf = parent;
+    weight = weights;
+    changed = false;
+    // (a constructor application of each class)
+    byClass = emptyIntMap();
+    if size(constructors) > 0 {
+        for i in 0..size(terms) {
+            a = get(terms, i);
+            if constructorSet.contains(a.function) {
+                r = ufFind(uf, a.id);
+                if byClass.contains(r) {
+                    b = applicationAt(terms, byClass.lookup(r, 0));
+                    if ufFind(uf, a.function) = ufFind(uf, b.function) && size(a.arguments) = size(b.arguments) {
+                        for k in 0..size(a.arguments) {
+                            x = get(a.arguments, k);
+                            y = get(b.arguments, k);
+                            if ufFind(uf, x) != ufFind(uf, y) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, x, y); changed = true; };
+                        };
+                    };
+                } else { byClass = byClass.insert(r, i); };
+            };
+        };
+        for fieldAppPosition in 0..size(terms) {
+            fieldApp = get(terms, fieldAppPosition);
+            if size(fieldApp.arguments) = 1 {
+                r = ufFind(uf, get(fieldApp.arguments, 0));
+                if byClass.contains(r) {
+                    a = applicationAt(terms, byClass.lookup(r, 0));
+                    for selectionPosition in 0..size(constructorFields) {
+                        selection = get(constructorFields, selectionPosition);
+                        if selection.constructor = a.function && selection.field = fieldApp.function {
+                            if selection.index >= 0 && selection.index < size(a.arguments) {
+                                value = get(a.arguments, selection.index);
+                                if ufFind(uf, fieldApp.id) != ufFind(uf, value) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, fieldApp.id, value); changed = true; };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return ClosureRound { parent: uf, weight: weight, changed: changed };
+};
+
+fn differenceRound(parent: HashMap<Int, Int>, weights: HashMap<Int, Int>, terms: &List<ApplicationTerm>) -> ClosureRound {
+    uf = parent;
+    weight = weights;
+    changed = false;
+    // (the sums of each class, so that a difference finds the sums it undoes)
+    sumsOfClass = emptyPositions();
+    for bPosition in 0..size(terms) {
+        if get(terms, bPosition).function = -1 && size(get(terms, bPosition).arguments) = 2 {
+            rb = ufFind(uf, get(terms, bPosition).id);
+            sumsOfClass = sumsOfClass.insert(rb, push(sumsOfClass.lookup(rb, []), bPosition));
+        };
+    };
+    for aPosition in 0..size(terms) {
+        a = get(terms, aPosition);
+        if a.function = -2 && size(a.arguments) = 2 {
+            r = ufFind(uf, get(a.arguments, 0));
+            subtrahend = ufFind(uf, get(a.arguments, 1));
+            for bPosition in sumsOfClass.lookup(r, []) {
+                if bPosition >= 0 && bPosition < size(terms) && get(terms, bPosition).function = -1 && size(get(terms, bPosition).arguments) = 2 {
+                    b = get(terms, bPosition);
+                    if ufFind(uf, b.id) = r {
+                        leftPart = get(b.arguments, 0);
+                        rightPart = get(b.arguments, 1);
+                        if subtrahend = ufFind(uf, leftPart) {
+                            if ufFind(uf, a.id) != ufFind(uf, rightPart) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, rightPart); changed = true; };
+                        };
+                        if subtrahend = ufFind(uf, rightPart) {
+                            if ufFind(uf, a.id) != ufFind(uf, leftPart) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, leftPart); changed = true; };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return ClosureRound { parent: uf, weight: weight, changed: changed };
+};
+
+fn congruenceClosure(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, constants: &List<ConstantTerm>, constructors: &List<Int>, constructorFields: &List<ConstructorField>) -> List<EqualityFact> {
+    constructorSet = HashSet::new();
+    for constructor in constructors { constructorSet = constructorSet.insert(constructor); };
+    uf = emptyIntMap();
+    weight = emptyIntMap();
+    for f in facts { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, f.left, f.right); };
+    // (constants of one kind and value are one: each is joined to the first of its value)
+    byValue = emptyPositions();
+    for i in 0..size(constants) {
+        v = get(constants, i).value;
+        joined = false;
+        for j in byValue.lookup(v, []) {
+            if joined = false && j >= 0 && j < size(constants) {
+                if get(constants, j).kind = get(constants, i).kind {
+                    UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, get(constants, i).id, get(constants, j).id);
+                    joined = true;
+                };
+            };
+        };
+        if joined = false { byValue = byValue.insert(v, push(byValue.lookup(v, []), i)); };
+    };
+    changed = true;
+    for round in 0..size(terms) + 2 {
+        if changed {
+            ClosureRound { parent: uf, weight: weight, changed: bySignature } = signatureRound(uf, weight, terms);
+            ClosureRound { parent: uf, weight: weight, changed: byConstructor } = constructorRound(uf, weight, terms, constructors, constructorSet, constructorFields);
+            ClosureRound { parent: uf, weight: weight, changed: byDifference } = differenceRound(uf, weight, terms);
+            changed = bySignature || byConstructor || byDifference;
+        };
+    };
+    result = [];
+    for entry in uf.entries() {
+        root = ufFind(uf, entry.key);
+        if root != entry.key { result = push(result, EqualityFact { left: entry.key, right: root }); };
+    };
+    return result;
+};
+
+fn applicationFactsWithConstructors(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, constructors: &List<Int>, constructorFields: &List<ConstructorField>) -> List<EqualityFact> {
+    return congruenceClosure(facts, terms, [], constructors, constructorFields);
+};
+
+fn applicationFacts(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>) -> List<EqualityFact> {
+    return applicationFactsWithConstructors(facts, terms, [], []);
+};
+
+// The element at an index that data gives (a node of a template, an entry
+// a map holds), or a value of none where the index is not in the list: the
+// data is made so that it always is, which nothing here proves
+fn emptyPositions() -> HashMap<Int, List<Int>> { return HashMap::new(); };
+
+fn minInt(a: Int, b: Int) -> Int {
+    if a < b { return a; };
+    return b;
+};
+
+fn intAt(xs: &List<Int>, i: Int, fallback: Int) -> Int {
+    if i >= 0 && i < size(xs) { return get(xs, i); };
+    return fallback;
+};
+
+fn boolAt(xs: &List<Bool>, i: Int, fallback: Bool) -> Bool {
+    if i >= 0 && i < size(xs) { return get(xs, i); };
+    return fallback;
+};
+
+fn applicationAt(apps: &List<ApplicationTerm>, i: Int) -> ApplicationTerm {
+    if i >= 0 && i < size(apps) { return clone(get(apps, i)); };
+    return ApplicationTerm { id: 0, function: 0 - 999999, arguments: [] };
+};
+
+fn hasApplicationEquality(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, left: Int, right: Int) -> Bool {
+    return hasEquality(applicationFacts(facts, terms), left, right);
+};
+
+fn hasApplicationOrder(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    return hasOrder(applicationFacts(equalities, terms), orders, left, right, strict);
+};
+
+// A strict path from an identifier back to itself contradicts the premises.
+// Every such cycle passes through an endpoint of one of the comparisons.
+fn contradictoryOrders(equalities: &List<EqualityFact>, orders: &List<OrderFact>) -> Bool {
+    for edgePosition in 0..size(orders) {
+        edge = get(orders, edgePosition);
+        if hasOrder(equalities, orders, edge.smaller, edge.smaller, true) {
+            return true;
+        };
+    };
+    return false;
+};
+
+// In an inconsistent context every comparison follows. The contradiction
+// check is deliberately limited to equality and strict/non-strict order facts.
+fn entailsApplicationOrder(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    closed = applicationFacts(equalities, terms);
+    closedClasses = leastClasses(closed);
+    if contradictoryOrders(closed, orders) {
+        return true;
+    };
+    return hasOrderIn(closedClasses, orders, left, right, strict);
+};
+
+
+fn contradictoryDisequalities(classes: &HashMap<Int, Int>, different: &List<DisequalityFact>) -> Bool {
+    for factPosition in 0..size(different) {
+        fact = get(different, factPosition);
+        if sameIn(classes, fact.left, fact.right) {
+            return true;
+        };
+    };
+    return false;
+};
+
+// Disequalities are symmetric and may be transported through equality. A
+// strict ordering also establishes disequality. Contradictory explicit facts
+// or a strict cycle make every relation follow.
+// (as entailsApplicationDisequality, for equalities already closed, as an
+// analysis's are, in a context already found not contradictory)
+fn closedDisequality(classes: &HashMap<Int, Int>, orders: &List<OrderFact>, different: &List<DisequalityFact>, left: Int, right: Int) -> Bool {
+    if hasOrderIn(classes, orders, left, right, true) { return true; };
+    if hasOrderIn(classes, orders, right, left, true) { return true; };
+    for factPosition in 0..size(different) {
+        fact = get(different, factPosition);
+        if sameIn(classes, left, fact.left) && sameIn(classes, right, fact.right) { return true; };
+        if sameIn(classes, left, fact.right) && sameIn(classes, right, fact.left) { return true; };
+    };
+    return false;
+};
+
+fn entailsApplicationDisequality(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, orders: &List<OrderFact>, different: &List<DisequalityFact>, left: Int, right: Int) -> Bool {
+    closed = applicationFacts(equalities, terms);
+    closedClasses = leastClasses(closed);
+    if contradictoryDisequalities(closedClasses, different) {
+        return true;
+    };
+    if contradictoryOrders(closed, orders) {
+        return true;
+    };
+    if hasOrderIn(closedClasses, orders, left, right, true) {
+        return true;
+    };
+    if hasOrderIn(closedClasses, orders, right, left, true) {
+        return true;
+    };
+    for factPosition in 0..size(different) {
+        fact = get(different, factPosition);
+        if sameIn(closedClasses, left, fact.left) {
+            if sameIn(closedClasses, right, fact.right) {
+                return true;
+            };
+        };
+        if sameIn(closedClasses, left, fact.right) {
+            if sameIn(closedClasses, right, fact.left) {
+                return true;
+            };
+        };
+    };
+    return false;
+};
+
+// The facts of a context as linear inequalities over terms: orders and
+// differences directly, equalities and the defining identities of sum,
+// difference, scale and size applications as equations.
+// The representative of a term under the known equalities: arithmetic
+// over applications only combines when the same value, reached through
+// equal terms (a projection of a pair and the pair's part, say), is one
+// variable, so applications and facts are read through representatives.
+fn canonicalTerm(known: &List<EqualityFact>, term: Int) -> Int {
+    return canonicalIn(leastClasses(known), term);
+};
+
+// Each term of the facts, mapped to the least member of its class (a term
+// of no fact is its own class)
+fn leastClasses(known: &List<EqualityFact>) -> HashMap<Int, Int> {
+    uf = unionOf(known);
+    least = emptyIntMap();
+    for fPosition in 0..size(known) {
+        f = get(known, fPosition);
+        r = ufFind(uf, f.left);
+        m = least.lookup(r, r);
+        if f.left < m { m = f.left; };
+        if f.right < m { m = f.right; };
+        least = least.insert(r, m);
+    };
+    classes = emptyIntMap();
+    for fPosition in 0..size(known) {
+        f = get(known, fPosition);
+        r = ufFind(uf, f.left);
+        m = least.lookup(r, r);
+        classes = classes.insert(f.left, m);
+        classes = classes.insert(f.right, m);
+    };
+    return classes;
+};
+
+// Whether two terms are in one class of a map from each term to the least
+// member of its class (leastClasses): what hasEquality says of the list the
+// map was made from, by two lookups
+fn sameIn(classes: &HashMap<Int, Int>, left: Int, right: Int) -> Bool {
+    if left = right { return true; };
+    return canonicalIn(classes, left) = canonicalIn(classes, right);
+};
+
+fn hasDifferenceIn(classes: &HashMap<Int, Int>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
+    return canonicalHasDifference(canonicalDifferencesIn(classes, facts), canonicalIn(classes, left), canonicalIn(classes, right), bound);
+};
+
+fn canonicalIn(classes: &HashMap<Int, Int>, term: Int) -> Int {
+    return classes.lookup(term, term);
+};

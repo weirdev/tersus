@@ -1,0 +1,526 @@
+
+// An equality proof query for the Tersus validator under development. The
+// integers are symbolic value identifiers, not the values they stand for.
+struct EqualityFact { left: Int, right: Int };
+
+impl Clone for EqualityFact { };
+
+impl Copy for EqualityFact { };
+
+struct ConstantTerm { id: Int, kind: Int, value: Int };
+
+impl Clone for ConstantTerm { };
+
+struct Representative { term: Int, rep: Int };
+
+impl Clone for Representative { };
+
+impl Copy for Representative { };
+
+// A binary application of an uninterpreted operator to two term identifiers.
+// Every identifier must name one term, and operator identifiers must distinguish
+// different operators. Equalities may mention identifiers without an application.
+struct BinaryTerm { id: Int, op: Int, left: Int, right: Int };
+
+impl Clone for BinaryTerm { };
+
+impl Copy for BinaryTerm { };
+
+// A strict comparison between symbolic value identifiers.
+struct StrictOrderFact { smaller: Int, greater: Int };
+
+impl Clone for StrictOrderFact { };
+
+impl Copy for StrictOrderFact { };
+
+// A comparison smaller <= greater; strict means smaller < greater.
+struct OrderFact { smaller: Int, greater: Int, strict: Bool };
+
+impl Clone for OrderFact { };
+
+impl Copy for OrderFact { };
+
+// An application is identified separately from its function and arguments.
+// Function identifiers are terms too, so equal functions applied to equal
+// argument lists produce equal results. Zero-argument applications are valid.
+struct ApplicationTerm { id: Int, function: Int, arguments: List<Int> };
+
+impl Clone for ApplicationTerm { };
+
+struct ConstructorField { constructor: Int, field: Int, index: Int };
+
+impl Clone for ConstructorField { };
+
+// Saturation is bounded by the finite terms in the facts and applications.
+// Constructor injectivity can merge argument classes, which can then make
+// additional application results equal.
+// The congruence closure of equalities over application terms, by union
+// and find: equal functions of equal arguments are equal; a constructor
+// application equal to another of the same constructor has equal
+// arguments; a field of a value equal to a constructor application is that
+// argument; and x - s = r where x = l + r and s = l (or s = r and the other
+// part). The result names each term of a class by the class's root (each
+// equality is a term and its root), which hasEquality reads in two passes.
+struct UnionFind { parent: HashMap<Int, Int>, weight: HashMap<Int, Int> };
+
+impl Clone for UnionFind { };
+
+// The union-find of a congruence closure after one pass of a rule, and whether the pass joined two classes
+struct ClosureRound { parent: HashMap<Int, Int>, weight: HashMap<Int, Int>, changed: Bool };
+
+impl Clone for ClosureRound { };
+
+struct DisequalityFact { left: Int, right: Int };
+
+impl Clone for DisequalityFact { };
+
+impl Copy for DisequalityFact { };
+
+// Values built with different variants of the same enum cannot be equal.
+// The host emits these facts only for actual enum constructors.
+struct VariantFact { object: Int, family: Int, constructor: Int, matches: Bool };
+
+impl Clone for VariantFact { };
+
+impl Copy for VariantFact { };
+
+// A difference constraint left - right <= bound. It is an edge from right to
+// left whose weight is bound. Paths compose constraints by adding weights.
+struct DifferenceFact { left: Int, right: Int, bound: Int };
+
+impl Clone for DifferenceFact { };
+
+impl Copy for DifferenceFact { };
+enum SumResult { Overflow, Sum { value: Int } };
+
+impl Clone for SumResult { };
+
+impl Copy for SumResult { };
+
+// A potential of the difference graph: p(left) <= p(right) + bound for every
+// edge, found from a source joined to every node by an edge of bound 0. It is
+// valid when the search settles and no sum it needs overflows; a valid
+// potential means the graph has no negative cycle, and two nodes are at
+// distance at most 0 from each other, both ways, exactly when they have one
+// potential and are in one strongly connected component of the edges it
+// makes tight (p(left) = p(right) + bound).
+struct DifferencePotential { valid: Bool, potential: HashMap<Int, Int> };
+
+impl Clone for DifferencePotential { };
+
+struct DistanceTable { source: Int, distances: HashMap<Int, Int> };
+
+impl Clone for DistanceTable { };
+
+// Concrete terms use kind 0 for Int and kind 1 for Bool (value 0 or 1).
+// Identifiers refer to terms, so repeated literals are registered as equal.
+
+impl Copy for ConstantTerm { };
+
+struct ValidatorContext {
+    equalities: List<EqualityFact>,
+    applications: List<ApplicationTerm>,
+    constants: List<ConstantTerm>,
+    orders: List<OrderFact>,
+    different: List<DisequalityFact>,
+    variants: List<VariantFact>,
+    fieldFunctions: List<Int>,
+    constructorFunctions: List<Int>,
+    constructorFields: List<ConstructorField>,
+    differences: List<DifferenceFact>,
+};
+
+impl Clone for ValidatorContext { };
+
+// The edges as lists of node indexes: the edges out of node n are the
+// targets from starts(n) to starts(n + 1), from right to left (or left to
+// right, reversed)
+struct EdgeGraph { starts: List<Int>, targets: List<Int> };
+
+impl Clone for EdgeGraph { };
+
+enum ValidatorGoal {
+    Equal { left: Int, right: Int },
+    Different { left: Int, right: Int },
+    Less { left: Int, right: Int },
+    AtMost { left: Int, right: Int },
+    Difference { left: Int, right: Int, bound: Int },
+    Within { inner: Int, outer: Int },
+};
+
+impl Clone for ValidatorGoal { };
+
+impl Copy for ValidatorGoal { };
+
+enum VariantObjectLookup { Missing, Found { object: Int } };
+
+impl Clone for VariantObjectLookup { };
+
+impl Copy for VariantObjectLookup { };
+
+// False means not established, including when a search omitted an overflowed
+// path. The context must use distinct identifiers for distinct terms and the
+// documented constant kinds; the host is responsible for encoding it.
+enum IntegerLookup { Missing, Found { value: Int } };
+
+impl Clone for IntegerLookup { };
+
+impl Copy for IntegerLookup { };
+
+// What the signs of terms are read from: the closed equalities, the orders
+// over them, and the constant 0 if there is one (they depend on the context
+// alone, so a search that asks of many terms makes them once)
+struct SignFacts { equalities: List<EqualityFact>, classes: HashMap<Int, Int>, orders: List<OrderFact>, zero: Int, zeroFound: Bool };
+
+impl Clone for SignFacts { };
+
+
+struct LinTerm { term: Int, coeff: Int };
+
+impl Clone for LinTerm { };
+
+impl Copy for LinTerm { };
+
+struct LinFact { terms: List<LinTerm>, bound: Int };
+
+impl Clone for LinFact { };
+
+struct Joined { set: HashSet<Int>, grew: Bool };
+
+impl Clone for Joined { };
+
+// What a context gives every goal asked of it: the closed equalities, the
+// orders and differences, and whether the facts contradict each other.
+struct ContextAnalysis { equalities: List<EqualityFact>, classes: HashMap<Int, Int>, orders: List<OrderFact>, differences: List<DifferenceFact>, contradictory: Bool };
+
+impl Clone for ContextAnalysis { };
+
+struct GetFact { seq: Int, at: Int, found: Bool };
+
+impl Clone for GetFact { };
+
+impl Copy for GetFact { };
+
+struct SizeFact { term: Int, found: Bool };
+
+impl Clone for SizeFact { };
+
+impl Copy for SizeFact { };
+
+// Whether the two lists of a forall fact over a range are the lists of two reads (either way round), or the first read
+// is of a push onto one of them: which of the fact's lists the push is onto
+struct FactLists { same: Bool, pushed: Bool, inner: Int };
+
+impl Clone for FactLists { };
+
+struct RelationFact { function: Int, left: Int, right: Int, found: Bool };
+
+impl Clone for RelationFact { };
+
+impl Copy for RelationFact { };
+
+
+enum ProofStep {
+    KnownEquality { left: Int, right: Int },
+    KnownDifferent { left: Int, right: Int },
+    KnownOrder { left: Int, right: Int, strict: Bool },
+    KnownDifference { left: Int, right: Int, bound: Int },
+    Check { goal: ValidatorGoal },
+};
+
+impl Clone for ProofStep { };
+
+impl Copy for ProofStep { };
+
+struct ProofResult { valid: Bool, failedAt: Int };
+
+impl Clone for ProofResult { };
+
+impl Copy for ProofResult { };
+struct ProofRun { valid: Bool, failedAt: Int, state: ValidatorContext };
+
+impl Clone for ProofRun { };
+
+// A goal holds of a context when it holds of the context's facts, or of them
+// with the sum and refined orders derived. Several goals asked of one context
+// share its analysis and its derived context through the cache.
+enum AnalysisLookup { Missing, Found { analysis: ContextAnalysis } };
+
+impl Clone for AnalysisLookup { };
+
+struct EntailmentCache { plain: ValidatorContext, plainAnalysis: AnalysisLookup, derivedMade: Bool, derived: ValidatorContext, derivedAnalysis: AnalysisLookup };
+
+impl Clone for EntailmentCache { };
+
+struct CachedAnswer { holds: Bool, cache: EntailmentCache };
+
+impl Clone for CachedAnswer { };
+
+// A host translates verified MIR blocks to this form. Branch facts are trusted
+// consequences of taking that edge, not unchecked source assertions. A path
+// that contains an operation the bridge cannot encode ends in Unsupported.
+enum FlowEnd {
+    Done,
+    Jump { target: Int },
+    Branch { yes: Int, no: Int, yesFacts: List<ProofStep>, noFacts: List<ProofStep> },
+    Unsupported,
+};
+
+impl Clone for FlowEnd { };
+
+struct FlowBlock { id: Int, steps: List<ProofStep>, end: FlowEnd };
+
+impl Clone for FlowBlock { };
+
+// status 0: valid; 1: unproved obligation; 2: unsupported operation;
+// 3: invalid graph; 4: a cycle needs an invariant and has not been checked.
+struct FlowResult { status: Int, block: Int, step: Int };
+
+impl Clone for FlowResult { };
+
+impl Copy for FlowResult { };
+
+// Locals are names for immutable symbolic terms. A copy changes the binding,
+// not the term or the facts that describe it.
+enum ValueRef { Local { local: Int }, Term { term: Int } };
+
+impl Clone for ValueRef { };
+
+impl Copy for ValueRef { };
+enum ValueLookup { Missing, Found { term: Int } };
+
+impl Clone for ValueLookup { };
+
+impl Copy for ValueLookup { };
+enum ArgumentsLookup { Missing, Found { terms: List<Int> } };
+
+impl Clone for ArgumentsLookup { };
+
+// A forall the path has assumed, kept so that it is used at the elements a
+// failed check reads (saturate). Its terms are nodes in order: the index
+// (kind 0), a value of the path (kind 1: a local or a term), or a function of
+// earlier nodes (kind 2). A guard or the body relates two nodes.
+struct TemplateNode { kind: Int, function: Int, value: ValueRef, arguments: List<Int> };
+
+impl Clone for TemplateNode { };
+
+struct TemplateRelation { relation: Int, left: Int, right: Int };
+
+impl Clone for TemplateRelation { };
+
+struct ForallTemplate { id: Int, nodes: List<TemplateNode>, guards: List<TemplateRelation>, body: TemplateRelation };
+
+impl Clone for ForallTemplate { };
+
+struct ExecutionState { context: ValidatorContext, locals: HashMap<Int, Int>, templates: List<ForallTemplate> };
+
+impl Clone for ExecutionState { };
+
+struct MergePair { left: Int, right: Int, joined: Int, ambiguous: Bool };
+
+impl Clone for MergePair { };
+
+enum StateMergeLookup { Missing, Found { state: ExecutionState } };
+
+impl Clone for StateMergeLookup { };
+
+// A read of set(inner, idx, value) at an index that is neither known to be
+// idx nor known not to be: the goal holds if it holds when the index is idx
+// (the read is the value) and when it is not (the read is the element of
+// inner there, a new read), each case perhaps split again. Only reads the
+// goal is about are split (a side, or an argument of one), at most depth
+// times along a path.
+struct SplitResult { holds: Bool, used: Int };
+
+// A write that a read may read through: a set at its index, or a push at the old size, read at an index known not to
+// be past it
+struct WriteOf { written: Bool, pushed: Bool, inner: Int, idx: Int, value: Int };
+
+impl Clone for WriteOf { };
+
+// Apply is restricted to pure functions. The host must encode the operation's
+// preconditions as checks before the Apply; unknown or effectful operations
+// must be rejected by the host instead of encoded as a pure application.
+struct LoopTest { relation: Int, left: ValueRef, right: ValueRef };
+
+impl Clone for LoopTest { };
+
+enum ExecutionStep {
+    Assign { local: Int, value: ValueRef },
+    Apply { local: Int, result: Int, function: Int, arguments: List<ValueRef> },
+    ApplyFresh { local: Int, function: Int, arguments: List<ValueRef> },
+    Literal { result: Int, function: Int, arguments: List<ValueRef> },
+    Push { local: Int, list: ValueRef, value: ValueRef, zero: ValueRef },
+    Last { local: Int, list: ValueRef, zero: ValueRef },
+    Set { local: Int, list: ValueRef, index: ValueRef, value: ValueRef },
+    Pop { local: Int, list: ValueRef },
+    NewArray { local: Int, length: ValueRef, value: ValueRef },
+    Havoc { local: Int },
+    RequireDefined { value: ValueRef },
+    Check { relation: Int, left: ValueRef, right: ValueRef },
+    Assume { relation: Int, left: ValueRef, right: ValueRef },
+    AssumeVariant { object: ValueRef, family: Int, constructor: Int, matches: Bool },
+    RequireVariant { object: ValueRef, family: Int, constructor: Int },
+    CheckWithin { inner: ValueRef, outer: ValueRef },
+    Proof { step: ProofStep },
+    // the path assumes a forall, which saturate uses where a check fails
+    AssumeForall { template: ForallTemplate },
+};
+
+impl Clone for ExecutionStep { };
+
+// status 0 is success; 1 is an unproved check; 2 is malformed or unsupported.
+struct ExecutionResult { status: Int, failedAt: Int, state: ExecutionState };
+
+impl Clone for ExecutionResult { };
+
+struct NegatedRelation { relation: Int, left: Int, right: Int };
+
+impl Clone for NegatedRelation { };
+
+impl Copy for NegatedRelation { };
+
+// Saturation: the foralls the path assumed, and the frames of set and push,
+// are instantiated at the reads (get(L, k)) of the lists they speak of, and
+// the instances whose guards hold become facts, in rounds until none is new.
+// A term an instance makes has the generation of its index plus one (the
+// terms the state had are 0), and only indexes of generation 1 or less are
+// used, so a forall whose instance reads at a new index (the node a link
+// leads to) is used there once and does not feed itself. An instance missing
+// exactly one guard is blocked on it: a case split on that guard may let it
+// be used (proveBySaturation).
+struct ClosedFacts { contradictory: Bool, reps: List<Representative>, edges: List<DifferenceFact>, different: List<DisequalityFact> };
+
+impl Clone for ClosedFacts { };
+
+struct DoneKey { kind: Int, owner: Int, index: Int };
+
+impl Clone for DoneKey { };
+
+struct TermRelation { relation: Int, left: Int, right: Int };
+
+impl Clone for TermRelation { };
+
+struct BlockedGuard { relation: Int, left: Int, right: Int, index: Int };
+
+impl Clone for BlockedGuard { };
+
+
+struct SatInstance { key: DoneKey, guards: List<TermRelation>, body: TermRelation };
+
+impl Clone for SatInstance { };
+
+// (closed: the closure of the state's facts, when it is known)
+struct Saturation { state: ExecutionState, births: HashMap<Int, Int>, done: List<DoneKey>, blocked: List<BlockedGuard>, closed: List<ClosedFacts> };
+
+impl Clone for Saturation { };
+
+struct RoundResult { saturation: Saturation, accepted: Int };
+
+impl Clone for RoundResult { };
+
+// The term of an application, made (as the next fresh term) if the state
+// has none, with what its builtin is known to give
+struct StateTerm { state: ExecutionState, term: Int, created: Bool, next: Int };
+
+impl Clone for StateTerm { };
+
+// The terms of a template's nodes at an index: those made of the index
+// (dependent) from the others' terms, given; or those not made of it. The
+// terms made are of the generation given.
+struct NodeTerms { state: ExecutionState, terms: List<Int>, found: Bool, next: Int, births: HashMap<Int, Int> };
+
+impl Clone for NodeTerms { };
+
+// What a round of saturation carries from one of its passes to the next: the state it adds terms to, the generations
+// of the terms, the instances made and the keys they are made for, and the next free term
+struct SatWork { state: ExecutionState, births: HashMap<Int, Int>, pending: List<DoneKey>, instances: List<SatInstance>, nextTerm: Int };
+
+impl Clone for SatWork { };
+
+// A closure the checks of a block share. It is made from the facts of one
+// state, and a later state of the block has those facts and more as long as
+// every step between only adds facts and binds locals (addsFactsOnly), so a
+// goal it proves holds there too; a goal it cannot prove is asked again of
+// the facts there are now. Any other step (a proof step, the application that
+// forgets a term) drops it.
+enum SharedEntailment { Missing, Found { cache: EntailmentCache } };
+
+impl Clone for SharedEntailment { };
+
+struct CheckedStep { result: ExecutionResult, shared: SharedEntailment };
+
+impl Clone for CheckedStep { };
+
+// A loop being walked: its header, the blocks that can get back to it, what
+// has to hold at each back edge, and the value of the variant when the
+// iteration started. A stack of frames keeps an exit from a nested loop inside
+// the loop that encloses it.
+
+struct LoopFrame {
+    header: Int,
+    region: List<Int>,
+    checks: List<ExecutionStep>,
+    variant: ValueRef,
+    variantMode: Int,
+    variantOther: ValueRef,
+    prior: Int,
+    priorOther: Int,
+};
+
+impl Clone for LoopFrame { };
+
+// An execution graph carries local bindings separately along every path. Its
+// edge steps are host-supplied consequences of the branch condition. An
+// unsupported MIR operation must be represented by ExecutionEnd::Unsupported.
+enum ExecutionEnd {
+    Done,
+    Jump { target: Int },
+    Branch { yes: Int, no: Int, yesSteps: List<ExecutionStep>, noSteps: List<ExecutionStep> },
+    BooleanBranch { yes: Int, no: Int, join: Int, value: ValueRef, trueValue: ValueRef, falseValue: ValueRef },
+    Condition { yes: Int, no: Int, relation: Int, left: ValueRef, right: ValueRef },
+    // body is the block an iteration starts on, and region is the header and
+    // every block that can get back to it; a block outside the region leaves
+    // the loop and is walked after it.
+    Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef, variantObject: ValueRef, variantFamily: Int, variantConstructor: Int, orTests: List<LoopTest> },
+    Unsupported,
+};
+
+impl Clone for ExecutionEnd { };
+
+struct ExecutionBlock { id: Int, steps: List<ExecutionStep>, end: ExecutionEnd };
+
+impl Clone for ExecutionBlock { };
+
+// status 0: valid; 1: unproved; 2: unsupported or malformed step;
+// 3: invalid graph; 4: cycle whose invariant has not yet been checked.
+struct ExecutionFlowResult { status: Int, block: Int, step: Int, state: ExecutionState };
+
+impl Clone for ExecutionFlowResult { };
+
+struct InferSubject { local: Int, isSize: Bool, temp: Int, term: Int, kind: Int, indexTerm: Int };
+
+impl Clone for InferSubject { };
+
+impl Copy for InferSubject { };
+
+struct InferGoal { relation: Int, left: Int, right: Int, assumes: List<ExecutionStep>, checks: List<ExecutionStep> };
+
+impl Clone for InferGoal { };
+
+struct LoopCandidates { assumes: List<ExecutionStep>, checks: List<ExecutionStep> };
+
+impl Clone for LoopCandidates { };
+
+// What the inference of loop candidates carries from one of its passes to the next: the state it adds terms to, the
+// numbers of the temporaries it made, the subjects and anchors, and the candidate goals
+struct InferState { work: ExecutionState, index: Int, candIndex: Int, assigned: List<InferSubject>, anchors: List<InferSubject>, goals: List<InferGoal> };
+
+impl Clone for InferState { };
+
+// A distance between two subjects as a value: a constant of the program, or, for a small distance the program writes
+// no constant for, a sum of ones (a list that starts with two elements and grows with its counter), with the subjects
+// swapped when it is negative
+struct InferDistance { found: Bool, swapped: Bool, steps: List<ExecutionStep>, value: ValueRef };
+
+impl Clone for InferDistance { };
