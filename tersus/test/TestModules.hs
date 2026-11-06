@@ -1659,6 +1659,12 @@ testModuleLateDeclarations = testCaseSeq "late top-level definitions consume exp
 testValidatorPackage :: Test
 testValidatorPackage = TestCase "validator package keeps bare helpers and reference calls never run driver main" $ do
     disk <- mapM (\(path, _) -> do source <- readFile path; pure (path, source)) validationPackageFiles
+    reference <- bootstrapFromFile MirHousekeeping.validationEntry
+    replay <- bootstrapFromFile MirHousekeeping.validationEntry
+    let changed = [(path, if path == MirHousekeeping.validationEntry
+            then unlines (concatMap (\line -> ["affirm false;" | line == "bytes = driverReadAll();"] ++ [line]) (lines source))
+            else source) | (path,source) <- validationPackageFiles]
+    refused <- programFromFiles MirHousekeeping.validationEntry changed
     pure $ case loadPkg validationPackageFiles MirHousekeeping.validationEntry of
         Left e -> Just e
         Right pkg -> case PackageCompile.compileModules pkg of
@@ -1673,7 +1679,14 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                             typeNames = [name | modu <- PackageCompile.compiledModules compiled, stmt <- PackageCompile.compiledStatements modu, name <- case stmt of StructDef n _ _ _ -> [n]; EnumDef n _ -> [n]; _ -> []]
                             trapped = checker{M.progMain = (M.progMain checker){M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Unreachable)}}
                          in foldr (<>) Nothing
-                            [ testAssertEq (validatorMetadataFingerprint raw) "5a777f689a0d83c0"
+                            [ case reference of
+                                Error e -> Just e
+                                Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
+                            , case replay of
+                                Error e -> Just e
+                                Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
+                            , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
+                            , testAssertEq (validatorMetadataFingerprint raw) "5a777f689a0d83c0"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
