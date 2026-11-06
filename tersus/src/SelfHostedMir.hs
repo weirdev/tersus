@@ -1,5 +1,5 @@
 -- The bridge from MIR to the validator written in Tersus
--- (lib/validation.tersus): encode is a data-only translation, and anything it
+-- (lib/validation/validation.tersus): encode is a data-only translation, and anything it
 -- does not fully model is reported as an Unmodeled verdict, never accepted.
 module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode, encodeLibrary, obligationNote, sourceContainerView) where
 
@@ -14,9 +14,8 @@ import Pretty (renderVarProof)
 import MirEval (MirValue (..), runNamedFunction)
 import LibPackage (LibPackage (..), libPackage)
 import Compile (lowerSource)
-import MirHousekeeping (eraseGhosts, verifyProgram)
+import MirHousekeeping (eraseGhosts, verifyProgram, toolProgram, validationEntry)
 import MirMono (monomorphizeProofCallsForValidation)
-import PreludeSource (validationSource)
 import StdLib (builtinFunct, eqVarProof, stdLibRuleCtx)
 import StdLibDefs (stdLibValCtx)
 import Syntax
@@ -671,7 +670,7 @@ lambdaInstances k b0 = foldl one ([], b0) (buildLambdas b0)
 -- A forall that holds is kept by the path (an AssumeForall step), with the
 -- values of the names it mentions copied where it is assumed (a later change
 -- to them does not change what it said), and the validator uses it at the
--- elements a check that fails reads (saturate, in lib/validation.tersus). Its
+-- elements a check that fails reads (saturate, in lib/validation/validation.tersus). Its
 -- terms are the template's nodes. Unrepresented call-bearing templates must
 -- reject encoding: dropping them would also drop an input call obligation.
 registerForall :: M.Env -> VariableProof -> Build -> Maybe ([MirValue], Build)
@@ -3107,7 +3106,7 @@ sourceContainerView program = program
         , Map.lookup name (M.progInvariants program) == Just invariant
         ]
 
--- The first argument is the validated lib/validation.tersus program. The
+-- The first argument is the validated lib/validation/validation.tersus program. The
 -- verdict says whether every obligation was proved, which one was not, or
 -- what part of the MIR is outside this bridge's current subset (including
 -- most loop shapes and function calls).
@@ -3143,9 +3142,7 @@ verdictProved verdict = case verdict of
 -- TestPipeline checks that it accepts its own MIR). Every program that is
 -- validated is validated by this program and nothing else.
 checkerProgram :: Result M.Program String
-checkerProgram = case lowerSource True validationSource of
-    Error err -> Error ("Could not compile lib/validation.tersus: " ++ err)
-    Ok program -> eraseGhosts program
+checkerProgram = toolProgram validationEntry `bindResult` eraseGhosts
 
 -- Validate a program with the Tersus validator. A program the bridge does not
 -- model is refused, not waved through: there is no other validator to fall

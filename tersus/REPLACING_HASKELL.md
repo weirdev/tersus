@@ -27,7 +27,7 @@ reader and writer of the MIR as data (`examples/mir/mir_reader/mir_reader.tersus
 checker of it (`examples/mir/mir_verify/mir_verify.tersus`), the
 libraries every program gets (`lib/prelude.tersus`, `lib/lists.tersus`,
 `lib/box.tersus`, `lib/string.tersus`), and a validator that is not yet the
-production one (`lib/validation.tersus`, 2,884 lines). The superseded
+production one (`lib/validation/validation.tersus`, 2,884 lines). The superseded
 Python prototype and the `stack/tersus/` starter snapshot are deleted
 (the second in PR #95), so everything below is the real remainder.
 
@@ -38,11 +38,35 @@ library that Tersus would have to grow first.
 
 ## The targets, in order
 
+### Validator package migration
+
+The validator core and native driver are one ordinary package under
+`lib/validation/`, with `driver.tersus` as the entry for native construction
+and reference queries. Both preserve bare core type and function identities.
+Reference queries call named functions without executing the driver main;
+the unpruned linked program retains every helper and its proof metadata.
+
+The entry module cannot be imported by a reachable dependency without a
+cycle, so it uses the existing compiler-owned home interface. Private bounded
+helpers stay inside that entry unit; bounded exports from ordinary imported
+modules remain unsupported. Top-level functions after a main return are
+lowered once at their declaration position, rather than consuming their
+expression types once while skipping and again while lowering. Linked ghost
+environments are completed with the existing `Compile.completeSpecEnvs`
+contract, including private instantiated library functions. Existing local
+bindings win over global function names; completing twice changes nothing.
+
+Preparation uses the package's path/content manifest and the existing native
+input, producer, runtime, flags and target keys. The checked validator still
+requires uncached proofs of the full linked core/driver source and physical
+native List/Box storage. No algorithm, wire format or bootstrap trust gate
+changes with the move.
+
 ### 1. Make the Tersus validator the production validator (deletes ~4,000 lines)
 
 `ProofEngine`, `Ghost`, `MirValidate`, `MirVerify`, `MirGhost`,
 `ProofState`, `ProofHelpers` and `Linear` go, replaced by
-`lib/validation.tersus`. This comes first because it is the only target
+`lib/validation/validation.tersus`. This comes first because it is the only target
 whose Tersus implementation is already substantially written, and because
 it deletes the largest single chunk.
 
@@ -76,7 +100,7 @@ oracle behind a flag. Then the Haskell proof modules and both bridges
 are deleted together (the bridges exist only to feed a Haskell host).
 
 Status (2026-10-31, PR #94): the flip is made. `Pipeline` validates only
-through `lib/validation.tersus`, fed by `SelfHostedMir`; the Haskell
+through `lib/validation/validation.tersus`, fed by `SelfHostedMir`; the Haskell
 validator, `SelfHostedProof` and `dev/parity` are deleted, and a program
 the bridge does not model is refused, never passed.
 
@@ -118,7 +142,7 @@ spread past four entries. The checker's arithmetic no longer traps
 the compiled validator on values like the least integer: a linear
 combination whose bound is not representable is dropped rather than
 computed, and a size is known never negative. The validator's own
-self-check (`testMir` on `lib/validation.tersus`) has not finished in
+self-check (`testMir` on `lib/validation/validation.tersus`) has not finished in
 this environment; it is still unverified.
 
 The validator itself uses `HashMap` and `HashSet`, so every validation
@@ -132,7 +156,7 @@ including one that follows from a branch value (`0 <= 0 - n` from
 `n < 0`), which the `String::fromInt` shape needs.
 
 The validator no longer runs interpreted in production: it is compiled
-to native code once (with `lib/validation_driver.tersus` as its main
+to native code once (with `lib/validation/driver.tersus` as its main
 program, which reads the bridge's encoded functions from standard
 input) and kept in the cache directory under an identity derived from its exact
 owned-MIR input, emitter identity, runtime, target and compiler flags
@@ -142,7 +166,7 @@ what it is made of: the native storage library its lists and Boxes are
 built with, and its own source, each function by a process of its own,
 in parallel. The interpreted validator remains only where the
 validator is itself the program under test (`TestPipeline`'s checks of
-`lib/validation.tersus`).
+`lib/validation/validation.tersus`).
 
 Concrete evaluation is in the validator: a term whose parts are all
 known is recorded as the constant it evaluates to (arithmetic,

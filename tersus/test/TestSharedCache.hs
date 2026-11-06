@@ -9,10 +9,10 @@ import TestProgramBinaryChecks (binaryChecks, richProgram)
 import TestProgramBuildIdentity (concreteBuildIdentity)
 import Control.DeepSeq (force)
 import qualified Control.Exception as Exception
-import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, tryPutMVar)
+import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, tryPutMVar, yield)
 import Control.Concurrent.MVar (modifyMVar, readMVar, tryReadMVar)
 import Control.Exception (IOException, MaskingState (..), SomeException, bracket, bracketOnError, displayException, finally, getMaskingState, mask, mask_, throwIO, try)
-import Control.Monad (forever, when)
+import Control.Monad (forever, when, forM)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Maybe (isNothing)
 import Data.Char (isSpace, ord)
@@ -21,11 +21,12 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import PreludeSource (mirPackageFiles, validationSource, validationDriverSource, listsSource, boxSource)
+import PreludeSource (mirPackageFiles, listsSource, boxSource)
 import Seed (compilerSnapshotHash, parserSeedHash)
 import qualified TersusParser
 import qualified Modules
 import qualified Compile
+import qualified Pipeline
 import qualified Bootstrap
 import GHC.Clock (getMonotonicTime)
 import qualified PackageCompile
@@ -36,7 +37,7 @@ import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv,
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (Handle, IOMode (ReadMode, WriteMode), SeekMode (AbsoluteSeek), hClose, hSetBinaryMode, stdin, withFile)
-import CacheLock (copyFileCloexec, openTempFileCloexec, withExecutableTempFile, withExecutableWrite)
+import CacheLock (copyFileCloexec, openTempFileCloexec, withExecutableTempFile, withExecutableWrite, withSpawnShared)
 import System.Posix.Files (setFileMode)
 import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Process (exitImmediately, getProcessID)
@@ -44,7 +45,7 @@ import System.Posix.Types (ProcessID)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (NoStream, UseHandle), getPid, getProcessExitCode, proc, waitForProcess)
 import System.Timeout (timeout)
 
-import GHC.Conc (getNumCapabilities)
+import GHC.Conc (getNumCapabilities, setNumCapabilities)
 import Modules (LoadResult (..), LoadedPackage (..), LoadedModule (..), LoadedFile (..), ModuleId (..), loadFromFilesystem, normalizePath, snapshotFromFilesystem)
 import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
@@ -74,7 +75,9 @@ testSharedCache =
         "testSharedCache"
         (codecCases
         ++ [ TestCase "atomic close-on-exec writes keep published tools executable across spawns" atomicExecutableWrites
+           , TestCase "cancelled shared readers release executable writers and restore capabilities" cancelledSharedReaders
            , TestCase "captured process input closes on errors and preserves broken-pipe behavior" capturedInputErrors ]
+        ++ singleSourceCases
         ++ map requireParser
         [ TestCase "truncated named List declaration is refused natively" (rawNamedTruncation "List" "")
         , TestCase "truncated named Box element is refused natively" (rawNamedTruncation "Box" " type")
@@ -116,6 +119,7 @@ testSharedCache =
         , TestCase "content-key locators retain verified dependencies across cache homes" contentLocatorIntegrity
         , TestCase "prepared input aliases reuse verified bytes and repair corrupt or partial files" preparedAliasIntegrity
         , TestCase "proof-only changes invalidate checked certificates and verdict namespaces" proofCertificateNamespace
+        , TestCase "changed core, driver and wire certificates cannot publish a checked validator" validatorCertificateRejections
         , testCase "signal targets reject self, process groups and malformed PID markers" $
             firstFailure
                 [ testAssertTrue (all (not . validSignalTarget 20 10) [-1, 0, 1, 10, 20])
@@ -144,6 +148,169 @@ testSharedCache =
             Left e -> pure (Just e)
             Right _ -> action
     requireParser test = test
+
+singleSourceCases :: [Test]
+singleSourceCases =
+    [ TestCase "compileFromValidated reuses the exact validated sentinel" compileFromValidated
+    , TestCase "ownedFromCompile reuses the exact compiled sentinel" ownedFromCompile
+    , TestCase "warm compile does not traverse upstream" (hotSingleSource "compile")
+    , TestCase "warm owned does not traverse upstream" (hotSingleSource "owned")
+    , TestCase "single-source stages preserve complete Programs in both request orders" singleSourceOrders
+    , TestCase "fresh processes request mixed single-source stages without lock cycles" singleSourceProcesses
+    , TestCase "single-source ownership still refuses unsized references" singleSourceUnsized
+    ]
+
+sameProgram :: Result Program String -> Result Program String -> TestResult
+sameProgram actual expected = testAssertEq actual expected <> testAssertEq (show actual) (show expected)
+
+compileFromValidated :: IO TestResult
+compileFromValidated = withToolsCacheHome $ \_ -> do
+    let source = "return 991101;"
+        sentinel = Pipeline.validatedSource richSource
+    calls <- newIORef (0 :: Int)
+    seeded <- sharedProgram "validated" source $ do
+        atomicModifyIORef' calls (\n -> (n + 1, ()))
+        pure sentinel
+    reused <- sharedProgram "validated" source (throwIO (userError "validated sentinel recomputed"))
+    downstream <- compileOnce source
+    count <- readIORef calls
+    pure (sameProgram seeded sentinel <> sameProgram reused sentinel
+        <> testAssertTrue (case sentinel of Ok _ -> True; Error _ -> False)
+        <> testAssertEq count 1 <> sameProgram downstream (sentinel `bindResult` MirHousekeeping.eraseGhosts))
+
+ownedFromCompile :: IO TestResult
+ownedFromCompile = withToolsCacheHome $ \_ -> do
+    let source = "return 991102;"
+        sentinel = Pipeline.compileSource richSource
+    calls <- newIORef (0 :: Int)
+    seeded <- sharedProgram "compile" source $ do
+        atomicModifyIORef' calls (\n -> (n + 1, ()))
+        pure sentinel
+    reused <- sharedProgram "compile" source (throwIO (userError "compiled sentinel recomputed"))
+    downstream <- ownedOnce source
+    count <- readIORef calls
+    pure (sameProgram seeded sentinel <> sameProgram reused sentinel
+        <> testAssertTrue (case sentinel of Ok _ -> True; Error _ -> False)
+        <> testAssertEq count 1 <> sameProgram downstream (sentinel `bindResult` Pipeline.ownedOfProgram))
+
+singleSourceStage :: String -> String -> IO (Result Program String)
+singleSourceStage "validated" = validatedOnce
+singleSourceStage "compile" = compileOnce
+singleSourceStage "owned" = ownedOnce
+singleSourceStage stage = const (pure (Error ("unknown single-source stage: " ++ stage)))
+
+freshSingleSourceStage :: String -> String -> Result Program String
+freshSingleSourceStage "validated" = Pipeline.validatedSource
+freshSingleSourceStage "compile" = Pipeline.compileSource
+freshSingleSourceStage "owned" = Pipeline.ownedSource
+freshSingleSourceStage stage = const (Error ("unknown single-source stage: " ++ stage))
+
+hotSource :: String -> String
+hotSource stage = "return missing_hot_" ++ stage ++ "_991103(;"
+
+hotSingleSource :: String -> IO TestResult
+hotSingleSource stage = withToolsCacheHome $ \home -> do
+    let sentinel = freshSingleSourceStage stage richSource
+    seeded <- sharedProgram stage (hotSource stage) (pure sentinel)
+    checked <- runSingleSourceProbe home ("hot-" ++ stage)
+    pure (sameProgram seeded sentinel <> checked)
+
+withParserTrap :: FilePath -> IO a -> IO a
+withParserTrap marker action = do
+    tool <- TersusParser.parserExecutable
+    case tool of
+        Error e -> fail e
+        Ok parser -> bracket (renameFile parser (parser ++ ".held"))
+            (\_ -> renameFile (parser ++ ".held") parser)
+            (\_ -> do
+                withExecutableWrite $ do
+                    writeFile parser ("#!/bin/sh\nprintf trap >> '" ++ marker ++ "'\nprintf 'intentional upstream trap\\n' >&2\nexit 23\n")
+                    setFileMode parser 0o755
+                action)
+
+singleSourceProbe :: String -> IO TestResult
+singleSourceProbe mode = do
+    Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
+    result <- if "hot-" `isPrefixOf` mode then do
+        let stage = drop 4 mode
+            source = hotSource stage
+            trap = marker ++ ".upstream"
+            expected = freshSingleSourceStage stage richSource
+        _ <- Exception.evaluate (force (show expected))
+        withParserTrap trap $ do
+            downstream <- singleSourceStage stage source
+            eager <- doesFileExist trap
+            control <- validatedOnce source
+            reached <- doesFileExist trap
+            pure (sameProgram downstream expected
+                <> testAssertTrue (not eager) <> testAssertTrue reached
+                <> testAssertErrorContains "intentional upstream trap" control)
+      else do
+        Just home <- lookupEnv "XDG_CACHE_HOME"
+        when ("mixed-" `isPrefixOf` mode) $ do
+            writeFile (marker ++ ".ready") ""
+            awaitNativeFile (home </> "go")
+        let stages = case mode of
+                "forward" -> ["validated", "compile", "owned"]
+                "reverse" -> ["owned", "compile", "validated"]
+                _ -> [drop 6 mode]
+            source = richSource ++ "\n// single-source stage orders\n"
+        results <- mapM (\stage -> do
+            actual <- singleSourceStage stage source
+            _ <- Exception.evaluate (force (show actual))
+            pure (sameProgram actual (freshSingleSourceStage stage source))) stages
+        pure (firstFailure results)
+    writeFile marker (maybe "pass" id result)
+    pure result
+
+spawnSingleSourceProbe :: FilePath -> String -> IO ProcessHandle
+spawnSingleSourceProbe home mode = spawnProbeInGroup True home
+    [("TERSUS_SINGLE_SOURCE_PROBE", mode), ("TERSUS_SHARED_CACHE_PROBE", home </> mode)]
+
+withSingleSourceProbes :: [IO ProcessHandle] -> ([ProcessHandle] -> IO a) -> IO a
+withSingleSourceProbes [] use = use []
+withSingleSourceProbes (spawn : rest) use = bracket spawn (stopOwnedProcess True) $ \child ->
+    withSingleSourceProbes rest (\others -> use (child : others))
+
+runSingleSourceProbe :: FilePath -> String -> IO TestResult
+runSingleSourceProbe home mode = bracket
+    (spawnSingleSourceProbe home mode)
+    (stopOwnedProcess True)
+    (\child -> do
+        code <- waitChild 300 child
+        output <- readMarker (home </> mode)
+        pure (testAssertEq code (Just ExitSuccess) <> testAssertEq output (Right "pass")))
+
+singleSourceOrders :: IO TestResult
+singleSourceOrders = firstFailure <$> mapM (\mode -> withToolsCacheHome $ \home -> do
+    result <- runSingleSourceProbe home mode
+    entries <- entryFiles home
+    pure (result <> testAssertEq (length entries) 3)) ["forward", "reverse"]
+
+singleSourceProcesses :: IO TestResult
+singleSourceProcesses = withToolsCacheHome $ \home -> do
+    let modes = map ("mixed-" ++) ["validated", "compile", "owned"]
+    withSingleSourceProbes (map (spawnSingleSourceProbe home) modes) $ \children -> do
+        mapM_ (awaitNativeFile . (\mode -> home </> (mode ++ ".ready"))) modes
+        writeFile (home </> "go") ""
+        codes <- mapM (waitChild 300) children
+        outputs <- mapM (readMarker . (home </>)) modes
+        entries <- entryFiles home
+        before <- mapM getModificationTime entries
+        warm <- runSingleSourceProbe home "reverse"
+        after <- mapM getModificationTime entries
+        pure (testAssertEq codes (replicate 3 (Just ExitSuccess))
+            <> testAssertEq outputs (replicate 3 (Right "pass"))
+            <> testAssertEq (length entries) 3 <> testAssertEq after before <> warm)
+
+singleSourceUnsized :: IO TestResult
+singleSourceUnsized = do
+    let source = "fn f(b: Box<Array<Int>>) -> Int { a = &*b; return size(*a); }; return f(Box::new(#[10, 20]));"
+    compiled <- compileOnce source
+    owned <- ownedOnce source
+    pure ((case compiled of Error e -> Just e; Ok _ -> Nothing)
+        <> sameProgram owned (Pipeline.ownedSource source)
+        <> testAssertErrorContains "a reference to an unsized value" owned)
 
 testSharedCacheCodec :: Test
 testSharedCacheCodec = TestList "testSharedCacheCodec" codecCases
@@ -463,6 +630,41 @@ atomicExecutableWrites = withNativeHome $ \home -> do
             abandoned <- abandonedRoundCleansUp home bulky
             pure (firstFailure [namedResult "the padded tool itself" padded, held, copied, ordered, abandoned])
 
+cancelledSharedReaders :: IO TestResult
+cancelledSharedReaders = do
+    original <- getNumCapabilities
+    result <- bracket (pure original) setNumCapabilities $ \capabilities -> do
+        setNumCapabilities (max 2 capabilities)
+        rounds (1 :: Int)
+    restored <- getNumCapabilities
+    pure (result <> testAssertEq restored original)
+  where
+    rounds index
+        | index > 128 = pure Nothing
+        | otherwise = do
+            ready <- withReaders (32 :: Int) $ \workers ->
+                timeout 2000000 (mapM_ (takeMVar . fst . snd) workers)
+            released <- timeout 2000000 (withExecutableWrite (pure ()))
+            case (ready, released) of
+                (Just (), Just ()) -> rounds (index + 1)
+                _ -> pure (Just ("cancelled reader round " ++ show index ++ " retained lock ownership"))
+    withReaders 0 use = use []
+    withReaders count use = bracket start stop $ \worker ->
+        withReaders (count - 1) (\workers -> use (worker : workers))
+    start = do
+        entered <- newEmptyMVar
+        done <- newEmptyMVar
+        thread <- forkIOWithUnmask $ \unmask -> do
+            result <- try (unmask (do
+                withSpawnShared (putMVar entered ())
+                forever (withSpawnShared yield)))
+            putMVar done (result :: Either SomeException ())
+        pure (thread, (entered, done))
+    -- These unmasked workers only yield or take the short spawn lock; none waits
+    -- for a child or runs I/O that could make cancellation and joining unbounded.
+    stop (thread, (_, done)) = Exception.uninterruptibleMask_ $
+        killThread thread >> readMVar done >> pure ()
+
 removeIfPresent :: FilePath -> IO ()
 removeIfPresent path = do
     _ <- try (removeFile path) :: IO (Either IOException ())
@@ -737,6 +939,48 @@ proofCertificateNamespace = do
         (Error e, _) -> pure (Just e)
         (_, Error e) -> pure (Just e)
 
+validatorCertificateRejections :: IO TestResult
+validatorCertificateRejections = do
+    prepared <- MirHousekeeping.prepareValidator
+    executable <- MirHousekeeping.cachedUncheckedValidator
+    let falseSource = Compile.lowerSource True "fn falseCertificate() -> Int [{ }] [{ affirm 0 = 1; }] { return 0; }; return 0;"
+    case (prepared, executable, MirHousekeeping.nativeStorage, falseSource) of
+        (Ok (unchecked, raw, _), Ok exe, Ok (_, library), Ok falseProgram) ->
+            case (ValidatorNative.prepareTexts True library, ValidatorNative.prepareTexts False raw, Map.lookup "falseCertificate" (progFunctions falseProgram)) of
+                (Ok libraryChecks, Ok ownChecks, Just falseFunction) -> do
+                    let failed name = raw{progFunctions = Map.adjust (\fn -> fn{fnSpec = (fnSpec fn){specEnsures = specEnsures (fnSpec falseFunction)}}) name (progFunctions raw)}
+                        prepare name = case ValidatorNative.prepareTexts False (failed name) of
+                            Error e -> Error e
+                            Ok checks -> case lookup name checks of
+                                Nothing -> Error ("missing certificate function " ++ name)
+                                Just wire -> Ok (name, wire, map snd checks, "1")
+                        malformed = "0\ni 0\nl 0\n"
+                        wireChecks = malformed : map snd (drop 1 ownChecks)
+                        variants = [prepare "noTemplates", prepare "driverPrintVerdict", Ok ("wire-context", malformed, wireChecks, "3")]
+                        baseKey = ValidatorNative.certificateKey unchecked (map snd libraryChecks) (map snd ownChecks)
+                    withCacheHome $ \home -> do
+                        results <- forM variants $ \variant -> case variant of
+                            Error e -> pure (Just e)
+                            Ok (name, wire, checks, status) -> do
+                                let key = ValidatorNative.certificateKey unchecked (map snd libraryChecks) checks
+                                    rejected = "rejected certificate " ++ name
+                                result <- cachedProgram "validator" key "invalid validator certificate control" $ \output -> do
+                                    (exit, out, errors) <- runCommandWithInputFull "/bin/sh" ["-c", "ulimit -s unlimited 2>/dev/null || ulimit -s 65532 2>/dev/null; exec \"$0\"", exe] ("1\n" ++ wire)
+                                    case (exit, words (takeWhile (/= '\n') out)) of
+                                        (ExitSuccess, first : _) | first == status -> pure (Error rejected)
+                                        (ExitSuccess, "0" : _) -> writeFile output "incorrectly checked" >> pure (Ok ())
+                                        _ -> pure (Error ("certificate control failed: " ++ show exit ++ take 200 out ++ take 200 errors))
+                                published <- doesFileExist (home </> "tersus" </> ("validator-" ++ key))
+                                pure $ firstFailure [testAssertTrue (key /= baseKey), testAssertEq result (Error rejected), testAssertEq published False]
+                        pure (firstFailure results)
+                (Error e, _, _) -> pure (Just e)
+                (_, Error e, _) -> pure (Just e)
+                _ -> pure (Just "missing false certificate control")
+        (Error e, _, _, _) -> pure (Just e)
+        (_, Error e, _, _) -> pure (Just e)
+        (_, _, Error e, _) -> pure (Just e)
+        (_, _, _, Error e) -> pure (Just e)
+
 nativeProcessCancellation :: IO TestResult
 nativeProcessCancellation = processCancellation True
 
@@ -970,8 +1214,11 @@ contentRestoreProbe directory = do
 
 cacheProbe :: IO TestResult
 cacheProbe = do
+    singleSource <- lookupEnv "TERSUS_SINGLE_SOURCE_PROBE"
     binary <- lookupEnv "TERSUS_SHARED_BINARY_PROBE"
-    maybe ordinaryCacheProbe binaryProbe binary
+    case singleSource of
+        Just mode -> singleSourceProbe mode
+        Nothing -> maybe ordinaryCacheProbe binaryProbe binary
 
 ordinaryCacheProbe :: IO TestResult
 ordinaryCacheProbe = do
@@ -1426,12 +1673,12 @@ touchedExecutable = do
         first <- readMarker marker
         entries <- entryFiles home
         case (code1, first, entries) of
-            (ExitSuccess, Right original, [entry]) -> do
-                before <- getModificationTime entry
+            (ExitSuccess, Right original, [firstEntry, secondEntry]) -> do
+                before <- mapM getModificationTime [firstEntry, secondEntry]
                 setModificationTime copied (read "2000-01-01 00:00:00 UTC")
                 (code2, _, err2) <- runChild
                 second <- readMarker marker
-                after <- getModificationTime entry
+                after <- mapM getModificationTime [firstEntry, secondEntry]
                 afterEntries <- entryFiles home
                 pure $ firstFailure
                     [ testAssertEq code2 ExitSuccess <? err2
@@ -1452,7 +1699,9 @@ staleBuildEntry = do
         original <- readMarker marker
         entries <- entryFiles home
         case (firstCode, original, entries) of
-            (Just ExitSuccess, Right expected, [entry]) -> do
+            (Just ExitSuccess, Right expected, [_, _]) -> do
+                Just compiledFile <- sharedProgramCacheFile "compile" probeSource
+                let entry = home </> "tersus" </> "test-programs" </> takeFileName compiledFile
                 Right bytes <- readBinaryMarker entry
                 let stale = case decodeProgram expected of
                         Ok program -> ProgramBinary.encodeEntry (replicate 64 '0') program
@@ -1620,11 +1869,11 @@ independentProcesses = do
         first <- try (readFile marker >>= \t -> length t `seq` pure t) :: IO (Either IOError String)
         entries <- entryFiles home
         case (code1, first, entries) of
-            (ExitSuccess, Right text1, [entry]) -> do
-                before <- getModificationTime entry
+            (ExitSuccess, Right text1, [firstEntry, secondEntry]) -> do
+                before <- mapM getModificationTime [firstEntry, secondEntry]
                 (code2, _, err2) <- runChild
                 second <- try (readFile marker >>= \t -> length t `seq` pure t) :: IO (Either IOError String)
-                after <- getModificationTime entry
+                after <- mapM getModificationTime [firstEntry, secondEntry]
                 pure $ case (code2, second) of
                     (ExitSuccess, Right text2)
                         | text1 /= text2 -> Just "the second process wrote a different program"
@@ -1643,7 +1892,7 @@ concurrentProcesses = do
         markers <- mapM (readMarker . \i -> home </> ("marker" ++ show i)) [1 .. 4 :: Int]
         entries <- entryFiles home
         pure $ case (codes, markers, entries) of
-            ([Just ExitSuccess, Just ExitSuccess, Just ExitSuccess, Just ExitSuccess], [Right a, Right b, Right c, Right d], [_]) ->
+            ([Just ExitSuccess, Just ExitSuccess, Just ExitSuccess, Just ExitSuccess], [Right a, Right b, Right c, Right d], [_, _]) ->
                 if a == b && b == c && c == d
                     then case decodeProgram a of
                         Ok _ -> Nothing
@@ -1674,7 +1923,7 @@ killedOwnerReleases = do
                 entries <- entryFiles home
                 marker <- readMarker (home </> "waiter-marker")
                 pure $ case (code, entries, marker) of
-                    (Just ExitSuccess, [_], Right _) -> Nothing
+                    (Just ExitSuccess, [_, _], Right _) -> Nothing
                     _ -> Just ("the waiter did not finish after the owner was killed: " ++ show code ++ " entries " ++ show entries))
         `finally` removeDirectoryRecursive home
 
@@ -1731,14 +1980,17 @@ probeEnv home marker extra = do
     pure (("XDG_CACHE_HOME", home) : ("TERSUS_SHARED_CACHE_PROBE", marker) : extra ++ [(k, v) | (k, v) <- env0, k /= "XDG_CACHE_HOME", k /= "TERSUS_SHARED_CACHE_PROBE", k `notElem` map fst extra])
 
 spawnProbe :: FilePath -> [(String, String)] -> IO ProcessHandle
-spawnProbe home extra = do
+spawnProbe = spawnProbeInGroup False
+
+spawnProbeInGroup :: Bool -> FilePath -> [(String, String)] -> IO ProcessHandle
+spawnProbeInGroup grouped home extra = do
     self <- getExecutablePath
     let marker = case lookup "TERSUS_SHARED_CACHE_PROBE" extra of
             Just m -> m
             Nothing -> home </> "marker"
     env <- probeEnv home marker extra
     withFile "/dev/null" WriteMode $ \sink -> do
-        (_, _, _, handle) <- spawnShared (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just env, std_out = UseHandle sink, std_err = UseHandle sink}
+        (_, _, _, handle) <- spawnShared (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){create_group = grouped, env = Just env, std_out = UseHandle sink, std_err = UseHandle sink}
         pure handle
 
 waitChild :: Int -> ProcessHandle -> IO (Maybe ExitCode)

@@ -14,7 +14,7 @@ import qualified Mir as M
 import qualified Data.Map as Map
 import qualified Compile
 import qualified TersusParser
-import MirHousekeeping (cachedEmitter)
+import MirHousekeeping (cachedEmitter, validationEntry)
 import ParsedFile (Decls, ParsedFile, emptyDecls, fileBody, locating)
 import qualified FileParserProtocol as File
 import PreludeSource (toolPackageFiles)
@@ -113,20 +113,25 @@ corpusParity batch = do
     paths <- corpusPaths
     allSources <- forM paths $ \path -> do source <- readFile path; pure (path, source)
     let resolver = Modules.resolverFromFiles (allSources ++ toolPackageFiles)
-        emitterFiles = filter ((`elem` emitterCorpusFiles) . fst) allSources
-        units = emitterFiles : [[sample] | sample <- allSources, fst sample `notElem` emitterCorpusFiles]
+        fixtures = [(emitterCorpusEntry, emitterCorpusFiles), (validationEntry, ["lib/validation/validation.tersus", validationEntry])]
+        fixturePaths = concatMap snd fixtures
+        units = [filter ((`elem` members) . fst) allSources | (_, members) <- fixtures]
+            ++ [[sample] | sample <- allSources, fst sample `notElem` fixturePaths]
         selected = map fst (concat (batchItems 4 batch units))
         sources = filter ((`elem` selected) . fst) allSources
-    emitter <- if any ((`elem` emitterCorpusFiles) . fst) sources
-        then comparePreparedPackage resolver emitterCorpusEntry
-        else pure ([], Nothing)
+    reports <- forM fixtures $ \(entry, members) -> do
+        report <- if any ((`elem` members) . fst) sources
+            then comparePreparedPackage resolver entry
+            else pure ([], Nothing)
+        pure [(path, report) | path <- members]
+    let prepared = Map.fromList (concat reports)
     results <- forM sources $ \(path, source) -> do
         putStrLn ("Native corpus file: " ++ path)
         result <- case Modules.discoverEntry resolver path of
             Modules.InPackage _ _ | takeFileName path /= "package.tersus" ->
-                if path `elem` emitterCorpusFiles
-                    then pure (observedSource source emitter)
-                    else observedSource source <$> comparePreparedPackage resolver path
+                case Map.lookup path prepared of
+                    Just report -> pure (observedSource source report)
+                    Nothing -> observedSource source <$> comparePreparedPackage resolver path
             _ -> do
                 ast <- compareSource tersusData source
                 wire <- compareFileRecords source

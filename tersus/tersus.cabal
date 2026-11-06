@@ -43,8 +43,9 @@ extra-source-files:
     examples/parser/parser.tersus
     examples/mir/mir_verify/mir_verify.tersus
     examples/mir/mir_erase/mir_erase.tersus
-    lib/validation.tersus
-    lib/validation_driver.tersus
+    lib/validation/package.tersus
+    lib/validation/validation.tersus
+    lib/validation/driver.tersus
     lib/stdlib.tersus
     lib/box.tersus
     lib/map.tersus

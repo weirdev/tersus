@@ -15,7 +15,7 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
+import Types (Arg (..), BuiltinFunct (Field), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -211,11 +211,19 @@ redirectProofCalls program caller
         declared<-traverse(\local->localType<$>Map.lookup local(fnLocals fn))(fnParams fn)
         let found=concat(zipWith match declared actual)
         types<-traverse(\parameter->case nub[value|(name,value)<-found,name==parameter] of [value]|not(mentionsParameter value)->Just value;_->Nothing)(fnTypeParams fn)
-        if and(zipWith (\expected value->substitute [] (zip(fnTypeParams fn)types) expected==value) declared actual) then Just(fnName fn,types,[]) else Nothing
+        if and(zipWith (\expected value->unlent(substitute [] (zip(fnTypeParams fn)types) expected)==unlent value) declared actual) then Just(fnName fn,types,[]) else Nothing
     proofType env _ (S.ATerm name)=Map.lookup name env >>= operandType
     proofType _ bound (S.BVar name)|name`elem`bound=Just TInt
     proofType _ _ (S.CTerm(S.VInt _))=Just TInt
     proofType _ _ (S.CTerm(S.VBool _))=Just TBool
+    proofType env bound (S.FApp (S.CTerm (S.VFunct _ _ _ (S.BuiltinFunct (Field _ field)) _)) [object])=do
+        owner<-proofType env bound object
+        case unlent owner of
+            TNamed name args | Just (params,fields)<-Map.lookup name(progGenerics program) -> do
+                declared<-lookup field fields
+                Just(substitute [(param,size)|(param,ArgSize size)<-zip params args] [(param,ty)|(param,ArgType ty)<-zip params args] declared)
+            TNamed name [] | Just (StructDecl fields)<-Map.lookup name(progTypes program) -> lookup field fields
+            _ -> Nothing
     proofType env bound (S.FApp function args)=do
         name<-target env function
         fn<-Map.lookup name(progFunctions program)
@@ -228,6 +236,9 @@ redirectProofCalls program caller
             (_,types,sizes)<-proofKey env bound fn args
             fnReturns(instantiate fn types sizes)
     proofType _ _ _=Nothing
+    unlent (TRef ty)=ty
+    unlent (TMutRef ty)=ty
+    unlent ty=ty
     operandType (Copy local)=localType<$>Map.lookup local(fnLocals caller)
     operandType (Move local)=localType<$>Map.lookup local(fnLocals caller)
     operandType (Const(CInt _))=Just TInt

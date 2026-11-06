@@ -89,7 +89,7 @@ extractInterfaceWith inModule isLib modu original elaborated state
         Ok
             ModuleInterface
                 { ifModule = modu
-                , ifTypes = Map.unions [Map.fromList [(name, [name]) | StructDef name _ _ _ <- elaborated], Map.fromList [(name, map fst variants) | EnumDef name variants <- elaborated], if isLib then Map.fromList [(owner, [owner]) | (_, (owner, _)) <- genericCtors] else Map.empty]
+                , ifTypes = Map.unions [Map.fromList [(name, [name]) | StructDef name _ _ _ <- elaborated], Map.fromList [(name, map fst variants) | EnumDef name variants <- elaborated]]
                 , ifCtors =
                     Map.union
                         (Map.fromList ([(name, (name, fields)) | StructDef name params fields _ <- elaborated, null params] ++ [(variant, (name, fields)) | EnumDef name variants <- elaborated, (variant, fields) <- variants]))

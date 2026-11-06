@@ -19,8 +19,7 @@ module PreludeSource
     , toolPackageFiles
     , stdlibSource
     , compilerSourceHash
-    , validationSource
-    , validationDriverSource
+    , validationPackageFiles
     , seedSha256
     , parserSeedSha256
     ) where
@@ -176,25 +175,12 @@ mirPackageFiles = dataPackageFiles ++
         lift files
      )
 
--- The text of lib/validation.tersus: the validator written in Tersus, which is
--- what validates every program (see SelfHostedMir.validateByTersus)
-validationSource :: String
-validationSource =
+validationPackageFiles :: [(FilePath, String)]
+validationPackageFiles =
     $( do
-        addDependentFile "lib/validation.tersus"
-        contents <- runIO (readFile "lib/validation.tersus")
-        lift contents
-     )
-
--- The text of lib/validation_driver.tersus: the main program of the
--- validator compiled to native code, put after validation.tersus for that
--- build only (see ValidatorNative)
-validationDriverSource :: String
-validationDriverSource =
-    $( do
-        addDependentFile "lib/validation_driver.tersus"
-        contents <- runIO (readFile "lib/validation_driver.tersus")
-        lift contents
+        let paths = ["lib/validation/package.tersus", "lib/validation/validation.tersus", "lib/validation/driver.tersus"]
+        files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
+        lift files
      )
 
 -- The SHA-256 pinned in bootstrap/emitter.sha256: the seed IR itself is a GitHub release asset (see Bootstrap), so only this digest is kept in the repository

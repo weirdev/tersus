@@ -14,7 +14,7 @@ import qualified ParsedFile as Parse
 import qualified ParserSeed
 import Syntax
 import Types
-import TypeCheck (elaborateWith, Elaborated(..), emptyImportEnv)
+import TypeCheck (elaborateWith, Elaborated(..), ImportEnv(..), emptyImportEnv)
 import TestHarness
 import Utils
 
@@ -23,7 +23,10 @@ compileUnit name dependencies declarations source =
     case ParserSeed.parseFileWith declarations source of
         Left err -> Error (show err)
         Right (Parse.ParsedFile _ original, nextDecls) ->
-            let imported = mergeInterfacesImportEnv dependencies
+            -- (a generic constructor owner is a compiler-only view, given to library modules as LibPackage does)
+            let merged = mergeInterfacesImportEnv dependencies
+                owners = Map.fromList [(owner, [ctor]) | iface <- dependencies, (ctor, (owner, _)) <- Map.toList (ifCtors iface), ctor == owner]
+                imported = merged{ieTypes = Map.union (ieTypes merged) owners}
              in elaborateWith (predeclareOwnEnv imported) original `bindResult` \(typed@(Elaborated statements _), state) ->
                 extractLibInterface (ModuleId "fixturelib" (Just name)) original statements state `bindResult` \iface ->
                     lowerModuleWith imported dependencies typed `bindResult` \program -> Ok (iface, program, nextDecls)
@@ -39,7 +42,7 @@ testLibInterfaceProviders :: Test
 testLibInterfaceProviders = TestList "testLibInterfaceProviders"
     [ testCase "symbolic generic constructor owners have consistent type keys" $ case compileUnit "types" [] Parse.emptyDecls (genericType ++ "struct Sized<n> { cells: Array<Int, n> };") of
         Error err -> Just err
-        Ok (iface, _, _) -> testAssertTrue (not (Map.null (ifCtors iface)) && all (\(_, (owner, _)) -> Map.lookup owner (ifTypes iface) == Just [owner]) (Map.toList (ifCtors iface)))
+        Ok (iface, _, _) -> testAssertTrue (not (Map.null (ifCtors iface)) && all (\(ctor, (owner, _)) -> ctor == owner && Map.notMember owner (ifTypes iface)) (Map.toList (ifCtors iface)))
     , testCase "unused symbolic frontend seeds are not runtime declarations" unusedRuntimeSeeds
     , testCase "used symbolic and concrete generic instances are still completed" usedRuntimeInstances
     , testCase "provider constructs imported generic Self without redeclaration" $ case providerFixture of Error err -> Just err; Ok _ -> Nothing

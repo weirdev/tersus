@@ -83,8 +83,8 @@ import System.Process (proc)
 import CacheLock (openBinaryTempFileCloexec, openLockFd)
 import Mir (Program)
 import Compile (lowerSource)
-import MirHousekeeping (eraseGhosts, toolProgram)
-import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationDriverSource, validationSource)
+import MirHousekeeping (eraseGhosts, toolProgram, validationEntry)
+import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationPackageFiles)
 import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
@@ -93,7 +93,7 @@ import Native (cacheDirectory, readProcessOutput)
 import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
-import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, compileSource, ownedSource, parseSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
@@ -333,7 +333,9 @@ decodeProgram text = case stripPrefix programCodecHeader text of
 -- validate the same big programs again. Only successful compilations are remembered,
 -- so a transient tool failure can be retried in the same process.
 compileOnce :: String -> IO (Result Program String)
-compileOnce source = sharedProgram "compile" source (pure (compileSource source))
+compileOnce source = sharedProgram "compile" source $ do
+    validated <- validatedOnce source
+    pure (validated `bindResult` eraseGhosts)
 
 -- A program of the compiler itself (the emitter, the MIR checker and eraser, the validator)
 -- as the host builds it, lowered with its ghosts erased and not validated: the validator is
@@ -343,7 +345,9 @@ bootstrapOnce :: String -> IO (Result Program String)
 bootstrapOnce source = sharedProgram "bootstrap" source (pure (lowerSource True source `bindResult` eraseGhosts))
 
 ownedOnce :: String -> IO (Result Program String)
-ownedOnce source = sharedProgram "owned" source (pure (ownedSource source))
+ownedOnce source = sharedProgram "owned" source $ do
+    compiled <- compileOnce source
+    pure (compiled `bindResult` ownedOfProgram)
 
 validatedOnce :: String -> IO (Result Program String)
 validatedOnce source = sharedProgram "validated" source (pure (validatedSource source))
@@ -381,12 +385,14 @@ packageCacheInput path files = show (normalizePath path,
 
 matchesEmbeddedPackage :: FilePath -> Modules.LoadedPackage -> Bool
 matchesEmbeddedPackage path actual
-    | normalizePath path `notElem` map fst toolPackageFiles = False
+    | normalizePath path `notElem` map fst files = False
     -- The cached tool is compiled by the bootstrap/oracle loader. Compare
     -- against that exact input, not a second production-parser reading.
-    | otherwise = case Modules.loadFromEntry (resolverFromFiles toolPackageFiles) (normalizePath path) of
+    | otherwise = case Modules.loadFromEntry (resolverFromFiles files) (normalizePath path) of
         Right (PackageResult embedded) -> show actual == show embedded
         _ -> False
+  where
+    files = if normalizePath path == validationEntry then validationPackageFiles else toolPackageFiles
 
 cachedFromPackage :: String -> FilePath -> [(FilePath, String)] -> IO (Result Program String)
 cachedFromPackage stage path files = do
@@ -399,11 +405,14 @@ cachedFromPackage stage path files = do
                 | matchesEmbeddedPackage path pkg -> toolProgram (normalizePath path)
                 | otherwise -> compileModulesValidated pkg
             Right _ -> Error (path ++ " is not in a package")
-    packageStage stage input validated
+    packageStage (if stage == "program" && normalizePath path == validationEntry then "validator-reference" else stage) input validated
 
 packageStage :: String -> String -> Result Program String -> IO (Result Program String)
 packageStage stage input validated = sharedProgram ("package-" ++ stage) input $ case stage of
     "validated" -> pure validated
+    "validator-reference" -> do
+        before <- packageStage "validated" input validated
+        pure (before `bindResult` eraseGhosts)
     "program" -> do
         before <- packageStage "validated" input validated
         pure (before `bindResult` erasedModuleProgram)
@@ -637,13 +646,11 @@ compilerIdentity =
         , concreteBuildIdentity
         , ProgramBinary.codecVersion
         , stdlibSource
-        , validationSource
-        , validationDriverSource
         , seedSha256
         , parserSeedSha256
         ]
             ++ concatMap (\(path, contents) -> [path, contents]) libPackageFiles
-            ++ concatMap (\(path, contents) -> [path, contents]) toolPackageFiles
+            ++ concatMap (\(path, contents) -> [path, contents]) (toolPackageFiles ++ validationPackageFiles)
 
 harnessSourceHash :: String
 harnessSourceHash =

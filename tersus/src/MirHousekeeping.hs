@@ -19,6 +19,7 @@ module MirHousekeeping
     , parserIr
     , emitterKey
     , parserKey
+    , validationEntry
     , prepareValidator
     , ownedContentKey
     , cachedPreparedInput
@@ -56,7 +57,7 @@ import Seed (cachedSeed, cachedParserSeed, seedHash, parserSeedHash)
 import Compile (lowerSource)
 import Modules (ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
 import PackageCompile (compileModulesLinked)
-import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, boxSource, listsSource, mirPackageFiles, parserPackageFiles, toolPackageFiles, validationDriverSource, validationSource)
+import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, boxSource, listsSource, mirPackageFiles, parserPackageFiles, toolPackageFiles, validationPackageFiles)
 import Types (Type (..))
 import Utils
 
@@ -319,7 +320,7 @@ cachedUncheckedValidator = do
 
 cachedUncheckedValidatorExe :: IO (Result FilePath String)
 cachedUncheckedValidatorExe = do
-    key <- derivedKey "validator" (lowerSource True (validationSource ++ "\n" ++ validationDriverSource)) ["-O2"]
+    key <- derivedKey "validator" (toolProgram validationEntry) ["-O2"]
     case key of
         Error e -> pure (Error e)
         Ok identity -> do
@@ -337,7 +338,7 @@ cachedUncheckedValidatorExe = do
 {-# NOINLINE preparationSnapshot #-}
 preparationSnapshot :: String
 preparationSnapshot = fingerprint [show (compilerSourceHash, seedHash, parserSeedHash,
-    toolPackageFiles, libPackageFiles, stdlibSource, validationSource, validationDriverSource, runtimeSource)]
+    toolPackageFiles, libPackageFiles, stdlibSource, validationPackageFiles, runtimeSource)]
 
 preparedInputPath :: FilePath -> FilePath -> [String] -> FilePath
 preparedInputPath dir entry flags = dir </> ("prepared-" ++ fingerprint [show (preparationSnapshot, entry, flags)])
@@ -516,12 +517,15 @@ parserKey = do
         Error e -> pure (Error e)
         Ok () -> derivedKey "examples/parser/parser.tersus" (toolProgram "examples/parser/parser.tersus") []
 
+validationEntry :: FilePath
+validationEntry = "lib/validation/driver.tersus"
+
 prepareValidator :: IO (Result (String, Program, String) String)
 prepareValidator = do
     ready <- prepareBootstrap
     case ready of
         Error e -> pure (Error e)
-        Ok () -> preparedDerived "validator" (lowerSource True (validationSource ++ "\n" ++ validationDriverSource)) ["-O2"]
+        Ok () -> preparedDerived "validator" (toolProgram validationEntry) ["-O2"]
 
 -- Stage 1 (the emitter as it is now) in the cache, made from stage 0 in the cache as Bootstrap makes it, and under the
 -- same name, so the two hosts keep one emitter between them: the program it is made from is this module's own way of
@@ -609,10 +613,12 @@ toolProgram entry = unsafePerformIO $ do
             Ok program -> pure (Just program, Ok program)
 
 compileToolProgram :: FilePath -> Result Program String
-compileToolProgram entry = case loadFromEntry (resolverFromFiles toolPackageFiles) entry of
+compileToolProgram entry = case loadFromEntry (resolverFromFiles files) entry of
     Left e -> Error e
     Right (PackageResult pkg) -> compileModulesLinked pkg
     Right (StandaloneResult _ _) -> Error ("internal: " ++ entry ++ " is not in an embedded tool package")
+  where
+    files = if entry == validationEntry then validationPackageFiles else toolPackageFiles
 
 -- The program that native code is made of, for a program of the mir package
 -- the host compiles itself (the emitter, the checker, the eraser): with the
