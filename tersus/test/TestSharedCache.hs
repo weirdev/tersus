@@ -9,7 +9,7 @@ import TestProgramBinaryChecks (binaryChecks, richProgram)
 import TestProgramBuildIdentity (concreteBuildIdentity)
 import Control.DeepSeq (force)
 import qualified Control.Exception as Exception
-import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, tryPutMVar)
+import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, tryPutMVar, yield)
 import Control.Concurrent.MVar (modifyMVar, readMVar, tryReadMVar)
 import Control.Exception (IOException, MaskingState (..), SomeException, bracket, bracketOnError, displayException, finally, getMaskingState, mask, mask_, throwIO, try)
 import Control.Monad (forever, when)
@@ -37,7 +37,7 @@ import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv,
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (Handle, IOMode (ReadMode, WriteMode), SeekMode (AbsoluteSeek), hClose, hSetBinaryMode, stdin, withFile)
-import CacheLock (copyFileCloexec, openTempFileCloexec, withExecutableTempFile, withExecutableWrite)
+import CacheLock (copyFileCloexec, openTempFileCloexec, withExecutableTempFile, withExecutableWrite, withSpawnShared)
 import System.Posix.Files (setFileMode)
 import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Process (exitImmediately, getProcessID)
@@ -45,7 +45,7 @@ import System.Posix.Types (ProcessID)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (NoStream, UseHandle), getPid, getProcessExitCode, proc, waitForProcess)
 import System.Timeout (timeout)
 
-import GHC.Conc (getNumCapabilities)
+import GHC.Conc (getNumCapabilities, setNumCapabilities)
 import Modules (LoadResult (..), LoadedPackage (..), LoadedModule (..), LoadedFile (..), ModuleId (..), loadFromFilesystem, normalizePath, snapshotFromFilesystem)
 import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
@@ -75,6 +75,7 @@ testSharedCache =
         "testSharedCache"
         (codecCases
         ++ [ TestCase "atomic close-on-exec writes keep published tools executable across spawns" atomicExecutableWrites
+           , TestCase "cancelled shared readers release executable writers and restore capabilities" cancelledSharedReaders
            , TestCase "captured process input closes on errors and preserves broken-pipe behavior" capturedInputErrors ]
         ++ singleSourceCases
         ++ map requireParser
@@ -627,6 +628,41 @@ atomicExecutableWrites = withNativeHome $ \home -> do
             ordered <- spawnsWaitForExecutableWrites tool
             abandoned <- abandonedRoundCleansUp home bulky
             pure (firstFailure [namedResult "the padded tool itself" padded, held, copied, ordered, abandoned])
+
+cancelledSharedReaders :: IO TestResult
+cancelledSharedReaders = do
+    original <- getNumCapabilities
+    result <- bracket (pure original) setNumCapabilities $ \capabilities -> do
+        setNumCapabilities (max 2 capabilities)
+        rounds (1 :: Int)
+    restored <- getNumCapabilities
+    pure (result <> testAssertEq restored original)
+  where
+    rounds index
+        | index > 128 = pure Nothing
+        | otherwise = do
+            ready <- withReaders (32 :: Int) $ \workers ->
+                timeout 2000000 (mapM_ (takeMVar . fst . snd) workers)
+            released <- timeout 2000000 (withExecutableWrite (pure ()))
+            case (ready, released) of
+                (Just (), Just ()) -> rounds (index + 1)
+                _ -> pure (Just ("cancelled reader round " ++ show index ++ " retained lock ownership"))
+    withReaders 0 use = use []
+    withReaders count use = bracket start stop $ \worker ->
+        withReaders (count - 1) (\workers -> use (worker : workers))
+    start = do
+        entered <- newEmptyMVar
+        done <- newEmptyMVar
+        thread <- forkIOWithUnmask $ \unmask -> do
+            result <- try (unmask (do
+                withSpawnShared (putMVar entered ())
+                forever (withSpawnShared yield)))
+            putMVar done (result :: Either SomeException ())
+        pure (thread, (entered, done))
+    -- These unmasked workers only yield or take the short spawn lock; none waits
+    -- for a child or runs I/O that could make cancellation and joining unbounded.
+    stop (thread, (_, done)) = Exception.uninterruptibleMask_ $
+        killThread thread >> readMVar done >> pure ()
 
 removeIfPresent :: FilePath -> IO ()
 removeIfPresent path = do
