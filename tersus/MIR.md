@@ -1,6 +1,6 @@
 # Tersus MIR (design)
 
-Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, the checker written in Tersus run by `MirHousekeeping`, the validator written in Tersus `lib/validation.tersus` with its bridge `SelfHostedMir`, `MirEval.hs`; `tersus eval` validates and runs the MIR, `tersus run` validates, compiles and runs the native code, and `tersus mir` prints it) and the lowering to LLVM IR is written in Tersus (`examples/mir/emit/emit.tersus`, `tersus llvm` and `tersus build`; see Native code). The later steps are listed under Phases so the data model is shaped for them.
+Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, the checker written in Tersus run by `MirHousekeeping`, the validator written in Tersus `lib/validation/validation.tersus` with its bridge `SelfHostedMir`, `MirEval.hs`; `tersus eval` validates and runs the MIR, `tersus run` validates, compiles and runs the native code, and `tersus mir` prints it) and the lowering to LLVM IR is written in Tersus (`examples/mir/emit/emit.tersus`, `tersus llvm` and `tersus build`; see Native code). The later steps are listed under Phases so the data model is shaped for them.
 
 ```
 step 1:   source -> AST -> validation -> MIR -> execution of the MIR
@@ -184,7 +184,7 @@ both concrete instances and generic templates before linking. This also
 normalizes the imported declaration seeds carried by permission-free bootstrap
 tools, whose runtime erasure is deliberately skipped; it does not change the
 checked helper bodies or their pre-erasure layout proofs. The stdlib builtin-contract extraction and
-`lib/validation.tersus` are not part of this migration.
+`lib/validation/validation.tersus` are not part of this migration.
 
 ## Executing it
 
@@ -341,7 +341,7 @@ A type is `int`, `byte`, `bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T
 
 ## Validation
 
-The validator is written in Tersus (`lib/validation.tersus`, compiled to native code by `ValidatorNative`), and `SelfHostedMir` translates the MIR into its data: each function is a list of `ExecutionBlock`s whose steps run over numbered terms, and `validateExecution` walks them with one state per path (the term each local holds and the facts known). Values never change, so an assignment gives the local a new term and a fact stays true for the rest of the path.
+The validator is written in Tersus (`lib/validation/validation.tersus`, compiled to native code by `ValidatorNative`), and `SelfHostedMir` translates the MIR into its data: each function is a list of `ExecutionBlock`s whose steps run over numbered terms, and `validateExecution` walks them with one state per path (the term each local holds and the facts known). Values never change, so an assignment gives the local a new term and a fact stays true for the rest of the path.
 
 - **Reuse.** A verdict on a function is kept for the rest of the process under the data the bridge makes of it (its blocks, its contracts and the contracts of what it calls, the invariants of the types it makes and the rules it uses), so a verdict is reused only where it would be the same; `testValidationCache` checks hits and cached/uncached parity. See [README.md, Interpreter flow](README.md#interpreter-flow).
 - **Container proofs.** Validation keeps the logical List/Box model: list facts come from operation contracts, and a Box has the value of its payload (the bridge leaves the library's physical `List` and Box structs out of what it reads, `SelfHostedMir.sourceContainerView`). The native library itself, `lib/lists.tersus` and `lib/box.tersus`, is validated with its physical layouts instead (`SelfHostedMir.encodeLibrary`): a List and a Box are the structs they are, with their invariants, an operation of the logical list or Box is refused there, and its generic functions are checked as written, for any type. Native code of the validator is made with the library, so the validator is built first without validation and then validates the library before it is used (`ValidatorNative.validatorExecutable`). A Box's own `addr` and `blk` are field functions of their own in the logical view only, so a payload field of the same name says nothing of them.

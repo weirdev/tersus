@@ -14,7 +14,7 @@ import Data.Ord (comparing)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (librariesFor, reservedHelperName, reservedError)
+import Compile (librariesFor, reservedHelperName, reservedError, completeSpecEnvs)
 import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, extractLibInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv, withoutDeclaredNames)
 import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
@@ -240,7 +240,7 @@ lowerCompiledPackage pkg compiled =
                     allIfaces = compiledLibInterfaces modu ++ depIfaces
                  in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv allIfaces) allIfaces (compiledElaborated modu)))
         libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
-     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
+     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> mapResult completeSpecEnvs (linkPrograms (libUnits ++ units))
 
 assumptionsOfPackage :: CompiledPackage -> [String]
 assumptionsOfPackage compiled = concatMap perModule (compiledModules compiled)

@@ -68,11 +68,12 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   - `stdlib.tersus`: the standard library written in Tersus. Embedded by
     `PreludeSource` and parsed by `StdLibDefs`, which is where the builtins it
     declares get their contracts; it is not linked into user programs.
-  - `validation.tersus`: the validator written in Tersus, which is the
-    production validator: `SelfHostedMir` turns each function's MIR into the
-    data it reads, and `ValidatorNative` runs it compiled to native code (with
-    `validation_driver.tersus`, which reads that data from the standard
-    input). Embedded by `PreludeSource`.
+  - `validation/`: the validator package. Its `validation.tersus` core is
+    declarative; `driver.tersus` imports it and is the native entry. Reference
+    queries call the same linked program's named core functions without running
+    the driver entry. `PreludeSource.validationPackageFiles` embeds all three
+    files, including `package.tersus`. `ValidatorNative` requires the validator
+    to prove its own source and native List/Box storage before it is used.
 - `tersus/examples/`: example programs, all loaded and checked by
   `testExamples` (see Testing Guidelines), but for the compiler's own
   programs below, which `testHostValidation` checks. `examples/mir/emit/emit.tersus` is the LLVM
