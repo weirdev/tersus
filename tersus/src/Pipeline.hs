@@ -21,6 +21,7 @@ module Pipeline
     , ownedModuleProgram
     , assumptionsOfPackage
     , ownedSource
+    , ownedOfProgram
     , nativeProgram
     , validateStatements
     , runStatements

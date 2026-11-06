@@ -93,7 +93,7 @@ import Native (cacheDirectory, readProcessOutput)
 import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
-import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, compileSource, ownedSource, parseSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
@@ -333,7 +333,9 @@ decodeProgram text = case stripPrefix programCodecHeader text of
 -- validate the same big programs again. Only successful compilations are remembered,
 -- so a transient tool failure can be retried in the same process.
 compileOnce :: String -> IO (Result Program String)
-compileOnce source = sharedProgram "compile" source (pure (compileSource source))
+compileOnce source = sharedProgram "compile" source $ do
+    validated <- validatedOnce source
+    pure (validated `bindResult` eraseGhosts)
 
 -- A program of the compiler itself (the emitter, the MIR checker and eraser, the validator)
 -- as the host builds it, lowered with its ghosts erased and not validated: the validator is
@@ -343,7 +345,9 @@ bootstrapOnce :: String -> IO (Result Program String)
 bootstrapOnce source = sharedProgram "bootstrap" source (pure (lowerSource True source `bindResult` eraseGhosts))
 
 ownedOnce :: String -> IO (Result Program String)
-ownedOnce source = sharedProgram "owned" source (pure (ownedSource source))
+ownedOnce source = sharedProgram "owned" source $ do
+    compiled <- compileOnce source
+    pure (compiled `bindResult` ownedOfProgram)
 
 validatedOnce :: String -> IO (Result Program String)
 validatedOnce source = sharedProgram "validated" source (pure (validatedSource source))
