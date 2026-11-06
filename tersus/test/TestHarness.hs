@@ -405,11 +405,14 @@ cachedFromPackage stage path files = do
                 | matchesEmbeddedPackage path pkg -> toolProgram (normalizePath path)
                 | otherwise -> compileModulesValidated pkg
             Right _ -> Error (path ++ " is not in a package")
-    packageStage stage input validated
+    packageStage (if stage == "program" && normalizePath path == validationEntry then "validator-reference" else stage) input validated
 
 packageStage :: String -> String -> Result Program String -> IO (Result Program String)
 packageStage stage input validated = sharedProgram ("package-" ++ stage) input $ case stage of
     "validated" -> pure validated
+    "validator-reference" -> do
+        before <- packageStage "validated" input validated
+        pure (before `bindResult` eraseGhosts)
     "program" -> do
         before <- packageStage "validated" input validated
         pure (before `bindResult` erasedModuleProgram)
