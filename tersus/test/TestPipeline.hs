@@ -25,7 +25,7 @@ import PreludeSource (parserPackageFiles)
 import qualified Mir as M
 import MirEval
 import MirLower
-import MirHousekeeping (verifyProgram)
+import MirHousekeeping (verifyProgram, validationEntry)
 import Pipeline
 import SelfHostedMir (validateMirSubset, verdictProved)
 import TestParserFragments
@@ -580,8 +580,7 @@ testMirSelfHosted :: Test
 testMirSelfHosted = TestList "testMirSelfHosted"
     [ TestList name
         [ TestCase (show queryIndex) $ do
-            source <- readFile "lib/validation.tersus"
-            compiled <- bootstrapOnce source
+            compiled <- bootstrapFromFile validationEntry
             pure $ case compiled of
                 Error e -> Just ("Could not compile the Tersus validator: " ++ e)
                 Ok program -> snd (selfHostedQueryFamilies program !! familyIndex) !! queryIndex

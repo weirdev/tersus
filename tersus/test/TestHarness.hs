@@ -83,8 +83,8 @@ import System.Process (proc)
 import CacheLock (openBinaryTempFileCloexec, openLockFd)
 import Mir (Program)
 import Compile (lowerSource)
-import MirHousekeeping (eraseGhosts, toolProgram)
-import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationDriverSource, validationSource)
+import MirHousekeeping (eraseGhosts, toolProgram, validationEntry)
+import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationPackageFiles)
 import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
@@ -385,12 +385,14 @@ packageCacheInput path files = show (normalizePath path,
 
 matchesEmbeddedPackage :: FilePath -> Modules.LoadedPackage -> Bool
 matchesEmbeddedPackage path actual
-    | normalizePath path `notElem` map fst toolPackageFiles = False
+    | normalizePath path `notElem` map fst files = False
     -- The cached tool is compiled by the bootstrap/oracle loader. Compare
     -- against that exact input, not a second production-parser reading.
-    | otherwise = case Modules.loadFromEntry (resolverFromFiles toolPackageFiles) (normalizePath path) of
+    | otherwise = case Modules.loadFromEntry (resolverFromFiles files) (normalizePath path) of
         Right (PackageResult embedded) -> show actual == show embedded
         _ -> False
+  where
+    files = if normalizePath path == validationEntry then validationPackageFiles else toolPackageFiles
 
 cachedFromPackage :: String -> FilePath -> [(FilePath, String)] -> IO (Result Program String)
 cachedFromPackage stage path files = do
@@ -641,13 +643,11 @@ compilerIdentity =
         , concreteBuildIdentity
         , ProgramBinary.codecVersion
         , stdlibSource
-        , validationSource
-        , validationDriverSource
         , seedSha256
         , parserSeedSha256
         ]
             ++ concatMap (\(path, contents) -> [path, contents]) libPackageFiles
-            ++ concatMap (\(path, contents) -> [path, contents]) toolPackageFiles
+            ++ concatMap (\(path, contents) -> [path, contents]) (toolPackageFiles ++ validationPackageFiles)
 
 harnessSourceHash :: String
 harnessSourceHash =

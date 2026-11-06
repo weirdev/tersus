@@ -318,28 +318,23 @@ registerTopLevel stmts = do
         modifyS (\s -> s{lsPrereg = Map.insertWith (\new old -> old ++ new) var [name] (lsPrereg s), lsGlobals = if assigned then lsGlobals s else Map.insert var (name, functionType sizes types ptys rty) (lsGlobals s)})
     register _ = return ()
 
+lowerProgramStatement :: Statement -> L ()
+lowerProgramStatement stmt = do
+    open <- isOpen
+    if open then lowerStatement stmt else case stmt of
+        Assign var (Val (VFunct _ _ _ (NativeFunct _ _ _) _)) -> do
+            names <- Map.findWithDefault [] var . lsPrereg <$> getS
+            env <- visibleEnv
+            lowerStatement stmt
+            case names of
+                name : _ -> modifyB (\b -> b{bBlocks = Map.adjust (\(M.BasicBlock ss t) -> M.BasicBlock (ss ++ [M.Ghost env (M.GhostFunction name var True)]) t) (M.BlockId 0) (bBlocks b)})
+                [] -> return ()
+        _ -> skipStatement stmt
+
 program :: [Statement] -> L M.Program
 program stmts = do
     registerTopLevel stmts
-    lowerStatements stmts
-    -- the definitions past a return of the program are lowered too: a function defined there can be called
-    -- from the ones before it, so its body has to be in the program. Its GhostFunction goes in the entry
-    -- block, which is kept, where the validator will find it.
-    prereg <- lsPrereg <$> getS
-    let leftover = [stmt | stmt@(Assign var _) <- stmts, maybe False (not . null) (Map.lookup var prereg)]
-    unless (null leftover) $ do
-        env <- visibleEnv
-        mapM_
-            ( \stmt -> case stmt of
-                Assign var _ -> do
-                    names <- Map.findWithDefault [] var . lsPrereg <$> getS
-                    lowerStatement stmt
-                    case names of
-                        name : _ -> modifyB (\b -> b{bBlocks = Map.adjust (\(M.BasicBlock ss t) -> M.BasicBlock (ss ++ [M.Ghost env (M.GhostFunction name var True)]) t) (M.BlockId 0) (bBlocks b)})
-                        [] -> return ()
-                _ -> return ()
-            )
-            leftover
+    mapM_ lowerProgramStatement stmts
     open <- isOpen
     when open (terminate M.Return)
     b <- builder

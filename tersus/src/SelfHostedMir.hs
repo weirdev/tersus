@@ -14,9 +14,8 @@ import Pretty (renderVarProof)
 import MirEval (MirValue (..), runNamedFunction)
 import LibPackage (LibPackage (..), libPackage)
 import Compile (lowerSource)
-import MirHousekeeping (eraseGhosts, verifyProgram)
+import MirHousekeeping (eraseGhosts, verifyProgram, toolProgram, validationEntry)
 import MirMono (monomorphizeForValidation)
-import PreludeSource (validationSource)
 import StdLib (builtinFunct, eqVarProof, stdLibRuleCtx)
 import StdLibDefs (stdLibValCtx)
 import Syntax
@@ -3076,9 +3075,7 @@ verdictProved verdict = case verdict of
 -- TestPipeline checks that it accepts its own MIR). Every program that is
 -- validated is validated by this program and nothing else.
 checkerProgram :: Result M.Program String
-checkerProgram = case lowerSource True validationSource of
-    Error err -> Error ("Could not compile lib/validation.tersus: " ++ err)
-    Ok program -> eraseGhosts program
+checkerProgram = toolProgram validationEntry `bindResult` eraseGhosts
 
 -- Validate a program with the Tersus validator. A program the bridge does not
 -- model is refused, not waved through: there is no other validator to fall
