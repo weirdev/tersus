@@ -12,7 +12,7 @@ import qualified Control.Exception as Exception
 import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, tryPutMVar, yield)
 import Control.Concurrent.MVar (modifyMVar, readMVar, tryReadMVar)
 import Control.Exception (IOException, MaskingState (..), SomeException, bracket, bracketOnError, displayException, finally, getMaskingState, mask, mask_, throwIO, try)
-import Control.Monad (forever, when)
+import Control.Monad (forever, when, forM)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Maybe (isNothing)
 import Data.Char (isSpace, ord)
@@ -119,6 +119,7 @@ testSharedCache =
         , TestCase "content-key locators retain verified dependencies across cache homes" contentLocatorIntegrity
         , TestCase "prepared input aliases reuse verified bytes and repair corrupt or partial files" preparedAliasIntegrity
         , TestCase "proof-only changes invalidate checked certificates and verdict namespaces" proofCertificateNamespace
+        , TestCase "changed core, driver and wire certificates cannot publish a checked validator" validatorCertificateRejections
         , testCase "signal targets reject self, process groups and malformed PID markers" $
             firstFailure
                 [ testAssertTrue (all (not . validSignalTarget 20 10) [-1, 0, 1, 10, 20])
@@ -937,6 +938,48 @@ proofCertificateNamespace = do
             (_, _, _, Error e) -> pure (Just e)
         (Error e, _) -> pure (Just e)
         (_, Error e) -> pure (Just e)
+
+validatorCertificateRejections :: IO TestResult
+validatorCertificateRejections = do
+    prepared <- MirHousekeeping.prepareValidator
+    executable <- MirHousekeeping.cachedUncheckedValidator
+    let falseSource = Compile.lowerSource True "fn falseCertificate() -> Int [{ }] [{ affirm 0 = 1; }] { return 0; }; return 0;"
+    case (prepared, executable, MirHousekeeping.nativeStorage, falseSource) of
+        (Ok (unchecked, raw, _), Ok exe, Ok (_, library), Ok falseProgram) ->
+            case (ValidatorNative.prepareTexts True library, ValidatorNative.prepareTexts False raw, Map.lookup "falseCertificate" (progFunctions falseProgram)) of
+                (Ok libraryChecks, Ok ownChecks, Just falseFunction) -> do
+                    let failed name = raw{progFunctions = Map.adjust (\fn -> fn{fnSpec = (fnSpec fn){specEnsures = specEnsures (fnSpec falseFunction)}}) name (progFunctions raw)}
+                        prepare name = case ValidatorNative.prepareTexts False (failed name) of
+                            Error e -> Error e
+                            Ok checks -> case lookup name checks of
+                                Nothing -> Error ("missing certificate function " ++ name)
+                                Just wire -> Ok (name, wire, map snd checks, "1")
+                        malformed = "0\ni 0\nl 0\n"
+                        wireChecks = malformed : map snd (drop 1 ownChecks)
+                        variants = [prepare "noTemplates", prepare "driverPrintVerdict", Ok ("wire-context", malformed, wireChecks, "3")]
+                        baseKey = ValidatorNative.certificateKey unchecked (map snd libraryChecks) (map snd ownChecks)
+                    withCacheHome $ \home -> do
+                        results <- forM variants $ \variant -> case variant of
+                            Error e -> pure (Just e)
+                            Ok (name, wire, checks, status) -> do
+                                let key = ValidatorNative.certificateKey unchecked (map snd libraryChecks) checks
+                                    rejected = "rejected certificate " ++ name
+                                result <- cachedProgram "validator" key "invalid validator certificate control" $ \output -> do
+                                    (exit, out, errors) <- runCommandWithInputFull "/bin/sh" ["-c", "ulimit -s unlimited 2>/dev/null || ulimit -s 65532 2>/dev/null; exec \"$0\"", exe] ("1\n" ++ wire)
+                                    case (exit, words (takeWhile (/= '\n') out)) of
+                                        (ExitSuccess, first : _) | first == status -> pure (Error rejected)
+                                        (ExitSuccess, "0" : _) -> writeFile output "incorrectly checked" >> pure (Ok ())
+                                        _ -> pure (Error ("certificate control failed: " ++ show exit ++ take 200 out ++ take 200 errors))
+                                published <- doesFileExist (home </> "tersus" </> ("validator-" ++ key))
+                                pure $ firstFailure [testAssertTrue (key /= baseKey), testAssertEq result (Error rejected), testAssertEq published False]
+                        pure (firstFailure results)
+                (Error e, _, _) -> pure (Just e)
+                (_, Error e, _) -> pure (Just e)
+                _ -> pure (Just "missing false certificate control")
+        (Error e, _, _, _) -> pure (Just e)
+        (_, Error e, _, _) -> pure (Just e)
+        (_, _, Error e, _) -> pure (Just e)
+        (_, _, _, Error e) -> pure (Just e)
 
 nativeProcessCancellation :: IO TestResult
 nativeProcessCancellation = processCancellation True
