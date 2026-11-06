@@ -12,7 +12,7 @@ module CacheLock
 #include <fcntl.h>
 
 import Control.Concurrent.MVar (MVar, newMVar, putMVar, takeMVar)
-import Control.Exception (IOException, SomeException, bracket, bracketOnError, finally, mask, mask_, onException, throwIO, try)
+import Control.Exception (IOException, SomeException, bracket, bracketOnError, finally, mask, mask_, onException, throwIO, try, uninterruptibleMask_)
 import Data.Bits ((.&.))
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Word (Word8)
@@ -93,7 +93,9 @@ acquireShared = mask_ $ do
     either throwIO pure outcome
 
 releaseShared :: IO ()
-releaseShared = mask_ $ do
+-- A counted reader prevents acquisition from waiting on spawnResource while
+-- holding spawnReaders. This release is bounded, and must survive cancellation.
+releaseShared = uninterruptibleMask_ $ do
     held <- takeMVar spawnReaders
     (if held == 1 then putMVar spawnResource () else pure ())
         `onException` putMVar spawnReaders held
