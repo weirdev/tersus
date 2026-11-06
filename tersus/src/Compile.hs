@@ -1,7 +1,7 @@
 module Compile
     ( parseSource, SourceParts, parseSourceParts, parsedLibraries, probeDecls
     , lowerSourceParts, parseWithEquality, librariesFor, lowerSource
-    , lowerStatements, reservedName, reservedHelperName, reservedError
+    , lowerStatements, reservedName, reservedHelperName, reservedError, completeSpecEnvs
     ) where
 
 import qualified Data.Map as Map

@@ -1,5 +1,5 @@
 -- The bridge from MIR to the validator written in Tersus
--- (lib/validation.tersus): encode is a data-only translation, and anything it
+-- (lib/validation/validation.tersus): encode is a data-only translation, and anything it
 -- does not fully model is reported as an Unmodeled verdict, never accepted.
 module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode, encodeLibrary, obligationNote, sourceContainerView) where
 
@@ -644,7 +644,7 @@ lambdaInstances k b0 = foldl one ([], b0) (buildLambdas b0)
 -- A forall that holds is kept by the path (an AssumeForall step), with the
 -- values of the names it mentions copied where it is assumed (a later change
 -- to them does not change what it said), and the validator uses it at the
--- elements a check that fails reads (saturate, in lib/validation.tersus). Its
+-- elements a check that fails reads (saturate, in lib/validation/validation.tersus). Its
 -- terms are the template's nodes: the index, a copy or a literal, or a
 -- function of earlier nodes. A forall whose terms need more than that (a
 -- check of a divisor, a call that is not a function of its arguments) is not
@@ -3039,7 +3039,7 @@ sourceContainerView program = program
         , Map.lookup name (M.progInvariants program) == Just invariant
         ]
 
--- The first argument is the validated lib/validation.tersus program. The
+-- The first argument is the validated lib/validation/validation.tersus program. The
 -- verdict says whether every obligation was proved, which one was not, or
 -- what part of the MIR is outside this bridge's current subset (including
 -- most loop shapes and function calls).

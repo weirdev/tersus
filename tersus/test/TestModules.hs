@@ -1,5 +1,6 @@
 module TestModules
     ( testModules
+    , validatorMetadataFingerprint
     ) where
 
 import Control.Exception (bracket, evaluate, try, SomeException)
@@ -1608,31 +1609,119 @@ testCrossPackageConstructors = testCaseSeq "cross-package-constructor-seeds"
         Error _ -> Nothing
         Ok _ -> Just "unimported qualified constructor/type became visible"
 
+testModuleLateDeclarations :: Test
+testModuleLateDeclarations = testCaseSeq "late top-level definitions consume expression types once"
+    ([ case loadPkg (files entry helper) ("app/" ++ entry ++ ".tersus") of
+        Left e -> Just e
+        Right pkg -> case PackageCompile.compileModulesLinked pkg of
+            Error e -> Just e
+            Ok program -> foldr (<>) Nothing
+                [ testAssertEq (runProgram program) (Ok (Just (MInt 42)))
+                , testAssertTrue (Map.member "uncalled" (M.progFunctions program))
+                , testAssertTrue (not (any (isInfixOf "hiddenAfterReturn") (Map.keys (M.progFunctions program))))
+                , testAssertTrue (not (any ((== Just "dead") . M.localName) (Map.elems (M.fnLocals (M.progMain program)))))
+                , testAssertEq [name | M.Ghost _ (M.GhostFunction name "uncalled" True) <- concatMap M.blockStatements (Map.elems (M.fnBlocks (M.progMain program)))] ["uncalled"]
+                ]
+     | (entry,helper) <- [("a","z"),("z","a")]
+     ] ++
+     [ case loadPkg [("app/package.tersus", ""), ("app/main.tersus", "return sameName(7); fn sameName(sameName: Int) -> Int { return sameName; };")] "app/main.tersus" of
+        Left e -> Just e
+        Right pkg -> case PackageCompile.compileModulesLinked pkg of
+            Error e -> Just e
+            Ok p -> case Map.lookup "sameName" (M.progFunctions p) of
+                Nothing -> Just "missing sameName"
+                Just fn -> testAssertEq (Map.lookup "sameName" (M.specEnv (M.fnSpec fn))) (Just (M.Copy (M.Local 1)))
+     , case loadPkg [("app/package.tersus", ""), ("app/main.tersus", "fn globalKey() -> Int { return 0; }; fn localLoop(globalKey: Int) -> Int { while globalKey > 0 [{ affirm globalKey >= 0; }] shrinks globalKey { globalKey = globalKey - 1; }; return globalKey; }; return 0;")] "app/main.tersus" of
+        Left e -> Just e
+        Right pkg -> case PackageCompile.compileModulesLinked pkg of
+            Error e -> Just e
+            Ok p -> case Map.lookup "localLoop" (M.progFunctions p) of
+                Nothing -> Just "missing localLoop"
+                Just fn -> testAssertTrue (not (Map.null (M.specLoops (M.fnSpec fn))) &&
+                    all ((== Just (M.Copy (M.Local 1))) . Map.lookup "globalKey" . M.loopEnv) (Map.elems (M.specLoops (M.fnSpec fn))))
+     , case loadPkg
+        [("app/package.tersus", ""), ("app/a.tersus", "import app::z { bad }; return 0;"),
+         ("app/z.tersus", "fn bad(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n; };")]
+        "app/a.tersus" of
+        Left e -> Just e
+        Right pkg -> testAssertErrorContains "Could not prove" (compileModulesValidated pkg)
+     , case Compile.lowerSource True "return answer(); dead = 1 + 2; { fn hiddenAfterReturn() -> Int { return 91; }; }; fn answer() -> Int { return 42; }; fn uncalled() -> Int { return 99; };" of
+        Error e -> Just e
+        Ok p -> testAssertEq (runProgram p) (Ok (Just (MInt 42)))
+     ])
+  where
+    files entry helper =
+        [ ("app/package.tersus", "")
+        , ("app/" ++ entry ++ ".tersus", "import app::" ++ helper ++ " { answer }; return answer(); dead = 1 + 2; { fn hiddenAfterReturn() -> Int { return 91; }; };")
+        , ("app/" ++ helper ++ ".tersus", "fn answer() -> Int { return 42; }; fn uncalled() -> Int { return 99; };")
+        ]
+
 testValidatorPackage :: Test
 testValidatorPackage = TestCase "validator package keeps bare helpers and reference calls never run driver main" $ do
     disk <- mapM (\(path, _) -> do source <- readFile path; pure (path, source)) validationPackageFiles
     pure $ case loadPkg validationPackageFiles MirHousekeeping.validationEntry of
         Left e -> Just e
-        Right pkg -> case PackageCompile.compileModulesLinked pkg of
+        Right pkg -> case PackageCompile.compileModules pkg of
             Error e -> Just e
-            Ok raw -> case MirHousekeeping.eraseGhosts raw of
+            Ok compiled -> case PackageCompile.lowerCompiledPackage pkg compiled of
                 Error e -> Just e
-                Ok checker ->
-                    let files = concatMap loadedModuleFiles (packageModules pkg)
-                        trapped = checker{M.progMain = (M.progMain checker){M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Unreachable)}}
-                     in foldr (<>) Nothing
-                        [ testAssertEq disk validationPackageFiles
-                        , testAssertEq (map loadedFileStem files) ["driver", "validation"]
-                        , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 390
-                        , testAssertTrue (all (`Map.member` M.progFunctions checker) ["validateExecution", "noTemplates", "commonContext", "driverReadAll"])
-                        , testAssertTrue (all (not . isInfixOf "validation$") (Map.keys (M.progFunctions checker)))
-                        , testAssertEq (runNamedFunction trapped "noTemplates" []) (Ok (Just (MList [])))
-                        , case runProgram trapped of Error _ -> Nothing; Ok _ -> Just "driver-main trap did not fail"
-                        ]
+                Ok raw -> case MirHousekeeping.eraseGhosts raw of
+                    Error e -> Just e
+                    Ok checker ->
+                        let files = concatMap loadedModuleFiles (packageModules pkg)
+                            declared = [name | modu <- PackageCompile.compiledModules compiled, Assign name (Val VFunct{}) <- PackageCompile.compiledStatements modu]
+                            typeNames = [name | modu <- PackageCompile.compiledModules compiled, stmt <- PackageCompile.compiledStatements modu, name <- case stmt of StructDef n _ _ _ -> [n]; EnumDef n _ -> [n]; _ -> []]
+                            trapped = checker{M.progMain = (M.progMain checker){M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Unreachable)}}
+                         in foldr (<>) Nothing
+                            [ testAssertEq (validatorMetadataFingerprint raw) "5a777f689a0d83c0"
+                            , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
+                            , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
+                            , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
+                                Nothing -> False
+                                Just fn -> let env = M.specEnv (M.fnSpec fn) in
+                                    all (`Map.member` env) (Map.keys (M.progFunctions raw)) && not (Map.member "countParsed" env))
+                                ["containsValue", "commonContext", "driverReadAll"])
+                            , testAssertEq (Map.size (M.progFunctions raw)) 772
+                            , testAssertEq (Map.keys (M.progFunctions checker)) (Map.keys (M.progFunctions raw))
+                            , testAssertTrue (all (`Map.member` M.progFunctions raw) declared)
+                            , testAssertTrue (all (`Map.member` M.progFunctions checker) declared)
+                            , testAssertTrue (all (\n -> Map.member n (M.progTypes raw) || Map.member n (M.progGenerics raw)) typeNames)
+                            , testAssertEq disk validationPackageFiles
+                            , testAssertEq (map loadedFileStem files) ["driver", "validation"]
+                            , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 390
+                            , testAssertTrue (all (`Map.member` M.progFunctions checker) ["validateExecution", "noTemplates", "commonContext", "driverReadAll"])
+                            , testAssertTrue (all (not . isInfixOf "validation$") (Map.keys (M.progFunctions checker)))
+                            , testAssertEq (runNamedFunction trapped "noTemplates" []) (Ok (Just (MList [])))
+                            , case runProgram trapped of Error _ -> Nothing; Ok _ -> Just "driver-main trap did not fail"
+                            ]
   where
     definitions (Assign _ (Val VFunct{})) = 1 :: Int
     definitions (BoundedDef _ statement) = definitions statement
     definitions _ = 0
 
+validatorMetadataFingerprint :: M.Program -> String
+validatorMetadataFingerprint program = fingerprint
+    [ show (M.progTypes program, M.progGenerics program, M.progInvariants program)
+    , show (metadata (M.progMain program))
+    , show [(name, metadata fn) | (name,fn) <- Map.toAscList (M.progFunctions program)]
+    ]
+  where
+    metadata fn = (M.fnName fn, M.fnParams fn, M.fnReturns fn, M.fnLocals fn,
+        M.fnSizeParams fn, M.fnTypeParams fn, M.fnBorrowed fn, M.fnMutBorrowed fn, M.fnFrom fn, M.fnSpec fn,
+        [(block, [ghost | ghost@M.Ghost{} <- M.blockStatements body]) | (block,body) <- Map.toAscList (M.fnBlocks fn)])
+
+metadataMutations :: M.Program -> [M.Program]
+metadataMutations program =
+    [ program{M.progMain = main{M.fnLocals = Map.adjust (\d -> d{M.localType = TBool}) (M.Local 0) (M.fnLocals main)}}
+    , program{M.progMain = main{M.fnBlocks = Map.adjust (\(M.BasicBlock ss t) -> M.BasicBlock (M.Ghost Map.empty (M.GhostValidation (ProofAssert (ATerm "metadata-probe"))) : ss) t) (M.BlockId 0) (M.fnBlocks main)}}
+    , program{M.progInvariants = Map.insert "metadata-probe" [ProofAssert (ATerm "metadata-probe")] (M.progInvariants program)}
+    , program{M.progFunctions = Map.adjust changeLoop loopFunction (M.progFunctions program)}
+    ]
+  where
+    main = M.progMain program
+    loopFunction = head [name | (name,fn) <- Map.toAscList (M.progFunctions program), not (Map.null (M.specLoops (M.fnSpec fn)))]
+    changeLoop fn = fn{M.fnSpec = spec{M.specLoops = Map.adjust (\loop -> loop{M.loopEnv = Map.insert "metadata-probe" (M.Const (M.CInt 0)) (M.loopEnv loop)}) (fst (Map.findMin (M.specLoops spec))) (M.specLoops spec)}}
+      where spec = M.fnSpec fn
+
 testModules :: Test
-testModules = TestList "testModules" [testValidatorPackage,testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
+testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]

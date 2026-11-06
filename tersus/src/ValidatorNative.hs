@@ -1,8 +1,8 @@
--- The validator written in Tersus (lib/validation.tersus), compiled to
+-- The validator written in Tersus (lib/validation/validation.tersus), compiled to
 -- native code and run as a program: this is how every program is
 -- validated. The bridge (SelfHostedMir.encode) makes the data the
 -- validator checks; this module writes it in the text the validator's
--- driver (lib/validation_driver.tersus) reads, runs the compiled
+-- driver (lib/validation/driver.tersus) reads, runs the compiled
 -- validator on it, and reads its verdict back. The validator is built as
 -- MirHousekeeping builds the checker and the eraser (by the emitter in the
 -- cache) and kept in the cache under a name made of everything it is made
@@ -230,7 +230,7 @@ runValidator validator texts = do
 
 -- The text the driver reads of one function: its entry block, its entry
 -- state and its blocks; the driver reads a count of them first (see
--- lib/validation_driver.tersus)
+-- lib/validation/driver.tersus)
 serializeFunction :: (MirValue, MirValue, Integer) -> Either String String
 serializeFunction (blocks, initial, entry) = do
     stateText <- serializeValue initial
