@@ -1,0 +1,436 @@
+import validation::context { edgeNodes };
+import validation::model { ApplicationTerm, ConstantTerm, DifferenceFact, DifferencePotential, DisequalityFact, DistanceTable, EqualityFact, OrderFact, Representative, SumResult };
+import validation::relations { applicationFacts, canonicalIn, congruenceClosure, containsValue, contradictoryDisequalities, contradictoryOrders, emptyIntMap, hasEquality, hasOrderIn, leastClasses, representativeOf, sameIn };
+
+
+
+// The proof engine uses mathematical integers, while a running Tersus program
+// uses checked 64-bit integers. Reject an unrepresentable intermediate path
+// instead of overflowing or silently changing the bound.
+fn safeBoundSum(a: Int, b: Int) -> SumResult {
+    if b > 0 {
+        if a > 9223372036854775807 - b {
+            return SumResult::Overflow;
+        };
+    };
+    if b < 0 {
+        if a < -9223372036854775808 - b {
+            return SumResult::Overflow;
+        };
+    };
+    return SumResult::Sum { value: a + b };
+};
+
+// The difference facts with each term named by its class's least member
+fn canonicalDifferencesIn(classes: &HashMap<Int, Int>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
+    result = [];
+    for factPosition in 0..size(facts) {
+        fact = get(facts, factPosition);
+        result = push(result, DifferenceFact { left: canonicalIn(classes, fact.left), right: canonicalIn(classes, fact.right), bound: fact.bound });
+    };
+    return result;
+};
+
+fn differencePotential(edges: &List<DifferenceFact>) -> DifferencePotential {
+    nodes = edgeNodes(edges);
+    p = emptyIntMap();
+    for node in nodes { p = p.insert(node, 0); };
+    changed = true;
+    for round in 0..size(nodes) + 1 {
+        if changed {
+            changed = false;
+            for edgePosition in 0..size(edges) {
+                edge = get(edges, edgePosition);
+                sum = safeBoundSum(p.lookup(edge.right, 0), edge.bound);
+                if sum is SumResult::Sum {
+                    if (sum as SumResult::Sum).value < p.lookup(edge.left, 0) {
+                        p = p.insert(edge.left, (sum as SumResult::Sum).value);
+                        changed = true;
+                    };
+                };
+            };
+        };
+    };
+    if changed { return DifferencePotential { valid: false, potential: p }; };
+    for edgePosition in 0..size(edges) {
+        edge = get(edges, edgePosition);
+        if safeBoundSum(p.lookup(edge.right, 0), edge.bound) is SumResult::Overflow {
+            return DifferencePotential { valid: false, potential: p };
+        };
+    };
+    return DifferencePotential { valid: true, potential: p };
+};
+
+fn tightEdges(edges: &List<DifferenceFact>, p: &HashMap<Int, Int>) -> List<DifferenceFact> {
+    tight = [];
+    for edgePosition in 0..size(edges) {
+        edge = get(edges, edgePosition);
+        sum = safeBoundSum(p.lookup(edge.right, 0), edge.bound);
+        if sum is SumResult::Sum {
+            if (sum as SumResult::Sum).value = p.lookup(edge.left, 0) { tight = push(tight, edge); };
+        };
+    };
+    return tight;
+};
+
+fn canonicalDifferences(reps: &List<Representative>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
+    result = [];
+    for factPosition in 0..size(facts) {
+        fact = get(facts, factPosition);
+        result = push(result, DifferenceFact { left: representativeOf(reps, fact.left), right: representativeOf(reps, fact.right), bound: fact.bound });
+    };
+    return result;
+};
+
+// Search paths from right to left. A simple path has at most size(facts)
+// edges; omitting overflowed paths can lose a proof but cannot invent one.
+// Negative cycles are not yet used to prove unrelated goals. Equal terms are
+// one node, named by its class representative.
+// hasDifference over edges whose nodes are already class representatives.
+fn canonicalHasDifference(edges: &List<DifferenceFact>, target: Int, source: Int, bound: Int) -> Bool {
+    if bound >= 0 && target = source { return true; };
+    distances = emptyIntMap();
+    distances = distances.insert(source, 0);
+    changed = true;
+    for round in 0..size(edges) {
+        if changed {
+            changed = false;
+            for edgePosition in 0..size(edges) {
+                edge = get(edges, edgePosition);
+                if distances.contains(edge.right) {
+                    sum = safeBoundSum(distances.lookup(edge.right, 0), edge.bound);
+                    if sum is SumResult::Sum {
+                        candidate = (sum as SumResult::Sum).value;
+                        if candidate <= bound && edge.left = target { return true; };
+                        if distances.contains(edge.left) = false || candidate < distances.lookup(edge.left, 0) {
+                            distances = distances.insert(edge.left, candidate);
+                            changed = true;
+                        };
+                    };
+                };
+            };
+        };
+    };
+    if distances.contains(target) { return distances.lookup(target, 0) <= bound; };
+    return false;
+};
+
+fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
+    classes = leastClasses(equalities);
+    return canonicalHasDifference(canonicalDifferencesIn(classes, facts), canonicalIn(classes, left), canonicalIn(classes, right), bound);
+};
+
+// The shortest distances from a source over edges whose nodes are class
+// representatives, as hasDifference finds them.
+fn canonicalDistances(edges: &List<DifferenceFact>, source: Int) -> HashMap<Int, Int> {
+    distances = emptyIntMap();
+    distances = distances.insert(source, 0);
+    changed = true;
+    for round in 0..size(edges) {
+        if changed {
+            changed = false;
+            for edgePosition in 0..size(edges) {
+                edge = get(edges, edgePosition);
+                if distances.contains(edge.right) {
+                    sum = safeBoundSum(distances.lookup(edge.right, 0), edge.bound);
+                    if sum is SumResult::Sum {
+                        candidate = (sum as SumResult::Sum).value;
+                        if distances.contains(edge.left) = false || candidate < distances.lookup(edge.left, 0) {
+                            distances = distances.insert(edge.left, candidate);
+                            changed = true;
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return distances;
+};
+
+fn hasDistanceTable(tables: &List<DistanceTable>, source: Int) -> Bool {
+    for tablePosition in 0..size(tables) {
+        table = get(tables, tablePosition);
+        if table.source = source { return true; };
+    };
+    return false;
+};
+
+fn tableDistanceAtMost(tables: &List<DistanceTable>, from: Int, to: Int, bound: Int) -> Bool {
+    for tablePosition in 0..size(tables) {
+        if get(tables, tablePosition).source = from {
+            if get(tables, tablePosition).distances.contains(to) {
+                return get(tables, tablePosition).distances.lookup(to, 0) <= bound;
+            };
+            return false;
+        };
+    };
+    return false;
+};
+
+fn hasApplicationDifference(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
+    return hasDifference(applicationFacts(equalities, terms), facts, left, right, bound);
+};
+
+// A non-strict bound between values known to differ is strict. This rule can
+// use an order path rather than requiring the bound to be a single input edge.
+fn refinedOrders(classes: &HashMap<Int, Int>, orders: &List<OrderFact>, different: &List<DisequalityFact>) -> List<OrderFact> {
+    known = clone(orders);
+    for factPosition in 0..size(different) {
+        fact = get(different, factPosition);
+        if hasOrderIn(classes, known, fact.left, fact.right, false) {
+            if hasOrderIn(classes, known, fact.left, fact.right, true) = false {
+                known = push(known, OrderFact { smaller: fact.left, greater: fact.right, strict: true });
+            };
+        };
+        if hasOrderIn(classes, known, fact.right, fact.left, false) {
+            if hasOrderIn(classes, known, fact.right, fact.left, true) = false {
+                known = push(known, OrderFact { smaller: fact.right, greater: fact.left, strict: true });
+            };
+        };
+    };
+    return known;
+};
+
+fn entailsRefinedOrder(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, orders: &List<OrderFact>, different: &List<DisequalityFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    closed = applicationFacts(equalities, terms);
+    closedClasses = leastClasses(closed);
+    if contradictoryDisequalities(closedClasses, different) {
+        return true;
+    };
+    refined = refinedOrders(closedClasses, orders, different);
+    if contradictoryOrders(closed, refined) {
+        return true;
+    };
+    return hasOrderIn(closedClasses, refined, left, right, strict);
+};
+
+fn constantEqualities(equalities: &List<EqualityFact>, constants: &List<ConstantTerm>) -> List<EqualityFact> {
+    known = clone(equalities);
+    for aPosition in 0..size(constants) {
+        a = get(constants, aPosition);
+        for bPosition in 0..size(constants) {
+            b = get(constants, bPosition);
+            if a.kind = b.kind {
+                if a.value = b.value {
+                    if hasEquality(known, a.id, b.id) = false {
+                        known = push(known, EqualityFact { left: a.id, right: b.id });
+                    };
+                };
+            };
+        };
+    };
+    return known;
+};
+
+// Two different literal values cannot occupy the same equality class.
+fn contradictoryConstants(classes: &HashMap<Int, Int>, constants: &List<ConstantTerm>) -> Bool {
+    for aPosition in 0..size(constants) {
+        a = get(constants, aPosition);
+        for bPosition in 0..size(constants) {
+            b = get(constants, bPosition);
+            if sameIn(classes, a.id, b.id) {
+                if a.kind != b.kind {
+                    return true;
+                };
+                if a.value != b.value {
+                    return true;
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn semanticFacts(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, constants: &List<ConstantTerm>) -> List<EqualityFact> {
+    return congruenceClosure(equalities, terms, constants, [], []);
+};
+
+fn entailsSemanticEquality(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, constants: &List<ConstantTerm>, left: Int, right: Int) -> Bool {
+    known = semanticFacts(equalities, terms, constants);
+    knownClasses = leastClasses(known);
+    if contradictoryConstants(knownClasses, constants) {
+        return true;
+    };
+    return sameIn(knownClasses, left, right);
+};
+
+// Concrete integer values also provide their exact order. Booleans do not
+// provide integer-order edges, even though their encoding uses an integer.
+// The integer constants in order of value, each below the next larger one:
+// a chain, which orders every pair as the transitive closure does, with one
+// fact per constant rather than one per pair.
+fn constantOrders(orders: &List<OrderFact>, constants: &List<ConstantTerm>) -> List<OrderFact> {
+    known = clone(orders);
+    for aPosition in 0..size(constants) {
+        a = get(constants, aPosition);
+        if a.kind = 0 {
+            next = 0;
+            nextValue = 0;
+            found = false;
+            for bPosition in 0..size(constants) {
+                b = get(constants, bPosition);
+                if b.kind = 0 {
+                    if b.value > a.value {
+                        if found = false || b.value < nextValue {
+                            next = b.id;
+                            nextValue = b.value;
+                            found = true;
+                        };
+                    };
+                };
+            };
+            if found { known = push(known, OrderFact { smaller: a.id, greater: next, strict: true }); };
+        };
+    };
+    return known;
+};
+
+fn entailsSemanticOrder(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, constants: &List<ConstantTerm>, orders: &List<OrderFact>, different: &List<DisequalityFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    closed = semanticFacts(equalities, terms, constants);
+    closedClasses = leastClasses(closed);
+    if contradictoryConstants(closedClasses, constants) {
+        return true;
+    };
+    if contradictoryDisequalities(closedClasses, different) {
+        return true;
+    };
+    refined = refinedOrders(closedClasses, constantOrders(orders, constants), different);
+    if contradictoryOrders(closed, refined) {
+        return true;
+    };
+    return hasOrderIn(closedClasses, refined, left, right, strict);
+};
+
+// A checked difference, using bounds that do not themselves overflow.
+fn safeBoundDifference(a: Int, b: Int) -> SumResult {
+    if b > 0 {
+        if a < -9223372036854775808 + b {
+            return SumResult::Overflow;
+        };
+    };
+    if b < 0 {
+        if a > 9223372036854775807 + b {
+            return SumResult::Overflow;
+        };
+    };
+    return SumResult::Sum { value: a - b };
+};
+
+fn comparisonDifferences(orders: &List<OrderFact>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
+    result = clone(facts);
+    for orderPosition in 0..size(orders) {
+        order = get(orders, orderPosition);
+        if order.strict {
+            result = push(result, DifferenceFact { left: order.smaller, right: order.greater, bound: -1 });
+        } else {
+            result = push(result, DifferenceFact { left: order.smaller, right: order.greater, bound: 0 });
+        };
+    };
+    return result;
+};
+
+// A size is never negative, whether or not the program said so. The reference
+// validator adds the same constraint for every size term it sees; here it is
+// checked directly so that a goal like 0 <= size(l) does not need the full
+// difference graph to be rebuilt for every size term.
+fn isSizeTerm(applications: &List<ApplicationTerm>, term: Int) -> Bool {
+    for applicationPosition in 0..size(applications) {
+        application = get(applications, applicationPosition);
+        if application.id = term {
+            if application.function = -13 {
+                if size(application.arguments) = 1 { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+fn constantDifferences(constants: &List<ConstantTerm>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
+    result = clone(facts);
+    for aPosition in 0..size(constants) {
+        a = get(constants, aPosition);
+        for bPosition in 0..size(constants) {
+            b = get(constants, bPosition);
+            if a.kind = 0 {
+                if b.kind = 0 {
+                    redundant = false;
+                    if a.id = b.id {
+                        if a.value = b.value { redundant = true; };
+                    };
+                    if redundant = false {
+                        d = safeBoundDifference(a.value, b.value);
+                        if d is SumResult::Sum {
+                            result = push(result, DifferenceFact { left: a.id, right: b.id, bound: (d as SumResult::Sum).value });
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return result;
+};
+
+// A representable negative cycle contradicts the premises. If a path needs an
+// unrepresentable intermediate, hasDifference declines it and this check may
+// miss the contradiction, but never reports one without a proof.
+fn contradictoryDifferences(classes: &HashMap<Int, Int>, facts: &List<DifferenceFact>) -> Bool {
+    negative = false;
+    for factPosition in 0..size(facts) {
+        fact = get(facts, factPosition);
+        if fact.bound < 0 { negative = true; };
+    };
+    if negative = false { return false; };
+    edges = canonicalDifferencesIn(classes, facts);
+    if differencePotential(edges).valid { return false; };
+    // Every negative cycle contains a negative edge. Checking only its
+    // endpoints avoids repeating the same search for nonnegative edges, and
+    // the endpoints of one class are one search.
+    searched = [];
+    for edgePosition in 0..size(edges) {
+        edge = get(edges, edgePosition);
+        if edge.bound < 0 {
+            if containsValue(searched, edge.left) = false {
+                searched = push(searched, edge.left);
+                if canonicalHasDifference(edges, edge.left, edge.left, -1) {
+                    return true;
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// Compute a product only when it fits the interpreter's signed Int range.
+// The divisions below have nonzero denominators and never divide minInt by
+// minus one. An unrepresentable product yields no proof fact.
+fn safeProduct(a: Int, b: Int) -> SumResult {
+    if a > 0 {
+        if b > 0 {
+            if a > 9223372036854775807 / b { return SumResult::Overflow; };
+        };
+        if b < 0 {
+            bound = -9223372036854775808 / a;
+            if b < bound { return SumResult::Overflow; };
+            if b = bound {
+                if -9223372036854775808 % a != 0 { return SumResult::Overflow; };
+            };
+        };
+    };
+    if a < 0 {
+        if b > 0 {
+            bound = -9223372036854775808 / b;
+            if a < bound { return SumResult::Overflow; };
+            if a = bound {
+                if -9223372036854775808 % b != 0 { return SumResult::Overflow; };
+            };
+        };
+        if b < 0 {
+            bound = 9223372036854775807 / b;
+            if a < bound { return SumResult::Overflow; };
+            if a = bound {
+                if 9223372036854775807 % b != 0 { return SumResult::Overflow; };
+            };
+        };
+    };
+    return SumResult::Sum { value: a * b };
+};

@@ -1,0 +1,869 @@
+import validation::context { analyzeContext, contextDifferent, integerValue };
+import validation::differences { semanticFacts };
+import validation::linear { linearEntails };
+import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, IntegerLookup, MergePair, OrderFact, SplitResult, StateMergeLookup, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
+import validation::relations { applicationAt, containsValue, emptyIntMap, emptyPositions, intAt, leastClasses, minInt, sameIn };
+import validation::saturation { withInstances };
+import validation::sequenceFacts { sizeTermOf };
+import validation::state { bindLocal, commonTemplates, emptyMergePairs, goalSides, lookupLocal, noTemplates, termInUse };
+import validation::validation { entailmentCache, entailsGoal, entailsGoalCached };
+
+
+
+fn writeOf(context: &ValidatorContext, classes: &HashMap<Int, Int>, k: Int, setApp: &ApplicationTerm) -> WriteOf {
+    if setApp.function = -17 && size(setApp.arguments) = 3 {
+        return WriteOf { written: true, pushed: false, inner: get(setApp.arguments, 0), idx: get(setApp.arguments, 1), value: get(setApp.arguments, 2) };
+    };
+    if setApp.function = -16 && size(setApp.arguments) = 2 {
+        st = sizeTermOf(context, classes, get(setApp.arguments, 0));
+        if st.found {
+            if linearEntails(context, k, st.term, 0) {
+                return WriteOf { written: true, pushed: true, inner: get(setApp.arguments, 0), idx: st.term, value: get(setApp.arguments, 1) };
+            };
+        };
+    };
+    return WriteOf { written: false, pushed: false, inner: 0, idx: 0, value: 0 };
+};
+
+// The terms of the goal's sides and the arguments of the applications they are
+fn nearTerms(context: &ValidatorContext, classes: &HashMap<Int, Int>, sides: &List<Int>) -> List<Int> {
+    near = clone(sides);
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        for sidePosition in 0..size(sides) {
+            if sameIn(classes, app.id, get(sides, sidePosition)) {
+                for argument in app.arguments { near = push(near, argument); };
+            };
+        };
+    };
+    return near;
+};
+
+fn equalToAny(classes: &HashMap<Int, Int>, term: Int, terms: &List<Int>) -> Bool {
+    for t in terms { if sameIn(classes, term, t) { return true; }; };
+    return false;
+};
+
+fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, budget: Int) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
+    if depth <= 0 || budget <= 0 { return SplitResult { holds: false, used: 0 }; };
+    used = 0;
+    analysis = analyzeContext(state.context);
+    near = nearTerms(state.context, analysis.classes, goalSides(goal));
+    tried = 0;
+    // (the newest reads first: a read a split made is the one to split next)
+    count = size(state.context.applications);
+    for back in 0..count {
+        app = applicationAt(state.context.applications, count - 1 - back);
+        if app.function = -14 && size(app.arguments) = 2 && tried < 3 && used < budget && size(state.templates) = 0 {
+            if equalToAny(analysis.classes, app.id, near) {
+                k = get(app.arguments, 1);
+                for setAppPosition in 0..size(state.context.applications) {
+                    w = writeOf(state.context, analysis.classes, k, get(state.context.applications, setAppPosition));
+                    if w.written {
+                        if sameIn(analysis.classes, get(state.context.applications, setAppPosition).id, get(app.arguments, 0)) {
+                            tried = tried + 1;
+                            r = splitAtWrite(state, analysis, goal, depth, budget - used, app.id, k, w);
+                            used = used + r.used;
+                            if r.holds { return SplitResult { holds: true, used: used }; };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    // (a read of a list a forall fact is about, at an index on no known side of
+    // the fact's bound: the goal holds below the bound and at or above it)
+    rangeTried = 0;
+    for back in 0..count {
+        app = applicationAt(state.context.applications, count - 1 - back);
+        if app.function = -14 && size(app.arguments) = 2 && rangeTried < 2 && used < budget {
+            if equalToAny(analysis.classes, app.id, near) {
+                k = get(app.arguments, 1);
+                list = get(app.arguments, 0);
+                for factPosition in 0..size(state.context.applications) {
+                    fact = get(state.context.applications, factPosition);
+                    if fact.function = -30 && size(fact.arguments) = 5 && rangeTried < 2 && used < budget {
+                        if sameIn(analysis.classes, get(fact.arguments, 0), list) || sameIn(analysis.classes, get(fact.arguments, 1), list) {
+                            for side in 0..2 {
+                                bound = get(fact.arguments, 2 + side);
+                                if rangeTried < 2 && used < budget {
+                                    if linearEntails(state.context, bound, k, 0) = false && linearEntails(state.context, k, bound, -1) = false {
+                                        rangeTried = rangeTried + 1;
+                                        r = splitAtBound(state, goal, depth, budget - used, k, bound);
+                                        used = used + r.used;
+                                        if r.holds { return SplitResult { holds: true, used: used }; };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return SplitResult { holds: false, used: used };
+};
+
+// The goal at a read of a write: at the write's index the read is the value written; elsewhere it is a read of the
+// list written to, at an index other than the write's (below it, for a push)
+fn splitAtWrite(state: &ExecutionState, analysis: &ContextAnalysis, goal: &ValidatorGoal, depth: Int, budget: Int, readId: Int, k: Int, w: &WriteOf) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
+    used = 0;
+    context = clone(state.context);
+    sameIndex = sameIn(analysis.classes, k, w.idx);
+    atOk = contextDifferent(analysis.equalities, context.applications, context.orders, context.different, analysis.differences, k, w.idx);
+    if atOk = false {
+        atIdx = ValidatorContext { equalities: push(push(clone(context.equalities), EqualityFact { left: k, right: w.idx }), EqualityFact { left: readId, right: w.value }), ..clone(context) };
+        atOk = analyzeContext(atIdx).contradictory;
+        if atOk = false { used = used + 1; atOk = entailsGoal(atIdx, clone(goal)); };
+        // (the value may itself be read from a write: a node set from the node there)
+        if atOk = false && used < budget {
+            deeper = splitReadOverWrite(ExecutionState { context: clone(atIdx), ..clone(state) }, clone(goal), depth - 1, budget - used);
+            used = used + deeper.used;
+            atOk = deeper.holds;
+        };
+    };
+    if atOk = false { return SplitResult { holds: false, used: used }; };
+    if sameIndex { return SplitResult { holds: true, used: used }; };
+    fresh = freshValue(state);
+    if fresh is ValueLookup::Missing { return SplitResult { holds: false, used: used }; };
+    newRead = (fresh as ValueLookup::Found).term;
+    apps = push(clone(context.applications), ApplicationTerm { id: newRead, function: -14, arguments: push(push([], w.inner), k) });
+    elsewhere = ValidatorContext { applications: apps, equalities: push(clone(context.equalities), EqualityFact { left: readId, right: newRead }), different: push(clone(context.different), DisequalityFact { left: k, right: w.idx }), ..clone(context) };
+    if w.pushed {
+        elsewhere = ValidatorContext { orders: push(clone(elsewhere.orders), OrderFact { smaller: k, greater: w.idx, strict: true }), ..clone(elsewhere) };
+    };
+    elseOk = analyzeContext(elsewhere).contradictory;
+    if elseOk = false { used = used + 1; elseOk = entailsGoal(elsewhere, clone(goal)); };
+    if elseOk = false {
+        deeper = splitReadOverWrite(ExecutionState { context: clone(elsewhere), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        used = used + deeper.used;
+        elseOk = deeper.holds;
+    };
+    return SplitResult { holds: elseOk, used: used };
+};
+
+// The goal at a read on no known side of a forall fact's bound: below the bound, and at or above it
+fn splitAtBound(state: &ExecutionState, goal: &ValidatorGoal, depth: Int, budget: Int, k: Int, bound: Int) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
+    used = 0;
+    below = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: k, greater: bound, strict: true }), ..clone(state.context) };
+    below = withInstances(state, below);
+    belowOk = analyzeContext(below).contradictory;
+    if belowOk = false { used = used + 1; belowOk = entailsGoal(below, clone(goal)); };
+    if belowOk = false {
+        deeper = splitReadOverWrite(ExecutionState { context: clone(below), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        used = used + deeper.used;
+        belowOk = deeper.holds;
+    };
+    if belowOk = false { return SplitResult { holds: false, used: used }; };
+    above = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: bound, greater: k, strict: false }), ..clone(state.context) };
+    above = withInstances(state, above);
+    aboveOk = analyzeContext(above).contradictory;
+    if aboveOk = false { used = used + 1; aboveOk = entailsGoal(above, clone(goal)); };
+    if aboveOk = false {
+        deeper = splitReadOverWrite(ExecutionState { context: clone(above), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        used = used + deeper.used;
+        aboveOk = deeper.holds;
+    };
+    return SplitResult { holds: aboveOk, used: used };
+};
+
+// (below every term the state mentions, found in one pass over it)
+fn freshValue(state: &ExecutionState) -> ValueLookup {
+    return ValueLookup::Found { term: leastTermInUse(state) - 1 };
+};
+
+fn leastTermInUse(state: &ExecutionState) -> Int {
+    least = -999;
+    for binding in state.locals.entries() { if binding.value < least { least = binding.value; }; };
+    for factPosition in 0..size(state.context.equalities) {
+        fact = get(state.context.equalities, factPosition);
+        if fact.left < least { least = fact.left; };
+        if fact.right < least { least = fact.right; };
+    };
+    for factPosition in 0..size(state.context.different) {
+        fact = get(state.context.different, factPosition);
+        if fact.left < least { least = fact.left; };
+        if fact.right < least { least = fact.right; };
+    };
+    for factPosition in 0..size(state.context.orders) {
+        fact = get(state.context.orders, factPosition);
+        if fact.smaller < least { least = fact.smaller; };
+        if fact.greater < least { least = fact.greater; };
+    };
+    for factPosition in 0..size(state.context.differences) {
+        fact = get(state.context.differences, factPosition);
+        if fact.left < least { least = fact.left; };
+        if fact.right < least { least = fact.right; };
+    };
+    // (an application is read where it is: it holds a list)
+    for vPosition in 0..size(state.context.variants) {
+        object = get(state.context.variants, vPosition).object;
+        if object < least { least = object; };
+    };
+    for cPosition in 0..size(state.context.constants) {
+        id = get(state.context.constants, cPosition).id;
+        if id < least { least = id; };
+    };
+    for appPosition in 0..size(state.context.applications) {
+        id = get(state.context.applications, appPosition).id;
+        if id < least { least = id; };
+        function = get(state.context.applications, appPosition).function;
+        if function < least { least = function; };
+        count = size(get(state.context.applications, appPosition).arguments);
+        for k in 0..count {
+            a = intAt(get(state.context.applications, appPosition).arguments, k, 0);
+            if a < least { least = a; };
+        };
+    };
+    return least;
+};
+
+fn sameConstructorField(a: &ConstructorField, b: &ConstructorField) -> Bool {
+    return a.constructor = b.constructor && a.field = b.field && a.index = b.index;
+};
+
+fn containsConstructorField(fields: &List<ConstructorField>, field: &ConstructorField) -> Bool {
+    for candidatePosition in 0..size(fields) {
+        candidate = get(fields, candidatePosition);
+        if sameConstructorField(candidate, field) { return true; };
+    };
+    return false;
+};
+
+fn unionContexts(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
+    equalities = clone(left.equalities);
+    applications = clone(left.applications);
+    constants = clone(left.constants);
+    orders = clone(left.orders);
+    different = clone(left.different);
+    variants = clone(left.variants);
+    fieldFunctions = clone(left.fieldFunctions);
+    constructorFunctions = clone(left.constructorFunctions);
+    constructorFields = clone(left.constructorFields);
+    differences = clone(left.differences);
+    for fact in right.equalities { equalities = push(equalities, clone(fact)); };
+    for fact in right.applications { applications = push(applications, clone(fact)); };
+    for fact in right.constants { constants = push(constants, clone(fact)); };
+    for fact in right.orders { orders = push(orders, clone(fact)); };
+    for fact in right.different { different = push(different, clone(fact)); };
+    for fact in right.variants { variants = push(variants, clone(fact)); };
+    fieldSeen = HashSet::new();
+    for function in fieldFunctions { fieldSeen = fieldSeen.insert(function); };
+    for function in right.fieldFunctions { if fieldSeen.contains(function) = false { fieldSeen = fieldSeen.insert(function); fieldFunctions = push(fieldFunctions, function); }; };
+    constructorSeen = HashSet::new();
+    for function in constructorFunctions { constructorSeen = constructorSeen.insert(function); };
+    for function in right.constructorFunctions { if constructorSeen.contains(function) = false { constructorSeen = constructorSeen.insert(function); constructorFunctions = push(constructorFunctions, function); }; };
+    for field in right.constructorFields { if containsConstructorField(constructorFields, field) = false { constructorFields = push(constructorFields, clone(field)); }; };
+    for fact in right.differences { differences = push(differences, clone(fact)); };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashSet<Int>, term: Int) -> ValueLookup {
+    if ambiguous.contains(term) { return ValueLookup::Missing; };
+    if joined.contains(term) { return ValueLookup::Found { term: joined.lookup(term, 0) }; };
+    if term >= 0 { return ValueLookup::Found { term: term }; };
+    return ValueLookup::Missing;
+};
+
+fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> ValidatorContext {
+    joined = emptyIntMap();
+    ambiguous = HashSet::new();
+    // (a term a local keeps as itself across the join keeps its facts: a local
+    // joined from it on this side is said equal to it here, not renamed into
+    // it, or the local that keeps it would lose what is known of it)
+    kept = HashSet::new();
+    for pairPosition in 0..size(pairs) {
+        pair = get(pairs, pairPosition);
+        if pair.joined = pair.left && pair.joined = pair.right && pair.left < 0 {
+            kept = kept.insert(pair.left);
+            joined = joined.insert(pair.left, pair.left);
+        };
+    };
+    sameAsKept = [];
+    for pairPosition in 0..size(pairs) {
+        pair = get(pairs, pairPosition);
+        source = pair.right;
+        if leftSide { source = pair.left; };
+        // (a literal is a term every fact may speak of, not the local's own
+        // value: renaming it would turn m >= 1 into m >= c after c = 1 on one
+        // side; the joined value gets its range from the bounds instead)
+        if source >= 0 {
+        } else if kept.contains(source) {
+            if pair.joined != source { sameAsKept = push(sameAsKept, EqualityFact { left: pair.joined, right: source }); };
+        } else if pair.ambiguous {
+            ambiguous = ambiguous.insert(source);
+        } else if ambiguous.contains(source) = false {
+            if joined.contains(source) {
+                if joined.lookup(source, 0) != pair.joined {
+                    ambiguous = ambiguous.insert(source);
+                };
+            } else {
+                joined = joined.insert(source, pair.joined);
+            };
+        };
+    };
+    equalities = [];
+    applications = [];
+    constants = [];
+    orders = [];
+    different = [];
+    variants = [];
+    fieldFunctions = clone(context.fieldFunctions);
+    constructorFunctions = clone(context.constructorFunctions);
+    constructorFields = clone(context.constructorFields);
+    differences = [];
+    for factPosition in 0..size(context.equalities) {
+        fact = get(context.equalities, factPosition);
+        left = mergeTerm(joined, ambiguous, fact.left);
+        right = mergeTerm(joined, ambiguous, fact.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found {
+                equalities = push(equalities, EqualityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term });
+            };
+        };
+    };
+    for factPosition in 0..size(context.applications) {
+        fact = get(context.applications, factPosition);
+        id = mergeTerm(joined, ambiguous, fact.id);
+        arguments = [];
+        valid = true;
+        for argumentPosition in 0..size(fact.arguments) {
+            argument = get(fact.arguments, argumentPosition);
+            mapped = mergeTerm(joined, ambiguous, argument);
+            if mapped is ValueLookup::Found { arguments = push(arguments, (mapped as ValueLookup::Found).term); } else { valid = false; };
+        };
+        if id is ValueLookup::Found {
+            if valid { applications = push(applications, ApplicationTerm { id: (id as ValueLookup::Found).term, function: fact.function, arguments: arguments }); };
+        };
+    };
+    for factPosition in 0..size(context.constants) {
+        fact = get(context.constants, factPosition);
+        id = mergeTerm(joined, ambiguous, fact.id);
+        if id is ValueLookup::Found { constants = push(constants, ConstantTerm { id: (id as ValueLookup::Found).term, kind: fact.kind, value: fact.value }); };
+    };
+    for factPosition in 0..size(context.orders) {
+        fact = get(context.orders, factPosition);
+        smaller = mergeTerm(joined, ambiguous, fact.smaller);
+        greater = mergeTerm(joined, ambiguous, fact.greater);
+        if smaller is ValueLookup::Found {
+            if greater is ValueLookup::Found { orders = push(orders, OrderFact { smaller: (smaller as ValueLookup::Found).term, greater: (greater as ValueLookup::Found).term, strict: fact.strict }); };
+        };
+    };
+    for factPosition in 0..size(context.different) {
+        fact = get(context.different, factPosition);
+        left = mergeTerm(joined, ambiguous, fact.left);
+        right = mergeTerm(joined, ambiguous, fact.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found { different = push(different, DisequalityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term }); };
+        };
+    };
+    for factPosition in 0..size(context.differences) {
+        fact = get(context.differences, factPosition);
+        left = mergeTerm(joined, ambiguous, fact.left);
+        right = mergeTerm(joined, ambiguous, fact.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found { differences = push(differences, DifferenceFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term, bound: fact.bound }); };
+        };
+    };
+    for factPosition in 0..size(context.variants) {
+        fact = get(context.variants, factPosition);
+        object = mergeTerm(joined, ambiguous, fact.object);
+        if object is ValueLookup::Found { variants = push(variants, VariantFact { object: (object as ValueLookup::Found).term, family: fact.family, constructor: fact.constructor, matches: fact.matches }); };
+    };
+    for fact in sameAsKept { equalities = push(equalities, fact); };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn sameEquality(a: &EqualityFact, b: &EqualityFact) -> Bool {
+    return (a.left = b.left && a.right = b.right) || (a.left = b.right && a.right = b.left);
+};
+
+fn sameDisequality(a: &DisequalityFact, b: &DisequalityFact) -> Bool {
+    return (a.left = b.left && a.right = b.right) || (a.left = b.right && a.right = b.left);
+};
+
+fn sameVariantFact(a: &VariantFact, b: &VariantFact) -> Bool {
+    return a.object = b.object && a.family = b.family && a.constructor = b.constructor && a.matches = b.matches;
+};
+
+fn sameApplication(a: &ApplicationTerm, b: &ApplicationTerm) -> Bool {
+    return a.id = b.id && a.function = b.function && a.arguments = b.arguments;
+};
+
+// A fact a join keeps when both paths hold it: a key that equal facts share,
+// and whether two facts are the same
+trait JoinedFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }];
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }];
+};
+
+impl JoinedFact for EqualityFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return minInt(self.left, self.right); };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameEquality(self, other); };
+};
+
+impl JoinedFact for ApplicationTerm {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.id; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameApplication(self, other); };
+};
+
+impl JoinedFact for ConstantTerm {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.id; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.id = other.id && self.kind = other.kind && self.value = other.value; };
+};
+
+impl JoinedFact for OrderFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.smaller; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.smaller = other.smaller && self.greater = other.greater && self.strict = other.strict; };
+};
+
+impl JoinedFact for DisequalityFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return minInt(self.left, self.right); };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameDisequality(self, other); };
+};
+
+impl JoinedFact for VariantFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.object; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameVariantFact(self, other); };
+};
+
+impl JoinedFact for ConstructorField {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.constructor; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameConstructorField(self, other); };
+};
+
+impl JoinedFact for DifferenceFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.left; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.left = other.left && self.right = other.right && self.bound = other.bound; };
+};
+
+// The facts of left that right holds too, each once. (A fact held twice on
+// each side was kept four times, and the copies multiplied with every join
+// after it.) The facts of right are found by their key, not by a walk over
+// all of them for each fact of left.
+fn commonFacts<T: JoinedFact + Clone>(left: &List<T>, right: &List<T>) -> List<T> {
+    common = [];
+    byKey = emptyPositions();
+    for rPosition in 0..size(right) {
+        rKey = JoinedFact::joinKey(get(right, rPosition));
+        byKey = byKey.insert(rKey, push(byKey.lookup(rKey, []), rPosition));
+    };
+    kept = emptyPositions();
+    for lPosition in 0..size(left) {
+        lKey = JoinedFact::joinKey(get(left, lPosition));
+        matched = false;
+        for candidate in byKey.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right) {
+                if JoinedFact::sameFact(get(left, lPosition), get(right, candidate)) { matched = true; };
+            };
+        };
+        if matched {
+            already = false;
+            for earlier in kept.lookup(lKey, []) {
+                if already = false && earlier >= 0 && earlier < size(left) {
+                    if JoinedFact::sameFact(get(left, lPosition), get(left, earlier)) { already = true; };
+                };
+            };
+            if already = false {
+                kept = kept.insert(lKey, push(kept.lookup(lKey, []), lPosition));
+                common = push(common, clone(get(left, lPosition)));
+            };
+        };
+    };
+    return common;
+};
+
+fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
+    fieldFunctions = [];
+    rightFields = HashSet::new();
+    for function in right.fieldFunctions { rightFields = rightFields.insert(function); };
+    for function in left.fieldFunctions { if rightFields.contains(function) { fieldFunctions = push(fieldFunctions, function); }; };
+    constructorFunctions = [];
+    rightConstructors = HashSet::new();
+    for function in right.constructorFunctions { rightConstructors = rightConstructors.insert(function); };
+    for function in left.constructorFunctions { if rightConstructors.contains(function) { constructorFunctions = push(constructorFunctions, function); }; };
+    return ValidatorContext { equalities: commonFacts(left.equalities, right.equalities), applications: commonFacts(left.applications, right.applications), constants: commonFacts(left.constants, right.constants), orders: commonFacts(left.orders, right.orders), different: commonFacts(left.different, right.different), variants: commonFacts(left.variants, right.variants), fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: commonFacts(left.constructorFields, right.constructorFields), differences: commonFacts(left.differences, right.differences) };
+};
+
+// One end of the integer range a term is known to lie in: its constant
+// value, or the tightest order fact against a constant-valued term.
+fn rangeBound(context: &ValidatorContext, term: Int, low: Bool) -> IntegerLookup {
+    value = integerValue(context, term);
+    if value is IntegerLookup::Found { return value; };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    best = 0;
+    found = false;
+    for orderPosition in 0..size(context.orders) {
+        order = get(context.orders, orderPosition);
+        if low {
+            if sameIn(equalitiesClasses, order.greater, term) {
+                v = integerValue(context, order.smaller);
+                if v is IntegerLookup::Found {
+                    cand = (v as IntegerLookup::Found).value;
+                    usable = true;
+                    if order.strict {
+                        if cand < 9223372036854775807 { cand = cand + 1; } else { usable = false; };
+                    };
+                    if usable {
+                        if found = false || cand > best { best = cand; found = true; };
+                    };
+                };
+            };
+        } else {
+            if sameIn(equalitiesClasses, order.smaller, term) {
+                v = integerValue(context, order.greater);
+                if v is IntegerLookup::Found {
+                    cand = (v as IntegerLookup::Found).value;
+                    usable = true;
+                    if order.strict {
+                        if cand > -9223372036854775808 { cand = cand - 1; } else { usable = false; };
+                    };
+                    if usable {
+                        if found = false || cand < best { best = cand; found = true; };
+                    };
+                };
+            };
+        };
+    };
+    if found { return IntegerLookup::Found { value: best }; };
+    return IntegerLookup::Missing;
+};
+
+fn addRangeBound(state: &ExecutionState, term: Int, value: Int, low: Bool) -> ExecutionState {
+    boundTerm = 0;
+    found = false;
+    for constantPosition in 0..size(state.context.constants) {
+        constant = get(state.context.constants, constantPosition);
+        if constant.kind = 0 {
+            if constant.value = value { boundTerm = constant.id; found = true; };
+        };
+    };
+    owned = clone(state);
+    context = clone(owned.context);
+    if found = false {
+        fresh = freshValue(state);
+        if fresh is ValueLookup::Found {
+            boundTerm = (fresh as ValueLookup::Found).term;
+            context = ValidatorContext { constants: push(clone(context.constants), ConstantTerm { id: boundTerm, kind: 0, value: value }), ..context };
+        } else { return clone(state); };
+    };
+    if low {
+        context = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: boundTerm, greater: term, strict: false }), ..context };
+    } else {
+        context = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: term, greater: boundTerm, strict: false }), ..context };
+    };
+    return ExecutionState { context: context, ..owned };
+};
+
+fn addOrderToState(state: &ExecutionState, smaller: Int, greater: Int) -> ExecutionState {
+    for orderPosition in 0..size(state.context.orders) {
+        order = get(state.context.orders, orderPosition);
+        if order.smaller = smaller {
+            if order.greater = greater { return clone(state); };
+        };
+    };
+    context = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: smaller, greater: greater, strict: false }), ..clone(state.context) };
+    return ExecutionState { context: context, ..clone(state) };
+};
+
+fn addStrictOrderToState(state: &ExecutionState, smaller: Int, greater: Int) -> ExecutionState {
+    for orderPosition in 0..size(state.context.orders) {
+        order = get(state.context.orders, orderPosition);
+        if order.smaller = smaller {
+            if order.greater = greater {
+                if order.strict { return clone(state); };
+            };
+        };
+    };
+    context = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: smaller, greater: greater, strict: true }), ..clone(state.context) };
+    return ExecutionState { context: context, ..clone(state) };
+};
+
+// A bound that both branches give the joined term, though neither branch
+// states it of that term: on one side it may follow from the value the term
+// was before the join (0 <= 0 - n from n < 0), so each side is asked with the
+// solver, not matched as a fact. The bounds tried are the constants the join
+// keeps and the terms both sides compare against.
+fn constantTermWithValue(context: &ValidatorContext, value: Int) -> ValueLookup {
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.kind = 0 {
+            if constant.value = value { return ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+// Two locals the paths set to different numbers with the same sum (x = 1,
+// y = 0 on one, x = 0, y = 1 on the other) keep that sum after the join
+fn addJoinedSums(state: &ExecutionState, pairs: &List<MergePair>, left: &ExecutionState, right: &ExecutionState) -> ExecutionState {
+    result = clone(state);
+    added = 0;
+    for i in 0..size(pairs) {
+        for j in 0..size(pairs) {
+            if i < j && added < 8 {
+                p = get(pairs, i);
+                q = get(pairs, j);
+                if p.ambiguous = false && q.ambiguous = false {
+                    lp = integerValue(left.context, p.left);
+                    lq = integerValue(left.context, q.left);
+                    rp = integerValue(right.context, p.right);
+                    rq = integerValue(right.context, q.right);
+                    if lp is IntegerLookup::Found && lq is IntegerLookup::Found && rp is IntegerLookup::Found && rq is IntegerLookup::Found {
+                        a = (lp as IntegerLookup::Found).value;
+                        b = (lq as IntegerLookup::Found).value;
+                        c = (rp as IntegerLookup::Found).value;
+                        d = (rq as IntegerLookup::Found).value;
+                        if a + b = c + d && a != c {
+                            total = constantTermWithValue(result.context, a + b);
+                            fresh = freshValue(result);
+                            if total is ValueLookup::Found && fresh is ValueLookup::Found {
+                                sumTerm = (fresh as ValueLookup::Found).term;
+                                apps = push(clone(result.context.applications), ApplicationTerm { id: sumTerm, function: -1, arguments: push(push([], p.joined), q.joined) });
+                                facts = push(clone(result.context.equalities), EqualityFact { left: sumTerm, right: (total as ValueLookup::Found).term });
+                                result = ExecutionState { context: ValidatorContext { applications: apps, equalities: facts, ..clone(result.context) }, ..clone(result) };
+                                added = added + 1;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return result;
+};
+
+fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &ExecutionState, right: &ExecutionState) -> ExecutionState {
+    result = clone(state);
+    leftCache = entailmentCache(left.context);
+    rightCache = entailmentCache(right.context);
+    for pairPosition in 0..size(pairs) {
+        pair = get(pairs, pairPosition);
+        mergedCandidates = [];
+        leftCandidates = [];
+        rightCandidates = [];
+        candidateValues = [];
+        for constantPosition in 0..size(result.context.constants) {
+            constant = get(result.context.constants, constantPosition);
+            if constant.kind = 0 {
+                lc = constantTermWithValue(left.context, constant.value);
+                rc = constantTermWithValue(right.context, constant.value);
+                if lc is ValueLookup::Found {
+                    if rc is ValueLookup::Found {
+                        if containsValue(mergedCandidates, constant.id) = false {
+                            mergedCandidates = push(mergedCandidates, constant.id);
+                            candidateValues = push(candidateValues, constant.value);
+                            leftCandidates = push(leftCandidates, (lc as ValueLookup::Found).term);
+                            rightCandidates = push(rightCandidates, (rc as ValueLookup::Found).term);
+                        };
+                    };
+                };
+            };
+        };
+        firstLocal = size(mergedCandidates);
+        for binding in result.locals.entries() {
+            if binding.value != pair.joined {
+                lc = lookupLocal(left.locals, binding.key);
+                rc = lookupLocal(right.locals, binding.key);
+                if lc is ValueLookup::Found {
+                    if rc is ValueLookup::Found {
+                        if containsValue(mergedCandidates, binding.value) = false {
+                            mergedCandidates = push(mergedCandidates, binding.value);
+                            leftCandidates = push(leftCandidates, (lc as ValueLookup::Found).term);
+                            rightCandidates = push(rightCandidates, (rc as ValueLookup::Found).term);
+                        };
+                    };
+                };
+            };
+        };
+        haveLower = false;
+        lowerValue = 0;
+        lowerTerm = 0;
+        haveUpper = false;
+        upperValue = 0;
+        upperTerm = 0;
+        for i in 0..size(mergedCandidates) {
+            candidate = get(mergedCandidates, i);
+            lc = intAt(leftCandidates, i, 0);
+            rc = intAt(rightCandidates, i, 0);
+            // (a bound both sides keep strictly against a local is kept strictly:
+            // r > n after r = n + 1 on one side and r = n + 2 on the other; a
+            // constant's own value says as much without the cost)
+            lowerLeft = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: lc, right: pair.left });
+            leftCache = lowerLeft.cache;
+            if lowerLeft.holds {
+                lowerRight = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: rc, right: pair.right });
+                rightCache = lowerRight.cache;
+                if lowerRight.holds {
+                    strict = false;
+                    if i >= firstLocal && entailsGoal(left.context, ValidatorGoal::Less { left: lc, right: pair.left }) {
+                        strict = entailsGoal(right.context, ValidatorGoal::Less { left: rc, right: pair.right });
+                    };
+                    if i < firstLocal {
+                        // (of the constants below both sides only the greatest is kept:
+                        // the others follow from it, and each would be a fact to carry)
+                        v = intAt(candidateValues, i, 0);
+                        if haveLower = false || v > lowerValue { haveLower = true; lowerValue = v; lowerTerm = candidate; };
+                    } else {
+                        if strict { result = addStrictOrderToState(result, candidate, pair.joined); } else { result = addOrderToState(result, candidate, pair.joined); };
+                    };
+                };
+            };
+            upperLeft = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: pair.left, right: lc });
+            leftCache = upperLeft.cache;
+            if upperLeft.holds {
+                upperRight = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: pair.right, right: rc });
+                rightCache = upperRight.cache;
+                if upperRight.holds {
+                    strict = false;
+                    if i >= firstLocal && entailsGoal(left.context, ValidatorGoal::Less { left: pair.left, right: lc }) {
+                        strict = entailsGoal(right.context, ValidatorGoal::Less { left: pair.right, right: rc });
+                    };
+                    if i < firstLocal {
+                        v = intAt(candidateValues, i, 0);
+                        if haveUpper = false || v < upperValue { haveUpper = true; upperValue = v; upperTerm = candidate; };
+                    } else {
+                        if strict { result = addStrictOrderToState(result, pair.joined, candidate); } else { result = addOrderToState(result, pair.joined, candidate); };
+                    };
+                };
+            };
+        };
+        if haveLower { result = addOrderToState(result, lowerTerm, pair.joined); };
+        if haveUpper { result = addOrderToState(result, pair.joined, upperTerm); };
+    };
+    for pPosition in 0..size(pairs) {
+        p = get(pairs, pPosition);
+        for qPosition in 0..size(pairs) {
+            q = get(pairs, qPosition);
+            if p.joined != q.joined {
+                a = integerValue(left.context, p.left);
+                b = integerValue(left.context, q.left);
+                c = integerValue(right.context, p.right);
+                d = integerValue(right.context, q.right);
+                if a is IntegerLookup::Found {
+                    if b is IntegerLookup::Found {
+                        if c is IntegerLookup::Found {
+                            if d is IntegerLookup::Found {
+                                av = (a as IntegerLookup::Found).value;
+                                bv = (b as IntegerLookup::Found).value;
+                                cv = (c as IntegerLookup::Found).value;
+                                dv = (d as IntegerLookup::Found).value;
+                                if av <= bv {
+                                    if cv <= dv { result = addOrderToState(result, p.joined, q.joined); };
+                                };
+                                if av < bv {
+                                    if cv < dv { result = addStrictOrderToState(result, p.joined, q.joined); };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return result;
+};
+
+fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
+    poolContext = unionContexts(left.context, right.context);
+    poolEqualities = clone(poolContext.equalities);
+    for binding in left.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
+    for binding in right.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
+    poolContext = ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) };
+    pool = ExecutionState { context: clone(poolContext), locals: HashMap::new(), templates: noTemplates() };
+    pairs = emptyMergePairs();
+    locals = emptyIntMap();
+    for binding in left.locals.entries() {
+        other = lookupLocal(right.locals, binding.key);
+        if other is ValueLookup::Found {
+            rightTerm = (other as ValueLookup::Found).term;
+            if binding.value >= 0 && binding.value = rightTerm {
+                locals = bindLocal(locals, binding.key, binding.value);
+            } else if binding.value = rightTerm && termInUse(fork, binding.value) {
+                // (a term the checker made before the branch, as size(digits)
+                // from a contract, is the same on both sides: it is kept as
+                // itself, and the joined state keeps what both sides know of
+                // it; the same number made separately on each side after the
+                // branch is two values, and is joined)
+                locals = bindLocal(locals, binding.key, binding.value);
+                known = false;
+                for pair in pairs { if pair.left = binding.value && pair.right = binding.value { known = true; }; };
+                if known = false { pairs = push(pairs, MergePair { left: binding.value, right: binding.value, joined: binding.value, ambiguous: false }); };
+            } else {
+                joined = 0;
+                found = false;
+                for pairPosition in 0..size(pairs) {
+                    pair = get(pairs, pairPosition);
+                    if pair.left = binding.value && pair.right = rightTerm {
+                        joined = pair.joined;
+                        found = true;
+                    };
+                };
+                if found = false {
+                    fresh = freshValue(pool);
+                    if fresh is ValueLookup::Found {
+                        joined = (fresh as ValueLookup::Found).term;
+                        pairs = push(pairs, MergePair { left: binding.value, right: rightTerm, joined: joined, ambiguous: binding.value < 0 && binding.value = rightTerm });
+                        poolEqualities = push(clone(poolEqualities), EqualityFact { left: joined, right: joined });
+                        pool = ExecutionState { context: ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) }, locals: HashMap::new(), templates: noTemplates() };
+                        found = true;
+                    } else { return StateMergeLookup::Missing; };
+                };
+                if found { locals = bindLocal(locals, binding.key, joined); };
+            };
+        };
+    };
+    leftContext = normalizedContext(left.context, pairs, true);
+    rightContext = normalizedContext(right.context, pairs, false);
+    // (a forall both paths assumed holds after the join: its values are locals,
+    // which the join gives the joined terms)
+    state = ExecutionState { context: commonContext(leftContext, rightContext), locals: locals, templates: commonTemplates(left.templates, right.templates) };
+    mergedConstants = clone(state.context.constants);
+    for factPosition in 0..size(leftContext.constants) {
+        fact = get(leftContext.constants, factPosition);
+        if fact.id >= 0 {
+            known = false;
+            for kept in mergedConstants { if kept.id = fact.id { known = true; }; };
+            if known = false { mergedConstants = push(mergedConstants, clone(fact)); };
+        };
+    };
+    for factPosition in 0..size(rightContext.constants) {
+        fact = get(rightContext.constants, factPosition);
+        if fact.id >= 0 {
+            known = false;
+            for kept in mergedConstants { if kept.id = fact.id { known = true; }; };
+            if known = false { mergedConstants = push(mergedConstants, clone(fact)); };
+        };
+    };
+    state = ExecutionState { context: ValidatorContext { constants: mergedConstants, ..state.context }, ..state };
+    joinPairs = emptyMergePairs();
+    for pairPosition in 0..size(pairs) {
+        pair = get(pairs, pairPosition);
+        if pair.joined != pair.left || pair.joined != pair.right { joinPairs = push(joinPairs, clone(pair)); };
+    };
+    for pairPosition in 0..size(joinPairs) {
+        pair = get(joinPairs, pairPosition);
+        loLeft = rangeBound(left.context, pair.left, true);
+        loRight = rangeBound(right.context, pair.right, true);
+        if loLeft is IntegerLookup::Found {
+            if loRight is IntegerLookup::Found {
+                lo = (loLeft as IntegerLookup::Found).value;
+                if (loRight as IntegerLookup::Found).value < lo { lo = (loRight as IntegerLookup::Found).value; };
+                state = addRangeBound(state, pair.joined, lo, true);
+            };
+        };
+        hiLeft = rangeBound(left.context, pair.left, false);
+        hiRight = rangeBound(right.context, pair.right, false);
+        if hiLeft is IntegerLookup::Found {
+            if hiRight is IntegerLookup::Found {
+                hi = (hiLeft as IntegerLookup::Found).value;
+                if (hiRight as IntegerLookup::Found).value > hi { hi = (hiRight as IntegerLookup::Found).value; };
+                state = addRangeBound(state, pair.joined, hi, false);
+            };
+        };
+    };
+    state = addJoinedBounds(state, joinPairs, left, right);
+    state = addJoinedSums(state, joinPairs, left, right);
+    return StateMergeLookup::Found { state: state };
+};
