@@ -1,0 +1,227 @@
+import data::codec::codec { printInt, printWord, printName, printNames, printInts, newLine, printType, wordOf };
+import mir::reader::reader { Field, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords };
+
+
+// Writing. A token is written with a space before it, and a record starts with its word without one. Every function gives the number of bytes it wrote.
+
+// A name in quotes: the bytes that are printable ASCII as they are, and the others, `"` and `\` as `\xHH`
+
+fn printConstant(c: &Constant) -> Int ~ {
+    n = 0;
+    match c {
+        Constant::CInt { n: v } => { n = " int".print() + printInt(v); },
+        Constant::CBool { b: b } => {
+            if b { n = " bool true".print(); } else { n = " bool false".print(); };
+        },
+        Constant::CList { items: items } => {
+            n = " list".print() + printInt(size(items));
+            i = 0;
+            while i < size(items) [{ affirm i >= 0; affirm i <= size(items); }] ~ {
+                n = n + printConstant(get(items, i));
+                i = i + 1;
+            };
+        },
+        Constant::CArray { items: items } => {
+            n = " array".print() + printInt(size(items));
+            i = 0;
+            while i < size(items) [{ affirm i >= 0; affirm i <= size(items); }] ~ {
+                n = n + printConstant(get(items, i));
+                i = i + 1;
+            };
+        },
+        Constant::CData { name: name, fields: fields, values: values } => {
+            n = " data".print() + printName(name) + printInt(size(fields));
+            i = 0;
+            while i < size(fields) && i < size(values) [{ affirm i >= 0; affirm i <= size(fields); affirm i <= size(values); }] ~ {
+                n = n + printName(get(fields, i)) + printConstant(get(values, i));
+                i = i + 1;
+            };
+        },
+        Constant::CFn { name: name } => { n = " fn".print() + printName(name); },
+    };
+    return n;
+};
+
+fn printOperand(o: &Operand) -> Int ~ {
+    return match o {
+        Operand::Copy { local: l } => " copy".print() + printInt(l),
+        Operand::Move { local: l } => " move".print() + printInt(l),
+        Operand::Const { value: c } => " const".print() + printConstant(c),
+    };
+};
+
+fn printOperands(os: &List<Operand>) -> Int ~ {
+    n = printInt(size(os));
+    i = 0;
+    while i < size(os) [{ affirm i >= 0; affirm i <= size(os); }] ~ {
+        n = n + printOperand(get(os, i));
+        i = i + 1;
+    };
+    return n;
+};
+
+fn printRefStep(step: &RefStep) -> Int ~ {
+    n = 0;
+    match step {
+        RefStep::Field { ctor: ctor, field: field } => { n = " field".print() + printName(ctor) + printName(field); },
+        RefStep::Index { o: o } => { n = " index".print() + printOperand(o); },
+    };
+    return n;
+};
+
+fn printRvalue(rv: &Rvalue) -> Int ~ {
+    n = 0;
+    match rv {
+        Rvalue::Use { o: o } => { n = " use".print() + printOperand(o); },
+        Rvalue::BinaryOp { op: op, a: a, b: b } => {
+            n = " binary".print() + printWord(wordOf(binaryWords(), op)) + printOperand(a) + printOperand(b);
+        },
+        Rvalue::ListOp { op: op, args: args } => {
+            n = " listop".print() + printWord(wordOf(listWords(), op)) + printOperands(args);
+        },
+        Rvalue::MakeList { items: items } => { n = " makelist".print() + printOperands(items); },
+        Rvalue::MakeBox { o: o } => { n = " makebox".print() + printOperand(o); },
+        Rvalue::Unbox { o: o } => { n = " unbox".print() + printOperand(o); },
+        Rvalue::Unsize { o: o } => { n = " unsize".print() + printOperand(o); },
+        Rvalue::MakeData { name: name, fields: fields, values: values } => {
+            n = " makedata".print() + printName(name) + printInt(size(fields));
+            i = 0;
+            while i < size(fields) && i < size(values) [{ affirm i >= 0; affirm i <= size(fields); affirm i <= size(values); }] ~ {
+                n = n + printName(get(fields, i)) + printOperand(get(values, i));
+                i = i + 1;
+            };
+        },
+        Rvalue::ReadField { o: o, name: name, field: field } => {
+            n = " readfield".print() + printOperand(o) + printName(name) + printName(field);
+        },
+        Rvalue::IsVariant { o: o, name: name } => { n = " isvariant".print() + printOperand(o) + printName(name); },
+        Rvalue::AsVariant { o: o, name: name } => { n = " asvariant".print() + printOperand(o) + printName(name); },
+        Rvalue::Copy { o: o } => { n = " clone".print() + printOperand(o); },
+        Rvalue::TakeField { local: l, name: name, field: field } => {
+            n = " takefield".print() + printInt(l) + printName(name) + printName(field);
+        },
+        Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => {
+            kw = " borrow";
+            if mutable { kw = " borrowmut"; };
+            n = kw.print() + printInt(root) + printInt(size(steps));
+            i = 0;
+            while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+                n = n + printRefStep(get(steps, i));
+                i = i + 1;
+            };
+        },
+        Rvalue::Deref { o: o } => { n = " deref".print() + printOperand(o); },
+    };
+    return n;
+};
+
+fn printStatement(st: &Statement) -> Int ~ {
+    n = 0;
+    match st {
+        Statement::Assign { local: l, rv: rv } => { n = "assign".print() + printInt(l) + printRvalue(rv); },
+        Statement::Peek { local: l, rv: rv } => { n = "peek".print() + printInt(l) + printRvalue(rv); },
+        Statement::Drop { local: l } => { n = "drop".print() + printInt(l); },
+        Statement::Ghost { id: id } => { n = "ghost".print(); if id >= 0 { n = n + printInt(id); }; },
+        Statement::Dissolve { local: l } => { n = "dissolve".print() + printInt(l); },
+        Statement::AssignRef { local: l, steps: steps, rv: rv } => {
+            n = "assignref".print() + printInt(l) + printInt(size(steps));
+            i = 0;
+            while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+                n = n + printRefStep(get(steps, i));
+                i = i + 1;
+            };
+            n = n + printRvalue(rv);
+        },
+    };
+    return n + newLine();
+};
+
+fn printTerminator(t: &Terminator) -> Int ~ {
+    n = 0;
+    match t {
+        Terminator::Goto { block: b } => { n = "goto".print() + printInt(b); },
+        Terminator::Switch { cond: c, yes: yes, no: no } => { n = "switch".print() + printOperand(c) + printInt(yes) + printInt(no); },
+        Terminator::Call { callee: callee, args: args, dest: dest, next: after } => {
+            n = "call".print() + printOperand(callee) + printOperands(args) + printInt(dest) + printInt(after);
+        },
+        Terminator::Return => { n = "return".print(); },
+        Terminator::Unreachable => { n = "unreachable".print(); },
+    };
+    return n + newLine();
+};
+
+fn printBlock(b: &MirBlock) -> Int ~ {
+    n = "block".print() + printInt(b.id) + newLine();
+    i = 0;
+    while i < size(b.stmts) [{ affirm i >= 0; affirm i <= size(b.stmts); }] ~ {
+        n = n + printStatement(get(b.stmts, i));
+        i = i + 1;
+    };
+    return n + printTerminator(b.term);
+};
+
+fn printLocal(d: &LocalDecl) -> Int ~ {
+    n = "local".print() + printInt(d.id);
+    if d.named { n = n + " some".print() + printName(d.name); } else { n = n + " none".print(); };
+    return n + printType(d.ty) + newLine();
+};
+
+fn printFunction(kind: &String, f: &Function) -> Int ~ {
+    n = kind.print() + printName(f.name) + " params".print() + printInts(f.params) + " returns".print();
+    if f.hasReturn { n = n + " some".print() + printType(f.returns); } else { n = n + " none".print(); };
+    n = n + " sizeparams".print() + printNames(f.sizeParams) + " typeparams".print() + printNames(f.typeParams) + " borrowed".print() + printInts(f.borrowed);
+    if size(f.mutBorrowed) + size(f.from) > 0 { n = n + " mutborrowed".print() + printInts(f.mutBorrowed) + " from".print() + printInts(f.from); };
+    n = n + newLine();
+    i = 0;
+    while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] ~ {
+        n = n + printLocal(get(f.locals, i));
+        i = i + 1;
+    };
+    j = 0;
+    while j < size(f.blocks) [{ affirm j >= 0; affirm j <= size(f.blocks); }] ~ {
+        n = n + printBlock(get(f.blocks, j));
+        j = j + 1;
+    };
+    return n + "end".print() + newLine();
+};
+
+fn printFields(fields: &List<Field>) -> Int ~ {
+    n = printInt(size(fields));
+    for f in fields {
+        n = n + printName(f.name) + printType(f.ty);
+    };
+    return n;
+};
+
+fn printDecl(d: &TypeDecl) -> Int ~ {
+    n = 0;
+    match d {
+        TypeDecl::DStruct { name: name, fields: fields } => { n = "struct".print() + printName(name) + printFields(fields); },
+        TypeDecl::DEnum { name: name, variants: variants } => {
+            n = "enum".print() + printName(name) + printInt(size(variants));
+            for v in variants {
+                n = n + printName(v.name) + printFields(v.fields);
+            };
+        },
+    };
+    return n + newLine();
+};
+
+fn printProgram(p: &Program) -> Int ~ {
+    return printProgramVersion(p, "tersus-mir 1");
+};
+
+fn printProgramWithGhosts(p: &Program) -> Int ~ {
+    return printProgramVersion(p, "tersus-mir 2");
+};
+
+fn printProgramVersion(p: &Program, header: &String) -> Int ~ {
+    n = header.print() + newLine();
+    for d in p.types {
+        n = n + printDecl(d);
+    };
+    for f in p.functions {
+        n = n + printFunction("function", f);
+    };
+    return n + printFunction("main", p.entry);
+};

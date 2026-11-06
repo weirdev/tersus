@@ -53,7 +53,6 @@ import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
 import Native (availableProcessors, cacheDirectory, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresentWithArtifacts, parallelBuilds, readProcessOutput, runCommandWithInputFull, runExecutable, runWithInputFull, spawnShared, stopOwnedProcess, validSignalTarget, withSpawnedProcess)
 import MirData (forNative, writeProgram)
-import MirOwnership (insertOwnership)
 import TestHarness
 import Types (Type (..))
 import Utils
@@ -904,7 +903,7 @@ preparedAliasIntegrity = withCacheHome $ \home -> do
 proofCertificateNamespace :: IO TestResult
 proofCertificateNamespace = do
     let program post = Compile.lowerSource True ("fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return " ++ post ++ " 0; }] { return n; }; return f(3);")
-        owned raw = mapResult (writeProgram . insertOwnership) (MirHousekeeping.nativeProgram raw)
+        owned raw = mapResult writeProgram (MirHousekeeping.nativeProgram raw `bindResult` MirHousekeeping.insertOwnership)
     case (program ">", program "<") of
         (Ok good, Ok bad) -> case (owned good, owned bad, ValidatorNative.prepareTexts False good, ValidatorNative.prepareTexts False bad) of
             (Ok a, Ok b, Ok proofA, Ok proofB) -> withCacheHome $ \home -> do

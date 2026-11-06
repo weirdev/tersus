@@ -23,6 +23,13 @@ extra-source-files:
 - examples/mir/emit/functions.tersus
 - examples/mir/emit/helpers.tersus
 - examples/mir/mir_reader/mir_reader.tersus
+- examples/mir/writer/writer.tersus
+- examples/mir/ownership/ownership.tersus
+- examples/mir/ownership/common.tersus
+- examples/mir/ownership/analysis.tersus
+- examples/mir/ownership/rewrite.tersus
+- examples/mir/ownership/refwrites.tersus
+- examples/mir/ownership/drops.tersus
 - examples/data/package.tersus
 - examples/data/codec/codec.tersus
 - examples/data/ast/ast.tersus
@@ -144,6 +151,19 @@ executables:
     - binary >= 0.8.8 && < 0.9
     - bytestring >= 0.10.12 && < 0.13
     - deepseq >= 1.4.4 && < 1.6
+
+  emitter-seed:
+    main:                Main.hs
+    source-dirs:
+    - dev/emitter-seed
+    - test
+    other-modules:
+    - TestOwnershipOracle
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    dependencies:
+    - tersus
 
 tests:
   tersus-test:

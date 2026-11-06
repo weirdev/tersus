@@ -2,10 +2,12 @@
 
 module TestMirEmit (testMirEmit, testMirEmitPrograms) where
 
+import Control.Concurrent.MVar (MVar, newMVar)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
+import System.IO.Unsafe (unsafePerformIO)
 
 import Bootstrap (compilerSnapshotHash, llvmOfOwned)
 import Hash (fingerprint)
@@ -16,14 +18,14 @@ import qualified TersusParser
 
 import Cli (World (..), noWorld, runProgramIn)
 import Compile (lowerSource)
-import MirOwnership (insertOwnership)
+import MirHousekeeping (insertOwnership)
 import qualified MirEval as Eval
 import Types (Type (..), pattern TList, pattern TBox)
 import Mir
 import MirData (readProgram, writeProgram)
 import TestHarness
-import TestMirReader (withProgram)
-import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
+import TestMirReader (programExecutable)
+import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
 -- The lowering to LLVM IR written in Tersus (examples/mir/emit/emit.tersus, step 31 of the roadmap and STEP31.md) is the compiler's emitter. It is given the MIR as data,
@@ -60,13 +62,15 @@ sharedReader :: IO TestResult
 sharedReader = do
     codec <- readFile "examples/data/codec/codec.tersus"
     reader <- readFile "examples/mir/reader/reader.tersus"
-    programs <- mapM readFile ["examples/mir/mir_reader/mir_reader.tersus", "examples/mir/emit/emit.tersus", "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus"]
+    writer <- readFile "examples/mir/writer/writer.tersus"
+    programs <- mapM readFile ["examples/mir/mir_reader/mir_reader.tersus", "examples/mir/emit/emit.tersus", "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus", "examples/mir/ownership/ownership.tersus"]
     pure $
         if "struct Token" `isInfixOf` codec
             && "struct Field" `isInfixOf` reader
-            && all ("import data::codec::codec" `isInfixOf`) (reader : programs)
+            && "import data::codec::codec" `isInfixOf` reader
+            && "import data::codec::codec" `isInfixOf` writer
             && all ("import mir::reader::reader" `isInfixOf`) programs
-            && not (any ("struct Token" `isInfixOf`) (reader : programs))
+            && not (any ("struct Token" `isInfixOf`) (reader : writer : programs))
             then Nothing
             else Just "a MIR program does not use the shared reader and codec, or contains its own Token declaration"
 
@@ -80,12 +84,34 @@ runEmitter world compiled = case compiled of
     Error e -> Error e
     Ok program -> runProgramIn world program
 
+-- The emitter linked and owned, made once in a process for the cases that look at its owned MIR
+{-# NOINLINE ownedEmitter #-}
+ownedEmitter :: Result Program String
+ownedEmitter = unsafePerformIO (linkedFromFile "examples/mir/emit/emit.tersus") `bindResult` insertOwnership
+
+-- The emitter executable (TestMirReader.programExecutable, kept on disk for the run), looked up once in a process: the
+-- cases of a sweep would otherwise each hash its package again (TestHarness.memoizedTestExecutable keeps no failed build
+-- and rebuilds an executable that is gone)
+{-# NOINLINE emitterExecutable #-}
+emitterExecutable :: MVar (Maybe FilePath)
+emitterExecutable = unsafePerformIO (newMVar Nothing)
+
+withEmitter :: (FilePath -> IO TestResult) -> IO TestResult
+withEmitter use = do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else do
+            built <- memoizedTestExecutable emitterExecutable (programExecutable "examples/mir/emit/emit.tersus" "emit")
+            case built of
+                Error e -> pure (Just e)
+                Ok exe -> use exe
+
 borrowedTypeTable :: IO TestResult
 borrowedTypeTable = do
-    loaded <- linkedFromFile "examples/mir/emit/emit.tersus"
-    pure $ case loaded of
+    pure $ case ownedEmitter of
         Error e -> Just e
-        Ok program -> case Map.lookup "fieldOffset" (progFunctions (insertOwnership program)) of
+        Ok program -> case Map.lookup "fieldOffset" (progFunctions program) of
             Nothing -> Just "the emitter has no fieldOffset function"
             Just fn ->
                 let table = TList (TNamed "mir$reader$reader$TypeDecl" [])
@@ -94,12 +120,10 @@ borrowedTypeTable = do
 
 threadedGen :: IO TestResult
 threadedGen = do
-    loaded <- linkedFromFile "examples/mir/emit/emit.tersus"
-    pure $ case loaded of
+    pure $ case ownedEmitter of
         Error e -> Just e
-        Ok program ->
-            let owned = insertOwnership program
-                functions = [fn | (name, fn) <- Map.toList (progFunctions owned), fnReturns fn == Just (TNamed "Gen" []), name `notElem` ["<Gen as Clone>::clone", "Clone for Gen::clone"]]
+        Ok owned ->
+            let functions = [fn | (name, fn) <- Map.toList (progFunctions owned), fnReturns fn == Just (TNamed "Gen" []), name `notElem` ["<Gen as Clone>::clone", "Clone for Gen::clone"]]
                 snapshots = [fnName fn | fn <- functions, block <- Map.elems (fnBlocks fn), Call (Const (CFn "<Gen as Clone>::clone")) _ _ _ <- [blockTerminator block]]
                 copies = [fnName fn | fn <- functions, block <- Map.elems (fnBlocks fn), Assign dest CopyOf{} <- blockStatements block, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == TNamed "Gen" []]
              in if null functions then Just "the emitter has no Gen operations" else
@@ -162,7 +186,7 @@ emitModeSubset :: [String]
 emitModeSubset = ["examples/arithmetic.tersus", "examples/loops.tersus", "expression"]
 
 nativeCheck :: String -> String -> IO TestResult
-nativeCheck name source = withProgram "examples/mir/emit/emit.tersus" "emit" $ \exe -> do
+nativeCheck name source = withEmitter $ \exe -> do
     bad <- check exe (name, source)
     pure $ case bad of
         [] -> Nothing
@@ -201,7 +225,7 @@ nativeCheck name source = withProgram "examples/mir/emit/emit.tersus" "emit" $ \
                 pure (modeProblems ++ roundTrip ++ [name ++ ": default and explicit ir differ" | everything /= explicit])
 
 outlineDispatch :: IO TestResult
-outlineDispatch = withProgram "examples/mir/emit/emit.tersus" "emit" $ \exe -> do
+outlineDispatch = withEmitter $ \exe -> do
     files <- Modules.snapshotFromFilesystem path
     loaded <- ownedFromFiles path files
     input <- mirDataOf "fn double(n: Int) -> Int { return n + n; }; return double(3);"
@@ -261,7 +285,7 @@ firstFailure results = case [message | Just message <- results] of
     [] -> Nothing
 
 refusal :: IO TestResult
-refusal = withProgram "examples/mir/emit/emit.tersus" "emit" $ \exe -> do
+refusal = withEmitter $ \exe -> do
     owned <- ownedOnce "return 1;"
     case owned of
         Error e -> pure (Just e)

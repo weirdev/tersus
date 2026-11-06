@@ -10,11 +10,10 @@ import Cli (World (..), noWorld, runProgramIn)
 import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
-import MirHousekeeping (verifyProgram, toolProgram)
-import MirOwnership (insertOwnership)
+import MirHousekeeping (insertOwnership, verifyProgram, toolProgram)
 import MirLower (lowerProgram)
 import TestParserFragments (parseStatementBlock)
-import Pipeline (nativeProgram)
+import Pipeline (compileSource, nativeProgram)
 import MirHousekeeping (storageProgram)
 import Types (Type (..), pattern TList, pattern TBox)
 import TestHarness
@@ -60,6 +59,19 @@ testMirVerify =
             [TestCase name (rawInterpreted expected input) | (name, input, expected) <- callCases]
         , TestList "local IDs, interpreted"
             [TestCase name (localExact input expected errors) | (name, input, expected, errors) <- localCases]
+        , TestList "a lent parameter given on bare is refused"
+            [ testCase name (case compileSource source of
+                Error e | "Lowering produced a malformed program" `isInfixOf` e && "is not &mut" `isInfixOf` e -> Nothing
+                Error e -> Just ("refused for another reason: " ++ e)
+                Ok _ -> Just "accepted: a parameter lent to a function is given on only through an explicit reborrow")
+            | (name, source) <-
+                [ ("to an update parameter", "fn g(r: &mut List<Int>) -> Int writes(r) { *r = push(clone(*r), 1); return 0; }; fn f(r: &mut List<Int>) -> Int writes(r) { return g(r); }; xs = [7]; f(&mut xs); return size(xs);")
+                , ("to two update parameters", "fn g2(a: &mut List<Int>, b: &mut List<Int>) -> Int writes(a, b) { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g2(r, r); }; xs = [7]; return f(&mut xs);")
+                , ("to an update and a read parameter", "fn g3(a: &mut List<Int>, b: &List<Int>) -> Int writes(a) { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g3(r, r); }; xs = [7]; return f(&mut xs);")
+                , ("beside a read reborrow of it", "fn g3(a: &mut List<Int>, b: &List<Int>) -> Int writes(a) { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g3(r, &*r); }; xs = [7]; return f(&mut xs);")
+                , ("to a callee whose contract would then be false", "fn g2(a: &mut List<Int>, b: &mut List<Int>) -> Int writes(a, b) [{ }] [{ affirm size(*a) = old(size(*a)) + 1; affirm size(*b) = old(size(*b)); }] { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g2(r, r); }; xs = [7]; return f(&mut xs);")
+                ]
+            ]
         , TestCase "local IDs, natively" localNative
         , TestCase "pre-erasure and function-list cases, natively" rawNative
         , TestParallel
@@ -77,11 +89,10 @@ testMirVerifyPrograms =
 
 contextMapsBorrowed :: IO TestResult
 contextMapsBorrowed =
-    pure $ case toolProgram "examples/mir/mir_verify/mir_verify.tersus" of
+    pure $ case toolProgram "examples/mir/mir_verify/mir_verify.tersus" `bindResult` insertOwnership of
         Error e -> Just e
-        Ok program ->
-            let owned = insertOwnership program
-                large ty = case ty of
+        Ok owned ->
+            let large ty = case ty of
                     TNamed name _ -> name `elem` ["HashMap", "FunctionIndex", "mir$reader$reader$Function"]
                     _ -> False
                 check name = case Map.lookup name (progFunctions owned) of
@@ -99,11 +110,10 @@ contextMapsBorrowed =
 borrowedLookups :: IO TestResult
 borrowedLookups = do
     loaded <- linkedFromFile "examples/mir/mir_verify/mir_verify.tersus"
-    pure $ case loaded of
+    pure $ case loaded `bindResult` \program -> mapResult ((,) program) (insertOwnership program) of
         Error e -> Just e
-        Ok program ->
-            let owned = insertOwnership program
-                check (name, owner, field, tableType, elementType) = case Map.lookup name (progFunctions owned) of
+        Ok (program, owned) ->
+            let check (name, owner, field, tableType, elementType) = case Map.lookup name (progFunctions owned) of
                     Nothing -> Just ("the verifier has no " ++ name ++ " function")
                     Just fn ->
                         let copied = [dest | block <- Map.elems (fnBlocks fn), Assign dest (ReadField _ actualOwner actualField) <- blockStatements block, actualOwner == owner, actualField == field, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == tableType]
@@ -267,6 +277,8 @@ callCases =
         , ("mutable reference returned through parameter", "fn f(x: &mut Int) -> &mut Int from x { return &mut *x; }; a = 1; r = f(&mut a); *r = 9; return a;")
         , ("mutable result read after write", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return *r;")
         , ("native update parameter", "fn inc(x: &mut Int) -> Int { *x = *x + 1; return *x; }; a = 41; inc(&mut a); return a;")
+        , ("an update parameter is reborrowed for an update parameter", "fn g(r: &mut List<Int>) -> Int writes(r) { *r = push(clone(*r), 1); return 0; }; fn f(r: &mut List<Int>) -> Int writes(r) { return g(&mut *r); }; xs = [7]; f(&mut xs); return size(xs);")
+        , ("an update parameter is reborrowed for a read parameter", "fn g(r: &List<Int>) -> Int { return size(*r); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g(&*r); }; xs = [7]; return f(&mut xs);")
         , ("generic Block cast reaches erasure", "fn f<T>(p: Addr<T>, ghost b: Block<T>) -> Int [{ affirm base(b) = p; affirm whole(b); affirm cap(b) >= 1; affirm count(b) = 0; }] [{ }] { c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, 7, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c); }; (p, b) = Addr::alloc(1); return f(p, b);")
         ]
     negatives =
@@ -367,7 +379,7 @@ functionCases =
         Nothing -> Error ("no function program named " ++ name)
         Just source -> case parseStatementBlock source of
             Left e -> Error (show e)
-            Right stmts -> mapResult (writeProgram . insertOwnership) (lowerProgram stmts `bindResult` nativeProgram)
+            Right stmts -> mapResult writeProgram (lowerProgram stmts `bindResult` nativeProgram `bindResult` insertOwnership)
     ordinary = ("fn(Int) -> Int", "fn 1 int int")
     borrowedArg = ("fn(&List<Int>) -> Int", "fn 1 ref list int int")
     namedArg = ("fn(Integer) -> Int", "fn 1 named \"Integer\" 0 int")

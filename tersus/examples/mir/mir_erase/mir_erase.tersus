@@ -202,7 +202,7 @@ fn printStatement(st: &Statement) -> Int ~ {
         Statement::Assign { local: l, rv: rv } => { n = "assign".print() + printInt(l) + printRvalue(rv); },
         Statement::Peek { local: l, rv: rv } => { n = "peek".print() + printInt(l) + printRvalue(rv); },
         Statement::Drop { local: l } => { n = "drop".print() + printInt(l); },
-        Statement::Ghost => { n = "ghost".print(); },
+        Statement::Ghost { id: id } => { n = "ghost".print(); if id >= 0 { n = n + printInt(id); }; },
         Statement::Dissolve { local: l } => { n = "dissolve".print() + printInt(l); },
         Statement::AssignRef { local: root, steps: steps, rv: rv } => { n = "assignref".print() + printInt(root) + printRefSteps(steps) + printRvalue(rv); },
     };
@@ -740,7 +740,7 @@ fn eraseStatement(locals: &HashMap<Int, LocalInfo>, st: &Statement) -> List<Stat
         Statement::Peek { local: l, rv: rv } => { out = push(out, clone(st)); },
         Statement::Drop { local: l } => { out = push(out, clone(st)); },
         Statement::AssignRef { local: root, steps: steps, rv: rv } => { out = push(out, clone(st)); },
-        Statement::Ghost => { },
+        Statement::Ghost { id: id } => { },
         Statement::Dissolve { local: l } => {
             if !isGhostLocal(locals, l) {
                 out = push(out, Statement::Peek { local: l, rv: Rvalue::ListOp { op: 35, args: [] } });
@@ -1103,7 +1103,7 @@ fn plainFunction(f: &Function) -> Function ~ {
                 Statement::Peek { local: l, rv: rv } => { ns = Statement::Peek { local: l, rv: plainRvalue(rv) }; },
                 Statement::AssignRef { local: root, steps: steps, rv: rv } => { ns = Statement::AssignRef { local: root, steps: plainRefSteps(steps), rv: plainRvalue(rv) }; },
                 Statement::Drop { local: l } => { },
-                Statement::Ghost => { },
+                Statement::Ghost { id: id } => { },
                 Statement::Dissolve { local: l } => { },
             };
             stmts = push(stmts, ns);

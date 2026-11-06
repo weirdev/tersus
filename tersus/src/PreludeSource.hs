@@ -168,6 +168,13 @@ mirPackageFiles = dataPackageFiles ++
                 , "examples/mir/emit/functions.tersus"
                 , "examples/mir/emit/helpers.tersus"
                 , "examples/mir/mir_reader/mir_reader.tersus"
+                , "examples/mir/writer/writer.tersus"
+                , "examples/mir/ownership/ownership.tersus"
+                , "examples/mir/ownership/common.tersus"
+                , "examples/mir/ownership/analysis.tersus"
+                , "examples/mir/ownership/rewrite.tersus"
+                , "examples/mir/ownership/refwrites.tersus"
+                , "examples/mir/ownership/drops.tersus"
                 , "examples/mir/mir_verify/mir_verify.tersus"
                 , "examples/mir/mir_erase/mir_erase.tersus"
                 ]

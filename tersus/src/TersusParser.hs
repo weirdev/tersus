@@ -30,8 +30,7 @@ import qualified ParserSeed
 import SourceParse (SourceParts, parseSourcePartsWith, parseWithEqualityWith)
 import Mir (Program)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
-import MirHousekeeping (cachedParser, nativeProgram, parserKey, parserIr, toolProgram)
-import MirOwnership (insertOwnership)
+import MirHousekeeping (cachedParser, insertOwnership, nativeProgram, parserKey, parserIr, toolProgram)
 import Native (runWithInputFull)
 import Seed (cachedParserSeed)
 import Syntax (Statement)
@@ -205,7 +204,7 @@ validatedParserProgram = toolProgram "examples/parser/parser.tersus"
 
 ownedParserProgram :: Result Program String
 ownedParserProgram = validatedParserProgram `bindResult` \program ->
-    mapResult insertOwnership (nativeProgram program)
+    nativeProgram program `bindResult` insertOwnership
 
 runInterpreted :: Program -> String -> Result (String, String, Maybe MirValue) String
 runInterpreted program input = case runProgramEnv RunEnv{envArgs = [], envInput = input, envFile = const Nothing} program of

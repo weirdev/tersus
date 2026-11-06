@@ -121,6 +121,8 @@ instantiate fn tys sizes =
         , fnSizeParams = []
         , fnTypeParams = []
         , fnBorrowed = [l | l <- fnBorrowed fn, l `notElem` sizeLocals]
+        , fnMutBorrowed = [l | l <- fnMutBorrowed fn, l `notElem` sizeLocals]
+        , fnFrom = [l | l <- fnFrom fn, l `notElem` sizeLocals]
         , fnSpec = spec (fnSpec fn)
         }
   where
@@ -143,6 +145,7 @@ instantiate fn tys sizes =
             TBlock u -> namedSubs u
             TUninit u -> namedSubs u
             TRef u -> namedSubs u
+            TMutRef u -> namedSubs u
             TFn as r -> concatMap namedSubs (r : as)
             TForall _ _ u -> namedSubs u
             _ -> []
@@ -161,6 +164,7 @@ instantiate fn tys sizes =
     statement s = case s of
         Assign l rv -> Assign l (rvalue rv)
         Peek l rv -> Peek l (rvalue rv)
+        AssignRef root steps rv -> AssignRef root (map refStep steps) (rvalue rv)
         Ghost e g -> Ghost (env e) g
         Drop _ -> s
     terminator t = case t of
@@ -180,12 +184,11 @@ instantiate fn tys sizes =
         IsVariant o name -> IsVariant (operand o) (named name)
         AsVariant o name -> AsVariant (operand o) (named name)
         CopyOf o -> CopyOf (operand o)
-        Borrow root steps mutable -> Borrow root (map step steps) mutable
+        Borrow root steps mutable -> Borrow root (map refStep steps) mutable
         Deref o -> Deref (operand o)
         TakeField l name field -> TakeField l (named name) field
-      where
-        step (RefField n f) = RefField (named n) f
-        step (RefIndex o) = RefIndex (operand o)
+    refStep (RefField n f) = RefField (named n) f
+    refStep (RefIndex o) = RefIndex (operand o)
     spec s = s{specEnv = env (specEnv s), specLoops = Map.map (\l -> l{loopEnv = env (loopEnv l)}) (specLoops s)}
 
 -- The function with each call of a function with size parameters made a call of the copy for its sizes, and the copies that need
@@ -268,6 +271,7 @@ namedTypesByName program = Map.fromList [(instanceName b a, TNamed b a) | ty <- 
         TBlock u -> subs u
         TUninit u -> subs u
         TRef u -> subs u
+        TMutRef u -> subs u
         TFn as r -> concatMap subs (r : as)
         TForall _ _ u -> subs u
         _ -> []

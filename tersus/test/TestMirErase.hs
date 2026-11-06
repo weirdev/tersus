@@ -7,8 +7,7 @@ import Cli (World (..), noWorld, runProgramIn)
 import qualified Data.Map.Strict as Map
 import Mir (BasicBlock (..), Function (..), Program (..), Statement (..), Rvalue (..), LocalDecl (..), ListOp (..))
 import MirData (writeProgram, writeProgramWithGhosts)
-import MirHousekeeping (eraseGhosts, toolProgram)
-import MirOwnership (insertOwnership)
+import MirHousekeeping (eraseGhosts, toolOwnedProgram, toolProgram)
 import Types (Type (..))
 import Pipeline (validatedSource)
 import TestHarness
@@ -238,11 +237,10 @@ entryGhostsKept = pure $ case validatedSource "assume 1 = 1; return 1;" of
 -- Metadata construction must not reintroduce a whole LocalDecl/Type clone through a projection.
 metadataBorrows :: IO TestResult
 metadataBorrows =
-    pure $ case toolProgram "examples/mir/mir_erase/mir_erase.tersus" of
+    pure $ case toolOwnedProgram "examples/mir/mir_erase/mir_erase.tersus" of
         Error e -> Just e
-        Ok program ->
-            let owned = insertOwnership program
-                large ty = case ty of
+        Ok owned ->
+            let large ty = case ty of
                     TNamed name _ -> name `elem` ["HashMap", "mir$reader$reader$Function", "mir$reader$reader$LocalDecl", "data$codec$codec$Type"]
                     _ -> False
                 check name = case Map.lookup name (progFunctions owned) of

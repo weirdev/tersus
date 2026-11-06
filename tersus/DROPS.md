@@ -8,6 +8,20 @@
 
 This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: `MirOwnership` (who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the emitter (`examples/mir/emit/emit.tersus`), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built, except what came first and changed the plan: copies are explicit (`clone`, `impl Clone for T { };`, `impl Copy for T { };`), statements carry their line (`Mark`, `GhostPosition`), and `MirMoves` finds a use of a moved value, see LANGUAGE.md, Moves, Clone And Copy.
 
+**Ownership implementation (2026-11-05).** `examples/mir/ownership/`
+now performs reference-write expansion, liveness/loan analysis, move/copy/peek
+rewriting and drop elaboration. `MirHousekeeping` is the Result-returning host;
+`MirOwnership` retains only operand-role classification for the move checker. The
+heap model uses the frozen Haskell oracle's drop classification. The
+native monomorphization adapter remains Haskell. The frozen old transform is
+`test/TestOwnershipOracle.hs`, not a production or bootstrap fallback. This
+changes where ownership is implemented, not the drop signature or runtime ABI.
+Ownership counts consuming reference writes when tracking moves and cleanup,
+and emits an explicit drop of the old owned referent before storing its
+replacement. Mutable parameters do not qualify as permanently stable
+read-only sources. The heap-model regressions cover stored owners and views
+used after replacement.
+
 ## Where things stand
 
 - Ownership is implicit and structural. `needsDrop` says a type owns something to free (a list, a `Box`, or a struct, enum or array that holds one). `insertOwnership` turns every use into a `Move` or a `Clone` and puts a `Drop` for every owned local at each `Return`. `tersus_drop` frees by walking the descriptor. A moved-from slot holds cleared words, and dropping that does nothing.

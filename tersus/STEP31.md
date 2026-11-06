@@ -1,8 +1,9 @@
 # Step 31: the lowering from the MIR to LLVM IR written in Tersus
 
-The plan for step 31 of the roadmap in `README.md`. The aim is `LlvmEmit` (`src/LlvmEmit.hs`) written in Tersus, as the first
-part of the compiler that compiles itself. The front end (parser, checker, validator, lowering, ownership, monomorphization)
-stays in Haskell.
+The original plan for step 31 of the roadmap in `README.md` replaced
+`LlvmEmit.hs` with a Tersus emitter. Parsing, validation and ownership have
+since moved to Tersus too; `REPLACING_HASKELL.md` tracks the remaining work.
+The measurements and slices below describe the original emitter rewrite.
 
 ## Current source layout
 
@@ -19,8 +20,52 @@ and `values/helpers -> types`. This graph has no cross-file call cycle;
 self-recursive routines stay with their helpers. All files remain one build unit
 so emitter names stay bare and the single foreign `String.then` stays module-local.
 The codec, reader and phase-neutral support remain separate ordinary dependencies.
-The entry path, output order, modes, ownership behavior and bootstrap protocol
-are unchanged. The historical slices below describe the original implementation.
+The emitter imports the ownership dispatcher in `examples/mir/ownership/`.
+MIR v1 input still produces LLVM IR; `pass expand` or `pass ownership` followed
+by MIR v2 produces the transformed MIR v2. The emitter seed includes this
+dispatcher so ownership also runs natively during cold builds. The historical
+slices below describe the original implementation.
+
+## Bootstrap and seed regeneration
+
+The pinned seed is a release asset selected by `bootstrap/emitter.sha256`.
+Stage 0 runs the ownership passes on every program the host builds for itself
+(the emitter, checker, eraser, parser and validator) and emits the emitter to
+build stage 1. Stage 1 emits the other tools and runs the passes on user
+programs. The fixpoint below makes the two stages own alike.
+The Haskell `MirMono` adapter still specializes programs between list lowering
+and ownership. `MirOwnershipData` retains metadata outside runtime serialization.
+
+`TestBootstrap` compares stage-0-owned and stage-1-owned emitter MIR produced
+independently from the same raw source. It then compares both stages' emitted
+LLVM and checks that the resulting digest matches the pin. Comparing two
+emitters over one already-owned program alone would miss ownership divergence.
+
+From `tersus/`, regenerate into a new temporary file:
+
+```sh
+stack run emitter-seed -- emit /tmp/emitter-l1.ll
+```
+
+`emit` requires stage 0 and stage 1 to own the emitter alike, so it cannot
+cross a change in what ownership writes. For that, first run
+`stack run emitter-seed -- advance /tmp/emitter-candidate.ll` with the current
+pin: stage 1 owns and emits the emitter. Then pin the candidate and run `emit`
+from it; the result is the seed only if it equals the candidate byte for byte.
+
+Only the initial migration from a seed that predates ownership needs
+`stack run emitter-seed -- oracle <old-stage0-executable> /tmp/emitter-prototype.ll`.
+That development executable links the frozen Haskell test oracle explicitly;
+the production host never calls it. The prototype must be followed by the
+production `emit` command, not published as the final seed.
+
+For a new candidate, put its digest in `bootstrap/emitter.sha256`, rebuild the
+host, and set `TERSUS_SEED_FILE` to its verified local bytes. Emit to another
+temporary file and require `cmp` to succeed against the candidate. Do not write
+over a seed file that the running compiler is using. Run `stack test` and
+`testBootstrap`, then upload the matching `emitter.ll` release asset tagged
+`bootstrap-<first 12 digits of the digest>` with the pin committed alongside it.
+The parser override remains `TERSUS_PARSER_SEED_FILE` with its independent pin.
 
 ## What gets rewritten
 

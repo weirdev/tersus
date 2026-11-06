@@ -84,7 +84,10 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   reader, the MIR checker and the ghost erasure written in Tersus. The host
   runs the checker and the erasure on the MIR as data (`MirHousekeeping`);
   they are the production path, and the examples' expectations in
-  `test/TestPipeline.hs` say what running them with no input does. The emitter's
+  `test/TestPipeline.hs` say what running them with no input does.
+  `examples/mir/ownership/` holds the ownership and reference-write passes;
+  the emitter's executable runs them when its input starts with
+  `pass ownership` or `pass expand`. The emitter's
   declaration-only `types.tersus`, `values.tersus`, `operations.tersus`,
   `functions.tersus` and `helpers.tersus` files are siblings of `emit.tersus`
   in one `mir::emit` module; only `emit.tersus` runs. All six are embedded by
@@ -138,13 +141,16 @@ Work from `tersus/`.
 - If a change alters what the emitter in Tersus produces (a change to
   `examples/mir/emit/emit.tersus` or to what it is built from), regenerate the seed
   into a temporary file only when that succeeds:
-  `stack run tersus-exe -- llvm examples/mir/emit/emit.tersus > emitter.ll.new`,
-  then `sha256sum emitter.ll.new`, upload it as the `emitter.ll` asset of a
+  `stack run emitter-seed -- emit /tmp/emitter.ll.new` (it checks that stage 0
+  and stage 1 own and emit the emitter alike; after a change to what the
+  ownership passes in `examples/mir/ownership/` write, run
+  `stack run emitter-seed -- advance` first, pin its output, and `emit` from it,
+  which must give the same bytes; `STEP31.md`),
+  then `sha256sum /tmp/emitter.ll.new`, upload it as the `emitter.ll` asset of a
   new GitHub release tagged `bootstrap-<first 12 digits of that digest>`,
   put the digest in `bootstrap/emitter.sha256`, and let `TestBootstrap`
-  check the stage 0 / stage 1 fixpoint. Do not redirect straight into a seed
-  file the running compiler is using: the shell truncates it before the
-  compiler runs.
+  check the stage 0 / stage 1 fixpoint. Do not write straight into a seed
+  file the running compiler is using.
 - Production parsing uses native P1. Bootstrap readers (`StdLibDefs`,
   `LibParsed`, `Compile`, default `Modules`) use the pinned native P0 leaf;
   there is no Haskell grammar or fallback. Building Haskell needs no clang

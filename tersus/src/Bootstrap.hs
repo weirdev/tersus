@@ -15,7 +15,7 @@ module Bootstrap
 import qualified Mir as M
 import MirData (writeProgram)
 import Native (buildExecutable, runWithInput)
-import MirHousekeeping (emitterOwnedProgram)
+import MirHousekeeping (emitterEntry, ownedToolWith)
 import Pipeline (ownedSource)
 import Seed (cachedSeed, compilerSnapshotHash, seedHash, seedSha256, seedUrl, stageZero)
 import ValidatorNative (cachedBootstrapEmitter)
@@ -39,15 +39,17 @@ import Utils
 --   When a change breaks the data the seed reads (the MirData format or native struct names), that command cannot run until there is a seed that reads it: build the emitter as it is now with stage 0 fed the emitter's data in the format and native struct names the seed reads, which gives an emitter that reads the new data, and make the seed with it (`<that emitter>`, fed the new data by hand, in place of `tersus llvm`); upload the result as the asset of a new release as above and put its digest in bootstrap/emitter.sha256. The result is a seed only when it writes the same IR for the emitter again.
 -- Both are built when they are first needed and kept in the cache directory of the user, so that building this package needs no clang and no network.
 
--- Stage 1: the emitter as it is now, built at the path from the IR that the emitter at the first path writes for it
+-- Stage 1: the emitter as it is now, owned and built at the path by the emitter at the first path
 stageOne :: FilePath -> FilePath -> IO (Result () String)
-stageOne compiler output = case emitterOwnedProgram of
-    Error e -> pure (Error e)
-    Ok owned -> do
-        ir <- emitWith compiler (writeProgram owned)
-        case ir of
-            Error e -> pure (Error e)
-            Ok text -> buildExecutable output text
+stageOne compiler output = do
+    owned <- ownedToolWith compiler emitterEntry
+    case owned of
+        Error e -> pure (Error e)
+        Ok program -> do
+            ir <- emitWith compiler (writeProgram program)
+            case ir of
+                Error e -> pure (Error e)
+                Ok text -> buildExecutable output text
 
 -- What the emitter at the path writes for the MIR as data: its IR, or its reason (on the standard error) for refusing the program (Native.runWithInput)
 emitWith :: FilePath -> String -> IO (Result String String)

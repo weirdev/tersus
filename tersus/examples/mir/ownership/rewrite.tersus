@@ -1,0 +1,349 @@
+import data::codec::codec { Type };
+import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep };
+import mir::ownership::common { Context, Rewrite, Key, FieldName, fieldNames, blockIndex, Alias, Site, UseSite, RoleOperand, Count, getLocal, needsDrop, stepsType, forgetLocal, role, intSetHas, intSetAdd, keySetHas, whole, fieldKey, operandLocal, roles, freshLocal, projectionSource, isProjection, concatStatements, blockIn, nextLocal, nextBlock, isDropFunction, singleton, noOwnershipLocals, localsOf, statementRoles };
+import mir::ownership::analysis { countOf, countAdd, termUses, fuseCasts, definitions, liveness, livesAt, loanStates, reaches };
+import mir::ownership::drops { elaborateDrops };
+
+struct BorrowArg { lent: Bool, hasType: Bool, ty: Type };
+impl Clone for BorrowArg { };
+struct End { ok: Bool, index: Int };
+impl Clone for End { };
+struct PreparedOperands { before: List<Statement>, after: List<Statement>, operands: List<Operand> };
+impl Clone for PreparedOperands { };
+struct PreparedTerm { before: List<Statement>, term: Terminator };
+impl Clone for PreparedTerm { };
+
+fn borrowedArguments(p: &Program, cx: &Context, callee: &Operand, count: Int) -> List<BorrowArg> ~ {
+    out = []; found = false;
+    if callee is Operand::Const && (callee as Operand::Const).value is Constant::CFn {
+        name = ((callee as Operand::Const).value as Constant::CFn).name;
+        for f in p.functions {
+            if f.name = name { for param in f.params { out = push(out, BorrowArg { lent: intSetHas(f.borrowed, param), hasType: true, ty: getLocal(f, param).ty }); }; found = true; };
+        };
+    };
+    l = operandLocal(callee);
+    if !found && l >= 0 {
+        ty = getLocal(cx.function, l).ty;
+        if ty is Type::TFn {
+            for a in (ty as Type::TFn).args {
+                lent = a is Type::TRef || a is Type::TMutRef;
+                target = clone(a);
+                if a is Type::TRef { target = clone(Box::unbox((a as Type::TRef).inner)); };
+                if a is Type::TMutRef { target = clone(Box::unbox((a as Type::TMutRef).inner)); };
+                out = push(out, BorrowArg { lent: lent, hasType: true, ty: target });
+            };
+            found = true;
+        };
+    };
+    if !found && count > 0 { for i in 0..count { out = push(out, BorrowArg { lent: false, hasType: false, ty: Type::TInt }); }; };
+    return out;
+};
+fn takesField(p: &Program, cx: &Context, st: &Statement, after: &List<Key>) -> Bool ~ {
+    if !(st is Statement::Assign) { return false; };
+    a = st as Statement::Assign;
+    if !(a.rv is Rvalue::ReadField) || !((a.rv as Rvalue::ReadField).o is Operand::Copy) { return false; };
+    r = a.rv as Rvalue::ReadField; s = operandLocal(r.o);
+    afters = forgetLocal(after, a.local);
+    return needsDrop(p, getLocal(cx.function, a.local).ty)
+        && !intSetHas(cx.projected, s) && !intSetHas(cx.function.borrowed, s)
+        && !keySetHas(afters, whole(s)) && !keySetHas(afters, fieldKey(cx.names, s, r.name, r.field));
+};
+fn aliasSource(sources: &List<Alias>, local: Int) -> Alias ~ {
+    for s in sources { if s.local = local { return clone(s); }; };
+    return Alias { local: local, block: 0 - 1, source: 0 - 1 };
+};
+fn stableChain(cx: &Context, sources: &List<Alias>, local: Int) -> Bool ~ {
+    if intSetHas(cx.function.borrowed, local) {
+        return !intSetHas(cx.function.mutBorrowed, local) && !(getLocal(cx.function, local).ty is Type::TMutRef) && countOf(cx.defs, local) = 1;
+    };
+    s = aliasSource(sources, local);
+    if s.source >= 0 { return countOf(cx.defs, local) = 1 && stableChain(cx, sources, s.source); };
+    return false;
+};
+fn markAlias(r: &mut Rewrite, local: Int) -> Int ~ { (*r).aliases = intSetAdd((*r).aliases, local); return 0; };
+fn markAliasOf(r: &mut Rewrite, local: Int, block: Int, source: Int) -> Int ~ {
+    markAlias(&mut *r, local);
+    kept = []; for s in (*r).sources { if s.local != local { kept = push(kept, clone(s)); }; };
+    (*r).sources = push(kept, Alias { local: local, block: block, source: source });
+    return 0;
+};
+fn terminatorUsers(cx: &Context, local: Int) -> List<Int> ~ {
+    out = [];
+    for b in cx.function.blocks { if intSetHas(localsOf(termUses(b.term)), local) { out = push(out, b.id); }; };
+    return out;
+};
+fn readOnlyEverywhere(p: &Program, cx: &Context, local: Int) -> Bool ~ {
+    if countOf(cx.defs, local) != 1 { return false; };
+    for u in cx.uses { if u.local = local && u.consume { return false; }; };
+    for id in terminatorUsers(cx, local) {
+        b = blockIn(cx.function.blocks, id);
+        if !(b.term is Terminator::Call) { return false; };
+        c = b.term as Terminator::Call;
+        if operandLocal(c.callee) = local || c.dest = local { return false; };
+        args = borrowedArguments(p, cx, c.callee, size(c.args));
+        for i in 0..size(c.args) {
+            if operandLocal(get(c.args, i)) = local && (i >= size(args) || !get(args, i).lent) { return false; };
+        };
+    };
+    return true;
+};
+fn lastUseIn(cx: &Context, index: Int, local: Int) -> Int ~ {
+    last = index; for u in cx.uses { if u.local = local && u.index > last { last = u.index; }; }; return last;
+};
+fn peekEnd(p: &Program, cx: &Context, block: Int, index: Int, local: Int) -> End ~ {
+    users = terminatorUsers(cx, local);
+    if size(users) = 0 { return End { ok: true, index: lastUseIn(cx, index, local) }; };
+    if size(users) = 1 && get(users, 0) = block {
+        b = blockIn(cx.function.blocks, block);
+        if b.term is Terminator::Call {
+            c = b.term as Terminator::Call;
+            onlyLent = true;
+            args = borrowedArguments(p, cx, c.callee, size(c.args));
+            for i in 0..size(c.args) { if operandLocal(get(c.args, i)) = local && (i >= size(args) || !get(args, i).lent) { onlyLent = false; }; };
+            if operandLocal(c.callee) != local && c.dest != local && onlyLent { return End { ok: true, index: size(b.stmts) - 1 }; };
+        };
+    };
+    return End { ok: false, index: 0 };
+};
+fn callLeaves(cx: &Context, block: Int, temp: Int, source: Int) -> Bool ~ {
+    if size(terminatorUsers(cx, temp)) = 0 { return true; };
+    b = blockIn(cx.function.blocks, block);
+    if b.term is Terminator::Call {
+        c = b.term as Terminator::Call;
+        if c.dest = source || operandLocal(c.callee) = source { return false; };
+        for a in c.args { l = operandLocal(a); if l = source || (l >= 0 && reaches(cx.loans, block, size(b.stmts), l, source, true)) { return false; }; };
+        return true;
+    };
+    return false;
+};
+fn takesAt(cx: &Context, block: Int, index: Int) -> Bool ~ { for s in cx.takes { if s.block = block && s.index = index { return true; }; }; return false; };
+// A view of source stays a view only while nothing changes, moves or writes through to source or the places it comes from
+fn undisturbed(cx: &Context, block: Int, from: Int, to: Int, source: Int) -> Bool ~ {
+    bi = blockIndex(cx.function.blocks, block);
+    if bi < 0 || bi >= size(cx.function.blocks) { return true; };
+    b = get(cx.function.blocks, bi);
+    i = from;
+    while i <= to ~ {
+        if i >= 0 && i < size(b.stmts) {
+            st = get(b.stmts, i);
+            if st is Statement::Assign {
+                a = st as Statement::Assign;
+                if takesAt(cx, block, i) && a.rv is Rvalue::ReadField && (a.rv as Rvalue::ReadField).o is Operand::Copy && operandLocal((a.rv as Rvalue::ReadField).o) = source { return false; };
+                if a.local = source || reaches(cx.loans, block, i, a.local, source, false) { return false; };
+                for ro in roles(a.rv) { if ro.consume && consumesFrom(cx, block, i, operandLocal(ro.operand), source) { return false; }; };
+            };
+            if st is Statement::AssignRef {
+                a = st as Statement::AssignRef;
+                if a.local = source || reaches(cx.loans, block, i, a.local, source, true) { return false; };
+                for ro in roles(a.rv) { if ro.consume && consumesFrom(cx, block, i, operandLocal(ro.operand), source) { return false; }; };
+            };
+        };
+        i = i + 1;
+    };
+    return true;
+};
+fn consumesFrom(cx: &Context, block: Int, index: Int, local: Int, source: Int) -> Bool ~ {
+    return local = source || (local >= 0 && reaches(cx.loans, block, index, local, source, false));
+};
+fn peekableIn(cx: &Context, block: Int, index: Int, temp: Int, source: Int, end: Int) -> Bool ~ {
+    if temp = source || countOf(cx.defs, temp) != 1 || intSetHas(cx.borrowRoots, temp) { return false; };
+    for u in cx.uses { if u.local = temp && (u.block != block || u.index <= index || u.consume) { return false; }; };
+    return undisturbed(cx, block, index + 1, end, source) && callLeaves(cx, block, temp, source);
+};
+fn chainUndisturbed(cx: &Context, sources: &List<Alias>, block: Int, index: Int, dest: Int, end: Int, source: Int) -> Bool ~ {
+    if !intSetHas(cx.projected, source) { return true; };
+    s = aliasSource(sources, source);
+    return s.source >= 0 && s.block = block && undisturbed(cx, block, index + 1, end, s.source) && callLeaves(cx, block, dest, s.source) && chainUndisturbed(cx, sources, block, index, dest, end, s.source);
+};
+fn withOperands(rv: &Rvalue, os: &List<Operand>) -> Rvalue ~ {
+    n = size(os);
+    if rv is Rvalue::Use && n = 1 { return Rvalue::Use { o: clone(get(os, 0)) }; };
+    if rv is Rvalue::BinaryOp && n = 2 { return Rvalue::BinaryOp { op: (rv as Rvalue::BinaryOp).op, a: clone(get(os, 0)), b: clone(get(os, 1)) }; };
+    if rv is Rvalue::ListOp { return Rvalue::ListOp { op: (rv as Rvalue::ListOp).op, args: clone(os) }; };
+    if rv is Rvalue::MakeList { return Rvalue::MakeList { items: clone(os) }; };
+    if rv is Rvalue::MakeBox && n = 1 { return Rvalue::MakeBox { o: clone(get(os, 0)) }; };
+    if rv is Rvalue::Unbox && n = 1 { return Rvalue::Unbox { o: clone(get(os, 0)) }; };
+    if rv is Rvalue::Unsize && n = 1 { return Rvalue::Unsize { o: clone(get(os, 0)) }; };
+    if rv is Rvalue::MakeData { r = rv as Rvalue::MakeData; return Rvalue::MakeData { name: clone(r.name), fields: clone(r.fields), values: clone(os) }; };
+    if rv is Rvalue::ReadField && n = 1 { r = rv as Rvalue::ReadField; return Rvalue::ReadField { o: clone(get(os, 0)), name: clone(r.name), field: clone(r.field) }; };
+    if rv is Rvalue::IsVariant && n = 1 { return Rvalue::IsVariant { o: clone(get(os, 0)), name: clone((rv as Rvalue::IsVariant).name) }; };
+    if rv is Rvalue::AsVariant && n = 1 { return Rvalue::AsVariant { o: clone(get(os, 0)), name: clone((rv as Rvalue::AsVariant).name) }; };
+    if rv is Rvalue::Copy && n = 1 { return Rvalue::Copy { o: clone(get(os, 0)) }; };
+    if rv is Rvalue::Deref && n = 1 { return Rvalue::Deref { o: clone(get(os, 0)) }; };
+    if rv is Rvalue::Borrow && n > 0 && get(os, 0) is Operand::Copy {
+        b = rv as Rvalue::Borrow; steps = []; i = 1;
+        for s in b.steps { if s is RefStep::Index { if i < n { steps = push(steps, RefStep::Index { o: clone(get(os, i)) }); i = i + 1; }; } else { steps = push(steps, clone(s)); }; };
+        return Rvalue::Borrow { root: operandLocal(get(os, 0)), steps: steps, mutable: b.mutable };
+    };
+    return clone(rv);
+};
+fn rewriteOperands(p: &Program, cx: &Context, after: &List<Key>, operands: &List<RoleOperand>, r: &mut Rewrite) -> PreparedOperands ~ {
+    stillLive = localsOf(after); for l in cx.function.borrowed { stillLive = intSetAdd(stillLive, l); };
+    readHere = []; counts = [];
+    for ro in operands {
+        l = operandLocal(ro.operand);
+        if l >= 0 { if !ro.consume { readHere = intSetAdd(readHere, l); } else { if needsDrop(p, getLocal(cx.function, l).ty) { counts = countAdd(counts, l); }; }; };
+    };
+    before = []; afters = []; os = [];
+    for ro in operands {
+        o = clone(ro.operand); l = operandLocal(o);
+        if ro.consume && l >= 0 && needsDrop(p, getLocal(cx.function, l).ty) {
+            left = countOf(counts, l) - 1; next = [];
+            for c in counts { if c.local = l { next = push(next, Count { local: l, count: left }); } else { next = push(next, clone(c)); }; }; counts = next;
+            if left > 0 || intSetHas(stillLive, l) || intSetHas(readHere, l) {
+                temp = freshLocal(&mut *r, getLocal(cx.function, l).ty);
+                before = push(before, Statement::Assign { local: temp, rv: Rvalue::Copy { o: Operand::Copy { local: l } } });
+                o = Operand::Move { local: temp };
+            } else { o = Operand::Move { local: l }; };
+        };
+        os = push(os, o);
+    };
+    return PreparedOperands { before: before, after: afters, operands: os };
+};
+fn rewriteAssign(p: &Program, cx: &Context, block: Int, index: Int, after: &List<Key>, st: &Statement, r: &mut Rewrite) -> List<Statement> ~ {
+    if !(st is Statement::Assign) { return singleton(clone(st)); };
+    a = st as Statement::Assign; d = a.local; rv = clone(a.rv);
+    afters = forgetLocal(after, d);
+    if isProjection(rv) && needsDrop(p, getLocal(cx.function, d).ty) {
+        if rv is Rvalue::ReadField && (rv as Rvalue::ReadField).o is Operand::Copy && takesAt(cx, block, index) {
+            f = rv as Rvalue::ReadField; return singleton(Statement::Assign { local: d, rv: Rvalue::TakeField { local: operandLocal(f.o), name: clone(f.name), field: clone(f.field) } });
+        };
+        source = projectionSource(rv);
+        sourceIsCopy = false;
+        if rv is Rvalue::ReadField { sourceIsCopy = (rv as Rvalue::ReadField).o is Operand::Copy; };
+        if rv is Rvalue::Deref { sourceIsCopy = (rv as Rvalue::Deref).o is Operand::Copy; };
+        if rv is Rvalue::ListOp && size((rv as Rvalue::ListOp).args) > 0 { sourceIsCopy = get((rv as Rvalue::ListOp).args, 0) is Operand::Copy; };
+        if sourceIsCopy && source >= 0 {
+            end = peekEnd(p, cx, block, index, d);
+            if (end.ok && peekableIn(cx, block, index, d, source, end.index) && chainUndisturbed(cx, r.sources, block, index, d, end.index, source))
+                || (readOnlyEverywhere(p, cx, d) && stableChain(cx, r.sources, source)) {
+                markAliasOf(&mut *r, d, block, source); return singleton(Statement::Peek { local: d, rv: clone(rv) });
+            };
+        };
+        ops = rewriteOperands(p, cx, afters, roles(rv), &mut *r);
+        alias = freshLocal(&mut *r, getLocal(cx.function, d).ty); markAlias(&mut *r, alias);
+        body = push(push(ops.before, Statement::Peek { local: alias, rv: withOperands(rv, ops.operands) }), Statement::Assign { local: d, rv: Rvalue::Copy { o: Operand::Copy { local: alias } } });
+        return concatStatements(body, ops.after);
+    };
+    ops = rewriteOperands(p, cx, afters, roles(rv), &mut *r);
+    updated = withOperands(rv, ops.operands);
+    declTy = getLocal(cx.function, d).ty;
+    if intSetHas(cx.function.mutBorrowed, d) && !(declTy is Type::TMutRef) && !(declTy is Type::TRef) && needsDrop(p, declTy) {
+        // An update parameter is stored over in its caller's place, as a reference write is: what it held is freed first
+        // (through a shallow copy that owns it), after the new value is made when that reads the parameter itself
+        body = clone(ops.before); value = clone(updated);
+        reads = false; for ro in roles(rv) { if operandLocal(ro.operand) = d { reads = true; }; };
+        if reads {
+            made = freshLocal(&mut *r, clone(declTy));
+            body = push(body, Statement::Assign { local: made, rv: clone(updated) });
+            value = Rvalue::Use { o: Operand::Move { local: made } };
+        };
+        old = freshLocal(&mut *r, clone(declTy));
+        body = push(push(body, Statement::Assign { local: old, rv: Rvalue::Use { o: Operand::Copy { local: d } } }), Statement::Drop { local: old });
+        return concatStatements(push(body, Statement::Assign { local: d, rv: value }), ops.after);
+    };
+    if size(ops.before) = 1 && get(ops.before, 0) is Statement::Assign && updated is Rvalue::Use && (updated as Rvalue::Use).o is Operand::Move {
+        pre = get(ops.before, 0) as Statement::Assign;
+        if pre.rv is Rvalue::Copy && pre.local = operandLocal((updated as Rvalue::Use).o) { return concatStatements(singleton(Statement::Assign { local: d, rv: clone(pre.rv) }), ops.after); };
+    };
+    return concatStatements(push(ops.before, Statement::Assign { local: d, rv: updated }), ops.after);
+};
+// Native code stores over the place, so what it owned is freed here, through a shallow copy that owns it
+fn releaseReferent(p: &Program, cx: &Context, root: Int, steps: &List<RefStep>, r: &mut Rewrite) -> List<Statement> ~ {
+    refType = getLocal(cx.function, root).ty;
+    if !(refType is Type::TMutRef) { return []; };
+    placeTy = stepsType(p, Box::unbox((refType as Type::TMutRef).inner), steps);
+    if !needsDrop(p, placeTy) { return []; };
+    out = []; place = root;
+    if size(steps) > 0 {
+        place = freshLocal(&mut *r, Type::TMutRef { inner: Box::new(clone(placeTy)) });
+        out = push(out, Statement::Assign { local: place, rv: Rvalue::Borrow { root: root, steps: clone(steps), mutable: true } });
+    };
+    old = freshLocal(&mut *r, placeTy);
+    out = push(out, Statement::Assign { local: old, rv: Rvalue::Deref { o: Operand::Copy { local: place } } });
+    return push(out, Statement::Drop { local: old });
+};
+fn rewriteStatement(p: &Program, cx: &Context, block: Int, index: Int, after: &List<Key>, st: &Statement, r: &mut Rewrite) -> List<Statement> ~ {
+    if st is Statement::AssignRef {
+        a = st as Statement::AssignRef;
+        ops = rewriteOperands(p, cx, after, roles(a.rv), &mut *r);
+        stmts = concatStatements(ops.before, releaseReferent(p, cx, a.local, a.steps, &mut *r));
+        return concatStatements(push(stmts, Statement::AssignRef { local: a.local, steps: clone(a.steps), rv: withOperands(a.rv, ops.operands) }), ops.after);
+    };
+    if st is Statement::Assign {
+        a = st as Statement::Assign; decl = getLocal(cx.function, a.local);
+        listSource = 0 - 1;
+        if a.rv is Rvalue::Use { listSource = operandLocal((a.rv as Rvalue::Use).o); };
+        if a.rv is Rvalue::ReadField { listSource = operandLocal((a.rv as Rvalue::ReadField).o); };
+        if decl.named && size(decl.name.bytes) >= 6 && decl.name.slice(0, 6) = "$list " && listSource >= 0
+            && needsDrop(p, decl.ty) && stableChain(cx, r.sources, listSource) {
+            markAliasOf(&mut *r, a.local, block, listSource); return singleton(Statement::Peek { local: a.local, rv: clone(a.rv) });
+        };
+        return rewriteAssign(p, cx, block, index, after, st, &mut *r);
+    };
+    return singleton(clone(st));
+};
+fn rewriteTerminator(p: &Program, cx: &Context, out: &List<Key>, term: &Terminator, r: &mut Rewrite) -> PreparedTerm ~ {
+    if term is Terminator::Call {
+        c = term as Terminator::Call;
+        lent = borrowedArguments(p, cx, c.callee, size(c.args));
+        args = [];
+        for i in 0..size(c.args) { if i < size(lent) { args = push(args, role(clone(get(c.args, i)), !get(lent, i).lent)); }; };
+        ops = rewriteOperands(p, cx, forgetLocal(out, c.dest), args, &mut *r);
+        return PreparedTerm { before: ops.before, term: Terminator::Call { callee: clone(c.callee), args: ops.operands, dest: c.dest, next: c.next } };
+    };
+    return PreparedTerm { before: [], term: clone(term) };
+};
+// A local that a reference is made to: a view of it would outlive its own uses through the reference
+fn borrowRootsOf(f: &Function) -> List<Int> ~ {
+    out = [];
+    for b in f.blocks { for st in b.stmts {
+        if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::Borrow { out = intSetAdd(out, ((st as Statement::Assign).rv as Rvalue::Borrow).root); };
+    }; };
+    return out;
+};
+fn contextOf(p: &Program, names: &List<FieldName>, f: &Function) -> Context ~ {
+    loans = loanStates(p, names, f);
+    projected = []; uses = []; afters = liveness(f, names, loans);
+    for b in f.blocks { for i in 0..size(b.stmts) {
+        st = get(b.stmts, i);
+        if st is Statement::Assign {
+            a = st as Statement::Assign;
+            if isProjection(a.rv) && needsDrop(p, getLocal(f, a.local).ty) { projected = intSetAdd(projected, a.local); };
+        };
+        for ro in statementRoles(st) { l = operandLocal(ro.operand); if l >= 0 { uses = push(uses, UseSite { local: l, block: b.id, index: i, consume: ro.consume }); }; };
+    }; };
+    cx = Context { function: clone(f), names: clone(names), projected: projected, defs: definitions(f, true), uses: uses, afters: afters, takes: [], loans: loans, borrowRoots: borrowRootsOf(f) };
+    takes = [];
+    for b in f.blocks { after = livesAt(cx.afters, b.id).afters; for i in 0..size(b.stmts) { if i < size(after) && takesField(p, cx, get(b.stmts, i), get(after, i)) { takes = push(takes, Site { block: b.id, index: i }); }; }; };
+    return Context { takes: takes, ..cx };
+};
+fn sortLocals(locals: &List<LocalDecl>) -> List<LocalDecl> ~ {
+    sorted = true;
+    if size(locals) > 0 { for i in 1..size(locals) { if get(locals, i - 1).id >= get(locals, i).id { sorted = false; }; }; };
+    if sorted { return clone(locals); };
+    out = noOwnershipLocals(); for d in locals { next = []; added = false; for x in out { if !added && x.id >= d.id { next = push(next, clone(d)); added = true; }; if x.id != d.id { next = push(next, clone(x)); }; }; if !added { next = push(next, clone(d)); }; out = next; }; return out;
+};
+fn ownFunction(p: &Program, names: &List<FieldName>, original: &Function) -> Function ~ {
+    f = fuseCasts(original); cx = contextOf(p, names, f);
+    r = Rewrite { next: nextLocal(f.locals), locals: [], aliases: [], sources: [] };
+    blocks = [];
+    for b in f.blocks {
+        lives = livesAt(cx.afters, b.id); stmts = [];
+        for i in 0..size(b.stmts) { if i < size(lives.afters) { stmts = concatStatements(stmts, rewriteStatement(p, cx, b.id, i, get(lives.afters, i), get(b.stmts, i), &mut r)); }; };
+        term = rewriteTerminator(p, cx, lives.out, b.term, &mut r);
+        blocks = push(blocks, MirBlock { id: b.id, stmts: concatStatements(stmts, term.before), term: term.term });
+    };
+    locals = clone(f.locals); for d in r.locals { locals = push(locals, clone(d)); }; locals = sortLocals(locals);
+    owned = [];
+    for d in locals {
+        dropped = isDropFunction(f.name) && size(f.params) > 0 && get(f.params, 0) = d.id;
+        if needsDrop(p, d.ty) && d.id != 0 && !intSetHas(r.aliases, d.id) && !intSetHas(f.borrowed, d.id) && !dropped { owned = intSetAdd(owned, d.id); };
+    };
+    return elaborateDrops(names, p, f, owned, locals, clone(blocks), r.next, nextBlock(blocks));
+};
+fn insertOwnership(p: &Program) -> Program ~ {
+    names = fieldNames(p);
+    functions = []; for f in p.functions { functions = push(functions, ownFunction(p, names, f)); };
+    return Program { functions: functions, entry: ownFunction(p, names, p.entry), types: clone(p.types) };
+};
