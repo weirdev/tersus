@@ -1,0 +1,870 @@
+import validation::context { analyzeContext, contextEqual, integerValue, integerValueIn };
+import validation::linear { linearEntails, linearEntailsIn };
+import validation::model { ContextAnalysis, EqualityFact, FactLists, GetFact, IntegerLookup, OrderFact, SizeFact, ValidatorContext };
+import validation::relations { hasDifferenceIn, sameIn };
+import validation::validation { forallInstanceEqualities };
+
+
+
+fn getFactOf(context: &ValidatorContext, classes: &HashMap<Int, Int>, term: Int) -> GetFact {
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -14 {
+            if size(app.arguments) = 2 {
+                if sameIn(classes, app.id, term) {
+                    return GetFact { seq: get(app.arguments, 0), at: get(app.arguments, 1), found: true };
+                };
+            };
+        };
+    };
+    return GetFact { seq: 0, at: 0, found: false };
+};
+
+// Every recorded reading of a term: a value produced by a sequence
+// operation is also the reading of what it came from (a pushed, set or
+// popped list), so one term can be a get of several lists.
+fn getFactsOf(context: &ValidatorContext, classes: &HashMap<Int, Int>, term: Int) -> List<GetFact> {
+    facts = [];
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -14 {
+            if size(app.arguments) = 2 {
+                if sameIn(classes, app.id, term) {
+                    facts = push(facts, GetFact { seq: get(app.arguments, 0), at: get(app.arguments, 1), found: true });
+                };
+            };
+        };
+    };
+    return facts;
+};
+
+
+// A reading of one list is also a reading of another when a `-30` fact
+// relates them (`get(a, base + j) = get(b, j)`): the corresponding index
+// in the other list is the sum application, or the index itself when the
+// offset is zero, and back the same way through the sum's parts.
+fn getFactsTranslated(context: &ValidatorContext, classes: &HashMap<Int, Int>, term: Int) -> List<GetFact> {
+    facts = getFactsOf(context, classes, term);
+    extra = [];
+    for gfPosition in 0..size(facts) {
+        gf = get(facts, gfPosition);
+        for appPosition in 0..size(context.applications) {
+            app = get(context.applications, appPosition);
+            if app.function = -30 {
+                if size(app.arguments) = 5 {
+                    a = get(app.arguments, 0);
+                    b = get(app.arguments, 1);
+                    base = get(app.arguments, 4);
+                    if sameIn(classes, gf.seq, b) {
+                        cand = shiftedIndex(context, classes, base, gf.at);
+                        if cand is IntegerLookup::Found {
+                            if linearEntails(context, get(app.arguments, 2), gf.at, 0) {
+                                if linearEntails(context, gf.at, get(app.arguments, 3), -1) { extra = push(extra, GetFact { seq: a, at: (cand as IntegerLookup::Found).value, found: true }); };
+                            };
+                        };
+                    };
+                    if sameIn(classes, gf.seq, a) {
+                        bvA = integerValue(context, base);
+                        candB = 0;
+                        candBFound = false;
+                        if bvA is IntegerLookup::Found {
+                            if (bvA as IntegerLookup::Found).value = 0 { candB = gf.at; candBFound = true; };
+                        };
+                        for sumPosition in 0..size(context.applications) {
+                            sum = get(context.applications, sumPosition);
+                            if sum.function = -1 {
+                                if size(sum.arguments) = 2 {
+                                    if sameIn(classes, sum.id, gf.at) {
+                                        if sameIn(classes, get(sum.arguments, 0), base) { candB = get(sum.arguments, 1); candBFound = true; };
+                                        if sameIn(classes, get(sum.arguments, 1), base) { candB = get(sum.arguments, 0); candBFound = true; };
+                                    };
+                                };
+                            };
+                        };
+                        if candBFound {
+                            if linearEntails(context, get(app.arguments, 2), candB, 0) {
+                                if linearEntails(context, candB, get(app.arguments, 3), -1) { extra = push(extra, GetFact { seq: b, at: candB, found: true }); };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    for f in extra { facts = push(facts, f); };
+    return facts;
+};
+
+// The term for `base + j`: the index itself when the offset is zero, the
+// constant of the sum when both sides are known, else an application of
+// the sum that the context already has.
+fn shiftedIndex(context: &ValidatorContext, classes: &HashMap<Int, Int>, base: Int, j: Int) -> IntegerLookup {
+    bv = integerValue(context, base);
+    if bv is IntegerLookup::Found {
+        if (bv as IntegerLookup::Found).value = 0 { return IntegerLookup::Found { value: j }; };
+        jv = integerValue(context, j);
+        if jv is IntegerLookup::Found {
+            want = (bv as IntegerLookup::Found).value + (jv as IntegerLookup::Found).value;
+            for constantPosition in 0..size(context.constants) {
+                constant = get(context.constants, constantPosition);
+                if constant.kind = 0 {
+                    if constant.value = want { return IntegerLookup::Found { value: constant.id }; };
+                };
+            };
+            return IntegerLookup::Missing;
+        };
+    };
+    for sumPosition in 0..size(context.applications) {
+        sum = get(context.applications, sumPosition);
+        if sum.function = -1 {
+            if size(sum.arguments) = 2 {
+                if sameIn(classes, get(sum.arguments, 0), base) {
+                    if sameIn(classes, get(sum.arguments, 1), j) { return IntegerLookup::Found { value: sum.id }; };
+                };
+                if sameIn(classes, get(sum.arguments, 1), base) {
+                    if sameIn(classes, get(sum.arguments, 0), j) { return IntegerLookup::Found { value: sum.id }; };
+                };
+            };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+fn sizeTermOf(context: &ValidatorContext, classes: &HashMap<Int, Int>, seq: Int) -> SizeFact {
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -13 {
+            if size(app.arguments) = 1 {
+                if sameIn(classes, get(app.arguments, 0), seq) {
+                    return SizeFact { term: app.id, found: true };
+                };
+            };
+        };
+    };
+    return SizeFact { term: 0, found: false };
+};
+
+fn listsOfFact(context: &ValidatorContext, classes: &HashMap<Int, Int>, leftSeq: Int, rightSeq: Int, a: Int, b: Int) -> FactLists {
+    same = false;
+    pushed = false;
+    inner = a;
+    if sameIn(classes, leftSeq, a) && sameIn(classes, rightSeq, b) { same = true; };
+    if sameIn(classes, leftSeq, b) && sameIn(classes, rightSeq, a) { same = true; };
+    for pushAppPosition in 0..size(context.applications) {
+        pushApp = get(context.applications, pushAppPosition);
+        if pushApp.function = -16 && size(pushApp.arguments) = 2 {
+            if sameIn(classes, pushApp.id, leftSeq) {
+                if sameIn(classes, get(pushApp.arguments, 0), a) && sameIn(classes, rightSeq, b) { same = true; pushed = true; inner = a; };
+                if sameIn(classes, get(pushApp.arguments, 0), b) && sameIn(classes, rightSeq, a) { same = true; pushed = true; inner = b; };
+            };
+        };
+    };
+    return FactLists { same: same, pushed: pushed, inner: inner };
+};
+
+// Whether a term is a sum of base and other, either way round
+fn sumOfEqual(context: &ValidatorContext, classes: &HashMap<Int, Int>, term: Int, base: Int, other: Int) -> Bool {
+    for sumPosition in 0..size(context.applications) {
+        sum = get(context.applications, sumPosition);
+        if sum.function = -1 && size(sum.arguments) = 2 {
+            if sameIn(classes, sum.id, term) {
+                if sameIn(classes, get(sum.arguments, 0), base) && sameIn(classes, get(sum.arguments, 1), other) { return true; };
+                if sameIn(classes, get(sum.arguments, 1), base) && sameIn(classes, get(sum.arguments, 0), other) { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+fn strictOrderStated(context: &ValidatorContext, classes: &HashMap<Int, Int>, smaller: Int, greater: Int) -> Bool {
+    for oPosition in 0..size(context.orders) {
+        o = get(context.orders, oPosition);
+        if o.strict && sameIn(classes, o.smaller, smaller) && sameIn(classes, o.greater, greater) { return true; };
+    };
+    return false;
+};
+
+// (at the end of the range the element may follow from another forall at that index: get(out, i) = get(a, i), say)
+fn endReadsEqual(context: &ValidatorContext, eqContext: &ValidatorContext, classes: &HashMap<Int, Int>, a: Int, b: Int, leftSeq: Int, rightSeq: Int, hi: Int, base: Int, offsetAt: Int) -> Bool {
+    for gPosition in 0..size(context.applications) {
+        g = get(context.applications, gPosition);
+        if g.function = -14 && size(g.arguments) = 2 {
+            gList = get(g.arguments, 0);
+            if sameIn(classes, gList, a) || sameIn(classes, gList, leftSeq) {
+                gIndex = get(g.arguments, 1);
+                if sameIn(classes, gIndex, hi) || sumOfEqual(context, classes, gIndex, base, hi) {
+                    if endReadOf(context, eqContext, classes, g.id, b, rightSeq, hi, offsetAt) { return true; };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn endReadOf(context: &ValidatorContext, eqContext: &ValidatorContext, classes: &HashMap<Int, Int>, read: Int, b: Int, rightSeq: Int, hi: Int, offsetAt: Int) -> Bool {
+    for hPosition in 0..size(context.applications) {
+        h = get(context.applications, hPosition);
+        if h.function = -14 && size(h.arguments) = 2 {
+            hList = get(h.arguments, 0);
+            if sameIn(classes, hList, b) || sameIn(classes, hList, rightSeq) {
+                hIndex = get(h.arguments, 1);
+                hIndexOk = sameIn(classes, hIndex, hi);
+                if hIndexOk = false {
+                    if linearEntails(eqContext, hIndex, offsetAt, 0) {
+                        if linearEntails(eqContext, offsetAt, hIndex, 0) { hIndexOk = true; };
+                    };
+                };
+                if hIndexOk && sameIn(classes, read, h.id) { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+// The bridge records `forall j in lo..hi: get(a, j) = get(b, j)` as an
+// application of function -30 to (a, b, lo, hi). It proves an element
+// equality inside the range (and at the end point when that element is
+// known equal separately), and the equality of the lists themselves when
+// the range is the whole of two lists of one size.
+fn forallEqualPair(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact) -> Bool {
+    return forallEqualPairWithin(context, analysis, left, right, lg, rg, 2);
+};
+
+fn forallEqualPairWithin(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks 2 * fuel + 1 {
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -30 && size(app.arguments) = 5 {
+            a = get(app.arguments, 0);
+            b = get(app.arguments, 1);
+            lo = get(app.arguments, 2);
+            hi = get(app.arguments, 3);
+            base = get(app.arguments, 4);
+            if lg.found && rg.found {
+                if forallPairInRange(context, analysis, left, right, lg, rg, fuel, a, b, lo, hi, base) { return true; };
+            };
+            if forallPairWhole(context, analysis, left, right, a, b, lo, hi, base) { return true; };
+        };
+    };
+    return false;
+};
+
+// Two reads of the lists of a forall fact (or of a push onto one), at indexes the fact relates, inside its range
+fn forallPairInRange(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact, fuel: Int, a: Int, b: Int, lo: Int, hi: Int, base: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks 2 * fuel {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    lists = listsOfFact(context, analysis.classes, lg.seq, rg.seq, a, b);
+    if lists.same = false { return false; };
+    // (the read of a, at j + base, is the left one or the right one, as the
+    // lists the reads are of say; which is which decides the end case)
+    leftIsA = (sameIn(analysis.classes, lg.seq, a) && sameIn(analysis.classes, rg.seq, b)) || (lists.pushed && sameIn(analysis.classes, lists.inner, a));
+    leftIsB = (sameIn(analysis.classes, lg.seq, b) && sameIn(analysis.classes, rg.seq, a)) || (lists.pushed && sameIn(analysis.classes, lists.inner, b));
+    j = rg.at;
+    offsetAt = lg.at;
+    aSeq = lg.seq;
+    bSeq = rg.seq;
+    indexMatches = leftIsA && (sameIn(analysis.classes, offsetAt, j) || sumOfEqual(context, analysis.classes, offsetAt, base, j));
+    if indexMatches = false && leftIsB {
+        j = lg.at;
+        offsetAt = rg.at;
+        aSeq = rg.seq;
+        bSeq = lg.seq;
+        indexMatches = sameIn(analysis.classes, offsetAt, j) || sumOfEqual(context, analysis.classes, offsetAt, base, j);
+    };
+    if indexMatches = false { return false; };
+    if hasDifferenceIn(analysis.classes, differences, lo, j, 0) = false { return false; };
+    below = hasDifferenceIn(analysis.classes, differences, j, hi, -1);
+    if below = false { below = linearEntailsIn(context, analysis.classes, j, hi, -1); };
+    if below {
+        if lists.pushed {
+            st = sizeTermOf(context, analysis.classes, lists.inner);
+            if st.found {
+                if hasDifferenceIn(analysis.classes, differences, lg.at, st.term, -1) { return true; };
+                if linearEntailsIn(context, analysis.classes, lg.at, st.term, -1) { return true; };
+            };
+        } else { return true; };
+    };
+    atMost = hasDifferenceIn(analysis.classes, differences, j, hi, 0);
+    if atMost = false { atMost = linearEntailsIn(context, analysis.classes, j, hi, 0); };
+    if atMost = false || fuel <= 0 || strictOrderStated(context, analysis.classes, j, hi) { return false; };
+    strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+    strictAnalysis = analyzeContext(strictContext);
+    if forallEqualPairWithin(strictContext, strictAnalysis, left, right, lg, rg, fuel - 1) = false { return false; };
+    return forallPairAtEnd(context, left, right, a, b, aSeq, bSeq, hi, base, j, offsetAt);
+};
+
+// The two reads at the end of the range, j = hi, where the fact says nothing
+fn forallPairAtEnd(context: &ValidatorContext, left: Int, right: Int, a: Int, b: Int, aSeq: Int, bSeq: Int, hi: Int, base: Int, j: Int, offsetAt: Int) -> Bool {
+    eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+    eqAnalysis = analyzeContext(eqContext);
+    if eqAnalysis.contradictory { return true; };
+    if contextEqual(eqAnalysis.classes, eqAnalysis.differences, left, right) { return true; };
+    // (at the end of the range the element may follow from another
+    // forall at that index: get(out, i) = get(a, i), say)
+    instances = forallInstanceEqualities(eqContext, eqAnalysis);
+    if size(instances) > 0 {
+        widerEqualities = clone(eqContext.equalities);
+        for e in instances { widerEqualities = push(widerEqualities, e); };
+        wider = ValidatorContext { equalities: widerEqualities, ..clone(eqContext) };
+        widerAnalysis = analyzeContext(wider);
+        if widerAnalysis.contradictory { return true; };
+        if contextEqual(widerAnalysis.classes, widerAnalysis.differences, left, right) { return true; };
+    };
+    return endReadsEqual(context, eqContext, eqAnalysis.classes, a, b, aSeq, bSeq, hi, base, offsetAt);
+};
+
+// The two lists of a forall fact over all of both, from 0, of one size: equal lists
+fn forallPairWhole(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, a: Int, b: Int, lo: Int, hi: Int, base: Int) -> Bool {
+    equalities = analysis.equalities;
+    listPair = (sameIn(analysis.classes, left, a) && sameIn(analysis.classes, right, b)) || (sameIn(analysis.classes, left, b) && sameIn(analysis.classes, right, a));
+    if listPair = false { return false; };
+    sa = sizeTermOf(context, analysis.classes, a);
+    sb = sizeTermOf(context, analysis.classes, b);
+    if sa.found = false || sb.found = false { return false; };
+    if contextEqual(analysis.classes, analysis.differences, sa.term, sb.term) = false { return false; };
+    loValue = integerValueIn(analysis.classes, context.constants, lo);
+    baseValue = integerValueIn(analysis.classes, context.constants, base);
+    if loValue is IntegerLookup::Found {
+        if baseValue is IntegerLookup::Found {
+            if (loValue as IntegerLookup::Found).value = 0 && (baseValue as IntegerLookup::Found).value = 0 {
+                return sameIn(analysis.classes, hi, sa.term);
+            };
+        };
+    };
+    return false;
+};
+
+// A term can be recorded as a get of several lists (a read through a push
+// or a set is the same term as the get of the list it reads through), so
+// try every recorded get of the two sides that a forall fact can speak of.
+fn forallEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    equalities = analysis.equalities;
+    lg = getFactOf(context, analysis.classes, left);
+    rg = getFactOf(context, analysis.classes, right);
+    if forallEqualPair(context, analysis, left, right, lg, rg) { return true; };
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -30 {
+            if size(app.arguments) = 5 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                for lappPosition in 0..size(context.applications) {
+                    lapp = get(context.applications, lappPosition);
+                    if lapp.function = -14 {
+                        if size(lapp.arguments) = 2 {
+                            if sameIn(analysis.classes, lapp.id, left) {
+                                lseq = get(lapp.arguments, 0);
+                                lMatches = false;
+                                if sameIn(analysis.classes, lseq, a) { lMatches = true; };
+                                if sameIn(analysis.classes, lseq, b) { lMatches = true; };
+                                for pushAppPosition in 0..size(context.applications) {
+                                    pushApp = get(context.applications, pushAppPosition);
+                                    if pushApp.function = -16 {
+                                        if size(pushApp.arguments) = 2 {
+                                            if sameIn(analysis.classes, pushApp.id, lseq) {
+                                                if sameIn(analysis.classes, get(pushApp.arguments, 0), a) { lMatches = true; };
+                                                if sameIn(analysis.classes, get(pushApp.arguments, 0), b) { lMatches = true; };
+                                            };
+                                        };
+                                    };
+                                };
+                                if lMatches {
+                                    for rappPosition in 0..size(context.applications) {
+                                        rapp = get(context.applications, rappPosition);
+                                        if rapp.function = -14 {
+                                            if size(rapp.arguments) = 2 {
+                                                if sameIn(analysis.classes, rapp.id, right) {
+                                                    rseq = get(rapp.arguments, 0);
+                                                    rMatches = false;
+                                                    if sameIn(analysis.classes, rseq, a) { rMatches = true; };
+                                                    if sameIn(analysis.classes, rseq, b) { rMatches = true; };
+                                                    for pushApp2Position in 0..size(context.applications) {
+                                                        pushApp2 = get(context.applications, pushApp2Position);
+                                                        if pushApp2.function = -16 {
+                                                            if size(pushApp2.arguments) = 2 {
+                                                                if sameIn(analysis.classes, pushApp2.id, rseq) {
+                                                                    if sameIn(analysis.classes, get(pushApp2.arguments, 0), a) { rMatches = true; };
+                                                                    if sameIn(analysis.classes, get(pushApp2.arguments, 0), b) { rMatches = true; };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                    if rMatches {
+                                                        lf = GetFact { seq: lseq, at: get(lapp.arguments, 1), found: true };
+                                                        rf = GetFact { seq: rseq, at: get(rapp.arguments, 1), found: true };
+                                                        if forallEqualPair(context, analysis, left, right, lf, rf) { return true; };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// A get at a symbolic index of a list of known size is one of its finitely
+// many elements: when every element is the goal's other side, the get is too.
+fn getCoveredByEqualRange(context: &ValidatorContext, classes: &HashMap<Int, Int>, seq: Int, otherSeq: Int, index: Int) -> Bool {
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -30 {
+            if size(app.arguments) = 5 {
+                bv = integerValue(context, get(app.arguments, 4));
+                if bv is IntegerLookup::Found {
+                    if (bv as IntegerLookup::Found).value = 0 {
+                        aSide = sameIn(classes, seq, get(app.arguments, 0)) && sameIn(classes, otherSeq, get(app.arguments, 1));
+                        bSide = sameIn(classes, seq, get(app.arguments, 1)) && sameIn(classes, otherSeq, get(app.arguments, 0));
+                        if aSide || bSide {
+                            if linearEntails(context, get(app.arguments, 2), index, 0) {
+                                if linearEntails(context, index, get(app.arguments, 3), -1) { return true; };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn constantOverList(context: &ValidatorContext, analysis: &ContextAnalysis, seq: Int, at: Int, otherTerm: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -32 {
+            if size(app.arguments) = 5 {
+                if sameIn(analysis.classes, seq, get(app.arguments, 0)) {
+                    if sameIn(analysis.classes, otherTerm, get(app.arguments, 4)) {
+                        if hasDifferenceIn(analysis.classes, differences, get(app.arguments, 1), at, 0) {
+                            if hasDifferenceIn(analysis.classes, differences, at, get(app.arguments, 2), -1) { return true; };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn setGetEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if setGetSide(context, analysis, left, right) { return true; };
+    return setGetSide(context, analysis, right, left);
+};
+
+fn setGetSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    equalities = analysis.equalities;
+    for gf in getFactsOf(context, analysis.classes, getTerm) {
+        for appPosition in 0..size(context.applications) {
+            app = get(context.applications, appPosition);
+            if app.function = -17 {
+                if size(app.arguments) = 3 {
+                    if sameIn(analysis.classes, app.id, gf.seq) {
+                        inner = get(app.arguments, 0);
+                        idx = get(app.arguments, 1);
+                        val = get(app.arguments, 2);
+                        if linearEntailsIn(context, analysis.classes, gf.at, idx, 0) {
+                            eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: gf.at, right: idx }), ..clone(context) };
+                            eqAnalysis = analyzeContext(eqContext);
+                            eqOk = eqAnalysis.contradictory;
+                            if eqOk = false { eqOk = contextEqual(eqAnalysis.classes, eqAnalysis.differences, val, otherTerm); };
+                            if eqOk {
+                                ltContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: gf.at, greater: idx, strict: true }), ..clone(context) };
+                                ltAnalysis = analyzeContext(ltContext);
+                                if ltAnalysis.contradictory { return true; };
+                                if constantOverList(ltContext, ltAnalysis, inner, gf.at, otherTerm) { return true; };
+                                for factPosition in 0..size(ltContext.applications) {
+                                    fact = get(ltContext.applications, factPosition);
+                                    if fact.function = -30 {
+                                        if size(fact.arguments) = 5 {
+                                            bv = integerValue(ltContext, get(fact.arguments, 4));
+                                            if bv is IntegerLookup::Found {
+                                                if (bv as IntegerLookup::Found).value = 0 {
+                                                    if linearEntails(ltContext, get(fact.arguments, 2), gf.at, 0) {
+                                                        if linearEntails(ltContext, gf.at, get(fact.arguments, 3), -1) {
+                                                            if sameIn(ltAnalysis.classes, inner, get(fact.arguments, 0)) {
+                                                                if constantOverList(ltContext, ltAnalysis, get(fact.arguments, 1), gf.at, otherTerm) { return true; };
+                                                            };
+                                                            if sameIn(ltAnalysis.classes, inner, get(fact.arguments, 1)) {
+                                                                if constantOverList(ltContext, ltAnalysis, get(fact.arguments, 0), gf.at, otherTerm) { return true; };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn finiteGetSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    for gf in getFactsTranslated(context, analysis.classes, getTerm) {
+        if finiteGetSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
+    };
+    return false;
+};
+
+fn finiteGetSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    sz = sizeTermOf(context, analysis.classes, gf.seq);
+    if sz.found = false { return false; };
+    nv = integerValueIn(analysis.classes, context.constants, sz.term);
+    if nv is IntegerLookup::Found {
+        n = (nv as IntegerLookup::Found).value;
+        if n < 0 { return false; };
+        if n > 64 { return false; };
+        zero = 0;
+        zeroFound = false;
+        for constantPosition in 0..size(context.constants) {
+            constant = get(context.constants, constantPosition);
+            if constant.kind = 0 {
+                if constant.value = 0 { zero = constant.id; zeroFound = true; };
+            };
+        };
+        if zeroFound = false { return false; };
+        if hasDifferenceIn(analysis.classes, differences, zero, gf.at, 0) = false { return false; };
+        if hasDifferenceIn(analysis.classes, differences, gf.at, sz.term, -1) = false { return false; };
+        for k in 0..n {
+            kTerm = 0;
+            kFound = false;
+            for constantPosition in 0..size(context.constants) {
+                constant = get(context.constants, constantPosition);
+                if constant.kind = 0 {
+                    if constant.value = k { kTerm = constant.id; kFound = true; };
+                };
+            };
+            if kFound = false { return false; };
+            elemFound = false;
+            for appPosition in 0..size(context.applications) {
+                app = get(context.applications, appPosition);
+                if app.function = -14 {
+                    if size(app.arguments) = 2 {
+                        if sameIn(analysis.classes, get(app.arguments, 1), kTerm) {
+                            if sameIn(analysis.classes, app.id, otherTerm) {
+                                if sameIn(analysis.classes, get(app.arguments, 0), gf.seq) { elemFound = true; };
+                                if getCoveredByEqualRange(context, analysis.classes, gf.seq, get(app.arguments, 0), kTerm) { elemFound = true; };
+                            };
+                        };
+                    };
+                };
+            };
+            if elemFound = false { return false; };
+        };
+        return true;
+    };
+    return false;
+};
+
+fn finiteGetEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if finiteGetSide(context, analysis, left, right) { return true; };
+    return finiteGetSide(context, analysis, right, left);
+};
+
+// The bridge records `forall j in lo..hi: get(a, base + j) = c` as an
+// application of function -32 to (a, lo, hi, base, c).
+fn forallConstantSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    for gf in getFactsTranslated(context, analysis.classes, getTerm) {
+        if forallConstantSideFor(context, analysis, getTerm, otherTerm, gf, 2) { return true; };
+    };
+    return false;
+};
+
+fn forallConstantSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -32 {
+            if size(app.arguments) = 5 {
+                a = get(app.arguments, 0);
+                lo = get(app.arguments, 1);
+                hi = get(app.arguments, 2);
+                base = get(app.arguments, 3);
+                c = get(app.arguments, 4);
+                if sameIn(analysis.classes, gf.seq, a) {
+                    if sameIn(analysis.classes, otherTerm, c) {
+                        j = gf.at;
+                        jFound = false;
+                        bv = integerValueIn(analysis.classes, context.constants, base);
+                        if bv is IntegerLookup::Found {
+                            if (bv as IntegerLookup::Found).value = 0 { jFound = true; };
+                        };
+                        if jFound = false {
+                            for sumPosition in 0..size(context.applications) {
+                                sum = get(context.applications, sumPosition);
+                                if sum.function = -1 {
+                                    if size(sum.arguments) = 2 {
+                                        if sameIn(analysis.classes, sum.id, gf.at) {
+                                            if sameIn(analysis.classes, get(sum.arguments, 0), base) { j = get(sum.arguments, 1); jFound = true; };
+                                            if sameIn(analysis.classes, get(sum.arguments, 1), base) { j = get(sum.arguments, 0); jFound = true; };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                        if jFound {
+                            if hasDifferenceIn(analysis.classes, differences, lo, j, 0) {
+                                below = hasDifferenceIn(analysis.classes, differences, j, hi, -1);
+                                if below = false { below = linearEntailsIn(context, analysis.classes, j, hi, -1); };
+                                if below { return true; };
+                                atMost = hasDifferenceIn(analysis.classes, differences, j, hi, 0);
+                                if atMost = false { atMost = linearEntailsIn(context, analysis.classes, j, hi, 0); };
+                                if atMost {
+                                    strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+                                    strictAnalysis = analyzeContext(strictContext);
+                                    deeper = false;
+                                    if fuel > 0 {
+                                        for gfDeeper in getFactsTranslated(strictContext, strictAnalysis.classes, getTerm) {
+                                            if deeper = false { deeper = forallConstantSideFor(strictContext, strictAnalysis, getTerm, otherTerm, gfDeeper, fuel - 1); };
+                                        };
+                                    };
+                                    if deeper {
+                                        eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+                                        eqAnalysis = analyzeContext(eqContext);
+                                        if eqAnalysis.contradictory { return true; };
+                                        if contextEqual(eqAnalysis.classes, eqAnalysis.differences, getTerm, otherTerm) { return true; };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// The bridge records `forall j in lo..hi: get(a, base + j) = get(b, j) + d`
+// (mode 0) or `get(b, j) - d` (mode 1) as an application of function -33 to
+// (a, b, lo, hi, base, d, mode).
+fn forallShiftSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int) -> Bool {
+    for gf in getFactsTranslated(context, analysis.classes, getTerm) {
+        if forallShiftSideFor(context, analysis, getTerm, exprTerm, gf, 2) { return true; };
+    };
+    return false;
+};
+
+fn forallShiftSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int, gf: &GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks 2 * fuel + 1 {
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -33 && size(app.arguments) = 7 {
+            if forallShiftFromFact(context, analysis, getTerm, exprTerm, gf, fuel, app.arguments) { return true; };
+        };
+    };
+    return false;
+};
+
+// How a read's list is a list a fact is about: 0 when it is not, 1 when it is that list, 2 when it is a push onto it
+fn readListOf(context: &ValidatorContext, classes: &HashMap<Int, Int>, seq: Int, list: Int) -> Int {
+    if sameIn(classes, seq, list) { return 1; };
+    for pushAppPosition in 0..size(context.applications) {
+        pushApp = get(context.applications, pushAppPosition);
+        if pushApp.function = -16 && size(pushApp.arguments) = 2 {
+            if sameIn(classes, pushApp.id, seq) && sameIn(classes, get(pushApp.arguments, 0), list) { return 2; };
+        };
+    };
+    return 0;
+};
+
+// The index j that a read at `at` is at past base: at = base + j (j = at when base is 0)
+fn indexPastBase(context: &ValidatorContext, classes: &HashMap<Int, Int>, at: Int, base: Int) -> SizeFact {
+    bv = integerValue(context, base);
+    if bv is IntegerLookup::Found {
+        if (bv as IntegerLookup::Found).value = 0 { return SizeFact { term: at, found: true }; };
+    };
+    result = SizeFact { term: at, found: false };
+    for sumPosition in 0..size(context.applications) {
+        sum = get(context.applications, sumPosition);
+        if sum.function = -1 && size(sum.arguments) = 2 {
+            if sameIn(classes, sum.id, at) {
+                if sameIn(classes, get(sum.arguments, 0), base) { result = SizeFact { term: get(sum.arguments, 1), found: true }; };
+                if sameIn(classes, get(sum.arguments, 1), base) { result = SizeFact { term: get(sum.arguments, 0), found: true }; };
+            };
+        };
+    };
+    return result;
+};
+
+// A read of a list at an index, as a term (the last one recorded)
+fn readTermAt(context: &ValidatorContext, classes: &HashMap<Int, Int>, list: Int, index: Int) -> SizeFact {
+    result = SizeFact { term: 0, found: false };
+    for gappPosition in 0..size(context.applications) {
+        gapp = get(context.applications, gappPosition);
+        if gapp.function = -14 && size(gapp.arguments) = 2 {
+            if sameIn(classes, get(gapp.arguments, 0), list) && sameIn(classes, get(gapp.arguments, 1), index) { result = SizeFact { term: gapp.id, found: true }; };
+        };
+    };
+    return result;
+};
+
+// Whether a term is the read shifted by delta: read + delta in mode 0, read - delta in mode 1
+fn shiftedRead(context: &ValidatorContext, classes: &HashMap<Int, Int>, exprTerm: Int, read: Int, delta: Int, mode: Int) -> Bool {
+    for eappPosition in 0..size(context.applications) {
+        eapp = get(context.applications, eappPosition);
+        if sameIn(classes, eapp.id, exprTerm) && size(eapp.arguments) = 2 {
+            u = get(eapp.arguments, 0);
+            v = get(eapp.arguments, 1);
+            if eapp.function = -1 && mode = 0 {
+                if sameIn(classes, u, read) && sameIn(classes, v, delta) { return true; };
+                if sameIn(classes, v, read) && sameIn(classes, u, delta) { return true; };
+            };
+            if eapp.function = -2 && mode = 1 {
+                if sameIn(classes, u, read) && sameIn(classes, v, delta) { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+// One shift fact, get(a, base + j) = get(b, j) + delta (or - delta) for lo <= j < hi, at the read and the expression
+fn forallShiftFromFact(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int, gf: &GetFact, fuel: Int, args: &List<Int>) -> Bool [{ affirm fuel >= 0; affirm size(args) = 7; }] [{ }] shrinks 2 * fuel {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    a = get(args, 0);
+    b = get(args, 1);
+    lo = get(args, 2);
+    hi = get(args, 3);
+    base = get(args, 4);
+    delta = get(args, 5);
+    listOf = readListOf(context, analysis.classes, gf.seq, a);
+    if listOf = 0 { return false; };
+    modeValue = integerValueIn(analysis.classes, context.constants, get(args, 6));
+    if modeValue is IntegerLookup::Missing { return false; };
+    mode = (modeValue as IntegerLookup::Found).value;
+    index = indexPastBase(context, analysis.classes, gf.at, base);
+    if index.found = false { return false; };
+    j = index.term;
+    gb = readTermAt(context, analysis.classes, b, j);
+    if gb.found = false { return false; };
+    if shiftedRead(context, analysis.classes, exprTerm, gb.term, delta, mode) = false { return false; };
+    if hasDifferenceIn(analysis.classes, differences, lo, j, 0) = false { return false; };
+    below = hasDifferenceIn(analysis.classes, differences, j, hi, -1);
+    if below = false { below = linearEntailsIn(context, analysis.classes, j, hi, -1); };
+    if below {
+        if listOf = 2 {
+            st = sizeTermOf(context, analysis.classes, a);
+            if st.found {
+                if hasDifferenceIn(analysis.classes, differences, gf.at, st.term, -1) { return true; };
+                if linearEntailsIn(context, analysis.classes, gf.at, st.term, -1) { return true; };
+            };
+        } else { return true; };
+    };
+    atMost = hasDifferenceIn(analysis.classes, differences, j, hi, 0);
+    if atMost = false { atMost = linearEntailsIn(context, analysis.classes, j, hi, 0); };
+    if atMost = false || fuel <= 0 { return false; };
+    strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+    strictAnalysis = analyzeContext(strictContext);
+    deeper = false;
+    for gfDeeper in getFactsTranslated(strictContext, strictAnalysis.classes, getTerm) {
+        if deeper = false { deeper = forallShiftSideFor(strictContext, strictAnalysis, getTerm, exprTerm, gfDeeper, fuel - 1); };
+    };
+    if deeper = false { return false; };
+    eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+    eqAnalysis = analyzeContext(eqContext);
+    if eqAnalysis.contradictory { return true; };
+    return contextEqual(eqAnalysis.classes, eqAnalysis.differences, getTerm, exprTerm);
+};
+
+// `a % d` is `a` itself when `0 <= a < d`.
+fn modIsSelf(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    zero = 0;
+    zeroFound = false;
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.kind = 0 {
+            if constant.value = 0 { zero = constant.id; zeroFound = true; };
+        };
+    };
+    if zeroFound = false { return false; };
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -5 {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                d = get(app.arguments, 1);
+                dv = integerValueIn(analysis.classes, context.constants, d);
+                if dv is IntegerLookup::Found {
+                    if (dv as IntegerLookup::Found).value > 0 {
+                        matches = false;
+                        if sameIn(analysis.classes, app.id, left) {
+                            if sameIn(analysis.classes, a, right) { matches = true; };
+                        };
+                        if sameIn(analysis.classes, app.id, right) {
+                            if sameIn(analysis.classes, a, left) { matches = true; };
+                        };
+                        if matches {
+                            if hasDifferenceIn(analysis.classes, differences, zero, a, 0) {
+                                if hasDifferenceIn(analysis.classes, differences, a, d, -1) { return true; };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// A dividend whose remainder is known differs from any value with another
+// remainder.
+fn modDifferent(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    equalities = analysis.equalities;
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -5 {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                d = get(app.arguments, 1);
+                dv = integerValueIn(analysis.classes, context.constants, d);
+                if dv is IntegerLookup::Found {
+                    if (dv as IntegerLookup::Found).value > 0 {
+                        rv = integerValueIn(analysis.classes, context.constants, app.id);
+                        if rv is IntegerLookup::Found {
+                            r = (rv as IntegerLookup::Found).value;
+                            if sameIn(analysis.classes, a, left) {
+                                ov = integerValueIn(analysis.classes, context.constants, right);
+                                if ov is IntegerLookup::Found {
+                                    if (ov as IntegerLookup::Found).value % (dv as IntegerLookup::Found).value != r { return true; };
+                                };
+                            };
+                            if sameIn(analysis.classes, a, right) {
+                                ov = integerValueIn(analysis.classes, context.constants, left);
+                                if ov is IntegerLookup::Found {
+                                    if (ov as IntegerLookup::Found).value % (dv as IntegerLookup::Found).value != r { return true; };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn forallShift(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if forallShiftSide(context, analysis, left, right) { return true; };
+    return forallShiftSide(context, analysis, right, left);
+};
+
+fn forallConstant(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if forallConstantSide(context, analysis, left, right) { return true; };
+    return forallConstantSide(context, analysis, right, left);
+};

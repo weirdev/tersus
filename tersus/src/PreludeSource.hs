@@ -178,7 +178,14 @@ mirPackageFiles = dataPackageFiles ++
 validationPackageFiles :: [(FilePath, String)]
 validationPackageFiles =
     $( do
-        let paths = ["lib/validation/package.tersus", "lib/validation/validation.tersus", "lib/validation/driver.tersus"]
+        let paths = ["lib/validation/package.tersus", "lib/validation/driver.tersus",
+                "lib/validation/context.tersus", "lib/validation/differences.tersus",
+                "lib/validation/evaluation.tersus", "lib/validation/execution.tersus",
+                "lib/validation/flow.tersus", "lib/validation/joins.tersus",
+                "lib/validation/linear.tersus", "lib/validation/loopInference.tersus",
+                "lib/validation/model.tersus", "lib/validation/relations.tersus", "lib/validation/saturation.tersus",
+                "lib/validation/sequenceFacts.tersus", "lib/validation/state.tersus",
+                "lib/validation/validation.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )

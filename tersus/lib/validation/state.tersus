@@ -1,0 +1,236 @@
+import validation::execution { localGoal };
+import validation::model { ArgumentsLookup, CachedAnswer, EntailmentCache, ExecutionState, ForallTemplate, IntegerLookup, MergePair, NegatedRelation, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef };
+import validation::relations { containsValue };
+import validation::validation { entailmentCache, entailsAnyCached };
+
+
+
+fn noTemplates() -> List<ForallTemplate> { return []; };
+
+fn emptyMergePairs() -> List<MergePair> { return []; };
+
+fn lookupLocal(locals: &HashMap<Int, Int>, local: Int) -> ValueLookup {
+    if locals.contains(local) {
+        return ValueLookup::Found { term: locals.lookup(local, 0) };
+    };
+    return ValueLookup::Missing;
+};
+
+fn bindLocal(locals: HashMap<Int, Int>, local: Int, term: Int) -> HashMap<Int, Int> {
+    return locals.insert(local, term);
+};
+
+fn forgetLocal(locals: HashMap<Int, Int>, local: Int) -> HashMap<Int, Int> {
+    return locals.remove(local);
+};
+
+// Term references are supplied by the host's term interner; a Local reference
+// must already be bound on this path. Unknown variants and locals fail closed.
+fn resolveValue(state: &ExecutionState, value: ValueRef) -> ValueLookup {
+    if value is ValueRef::Local {
+        return lookupLocal(state.locals, (value as ValueRef::Local).local);
+    };
+    if value is ValueRef::Term {
+        return ValueLookup::Found { term: (value as ValueRef::Term).term };
+    };
+    return ValueLookup::Missing;
+};
+
+fn resolveArguments(state: &ExecutionState, values: &List<ValueRef>) -> ArgumentsLookup {
+    terms = [];
+    for valuePosition in 0..size(values) {
+        value = get(values, valuePosition);
+        result = resolveValue(state, value);
+        if result is ValueLookup::Found {
+            terms = push(terms, (result as ValueLookup::Found).term);
+        } else {
+            return ArgumentsLookup::Missing;
+        };
+    };
+    return ArgumentsLookup::Found { terms: terms };
+};
+
+// A fresh result must not alias any term already present on this path.
+fn termInUse(state: &ExecutionState, term: Int) -> Bool {
+    for binding in state.locals.entries() { if binding.value = term { return true; }; };
+    for factPosition in 0..size(state.context.equalities) {
+        fact = get(state.context.equalities, factPosition);
+        if fact.left = term { return true; }; if fact.right = term { return true; };
+    };
+    for factPosition in 0..size(state.context.different) {
+        fact = get(state.context.different, factPosition);
+        if fact.left = term { return true; }; if fact.right = term { return true; };
+    };
+    for factPosition in 0..size(state.context.orders) {
+        fact = get(state.context.orders, factPosition);
+        if fact.smaller = term { return true; }; if fact.greater = term { return true; };
+    };
+    for factPosition in 0..size(state.context.differences) {
+        fact = get(state.context.differences, factPosition);
+        if fact.left = term { return true; }; if fact.right = term { return true; };
+    };
+    for factPosition in 0..size(state.context.variants) {
+        fact = get(state.context.variants, factPosition);
+        if fact.object = term { return true; };
+    };
+    for constant in state.context.constants { if constant.id = term { return true; }; };
+    for appPosition in 0..size(state.context.applications) {
+        app = get(state.context.applications, appPosition);
+        if app.id = term { return true; };
+        if app.function = term { return true; };
+        if containsValue(app.arguments, term) { return true; };
+    };
+    return false;
+};
+
+// The MIR bridge reserves -1 through -19 for builtin functions and uses
+// non-negative IDs for input terms. A bounded search supplies path-local
+// symbols without aliasing any term still mentioned by the state. Exhaustion
+// is reported as unsupported rather than reusing a live identifier.
+fn goalSides(goal: &ValidatorGoal) -> List<Int> {
+    if goal is ValidatorGoal::Equal { g = goal as ValidatorGoal::Equal; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::Different { g = goal as ValidatorGoal::Different; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::Less { g = goal as ValidatorGoal::Less; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::AtMost { g = goal as ValidatorGoal::AtMost; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::Difference { g = goal as ValidatorGoal::Difference; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::Within { g = goal as ValidatorGoal::Within; return push(push([], g.inner), g.outer); };
+    return [];
+};
+
+fn negateRelation(relation: Int, left: Int, right: Int) -> NegatedRelation {
+    if relation = 0 { return NegatedRelation { relation: 1, left: left, right: right }; };
+    if relation = 1 { return NegatedRelation { relation: 0, left: left, right: right }; };
+    if relation = 2 { return NegatedRelation { relation: 3, left: right, right: left }; };
+    return NegatedRelation { relation: 2, left: right, right: left };
+};
+
+// The comparison that produced the term, negated when the term has to be
+// false. The application keeps the operands from the time of the comparison.
+fn relationGoals(context: &ValidatorContext, term: Int, truth: Bool) -> List<ValidatorGoal> {
+    goals = [];
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.id = term {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                relation = -1;
+                left = a;
+                right = b;
+                if app.function = -6 { relation = 0; };
+                if app.function = -7 { relation = 1; };
+                if app.function = -8 { relation = 2; };
+                if app.function = -9 { relation = 3; };
+                if app.function = -10 { relation = 2; left = b; right = a; };
+                if app.function = -11 { relation = 3; left = b; right = a; };
+                if relation >= 0 {
+                    if truth = false {
+                        opposite = negateRelation(relation, left, right);
+                        relation = opposite.relation;
+                        left = opposite.left;
+                        right = opposite.right;
+                    };
+                    goals = push(goals, localGoal(relation, left, right));
+                };
+            };
+        };
+    };
+    return goals;
+};
+
+// Recognize a boolean directly or through the comparison that produced it.
+// The literal is the term for the truth value being asked about, so `truth` and
+// `literal` always agree.
+fn booleanKnownCached(cache: EntailmentCache, term: Int, literal: Int, truth: Bool) -> CachedAnswer {
+    goals = push(relationGoals(cache.plain, term, truth), ValidatorGoal::Equal { left: term, right: literal });
+    return entailsAnyCached(cache, goals);
+};
+
+fn booleanKnown(context: &ValidatorContext, term: Int, literal: Int, truth: Bool) -> Bool {
+    return booleanKnownCached(entailmentCache(context), term, literal, truth).holds;
+};
+
+// A boolean term that the context knows to be a literal: kind 1 is a boolean,
+// and its value is 0 or 1.
+fn booleanLiteral(context: &ValidatorContext, term: Int) -> IntegerLookup {
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.id = term {
+            if constant.kind = 1 { return IntegerLookup::Found { value: constant.value }; };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+
+// The term for the boolean constant with this value, if the program has one.
+// A check against the other value has to name its own literal.
+fn booleanConstant(context: &ValidatorContext, value: Int) -> ValueLookup {
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.kind = 1 {
+            if constant.value = value { return ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+// A disequality asks the term for the opposite of the literal it was compared
+// with, so the literal itself cannot answer it. The producing comparison still
+// can; a plain constant needs the term for that value, which the program may
+// not mention at all.
+fn booleanOpposite(context: &ValidatorContext, term: Int, truth: Bool) -> Bool {
+    goals = relationGoals(context, term, truth);
+    value = 0;
+    if truth { value = 1; };
+    literal = booleanConstant(context, value);
+    if literal is ValueLookup::Found {
+        goals = push(goals, ValidatorGoal::Equal { left: term, right: (literal as ValueLookup::Found).term });
+    };
+    return entailsAnyCached(entailmentCache(context), goals).holds;
+};
+
+// `term` has to be the literal `value` when the operands are equal and the
+// other value when they differ, so a disequality asks for the opposite
+// literal rather than reusing the one it was compared with.
+fn booleanAgainstLiteral(context: &ValidatorContext, term: Int, literal: Int, value: Int, relation: Int) -> Bool {
+    if value != 0 {
+        if value != 1 { return false; };
+    };
+    if relation = 0 {
+        if value = 1 { return booleanKnown(context, term, literal, true); };
+        return booleanKnown(context, term, literal, false);
+    };
+    if value = 0 { return booleanOpposite(context, term, true); };
+    return booleanOpposite(context, term, false);
+};
+
+// A check of a boolean term against a literal is the comparison that produced
+// the term, so `below = true` follows from `below` being `x < 6` with x < 6.
+// The relation itself stays with the terms that were compared, not with the
+// current values of the locals.
+fn booleanCheck(context: &ValidatorContext, relation: Int, left: Int, right: Int) -> Bool {
+    if relation != 0 {
+        if relation != 1 { return false; };
+    };
+    a = booleanLiteral(context, left);
+    if a is IntegerLookup::Found {
+        return booleanAgainstLiteral(context, right, left, (a as IntegerLookup::Found).value, relation);
+    };
+    b = booleanLiteral(context, right);
+    if b is IntegerLookup::Found {
+        return booleanAgainstLiteral(context, left, right, (b as IntegerLookup::Found).value, relation);
+    };
+    return false;
+};
+
+
+fn commonTemplates(left: &List<ForallTemplate>, right: &List<ForallTemplate>) -> List<ForallTemplate> {
+    kept = noTemplates();
+    for tPosition in 0..size(left) {
+        t = get(left, tPosition);
+        both = false;
+        for u in right { if u.id = t.id { both = true; }; };
+        if both { kept = push(kept, clone(t)); };
+    };
+    return kept;
+};

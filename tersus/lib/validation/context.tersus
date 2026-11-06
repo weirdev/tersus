@@ -1,0 +1,709 @@
+import validation::differences { canonicalDifferences, canonicalDifferencesIn, canonicalDistances, comparisonDifferences, constantDifferences, constantOrders, contradictoryConstants, contradictoryDifferences, differencePotential, hasDifference, isSizeTerm, refinedOrders, semanticFacts, tableDistanceAtMost, tightEdges };
+import validation::model { ApplicationTerm, ConstantTerm, ContextAnalysis, DifferenceFact, DisequalityFact, DistanceTable, EdgeGraph, EqualityFact, IntegerLookup, OrderFact, Representative, SignFacts, UnionFind, ValidatorContext, VariantFact, VariantObjectLookup };
+import validation::relations { applicationAt, applicationFactsWithConstructors, canonicalIn, closedDisequality, contradictoryDisequalities, emptyIntMap, emptyPositions, entailsApplicationDisequality, equalityRepresentatives, hasDifferenceIn, hasEquality, hasOrderIn, hashStep, intAt, leastClasses, sameIn, ufFind, ufUnion };
+
+
+
+// Any equality obtained from bounds relates endpoints of comparisons,
+// differences, constants or disequalities. Equalities to other identifiers
+// are already represented in the equality closure.
+fn contextNodes(context: &ValidatorContext) -> List<Int> {
+    candidates = [];
+    for orderPosition in 0..size(context.orders) {
+        order = get(context.orders, orderPosition);
+        candidates = push(candidates, order.smaller);
+        candidates = push(candidates, order.greater);
+    };
+    for factPosition in 0..size(context.differences) {
+        fact = get(context.differences, factPosition);
+        candidates = push(candidates, fact.left);
+        candidates = push(candidates, fact.right);
+    };
+    for factPosition in 0..size(context.different) {
+        fact = get(context.different, factPosition);
+        candidates = push(candidates, fact.left);
+        candidates = push(candidates, fact.right);
+    };
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        candidates = push(candidates, constant.id);
+    };
+    nodes = [];
+    seen = HashSet::new();
+    for nodePosition in 0..size(candidates) {
+        node = get(candidates, nodePosition);
+        if seen.contains(node) = false {
+            seen = seen.insert(node);
+            nodes = push(nodes, node);
+        };
+    };
+    return nodes;
+};
+
+fn representativeMap(reps: &List<Representative>) -> HashMap<Int, Int> {
+    m = emptyIntMap();
+    for rPosition in 0..size(reps) {
+        r = get(reps, rPosition);
+        m = m.insert(r.term, r.rep);
+    };
+    return m;
+};
+
+fn mappedRepresentative(m: &HashMap<Int, Int>, term: Int) -> Int {
+    if m.contains(term) { return m.lookup(term, term); };
+    return term;
+};
+
+// (as mergeRepresentatives, for a map)
+fn mergeRepresentativeMap(m: HashMap<Int, Int>, a: Int, b: Int) -> HashMap<Int, Int> {
+    ra = mappedRepresentative(m, a);
+    rb = mappedRepresentative(m, b);
+    if ra = rb { return m; };
+    least = ra;
+    if rb < least { least = rb; };
+    result = m;
+    for entry in result.entries() {
+        if entry.value = ra || entry.value = rb { result = result.insert(entry.key, least); };
+    };
+    result = result.insert(a, least);
+    result = result.insert(b, least);
+    return result;
+};
+
+fn pairKey(a: Int, b: Int) -> Int {
+    return hashStep(hashStep(11, a), b);
+};
+
+fn edgeNodes(edges: &List<DifferenceFact>) -> List<Int> {
+    nodes = [];
+    seen = HashSet::new();
+    for ePosition in 0..size(edges) {
+        a = get(edges, ePosition).left;
+        b = get(edges, ePosition).right;
+        if seen.contains(a) = false { seen = seen.insert(a); nodes = push(nodes, a); };
+        if seen.contains(b) = false { seen = seen.insert(b); nodes = push(nodes, b); };
+    };
+    return nodes;
+};
+
+fn edgeGraph(edges: &List<DifferenceFact>, index: &HashMap<Int, Int>, count: Int, reversed: Bool) -> EdgeGraph [{ affirm count >= 0; }] [{ }] {
+    starts = [];
+    for k in 0..count + 1 { starts = push(starts, 0); };
+    for ePosition in 0..size(edges) {
+        from = index.lookup(get(edges, ePosition).right, -1);
+        if reversed { from = index.lookup(get(edges, ePosition).left, -1); };
+        if from >= 0 && from + 1 < size(starts) { starts = set(starts, from + 1, get(starts, from + 1) + 1); };
+    };
+    for k in 0..count {
+        if k + 1 < size(starts) { starts = set(starts, k + 1, get(starts, k + 1) + get(starts, k)); };
+    };
+    targets = [];
+    for ePosition in 0..size(edges) { targets = push(targets, -1); };
+    fill = clone(starts);
+    for ePosition in 0..size(edges) {
+        from = index.lookup(get(edges, ePosition).right, -1);
+        to = index.lookup(get(edges, ePosition).left, -1);
+        if reversed {
+            from = index.lookup(get(edges, ePosition).left, -1);
+            to = index.lookup(get(edges, ePosition).right, -1);
+        };
+        if from >= 0 && from < size(fill) {
+            place = get(fill, from);
+            if place >= 0 && place < size(targets) {
+                targets = set(targets, place, to);
+                fill = set(fill, from, place + 1);
+            };
+        };
+    };
+    return EdgeGraph { starts: starts, targets: targets };
+};
+
+// (the node indexes in the order a depth-first walk from each of them in turn
+// finishes them)
+fn finishOrder(graph: &EdgeGraph, count: Int, steps: Int) -> List<Int> [{ affirm count >= 0; affirm steps >= 0; }] [{ }] {
+    order = [];
+    visited = [];
+    for k in 0..count { visited = push(visited, false); };
+    for start in 0..count {
+        if start < size(visited) && get(visited, start) = false {
+            visited = set(visited, start, true);
+            stack = push([], start);
+            next = push([], intAt(graph.starts, start, 0));
+            for step in 0..steps {
+                if size(stack) > 0 && size(next) = size(stack) {
+                    top = last(stack);
+                    i = last(next);
+                    if i < intAt(graph.starts, top + 1, 0) {
+                        next = set(next, size(next) - 1, i + 1);
+                        to = intAt(graph.targets, i, -1);
+                        if to >= 0 && to < size(visited) {
+                            if get(visited, to) = false {
+                                visited = set(visited, to, true);
+                                stack = push(stack, to);
+                                next = push(next, intAt(graph.starts, to, 0));
+                            };
+                        };
+                    } else {
+                        order = push(order, top);
+                        stack = pop(stack);
+                        next = pop(next);
+                    };
+                };
+            };
+        };
+    };
+    return order;
+};
+
+// The strongly connected components of the difference edges, by Kosaraju's
+// two walks: each node the edges name is mapped to the first node of its
+// component the second walk finds
+fn edgeComponents(edges: &List<DifferenceFact>) -> HashMap<Int, Int> {
+    nodes = edgeNodes(edges);
+    count = size(nodes);
+    index = emptyIntMap();
+    for k in 0..count { index = index.insert(get(nodes, k), k); };
+    steps = 2 * size(edges) + 2 * count + 2;
+    order = finishOrder(edgeGraph(edges, index, count, false), count, steps);
+    reversed = edgeGraph(edges, index, count, true);
+    component = [];
+    for k in 0..count { component = push(component, -1); };
+    for back in 0..size(order) {
+        start = intAt(order, size(order) - 1 - back, -1);
+        if start >= 0 && start < size(component) {
+            if get(component, start) < 0 {
+                component = set(component, start, start);
+                stack = push([], start);
+                for step in 0..steps {
+                    if size(stack) > 0 {
+                        top = last(stack);
+                        stack = pop(stack);
+                        lo = intAt(reversed.starts, top, 0);
+                        hi = intAt(reversed.starts, top + 1, 0);
+                        if hi < lo { hi = lo; };
+                        for i in lo..hi {
+                            to = intAt(reversed.targets, i, -1);
+                            if to >= 0 && to < size(component) {
+                                if get(component, to) < 0 {
+                                    component = set(component, to, start);
+                                    stack = push(stack, to);
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    result = emptyIntMap();
+    for k in 0..count {
+        c = intAt(component, k, -1);
+        if c >= 0 && c < count && k < count { result = result.insert(get(nodes, k), get(nodes, c)); };
+    };
+    return result;
+};
+
+fn boundEqualities(equalities: &List<EqualityFact>, classes: &HashMap<Int, Int>, differences: &List<DifferenceFact>, nodes: &List<Int>) -> List<EqualityFact> {
+    edges = canonicalDifferencesIn(classes, differences);
+    potential = differencePotential(edges);
+    if potential.valid = false { return boundEqualitiesByTables(equalities, differences, nodes); };
+    // (a tight path from a to b weighs p(b) - p(a), and every other path
+    // more: the classes of one tight component with one potential are at
+    // distance 0 from each other both ways, and so are one class)
+    component = edgeComponents(tightEdges(edges, potential.potential));
+    known = clone(equalities);
+    first = emptyPositions();
+    joined = HashSet::new();
+    for nodePosition in 0..size(nodes) {
+        r = canonicalIn(classes, get(nodes, nodePosition));
+        if component.contains(r) && joined.contains(r) = false {
+            joined = joined.insert(r);
+            key = pairKey(component.lookup(r, r), potential.potential.lookup(r, 0));
+            if first.contains(key) = false {
+                first = first.insert(key, push([], r));
+            } else {
+                // (a key two groups share is told apart by both of its parts)
+                matched = false;
+                for other in first.lookup(key, []) {
+                    if matched = false && component.lookup(other, other) = component.lookup(r, r) && potential.potential.lookup(other, 0) = potential.potential.lookup(r, 0) {
+                        known = push(known, EqualityFact { left: other, right: r });
+                        matched = true;
+                    };
+                };
+                if matched = false { first = first.insert(key, push(first.lookup(key, []), r)); };
+            };
+        };
+    };
+    return known;
+};
+
+// (the same, by a table of distances from each class in a component of more
+// than one: for a graph with a negative cycle, or sums near the bounds of Int)
+fn boundEqualitiesByTables(equalities: &List<EqualityFact>, differences: &List<DifferenceFact>, nodes: &List<Int>) -> List<EqualityFact> {
+    known = clone(equalities);
+    reps = equalityRepresentatives(equalities);
+    repMap = representativeMap(reps);
+    edges = canonicalDifferences(reps, differences);
+    // (only the classes in a component of more than one can be merged, and the
+    // distances between them are read over the edges inside it)
+    component = edgeComponents(edges);
+    componentSize = emptyIntMap();
+    for entry in component.entries() {
+        componentSize = componentSize.insert(entry.value, componentSize.lookup(entry.value, 0) + 1);
+    };
+    inner = [];
+    for ePosition in 0..size(edges) {
+        e = get(edges, ePosition);
+        if component.contains(e.left) && component.lookup(e.left, 0) = component.lookup(e.right, 1) && componentSize.lookup(component.lookup(e.left, 0), 0) > 1 {
+            inner = push(inner, clone(e));
+        };
+    };
+    // (nodes of one class have the same distances, so each class gets one
+    // table; the pairs at distance at most 0 are kept as keys too, so that most
+    // pairs are ruled out without reading a table, and a key that matches is
+    // read from the tables before it is believed)
+    tables = [];
+    sources = HashSet::new();
+    zeroPairs = HashSet::new();
+    for nodePosition in 0..size(nodes) {
+        node = get(nodes, nodePosition);
+        r = mappedRepresentative(repMap, node);
+        if sources.contains(r) = false && componentSize.lookup(component.lookup(r, r), 0) > 1 {
+            sources = sources.insert(r);
+            distances = canonicalDistances(inner, r);
+            for d in distances.entries() {
+                if d.value <= 0 { zeroPairs = zeroPairs.insert(pairKey(r, d.key)); };
+            };
+            tables = push(tables, DistanceTable { source: r, distances: distances });
+        };
+    };
+    // (two classes at distance at most 0 from each other, both ways, are one)
+    knownReps = clone(repMap);
+    for tPosition in 0..size(tables) {
+        ra = get(tables, tPosition).source;
+        ds = get(tables, tPosition).distances;
+        for d in ds.entries() {
+            rb = d.key;
+            if d.value <= 0 && rb != ra && sources.contains(rb) {
+                if zeroPairs.contains(pairKey(rb, ra)) {
+                    if mappedRepresentative(knownReps, ra) != mappedRepresentative(knownReps, rb) {
+                        if tableDistanceAtMost(tables, rb, ra, 0) {
+                            known = push(known, EqualityFact { left: ra, right: rb });
+                            knownReps = mergeRepresentativeMap(knownReps, ra, rb);
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return known;
+};
+
+// Repeat because an equality proved by bounds can make applications equal,
+// and those equal applications can in turn connect more bounds. Every round
+// that changes the result merges at least one of the finite candidate classes.
+fn closeContext(context: &ValidatorContext) -> List<EqualityFact> {
+    nodes = contextNodes(context);
+    known = semanticFacts(context.equalities, context.applications, context.constants);
+    for round in 0..size(nodes) + 2 * size(context.equalities) + 8 * size(context.applications) + 8 {
+        classes = leastClasses(known);
+        orders = refinedOrders(classes, constantOrders(context.orders, context.constants), context.different);
+        differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
+        next = applicationFactsWithConstructors(boundEqualities(known, classes, differences, nodes), context.applications, context.constructorFunctions, context.constructorFields);
+        if size(next) = size(known) { return next; };
+        known = next;
+    };
+    return known;
+};
+
+fn contextEqual(classes: &HashMap<Int, Int>, differences: &List<DifferenceFact>, left: Int, right: Int) -> Bool {
+    if sameIn(classes, left, right) {
+        return true;
+    };
+    if hasDifferenceIn(classes, differences, left, right, 0) {
+        return hasDifferenceIn(classes, differences, right, left, 0);
+    };
+    return false;
+};
+
+fn contextDifferent(equalities: &List<EqualityFact>, applications: &List<ApplicationTerm>, orders: &List<OrderFact>, different: &List<DisequalityFact>, differences: &List<DifferenceFact>, left: Int, right: Int) -> Bool {
+    if hasDifference(equalities, differences, left, right, -1) {
+        return true;
+    };
+    if hasDifference(equalities, differences, right, left, -1) {
+        return true;
+    };
+    return entailsApplicationDisequality(equalities, applications, orders, different, left, right);
+};
+
+fn contradictoryVariants(classes: &HashMap<Int, Int>, variants: &List<VariantFact>) -> Bool {
+    for aPosition in 0..size(variants) {
+        a = get(variants, aPosition);
+        for bPosition in 0..size(variants) {
+            b = get(variants, bPosition);
+            if a.family = b.family {
+                if sameIn(classes, a.object, b.object) {
+                    if a.constructor = b.constructor {
+                        if a.matches != b.matches { return true; };
+                    } else if a.matches {
+                        if b.matches { return true; };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn contradictoryConstructors(classes: &HashMap<Int, Int>, applications: &List<ApplicationTerm>, constructors: &List<Int>) -> Bool {
+    // (two constructions in one class whose constructors are not in one class:
+    // each is compared with the first construction of its class)
+    constructorSet = HashSet::new();
+    for constructor in constructors { constructorSet = constructorSet.insert(constructor); };
+    constructorOfClass = emptyIntMap();
+    for aPosition in 0..size(applications) {
+        function = get(applications, aPosition).function;
+        if constructorSet.contains(function) {
+            r = ufFind(classes, get(applications, aPosition).id);
+            f = ufFind(classes, function);
+            if constructorOfClass.contains(r) {
+                if constructorOfClass.lookup(r, f) != f { return true; };
+            } else { constructorOfClass = constructorOfClass.insert(r, f); };
+        };
+    };
+    return false;
+};
+
+fn entailsConstructorDisequality(classes: &HashMap<Int, Int>, applications: &List<ApplicationTerm>, constructors: &List<Int>, left: Int, right: Int) -> Bool {
+    constructorSet = HashSet::new();
+    for constructor in constructors { constructorSet = constructorSet.insert(constructor); };
+    for aPosition in 0..size(applications) {
+        a = get(applications, aPosition);
+        if constructorSet.contains(a.function) {
+            for bPosition in 0..size(applications) {
+                b = get(applications, bPosition);
+                if constructorSet.contains(b.function) {
+                    if sameIn(classes, a.function, b.function) = false {
+                        if sameIn(classes, left, a.id) {
+                            if sameIn(classes, right, b.id) { return true; };
+                        };
+                        if sameIn(classes, left, b.id) {
+                            if sameIn(classes, right, a.id) { return true; };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn entailsVariantDisequality(classes: &HashMap<Int, Int>, variants: &List<VariantFact>, left: Int, right: Int) -> Bool {
+    for aPosition in 0..size(variants) {
+        a = get(variants, aPosition);
+        for bPosition in 0..size(variants) {
+            b = get(variants, bPosition);
+            if a.family = b.family {
+                distinct = (a.constructor != b.constructor && a.matches && b.matches)
+                    || (a.constructor = b.constructor && a.matches != b.matches);
+                if distinct {
+                    if sameIn(classes, left, a.object) {
+                        if sameIn(classes, right, b.object) { return true; };
+                    };
+                    if sameIn(classes, left, b.object) {
+                        if sameIn(classes, right, a.object) { return true; };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// A positive test for another variant of the same enum makes this test false.
+// Negative facts for other tags do not establish a tag without exhaustiveness.
+fn knownVariant(classes: &HashMap<Int, Int>, variants: &List<VariantFact>, object: Int, family: Int, constructor: Int) -> Int {
+    answer = -1;
+    for factPosition in 0..size(variants) {
+        fact = get(variants, factPosition);
+        if fact.family = family {
+            if sameIn(classes, object, fact.object) {
+                if fact.constructor = constructor {
+                    if fact.matches { answer = 1; } else { answer = 0; };
+                } else if fact.matches {
+                    answer = 0;
+                };
+            };
+        };
+    };
+    return answer;
+};
+
+fn equivalentTermIn(classes: &HashMap<Int, Int>, terms: &List<Int>, term: Int) -> Bool {
+    for candidatePosition in 0..size(terms) {
+        candidate = get(terms, candidatePosition);
+        if sameIn(classes, candidate, term) { return true; };
+    };
+    return false;
+};
+
+fn contextWithin(context: &ValidatorContext, inner: Int, outer: Int) -> Bool {
+    return contextWithinUnder(context, leastClasses(closeContext(context)), inner, outer);
+};
+
+// (the classes reached from outer by reading a field or an element, as a set
+// that grows until a pass adds nothing)
+fn contextWithinUnder(context: &ValidatorContext, classes: &HashMap<Int, Int>, inner: Int, outer: Int) -> Bool {
+    fieldSet = HashSet::new();
+    for function in context.fieldFunctions { fieldSet = fieldSet.insert(function); };
+    innerClass = ufFind(classes, inner);
+    outerClass = ufFind(classes, outer);
+    if innerClass = outerClass { return false; };
+    reached = HashSet::new();
+    reached = reached.insert(outerClass);
+    changed = true;
+    // Each useful round adds a distinct field-result class; the graph is finite.
+    // An element of a list that is a part is a part too (a call's argument has
+    // the parameter's type, so it is a smaller value of it).
+    for round in 0..size(context.applications) {
+        if changed {
+            changed = false;
+            for appPosition in 0..size(context.applications) {
+                app = get(context.applications, appPosition);
+                step = false;
+                if app.function = -14 && size(app.arguments) = 2 { step = true; };
+                if size(app.arguments) = 1 && fieldSet.contains(app.function) { step = true; };
+                if step {
+                    if reached.contains(ufFind(classes, get(app.arguments, 0))) {
+                        c = ufFind(classes, app.id);
+                        if reached.contains(c) = false { reached = reached.insert(c); changed = true; };
+                    };
+                };
+            };
+        };
+    };
+    return reached.contains(innerClass);
+};
+
+// Resolve the object from the saved IsVariant application, not from the
+// current local value, which may have been reassigned after the test.
+fn variantTestObject(context: &ValidatorContext, test: Int, predicate: Int) -> VariantObjectLookup {
+    equalities = closeContext(context);
+    equalitiesClasses = leastClasses(equalities);
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = predicate {
+            if size(app.arguments) = 1 {
+                if sameIn(equalitiesClasses, app.id, test) {
+                    return VariantObjectLookup::Found { object: get(app.arguments, 0) };
+                };
+            };
+        };
+    };
+    return VariantObjectLookup::Missing;
+};
+
+fn integerValue(context: &ValidatorContext, term: Int) -> IntegerLookup {
+    return integerValueIn(leastClasses(semanticFacts(context.equalities, context.applications, context.constants)), context.constants, term);
+};
+
+// The integer constant in the class of a term, if any (the classes are those
+// of facts the context entails)
+fn integerValueIn(classes: &HashMap<Int, Int>, constants: &List<ConstantTerm>, term: Int) -> IntegerLookup {
+    for constantPosition in 0..size(constants) {
+        constant = get(constants, constantPosition);
+        if constant.kind = 0 && sameIn(classes, constant.id, term) {
+            return IntegerLookup::Found { value: constant.value };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+
+fn signFacts(context: &ValidatorContext) -> SignFacts {
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
+    zero = 0;
+    zeroFound = false;
+    for constantPosition in 0..size(context.constants) {
+        if get(context.constants, constantPosition).kind = 0 && get(context.constants, constantPosition).value = 0 {
+            zero = get(context.constants, constantPosition).id;
+            zeroFound = true;
+        };
+    };
+    return SignFacts { classes: clone(equalitiesClasses), equalities: equalities, orders: orders, zero: zero, zeroFound: zeroFound };
+};
+
+fn knownNonnegative(context: &ValidatorContext, term: Int) -> Bool {
+    return knownNonnegativeWith(context, signFacts(context), term);
+};
+
+fn knownNonnegativeWith(context: &ValidatorContext, signs: &SignFacts, term: Int) -> Bool {
+    if isSizeTerm(context.applications, term) { return true; };
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.kind = 0 && hasEquality(signs.equalities, constant.id, term) {
+            if constant.value >= 0 { return true; };
+            if signs.zeroFound = false { return false; };
+            return hasOrderIn(signs.classes, signs.orders, signs.zero, term, false);
+        };
+    };
+    if signs.zeroFound = false { return false; };
+    return hasOrderIn(signs.classes, signs.orders, signs.zero, term, false);
+};
+
+fn hasOrderFact(facts: &List<OrderFact>, smaller: Int, greater: Int) -> Bool {
+    for factPosition in 0..size(facts) {
+        fact = get(facts, factPosition);
+        if fact.smaller = smaller && fact.greater = greater { return true; };
+    };
+    return false;
+};
+
+// Facts about a sum whose parts are only known nonnegative after the sum was
+// formed (a contract may state the sum before the signs) are derived when a
+// goal is checked, from whatever signs are known by then.
+fn deriveSumOrders(context: &ValidatorContext) -> ValidatorContext {
+    signs = signFacts(context);
+    facts = clone(context.orders);
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.function = -1 {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                if knownNonnegativeWith(context, signs, a) {
+                    if hasOrderFact(facts, b, app.id) = false { facts = push(facts, OrderFact { smaller: b, greater: app.id, strict: false }); };
+                };
+                if knownNonnegativeWith(context, signs, b) {
+                    if hasOrderFact(facts, a, app.id) = false { facts = push(facts, OrderFact { smaller: a, greater: app.id, strict: false }); };
+                };
+            };
+        };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+// Every term the arithmetic reads is replaced by the representative of
+// its equality class: the same value reached through equal terms (a
+// projection of a pair and the pair's part, say) must be one variable,
+// or counts and sizes of it never combine.
+fn canonicalFacts(context: &ValidatorContext) -> List<EqualityFact> {
+    return applicationFactsWithConstructors(semanticFacts(context.equalities, context.applications, context.constants), context.applications, context.constructorFunctions, context.constructorFields);
+};
+
+fn canonicalContext(context: &ValidatorContext, classes: &HashMap<Int, Int>) -> ValidatorContext {
+    equalities = [];
+    for f in context.equalities { equalities = push(equalities, EqualityFact { left: canonicalIn(classes, f.left), right: canonicalIn(classes, f.right) }); };
+    applications = [];
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        args = [];
+        for arg in app.arguments { args = push(args, canonicalIn(classes, arg)); };
+        applications = push(applications, ApplicationTerm { id: canonicalIn(classes, app.id), function: app.function, arguments: args });
+    };
+    constants = [];
+    for c in context.constants { constants = push(constants, ConstantTerm { id: canonicalIn(classes, c.id), kind: c.kind, value: c.value }); };
+    orders = [];
+    for o in context.orders { orders = push(orders, OrderFact { smaller: canonicalIn(classes, o.smaller), greater: canonicalIn(classes, o.greater), strict: o.strict }); };
+    different = [];
+    for d in context.different { different = push(different, DisequalityFact { left: canonicalIn(classes, d.left), right: canonicalIn(classes, d.right) }); };
+    variants = [];
+    for v in context.variants { variants = push(variants, VariantFact { object: canonicalIn(classes, v.object), family: v.family, constructor: v.constructor, matches: v.matches }); };
+    differences = [];
+    for d in context.differences { differences = push(differences, DifferenceFact { left: canonicalIn(classes, d.left), right: canonicalIn(classes, d.right), bound: d.bound }); };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
+};
+
+fn analyzeContext(context: &ValidatorContext) -> ContextAnalysis {
+    equalities = closeContext(context);
+    equalitiesClasses = leastClasses(equalities);
+    contradictory = false;
+    if contradictoryVariants(equalitiesClasses, context.variants) { contradictory = true; };
+    if contradictory = false {
+        if contradictoryConstructors(equalitiesClasses, context.applications, context.constructorFunctions) { contradictory = true; };
+    };
+    if contradictory = false {
+        if contradictoryConstants(equalitiesClasses, context.constants) { contradictory = true; };
+    };
+    if contradictory = false {
+        if contradictoryDisequalities(equalitiesClasses, context.different) { contradictory = true; };
+    };
+    orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
+    differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
+    if contradictory = false {
+        if contradictoryDifferences(equalitiesClasses, differences) { contradictory = true; };
+    };
+    return ContextAnalysis { classes: equalitiesClasses, equalities: equalities, orders: orders, differences: differences, contradictory: contradictory };
+};
+
+// Two values differ when some part of them differs: if f(a) and f(b) are
+// known different, a and b are (congruence read backwards).
+fn entailsPartDisequality(context: &ValidatorContext, classes: &HashMap<Int, Int>, orders: &List<OrderFact>, left: Int, right: Int) -> Bool {
+    return entailsPartDisequalityWithin(context, classes, orders, left, right, 2);
+};
+
+// The classes of equalities, as union and find (ufFind names a class by its root)
+fn unionOf(equalities: &List<EqualityFact>) -> HashMap<Int, Int> {
+    uf = emptyIntMap();
+    weight = emptyIntMap();
+    for fPosition in 0..size(equalities) {
+        f = get(equalities, fPosition);
+        UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, f.left, f.right);
+    };
+    return uf;
+};
+
+// (two applications of one function differ where the arguments they differ
+// in differ: only applications with an argument in the class of left or of
+// right can be such a pair, so those are found first)
+fn entailsPartDisequalityWithin(context: &ValidatorContext, classes: &HashMap<Int, Int>, orders: &List<OrderFact>, left: Int, right: Int, depth: Int) -> Bool [{ affirm depth >= 0; }] [{ }] shrinks depth {
+    rl = ufFind(classes, left);
+    rr = ufFind(classes, right);
+    candidates = [];
+    for aPosition in 0..size(context.applications) {
+        a = get(context.applications, aPosition);
+        near = false;
+        for xPosition in 0..size(a.arguments) {
+            r = ufFind(classes, get(a.arguments, xPosition));
+            if r = rl || r = rr { near = true; };
+        };
+        if near { candidates = push(candidates, aPosition); };
+    };
+    for ac in 0..size(candidates) {
+        a = applicationAt(context.applications, get(candidates, ac));
+        for bc in 0..size(candidates) {
+            b = applicationAt(context.applications, get(candidates, bc));
+            if a.function = b.function {
+                if size(a.arguments) = size(b.arguments) {
+                    uses = false;
+                    matches = true;
+                    for i in 0..size(a.arguments) {
+                        x = ufFind(classes, get(a.arguments, i));
+                        y = ufFind(classes, get(b.arguments, i));
+                        if x = rl {
+                            if y = rr { uses = true; } else if x != y { matches = false; };
+                        } else if x = rr {
+                            if y = rl { uses = true; } else if x != y { matches = false; };
+                        } else if x != y { matches = false; };
+                    };
+                    if uses {
+                        if matches {
+                            if closedDisequality(classes, orders, context.different, a.id, b.id) { return true; };
+                            if depth > 1 && a.id != left && a.id != right {
+                                if entailsPartDisequalityWithin(context, classes, orders, a.id, b.id, depth - 1) { return true; };
+                            };
+                            av = integerValue(context, a.id);
+                            bv = integerValue(context, b.id);
+                            if av is IntegerLookup::Found {
+                                if bv is IntegerLookup::Found {
+                                    if (av as IntegerLookup::Found).value != (bv as IntegerLookup::Found).value { return true; };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};

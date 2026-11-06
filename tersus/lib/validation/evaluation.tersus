@@ -1,0 +1,691 @@
+import validation::context { integerValue, knownNonnegativeWith, signFacts, unionOf };
+import validation::differences { comparisonDifferences, constantDifferences, constantOrders, isSizeTerm, refinedOrders, safeBoundDifference, safeProduct, semanticFacts };
+import validation::joins { freshValue };
+import validation::linear { linearEntails };
+import validation::model { ApplicationTerm, ConstantTerm, DifferenceFact, EqualityFact, ExecutionState, IntegerLookup, OrderFact, SumResult, ValidatorContext, ValueLookup };
+import validation::relations { hasDifferenceIn, hasOrderIn, intAt, leastClasses, sameIn, ufFind };
+
+
+
+// The MIR bridge reserves function -1 for addition and -2 for subtraction.
+// For result = base + offset, record both difference bounds if their literal
+// weights fit. If negating the offset overflows, retaining one direction is
+// sound and merely incomplete.
+fn addOffsetFacts(context: &ValidatorContext, result: Int, base: Int, offset: Int) -> ValidatorContext {
+    facts = push(clone(context.differences), DifferenceFact { left: result, right: base, bound: offset });
+    reverse = safeBoundDifference(0, offset);
+    if reverse is SumResult::Sum {
+        facts = push(facts, DifferenceFact { left: base, right: result, bound: (reverse as SumResult::Sum).value });
+    };
+    return ValidatorContext { differences: facts, ..clone(context) };
+};
+
+// A checked read can be traced through a sequence operation when its index
+// is known to survive. The scan is bounded and omits any case it cannot
+// establish, rather than guessing about a symbolic index.
+fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index: Int) -> ValidatorContext {
+    state = clone(context);
+    current = list;
+    visited = HashSet::new();
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    for round in 0..size(context.applications) {
+        if visited.contains(current) { return state; };
+        visited = visited.insert(current);
+        moved = false;
+        for appPosition in 0..size(context.applications) {
+            app = get(context.applications, appPosition);
+            if moved = false {
+                if sameIn(equalitiesClasses, app.id, current) {
+                    if app.function = -19 {
+                        if size(app.arguments) = 2 {
+                            fact = EqualityFact { left: result, right: get(app.arguments, 1) };
+                            return ValidatorContext { equalities: push(state.equalities, fact), ..state };
+                        };
+                    };
+                    if app.function = -17 {
+                        if size(app.arguments) = 3 {
+                            changed = get(app.arguments, 1);
+                            if sameIn(equalitiesClasses, index, changed) {
+                                fact = EqualityFact { left: result, right: get(app.arguments, 2) };
+                                return ValidatorContext { equalities: push(state.equalities, fact), ..state };
+                            };
+                            a = integerValue(context, index);
+                            b = integerValue(context, changed);
+                            if a is IntegerLookup::Found {
+                                if b is IntegerLookup::Found {
+                                    if (a as IntegerLookup::Found).value != (b as IntegerLookup::Found).value {
+                                        current = get(app.arguments, 0);
+                                        moved = true;
+                                    };
+                                };
+                            };
+                            if moved = false {
+                                distinct = false;
+                                for dPosition in 0..size(context.different) {
+                                    d = get(context.different, dPosition);
+                                    if sameIn(equalitiesClasses, d.left, index) {
+                                        if sameIn(equalitiesClasses, d.right, changed) { distinct = true; };
+                                    };
+                                    if sameIn(equalitiesClasses, d.left, changed) {
+                                        if sameIn(equalitiesClasses, d.right, index) { distinct = true; };
+                                    };
+                                };
+                                if distinct {
+                                    current = get(app.arguments, 0);
+                                    moved = true;
+                                };
+                            };
+                        };
+                    };
+                    if app.function = -18 {
+                        if size(app.arguments) = 1 {
+                            current = get(app.arguments, 0);
+                            moved = true;
+                        };
+                    };
+                    if app.function = -16 {
+                        if size(app.arguments) = 2 {
+                            original = get(app.arguments, 0);
+                            for lengthAppPosition in 0..size(context.applications) {
+                                lengthApp = get(context.applications, lengthAppPosition);
+                                if lengthApp.function = -13 {
+                                    if size(lengthApp.arguments) = 1 {
+                                        if sameIn(equalitiesClasses, get(lengthApp.arguments, 0), original) {
+                                            length = integerValue(context, lengthApp.id);
+                                            position = integerValue(context, index);
+                                            if length is IntegerLookup::Found {
+                                                if position is IntegerLookup::Found {
+                                                    n = (length as IntegerLookup::Found).value;
+                                                    i = (position as IntegerLookup::Found).value;
+                                                    if i = n {
+                                                        fact = EqualityFact { left: result, right: get(app.arguments, 1) };
+                                                        return ValidatorContext { equalities: push(state.equalities, fact), ..state };
+                                                    };
+                                                    if i >= 0 {
+                                                        if i < n { current = original; moved = true; };
+                                                    };
+                                                };
+                                            };
+                                            if sameIn(equalitiesClasses, index, lengthApp.id) {
+                                                fact = EqualityFact { left: result, right: get(app.arguments, 1) };
+                                                return ValidatorContext { equalities: push(state.equalities, fact), ..state };
+                                            };
+                                            if moved = false {
+                                                orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
+                                                differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
+                                                if hasDifferenceIn(equalitiesClasses, differences, index, lengthApp.id, -1) {
+                                                    current = original;
+                                                    moved = true;
+                                                };
+                                                if moved = false {
+                                                    if linearEntails(context, index, lengthApp.id, -1) {
+                                                        current = original;
+                                                        moved = true;
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        if moved = false { return state; };
+        prior = ApplicationTerm { id: result, function: -14, arguments: push(push([], current), index) };
+        state = ValidatorContext { applications: push(state.applications, prior), ..state };
+    };
+    return state;
+};
+
+// Scaling preserves or reverses an operand's order around zero according to
+// the sign of the known integer factor.
+
+fn addSumOrders(context: &ValidatorContext, result: Int, a: Int, b: Int) -> ValidatorContext {
+    signs = signFacts(context);
+    aNonnegative = knownNonnegativeWith(context, signs, a);
+    bNonnegative = knownNonnegativeWith(context, signs, b);
+    facts = clone(context.orders);
+    if bNonnegative { facts = push(facts, OrderFact { smaller: a, greater: result, strict: false }); };
+    if aNonnegative { facts = push(facts, OrderFact { smaller: b, greater: result, strict: false }); };
+    if aNonnegative && bNonnegative {
+        for constantPosition in 0..size(context.constants) {
+            constant = get(context.constants, constantPosition);
+            if constant.kind = 0 {
+                if constant.value = 0 { facts = push(facts, OrderFact { smaller: constant.id, greater: result, strict: false }); };
+            };
+        };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+fn addScaleOrders(context: &ValidatorContext, result: Int, operand: Int, factor: Int) -> ValidatorContext {
+    zero = ValueLookup::Missing;
+    z = 0;
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.kind = 0 {
+            if constant.value = 0 { zero = ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    if zero is ValueLookup::Found {
+        z = (zero as ValueLookup::Found).term;
+    } else { return clone(context); };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
+    nonnegative = hasOrderIn(equalitiesClasses, orders, z, operand, false) || isSizeTerm(context.applications, operand);
+    positive = hasOrderIn(equalitiesClasses, orders, z, operand, true);
+    nonpositive = hasOrderIn(equalitiesClasses, orders, operand, z, false);
+    negative = hasOrderIn(equalitiesClasses, orders, operand, z, true);
+    facts = clone(context.orders);
+    if factor > 0 {
+        if nonnegative { facts = push(facts, OrderFact { smaller: z, greater: result, strict: false }); };
+        if positive { facts = push(facts, OrderFact { smaller: z, greater: result, strict: true }); };
+        if nonpositive { facts = push(facts, OrderFact { smaller: result, greater: z, strict: false }); };
+        if negative { facts = push(facts, OrderFact { smaller: result, greater: z, strict: true }); };
+        if factor > 1 {
+            if nonnegative { facts = push(facts, OrderFact { smaller: operand, greater: result, strict: false }); };
+            if positive { facts = push(facts, OrderFact { smaller: operand, greater: result, strict: true }); };
+            if nonpositive { facts = push(facts, OrderFact { smaller: result, greater: operand, strict: false }); };
+            if negative { facts = push(facts, OrderFact { smaller: result, greater: operand, strict: true }); };
+        };
+    } else {
+        if nonnegative { facts = push(facts, OrderFact { smaller: result, greater: z, strict: false }); };
+        if positive { facts = push(facts, OrderFact { smaller: result, greater: z, strict: true }); };
+        if nonpositive { facts = push(facts, OrderFact { smaller: z, greater: result, strict: false }); };
+        if negative { facts = push(facts, OrderFact { smaller: z, greater: result, strict: true }); };
+        if nonnegative { facts = push(facts, OrderFact { smaller: result, greater: operand, strict: false }); };
+        if positive { facts = push(facts, OrderFact { smaller: result, greater: operand, strict: true }); };
+        if nonpositive { facts = push(facts, OrderFact { smaller: operand, greater: result, strict: false }); };
+        if negative { facts = push(facts, OrderFact { smaller: operand, greater: result, strict: true }); };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+// Integer remainder has the sign of its divisor and is strictly inside its
+// magnitude, even when the dividend is symbolic.
+fn addRemainderOrders(context: &ValidatorContext, result: Int, divisor: Int) -> ValidatorContext {
+    zero = ValueLookup::Missing;
+    z = 0;
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.kind = 0 {
+            if constant.value = 0 { zero = ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    if zero is ValueLookup::Found {
+        z = (zero as ValueLookup::Found).term;
+    } else { return clone(context); };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
+    positiveDivisor = hasOrderIn(equalitiesClasses, orders, z, divisor, true);
+    negativeDivisor = hasOrderIn(equalitiesClasses, orders, divisor, z, true);
+    facts = clone(context.orders);
+    if positiveDivisor {
+        facts = push(facts, OrderFact { smaller: z, greater: result, strict: false });
+        facts = push(facts, OrderFact { smaller: result, greater: divisor, strict: true });
+    };
+    if negativeDivisor {
+        facts = push(facts, OrderFact { smaller: result, greater: z, strict: false });
+        facts = push(facts, OrderFact { smaller: divisor, greater: result, strict: true });
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+// Integer division by a proved positive divisor stays between the dividend
+// and zero. A negative divisor reverses the result's sign.
+fn addDivisionOrders(context: &ValidatorContext, result: Int, dividend: Int, divisor: Int) -> ValidatorContext {
+    zero = ValueLookup::Missing;
+    z = 0;
+    for constantPosition in 0..size(context.constants) {
+        constant = get(context.constants, constantPosition);
+        if constant.kind = 0 {
+            if constant.value = 0 { zero = ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    if zero is ValueLookup::Found {
+        z = (zero as ValueLookup::Found).term;
+    } else { return clone(context); };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    equalitiesClasses = leastClasses(equalities);
+    orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
+    positiveDivisor = hasOrderIn(equalitiesClasses, orders, z, divisor, true);
+    negativeDivisor = hasOrderIn(equalitiesClasses, orders, divisor, z, true);
+    nonnegativeDividend = hasOrderIn(equalitiesClasses, orders, z, dividend, false);
+    nonpositiveDividend = hasOrderIn(equalitiesClasses, orders, dividend, z, false);
+    facts = clone(context.orders);
+    if positiveDivisor {
+        if nonnegativeDividend {
+            facts = push(facts, OrderFact { smaller: z, greater: result, strict: false });
+            facts = push(facts, OrderFact { smaller: result, greater: dividend, strict: false });
+        };
+        if nonpositiveDividend {
+            facts = push(facts, OrderFact { smaller: dividend, greater: result, strict: false });
+            facts = push(facts, OrderFact { smaller: result, greater: z, strict: false });
+        };
+    };
+    if negativeDivisor {
+        if nonnegativeDividend { facts = push(facts, OrderFact { smaller: result, greater: z, strict: false }); };
+        if nonpositiveDividend { facts = push(facts, OrderFact { smaller: z, greater: result, strict: false }); };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+// The value of a term whose parts are all known: arithmetic on known
+// values, the size of a list made of known pushes, and an element read
+// at a known index of one. This is what the reference engine's constant
+// evaluation gives its inference; anything not wholly known is Missing.
+fn evalApplication(context: &ValidatorContext, id: Int) -> ApplicationTerm {
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.id = id { return clone(app); };
+    };
+    return ApplicationTerm { id: id, function: 0, arguments: [] };
+};
+
+fn evalHasApplication(context: &ValidatorContext, id: Int) -> Bool {
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        if app.id = id { return true; };
+    };
+    return false;
+};
+
+// A value the context gives a term directly: a constant, or a term its
+// equalities make one (the evaluator asks this of every term it meets, and
+// the closure integerValue reads under is too dear for that)
+fn directIntegerValue(context: &ValidatorContext, term: Int) -> IntegerLookup {
+    return directIntegerValueIn(unionOf(context.equalities), context.constants, term);
+};
+
+fn directIntegerValueIn(classes: &HashMap<Int, Int>, constants: &List<ConstantTerm>, term: Int) -> IntegerLookup {
+    r = ufFind(classes, term);
+    for cPosition in 0..size(constants) {
+        if get(constants, cPosition).kind = 0 {
+            if ufFind(classes, get(constants, cPosition).id) = r { return IntegerLookup::Found { value: get(constants, cPosition).value }; };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+
+fn evalListSize(context: &ValidatorContext, classes: &HashMap<Int, Int>, list: Int, depth: Int) -> IntegerLookup [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
+    if evalHasApplication(context, list) = false { return IntegerLookup::Missing; };
+    app = evalApplication(context, list);
+    if app.function = -12 { return IntegerLookup::Found { value: size(app.arguments) }; };
+    if app.function = -15 { return IntegerLookup::Found { value: size(app.arguments) }; };
+    if app.function = -16 {
+        if depth <= 0 { return IntegerLookup::Missing; };
+        if size(app.arguments) = 2 {
+            inner = evalListSize(context, classes, get(app.arguments, 0), depth - 1);
+            if inner is IntegerLookup::Found { return IntegerLookup::Found { value: (inner as IntegerLookup::Found).value + 1 }; };
+        };
+    };
+    if app.function = -19 {
+        // (an array's length may be the size of that very array: the term
+        // graph can be a cycle, which only the depth ends)
+        if depth <= 0 { return IntegerLookup::Missing; };
+        if size(app.arguments) = 2 { return evalTermValue(context, classes, get(app.arguments, 0), depth - 1); };
+    };
+    return IntegerLookup::Missing;
+};
+
+fn evalListGet(context: &ValidatorContext, classes: &HashMap<Int, Int>, list: Int, index: Int, depth: Int) -> IntegerLookup [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
+    if evalHasApplication(context, list) = false { return IntegerLookup::Missing; };
+    app = evalApplication(context, list);
+    if app.function = -12 {
+        if index >= 0 { if index < size(app.arguments) { return evalTermValue(context, classes, get(app.arguments, index), depth); }; };
+        return IntegerLookup::Missing;
+    };
+    if app.function = -15 {
+        if index >= 0 { if index < size(app.arguments) { return evalTermValue(context, classes, get(app.arguments, index), depth); }; };
+        return IntegerLookup::Missing;
+    };
+    if app.function = -16 {
+        if depth <= 0 { return IntegerLookup::Missing; };
+        if size(app.arguments) = 2 {
+            innerSize = evalListSize(context, classes, get(app.arguments, 0), depth - 1);
+            if innerSize is IntegerLookup::Found {
+                if index = (innerSize as IntegerLookup::Found).value { return evalTermValue(context, classes, get(app.arguments, 1), depth - 1); };
+                if index < (innerSize as IntegerLookup::Found).value { return evalListGet(context, classes, get(app.arguments, 0), index, depth - 1); };
+            };
+        };
+    };
+    if app.function = -17 {
+        if depth <= 0 { return IntegerLookup::Missing; };
+        if size(app.arguments) = 3 {
+            changed = evalTermValue(context, classes, get(app.arguments, 1), depth - 1);
+            if changed is IntegerLookup::Found {
+                if index = (changed as IntegerLookup::Found).value { return evalTermValue(context, classes, get(app.arguments, 2), depth - 1); };
+                return evalListGet(context, classes, get(app.arguments, 0), index, depth - 1);
+            };
+        };
+    };
+    if app.function = -19 {
+        if depth <= 0 { return IntegerLookup::Missing; };
+        if size(app.arguments) = 2 {
+            length = evalTermValue(context, classes, get(app.arguments, 0), depth - 1);
+            if length is IntegerLookup::Found {
+                if index >= 0 { if index < (length as IntegerLookup::Found).value { return evalTermValue(context, classes, get(app.arguments, 1), depth - 1); }; };
+            };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+
+fn evalTermValue(context: &ValidatorContext, classes: &HashMap<Int, Int>, term: Int, depth: Int) -> IntegerLookup [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth {
+    known = directIntegerValueIn(classes, context.constants, term);
+    if known is IntegerLookup::Found { return known; };
+    if depth <= 0 { return IntegerLookup::Missing; };
+    if evalHasApplication(context, term) = false { return IntegerLookup::Missing; };
+    app = evalApplication(context, term);
+    if app.function = -13 {
+        if size(app.arguments) = 1 { return evalListSize(context, classes, get(app.arguments, 0), depth - 1); };
+        return IntegerLookup::Missing;
+    };
+    if app.function = -14 {
+        if size(app.arguments) = 2 {
+            index = evalTermValue(context, classes, get(app.arguments, 1), depth - 1);
+            if index is IntegerLookup::Found { return evalListGet(context, classes, get(app.arguments, 0), (index as IntegerLookup::Found).value, depth - 1); };
+        };
+        return IntegerLookup::Missing;
+    };
+    if size(app.arguments) != 2 { return IntegerLookup::Missing; };
+    a = evalTermValue(context, classes, get(app.arguments, 0), depth - 1);
+    if a is IntegerLookup::Missing { return IntegerLookup::Missing; };
+    b = evalTermValue(context, classes, get(app.arguments, 1), depth - 1);
+    if b is IntegerLookup::Missing { return IntegerLookup::Missing; };
+    av = (a as IntegerLookup::Found).value;
+    bv = (b as IntegerLookup::Found).value;
+    if app.function = -1 {
+        if av > 0 { if bv > 9223372036854775807 - av { return IntegerLookup::Missing; }; };
+        if av < 0 { if bv < -9223372036854775808 - av { return IntegerLookup::Missing; }; };
+        return IntegerLookup::Found { value: av + bv };
+    };
+    if app.function = -2 {
+        if bv < 0 { if av > 9223372036854775807 + bv { return IntegerLookup::Missing; }; };
+        if bv > 0 { if av < -9223372036854775808 + bv { return IntegerLookup::Missing; }; };
+        return IntegerLookup::Found { value: av - bv };
+    };
+    if app.function = -3 {
+        product = safeProduct(av, bv);
+        if product is SumResult::Sum { return IntegerLookup::Found { value: (product as SumResult::Sum).value }; };
+        return IntegerLookup::Missing;
+    };
+    if app.function = -4 {
+        if bv = 0 { return IntegerLookup::Missing; };
+        if av = -9223372036854775808 { if bv = -1 { return IntegerLookup::Missing; }; };
+        return IntegerLookup::Found { value: av / bv };
+    };
+    if app.function = -5 {
+        if bv = 0 { return IntegerLookup::Missing; };
+        if av = -9223372036854775808 { if bv = -1 { return IntegerLookup::Found { value: 0 }; }; };
+        return IntegerLookup::Found { value: av % bv };
+    };
+    return IntegerLookup::Missing;
+};
+
+// A context with one more application (it is taken, not copied)
+fn contextWithApplication(context: ValidatorContext, app: ApplicationTerm) -> ValidatorContext {
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    return ValidatorContext { equalities: equalities, applications: push(applications, app), constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn contextWithConstant(context: ValidatorContext, constant: ConstantTerm) -> ValidatorContext {
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    return ValidatorContext { equalities: equalities, applications: applications, constants: push(constants, constant), orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn stateWithConstant(state: ExecutionState, constant: ConstantTerm) -> ExecutionState {
+    ExecutionState { context: context, locals: locals, templates: templates } = state;
+    return ExecutionState { context: contextWithConstant(context, constant), locals: locals, templates: templates };
+};
+
+// A term whose value concrete evaluation knows is recorded as a
+// constant, so the searches see it like any other known value.
+fn recordEvaluatedValue(state: ExecutionState, term: Int) -> ExecutionState {
+    // (a constant added on the way leaves the equalities, and so their union, as they are)
+    classes = unionOf(state.context.equalities);
+    if directIntegerValueIn(classes, state.context.constants, term) is IntegerLookup::Missing {
+        value = evalTermValue(state.context, classes, term, 6);
+        if value is IntegerLookup::Found {
+            return recordEvaluatedSizeIn(stateWithConstant(state, ConstantTerm { id: term, kind: 0, value: (value as IntegerLookup::Found).value }), classes, term);
+        };
+    };
+    return recordEvaluatedSizeIn(state, classes, term);
+};
+
+// The size of a list whose elements concrete evaluation can count is
+// recorded on the size application of the list, like a known value.
+fn recordEvaluatedSize(state: ExecutionState, list: Int) -> ExecutionState {
+    classes = unionOf(state.context.equalities);
+    return recordEvaluatedSizeIn(state, classes, list);
+};
+
+fn recordEvaluatedSizeIn(state: ExecutionState, classes: &HashMap<Int, Int>, list: Int) -> ExecutionState {
+    found = evalListSize(state.context, classes, list, 6);
+    if found is IntegerLookup::Found {
+        value = (found as IntegerLookup::Found).value;
+        for appPosition in 0..size(state.context.applications) {
+            if get(state.context.applications, appPosition).function = -13 {
+                if size(get(state.context.applications, appPosition).arguments) = 1 {
+                    if intAt(get(state.context.applications, appPosition).arguments, 0, 0) = list {
+                        id = get(state.context.applications, appPosition).id;
+                        if integerValue(state.context, id) is IntegerLookup::Missing {
+                            return stateWithConstant(state, ConstantTerm { id: id, kind: 0, value: value });
+                        };
+                        return state;
+                    };
+                };
+            };
+        };
+        fresh = freshValue(state);
+        if fresh is ValueLookup::Found {
+            term = (fresh as ValueLookup::Found).term;
+            ExecutionState { context: context, locals: locals, templates: templates } = state;
+            sized = contextWithConstant(contextWithApplication(context, ApplicationTerm { id: term, function: -13, arguments: push([], list) }), ConstantTerm { id: term, kind: 0, value: value });
+            return ExecutionState { context: sized, locals: locals, templates: templates };
+        };
+    };
+    return state;
+};
+
+// Every fact that mentions a term is dropped when the term is forgotten.
+// Facts learned under an assumption scoped to one term (the havoced index
+// of a checked forall, whose guards are assumed for the check) must not
+// outlive that assumption: an index whose guards cannot hold would
+// otherwise leave the context contradictory and prove everything after.
+// Forgetting only removes facts, so it can never prove a new goal.
+fn termForgotten(tainted: &List<Int>, term: Int) -> Bool {
+    for t in tainted { if t = term { return true; }; };
+    return false;
+};
+
+fn forgetTerm(context: &ValidatorContext, root: Int) -> ValidatorContext {
+    tainted = push([], root);
+    for round in 0..size(context.applications) + 1 {
+        for appPosition in 0..size(context.applications) {
+            app = get(context.applications, appPosition);
+            if termForgotten(tainted, app.id) = false {
+                hit = false;
+                for arg in app.arguments { if termForgotten(tainted, arg) { hit = true; }; };
+                if hit { tainted = push(tainted, app.id); };
+            };
+        };
+    };
+    applications = [];
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        keep = termForgotten(tainted, app.id) = false;
+        for arg in app.arguments { if termForgotten(tainted, arg) { keep = false; }; };
+        if keep { applications = push(applications, clone(app)); };
+    };
+    equalities = [];
+    for factPosition in 0..size(context.equalities) {
+        fact = get(context.equalities, factPosition);
+        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { equalities = push(equalities, clone(fact)); }; };
+    };
+    orders = [];
+    for factPosition in 0..size(context.orders) {
+        fact = get(context.orders, factPosition);
+        if termForgotten(tainted, fact.smaller) = false { if termForgotten(tainted, fact.greater) = false { orders = push(orders, clone(fact)); }; };
+    };
+    different = [];
+    for factPosition in 0..size(context.different) {
+        fact = get(context.different, factPosition);
+        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { different = push(different, clone(fact)); }; };
+    };
+    differences = [];
+    for factPosition in 0..size(context.differences) {
+        fact = get(context.differences, factPosition);
+        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { differences = push(differences, clone(fact)); }; };
+    };
+    variants = [];
+    for factPosition in 0..size(context.variants) {
+        fact = get(context.variants, factPosition);
+        if termForgotten(tainted, fact.object) = false { variants = push(variants, clone(fact)); };
+    };
+    constants = [];
+    for factPosition in 0..size(context.constants) {
+        fact = get(context.constants, factPosition);
+        if termForgotten(tainted, fact.id) = false { constants = push(constants, clone(fact)); };
+    };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
+};
+
+fn builtinFacts(context: ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
+    if function = -40 {
+        if size(args) = 1 { return forgetTerm(context, get(args, 0)); };
+        return context;
+    };
+    // (a size is at least 0, as an order, so that a size known not to be 0 is
+    // more than 0)
+    if function = -13 && size(args) = 1 {
+        for cPosition in 0..size(context.constants) {
+            c = get(context.constants, cPosition);
+            if c.kind = 0 && c.value = 0 {
+                for oPosition in 0..size(context.orders) {
+                    o = get(context.orders, oPosition);
+                    if o.smaller = c.id && o.greater = result { return context; };
+                };
+                return ValidatorContext { orders: push(context.orders, OrderFact { smaller: c.id, greater: result, strict: false }), ..context };
+            };
+        };
+        return context;
+    };
+    if size(args) != 2 { return context; };
+    a = get(args, 0);
+    b = get(args, 1);
+    if function = -14 {
+        return readThroughSequence(context, result, a, b);
+    };
+    if function = -1 {
+        bv = integerValue(context, b);
+        if bv is IntegerLookup::Found {
+            return addOffsetFacts(context, result, a, (bv as IntegerLookup::Found).value);
+        };
+        av = integerValue(context, a);
+        if av is IntegerLookup::Found {
+            return addOffsetFacts(context, result, b, (av as IntegerLookup::Found).value);
+        };
+        return addSumOrders(context, result, a, b);
+    };
+    if function = -2 {
+        bv = integerValue(context, b);
+        if bv is IntegerLookup::Found {
+            offset = safeBoundDifference(0, (bv as IntegerLookup::Found).value);
+            if offset is SumResult::Sum {
+                return addOffsetFacts(context, result, a, (offset as SumResult::Sum).value);
+            };
+            // result = a - minInt implies a - result <= minInt even though
+            // the opposite bound cannot be represented in an Int.
+            facts = push(context.differences, DifferenceFact { left: a, right: result, bound: (bv as IntegerLookup::Found).value });
+            return ValidatorContext { differences: facts, ..context };
+        };
+    };
+    // Multiplication by zero or one and division by one preserve a known
+    // value. The bridge checks the divisor before introducing division.
+    if function = -3 {
+        av = integerValue(context, a);
+        if av is IntegerLookup::Found {
+            n = (av as IntegerLookup::Found).value;
+            if n = 0 { return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: a }), ..context }; };
+            if n = 1 { return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: b }), ..context }; };
+            bv0 = integerValue(context, b);
+            if bv0 is IntegerLookup::Found {
+                product = safeProduct(n, (bv0 as IntegerLookup::Found).value);
+                if product is SumResult::Sum {
+                    constant = ConstantTerm { id: result, kind: 0, value: (product as SumResult::Sum).value };
+                    return ValidatorContext { constants: push(context.constants, constant), ..context };
+                };
+            };
+            return addScaleOrders(context, result, b, n);
+        };
+        bv = integerValue(context, b);
+        if bv is IntegerLookup::Found {
+            n = (bv as IntegerLookup::Found).value;
+            if n = 0 { return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: b }), ..context }; };
+            if n = 1 { return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: a }), ..context }; };
+            if av is IntegerLookup::Found {
+                product = safeProduct((av as IntegerLookup::Found).value, n);
+                if product is SumResult::Sum {
+                    constant = ConstantTerm { id: result, kind: 0, value: (product as SumResult::Sum).value };
+                    return ValidatorContext { constants: push(context.constants, constant), ..context };
+                };
+            };
+            return addScaleOrders(context, result, a, n);
+        };
+    };
+    if function = -4 {
+        bv = integerValue(context, b);
+        if bv is IntegerLookup::Found {
+            divisor = (bv as IntegerLookup::Found).value;
+            if divisor = 1 {
+                return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: result, right: a }), ..context };
+            };
+            if divisor != 0 {
+                av = integerValue(context, a);
+                if av is IntegerLookup::Found {
+                    dividend = (av as IntegerLookup::Found).value;
+                    overflow = false;
+                    if dividend = -9223372036854775808 {
+                        if divisor = -1 { overflow = true; };
+                    };
+                    if overflow = false {
+                        constant = ConstantTerm { id: result, kind: 0, value: dividend / divisor };
+                        return ValidatorContext { constants: push(context.constants, constant), ..context };
+                    };
+                };
+                return addDivisionOrders(context, result, a, b);
+            };
+        };
+        return addDivisionOrders(context, result, a, b);
+    };
+    if function = -5 {
+        bv = integerValue(context, b);
+        if bv is IntegerLookup::Found {
+            divisor = (bv as IntegerLookup::Found).value;
+            if divisor != 0 {
+                av = integerValue(context, a);
+                if av is IntegerLookup::Found {
+                    dividend = (av as IntegerLookup::Found).value;
+                    remainder = 0;
+                    special = false;
+                    if dividend = -9223372036854775808 {
+                        if divisor = -1 { special = true; };
+                    };
+                    if special = false { remainder = dividend % divisor; };
+                    constant = ConstantTerm { id: result, kind: 0, value: remainder };
+                    return ValidatorContext { constants: push(context.constants, constant), ..context };
+                };
+                return addRemainderOrders(context, result, b);
+            };
+        };
+        return addRemainderOrders(context, result, b);
+    };
+    return context;
+};

@@ -46,6 +46,34 @@ and reference queries. Both preserve bare core type and function identities.
 Reference queries call named functions without executing the driver main;
 the unpruned linked program retains every helper and its proof metadata.
 
+The core declarations are split into fourteen sibling providers, all in that
+same root module:
+
+- `model.tersus`: data declarations and their Clone/Copy implementations.
+- `relations.tersus`: equality/order facts, congruence closure and representatives.
+- `differences.tersus`: difference constraints, constants and overflow-safe arithmetic.
+- `context.tersus` and `linear.tersus`: context closure/analysis and linear entailment.
+- `sequenceFacts.tersus`: finite and quantified facts about sequence reads.
+- `validation.tersus`: goal entailment, proof-step checking and proof-flow queries.
+- `state.tersus` and `joins.tersus`: values, boolean facts, branch joins and read/write splits.
+- `evaluation.tersus` and `execution.tersus`: concrete/builtin facts and execution steps.
+- `saturation.tersus`: quantified instances, frames and bounded proof search.
+- `loopInference.tersus` and `flow.tersus`: loop candidates and execution-flow validation.
+
+Every file imports the providers it uses explicitly. `driver.tersus` is still
+the sole executable entry and imports the moved types and helper functions
+from their actual owners. `JoinedFact`, its implementations, private bounded
+`commonFacts` and its regular wrapper stay together in `joins.tersus`. Data
+and Clone/Copy declarations retain their original relative order in
+`model.tersus`: a derived clone needs its field types' clone implementations
+already available when it is checked. No file-name ordering dependency or
+compiler change is introduced. The package remains one build unit: the cycles between reasoning and execution
+helpers do not become cross-module dependencies. Declarations, function
+bodies, contracts and the driver wire protocol are unchanged; generated
+source-coordinate names and declaration-placement metadata reflect the new
+files. The fixed full-metadata regression is updated only after comparing
+those differences with the landed baseline.
+
 The entry module cannot be imported by a reachable dependency without a
 cycle, so it uses the existing compiler-owned home interface. Private bounded
 helpers stay inside that entry unit; bounded exports from ordinary imported

@@ -1,0 +1,474 @@
+import validation::context { analyzeContext, integerValue };
+import validation::differences { canonicalDifferences, canonicalHasDifference };
+import validation::evaluation { addSumOrders, builtinFacts };
+import validation::execution { assumeBooleanFact, assumeRelation, existingApplication, localGoal };
+import validation::joins { constantTermWithValue, leastTermInUse };
+import validation::model { ApplicationTerm, BlockedGuard, ClosedFacts, DisequalityFact, DoneKey, ExecutionState, ForallTemplate, IntegerLookup, NodeTerms, RoundResult, SatInstance, SatWork, Saturation, SplitResult, StateTerm, TermRelation, ValidatorContext, ValueLookup };
+import validation::relations { boolAt, containsValue, emptyIntMap, equalityRepresentatives, intAt, representativeOf };
+import validation::state { booleanCheck, resolveValue };
+import validation::validation { entailsGoal };
+
+
+
+fn noDoneKeys() -> List<DoneKey> { return []; };
+
+fn noBlocked() -> List<BlockedGuard> { return []; };
+
+fn noClosed() -> List<ClosedFacts> { return []; };
+
+fn knownClosure(given: &Saturation) -> ClosedFacts {
+    if size(given.closed) > 0 { return clone(get(given.closed, 0)); };
+    return closedFacts(given.state.context);
+};
+
+fn generationOf(births: &HashMap<Int, Int>, term: Int) -> Int {
+    if births.contains(term) { return births.lookup(term, 0); };
+    return 0;
+};
+
+fn keyDone(keys: &List<DoneKey>, closed: &ClosedFacts, kind: Int, owner: Int, index: Int) -> Bool {
+    for keyPosition in 0..size(keys) {
+        key = get(keys, keyPosition);
+        if key.kind = kind && key.owner = owner {
+            if sameClass(closed, key.index, index) { return true; };
+        };
+    };
+    return false;
+};
+
+// Whether each node of a template is made of its index
+fn templateDepends(template: &ForallTemplate) -> List<Bool> {
+    result = [];
+    for nodePosition in 0..size(template.nodes) {
+        node = get(template.nodes, nodePosition);
+        d = false;
+        if node.kind = 0 { d = true; };
+        if node.kind = 2 {
+            for aPosition in 0..size(node.arguments) {
+                a = get(node.arguments, aPosition);
+                if a >= 0 && a < size(result) { if get(result, a) { d = true; }; };
+            };
+        };
+        result = push(result, d);
+    };
+    return result;
+};
+
+fn applicationTerm(given: &ExecutionState, function: Int, args: List<Int>, next: Int) -> StateTerm {
+    state = clone(given);
+    existing = existingApplication(state.context, function, args);
+    if existing is ValueLookup::Found {
+        return StateTerm { state: state, term: (existing as ValueLookup::Found).term, created: false, next: next };
+    };
+    apps = push(clone(state.context.applications), ApplicationTerm { id: next, function: function, arguments: clone(args) });
+    withApp = ValidatorContext { applications: apps, ..clone(state.context) };
+    context = builtinFacts(withApp, function, next, args);
+    return StateTerm { state: ExecutionState { context: context, ..state }, term: next, created: true, next: next - 1 };
+};
+
+fn templateTerms(state: &ExecutionState, template: &ForallTemplate, index: Int, given: &List<Int>, depends: &List<Bool>, dependent: Bool, next: Int, births: &HashMap<Int, Int>, generation: Int) -> NodeTerms {
+    current = clone(state);
+    counter = next;
+    born = clone(births);
+    terms = [];
+    found = true;
+    for i in 0..size(template.nodes) {
+        node = get(template.nodes, i);
+        term = 0;
+        if boolAt(depends, i, false) = dependent {
+            if node.kind = 0 { term = index; };
+            if node.kind = 1 {
+                v = resolveValue(current, node.value);
+                if v is ValueLookup::Found { term = (v as ValueLookup::Found).term; } else { found = false; };
+            };
+            if node.kind = 2 && found {
+                args = [];
+                for a in node.arguments { if a >= 0 && a < size(terms) { args = push(args, get(terms, a)); } else { found = false; }; };
+                if found {
+                    made = applicationTerm(current, node.function, args, counter);
+                    current = made.state;
+                    counter = made.next;
+                    term = made.term;
+                    if made.created { born = born.insert(term, generation); };
+                };
+            };
+        } else {
+            // (the free pass leaves the dependent nodes for the index's pass)
+            if dependent {
+                if i < size(given) { term = get(given, i); } else { found = false; };
+            };
+        };
+        terms = push(terms, term);
+    };
+    return NodeTerms { state: current, terms: terms, found: found, next: counter, births: born };
+};
+
+fn saturationRound(given: &Saturation) -> RoundResult {
+    state = clone(given.state);
+    births = clone(given.births);
+    done = clone(given.done);
+    start = knownClosure(given);
+    gets = [];
+    writes = [];
+    for appPosition in 0..size(state.context.applications) {
+        app = get(state.context.applications, appPosition);
+        if app.function = -14 && size(app.arguments) = 2 {
+            if generationOf(births, get(app.arguments, 1)) <= 1 { gets = push(gets, clone(app)); };
+        };
+        if app.function = -17 && size(app.arguments) = 3 { writes = push(writes, clone(app)); };
+        if app.function = -16 && size(app.arguments) = 2 { writes = push(writes, clone(app)); };
+    };
+    pending = noDoneKeys();
+    instances = [];
+    nextTerm = leastTermInUse(state) - 1;
+    sat = SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
+    sat = saturateTemplates(sat, start, gets, writes, done);
+    sat = saturateRangeFacts(sat, start, gets, writes, done);
+    sat = saturateFrames(sat, start, gets, writes, done);
+    SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm } = sat;
+    // (a guard is asked of the closure of the facts alone, as a solver would:
+    // the slower heuristics of entailsGoal are for the goal)
+    closed = clone(start);
+    context = clone(state.context);
+    accepted = 0;
+    blocked = noBlocked();
+    for instPosition in 0..size(instances) {
+        inst = get(instances, instPosition);
+        failing = 0;
+        missing = TermRelation { relation: 0, left: 0, right: 0 };
+        for grPosition in 0..size(inst.guards) {
+            gr = get(inst.guards, grPosition);
+            if failing < 2 {
+                if closedHolds(closed, gr.relation, gr.left, gr.right) = false { failing = failing + 1; missing = clone(gr); };
+            };
+        };
+        if failing = 0 {
+            context = assumeRelation(context, inst.body.relation, inst.body.left, inst.body.right);
+            if inst.body.relation = 0 { context = assumeBooleanFact(context, inst.body.left, inst.body.right); };
+            done = push(done, clone(inst.key));
+            accepted = accepted + 1;
+        };
+        if failing = 1 && missing.left != missing.right {
+            if sameClass(closed, missing.left, missing.right) = false {
+                blocked = push(blocked, BlockedGuard { relation: missing.relation, left: missing.left, right: missing.right, index: inst.key.index });
+            };
+        };
+    };
+    after = closedFacts(context);
+    next = Saturation { state: ExecutionState { context: context, ..state }, births: births, done: done, blocked: blocked, closed: push([], after) };
+    return RoundResult { saturation: next, accepted: accepted };
+};
+
+fn saturateTemplates(sat: SatWork, start: &ClosedFacts, gets: &List<ApplicationTerm>, writes: &List<ApplicationTerm>, done: &List<DoneKey>) -> SatWork {
+    SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm } = sat;
+    templates = clone(state.templates);
+    count = size(templates);
+    for back in 0..count {
+        if back < 16 {
+            template = clone(get(templates, count - 1 - back));
+            depends = templateDepends(template);
+            free = templateTerms(state, template, 0, [], depends, false, nextTerm, births, 0);
+            freeTerms = clone(free.terms);
+            freeFound = free.found;
+            nextTerm = free.next;
+            state = free.state;
+            births = free.births;
+            if freeFound {
+                for i in 0..size(template.nodes) {
+                    node = get(template.nodes, i);
+                    if node.kind = 2 && node.function = -14 && size(node.arguments) = 2 {
+                        listNode = get(node.arguments, 0);
+                        indexNode = get(node.arguments, 1);
+                        indexIsTheIndex = false;
+                        if indexNode >= 0 && indexNode < size(template.nodes) { indexIsTheIndex = get(template.nodes, indexNode).kind = 0; };
+                        if indexIsTheIndex && boolAt(depends, listNode, true) = false {
+                            lt = intAt(freeTerms, listNode, 0);
+                            for gPosition in 0..size(gets) {
+                                g = get(gets, gPosition);
+                                onList = intAt(g.arguments, 0, 0) = lt;
+                                if onList = false { onList = sameClass(start, intAt(g.arguments, 0, 0), lt); };
+                                if onList && size(instances) < 240 {
+                                    k = intAt(g.arguments, 1, 0);
+                                    if keyDone(done, start, 0, template.id, k) = false && keyDone(pending, start, 0, template.id, k) = false {
+                                        pending = push(pending, DoneKey { kind: 0, owner: template.id, index: k });
+                                        generation = generationOf(births, k) + 1;
+                                        made = templateTerms(state, template, k, freeTerms, depends, true, nextTerm, births, generation);
+                                        madeTerms = clone(made.terms);
+                                        madeFound = made.found;
+                                        nextTerm = made.next;
+                                        state = made.state;
+                                        births = made.births;
+                                        if madeFound {
+                                            guards = [];
+                                            for grPosition in 0..size(template.guards) {
+                                                gr = get(template.guards, grPosition);
+                                                guards = push(guards, TermRelation { relation: gr.relation, left: intAt(madeTerms, gr.left, 0), right: intAt(madeTerms, gr.right, 0) });
+                                            };
+                                            instances = push(instances, SatInstance { key: DoneKey { kind: 0, owner: template.id, index: k }, guards: guards, body: TermRelation { relation: template.body.relation, left: intAt(madeTerms, template.body.left, 0), right: intAt(madeTerms, template.body.right, 0) } });
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
+};
+
+fn saturateRangeFacts(sat: SatWork, start: &ClosedFacts, gets: &List<ApplicationTerm>, writes: &List<ApplicationTerm>, done: &List<DoneKey>) -> SatWork {
+    SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm } = sat;
+    // (a fact that two lists agree over a range, get(a, base + j) = get(b, j)
+    // for lo <= j < hi, is used at the reads of either list like a forall)
+    for fact in state.context.applications {
+        if fact.function = -30 && size(fact.arguments) = 5 {
+            fa = get(fact.arguments, 0);
+            fb = get(fact.arguments, 1);
+            lo = get(fact.arguments, 2);
+            hi = get(fact.arguments, 3);
+            base = get(fact.arguments, 4);
+            baseZero = false;
+            bv = integerValue(state.context, base);
+            if bv is IntegerLookup::Found { if (bv as IntegerLookup::Found).value = 0 { baseZero = true; }; };
+            for gPosition in 0..size(gets) {
+                g = get(gets, gPosition);
+                k = intAt(g.arguments, 1, 0);
+                for side in 0..2 {
+                    onSide = false;
+                    if side = 0 { onSide = sameClass(start, intAt(g.arguments, 0, 0), fb); };
+                    if side = 1 { onSide = sameClass(start, intAt(g.arguments, 0, 0), fa); };
+                    if onSide && size(instances) < 240 {
+                        if keyDone(done, start, 2 + side, fact.id, k) = false && keyDone(pending, start, 2 + side, fact.id, k) = false {
+                            pending = push(pending, DoneKey { kind: 2 + side, owner: fact.id, index: k });
+                            generation = generationOf(births, k) + 1;
+                            // (the index in the other list, and the index of the range)
+                            otherIndex = k;
+                            rangeIndex = k;
+                            if baseZero = false {
+                                function = -1;
+                                if side = 1 { function = -2; };
+                                shifted = applicationTerm(state, function, push(push([], k), base), nextTerm);
+                                if shifted.created { births = births.insert(shifted.term, generation); };
+                                nextTerm = shifted.next;
+                                if side = 0 { otherIndex = shifted.term; } else { rangeIndex = shifted.term; otherIndex = shifted.term; };
+                                state = shifted.state;
+                                if shifted.created {
+                                    offsetContext = state.context;
+                                    if side = 0 { offsetContext = addSumOrders(offsetContext, otherIndex, k, base); };
+                                    state = ExecutionState { context: offsetContext, ..state };
+                                };
+                            };
+                            otherList = fa;
+                            if side = 1 { otherList = fb; };
+                            read = applicationTerm(state, -14, push(push([], otherList), otherIndex), nextTerm);
+                            readTerm = read.term;
+                            if read.created { births = births.insert(readTerm, generation); };
+                            nextTerm = read.next;
+                            state = read.state;
+                            guards = push(push([], TermRelation { relation: 3, left: lo, right: rangeIndex }), TermRelation { relation: 2, left: rangeIndex, right: hi });
+                            instances = push(instances, SatInstance { key: DoneKey { kind: 2 + side, owner: fact.id, index: k }, guards: guards, body: TermRelation { relation: 0, left: g.id, right: readTerm } });
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
+};
+
+fn saturateFrames(sat: SatWork, start: &ClosedFacts, gets: &List<ApplicationTerm>, writes: &List<ApplicationTerm>, done: &List<DoneKey>) -> SatWork {
+    SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm } = sat;
+    // (the frames: a read of set(l, p, v) at k is the read of l at k when
+    // 0 <= k < size(l) and k != p; of push(l, x), when 0 <= k < size(l))
+    zero = constantTermWithValue(state.context, 0);
+    if zero is ValueLookup::Found {
+        z = (zero as ValueLookup::Found).term;
+        for gPosition in 0..size(gets) {
+            g = get(gets, gPosition);
+            k = intAt(g.arguments, 1, 0);
+            for wPosition in 0..size(writes) {
+                w = get(writes, wPosition);
+                onWrite = w.id = intAt(g.arguments, 0, 0);
+                if onWrite = false { onWrite = sameClass(start, w.id, intAt(g.arguments, 0, 0)); };
+                if onWrite && size(instances) < 240 {
+                    if keyDone(done, start, 1, w.id, k) = false && keyDone(pending, start, 1, w.id, k) = false {
+                        pending = push(pending, DoneKey { kind: 1, owner: w.id, index: k });
+                        inner = intAt(w.arguments, 0, 0);
+                        generation = generationOf(births, k) + 1;
+                        sized = applicationTerm(state, -13, push([], inner), nextTerm);
+                        sizeTerm = sized.term;
+                        if sized.created { births = births.insert(sizeTerm, generation); };
+                        sizedNext = sized.next;
+                        read = applicationTerm(sized.state, -14, push(push([], inner), k), sizedNext);
+                        readTerm = read.term;
+                        if read.created { births = births.insert(readTerm, generation); };
+                        nextTerm = read.next;
+                        state = read.state;
+                        guards = push(push([], TermRelation { relation: 3, left: z, right: k }), TermRelation { relation: 2, left: k, right: sizeTerm });
+                        if w.function = -17 { guards = push(guards, TermRelation { relation: 1, left: k, right: intAt(w.arguments, 1, 0) }); };
+                        instances = push(instances, SatInstance { key: DoneKey { kind: 1, owner: w.id, index: k }, guards: guards, body: TermRelation { relation: 0, left: g.id, right: readTerm } });
+                    };
+                };
+            };
+        };
+    };
+    return SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
+};
+
+// The closure of a context's facts, with its classes and its differences
+// between them made once, for the many questions a saturation round asks
+fn closedFacts(context: &ValidatorContext) -> ClosedFacts {
+    analysis = analyzeContext(context);
+    reps = equalityRepresentatives(analysis.equalities);
+    edges = canonicalDifferences(reps, analysis.differences);
+    different = [];
+    for d in context.different { different = push(different, DisequalityFact { left: representativeOf(reps, d.left), right: representativeOf(reps, d.right) }); };
+    return ClosedFacts { contradictory: analysis.contradictory, reps: reps, edges: edges, different: different };
+};
+
+fn sameClass(closed: &ClosedFacts, left: Int, right: Int) -> Bool {
+    if left = right { return true; };
+    return representativeOf(closed.reps, left) = representativeOf(closed.reps, right);
+};
+
+fn closedDifference(closed: &ClosedFacts, left: Int, right: Int, bound: Int) -> Bool {
+    return canonicalHasDifference(closed.edges, representativeOf(closed.reps, left), representativeOf(closed.reps, right), bound);
+};
+
+fn closedHolds(closed: &ClosedFacts, relation: Int, left: Int, right: Int) -> Bool {
+    if closed.contradictory { return true; };
+    if relation = 0 {
+        if sameClass(closed, left, right) { return true; };
+        if closedDifference(closed, left, right, 0) { return closedDifference(closed, right, left, 0); };
+        return false;
+    };
+    if relation = 1 {
+        if closedDifference(closed, left, right, -1) { return true; };
+        if closedDifference(closed, right, left, -1) { return true; };
+        l = representativeOf(closed.reps, left);
+        r = representativeOf(closed.reps, right);
+        for dPosition in 0..size(closed.different) {
+            d = get(closed.different, dPosition);
+            if d.left = l && d.right = r { return true; };
+            if d.left = r && d.right = l { return true; };
+        };
+        return false;
+    };
+    if relation = 2 { return closedDifference(closed, left, right, -1); };
+    return closedDifference(closed, left, right, 0);
+};
+
+// A case's context with the instances of the path's foralls that hold in it
+fn withInstances(state: &ExecutionState, context: ValidatorContext) -> ValidatorContext {
+    if size(state.templates) = 0 { return context; };
+    saturated = saturate(Saturation { state: ExecutionState { context: context, ..clone(state) }, births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() });
+    return saturated.state.context;
+};
+
+fn saturate(given: &Saturation) -> Saturation {
+    current = clone(given);
+    going = true;
+    for round in 0..12 {
+        if going {
+            outcome = saturationRound(current);
+            current = outcome.saturation;
+            if outcome.accepted = 0 { going = false; };
+        };
+    };
+    return current;
+};
+
+// The indexes of the reads a goal is made of, four levels down
+fn goalReadIndexes(context: &ValidatorContext, closed: &ClosedFacts, left: Int, right: Int) -> List<Int> {
+    near = push(push([], left), right);
+    indexes = [];
+    for level in 0..4 {
+        grown = clone(near);
+        for appPosition in 0..size(context.applications) {
+            app = get(context.applications, appPosition);
+            if size(grown) < 96 {
+                isNear = false;
+                for tPosition in 0..size(near) {
+                    t = get(near, tPosition);
+                    if isNear = false { if sameClass(closed, app.id, t) { isNear = true; }; };
+                };
+                if isNear {
+                    for a in app.arguments { if containsValue(grown, a) = false { grown = push(grown, a); }; };
+                    if app.function = -14 && size(app.arguments) = 2 {
+                        if containsValue(indexes, get(app.arguments, 1)) = false { indexes = push(indexes, get(app.arguments, 1)); };
+                    };
+                };
+            };
+        };
+        near = grown;
+    };
+    return indexes;
+};
+
+// relation(left, right) holds of the saturation, or of each case of a guard
+// that blocked an instance (one guard a level, those at the indexes the goal
+// reads first), within a depth and a budget of saturations
+fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, depth: Int, budget: Int, splits: &List<BlockedGuard>) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks depth {
+    if budget <= 0 { return SplitResult { holds: false, used: 0 }; };
+    saturated = saturate(given);
+    used = 1;
+    closed = knownClosure(saturated);
+    if closed.contradictory { return SplitResult { holds: true, used: used }; };
+    if closedHolds(closed, relation, left, right) { return SplitResult { holds: true, used: used }; };
+    indexes = goalReadIndexes(saturated.state.context, closed, left, right);
+    chosen = -1;
+    firstFresh = -1;
+    for i in 0..size(saturated.blocked) {
+        bg = get(saturated.blocked, i);
+        fresh = true;
+        for spPosition in 0..size(splits) {
+            sp = get(splits, spPosition);
+            if sp.left = bg.left && sp.right = bg.right { fresh = false; };
+            if sp.left = bg.right && sp.right = bg.left { fresh = false; };
+        };
+        if fresh {
+            if firstFresh < 0 { firstFresh = i; };
+            if chosen < 0 {
+                relevant = false;
+                for tPosition in 0..size(indexes) {
+                    t = get(indexes, tPosition);
+                    if relevant = false { if sameClass(closed, t, bg.index) { relevant = true; }; };
+                };
+                if relevant { chosen = i; };
+            };
+        };
+    };
+    if chosen < 0 { chosen = firstFresh; };
+    // (where no case is left to split, the goal is asked with every heuristic)
+    if chosen < 0 || depth <= 0 {
+        if entailsGoal(saturated.state.context, localGoal(relation, left, right)) { return SplitResult { holds: true, used: used }; };
+        if relation <= 1 {
+            if booleanCheck(saturated.state.context, relation, left, right) { return SplitResult { holds: true, used: used }; };
+        };
+        return SplitResult { holds: false, used: used };
+    };
+    if chosen >= size(saturated.blocked) { return SplitResult { holds: false, used: used }; };
+    guard = clone(get(saturated.blocked, chosen));
+    cases = [];
+    if guard.relation = 1 {
+        cases = push(push(cases, TermRelation { relation: 0, left: guard.left, right: guard.right }), TermRelation { relation: 1, left: guard.left, right: guard.right });
+    } else {
+        cases = push(push(push(cases, TermRelation { relation: 2, left: guard.left, right: guard.right }), TermRelation { relation: 0, left: guard.left, right: guard.right }), TermRelation { relation: 2, left: guard.right, right: guard.left });
+    };
+    deeperSplits = push(clone(splits), clone(guard));
+    allHold = true;
+    for cPosition in 0..size(cases) {
+        c = get(cases, cPosition);
+        if allHold {
+            caseContext = assumeRelation(clone(saturated.state.context), c.relation, c.left, c.right);
+            if c.relation = 0 { caseContext = assumeBooleanFact(caseContext, c.left, c.right); };
+            caseSat = Saturation { state: ExecutionState { context: caseContext, ..clone(saturated.state) }, births: clone(saturated.births), done: clone(saturated.done), blocked: noBlocked(), closed: noClosed() };
+            r = proveBySaturation(caseSat, relation, left, right, depth - 1, budget - used, deeperSplits);
+            used = used + r.used;
+            if r.holds = false { allHold = false; };
+        };
+    };
+    return SplitResult { holds: allHold, used: used };
+};

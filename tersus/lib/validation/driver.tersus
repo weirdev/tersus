@@ -8,7 +8,9 @@
 // numbers on one line: status, block, step, function index. Four zeroes
 // with index -1 mean every function proved.
 
-import validation::validation { ApplicationTerm, ConstantTerm, ConstructorField, DifferenceFact, DisequalityFact, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionState, ExecutionStep, ForallTemplate, LoopTest, OrderFact, ProofStep, TemplateNode, TemplateRelation, ValidatorContext, ValidatorGoal, ValueRef, VariantFact, noTemplates, validateExecution };
+import validation::flow { validateExecution };
+import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, DifferenceFact, DisequalityFact, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionState, ExecutionStep, ForallTemplate, LoopTest, OrderFact, ProofStep, TemplateNode, TemplateRelation, ValidatorContext, ValidatorGoal, ValueRef, VariantFact };
+import validation::state { noTemplates };
 
 enum DriverValue { DriverInt { value: Int }, DriverBool { value: Bool }, DriverList { items: List<DriverValue> }, DriverData { name: List<Int>, fields: List<DriverValue> } };
 

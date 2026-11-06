@@ -1677,6 +1677,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                         let files = concatMap loadedModuleFiles (packageModules pkg)
                             declared = [name | modu <- PackageCompile.compiledModules compiled, Assign name (Val VFunct{}) <- PackageCompile.compiledStatements modu]
                             typeNames = [name | modu <- PackageCompile.compiledModules compiled, stmt <- PackageCompile.compiledStatements modu, name <- case stmt of StructDef n _ _ _ -> [n]; EnumDef n _ -> [n]; _ -> []]
+                            markers = [(name, source, top) | block <- Map.elems (M.fnBlocks (M.progMain raw)), M.Ghost _ (M.GhostFunction name source top) <- M.blockStatements block]
                             trapped = checker{M.progMain = (M.progMain checker){M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Unreachable)}}
                          in foldr (<>) Nothing
                             [ case reference of
@@ -1686,7 +1687,8 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Error e -> Just e
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
-                            , testAssertEq (validatorMetadataFingerprint raw) "f3c37406da3717ee"
+                            , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
+                            , testAssertEq (validatorMetadataFingerprint raw) "c66b6822fb86d523"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
@@ -1700,7 +1702,13 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) declared)
                             , testAssertTrue (all (\n -> Map.member n (M.progTypes raw) || Map.member n (M.progGenerics raw)) typeNames)
                             , testAssertEq disk validationPackageFiles
-                            , testAssertEq (map loadedFileStem files) ["driver", "validation"]
+                            , testAssertEq (map loadedFileStem files) ["context", "differences", "driver", "evaluation", "execution", "flow", "joins", "linear", "loopInference", "model", "relations", "saturation", "sequenceFacts", "state", "validation"]
+                            , testAssertEq (length (packageModules pkg)) 1
+                            , testAssertTrue (all ((== packageEntryModule pkg) . loadedFileModule) files)
+                            , testAssertTrue (all (\file -> all ((== packageEntryModule pkg) . resolvedTargetModule) (loadedImports file)) files)
+                            , testAssertEq [loadedFileStem file | file <- files, "JoinedFact" `elem` loadedDeclNames file] ["joins"]
+                            , testAssertEq [loadedFileStem file | file <- files, "commonFacts" `elem` loadedDeclNames file] ["joins"]
+                            , testAssertEq [loadedFileStem file | file <- files, "commonContext" `elem` loadedDeclNames file] ["joins"]
                             , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 391
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) ["validateExecution", "noTemplates", "commonContext", "driverReadAll"])
                             , testAssertTrue (all (not . isInfixOf "validation$") (Map.keys (M.progFunctions checker)))
