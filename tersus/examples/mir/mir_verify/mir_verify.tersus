@@ -1,4 +1,4 @@
-import mir::support::support { Layout, beforeAngle, escaped, renderType, declName, lookupDecl, sizedArray, declaredName, roundUp, wordLayout, simpleLayout };
+import mir::support::support { Layout, beforeAngle, escaped, renderType, declName, lookupDecl, sizedArray, declaredName, roundUp, wordLayout, simpleLayout, variantsOf };
 import data::codec::codec { Size, Type, quoted, parseInt, wordOf };
 
 // The MIR as data, checked for well-formedness by a program in Tersus: what MirVerify checks of a
@@ -1078,7 +1078,117 @@ fn blockOpWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap
     return out;
 };
 
+fn runtimeTypeAt(types: &List<TypeDecl>, t: &Type, seen: &List<String>) -> Bool ~ {
+    if t is Type::TBlock || t is Type::TParam || t is Type::TVar { return false; };
+    if t is Type::TUninit { return runtimeTypeAt(types, Box::unbox((t as Type::TUninit).inner), seen); };
+    if t is Type::TRef { return runtimeTypeAt(types, Box::unbox((t as Type::TRef).inner), seen); };
+    if t is Type::TMutRef { return runtimeTypeAt(types, Box::unbox((t as Type::TMutRef).inner), seen); };
+    n = declaredName(types, t);
+    if !n.ok { return true; };
+    for name in seen { if name = n.text { return false; }; };
+    i = lookupDecl(types, n.text);
+    if i < 0 { return false; };
+    d = get(types, i);
+    if !(d is TypeDecl::DStruct) { return true; };
+    fields = (d as TypeDecl::DStruct).fields;
+    if size(fields) = 0 { return true; };
+    next = push(clone(seen), clone(n.text));
+    for fd in fields { if runtimeTypeAt(types, fd.ty, next) { return true; }; };
+    return false;
+};
+
+fn runtimeLocal(p: &Program, f: &Function, locals: &HashMap<Int, Int>, id: Int) -> Bool ~ {
+    t = localTy(f, locals, id);
+    return t.ok && runtimeTypeAt(p.types, t.ty, []);
+};
+
+fn rawPayloadFree(types: &List<TypeDecl>, t: &Type, seen: &List<String>) -> Bool ~ {
+    if t is Type::TRef || t is Type::TMutRef || t is Type::TParam || t is Type::TVar || t is Type::TBlock || t is Type::TForall { return false; };
+    if t is Type::TFn {
+        function = t as Type::TFn;
+        for arg in function.args { if !rawPayloadFree(types, arg, seen) { return false; }; };
+        return rawPayloadFree(types, Box::unbox(function.ret), seen);
+    };
+    if t is Type::TList { return rawPayloadFree(types, Box::unbox((t as Type::TList).elem), seen); };
+    if t is Type::TArray { return (t as Type::TArray).size is Size::SConst && rawPayloadFree(types, Box::unbox((t as Type::TArray).elem), seen); };
+    if t is Type::TAddr { return rawPayloadFree(types, Box::unbox((t as Type::TAddr).inner), seen); };
+    if t is Type::TBox { return rawPayloadFree(types, Box::unbox((t as Type::TBox).inner), seen); };
+    if t is Type::TUninit { return rawPayloadFree(types, Box::unbox((t as Type::TUninit).inner), seen); };
+    n = declaredName(types, t);
+    if !n.ok { return true; };
+    for name in seen { if name = n.text { return true; }; };
+    if lookupDecl(types, n.text) < 0 { return false; };
+    next = push(clone(seen), clone(n.text));
+    for variant in variantsOf(types, n.text) {
+        for field in variant.fields { if !rawPayloadFree(types, field.ty, next) { return false; }; };
+    };
+    return true;
+};
+
+fn addrBorrowWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, d: &Type, args: &List<Operand>) -> List<String> ~ {
+    n = size(args);
+    if n != 3 && n != 4 { return one("addrBorrow is applied to ".then(String::fromInt(n)).then(" operands")); };
+    if !(d is Type::TRef) { return one("addrBorrow needs a read reference result, not ".then(renderType(d))); };
+    elem = Box::unbox((d as Type::TRef).inner);
+    if !rawPayloadFree(p.types, elem, []) { return one("addrBorrow requires a concrete reference-free payload in this intermediate unit"); };
+    out = exactOperandWhy(p, funcs, f, locals, Type::TAddr { inner: Box::new(clone(elem)) }, argAt(args, 0));
+    for w in exactOperandWhy(p, funcs, f, locals, Type::TInt, argAt(args, 1)) { out = push(out, clone(w)); };
+    if n = 4 {
+        for w in exactOperandWhy(p, funcs, f, locals, Type::TBlock { inner: Box::new(clone(elem)) }, argAt(args, 2)) { out = push(out, clone(w)); };
+    };
+    owner = argAt(args, n - 1);
+    validOwner = false;
+    if owner is Operand::Copy { validOwner = runtimeLocal(p, f, locals, (owner as Operand::Copy).local); };
+    if !validOwner { out = push(out, "addrBorrow needs a declared runtime owner copied from a non-ghost local"); };
+    return out;
+};
+
+fn addrTakeArrayWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, d: &Type, args: &List<Operand>) -> List<String> ~ {
+    n = size(args);
+    if n != 2 && n != 3 { return one("addrTakeArray needs an address, a size and an optional ghost permission"); };
+    if !(d is Type::TArray) { return one("addrTakeArray needs an inline array result"); };
+    elem = Box::unbox((d as Type::TArray).elem);
+    sz = (d as Type::TArray).size;
+    sizeOk = false;
+    given = argAt(args, 1);
+    if sz is Size::SConst {
+        if given is Operand::Const {
+            c = (given as Operand::Const).value;
+            if c is Constant::CInt { sizeOk = (c as Constant::CInt).n = (sz as Size::SConst).n && (c as Constant::CInt).n >= 0; };
+        };
+    };
+    if sz is Size::SParam {
+        l = 0 - 1;
+        if given is Operand::Copy { l = (given as Operand::Copy).local; };
+        if l >= 0 {
+            declaration = findLocal(f, locals, l);
+            if declaration >= 0 && declaration < size(f.locals) {
+                decl = get(f.locals, declaration);
+                name = (sz as Size::SParam).name;
+                if decl.named && decl.name = name && size(f.sizeParams) <= size(f.params) {
+                    firstSize = size(f.params) - size(f.sizeParams);
+                    k = 0;
+                    while k < size(f.sizeParams) [{ affirm k >= 0; affirm k <= size(f.sizeParams); }] ~ {
+                        if get(f.sizeParams, k) = name && get(f.params, firstSize + k) = l { sizeOk = true; };
+                        k = k + 1;
+                    };
+                };
+            };
+        };
+    };
+    out = exactOperandWhy(p, funcs, f, locals, Type::TAddr { inner: Box::new(clone(elem)) }, argAt(args, 0));
+    for w in exactOperandWhy(p, funcs, f, locals, Type::TInt, given) { out = push(out, clone(w)); };
+    if !sizeOk { out = push(out, "addrTakeArray size operand must equal its result's constant or declared size parameter"); };
+    if n = 3 {
+        for w in exactOperandWhy(p, funcs, f, locals, Type::TBlock { inner: Box::new(clone(elem)) }, argAt(args, 2)) { out = push(out, clone(w)); };
+    };
+    return out;
+};
+
 fn listOpWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, d: &Type, op: Int, args: &List<Operand>, inSet: Bool) -> List<String> ~ {
+    if op = 54 { return addrBorrowWhy(p, funcs, f, locals, d, args); };
+    if op = 55 { return addrTakeArrayWhy(p, funcs, f, locals, d, args); };
+    if op = 56 { return blockOpWhy(p, funcs, f, locals, d, op, args); };
     out = [];
     n = size(args);
     if op = 0 {
@@ -1483,6 +1593,10 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
             if !fits(p, funcs, f, locals, d, o) { out = expectedWhy(p, f, locals, d, o); };
         },
         Rvalue::Borrow { root: root, steps: steps, mutable: m } => {
+            rootType = localTy(f, locals, root);
+            readRoot = hasLocal(f.borrowed, root) && !hasLocal(f.mutBorrowed, root);
+            if rootType.ok && rootType.ty is Type::TRef { readRoot = true; };
+            if m && readRoot { return one("a read reference cannot be reborrowed for updating"); };
             pt = placeWhy(p, f, locals, root, steps);
             held = boxInnerOf(pt.ty);
             wanted = noTy();
@@ -1699,6 +1813,60 @@ fn terminatorFunctions(t: &Terminator) -> List<String> ~ {
     return out;
 };
 
+fn hasLocal(ids: &List<Int>, id: Int) -> Bool [{ }] [{ }] {
+    for x in ids { if x = id { return true; }; };
+    return false;
+};
+
+fn rawMetadataWhy(p: &Program, f: &Function, locals: &HashMap<Int, Int>) -> List<String> ~ {
+    for source in f.from {
+        if !hasLocal(f.params, source) || !hasLocal(f.borrowed, source) {
+            return one("a from origin must be a borrowed parameter");
+        };
+        if runtimeTypeAt(p.types, f.returns, []) && !runtimeLocal(p, f, locals, source) {
+            return one("a runtime from origin must be a runtime parameter");
+        };
+    };
+    if size(f.from) > 0 && (f.returns is Type::TInt || f.returns is Type::TBool || f.returns is Type::TByte || f.returns is Type::TWord) {
+        return one("a scalar return cannot declare reference from origins");
+    };
+    directRef = f.returns is Type::TRef || f.returns is Type::TMutRef;
+    for b in f.blocks {
+        for st in b.stmts {
+            if st is Statement::Drop && hasLocal(f.borrowed, (st as Statement::Drop).local) { return one("a borrowed parameter cannot be dropped"); };
+            if st is Statement::Peek {
+                for o in rvalueOperands((st as Statement::Peek).rv) {
+                    if o is Operand::Move && hasLocal(f.borrowed, (o as Operand::Move).local) { return one("a borrowed parameter cannot be moved"); };
+                };
+            };
+            if st is Statement::Assign {
+                assign = st as Statement::Assign;
+                rv = assign.rv;
+                if directRef && rv is Rvalue::ListOp && (rv as Rvalue::ListOp).op = 54 {
+                    args = (rv as Rvalue::ListOp).args;
+                    owner = argAt(args, size(args) - 1);
+                    if owner is Operand::Copy {
+                        id = (owner as Operand::Copy).local;
+                        t = localTy(f, locals, id);
+                        if !hasLocal(f.from, id) || !t.ok || t.ty is Type::TAddr {
+                            return one("a raw return's owner operand must name a non-address from parameter");
+                        };
+                    };
+                };
+                if directRef && assign.local = 0 && rv is Rvalue::Use {
+                    o = (rv as Rvalue::Use).o;
+                    for local in operandLocals(o) {
+                        if hasLocal(f.params, local) && !hasLocal(f.from, local) {
+                            return one("a returned reference parameter must be in from");
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return [];
+};
+
 fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>) -> List<String> ~ {
     out = [];
     prefix = "In ".then(f.name).then(": ");
@@ -1773,7 +1941,11 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &FunctionIndex, 
                 for w in callWhy(p, funcs, f, locals, callee, args, dest) { out = push(out, clone(bp).then("is ill typed: ").then(w)); };
             },
             Terminator::Goto { block: t } => { },
-            Terminator::Return => { },
+            Terminator::Return => {
+                if f.hasReturn {
+                    for w in rawMetadataWhy(p, f, locals) { out = push(out, clone(bp).then(w)); };
+                };
+            },
             Terminator::Unreachable => { },
         };
     };

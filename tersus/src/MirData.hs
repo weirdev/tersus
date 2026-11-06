@@ -216,6 +216,7 @@ listOps =
     , ("blockSplitHi", BlockSplitHi), ("blockJoin", BlockJoin), ("blockAssume", BlockAssume), ("blockCast", BlockCast)
     , ("narrowI8", Narrow True 8), ("narrowI16", Narrow True 16), ("narrowI32", Narrow True 32), ("narrowU16", Narrow False 16), ("narrowU32", Narrow False 32)
     , ("uninitEmpty", UninitEmpty), ("uninitNew", UninitNew), ("uninitGet", UninitGet), ("uninitTake", UninitTake), ("uninitDiscard", UninitDiscard)
+    , ("addrBorrow", AddrBorrow), ("addrTakeArray", AddrTakeArray), ("blockPrefixTaken", BlockPrefixTaken)
     ]
 
 listOpWord :: ListOp -> String

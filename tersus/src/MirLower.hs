@@ -1,4 +1,4 @@
-module MirLower (lowerProgram, lowerElaborated, lowerLibrary, lowerModuleWith) where
+module MirLower (lowerProgram, lowerElaborated, lowerLibrary, lowerModuleWith, lowerEntryWith) where
 
 import Control.Monad (forM, unless, when)
 import Data.List (intercalate)
@@ -6,9 +6,11 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import Interface (InterfaceFunction (..), ModuleInterface (..))
+import Interface (InterfaceFunction (..), ModuleInterface (..), genericConstructorSeeds)
+import Link (linkPrograms)
+import Modules (ModuleId(..))
 import qualified Mir as M
-import MirMoves (checkMovesExcluding, stripPositions)
+import MirMoves (checkMovesWithLifetimes, stripPositions)
 import Pretty (renderType)
 import StdLib (builtinFunct)
 import StdLibDefs (stdLibCtx)
@@ -44,11 +46,35 @@ lowerWith checking elaborated@(Elaborated stmts _) =
         Left e -> Error e
         Right (p, _) -> Ok p
 
+lowerEntryWith :: ImportEnv -> [ModuleInterface] -> [(ModuleId, M.Program)] -> Elaborated -> Result M.Program String
+lowerEntryWith _env ifaces dependencies elaborated@(Elaborated stmts _) =
+    case runL (program stmts) ((seededModuleState ifaces elaborated){lsChecking = False}) of
+        Left err -> Error err
+        Right (entry, state) ->
+            let withoutStubs = entry{M.progFunctions = Map.withoutKeys (M.progFunctions entry) (lsStubs state)}
+             in linkPrograms (dependencies ++ [(ModuleId "main" Nothing, withoutStubs)]) `bindResult` \linked ->
+                let withoutLifetimes = linked{M.progMain = clearLifetimes (M.progMain linked), M.progFunctions = Map.map clearLifetimes (M.progFunctions linked)}
+                    (checked, errors) = checkMovesWithLifetimes (lsCopies state) (lsLinear state) (lsDrops state) Set.empty withoutLifetimes
+                 in case errors of
+                    [] -> Ok (stripPositions checked)
+                    _ -> Error (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
+  where
+    clearLifetimes function = function{M.fnBlocks = Map.map clearBlock (M.fnBlocks function)}
+    clearBlock (M.BasicBlock statements term) = M.BasicBlock (filter keep statements) term
+    keep (M.Ghost _ M.GhostLifetime{}) = False
+    keep _ = True
+
 lowerModuleWith :: ImportEnv -> [ModuleInterface] -> Elaborated -> Result M.Program String
 lowerModuleWith _env ifaces elaborated@(Elaborated stmts _) =
     case runL (program stmts) (seededModuleState ifaces elaborated) of
         Left e -> Error e
-        Right (p, finalState) -> Ok p{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs finalState) (M.progFunctions p)}
+        Right (p, finalState)
+            | any rawBorrow [rv | fn <- M.progMain p : Map.elems (M.progFunctions p), block <- Map.elems (M.fnBlocks fn), M.Assign _ rv <- M.blockStatements block] ->
+                Error "raw-reference lifetime: raw borrows in separately compiled modules require exported checked footprints and are unavailable in this intermediate unit"
+            | otherwise -> Ok p{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs finalState) (M.progFunctions p)}
+  where
+    rawBorrow (M.ListOp M.AddrBorrow _) = True
+    rawBorrow _ = False
 
 seededModuleState :: [ModuleInterface] -> Elaborated -> LS
 seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
@@ -108,9 +134,11 @@ interfaceTypeDecls iface =
         [ (name, decl)
         | (name, variants) <- Map.toList (ifTypes iface)
         , name `Map.notMember` ifGenerics iface
+        , name `Set.notMember` symbolicSeeds
         , let decl = if variants == [name] then M.StructDecl (fieldsOf name) else M.EnumDecl [(variant, fieldsOf variant) | variant <- variants]
         ]
   where
+    symbolicSeeds = Set.fromList (map fst (genericConstructorSeeds (ifGenerics iface)))
     fieldsOf ctor = maybe [] snd (Map.lookup ctor (ifCtors iface))
 
 -- The lowering monad: state, and failure for what should not happen to a program that has been checked
@@ -352,8 +380,9 @@ program stmts = do
     -- themselves be lowered to be made from the seed. The stub functions of imported modules stay in the
     -- program for this check, so a call of one is seen with its signature; they are not checked themselves,
     -- and lowerModuleWith takes them out of the unit it returns.)
-    case if lsChecking s then checkMovesExcluding (lsCopies s) (lsLinear s) (lsDrops s) (lsStubs s) result else [] of
-        [] -> return (stripPositions result)
+    let (withLifetimes, moveErrors) = if lsChecking s then checkMovesWithLifetimes (lsCopies s) (lsLinear s) (lsDrops s) (lsStubs s) result else (result, [])
+    case moveErrors of
+        [] -> return (if lsChecking s then stripPositions withLifetimes else withLifetimes)
         errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
 -- One type variable the checker never learned (the elements of a list that is never used) is an Int
@@ -595,13 +624,13 @@ lowerReturn expr = do
             binding <- lookupBinding v
             case binding of
                 Just (BLocal l _) | l `elem` bBorrowed b0 || l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] False), TRef rt)
-                _ -> lowerLast expr
+                _ -> lowerLastWith expr (TRef rt)
         (Just (TMutRef rt), Var v) -> do
             _ <- claim
             binding <- lookupBinding v
             case binding of
                 Just (BLocal l _) | l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] True), TMutRef rt)
-                _ -> lowerLast expr
+                _ -> lowerLastWith expr (TMutRef rt)
         _ -> lowerLast expr
     b <- builder
     case bReturns b of
@@ -900,6 +929,13 @@ lowerRefRoot expr = do
         M.Const _ -> failL "Lowering failed: * of a value that is not a reference"
 
 lowerBorrow :: Bool -> Expression -> Type -> L (Pending, Type)
+lowerBorrow mutable place result | Just (address, index, permission) <- rawReadArgs place = do
+    when mutable $ failL "A raw-memory reference is read-only"
+    _ <- claim
+    (p, _) <- lowerOperand address
+    (i, _) <- lowerOperand index
+    (b, _) <- lowerOperand permission
+    return (PRvalue (M.ListOp M.AddrBorrow [p, i, b, b]), result)
 lowerBorrow mutable place result = do
     (root, steps, _) <- lowerPlace place
     return (PRvalue (M.Borrow root steps mutable), result)
@@ -1031,6 +1067,7 @@ pairParts :: BuiltinFunct -> Maybe (M.ListOp, M.ListOp)
 pairParts b = case b of
     AllocPair -> Just (M.AddrAlloc, M.BlockNew)
     TakePair -> Just (M.AddrTake, M.BlockTaken)
+    TakeArrayPair -> Just (M.AddrTakeArray, M.BlockPrefixTaken)
     ResizePair -> Just (M.AddrResize, M.BlockResized)
     SplitPair -> Just (M.BlockSplitLo, M.BlockSplitHi)
     _ -> Nothing
@@ -1048,6 +1085,7 @@ pairRvalue b first second result ops = do
             secondOps <- case (b, ops) of
                 (AllocPair, [n]) -> return [M.Copy x, n]
                 (TakePair, [_, i, blk]) -> return [blk, i]
+                (TakeArrayPair, [_, n, blk]) -> return [blk, n]
                 (ResizePair, [_, n, blk]) -> return [blk, M.Copy x, n]
                 (SplitPair, _) -> return ops
                 _ -> failL ("A builtin was applied to the wrong number of arguments: " ++ show b)

@@ -25,7 +25,7 @@ import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput)
 import ParsedFile (emptyDecls, locating)
 import TestParserFragments (parseStatementBlockWith)
-import Pipeline (nativeProgram, parseSource, runStatements)
+import Pipeline (compileModulesBootstrap, nativeProgram, parseSource, runStatements)
 import Seed (cachedSeed, seedHash)
 import MirEval (fromMirValue)
 import StdLibDefs (stdlibBuiltin)
@@ -372,7 +372,27 @@ readerProgram = modifyMVar readerProgramCache $ \cached -> case cached of
 interpreted :: [Statement] -> [String] -> IO TestResult
 interpreted ss args = do
     compiled <- readerProgram
-    pure $ case compiled `bindResult` runProgramIn noWorld{worldInput = dataParsed ss, worldArgs = args} of
+    pure (interpretedProgram compiled ss args)
+
+interpretedSource :: String -> [Statement] -> [String] -> IO TestResult
+interpretedSource source ss args = do
+    files <- Mod.snapshotFromFilesystem readerPath
+    let matching = [path | (path, _) <- files, Mod.normalizePath path == Mod.normalizePath readerPath]
+    case matching of
+        -- (built as the unmutated reader is, a compiler tool linked without
+        -- being validated: testHostValidation validates the reader)
+        [entry] -> pure (interpretedProgram (toolLike [(path, if path == entry then source else text) | (path, text) <- files]) ss args)
+        _ -> pure (Just "Mutation did not select exactly one AST reader package entry")
+
+toolLike :: [(FilePath, String)] -> Result M.Program String
+toolLike files = case Mod.loadFromEntry (Mod.resolverFromFiles files) readerPath of
+    Left e -> Error e
+    Right (Mod.PackageResult pkg) -> compileModulesBootstrap pkg
+    Right _ -> Error (readerPath ++ " is not in a package")
+
+interpretedProgram :: Result M.Program String -> [Statement] -> [String] -> TestResult
+interpretedProgram compiled ss args =
+    case compiled `bindResult` runProgramIn noWorld{worldInput = dataParsed ss, worldArgs = args} of
         Error e -> Just e
         Ok ((out, err), _) ->
             let output = if args == ["count"] then out ++ "\n" else out
@@ -506,7 +526,7 @@ testAstData = TestList "testAstData"
     ]
 
 testAstReader :: Test
-testAstReader = TestList "testAstReader"
+testAstReader = TestList "testAstReader" $
     [ TestCase "interpreted round trip" (interpreted small [])
     , TestCase "interpreted UTF-8 names" (interpreted [Assign "café" (Var "λ\NUL\n\\\"")] [])
     , TestCase "interpreted exact printed byte count" (interpreted small ["count"])
@@ -518,4 +538,22 @@ testAstReader = TestList "testAstReader"
     , TestCase "packaged elaborated tools native round trip" nativeElaboratedPackages
     , TestList "whole corpus native round trip"
         [TestCase (show batch ++ "/4") (nativeCorpus batch) | batch <- [1 .. 4]]
-    ]
+    ] ++ concat
+        [ [ TestCase ("interpreted array primitive " ++ show primitive) (interpreted statements [])
+          , TestCase ("native parsed array primitive " ++ show primitive) (withAstReader (\exe -> nativeText exe (dataParsed statements)))
+          , TestCase ("native elaborated-envelope array primitive " ++ show primitive) (withAstReader (\exe -> nativeText exe (dataElaborated (Elaborated statements []))))
+          , TestCase ("removing array primitive whitelist entry " ++ show primitive) $ do
+                source <- readFile readerPath
+                let entry = "    w = push(w, \"" ++ show primitive ++ "\");"
+                    mutated = unlines (filter (/= entry) (lines source))
+                if length (filter (== entry) (lines source)) /= 1
+                    then pure (Just "Mutation did not remove exactly one whitelist entry")
+                    else do
+                        result <- interpretedSource mutated statements []
+                        pure $ case result of
+                            Just err | "not the AST as data" `isInfixOf` err -> Nothing
+                            _ -> Just ("Whitelist mutation did not reject its primitive: " ++ show result)
+          ]
+        | primitive <- [AddrTakeArray, TakeArrayPair, BlockPrefixTaken]
+        , let statements = [Return (Val (builtinSymbol primitive))]
+        ]

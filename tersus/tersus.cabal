@@ -232,6 +232,7 @@ test-suite tersus-test
   type: exitcode-stdio-1.0
   main-is: TestTersus.hs
   other-modules:
+      TestAllocationRefs
       TestArrays
       TestAstData
       TestBasics
@@ -240,6 +241,8 @@ test-suite tersus-test
       TestBox
       TestBuiltinRegistry
       TestBytes
+      TestCanonicalRuleReplay
+      TestCloneDropOrder
       TestConnectives
       TestControl
       TestCopies
@@ -247,10 +250,12 @@ test-suite tersus-test
       TestDataCodec
       TestDeref
       TestEq
+      TestForallDomains
       TestGenerics
       TestHarness
       TestHashMap
       TestHashSet
+      TestLibInterfaceProviders
       TestLibModules
       TestMirData
       TestMirEmit
@@ -261,6 +266,7 @@ test-suite tersus-test
       TestMirVerify
       TestModules
       TestNative
+      TestNativeProofGuards
       TestOwnership
       TestParity
       TestParser
@@ -272,9 +278,13 @@ test-suite tersus-test
       TestProgramBinary
       TestProgramBinaryChecks
       TestProgramBuildIdentity
+      TestProofCallMono
       TestProofs
+      TestRawArrayTransfer
+      TestRuleScopes
       TestScheduling
       TestSequence
+      TestSequenceContracts
       TestSharedCache
       TestStorageOracle
       TestStrings

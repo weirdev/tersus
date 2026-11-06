@@ -200,7 +200,16 @@ fn driverProofStep(value: &DriverValue) -> ProofStep {
     return ProofStep::KnownEquality { left: driverInt(driverField(value, 0)), right: driverInt(driverField(value, 1)) };
 };
 
-fn driverStep(value: &DriverValue) -> ExecutionStep {
+fn driverValidRef(value: &DriverValue) -> Bool {
+    if !(value is DriverValue::DriverData) { return false; };
+    name = driverName(value);
+    if !driverNameIs(name, "ValueRef::Local") && !driverNameIs(name, "ValueRef::Term") { return false; };
+    fields = driverItems(value);
+    if size(fields) != 1 { return false; };
+    return get(fields, 0) is DriverValue::DriverInt;
+};
+
+fn driverStep(value: &DriverValue) -> ExecutionStep shrinks value {
     name = driverName(value);
     if driverNameIs(name, "ExecutionStep::Assign") { return ExecutionStep::Assign { local: driverInt(driverField(value, 0)), value: driverValueRef(driverField(value, 1)) }; };
     if driverNameIs(name, "ExecutionStep::Literal") { return ExecutionStep::Literal { result: driverInt(driverField(value, 0)), function: driverInt(driverField(value, 1)), arguments: driverValueRefs(driverField(value, 2)) }; };
@@ -212,20 +221,39 @@ fn driverStep(value: &DriverValue) -> ExecutionStep {
     if driverNameIs(name, "ExecutionStep::Pop") { return ExecutionStep::Pop { local: driverInt(driverField(value, 0)), list: driverValueRef(driverField(value, 1)) }; };
     if driverNameIs(name, "ExecutionStep::NewArray") { return ExecutionStep::NewArray { local: driverInt(driverField(value, 0)), length: driverValueRef(driverField(value, 1)), value: driverValueRef(driverField(value, 2)) }; };
     if driverNameIs(name, "ExecutionStep::Havoc") { return ExecutionStep::Havoc { local: driverInt(driverField(value, 0)) }; };
-    if driverNameIs(name, "ExecutionStep::RequireDefined") { return ExecutionStep::RequireDefined { value: driverValueRef(driverField(value, 0)) }; };
-    if driverNameIs(name, "ExecutionStep::Check") { return ExecutionStep::Check { relation: driverInt(driverField(value, 0)), left: driverValueRef(driverField(value, 1)), right: driverValueRef(driverField(value, 2)) }; };
+    if driverNameIs(name, "ExecutionStep::RequireDefined") {
+        fields = driverItems(value);
+        if size(fields) != 1 { return ExecutionStep::Unsupported; };
+        if !driverValidRef(get(fields, 0)) { return ExecutionStep::Unsupported; };
+        return ExecutionStep::RequireDefined { value: driverValueRef(get(fields, 0)) };
+    };
+    if driverNameIs(name, "ExecutionStep::Check") {
+        fields = driverItems(value);
+        if size(fields) != 3 { return ExecutionStep::Unsupported; };
+        if !(get(fields, 0) is DriverValue::DriverInt) { return ExecutionStep::Unsupported; };
+        if !driverValidRef(get(fields, 1)) || !driverValidRef(get(fields, 2)) { return ExecutionStep::Unsupported; };
+        return ExecutionStep::Check { relation: driverInt(get(fields, 0)), left: driverValueRef(get(fields, 1)), right: driverValueRef(get(fields, 2)) };
+    };
     if driverNameIs(name, "ExecutionStep::Assume") { return ExecutionStep::Assume { relation: driverInt(driverField(value, 0)), left: driverValueRef(driverField(value, 1)), right: driverValueRef(driverField(value, 2)) }; };
     if driverNameIs(name, "ExecutionStep::AssumeForall") { return ExecutionStep::AssumeForall { template: driverTemplate(driverField(value, 0)) }; };
     if driverNameIs(name, "ExecutionStep::AssumeVariant") { return ExecutionStep::AssumeVariant { object: driverValueRef(driverField(value, 0)), family: driverInt(driverField(value, 1)), constructor: driverInt(driverField(value, 2)), matches: driverBool(driverField(value, 3)) }; };
     if driverNameIs(name, "ExecutionStep::RequireVariant") { return ExecutionStep::RequireVariant { object: driverValueRef(driverField(value, 0)), family: driverInt(driverField(value, 1)), constructor: driverInt(driverField(value, 2)) }; };
     if driverNameIs(name, "ExecutionStep::CheckWithin") { return ExecutionStep::CheckWithin { inner: driverValueRef(driverField(value, 0)), outer: driverValueRef(driverField(value, 1)) }; };
     if driverNameIs(name, "ExecutionStep::Proof") { return ExecutionStep::Proof { step: driverProofStep(driverField(value, 0)) }; };
-    return ExecutionStep::Havoc { local: 0 };
+    if driverNameIs(name, "ExecutionStep::Scoped") {
+        if !(value is DriverValue::DriverData) { return ExecutionStep::Unsupported; };
+        if size((value as DriverValue::DriverData).fields) != 2 { return ExecutionStep::Unsupported; };
+        if !(get((value as DriverValue::DriverData).fields, 0) is DriverValue::DriverList) { return ExecutionStep::Unsupported; };
+        if !(get((value as DriverValue::DriverData).fields, 1) is DriverValue::DriverInt) { return ExecutionStep::Unsupported; };
+        return ExecutionStep::Scoped { steps: driverSteps(get((value as DriverValue::DriverData).fields, 0)), watermark: driverInt(get((value as DriverValue::DriverData).fields, 1)) };
+    };
+    return ExecutionStep::Unsupported;
 };
 
-fn driverSteps(value: &DriverValue) -> List<ExecutionStep> {
+fn driverSteps(value: &DriverValue) -> List<ExecutionStep> shrinks value {
+    if !(value is DriverValue::DriverList) { return push([], ExecutionStep::Unsupported); };
     out = [];
-    for item in driverItems(value) { out = push(out, driverStep(item)); };
+    for item in (value as DriverValue::DriverList).items { out = push(out, driverStep(item)); };
     return out;
 };
 

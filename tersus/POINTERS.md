@@ -193,7 +193,7 @@ Natively every value is held in 64-bit words today: an `Int`, a `Bool` and a `By
 - **Arrays** are their elements, each `size(T)` bytes apart, as in C. The limit of an array held in a frame becomes 64 KB of bytes and not 8192 words.
 - **What does not change**: an `Int`, an address, a function and a `Box` are 8 bytes, and the validator sees values, not bytes, so no proof changes. `eval` holds values and is unaffected.
 
-**What it costs.** The emitters (both, in step), the runtime's descriptors and walks (`words` becomes a size in bytes and an alignment, and `tersus_drop`, `tersus_clone`, `tersus_equal` and `tersus_print` step by field offsets), the stride of a list's elements in `StdList`, `MirData`'s types, the `bootstrap/emitter.ll` seed, and the builtins that move bytes in and out (`writeByte`, `readByte`, `fileByte`, which become 8-bit). The same tests are the check: `TestNative` against `eval`, the heap model, `TERSUS_CHECK` and valgrind. It is mechanical, but it touches every place that counts words.
+**What it costs.** The emitters (both, in step), the runtime's descriptors and walks (`words` becomes a size in bytes and an alignment, and `tersus_drop`, `tersus_clone`, `tersus_equal` and `tersus_print` step by field offsets), the stride of a list's elements in `List`, `MirData`'s types, the `bootstrap/emitter.ll` seed, and the builtins that move bytes in and out (`writeByte`, `readByte`, `fileByte`, which become 8-bit). The same tests are the check: `TestNative` against `eval`, the heap model, `TERSUS_CHECK` and valgrind. It is mechanical, but it touches every place that counts words.
 
 ## Assumptions
 
@@ -310,7 +310,7 @@ impl<T> Vec<T> {
 };
 ```
 
-Before drops exist (step 26), linearity makes a `Vec` safe rather than leaky: a `Vec` that is not freed is an error (`v is linear and is not used`). `StdList` moves to the same form after step 26, which gives it a `Drop`.
+Before drops exist (step 26), linearity makes a `Vec` safe rather than leaky: a `Vec` that is not freed is an error (`v is linear and is not used`). `List` moves to the same form after step 26, which gives it a `Drop`.
 
 ### `Uninit<T>`: empty slots without addresses
 
@@ -328,6 +328,8 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 - **Native code.** An `Addr` is an `i64`. `alloc`, `resize` and `free` call the runtime's `allocate`, `reallocate` and `release`, so `TERSUS_CHECK` counts the blocks. `get`, `write` and `take` copy `size(T)` bytes at `p + i * size(T)`, `offset` adds `i * size(T)`, and `dropValue` and `dropRange` call the `drop$T` function the emitter makes for `T`. An `Uninit<T>` is laid out as a `T`, and dropping, copying and comparing it is nothing.
 - **The emitter, in step.** `examples/mir/emit/emit.tersus` gains the same cases, `examples/mir/mir_reader/mir_reader.tersus` reads the new words, and `bootstrap/emitter.ll` is regenerated.
 
+`Addr::takeArray(p, n, b)` transfers slots `0..n` into `Array<T, n>` using a constant or declared size parameter. The validator checks the permission's base, capacity, count and initialized prefix. Lowering uses `AddrTakeArray [p, n, b]` and ghost `BlockPrefixTaken [b, n]`; native code copies the exact inline-array bytes and clears the source slots without cloning, dropping or freeing them. The suffix, allocation identity and capacity stay unchanged. The interpreter moves the same slot values. Held-reference footprint transport must be integrated before this primitive is used for the final generic List getter/conversion cutover.
+
 ## Order of work
 
 1. **Tuples**: types, values, projections, destructuring, moves of the parts, the validator's terms, and the emitters. These are independent of everything else.
@@ -337,7 +339,7 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 5. **Layout in bytes**: 8-bit `Byte` and `Bool`, the fixed-width integers, C's rules for structs, in both emitters and the runtime. This is independent of 1 to 4 and can be done at any point before 6.
 6. **`Addr<T>` and `Block<T>`**: the types, the operations, the ghost functions and the two offset facts in the proof engine, split and join, the heap in `MirEval`, the emitters and runtime, `Buffer<T>`, `examples/addresses.tersus` (a buffer, a buffer split between two functions, and an arena-linked list, all proved), and a rejected program for each contract: read of an empty slot, write over a filled one, out of bounds, the permission of one block with the address of another, free of a part, join of blocks from two allocations, free with a slot filled, use after free, a view used after its block changed, a permission dropped.
 7. **Assumptions**: `assume`, `Block::assume`, `extern fn`, and `tersus assumptions`.
-8. **Drops (step 26)**, then `StdList` on an address, then `Box` in the library (step 29).
+8. **Drops (step 26)**, then `List` on an address, then `Box` in the library (step 29).
 
 ## Changes to other documents
 

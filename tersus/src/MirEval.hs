@@ -2,7 +2,7 @@
 {-# LANGUAGE ViewPatterns #-}
 
 module MirEval
-    ( MirValue (MInt, MBool, MList, MData, MFn, MEmpty, MRef)
+    ( MirValue (MInt, MBool, MList, MData, MFn, MEmpty, MRef, MHeapRef, MFrameRef)
     , runProgram
     , runProgramOutput
     , runProgramWith
@@ -19,15 +19,15 @@ module MirEval
 
 import Data.Char (chr)
 import Data.Foldable (toList)
-import Data.List (elemIndex, intercalate)
+import Data.List (intercalate)
 import Data.Sequence (Seq, ViewL (..), ViewR (..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 
 import Mir
-import Types (Name, Rel (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
+import MirMono (monomorphize)
+import Types (Name, Rel (..), Type (..), pattern TList, pattern TBox, Variable)
 import Syntax (Value (..))
 import Utils
 
@@ -43,10 +43,10 @@ data MirValue
     | MFn Name
     | -- What an empty Uninit<T> holds: nothing, which no operation can read
       MEmpty
-    | -- A reference to a place in the frame that runs it: the local it starts from, and the fields and indexes from
-      -- there (REFERENCES.md). Reading it gives the place's current value; a call through an update reference
-      -- writes the callee's final value back into the place.
+    | -- Host-supplied frame-local targets are qualified when their frame starts.
       MRef Local [EvalStep]
+    | MHeapRef Integer [EvalStep]
+    | MFrameRef Integer Local [EvalStep]
     deriving (Eq)
 
 pattern MList :: [MirValue] -> MirValue
@@ -54,7 +54,7 @@ pattern MList values <- MSequence (toList -> values)
   where
     MList values = MSequence (Seq.fromList values)
 
-{-# COMPLETE MInt, MBool, MList, MData, MFn, MEmpty, MRef #-}
+{-# COMPLETE MInt, MBool, MList, MData, MFn, MEmpty, MRef, MHeapRef, MFrameRef #-}
 
 instance Show MirValue where
     showsPrec p value = case value of
@@ -65,6 +65,8 @@ instance Show MirValue where
         MFn name -> constructor "MFn" [showsPrec 11 name]
         MEmpty -> showString "MEmpty"
         MRef local steps -> constructor "MRef" [showsPrec 11 local, showsPrec 11 steps]
+        MHeapRef address steps -> constructor "MHeapRef" [showsPrec 11 address, showsPrec 11 steps]
+        MFrameRef frame local steps -> constructor "MFrameRef" [showsPrec 11 frame, showsPrec 11 local, showsPrec 11 steps]
       where
         constructor name args = showParen (p > 10) (showString name . foldr (.) id [showChar ' ' . arg | arg <- args])
 
@@ -113,8 +115,9 @@ data Outcome = Outcome
     }
 
 runProgramEnv :: RunEnv -> Program -> Result Outcome String
-runProgramEnv env program =
-    mapResult
+runProgramEnv env source =
+    let program = monomorphize source
+     in mapResult
         (\(value, (out, err), s) -> Outcome out err [(spelling, Map.findWithDefault "" key (sFiles s)) | (key, spelling) <- sOrder s] value)
         (runE (fmap fst (runFunction program (progMain program) [] Map.empty)) env (startState program (envInput env)))
 
@@ -135,6 +138,10 @@ data S = S
     , sOrder :: [(FilePath, FilePath)] -- the files written, by that path and the way the program first spelled it
     , sHeap :: Map Integer Allocation -- the memory that Addr::alloc gave, by the number of each allocation
     , sNextAllocation :: Integer
+    , sFrames :: Map Integer Frame
+    , sFrame :: Frame
+    , sCurrentFrame :: Maybe Integer
+    , sNextFrame :: Integer
     , sReferences :: Bool -- whether the program can make a reference at all: when it cannot, a call passes and returns values as they are
     }
 
@@ -146,15 +153,17 @@ data S = S
 data Allocation = Allocation {allocSize :: Integer, allocSlots :: Map Integer MirValue}
 
 startState :: Program -> String -> S
-startState program input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1, sReferences = makesReferences program}
+startState program input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1, sFrames = Map.empty, sFrame = Map.empty, sCurrentFrame = Nothing, sNextFrame = 1, sReferences = makesReferences program}
 
--- A reference value (MRef) comes only from a Borrow, and an update parameter is only given one, so a program with neither has no
--- reference to resolve, rebase or write back at a call
 makesReferences :: Program -> Bool
 makesReferences program = any function (progMain program : Map.elems (progFunctions program))
   where
-    function fn = not (null (specMutParams (fnSpec fn))) || any borrows (Map.elems (fnBlocks fn))
-    borrows (BasicBlock stmts _) = or [True | Assign _ Borrow{} <- stmts]
+    function fn = not (null (specMutParams (fnSpec fn))) || any (referencePayload . localType) (Map.elems (fnLocals fn)) || any borrows (Map.elems (fnBlocks fn))
+    borrows (BasicBlock stmts _) = any referenceStatement stmts
+    referenceStatement (Assign _ Borrow{}) = True
+    referenceStatement (Assign _ (ListOp AddrBorrow _)) = True
+    referenceStatement AssignRef{} = True
+    referenceStatement _ = False
 
 allocationSpan :: Integer
 allocationSpan = 2 ^ (32 :: Integer)
@@ -186,11 +195,14 @@ readSlot taking address = heapE $ \s ->
         Just v -> Ok (v, if taking then s{sHeap = Map.insert k a{allocSlots = Map.delete slot (allocSlots a)} (sHeap s)} else s)
 
 writeSlot :: Integer -> MirValue -> E ()
-writeSlot address v = heapE $ \s ->
-    slotAt s address `bindResult` \(k, a, slot) ->
-        if Map.member slot (allocSlots a)
-            then Error "A value was written over a slot that holds one"
-            else Ok ((), s{sHeap = Map.insert k a{allocSlots = Map.insert slot v (allocSlots a)} (sHeap s)})
+writeSlot address value = do
+    references <- E (\_ s -> Ok (sReferences s, none, s))
+    v <- if references then currentFrame >>= \frame -> captureValue frame value else pure value
+    heapE $ \s ->
+        slotAt s address `bindResult` \(k, a, slot) ->
+            if Map.member slot (allocSlots a)
+                then Error "A value was written over a slot that holds one"
+                else Ok ((), s{sHeap = Map.insert k a{allocSlots = Map.insert slot v (allocSlots a)} (sHeap s)})
 
 -- The allocation that starts at the address
 wholeAt :: S -> Integer -> Result (Integer, Allocation) String
@@ -333,160 +345,217 @@ runFunction :: Program -> Function -> [MirValue] -> Frame -> E (Maybe MirValue, 
 runFunction program fn args extra
     | length args /= length (fnParams fn) =
         failE ("Function expected " ++ show (length (fnParams fn)) ++ " arguments, got " ++ show (length args))
-    | otherwise = runBlock program fn (BlockId 0) (Map.union extra (Map.fromList (zip (fnParams fn) args)))
+    | otherwise = do
+        references <- E (\_ s -> Ok (sReferences s, none, s))
+        let initial = Map.union extra (Map.fromList (zip (fnParams fn) args))
+        if not references then runBlock program fn (BlockId 0) initial else runReferenceFunction program fn initial
+
+runReferenceFunction :: Program -> Function -> Frame -> E (Maybe MirValue,Frame)
+runReferenceFunction program fn initial = do
+        (_identity, parent) <- heapE $ \s ->
+            if sCurrentFrame s == Nothing && any hasFrameReference (Map.elems initial)
+                then Error "A frame reference from another evaluation was used"
+                else let identity = sNextFrame s
+                         frame = case sCurrentFrame s of
+                             Nothing -> Map.map (qualifyRefs identity initial) initial
+                             Just _ -> initial
+                      in Ok ((identity, sCurrentFrame s), s{sFrames = maybe (sFrames s) (\parent -> Map.insert parent (sFrame s) (sFrames s)) (sCurrentFrame s), sFrame = frame, sCurrentFrame = Just identity, sNextFrame = identity + 1})
+        initial' <- currentFrame
+        (result, _) <- runBlock program fn (BlockId 0) initial'
+        final <- currentFrame
+        heapE $ \s -> case parent of
+            Nothing -> Ok ((), s{sFrame = Map.empty, sCurrentFrame = Nothing})
+            Just caller -> case Map.lookup caller (sFrames s) of
+                Nothing -> Error "The suspended caller frame is not there"
+                Just callerFrame -> Ok ((), s{sFrames = Map.delete caller (sFrames s), sFrame = callerFrame, sCurrentFrame = parent})
+        return (result, final)
+
+mapResults :: (a -> Result b String) -> [a] -> Result [b] String
+mapResults = flatResultMap
 
 type Frame = Map Local MirValue
+
+hasFrameReference :: MirValue -> Bool
+hasFrameReference MFrameRef{} = True
+hasFrameReference (MData _ fields) = any (hasFrameReference . snd) fields
+hasFrameReference (MSequence values) = any hasFrameReference values
+hasFrameReference _ = False
+
+currentIdentity :: E Integer
+currentIdentity = heapE (\s -> maybe (Error "No active reference frame") (\identity -> Ok (identity, s)) (sCurrentFrame s))
+
+frameAt :: Integer -> E Frame
+frameAt identity = E $ \_ s ->
+    if sCurrentFrame s == Just identity
+        then Ok (sFrame s, none, s)
+        else maybe (Error "A reference to an exited frame was used") (\frame -> Ok (frame, none, s)) (Map.lookup identity (sFrames s))
+
+currentFrame :: E Frame
+currentFrame = E $ \_ s -> case sCurrentFrame s of
+    Nothing -> Error "No active reference frame"
+    Just _ -> Ok (sFrame s, none, s)
+
+storeFrame :: Integer -> Frame -> E ()
+storeFrame identity frame = E $ \_ s ->
+    if sCurrentFrame s == Just identity
+        then Ok ((), none, s{sFrame = frame})
+        else if Map.member identity (sFrames s)
+            then Ok ((), none, s{sFrames = Map.insert identity frame (sFrames s)})
+            else Error "A reference to an exited frame was updated"
+
+storeCurrentFrame :: Frame -> E ()
+storeCurrentFrame frame = E $ \_ s -> if not(sReferences s) then Ok((),none,s) else case sCurrentFrame s of
+    Nothing -> Error "No active reference frame"
+    Just _ -> Ok ((), none, s{sFrame = frame})
+
+captureValue :: Frame -> MirValue -> E MirValue
+captureValue frame value = do
+    identity <- currentIdentity
+    return (qualifyRefs identity frame value)
+
+qualifyRefs :: Integer -> Frame -> MirValue -> MirValue
+qualifyRefs identity frame value = case value of
+    MRef{} -> case normaliseRefs frame value of
+        MRef root steps -> MFrameRef identity root steps
+        qualified -> qualified
+    MData name fields -> MData name [(field, qualifyRefs identity frame child) | (field, child) <- fields]
+    MSequence values -> MSequence (fmap (qualifyRefs identity frame) values)
+    qualified -> qualified
 
 runBlock :: Program -> Function -> BlockId -> Frame -> E (Maybe MirValue, Frame)
 runBlock program fn block frame =
     case Map.lookup block (fnBlocks fn) of
         Nothing -> failE ("Jump to a block that does not exist: " ++ show block)
         Just (BasicBlock stmts term) -> do
-            frame' <- runStatements frame stmts
+            frame' <- runStatements program fn frame stmts
             case term of
                 Goto next -> runBlock program fn next frame'
                 SwitchBool test yes no -> do
-                    v <- liftE (operandValue frame' test)
+                    v <- intOrValue frame' test
                     case v of
                         MBool True -> runBlock program fn yes frame'
                         MBool False -> runBlock program fn no frame'
                         _ -> failE "Condition must be a boolean"
                 Call callee args dest next -> do
                     references <- E (\_ s -> Ok (sReferences s, none, s))
-                    f <- liftE (operandValue frame' callee)
-                    argValues <- liftE (mapResults (operandValue frame') args)
                     if not references
                         then do
+                            f <- liftE (operandValue frame' callee)
+                            argValues <- liftE (mapResults (operandValue frame') args)
                             (result, _) <- callFunction program f argValues Map.empty
                             runBlock program fn next (Map.insert dest result frame')
                         else do
-                            resolved <- liftE (mapResults (resolveRef frame') argValues)
-                            let normArgs = map (normaliseRefs frame') resolved
-                                synthRoots = refRootClosure frame' normArgs
-                                synthMap = Map.fromList (zip synthRoots [Local (1000000 + i) | i <- [0 ..]])
-                                calleeArgs = map (rewriteRefRoots synthMap) normArgs
-                                synthFrame = Map.fromList [(synth, rewriteRefRoots synthMap (normaliseRefs frame' v)) | (root, synth) <- Map.toList synthMap, Just v <- [Map.lookup root frame']]
-                            (result, calleeFrame) <- callFunction program f calleeArgs synthFrame
-                            -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
-                            -- the same place in this frame. References to the callee's own places cannot be returned,
-                            -- which the checker has already refused.)
-                            result' <- liftE $ case f of
-                                MFn name | Just callee <- Map.lookup name (progFunctions program) -> rebaseRefs program callee calleeFrame args frame' result
-                                _ -> Ok result
-                            let finalParams = case f of
-                                    MFn name | Just callee <- Map.lookup name (progFunctions program) -> [Map.findWithDefault MEmpty p calleeFrame | p <- fnParams callee]
-                                    _ -> []
-                            frame'' <- liftE (writeBack program frame' f args finalParams)
-                            let invSynth = Map.fromList [(s, r) | (r, s) <- Map.toList synthMap]
-                                result2 = rewriteRefRoots invSynth result'
-                            frame3 <- liftE (foldl (\acc (root, synth) -> acc `bindResult` \fr -> case Map.lookup synth calleeFrame of Just v -> writePlace fr root [] (rewriteRefRoots invSynth v); Nothing -> Ok fr) (Ok frame'') (Map.toList synthMap))
-                            runBlock program fn next (Map.insert dest result2 frame3)
+                            f <- intOrValue frame' callee
+                            target <- case f of
+                                MFn name -> maybe (failE ("Call of a function that does not exist: " ++ name)) return (Map.lookup name (progFunctions program))
+                                _ -> failE "Object being called must be a function"
+                            argValues <- prepareArguments fn target args
+                            (result, _) <- callFunction program f argValues Map.empty
+                            refreshed <- currentFrame
+                            runBlock program fn next (Map.insert dest result refreshed)
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
 
-callHasReferences :: Program -> Function -> Bool
-callHasReferences program fn = any parameter (fnParams fn) || maybe False (holds Set.empty) (fnReturns fn)
+prepareArguments :: Function -> Function -> [Operand] -> E [MirValue]
+prepareArguments caller callee args
+    | length args /= length (fnParams callee) = failE ("Function expected " ++ show (length (fnParams callee)) ++ " arguments, got " ++ show (length args))
+    | otherwise = mapM argument (zip (fnParams callee) args)
   where
-    parameter local = case Map.lookup local (fnLocals fn) of
-        Nothing -> True
-        Just decl -> holds Set.empty (contents (localType decl))
-    contents (TRef ty) = ty
-    contents (TMutRef ty) = ty
-    contents ty = ty
-    holds seen ty = case ty of
-        TRef _ -> True
-        TMutRef _ -> True
-        TList inner -> holds seen inner
-        TArrayOf inner _ -> holds seen inner
-        TBox inner -> holds seen inner
-        TUninit inner -> holds seen inner
-        TParam _ -> True
-        TVar _ -> True
-        TNamed base args
-            | Set.member ty seen -> False
-            | otherwise -> case Map.lookup (instanceName base args) (progTypes program) of
-                Nothing -> True
-                Just decl -> any (holds (Set.insert ty seen) . snd) (fields decl)
-        TVariant name -> maybe True (\owner -> holds seen (TNamed owner [])) (ownerOf program name)
-        _ -> False
-    fields (StructDecl fs) = fs
-    fields (EnumDecl variants) = concatMap snd variants
+    argument (param, operand) = do
+        frame <- currentFrame
+        value <- liftE (operandValue frame operand)
+        if param `elem` fnBorrowed callee || maybe False (referenceType . localType) (Map.lookup param (fnLocals callee))
+            then case value of
+                MRef{} -> captureValue frame value
+                MFrameRef{} -> return value
+                MHeapRef{} -> return value
+                _ -> case operand of
+                    Copy root -> captureValue frame (MRef root [])
+                    Move root -> captureValue frame (MRef root [])
+                    Const _ -> do
+                        let root = Local (minimum (0 : [slot | Local slot <- Map.keys frame ++ Map.keys (fnLocals caller)]) - 1)
+                        storeCurrentFrame (Map.insert root value frame)
+                        captureValue frame (MRef root [])
+            else if maybe False (referencePayload . localType) (Map.lookup param (fnLocals callee))
+                then return value
+                else resolveContents frame value
 
--- What a reference stands for here: the value at the place it is to
-resolveRef :: Frame -> MirValue -> Result MirValue String
-resolveRef frame (MRef l steps) = readPlace frame l steps
-resolveRef _ v = Ok v
+referencePayload :: Type -> Bool
+referencePayload (TBox inner) = referencePayload inner
+referencePayload (TUninit inner) = referencePayload inner
+referencePayload ty = referenceType ty
 
-readPlace :: Frame -> Local -> [EvalStep] -> Result MirValue String
-readPlace frame l steps = case Map.lookup l frame of
-    Nothing -> Error ("Undefined variable: " ++ show l)
-    Just base -> readSteps base steps
+referenceType :: Type -> Bool
+referenceType TRef{} = True
+referenceType TMutRef{} = True
+referenceType _ = False
+
+resolveReference :: Frame -> MirValue -> E MirValue
+resolveReference frame value = case value of
+    MRef{} -> captureValue frame value >>= resolveReference frame
+    MFrameRef identity root steps -> do
+        target <- frameAt identity
+        base <- maybe (failE ("Undefined reference root: " ++ show root)) return (Map.lookup root target)
+        walk target steps base
+    MHeapRef address steps -> readSlot False address >>= walk frame steps
+    _ -> return value
   where
-    readSteps (MRef l' steps') rest = readPlace frame l' (steps' ++ rest)
-    readSteps v [] = Ok v
-    readSteps (MData _ fields) (EvalField field : rest) = maybe (Error ("A reference is to a field that is not there: " ++ field)) (\v -> readSteps v rest) (lookup field fields)
-    readSteps (MSequence xs) (EvalIndex i : rest)
-        | i >= 0 && i < toInteger (Seq.length xs) = readSteps (Seq.index xs (fromInteger i)) rest
-        | otherwise = Error "A reference is to an index that is not there"
-    readSteps _ _ = Error "A reference is to a place that is not there"
+    walk _ [] base = return base
+    walk context steps base | isReference base = resolveReference context base >>= walk context steps
+    walk context (EvalField field : rest) (MData _ fields) = case lookup field fields of
+        Nothing -> failE ("A reference is to a field that is not there: " ++ field)
+        Just child -> walk context rest child
+    walk context (EvalIndex i : rest) (MSequence values)
+        | i >= 0 && i < toInteger (Seq.length values) = walk context rest (Seq.index values (fromInteger i))
+        | otherwise = failE "A reference is to an index that is not there"
+    walk _ _ _ = failE "A reference is to a place that is not there"
 
-writePlace :: Frame -> Local -> [EvalStep] -> MirValue -> Result Frame String
-writePlace frame l steps value = case Map.lookup l frame of
-    Nothing -> Error ("Undefined variable: " ++ show l)
-    Just (MRef l' steps') -> writePlace frame l' (steps' ++ steps) value
-    Just base -> mapResult (\new -> Map.insert l new frame) (setSteps base steps value)
+isReference :: MirValue -> Bool
+isReference MRef{} = True
+isReference MFrameRef{} = True
+isReference MHeapRef{} = True
+isReference _ = False
+
+resolveContents :: Frame -> MirValue -> E MirValue
+resolveContents frame value
+    | isReference value = resolveReference frame value >>= resolveContents frame
+    | otherwise = return value
+
+appendReference :: MirValue -> [EvalStep] -> MirValue
+appendReference (MRef root steps) rest = MRef root (steps ++ rest)
+appendReference (MFrameRef identity root steps) rest = MFrameRef identity root (steps ++ rest)
+appendReference (MHeapRef address steps) rest = MHeapRef address (steps ++ rest)
+appendReference value _ = value
+
+writeReference :: Frame -> MirValue -> MirValue -> E ()
+writeReference context target value = case target of
+    MRef{} -> captureValue context target >>= \qualified -> writeReference context qualified value
+    MFrameRef identity root steps -> do
+        frame <- frameAt identity
+        base <- maybe (failE ("Undefined reference root: " ++ show root)) return (Map.lookup root frame)
+        changed <- setPath frame base steps value
+        refreshed <- frameAt identity
+        storeFrame identity (Map.insert root changed refreshed)
+    MHeapRef{} -> do
+        held <- resolveReference context target
+        if isReference held
+            then writeReference context held value
+            else failE "A raw heap reference cannot be written through"
+    _ -> failE "A value that is not a reference is written through"
   where
-    setSteps _ [] new = Ok new
-    setSteps (MData name fields) (EvalField field : rest) new = case lookup field fields of
-        Nothing -> Error ("A reference is to a field that is not there: " ++ field)
-        Just old -> mapResult (\changed -> MData name [(f, if f == field then changed else v) | (f, v) <- fields]) (setSteps old rest new)
-    setSteps (MSequence xs) (EvalIndex i : rest) new
-        | i >= 0 && i < toInteger (Seq.length xs) = mapResult (\changed -> MSequence (Seq.update (fromInteger i) changed xs)) (setSteps (Seq.index xs (fromInteger i)) rest new)
-        | otherwise = Error "A reference is to an index that is not there"
-    setSteps _ _ _ = Error "A reference is to a place that is not there"
-
--- A value that comes back from a call, with each reference in it made to name its place in the caller's
--- frame: a reference in the callee was to a local there, which was itself a reference or a parameter, and a
--- parameter's place is the place its argument is to here
-rebaseRefs :: Program -> Function -> Frame -> [Operand] -> Frame -> MirValue -> Result MirValue String
-rebaseRefs program callee calleeFrame args callerFrame value = case value of
-    MRef l steps -> placeOf l steps
-    MData name fields -> mapResult (MData name) (mapEach field fields)
-      where
-        field (f, v) = mapResult (\v' -> (f, v')) (rebaseRefs program callee calleeFrame args callerFrame v)
-    MSequence values -> mapResult MSequence (mapSequence (rebaseRefs program callee calleeFrame args callerFrame) values)
-    _ -> Ok value
-  where
-    mapEach _ [] = Ok []
-    mapEach g (x : xs) = g x `bindResult` \y -> mapResult (y :) (mapEach g xs)
-    placeOf l steps = case Map.lookup l calleeFrame of
-        Just (MRef l2 steps2) -> placeOf l2 (steps2 ++ steps)
-        _ -> case elemIndex l (fnParams callee) of
-            Just i | i < length args -> case args !! i of
-                Copy cl -> Ok (case Map.lookup cl callerFrame of
-                    Just (MRef rl rs) -> MRef rl (rs ++ steps)
-                    _ -> MRef cl steps)
-                Move cl -> Ok (case Map.lookup cl callerFrame of
-                    Just (MRef rl rs) -> MRef rl (rs ++ steps)
-                    _ -> MRef cl steps)
-                _ -> Ok value
-            _ -> Ok value
-
--- After a call, the final value of each update parameter is written back into the place its argument was to
-writeBack :: Program -> Frame -> MirValue -> [Operand] -> [MirValue] -> Result Frame String
-writeBack program frame (MFn name) args finalParams = case Map.lookup name (progFunctions program) of
-    Nothing -> Ok frame
-    Just fn ->
-        let muts = [i | (i, param) <- zip [0 ..] (fnParams fn), Just (LocalDecl _ (Just n)) <- [Map.lookup param (fnLocals fn)], n `elem` specMutParams (fnSpec fn)]
-            write (f, i) = case (args !! i, finalParams !! i) of
-                (Copy l, v) -> placeOf f l v
-                (Move l, v) -> placeOf f l v
-                _ -> Ok f
-            placeOf f l v = case Map.lookup l f of
-                Just (MRef root steps) -> writePlace f root steps v
-                _ -> writePlace f l [] v
-         in foldl (\acc i -> acc `bindResult` \f -> write (f, i)) (Ok frame) muts
-writeBack _ frame _ _ _ = Ok frame
+    setPath _ _ [] new = return new
+    setPath frame base rest new | isReference base = writeReference frame (appendReference base rest) new >> return base
+    setPath frame (MData name fields) (EvalField field : rest) new = case lookup field fields of
+        Nothing -> failE ("A reference is to a field that is not there: " ++ field)
+        Just old -> do
+            changed <- setPath frame old rest new
+            return (MData name [(f, if f == field then changed else v) | (f, v) <- fields])
+    setPath frame (MSequence values) (EvalIndex i : rest) new
+        | i >= 0 && i < toInteger (Seq.length values) = do
+            changed <- setPath frame (Seq.index values (fromInteger i)) rest new
+            return (MSequence (Seq.update (fromInteger i) changed values))
+        | otherwise = failE "A reference is to an index that is not there"
+    setPath _ _ _ _ = failE "A reference is to a place that is not there"
 
 callFunction :: Program -> MirValue -> [MirValue] -> Frame -> E (MirValue, Frame)
 callFunction _ (MFn name) _ _
@@ -504,90 +573,185 @@ normaliseRefs :: Frame -> MirValue -> MirValue
 normaliseRefs frame value = case value of
     MRef l steps -> case Map.lookup l frame of
         Just (MRef l2 steps2) -> normaliseRefs frame (MRef l2 (steps2 ++ steps))
+        Just (MHeapRef address steps2) -> MHeapRef address (steps2 ++ steps)
+        Just (MFrameRef identity root steps2) -> MFrameRef identity root (steps2 ++ steps)
         _ -> MRef l steps
     MData name fields -> MData name [(f, normaliseRefs frame v) | (f, v) <- fields]
     MSequence values -> MSequence (fmap (normaliseRefs frame) values)
     _ -> value
 
-refRoots :: MirValue -> [Local]
-refRoots value = case value of
-    MRef l _ -> [l]
-    MData _ fields -> concatMap (refRoots . snd) fields
-    MSequence values -> foldMap refRoots values
-    _ -> []
+runStatements :: Program -> Function -> Frame -> [Statement] -> E Frame
+runStatements program fn frame stmts = storeCurrentFrame frame >> runStatementsStep program fn frame stmts
 
-refRootClosure :: Frame -> [MirValue] -> [Local]
-refRootClosure frame args = go [] (concatMap refRoots args)
-  where
-    go seen [] = seen
-    go seen (r : rest)
-        | r `elem` seen = go seen rest
-        | otherwise = go (seen ++ [r]) (rest ++ maybe [] (refRoots . normaliseRefs frame) (Map.lookup r frame))
-
-rewriteRefRoots :: Map Local Local -> MirValue -> MirValue
-rewriteRefRoots m value | Map.null m = value
-rewriteRefRoots m value = case value of
-    MRef l steps -> MRef (Map.findWithDefault l l m) steps
-    MData name fields -> MData name [(f, rewriteRefRoots m v) | (f, v) <- fields]
-    MSequence values -> MSequence (fmap (rewriteRefRoots m) values)
-    _ -> value
-
-mapSequence :: (a -> Result b e) -> Seq a -> Result (Seq b) e
-mapSequence f = foldr (\x rest -> f x `bindResult` \y -> mapResult (y Seq.<|) rest) (Ok Seq.empty)
-
-mapResults :: (a -> Result b String) -> [a] -> Result [b] String
-mapResults = flatResultMap
-
-runStatements :: Frame -> [Statement] -> E Frame
-runStatements frame [] = return frame
-runStatements frame (Ghost{} : rest) = runStatements frame rest
-runStatements frame (Drop{} : rest) = runStatements frame rest
-runStatements frame (Peek dest rv : rest) = runStatements frame (Assign dest rv : rest)
-runStatements frame (Assign dest (ListOp PathByte [b]) : rest) = intArgument frame b >>= \x -> pathByte x >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
-runStatements frame (Assign dest (ListOp FileLoad []) : rest) = fileLoad >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
-runStatements frame (Assign dest (ListOp FileByte [i]) : rest) = intArgument frame i >>= \x -> fileByteAt x >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
-runStatements frame (Assign dest (ListOp StoreByte [b]) : rest) = intArgument frame b >>= \x -> storeByte x >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
-runStatements frame (Assign dest (ListOp FileStore []) : rest) = fileStore >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
-runStatements frame (Assign dest (ListOp ArgCount []) : rest) = do
+runStatementsStep :: Program -> Function -> Frame -> [Statement] -> E Frame
+runStatementsStep _ _ frame [] = return frame
+runStatementsStep program fn frame (Ghost{} : rest) = runStatements program fn frame rest
+runStatementsStep program fn frame (Drop{} : rest) = runStatements program fn frame rest
+runStatementsStep program fn frame (Peek dest rv : rest) = runStatementsStep program fn frame (Assign dest rv : rest)
+runStatementsStep program fn frame (Assign dest (ListOp PathByte [b]) : rest) = intArgument frame b >>= \x -> pathByte x >>= \n -> runStatements program fn (Map.insert dest (MInt n) frame) rest
+runStatementsStep program fn frame (Assign dest (ListOp FileLoad []) : rest) = fileLoad >>= \n -> runStatements program fn (Map.insert dest (MInt n) frame) rest
+runStatementsStep program fn frame (Assign dest (ListOp FileByte [i]) : rest) = intArgument frame i >>= \x -> fileByteAt x >>= \n -> runStatements program fn (Map.insert dest (MInt n) frame) rest
+runStatementsStep program fn frame (Assign dest (ListOp StoreByte [b]) : rest) = intArgument frame b >>= \x -> storeByte x >>= \n -> runStatements program fn (Map.insert dest (MInt n) frame) rest
+runStatementsStep program fn frame (Assign dest (ListOp FileStore []) : rest) = fileStore >>= \n -> runStatements program fn (Map.insert dest (MInt n) frame) rest
+runStatementsStep program fn frame (Assign dest (ListOp ArgCount []) : rest) = do
     args <- arguments
-    runStatements (Map.insert dest (MInt (toInteger (length args))) frame) rest
-runStatements frame (Assign dest (ListOp ArgByte [i, j]) : rest) = do
+    runStatements program fn (Map.insert dest (MInt (toInteger (length args))) frame) rest
+runStatementsStep program fn frame (Assign dest (ListOp ArgByte [i, j]) : rest) = do
     args <- arguments
-    iv <- liftE (operandValue frame i)
-    jv <- liftE (operandValue frame j)
+    iv <- intOrValue frame i
+    jv <- intOrValue frame j
     let byte = case (iv, jv) of
             (MInt a, MInt b)
                 | a >= 0 && a < toInteger (length args) && b >= 0 && b < toInteger (length (args !! fromInteger a)) -> toInteger (fromEnum (args !! fromInteger a !! fromInteger b) `mod` 256)
             _ -> -1
-    runStatements (Map.insert dest (MInt byte) frame) rest
-runStatements frame (Assign dest (ListOp ReadByte []) : rest) = do
+    runStatements program fn (Map.insert dest (MInt byte) frame) rest
+runStatementsStep program fn frame (Assign dest (ListOp ReadByte []) : rest) = do
     b <- readInput
-    runStatements (Map.insert dest (MInt b) frame) rest
-runStatements frame (Assign dest (ListOp WriteByte [o]) : rest) = do
-    v <- liftE (operandValue frame o)
+    runStatements program fn (Map.insert dest (MInt b) frame) rest
+runStatementsStep program fn frame (Assign dest (ListOp WriteByte [o]) : rest) = do
+    v <- intOrValue frame o
     case v of
-        MInt b -> write (chr (fromIntegral (b `mod` 256))) >> runStatements (Map.insert dest v frame) rest
+        MInt b -> write (chr (fromIntegral (b `mod` 256))) >> runStatements program fn (Map.insert dest v frame) rest
         _ -> failE "writeByte takes an Int"
-runStatements frame (Assign dest (ListOp WriteError [o]) : rest) = do
-    v <- liftE (operandValue frame o)
+runStatementsStep program fn frame (Assign dest (ListOp WriteError [o]) : rest) = do
+    v <- intOrValue frame o
     case v of
-        MInt b -> writeError (chr (fromIntegral (b `mod` 256))) >> runStatements (Map.insert dest v frame) rest
+        MInt b -> writeError (chr (fromIntegral (b `mod` 256))) >> runStatements program fn (Map.insert dest v frame) rest
         _ -> failE "writeError takes an Int"
-runStatements frame (Assign dest (ListOp op os) : rest) | Just run <- memoryOp op = do
-    args <- mapM (intOrValue frame) os
+runStatementsStep program fn frame (Assign dest (ListOp op os) : rest) | Just run <- memoryOp op = do
+    args <- case (op, os) of
+        (AddrBorrow, [p, i, _]) -> do
+            address <- intOrValue frame p
+            index <- intOrValue frame i
+            return [address, index, MEmpty]
+        (AddrWrite, [p, i, x]) -> do
+            address <- intOrValue frame p
+            index <- intOrValue frame i
+            let element = case p of
+                    Copy root -> addressElement root
+                    Move root -> addressElement root
+                    Const _ -> TInt
+                addressElement root = case Map.lookup root (fnLocals fn) of
+                    Just decl -> case localType decl of TAddr inner -> inner; _ -> TInt
+                    Nothing -> TInt
+            v <- evalValue program fn frame element (Use x)
+            return [address, index, v]
+        _ -> mapM (intOrValue frame) os
     v <- run args
-    runStatements (Map.insert dest v frame) rest
-runStatements frame (AssignRef root steps rv : rest) = do
-    v <- liftE (evalRvalue frame rv)
-    evalSteps <- liftE (mapResults (evalRefStep frame) steps)
-    frame' <- liftE (writePlace frame root evalSteps v)
-    runStatements frame' rest
-runStatements frame (Assign dest rv : rest) = do
-    v <- liftE (evalRvalue frame rv)
-    runStatements (Map.insert dest v frame) rest
+    runStatements program fn (Map.insert dest v frame) rest
+runStatementsStep program fn frame (AssignRef root steps rv : rest) = do
+    let target = referencePlaceType program fn root steps
+    v <- evalValue program fn frame target rv
+    evalSteps <- mapM (evalReferenceStep frame) steps
+    writeReference frame (normaliseRefs frame (MRef root evalSteps)) v
+    refreshed <- currentFrame
+    runStatements program fn refreshed rest
+runStatementsStep program fn frame (Assign dest rv : rest) = do
+    let target = maybe TInt localType (Map.lookup dest (fnLocals fn))
+    v <- evalValue program fn frame target rv
+    runStatements program fn (Map.insert dest v frame) rest
+
+referencePlaceType :: Program -> Function -> Local -> [RefStep] -> Type
+referencePlaceType program fn root = foldl project (contents (maybe TInt localType (Map.lookup root (fnLocals fn))))
+  where
+    contents (TRef ty) = ty
+    contents (TMutRef ty) = ty
+    contents (TBox ty) = ty
+    contents ty = ty
+    project ty (RefIndex _) = case contents ty of
+        TList element -> element
+        TArrayOf element _ -> element
+        _ -> TInt
+    project _ (RefField name field) = case Map.lookup name (progTypes program) of
+        Just (StructDecl fields) -> maybe TInt id (lookup field fields)
+        Just (EnumDecl variants) -> maybe TInt id (lookup field (concatMap snd variants))
+        Nothing -> maybe TInt id (lookup field (concat [fields | EnumDecl variants <- Map.elems (progTypes program), (variant, fields) <- variants, variant == name]))
+
+evalReferenceStep :: Frame -> RefStep -> E EvalStep
+evalReferenceStep _ (RefField _ field) = return (EvalField field)
+evalReferenceStep frame (RefIndex operand) = intArgument frame operand >>= return . EvalIndex
 
 intOrValue :: Frame -> Operand -> E MirValue
-intOrValue frame o = liftE (operandValue frame o)
+intOrValue frame operand = case operandValue frame operand of
+    Ok value | not (isReference value) -> pure value
+    result -> liftE result >>= resolveContents frame
+
+evalValue :: Program -> Function -> Frame -> Type -> Rvalue -> E MirValue
+evalValue program fn frame target rv = case rv of
+    Use o -> valueAtType target o
+    CopyOf o -> valueAtType target o
+    Borrow root steps _ -> do
+        evaluated <- mapM step steps
+        captureValue frame (MRef root evaluated)
+    BinaryOp op a b -> case (operandValue frame a, operandValue frame b) of
+        (Ok x, Ok y) | not (isReference x || isReference y) -> liftE (binary op x y)
+        _ -> do
+            x <- value a
+            y <- value b
+            liftE (binary op x y)
+    ListOp Push [container, item] -> do
+        base <- value container
+        child <- valueAtType (elementOf target) item
+        liftE (listOp Push [base, child])
+    ListOp Set [container, index, item] -> do
+        base <- value container
+        i <- value index
+        child <- valueAtType (elementOf target) item
+        liftE (listOp Set [base, i, child])
+    ListOp op [count, item] | op == NewArray || op == NewBoxed -> do
+        n <- value count
+        child <- valueAtType (elementOf target) item
+        liftE (listOp op [n, child])
+    ListOp UninitNew [item] -> do
+        child <- valueAtType (case target of TUninit inner -> inner; _ -> target) item
+        liftE (listOp UninitNew [child])
+    ListOp op [item] | op == UninitGet || op == UninitTake -> do
+        child <- valueAtType target item
+        liftE (listOp op [child])
+    ListOp op os -> mapM value os >>= liftE . listOp op
+    MakeList os -> MList <$> mapM (valueAtType (elementOf target)) os
+    MakeBox o -> valueAtType (case target of TBox inner -> inner; _ -> target) o
+    Unbox o -> do
+        v <- liftE (operandValue frame o)
+        case v of MHeapRef{} -> resolveReference frame v; _ -> return v
+    Unsize o -> valueAtType target o
+    MakeData name fields -> do
+        values <- mapM (\(field, o) -> (,) field <$> valueAtType (fieldType name field) o) fields
+        return (MData (plain name) values)
+    IsVariant o name -> do
+        v <- value o
+        case v of MData actual _ -> return (MBool (actual == plain name)); _ -> failE "Is only tests the variant of an enum value"
+    AsVariant o _ -> value o
+    TakeField root name field -> evalValue program fn frame target (ReadField (Copy root) name field)
+    ReadField o name field -> do
+        v <- value o
+        case v of
+            MData actual fields | actual /= plain name -> failE ("Expected a " ++ name ++ " but got a " ++ actual)
+                               | otherwise -> maybe (failE ("Variant " ++ name ++ " has no field " ++ field)) (atType target) (lookup field fields)
+            MList values | field == "len" || field == "cap" -> return (MInt (toInteger (length values)))
+            _ -> failE "A field can only be read from a struct"
+    Deref o -> do
+        v <- liftE (operandValue frame o) >>= resolveReference frame
+        atType target v
+  where
+    value = intOrValue frame
+    valueAtType ty o = case operandValue frame o of
+        Ok v | not (referencePayload ty || isReference v) -> pure v
+        result -> liftE result >>= atType ty
+    atType ty v | referencePayload ty = captureValue frame v
+                | otherwise = resolveContents frame v
+    elementOf (TList inner) = inner
+    elementOf (TArrayOf inner _) = inner
+    elementOf (TBox inner) = elementOf inner
+    elementOf _ = TInt
+    fieldType name field = case Map.lookup name (progTypes program) of
+        Just (StructDecl fields) -> maybe TInt id (lookup field fields)
+        Just (EnumDecl variants) -> maybe TInt id (lookup field (concatMap snd variants))
+        Nothing -> maybe TInt id (lookup field (concat [fields | EnumDecl variants <- Map.elems (progTypes program), (variant, fields) <- variants, variant == name]))
+    step (RefField _ field) = return (EvalField field)
+    step (RefIndex o) = do
+        v <- value o
+        case v of MInt index -> return (EvalIndex index); _ -> failE "The index of a borrowed place is not an Int"
 
 -- The operations on memory, which change the heap (the permissions they were given are erased by the ghost erasure)
 memoryOp :: ListOp -> Maybe ([MirValue] -> E MirValue)
@@ -595,8 +759,16 @@ memoryOp op = case op of
     AddrAlloc -> Just (\args -> case args of
         [MInt n] -> MInt <$> allocate n
         _ -> bad)
+    AddrBorrow -> Just (\args -> case args of
+        [MInt p, MInt i, _] -> readSlot False (p + i) >> return (MHeapRef (p + i) [])
+        _ -> bad)
     AddrGet -> Just (\args -> case args of
         [MInt p, MInt i] -> readSlot False (p + i)
+        _ -> bad)
+    AddrTakeArray -> Just (\args -> case args of
+        [MInt p, MInt n]
+            | n < 0 -> failE "Addr::takeArray needs a non-negative prefix length"
+            | otherwise -> MList <$> mapM (readSlot True . (p +)) [0 .. n - 1]
         _ -> bad)
     AddrTake -> Just (\args -> case args of
         [MInt p, MInt i] -> readSlot True (p + i)
@@ -622,16 +794,10 @@ memoryOp op = case op of
   where
     bad = failE (show op ++ " is given an address, numbers and a value, without the permission (which is erased before the program runs)")
 
-evalRefStep :: Frame -> RefStep -> Result EvalStep String
-evalRefStep _ (RefField _ field) = Ok (EvalField field)
-evalRefStep frame (RefIndex o) = operandValue frame o `bindResult` \v -> case v of
-    MInt i -> Ok (EvalIndex i)
-    _ -> Error "The index of a borrowed place is not an Int"
-
 -- The Int that an operand is
 intArgument :: Frame -> Operand -> E Integer
 intArgument frame o = do
-    v <- liftE (operandValue frame o)
+    v <- liftE (operandValue frame o) >>= resolveContents frame
     case v of
         MInt n -> return n
         _ -> failE "An Int was expected"
@@ -649,41 +815,6 @@ constantValue (CList cs) = MList (map constantValue cs)
 constantValue (CArray cs) = MList (map constantValue cs)
 constantValue (CData name fields) = MData (plain name) [(f, constantValue c) | (f, c) <- fields]
 constantValue (CFn name) = MFn name
-
-evalRvalue :: Frame -> Rvalue -> Result MirValue String
-evalRvalue frame rv =
-    case rv of
-        Use o -> operandValue frame o
-        Borrow root steps _ -> MRef root <$$> mapResults evalStep steps
-        Deref o -> operandValue frame o `bindResult` resolveRef frame
-        BinaryOp op a b -> operandValue frame a `bindResult` \x -> operandValue frame b `bindResult` \y -> binary op x y
-        ListOp op os -> mapResults (\o -> operandValue frame o `bindResult` resolveRef frame) os `bindResult` listOp op
-        MakeList os -> MList <$$> mapResults (operandValue frame) os
-        MakeBox o -> operandValue frame o
-        Unbox o -> operandValue frame o
-        Unsize o -> operandValue frame o
-        MakeData name fields -> MData (plain name) <$$> mapResults (\(f, o) -> (,) f <$$> operandValue frame o) fields
-        ReadField o name field ->
-            operandValue frame o `bindResult` \v -> case v of
-                MData actual fields
-                    | actual /= plain name -> Error ("Expected a " ++ name ++ " but got a " ++ actual)
-                    | otherwise -> maybe (Error ("Variant " ++ name ++ " has no field " ++ field)) Ok (lookup field fields)
-                -- (a list is a struct of the prelude in the checker, and a value of one here: its length is the
-                -- number of elements, and its capacity is not a thing the interpreter keeps, so it is the length)
-                MList elements
-                    | field == "len" || field == "cap" -> Ok (MInt (toInteger (length elements)))
-                _ -> Error "A field can only be read from a struct"
-        -- (a wrong cast is undefined behaviour, as in the evaluator of the AST: reading a field that is not there is the error)
-        AsVariant o _ -> operandValue frame o
-        CopyOf o -> operandValue frame o
-        TakeField l name field -> evalRvalue frame (ReadField (Copy l) name field)
-        IsVariant o name ->
-            operandValue frame o `bindResult` \v -> case v of
-                MData actual _ -> Ok (MBool (actual == plain name))
-                _ -> Error "Is only tests the variant of an enum value"
-  where
-    f <$$> r = mapResult f r
-    evalStep = evalRefStep frame
 
 binary :: BinOp -> MirValue -> MirValue -> Result MirValue String
 binary Add (MInt a) (MInt b) = checked (a + b)
@@ -782,6 +913,9 @@ renderMirValue (MData name []) = name
 renderMirValue (MData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderMirValue v | (f, v) <- fields] ++ " }"
 renderMirValue MFn{} = "<function>"
 renderMirValue MEmpty = "<empty>"
+renderMirValue MRef{} = "<reference>"
+renderMirValue MFrameRef{} = "<reference>"
+renderMirValue MHeapRef{} = "<reference>"
 
 -- The value of the AST that a value of the MIR is, and the other way: a function of the program is VFnRef, and no function
 -- written in the AST is a value of the MIR
@@ -792,6 +926,9 @@ fromMirValue (MList vs) = VList (map fromMirValue vs)
 fromMirValue (MData name fields) = VData name [(f, fromMirValue v) | (f, v) <- fields]
 fromMirValue (MFn name) = VFnRef name
 fromMirValue MEmpty = VData "<empty>" []
+fromMirValue MRef{} = error "A runtime reference cannot be converted to a proof value"
+fromMirValue MFrameRef{} = error "A runtime reference cannot be converted to a proof value"
+fromMirValue MHeapRef{} = error "A runtime reference cannot be converted to a proof value"
 
 toMirValue :: Value -> Maybe MirValue
 toMirValue (VInt i) = Just (MInt i)

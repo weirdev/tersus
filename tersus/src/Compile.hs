@@ -6,11 +6,9 @@ module Compile
 
 import qualified Data.Map as Map
 import qualified Mir as M
-import MirLower (lowerElaborated, lowerModuleWith)
+import MirLower (lowerElaborated, lowerEntryWith)
 import Interface (mergeInterfacesImportEnv, withoutDeclaredNames)
 import LibPackage (libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
-import Link (linkPrograms)
-import Modules (ModuleId (..))
 import qualified ParserSeed
 import SourceParse (SourceParts, parsedLibraries, probeDecls, librariesFor, reservedName, reservedHelperName, reservedError, declaredNames, definedFunctionNames)
 import qualified SourceParse
@@ -44,8 +42,7 @@ lowerSourceParts _reserving (names, _library, stmts) =
                             ifaces = map (withoutDeclaredNames own) selectedIfaces
                             importEnv = mergeInterfacesImportEnv ifaces
                          in stage "Validation failed: " (mapResult fst (elaborateWith importEnv stmts)) `bindResult` \elaborated ->
-                                stage "Lowering failed: " (lowerModuleWith importEnv ifaces elaborated) `bindResult` \entryProgram ->
-                                    mapResult completeSpecEnvs (linkPrograms (stripDeclaredFromUnits own units ++ [(ModuleId "main" Nothing, entryProgram)]))
+                                mapResult completeSpecEnvs (stage "Lowering failed: " (lowerEntryWith importEnv ifaces (stripDeclaredFromUnits own units) elaborated))
 
 -- Linked functions need the complete program's ghost environment, not only the unit's.
 completeSpecEnvs :: M.Program -> M.Program
@@ -55,6 +52,7 @@ completeSpecEnvs program = program{M.progFunctions = Map.map completeFunction (M
     completeFunction fn = completeGhosts fn{M.fnSpec = completeSpec (M.fnSpec fn)}
     completeGhosts fn = fn{M.fnBlocks = Map.map completeBlock (M.fnBlocks fn)}
     completeBlock (M.BasicBlock statements term) = M.BasicBlock (map completeStatement statements) term
+    completeStatement statement@(M.Ghost _ M.GhostLifetime{}) = statement
     completeStatement (M.Ghost env ghost) = M.Ghost (completeEnv env) ghost
     completeStatement other = other
     completeSpec spec = spec{M.specEnv = completeEnv (M.specEnv spec), M.specLoops = Map.map (\loop -> loop{M.loopEnv = completeEnv (M.loopEnv loop)}) (M.specLoops spec)}

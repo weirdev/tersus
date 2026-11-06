@@ -166,4 +166,3 @@ refusals = withReader $ \exe -> do
     refused exe (name, text) = do
         (_, output, errors) <- runExecutableBytes exe [] text
         pure [name ++ ": read as " ++ show output ++ " with " ++ show errors | output /= "1\n" || null errors]
-

@@ -68,6 +68,13 @@ instance Ord Value where
 -- TODO: Call
 data Expression = Val Value | Var Variable | F Expression [Expression]
     deriving (Show, Eq, Ord, Read)
+
+rawReadArgs :: Expression -> Maybe (Expression, Expression, Expression)
+rawReadArgs expr = case expr of
+    F (Var "Addr::get") [address, index, permission] -> Just (address, index, permission)
+    F (Val (VFunct _ _ _ (BuiltinFunct AddrGet) _)) [address, index, permission] -> Just (address, index, permission)
+    _ -> Nothing
+
 data ValidationStatement
     = Rewrite RwRule
     | ProofAssert VariableProof

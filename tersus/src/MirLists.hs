@@ -299,6 +299,7 @@ lowerFunction original fn =
         modifySt (\s' -> s'{stDone = (stCurrent s, BasicBlock (reverse (stStatements s)) term') : stDone s', stStatements = []})
 
     lowerStatement stmt = case stmt of
+        Ghost _ (GhostLifetime _ _) -> emit stmt
         Ghost{} -> return ()
         Assign dest rv | Map.member dest boxedFromLists -> return ()
         Assign dest rv -> lowerAssign dest rv

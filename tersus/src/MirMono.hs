@@ -3,16 +3,19 @@
 module MirMono
     ( monomorphize
     , monomorphizeForValidation
+    , monomorphizeProofCallsForValidation
     ) where
 
-import Data.List (intercalate)
+import Data.List (intercalate, nub)
+import qualified Syntax as S
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
+import Types (Arg (..), BuiltinFunct (Field), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -34,12 +37,222 @@ monomorphize = monoWith unspecifiedFunction completeErasedInstances
 monomorphizeForValidation :: Program -> Program
 monomorphizeForValidation = monoWith id completeInstances
 
+monomorphizeProofCallsForValidation :: Program -> Either String Program
+monomorphizeProofCallsForValidation original = do
+    rejectProofCallCycles original
+    close Map.empty original
+  where
+    templates = Map.filter (\fn -> not(null(fnTypeParams fn) && null(fnSizeParams fn))) (progFunctions original)
+    close known working = do
+        let mono = monomorphizeForValidation working
+            context = mono{progFunctions = Map.union (progFunctions mono) templates}
+        (mainFn, mainKeys) <- redirectProofCalls context (progMain context)
+        converted <- traverse (redirectProofCalls context) (Map.elems(progFunctions mono))
+        let demanded = nub(mainKeys ++ concatMap snd converted)
+            freshKeys = filter (`Map.notMember` known) demanded
+            rewritten = context{progMain=mainFn,progFunctions=Map.union (Map.fromList[(fnName fn,fn)|(fn,_)<-converted]) templates}
+        if null freshKeys then Right rewritten else do
+            let instances = build original freshKeys known
+            if all (`Map.member` instances) freshKeys then Right () else Left "a proof call has no original declaration instance"
+            close instances rewritten{progFunctions=Map.union (Map.fromList[(fnName fn,fn)|fn<-Map.elems instances]) (progFunctions rewritten)}
+
+rejectProofCallCycles :: Program -> Either String ()
+rejectProofCallCycles program = case [(name,target)| (name,edges)<-Map.toList graph,(target,unsafe)<-edges,unsafe,reachable Set.empty target name] of
+    (name,_):_ -> Left("recursive proof declaration workload: "++name)
+    [] -> Right()
+  where
+    graph=Map.fromList[(fnName fn,map(\target->(target,True))(dependencies fn)++runtimeEdges fn)|fn<-progMain program:Map.elems(progFunctions program)]
+    reachable seen current goal
+        | current==goal = True
+        | Set.member current seen = False
+        | otherwise = any (\(target,_)->reachable(Set.insert current seen)target goal) (Map.findWithDefault [] current graph)
+    runtimeEdges caller=[(name,expansive caller target args dest)|BasicBlock _ (Call(Const(CFn name))args dest _)<-Map.elems(fnBlocks caller),Just target<-[Map.lookup name(progFunctions program)]]
+    expansive caller target args dest
+        | null(fnTypeParams target) = False
+        | otherwise = any grows (fnTypeParams target)
+      where
+        explicit=take(length args-length(fnSizeParams target))args
+        found=concat[match expected actual|(param,arg)<-zip(fnParams target)explicit,Just expected<-[localType<$>Map.lookup param(fnLocals target)],Just actual<-[argumentType caller arg]]++concat[match expected actual|Just expected<-[fnReturns target],Just actual<-[localType<$>Map.lookup dest(fnLocals caller)]]
+        grows parameter=case nub[actual|(name,actual)<-found,name==parameter] of
+            [actual] -> wrapped(fnTypeParams caller)False actual
+            _ -> True
+    argumentType caller (Copy local)=localType<$>Map.lookup local(fnLocals caller)
+    argumentType caller (Move local)=localType<$>Map.lookup local(fnLocals caller)
+    argumentType _ (Const(CInt _))=Just TInt
+    argumentType _ (Const(CBool _))=Just TBool
+    argumentType _ _=Nothing
+    wrapped names deeper ty=case ty of
+        TParam name -> deeper && name`elem`names
+        TNamed _ args -> any(\arg->case arg of ArgType value->wrapped names True value;_->False)args
+        TArrayOf value _ -> wrapped names True value
+        TRef value -> wrapped names True value
+        TMutRef value -> wrapped names True value
+        TBox value -> wrapped names True value
+        TAddr value -> wrapped names True value
+        TBlock value -> wrapped names True value
+        TUninit value -> wrapped names True value
+        TFn args result -> any(wrapped names True)(result:args)
+        TForall _ _ value -> wrapped names True value
+        _ -> False
+    dependencies fn =
+        let spec0=fnSpec fn
+            (inputs,inputEnv)=clauses(specEnv spec0)(specRequires spec0)
+            (outputs,_)=clauses inputEnv(specEnsures spec0)
+         in inputs++outputs++concat[fst(clauses(loopEnv loop)(loopInvariant loop))|loop<-Map.elems(specLoops spec0)]++concat[ghostRefs env ghost|BasicBlock ss _<-Map.elems(fnBlocks fn),Ghost env ghost<-ss]
+    ghostRefs env (GhostValidation clause)=fst(clauses env[clause])
+    ghostRefs env (GhostProof _ params ins outs body)=
+        let scoped=foldr Map.delete env params
+            (inputs,inputEnv)=clauses scoped ins
+         in inputs++fst(clauses inputEnv outs)++fst(clauses inputEnv body)
+    ghostRefs env (GhostAxiom _ params ins outs)=
+        let (inputs,inputEnv)=clauses(foldr Map.delete env params)ins
+         in inputs++fst(clauses inputEnv outs)
+    ghostRefs _ _=[]
+    clauses env []=([],env)
+    clauses env (clause:rest)=
+        let (refs,next)=case clause of
+                S.ProofAssert proof -> (proofRefs env proof,env)
+                S.Assume proof -> (proofRefs env proof,env)
+                S.AssignProofVar name(S.Var source) -> ([],maybe(Map.delete name env)(\value->Map.insert name value env)(Map.lookup source env))
+                S.AssignProofVar name(S.Val(S.VFnRef original)) | Map.member original(progFunctions program) -> ([],Map.insert name(Const(CFn original))env)
+                S.AssignProofVar name expression -> (proofRefs env(S.exprToProof expression),Map.delete name env)
+                S.Rewrite(S.CheckRel proof) -> (proofRefs env proof,env)
+                S.Rewrite(S.UserRewrite _ arguments) -> (concatMap(proofRefs env)arguments,env)
+                _ -> ([],env)
+            (remaining,lastEnv)=clauses next rest
+         in(refs++remaining,lastEnv)
+    proofRefs env(S.Forall index guards body)=concatMap(proofRefs(Map.delete index env))(guards++[body])
+    proofRefs env(S.FApp function arguments)=
+        let callee=case function of
+                S.ATerm name -> case Map.lookup name env of Just(Const(CFn original))->[original];_->[]
+                S.CTerm(S.VFnRef original)->[original]
+                _ -> proofRefs env function
+         in callee++concatMap(proofRefs env)arguments
+    proofRefs _ _=[]
+
+redirectProofCalls :: Program -> Function -> Either String (Function,[Key])
+redirectProofCalls program caller
+    | not(null(fnTypeParams caller) && null(fnSizeParams caller)) = Right(caller,[])
+    | otherwise = do
+        (ins, inputEnv, k1) <- clauses (returnEnv(specEnv spec0)) (specRequires spec0)
+        (outs, _, k2) <- clauses inputEnv (specEnsures spec0)
+        loops <- traverse (\loop -> do
+            (invariant,_,keys) <- clauses (loopEnv loop) (loopInvariant loop)
+            Right(loop{loopInvariant=invariant},keys)) (specLoops spec0)
+        blocks <- traverse block (fnBlocks caller)
+        let spec1=spec0{specRequires=ins,specEnsures=outs,specLoops=Map.map fst loops}
+        Right(caller{fnSpec=spec1,fnBlocks=Map.map fst blocks},k1++k2++concatMap snd(Map.elems loops)++concatMap snd(Map.elems blocks))
+  where
+    spec0=fnSpec caller
+    returnEnv env = case (fnReturns caller,Map.lookup(Local 0)(fnLocals caller)) of
+        (Just result,Just local) | localType local==result -> Map.insertWith (\_ original->original) "return" (Copy(Local 0)) env
+        _ -> env
+    clauses env []=Right([],env,[])
+    clauses env (clause:rest)=do
+        (converted,next,keys) <- validation env clause
+        (tailClauses,lastEnv,more) <- clauses next rest
+        Right(converted:tailClauses,lastEnv,keys++more)
+    validation env (S.ProofAssert proof)=do
+        (converted,keys) <- rewriteProof env [] proof
+        Right(S.ProofAssert converted,env,keys)
+    validation env (S.Assume proof)=do
+        (converted,keys) <- rewriteProof env [] proof
+        Right(S.Assume converted,env,keys)
+    validation env clause@(S.AssignProofVar name (S.Var source)) =
+        Right(clause,maybe (Map.delete name env) (\value->Map.insert name value env) (Map.lookup source env),[])
+    validation env clause@(S.AssignProofVar name (S.Val(S.VFnRef source))) | Map.member source(progFunctions program) = Right(clause,Map.insert name(Const(CFn source))env,[])
+    validation env clause@(S.AssignProofVar name (S.Val(S.VInt value))) = Right(clause,Map.insert name(Const(CInt value))env,[])
+    validation env clause@(S.AssignProofVar name (S.Val(S.VBool value))) = Right(clause,Map.insert name(Const(CBool value))env,[])
+    validation env clause@(S.AssignProofVar name _) = Right(clause,Map.delete name env,[])
+    validation env (S.Rewrite (S.CheckRel proof))=do
+        (converted,keys)<-rewriteProof env [] proof
+        Right(S.Rewrite(S.CheckRel converted),env,keys)
+    validation env (S.Rewrite (S.UserRewrite name args))=do
+        changed<-traverse(rewriteProof env [])args
+        Right(S.Rewrite(S.UserRewrite name(map fst changed)),env,concatMap snd changed)
+    validation env other=Right(other,env,[])
+    block (BasicBlock statements term)=do
+        converted<-traverse statement statements
+        Right(BasicBlock(map fst converted)term,concatMap snd converted)
+    statement (Ghost env (GhostValidation clause))=do
+        (converted,_,keys)<-validation env clause
+        Right(Ghost env(GhostValidation converted),keys)
+    statement (Ghost env (GhostProof name params ins outs body))=do
+        let scoped=foldr Map.delete env params
+        (inputs,inputEnv,k1)<-clauses scoped ins
+        (outputs,_,k2)<-clauses inputEnv outs
+        (proofBody,_,k3)<-clauses inputEnv body
+        Right(Ghost env(GhostProof name params inputs outputs proofBody),k1++k2++k3)
+    statement (Ghost env (GhostAxiom name params ins outs))=do
+        let scoped=foldr Map.delete env params
+        (inputs,inputEnv,k1)<-clauses scoped ins
+        (outputs,_,k2)<-clauses inputEnv outs
+        Right(Ghost env(GhostAxiom name params inputs outputs),k1++k2)
+    statement other=Right(other,[])
+    rewriteProof env bound (S.Forall index guards body)=do
+        changed<-traverse(rewriteProof (Map.delete index env)(index:bound))(guards++[body])
+        Right(S.Forall index(map fst(init changed))(fst(last changed)),concatMap snd changed)
+    rewriteProof env bound proof@(S.FApp function args)=do
+        changed<-traverse(rewriteProof env bound)args
+        case target env function of
+            Just name | Just fn<-Map.lookup name(progFunctions program), not(null(fnTypeParams fn)&&null(fnSizeParams fn)) -> do
+                key@(_,tys,sizes)<-maybe (Left("proof call cannot select its declared type/size key: "++name)) Right (proofKey env bound fn args)
+                Right(S.FApp(S.CTerm(S.VFnRef(fnInstanceName name tys sizes)))(map fst changed),key:concatMap snd changed)
+            _ -> do
+                (head',keys)<-rewriteProof env bound function
+                Right(S.FApp head'(map fst changed),keys++concatMap snd changed)
+    rewriteProof _ _ proof=Right(proof,[])
+    target env (S.ATerm name)=case Map.lookup name env of Just(Const(CFn original))->Just original;_->Nothing
+    target _ (S.CTerm(S.VFnRef name))=Just name
+    target _ _=Nothing
+    proofKey env bound fn args=do
+        if null(fnSizeParams fn) && length args==length(fnParams fn) then Just() else Nothing
+        actual<-traverse(proofType env bound)args
+        declared<-traverse(\local->localType<$>Map.lookup local(fnLocals fn))(fnParams fn)
+        let found=concat(zipWith match declared actual)
+        types<-traverse(\parameter->case nub[value|(name,value)<-found,name==parameter] of [value]|not(mentionsParameter value)->Just value;_->Nothing)(fnTypeParams fn)
+        if and(zipWith (\expected value->unlent(substitute [] (zip(fnTypeParams fn)types) expected)==unlent value) declared actual) then Just(fnName fn,types,[]) else Nothing
+    proofType env _ (S.ATerm name)=Map.lookup name env >>= operandType
+    proofType _ bound (S.BVar name)|name`elem`bound=Just TInt
+    proofType _ _ (S.CTerm(S.VInt _))=Just TInt
+    proofType _ _ (S.CTerm(S.VBool _))=Just TBool
+    proofType env bound (S.FApp (S.CTerm (S.VFunct _ _ _ (S.BuiltinFunct (Field _ field)) _)) [object])=do
+        owner<-proofType env bound object
+        case unlent owner of
+            TNamed name args | Just (params,fields)<-Map.lookup name(progGenerics program) -> do
+                declared<-lookup field fields
+                Just(substitute [(param,size)|(param,ArgSize size)<-zip params args] [(param,ty)|(param,ArgType ty)<-zip params args] declared)
+            TNamed name [] | Just (StructDecl fields)<-Map.lookup name(progTypes program) -> lookup field fields
+            _ -> Nothing
+    proofType env bound (S.FApp function args)=do
+        name<-target env function
+        fn<-Map.lookup name(progFunctions program)
+        if length args/=length(fnParams fn) then Nothing else Just()
+        if null(fnTypeParams fn)&&null(fnSizeParams fn) then do
+            actual<-traverse(proofType env bound)args
+            expected<-traverse(\local->localType<$>Map.lookup local(fnLocals fn))(fnParams fn)
+            if actual==expected then fnReturns fn else Nothing
+        else do
+            (_,types,sizes)<-proofKey env bound fn args
+            fnReturns(instantiate fn types sizes)
+    proofType _ _ _=Nothing
+    unlent (TRef ty)=ty
+    unlent (TMutRef ty)=ty
+    unlent ty=ty
+    operandType (Copy local)=localType<$>Map.lookup local(fnLocals caller)
+    operandType (Move local)=localType<$>Map.lookup local(fnLocals caller)
+    operandType (Const(CInt _))=Just TInt
+    operandType (Const(CBool _))=Just TBool
+    operandType _=Nothing
+
 -- A function with its contracts and ghost statements stripped, as
--- native code is given a copy
+-- native code is given a copy; the lifetimes of its references stay, which
+-- native lowering frees by
 unspecifiedFunction :: Function -> Function
 unspecifiedFunction f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
   where
     isGhost s = case s of
+        Ghost _ (GhostLifetime _ _) -> False
         Ghost _ _ -> True
         _ -> False
 
@@ -64,6 +277,7 @@ monoWith finish completeTypes program
     -- (what the validator was told names functions that are not there any more; nothing after it needs it)
     unspecified f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
     isGhost s = case s of
+        Ghost _ (GhostLifetime _ _) -> False
         Ghost _ _ -> True
         _ -> False
     generic f = not (null (fnSizeParams f) && null (fnTypeParams f))
@@ -160,6 +374,7 @@ instantiate fn tys sizes =
     block (BasicBlock stmts term) = BasicBlock (map statement stmts) (terminator term)
     statement s = case s of
         Assign l rv -> Assign l (rvalue rv)
+        AssignRef root steps rv -> AssignRef root (map refStep steps) (rvalue rv)
         Peek l rv -> Peek l (rvalue rv)
         Ghost e g -> Ghost (env e) g
         Drop _ -> s
@@ -180,12 +395,11 @@ instantiate fn tys sizes =
         IsVariant o name -> IsVariant (operand o) (named name)
         AsVariant o name -> AsVariant (operand o) (named name)
         CopyOf o -> CopyOf (operand o)
-        Borrow root steps mutable -> Borrow root (map step steps) mutable
+        Borrow root steps mutable -> Borrow root (map refStep steps) mutable
         Deref o -> Deref (operand o)
         TakeField l name field -> TakeField l (named name) field
-      where
-        step (RefField n f) = RefField (named n) f
-        step (RefIndex o) = RefIndex (operand o)
+    refStep (RefField name field) = RefField (named name) field
+    refStep (RefIndex o) = RefIndex (operand o)
     spec s = s{specEnv = env (specEnv s), specLoops = Map.map (\l -> l{loopEnv = env (loopEnv l)}) (specLoops s)}
 
 -- The function with each call of a function with size parameters made a call of the copy for its sizes, and the copies that need

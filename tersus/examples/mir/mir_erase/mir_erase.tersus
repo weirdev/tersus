@@ -602,7 +602,7 @@ fn typeText(t: &Type) -> String ~ {
 
 // The operations that make a permission, whose indices in the table of the list operations are 46 to 53
 fn ghostOp(op: Int) -> Bool [{ }] [{ }] {
-    return op >= 46 && op <= 53;
+    return (op >= 46 && op <= 53) || op = 56;
 };
 
 struct LocalInfo { ghostBool: Bool, position: Int };
@@ -617,6 +617,8 @@ fn noLocalInfo() -> LocalInfo [{ }] [{ }] {
 fn ghostTypeAt(types: &List<TypeDecl>, t: &Type, depth: Int) -> Bool ~ {
     if depth > 16 { return false; };
     if t is Type::TBlock { return true; };
+    if t is Type::TRef { return ghostTypeAt(types, Box::unbox((t as Type::TRef).inner), depth + 1); };
+    if t is Type::TMutRef { return ghostTypeAt(types, Box::unbox((t as Type::TMutRef).inner), depth + 1); };
     if t is Type::TNamed {
         i = lookupDecl(types, (t as Type::TNamed).name);
         if i >= 0 {
@@ -636,6 +638,11 @@ fn ghostTypeAt(types: &List<TypeDecl>, t: &Type, depth: Int) -> Bool ~ {
 
 fn ghostType(types: &List<TypeDecl>, t: &Type) -> Bool ~ {
     return ghostTypeAt(types, t, 0);
+};
+
+// A reference to a ghost is erased with what it refers to, and so is what it is from
+fn ghostReference(types: &List<TypeDecl>, t: &Type) -> Bool ~ {
+    return (t is Type::TRef || t is Type::TMutRef) && ghostType(types, t);
 };
 
 // Index the first declaration of each explicit ID, not the ID's position in the list.
@@ -826,7 +833,7 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function, locals: &HashMap<Int, Loc
     };
     fromList = [];
     for pid in f.from {
-        if !isGhostLocal(locals, pid) { fromList = push(fromList, pid); };
+        if !ghostReference(types, f.returns) && !isGhostLocal(locals, pid) { fromList = push(fromList, pid); };
     };
     blocks = [];
     for b in blocks1 {

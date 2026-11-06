@@ -365,6 +365,8 @@ enum ExecutionStep {
     Proof { step: ProofStep },
     // the path assumes a forall, which saturate uses where a check fails
     AssumeForall { template: ForallTemplate },
+    Scoped { steps: List<ExecutionStep>, watermark: Int },
+    Unsupported,
 };
 
 impl Clone for ExecutionStep { };

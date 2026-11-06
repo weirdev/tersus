@@ -42,6 +42,7 @@ testPointers =
             , testCase "a block of one type as another" (runs "struct Two { a: I32, b: I32 }; impl Clone for Two { }; impl Copy for Two { }; (p, b) = Addr::alloc(2); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, Two { a: -1, b: 2 }, c); x = Addr::get(q, 0, c); c = Addr::dropValue(q, 0, c); d = Addr::free(q, c); return toInt(x.a) + toInt(x.b);" "1")
             , testCase "a block of slots of another size" (rejected "(p, b) = Addr::alloc(2); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, true, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c);" "are not the same size")
             , testCase "the permission to memory the program did not allocate is an assumption" (valid "p = Addr::fromInt(4096); b = Block::assume(p, 2); b = Addr::write(p, 0, 5, b); b = Addr::dropValue(p, 0, b); return Addr::free(p, b);")
+            , testCase "an emptied slot is known empty" (valid "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); b = Addr::dropValue(p, 0, b); affirm filled(b, 0) = false; return Addr::free(p, b);")
             , testCase "a Vec on an address" (runs vec "1")
             ]
         , TestList
@@ -102,7 +103,7 @@ testPointers =
             , testCase "a type with a drop holds a permission" (rejected "struct H { n: Int }; impl Drop for H { fn drop(self: Self) -> Int { return self.n; }; }; return 1;" "H holds no permission")
             , testCase "a drop is not called by the program" (rejected (dropper ++ "v = V::new(3); return v.drop();") "is a drop, which is called where a value goes out of scope")
             , testCase "a drop of the wrong type" (rejected (owner ++ "impl Drop for V { fn drop(self: Self) -> Bool { return true; }; }; return 0;") "but Drop declares fn(V) -> Int")
-            , testCase "a value with a drop is not copied" (rejected (dropper ++ "impl Clone for V { }; return 0;") "V has a drop")
+            , testCase "derived Clone of a drop owner cannot copy its permission" (rejected (dropper ++ "impl Clone for V { }; return 0;") "Block<Int> is a permission, which is never copied")
             ]
         , TestList
             "assumptions"
@@ -131,6 +132,9 @@ testPointers =
         , ("a free of a part of an allocation", "(p, b) = Addr::alloc(4); (lo, hi) = Block::split(b, 2); d = Addr::free(p, lo); return d + Addr::free(Addr::offset(p, 2), hi);", "Could not prove: cap(b) = extent(origin(b))")
         , ("a join of blocks from two allocations", "(p, b) = Addr::alloc(2); (q, c) = Addr::alloc(2); r = Block::join(b, c); return Addr::free(p, r);", "Could not prove: origin(lo) = origin(hi)")
         , ("a join of the parts in the wrong order", "(p, b) = Addr::alloc(4); (lo, hi) = Block::split(b, 2); r = Block::join(hi, lo); return Addr::free(p, r);", "Could not prove: start(hi) = start(lo) + cap(lo)")
+        , ("an emptied slot is not still filled", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); b = Addr::dropValue(p, 0, b); affirm filled(b, 0) = true; return Addr::free(p, b);", "Could not prove: filled(b, 0) = true")
+        , ("a slot taken from is not still filled", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); (x, b) = Addr::take(p, 0, b); affirm filled(b, 0) = true; return x + Addr::free(p, b);", "Could not prove: filled(b, 0) = true")
+        , ("a dropped range is not still filled", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); b = Addr::dropRange(p, 0, 1, b); affirm filled(b, 0) = true; return Addr::free(p, b);", "Could not prove: filled(b, 0) = true")
         , ("a free with a slot filled", "(p, b) = Addr::alloc(2); b = Addr::write(p, 0, 1, b); return Addr::free(p, b);", "Could not prove: count(b) = 0")
         , ("a resize that would lose a value", "(p, b) = Addr::alloc(2); b = Addr::write(p, 1, 1, b); (q, b) = Addr::resize(p, 1, b); b = Addr::dropValue(q, 0, b); return Addr::free(q, b);", "Could not prove: forall j in n..cap(b): filled(b, j) = false")
         , ("a cast of a block that holds a value", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 1, b); c = Block::cast(b); q = Addr::cast(p); c = Addr::dropValue(q, 0, c); d = Addr::free(q, c); return 0;", "Could not prove: count(b) = 0")

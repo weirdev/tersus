@@ -2,7 +2,9 @@
 
 > **Reconciled (2026-10-30, `REFERENCES.md` stage 1).** Two statements below are superseded and are marked where they stand: user-defined drops are built, and the built `drop` takes `self: Self`, not `&Self` (`POINTERS.md`, Status item 9 is the record of the built form; `examples/drops.tersus` exercises it). And `&mut T` now exists as a nonescaping update reference (`REFERENCES.md` stages 2-3, `LANGUAGE.md` "Updating through a reference"); a drop still takes `Self`, because it consumes the value — `&mut` was not needed for it and is not used by it. The rest of this document remains the design for what is not built (linear types, raw pointers).
 >
-> **Reconciled (2026-10-31).** `Clone` is now an ordinary trait with a `clone` of its own (`LANGUAGE.md`, Moves, Clone And Copy), so the `Clone` with a body that "Copying" below proposes is built, and an `impl Clone` for a type with a drop or a linear type is refused. The MIR's internal copy is `CopyOf`, not a call of it.
+> **Reconciled (2026-10-31).** `Clone` is now an ordinary trait with a `clone` of its own (`LANGUAGE.md`, Moves, Clone And Copy), so the `Clone` with a body that "Copying" below proposes is built. Drop and Clone may coexist; Copy and Drop may not. Linear types remain non-cloneable. The MIR's internal copy is `CopyOf`, not a call of it.
+
+> **Current container status (step 29).** List and Box are prelude structs and their native implementations use those same names. List storage is an address, length, capacity and ghost permission, not a filled Box of an array. Lists allocate uninitialized spare slots and pop drops the removed element. The container restrictions below describe the earlier design, not the current implementation.
 
 > **Provisional.** This is a plan, not a decision, and it was revised once already: the first draft assumed implicit copies, and explicit `Clone`/`Copy` and the `MirMoves` check were built before any of it. Expect more changes when the drops are started (the flag word, the moment a drop runs and the `eval` change are open, see Decisions). Where the text says "now", it means the code as of the explicit-copies change.
 
@@ -79,7 +81,7 @@ impl Clone for Counted { fn clone(self: &Self) -> Self [{ }] [{ affirm return = 
 
 ### Containers (the reason step 25 comes first)
 
-`StdList<T>` is a `Box<Array<T>>` and a length. A push into a full list makes `Array::boxed(2n + 4, x)`, which **copies `x` into every slot** (the slack), and `pop` leaves the popped element in the array, to be written over or freed with it. Both are wrong for a value with a drop: the slack would hold clones that run the drop, and the popped element would be dropped late or twice. So the first cut refuses `List<T>`, `Array<T, N>`, `Array::boxed` and `Vec<T>` of a type with a `Drop` or a linear type, with a message that names the type and the container. A `Box<T>`, a struct field and an enum payload are fine: they hold exactly one value or none.
+`List<T>` is a `Box<Array<T>>` and a length. A push into a full list makes `Array::boxed(2n + 4, x)`, which **copies `x` into every slot** (the slack), and `pop` leaves the popped element in the array, to be written over or freed with it. Both are wrong for a value with a drop: the slack would hold clones that run the drop, and the popped element would be dropped late or twice. So the first cut refuses `List<T>`, `Array<T, N>`, `Array::boxed` and `Vec<T>` of a type with a `Drop` or a linear type, with a message that names the type and the container. A `Box<T>`, a struct field and an enum payload are fine: they hold exactly one value or none.
 
 Lists of such values come with raw pointers (Part 3 and `POINTERS.md`): the slack is slots that hold nothing, and the list's own `Drop` drops elements `0..len` and frees the block.
 

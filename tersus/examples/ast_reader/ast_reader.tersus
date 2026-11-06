@@ -110,6 +110,9 @@ fn primitiveWords() -> List<String> [{ }] [{ }] {
     w = push(w, "AddrGet");
     w = push(w, "AddrWrite");
     w = push(w, "AddrTake");
+    w = push(w, "AddrTakeArray");
+    w = push(w, "TakeArrayPair");
+    w = push(w, "BlockPrefixTaken");
     w = push(w, "AddrDropValue");
     w = push(w, "AddrDropRange");
     w = push(w, "AddrResize");

@@ -420,7 +420,7 @@ fn existingApplication(context: &ValidatorContext, function: Int, args: &List<In
 };
 
 // The steps of a block in order, as far as the first that fails (a step of a kind not known fails as unsupported)
-fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
+fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult shrinks steps {
     state = initial;
     shared = SharedEntailment::Missing;
     for i in 0..size(steps) {
@@ -463,7 +463,7 @@ fn addsFactsOnly(step: &ExecutionStep) -> Bool {
     return false;
 };
 
-fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult shrinks step {
     if step is ExecutionStep::Assign { return stepAssign(state, step, i); };
     if step is ExecutionStep::Apply { return stepApply(state, step, i); };
     if step is ExecutionStep::Literal { return stepLiteral(state, step, i); };
@@ -482,6 +482,14 @@ fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> Execution
     if step is ExecutionStep::AssumeVariant { return stepAssumeVariant(state, step, i); };
     if step is ExecutionStep::RequireVariant { return stepRequireVariant(state, step, i); };
     if step is ExecutionStep::Proof { return stepProof(state, step, i); };
+    if step is ExecutionStep::Scoped {
+        scoped = step as ExecutionStep::Scoped;
+        if scoped.watermark >= 0 || state.locals.contains(scoped.watermark) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        checked = executeSteps(clone(state), scoped.steps);
+        if checked.status != 0 { return ExecutionResult { status: checked.status, failedAt: i, state: state }; };
+        watermark = leastTermInUse(checked.state);
+        return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { locals: bindLocal(state.locals, scoped.watermark, watermark), ..state } };
+    };
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 

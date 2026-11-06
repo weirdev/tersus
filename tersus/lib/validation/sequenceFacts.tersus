@@ -253,12 +253,20 @@ fn forallPairInRange(context: &ValidatorContext, analysis: &ContextAnalysis, lef
     differences = analysis.differences;
     lists = listsOfFact(context, analysis.classes, lg.seq, rg.seq, a, b);
     if lists.same = false { return false; };
+    // (the read of a, at j + base, is the left one or the right one, as the
+    // lists the reads are of say; which is which decides the end case)
+    leftIsA = (sameIn(analysis.classes, lg.seq, a) && sameIn(analysis.classes, rg.seq, b)) || (lists.pushed && sameIn(analysis.classes, lists.inner, a));
+    leftIsB = (sameIn(analysis.classes, lg.seq, b) && sameIn(analysis.classes, rg.seq, a)) || (lists.pushed && sameIn(analysis.classes, lists.inner, b));
     j = rg.at;
     offsetAt = lg.at;
-    indexMatches = sameIn(analysis.classes, offsetAt, j) || sumOfEqual(context, analysis.classes, offsetAt, base, j);
-    if indexMatches = false {
+    aSeq = lg.seq;
+    bSeq = rg.seq;
+    indexMatches = leftIsA && (sameIn(analysis.classes, offsetAt, j) || sumOfEqual(context, analysis.classes, offsetAt, base, j));
+    if indexMatches = false && leftIsB {
         j = lg.at;
         offsetAt = rg.at;
+        aSeq = rg.seq;
+        bSeq = lg.seq;
         indexMatches = sameIn(analysis.classes, offsetAt, j) || sumOfEqual(context, analysis.classes, offsetAt, base, j);
     };
     if indexMatches = false { return false; };
@@ -280,11 +288,11 @@ fn forallPairInRange(context: &ValidatorContext, analysis: &ContextAnalysis, lef
     strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
     strictAnalysis = analyzeContext(strictContext);
     if forallEqualPairWithin(strictContext, strictAnalysis, left, right, lg, rg, fuel - 1) = false { return false; };
-    return forallPairAtEnd(context, left, right, lg, rg, a, b, hi, base, j, offsetAt);
+    return forallPairAtEnd(context, left, right, a, b, aSeq, bSeq, hi, base, j, offsetAt);
 };
 
 // The two reads at the end of the range, j = hi, where the fact says nothing
-fn forallPairAtEnd(context: &ValidatorContext, left: Int, right: Int, lg: GetFact, rg: GetFact, a: Int, b: Int, hi: Int, base: Int, j: Int, offsetAt: Int) -> Bool {
+fn forallPairAtEnd(context: &ValidatorContext, left: Int, right: Int, a: Int, b: Int, aSeq: Int, bSeq: Int, hi: Int, base: Int, j: Int, offsetAt: Int) -> Bool {
     eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
     eqAnalysis = analyzeContext(eqContext);
     if eqAnalysis.contradictory { return true; };
@@ -300,7 +308,7 @@ fn forallPairAtEnd(context: &ValidatorContext, left: Int, right: Int, lg: GetFac
         if widerAnalysis.contradictory { return true; };
         if contextEqual(widerAnalysis.classes, widerAnalysis.differences, left, right) { return true; };
     };
-    return endReadsEqual(context, eqContext, eqAnalysis.classes, a, b, lg.seq, rg.seq, hi, base, offsetAt);
+    return endReadsEqual(context, eqContext, eqAnalysis.classes, a, b, aSeq, bSeq, hi, base, offsetAt);
 };
 
 // The two lists of a forall fact over all of both, from 0, of one size: equal lists

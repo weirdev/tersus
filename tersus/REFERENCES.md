@@ -564,16 +564,20 @@ mid-implementation:
    like any program.*
    *Done (2026-10-31): disjoint index loans (two borrows of different
    elements of one list may be live together when both indices are known;
-   an unknown index counts as any element), and the `Block` unification
-   is settled by construction: a reference cannot be made from raw
-   memory — an `Addr` and its `Block` permission confer no reference
-   permission — so references and `Block` permissions never alias and
-   neither can bypass the other; `Addr::write`, `take`, `free`, splits
-   and joins remain governed by the permission alone. Native code takes
-   all of stages 1 to 5 except unsized references: a borrowed or update
-   parameter is passed by address, a returned reference is the address
-   of its place, and `mir_verify.tersus` checks the borrow, deref and
-   assignref rows like the Haskell verifier.*
+   an unknown index counts as any element).*
+   The allocation-backed read-reference foundation adds `&Addr::get(p, i, b)`.
+   Its contract is the existing guarded read contract. `MirMoves` derives all
+   possible runtime owners from checked permission provenance; dependencies
+   survive erasure and monomorphization as ownership metadata, not assumed facts.
+   This intermediate unit accepts only concrete, reference-free, ghost-free raw payloads and
+   rejects raw-derived references entering unsupported storage or transitively
+   storing/opaque calls, including Int-returning setters without mutable parameters.
+   Known raw getter aliases work; opaque transport needs later checked effects. Separately compiled
+   raw-borrow modules need later exported footprints. A ghost-only permission cannot
+   anchor an escaping runtime reference. The interpreter distinguishes live frame
+   targets from allocation targets. Raw update borrowing remains unsupported.
+   Existing logical List-of-reference operations remain in place. This is not the
+   completed reference-footprint unit, List getter cutover, or 24(b).
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization
    contracts and frame/cancellation rules before enabling these uses.
 

@@ -18,6 +18,7 @@ import TestHarness
 import TestBasics
 import TestValidation
 import TestProofs
+import TestForallDomains
 import TestControl
 import TestData
 import TestPipeline
@@ -26,12 +27,20 @@ import TestOwnership
 import TestTraits
 import TestArrays
 import TestBorrow
+import TestAllocationRefs
 import TestCopies
+import TestCloneDropOrder
 import TestGenerics
 import TestBox
 import TestDeref
 import TestPointers
 import TestSequence
+import TestSequenceContracts
+import TestRuleScopes
+import TestNativeProofGuards
+import TestCanonicalRuleReplay
+import TestProofCallMono
+import TestRawArrayTransfer
 import TestStrings
 import TestBytes
 import TestConnectives
@@ -57,6 +66,7 @@ import TestParser
 import TestParserBootstrap
 import TestParserUnicode
 import TestLibModules
+import TestLibInterfaceProviders
 
 main :: IO ()
 main = do
@@ -138,6 +148,7 @@ originalGroups =
     , testForallSyntax
     , testForallInstantiation
     , testForallProof
+    , testForallDomains
     , testForallLoops
     , testPrettyProofs
     , testMulDivNegative
@@ -172,9 +183,17 @@ originalGroups =
     , testDeref
     , testPointers
     , testBorrow
+    , testAllocationRefs
     , testCopies
+    , testCloneDropOrder
     , testGenerics
     , testSequence
+    , testSequenceContracts
+    , testRuleScopes
+    , testNativeProofGuards
+    , testCanonicalRuleReplay
+    , testProofCallMono
+    , testRawArrayTransfer
     , testStrings
     , testBytes
     , testConnectives
@@ -204,6 +223,7 @@ originalGroups =
     , testAstReader
     , testParity
     , testLibModules
+    , testLibInterfaceProviders
     , testNativeStorageModules
     , testMirSupport
     ]
