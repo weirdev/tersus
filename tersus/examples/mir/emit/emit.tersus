@@ -263,8 +263,8 @@ if mode = "bodies" {
     printLines(bodies(program.value));
 } else {
     if mode = "outline" || mode = "ir" || mode = "" {
-        result = outline(program.value);
-        if mode != "outline" { result = ir(program.value); };
+        result = failedEntry("");
+        if mode = "outline" { result = outline(program.value); } else { result = ir(program.value); };
         if !result.ok {
             result.error.printError();
             "\n".printError();
