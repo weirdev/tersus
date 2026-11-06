@@ -5,12 +5,13 @@ module Link
     , pruneProgram
     ) where
 
-import Data.List (isPrefixOf, nubBy)
+import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
+import LibParsed (nativeStorageModules)
 import qualified Mir as M
-import Modules (ModuleId, renderModuleId)
+import Modules (ModuleId (..), renderModuleId)
 import qualified Syntax
 import Syntax (Proof (..), ValidationStatement (..), VariableProof, Value (..))
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, baseNameOf)
@@ -26,18 +27,28 @@ import Utils (Result (..), bindResult)
 -- carries seeded from the interface it was lowered against) merges.
 linkPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
 linkPrograms [] = Error "link error: no modules to link"
-linkPrograms units =
+linkPrograms units = deduplicateUnits [(modu, normalizeExterns program) | (modu, program) <- units] `bindResult` linkNormalized
+
+linkNormalized :: [(ModuleId, M.Program)] -> Result M.Program String
+linkNormalized normalized =
     mergeAll "type" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progTypes program)] `bindResult` \types ->
         mergeFunctions normalized `bindResult` \functions ->
             mergeAll "generic struct" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progGenerics program)] `bindResult` \generics ->
                 mergeAll "invariant" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInvariants program)] `bindResult` \invariants ->
                     Ok (M.completeInstances (M.Program types functions linkedMain generics invariants))
   where
-    normalized = nubBy sameUnit [(modu, normalizeExterns program) | (modu, program) <- units]
-    sameUnit (a, programA) (b, programB) = a == b && programA == programB
     rootMain = M.progMain (snd (last normalized))
-    depGhosts = concatMap unitGhosts (init normalized)
-    linkedMain = prependGhosts depGhosts rootMain
+    linkedMain = prependGhosts (concatMap unitGhosts (init normalized)) rootMain
+
+deduplicateUnits :: [(ModuleId, M.Program)] -> Result [(ModuleId, M.Program)] String
+deduplicateUnits = go Map.empty []
+  where
+    go _ done [] = Ok (reverse done)
+    go seen done (unit@(modu, program) : rest) = case Map.lookup modu seen of
+        Nothing -> go (Map.insert modu program seen) (unit : done) rest
+        Just existing
+            | existing == program -> go seen done rest
+            | otherwise -> Error ("link error: module " ++ renderModuleId modu ++ " has inconsistent units")
 
 unitGhosts :: (ModuleId, M.Program) -> [M.Statement]
 unitGhosts (_, program) = [stmt | (_, block) <- Map.toAscList (M.fnBlocks (M.progMain program)), stmt@(M.Ghost _ _) <- M.blockStatements block]
@@ -65,7 +76,7 @@ mergeFunctions units = go Map.empty Map.empty [(modu, fn) | (modu, program) <- u
     go functions origins ((modu, fn) : rest) = case Map.lookup (M.fnName fn) functions of
         Nothing -> go (Map.insert (M.fnName fn) fn functions) (Map.insert (M.fnName fn) modu origins) rest
         Just existing
-            | sameFunction existing fn -> go functions origins rest
+            | sameFunction existing fn && compatibleOrigin (origins Map.! M.fnName fn) modu -> go functions origins rest
             | otherwise -> Error ("link error: function " ++ displayName (M.fnName fn) ++ " is defined by both module " ++ renderModuleId (origins Map.! M.fnName fn) ++ " and module " ++ renderModuleId modu ++ " with different definitions")
     displayName name = case externLocal name of
         Just local -> "extern fn " ++ local
@@ -85,6 +96,12 @@ mergeFunctions units = go Map.empty Map.empty [(modu, fn) | (modu, program) <- u
         , M.specMutParams (M.fnSpec fn)
         , M.specFrom (M.fnSpec fn)
         )
+
+compatibleOrigin :: ModuleId -> ModuleId -> Bool
+compatibleOrigin a b = not (private a || private b)
+  where
+    private (ModuleId "tersuslib" (Just name)) = name `elem` nativeStorageModules
+    private _ = False
 
 externLocal :: Name -> Maybe Name
 externLocal name

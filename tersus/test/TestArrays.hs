@@ -1,6 +1,9 @@
 module TestArrays (testArrays) where
 
 import Syntax
+import Pipeline (parseWithEquality)
+import qualified ParserSeed
+import Utils (Result (..))
 import TestHarness
 
 -- Array<T, N>: N elements held inline, wherever the array is made. The size is a constant and part of the type; the validator
@@ -10,6 +13,10 @@ testArrays =
     let runs body expected = parseEvalProgramHelper body (Just expected)
         valid = parseValidProgramHelper
         rejected = parseValidateFailProgramHelper
+        parseRejected source reason = case parseWithEquality source of
+            Left e | ParserSeed.toolFailure e -> Just e
+                   | otherwise -> testAssertErrorContains reason (Error e :: Result () String)
+            Right _ -> Just ("Expected a native parse rejection for: " ++ source)
         ints = VList . map VInt
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
@@ -24,6 +31,40 @@ testArrays =
                 , "    return total;"
                 , "};"
                 ]
+        arrayTypeMismatches =
+            [ ("the size is part of the type", "fn f(a: Array<Int, 3>) -> Int { return 0; }; return f(array(4, 1));", "argument 1 of f: expected Array<Int, 3>, got Array<Int, 4>")
+            , ("two sizes are not compared", "return #[1, 2] = #[1, 2, 3];", "expected Array<Int, 2>, got Array<Int, 3>")
+            , ("a function returns the size it says", "fn f() -> Array<Int, 3> { return array(2, 0); }; return 0;", "returned value: expected Array<Int, 3>, got Array<Int, 2>")
+            , ("an array has no push", "a = array(2, 0); a = push(a, 1); return 0;", "argument 1 of push: expected List<?>, got Array<Int, 2>")
+            , ("an array is not a list", "fn f(l: List<Int>) -> Int { return 0; }; return f(array(2, 0));", "argument 1 of f: expected List<Int>, got Array<Int, 2>")
+            , ("a list is not an array", "fn f(a: Array<Int, 2>) -> Int { return 0; }; return f([1, 2]);", "argument 1 of f: expected Array<Int, 2>, got List<Int>")
+            , ("the size is an Int", "return size(array(true, 0));", "argument 1 of array: expected Int, got Bool")
+            , ("an element has the type of the others", "a = array(2, 0); a = set(a, 0, true); return 0;", "argument 3 of set")
+            , ("a literal has one element type", "return #[1, true];", "list element")
+            , ("size is not an array", "return size(3);", "argument 1 of size")
+            ]
+        arraySizeExprs =
+            [ ("the size must be a constant", "n = 3; return size(array(n, 0));", Left "the size of an array must be a constant")
+            , ("the size must be known where the array is made, not in a function", "fn f(n: Int) -> Int { return size(array(n, 0)); }; return f(2);", Left "the size of an array must be a constant")
+            , ("the size cannot be negative", "return size(array(2 - 5, 0));", Left "the size of an array cannot be negative, got -3")
+            , ("a step of the size that leaves the Int range is refused, not folded away", "return size(array(9223372036854775807 + 1 - 9223372036854775807, 0));", Left "integer overflow in the size of an array")
+            , ("a product that leaves the Int range", "return size(array(4611686018427387904 * 2 / 4611686018427387904, 0));", Left "integer overflow in the size of an array")
+            , ("a division by zero in the size", "return size(array(3 / 0, 0));", Left "division by zero in the size of an array")
+            , ("a modulo by zero in the size", "return size(array(3 % 0, 0));", Left "modulo by zero in the size of an array")
+            , ("a size can pass through a negative step", "return size(array(5 - 10 + 8, 0));", Right (VInt 3))
+            , ("the size in a proof is checked the same way", "affirm size(array(9223372036854775807 + 1 - 9223372036854775807, 0)) = 1; return 0;", Left "integer overflow in the size of an array")
+            ]
+        noSizeArrays =
+            [ ("a size can be left out, and then it is ?", "fn f(a: Array<Int>) -> Int { return 0; }; return 0;", "an array with no size (Array<T> is Array<T, ?>) can only be used behind a Box, as in Box<Array<Int>>")
+            , ("or written as ?", "fn f(a: Array<Int, ?>) -> Int { return 0; }; return 0;", "an array with no size")
+            , ("with spaces", "fn f(a: Array <Int , ?>) -> Int { return 0; }; return 0;", "an array with no size")
+            , ("an array with no size is not held by value as a result", "fn f() -> Array<Int> { return #[1]; }; return 0;", "an array with no size")
+            , ("nor as an element of a list", "fn f(l: List<Array<Int>>) -> Int { return 0; }; return 0;", "an array with no size")
+            , ("nor as the parameter of a function value", "fn f(g: fn(Array<Int>) -> Int) -> Int { return 0; }; return 0;", "an array with no size")
+            , ("nor as a field", "struct S { a: Array<Int> }; return 0;", "an array with no size")
+            , ("nor as the element of an array that has a size", "fn f(a: Array<Array<Int>, 2>) -> Int { return 0; }; return 0;", "an array with no size")
+            , ("the size of an array of arrays can be left out too", "fn f(a: Array<Array<Int, 3>>) -> Int { return 0; }; return 0;", "an array with no size")
+            ]
      in TestList
             "testArrays"
             [ TestList
@@ -80,29 +121,12 @@ testArrays =
                 ]
             , TestList
                 "types"
-                [ testCase "the size is part of the type" (rejected "fn f(a: Array<Int, 3>) -> Int { return 0; }; return f(array(4, 1));" "argument 1 of f: expected Array<Int, 3>, got Array<Int, 4>")
-                , testCase "two sizes are not compared" (rejected "return #[1, 2] = #[1, 2, 3];" "expected Array<Int, 2>, got Array<Int, 3>")
-                , testCase "a function returns the size it says" (rejected "fn f() -> Array<Int, 3> { return array(2, 0); }; return 0;" "returned value: expected Array<Int, 3>, got Array<Int, 2>")
-                , testCase "an array has no push" (rejected "a = array(2, 0); a = push(a, 1); return 0;" "argument 1 of push: expected List<?>, got Array<Int, 2>")
-                , testCase "an array is not a list" (rejected "fn f(l: List<Int>) -> Int { return 0; }; return f(array(2, 0));" "argument 1 of f: expected List<Int>, got Array<Int, 2>")
-                , testCase "a list is not an array" (rejected "fn f(a: Array<Int, 2>) -> Int { return 0; }; return f([1, 2]);" "argument 1 of f: expected Array<Int, 2>, got List<Int>")
-                , testCase "the size is an Int" (rejected "return size(array(true, 0));" "argument 1 of array: expected Int, got Bool")
-                , testCase "an element has the type of the others" (rejected "a = array(2, 0); a = set(a, 0, true); return 0;" "argument 3 of set")
-                , testCase "a literal has one element type" (rejected "return #[1, true];" "list element")
-                , testCase "size is not an array" (rejected "return size(3);" "argument 1 of size")
+                [ TestList "type mismatches" [ testCase name (rejected source expected) | (name, source, expected) <- arrayTypeMismatches ]
                 , testCase "arrays of arrays" (valid "fn f(m: Array<Array<Int, 3>, 2>) -> Int { return size(get(m, 0)); }; return f(array(2, array(3, 0)));")
                 ]
             , TestList
                 "what an array can be"
-                [ testCase "the size must be a constant" (rejected "n = 3; return size(array(n, 0));" "the size of an array must be a constant")
-                , testCase "the size must be known where the array is made, not in a function" (rejected "fn f(n: Int) -> Int { return size(array(n, 0)); }; return f(2);" "the size of an array must be a constant")
-                , testCase "the size cannot be negative" (rejected "return size(array(2 - 5, 0));" "the size of an array cannot be negative, got -3")
-                , testCase "a step of the size that leaves the Int range is refused, not folded away" (rejected "return size(array(9223372036854775807 + 1 - 9223372036854775807, 0));" "integer overflow in the size of an array")
-                , testCase "a product that leaves the Int range" (rejected "return size(array(4611686018427387904 * 2 / 4611686018427387904, 0));" "integer overflow in the size of an array")
-                , testCase "a division by zero in the size" (rejected "return size(array(3 / 0, 0));" "division by zero in the size of an array")
-                , testCase "a modulo by zero in the size" (rejected "return size(array(3 % 0, 0));" "modulo by zero in the size of an array")
-                , testCase "a size can pass through a negative step" (runs "return size(array(5 - 10 + 8, 0));" (VInt 3))
-                , testCase "the size in a proof is checked the same way" (rejected "affirm size(array(9223372036854775807 + 1 - 9223372036854775807, 0)) = 1; return 0;" "integer overflow in the size of an array")
+                [ TestList "size expressions" [ testCase name (case outcome of Left expected -> rejected source expected; Right value -> runs source value) | (name, source, outcome) <- arraySizeExprs ]
                 , testCase "an array that is too large for a frame" (rejected "return size(array(9000, 0));" "more than the 8192")
                 , testCase "arrays inside an array count" (rejected "fn f(a: Array<Array<Int, 100>, 100>) -> Int { return 0; }; return 0;" "takes 10000 words")
                 , testCase "an element that is a list" (runs "return array(2, [1]);" (VList [VList [VInt 1], VList [VInt 1]]))
@@ -140,15 +164,7 @@ testArrays =
                 , testCase "array in a proof" (valid "a = array(3, 4); affirm a = array(3, 4); return 0;")
                 , testCase "spaces in the type" (valid "fn f(a: Array <Int , 2>) -> Int { return 0; }; return 0;")
                 , testCase "a literal is an operand" (runs "return size(#[1, 2]) + size(#[3]);" (VInt 3))
-                , testCase "a size can be left out, and then it is ?" (rejected "fn f(a: Array<Int>) -> Int { return 0; }; return 0;" "an array with no size (Array<T> is Array<T, ?>) can only be used behind a Box, as in Box<Array<Int>>")
-                , testCase "or written as ?" (rejected "fn f(a: Array<Int, ?>) -> Int { return 0; }; return 0;" "an array with no size")
-                , testCase "with spaces" (rejected "fn f(a: Array <Int , ?>) -> Int { return 0; }; return 0;" "an array with no size")
-                , testCase "an array with no size is not held by value as a result" (rejected "fn f() -> Array<Int> { return #[1]; }; return 0;" "an array with no size")
-                , testCase "nor as an element of a list" (rejected "fn f(l: List<Array<Int>>) -> Int { return 0; }; return 0;" "an array with no size")
-                , testCase "nor as the parameter of a function value" (rejected "fn f(g: fn(Array<Int>) -> Int) -> Int { return 0; }; return 0;" "an array with no size")
-                , testCase "nor as a field" (rejected "struct S { a: Array<Int> }; return 0;" "an array with no size")
-                , testCase "nor as the element of an array that has a size" (rejected "fn f(a: Array<Array<Int>, 2>) -> Int { return 0; }; return 0;" "an array with no size")
-                , testCase "the size of an array of arrays can be left out too" (rejected "fn f(a: Array<Array<Int, 3>>) -> Int { return 0; }; return 0;" "an array with no size")
+                , TestList "an array with no size" [ testCase name (rejected source expected) | (name, source, expected) <- noSizeArrays ]
                 , testCase "a size is a number or ?" (parseFails "fn f(a: Array<Int, !>) -> Int { return 0; }; return 0;")
                 , testCase "a type without a type argument" (parseFails "fn f(a: Array) -> Int { return 0; }; return 0;")
                 , testCase "a hash needs a literal" (parseFails "return #;")
@@ -205,7 +221,7 @@ testArrays =
                 , testCase "its sizes are given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P) -> Int { return 0; }; return 1;" "P has parameters <n>, which a type gives")
                 , testCase "as many as it has" (parseFails "struct P<n> { id: Int, body: Array<Int, n> }; x = P<1, 2> { id: 1, body: #[5] }; return 1;")
                 , testCase "a size that no field uses still fits in an Int" (runs "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775807> { x: 0 });" (VInt 9223372036854775807))
-                , testCase "and not more" (rejected "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775808> { x: 0 });" "the size 9223372036854775808 in Tag<9223372036854775808> is more than an Int can hold")
+                , testCase "and not more" (parseRejected "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775808> { x: 0 });" "Integer literal out of range (Int is 64 bits)")
                 , testCase "a size is a name that the struct declares" (rejected "struct Q<n> { body: Array<Int, k> }; return 1;" "k is not a size here")
                 , testCase "a size is not named twice" (rejected "struct Q<n, n> { body: Array<Int, n> }; return 1;" "names a parameter twice")
                 , testCase "a size that is not given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P<?>) -> Int { return 0; }; return 1;" "a size that is not given")

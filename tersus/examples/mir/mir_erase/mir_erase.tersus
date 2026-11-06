@@ -1,3 +1,4 @@
+import mir::support::support { Layout, showInt, joinWith, beforeAngle, renderSize, lookupDecl, sizedArray, declaredName, roundUp, wordLayout, simpleLayout };
 import data::codec::codec { Token, Size, Type, quoted, parseInt, printInt, printWord, printName, printNames, printInts, newLine, printSize, wordOf };
 
 // The ghosts of a program, erased by a program in Tersus. The host runs this on every program (MirHousekeeping) after validation and before anything else. It is checked against the erasure it replaced by TestMirErase.
@@ -22,6 +23,12 @@ import data::codec::codec { Token, Size, Type, quoted, parseInt, printInt, print
 
 import mir::reader::reader { Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords, ghostProgramAt, readLines };
 
+
+impl String {
+    fn then(self: Self, other: &String) -> Self [{ }] [{ }] {
+        return self.concat(other);
+    };
+};
 
 // Writing. A token is written with a space before it, and a record starts with its word without one. Every function gives the number of bytes it wrote.
 
@@ -284,124 +291,6 @@ fn printProgram(p: &Program) -> Int ~ {
     return n + printFunction("main", p.entry);
 };
 
-impl String {
-    fn then(self: Self, other: &String) -> Self [{ }] [{ }] {
-        return self.concat(other);
-    };
-};
-
-struct Res { ok: Bool, text: String };
-
-impl Clone for Res { };
-
-fn showInt(n: Int) -> String [{ }] [{ }] {
-    return String::fromInt(n);
-};
-
-fn joinWith(sep: &String, parts: &List<String>) -> String [{ }] [{ }] {
-    out = "";
-    for i in 0..size(parts) {
-        if i > 0 { out = out.then(sep); };
-        out = out.then(get(parts, i));
-    };
-    return out;
-};
-
-fn beforeAngle(name: &String) -> String [{ }] [{ }] {
-    i = name.find(toByte(60), 0);
-    return name.slice(0, i);
-};
-
-fn declName(d: &TypeDecl) -> String [{ }] [{ }] {
-    return match d {
-        TypeDecl::DStruct { name: name, fields: fields } => clone(name),
-        TypeDecl::DEnum { name: name, variants: variants } => clone(name),
-    };
-};
-
-fn lookupDecl(types: &List<TypeDecl>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(types); }] {
-    i = 0;
-    while i < size(types) [{ affirm i >= 0; affirm i <= size(types); }] shrinks size(types) - i {
-        d = get(types, i);
-        if declName(d) = name { return i; };
-        i = i + 1;
-    };
-    return 0 - 1;
-};
-
-fn variantNamed(variants: &List<Variant>, name: &String) -> Bool [{ }] [{ }] {
-    for v in variants {
-        if v.name = name { return true; };
-    };
-    return false;
-};
-
-fn ownerOf(types: &List<TypeDecl>, v: &String) -> Res [{ }] [{ }] {
-    i = lookupDecl(types, v);
-    if i >= 0 {
-        d = get(types, i);
-        if d is TypeDecl::DStruct { return Res { ok: true, text: clone(v) }; };
-    };
-    for d in types {
-        match d {
-            TypeDecl::DStruct { name: name, fields: fields } => { },
-            TypeDecl::DEnum { name: name, variants: variants } => {
-                if variantNamed(variants, v) { return Res { ok: true, text: clone(name) }; };
-            },
-        };
-    };
-    return Res { ok: false, text: "" };
-};
-
-fn declaredName(types: &List<TypeDecl>, t: &Type) -> Res [{ }] [{ }] {
-    if t is Type::TNamed { return Res { ok: true, text: clone((t as Type::TNamed).name) }; };
-    if t is Type::TVariant { return ownerOf(types, (t as Type::TVariant).name); };
-    return Res { ok: false, text: "" };
-};
-
-struct ArrayInfo { ok: Bool, length: Int, elem: Type };
-
-impl Clone for ArrayInfo { };
-
-fn notArray() -> ArrayInfo [{ }] [{ }] {
-    return ArrayInfo { ok: false, length: 0, elem: Type::TInt };
-};
-
-fn sizedArray(t: &Type) -> ArrayInfo [{ }] [{ }] {
-    if t is Type::TArray {
-        s = (t as Type::TArray).size;
-        if s is Size::SConst {
-            return ArrayInfo { ok: true, length: (s as Size::SConst).n, elem: clone(Box::unbox((t as Type::TArray).elem)) };
-        };
-    };
-    return notArray();
-};
-
-struct Layout { size: Int, align: Int };
-
-impl Clone for Layout { };
-
-fn roundUp(n: Int, a: Int) -> Int [{ }] [{ }] {
-    if a <= 1 { return n; };
-    return (n + a - 1) / a * a;
-};
-
-fn wordLayout() -> Layout [{ }] [{ }] {
-    return Layout { size: 8, align: 8 };
-};
-
-struct Simple { ok: Bool, layout: Layout };
-
-impl Clone for Simple { };
-
-fn simpleLayout(t: &Type) -> Simple [{ }] [{ }] {
-    if t is Type::TByte || t is Type::TBool { return Simple { ok: true, layout: Layout { size: 1, align: 1 } }; };
-    if t is Type::TWord {
-        b = (t as Type::TWord).bits / 8;
-        return Simple { ok: true, layout: Layout { size: b, align: b } };
-    };
-    return Simple { ok: false, layout: wordLayout() };
-};
 
 fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
     if t is Type::TBlock { return Layout { size: 0, align: 1 }; };
@@ -661,14 +550,6 @@ fn textType(s: &String) -> TyRes ~ {
     return noTy();
 };
 
-fn renderSize(s: &Size) -> String [{ }] [{ }] {
-    return match s {
-        Size::SConst { n: n } => showInt(n),
-        Size::SAny => "?",
-        Size::SParam { name: name } => clone(name),
-        Size::SVar { n: n } => "_".then(showInt(n)),
-    };
-};
 
 // A name that starts with a small letter and is letters and digits after it
 fn bareLower(name: &String) -> Bool [{ }] [{ }] {
@@ -724,20 +605,12 @@ fn ghostOp(op: Int) -> Bool [{ }] [{ }] {
     return (op >= 46 && op <= 53) || op = 56;
 };
 
-// The local of a function with an index, or nothing
-struct LocalRes { ok: Bool, decl: LocalDecl };
+struct LocalInfo { ghostBool: Bool, position: Int };
 
-impl Clone for LocalRes { };
+impl Clone for LocalInfo { };
 
-fn noLocalRes() -> LocalRes [{ }] [{ }] {
-    return LocalRes { ok: false, decl: LocalDecl { id: 0, named: false, name: "", ty: Type::TInt } };
-};
-
-fn localRes(f: &Function, id: Int) -> LocalRes [{ }] [{ }] {
-    for d in f.locals {
-        if d.id = id { return LocalRes { ok: true, decl: clone(d) }; };
-    };
-    return noLocalRes();
+fn noLocalInfo() -> LocalInfo [{ }] [{ }] {
+    return LocalInfo { ghostBool: false, position: -1 };
 };
 
 // Whether a type is only for the validator: a permission, or a struct made only of them (and that has some)
@@ -767,40 +640,67 @@ fn ghostType(types: &List<TypeDecl>, t: &Type) -> Bool ~ {
     return ghostTypeAt(types, t, 0);
 };
 
-fn isGhostLocal(types: &List<TypeDecl>, f: &Function, id: Int) -> Bool ~ {
-    r = localRes(f, id);
-    return r.ok && ghostType(types, r.decl.ty);
+// A reference to a ghost is erased with what it refers to, and so is what it is from
+fn ghostReference(types: &List<TypeDecl>, t: &Type) -> Bool ~ {
+    return (t is Type::TRef || t is Type::TMutRef) && ghostType(types, t);
 };
 
-fn ghostOperand(types: &List<TypeDecl>, f: &Function, o: &Operand) -> Bool ~ {
+// Index the first declaration of each explicit ID, not the ID's position in the list.
+// Casts retain a position into the original declarations; no recursive Type is copied into the map.
+fn emptyLocalIndex() -> HashMap<Int, LocalInfo> [{ }] [{ }] {
+    return HashMap::new();
+};
+
+fn localInfo(types: &List<TypeDecl>, d: &LocalDecl, position: Int) -> LocalInfo ~ {
+    return LocalInfo { ghostBool: ghostType(types, &d.ty), position: position };
+};
+
+fn indexLocals(types: &List<TypeDecl>, f: &Function) -> HashMap<Int, LocalInfo> ~ {
+    locals = emptyLocalIndex();
+    i = 0;
+    while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] shrinks size(f.locals) - i {
+        d = &get(f.locals, i);
+        if !locals.contains((*d).id) {
+            locals = locals.insert((*d).id, localInfo(types, d, i));
+        };
+        i = i + 1;
+    };
+    return locals;
+};
+
+fn isGhostLocal(locals: &HashMap<Int, LocalInfo>, id: Int) -> Bool [{ }] [{ }] {
+    return locals.lookup(id, noLocalInfo()).ghostBool;
+};
+
+fn ghostOperand(locals: &HashMap<Int, LocalInfo>, o: &Operand) -> Bool ~ {
     r = false;
     match clone(o) {
-        Operand::Copy { local: l } => { r = isGhostLocal(types, f, l); },
-        Operand::Move { local: l } => { r = isGhostLocal(types, f, l); },
+        Operand::Copy { local: l } => { r = isGhostLocal(locals, l); },
+        Operand::Move { local: l } => { r = isGhostLocal(locals, l); },
         Operand::Const { value: c } => { },
     };
     return r;
 };
 
-fn runtimeOperands(types: &List<TypeDecl>, f: &Function, os: &List<Operand>) -> List<Operand> ~ {
+fn runtimeOperands(locals: &HashMap<Int, LocalInfo>, os: &List<Operand>) -> List<Operand> ~ {
     out = [];
     for o in os {
-        if !ghostOperand(types, f, o) { out = push(out, clone(o)); };
+        if !ghostOperand(locals, o) { out = push(out, clone(o)); };
     };
     return out;
 };
 
-fn eraseRvalue(types: &List<TypeDecl>, f: &Function, rv: &Rvalue) -> Rvalue ~ {
+fn eraseRvalue(locals: &HashMap<Int, LocalInfo>, rv: &Rvalue) -> Rvalue ~ {
     r = clone(rv);
     match clone(rv) {
-        Rvalue::ListOp { op: op, args: args } => { r = Rvalue::ListOp { op: op, args: runtimeOperands(types, f, args) }; },
+        Rvalue::ListOp { op: op, args: args } => { r = Rvalue::ListOp { op: op, args: runtimeOperands(locals, args) }; },
         Rvalue::MakeData { name: name, fields: fields, values: values } => {
             names = [];
             vals = [];
             i = 0;
             while i < size(values) && i < size(fields) [{ affirm i >= 0; affirm i <= size(values); affirm i <= size(fields); }] ~ {
                 if i < size(fields) {
-                    if !ghostOperand(types, f, get(values, i)) {
+                    if !ghostOperand(locals, get(values, i)) {
                         names = push(names, clone(get(fields, i)));
                         vals = push(vals, clone(get(values, i)));
                     };
@@ -826,22 +726,22 @@ fn eraseRvalue(types: &List<TypeDecl>, f: &Function, rv: &Rvalue) -> Rvalue ~ {
     return r;
 };
 
-fn eraseStatement(types: &List<TypeDecl>, f: &Function, st: &Statement) -> List<Statement> ~ {
+fn eraseStatement(locals: &HashMap<Int, LocalInfo>, st: &Statement) -> List<Statement> ~ {
     out = [];
     match clone(st) {
         Statement::Assign { local: l, rv: rv } => {
-            if l = 0 && isGhostLocal(types, f, 0) {
+            if l = 0 && isGhostLocal(locals, 0) {
                 handled = false;
                 if rv is Rvalue::ListOp {
                     op = (rv as Rvalue::ListOp).op;
                     if !ghostOp(op) {
-                        out = push(out, Statement::Assign { local: 0, rv: Rvalue::ListOp { op: op, args: runtimeOperands(types, f, (rv as Rvalue::ListOp).args) } });
+                        out = push(out, Statement::Assign { local: 0, rv: Rvalue::ListOp { op: op, args: runtimeOperands(locals, (rv as Rvalue::ListOp).args) } });
                         handled = true;
                     };
                 };
                 if !handled { out = push(out, Statement::Assign { local: 0, rv: Rvalue::Use { o: Operand::Const { value: Constant::CInt { n: 0 } } } }); };
-            } else if !isGhostLocal(types, f, l) {
-                out = push(out, Statement::Assign { local: l, rv: eraseRvalue(types, f, rv) });
+            } else if !isGhostLocal(locals, l) {
+                out = push(out, Statement::Assign { local: l, rv: eraseRvalue(locals, rv) });
             };
         },
         Statement::Peek { local: l, rv: rv } => { out = push(out, clone(st)); },
@@ -849,7 +749,7 @@ fn eraseStatement(types: &List<TypeDecl>, f: &Function, st: &Statement) -> List<
         Statement::AssignRef { local: root, steps: steps, rv: rv } => { out = push(out, clone(st)); },
         Statement::Ghost => { },
         Statement::Dissolve { local: l } => {
-            if !isGhostLocal(types, f, l) {
+            if !isGhostLocal(locals, l) {
                 out = push(out, Statement::Peek { local: l, rv: Rvalue::ListOp { op: 35, args: [] } });
             };
         },
@@ -868,7 +768,7 @@ fn retargetId(oldIds: &List<Int>, newIds: &List<Int>, id: Int) -> Int ~ {
     return id;
 };
 
-fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
+fn eraseFunction(types: &List<TypeDecl>, f: &Function, locals: &HashMap<Int, LocalInfo>) -> Function ~ {
     // A new local for each operation or call that gives a permission to a ghost local: it gives 0 there instead
     firstFree = 1;
     for d in f.locals {
@@ -885,7 +785,7 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
             if st is Statement::Assign {
                 l = (st as Statement::Assign).local;
                 rv = (st as Statement::Assign).rv;
-                if rv is Rvalue::ListOp && l != 0 && isGhostLocal(types, f, l) {
+                if rv is Rvalue::ListOp && l != 0 && isGhostLocal(locals, l) {
                     if !ghostOp((rv as Rvalue::ListOp).op) {
                         nid = firstFree + size(newIds);
                         oldIds = push(oldIds, l);
@@ -900,7 +800,7 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
         term1 = clone(b.term);
         if b.term is Terminator::Call {
             dest = (b.term as Terminator::Call).dest;
-            if dest != 0 && isGhostLocal(types, f, dest) {
+            if dest != 0 && isGhostLocal(locals, dest) {
                 nid = firstFree + size(newIds);
                 oldIds = push(oldIds, dest);
                 newIds = push(newIds, nid);
@@ -910,40 +810,40 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
         };
         blocks1 = push(blocks1, MirBlock { id: b.id, stmts: stmts1, term: term1 });
     };
-    locals = [];
+    keptLocals = [];
     for d in f.locals {
-        if !isGhostLocal(types, f, d.id) || d.id = 0 {
+        if !isGhostLocal(locals, d.id) || d.id = 0 {
             nd = clone(d);
-            if d.id = 0 && isGhostLocal(types, f, d.id) { nd = LocalDecl { id: d.id, named: d.named, name: clone(d.name), ty: Type::TInt }; };
-            locals = push(locals, nd);
+            if d.id = 0 && isGhostLocal(locals, d.id) { nd = LocalDecl { id: d.id, named: d.named, name: clone(d.name), ty: Type::TInt }; };
+            keptLocals = push(keptLocals, nd);
         };
     };
-    for d in newDecls { locals = push(locals, clone(d)); };
+    for d in newDecls { keptLocals = push(keptLocals, clone(d)); };
     params = [];
     for pid in f.params {
-        if !isGhostLocal(types, f, pid) { params = push(params, pid); };
+        if !isGhostLocal(locals, pid) { params = push(params, pid); };
     };
     borrowed = [];
     for pid in f.borrowed {
-        if !isGhostLocal(types, f, pid) { borrowed = push(borrowed, pid); };
+        if !isGhostLocal(locals, pid) { borrowed = push(borrowed, pid); };
     };
     mutBorrowed = [];
     for pid in f.mutBorrowed {
-        if !isGhostLocal(types, f, pid) { mutBorrowed = push(mutBorrowed, pid); };
+        if !isGhostLocal(locals, pid) { mutBorrowed = push(mutBorrowed, pid); };
     };
     fromList = [];
     for pid in f.from {
-        if !ghostType(types, f.returns) && !isGhostLocal(types, f, pid) { fromList = push(fromList, pid); };
+        if !ghostReference(types, f.returns) && !isGhostLocal(locals, pid) { fromList = push(fromList, pid); };
     };
     blocks = [];
     for b in blocks1 {
         stmts = [];
         for st in b.stmts {
-            for es in eraseStatement(types, f, st) { stmts = push(stmts, clone(es)); };
+            for es in eraseStatement(locals, st) { stmts = push(stmts, clone(es)); };
         };
         term = clone(b.term);
         if b.term is Terminator::Call {
-            term = Terminator::Call { callee: clone((b.term as Terminator::Call).callee), args: runtimeOperands(types, f, (b.term as Terminator::Call).args), dest: (b.term as Terminator::Call).dest, next: (b.term as Terminator::Call).next };
+            term = Terminator::Call { callee: clone((b.term as Terminator::Call).callee), args: runtimeOperands(locals, (b.term as Terminator::Call).args), dest: (b.term as Terminator::Call).dest, next: (b.term as Terminator::Call).next };
         };
         blocks = push(blocks, MirBlock { id: b.id, stmts: stmts, term: term });
     };
@@ -952,7 +852,7 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
     return Function {
         name: clone(f.name), params: params, hasReturn: f.hasReturn, returns: returns,
         sizeParams: clone(f.sizeParams), typeParams: clone(f.typeParams), borrowed: borrowed, mutBorrowed: mutBorrowed, from: fromList,
-        locals: locals, blocks: blocks,
+        locals: keptLocals, blocks: blocks,
     };
 };
 
@@ -1264,11 +1164,15 @@ fn plainProgram(p: &Program) -> Program ~ {
     return Program { types: types, functions: functions, entry: plainFunction(p.entry) };
 };
 
-fn eraseProgram(p: &Program) -> Program ~ {
+fn eraseProgram(p: &Program, indexes: &List<HashMap<Int, LocalInfo>>, entryIndex: &HashMap<Int, LocalInfo>) -> Program ~ {
     types = eraseDecls(p.types);
     functions = [];
-    for f in p.functions { functions = push(functions, eraseFunction(p.types, f)); };
-    erased = Program { types: types, functions: functions, entry: eraseFunction(p.types, p.entry) };
+    i = 0;
+    while i < size(p.functions) && i < size(indexes) [{ affirm i >= 0; affirm i <= size(p.functions); affirm i <= size(indexes); }] shrinks size(p.functions) - i {
+        functions = push(functions, eraseFunction(p.types, &get(p.functions, i), &get(indexes, i)));
+        i = i + 1;
+    };
+    erased = Program { types: types, functions: functions, entry: eraseFunction(p.types, &p.entry, entryIndex) };
     return plainProgram(erased);
 };
 
@@ -1340,14 +1244,14 @@ fn knownLayoutAt(types: &List<TypeDecl>, t: &Type, depth: Int) -> Bool ~ {
     return r;
 };
 
-fn castProblemIn(types: &List<TypeDecl>, f: &Function) -> String ~ {
+fn castProblemIn(types: &List<TypeDecl>, f: &Function, locals: &HashMap<Int, LocalInfo>) -> String ~ {
     for b in f.blocks {
         for st in b.stmts {
             if st is Statement::Assign {
                 l = (st as Statement::Assign).local;
                 rv = (st as Statement::Assign).rv;
                 if rv is Rvalue::ListOp && (rv as Rvalue::ListOp).op = 53 && size((rv as Rvalue::ListOp).args) = 1 {
-                    dt = localRes(f, l);
+                    dt = locals.lookup(l, noLocalInfo()).position;
                     srcOperand = get((rv as Rvalue::ListOp).args, 0);
                     srcLocal = 0 - 1;
                     match clone(srcOperand) {
@@ -1356,17 +1260,21 @@ fn castProblemIn(types: &List<TypeDecl>, f: &Function) -> String ~ {
                         Operand::Const { value: c } => { },
                     };
                     if srcLocal >= 0 {
-                        src = localRes(f, srcLocal);
-                        if dt.ok && src.ok && dt.decl.ty is Type::TBlock && src.decl.ty is Type::TBlock {
-                            to = Box::unbox((dt.decl.ty as Type::TBlock).inner);
-                            from = Box::unbox((src.decl.ty as Type::TBlock).inner);
-                            if !knownLayoutAt(types, from, 0) || !knownLayoutAt(types, to, 0) {
-                                return "in ".then(clone(f.name)).then(": Block::cast from ").then(typeText(from)).then(" to ").then(typeText(to)).then(", where the layout of a type parameter or a size parameter is not known");
-                            };
-                            lf = layoutOf(types, plainType(from));
-                            lt = layoutOf(types, plainType(to));
-                            if lf.size != lt.size || lt.align > lf.align {
-                                return "in ".then(clone(f.name)).then(": Block::cast from ").then(typeText(from)).then(" to ").then(typeText(to)).then(", whose slots are not the same size, or are aligned more strictly (").then(showInt(lf.size)).then(",").then(showInt(lf.align)).then(") and (").then(showInt(lt.size)).then(",").then(showInt(lt.align)).then("), as bytes and alignment)");
+                        src = locals.lookup(srcLocal, noLocalInfo()).position;
+                        if dt >= 0 && dt < size(f.locals) && src >= 0 && src < size(f.locals) {
+                            dtDecl = &get(f.locals, dt);
+                            srcDecl = &get(f.locals, src);
+                            if (*dtDecl).ty is Type::TBlock && (*srcDecl).ty is Type::TBlock {
+                                to = Box::unbox(((*dtDecl).ty as Type::TBlock).inner);
+                                from = Box::unbox(((*srcDecl).ty as Type::TBlock).inner);
+                                if !knownLayoutAt(types, from, 0) || !knownLayoutAt(types, to, 0) {
+                                    return "in ".then(clone(f.name)).then(": Block::cast from ").then(typeText(from)).then(" to ").then(typeText(to)).then(", where the layout of a type parameter or a size parameter is not known");
+                                };
+                                lf = layoutOf(types, plainType(from));
+                                lt = layoutOf(types, plainType(to));
+                                if lf.size != lt.size || lt.align > lf.align {
+                                    return "in ".then(clone(f.name)).then(": Block::cast from ").then(typeText(from)).then(" to ").then(typeText(to)).then(", whose slots are not the same size, or are aligned more strictly (").then(showInt(lf.size)).then(",").then(showInt(lf.align)).then(") and (").then(showInt(lt.size)).then(",").then(showInt(lt.align)).then("), as bytes and alignment)");
+                                };
                             };
                         };
                     };
@@ -1377,12 +1285,14 @@ fn castProblemIn(types: &List<TypeDecl>, f: &Function) -> String ~ {
     return "";
 };
 
-fn castProblem(p: &Program) -> String ~ {
-    r = castProblemIn(p.types, p.entry);
+fn castProblem(p: &Program, indexes: &List<HashMap<Int, LocalInfo>>, entryIndex: &HashMap<Int, LocalInfo>) -> String ~ {
+    r = castProblemIn(p.types, &p.entry, entryIndex);
     if r != "" { return r; };
-    for f in p.functions {
-        r = castProblemIn(p.types, f);
+    i = 0;
+    while i < size(p.functions) && i < size(indexes) [{ affirm i >= 0; affirm i <= size(p.functions); affirm i <= size(indexes); }] shrinks size(p.functions) - i {
+        r = castProblemIn(p.types, &get(p.functions, i), &get(indexes, i));
         if r != "" { return r; };
+        i = i + 1;
     };
     return "";
 };
@@ -1400,10 +1310,17 @@ if !program.ok {
     "the input is not the MIR as data\n".printError();
     return 1;
 };
-problem = castProblem(program.value);
+indexes = [];
+i = 0;
+while i < size(program.value.functions) [{ affirm i >= 0; affirm i <= size(program.value.functions); }] shrinks size(program.value.functions) - i {
+    indexes = push(indexes, indexLocals(program.value.types, &get(program.value.functions, i)));
+    i = i + 1;
+};
+entryIndex = indexLocals(program.value.types, &program.value.entry);
+problem = castProblem(program.value, indexes, entryIndex);
 if problem != "" {
     problem.printError();
     writeError(toByte(10));
     return 1;
 };
-printProgram(eraseProgram(program.value));
+printProgram(eraseProgram(program.value, indexes, entryIndex));

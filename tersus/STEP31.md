@@ -4,6 +4,24 @@ The plan for step 31 of the roadmap in `README.md`. The aim is `LlvmEmit` (`src/
 part of the compiler that compiles itself. The front end (parser, checker, validator, lowering, ownership, monomorphization)
 stays in Haskell.
 
+## Current source layout
+
+The LLVM emitter is now the Tersus module `mir::emit`, not `LlvmEmit.hs`.
+`examples/mir/emit/emit.tersus` keeps program assembly and stdin/mode/error handling.
+Its declaration-only sibling files separate model/layout/context (`types`),
+generation state and operands (`values`), rvalues/statements (`operations`),
+calls/control/function ABI (`functions`), and generated drop/clone/print functions
+(`helpers`). Every file imports the declarations it uses.
+
+File dependencies are `emit -> functions/helpers/types/values`,
+`functions -> operations/values/types`, `operations -> values/types`,
+and `values/helpers -> types`. This graph has no cross-file call cycle;
+self-recursive routines stay with their helpers. All files remain one build unit
+so emitter names stay bare and the single foreign `String.then` stays module-local.
+The codec, reader and phase-neutral support remain separate ordinary dependencies.
+The entry path, output order, modes, ownership behavior and bootstrap protocol
+are unchanged. The historical slices below describe the original implementation.
+
 ## What gets rewritten
 
 - `LlvmEmit.hs` is 1,282 lines with 95 top-level functions. It runs in a state-plus-error monad (`G`) with about 190 binds,

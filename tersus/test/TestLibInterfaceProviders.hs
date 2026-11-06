@@ -8,9 +8,10 @@ import qualified LibPackage as L
 import Link (linkPrograms)
 import qualified Mir as M
 import MirLower (lowerModuleWith)
-import qualified MirValidate as V
+import qualified ValidatorNative as V
 import Modules (ModuleId(..))
-import qualified Parse
+import qualified ParsedFile as Parse
+import qualified ParserSeed
 import Syntax
 import Types
 import TypeCheck (elaborateWith, Elaborated(..), emptyImportEnv)
@@ -19,7 +20,7 @@ import Utils
 
 compileUnit :: String -> [ModuleInterface] -> Parse.Decls -> String -> Result (ModuleInterface, M.Program, Parse.Decls) String
 compileUnit name dependencies declarations source =
-    case Parse.parseFileWith declarations source of
+    case ParserSeed.parseFileWith declarations source of
         Left err -> Error (show err)
         Right (Parse.ParsedFile _ original, nextDecls) ->
             let imported = mergeInterfacesImportEnv dependencies
@@ -72,7 +73,7 @@ usedRuntimeInstances = case providerFixture of
     Ok (_, program) -> testAssertEq (Map.lookup "G<'T>" (M.progTypes program), Map.lookup "G<Int>" (M.progTypes program)) (Just (M.StructDecl [("value", TParam "T")]), Just (M.StructDecl [("value", TInt)]))
 
 pairedValidation :: M.Program -> TestResult
-pairedValidation program = case (mapResult (const ()) (V.validateProgramUncached program), mapResult (const ()) (V.validateProgramWithCache V.emptyValidationCache program)) of
+pairedValidation program = case (V.validateCompiledUncached program, V.validateCompiled program) of
     (Ok (), Ok ()) -> Nothing
     other -> Just (show other)
 

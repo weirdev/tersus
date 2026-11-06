@@ -21,16 +21,31 @@ testStrings =
         bytes xs = "String { bytes: [" ++ intercalate ", " (map show (xs :: [Int])) ++ "] }"
         true = "true"
         false = "false"
+        fromIntCases =
+            [ ("0", "return String::fromInt(0);", (bytes [48]))
+            , ("a digit", "return String::fromInt(7);", (bytes [55]))
+            , ("several", "return String::fromInt(1203);", (bytes [49, 50, 48, 51]))
+            , ("a negative", "return String::fromInt(0 - 45);", (bytes [45, 52, 53]))
+            , ("the greatest Int", "return String::fromInt(9223372036854775807);", (bytes (map (fromEnum :: Char -> Int) "9223372036854775807")))
+            , ("the least Int", "return String::fromInt(0 - 9223372036854775807 - 1);", (bytes (map (fromEnum :: Char -> Int) "-9223372036854775808")))
+            ]
+        proofCallCases =
+            [ ("fileLoad", "a proof does not call the file operations", "affirm fileLoad() >= 0 - 1; return 0;", "A proof calls fileLoad")
+            , ("fileByte", "nor fileByte", "affirm fileByte(0) >= 0 - 1; return 0;", "A proof calls fileByte")
+            , ("argCount", "a proof does not call them", "affirm argCount() >= 0; return 0;", "A proof calls argCount")
+            , ("argByte", "nor argByte", "affirm argByte(0, 0) >= 0 - 1; return 0;", "A proof calls argByte")
+            , ("readByte", "a proof does not call readByte (it does not know the end of the input)", "affirm readByte() = 0 - 1; return 0;", "A proof calls readByte")
+            , ("readByte", "nor to say it is a byte", "affirm readByte() >= 0; return 0;", "A proof calls readByte")
+            , ("readByte", "nor to say two of them are one value", "affirm readByte() = readByte(); return 0;", "A proof calls readByte")
+            , ("String::readLine", "nor the size of a line", "affirm size(String::readLine(5)) = 0; return 0;", "reads the input")
+            , ("readByte", "nor to compare it with the value read before", "c = readByte(); affirm c = readByte(); return 0;", "A proof calls readByte")
+            , ("next (transitive)", "a proof does not call a function that reads", "fn next() -> Int [{ }] [{ }] { return readByte(); }; fn f(x: Int) -> Int [{ affirm next() >= 0 - 1; }] [{ }] { return x; }; return f(1);", "reads the input")
+            ]
      in TestList
             "testStrings"
             [ TestList
                 "numbers and search"
-                [ testCase "0" (runs "return String::fromInt(0);" (bytes [48]))
-                , testCase "a digit" (runs "return String::fromInt(7);" (bytes [55]))
-                , testCase "several" (runs "return String::fromInt(1203);" (bytes [49, 50, 48, 51]))
-                , testCase "a negative" (runs "return String::fromInt(0 - 45);" (bytes [45, 52, 53]))
-                , testCase "the greatest Int" (runs "return String::fromInt(9223372036854775807);" (bytes (map (fromEnum :: Char -> Int) "9223372036854775807")))
-                , testCase "the least Int" (runs "return String::fromInt(0 - 9223372036854775807 - 1);" (bytes (map (fromEnum :: Char -> Int) "-9223372036854775808")))
+                [ TestList "String::fromInt" [ testCase name (runs source expected) | (name, source, expected) <- fromIntCases ]
                 , testCase "it has a digit at least" (valid "n = readByte(); s = String::fromInt(n); affirm size(s) >= 1;")
                 , testCase "it is written" (runs "String::fromInt(0 - 12).print(); return 0;" "-120")
                 , testCase "a slice" (runs "return \"abcdef\".slice(1, 4);" (bytes [98, 99, 100]))
@@ -162,8 +177,6 @@ testStrings =
                 , testCase "a limit that is negative is refused" (rejected "t = String::readFile(\"a\", 0 - 1); return 0;" "Could not prove: limit >= 0")
                 , testCase "writing gives 0 or -1" (valid "r = \"x\".writeFile(\"a\"); affirm r >= 0 - 1; affirm r <= 0; return r;")
                 , testCase "two loads are not the same value" (rejected "a = String::fileSize(\"a\"); b = String::fileSize(\"a\"); affirm a = b; return a;" "Could not prove: a = b")
-                , testCase "a proof does not call the file operations" (rejected "affirm fileLoad() >= 0 - 1; return 0;" "A proof calls fileLoad")
-                , testCase "nor fileByte" (rejected "affirm fileByte(0) >= 0 - 1; return 0;" "A proof calls fileByte")
                 , testCase "a path byte is a Byte" (rejected "n = 65; pathByte(n); return 0;" "expected Byte, got Int")
                 , testCase "a number written out is" (valid "pathByte(65); return 0;")
                 ]
@@ -182,8 +195,6 @@ testStrings =
                 , testCase "a byte is from -1 to 255" (valid "c = argByte(0, 0); affirm c >= 0 - 1; affirm c < 256; return c;")
                 , testCase "but is not known to be a byte" (rejected "c = argByte(0, 0); affirm c >= 0; return c;" "Could not prove: c >= 0")
                 , testCase "two of them are not the same value" (rejected "a = argCount(); b = argCount(); affirm a = b; return a;" "Could not prove: a = b")
-                , testCase "a proof does not call them" (rejected "affirm argCount() >= 0; return 0;" "A proof calls argCount")
-                , testCase "nor argByte" (rejected "affirm argByte(0, 0) >= 0 - 1; return 0;" "A proof calls argByte")
                 , testCase "a limit that is negative is refused" (rejected "s = String::arg(0, 0 - 1); return 0;" "Could not prove: limit >= 0")
                 , testCase "and the size is at most the limit" (valid "s = String::arg(0, 5); affirm size(s) <= 5; return 0;")
                 ]
@@ -216,19 +227,14 @@ testStrings =
                 , testCase "two reads are not the same value" (rejected "a = readByte(); b = readByte(); affirm a = b; return a;" "Could not prove: a = b")
                 , testCase "two reads of a function are not the same value either" (rejected "a = String::readLine(5); b = String::readLine(5); affirm a = b; return 0;" "Could not prove: a = b")
                 , testCase "so two reads cannot make an index valid" (rejected "c = readByte(); d = readByte(); x = [0]; return get(x, c - d);" "Funct input validation failed")
-                , testCase "a proof does not call readByte (it does not know the end of the input)" (rejected "affirm readByte() = 0 - 1; return 0;" "A proof calls readByte")
-                , testCase "nor to say it is a byte" (rejected "affirm readByte() >= 0; return 0;" "A proof calls readByte")
-                , testCase "nor to say two of them are one value" (rejected "affirm readByte() = readByte(); return 0;" "A proof calls readByte")
-                , testCase "nor the size of a line" (rejected "affirm size(String::readLine(5)) = 0; return 0;" "reads the input")
-                , testCase "nor to compare it with the value read before" (rejected "c = readByte(); affirm c = readByte(); return 0;" "A proof calls readByte")
                 , testCase "nor are the sizes of two reads" (rejected "a = String::readLine(5); b = String::readLine(5); affirm size(a) = size(b); return 0;" "Could not prove")
                 , testCase "a function that calls one that reads does not give the same value twice" (rejected "fn next() -> Int [{ }] [{ }] { return readByte(); }; a = next(); b = next(); affirm a = b; return 0;" "Could not prove: a = b")
-                , testCase "a proof does not call a function that reads" (rejected "fn next() -> Int [{ }] [{ }] { return readByte(); }; fn f(x: Int) -> Int [{ affirm next() >= 0 - 1; }] [{ }] { return x; }; return f(1);" "reads the input")
                 , testCase "a function that does not read still gives the same value twice" (valid "fn double(x: Int) -> Int [{ }] [{ }] { return x + x; }; a = double(3); b = double(3); affirm a = b; return 0;")
                 , testCase "a limit that is negative is refused" (rejected "a = String::read(0 - 1); return 0;" "Could not prove: limit >= 0")
                 , testCase "and the size of what is read is at most the limit" (valid "a = String::readLine(5); affirm size(a) <= 5; return 0;")
                 , testCase "but not more than that" (rejected "a = String::readLine(5); affirm size(a) <= 4; return 0;" "Could not prove: <String as Sequence>::size(a) <= 4")
                 ]
+            , TestList "a proof does not call the outside" [ testCase name (rejected source expected) | (_callee, name, source, expected) <- proofCallCases ]
             , TestList
                 "the library"
                 [ testCase "a program without a string has no String" (rejected "return \"a\"; fn f(x: Int) -> Int [{ }] [{ }] { return y; };" "y")

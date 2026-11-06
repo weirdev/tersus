@@ -1,0 +1,17 @@
+build/
+identity/
+fixtures/
+probe
+probe-current
+*.log
+__pycache__/
+cabal.config
+cabal-cache/
+cabal-store/
+cabal-build/
+integration-build/
+integration-tmp/
+interpreted-tmp/
+integration-probe
+scope-before
+scope-after

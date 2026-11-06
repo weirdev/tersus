@@ -1,0 +1,386 @@
+[
+  {
+    "fixture": "small",
+    "phase": "read",
+    "codec": "old",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "old/read wall=2.4647e-5 cpu=2.4126e-5 allocated=58728"
+  },
+  {
+    "fixture": "small",
+    "phase": "read",
+    "codec": "binary",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "binary/read wall=3.6696e-5 cpu=3.6134e-5 allocated=31632"
+  },
+  {
+    "fixture": "small",
+    "phase": "read",
+    "codec": "old",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "old/read wall=2.3315e-5 cpu=2.2814e-5 allocated=58728"
+  },
+  {
+    "fixture": "small",
+    "phase": "read",
+    "codec": "binary",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "binary/read wall=3.0706e-5 cpu=3.0215e-5 allocated=31632"
+  },
+  {
+    "fixture": "small",
+    "phase": "read",
+    "codec": "old",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "old/read wall=2.5408e-5 cpu=2.4927e-5 allocated=58728"
+  },
+  {
+    "fixture": "small",
+    "phase": "read",
+    "codec": "binary",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "binary/read wall=3.6084e-5 cpu=3.5544e-5 allocated=31632"
+  },
+  {
+    "fixture": "small",
+    "phase": "decode",
+    "codec": "old",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "old/decode wall=5.49511e-4 cpu=5.15812e-4 allocated=785568"
+  },
+  {
+    "fixture": "small",
+    "phase": "decode",
+    "codec": "binary",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "binary/decode wall=5.6395e-5 cpu=5.5944e-5 allocated=33912"
+  },
+  {
+    "fixture": "small",
+    "phase": "decode",
+    "codec": "old",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "old/decode wall=4.87046e-4 cpu=4.80071e-4 allocated=785400"
+  },
+  {
+    "fixture": "small",
+    "phase": "decode",
+    "codec": "binary",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "binary/decode wall=5.301e-5 cpu=5.2609e-5 allocated=33912"
+  },
+  {
+    "fixture": "small",
+    "phase": "decode",
+    "codec": "old",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "old/decode wall=4.5656e-4 cpu=4.55984e-4 allocated=785400"
+  },
+  {
+    "fixture": "small",
+    "phase": "decode",
+    "codec": "binary",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "binary/decode wall=6.1574e-5 cpu=5.6124e-5 allocated=33912"
+  },
+  {
+    "fixture": "small",
+    "phase": "encode",
+    "codec": "old",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "old/encode wall=5.5313e-5 cpu=4.5129e-5 allocated=106392"
+  },
+  {
+    "fixture": "small",
+    "phase": "encode",
+    "codec": "binary",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "binary/encode wall=5.5545e-5 cpu=5.5033e-5 allocated=31248"
+  },
+  {
+    "fixture": "small",
+    "phase": "encode",
+    "codec": "old",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "old/encode wall=4.2334e-5 cpu=4.1813e-5 allocated=106392"
+  },
+  {
+    "fixture": "small",
+    "phase": "encode",
+    "codec": "binary",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "binary/encode wall=5.2721e-5 cpu=5.2238e-5 allocated=31080"
+  },
+  {
+    "fixture": "small",
+    "phase": "encode",
+    "codec": "old",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "old/encode wall=4.3084e-5 cpu=4.2613e-5 allocated=106392"
+  },
+  {
+    "fixture": "small",
+    "phase": "encode",
+    "codec": "binary",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "binary/encode wall=6.3005e-5 cpu=6.2523e-5 allocated=31080"
+  },
+  {
+    "fixture": "large",
+    "phase": "read",
+    "codec": "old",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "old/read wall=2.92033207 cpu=2.897220908 allocated=2359734144"
+  },
+  {
+    "fixture": "large",
+    "phase": "read",
+    "codec": "binary",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "binary/read wall=4.1722541e-2 cpu=4.1276527e-2 allocated=110723096"
+  },
+  {
+    "fixture": "large",
+    "phase": "read",
+    "codec": "old",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "old/read wall=2.941918658 cpu=2.885987687 allocated=2359734144"
+  },
+  {
+    "fixture": "large",
+    "phase": "read",
+    "codec": "binary",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "binary/read wall=4.004959e-2 cpu=3.9644077e-2 allocated=110723096"
+  },
+  {
+    "fixture": "large",
+    "phase": "read",
+    "codec": "old",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "old/read wall=2.907582386 cpu=2.885089215 allocated=2359734144"
+  },
+  {
+    "fixture": "large",
+    "phase": "read",
+    "codec": "binary",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "binary/read wall=3.9892451e-2 cpu=3.9600297e-2 allocated=110722928"
+  },
+  {
+    "fixture": "large",
+    "phase": "decode",
+    "codec": "old",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "old/decode wall=17.18230167 cpu=17.017298579 allocated=80228926544"
+  },
+  {
+    "fixture": "large",
+    "phase": "decode",
+    "codec": "binary",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "binary/decode wall=3.046786659 cpu=3.023730451 allocated=8448191536"
+  },
+  {
+    "fixture": "large",
+    "phase": "decode",
+    "codec": "old",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "old/decode wall=17.40144502 cpu=17.232577081 allocated=80228926544"
+  },
+  {
+    "fixture": "large",
+    "phase": "decode",
+    "codec": "binary",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "binary/decode wall=3.022362767 cpu=2.997642651 allocated=8448191536"
+  },
+  {
+    "fixture": "large",
+    "phase": "decode",
+    "codec": "old",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "old/decode wall=17.437041643 cpu=17.23388817 allocated=80228926544"
+  },
+  {
+    "fixture": "large",
+    "phase": "decode",
+    "codec": "binary",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "binary/decode wall=2.991282409 cpu=2.966935246 allocated=8448191536"
+  },
+  {
+    "fixture": "large",
+    "phase": "encode",
+    "codec": "old",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "old/encode wall=4.683756637 cpu=4.644944439 allocated=7416907264"
+  },
+  {
+    "fixture": "large",
+    "phase": "encode",
+    "codec": "binary",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "binary/encode wall=1.561180117 cpu=1.537813243 allocated=1673000320"
+  },
+  {
+    "fixture": "large",
+    "phase": "encode",
+    "codec": "old",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "old/encode wall=4.540182261 cpu=4.507663661 allocated=7416907264"
+  },
+  {
+    "fixture": "large",
+    "phase": "encode",
+    "codec": "binary",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "binary/encode wall=1.450265975 cpu=1.438167318 allocated=1673000320"
+  },
+  {
+    "fixture": "large",
+    "phase": "encode",
+    "codec": "old",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "old/encode wall=4.463105934 cpu=4.427650378 allocated=7416907264"
+  },
+  {
+    "fixture": "large",
+    "phase": "encode",
+    "codec": "binary",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "binary/encode wall=1.448944143 cpu=1.436379595 allocated=1673000320"
+  },
+  {
+    "fixture": "small",
+    "phase": "raw-read",
+    "codec": "old",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "old/raw-read wall=2.8583e-5 cpu=2.8042e-5 allocated=27008"
+  },
+  {
+    "fixture": "small",
+    "phase": "raw-read",
+    "codec": "binary",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "binary/raw-read wall=3.1327e-5 cpu=3.0877e-5 allocated=31760"
+  },
+  {
+    "fixture": "small",
+    "phase": "raw-read",
+    "codec": "old",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "old/raw-read wall=2.5258e-5 cpu=2.3785e-5 allocated=27008"
+  },
+  {
+    "fixture": "small",
+    "phase": "raw-read",
+    "codec": "binary",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "binary/raw-read wall=2.7893e-5 cpu=2.7341e-5 allocated=31760"
+  },
+  {
+    "fixture": "small",
+    "phase": "raw-read",
+    "codec": "old",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "old/raw-read wall=2.4688e-5 cpu=2.4047e-5 allocated=27008"
+  },
+  {
+    "fixture": "small",
+    "phase": "raw-read",
+    "codec": "binary",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "binary/raw-read wall=2.8843e-5 cpu=2.8363e-5 allocated=31760"
+  },
+  {
+    "fixture": "large",
+    "phase": "raw-read",
+    "codec": "old",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "old/raw-read wall=2.4222129e-2 cpu=2.3805361e-2 allocated=58515048"
+  },
+  {
+    "fixture": "large",
+    "phase": "raw-read",
+    "codec": "binary",
+    "repetition": 1,
+    "cpu_affinity": 0,
+    "output": "binary/raw-read wall=2.1395192e-2 cpu=2.1261752e-2 allocated=55377264"
+  },
+  {
+    "fixture": "large",
+    "phase": "raw-read",
+    "codec": "old",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "old/raw-read wall=2.3374868e-2 cpu=2.3155989e-2 allocated=58515048"
+  },
+  {
+    "fixture": "large",
+    "phase": "raw-read",
+    "codec": "binary",
+    "repetition": 2,
+    "cpu_affinity": 0,
+    "output": "binary/raw-read wall=2.1746743e-2 cpu=2.1554377e-2 allocated=55377264"
+  },
+  {
+    "fixture": "large",
+    "phase": "raw-read",
+    "codec": "old",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "old/raw-read wall=2.36795e-2 cpu=2.3439248e-2 allocated=58515048"
+  },
+  {
+    "fixture": "large",
+    "phase": "raw-read",
+    "codec": "binary",
+    "repetition": 3,
+    "cpu_affinity": 0,
+    "output": "binary/raw-read wall=2.254269e-2 cpu=2.2247505e-2 allocated=55377264"
+  }
+]

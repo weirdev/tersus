@@ -1,12 +1,15 @@
 module TestMirReader (testMirReader, withProgram, sameText) where
 
+import Control.Concurrent.MVar (MVar, newMVar)
+import System.IO.Unsafe (unsafePerformIO)
 import qualified TersusParser
 import Data.List (isPrefixOf)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 
-import Bootstrap (emitterHash, llvmOfOwned, tersusLlvm)
+import Bootstrap (compilerSnapshotHash, llvmOfOwned, tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runProgramIn, runSourceIn)
+import MirHousekeeping (toolOwnedProgram)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Native (buildExecutable, cachedProgram)
@@ -36,9 +39,6 @@ testMirReader =
         , TestCase "what is not the MIR is refused" refusals
         ]
 
-readerSource :: IO String
-readerSource = readFile "examples/mir/mir_reader/mir_reader.tersus"
-
 -- The data of a program, or the reason it has none (the harness's shared cache: these programs are compiled once
 -- between the groups that check them)
 dataOf :: String -> IO (Result String String)
@@ -52,7 +52,8 @@ sameText a b = trim a == trim b
 
 interpreted :: String -> IO TestResult
 interpreted source = do
-    reader <- programFromFile "examples/mir/mir_reader/mir_reader.tersus"
+    -- (the reader as the host builds it, not validated: testHostValidation validates it)
+    reader <- bootstrapFromFile "examples/mir/mir_reader/mir_reader.tersus"
     dataText <- dataOf source
     pure $ case (reader, dataText) of
         (Error e, _) -> Just e
@@ -64,7 +65,9 @@ interpreted source = do
                 | sameText output text -> Nothing
                 | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
 
--- A program of the examples as an executable, built once for the tests that need it (clang is needed, and the tests pass without it).
+-- One of the compiler's own programs (the reader, the emitter, the MIR checker and eraser) as an executable, built as the host builds
+-- them: lowered and owned without being validated (MirHousekeeping.ownedProgramOf), since whether each validates is testExamples' to
+-- say. Built once for the tests that need it (clang is needed, and the tests pass without it).
 -- The executable is kept in the cache directory of the user under a name made of the program and of what it is compiled with, so that the groups that need the same one
 -- (each in a process of its own) build it once between them; a build that failed is not remembered, so the case that asked for it
 -- reports why, and a build that is cut short leaves nothing at the name.
@@ -74,27 +77,46 @@ withProgram path name use = do
     if not available
         then pure Nothing
         else do
-            files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
-            backend <- lookupEnv "TERSUS_PARSER"
-            let hash = fingerprint [packageCacheInput path files, show backend, emitterHash, TersusParser.parserHash, runtimeSource]
-                build output = do
-                    ir <- if "examples/mir/" `isPrefixOf` path
-                        then ownedFromFiles path files >>= \owned -> case owned of
-                            Error e -> pure (Error e)
-                            Ok prog -> llvmOfOwned prog
-                        else case lookup (Modules.normalizePath path) files of
-                            Nothing -> pure (Error ("file not found: " ++ path))
-                            Just source -> tersusLlvm source
-                    case ir of
-                        Error e -> pure (Error e)
-                        Ok text -> buildExecutable output text
-            built <- cachedProgram ("test-" ++ name) hash ("the test " ++ name) build
+            built <- programExecutable path name
             case built of
                 Error e -> pure (Just e)
                 Ok exe -> use exe
 
+programExecutable :: FilePath -> String -> IO (Result FilePath String)
+programExecutable path name = do
+    files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
+    backend <- lookupEnv "TERSUS_PARSER"
+    parser <- TersusParser.parserKey
+    let build output = do
+            ir <- if "examples/mir/" `isPrefixOf` path
+                then ownedFromFiles path files >>= \owned -> case owned of
+                    Error e -> pure (Error e)
+                    Ok prog -> llvmOfOwned prog
+                else case lookup (Modules.normalizePath path) files of
+                    Nothing -> pure (Error ("file not found: " ++ path))
+                    Just source -> tersusLlvm source
+            case ir of
+                Error e -> pure (Error e)
+                Ok text -> buildExecutable output text
+    case parser of
+        Error e -> pure (Error e)
+        Ok identity -> cachedProgram ("test-" ++ name)
+            (fingerprint [packageCacheInput path files, show backend, compilerSnapshotHash, identity, runtimeSource])
+            ("the test " ++ name) build
+
+{-# NOINLINE readerExecutable #-}
+readerExecutable :: MVar (Maybe FilePath)
+readerExecutable = unsafePerformIO (newMVar Nothing)
+
 withReader :: (FilePath -> IO TestResult) -> IO TestResult
-withReader = withProgram "examples/mir/mir_reader/mir_reader.tersus" "mir-reader"
+withReader use = do
+    available <- clangAvailable
+    if not available then pure Nothing else do
+        built <- memoizedTestExecutable readerExecutable
+            (programExecutable "examples/mir/mir_reader/mir_reader.tersus" "mir-reader")
+        case built of
+            Error e -> pure (Just e)
+            Ok exe -> use exe
 
 -- One case per program, so the sweep runs at the harness's parallelism instead of one program after another
 -- inside a single case (withReader builds the reader executable once for the process).

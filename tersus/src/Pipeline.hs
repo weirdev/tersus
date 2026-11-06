@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 
 module Pipeline
     ( parseSource
@@ -13,6 +14,7 @@ module Pipeline
     , CompiledPackage (..)
     , compileModules
     , compileModulesValidated
+    , compileModulesBootstrap
     , compileModulesToProgram
     , compileModulesToOwned
     , erasedModuleProgram
@@ -26,19 +28,22 @@ module Pipeline
     ) where
 
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (SourceParts, lowerSourceParts, lowerStatements, parseWithEquality)
-import TersusParser (parseSource)
+import Compile (SourceParts, lowerSourceParts, lowerStatements)
+import TersusParser (parseSource, parseWithEquality)
 import qualified TersusParser
-import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesValidated)
+import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked)
 import Link (pruneProgram)
 import qualified Modules as Mod
 import MirOwnership (expandRefWrites, insertOwnership)
-import MirHousekeeping (eraseGhosts, verifyProgram, validatedListLibrary)
+import MirHousekeeping (eraseGhosts, verifyProgram)
 import qualified MirHousekeeping as Housekeeping
 import MirEval (MirValue, runProgram)
-import MirValidate (Validated, validateProgram)
-import MirLists (lowerLists)
+import ValidatorNative (validateCompiled)
+import MirLists (hasLists, lowerLists)
+import System.IO.Unsafe (unsafePerformIO)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import Types (Size (..), Type (..))
@@ -47,7 +52,7 @@ import Utils
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
 --
 --   source -> AST (TersusParser.parseSourceParts; Compile stays the explicit Haskell oracle/bootstrap)
---          -> checked AST (elaborate) -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateProgram) -> executed (runProgram)
+--          -> checked AST (elaborate) -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateCompiled: the validator written in Tersus, compiled to native code) -> executed (runProgram)
 --                                                                    or -> owned MIR (ownedSource) -> LLVM IR (the emitter written in Tersus, see Bootstrap)
 --
 -- The validated MIR has its permissions (ghost values, POINTERS.md) taken out by `eraseGhosts` before anything runs it or makes native code of it.
@@ -96,7 +101,7 @@ validatedSourceWith :: (Bool -> String -> Result SourceParts String) -> String -
 validatedSourceWith readSource source =
     readSource True source `bindResult` lowerSourceParts True `bindResult` \program ->
         checkedLowered program `bindResult` \checked ->
-            stage "Validation failed: " (validateProgram checked) `bindResult` \_ ->
+            stage "Validation failed: " (validateCompiled checked) `bindResult` \_ ->
                 Ok checked
 
 -- The MIR of a program that passes every check
@@ -130,8 +135,8 @@ ownedOfProgram program =
     -- carry yet, so it is refused here rather than miscompiled)
     if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
         then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
-        else
-            let owned = insertOwnership (nativeProgram program)
+        else nativeProgram program `bindResult` \native ->
+            let owned = insertOwnership native
              in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
   where
     unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)
@@ -144,23 +149,44 @@ ownedOfProgram program =
 
 -- The program that native code is made of: a validated program with each list and Box made of the library's structs (see MirLists).
 -- Each Uninit<T> is already a T in it: the erasure makes it one (it is laid out as one: an empty one is the words of a T cleared, which own nothing)
-nativeProgram :: M.Program -> M.Program
-nativeProgram = lowerLists listLibrary . expandRefWrites
+{-# NOINLINE nativeProgram #-}
+nativeProgram :: M.Program -> Result M.Program String
+nativeProgram program = unsafePerformIO $ do
+    ready <- Housekeeping.prepareBootstrap
+    case ready of
+        Error e -> pure (Error e)
+        Ok () -> do
+            let expanded = expandRefWrites program
+            if not (hasLists expanded) then pure (Ok expanded) else do
+                library <- listLibrary
+                pure (lowerLists library expanded)
 
--- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus), compiled and validated once
-listLibrary :: M.Program
-listLibrary = case checkedLowered validatedListLibrary of
-    Ok _ -> Housekeeping.listLibrary
-    Error e -> error ("lib/lists.tersus and lib/box.tersus do not compile: " ++ e)
+{-# NOINLINE checkedStorageBox #-}
+checkedStorageBox :: MVar (Maybe [(Mod.ModuleId, M.Program)])
+checkedStorageBox = unsafePerformIO (newMVar Nothing)
 
--- Checks and validates a program given as statements
-validateStatements :: [Statement] -> Result Validated String
+listLibrary :: IO (Result [(Mod.ModuleId, M.Program)] String)
+listLibrary = do
+    ready <- Housekeeping.prepareBootstrap
+    case ready of
+        Error e -> pure (Error e)
+        Ok () -> modifyMVar checkedStorageBox $ \saved -> case saved of
+            Just units -> pure (saved, Ok units)
+            Nothing -> do
+                result <- case Housekeeping.nativeStorage `bindResult` \(_, program) -> checkedLowered program of
+                    Error e -> pure (Error e)
+                    Ok _ -> Housekeeping.listLibrary
+                let keep = case result of Ok units -> Just units; Error _ -> Nothing
+                pure (keep, result)
+
+-- Checks and validates a program given as statements, with the validator written in Tersus
+validateStatements :: [Statement] -> Result () String
 validateStatements stmts =
     lowerStatements stmts `bindResult` \program ->
         (case verifyProgram program of
             Ok () -> Ok program
             Error e -> Error ("Lowering produced a malformed program: " ++ e))
-            `bindResult` validateProgram
+            `bindResult` validateCompiled
 
 -- Runs a program given as statements, once it type checks, without validating it
 runStatements :: [Statement] -> Result (Maybe MirValue) String
@@ -171,6 +197,40 @@ runStatements stmts =
             Error e -> Error ("Lowering produced a malformed program: " ++ e))
             `bindResult` eraseGhosts `bindResult` runProgram
 
+
+-- A package's modules lowered, linked and validated (by the validator
+-- written in Tersus, as a single-file program is)
+compileModulesValidated :: Mod.LoadedPackage -> Result M.Program String
+compileModulesValidated pkg =
+    compileModulesLinked pkg `bindResult` \linked ->
+        stage "Validation failed: " (validateCompiled (oneMarkerEach linked)) `bindResult` \_ -> Ok linked
+
+-- Linking makes one function of a definition several modules make alike (a
+-- library each module is given, an identical extern), and each module's
+-- marker of that definition stays: one of each is kept for the validator,
+-- which would take two for two definitions of one function.
+oneMarkerEach :: M.Program -> M.Program
+oneMarkerEach program =
+    let (seen, main') = dedupeFunction Set.empty (M.progMain program)
+        (_, functions') = Map.mapAccum dedupeFunction seen (M.progFunctions program)
+     in program{M.progMain = main', M.progFunctions = functions'}
+  where
+    dedupeFunction seen fn =
+        let (seen', blocks') = Map.mapAccum dedupeBlock seen (M.fnBlocks fn)
+         in (seen', fn{M.fnBlocks = blocks'})
+    dedupeBlock seen block =
+        let (kept, seen') = foldl keep ([], seen) (M.blockStatements block)
+         in (seen', block{M.blockStatements = reverse kept})
+    keep (acc, seen) statement = case statement of
+        M.Ghost _ (M.GhostFunction name _ _)
+            | Set.member name seen -> (acc, seen)
+            | otherwise -> (statement : acc, Set.insert name seen)
+        _ -> (statement : acc, seen)
+
+-- A package of the compiler's own programs as the host builds it: linked,
+-- its ghosts erased, not validated (see MirHousekeeping.toolProgram)
+compileModulesBootstrap :: Mod.LoadedPackage -> Result M.Program String
+compileModulesBootstrap pkg = mapResult pruneProgram (compileModulesLinked pkg `bindResult` eraseGhosts)
 
 compileModulesToProgram :: Mod.LoadedPackage -> Result M.Program String
 compileModulesToProgram pkg = compileModulesValidated pkg `bindResult` erasedModuleProgram
@@ -185,8 +245,8 @@ ownedModuleProgram :: M.Program -> Result M.Program String
 ownedModuleProgram program =
     if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
         then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
-        else
-            let owned = pruneProgram (insertOwnership (nativeProgram program))
+        else nativeProgram program `bindResult` \native ->
+            let owned = pruneProgram (insertOwnership native)
              in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
   where
     unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)

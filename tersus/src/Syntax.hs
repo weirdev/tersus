@@ -5,6 +5,9 @@ import Data.Map (Map)
 
 import Types
 
+data Elaborated = Elaborated [Statement] [Type]
+    deriving (Show)
+
 -- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
 -- terminate, and so may not call itself.
 data Termination
@@ -218,17 +221,9 @@ data RwRule
     | UserRewrite Variable [VariableProof]
     deriving (Show, Eq, Ord, Read) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 
-data RuleContract = RuleContract
-    { ruleParams :: [Variable]
-    , ruleInputs :: [ValidationStatement]
-    , ruleOutputs :: [ValidationStatement]
-    , ruleGlobals :: Map Variable Iota
-    }
-    deriving (Show, Eq, Ord, Read)
-
 data UserRule
-    = AxiomRule RuleContract
-    | ProofRule RuleContract [VariableProof]
+    = AxiomRule [Variable] [ValidationStatement] [ValidationStatement]
+    | ProofRule [Variable] [ValidationStatement] [VariableProof]
     deriving (Show, Eq, Ord, Read)
 
 type RuleContext = Map Variable UserRule

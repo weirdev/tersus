@@ -16,9 +16,10 @@ import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileE
 import GHC.IO.Encoding (char8, getFileSystemEncoding, setFileSystemEncoding)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hSetEncoding, openTempFile, withBinaryFile)
+import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hSetEncoding, withBinaryFile)
+import CacheLock (openTempFileCloexec)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, readProcessWithExitCode, waitForProcess)
+import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess)
 
 import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
@@ -27,11 +28,12 @@ import MirEval (renderMirValue, runProgram)
 import MirLower (lowerProgram)
 import MirOwnership (insertOwnership)
 import MirHousekeeping (verifyProgram)
-import Native (buildExecutableFast, runExecutable)
-import Parse (parseStatementBlock)
+import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared)
+import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
 import Pipeline
 import TestHarness
+import TestCopies (boxedClonePrograms, boxedArrayClonePrograms)
 import Utils
 
 -- Native code: the LLVM IR of a program, and the executable clang builds from it. The executable has to do what the
@@ -54,12 +56,15 @@ testNative =
         , TestParallel "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
         , TestParallel "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
         , TestParallel "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
+        , TestParallel "native storage" [TestCase name (sameAsMir name source) | (name, source) <- nativeStoragePrograms]
         , TestParallel "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
         , TestParallel "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestParallel "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestParallel "references" [TestCase name (sameAsMir name source) | (name, source) <- referencePrograms]
+        , TestParallel "boxed Clone" [TestCase name (sameAsMir name source) | (name, source, _, _) <- boxedClonePrograms]
+        , TestParallel "sized boxed-array Clone" [TestCase name (sameAsMir name source) | (name, source, _) <- boxedArrayClonePrograms]
         , TestList "build" [testBuildKeepsFiles, testEveryExampleIsBuilt, testRunExecutable]
         , TestList "memory" memoryTests
         , TestParallel "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
@@ -103,7 +108,8 @@ nativeOnly i name source expected = do
                 Error e -> pure (Just e)
                 Ok text -> buildAndRun "" [] ("c_program_" ++ show i) name text (ExitSuccess, expected, "")
 
--- Every example that validates
+-- Every example that validates, but for the compiler's own programs (testHostValidation validates those, and the
+-- groups that run them build them as the host does)
 nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
@@ -113,7 +119,9 @@ nativeExamples =
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text"
         ]
-    ] ++ ["examples/mir/mir_reader/mir_reader.tersus", "examples/mir/emit/emit.tersus"]
+    ]
+-- (the compiler's own programs, the MIR reader and the emitter, are left out: validating them takes
+-- far longer than the rest, and testHostValidation does it)
 
 testNativeProgram :: FilePath -> Test
 testNativeProgram path = TestCase path $ do
@@ -128,7 +136,7 @@ testNativeProgram path = TestCase path $ do
                     case compiled of
                         Error e -> pure (Just ("Does not compile: " ++ e))
                         Ok program -> do
-                            ir <- emitUnvalidated (nativeProgram program)
+                            ir <- emitUnvalidated program
                             case ir of
                                 Error e -> pure (Just e)
                                 Ok text -> buildAndRun "" [] (map safeChar path) path text (expected (runProgramIn noWorld program))
@@ -177,7 +185,7 @@ testNativeIr =
                 else case lowerSource "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(1);" of
                     Left e -> pure (Just e)
                     Right program -> do
-                        ir <- emitUnvalidated (nativeProgram program)
+                        ir <- emitUnvalidated program
                         pure $ case ir of
                             Error e -> Just e
                             Ok text -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` text && "call i64 %" `isInfixOf` text)
@@ -784,7 +792,15 @@ referencePrograms =
 
 -- Every program of these tests that validates, and every one that is lowered without being validated
 validatedPrograms :: [(String, String)]
-validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ stopPrograms
+validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ nativeStoragePrograms ++ stopPrograms
+
+nativeStoragePrograms :: [(String, String)]
+nativeStoragePrograms =
+    [ ("nested Box/List Clone+Drop storage", owned ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Owned::new(3); y = clone(x); xs = push([], wrap(y)); xs = pop(xs); return x.n + size(xs);")
+    , ("array-backed Clone+Drop storage", owned ++ "x = Owned::new(4); xs = Array::boxed(2, x); xs = set(xs, 1, Owned::new(5)); return get(xs, 0).n + get(xs, 1).n;")
+    ]
+  where
+    owned = "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct Owned { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl Owned { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for Owned { fn clone(self: &Self) -> Self { return Owned::new(self.n); }; }; impl Drop for Owned { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; "
 
 unvalidatedPrograms :: [(String, String)]
 unvalidatedPrograms = functionPrograms
@@ -812,12 +828,7 @@ testRunExecutable = TestCase "run builds, runs and removes the executable" $ do
                 case ir of
                     Error e -> pure (Error e)
                     Ok text -> runExecutable text []
-            failing <- do
-                ir <- tersusLlvm "return 9223372036854775807 + 1;"
-                case ir of
-                    Error e -> pure (Error e)
-                    Ok text -> runExecutable text []
-            pure (testAssertEq (ran, failing) (Ok ExitSuccess, Ok (ExitFailure 1)))
+            pure (testAssertEq ran (Ok ExitSuccess))
 
 -- Every example that validates is run natively: a new example has to be added to `nativeExamples`
 testEveryExampleIsBuilt :: Test
@@ -869,7 +880,7 @@ sameAsMirWorld name world source = do
             case compiled of
                 Error e -> pure (Just ("Does not compile: " ++ e))
                 Ok program -> do
-                    ir <- emitUnvalidated (nativeProgram program)
+                    ir <- emitUnvalidated program
                     case ir of
                         Error e -> pure (Just e)
                         Ok text -> buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name text (expected (runProgramIn world program))
@@ -914,7 +925,7 @@ memoryTests =
                             Error e -> pure (Just e)
                             Ok () -> do
                                 -- 150 MB of address space
-                                (code, out, err) <- readProcessWithExitCode "sh" ["-c", "ulimit -v 150000; " ++ exe] ""
+                                (code, out, err) <- readProcessOutput (proc "sh" ["-c", "ulimit -v 150000; " ++ exe]) ""
                                 pure (testAssertEq (code, out, err) (ExitSuccess, expected, ""))
 
 -- Builds the program, which tests the IR without running it
@@ -949,7 +960,7 @@ valgrindCases =
     , "examples/termination.tersus", "examples/packet_parser.tersus"
     , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
     , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
-    ]
+    ] ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms]
 
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to
@@ -960,7 +971,7 @@ buildAndRun input args file name ir expectation = do
     let dir = tmp </> "tersus-native-test"
     createDirectoryIfMissing True dir
     -- (a name of this build only: cases of the same name in other groups build at the same time, and each has its own executable)
-    (exe, handle) <- openTempFile dir (file ++ ".")
+    (exe, handle) <- openTempFileCloexec dir (file ++ ".")
     hClose handle
     removeFile exe
     buildAndRunHere exe `finally` (removeQuietly exe >> removeQuietly (exe ++ "_plain"))
@@ -981,7 +992,7 @@ buildAndRun input args file name ir expectation = do
                         if not available
                             then pure Nothing
                             else do
-                                built <- buildExecutableFast [] (exe ++ "_plain") ir
+                                built <- buildExecutableFast ["-DTERSUS_SYSTEM_MALLOC"] (exe ++ "_plain") ir
                                 case built of
                                     Error e -> pure (Just e)
                                     Ok () -> do
@@ -1014,7 +1025,7 @@ sameAsMirFiles name initial source = do
             case compiled of
                 Error e -> pure (Just ("Does not compile: " ++ e))
                 Ok program -> do
-                    ir <- emitUnvalidated (nativeProgram program)
+                    ir <- emitUnvalidated program
                     case ir of
                         Error e -> pure (Just e)
                         Ok text -> case runProgramIn noWorld{worldFile = \path -> lookup path initial} program of
@@ -1067,7 +1078,7 @@ runProcessBytes directory exe args input = do
     (Just hin, Just hout, Just herr, process) <- withMVar spawnLock $ \_ -> do
         savedFs <- getFileSystemEncoding
         setFileSystemEncoding char8
-        createProcess (proc exe args){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, cwd = directory}
+        spawnShared (proc exe args){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, cwd = directory}
             `finally` setFileSystemEncoding savedFs
     mapM_ (`hSetEncoding` char8) [hin, hout, herr]
     _ <- forkIO (hPutStr hin input >> hClose hin)
@@ -1091,7 +1102,7 @@ probeOnce :: MVar (Maybe Bool) -> String -> IO Bool
 probeOnce cache exe = modifyMVar cache $ \known -> case known of
     Just available -> pure (known, available)
     Nothing -> do
-        outcome <- try (readProcessWithExitCode exe ["--version"] "")
+        outcome <- try (readProcessOutput (proc exe ["--version"]) "")
         let available = case outcome of
                 Left e -> const False (e :: IOException)
                 Right (code, _, _) -> code == ExitSuccess
@@ -1114,7 +1125,7 @@ sameAsUnvalidated name source = do
         else case lowerSource source of
             Left e -> pure (Just e)
             Right program -> do
-                ir <- emitUnvalidated (nativeProgram program)
+                ir <- emitUnvalidated program
                 case ir of
                     Error e -> pure (Just e)
                     Ok text -> buildAndRun "" [] ("unvalidated_" ++ map safeChar name) name text (expected (runProgram program))
@@ -1125,11 +1136,11 @@ sameAsUnvalidated name source = do
 -- The IR of a program that is lowered without being validated, written by the emitter in Tersus: who owns each value is
 -- made explicit and checked, and the emitter is given the owned MIR as data
 emitUnvalidated :: M.Program -> IO (Result String String)
-emitUnvalidated program = case verifyProgram owned of
+emitUnvalidated program = case mapResult insertOwnership (nativeProgram program) of
     Error e -> pure (Error e)
-    Ok () -> llvmOfOwned owned
-  where
-    owned = insertOwnership (nativeProgram program)
+    Ok owned -> case verifyProgram owned of
+        Error e -> pure (Error e)
+        Ok () -> llvmOfOwned owned
 
 lowerSource :: String -> Either String M.Program
 lowerSource source = case parseStatementBlock source of

@@ -15,10 +15,11 @@ import MirOwnership (Role (..), insertOwnership, needsDrop, operandLocal, roles)
 import MirHousekeeping (verifyProgram)
 import MirLower (lowerProgram)
 import Modules (LoadResult (..))
-import Parse (parseStatementBlock)
+import TestParserFragments (parseStatementBlock)
 import Pipeline
+import TestCopies (boxedClonePrograms)
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
-import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
 import TestHarness
 import Utils
 
@@ -145,40 +146,62 @@ pointersOf (VA values) = concatMap pointersOf values
 pointersOf _ = []
 
 cloneVal :: Val -> M Val
-cloneVal (VP a) = do
+cloneVal v = do
+    frame <- currentFrame
+    cloneIn (Just (fnName (frameFunction frame))) v
+
+cloneIn :: Maybe Name -> Val -> M Val
+cloneIn current v@(VS name _) = do
+    program <- stProgram <$> getSt
+    let owner = typeOfValue program name
+        returnsOwner fn = owner /= Nothing && case fnReturns fn of
+            Just (TNamed base args) -> Just (instanceName base args) == owner
+            Just (TVariant variant) -> ownerOf program variant == owner
+            _ -> False
+        clones = [fn | fn <- Map.elems (progFunctions program), " as Clone>::clone" `isInfixOf` fnName fn, not (null (fnParams fn)), returnsOwner fn]
+    case clones of
+        fn : _ | Just (fnName fn) /= current -> do
+            result <- callFunction program fn [v]
+            maybe (failM "a Clone implementation did not return a value") return result
+        _ -> cloneFields v
+cloneIn _ v = cloneFields v
+
+-- The self-copy guard belongs to CopyOf, not to copies of its fields.
+cloneFields :: Val -> M Val
+cloneFields (VP a) = do
     c <- cell a
     case cellObject c of
-        OList vs -> mapM cloneVal vs >>= alloc . OList
-        OBox v -> cloneVal v >>= alloc . OBox
+        OList vs -> mapM (cloneIn Nothing) vs >>= alloc . OList
+        OBox v -> cloneIn Nothing v >>= alloc . OBox
         OMem _ _ -> failM "memory is copied"
 -- (a copy of a list has memory of its own, with copies of the elements in use)
-cloneVal (VS name fs) | isListStruct name, Just a <- listCell fs = do
+cloneFields (VS name fs) | isListStruct name, Just a <- listCell fs = do
     c <- cell a
     used <- case lookup "len" fs of
         Just (VI n) -> return n
         _ -> failM "a list without its length"
     case cellObject c of
         OMem slots _ -> do
-            copies <- mapM (\(k, v) -> (,) k <$> cloneVal v) [(k, v) | (k, v) <- Map.toList slots, k < used]
+            copies <- mapM (\(k, v) -> (,) k <$> cloneIn Nothing v) [(k, v) | (k, v) <- Map.toList slots, k < used]
             copy <- alloc (OMem (Map.fromList copies) used)
             case copy of
                 VP b -> return (VS name [(f, if f == "addr" then VI (toInteger b * 2 ^ (32 :: Integer)) else if f == "cap" then VI used else v) | (f, v) <- fs])
                 _ -> failM "an allocation is not on the heap"
         _ -> failM "a list that is not in memory"
 -- (a copy of a Box of the library has room of its own, with a copy of the value)
-cloneVal (VS name fs) | isBoxStruct name, Just a <- listCell fs = do
+cloneFields (VS name fs) | isBoxStruct name, Just a <- listCell fs = do
     c <- cell a
     case cellObject c of
         OMem slots size -> do
-            copies <- mapM (\(k, v) -> (,) k <$> cloneVal v) (Map.toList slots)
+            copies <- mapM (\(k, v) -> (,) k <$> cloneIn Nothing v) (Map.toList slots)
             copy <- alloc (OMem (Map.fromList copies) size)
             case copy of
                 VP b -> return (VS name [(f, if f == "addr" then VI (toInteger b * 2 ^ (32 :: Integer)) else v) | (f, v) <- fs])
                 _ -> failM "an allocation is not on the heap"
         _ -> failM "a Box that is not in memory"
-cloneVal (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneVal v) fs
-cloneVal (VA values) = VA <$> mapM cloneVal values
-cloneVal v = return v
+cloneFields (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneIn Nothing v) fs
+cloneFields (VA values) = VA <$> mapM (cloneIn Nothing) values
+cloneFields v = return v
 
 -- How many places own the value: locals (not those that only look) and slots of values
 owners :: Int -> M Int
@@ -342,8 +365,8 @@ object :: Val -> M (Int, Obj)
 object (VP a) = do
     c <- cell a
     return (a, cellObject c)
--- (a list of native code is read where its elements are: the first field of the struct List is the Box of the array that holds them)
-object (VS name fs) | isListStruct name, Just a <- listCell fs = object (VP a)
+-- (a native list or Box is read at the slots its first addr field owns)
+object (VS name fs) | isListStruct name || isBoxStruct name, Just a <- listCell fs = object (VP a)
 object v = failM ("not a value of the heap: " ++ show v)
 
 isListStruct :: Name -> Bool
@@ -746,19 +769,23 @@ runOwned program =
 
 -- The ownership pass runs on a program that is lowered, and the result checks out on the model with the answer of the executor
 sameOnModel :: String -> Program -> TestResult
-sameOnModel what program =
-    let owned = insertOwnership (nativeProgram program)
-     in case verifyProgram owned of
-            Error e -> Just (what ++ ": the owned MIR is ill formed: " ++ e)
-            Ok () -> case (runOwned owned, runProgram program) of
-                (Right a, Ok b) -> testAssertEq a b
-                (Left e, Error e') | e == e' -> Nothing
-                (Left e, _) -> Just (what ++ ": " ++ e)
-                (Right a, Error e) -> Just (what ++ ": the model returns " ++ show a ++ " where the executor stops with " ++ e)
+sameOnModel what program = case mapResult insertOwnership (nativeProgram program) of
+    Error e -> Just (what ++ ": " ++ e)
+    Ok owned -> case verifyProgram owned of
+        Error e -> Just (what ++ ": the owned MIR is ill formed: " ++ e)
+        Ok () -> case (runOwned owned, runProgram program) of
+            (Right a, Ok b) -> testAssertEq a b
+            (Left e, Error e') | e == e' -> Nothing
+            (Left e, _) -> Just (what ++ ": " ++ e)
+            (Right a, Error e) -> Just (what ++ ": the model returns " ++ show a ++ " where the executor stops with " ++ e)
 
 -- A program lowered and run on the model, with the answer of the executor, as source
-onSource :: String -> String -> TestResult
-onSource name source = onProgram name (compileSource source)
+-- (through TestHarness.compileOnce, so validated programs are compiled once and shared with other groups;
+-- only successful compiles are cached by the harness)
+onSource :: String -> String -> IO TestResult
+onSource name source = do
+    compiled <- compileOnce source
+    pure (onProgram name compiled)
 
 onProgram :: String -> Result Program String -> TestResult
 onProgram name compiled =
@@ -766,20 +793,27 @@ onProgram name compiled =
         Error e -> Just (name ++ " does not compile: " ++ e)
         Ok program -> sameOnModel name program
 
+-- Array-using examples are excluded at list construction, not silently passed in onFile: the heap model
+-- holds values of the heap and has no array heap model, so running these would be a blind spot (see the
+-- explicit blind-spot case in testOwnership). This list is the usesArrays match over nativeExamples.
+arrayExamples :: [FilePath]
+arrayExamples =
+    [ "examples/array_data.tersus", "examples/array_owners.tersus", "examples/array_sizes.tersus", "examples/arrays.tersus"
+    , "examples/borrowing.tersus", "examples/box_array.tersus", "examples/generic_structs.tersus", "examples/list_methods.tersus"
+    , "examples/sized_structs.tersus", "examples/type_parameters.tersus", "examples/vec.tersus"
+    ]
+
+ownershipExamples :: [FilePath]
+ownershipExamples = [path | path <- nativeExamples, path `notElem` arrayExamples]
+
 onFile :: FilePath -> IO TestResult
 onFile path = do
     loaded <- loadFromFilesystem path
     case loaded of
         Right (PackageResult _) -> do
-            source <- readFile path
-            if usesArrays source
-                then pure Nothing
-                else do
-                    compiled <- programFromFile path
-                    pure (onProgram path compiled)
-        _ -> do
-            source <- readFile path
-            pure (if usesArrays source then Nothing else onSource path source)
+            compiled <- programFromFile path
+            pure (onProgram path compiled)
+        _ -> readFile path >>= onSource path
 
 -- The same for a program that is lowered without being validated
 onLowered :: String -> String -> TestResult
@@ -808,40 +842,39 @@ functionText name text = unlines (takeWhile (/= "}") (dropWhile (not . isInfixOf
 -- What the pass decides, for programs where the answer is clear
 planTests :: [Test]
 planTests =
-    [ TestCase "a list pushed to in a loop is changed in place" . pure $
-        withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue ("listPush<Int>(move _1" `isInfixOf` m))
-    , -- an array is held inline and has nothing in it to free, so the pass leaves it alone (the model of the heap holds values of the
-      -- heap, and the programs with arrays are not run on it)
-      TestCase "an array is not owned: no copy, no move, nothing to free" . pure $
-        withOwned "a = array(3, 0); b = set(a, 0, 1); return get(b, 0) + get(a, 1) + size(a);" (\t -> testAssertEq (count "clone" t, count "move" t, count "drop" t, count "peek" t) (0, 0, 0, 0))
-    , TestCase "an array beside a list: only the list is freed" . pure $
-        withOwned "l = [1]; a = array(2, 0); a = set(a, 1, size(l)); return get(a, 1);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue (not ("drop _2" `isInfixOf` m) && "drop _1" `isInfixOf` m))
-    , TestCase "a list that is cloned for a push is copied once" . pure $
-        withOwned "x = [1]; y = push(clone(x), 2); return size(x) + size(y);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
-    , TestCase "a match takes the fields out of the value" . pure $
-        withOwned "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));" (\t -> let f = functionText "sum" t in testAssertEq (count "clone" f, count "take " f) (0, 2))
-    , TestCase "a part that is only read is looked at" . pure $
-        withOwned "rows = [[1], [2, 3]]; return size(get(rows, 1));" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m, count "peek Get" m) (0, 1))
-    , TestCase "a part that is kept is copied" . pure $
-        withOwned "rows = [[1], [2, 3]]; row = clone(get(rows, 1)); rows = set(rows, 0, clone(row)); return size(row);" (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1))
-    , TestCase "a call with a clone of an argument that is used after it copies the argument" . pure $
-        withOwned "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(clone(l)) + n(l);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
-    , TestCase "a cast is read from the value itself" . pure $
-        withOwned "enum S { A { r: Int }, C }; x = S::A { r: 4 }; return (x as S::A).r;" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue (not (" as S::A;" `isInfixOf` t)))
-    , TestCase "a parameter that is assigned a part is freed first" . pure $
-        withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "copy" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
-    , TestCase "a copy of a parameter is one copy" . pure $
-        withOwned "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);" (\t -> testAssertEq (count "clone" (functionText "f" t)) 1)
-    , TestCase "a value moved on every path is not dropped at the return" . pure $
-        withOwned "l = [1]; m = l; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (not ("drop _1" `isInfixOf` m) && "drop _2" `isInfixOf` m))
-    , TestCase "a value moved on one path is dropped under a test of its flag" . pure $
-        withOwned "l = [1, 2]; m = [0]; if size(l) = 2 { m = l; }; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (count "drop _1" m == 1 && "drop _2;" `isInfixOf` m && "const false;" `isInfixOf` m))
-    , TestCase "a value that is overwritten is dropped before the assignment" . pure $
-        withOwned "x = [1]; x = [1, 2]; return size(x);" (\t -> let m = functionText "main" t in testAssertEq (count "drop _1" m) 2)
-    , TestCase "a field taken on one path is dropped under a test of its flag" . pure $
-        withOwned "struct S { a: List<Int>, b: List<Int> }; s = S { a: [1, 2], b: [3, 4] }; n = 0; if size(s.b) = 2 { x = s.a; n = size(x); }; return n + size(s.b);" (\t -> let m = functionText "main" t in testAssertTrue ("take (_" `isInfixOf` m && "drop _" `isInfixOf` m && count "const false;" m >= 2))
-    ]
+    [TestCase label . pure $ withOwned source (\t -> testAssertEq (map (\needle -> count needle (scopeText t scope)) needles) expected) | (label, source, scope, needles, expected) <- countCases]
+        ++ [ TestCase "a list pushed to in a loop is changed in place" . pure $
+                withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue ("listPush<Int>(move _1" `isInfixOf` m))
+           , TestCase "an array beside a list: only the list is freed" . pure $
+                withOwned "l = [1]; a = array(2, 0); a = set(a, 1, size(l)); return get(a, 1);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue (not ("drop _2" `isInfixOf` m) && "drop _1" `isInfixOf` m))
+           , TestCase "a part that is kept is copied" . pure $
+                withOwned "rows = [[1], [2, 3]]; row = clone(get(rows, 1)); rows = set(rows, 0, clone(row)); return size(row);" (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1))
+           , TestCase "a cast is read from the value itself" . pure $
+                withOwned "enum S { A { r: Int }, C }; x = S::A { r: 4 }; return (x as S::A).r;" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue (not (" as S::A;" `isInfixOf` t)))
+           , TestCase "a parameter that is assigned a part is freed first" . pure $
+                withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "copy" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
+           , TestCase "a value moved on every path is not dropped at the return" . pure $
+                withOwned "l = [1]; m = l; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (not ("drop _1" `isInfixOf` m) && "drop _2" `isInfixOf` m))
+           , TestCase "a value moved on one path is dropped under a test of its flag" . pure $
+                withOwned "l = [1, 2]; m = [0]; if size(l) = 2 { m = l; }; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (count "drop _1" m == 1 && "drop _2;" `isInfixOf` m && "const false;" `isInfixOf` m))
+           , TestCase "a field taken on one path is dropped under a test of its flag" . pure $
+                withOwned "struct S { a: List<Int>, b: List<Int> }; s = S { a: [1, 2], b: [3, 4] }; n = 0; if size(s.b) = 2 { x = s.a; n = size(x); }; return n + size(s.b);" (\t -> let m = functionText "main" t in testAssertTrue ("take (_" `isInfixOf` m && "drop _" `isInfixOf` m && count "const false;" m >= 2))
+           ]
   where
+    -- Pure count-tuple cases: (label, source, function scope or "" for whole text, needles, expected counts)
+    -- An array is held inline and has nothing in it to free, so the pass leaves it alone (the heap model
+    -- holds values of the heap, and programs with arrays are not run on it).
+    countCases =
+        [ ("an array is not owned: no copy, no move, nothing to free", "a = array(3, 0); b = set(a, 0, 1); return get(b, 0) + get(a, 1) + size(a);", "", ["clone", "move", "drop", "peek"], [0, 0, 0, 0])
+        , ("a list that is cloned for a push is copied once", "x = [1]; y = push(clone(x), 2); return size(x) + size(y);", "main", ["clone"], [1])
+        , ("a match takes the fields out of the value", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));", "sum", ["clone", "take "], [0, 2])
+        , ("a part that is only read is looked at", "rows = [[1], [2, 3]]; return size(get(rows, 1));", "main", ["clone", "peek Get"], [0, 1])
+        , ("a call with a clone of an argument that is used after it copies the argument", "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(clone(l)) + n(l);", "main", ["clone"], [1])
+        , ("a copy of a parameter is one copy", "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);", "f", ["clone"], [1])
+        , ("a value that is overwritten is dropped before the assignment", "x = [1]; x = [1, 2]; return size(x);", "main", ["drop _1"], [2])
+        ]
+    scopeText t "" = t
+    scopeText t scope = functionText scope t
     withOwned source check = either Just check (ownedText source)
     orElseT Nothing b = b
     orElseT a _ = a
@@ -911,12 +944,14 @@ mainProgram locals stmts =
 -- is looked at is only looked at by the statements that follow it in its block
 windowTests :: [Test]
 windowTests =
-    [ TestCase "a part is copied when what it is part of changes before it is read" . pure $
+    [ TestCase "a part is copied when what it is part of changes before it is read" $ do
         let source = "rows = [[1, 2], [3]]; part = get(rows, 0); rows = set(rows, 0, [9]); return size(part);"
-         in onSource "the part" source `orElseT` either Just (\t -> testAssertTrue (count "copy" (functionText "main" t) >= 1)) (ownedText source)
-    , TestCase "a part is looked at when nothing changes before it is read" . pure $
+        model <- onSource "the part" source
+        pure (model `orElseT` either Just (\t -> testAssertTrue (count "copy" (functionText "main" t) >= 1)) (ownedText source))
+    , TestCase "a part is looked at when nothing changes before it is read" $ do
         let source = "rows = [[1, 2], [3]]; n = size(get(rows, 0)); rows = set(rows, 0, [9]); return n + size(rows);"
-         in onSource "the part" source `orElseT` either Just (\t -> let m = functionText "main" t in testAssertEq (count "peek Get" m, count "copy" m) (1, 0)) (ownedText source)
+        model <- onSource "the part" source
+        pure (model `orElseT` either Just (\t -> let m = functionText "main" t in testAssertEq (count "peek Get" m, count "copy" m) (1, 0)) (ownedText source))
     ]
   where
     orElseT Nothing b = b
@@ -924,10 +959,19 @@ windowTests =
 
 referenceModelTests :: [Test]
 referenceModelTests =
-    [ testCase "an indexed reference captures its index" (onSource "indexed reference" "xs = [7, 9]; i = 0; r = &get(xs, i); i = 1; return *r;")
-    , testCase "an intermediate reference field is followed" (onSource "reference field" "struct W { r: &List<Int> }; xs = [7]; w = W { r: &xs }; z = &get(*w.r, 0); return *z;")
-    , testCase "a reference copy keeps the same place" (onSource "reference copy" "xs = [7]; r = &xs; q = r; return get(*q, 0);")
-    , testCase "a returned reference keeps its caller's frame" (onSource "returned reference" "fn head(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; xs = [7]; r = head(xs); return *r;")
+    [ testCase "CopyOf dispatches a generic named Clone implementation" $ cloneCounter
+        [ Peek (Local 2) (ReadField (Copy (Local 1)) "Counter<Int>" "n")
+        , Assign (Local 3) (BinaryOp Add (Copy (Local 2)) (Const (CInt 1)))
+        , Assign (Local 0) (MakeData "Counter<Int>" [("n", Copy (Local 3))])
+        ] 8
+    , testCase "a Clone implementation's self-copy does not call itself" $
+        cloneCounter [Assign (Local 0) (CopyOf (Copy (Local 1)))] 7
+    , testCase "a structural self-copy still dispatches member Clone implementations" $
+        testAssertEq (runOwned clonedMembers) (Right (Just (MInt 4)))
+    , TestCase "an indexed reference captures its index" (onSource "indexed reference" "xs = [7, 9]; i = 0; r = &get(xs, i); i = 1; return *r;")
+    , TestCase "an intermediate reference field is followed" (onSource "reference field" "struct W { r: &List<Int> }; xs = [7]; w = W { r: &xs }; z = &get(*w.r, 0); return *z;")
+    , TestCase "a reference copy keeps the same place" (onSource "reference copy" "xs = [7]; r = &xs; q = r; return get(*q, 0);")
+    , TestCase "a returned reference keeps its caller's frame" (onSource "returned reference" "fn head(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; xs = [7]; r = head(xs); return *r;")
     , rejects "a changed scalar loan cannot be refreshed by forwarding" TInt
         [ Assign (Local 1) (Use (Const (CInt 1)))
         , Assign (Local 2) (Borrow (Local 1) [] False)
@@ -953,6 +997,45 @@ referenceModelTests =
                 Right _ -> Just "the heap model accepted a reference to a returned frame"
     ]
   where
+    cloneCounter body expected =
+        let ty = TNamed "Counter" [ArgType TInt]
+            base = mainProgram [(Local 0, TInt), (Local 1, ty), (Local 2, ty)]
+                [ Assign (Local 1) (Use (Const (CData "Counter<Int>" [("n", CInt 7)])))
+                , Assign (Local 2) (CopyOf (Copy (Local 1)))
+                , Assign (Local 0) (ReadField (Copy (Local 2)) "Counter<Int>" "n")
+                ]
+            clone = (progMain base)
+                { fnName = "<Counter as Clone>::clone<Int>", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just ty
+                , fnLocals = Map.fromList [(Local 0, LocalDecl ty Nothing), (Local 1, LocalDecl ty Nothing), (Local 2, LocalDecl TInt Nothing), (Local 3, LocalDecl TInt Nothing)]
+                , fnBlocks = Map.singleton (BlockId 0) (BasicBlock body Return)
+                }
+            program = base{progTypes = Map.singleton "Counter<Int>" (StructDecl [("n", TInt)]), progFunctions = Map.singleton (fnName clone) clone}
+         in testAssertEq (runOwned program) (Right (Just (MInt expected)))
+    clonedMembers =
+        let node = TNamed "Node" []
+            kids = TList node
+            leaf = CData "Node" [("n", CInt 3), ("kids", CList [])]
+            base = mainProgram [(Local 0, TInt), (Local 1, node), (Local 2, node), (Local 3, kids), (Local 4, node)]
+                [ Assign (Local 1) (Use (Const (CData "Node" [("n", CInt 7), ("kids", CList [leaf])])))
+                , Assign (Local 2) (CopyOf (Copy (Local 1)))
+                , Peek (Local 3) (ReadField (Copy (Local 2)) "Node" "kids")
+                , Peek (Local 4) (ListOp Get [Copy (Local 3), Const (CInt 0)])
+                , Assign (Local 0) (ReadField (Copy (Local 4)) "Node" "n")
+                , Drop (Local 2), Drop (Local 1)
+                ]
+            clone = (progMain base)
+                { fnName = "<Node as Clone>::clone", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just node
+                , fnLocals = Map.fromList [(Local 0, LocalDecl node Nothing), (Local 1, LocalDecl node Nothing), (Local 2, LocalDecl node Nothing), (Local 3, LocalDecl TInt Nothing), (Local 4, LocalDecl TInt Nothing), (Local 5, LocalDecl kids Nothing)]
+                , fnBlocks = Map.singleton (BlockId 0) (BasicBlock
+                    [ Assign (Local 2) (CopyOf (Copy (Local 1)))
+                    , Peek (Local 3) (ReadField (Copy (Local 2)) "Node" "n")
+                    , Assign (Local 4) (BinaryOp Add (Copy (Local 3)) (Const (CInt 1)))
+                    , Assign (Local 5) (TakeField (Local 2) "Node" "kids")
+                    , Drop (Local 2)
+                    , Assign (Local 0) (MakeData "Node" [("n", Copy (Local 4)), ("kids", Move (Local 5))])
+                    ] Return)
+                }
+         in base{progTypes = Map.singleton "Node" (StructDecl [("n", TInt), ("kids", kids)]), progFunctions = Map.singleton (fnName clone) clone}
     heap = TBox (TArrayOf TInt SizeAny)
     rejects name ty stmts expected =
         let base = mainProgram [(Local 1, ty), (Local 2, TRef ty), (Local 3, TInt)] []
@@ -1027,6 +1110,22 @@ borrowedRootTests =
                     ] Return)
                 ]
          in testAssertTrue (any (\stmt -> case stmt of Assign (Local 5) (Use (Move (Local 2))) -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
+    , testCase "a late successor reference use keeps its owner field live" $
+        let fn = own [(Local 1, TNamed "Holder" []), (Local 2, TRef list), (Local 3, list), (Local 4, list)]
+                ([ (BlockId 0, BasicBlock [Assign (Local 2) (Borrow (Local 1) [RefField "Holder" "xs"] False)] (Goto (BlockId 1)))
+                 , (BlockId 1, BasicBlock [Assign (Local 3) (ReadField (Copy (Local 1)) "Holder" "xs")] (Goto (BlockId 2)))
+                 ] ++ [(BlockId i, BasicBlock [] (Goto (BlockId (i + 1)))) | i <- [2 .. 11]]
+                   ++ [(BlockId 12, BasicBlock [Assign (Local 4) (Deref (Copy (Local 2))), Assign (Local 0) (ListOp Length [Copy (Local 4)])] Return)])
+         in testAssertEq [() | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign _ (TakeField (Local 1) "Holder" "xs") <- stmts] []
+    , testCase "a changed loop entry propagates both reborrow owners to its successor" $
+        let fn = own [(Local 1, list), (Local 2, list), (Local 3, TRef list), (Local 4, TRef list), (Local 5, list), (Local 6, list)]
+                [ (BlockId 0, BasicBlock [Assign (Local 3) (Borrow (Local 1) [] False)] (Goto (BlockId 1)))
+                , (BlockId 1, BasicBlock [Assign (Local 4) (Borrow (Local 3) [] False), Assign (Local 3) (Borrow (Local 2) [] False)] (SwitchBool (Const (CBool False)) (BlockId 1) (BlockId 2)))
+                , (BlockId 2, BasicBlock [Assign (Local 5) (Use (Copy (Local 2))), Assign (Local 6) (Deref (Copy (Local 4))), Assign (Local 0) (ListOp Length [Copy (Local 6)])] Return)
+                ]
+            stmts = [stmt | BasicBlock statements _ <- Map.elems (fnBlocks fn), stmt <- statements]
+         in testAssertTrue (any (\stmt -> case stmt of Assign _ (CopyOf (Copy (Local 2))) -> True; _ -> False) stmts
+            && not (any (\stmt -> case stmt of Assign (Local 5) (Use (Move (Local 2))) -> True; _ -> False) stmts))
     ]
   where
     list = TNamed "List" [ArgType TInt]
@@ -1042,16 +1141,61 @@ borrowedRootTests =
 usesArrays :: String -> Bool
 usesArrays source = any (`isInfixOf` source) ["Array<", "Array::", "array(", "#["]
 
+stateJoinTests :: [Test]
+stateJoinTests =
+    [ testCase "equal live branch states keep one whole drop" $
+        let owned = insertOwnership (branchProgram True [] [])
+         in testAssertEq (runOwned owned) (Right (Just (MInt 9)))
+            `orElseT` testAssertEq (length [() | block <- Map.elems (fnBlocks (progMain owned)), Drop (Local 1) <- blockStatements block]) 1
+    , testCase "equal empty branch states do not add a return drop" $
+        let owned = insertOwnership (branchProgram True [Drop (Local 1)] [Drop (Local 1)])
+         in testAssertEq (runOwned owned) (Right (Just (MInt 9)))
+            `orElseT` testAssertEq [() | Drop (Local 1) <- blockStatements (fnBlocks (progMain owned) Map.! BlockId 3)] []
+    , testCase "different branch states still guard the empty path" (mixed True)
+    , testCase "different branch states still free the live path" (mixed False)
+    , testCase "equal partial-field states retain empty-field overrides" $
+        let list = TNamed "List" [ArgType TInt]
+            base = mainProgram [(Local 0, TInt), (Local 1, TNamed "Holder" []), (Local 2, list)] []
+            fn = (progMain base){fnReturns = Just TInt, fnBlocks = Map.fromList
+                [ (BlockId 0, BasicBlock [Assign (Local 1) (Use (Const (CData "Holder" [("xs", CList [CInt 1]), ("ys", CList [CInt 2, CInt 3])]))), Assign (Local 2) (ReadField (Copy (Local 1)) "Holder" "xs")] (SwitchBool (Const (CBool True)) (BlockId 1) (BlockId 2)))
+                , (BlockId 1, BasicBlock [] (Goto (BlockId 3)))
+                , (BlockId 2, BasicBlock [] (Goto (BlockId 3)))
+                , (BlockId 3, BasicBlock [Assign (Local 0) (ListOp Length [Copy (Local 2)])] Return)
+                ]}
+            owned = insertOwnership base{progTypes = Map.singleton "Holder" (StructDecl [("xs", list), ("ys", list)]), progMain = fn}
+         in testAssertEq (runOwned owned) (Right (Just (MInt 1)))
+    ]
+  where
+    orElseT Nothing next = next
+    orElseT failure _ = failure
+    branchProgram condition left right =
+        let list = TNamed "List" [ArgType TInt]
+            base = mainProgram [(Local 0, TInt), (Local 1, list)] []
+         in base{progMain = (progMain base){fnReturns = Just TInt, fnBlocks = Map.fromList
+            [ (BlockId 0, BasicBlock [Assign (Local 1) (Use (Const (CList [CInt 7])))] (SwitchBool (Const (CBool condition)) (BlockId 1) (BlockId 2)))
+            , (BlockId 1, BasicBlock left (Goto (BlockId 3)))
+            , (BlockId 2, BasicBlock right (Goto (BlockId 3)))
+            , (BlockId 3, BasicBlock [Assign (Local 0) (Use (Const (CInt 9)))] Return)
+            ]}}
+    mixed condition =
+        let owned = insertOwnership (branchProgram condition [Drop (Local 1)] [])
+         in testAssertEq (runOwned owned) (Right (Just (MInt 9)))
+            `orElseT` testAssertTrue (any ((== TBool) . localType) (Map.elems (fnLocals (progMain owned))))
+
 testOwnership :: Test
 testOwnership =
     TestList
         "testOwnership"
-        [ TestList "examples" [TestCase path (onFile path) | path <- nativeExamples]
-        , TestList "programs" [TestCase name (pure (onSource name source)) | (name, source) <- validatedPrograms]
+        [ TestList "examples" [TestCase path (onFile path) | path <- ownershipExamples]
+        , TestCase "array examples are excluded: the heap model has no array model (blind spot)" . pure $
+            testAssertTrue (all (`notElem` ownershipExamples) arrayExamples && not (null arrayExamples) && usesArrays "a = array(3, 0); return get(a, 0);")
+        , TestList "programs" [TestCase name (onSource name source) | (name, source) <- validatedPrograms]
+        , TestList "boxed Clone" [TestCase name (onSource name source) | (name, source, _, _) <- boxedClonePrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests
         , TestList "what a part may be read after" windowTests
         , TestList "reference heap model" referenceModelTests
         , TestList "borrowed roots" borrowedRootTests
+        , TestList "joined ownership states" stateJoinTests
         , TestList "mistakes the model finds" mistakeTests
         ]

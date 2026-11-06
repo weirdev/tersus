@@ -1,30 +1,34 @@
 module TestAstData (testAstData, testAstReader) where
 
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Monad (forM)
+import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (listDirectory)
 import System.Exit (ExitCode (..))
+import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Modules as Mod
 import qualified PackageCompile as Package
-import Parse (fileBody)
+import ParsedFile (fileBody)
 import PreludeSource (toolPackageFiles)
+import qualified LibParsed as Lib
 import qualified AstData as A
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
 import Cli (World (..), noWorld, runProgramIn)
-import Compile (parseSource)
+import qualified ParserSeed
 import Hash (fingerprint)
 import qualified Mir as M
 import MirData (writeProgram)
 import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput)
-import Parse (emptyDecls, locating, parseStatementBlockWith)
-import Pipeline (nativeProgram, runStatements)
+import ParsedFile (emptyDecls, locating)
+import TestParserFragments (parseStatementBlockWith)
+import Pipeline (compileModulesBootstrap, nativeProgram, parseSource, runStatements)
 import Seed (cachedSeed, seedHash)
 import MirEval (fromMirValue)
 import StdLibDefs (stdlibBuiltin)
 import Syntax
-import TestDataCodec (testDataCodec)
 import TestHarness
 import TestNative (clangAvailable, runExecutableBytes)
 import TypeCheck (Elaborated (..), elaborate)
@@ -35,7 +39,10 @@ readerPath :: FilePath
 readerPath = "examples/ast_reader/ast_reader.tersus"
 
 corpus :: IO [(String, Result [Statement] String)]
-corpus = do
+corpus = concat <$> corpusUnits
+
+corpusUnits :: IO [[(String, Result [Statement] String)]]
+corpusUnits = do
     paths <- concat <$> mapM files ["examples", "examples/rejected", "lib"]
     fromFiles <- mapM (\p -> (,) p <$> readFile p) paths
     let packages = ["examples/parser/parser.tersus", readerPath]
@@ -43,9 +50,19 @@ corpus = do
             Left err -> [(entry, Error err)]
             Right (Mod.PackageResult pkg) -> [(Mod.loadedFilePath file, Ok (fileBody (Mod.loadedParsed file))) | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
             Right _ -> [(entry, Error "AST corpus tool is not a package")]
-    pure ([(path, parsed source) | (path, source) <- fromFiles ++ generated] ++ concatMap packageTrees packages)
+    pure ([[(path, parseCorpusFile path source)] | (path, source) <- fromFiles ++ generated] ++ map packageTrees packages)
   where
-    files dir = map ((dir ++ "/") ++) . filter (isSuffixOf ".tersus") . sort <$> listDirectory dir
+    parseCorpusFile path source = case [name | name <- Lib.libModuleNames ++ Lib.nativeStorageModules, path == "lib/" ++ name ++ ".tersus"] of
+        name : _ -> case if name `elem` Lib.nativeStorageModules then Lib.nativeLibParsed else Lib.libParsed of
+            Left e -> Error e
+            Right parsed ->
+                let closure [] done = done
+                    closure (n : rest) done | n `elem` done = closure rest done
+                    closure (n : rest) done = closure (Map.findWithDefault [] n (Lib.lpDependencies parsed) ++ rest) (n : done)
+                 in Ok (Lib.statementsForLibModules parsed (closure [name] []))
+        [] -> parsed source
+    -- (lib/validation_driver.tersus is read after lib/validation.tersus, not on its own)
+    files dir = map ((dir ++ "/") ++) . filter (\f -> isSuffixOf ".tersus" f && f /= "validation_driver.tersus") . sort <$> listDirectory dir
     generated =
         [ ("generated forward call", "fn a(n: Int) -> Int { return b(n); }; fn b(n: Int) -> Int { return n; }; return a(5);")
         , ("generated validation refusal", "affirm false; return 2;")
@@ -56,6 +73,7 @@ corpus = do
 parsed :: String -> Result [Statement] String
 parsed source = case parseSource source of
     Ok ss -> Ok ss
+    Error e | ParserSeed.toolFailure e -> Error e
     Error _ -> case parseStatementBlockWith (locating emptyDecls) source of
         Left e -> Error (show e)
         Right (ss, _) -> Ok ss
@@ -82,36 +100,44 @@ writerLimits = firstFailure
     rejected (Ok _) = Just "writer silently accepted unsupported type data"
 
 roundTrip :: [Statement] -> TestResult
-roundTrip ss = case A.readParsed (dataParsed ss) of
-    Error e -> Just e
-    Ok back
-        | show ss /= show back -> Just "syntax or builtin metadata changed"
-        | dataParsed ss /= dataParsed back -> Just "reserialization changed"
-        | otherwise -> Nothing
+roundTrip ss =
+    let text = dataParsed ss
+     in case A.readParsed text of
+            Error e -> Just e
+            Ok back
+                | show ss /= show back -> Just "syntax or builtin metadata changed"
+                | text /= dataParsed back -> Just "reserialization changed"
+                | otherwise -> Nothing
 
 elaboratedRoundTrip :: Elaborated -> TestResult
-elaboratedRoundTrip e = case A.readElaborated (dataElaborated e) of
-    Error err -> Just err
-    Ok back
-        | show e /= show back -> Just "elaborated syntax, occurrence types or builtin metadata changed"
-        | dataElaborated e /= dataElaborated back -> Just "elaborated reserialization changed"
-        | otherwise -> Nothing
+elaboratedRoundTrip e =
+    let text = dataElaborated e
+     in case A.readElaborated text of
+            Error err -> Just err
+            Ok back
+                | show e /= show back -> Just "elaborated syntax, occurrence types or builtin metadata changed"
+                | text /= dataElaborated back -> Just "elaborated reserialization changed"
+                | otherwise -> Nothing
 
 knownParserRejection :: String -> String -> Bool
 knownParserRejection path message =
     path == "examples/rejected/for_assigns_counter.tersus"
         && "The body of a for loop cannot assign its loop variable i" `isInfixOf` message
 
-corpusHaskell :: IO TestResult
-corpusHaskell = do
-    sources <- corpus
+corpusHaskell :: Int -> IO TestResult
+corpusHaskell batch = do
+    units <- corpusUnits
+    let samples = [(unitIndex, fileIndex, name, tree)
+            | (unitIndex, unit) <- batchItems 4 batch (zip [0 :: Int ..] units)
+            , (fileIndex, (name, tree)) <- zip [0 :: Int ..] unit]
+    putStrLn ("AST corpus samples: " ++ show [(unitIndex, fileIndex, name) | (unitIndex, fileIndex, name, _) <- samples])
     pure $ firstFailure
         [ prefix name $ case tree of
             Error e -> if knownParserRejection name e then Nothing else Just e
             Ok ss -> firstFailure [roundTrip ss, case elaborate ss of
                 Error _ -> Nothing
                 Ok e -> elaboratedRoundTrip e]
-        | (name, tree) <- sources
+        | (_, _, name, tree) <- samples
         ]
 
 toolElaborated :: FilePath -> Result [Elaborated] String
@@ -211,8 +237,40 @@ deep =
 longNames :: [Statement]
 longNames = [Assign (concat (replicate 3000 "café\NUL\n\"\\𐀀")) (Var ""), Return (Val (VFnRef "λ☃"))]
 
+chunkedInteger :: [String] -> String
+chunkedInteger chunks = unlines $
+    ["tersus-ast 1 parsed", "NameEnd"]
+    ++ ["NamePart " ++ show text ++ " " ++ show (i - 1) | (i, text) <- zip [1 :: Int ..] (reverse chunks)]
+    ++ ["VInt " ++ show n, "Val " ++ show (n + 1), "Return " ++ show (n + 2), "StatementsEnd"
+       , "StatementsCons " ++ show (n + 3) ++ " " ++ show (n + 4), "root " ++ show (n + 5)]
+  where
+    n = length chunks
+
+chunkedIntegers :: [(String, String, Integer)]
+chunkedIntegers =
+    [ ("distinct lossless large integer chunks", chunkedInteger large, read (concat large))
+    , ("empty integer chunks", chunkedInteger ["", "12", "", "34", ""], 1234)
+    , ("split minus sign", chunkedInteger ["", "-", "", "56", "78", ""], -5678)
+    , ("leading zero chunks", chunkedInteger ["00", "", "01", "02"], 102)
+    ]
+  where
+    large = [concat (replicate 64 "12345678"), concat (replicate 64 "87654321"), "2468013579"]
+
+chunkedIntegerRefusals :: [(String, String, String)]
+chunkedIntegerRefusals =
+    [ ("nondigit in an integer chunk", chunkedInteger ["12", "5", "34"], chunkedInteger ["12", "x", "34"])
+    , ("minus inside integer chunks", chunkedInteger ["12", "5", "34"], chunkedInteger ["12", "-", "34"])
+    , ("split bare minus", chunkedInteger ["", "-", "7", ""], chunkedInteger ["", "-", "", ""])
+    , ("only empty integer chunks", chunkedInteger ["", "0", ""], chunkedInteger ["", "", ""])
+    ]
+
+haskellChunkedInteger :: String -> Integer -> TestResult
+haskellChunkedInteger text expected = case A.readParsed text of
+    Error e -> Just e
+    Ok ss -> testAssertEq ss [Return (Val (VInt expected))]
+
 refusals :: [(String, String, String)]
-refusals = structural ++ mutations
+refusals = structural ++ mutations ++ chunkedIntegerRefusals
   where
     header = "tersus-ast 1 parsed\n"
     empty = dataParsed []
@@ -298,9 +356,22 @@ haskellRefused s = case A.readParsed s of
     Ok _ -> Just "accepted malformed AST"
 
 
+{-# NOINLINE readerProgramCache #-}
+readerProgramCache :: MVar (Maybe (Result M.Program String))
+readerProgramCache = unsafePerformIO (newMVar Nothing)
+
+readerProgram :: IO (Result M.Program String)
+readerProgram = modifyMVar readerProgramCache $ \cached -> case cached of
+    Just result -> pure (cached, result)
+    Nothing -> do
+        compiled <- programFromFile readerPath
+        pure $ case compiled of
+            Ok _ -> (Just compiled, compiled)
+            Error _ -> (Nothing, compiled)
+
 interpreted :: [Statement] -> [String] -> IO TestResult
 interpreted ss args = do
-    compiled <- programFromFile readerPath
+    compiled <- readerProgram
     pure (interpretedProgram compiled ss args)
 
 interpretedSource :: String -> [Statement] -> [String] -> IO TestResult
@@ -308,10 +379,16 @@ interpretedSource source ss args = do
     files <- Mod.snapshotFromFilesystem readerPath
     let matching = [path | (path, _) <- files, Mod.normalizePath path == Mod.normalizePath readerPath]
     case matching of
-        [entry] -> do
-            compiled <- programFromFiles readerPath [(path, if path == entry then source else text) | (path, text) <- files]
-            pure (interpretedProgram compiled ss args)
+        -- (built as the unmutated reader is, a compiler tool linked without
+        -- being validated: testHostValidation validates the reader)
+        [entry] -> pure (interpretedProgram (toolLike [(path, if path == entry then source else text) | (path, text) <- files]) ss args)
         _ -> pure (Just "Mutation did not select exactly one AST reader package entry")
+
+toolLike :: [(FilePath, String)] -> Result M.Program String
+toolLike files = case Mod.loadFromEntry (Mod.resolverFromFiles files) readerPath of
+    Left e -> Error e
+    Right (Mod.PackageResult pkg) -> compileModulesBootstrap pkg
+    Right _ -> Error (readerPath ++ " is not in a package")
 
 interpretedProgram :: Result M.Program String -> [Statement] -> [String] -> TestResult
 interpretedProgram compiled ss args =
@@ -334,39 +411,61 @@ checkOutput _ _ out = case A.readParsed out of
         Error e -> Just e
         Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt 5))
 
+{-# NOINLINE astReaderExeCache #-}
+astReaderExeCache :: MVar (Maybe FilePath)
+astReaderExeCache = unsafePerformIO (newMVar Nothing)
+
+astReaderExe :: IO (Result FilePath String)
+astReaderExe = modifyMVar astReaderExeCache $ \cached -> case cached of
+    Just exe -> pure (cached, Ok exe)
+    Nothing -> do
+        built <- buildAstReaderExe
+        pure $ case built of
+            Ok exe -> (Just exe, built)
+            Error _ -> (Nothing, built)
+
+buildAstReaderExe :: IO (Result FilePath String)
+buildAstReaderExe = do
+    files <- Mod.snapshotFromFilesystem readerPath
+    checked <- programFromFiles readerPath files
+    seed <- cachedSeed
+    case (checked `bindResult` nativeProgram, seed) of
+        (Error e, _) -> pure (Error e)
+        (_, Error e) -> pure (Error e)
+        (Ok program, Ok compiler) -> do
+            let native = insertOwnership program
+                dataText = writeProgram native
+                build output = do
+                    ir <- runWithInput compiler dataText
+                    case ir of
+                        Error e -> pure (Error e)
+                        Ok text -> buildExecutable output text
+            cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the AST reader" build
+
 withAstReader :: (FilePath -> IO TestResult) -> IO TestResult
 withAstReader use = do
     available <- clangAvailable
     if not available
         then putStrLn "[SKIP] native AST reader: clang is unavailable" >> pure Nothing
         else do
-            files <- Mod.snapshotFromFilesystem readerPath
-            checked <- programFromFiles readerPath files
-            seed <- cachedSeed
-            case (checked, seed) of
-                (Error e, _) -> pure (Just e)
-                (_, Error e) -> pure (Just e)
-                (Ok program, Ok compiler) -> do
-                    let native = insertOwnership (nativeProgram program)
-                        dataText = writeProgram native
-                        build output = do
-                            ir <- runWithInput compiler dataText
-                            case ir of
-                                Error e -> pure (Error e)
-                                Ok text -> buildExecutable output text
-                    built <- cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the validated AST reader" build
-                    case built of
-                        Error e -> pure (Just e)
-                        Ok exe -> use exe
+            built <- astReaderExe
+            case built of
+                Error e -> pure (Just e)
+                Ok exe -> use exe
 
 nativeText :: FilePath -> String -> IO TestResult
 nativeText exe text = do
     (code, out, err) <- runExecutableBytes exe [] text
     pure $ if code == ExitSuccess && null err && out == text then Nothing else Just ("exit " ++ show code ++ ", " ++ take 200 err ++ ", wrote " ++ show (length out) ++ " for " ++ show (length text))
 
-nativeCorpus :: IO TestResult
-nativeCorpus = withAstReader $ \exe -> do
-    sources <- corpus
+nativeCorpus :: Int -> IO TestResult
+nativeCorpus batch = withAstReader $ \exe -> do
+    units <- corpusUnits
+    let samples = [(unitIndex, fileIndex, name, tree)
+            | (unitIndex, unit) <- batchItems 4 batch (zip [0 :: Int ..] units)
+            , (fileIndex, (name, tree)) <- zip [0 :: Int ..] unit]
+        sources = [(name, tree) | (_, _, name, tree) <- samples]
+    putStrLn ("AST native corpus samples: " ++ show [(unitIndex, fileIndex, name) | (unitIndex, fileIndex, name, _) <- samples])
     results <- forM sources $ \(name, tree) -> case tree of
         Error e -> pure (if knownParserRejection name e then Nothing else Just (name ++ ": " ++ e), 0 :: Int, 0 :: Int)
         Ok ss -> do
@@ -377,17 +476,25 @@ nativeCorpus = withAstReader $ \exe -> do
                     result <- nativeText exe (dataElaborated tree)
                     pure (result, 1)
             pure (prefix name (firstFailure [p, e]), count, 1)
-    extra <- mapM (nativeText exe . dataParsed) [small, fixtures, deep, longNames]
+    let extras = batchItems 4 batch [small, fixtures, deep, longNames]
+    extra <- mapM (nativeText exe . dataParsed) extras
     let parsedCount = sum [n | (_, _, n) <- results]
-    putStrLn ("AST native corpus: " ++ show (length sources) ++ " sources, " ++ show parsedCount ++ " parsed, " ++ show (sum [n | (_, n, _) <- results]) ++ " elaborated wrappers, " ++ show (length sources - parsedCount) ++ " parser-rejected, 4 constructor/depth/name fixtures")
+    putStrLn ("AST native corpus: " ++ show (length sources) ++ " sources, " ++ show parsedCount ++ " parsed, " ++ show (sum [n | (_, n, _) <- results]) ++ " elaborated wrappers, " ++ show (length sources - parsedCount) ++ " parser-rejected, " ++ show (length extras) ++ " constructor/depth/name fixtures in batch " ++ show batch ++ "/4")
     pure (firstFailure ([result | (result, _, _) <- results] ++ extra))
+
+nativeChunkedIntegers :: IO TestResult
+nativeChunkedIntegers = withAstReader $ \exe -> do
+    results <- forM chunkedIntegers $ \(name, text, expected) -> do
+        exact <- nativeText exe text
+        pure (prefix name (firstFailure [haskellChunkedInteger text expected, exact]))
+    pure (firstFailure results)
 
 nativeRefusals :: IO TestResult
 nativeRefusals = withAstReader $ \exe -> do
     results <- forM refusals $ \(name, control, text) -> do
         accepted <- nativeText exe control
         (code, out, err) <- runExecutableBytes exe [] text
-        let rejected = if code == ExitSuccess && out == "1\n" && not (null err) then Nothing else Just ("did not refuse: " ++ show (code, take 200 out, take 200 err))
+        let rejected = if code == ExitSuccess && out == "1\n" && err == "not the AST as data\n" then Nothing else Just ("did not refuse: " ++ show (code, take 200 out, take 200 err))
         pure (prefix name (firstFailure [accepted, rejected]))
     pure (firstFailure results)
 
@@ -405,16 +512,17 @@ nativeMutation = withAstReader $ \exe -> do
 
 testAstData :: Test
 testAstData = TestList "testAstData"
-    [ testDataCodec
-    , testCase "checked writer refuses unsupported numeric and record sizes" writerLimits
+    [ testCase "checked writer refuses unsupported numeric and record sizes" writerLimits
     , testCase "all syntax constructors and builtins" (roundTrip fixtures)
     , testCase "builtin Eq hides metadata but serialization preserves it" metadata
     , testCase "elaborated wrapper preserves occurrence types" (elaboratedRoundTrip (Elaborated fixtures types))
     , testCase "deep expression arena" (roundTrip deep)
     , testCase "long UTF-8 names are chunked" (firstFailure [roundTrip longNames, testAssertTrue (all ((< 10000) . length) (lines (dataParsed longNames)))])
+    , TestList "chunked decimal integers" [testCase n (haskellChunkedInteger text expected) | (n, text, expected) <- chunkedIntegers]
     , TestList "malformed protocol" [testCase n (firstFailure [haskellAccepted control, haskellRefused bad]) | (n, control, bad) <- refusals]
     , TestCase "packaged tools retain elaborated AST and occurrence types" packageElaboratedRoundTrips
-    , TestCase "whole parsed and elaborated source corpus" corpusHaskell
+    , TestList "whole parsed and elaborated source corpus"
+        [TestCase (show batch ++ "/4") (corpusHaskell batch) | batch <- [1 .. 4]]
     ]
 
 testAstReader :: Test
@@ -424,10 +532,12 @@ testAstReader = TestList "testAstReader" $
     , TestCase "interpreted exact printed byte count" (interpreted small ["count"])
     , TestCase "interpreted semantic mutation" (interpreted small ["mutate"])
     , TestCase "native exact printed byte counts" nativeCount
+    , TestCase "native exact chunked decimal integers" nativeChunkedIntegers
     , TestCase "native malformed protocol" nativeRefusals
     , TestCase "native semantic mutation" nativeMutation
     , TestCase "packaged elaborated tools native round trip" nativeElaboratedPackages
-    , TestCase "whole corpus native round trip" nativeCorpus
+    , TestList "whole corpus native round trip"
+        [TestCase (show batch ++ "/4") (nativeCorpus batch) | batch <- [1 .. 4]]
     ] ++ concat
         [ [ TestCase ("interpreted array primitive " ++ show primitive) (interpreted statements [])
           , TestCase ("native parsed array primitive " ++ show primitive) (withAstReader (\exe -> nativeText exe (dataParsed statements)))

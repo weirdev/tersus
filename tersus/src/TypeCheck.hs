@@ -42,8 +42,6 @@ typeCheck stmts = mapResult (const ()) (elaborate stmts)
 -- lowering visits those expressions: an expression, then the expression it applies when that is itself computed
 -- (not a name or a value), then its arguments, statement by statement (a function's body where it is defined).
 -- That is all the lowering needs to give every local and temporary its type, so it never infers a type itself.
-data Elaborated = Elaborated [Statement] [Type]
-    deriving (Show)
 
 data PreparedPrefix = PreparedPrefix Ctx Env [Statement] [Type] TcState
 
@@ -916,12 +914,24 @@ inferExprR ctx env expr =
                     return (TExpr xt (F (Val (builtinFunct (Ctor name args (map fst fields)))) (map tExpr parts)) parts)
                 _ -> cloneTrait x'
         _ -> failTc ("Type error: clone takes 1 argument, got " ++ show (length args))
-    cloneInput x = do
-        boxed <- throughBox x
-        let projection = case tExpr x of Var _ -> False; expr -> clonePlace expr
-        return (if projection && not boxed
-            then TExpr (TRef (tType x)) (F (Val (builtinFunct BorrowOf)) [tExpr x]) [x]
-            else x)
+    cloneInput x = case x of
+        -- Only a lent Clone input may replace consuming unbox with a payload borrow.
+        TExpr ty (F (Val (VFunct _ _ _ (BuiltinFunct UnBox) _)) [box]) [boxed]
+            | clonePlace box -> do
+                payload <- zonk ty
+                -- Boxed arrays lower to List storage, not a Box slot containing an inline array.
+                let arrayPayload = case payload of TArrayOf{} -> True; _ -> False
+                crossesBox <- or <$> mapM throughBox (childrenOf boxed)
+                if arrayPayload || crossesBox then return x else do
+                    let pointee = TExpr ty (F (Val (builtinFunct DerefOf)) [box]) [boxed]
+                    return (TExpr (TRef ty) (F (Val (builtinFunct BorrowOf)) [tExpr pointee]) [pointee])
+        _ -> do
+            boxed <- or <$> mapM throughBox (childrenOf x)
+            let projection = case tExpr x of Var _ -> False; expr -> clonePlace expr
+            return (if projection && not boxed
+                then TExpr (TRef (tType x)) (F (Val (builtinFunct BorrowOf)) [tExpr x]) [x]
+                else x)
+    childrenOf (TExpr _ _ children) = children
     throughBox (TExpr ty _ children) = do
         resolved <- unref <$> zonk ty
         case resolved of

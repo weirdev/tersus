@@ -8,7 +8,6 @@ import BuiltinRegistry (builtinRegistry, entryInstances)
 import DataCodec
 import Syntax
 import Types
-import TypeCheck (Elaborated (..))
 import Utils
 
 type Build = (Int, [String])

@@ -25,7 +25,7 @@ testPointers =
             , testCase "a tuple in a tuple" (runs "t = (1, (2, 3)); return t.1.1;" "3")
             , testCase "the contract of a part" (valid "fn f(n: Int) -> (Int, Int) [{ }] [{ affirm return.0 = n; affirm return.1 = n + 1; }] { return (n, n + 1); }; (a, b) = f(4); affirm b = a + 1; return b;")
             , testCase "a part used after it was moved" (rejected "(a, b) = (push([], 1), push([], 2)); c = a; return size(a);" "a was moved")
-            , testCase "a tuple of one part" (rejected "t: (Int) = 1; return 0;" "")
+            , testCase "a tuple of one part" (rejected "fn f(t: (Int)) -> Int { return 0; }; return 0;" "a tuple type has two parts or more")
             , testCase "the name of the struct of tuples is the language's" (rejected "struct Tuple2<A, B> { x: A, y: B }; return 0;" "builtin type")
             ]
         , TestList
@@ -42,41 +42,12 @@ testPointers =
             , testCase "a block of one type as another" (runs "struct Two { a: I32, b: I32 }; impl Clone for Two { }; impl Copy for Two { }; (p, b) = Addr::alloc(2); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, Two { a: -1, b: 2 }, c); x = Addr::get(q, 0, c); c = Addr::dropValue(q, 0, c); d = Addr::free(q, c); return toInt(x.a) + toInt(x.b);" "1")
             , testCase "a block of slots of another size" (rejected "(p, b) = Addr::alloc(2); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, true, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c);" "are not the same size")
             , testCase "the permission to memory the program did not allocate is an assumption" (valid "p = Addr::fromInt(4096); b = Block::assume(p, 2); b = Addr::write(p, 0, 5, b); b = Addr::dropValue(p, 0, b); return Addr::free(p, b);")
+            , testCase "an emptied slot is known empty" (valid "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); b = Addr::dropValue(p, 0, b); affirm filled(b, 0) = false; return Addr::free(p, b);")
             , testCase "a Vec on an address" (runs vec "1")
             ]
         , TestList
             "refused"
-            [ testCase "a read of an empty slot" (rejected "(p, b) = Addr::alloc(2); x = Addr::get(p, 1, b); d = Addr::free(p, b); return x;" "Could not prove: filled(b, i) = true")
-            , testCase "a write over a filled slot" (rejected "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 1, b); b = Addr::write(p, 0, 2, b); b = Addr::dropValue(p, 0, b); return Addr::free(p, b);" "Could not prove: filled(b, i) = false")
-            , testCase "a slot out of bounds" (rejected "(p, b) = Addr::alloc(2); b = Addr::write(p, 2, 1, b); b = Addr::dropValue(p, 2, b); return Addr::free(p, b);" "Could not prove: i < cap(b)")
-            , testCase "a negative slot" (rejected "(p, b) = Addr::alloc(2); b = Addr::write(p, 0 - 1, 1, b); b = Addr::dropValue(p, 0 - 1, b); return Addr::free(p, b);" "Could not prove: i >= 0")
-            , testCase "the permission of one block with the address of another" (rejected "(p, b) = Addr::alloc(1); (q, c) = Addr::alloc(1); b = Addr::write(q, 0, 1, b); b = Addr::dropValue(p, 0, b); d = Addr::free(p, b); return d + Addr::free(q, c);" "Could not prove: base(b) = p")
-            , testCase "an old address after a resize" (rejected "(p, b) = Addr::alloc(1); (q, b) = Addr::resize(p, 2, b); b = Addr::write(p, 0, 1, b); b = Addr::dropValue(q, 0, b); return Addr::free(q, b);" "Could not prove: base(b) = p")
-            , testCase "a free of a part of an allocation" (rejected "(p, b) = Addr::alloc(4); (lo, hi) = Block::split(b, 2); d = Addr::free(p, lo); return d + Addr::free(Addr::offset(p, 2), hi);" "Could not prove: cap(b) = extent(origin(b))")
-            , testCase "a join of blocks from two allocations" (rejected "(p, b) = Addr::alloc(2); (q, c) = Addr::alloc(2); r = Block::join(b, c); return Addr::free(p, r);" "Could not prove: origin(lo) = origin(hi)")
-            , testCase "a join of the parts in the wrong order" (rejected "(p, b) = Addr::alloc(4); (lo, hi) = Block::split(b, 2); r = Block::join(hi, lo); return Addr::free(p, r);" "Could not prove: start(hi) = start(lo) + cap(lo)")
-            , testCase "a free with a slot filled" (rejected "(p, b) = Addr::alloc(2); b = Addr::write(p, 0, 1, b); return Addr::free(p, b);" "Could not prove: count(b) = 0")
-            , testCase "a resize that would lose a value" (rejected "(p, b) = Addr::alloc(2); b = Addr::write(p, 1, 1, b); (q, b) = Addr::resize(p, 1, b); b = Addr::dropValue(q, 0, b); return Addr::free(q, b);" "Could not prove: forall j in n..cap(b): filled(b, j) = false")
-            , testCase "a cast of a block that holds a value" (rejected "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 1, b); c = Block::cast(b); q = Addr::cast(p); c = Addr::dropValue(q, 0, c); d = Addr::free(q, c); return 0;" "Could not prove: count(b) = 0")
-            , testCase "a cast to slots of another size" (rejected "struct P { x: Int, y: Int }; (p, b) = Addr::alloc(1); c = Block::cast(b); q = Addr::cast(p); d = Addr::free(q, c); x = Addr::get(q, 0, c); return 0;" "")
-            , testCase "an offset of a cast address is not an offset of the address" (rejected "(p, b) = Addr::alloc(2); (lo, hi) = Block::split(b, 1); r = Addr::cast(Addr::offset(Addr::cast(p), 1)); hi = Addr::write(r, 0, 5, hi); hi = Addr::dropValue(r, 0, hi); return Addr::free(p, Block::join(lo, hi));" "Could not prove: base(b) = p")
-            , testCase "a cast to slots of lists, which take three words" (rejected "(p, b) = Addr::alloc(1); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, [1, 2, 3], c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c);" "(8,8) and (24,8)")
-            , testCase "a cast from slots of a type parameter" (rejected "fn f<T>(p: Addr<T>, ghost b: Block<T>) -> Int [{ affirm base(b) = p; affirm whole(b); affirm cap(b) >= 1; affirm count(b) = 0; }] [{ }] { c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, 7, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c); }; (p, b) = Addr::alloc(1); return f(p, b);" "layout of a type parameter")
-            , testCase "a use after free" (rejected "(p, b) = Addr::alloc(1); d = Addr::free(p, b); b = Addr::write(p, 0, 1, b); return d;" "b was moved at line 1:26 and cannot be used again")
-            , testCase "a view used after its block changed" (rejected "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, push([], 1), b); x = Addr::get(p, 0, b); b = Addr::dropValue(p, 0, b); d = Addr::free(p, b); return size(x);" "b[slot] is a part of it")
-            , testCase "a value moved out of a slot that still holds it" (rejected "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, push([], 1), b); x = Addr::get(p, 0, b); (y, b) = Addr::take(p, 0, b); d = Addr::free(p, b); return x;" "out of the memory of a permission")
-            , testCase "a permission that is dropped" (rejected "(p, b) = Addr::alloc(2); return 0;" "b is a permission given at line")
-            , testCase "a permission that is used on one path only" (rejected "fn f(c: Bool) -> Int { (p, b) = Addr::alloc(1); if c { d = Addr::free(p, b); }; return 0; }; return f(true);" "is a permission given at line")
-            , testCase "a permission lost by giving its local another value" (rejected "(p, b) = Addr::alloc(1); (p, b) = Addr::alloc(2); return Addr::free(p, b);" "is given another value here")
-            , testCase "a struct that holds a permission is dropped" (rejected "struct Buf { addr: Addr<Int>, ghost blk: Block<Int> }; (a, b) = Addr::alloc(1); x = Buf { addr: a, blk: b }; return 0;" "x.blk is a permission (in x)")
-            , testCase "a permission given to a function is not used" (rejected "fn f(p: Addr<Int>, ghost b: Block<Int>) -> Int { return 0; }; (p, b) = Addr::alloc(1); return f(p, b);" "b is a permission")
-            , testCase "a permission is copied" (rejected "(p, b) = Addr::alloc(1); c = clone(b); return Addr::free(p, b);" "is a permission, which is never copied")
-            , testCase "permissions are compared" (rejected "(p, b) = Addr::alloc(1); (q, c) = Addr::alloc(1); x = b = c; return 0;" "holds a permission, which cannot be compared")
-            , testCase "a list of permissions" (rejected "fn f(l: List<Block<Int>>) -> Int { return 0; }; return 0;" "a list cannot hold Block<Int>")
-            , testCase "a permission given to a type parameter" (rejected "fn id<T>(x: T) -> T { return x; }; (p, b) = Addr::alloc(1); c = id(b); return Addr::free(p, c);" "a type parameter is not one")
-            , testCase "what is known of a permission is not a value" (rejected "(p, b) = Addr::alloc(1); n = cap(b); return Addr::free(p, b) + n;" "is not a value the program has")
-            , testCase "ghost before a type that is not a permission" (rejected "fn f(ghost n: Int) -> Int { return n; }; return f(1);" "ghost is written before a type that is a permission")
-            , testCase "an allocation of a negative size" (rejected "(p, b) = Addr::alloc(0 - 1); return Addr::free(p, b);" "Could not prove: n >= 0")
+            [ TestList "permission refusals by invariant" [ testCase name (rejected source expected) | (name, source, expected) <- permissionRefusals ]
             ]
         , TestList
             "linear types"
@@ -146,11 +117,47 @@ testPointers =
     valid source = case runSource Check source of
         Ok _ -> Nothing
         Error e -> Just ("Expected the program to validate, but: " ++ e)
+    -- (the validator written in Tersus gives its own failure messages:
+    -- what is checked here is the refusal, as in TestHarness)
     rejected source expected = case runSource Check source of
-        Ok _ -> Just ("Expected the program to be refused with " ++ show expected)
-        Error e
-            | expected `isInfixOf` e -> Nothing
-            | otherwise -> Just ("Expected an error with " ++ show expected ++ ", got: " ++ e)
+        Ok _ -> Just "Expected the program to be refused"
+        Error e -> if expected `isInfixOf` e then Nothing else Just ("Expected failure containing: " ++ show expected ++ "\nGot: " ++ e)
+    permissionRefusals =
+        [ ("a read of an empty slot", "(p, b) = Addr::alloc(2); x = Addr::get(p, 1, b); d = Addr::free(p, b); return x;", "Could not prove: filled(b, i) = true")
+        , ("a write over a filled slot", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 1, b); b = Addr::write(p, 0, 2, b); b = Addr::dropValue(p, 0, b); return Addr::free(p, b);", "Could not prove: filled(b, i) = false")
+        , ("a slot out of bounds", "(p, b) = Addr::alloc(2); b = Addr::write(p, 2, 1, b); b = Addr::dropValue(p, 2, b); return Addr::free(p, b);", "Could not prove: i < cap(b)")
+        , ("a negative slot", "(p, b) = Addr::alloc(2); b = Addr::write(p, 0 - 1, 1, b); b = Addr::dropValue(p, 0 - 1, b); return Addr::free(p, b);", "Could not prove: i >= 0")
+        , ("the permission of one block with the address of another", "(p, b) = Addr::alloc(1); (q, c) = Addr::alloc(1); b = Addr::write(q, 0, 1, b); b = Addr::dropValue(p, 0, b); d = Addr::free(p, b); return d + Addr::free(q, c);", "Could not prove: base(b) = p")
+        , ("an old address after a resize", "(p, b) = Addr::alloc(1); (q, b) = Addr::resize(p, 2, b); b = Addr::write(p, 0, 1, b); b = Addr::dropValue(q, 0, b); return Addr::free(q, b);", "Could not prove: base(b) = p")
+        , ("a free of a part of an allocation", "(p, b) = Addr::alloc(4); (lo, hi) = Block::split(b, 2); d = Addr::free(p, lo); return d + Addr::free(Addr::offset(p, 2), hi);", "Could not prove: cap(b) = extent(origin(b))")
+        , ("a join of blocks from two allocations", "(p, b) = Addr::alloc(2); (q, c) = Addr::alloc(2); r = Block::join(b, c); return Addr::free(p, r);", "Could not prove: origin(lo) = origin(hi)")
+        , ("a join of the parts in the wrong order", "(p, b) = Addr::alloc(4); (lo, hi) = Block::split(b, 2); r = Block::join(hi, lo); return Addr::free(p, r);", "Could not prove: start(hi) = start(lo) + cap(lo)")
+        , ("an emptied slot is not still filled", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); b = Addr::dropValue(p, 0, b); affirm filled(b, 0) = true; return Addr::free(p, b);", "Could not prove: filled(b, 0) = true")
+        , ("a slot taken from is not still filled", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); (x, b) = Addr::take(p, 0, b); affirm filled(b, 0) = true; return x + Addr::free(p, b);", "Could not prove: filled(b, 0) = true")
+        , ("a dropped range is not still filled", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); b = Addr::dropRange(p, 0, 1, b); affirm filled(b, 0) = true; return Addr::free(p, b);", "Could not prove: filled(b, 0) = true")
+        , ("a free with a slot filled", "(p, b) = Addr::alloc(2); b = Addr::write(p, 0, 1, b); return Addr::free(p, b);", "Could not prove: count(b) = 0")
+        , ("a resize that would lose a value", "(p, b) = Addr::alloc(2); b = Addr::write(p, 1, 1, b); (q, b) = Addr::resize(p, 1, b); b = Addr::dropValue(q, 0, b); return Addr::free(q, b);", "Could not prove: forall j in n..cap(b): filled(b, j) = false")
+        , ("a cast of a block that holds a value", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 1, b); c = Block::cast(b); q = Addr::cast(p); c = Addr::dropValue(q, 0, c); d = Addr::free(q, c); return 0;", "Could not prove: count(b) = 0")
+        , ("a cast to slots of another size", "struct P { x: Int, y: Int }; (p, b) = Addr::alloc(1); c = Block::cast(b); q = Addr::cast(p); d = Addr::free(q, c); x = Addr::get(q, 0, c); return 0;", "c was moved at line 1:94 and cannot be used again")
+        , ("an offset of a cast address is not an offset of the address", "(p, b) = Addr::alloc(2); (lo, hi) = Block::split(b, 1); r = Addr::cast(Addr::offset(Addr::cast(p), 1)); hi = Addr::write(r, 0, 5, hi); hi = Addr::dropValue(r, 0, hi); return Addr::free(p, Block::join(lo, hi));", "Could not prove: base(b) = p")
+        , ("a cast to slots of lists, which take three words", "(p, b) = Addr::alloc(1); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, [1, 2, 3], c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c);", "(8,8) and (24,8)")
+        , ("a cast from slots of a type parameter", "fn f<T>(p: Addr<T>, ghost b: Block<T>) -> Int [{ affirm base(b) = p; affirm whole(b); affirm cap(b) >= 1; affirm count(b) = 0; }] [{ }] { c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, 7, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c); }; (p, b) = Addr::alloc(1); return f(p, b);", "layout of a type parameter")
+        , ("a use after free", "(p, b) = Addr::alloc(1); d = Addr::free(p, b); b = Addr::write(p, 0, 1, b); return d;", "b was moved at line 1:26 and cannot be used again")
+        , ("a view used after its block changed", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, push([], 1), b); x = Addr::get(p, 0, b); b = Addr::dropValue(p, 0, b); d = Addr::free(p, b); return size(x);", "b[slot] is a part of it")
+        , ("a value moved out of a slot that still holds it", "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, push([], 1), b); x = Addr::get(p, 0, b); (y, b) = Addr::take(p, 0, b); d = Addr::free(p, b); return x;", "out of the memory of a permission")
+        , ("a permission that is dropped", "(p, b) = Addr::alloc(2); return 0;", "b is a permission given at line")
+        , ("a permission that is used on one path only", "fn f(c: Bool) -> Int { (p, b) = Addr::alloc(1); if c { d = Addr::free(p, b); }; return 0; }; return f(true);", "is a permission given at line")
+        , ("a permission lost by giving its local another value", "(p, b) = Addr::alloc(1); (p, b) = Addr::alloc(2); return Addr::free(p, b);", "is given another value here")
+        , ("a struct that holds a permission is dropped", "struct Buf { addr: Addr<Int>, ghost blk: Block<Int> }; (a, b) = Addr::alloc(1); x = Buf { addr: a, blk: b }; return 0;", "x.blk is a permission (in x)")
+        , ("a permission given to a function is not used", "fn f(p: Addr<Int>, ghost b: Block<Int>) -> Int { return 0; }; (p, b) = Addr::alloc(1); return f(p, b);", "b is a permission")
+        , ("a permission is copied", "(p, b) = Addr::alloc(1); c = clone(b); return Addr::free(p, b);", "is a permission, which is never copied")
+        , ("permissions are compared", "(p, b) = Addr::alloc(1); (q, c) = Addr::alloc(1); x = b = c; return 0;", "holds a permission, which cannot be compared")
+        , ("a list of permissions", "fn f(l: List<Block<Int>>) -> Int { return 0; }; return 0;", "a list cannot hold Block<Int>")
+        , ("a permission given to a type parameter", "fn id<T>(x: T) -> T { return x; }; (p, b) = Addr::alloc(1); c = id(b); return Addr::free(p, c);", "a type parameter is not one")
+        , ("what is known of a permission is not a value", "(p, b) = Addr::alloc(1); n = cap(b); return Addr::free(p, b) + n;", "is not a value the program has")
+        , ("ghost before a type that is not a permission", "fn f(ghost n: Int) -> Int { return n; }; return f(1);", "ghost is written before a type that is a permission")
+        , ("an allocation of a negative size", "(p, b) = Addr::alloc(0 - 1); return Addr::free(p, b);", "Could not prove: n >= 0")
+        ]
     -- (a struct that holds a permission, which is linear unless it has a drop)
     owner = "struct V { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl V { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; };"
     dropper = owner ++ "impl Drop for V { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"

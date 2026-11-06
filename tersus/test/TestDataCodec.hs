@@ -2,12 +2,14 @@ module TestDataCodec (testDataCodec) where
 
 import Data.List (sort)
 import qualified Modules as Mod
-import Parse (fileBody)
+import ParsedFile (fileBody)
 import ModuleResolve (canonicalForFile, rewriteFileReferences)
 import qualified PackageCompile
 import PreludeSource (toolPackageFiles, parserPackageFiles)
 import qualified TersusParser
-import Seed (emitterHash)
+import qualified MirHousekeeping
+import MirData (writeProgram)
+import Seed (compilerSnapshotHash)
 import LlvmRuntime (runtimeSource)
 import Hash (fingerprint)
 import MirEval (fromMirValue, runProgramEnv, RunEnv (..), Outcome (..))
@@ -41,7 +43,8 @@ sharing entry = case Mod.loadFromEntry (Mod.resolverFromFiles toolPackageFiles) 
 codecRun :: String -> (Outcome -> TestResult) -> IO TestResult
 codecRun source check = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles (toolPackageFiles ++ [("examples/codec_test/package.tersus", ""), ("examples/codec_test/main.tersus", source)])) "examples/codec_test/main.tersus" of
     Left err -> Just err
-    Right (Mod.PackageResult pkg) -> case PackageCompile.compileModulesValidated pkg `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of
+    Right (Mod.PackageResult pkg) -> -- (the codec is the compiler's own code, built as the host builds it, not validated)
+        case PackageCompile.compileModulesLinked pkg `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of
         Error err -> Just err
         Ok outcome -> check outcome
     Right _ -> Just "codec fixture is standalone"
@@ -75,10 +78,19 @@ firstFailure results = case [err | Just err <- results] of
 testDataCodec :: Test
 testDataCodec = TestList "testDataCodec"
     [ TestList "canonical shared imports" [testCase entry (sharing entry) | entry <- entries]
-    , testCase "parser cache covers the complete package snapshot" $
-        let hash files = fingerprint ([emitterHash] ++ concatMap (\(path, source) -> [path, source]) files ++ [runtimeSource])
+    , TestCase "parser cache covers the complete package snapshot" $ do
+        producer <- MirHousekeeping.emitterKey
+        actual <- TersusParser.parserKey
+        let hash files = fingerprint ([compilerSnapshotHash] ++ concatMap (\(path, source) -> [path, source]) files ++ [runtimeSource])
+            original = hash parserPackageFiles
             changed target = [(path, source ++ if path == target then "\n" else "") | (path, source) <- parserPackageFiles]
-         in firstFailure [testAssertEq TersusParser.parserHash (hash parserPackageFiles), testAssertTrue (all (\(path, _) -> hash (changed path) /= TersusParser.parserHash) parserPackageFiles)]
+            manifest = testAssertTrue (all (\(path, _) -> hash (changed path) /= original) parserPackageFiles)
+        pure $ case (producer, actual, TersusParser.ownedParserProgram) of
+            (Ok emitter, Ok key, Ok program) -> firstFailure
+                [testAssertEq key (MirHousekeeping.ownedContentKey emitter (writeProgram program) []), manifest]
+            (Error e, _, _) -> Just e
+            (_, Error e, _) -> Just e
+            (_, _, Error e) -> Just e
     , TestCase "numeric, escaping and truncated-type refusals" readerBounds
     , TestCase "named type tokens and escaped bytes remain exact" writerMetadata
     ]

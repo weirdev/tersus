@@ -10,6 +10,7 @@ module MirOwnership
     , operandLocal
     ) where
 
+import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust, listToMaybe)
@@ -326,20 +327,22 @@ withLoanRoots :: LoanRoots -> Live -> Live
 withLoanRoots loans live = Set.union live (Set.unions [referencesOf loans l | (l, _) <- Set.toList live])
 
 blockLiveness :: Program -> Function -> Map BlockId LoanRoots -> BlockId -> Live -> (Live, [Live])
-blockLiveness program fn entries block out =
+blockLiveness program fn entries block =
     let BasicBlock stmts term = fnBlocks fn Map.! block
         states = scanl (loanStatement fn program) (Map.findWithDefault Map.empty block entries) stmts
         termLoans = last states
-        termLive = withLoanRoots termLoans (stepTerm term (withLoanRoots (loanTerminator fn program termLoans term) out))
-        lives = scanr (\(loans, stmt) after -> withLoanRoots loans (stepStmt stmt after)) termLive (zip states stmts)
-     in (head lives, tail lives)
+        afterTerm = loanTerminator fn program termLoans term
+     in \out ->
+        let termLive = withLoanRoots termLoans (stepTerm term (withLoanRoots afterTerm out))
+            lives = scanr (\(loans, stmt) after -> withLoanRoots loans (stepStmt stmt after)) termLive (zip states stmts)
+         in (head lives, tail lives)
 
 -- What is live when each block ends
-liveOuts :: Program -> Function -> Map BlockId LoanRoots -> Map BlockId Live
-liveOuts program fn entries = go (Map.map (const Set.empty) (fnBlocks fn))
+liveOuts :: Function -> Map BlockId (Live -> (Live, [Live])) -> Map BlockId Live
+liveOuts fn transfers = go (Map.map (const Set.empty) (fnBlocks fn))
   where
     go outs =
-        let ins = Map.mapWithKey (\b _ -> fst (blockLiveness program fn entries b (outs Map.! b))) (fnBlocks fn)
+        let ins = Map.mapWithKey (\b transfer -> fst (transfer (outs Map.! b))) transfers
             outs' = Map.map (\(BasicBlock _ term) -> Set.unions [Map.findWithDefault Set.empty s ins | s <- successors term]) (fnBlocks fn)
          in if outs' == outs then outs else go outs'
 
@@ -355,6 +358,9 @@ data Ctx = Ctx
     , cxStatements :: Map BlockId [Statement]
     , cxUses :: Map Local [(BlockId, Int, Role)] -- the uses of a local by statements
     , cxUsedByTerminator :: Set Local
+    , cxTerminatorUsers :: Map Local [BlockId] -- the blocks whose terminator uses a local
+    , cxTerminators :: Map BlockId Terminator
+    , cxNames :: Map Local Variable
     , cxAfters :: Map BlockId [Live]
     , cxTakes :: Set (BlockId, Int) -- the statements that take a field out of a value
     , cxBorrowed :: Set Local -- the parameters that are lent: the function does not own them, so it never frees or moves them
@@ -367,8 +373,9 @@ ownFunction :: Program -> Function -> Function
 ownFunction program fn0 =
     let fn = fuseCasts fn0
         entries = loanEntries program fn
-        outs = liveOuts program fn entries
-        afters = Map.mapWithKey (\b _ -> snd (blockLiveness program fn entries b (outs Map.! b))) (fnBlocks fn)
+        transfers = Map.mapWithKey (\b _ -> blockLiveness program fn entries b) (fnBlocks fn)
+        outs = liveOuts fn transfers
+        afters = Map.mapWithKey (\b transfer -> snd (transfer (outs Map.! b))) transfers
         statements = Map.map blockStatements (fnBlocks fn)
         -- (a parameter has a value from the start, so what is assigned to it is a second one)
         defsOf = Map.fromListWith (+) ([(d, 1 :: Int) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Just d <- map stmtDef stmts] ++ [(d, 1) | BasicBlock _ (Call _ _ d _) <- Map.elems (fnBlocks fn)] ++ [(p, 1) | p <- fnParams fn])
@@ -392,6 +399,8 @@ ownFunction program fn0 =
                 ]
         byTerminator =
             Set.fromList [l | BasicBlock _ term <- Map.elems (fnBlocks fn), (l, _) <- Set.toList (termUses term)]
+        terminatorUsers =
+            Map.fromListWith (++) [(l, [b]) | (b, BasicBlock _ term) <- Map.toList (fnBlocks fn), (l, _) <- Set.toList (termUses term)]
         cx0 =
             Ctx
                 { cxProgram = program
@@ -401,6 +410,9 @@ ownFunction program fn0 =
                 , cxStatements = statements
                 , cxUses = usesOf
                 , cxUsedByTerminator = byTerminator
+                , cxTerminatorUsers = terminatorUsers
+                , cxTerminators = Map.map blockTerminator (fnBlocks fn)
+                , cxNames = Map.mapMaybe localName (fnLocals fn)
                 , cxAfters = afters
                 , cxTakes = Set.empty
                 , cxBorrowed = Set.fromList (fnBorrowed fn)
@@ -416,7 +428,7 @@ ownFunction program fn0 =
         cx = cx0{cxTakes = takes}
         start = 1 + maximum (0 : [n | Local n <- Map.keys (fnLocals fn)])
         (blocks, finalState) =
-            runR (mapM (rewriteBlock cx outs) (Map.toList (fnBlocks fn))) (RS start Map.empty Set.empty)
+            runR (mapM (rewriteBlock cx outs) (Map.toList (fnBlocks fn))) (RS start Map.empty Set.empty Map.empty)
         allLocals = Map.union (fnLocals fn) (rsNew finalState)
         owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState, l `Set.notMember` cxBorrowed cx, not (dropped l)]
         -- (the drop of a type is given the value to free: native code frees what its fields own after it, so the drop does not free it)
@@ -455,13 +467,15 @@ ownStates = Map.filterWithKey (\k state -> state /= Empty || isJust (snd k))
 -- (a part that is not in a state holds nothing in it, and a field that is not in it is as the whole of it is, so a
 -- join looks at every part that either side names, and asks for a field of the whole of the other side)
 joinOwnStates :: OwnStates -> OwnStates -> OwnStates
-joinOwnStates a b =
-    ownStates
-        ( Map.fromList
-            [ (k, joinOwn (look a k) (look b k))
-            | k <- Set.toList (Map.keysSet a `Set.union` Map.keysSet b)
-            ]
-        )
+joinOwnStates a b
+    | a == b = ownStates a
+    | otherwise =
+        ownStates
+            ( Map.fromList
+                [ (k, joinOwn (look a k) (look b k))
+                | k <- Set.toList (Map.keysSet a `Set.union` Map.keysSet b)
+                ]
+            )
   where
     look states (l, Nothing) = Map.findWithDefault Empty (l, Nothing) states
     look states (l, Just field) =
@@ -864,7 +878,7 @@ takesField cx (Assign d (ReadField (Copy s) name field)) after =
 takesField _ _ _ = False
 
 -- The state of the rewriting: the next local to make, the locals that were made, and the ones that own nothing
-data RS = RS {rsNext :: Int, rsNew :: Map Local LocalDecl, rsAlias :: Set Local}
+data RS = RS {rsNext :: Int, rsNew :: Map Local LocalDecl, rsAlias :: Set Local, rsAliasOf :: Map Local (BlockId, Local)}
 
 newtype R a = R {runR :: RS -> (a, RS)}
 
@@ -884,6 +898,13 @@ freshLocal ty = R (\s -> let l = Local (rsNext s) in (l, s{rsNext = rsNext s + 1
 markAlias :: Local -> R ()
 markAlias l = R (\s -> ((), s{rsAlias = Set.insert l (rsAlias s)}))
 
+-- (a local that peeks at a part of the local it names, in the block it names)
+markAliasOf :: Local -> BlockId -> Local -> R ()
+markAliasOf l b src = R (\s -> ((), s{rsAlias = Set.insert l (rsAlias s), rsAliasOf = Map.insert l (b, src) (rsAliasOf s)}))
+
+aliasSources :: R (Map Local (BlockId, Local))
+aliasSources = R (\s -> (rsAliasOf s, s))
+
 rewriteBlock :: Ctx -> Map BlockId Live -> (BlockId, BasicBlock) -> R (BlockId, BasicBlock)
 rewriteBlock cx outs (b, BasicBlock stmts term) = do
     let out = outs Map.! b
@@ -899,7 +920,46 @@ rewriteStatement _ _ _ _ st@Peek{} = pure [st]
 rewriteStatement cx _ _ after (AssignRef root steps rv) = do
     (pre, post, operands) <- rewriteOperands cx after (roles rv)
     pure (pre ++ [AssignRef root steps (withOperands rv operands)] ++ post)
-rewriteStatement cx b k after (Assign d rv)
+rewriteStatement cx b k after st@(Assign d rv)
+    -- (the list a for loop goes through, read from a parameter that is lent and never given another value, or from a
+    -- part of one: it is looked at where it is for the whole loop, since nothing can change or free it during the call)
+    | forLoopList, Just s <- operandLocal =<< listSource = do
+        sources <- aliasSources
+        if heap cx (typeOf cx d) && stableChain cx sources s
+            then markAliasOf d b s >> pure [Peek d rv]
+            else rewriteAssign cx b k after st
+    | otherwise = rewriteAssign cx b k after st
+  where
+    forLoopList = maybe False ("$list " `isPrefixOf`) (Map.lookup d (cxNames cx))
+    listSource = case rv of
+        Use o -> Just o
+        ReadField o _ _ -> Just o
+        _ -> Nothing
+
+-- Whether a local is a parameter that is lent and never given another value, or a look at a part of one, made once:
+-- nothing changes or frees what it is during the call
+stableChain :: Ctx -> Map Local (BlockId, Local) -> Local -> Bool
+stableChain cx sources l
+    | l `Set.member` cxBorrowed cx = Map.findWithDefault 0 l (cxDefs cx) == 1
+    | Just (_, l') <- Map.lookup l sources = Map.findWithDefault 0 l (cxDefs cx) == 1 && stableChain cx sources l'
+    | otherwise = False
+
+-- Whether a local is given a value once and only read after, by statements and by calls it is lent to
+readOnlyEverywhere :: Ctx -> Local -> Bool
+readOnlyEverywhere cx d =
+    Map.findWithDefault 0 d (cxDefs cx) == 1
+        && all (\(_, _, role) -> role == Read) (Map.findWithDefault [] d (cxUses cx))
+        && all lentOnly (Map.findWithDefault [] d (cxTerminatorUsers cx))
+  where
+    lentOnly blk = case Map.lookup blk (cxTerminators cx) of
+        Just (Call callee args dest _) ->
+            operandLocal callee /= Just d
+                && dest /= d
+                && and [lentHere | (a, (lentHere, _)) <- zip args (borrowedArguments cx callee (length args) ++ repeat (False, Nothing)), operandLocal a == Just d]
+        _ -> False
+
+rewriteAssign :: Ctx -> BlockId -> Int -> Live -> Statement -> R [Statement]
+rewriteAssign cx b k after (Assign d rv)
     | isProjection rv && heap cx (typeOf cx d) = projection
     | otherwise = do
         (pre, post, operands) <- rewriteOperands cx after' (roles rv)
@@ -913,30 +973,76 @@ rewriteStatement cx b k after (Assign d rv)
         case (rv, projectionSource rv) of
             (ReadField (Copy s) name field, _)
                 | (b, k) `Set.member` cxTakes cx -> pure [Assign d (TakeField s name field)]
-            (_, Just (Copy s))
-                | peekable cx b k d s -> markAlias d >> pure [Peek d rv]
-            _ -> do
+            (_, Just (Copy s)) -> do
+                sources <- aliasSources
+                case peekEnd cx b k d of
+                    Just end | peekableIn cx b k d s end && chainUndisturbed sources end s -> markAliasOf d b s >> pure [Peek d rv]
+                    -- (a part of what nothing changes during the call, that is only read: looked at wherever it is used)
+                    _ | readOnlyEverywhere cx d && stableChain cx sources s -> markAliasOf d b s >> pure [Peek d rv]
+                    _ -> copied
+            _ -> copied
+    -- (what s peeks at, if s is a peek, must stay as it is while d is used too)
+    chainUndisturbed sources end s
+        | s `Set.notMember` cxProjected cx = True
+        | Just (b', s') <- Map.lookup s sources
+        , b' == b =
+            undisturbed cx b (k + 1) end s' && callLeaves cx b d s' && chainUndisturbed sources end s'
+        | otherwise = False
+    copied = do
                 -- a copy of the part: the part is read into a local that owns nothing, and that is cloned
                 (pre, post, operands) <- rewriteOperands cx after' (roles rv)
                 alias <- freshLocal (typeOf cx d)
                 markAlias alias
                 pure (pre ++ [Peek alias (withOperands rv operands), Assign d (CopyOf (Copy alias))] ++ post)
+rewriteAssign _ _ _ _ st = pure [st]
 
 -- Whether a temporary can look at a part of a value instead of owning a copy: it is given a value once, only read, by
 -- statements after it in its block, and none of them takes or changes what it was read from or uses it in a way that
 -- gives it away
-peekable :: Ctx -> BlockId -> Int -> Local -> Local -> Bool
-peekable cx b k t s =
+-- (a source that is a peek itself is the caller's to check: what it peeks at must stay as it is too)
+peekableIn :: Ctx -> BlockId -> Int -> Local -> Local -> Int -> Bool
+peekableIn cx b k t s end =
     t /= s
         && Map.findWithDefault 0 t (cxDefs cx) == 1
-        && s `Set.notMember` cxProjected cx
-        && t `Set.notMember` cxUsedByTerminator cx
         && all inBlockAfter uses
-        && not (any disturbed [k + 1 .. lastUse])
+        && undisturbed cx b (k + 1) end s
+        && callLeaves cx b t s
   where
     uses = Map.findWithDefault [] t (cxUses cx)
     inBlockAfter (b', k', role) = b' == b && k' > k && role == Read
-    lastUse = maximum (k : [k' | (_, k', _) <- uses])
+
+-- How far in its block a temporary given a value at statement k is used: to its last statement that uses it, or to the
+-- end of the block when the call that ends the block reads it as an argument it lends (the callee only reads it, and it
+-- is not used after); Nothing when another terminator uses it, or the call takes it
+peekEnd :: Ctx -> BlockId -> Int -> Local -> Maybe Int
+peekEnd cx b k t = case Map.findWithDefault [] t (cxTerminatorUsers cx) of
+    [] -> Just (lastUseIn cx k t)
+    [b'] | b' == b, Just (Call callee args dest _) <- Map.lookup b (cxTerminators cx) ->
+        let lent = borrowedArguments cx callee (length args)
+            onlyLent = and [lentHere | (a, (lentHere, _)) <- zip args (lent ++ repeat (False, Nothing)), operandLocal a == Just t]
+         in if operandLocal callee /= Just t && dest /= t && onlyLent
+                then Just (length (Map.findWithDefault [] b (cxStatements cx)) - 1)
+                else Nothing
+    _ -> Nothing
+
+-- Whether the call that ends the block, if the temporary t is lent to it, leaves the value t looks into alone: the call
+-- does not take it, lend it (it could be changed through a lent update) or write its result to it
+callLeaves :: Ctx -> BlockId -> Local -> Local -> Bool
+callLeaves cx b t s = case Map.findWithDefault [] t (cxTerminatorUsers cx) of
+    [] -> True
+    _ -> case Map.lookup b (cxTerminators cx) of
+        Just (Call callee args dest _) -> dest /= s && all ((/= Just s) . operandLocal) (callee : args)
+        _ -> False
+
+-- The last statement that uses t, from statement k of its block on
+lastUseIn :: Ctx -> Int -> Local -> Int
+lastUseIn cx k t = maximum (k : [k' | (_, k', _) <- Map.findWithDefault [] t (cxUses cx)])
+
+-- Whether statements from .. to of a block leave s as it is: none gives it another value, gives it away, or takes a
+-- field out of it
+undisturbed :: Ctx -> BlockId -> Int -> Int -> Local -> Bool
+undisturbed cx b from to s = not (any disturbed [from .. to])
+  where
     statements = Map.findWithDefault [] b (cxStatements cx)
     disturbed j =
         (b, j) `Set.member` cxTakes cx && takesFrom (statements !! j)

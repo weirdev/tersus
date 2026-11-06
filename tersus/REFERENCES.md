@@ -49,8 +49,8 @@ reference API must not introduce a hidden escape from them.
 
 `LANGUAGE.md` documents `&T` only on parameters, read-only views, explicit clones
 and value semantics. `MirMoves` follows projected places; `MirOwnership` can
-copy a disturbed read-only view to preserve its old value. `MirValidate` reasons
-about immutable iotas, not a mutable heap. These are foundations, not already a
+copy a disturbed read-only view to preserve its old value. The validator reasons
+about immutable terms, not a mutable heap. These are foundations, not already a
 general borrow checker.
 
 Tersus is in alpha: compatibility is not a design constraint. Replace today's

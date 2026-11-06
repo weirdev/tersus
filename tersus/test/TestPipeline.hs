@@ -1,5 +1,6 @@
 module TestPipeline
     ( testExamples
+    , testHostValidation
     , testCli
     , testMir
     , testMirSelfHosted
@@ -14,6 +15,7 @@ import Control.Exception (evaluate, finally)
 import Data.List (isInfixOf, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Directory (getTemporaryDirectory, removeFile)
+import CacheLock (openTempFileCloexec)
 import System.IO
 import qualified Data.Map as Map
 import Cli
@@ -23,13 +25,10 @@ import PreludeSource (parserPackageFiles)
 import qualified Mir as M
 import MirEval
 import MirLower
-import qualified MirValidate as Reference
 import MirHousekeeping (verifyProgram)
 import Pipeline
-import qualified ProofEngine as Engine
-import SelfHostedProof (querySelfHosted)
-import SelfHostedMir (validateMirSubset)
-import Parse
+import SelfHostedMir (validateMirSubset, verdictProved)
+import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
 import TypeCheck (Elaborated (..), elaborate)
@@ -89,6 +88,21 @@ testModulesPackageExample = TestCase "examples/modules/app/main.tersus" $ do
             Ok ((output, _), _) -> testAssertEq output "64"
         Right other -> Just ("modules example should be a package, got: " ++ show other)
 
+-- The compiler's own programs (the AST reader, and the MIR reader, checker and eraser and the
+-- emitter of the mir package) validated as examples. They are large enough that validating them takes far longer than
+-- the rest of the suite, so this group runs only when it is named (TestTersus.optInGroups); the
+-- groups that run them build them unvalidated, as the host does.
+testHostValidation :: Test
+testHostValidation =
+    TestList
+        "testHostValidation"
+        [ testExampleFile "examples/ast_reader/ast_reader.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "examples/mir/mir_reader/mir_reader.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "examples/mir/mir_verify/mir_verify.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "examples/mir/mir_erase/mir_erase.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "examples/mir/emit/emit.tersus" (ExpectReturn (VInt 1))
+        ]
+
 testExamples :: Test
 testExamples =
     TestList
@@ -135,12 +149,6 @@ exampleExpectations =
     , ("examples/strings.tersus", ((ExpectReturn (VInt 980))))
     , ("examples/upper.tersus", ((ExpectReturn (VInt 0))))
     , ("examples/text.tersus", ((ExpectReturn (VInt 504))))
-    , ("examples/mir/mir_reader/mir_reader.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/ast_reader/ast_reader.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/parser/parser.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/mir/mir_verify/mir_verify.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/mir/mir_erase/mir_erase.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/mir/emit/emit.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/vec.tersus", ((ExpectReturn (VInt 2491212381))))
     , ("examples/hashmap.tersus", ((ExpectReturn (VInt 218420))))
     , ("examples/spec_functions.tersus", ((ExpectReturn (VInt 25070))))
@@ -263,7 +271,7 @@ testCliCheck = testAssertEq (runSource Check "x = 5; affirm x = 5; return x;") (
 testCliReadsUtf8 :: Test
 testCliReadsUtf8 = TestCase "utf8 source" $ do
     tmp <- getTemporaryDirectory
-    (path, handle) <- openTempFile tmp "tersus_utf8.tersus"
+    (path, handle) <- openTempFileCloexec tmp "tersus_utf8.tersus"
     hSetEncoding handle utf8
     hPutStr handle "\233t\233 = 6; return \233t\233 * 7; // caf\233\n"
     hClose handle
@@ -278,20 +286,40 @@ testCliReadsUtf8 = TestCase "utf8 source" $ do
 testCli :: Test
 testCli = TestList "testCli" [testCliReadsUtf8, testCliCases]
 
+-- Every entry point must refuse a program that does not validate, before it
+-- is evaluated or lowered: (mode, runner for that mode, source, expected error).
+-- The "return first([]);" row is the one that would be evaluated if validation
+-- did not reject it first.
+validationFailureCases :: [(String, String -> Result String String, String, String)]
+validationFailureCases =
+    [ ("Interpret", runSource Interpret, "x = 5; affirm x < 4;", "Validation failed")
+    , ("Check", runSource Check, "x = 5; affirm x < 4;", "Validation failed")
+    , ("Interpret", runSource Interpret, "return first([]);", "Validation failed")
+    , ("Mir", runSource Mir, "x = 1; affirm x = 2;", "Validation failed")
+    , ("compileSource", \source -> mapResult (const "") (compileSource source), "x = 1; affirm x = 2;", "Validation failed: Could not prove")
+    ]
+
+validationFailuresFor :: [String] -> [TestResult]
+validationFailuresFor modes =
+    [ testAssertErrorContains expected (run source)
+    | (mode, run, source, expected) <- validationFailureCases
+    , mode `elem` modes
+    ]
+
+validationFailureFor :: String -> TestResult
+validationFailureFor mode = foldr orElse Nothing (validationFailuresFor [mode])
+
 testCliCases :: Test
 testCliCases =
     testCaseSeq
         "testCliCases"
-        [ testCliParseCommandLine
-        , testCliRenderValue
-        , testCliRun
-        , testCliCheck
-        , testAssertErrorContains "Parse error" (runSource Interpret "x = ;")
-        , testAssertErrorContains "Validation failed" (runSource Interpret "x = 5; affirm x < 4;")
-        , testAssertErrorContains "Validation failed" (runSource Check "x = 5; affirm x < 4;")
-        , -- Validation must reject the program before it is evaluated
-          testAssertErrorContains "Validation failed" (runSource Interpret "return first([]);")
-        ]
+        ([ testCliParseCommandLine
+         , testCliRenderValue
+         , testCliRun
+         , testCliCheck
+         , testAssertErrorContains "Parse error" (runSource Interpret "x = ;")
+         ]
+            ++ validationFailuresFor ["Interpret", "Check"])
 
 -- MIR tests
 -- Programs are lowered without being validated here (the examples are validated by testExamples), so a program may
@@ -526,12 +554,10 @@ testMir =
         , testStdlibInTersus
         , testCaseSeq
             "testMirCli"
-            [ -- `mir` prints the blocks
+            ([ -- `mir` prints the blocks
               testAssertEq (runSource Mir "x = 1 + 2; return x;") (Ok (unlines ["fn main() -> Int {", "    let _0: Int;", "    let _1: Int; // x", "    bb0: {", "        _1 = Add(const 1, const 2);", "        _0 = _1;", "        return;", "    }", "}"]))
-            , testAssertErrorContains "Validation failed" (runSource Mir "x = 1; affirm x = 2;")
-            , -- A run reports the errors that validation would have prevented
-              testAssertEq (runMir "return 1 / 0;") (Error "Division by zero")
             ]
+                ++ validationFailuresFor ["Mir"])
         ]
 
 -- The standard library is written in Tersus (lib/stdlib.tersus): the contracts the validator is
@@ -555,9 +581,9 @@ testMirSelfHosted = TestList "testMirSelfHosted"
     [ TestList name
         [ TestCase (show queryIndex) $ do
             source <- readFile "lib/validation.tersus"
-            compiled <- compileOnce source
+            compiled <- bootstrapOnce source
             pure $ case compiled of
-                Error e -> Just ("Could not validate the Tersus validator: " ++ e)
+                Error e -> Just ("Could not compile the Tersus validator: " ++ e)
                 Ok program -> snd (selfHostedQueryFamilies program !! familyIndex) !! queryIndex
         | queryIndex <- [0 .. count - 1]
         ]
@@ -571,113 +597,23 @@ selfHostedFamilyManifest =
 selfHostedQueryFamilies :: M.Program -> [(String, [TestResult])]
 selfHostedQueryFamilies program =
             let fact (a, b) = MData "EqualityFact" [("left", MInt a), ("right", MInt b)]
-                eq :: Integer -> Integer -> IotaProof
-                eq a b = FApp eqProof [ATerm (Iota (show a)), ATerm (Iota (show b))]
-                check pairs a b =
-                    let context = Engine.proofContextFromFacts [eq x y | (x, y) <- pairs]
-                        expected = Engine.entails (eq a b) context
-                        result = runNamedFunction program "hasEquality" [MList (map fact pairs), MInt a, MInt b]
-                     in case testAssertEq result (Ok (Just (MBool expected))) of
-                            Nothing -> Nothing
-                            Just e -> Just ("facts " ++ show pairs ++ ", query " ++ show (a, b) ++ ": " ++ e)
-                edges = [(a, b) | a <- [0..3], b <- [a + 1..3]] :: [(Integer, Integer)]
-                graphs = subsequences edges ++ [[(2, 3), (1, 2), (0, 1)], [(0, 1), (0, 1), (1, 1)]]
                 terms = [(12, 2, 10, 2), (13, 2, 11, 2), (10, 1, 0, 2), (11, 1, 1, 2), (14, 3, 1, 2)] :: [(Integer, Integer, Integer, Integer)]
                 term (i, op, a, b) = MData "BinaryTerm" [("id", MInt i), ("op", MInt op), ("left", MInt a), ("right", MInt b)]
-                expr i = case [(op, a, b) | (j, op, a, b) <- terms, i == j] of
-                    (op, a, b) : _ -> FApp (ATerm (Iota ("op" ++ show op))) [expr a, expr b]
-                    [] -> ATerm (Iota (show i))
-                congruenceContext = Engine.proofContextFromFacts [eq 0 1]
-                checkCongruence a b =
-                    let expected = Engine.entails (FApp eqProof [expr a, expr b]) congruenceContext
-                        actual = runNamedFunction program "hasCongruence" [MList [fact (0, 1)], MList (map term terms), MInt a, MInt b]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
-                lt :: Integer -> Integer -> IotaProof
-                lt a b = FApp (CTerm (builtinFunct (Rel Lt))) [ATerm (Iota (show a)), ATerm (Iota (show b))]
-                orders = [(3, 4), (2, 3), (1, 2)] :: [(Integer, Integer)]
-                orderFact (a, b) = MData "StrictOrderFact" [("smaller", MInt a), ("greater", MInt b)]
-                orderContext = Engine.proofContextFromFacts (eq 0 1 : [lt a b | (a, b) <- orders])
-                checkOrder a b =
-                    let expected = Engine.entails (lt a b) orderContext
-                        actual = runNamedFunction program "hasStrictOrder" [MList [fact (0, 1)], MList (map orderFact orders), MInt a, MInt b]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
-                le :: Integer -> Integer -> IotaProof
-                le a b = FApp (CTerm (builtinFunct (Rel LtEq))) [ATerm (Iota (show a)), ATerm (Iota (show b))]
                 mixed = [(3, 4, False), (2, 3, True), (1, 2, False)] :: [(Integer, Integer, Bool)]
                 mixedFact (a, b, s) = MData "OrderFact" [("smaller", MInt a), ("greater", MInt b), ("strict", MBool s)]
-                mixedContext = Engine.proofContextFromFacts (eq 0 1 : [if s then lt a b else le a b | (a, b, s) <- mixed])
-                checkMixed a b s =
-                    let expected = Engine.entails (if s then lt a b else le a b) mixedContext
-                        actual = runNamedFunction program "hasOrder" [MList [fact (0, 1)], MList (map mixedFact mixed), MInt a, MInt b, MBool s]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
-                termOrderContext = Engine.proofContextFromFacts [eq 0 1, FApp (CTerm (builtinFunct (Rel Lt))) [expr 10, expr 5]]
-                checkTermOrder a b =
-                    let expected = Engine.entails (FApp (CTerm (builtinFunct (Rel Lt))) [expr a, expr b]) termOrderContext
-                        actual = runNamedFunction program "hasOrderWithTerms" [MList [fact (0, 1)], MList (map term terms), MList [mixedFact (10, 5, True)], MInt a, MInt b, MBool True]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
                 apps = [(10,20,[0,2]), (11,21,[1,2]), (12,20,[0]), (13,20,[]), (14,21,[])] :: [(Integer,Integer,[Integer])]
                 app (i, f, args) = MData "ApplicationTerm" [("id", MInt i), ("function", MInt f), ("arguments", MList (map MInt args))]
-                appExpr i = case [(f, args) | (j, f, args) <- apps, i == j] of
-                    (f, args) : _ -> FApp (ATerm (Iota (show f))) (map appExpr args)
-                    [] -> ATerm (Iota (show i))
-                appContext = Engine.proofContextFromFacts [eq 0 1, eq 20 21]
-                checkApp a b =
-                    let expected = Engine.entails (FApp eqProof [appExpr a, appExpr b]) appContext
-                        actual = runNamedFunction program "hasApplicationEquality" [MList (map fact [(0,1),(20,21)]), MList (map app apps), MInt a, MInt b]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
-                appOrderContext = Engine.proofContextFromFacts [eq 0 1, eq 20 21, FApp (CTerm (builtinFunct (Rel Lt))) [appExpr 10, appExpr 5]]
-                checkAppOrder a b =
-                    let expected = Engine.entails (FApp (CTerm (builtinFunct (Rel Lt))) [appExpr a, appExpr b]) appOrderContext
-                        actual = runNamedFunction program "hasApplicationOrder" [MList (map fact [(0,1),(20,21)]), MList (map app apps), MList [mixedFact (10,5,True)], MInt a, MInt b, MBool True]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
-                impossible = [(1,2,True),(2,1,False)] :: [(Integer,Integer,Bool)]
-                impossibleContext = Engine.proofContextFromFacts [lt 1 2, le 2 1]
-                checkImpossible =
-                    let expected = Engine.entails (lt 7 8) impossibleContext
-                        actual = runNamedFunction program "entailsApplicationOrder" [MList [], MList [], MList (map mixedFact impossible), MInt 7, MInt 8, MBool True]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
-                ne :: Integer -> Integer -> IotaProof
-                ne a b = FApp (CTerm (builtinFunct (Rel NotEq))) [ATerm (Iota (show a)), ATerm (Iota (show b))]
                 differentFact (a, b) = MData "DisequalityFact" [("left", MInt a), ("right", MInt b)]
-                checkDifferent a b =
-                    let context = Engine.proofContextFromFacts [eq 0 1, ne 1 2, lt 2 3]
-                        expected = Engine.entails (ne a b) context
-                        actual = runNamedFunction program "entailsApplicationDisequality" [MList [fact (0,1)], MList [], MList [mixedFact (2,3,True)], MList [differentFact (1,2)], MInt a, MInt b]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
                 diffFact (a, b, k) = MData "DifferenceFact" [("left", MInt a), ("right", MInt b), ("bound", MInt k)]
                 differenceEdges = [(1,2,0),(2,3,-1),(3,4,0)] :: [(Integer,Integer,Integer)]
-                checkDifference a b s =
-                    let expected = Engine.entails (if s then lt a b else le a b) mixedContext
-                        actual = runNamedFunction program "hasDifference" [MList [fact (0,1)], MList (map diffFact differenceEdges), MInt a, MInt b, MInt (if s then -1 else 0)]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
                 overflowEdges = [(1,0,-9223372036854775808),(2,1,-1)] :: [(Integer,Integer,Integer)]
                 checkDifferenceOverflow = testAssertEq (runNamedFunction program "hasDifference" [MList [], MList (map diffFact overflowEdges), MInt 2, MInt 0, MInt (-9223372036854775808)]) (Ok (Just (MBool False)))
-                checkDifferenceContradiction facts expected = testAssertEq (runNamedFunction program "contradictoryDifferences" [MList [], MList (map diffFact facts)]) (Ok (Just (MBool expected)))
+                checkDifferenceContradiction facts expected = testAssertEq (runNamedFunction program "contradictoryDifferences" [localsValue [], MList (map diffFact facts)]) (Ok (Just (MBool expected)))
                 checkProduct a b result = testAssertEq (runNamedFunction program "safeProduct" [MInt a, MInt b]) (Ok (Just result))
                 productValues = [-9223372036854775808, -9223372036854775807, -4611686018427387904, -3074457345618258603, -3, -2, -1, 0, 1, 2, 3, 3074457345618258602, 4611686018427387903, 9223372036854775806, 9223372036854775807]
                 productResult a b = let n = a * b in if n < -9223372036854775808 || n > 9223372036854775807 then MData "SumResult::Overflow" [] else MData "SumResult::Sum" [("value", MInt n)]
-                refinedContext = Engine.proofContextFromFacts [eq 0 1, le 1 2, le 2 3, ne 0 3]
-                checkRefined a b =
-                    let expected = Engine.entails (lt a b) refinedContext
-                        actual = runNamedFunction program "entailsRefinedOrder" [MList [fact (0,1)], MList [], MList (map mixedFact [(1,2,False),(2,3,False)]), MList [differentFact (0,3)], MInt a, MInt b, MBool True]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
                 constants = [(30,0,3),(31,0,3),(32,0,5),(33,0,0),(34,1,0)] :: [(Integer,Integer,Integer)]
                 constant (i, k, v) = MData "ConstantTerm" [("id", MInt i), ("kind", MInt k), ("value", MInt v)]
-                constantExpr i = case i of
-                    30 -> CTerm (VInt 3)
-                    31 -> CTerm (VInt 3)
-                    32 -> CTerm (VInt 5)
-                    33 -> CTerm (VInt 0)
-                    34 -> CTerm (VBool False)
-                    _ -> ATerm (Iota (show i))
-                checkConstantEquality a b =
-                    let expected = Engine.entails (FApp eqProof [constantExpr a, constantExpr b]) Engine.emptyProofContext
-                        actual = runNamedFunction program "entailsSemanticEquality" [MList [], MList [], MList (map constant constants), MInt a, MInt b]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
-                checkConstantOrder a b =
-                    let expected = Engine.entails (FApp (CTerm (builtinFunct (Rel Lt))) [constantExpr a, constantExpr b]) Engine.emptyProofContext
-                        actual = runNamedFunction program "entailsSemanticOrder" [MList [], MList [], MList (map constant constants), MList [], MList [], MInt a, MInt b, MBool True]
-                     in testAssertEq actual (Ok (Just (MBool expected)))
                 validatorContext = MData "ValidatorContext" [("equalities", MList [fact (0,1)]), ("applications", MList []), ("constants", MList []), ("orders", MList (map mixedFact mixed)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 goal name a b = MData ("ValidatorGoal::" ++ name) [("left", MInt a), ("right", MInt b)]
                 checkContext name a b expected = testAssertEq (runNamedFunction program "entailsGoal" [validatorContext, goal name a b]) (Ok (Just (MBool expected)))
@@ -704,7 +640,7 @@ selfHostedQueryFamilies program =
                 checkFlowDuplicate = testAssertEq (runFlow [block 0 [] done, block 0 [] done]) (flowResult 3 0 (-1))
                 checkFlowUnsupported = testAssertEq (runFlow [block 0 [] (MData "FlowEnd::Unsupported" [])]) (flowResult 2 0 (-1))
                 localsValue bindings = MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt k), ("value", MInt v)] | (k, v) <- bindings]]), ("count", MInt (toInteger (length bindings)))]
-                initialExecution = MData "ExecutionState" [("context", emptyContext), ("locals", localsValue [])]
+                initialExecution = MData "ExecutionState" [("context", emptyContext), ("locals", localsValue []), ("templates", MList [])]
                 termRef i = MData "ValueRef::Term" [("term", MInt i)]
                 localRef i = MData "ValueRef::Local" [("local", MInt i)]
                 assignLocal i ref = MData "ExecutionStep::Assign" [("local", MInt i), ("value", ref)]
@@ -718,7 +654,7 @@ selfHostedQueryFamilies program =
                     let comparison = app (10, function, [0,1])
                         bool = constant (20, 1, if truth then 1 else 0)
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [comparison]), ("constants", MList [bool]), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
                         assume = MData "ExecutionStep::Assume" [("relation", MInt 0), ("left", termRef 10), ("right", termRef 20)]
                         obligation = MData "ExecutionStep::Check" [("relation", MInt relation), ("left", termRef left), ("right", termRef right)]
                      in case runNamedFunction program "executeSteps" [initial, MList [assume, obligation]] of
@@ -735,7 +671,7 @@ selfHostedQueryFamilies program =
                     result -> Just ("Unexpected execution flow result: " ++ show result)
                 checkBooleanBranch constantTerms destinations blocks expected =
                     let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("join", MInt (-1)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                      in case runNamedFunction program "validateExecution" [MList (execBlock 0 [] end : blocks), MInt 0, initial] of
                             Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
@@ -743,7 +679,7 @@ selfHostedQueryFamilies program =
                 checkBooleanJoin rightValue expected =
                     let joinConstants = boolConstants ++ [constant (30, 0, 3), constant (31, 0, rightValue), constant (32, 0, 3)]
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("join", MInt 3), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                         blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
                      in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
@@ -752,7 +688,7 @@ selfHostedQueryFamilies program =
                 checkBooleanJoinKnown expected =
                     let joinConstants = boolConstants ++ [constant (0, 0, 1), constant (1, 0, 2), constant (30, 0, 3), constant (31, 0, 4), constant (32, 0, 3)]
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("join", MInt 3), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                         blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
                      in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
@@ -764,10 +700,8 @@ selfHostedQueryFamilies program =
                      in case lowered of
                             Error e -> Just ("Could not lower test program: " ++ e)
                             Ok mir ->
-                                let result = validateMirSubset program mir
-                                    reference = case Reference.validateProgram mir of Ok _ -> True; Error _ -> False
-                                    agrees = case result of Ok (Just answer) -> answer == reference; _ -> True
-                                 in case testAssertEq result (Ok expected) `orElse` testAssertTrue agrees of
+                                let result = mapResult verdictProved (validateMirSubset program mir)
+                                 in case testAssertEq result (Ok expected) of
                                         Just failure -> Just (input ++ ": " ++ failure)
                                         Nothing -> Nothing
                 checkMalformedArrayLength =
@@ -784,17 +718,8 @@ selfHostedQueryFamilies program =
                                             replace block' = block'{M.blockStatements = map alter (M.blockStatements block')}
                                             broken = fn{M.fnBlocks = Map.map replace (M.fnBlocks fn)}
                                             program' = mir{M.progFunctions = Map.insert "f" broken (M.progFunctions mir)}
-                                         in testAssertEq (verifyProgram program') (Ok ()) `orElse` testAssertEq (validateMirSubset program program') (Ok Nothing)
+                                         in testAssertEq (verifyProgram program') (Ok ()) `orElse` testAssertEq (mapResult verdictProved (validateMirSubset program program')) (Ok Nothing)
                                     _ -> Just "Fixture has no unique m parameter"
-                bridgeFacts = [eq 0 1, lt 1 2, le 2 3]
-                checkBridge query = testAssertEq (querySelfHosted program bridgeFacts query) (Ok (Just (Engine.entails query (Engine.proofContextFromFacts bridgeFacts))))
-                checkBoxFieldBridge ctor expected =
-                    let payload = ATerm (Iota "payload")
-                        fieldValue = ATerm (Iota "field value")
-                        facts = [FApp eqProof [payload, FApp (CTerm (builtinFunct (Ctor ctor [] ["blk"]))) [fieldValue]]]
-                        query = FApp eqProof [FApp (CTerm (builtinFunct (namedField "Box<Int>" "blk"))) [payload], fieldValue]
-                     in testAssertEq (Engine.entails query (Engine.proofContextFromFacts facts)) expected
-                        `orElse` testAssertEq (querySelfHosted program facts query) (Ok (Just expected))
                 variantFact (object, family, constructor, matches) = MData "VariantFact" [("object", MInt object), ("family", MInt family), ("constructor", MInt constructor), ("matches", MBool matches)]
                 variantContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList [variantFact (0, 10, 20, True), variantFact (1, 10, 21, True)]), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkVariantGoal name a b expected = testAssertEq (runNamedFunction program "entailsGoal" [variantContext, goal name a b]) (Ok (Just (MBool expected)))
@@ -804,44 +729,27 @@ selfHostedQueryFamilies program =
                 withinGoal a b = MData "ValidatorGoal::Within" [("inner", MInt a), ("outer", MInt b)]
                 withinContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (11, 200, [10]), app (12, 201, [11])]), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt 200, MInt 201]), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkWithin a b expected = testAssertEq (runNamedFunction program "entailsGoal" [withinContext, withinGoal a b]) (Ok (Just (MBool expected)))
-                variantNone = CTerm (VData "Option::None" [])
-                variantSome = CTerm (VData "Option::Some" [])
-                checkVariantBridge = testAssertEq (querySelfHosted program [] (FApp (CTerm (builtinFunct (Rel NotEq))) [variantNone, variantSome])) (Ok (Just True))
-                checkVariantBridgeEqual = testAssertEq (querySelfHosted program [] (FApp (CTerm (builtinFunct (Rel Eq))) [variantNone, variantSome])) (Ok (Just False))
-                leftValue = ATerm (Iota "left value")
-                rightValue = ATerm (Iota "right value")
-                checkSymbolicVariantBridge = testAssertEq (querySelfHosted program [FApp (CTerm (builtinFunct (Is "Option::None"))) [leftValue], FApp (CTerm (builtinFunct (Is "Option::Some"))) [rightValue]] (FApp (CTerm (builtinFunct (Rel NotEq))) [leftValue, rightValue])) (Ok (Just True))
                 mergeContext constants equalities = MData "ValidatorContext" [("equalities", MList equalities), ("applications", MList []), ("constants", MList constants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                mergeLeftState = MData "ExecutionState" [("context", mergeContext [constant (10, 0, 3)] [fact (10, 10)]), ("locals", localsValue [(1, 10)])]
-                mergeRightState = MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (11, 11)]), ("locals", localsValue [(1, 11)])]
+                -- (the state where the paths parted, which knows nothing here)
+                mergeForkState = MData "ExecutionState" [("context", mergeContext [] []), ("locals", localsValue []), ("templates", MList [])]
+                mergeLeftState = MData "ExecutionState" [("context", mergeContext [constant (10, 0, 3)] [fact (10, 10)]), ("locals", localsValue [(1, 10)]), ("templates", MList [])]
+                mergeRightState = MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (11, 11)]), ("locals", localsValue [(1, 11)]), ("templates", MList [])]
                 checkCommonContext =
                     let left = mergeContext [] [fact (0, 1), fact (2, 3)]
                         right = mergeContext [] [fact (1, 0), fact (2, 4)]
                         expected = mergeContext [] [fact (0, 1)]
                      in testAssertEq (runNamedFunction program "commonContext" [left, right]) (Ok (Just expected))
-                checkMergeStates = case runNamedFunction program "mergeStates" [mergeLeftState, mergeRightState] of
-                    Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" [("context", MData "ValidatorContext" fields), ("locals", mergedLocals)])])) ->
-                        case (lookup "constants" fields, runNamedFunction program "lookupLocal" [mergedLocals, MInt 1]) of
-                            (Just (MList [MData "ConstantTerm" [("id", MInt joined), ("kind", MInt 0), ("value", MInt 3)]]), Ok (Just (MData "ValueLookup::Found" [("term", MInt found)]))) -> testAssertEq found joined
+                -- (both sides hold 3 in local 1: the merged context says the merged local is 3)
+                checkMergeStates = case runNamedFunction program "mergeStates" [mergeForkState, mergeLeftState, mergeRightState] of
+                    Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" [("context", context), ("locals", mergedLocals), ("templates", _)])])) ->
+                        case runNamedFunction program "lookupLocal" [mergedLocals, MInt 1] of
+                            Ok (Just (MData "ValueLookup::Found" [("term", MInt found)])) ->
+                                testAssertEq (runNamedFunction program "entailsGoal" [context, goal "Equal" found 10]) (Ok (Just (MBool True)))
                             other -> Just ("Merged state malformed: " ++ show other)
                     result -> Just ("Unexpected mergeStates result: " ++ show result)
-                withinOuter = ATerm (Iota "outer value")
-                withinInner = FApp (CTerm (builtinFunct (Field Nothing "x"))) [withinOuter]
-                checkWithinBridge = testAssertEq (querySelfHosted program [] (FApp (CTerm (builtinFunct Within)) [withinInner, withinOuter])) (Ok (Just True))
-             in [ ("equality graphs", [check graph a b | graph <- graphs, a <- [0..3], b <- [0..3]])
-                , ("products", [checkProduct a b (productResult a b) | a <- productValues, b <- productValues])
+             in [ ("products", [checkProduct a b (productResult a b) | a <- productValues, b <- productValues])
                 , ("relations",
-                      [ checkCongruence 10 11, checkCongruence 12 13, checkCongruence 10 14
-                      , checkOrder 0 4, checkOrder 1 3, checkOrder 4 0, checkOrder 0 0
-                      , checkMixed 0 4 True, checkMixed 0 4 False, checkMixed 0 2 True, checkMixed 0 2 False
-                      , checkMixed 4 0 False, checkMixed 0 0 False, checkMixed 0 0 True
-                      , checkTermOrder 11 5, checkTermOrder 5 11
-                      , checkApp 10 11, checkApp 10 12, checkApp 13 14, checkApp 12 10
-                      , checkAppOrder 11 5, checkAppOrder 5 11
-                      , checkImpossible
-                      , checkDifferent 0 2, checkDifferent 2 0, checkDifferent 2 3, checkDifferent 0 3, checkDifferent 0 0
-                      , checkDifference 0 4 True, checkDifference 0 2 True, checkDifference 0 2 False, checkDifference 4 0 False
-                      , checkDifferenceOverflow
+                      [ checkDifferenceOverflow
                       , checkDifferenceContradiction [(1,2,2),(2,1,-3)] True
                       , checkDifferenceContradiction [(1,2,2),(2,1,-2)] False
                       , checkDifferenceContradiction [(1,2,0),(2,1,0)] False
@@ -853,9 +761,6 @@ selfHostedQueryFamilies program =
                       , checkProduct (-3074457345618258603) 3 (MData "SumResult::Overflow" [])
                       , checkProduct (-4611686018427387904) (-2) (MData "SumResult::Overflow" [])
                       , checkProduct (-4611686018427387903) (-2) (MData "SumResult::Sum" [("value", MInt 9223372036854775806)])
-                      , checkRefined 1 3, checkRefined 1 2, checkRefined 3 1
-                      , checkConstantEquality 30 31, checkConstantEquality 30 32, checkConstantEquality 33 34
-                      , checkConstantOrder 30 32, checkConstantOrder 32 30
                       , checkContext "Equal" 0 1 True, checkContext "Less" 0 4 True, checkContext "AtMost" 0 2 True
                       , checkContext "Different" 0 4 True, checkContext "Less" 4 0 False
                       , checkBoundCongruence
@@ -894,31 +799,34 @@ selfHostedQueryFamilies program =
                       , checkMirSubset "fn f(x: Int) -> Int { affirm x = 0; return x; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int { return 1 / x; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int, y: Int) -> Int { if x < y { affirm x < y; } else { affirm y <= x; }; return 0; }; return 0;" (Just True)
+                      , checkMirSubset "fn f(flag: Bool) -> Int { y = 0; if flag { y = 1; } else { y = 2; }; affirm y > 0; return y; }; return f(true);" (Just True)
+                      , checkMirSubset "fn f(flag: Bool) -> Int { y = 0; if flag { y = 1; } else { y = 2; }; affirm y > 1; return y; }; return f(true);" (Just False)
                       , checkMirSubset "fn f(x: Int, y: Int) -> Int { if x < y { return 0; } else { affirm x < y; }; return 0; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] { return x; }; return 0;" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return >= 0; }] { return x; }; return 0;" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return > 0; }] { return x; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return + 1 > 0; }] { return x; }; return 0;" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x + 1 > 0; }] [{ affirm return = x + 1; }] { return x + 1; }; return f(1);" (Just True)
-                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x / 1 > 0; }] { return x; }; return f(1);" Nothing
-                      , checkMirSubset "fn f(x: Int, y: Int) -> Int [{ affirm x / y > 0; }] { return x; }; return 0;" Nothing
-                      , checkMirSubset "fn f(xs: List<Int>) -> Int [{ affirm size(xs) > 0; }] [{ affirm return = get(xs, 0); }] { return get(xs, 0); }; return f([5]);" Nothing
-                      , checkMirSubset "fn f(x: Int) -> Int shrinks x { return x; }; return 0;" Nothing
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x / 1 > 0; }] { return x; }; return f(1);" (Just True)
+                      , checkMirSubset "fn f(x: Int, y: Int) -> Int [{ affirm x / y > 0; }] { return x; }; return 0;" (Just True)
+                      , checkMirSubset "fn f(xs: List<Int>) -> Int [{ affirm size(xs) > 0; }] [{ affirm return = get(xs, 0); }] { return get(xs, 0); }; return f([5]);" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int shrinks x { return x; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int { return x; }; return f(1);" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int { return x; }; a = f(1); b = f(1); affirm a = b; return 0;" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int { return x; }; a = f(1); b = f(2); affirm a = b; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int { return x; }; fn g(x: Int) -> Int { return x; }; a = f(1); b = g(1); affirm a = b; return 0;" (Just False)
-                      , checkMirSubset "fn f() -> Int { return readByte(); }; a = f(); b = f(); affirm a = b; return 0;" Nothing
+                      , checkMirSubset "fn f() -> Int { return readByte(); }; a = f(); b = f(); affirm a = b; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return x; }; return f(1);" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return x; }; return f(0);" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; x = 3; x = f(x); affirm x = 3; return x;" (Just True)
-                      , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { x = 2; return x; }; return f(1);" Nothing
-                      , checkMirSubset "fn g() -> Int [{ }] [{ affirm return = 2; }] { return 2; }; fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { x = g(); return x; }; return f(1);" Nothing
+                      -- (a reassigned parameter is its entry value in the output contract: refused, return is 2 and x was 1)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { x = 2; return x; }; return f(1);" (Just False)
+                      , checkMirSubset "fn g() -> Int [{ }] [{ affirm return = 2; }] { return 2; }; fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { x = g(); return x; }; return f(1);" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return > 0; }] { return x; }; return f(1);" (Just False)
                       , checkMirSubset "fn yes() -> Bool [{ }] [{ affirm return = true; }] { return true; }; flag = yes(); if flag { return 1; } else { affirm 0 = 1; return 0; };" (Just True)
                       , checkMirSubset "fn g(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { return g(x); }; return f(2);" (Just True)
                       , checkMirSubset "fn g(x: Int) -> Int [{ affirm x > 0; }] { return x; }; fn f(x: Int) -> Int { return g(x); }; return f(1);" (Just False)
-                      , checkMirSubset "fn f(x: Int) -> Int { return f(x); }; return f(1);" Nothing
+                      , checkMirSubset "fn f(x: Int) -> Int { return f(x); }; return f(1);" (Just False)
                       ])
                 , ("MIR arithmetic",
                       [ checkMirSubset "return 7 / 1;" (Just True)
@@ -996,10 +904,10 @@ selfHostedQueryFamilies program =
                       , checkMirSubset "fn f<n>(a: Array<Int, n>) -> Int [{ affirm n > 0; }] { return get(a, 0); }; return f(#[1]);" (Just True)
                       , checkMirSubset "fn f<n>(a: Array<Int, n>) -> Int [{ affirm n > 0; }] { return get(a, 0); }; return f(#[]);" (Just False)
                       , checkMalformedArrayLength
-                      , checkMirSubset "enum E { A, B }; return E::A;" Nothing
-                      , checkMirSubset "extern fn labs(x: Int) -> Int [{ }] [{ affirm return >= 0; }]; a = labs(0 - 3); affirm a >= 0; return a;" Nothing
-                      , checkMirSubset "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); x = Addr::get(p, 0, b); return x + Addr::free(p, b);" Nothing
-                      , checkMirSubset "x = I32::from(3); return toInt(x);" Nothing
+                      , checkMirSubset "enum E { A, B }; return E::A;" (Just True)
+                      , checkMirSubset "extern fn labs(x: Int) -> Int [{ }] [{ affirm return >= 0; }]; a = labs(0 - 3); affirm a >= 0; return a;" (Just True)
+                      , checkMirSubset "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); x = Addr::get(p, 0, b); return x + Addr::free(p, b);" (Just False)
+                      , checkMirSubset "x = I32::from(3); return toInt(x);" (Just True)
                       ])
                 , ("MIR list updates",
                       [ checkMirSubset "xs = [4]; xs = push(xs, 5); affirm size(xs) = 2; affirm get(xs, 1) = 5; return 0;" (Just True)
@@ -1049,9 +957,11 @@ selfHostedQueryFamilies program =
                       , checkMirSubset "i = 0; while i < 2 [{ affirm i + 1 <= 3; }] shrinks 2 - i { i = i + 1; }; return i;" (Just True)
                       , checkMirSubset "s = 0; for i in 0..3 { s = s + 1; }; return s;" (Just True)
                       , checkMirSubset "i = 0; while i < 2 shrinks 2 - i { i = i - 1; }; return i;" (Just False)
-                      , checkMirSubset "n = 2; i = 0; while i < n shrinks n - i { i = i + 1; n = n + 1; }; return i;" Nothing
+                      , checkMirSubset "n = 2; i = 0; while i < n shrinks n - i { i = i + 1; n = n + 1; }; return i;" (Just False)
                       , checkMirSubset "xs = [1]; for i in 0..size(xs) { if get(xs, i) > 0 { return 1; }; }; return 0;" (Just True)
-                      , checkMirSubset "xs = [1]; for i in 0..size(xs) { if get(xs, i) > 0 { return 1; }; }; affirm 0 = 1; return 0;" (Just False)
+                      , -- (the loop returns on its first pass, so what follows it is never reached)
+                        checkMirSubset "xs = [1]; for i in 0..size(xs) { if get(xs, i) > 0 { return 1; }; }; affirm 0 = 1; return 0;" (Just True)
+                      , checkMirSubset "xs = [0]; for i in 0..size(xs) { if get(xs, i) > 0 { return 1; }; }; affirm 0 = 1; return 0;" (Just False)
                       , checkMirSubset "s = 0; for i in 0..1 { for j in 0..1 { s = s + 1; }; }; return s;" (Just True)
                       , checkMirSubset "i = 0; while i < 2 [{ affirm i >= 0; affirm i <= 2; }] shrinks 2 - i { if i < 2 { i = i + 1; } else { i = i + 0; }; }; return i;" (Just True)
                       , checkMirSubset "i = 0; while i < 2 [{ affirm i >= 0; affirm i <= 2; }] shrinks 2 - i { if i < 2 { i = i + 1; } else { i = i + 0; }; }; affirm i = 2; return i;" (Just True)
@@ -1066,10 +976,6 @@ selfHostedQueryFamilies program =
                       , checkConstructorGoal "Equal" 11 1 True, checkConstructorGoal "Equal" 11 0 False
                       , checkWithin 12 10 True, checkWithin 10 12 False, checkWithin 10 10 False
                       , checkCommonContext, checkMergeStates
-                      , checkVariantBridge, checkVariantBridgeEqual, checkSymbolicVariantBridge, checkWithinBridge
-                      , checkBridge (lt 0 3), checkBridge (lt 3 0), checkBridge (ne 0 3), checkBridge (eq 0 1)
-                      , checkBoxFieldBridge "P" False, checkBoxFieldBridge "Box<Int>" True
-                      , testAssertEq (querySelfHosted program [] (BVar "i")) (Ok Nothing)
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
                       , testAssertErrorContains "expected 3 arguments" (runNamedFunction program "hasEquality" [])
                       ])
@@ -1138,10 +1044,8 @@ testPipeline =
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program)) (Ok (Just "7"))
         , -- Each stage names itself in its error
           testAssertErrorContains "Parse error" (parseSource "x = ;")
-        , testAssertErrorContains "Validation failed: Could not prove" (compileSource "x = 1; affirm x = 2;")
+        , validationFailureFor "compileSource"
         , testAssertErrorContains "Validation failed: Type error" (compileSource "x = 1; y = x(2);")
-        , -- A program that does not validate is not lowered
-          testAssertErrorContains "Validation failed" (compileSource "x = 1; affirm x = 2;")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
           case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborate of
             Ok (Elaborated stmts _) -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))

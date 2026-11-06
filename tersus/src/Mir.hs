@@ -278,7 +278,10 @@ completeErasedInstances = completeInstancesWith True
 
 completeInstancesWith :: Bool -> Program -> Program
 completeInstancesWith erased program
-    | otherwise = program{progTypes = go (Map.map eraseDecl (progTypes program)) argMap (Set.toList mentioned)}
+    | otherwise = program
+        { progTypes = go (Map.map eraseDecl (progTypes program)) argMap (Set.toList mentioned)
+        , progGenerics = Map.map (\(params, fields) -> (params, eraseFields fields)) (progGenerics program)
+        }
   where
     eraseFields fields = [(f, t) | (f, t) <- fields, not (erased && isPermission t)]
     eraseDecl (StructDecl fields) = StructDecl (eraseFields fields)
@@ -646,7 +649,7 @@ readersOfInput program = grow (Set.fromList [name | (name, fn) <- functions, any
          in if Set.null more then known else grow (Set.union known more)
 
 -- The functions of the program that a function names as values or callees in its statements (not those its contracts could name,
--- which are all the functions before it): the validator knows each as the value it is (see ProofState.withFunctions)
+-- which are all the functions before it): the validator knows each as the value it is
 functionsNamed :: Function -> Set.Set Name
 functionsNamed fn =
     Set.fromList

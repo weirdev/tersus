@@ -10,7 +10,7 @@ module TestBasics
     , testControlFlow
     ) where
 
-import Parse
+import TestParserFragments
 import MirEval (fromMirValue)
 import Pipeline (parseWithEquality, runStatements, validateStatements)
 import StdLib
@@ -204,6 +204,21 @@ parseEvalReturningStmtHelper stmtStr expected =
                     Error e -> Just $ "Evaluation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
 
+-- Dual stage (validate + run) for snippets covered only here, replacing the
+-- former TestValidation parse-val twins of the same snippets.
+dualReturningStmtHelper :: String -> Value -> TestResult
+dualReturningStmtHelper stmtStr expected =
+    case parseStatement stmtStr of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right (Block stmts) ->
+            case validateStatements stmts of
+                Error e -> Just $ "Validation failed with error: " ++ e
+                Ok _ -> case runStatements stmts of
+                    Ok (Just val) -> testAssertEq (fromMirValue val) expected
+                    Ok Nothing -> Just "No value returned"
+                    Error e -> Just $ "Evaluation failed with error: " ++ e
+        Right _ -> Just "Not a block statement"
+
 testParseEvalSimpleExpression :: TestResult
 testParseEvalSimpleExpression =
     parseEvalExprHelper "0" (VInt 0)
@@ -214,7 +229,7 @@ testParseEvalCompoundExpression =
 
 testParseEvalBlockExpr :: TestResult
 testParseEvalBlockExpr =
-    parseEvalReturningStmtHelper
+    dualReturningStmtHelper
         "{\
         \  x = [5,4,3];\
         \  y = size(x);\
@@ -224,7 +239,7 @@ testParseEvalBlockExpr =
 
 testParseEvalWFunctDef :: TestResult
 testParseEvalWFunctDef =
-    parseEvalReturningStmtHelper
+    dualReturningStmtHelper
         "{\
         \  x = 6;\
         \  fn add1(i: Int) -> Int {\
@@ -248,7 +263,7 @@ testParseEvalWUdfCall =
 
 testParseNestedBlocks :: TestResult
 testParseNestedBlocks =
-    parseEvalReturningStmtHelper
+    dualReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
         \  {\
@@ -691,7 +706,7 @@ testFunctionCalls =
             , parseValidateFailProgramHelper (inc ++ "fn twice(n: Int) -> Int [{ }] [{ affirm return = (n + 3); }] { return inc(inc(n)); };") "Could not prove"
             , -- A function can call one defined after it, and a name is defined once
               parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return g(n); }; fn g(n: Int) -> Int [{ }] [{ }] { return n; }; x = f(1);"
-            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "Function already defined: f"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "is already defined"
             , -- A function defined inside a body is local to it: a later local function cannot call it
               parseValidProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; return helper(n); }; x = outer(1);"
             , parseValidateFailProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; fn user(m: Int) -> Int { return helper(m); }; return user(n); };" "Undefined variable: helper"
@@ -748,104 +763,98 @@ testCrlf =
           parseEvalProgramHelper "x = 1; // note\r\n\r\nl = [1,\r\n 2];\r\nif x < 2 {\r\n  x = 3;\r\n};\r\nreturn x;\r\n" (Just (VInt 3))
         ]
 
+data ListStage = ListEval | ListEvalFail | ListValid | ListValidateFail
+
+data ListExpect = ListValue Value | ListError String | ListOk
+
 testLists :: Test
 testLists =
-    testCaseSeq
-        "testLists"
-        [ -- Evaluation
-          parseEvalProgramHelper "return get([5, 6, 7], 0);" (Just (VInt 5))
-        , parseEvalProgramHelper "a = [5, 6, 7]; i = 1 + 1; return get(a, i);" (Just (VInt 7))
-        , parseEvalProgramHelper "return push([1, 2], 3);" (Just (VList [VInt 1, VInt 2, VInt 3]))
-        , parseEvalProgramHelper "return push([], 4);" (Just (VList [VInt 4]))
-        , parseEvalProgramHelper "return get(push(push([], 4), 9), 1);" (Just (VInt 9))
-        , parseEvalProgramHelper "a = [1]; b = push(clone(a), 2); return size(a) + size(b);" (Just (VInt 3))
-        , parseEvalFailStmtHelper "{ return get([5], 1); }" "Get index out of range"
-        , parseEvalFailStmtHelper "{ return get([5], 0 - 1); }" "Get index out of range"
-        , parseEvalFailStmtHelper "{ return push(1, 2); }" "argument 1 of push: expected List<?>, got Int"
-        , parseEvalFailStmtHelper "{ return get(1, 0); }" "argument 1 of get: expected List<?>, got Int"
-        , parseEvalProgramHelper "return set([1, 2, 3], 1, 20);" (Just (VList [VInt 1, VInt 20, VInt 3]))
-        , parseEvalProgramHelper "return set([1, 2, 3], 0, 9);" (Just (VList [VInt 9, VInt 2, VInt 3]))
-        , parseEvalProgramHelper "return set([1, 2, 3], 2, 9);" (Just (VList [VInt 1, VInt 2, VInt 9]))
-        , parseEvalProgramHelper "a = [1, 2, 3]; b = set(clone(a), 0, 9); return first(a) + first(b);" (Just (VInt 10))
-        , parseEvalProgramHelper "return set(push([1], 2), 1, 5);" (Just (VList [VInt 1, VInt 5]))
-        , parseEvalFailStmtHelper "{ return set([5], 1, 0); }" "Set index out of range"
-        , parseEvalFailStmtHelper "{ return set([5], 0 - 1, 0); }" "Set index out of range"
-        , parseEvalFailStmtHelper "{ return set([], 0, 0); }" "Set index out of range"
-        , parseEvalFailStmtHelper "{ return set(1, 0, 0); }" "argument 1 of set: expected List<?>, got Int"
-        , -- Frame facts: push's contract keeps the old elements, and nothing else is known
-          parseValidProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);"
-        , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 2) = get(a, 1);" "Could not prove"
-        , -- Validation: a concrete list and index need no proof from the caller
-          parseValidProgramHelper "a = [5, 6, 7]; x = get(a, 2); affirm x = 7;"
-        , parseValidProgramHelper "a = push(push([], 1), 2); n = size(a); affirm n = 2;"
-        , -- A symbolic index must be shown by the function's contract
-          parseValidProgramHelper
-            "fn at(l: List<Int>, i: Int) -> Int [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; return at([4, 5], 1);"
-        , -- push's output contract reaches a caller that only knows the list symbolically
-          parseValidProgramHelper
-            "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = (size(l) + 1); }] { return push(l, 5); };"
-        , parseValidProgramHelper
-            "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = (size(l) + 1); }] { r = push(l, 5); return r; };"
-        , -- set: a concrete list and index need no proof, and the result is as long as the input
-          parseValidProgramHelper "a = [5, 6, 7]; b = set(a, 2, 0); affirm size(b) = size(a);"
-        , parseValidProgramHelper
-            "fn f(l: List<Int>, i: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = size(l); }] { return set(l, i, 5); };"
-        , -- Element facts: set leaves x at the index and push leaves x at the old size
-          parseValidProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 20;"
-        , parseValidProgramHelper "a = [1, 2, 3]; i = 1; v = 20; b = set(a, i, v); affirm get(b, i) = v;"
-        , parseValidProgramHelper "l = [4, 5]; x = 9; r = push(l, x); define n = size(l); affirm get(r, n) = x;"
-        , parseValidProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 9;"
-        , parseValidProgramHelper
-            "fn f(l: List<Int>, i: Int, x: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = x; }] { return set(l, i, x); }; r = f([1, 2, 3], 1, 7); affirm get(r, 1) = 7;"
-        , parseValidProgramHelper
-            "fn g(l: List<Int>, x: Int) -> List<Int> [{ }] [{ affirm get(return, size(l)) = x; }] { return push(l, x); };"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 21;" "Could not prove"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = 20;" "Could not prove"
-        , -- set's contract keeps the other elements without a rule, and not the one it wrote
-          parseValidProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = get(a, 0); affirm get(b, 2) = get(a, 2);"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 1) = get(a, 1);" "Could not prove"
-        , -- With a symbolic list the elements are kept for any index in range, and only those
-          parseValidProgramHelper
-            "fn f(l: List<Int>, i: Int, j: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); affirm j != i; }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
-        , parseValidateFailProgramHelper
-            "fn f(l: List<Int>, i: Int, j: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
-            "Could not prove"
-        , parseValidProgramHelper
-            "fn f(l: List<Int>, j: Int) -> List<Int> [{ affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
-        , parseValidateFailProgramHelper
-            "fn f(l: List<Int>, j: Int) -> List<Int> [{ affirm j >= 0; affirm j <= size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
-            "Could not prove"
-        , parseValidateFailProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 8;" "Could not prove"
-        , parseValidateFailProgramHelper
-            "fn f(l: List<Int>, i: Int, x: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = get(l, i); }] { return set(l, i, x); };"
-            "Could not prove"
-        , -- Rejected: out of range, unproven, or a wrong size claim
-          parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 3, 0);" "Relation does not hold"
-        , parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 0 - 1, 0);" "Relation does not hold"
-        , parseValidateFailProgramHelper "fn f(l: List<Int>, i: Int) -> List<Int> { return set(l, i, 0); };" "Relation lacks a proof"
-        , parseValidateFailProgramHelper
-            "fn f(l: List<Int>, i: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = (size(l) + 1); }] { return set(l, i, 5); };"
-            "Could not prove"
-        , -- get and the rest of the rejected cases
-          parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 3);" "Relation does not hold"
-        , parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 0 - 1);" "Relation does not hold"
-        , parseValidateFailProgramHelper "a = []; x = get(a, 0);" "Relation does not hold"
-        , parseValidateFailProgramHelper "fn at(l: List<Int>, i: Int) -> Int { return get(l, i); };" "Relation lacks a proof"
-        , parseValidateFailProgramHelper
-            "fn at(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; }] [{ }] { return get(l, i); };"
-            "Relation lacks a proof"
-        , parseValidateFailProgramHelper
-            "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l); }] { return push(l, 5); };"
-            "Could not prove"
-        , parseValidateFailProgramHelper
-            "fn f(l: List<Int>) -> List<Int> { r = push(l, 5); affirm size(r) = size(l); return r; };"
-            "Could not prove"
-        , -- checkRel: adds a relation only when it holds, and refuses anything else
-          parseValidProgramHelper "x = 2; rewrite checkRel x < 3; affirm x < 3;"
-        , parseValidateFailProgramHelper "x = 5; rewrite checkRel x < 3;" "Relation does not hold"
-        , parseValidateFailProgramHelper "fn f(x: Int) -> Int { rewrite checkRel x < 3; return 1; };" "Relation lacks a proof"
-        , parseValidateFailProgramHelper "x = 5; rewrite checkRel x;" "requires a relation"
+    testCaseNamedSeq "testLists" (map runListRow listRows)
+  where
+    listRows :: [(String, ListStage, String, ListExpect)]
+    listRows =
+        [
+          -- Evaluation
+          ( "eval-return-get-5-6-7-0-vint-5", ListEval, "return get([5, 6, 7], 0);", ListValue ((VInt 5)) )
+        , ( "eval-a-5-6-7-i-1-1-return-get-a", ListEval, "a = [5, 6, 7]; i = 1 + 1; return get(a, i);", ListValue ((VInt 7)) )
+        , ( "eval-return-push-1-2-3-vlist-vint-1-vint-2", ListEval, "return push([1, 2], 3);", ListValue ((VList [VInt 1, VInt 2, VInt 3])) )
+        , ( "eval-return-push-4-vlist-vint-4", ListEval, "return push([], 4);", ListValue ((VList [VInt 4])) )
+        , ( "eval-return-get-push-push-4-9-1-vint-9", ListEval, "return get(push(push([], 4), 9), 1);", ListValue ((VInt 9)) )
+        , ( "eval-a-1-b-push-clone-a-2-return-size-a", ListEval, "a = [1]; b = push(clone(a), 2); return size(a) + size(b);", ListValue ((VInt 3)) )
+        , ( "eval-fail-return-get-5-1-get-index-out-of-range", ListEvalFail, "{ return get([5], 1); }", ListError "Get index out of range" )
+        , ( "eval-fail-return-get-5-0-1-get-index-out-of-range", ListEvalFail, "{ return get([5], 0 - 1); }", ListError "Get index out of range" )
+        , ( "eval-fail-return-push-1-2-argument-1-of-push-expected-list", ListEvalFail, "{ return push(1, 2); }", ListError "argument 1 of push: expected List<?>, got Int" )
+        , ( "eval-fail-return-get-1-0-argument-1-of-get-expected-list", ListEvalFail, "{ return get(1, 0); }", ListError "argument 1 of get: expected List<?>, got Int" )
+        , ( "eval-return-set-1-2-3-1-20-vlist-vint-1", ListEval, "return set([1, 2, 3], 1, 20);", ListValue ((VList [VInt 1, VInt 20, VInt 3])) )
+        , ( "eval-return-set-1-2-3-0-9-vlist-vint-9", ListEval, "return set([1, 2, 3], 0, 9);", ListValue ((VList [VInt 9, VInt 2, VInt 3])) )
+        , ( "eval-return-set-1-2-3-2-9-vlist-vint-1", ListEval, "return set([1, 2, 3], 2, 9);", ListValue ((VList [VInt 1, VInt 2, VInt 9])) )
+        , ( "eval-a-1-2-3-b-set-clone-a-0-9", ListEval, "a = [1, 2, 3]; b = set(clone(a), 0, 9); return first(a) + first(b);", ListValue ((VInt 10)) )
+        , ( "eval-return-set-push-1-2-1-5-vlist-vint-1", ListEval, "return set(push([1], 2), 1, 5);", ListValue ((VList [VInt 1, VInt 5])) )
+        , ( "eval-fail-return-set-5-1-0-set-index-out-of-range", ListEvalFail, "{ return set([5], 1, 0); }", ListError "Set index out of range" )
+        , ( "eval-fail-return-set-5-0-1-0-set-index-out-of", ListEvalFail, "{ return set([5], 0 - 1, 0); }", ListError "Set index out of range" )
+        , ( "eval-fail-return-set-0-0-set-index-out-of-range", ListEvalFail, "{ return set([], 0, 0); }", ListError "Set index out of range" )
+        , ( "eval-fail-return-set-1-0-0-argument-1-of-set-expected", ListEvalFail, "{ return set(1, 0, 0); }", ListError "argument 1 of set: expected List<?>, got Int" )
+          -- Frame facts: push's contract keeps the old elements, and nothing else is known
+        , ( "valid-a-1-2-b-push-a-3-affirm-get-b", ListValid, "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);", ListOk )
+        , ( "validate-fail-a-1-2-b-push-a-3-affirm-get-b", ListValidateFail, "a = [1, 2]; b = push(a, 3); affirm get(b, 2) = get(a, 1);", ListError "Could not prove" )
+          -- Validation: a concrete list and index need no proof from the caller
+        , ( "valid-a-5-6-7-x-get-a-2-affirm-x", ListValid, "a = [5, 6, 7]; x = get(a, 2); affirm x = 7;", ListOk )
+        , ( "valid-a-push-push-1-2-n-size-a-affirm-n", ListValid, "a = push(push([], 1), 2); n = size(a); affirm n = 2;", ListOk )
+          -- A symbolic index must be shown by the function's contract
+        , ( "valid-fn-at-l-list-int-i-int-int-rewrite-checkrel", ListValid, "fn at(l: List<Int>, i: Int) -> Int [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; return at([4, 5], 1);", ListOk )
+          -- push's output contract reaches a caller that only knows the list symbolically
+        , ( "valid-fn-f-l-list-int-list-int-affirm-size-return", ListValid, "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = (size(l) + 1); }] { return push(l, 5); };", ListOk )
+        , ( "valid-fn-f-l-list-int-list-int-affirm-size-return-2", ListValid, "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = (size(l) + 1); }] { r = push(l, 5); return r; };", ListOk )
+          -- set: a concrete list and index need no proof, and the result is as long as the input
+        , ( "valid-a-5-6-7-b-set-a-2-0-affirm", ListValid, "a = [5, 6, 7]; b = set(a, 2, 0); affirm size(b) = size(a);", ListOk )
+        , ( "valid-fn-f-l-list-int-i-int-list-int-rewrite", ListValid, "fn f(l: List<Int>, i: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = size(l); }] { return set(l, i, 5); };", ListOk )
+          -- Element facts: set leaves x at the index and push leaves x at the old size
+        , ( "valid-a-1-2-3-i-1-b-set-a-i", ListValid, "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 20;", ListOk )
+        , ( "valid-a-1-2-3-i-1-v-20-b-set", ListValid, "a = [1, 2, 3]; i = 1; v = 20; b = set(a, i, v); affirm get(b, i) = v;", ListOk )
+        , ( "valid-l-4-5-x-9-r-push-l-x-define", ListValid, "l = [4, 5]; x = 9; r = push(l, x); define n = size(l); affirm get(r, n) = x;", ListOk )
+        , ( "valid-l-4-5-r-push-l-9-define-n-size", ListValid, "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 9;", ListOk )
+        , ( "valid-fn-f-l-list-int-i-int-x-int-list", ListValid, "fn f(l: List<Int>, i: Int, x: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = x; }] { return set(l, i, x); }; r = f([1, 2, 3], 1, 7); affirm get(r, 1) = 7;", ListOk )
+        , ( "valid-fn-g-l-list-int-x-int-list-int-affirm", ListValid, "fn g(l: List<Int>, x: Int) -> List<Int> [{ }] [{ affirm get(return, size(l)) = x; }] { return push(l, x); };", ListOk )
+        , ( "validate-fail-a-1-2-3-i-1-b-set-a-i", ListValidateFail, "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 21;", ListError "Could not prove" )
+        , ( "validate-fail-a-1-2-3-b-set-a-1-20-affirm", ListValidateFail, "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = 20;", ListError "Could not prove" )
+          -- set's contract keeps the other elements without a rule, and not the one it wrote
+        , ( "valid-a-1-2-3-b-set-a-1-20-affirm", ListValid, "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = get(a, 0); affirm get(b, 2) = get(a, 2);", ListOk )
+        , ( "validate-fail-a-1-2-3-b-set-a-1-20-affirm-2", ListValidateFail, "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 1) = get(a, 1);", ListError "Could not prove" )
+          -- With a symbolic list the elements are kept for any index in range, and only those
+        , ( "valid-fn-f-l-list-int-i-int-j-int-list", ListValid, "fn f(l: List<Int>, i: Int, j: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); affirm j != i; }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };", ListOk )
+        , ( "validate-fail-fn-f-l-list-int-i-int-j-int-list", ListValidateFail, "fn f(l: List<Int>, i: Int, j: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };", ListError "Could not prove" )
+        , ( "valid-fn-f-l-list-int-j-int-list-int-affirm", ListValid, "fn f(l: List<Int>, j: Int) -> List<Int> [{ affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };", ListOk )
+        , ( "validate-fail-fn-f-l-list-int-j-int-list-int-affirm", ListValidateFail, "fn f(l: List<Int>, j: Int) -> List<Int> [{ affirm j >= 0; affirm j <= size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };", ListError "Could not prove" )
+        , ( "validate-fail-l-4-5-r-push-l-9-define-n-size", ListValidateFail, "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 8;", ListError "Could not prove" )
+        , ( "validate-fail-fn-f-l-list-int-i-int-x-int-list", ListValidateFail, "fn f(l: List<Int>, i: Int, x: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = get(l, i); }] { return set(l, i, x); };", ListError "Could not prove" )
+          -- Rejected: out of range, unproven, or a wrong size claim
+        , ( "validate-fail-a-5-6-7-b-set-a-3-0-relation", ListValidateFail, "a = [5, 6, 7]; b = set(a, 3, 0);", ListError "Relation does not hold" )
+        , ( "validate-fail-a-5-6-7-b-set-a-0-1-0", ListValidateFail, "a = [5, 6, 7]; b = set(a, 0 - 1, 0);", ListError "Relation does not hold" )
+        , ( "validate-fail-fn-f-l-list-int-i-int-list-int-return", ListValidateFail, "fn f(l: List<Int>, i: Int) -> List<Int> { return set(l, i, 0); };", ListError "Relation lacks a proof" )
+        , ( "validate-fail-fn-f-l-list-int-i-int-list-int-rewrite", ListValidateFail, "fn f(l: List<Int>, i: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = (size(l) + 1); }] { return set(l, i, 5); };", ListError "Could not prove" )
+          -- get and the rest of the rejected cases
+        , ( "validate-fail-a-5-6-7-x-get-a-3-relation-does", ListValidateFail, "a = [5, 6, 7]; x = get(a, 3);", ListError "Relation does not hold" )
+        , ( "validate-fail-a-5-6-7-x-get-a-0-1-relation", ListValidateFail, "a = [5, 6, 7]; x = get(a, 0 - 1);", ListError "Relation does not hold" )
+        , ( "validate-fail-a-x-get-a-0-relation-does-not-hold", ListValidateFail, "a = []; x = get(a, 0);", ListError "Relation does not hold" )
+        , ( "validate-fail-fn-at-l-list-int-i-int-int-return-get", ListValidateFail, "fn at(l: List<Int>, i: Int) -> Int { return get(l, i); };", ListError "Relation lacks a proof" )
+        , ( "validate-fail-fn-at-l-list-int-i-int-int-affirm-i", ListValidateFail, "fn at(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; }] [{ }] { return get(l, i); };", ListError "Relation lacks a proof" )
+        , ( "validate-fail-fn-f-l-list-int-list-int-affirm-size-return", ListValidateFail, "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l); }] { return push(l, 5); };", ListError "Could not prove" )
+        , ( "validate-fail-fn-f-l-list-int-list-int-r-push-l", ListValidateFail, "fn f(l: List<Int>) -> List<Int> { r = push(l, 5); affirm size(r) = size(l); return r; };", ListError "Could not prove" )
+          -- checkRel: adds a relation only when it holds, and refuses anything else
+        , ( "valid-x-2-rewrite-checkrel-x-3-affirm-x-3", ListValid, "x = 2; rewrite checkRel x < 3; affirm x < 3;", ListOk )
+        , ( "validate-fail-x-5-rewrite-checkrel-x-3-relation-does-not-hold", ListValidateFail, "x = 5; rewrite checkRel x < 3;", ListError "Relation does not hold" )
+        , ( "validate-fail-fn-f-x-int-int-rewrite-checkrel-x-3-return", ListValidateFail, "fn f(x: Int) -> Int { rewrite checkRel x < 3; return 1; };", ListError "Relation lacks a proof" )
+        , ( "validate-fail-x-5-rewrite-checkrel-x-requires-a-relation", ListValidateFail, "x = 5; rewrite checkRel x;", ListError "requires a relation" )
         ]
+    runListRow (name, stage, source, expect) =
+        ( name
+        , case (stage, expect) of
+            (ListEval, ListValue value) -> parseEvalProgramHelper source (Just value)
+            (ListEvalFail, ListError err) -> parseEvalFailStmtHelper source err
+            (ListValid, ListOk) -> parseValidProgramHelper source
+            (ListValidateFail, ListError err) -> parseValidateFailProgramHelper source err
+            _ -> Just "mismatched stage and expectation in testLists table"
+        )
 
 testControlFlow :: Test
 testControlFlow =

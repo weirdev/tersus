@@ -1,22 +1,24 @@
 module TestTersus (main, allGroups) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.MVar (modifyMVar, newMVar)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent.MVar (modifyMVar, modifyMVar_, newMVar)
 import Control.Exception (SomeException, displayException, mask, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.List (foldl', isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
-import GHC.Conc (getNumProcessors)
-import System.Environment (getArgs, getExecutablePath, lookupEnv)
+import Native (availableProcessors, readProcessOutput)
+import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (BufferMode (LineBuffering), hPutStr, hSetBuffering, stderr, stdout)
-import System.Process (proc, readCreateProcessWithExitCode)
+import System.Process (CreateProcess (..), proc)
+import System.Posix.Process (getParentProcessID, getProcessID)
 
 import TestHarness
 import TestBasics
 import TestValidation
 import TestProofs
+import TestForallDomains
 import TestControl
 import TestData
 import TestPipeline
@@ -35,6 +37,9 @@ import TestPointers
 import TestSequence
 import TestSequenceContracts
 import TestRuleScopes
+import TestNativeProofGuards
+import TestCanonicalRuleReplay
+import TestProofCallMono
 import TestRawArrayTransfer
 import TestStrings
 import TestBytes
@@ -45,6 +50,7 @@ import TestMirReader
 import TestMirVerify
 import TestMirErase
 import TestMirEmit
+import TestMirSupport
 import TestBootstrap
 import TestEq
 import TestHashMap
@@ -53,6 +59,7 @@ import TestBuiltinRegistry
 import TestSharedCache
 import TestScheduling
 import TestAstData
+import TestDataCodec
 import TestModules
 import TestParity
 import TestParser
@@ -77,11 +84,15 @@ main = do
                 putStrLn ("[GROUPS] " ++ unwords names)
             jobs <- case argumentJobs arguments of
                 Just n -> pure n
-                Nothing -> min (length names) <$> getNumProcessors
+                Nothing -> min (length names) <$> availableProcessors
+            isolated <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_ISOLATED"
+            parent <- getParentProcessID
+            processors <- availableProcessors
+            let overlap = bootstrapOverlapAllowed (argumentChild arguments) jobs processors names (isolated == Just (show parent))
             (summary, reported) <-
-                if jobs <= 1 || length names <= 1
-                    then runInProcess selected
-                    else runInParallel jobs names
+                if useWorkerProcesses arguments jobs (length names)
+                    then runInParallel jobs names
+                    else runInProcess overlap selected
             unless (argumentChild arguments) $ do
                 putStrLn $
                     "Summary: "
@@ -91,17 +102,26 @@ main = do
                         ++ " failed"
             when (summaryFailed summary > 0 || not reported) exitFailure
   where
-    select arguments = (,) arguments <$> selectGroupNames arguments (map groupName allGroups)
+    select arguments = (,) arguments . withoutOptIn arguments <$> selectGroupNames arguments (map groupName allGroups)
+    withoutOptIn arguments names
+        | null (argumentGroups arguments) = filter (`notElem` optInGroups) names
+        | otherwise = names
+
+-- Groups that run only when they are named: too slow for every run of the suite
+optInGroups :: [String]
+optInGroups = ["testHostValidation"]
 
 allGroups :: [Test]
 allGroups = concatMap registered originalGroups
   where
-    registered original = case lookup (groupName original) [(groupName tree, split) | (tree, split) <- batchedGroups] of
-        Just split -> split
-        Nothing -> [original]
+    registered original
+        | groupName original == "testParserBootstrap" = parserBootstrapGroups
+        | otherwise = case lookup (groupName original) [(groupName tree, split) | (tree, split) <- batchedGroups] of
+            Just split -> split
+            Nothing -> [original]
 
 batchedGroups :: [(Test, [Test])]
-batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted]]
+batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader]]
 
 originalGroups :: [Test]
 originalGroups =
@@ -111,12 +131,13 @@ originalGroups =
     , testValidateWithExpectedMismatch
     , testValidationFail
     , testValidationCache
+    , testHaskellParity
     , testUserRewriteValidation
-    , testProofEngine
     , testParseVal
     , testParseValFail
     , testCrashRegression
     , testExamples
+    , testHostValidation
     , testCli
     , testMir
     , testMirSelfHosted
@@ -124,11 +145,10 @@ originalGroups =
     , testPipeline
     , testControlFlow
     , testLists
-    , testArithmetic
     , testForallSyntax
     , testForallInstantiation
     , testForallProof
-    , testForallGrownList
+    , testForallDomains
     , testForallLoops
     , testPrettyProofs
     , testMulDivNegative
@@ -170,6 +190,9 @@ originalGroups =
     , testSequence
     , testSequenceContracts
     , testRuleScopes
+    , testNativeProofGuards
+    , testCanonicalRuleReplay
+    , testProofCallMono
     , testRawArrayTransfer
     , testStrings
     , testBytes
@@ -189,9 +212,11 @@ originalGroups =
     , testModules
     , testBuiltinRegistry
     , testSharedCache
+    , testVerdictLocks
     , testSharedCacheProbe
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
+    , testDataCodec
     , testParser
     , testParserBootstrap
     , testParserUnicode
@@ -199,12 +224,18 @@ originalGroups =
     , testParity
     , testLibModules
     , testLibInterfaceProviders
+    , testNativeStorageModules
+    , testMirSupport
     ]
 
-runInProcess :: [Test] -> IO (TestSummary, Bool)
-runInProcess selected = do
-    summary <- foldr combineSummaries (testSummary 0 0) <$> mapM (runTest []) selected
+runInProcess :: Bool -> [Test] -> IO (TestSummary, Bool)
+runInProcess overlap selected = do
+    summary <- foldr combineSummaries (testSummary 0 0) <$> mapM runGroup selected
     pure (summary, True)
+  where
+    runGroup group
+        | "testParserBootstrap:" `isPrefixOf` groupName group = withParserBootstrapFixture (groupName group) overlap (runTest [] group)
+        | otherwise = runTest [] group
 
 -- Each group runs in a process of its own, so that a group's temporary files, locale and environment are its own, and
 -- several groups make progress at once. A child is given one group, so it runs in its process and prints no summary;
@@ -217,27 +248,38 @@ runInParallel :: Int -> [String] -> IO (TestSummary, Bool)
 runInParallel jobs names = do
     self <- getExecutablePath
     statistics <- lookupEnv "TERSUS_TEST_RTS_STATS"
-    let rtsOptions = ["-s" | statistics == Just "1"]
+    inherited <- getEnvironment
+    processors <- availableProcessors
+    parent <- getProcessID
+    let isolated = if bootstrapOverlapAllowed False jobs processors names False then show parent else ""
+        environment = ("TERSUS_PARSER_BOOTSTRAP_ISOLATED", isolated) : [(key, value) | (key, value) <- inherited, key /= "TERSUS_PARSER_BOOTSTRAP_ISOLATED"]
+        rtsOptions = ["-s" | statistics == Just "1"]
     putStrLn ("Running " ++ show (length names) ++ " test groups in " ++ show jobs ++ " processes")
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
         pure (name, done)
-    queue <- newMVar (sortBy (comparing (negate . groupWeight . fst)) slots)
-    let worker = mask $ \restore -> do
-            next <- modifyMVar queue $ \remaining -> case remaining of
-                [] -> pure ([], Nothing)
-                slot : rest -> pure (rest, Just slot)
+    -- (a self-hosted group holds the compiled validator as Haskell data, about 2 GB, and peaks at 5 to 7 GB: at most
+    -- two run at once, so that a runner of 16 GB is not exhausted; the next group that may run is taken instead)
+    queue <- newMVar (sortBy (comparing (negate . groupWeight . fst)) slots, 0 :: Int)
+    let allowed heavy (name, _) = not (isSelfHosted name) || heavy < 2
+        release name = when (isSelfHosted name) $ modifyMVar_ queue (\(remaining, heavy) -> pure (remaining, heavy - 1))
+        worker = mask $ \restore -> do
+            next <- modifyMVar queue $ \(remaining, heavy) -> case break (allowed heavy) remaining of
+                (_, []) -> pure ((remaining, heavy), if null remaining then Nothing else Just Nothing)
+                (before, slot@(name, _) : after) -> pure ((before ++ after, heavy + fromEnum (isSelfHosted name)), Just (Just slot))
             case next of
                 Nothing -> pure ()
-                Just (name, done) -> do
+                Just Nothing -> threadDelay 200000 >> restore worker
+                Just (Just (name, done)) -> do
                     result <- try $ restore $ do
                         started <- getMonotonicTime
                         putStrLn ("[START] " ++ name)
                         let arguments = [name, "--child", "+RTS", "-N1"] ++ rtsOptions ++ ["-RTS"]
-                        outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
+                        outcome <- try (readProcessOutput (proc self arguments){env = Just environment} "")
                         finished <- getMonotonicTime
                         putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
                         pure (name, finished - started, outcome)
+                    release name
                     putMVar done $ case result of
                         Left e -> (name, 0, Left (e :: SomeException))
                         Right outcome -> outcome

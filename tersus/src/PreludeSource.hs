@@ -10,13 +10,19 @@ module PreludeSource
     , stringSource
     , mapSource
     , setSource
+    , libModules
+    , nativeStorageModules
+    , libPackageFiles
     , mirPackageFiles
     , parserPackageFiles
     , astReaderPackageFiles
     , toolPackageFiles
     , stdlibSource
     , compilerSourceHash
+    , validationSource
+    , validationDriverSource
     , seedSha256
+    , parserSeedSha256
     ) where
 
 import Data.List (isSuffixOf, sort)
@@ -29,7 +35,7 @@ compilerSourceHash :: String
 compilerSourceHash =
     $( do
         addDependentFile "tersus.cabal"
-        files <- runIO (sort . filter (isSuffixOf ".hs") <$> listDirectory "src")
+        files <- runIO (sort . filter (\file -> any (`isSuffixOf` file) [".hs", ".hsc"]) <$> listDirectory "src")
         inputs <- mapM (\file -> do
             let path = "src/" ++ file
             addDependentFile path
@@ -37,6 +43,25 @@ compilerSourceHash =
             pure [file, contents]) files
         lift (fingerprint (concat inputs))
      )
+
+libModules :: [(String, String, String)]
+libModules =
+    [ ("types", "the list and Box types", typesSource)
+    , ("clone", "the clone library", cloneSource)
+    , ("eq", "the equality library", eqSource)
+    , ("prelude", "the prelude", preludeSource)
+    , ("string", "the string library", stringSource)
+    , ("map", "the map library", mapSource)
+    , ("set", "the set library", setSource)
+    , ("lists", "the native list helpers", listsSource)
+    , ("box", "the native Box helpers", boxSource)
+    ]
+
+nativeStorageModules :: [String]
+nativeStorageModules = ["lists", "box"]
+
+libPackageFiles :: [(FilePath, String)]
+libPackageFiles = ("tersuslib/package.tersus", "") : [("tersuslib/" ++ name ++ "/" ++ name ++ ".tersus", text) | (name, _, text) <- libModules]
 
 -- The text of lib/types.tersus: the structs List and Box, which every program has
 typesSource :: String
@@ -136,7 +161,13 @@ mirPackageFiles = dataPackageFiles ++
         let paths =
                 [ "examples/mir/package.tersus"
                 , "examples/mir/reader/reader.tersus"
+                , "examples/mir/support/support.tersus"
                 , "examples/mir/emit/emit.tersus"
+                , "examples/mir/emit/types.tersus"
+                , "examples/mir/emit/values.tersus"
+                , "examples/mir/emit/operations.tersus"
+                , "examples/mir/emit/functions.tersus"
+                , "examples/mir/emit/helpers.tersus"
                 , "examples/mir/mir_reader/mir_reader.tersus"
                 , "examples/mir/mir_verify/mir_verify.tersus"
                 , "examples/mir/mir_erase/mir_erase.tersus"
@@ -145,12 +176,41 @@ mirPackageFiles = dataPackageFiles ++
         lift files
      )
 
+-- The text of lib/validation.tersus: the validator written in Tersus, which is
+-- what validates every program (see SelfHostedMir.validateByTersus)
+validationSource :: String
+validationSource =
+    $( do
+        addDependentFile "lib/validation.tersus"
+        contents <- runIO (readFile "lib/validation.tersus")
+        lift contents
+     )
+
+-- The text of lib/validation_driver.tersus: the main program of the
+-- validator compiled to native code, put after validation.tersus for that
+-- build only (see ValidatorNative)
+validationDriverSource :: String
+validationDriverSource =
+    $( do
+        addDependentFile "lib/validation_driver.tersus"
+        contents <- runIO (readFile "lib/validation_driver.tersus")
+        lift contents
+     )
+
 -- The SHA-256 pinned in bootstrap/emitter.sha256: the seed IR itself is a GitHub release asset (see Bootstrap), so only this digest is kept in the repository
 seedSha256 :: String
 seedSha256 =
     $( do
         addDependentFile "bootstrap/emitter.sha256"
         contents <- runIO (readFile "bootstrap/emitter.sha256")
+        lift (head (words contents))
+     )
+
+parserSeedSha256 :: String
+parserSeedSha256 =
+    $( do
+        addDependentFile "bootstrap/parser.sha256"
+        contents <- runIO (readFile "bootstrap/parser.sha256")
         lift (head (words contents))
      )
 

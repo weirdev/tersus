@@ -15,7 +15,13 @@ extra-source-files:
 - lib/string.tersus
 - examples/mir/package.tersus
 - examples/mir/reader/reader.tersus
+- examples/mir/support/support.tersus
 - examples/mir/emit/emit.tersus
+- examples/mir/emit/types.tersus
+- examples/mir/emit/values.tersus
+- examples/mir/emit/operations.tersus
+- examples/mir/emit/functions.tersus
+- examples/mir/emit/helpers.tersus
 - examples/mir/mir_reader/mir_reader.tersus
 - examples/data/package.tersus
 - examples/data/codec/codec.tersus
@@ -24,11 +30,13 @@ extra-source-files:
 - examples/ast_reader/ast_reader.tersus
 - AST_DATA.md
 - bootstrap/emitter.sha256
+- bootstrap/parser.sha256
 - examples/parser/package.tersus
 - examples/parser/parser.tersus
 - examples/mir/mir_verify/mir_verify.tersus
 - examples/mir/mir_erase/mir_erase.tersus
 - lib/validation.tersus
+- lib/validation_driver.tersus
 - lib/stdlib.tersus
 - lib/box.tersus
 - lib/map.tersus
@@ -77,11 +85,51 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - tersus
-  parity:
-    main:                Parity.hs
-    source-dirs:         dev/parity
+  parser-seed:
+    main:                Main.hs
+    source-dirs:         dev/parser-seed
+    ghc-options:
+    - -threaded
+    - -rtsopts
     dependencies:
     - tersus
+  cache-codec-probe:
+    main:                Main.hs
+    source-dirs:
+    - dev/cache-codec/src
+    - test
+    other-modules:
+    - TestProgramBinary
+    - TestProgramBinaryChecks
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    dependencies:
+    - tersus
+    - binary >= 0.8.8 && < 0.9
+    - bytestring >= 0.10.12 && < 0.13
+    - deepseq >= 1.4.4 && < 1.6
+
+  cache-integration-probe:
+    main: Main.hs
+    source-dirs:
+    - dev/cache-codec/integration
+    - test
+    other-modules:
+    - TestHarness
+    - TestParserFragments
+    - TestSharedCache
+    - TestProgramBinary
+    - TestProgramBinaryChecks
+    - TestProgramBuildIdentity
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    dependencies:
+    - tersus
+    - binary >= 0.8.8 && < 0.9
+    - bytestring >= 0.10.12 && < 0.13
+    - deepseq >= 1.4.4 && < 1.6
 
 tests:
   tersus-test:
@@ -95,3 +143,6 @@ tests:
     dependencies:
     - tersus
     - unix
+    - binary >= 0.8.8 && < 0.9
+    - bytestring >= 0.10.12 && < 0.13
+    - deepseq >= 1.4.4 && < 1.6

@@ -150,6 +150,10 @@ testBorrow =
                 , testCase "an owner is not assigned while borrowed" (rejected "x = 4; r = &mut x; x = 9; return *r;" "cannot be assigned while it is borrowed")
                 , testCase "a value is not moved out of a reference" (rejected "xs = [1, 2]; r = &xs; return *r;" "cannot move")
                 , testCase "a value read through a reference is a view, not a move" (runs "xs = [1, 2]; r = &xs; ys = *r; return size(ys) + size(xs);" (VInt 4))
+                , testCase "a Box owner cannot be moved while its payload is borrowed" (rejected "struct Payload { xs: List<Int> }; b = Box::new(Payload { xs: [1] }); r = &*b; moved = b; return size((*r).xs);" "cannot be moved while that borrow is live")
+                , testCase "a Box owner cannot be replaced while its payload is borrowed" (rejected "struct Payload { xs: List<Int> }; b = Box::new(Payload { xs: [1] }); r = &*b; b = Box::new(Payload { xs: [2] }); return size((*r).xs);" "cannot be assigned while it is borrowed")
+                , testCase "a boxed payload cannot be moved out of a read reference" (rejected "struct Payload { xs: List<Int> }; b = Box::new(Payload { xs: [1] }); r = &*b; return *r;" "cannot move")
+                , testCase "a cloned boxed payload releases its source loan" (runs "struct Payload { xs: List<Int> }; impl Clone for Payload { }; b = Box::new(Payload { xs: [1] }); copy = clone(Box::unbox(b)); b = Box::new(Payload { xs: [2, 3] }); return size(b.xs) * 10 + size(copy.xs);" (VInt 21))
                 , testCase "no update borrow of what a read borrow is to" (rejected "x = 4; r = &x; s = &mut *r; *s = 5; return x;" "cannot be made through a read reference")
                 ]
             ]

@@ -3,6 +3,10 @@ module FileParserProtocol
     , readFileRequest
     , writeParsedFile
     , readParsedFile
+    , writeImportPrefixRequest
+    , writeDeclarationNamesRequest
+    , readImportPrefix
+    , readDeclarationNames
     ) where
 
 import Control.Monad (replicateM, unless)
@@ -11,18 +15,33 @@ import qualified Text.Parsec as Reader
 
 import qualified AstData
 import DataCodec
-import Parse (Decls (..), Import (..), ParsedFile (..))
+import ParsedFile (Decls (..), Import (..), ParsedFile (..), emptyDecls)
 import Types
 import Utils (Result (..), bindResult, decodeUtf8, encodeUtf8, flatResultMap, mapResult)
 
 type Records = Reader.Parsec String ()
 
 writeFileRequest :: Decls -> String -> Result String String
-writeFileRequest decls source =
+writeFileRequest = writeRequest "tersus-file-parse 1"
+
+writeImportPrefixRequest :: String -> Result String String
+writeImportPrefixRequest = writeRequest "tersus-import-prefix 1" emptyDecls
+
+writeDeclarationNamesRequest :: String -> Result String String
+writeDeclarationNamesRequest = writeRequest "tersus-declaration-names 1" emptyDecls
+
+writeRequest :: String -> Decls -> String -> Result String String
+writeRequest tag decls source =
     writeDecls decls `bindResult` \declRecords ->
     let bytes = encodeUtf8 source
      in validUtf8 bytes `bindResult` \_ ->
-        Ok ("tersus-file-parse 1\n" ++ declRecords ++ "source " ++ show (length bytes) ++ "\n" ++ bytes)
+        Ok (tag ++ "\n" ++ declRecords ++ "source " ++ show (length bytes) ++ "\n" ++ bytes)
+
+readImportPrefix :: String -> Result [Import] String
+readImportPrefix = readEnvelope (header "tersus-imports 1" >> records "imports" importP)
+
+readDeclarationNames :: String -> Result [Name] String
+readDeclarationNames = readEnvelope (header "tersus-names 1" >> records "names" (expect "name" >> name))
 
 readFileRequest :: String -> Result (Decls, String) String
 readFileRequest = readEnvelope $ do

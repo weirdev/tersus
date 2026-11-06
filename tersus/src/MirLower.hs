@@ -890,8 +890,8 @@ lowerPlace expr = case expr of
     F (Var "get") [sub, index] -> lowerIndexPlace sub index
     F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
         ty <- claim
-        (root, _) <- lowerRefRoot inner
-        return (root, [], ty)
+        (root, steps, _) <- lowerPlace inner
+        return (root, steps, ty)
     _ -> do
         (operand, ty) <- lowerOperand expr
         case operand of

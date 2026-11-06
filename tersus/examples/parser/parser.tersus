@@ -1,7 +1,7 @@
 import data::codec::codec { Token, Parsed, Size, Type, hexValue, quoted, catStrings, renderTypeForName, printInt, printName, printNames, newLine, printType };
 import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst };
 
-// The Tersus parser, written in Tersus: reads source segments and writes the AST as data (`tersus-ast 1 parsed`, AST_DATA.md), byte for byte as AstData.writeParsed of the Haskell parser (src/Parse.hs) writes it. The host protocol is documented in AST_DATA.md.
+// The Tersus parser, written in Tersus: reads source segments and writes the AST as data (`tersus-ast 1 parsed`, AST_DATA.md), using the shared AST/file codecs. The host protocol is documented in AST_DATA.md.
 
 // ---- parser state ----
 
@@ -127,12 +127,14 @@ fn newSt() -> St ~ {
 
 fn fail<T>(st: St, v: T, msg: &String) -> Res<T> ~ {
     s = st;
-    if size(s.err.bytes) = 0 { s = St { err: clone(msg), ..s }; s = St { errPos: s.pos, ..s }; };
+    if size(s.err.bytes) = 0 || s.pos > s.errPos { s = St { err: clone(msg), errPos: s.pos, ..s }; };
     return Res<T> { st: s, v: v, ok: false };
 };
 
 fn ok<T>(st: St, v: T) -> Res<T> ~ {
-    return Res<T> { st: st, v: v, ok: true };
+    s = st;
+    if size(s.err.bytes) > 0 && s.pos >= s.errPos { s = St { err: "", errPos: 0, ..s }; };
+    return Res<T> { st: s, v: v, ok: true };
 };
 
 fn nameAtOr(xs: &List<String>, i: Int, fallback: &String) -> String ~ {
@@ -2231,13 +2233,21 @@ fn exprArgs(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     return ok( s, args);
 };
 
+fn errorText(st: &St) -> String ~ { return clone(st.err); };
+fn errorPosition(st: &St) -> Int ~ { return st.errPos; };
+
 fn nameLedExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = st;
     save = checkpoint(s);
     // struct literal attempt
     lit = tryStructLiteralExpr(sourceText, s); Res { st: resultPartslitState, v: resultPartslitValue, ok: resultPartslitOk } = lit;
     if resultPartslitOk { return Res<Int> { st: resultPartslitState, v: resultPartslitValue, ok: resultPartslitOk }; };
+    literalError = errorText(resultPartslitState);
+    literalPos = errorPosition(resultPartslitState);
     s = restore(resultPartslitState, save);
+    if size(literalError.bytes) > 0 && (size(s.err.bytes) = 0 || literalPos > s.errPos) {
+        s = St { err: literalError, errPos: literalPos, ..s };
+    };
     // call or variable
     q = qualifiedName(sourceText, s); Res { st: resultPartsqState, v: resultPartsqValue, ok: resultPartsqOk } = q;
     if !resultPartsqOk { return Res<Int> { st: resultPartsqState, v: 0, ok: false }; };
@@ -6571,22 +6581,22 @@ fn standardEqText(st: &St, typeName: &String) -> String ~ {
         fields = fieldsOfVariant( st, nameAtOr(variants, 0, ""));
         i = 0;
         for f in fields {
-            body = catStrings(body, compareFieldText( st, typeName, i, clone(f), "self", "other"));
+            body = body.concat(compareFieldText( st, typeName, i, clone(f), "self", "other"));
             i = i + 1;
         };
-        body = catStrings(body, "return true;");
+        body = body.concat("return true;");
     } else {
         for v in variants {
             fields = fieldsOfVariant( st, v);
             inner = "";
             i = 0;
             for f in fields {
-                inner = catStrings(inner, compareFieldText( st, typeName, i, clone(f), cat3("(self as ", v, ")"), cat3("(other as ", v, ")")));
+                inner = inner.concat(compareFieldText( st, typeName, i, clone(f), cat3("(self as ", v, ")"), cat3("(other as ", v, ")")));
                 i = i + 1;
             };
-            body = catStrings(body, catStrings(cat3(cat3("if self is ", v, " { if other is "), v, " { "), catStrings(inner, "return true; }; return false; }; ")));
+            body = body.concat(catStrings(cat3(cat3("if self is ", v, " { if other is "), v, " { "), inner.concat("return true; }; return false; }; ")));
         };
-        body = catStrings(body, "return false;");
+        body = body.concat("return false;");
     };
     return cat3("fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] shrinks self { ", body, " };");
 };
@@ -6650,9 +6660,9 @@ fn standardCloneText(st: &St, typeName: &String) -> String ~ {
             built = clone(v);
             if size(fields) > 0 { built = cat3(catStrings(v, " { "), nameAtOr(parts, 1, ""), " }"); };
             if vi < size(variants) - 1 {
-                body = catStrings(body, catStrings(catStrings(cat3("if self is ", v, " { "), nameAtOr(parts, 0, "")), cat3("return ", built, "; }; ")));
+                body = body.concat(catStrings(catStrings(cat3("if self is ", v, " { "), nameAtOr(parts, 0, "")), cat3("return ", built, "; }; ")));
             } else {
-                body = catStrings(body, catStrings(nameAtOr(parts, 0, ""), cat3("return ", built, ";")));
+                body = body.concat(catStrings(nameAtOr(parts, 0, ""), cat3("return ", built, ";")));
             };
             vi = vi + 1;
         };
@@ -6667,9 +6677,9 @@ fn cloneParts(st: &St, typeName: &String, fields: &List<FieldInfo>, prefix: &Str
     for f in &fields {
         src = cat3(prefix, &f.name, "");
         part = fieldCloneText( st, typeName, i, clone(f), src);
-        pre = catStrings(pre, nameAtOr(part, 0, ""));
-        if i > 0 { assigns = catStrings(assigns, ", "); };
-        assigns = catStrings(assigns, cat3(cat3(&f.name, ": ", nameAtOr(part, 1, "")), "", ""));
+        pre = pre.concat(nameAtOr(part, 0, ""));
+        if i > 0 { assigns = assigns.concat(", "); };
+        assigns = assigns.concat(cat3(cat3(&f.name, ": ", nameAtOr(part, 1, "")), "", ""));
         i = i + 1;
     };
     return push(push([], pre), assigns);
@@ -6682,9 +6692,9 @@ fn clonePartsPrefixed(st: &St, typeName: &String, fields: &List<FieldInfo>, srcB
     for f in &fields {
         src = cat3(srcBase, ".", &f.name);
         part = fieldCloneText( st, typeName, i, clone(f), src);
-        pre = catStrings(pre, nameAtOr(part, 0, ""));
-        if i > 0 { assigns = catStrings(assigns, ", "); };
-        assigns = catStrings(assigns, cat3(&f.name, ": ", nameAtOr(part, 1, "")));
+        pre = pre.concat(nameAtOr(part, 0, ""));
+        if i > 0 { assigns = assigns.concat(", "); };
+        assigns = assigns.concat(cat3(&f.name, ": ", nameAtOr(part, 1, "")));
         i = i + 1;
     };
     return push(push([], pre), assigns);
@@ -7994,6 +8004,136 @@ fn printFileImports(imports: &List<FileImport>) -> Int ~ {
     return count;
 };
 
+fn scanMetadataTail(sourceText: &Input, st: St, groupOnly: Bool) -> Res<Bool> ~ {
+    s = st;
+    depth = 0;
+    if groupOnly { depth = 1; s = St { pos: s.pos + 1, ..s }; };
+    quotedText = false;
+    scanning = true;
+    while scanning && !atEnd(sourceText, s) ~ {
+        c = byteAt(sourceText, s, s.pos);
+        if quotedText {
+            if c = 92 {
+                s = St { pos: s.pos + 1, ..s };
+                if atEnd(sourceText, s) { return fail(s, false, "expected an escaped character"); };
+            } else { if c = 34 { quotedText = false; }; };
+            s = St { pos: s.pos + 1, ..s };
+        } else {
+            oldPos = s.pos;
+            s = skipWs(sourceText, s);
+            if s.pos = oldPos {
+                if c = 59 && depth = 0 { scanning = false; }
+                else {
+                    if c = 34 { quotedText = true; };
+                    if c = 123 { depth = depth + 1; };
+                    if c = 125 && depth > 0 {
+                        depth = depth - 1;
+                        if groupOnly && depth = 0 { scanning = false; };
+                    };
+                    s = St { pos: s.pos + 1, ..s };
+                };
+            };
+        };
+    };
+    if quotedText { return fail(s, false, "expected closing quote"); };
+    if depth > 0 { return fail(s, false, "expected }"); };
+    return ok(s, true);
+};
+
+fn metadataHeaderStart(sourceText: &Input, st: St) -> St ~ {
+    s = st;
+    if keywordAt(sourceText, s, "linear") { s = St { pos: s.pos + 6, ..s }; s = skipWs(sourceText, s); };
+    return s;
+};
+
+fn metadataEnumHeader(sourceText: &Input, st: St) -> Res<List<String>> ~ {
+    s = metadataHeaderStart(sourceText, st);
+    if !keywordAt(sourceText, s, "enum") { return fail(s, [], "expected enum"); };
+    s = St { pos: s.pos + 4, ..s };
+    owner = parseVariable(sourceText, skipWs(sourceText, s));
+    Res { st: ownerState, v: ownerName, ok: ownerOk } = owner;
+    if !ownerOk { return Res<List<String>> { st: ownerState, v: [], ok: false }; };
+    s = skipWs(sourceText, ownerState);
+    if byteAt(sourceText, s, s.pos) != 123 { return fail(s, [], "expected {"); };
+    s = St { pos: s.pos + 1, ..s };
+    s = skipWs(sourceText, s);
+    names = push([], clone(ownerName));
+    variantsLoop = byteAt(sourceText, s, s.pos) != 125;
+    while variantsLoop ~ {
+        variant = parseVariable(sourceText, s);
+        Res { st: variantState, v: variantName, ok: variantOk } = variant;
+        if !variantOk { return Res<List<String>> { st: variantState, v: [], ok: false }; };
+        names = push(names, cat3(ownerName, "::", variantName));
+        s = skipWs(sourceText, variantState);
+        if byteAt(sourceText, s, s.pos) = 123 {
+            group = scanMetadataTail(sourceText, s, true);
+            Res { st: groupState, v: groupValue, ok: groupOk } = group;
+            if !groupOk { return Res<List<String>> { st: groupState, v: [], ok: false }; };
+            s = skipWs(sourceText, groupState);
+        };
+        if byteAt(sourceText, s, s.pos) = 44 {
+            s = St { pos: s.pos + 1, ..s };
+            s = skipWs(sourceText, s);
+            variantsLoop = byteAt(sourceText, s, s.pos) != 125;
+        } else { variantsLoop = false; };
+    };
+    if byteAt(sourceText, s, s.pos) != 125 { return fail(s, [], "expected }"); };
+    s = St { pos: s.pos + 1, ..s };
+    return ok(s, names);
+};
+
+fn metadataNamedHeader(sourceText: &Input, st: St) -> Res<List<String>> ~ {
+    s = metadataHeaderStart(sourceText, st);
+    if keywordAt(sourceText, s, "extern") || keywordAt(sourceText, s, "builtin") {
+        width = 6;
+        if keywordAt(sourceText, s, "builtin") { width = 7; };
+        s = St { pos: s.pos + width, ..s };
+        s = skipWs(sourceText, s);
+        if !keywordAt(sourceText, s, "fn") { return fail(s, [], "expected fn"); };
+        s = St { pos: s.pos + 2, ..s };
+    } else {
+        width = 0;
+        if keywordAt(sourceText, s, "fn") { width = 2; };
+        if keywordAt(sourceText, s, "struct") { width = 6; };
+        if keywordAt(sourceText, s, "trait") { width = 5; };
+        if keywordAt(sourceText, s, "axiom") { width = 5; };
+        if keywordAt(sourceText, s, "proof") { width = 5; };
+        if width = 0 { return fail(s, [], "expected a named declaration"); };
+        s = St { pos: s.pos + width, ..s };
+    };
+    named = parseVariable(sourceText, skipWs(sourceText, s));
+    Res { st: namedState, v: name, ok: namedOk } = named;
+    if !namedOk { return Res<List<String>> { st: namedState, v: [], ok: false }; };
+    return ok(namedState, push([], name));
+};
+
+fn metadataDeclarationNames(sourceText: &Input, st: St) -> Res<List<String>> ~ {
+    s = skipWs(sourceText, st);
+    names = [];
+    while !atEnd(sourceText, s) ~ {
+        header = metadataEnumHeader(sourceText, clone(s));
+        Res { st: headerState, v: headerNames, ok: headerOk } = header;
+        if !headerOk {
+            named = metadataNamedHeader(sourceText, clone(s));
+            Res { st: namedState, v: namedNames, ok: namedOk } = named;
+            headerState = namedState;
+            headerNames = namedNames;
+            headerOk = namedOk;
+        };
+        if headerOk {
+            s = headerState;
+            for name in headerNames { names = push(names, clone(name)); };
+        };
+        tail = scanMetadataTail(sourceText, s, false);
+        Res { st: tailState, v: tailValue, ok: tailOk } = tail;
+        if !tailOk { return Res<List<String>> { st: tailState, v: [], ok: false }; };
+        s = tailState;
+        if byteAt(sourceText, s, s.pos) = 59 { s = St { pos: s.pos + 1, ..s }; };
+        s = skipWs(sourceText, s);
+    };
+    return ok(s, names);
+};
+
 fn fileProtocolByte(text: &String, index: Int) -> Int ~ {
     if index < 0 || index >= size(text.bytes) { return 0 - 1; };
     return toInt(get(&text.bytes, index));
@@ -8042,7 +8182,7 @@ fn fileParseError(input: &Input, st: &St) -> Int ~ {
     return msg.printError();
 };
 
-fn runFileRequest() -> Int ~ {
+fn runFileRequest(mode: Int) -> Int ~ {
     seeded = readFileDecls();
     Parsed { value: initial, pos: ignored, ok: seedOk } = seeded;
     if !seedOk { "tersus parser: invalid declaration seed\n".printError(); return 1; };
@@ -8059,16 +8199,54 @@ fn runFileRequest() -> Int ~ {
     if readByte() >= 0 { "tersus parser: trailing input\n".printError(); return 1; };
     if !fileProtocolUtf8(text) { "tersus parser: invalid source UTF8\n".printError(); return 1; };
     input = newInput(text);
-    head = fileHeadDetailed(input, initial);
-    Res { st: headState, v: imports, ok: headOk } = head;
-    if !headOk { fileParseError(input, headState); return 1; };
-    parsed = statementBlock(input, headState);
-    Res { st: parsedState, v: body, ok: parsedOk } = parsed;
-    if !parsedOk { fileParseError(input, parsedState); return 1; };
-    s = skipWs(input, parsedState);
+    if mode = 2 {
+        scanned = metadataDeclarationNames(input, initial);
+        Res { st: scannedState, v: names, ok: scannedOk } = scanned;
+        if !scannedOk { fileParseError(input, scannedState); return 1; };
+        "tersus-names 1\n".print();
+        "names".print(); printInt(size(names)); newLine();
+        for name in names { "name".print(); printName(name); newLine(); };
+        return 0;
+    };
+    state = skipWs(input, initial);
+    imports = [];
+    body = [];
+    if mode <= 1 {
+        head = fileHeadDetailed(input, state);
+        Res { st: headState, v: foundImports, ok: headOk } = head;
+        if !headOk { fileParseError(input, headState); return 1; };
+        if mode = 1 {
+            "tersus-imports 1\n".print();
+            printFileImports(foundImports);
+            return 0;
+        };
+        imports = foundImports;
+        parsed = statementBlock(input, headState);
+        Res { st: parsedState, v: foundBody, ok: parsedOk } = parsed;
+        if !parsedOk { fileParseError(input, parsedState); return 1; };
+        state = parsedState;
+        body = foundBody;
+    } else if mode = 3 {
+        value = expression(input, state);
+        Res { st: valueState, v: valueId, ok: valueOk } = value;
+        if !valueOk { fileParseError(input, valueState); return 1; };
+        wrapped = stmtNode(valueState, AstStatement::Return { e: valueId });
+        Res { st: wrappedState, v: wrappedId, ok: wrappedOk } = wrapped;
+        if !wrappedOk { "tersus parser: internal arena failure\n".printError(); return 1; };
+        state = wrappedState;
+        body = push(body, wrappedId);
+    } else {
+        parsed = statement(input, state);
+        Res { st: parsedState, v: statementId, ok: parsedOk } = parsed;
+        if !parsedOk { fileParseError(input, parsedState); return 1; };
+        state = parsedState;
+        body = push(body, statementId);
+    };
+    s = skipWs(input, state);
     if !atEnd(input, s) {
-        s = St { err: "expected the end of the input", errPos: s.pos, ..s };
-        fileParseError(input, s);
+        ended = fail(s, 0, "expected the end of the input");
+        Res { st: endState, v: ignoredEndValue, ok: ignoredEndOk } = ended;
+        fileParseError(input, endState);
         return 1;
     };
     root = statementsList( s, body);
@@ -8083,9 +8261,24 @@ fn runFileRequest() -> Int ~ {
 };
 
 headerLine = String::readLine(64);
-if headerLine = "tersus-file-parse 1" {
-    fileStatus = runFileRequest();
+if headerLine = "tersus-file-parse 1" || headerLine = "tersus-import-prefix 1" || headerLine = "tersus-declaration-names 1" {
+    mode = 0;
+    if headerLine = "tersus-import-prefix 1" { mode = 1; };
+    if headerLine = "tersus-declaration-names 1" { mode = 2; };
+    fileStatus = runFileRequest(mode);
     if fileStatus != 0 { return 1; };
+} else if headerLine = "tersus-fragment-parse 1" {
+    fragmentRecord = fileReadRecord("fragment");
+    Parsed { value: fragmentTokens, pos: ignoredFragmentPos, ok: fragmentOk } = fragmentRecord;
+    if !fragmentOk || size(fragmentTokens) != 2 { "tersus parser: bad fragment record\n".printError(); return 1; };
+    kind = fileWordAt(fragmentTokens, 1);
+    if !kind.ok { "tersus parser: unknown fragment kind\n".printError(); return 1; };
+    mode = 0;
+    if kind.value = "expression" { mode = 3; }
+    else if kind.value = "statement" { mode = 4; }
+    else { "tersus parser: unknown fragment kind\n".printError(); return 1; };
+    fragmentStatus = runFileRequest(mode);
+    if fragmentStatus != 0 { return 1; };
 } else {
 if headerLine != "tersus-parse 1" { "tersus parser: bad header, expected tersus-parse 1\n".printError(); return 1; };
 metaLine = String::readLine(64);
@@ -8127,11 +8320,13 @@ while si < segmentCount && !parseFailed ~ {
             } else {
                 s = skipWs(sourceText, resultPartsparsedState);
                 if !atEnd(sourceText, s) {
+                    ended = fail(s, 0, "expected the end of the input");
+                    Res { st: endState, v: ignoredEndValue, ok: ignoredEndOk } = ended;
                     parseFailed = true;
-                    failMessage = "expected the end of the input";
+                    failMessage = clone(endState.err);
                     failSource = clone(sourceText.text);
-                    failPos = s.pos;
-                    state = s;
+                    failPos = endState.errPos;
+                    state = endState;
                 } else {
                     state = s;
                     for x in resultPartsparsedValue { allStatements = push(allStatements, x); };

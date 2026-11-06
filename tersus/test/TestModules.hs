@@ -23,15 +23,16 @@ import Interface
 import qualified Mir as M
 import MirEval (renderMirValue, runProgram)
 import Modules
-import Parse
-import qualified Parse as Oracle
+import TestParserFragments
+import ParsedFile
+import qualified ParserSeed as Oracle
 import qualified TersusParser as NativeParser
 import qualified Native
-import Seed (emitterHash)
+import Seed (compilerSnapshotHash)
 import LlvmRuntime (runtimeSource)
 import Hash (fingerprint)
 import System.Exit (ExitCode (..))
-import Pipeline (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesToOwned, compileModulesToProgram, compileSource)
+import Pipeline (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesToOwned, compileModulesToProgram, compileModulesValidated, compileSource)
 import Syntax
 import Types
 import TestHarness
@@ -199,12 +200,13 @@ loadPkg files entry = case loadFromEntry (resolverFromFiles files) entry of
     Right (StandaloneResult _ _) -> Left "expected a package, got a standalone program"
 
 expectErr :: Files -> FilePath -> String -> TestResult
-expectErr files entry needle = case loadPkg files entry of
-    Left err ->
-        if needle `isInfixOf` err
-            then Nothing
-            else Just ("Expected error containing " ++ show needle ++ ", got: " ++ err)
-    Right pkg -> Just ("Expected load failure containing " ++ show needle ++ ", got: " ++ show (map (renderModuleId . loadedModuleId) (packageModules pkg)))
+expectErr files entry needle = expectErrAll files entry [needle]
+
+-- One evaluation, every needle asserted against that single result.
+expectErrAll :: Files -> FilePath -> [String] -> TestResult
+expectErrAll files entry needles = case loadPkg files entry of
+    Left err -> foldr (\needle acc -> (if needle `isInfixOf` err then Nothing else Just ("Expected error containing " ++ show needle ++ ", got: " ++ err)) <> acc) Nothing needles
+    Right pkg -> Just ("Expected load failure containing " ++ show needles ++ ", got: " ++ show (map (renderModuleId . loadedModuleId) (packageModules pkg)))
 
 moduleOrder :: LoadedPackage -> [String]
 moduleOrder pkg = map (renderModuleId . loadedModuleId) (packageModules pkg)
@@ -343,14 +345,10 @@ testLoaderErrors =
             [("app/package.tersus", ""), ("app/main.tersus", "import otherpkg::geo; x = 1;"), ("app/geo/geo.tersus", "struct Point { x: Int };")]
             "app/main.tersus"
             "package \"otherpkg\" not found"
-        , expectErr
+        , expectErrAll
             [("app/package.tersus", ""), ("app/main.tersus", "import app::nope; x = 1;"), ("app/geo/geo.tersus", "struct Point { x: Int };")]
             "app/main.tersus"
-            "\"nope\" is not a module of package app"
-        , expectErr
-            [("app/package.tersus", ""), ("app/main.tersus", "import app::nope; x = 1;"), ("app/geo/geo.tersus", "struct Point { x: Int };")]
-            "app/main.tersus"
-            "modules are: geo"
+            ["\"nope\" is not a module of package app", "modules are: geo"]
         , expectErr
             [("app/package.tersus", ""), ("app/main.tersus", "import app::geo::shapes::Nope; x = 1;"), ("app/geo/shapes.tersus", "struct Point { x: Int };")]
             "app/main.tersus"
@@ -428,22 +426,14 @@ testLoaderLevels =
             "app/main.tersus" of
             Left err -> Just ("file-level import should load: " ++ err)
             Right pkg -> testAssertEq (map resolvedLevel (resolvedIn pkg "app" "main.tersus")) [LevelFile]
-        , expectErr
+        , expectErrAll
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo::Point; x = 1;")
             , ("app/geo/geo.tersus", "struct Point { x: Int };")
             , ("app/geo/extra.tersus", fnDecl "area")
             ]
             "app/main.tersus"
-            "write app::geo::geo::Point instead of app::geo::Point"
-        , expectErr
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo::Point; x = 1;")
-            , ("app/geo/geo.tersus", "struct Point { x: Int };")
-            , ("app/geo/extra.tersus", fnDecl "area")
-            ]
-            "app/main.tersus"
-            "has grown to 2 files"
+            ["write app::geo::geo::Point instead of app::geo::Point", "has grown to 2 files"]
         , expectErr
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo::Point; x = 1;")
@@ -453,6 +443,16 @@ testLoaderLevels =
             "app/main.tersus"
             "write app::geo::shapes::Point"
         ]
+
+-- One on-disk geo-package fixture for both filesystem cases; each case
+-- keeps its own assertions about what loading that package proves.
+writeGeoPackageFs :: FilePath -> String -> String -> IO FilePath
+writeGeoPackageFs pkgDir mainSource geoSource = do
+    createDirectoryIfMissing True (pkgDir </> "geo")
+    writeFile (pkgDir </> "package.tersus") ""
+    writeFile (pkgDir </> "main.tersus") mainSource
+    writeFile (pkgDir </> "geo" </> "geo.tersus") geoSource
+    return (pkgDir </> "main.tersus")
 
 testLoaderFilesystem :: Test
 testLoaderFilesystem = TestCase "loader-filesystem" $ do
@@ -466,12 +466,9 @@ testLoaderFilesystem = TestCase "loader-filesystem" $ do
         Right value -> value)
   where
     runFs root pkgDir = do
-        createDirectoryIfMissing True (pkgDir </> "geo")
-        writeFile (pkgDir </> "package.tersus") ""
-        writeFile (pkgDir </> "main.tersus") "import app::geo; x = 1;"
-        writeFile (pkgDir </> "geo" </> "geo.tersus") "struct Point { x: Int };"
-        loaded <- loadFromFilesystem (pkgDir </> "main.tersus")
-        injected <- loadFromFilesystemWith injectedFileParser (pkgDir </> "main.tersus")
+        entry <- writeGeoPackageFs pkgDir "import app::geo; x = 1;" "struct Point { x: Int };"
+        loaded <- loadFromFilesystem entry
+        injected <- loadFromFilesystemWith injectedFileParser entry
         return ((case loaded of
             Left err -> Just ("filesystem load failed: " ++ err)
             Right (PackageResult pkg) -> testAssertEq (moduleOrder pkg) ["app::geo", "app"]
@@ -500,12 +497,12 @@ expectCompiles files entry = case compilePkg files entry of
     Right _ -> Nothing
 
 expectCompileError :: Files -> FilePath -> String -> TestResult
-expectCompileError files entry needle = case compilePkg files entry of
-    Left err ->
-        if needle `isInfixOf` err
-            then Nothing
-            else Just ("Expected compile error containing " ++ show needle ++ ", got: " ++ err)
-    Right compiled -> Just ("Expected compile failure containing " ++ show needle ++ ", got modules: " ++ show (map (renderModuleId . compiledModuleId) (compiledModules compiled)))
+expectCompileError files entry needle = expectCompileErrorAll files entry [needle]
+
+expectCompileErrorAll :: Files -> FilePath -> [String] -> TestResult
+expectCompileErrorAll files entry needles = case compilePkg files entry of
+    Left err -> foldr (\needle acc -> (if needle `isInfixOf` err then Nothing else Just ("Expected compile error containing " ++ show needle ++ ", got: " ++ err)) <> acc) Nothing needles
+    Right compiled -> Just ("Expected compile failure containing " ++ show needles ++ ", got modules: " ++ show (map (renderModuleId . compiledModuleId) (compiledModules compiled)))
 
 compiledNamed :: CompiledPackage -> String -> Maybe CompiledModule
 compiledNamed compiled name = case [modu | modu <- compiledModules compiled, renderModuleId (compiledModuleId modu) == name] of
@@ -521,36 +518,41 @@ geoFiles mainSource =
 
 testModuleCheckBasic :: Test
 testModuleCheckBasic =
-    testCaseSeq
+    TestList
         "module-check-basic"
-        [ expectCompiles (geoFiles "import app::geo; p = geo::make(3); return geo::area(p);") "app/main.tersus"
-        , expectCompiles (geoFiles "import app::geo as g; p = g::make(3); return g::area(p);") "app/main.tersus"
-        , expectCompiles (geoFiles "import app::geo; p = app::geo::geo::make(3); return app::geo::geo::area(p);") "app/main.tersus"
-        , expectCompiles (geoFiles "import app::geo::geo::Point; import app::geo::geo::make; import app::geo::geo::area; p = make(3); return area(p);") "app/main.tersus"
-        , expectCompiles (geoFiles "import app::geo { Point, make, area }; p = make(3); return area(p);") "app/main.tersus"
-        , expectCompiles
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo::shapes; p = shapes::make(4); return shapes::area(p);")
-            , ("app/geo/shapes.tersus", "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };")
-            , ("app/geo/extra.tersus", "fn extra(x: Int) -> Int [{ }] [{ }] { return x + 1; };")
-            ]
-            "app/main.tersus"
-        , expectCompileError
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "p = geo::make(3); return p.x;")
-            , ("app/other.tersus", "import app::geo; struct Local { x: Int };")
-            , ("app/geo/geo.tersus", "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
-            ]
-            "app/main.tersus"
-            "covering import"
-        , expectCompileError
-            (geoFiles "import app::geo { Point }; struct Point { x: Int }; p = geo::make(3); return p.x;")
-            "app/main.tersus"
-            "ambiguous"
-        , expectCompiles
-            (geoFiles "import app::geo; struct Wrapper { p: geo::Point, n: Int }; fn get(w: Wrapper) -> Int [{ }] [{ }] { return w.p.x + w.n; }; p = geo::make(3); w = Wrapper { p: p, n: 1 }; return get(w);")
-            "app/main.tersus"
-        ]
+        ( [ testCase name (expectCompiles (geoFiles mainSource) "app/main.tersus")
+          | (name, mainSource, _expected) <-
+                [ ("module import", "import app::geo; p = geo::make(3); return geo::area(p);", "compiles")
+                , ("aliased module import", "import app::geo as g; p = g::make(3); return g::area(p);", "compiles")
+                , ("fully qualified names", "import app::geo; p = app::geo::geo::make(3); return app::geo::geo::area(p);", "compiles")
+                , ("selected symbol imports", "import app::geo::geo::Point; import app::geo::geo::make; import app::geo::geo::area; p = make(3); return area(p);", "compiles")
+                , ("selected name list", "import app::geo { Point, make, area }; p = make(3); return area(p);", "compiles")
+                ]
+          ]
+            ++ [ testCase "file-level shapes import" $ expectCompiles
+                    [ ("app/package.tersus", "")
+                    , ("app/main.tersus", "import app::geo::shapes; p = shapes::make(4); return shapes::area(p);")
+                    , ("app/geo/shapes.tersus", "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };")
+                    , ("app/geo/extra.tersus", "fn extra(x: Int) -> Int [{ }] [{ }] { return x + 1; };")
+                    ]
+                    "app/main.tersus"
+               , testCase "missing covering import" $ expectCompileError
+                    [ ("app/package.tersus", "")
+                    , ("app/main.tersus", "p = geo::make(3); return p.x;")
+                    , ("app/other.tersus", "import app::geo; struct Local { x: Int };")
+                    , ("app/geo/geo.tersus", "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
+                    ]
+                    "app/main.tersus"
+                    "covering import"
+               , testCase "local declaration shadows selected import" $ expectCompileError
+                    (geoFiles "import app::geo { Point }; struct Point { x: Int }; p = geo::make(3); return p.x;")
+                    "app/main.tersus"
+                    "ambiguous"
+               , testCase "imported type in local struct" $ expectCompiles
+                    (geoFiles "import app::geo; struct Wrapper { p: geo::Point, n: Int }; fn get(w: Wrapper) -> Int [{ }] [{ }] { return w.p.x + w.n; }; p = geo::make(3); w = Wrapper { p: p, n: 1 }; return get(w);")
+                    "app/main.tersus"
+               ]
+        )
 
 testModuleCheckTraits :: Test
 testModuleCheckTraits =
@@ -577,8 +579,7 @@ testModuleCheckTraits =
                         then Nothing
                         else Just ("expected the cross-module axiom name in elaborated root statements, got: " ++ show (compiledStatements modu))
                 Nothing -> Just "expected a compiled root module"
-        , expectCompileError boundedFiles "app/main.tersus" "bounded function"
-        , expectCompileError boundedFiles "app/main.tersus" "cannot be exported"
+        , expectCompileErrorAll boundedFiles "app/main.tersus" ["bounded function", "cannot be exported"]
         , expectCompileError orphanFiles "app/main.tersus" "orphan impl"
         , case compilePkg externFiles "app/main.tersus" of
             Left err -> Just ("extern package should compile: " ++ err)
@@ -663,41 +664,33 @@ expectRuns files entry expected = case programPkg files entry of
         Ok value -> testAssertEq (fmap renderMirValue value) (Just expected)
 
 expectProgramError :: Files -> FilePath -> String -> TestResult
-expectProgramError files entry needle = case programPkg files entry of
-    Left err ->
-        if needle `isInfixOf` err
-            then Nothing
-            else Just ("Expected program error containing " ++ show needle ++ ", got: " ++ err)
-    Right program -> Just ("Expected program failure containing " ++ show needle ++ ", got functions: " ++ show (Map.keys (M.progFunctions program)))
+expectProgramError files entry needle = expectProgramErrorAll files entry [needle]
+
+expectProgramErrorAll :: Files -> FilePath -> [String] -> TestResult
+expectProgramErrorAll files entry needles = case programPkg files entry of
+    Left err -> foldr (\needle acc -> (if needle `isInfixOf` err then Nothing else Just ("Expected program error containing " ++ show needle ++ ", got: " ++ err)) <> acc) Nothing needles
+    Right program -> Just ("Expected program failure containing " ++ show needles ++ ", got functions: " ++ show (Map.keys (M.progFunctions program)))
 
 linkGeo :: String
 linkGeo = "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; }; fn unrelated(x: Int) -> Int [{ }] [{ }] { return x * 2; };"
 
+linkFiles :: String -> String -> Files
+linkFiles mainSource geoSource =
+    [ ("app/package.tersus", "")
+    , ("app/main.tersus", mainSource)
+    , ("app/geo/geo.tersus", geoSource)
+    ]
+
 testModuleLinkEval :: Test
 testModuleLinkEval =
-    testCaseSeq
+    TestList
         "module-link-eval"
-        [ expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; p = geo::Point { x: 3 }; q = geo::make(4); return geo::area(p) + geo::area(q);")
-            , ("app/geo/geo.tersus", linkGeo)
+        [ testCase name (expectRuns (linkFiles mainSource geoSource) "app/main.tersus" expected)
+        | (name, mainSource, geoSource, expected) <-
+            [ ("point construction and area", "import app::geo; p = geo::Point { x: 3 }; q = geo::make(4); return geo::area(p) + geo::area(q);", linkGeo, "7")
+            , ("enum match", "import app::geo; s = geo::Shape::Circle { r: 5 }; y = 0; match s { geo::Shape::Circle { r: r } => { y = r; }, geo::Shape::Square { s: q } => { y = q; } }; return y;", "enum Shape { Circle { r: Int }, Square { s: Int } };", "5")
+            , ("selected point import", "import app::geo::geo::Point; p = Point { x: 5 }; return p.x;", linkGeo, "5")
             ]
-            "app/main.tersus"
-            "7"
-        , expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; s = geo::Shape::Circle { r: 5 }; y = 0; match s { geo::Shape::Circle { r: r } => { y = r; }, geo::Shape::Square { s: q } => { y = q; } }; return y;")
-            , ("app/geo/geo.tersus", "enum Shape { Circle { r: Int }, Square { s: Int } };")
-            ]
-            "app/main.tersus"
-            "5"
-        , expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo::geo::Point; p = Point { x: 5 }; return p.x;")
-            , ("app/geo/geo.tersus", linkGeo)
-            ]
-            "app/main.tersus"
-            "5"
         ]
 
 testModuleLinkPrune :: Test
@@ -812,9 +805,7 @@ testModuleLinkExtern =
         [ case programPkg externFiles "app/main.tersus" of
             Left err -> Just ("identical externs should link: " ++ err)
             Right program -> testAssertEq [name | name <- Map.keys (M.progFunctions program), name == "extern cfunc"] ["extern cfunc"]
-        , expectProgramError conflictFiles "app/main.tersus" "extern fn cfunc"
-        , expectProgramError conflictFiles "app/main.tersus" "app::geo"
-        , expectProgramError conflictFiles "app/main.tersus" "app::other"
+        , expectProgramErrorAll conflictFiles "app/main.tersus" ["extern fn cfunc", "app::geo", "app::other"]
         ]
   where
     externDecl ret = "extern fn cfunc(x: Int) -> " ++ ret ++ " [{ }] [{ }]; fn use(x: Int) -> Int [{ }] [{ }] { return cfunc(x); };"
@@ -863,11 +854,8 @@ testModuleCliFilesystem = TestCase "module-cli-filesystem" $ do
         Right value -> value)
   where
     runFs root pkgDir = do
-        createDirectoryIfMissing True (pkgDir </> "geo")
-        writeFile (pkgDir </> "package.tersus") ""
-        writeFile (pkgDir </> "main.tersus") "import app::geo; p = geo::Point { x: 3 }; return geo::area(p);"
-        writeFile (pkgDir </> "geo" </> "geo.tersus") "struct Point { x: Int }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };"
-        loaded <- loadFromFilesystem (pkgDir </> "main.tersus")
+        entry <- writeGeoPackageFs pkgDir "import app::geo; p = geo::Point { x: 3 }; return geo::area(p);" "struct Point { x: Int }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };"
+        loaded <- loadFromFilesystem entry
         value <- case loaded of
             Left err -> return (Just ("filesystem load failed: " ++ err))
             Right (PackageResult pkg) -> return (case runPackageFiles noWorld Interpret pkg of
@@ -879,52 +867,20 @@ testModuleCliFilesystem = TestCase "module-cli-filesystem" $ do
 
 testModuleLibraries :: Test
 testModuleLibraries =
-    testCaseSeq
+    TestList
         "module-libraries"
-        [ expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; return geo::greetingSize();")
-            , ("app/geo/geo.tersus", "fn greetingSize() -> Int [{ }] [{ }] { s = \"hi\".concat(\"!\"); return size(s); };")
+        [ testCase name (expectRuns (linkFilesWith mainSource extraFiles) "app/main.tersus" expected)
+        | (name, mainSource, extraFiles, expected) <-
+            [ ("string in geo", "import app::geo; return geo::greetingSize();", [("app/geo/geo.tersus", "fn greetingSize() -> Int [{ }] [{ }] { s = \"hi\".concat(\"!\"); return size(s); };")], "3")
+            , ("strings in two modules", "import app::geo; import app::other; return geo::greetingSize() + other::wordSize();", [("app/geo/geo.tersus", "fn greetingSize() -> Int [{ }] [{ }] { s = \"hi\".concat(\"!\"); return size(s); };"), ("app/other/other.tersus", "fn wordSize() -> Int [{ }] [{ }] { s = \"abcd\"; return size(s); };")], "7")
+            , ("hash map in geo", "import app::geo; m = geo::counts(); return m;", [("app/geo/geo.tersus", "fn counts() -> Int [{ }] [{ }] { counts = HashMap::new(); counts = counts.insert(\"the\", 40); counts = counts.insert(\"cat\", 1); counts = counts.insert(\"the\", 41); return counts.lookup(\"the\", 0) + counts.size(); };")], "43")
+            , ("clone and eq in geo", "import app::geo; p = geo::make(21); return geo::twice(p);", [("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn twice(p: Point) -> Int [{ }] [{ }] { q = clone(p); if q = p { return p.x + q.x; }; return 0; };")], "42")
+            , ("eq comparison in main", "import app::geo; a = geo::make(5); b = geo::make(5); if a = b { return 1; }; return 0;", [("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")], "1")
+            , ("string return from geo", "import app::geo; s = geo::greeting(); return size(s);", [("app/geo/geo.tersus", "fn greeting() -> String [{ }] [{ }] { return \"hi\".concat(\"!\"); };")], "3")
             ]
-            "app/main.tersus"
-            "3"
-        , expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; import app::other; return geo::greetingSize() + other::wordSize();")
-            , ("app/geo/geo.tersus", "fn greetingSize() -> Int [{ }] [{ }] { s = \"hi\".concat(\"!\"); return size(s); };")
-            , ("app/other/other.tersus", "fn wordSize() -> Int [{ }] [{ }] { s = \"abcd\"; return size(s); };")
-            ]
-            "app/main.tersus"
-            "7"
-        , expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; m = geo::counts(); return m;")
-            , ("app/geo/geo.tersus", "fn counts() -> Int [{ }] [{ }] { counts = HashMap::new(); counts = counts.insert(\"the\", 40); counts = counts.insert(\"cat\", 1); counts = counts.insert(\"the\", 41); return counts.lookup(\"the\", 0) + counts.size(); };")
-            ]
-            "app/main.tersus"
-            "43"
-        , expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; p = geo::make(21); return geo::twice(p);")
-            , ("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn twice(p: Point) -> Int [{ }] [{ }] { q = clone(p); if q = p { return p.x + q.x; }; return 0; };")
-            ]
-            "app/main.tersus"
-            "42"
-        , expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; a = geo::make(5); b = geo::make(5); if a = b { return 1; }; return 0;")
-            , ("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
-            ]
-            "app/main.tersus"
-            "1"
-        , expectRuns
-            [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; s = geo::greeting(); return size(s);")
-            , ("app/geo/geo.tersus", "fn greeting() -> String [{ }] [{ }] { return \"hi\".concat(\"!\"); };")
-            ]
-            "app/main.tersus"
-            "3"
         ]
+  where
+    linkFilesWith mainSource extraFiles = [("app/package.tersus", ""), ("app/main.tersus", mainSource)] ++ extraFiles
 
 testModuleLinkLibCollision :: Test
 testModuleLinkLibCollision =
@@ -1072,6 +1028,37 @@ testFileProtocol = TestList "file-protocol"
     , testCase "exact-reply-wire" $ case (writeParsedFile (ParsedFile [Import ["app", "geo"] (Just "g") (Just ["Point"]) 2 3] []) emptyDecls, AstData.writeParsed []) of
         (Ok wire, Ok ast) -> testAssertEq wire ("tersus-file 1\nimports 1\nimport 2 3 2 \"app\" \"geo\" some \"g\" some 1 \"Point\"\n" ++ emptyDeclRecords ++ "ast\n" ++ ast)
         _ -> Just "reply or AST writer failed"
+    , testCaseSeq "metadata-request-headers"
+        [ case writer "λ" of
+            Error err -> Just err
+            Ok wire -> testAssertEq wire (tag ++ "\n" ++ emptyDeclRecords ++ "source 2\n\xCE\xBB")
+        | (writer, tag) <- [(writeImportPrefixRequest, "tersus-import-prefix 1"), (writeDeclarationNamesRequest, "tersus-declaration-names 1")]
+        ]
+    , testCase "metadata-import-reply" $ testAssertEq
+        (readImportPrefix "tersus-imports 1\nimports 1\nimport 2 9 2 \"data\" \"codec\" some \"c\" some 1 \"Size\"\n")
+        (Ok [Import ["data", "codec"] (Just "c") (Just ["Size"]) 2 9])
+    , testCase "metadata-name-reply" $ testAssertEq
+        (readDeclarationNames "tersus-names 1\nnames 2\nname \"E\"\nname \"E::A\"\n") (Ok ["E", "E::A"])
+    , testCaseSeq "metadata-name-refusals"
+        [ protocolRefuses (readDeclarationNames wire)
+        | wire <-
+            [ "tersus-names 2\nnames 0\n", "tersus-names 1\nnames -1\n"
+            , "tersus-names 1\nnames 9223372036854775808\n", "tersus-names 1\nnames 1\n"
+            , "tersus-names 1\nnames 0\nname \"extra\"\n", "tersus-names 1\nnames 1\nname bare\n"
+            , "tersus-names 1\nnames 1\nname \"X\" extra\n", "tersus-names 1\nnames 1\nname \"X\""
+            , "tersus-names 1\nnames 1\nname \"\xFF\"\n"
+            ]
+        ]
+    , testCaseSeq "metadata-import-refusals"
+        [ protocolRefuses (readImportPrefix wire)
+        | wire <-
+            [ "tersus-imports 1\nimports -1\n", "tersus-imports 1\nimports 1\n"
+            , "tersus-imports 1\nimports 0\nextra\n"
+            , "tersus-imports 1\nimports 1\nimport 0 1 1 \"x\" none none\n"
+            , "tersus-imports 1\nimports 1\nimport 1 1 0 none none\n"
+            , "tersus-imports 1\nimports 1\nimport 1 1 1 \"x\" none some 0\n"
+            ]
+        ]
     , testCaseSeq "strict-declarations"
         [ protocolRefuses (readFileRequest ("tersus-file-parse 1\n" ++ replaceRecord old new emptyDeclRecords ++ "source 0\n"))
         | (old, new) <-
@@ -1270,7 +1257,8 @@ nativeSourceRecordLf = do
         (_, Error err, _) -> pure (Just err)
         (_, _, Error err) -> pure (Just err)
         (Right _, Ok home, Ok request) -> do
-            let exe = home </> ("tersus-parser-" ++ NativeParser.parserHash)
+            identity <- NativeParser.parserKey >>= \result -> case result of Error e -> fail e; Ok key -> pure key
+            let exe = home </> ("tersus-parser-" ++ identity)
                 unterminated = take (length request - 1) request
             (code, out, err) <- Native.runWithInputFull exe unterminated
             pure $ case File.readFileRequest unterminated of
@@ -1282,7 +1270,7 @@ nativeSourceRecordLf = do
 testNativeFiles :: Test
 testNativeFiles = TestList "native-file-transport"
     [ TestList "metadata-and-imports"
-        [ nativeFileCase label accepted decls source
+        ([ nativeFileCase label accepted decls source
         | (label, accepted, decls, source) <-
             [ ("empty", True, emptyDecls, "")
             , ("all ten seeded fields", True, protocolDecls, "")
@@ -1293,7 +1281,6 @@ testNativeFiles = TestList "native-file-transport"
             , ("alias and selected names", True, locating emptyDecls, "import app::geo::shapes as g { Point, area }; return 1;")
             , ("line and tab columns", True, locating emptyDecls, "// λ header\n\timport app::geo as g;\n  import app::other { A, B };\nreturn 1;")
             , ("unlocated body retains import positions", True, emptyDecls, "\n  import app::geo;\nreturn 1;")
-            , ("full library declarations and UTF-8 source", True, locating Compile.probeDecls, "// String in a comment is not a declaration\ns = \"λ🙂\"; return size(s.bytes);")
             , ("generic and impl scope restoration", True, locating emptyDecls, "struct Vec<T, n> { x: T, bytes: Array<Byte, n> }; impl<T, n> Vec<T, n> { fn get(self: &Self) -> &T from self [{ }] [{ }] { return &self.x; }; };")
             , ("empty selected names", False, locating emptyDecls, "import app::geo {};")
             , ("whitespace-only selected names", False, locating emptyDecls, "import app::geo { };")
@@ -1315,7 +1302,12 @@ testNativeFiles = TestList "native-file-transport"
             , ("misplaced import", False, locating emptyDecls, "return 0; import app::geo;")
             , ("malformed path", False, locating emptyDecls, "import app:::geo;")
             ]
-        ]
+        ] ++ [TestCase "full library declarations and UTF-8 source" $ case Compile.probeDecls of
+            Left e -> pure (Just e)
+            Right declared -> do
+                let source = "// String in a comment is not a declaration\ns = \"λ🙂\"; return size(s.bytes);"
+                actual <- NativeParser.parseFileNative (locating declared) source
+                pure (nativeFileVerdict True (locating declared) source actual)])
     , TestList "per-run-declaration-shadowing"
         [ nativeFileSequence "struct field order"
             [ (True, "struct S { x: Int, y: Int };")
@@ -1509,10 +1501,10 @@ testCrossPackageBoundaries = TestList "cross-package-boundaries"
       | (label, accepted, source) <- crossPackageSyntax]
     ++ [ testCase "owning package preserves nominal identity" $ case loadPkg (crossPackageFiles "import left as l; import right as r; fn bad(x: l::model::Twin) -> r::model::Twin { return x; }; return 0;") "pkgs/app/main.tersus" of
             Left err -> Just err
-            Right pkg -> testAssertErrorContains "right$model$Twin" (PackageCompile.compileModulesValidated pkg)
+            Right pkg -> testAssertErrorContains "right$model$Twin" (compileModulesValidated pkg)
        , testCase "unimported type cannot compile" $ case loadPkg (crossPackageFiles "fn f(s: left::a::E) -> Int { return 0; }; return 0;") "pkgs/app/main.tersus" of
             Left _ -> Nothing
-            Right pkg -> testAssertErrorContains "unknown type" (PackageCompile.compileModulesValidated pkg)
+            Right pkg -> testAssertErrorContains "unknown type" (compileModulesValidated pkg)
        , testCase "unused dependency root cannot introduce a cycle" $ case loadPkg
             [ ("pkgs/app/package.tersus", ""), ("pkgs/app/main.tersus", "import dep::core { Point }; p = Point { x: 1 }; return p.x;")
             , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "import dep::unused;")
@@ -1582,7 +1574,7 @@ testCrossPackageConstructors = testCaseSeq "cross-package-constructor-seeds"
         ]
     checked source = case loadPkg (files source) "pkgs/app/main.tersus" of
         Left err -> Error err
-        Right pkg -> PackageCompile.compileModulesValidated pkg
+        Right pkg -> compileModulesValidated pkg
     accepts source expected = case checked source of
         Error err -> Just err
         Ok program -> case runProgram program of

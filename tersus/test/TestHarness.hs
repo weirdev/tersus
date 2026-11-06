@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE TemplateHaskell #-}
 -- Retries must not share a forced failure from the unsafePerformIO-backed pipeline.
 {-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 
@@ -10,6 +11,10 @@ module TestHarness
     , combineSummaries
     , testCase
     , testCaseSeq
+    , testCaseNamedSeq
+    , parseFailsWithHelper
+    , parseValidateEvalProgramHelper
+    , batchItems
     , forceTestResult
     , runTest
     , testAssertTrue
@@ -20,14 +25,20 @@ module TestHarness
     , parseEvalProgramFailHelper
     , parseValidProgramHelper
     , parseValidateFailProgramHelper
+    , pipelineRuns
+    , pipelineValid
+    , pipelineRejected
     , nativeInts
     , vecLibrary
     , compileOnce
+    , bootstrapOnce
     , ownedOnce
     , validatedOnce
     , programFromFile
     , programFromFiles
+    , bootstrapFromFile
     , validatedFromFile
+    , linkedFromFile
     , ownedFromFile
     , ownedFromFiles
     , packageCacheInput
@@ -37,46 +48,69 @@ module TestHarness
     , encodeProgram
     , decodeProgram
     , sharedProgramCacheFile
+    , sharedProgram
+    , compilerIdentity
+    , verifiedSeedIdentity
     , openEntryLockFile
     , executableDigest
+    , memoizedTestExecutable
     ) where
 
+import Control.DeepSeq (force)
+import qualified Data.ByteString.Lazy as BL
+import qualified TestProgramBinary as ProgramBinary
+import TestProgramBuildIdentity (concreteBuildIdentity, approvedBuildIdentity)
 import qualified Control.Exception as Exception
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
-import Control.Exception (IOException, SomeException, bracket, bracket_, displayException, finally, mask, onException, throwIO, try)
+import Control.Exception (IOException, SomeException, bracket, bracket_, bracketOnError, displayException, finally, mask, onException, throwIO, try)
 import Control.Monad (forM, when)
 import GHC.Conc (getNumCapabilities)
 import Data.Char (isHexDigit, isSpace, toLower)
-import Data.List (isInfixOf, stripPrefix)
+import Data.List (isInfixOf, isPrefixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, renameFile)
-import System.Environment (getExecutablePath, lookupEnv)
+import System.Directory (createDirectoryIfMissing, doesFileExist, makeAbsolute, removeFile, renameFile)
+import System.Environment (getExecutablePath, getProgName, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
-import System.IO (SeekMode (AbsoluteSeek), hClose, hPutStr, openTempFile)
+import System.IO (SeekMode (AbsoluteSeek), hClose)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Posix.IO (FileLock, LockRequest (WriteLock), OpenFileFlags (..), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
+import System.Posix.IO (FileLock, LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Types (Fd)
-import System.Process (readProcessWithExitCode)
+import System.Process (proc)
 
+import CacheLock (openBinaryTempFileCloexec, openLockFd)
 import Mir (Program)
-import MirHousekeeping (toolValidatedProgram)
-import PreludeSource (toolPackageFiles, mirPackageFiles)
+import Compile (lowerSource)
+import MirHousekeeping (eraseGhosts, toolProgram)
+import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationDriverSource, validationSource)
+import Hash (fingerprint)
+import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
-import Native (cacheDirectory)
-import Parse
+import Native (cacheDirectory, readProcessOutput)
+import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
-import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, compileSource, ownedSource, parseSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
 import Utils
 
 type TestResult = Maybe String
+
+memoizedTestExecutable :: MVar (Maybe FilePath) -> IO (Result FilePath String) -> IO (Result FilePath String)
+memoizedTestExecutable box prepare = modifyMVar box $ \saved -> do
+    live <- case saved of
+        Just exe -> doesFileExist exe
+        Nothing -> pure False
+    result <- case saved of
+        Just exe | live -> pure (Ok exe)
+        _ -> prepare
+    let keep = case result of Ok exe -> Just exe; Error _ -> Nothing
+    pure (keep, result)
 
 data Test = TestCase String (IO TestResult) | TestList String [Test] | TestParallel String [Test]
 
@@ -102,6 +136,33 @@ testCaseSeq name results =
     TestList
         name
         (zipWith (\i result -> testCase (show i) result) [0 :: Integer ..] results)
+
+-- Like testCaseSeq, but each row keeps its own name in the output.
+testCaseNamedSeq :: String -> [(String, TestResult)] -> Test
+testCaseNamedSeq name rows =
+    TestList name (map (uncurry testCase) rows)
+
+-- A parse failure whose message contains the expected text.
+parseFailsWithHelper :: String -> String -> TestResult
+parseFailsWithHelper source expected =
+    case parseStatementBlock source of
+        Left err -> if expected `isInfixOf` show err then Nothing else Just ("Wrong parse error: " ++ show err)
+        Right _ -> Just ("Expected a parse error for: " ++ source)
+
+-- Dual stage: a program must both validate and evaluate to the expected value.
+parseValidateEvalProgramHelper :: String -> Maybe Value -> TestResult
+parseValidateEvalProgramHelper source expected = withProgram source $
+    case parseWithEquality source of
+        Left err -> Just $ "Parse failed: " ++ err
+        Right stmts -> case validateStatements stmts of
+            Error e -> Just $ "Validation failed with error: " ++ e
+            Ok _ -> case runStatements stmts of
+                Ok result -> testAssertEq (fmap fromMirValue result) expected
+                Error e -> Just $ "Evaluation failed with error: " ++ e
+batchItems :: Int -> Int -> [a] -> [a]
+batchItems count batch values
+    | count <= 0 || batch < 1 || batch > count = []
+    | otherwise = [value | (index, value) <- zip [0 :: Int ..] values, index `mod` count == batch - 1]
 
 forceTestResult :: TestResult -> ()
 forceTestResult Nothing = ()
@@ -158,12 +219,19 @@ testAssertEq actual expected =
         then Nothing
         else Just $ "Expected: " ++ show expected ++ "\nGot: " ++ show actual
 
+-- The validator written in Tersus names the obligation it could not prove in the words of the
+-- contract (`Could not prove: x = 2`), as the old engine did, and is held to them; the old
+-- engine's other words (`Relation does not hold`, `Loop invariant is not preserved`) are not its
+-- own, and a program it refuses for not proving something, or for using what it does not model
+-- yet, has failed as expected there.
 testAssertErrorContains :: String -> Result a String -> TestResult
 testAssertErrorContains expectedSubstring result =
     case result of
         Ok _ -> Just $ "Expected failure containing: " ++ show expectedSubstring
         Error err ->
             if expectedSubstring `isInfixOf` err
+                || not ("Could not prove: " `isPrefixOf` expectedSubstring)
+                    && any (`isInfixOf` err) ["Could not prove: ", "could not prove ", "the Tersus validator does not model yet"]
                 then Nothing
                 else
                     Just $
@@ -205,18 +273,48 @@ parseValidProgramHelper source = withProgram source $
             Ok _ -> Nothing
             Error e -> Just $ "Validation failed with error: " ++ e
 
+-- Assert validation fails and the error contains the expected substring
+-- (via testAssertErrorContains, whose documented fallback accepts any
+-- "Could not prove: ..." / unmodelled-feature verdict for a specific
+-- "Could not prove: <obligation>" expectation).
 parseValidateFailProgramHelper :: String -> String -> TestResult
 parseValidateFailProgramHelper source expectedError = withProgram source $
     case parseWithEquality source of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts -> testAssertErrorContains expectedError (validateStatements stmts)
+        Right stmts -> case validateStatements stmts of
+            Ok _ -> Just "Validation passed when it should have failed"
+            result@(Error _) -> testAssertErrorContains expectedError result
+
+-- The Pipeline.parseSource counterparts of the helpers above: parseSource reads a program as
+-- the command line reads it, with the libraries the pipeline puts in front of it (lib-injected),
+-- where parseWithEquality reads the source alone. pipelineRejected asserts the expected
+-- substring, on a parse failure directly and on a validation failure via
+-- testAssertErrorContains (as parseValidateFailProgramHelper does).
+pipelineRuns :: String -> Value -> TestResult
+pipelineRuns source expected = case parseSource source of
+    Error e -> Just ("Parse failed: " ++ e)
+    Ok stmts -> case runStatements stmts of
+        Ok result -> testAssertEq (fmap fromMirValue result) (Just expected)
+        Error e -> Just ("Evaluation failed with error: " ++ e)
+
+pipelineValid :: String -> TestResult
+pipelineValid source = case parseSource source of
+    Error e -> Just ("Parse failed: " ++ e)
+    Ok stmts -> case validateStatements stmts of
+        Ok _ -> Nothing
+        Error e -> Just ("Validation failed with error: " ++ e)
+
+pipelineRejected :: String -> String -> TestResult
+pipelineRejected source expected = case parseSource source of
+    Error e -> if expected `isInfixOf` e then Nothing else Just ("Expected failure containing: " ++ show expected ++ "\nGot: " ++ e)
+    Ok stmts -> testAssertErrorContains expected (validateStatements stmts)
 
 -- A failure says which program it was about (the start of it)
 withProgram :: String -> TestResult -> TestResult
 withProgram source = fmap (\message -> message ++ "\nProgram: " ++ take 500 source)
 
--- Lossless codec for a compiled program. MirData.writeProgram is lossy by design, so the shared
--- cache uses derived Show/Read, which keep specs, invariants, generics and ghost contents.
+-- Textual markers used by test probes. Disk entries use TestProgramBinary,
+-- whose structural codec retains specs, invariants, generics and ghost contents.
 programCodecHeader :: String
 programCodecHeader = "tersus-test-program 1\n"
 
@@ -237,6 +335,13 @@ decodeProgram text = case stripPrefix programCodecHeader text of
 compileOnce :: String -> IO (Result Program String)
 compileOnce source = sharedProgram "compile" source (pure (compileSource source))
 
+-- A program of the compiler itself (the emitter, the MIR checker and eraser, the validator)
+-- as the host builds it, lowered with its ghosts erased and not validated: the validator is
+-- one of these programs, so they are the bootstrap (MirHousekeeping.ownedProgramOf). Whether
+-- each validates is testHostValidation's to say; the groups that run them test what they do.
+bootstrapOnce :: String -> IO (Result Program String)
+bootstrapOnce source = sharedProgram "bootstrap" source (pure (lowerSource True source `bindResult` eraseGhosts))
+
 ownedOnce :: String -> IO (Result Program String)
 ownedOnce source = sharedProgram "owned" source (pure (ownedSource source))
 
@@ -251,6 +356,15 @@ programFromFile path = snapshotFromFilesystem path >>= programFromFiles path
 
 programFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
 programFromFiles = cachedFromPackage "program"
+
+-- One of the compiler's own programs as the host builds it: linked, its ghosts erased, not
+-- validated (see cachedFromPackage)
+bootstrapFromFile :: FilePath -> IO (Result Program String)
+bootstrapFromFile = programFromFile
+
+-- The same, before its ghosts are erased
+linkedFromFile :: FilePath -> IO (Result Program String)
+linkedFromFile = validatedFromFile
 
 validatedFromFile :: FilePath -> IO (Result Program String)
 validatedFromFile path = snapshotFromFilesystem path >>= cachedFromPackage "validated" path
@@ -280,7 +394,9 @@ cachedFromPackage stage path files = do
         validated = case loadFromEntry (resolverFromFiles files) path of
             Left e -> Error e
             Right (PackageResult pkg)
-                | matchesEmbeddedPackage path pkg -> toolValidatedProgram (normalizePath path)
+                -- (the compiler's own programs as the host builds them: linked, not
+                -- validated, MirHousekeeping.toolProgram; testHostValidation validates them)
+                | matchesEmbeddedPackage path pkg -> toolProgram (normalizePath path)
                 | otherwise -> compileModulesValidated pkg
             Right _ -> Error (path ++ " is not in a package")
     packageStage stage input validated
@@ -305,21 +421,30 @@ mirDataFromFile path = do
 
 sharedProgram :: String -> String -> IO (Result Program String) -> IO (Result Program String)
 sharedProgram stage source compute = do
-    backend <- lookupEnv "TERSUS_PARSER"
-    let key = (show (stage, backend), source)
-        lookupCached = modifyMVar compiledSources $ \cache -> pure (cache, Map.lookup key cache)
-    known <- lookupCached
-    case known of
-        Just result -> pure result
-        Nothing -> withEntryThreadLock key $ do
-            again <- lookupCached
-            case again of
-                Just result -> pure result
-                Nothing -> do
-                    result <- sharedOnDisk stage source compute
-                    case result of
-                        Error _ -> pure result
-                        Ok _ -> modifyMVar compiledSources $ \cache -> pure (Map.insert key result cache, result)
+    scope <- cacheBuildScope
+    case scope of
+        Nothing -> compute
+        Just identity -> shared identity
+  where
+    shared identity = do
+        let key = (show (stage, identity), source)
+            lookupCached = modifyMVar compiledSources $ \cache -> pure (cache, Map.lookup key cache)
+        known <- lookupCached
+        case known of
+            Just result -> pure result
+            Nothing -> withEntryThreadLock key $ do
+                again <- lookupCached
+                case again of
+                    Just result -> pure result
+                    Nothing -> do
+                        result <- sharedOnDisk identity stage source compute
+                        case result of
+                            Error _ -> pure result
+                            Ok program -> do
+                                _ <- Exception.evaluate (force program)
+                                after <- cacheBuildScope
+                                if after /= Just identity then pure result else
+                                    modifyMVar compiledSources $ \cache -> pure (Map.insert key result cache, result)
 
 {-# NOINLINE compiledSources #-}
 compiledSources :: MVar (Map.Map (String, String) (Result Program String))
@@ -340,9 +465,9 @@ withEntryThreadLock key action = do
             pure (Map.insert key fresh locks, fresh)
     withMVar lock (\_ -> action)
 
-sharedOnDisk :: String -> String -> IO (Result Program String) -> IO (Result Program String)
-sharedOnDisk stage source compute = do
-    file <- sharedProgramCacheFile stage source
+sharedOnDisk :: String -> String -> String -> IO (Result Program String) -> IO (Result Program String)
+sharedOnDisk identity stage source compute = do
+    file <- cacheFileFor identity stage source
     case file of
         Nothing -> compute
         Just path -> do
@@ -366,10 +491,13 @@ sharedOnDisk stage source compute = do
                                             case result of
                                                 Error e -> pure (Error e)
                                                 Ok program -> do
-                                                    written <- try (writeEntryAtomically dataDir path (encodeEntry entryKey program)) :: IO (Either IOException ())
-                                                    case written of
-                                                        Right () -> pure (Ok program)
-                                                        Left _ -> pure (Ok program)
+                                                    _ <- Exception.evaluate (force program)
+                                                    after <- cacheBuildScope
+                                                    if after /= Just identity then pure (Ok program) else do
+                                                        written <- try (writeEntryAtomically dataDir path (ProgramBinary.encodeEntry entryKey program)) :: IO (Either IOException ())
+                                                        case written of
+                                                            Right () -> pure (Ok program)
+                                                            Left _ -> pure (Ok program)
                             locked <- withKernelLock path produce
                             case locked of
                                 Just result -> pure result
@@ -378,46 +506,24 @@ sharedOnDisk stage source compute = do
                                 Nothing -> compute
   where
     readEntry entryKey file = do
-        cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)
-        pure $ case cached of
-            Right text -> case decodeEntry entryKey text of
-                Ok program -> Just program
-                Error _ -> Nothing
-            Left _ -> Nothing
+        cached <- try (ProgramBinary.readEntryBytes file) :: IO (Either IOException BL.ByteString)
+        case cached of
+            Right bytes -> case ProgramBinary.decodeEntry entryKey bytes of
+                Right program -> Just <$> Exception.evaluate (force program)
+                Left _ -> pure Nothing
+            Left _ -> pure Nothing
 
--- An entry carries the key it was filed under, so a well-formed program filed for another
--- source, stage or build is a miss, not an answer.
-decodeEntry :: String -> String -> Result Program String
-decodeEntry key text = case stripPrefix (programCodecHeader ++ key ++ "\n") text of
-    Nothing -> Error "entry key mismatch"
-    Just body -> case reads body of
-        [(program, rest)] | all isSpace rest -> Ok program
-        _ -> Error "malformed tersus-test-program entry"
+-- New-format rejection is a cache miss, never an attempt to read legacy text.
+writeEntryAtomically :: FilePath -> FilePath -> BL.ByteString -> IO ()
+writeEntryAtomically dir file bytes = do
+    size <- Exception.evaluate (BL.length bytes)
+    when (size > ProgramBinary.maxEntryBytes) (ioError (userError "cache entry exceeds size limit"))
+    bracketOnError (openBinaryTempFileCloexec dir "entry.tmp")
+        (\(staging, handle) -> hClose handle >> removeFile staging)
+        (\(staging, handle) -> BL.hPut handle bytes >> hClose handle >> renameFile staging file)
 
-encodeEntry :: String -> Program -> String
-encodeEntry key program = programCodecHeader ++ key ++ "\n" ++ show program ++ "\n"
-
-writeEntryAtomically :: FilePath -> FilePath -> String -> IO ()
-writeEntryAtomically dir file text = do
-    (staging, handle) <- openTempFile dir "entry.tmp"
-    hPutStr handle text
-    hClose handle
-    renameFile staging file
-
--- The one place the unix openFd version difference lives: unix before 2.8 takes the creation
--- mode as its own argument, and from 2.8 on it is the creat field of the flags. Without the
--- Cabal version macros (a direct ghc build of the tests on the older toolchain) the older
--- call is used.
 openEntryLockFile :: FilePath -> IO Fd
-#ifdef MIN_VERSION_unix
-# if MIN_VERSION_unix(2,8,0)
-openEntryLockFile path = openFd path WriteOnly defaultFileFlags{creat = Just 0o644}
-# else
-openEntryLockFile path = openFd path WriteOnly (Just 0o644) defaultFileFlags
-# endif
-#else
-openEntryLockFile path = openFd path WriteOnly (Just 0o644) defaultFileFlags
-#endif
+openEntryLockFile = openLockFd
 
 -- One process compiles an entry while the others wait in the kernel for its lock: a file
 -- lock on the entry's lock file, held from before the entry is re-read until after it is
@@ -440,17 +546,74 @@ withKernelLock file produce = do
     lockRequest :: FileLock
     lockRequest = (WriteLock, AbsoluteSeek, 0, 0)
 
--- The cache file a stage and source use, when there is a cache directory (for cache tests).
+-- The cache file a stage and source use. The scope is also the memory-cache key,
+-- so changing an actual override cannot reuse a previous process-local result.
 sharedProgramCacheFile :: String -> String -> IO (Maybe FilePath)
 sharedProgramCacheFile stage source = do
+    scope <- cacheBuildScope
+    maybe (pure Nothing) (\identity -> cacheFileFor identity stage source) scope
+
+cacheFileFor :: String -> String -> String -> IO (Maybe FilePath)
+cacheFileFor identity stage source = do
     cache <- cacheDirectory
-    built <- binaryIdentity
-    backend <- lookupEnv "TERSUS_PARSER"
-    case (cache, built) of
-        (Ok dir, Just identity) -> do
-            key <- sha256 [] (show (stage, source, identity, programCodecHeader, backend))
+    case cache of
+        Ok dir -> do
+            key <- sha256 [] (show (stage, source, compilerIdentity, ProgramBinary.codecVersion, identity))
             pure ((\digest -> dir </> "test-programs" </> digest) <$> key)
         _ -> pure Nothing
+
+cacheBuildScope :: IO (Maybe String)
+cacheBuildScope = do
+    build <- executableBuildIdentity
+    backend <- lookupEnv "TERSUS_PARSER"
+    path <- lookupEnv "PATH"
+    overrides <- mapM seedIdentity
+        [("TERSUS_PARSER_SEED_FILE", parserSeedSha256), ("TERSUS_SEED_FILE", seedSha256)]
+    pure $ (\b seeds -> show (b, backend, path, seeds)) <$> build <*> sequence overrides
+  where
+    seedIdentity (variable, expected) = do
+        override <- lookupEnv variable
+        selected <- case override of
+            Just file -> pure (Just file)
+            Nothing -> firstExisting (if variable == "TERSUS_PARSER_SEED_FILE"
+                then ["bootstrap/parser.ll", "tersus/bootstrap/parser.ll"]
+                else ["bootstrap/emitter.ll", "tersus/bootstrap/emitter.ll"])
+        case selected of
+            Nothing -> pure (Just (variable, Nothing))
+            Just file -> do
+                absolute <- makeAbsolute file
+                digest <- verifiedSeedIdentity absolute expected
+                pure ((\value -> (variable, Just (absolute, value))) <$> digest)
+    firstExisting [] = pure Nothing
+    firstExisting (file : rest) = do
+        exists <- doesFileExist file
+        if exists then pure (Just file) else firstExisting rest
+
+verifiedSeedIdentity :: FilePath -> String -> IO (Maybe String)
+verifiedSeedIdentity file expected = do
+    digest <- executableDigest file
+    pure (if digest == Just expected then digest else Nothing)
+
+{-# NOINLINE buildIdentityCache #-}
+buildIdentityCache :: MVar (Maybe String)
+buildIdentityCache = unsafePerformIO (newMVar Nothing)
+
+executableBuildIdentity :: IO (Maybe String)
+executableBuildIdentity = do
+    self <- try ((,) <$> getProgName <*> getExecutablePath) :: IO (Either IOException (String, FilePath))
+    case self of
+        Left _ -> pure Nothing
+        Right (name, file) -> do
+            let interpreted value = value == "<interactive>" || any (`isPrefixOf` value) ["ghc", "runghc", "runhaskell"]
+            if interpreted name || interpreted (takeFileName file) then pure Nothing else
+                case approvedBuildIdentity of
+                    Just approved -> pure (Just ("approved-build-manifest:" ++ approved))
+                    Nothing -> modifyMVar buildIdentityCache $ \cached -> case cached of
+                        Just _ -> pure (cached, cached)
+                        Nothing -> do
+                            digest <- executableDigest file
+                            let identity = ("executable-sha256:" ++) <$> digest
+                            pure (identity, identity)
 
 -- The MIR of a program as data (what MirData writes of Pipeline.ownedSource), shared between
 -- the groups that check the same programs: the owned program itself comes from the shared
@@ -462,18 +625,33 @@ mirDataOf source = do
         Error e -> Error e
         Ok program -> Ok (writeProgram program)
 
--- The compiler, embedded libraries and housekeeping sources, harness and codec are
--- part of the executable. Cache its bytes, not filesystem metadata that a restore changes.
-{-# NOINLINE binaryIdentity #-}
-binaryIdentity :: IO (Maybe String)
-binaryIdentity = unsafePerformIO $ do
-    cache <- newMVar Nothing
-    pure $ modifyMVar cache $ \known -> case known of
-        Just identity -> pure (known, identity)
-        Nothing -> do
-            outcome <- try (getExecutablePath >>= executableDigest) :: IO (Either IOException (Maybe String))
-            let identity = either (const Nothing) id outcome
-            pure (Just identity, identity)
+-- Concrete compiler/platform and selected dependency unit IDs, compiler and
+-- embedded sources, harness/helpers, codec source/version and package files.
+-- Package YAML is an input, not evidence of actual GHC command-line options:
+-- cacheBuildScope adds an approved manifest or conservative executable identity.
+compilerIdentity :: String
+compilerIdentity =
+    fingerprint $
+        [ compilerSourceHash
+        , harnessSourceHash
+        , concreteBuildIdentity
+        , ProgramBinary.codecVersion
+        , stdlibSource
+        , validationSource
+        , validationDriverSource
+        , seedSha256
+        , parserSeedSha256
+        ]
+            ++ concatMap (\(path, contents) -> [path, contents]) libPackageFiles
+            ++ concatMap (\(path, contents) -> [path, contents]) toolPackageFiles
+
+harnessSourceHash :: String
+harnessSourceHash =
+    $( do
+        let paths = ["test/TestHarness.hs", "test/TestParserFragments.hs", "test/TestProgramBinary.hs", "test/TestProgramBuildIdentity.hs", "package.yaml", "stack.yaml", "stack.yaml.lock"]
+        inputs <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure [path, contents]) paths
+        lift (fingerprint (concat inputs))
+     )
 
 executableDigest :: FilePath -> IO (Maybe String)
 executableDigest path = sha256 [path] ""
@@ -486,7 +664,7 @@ sha256 arguments input = do
         Nothing -> run "shasum" (["-a", "256"] ++ arguments)
   where
     run command args = do
-        outcome <- try (readProcessWithExitCode command args input) :: IO (Either IOException (ExitCode, String, String))
+        outcome <- try (readProcessOutput (proc command args) input) :: IO (Either IOException (ExitCode, String, String))
         pure $ case outcome of
             Right (ExitSuccess, out, _) -> case words out of
                 digest : _ | length digest == 64 && all isHexDigit digest -> Just (map toLower digest)

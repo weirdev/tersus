@@ -23,7 +23,13 @@ extra-source-files:
     lib/string.tersus
     examples/mir/package.tersus
     examples/mir/reader/reader.tersus
+    examples/mir/support/support.tersus
     examples/mir/emit/emit.tersus
+    examples/mir/emit/types.tersus
+    examples/mir/emit/values.tersus
+    examples/mir/emit/operations.tersus
+    examples/mir/emit/functions.tersus
+    examples/mir/emit/helpers.tersus
     examples/mir/mir_reader/mir_reader.tersus
     examples/data/package.tersus
     examples/data/codec/codec.tersus
@@ -32,11 +38,13 @@ extra-source-files:
     examples/ast_reader/ast_reader.tersus
     AST_DATA.md
     bootstrap/emitter.sha256
+    bootstrap/parser.sha256
     examples/parser/package.tersus
     examples/parser/parser.tersus
     examples/mir/mir_verify/mir_verify.tersus
     examples/mir/mir_erase/mir_erase.tersus
     lib/validation.tersus
+    lib/validation_driver.tersus
     lib/stdlib.tersus
     lib/box.tersus
     lib/map.tersus
@@ -51,16 +59,15 @@ library
       AstData
       Bootstrap
       BuiltinRegistry
+      CacheLock
       Cli
       Compile
       DataCodec
       FileParserProtocol
-      Ghost
       Hash
       Interface
       LibPackage
       LibParsed
-      Linear
       Link
       LlvmRuntime
       Mir
@@ -72,23 +79,20 @@ library
       MirMono
       MirMoves
       MirOwnership
-      MirValidate
       ModuleResolve
       Modules
       Native
       PackageCompile
-      Parse
+      ParsedFile
+      ParserSeed
       ParserUnicodeSource
       Pipeline
       PreludeSource
       Pretty
-      ProofEngine
-      ProofHelpers
-      ProofState
       Seed
       SelfHostedMir
-      SelfHostedProof
       Solver
+      SourceParse
       StdLib
       StdLibDefs
       Syntax
@@ -97,6 +101,7 @@ library
       TypeCheckCore
       Types
       Utils
+      ValidatorNative
   other-modules:
       Paths_tersus
   autogen-modules:
@@ -115,15 +120,67 @@ library
     , unix
   default-language: Haskell2010
 
-executable parity
-  main-is: Parity.hs
+executable cache-codec-probe
+  main-is: Main.hs
+  other-modules:
+      TestProgramBinary
+      TestProgramBinaryChecks
+  hs-source-dirs:
+      dev/cache-codec/src
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
+  build-depends:
+      base >=4.7 && <5
+    , binary >=0.8.8 && <0.9
+    , bytestring >=0.10.12 && <0.13
+    , containers
+    , deepseq >=1.4.4 && <1.6
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+    , unix
+  default-language: Haskell2010
+
+executable cache-integration-probe
+  main-is: Main.hs
+  other-modules:
+      TestHarness
+      TestParserFragments
+      TestSharedCache
+      TestProgramBinary
+      TestProgramBinaryChecks
+      TestProgramBuildIdentity
+  hs-source-dirs:
+      dev/cache-codec/integration
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
+  build-depends:
+      base >=4.7 && <5
+    , binary >=0.8.8 && <0.9
+    , bytestring >=0.10.12 && <0.13
+    , containers
+    , deepseq >=1.4.4 && <1.6
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+    , unix
+  default-language: Haskell2010
+
+executable parser-seed
+  main-is: Main.hs
   other-modules:
       Paths_tersus
   autogen-modules:
       Paths_tersus
   hs-source-dirs:
-      dev/parity
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+      dev/parser-seed
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
   build-depends:
       base >=4.7 && <5
     , containers
@@ -161,6 +218,7 @@ test-suite tersus-test
   type: exitcode-stdio-1.0
   main-is: TestTersus.hs
   other-modules:
+      TestAllocationRefs
       TestArrays
       TestAstData
       TestBasics
@@ -169,6 +227,8 @@ test-suite tersus-test
       TestBox
       TestBuiltinRegistry
       TestBytes
+      TestCanonicalRuleReplay
+      TestCloneDropOrder
       TestConnectives
       TestControl
       TestCopies
@@ -176,30 +236,43 @@ test-suite tersus-test
       TestDataCodec
       TestDeref
       TestEq
+      TestForallDomains
       TestGenerics
       TestHarness
       TestHashMap
       TestHashSet
+      TestLibInterfaceProviders
       TestLibModules
       TestMirData
       TestMirEmit
       TestMirErase
       TestMirEval
       TestMirReader
+      TestMirSupport
       TestMirVerify
       TestModules
       TestNative
+      TestNativeProofGuards
       TestOwnership
       TestParity
       TestParser
       TestParserBootstrap
+      TestParserFragments
       TestParserUnicode
       TestPipeline
       TestPointers
+      TestProgramBinary
+      TestProgramBinaryChecks
+      TestProgramBuildIdentity
+      TestProofCallMono
       TestProofs
+      TestRawArrayTransfer
+      TestRuleScopes
       TestScheduling
       TestSequence
+      TestSequenceContracts
       TestSharedCache
+      TestStorageOracle
       TestStrings
       TestTraits
       TestValidation
@@ -211,7 +284,10 @@ test-suite tersus-test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is TestTersus
   build-depends:
       base >=4.7 && <5
+    , binary >=0.8.8 && <0.9
+    , bytestring >=0.10.12 && <0.13
     , containers
+    , deepseq >=1.4.4 && <1.6
     , directory
     , filepath
     , parsec

@@ -55,29 +55,42 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   - `set.tersus`: the struct `HashSet`, made of a map, imported for a program
     that mentions `HashSet`. It imports `map`, `prelude`, `eq` and `clone`.
     Embedded by `PreludeSource`.
-  - `lists.tersus`: the list that native code is made of (`List`), and
-    `box.tersus`: the Box that native code is made of (`Box`). Both embedded
-    by `PreludeSource` and lowered with the lists library.
+  - `lists.tersus` and `box.tersus`: native-only List/Box helper modules of
+    the same synthetic `tersuslib` package. They import the types and traits
+    they use; `types.tersus` alone owns the structs and layout invariants.
+    `LibPackage` checks and lowers them separately, and `MirHousekeeping`
+    links them and erases their ghosts. Native code of the validator is made
+    with them, so they are built unvalidated, and the validator, once built,
+    validates them (with a List and a Box as the structs they are) before it is
+    used (`ValidatorNative.validatorExecutable`).
+    `MirLists` links only the helper units native lowering needs, after user
+    validation. Their bodies and Drop impls are never implicit user imports.
   - `stdlib.tersus`: the standard library written in Tersus. Embedded by
     `PreludeSource` and parsed by `StdLibDefs`, which is where the builtins it
     declares get their contracts; it is not linked into user programs.
-  - `validation.tersus`: the validator written in Tersus, run by
-    `SelfHostedMir`/`SelfHostedProof` alongside the Haskell validator, which
-    remains the production path. It is not embedded by `PreludeSource`; tests
-    and hosts read it from `lib/` directly.
+  - `validation.tersus`: the validator written in Tersus, which is the
+    production validator: `SelfHostedMir` turns each function's MIR into the
+    data it reads, and `ValidatorNative` runs it compiled to native code (with
+    `validation_driver.tersus`, which reads that data from the standard
+    input). Embedded by `PreludeSource`.
 - `tersus/examples/`: example programs, all loaded and checked by
-  `testExamples` (see Testing Guidelines). `examples/mir/emit/emit.tersus` is the LLVM
+  `testExamples` (see Testing Guidelines), but for the compiler's own
+  programs below, which `testHostValidation` checks. `examples/mir/emit/emit.tersus` is the LLVM
   emitter written in Tersus, and `examples/mir/mir_reader/mir_reader.tersus` /
   `examples/mir/mir_verify/mir_verify.tersus` / `examples/mir/mir_erase/mir_erase.tersus` are the MIR
   reader, the MIR checker and the ghost erasure written in Tersus. The host
   runs the checker and the erasure on the MIR as data (`MirHousekeeping`);
   they are the production path, and the examples' expectations in
-  `test/TestPipeline.hs` say what running them with no input does.
+  `test/TestPipeline.hs` say what running them with no input does. The emitter's
+  declaration-only `types.tersus`, `values.tersus`, `operations.tersus`,
+  `functions.tersus` and `helpers.tersus` files are siblings of `emit.tersus`
+  in one `mir::emit` module; only `emit.tersus` runs. All six are embedded by
+  `PreludeSource.mirPackageFiles` and listed in `package.yaml`.
 - `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
   emitter is bootstrapped from; the seed itself is a GitHub release asset
   (see Build, Test, and Development Commands).
-- `tersus/dev/parity/`: the `parity` executable, a development harness outside
-  the production library and CLI.
+- `tersus/bootstrap/parser.sha256`: the SHA-256 pin of the native parser LLVM
+  seed; `TERSUS_PARSER_SEED_FILE` supplies verified local bytes before release.
 - `tersus/test/`: regression tests. `TestTersus.hs` runs the test groups; the
   groups live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`,
   `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`,
@@ -92,8 +105,7 @@ Work from `tersus/`.
 - `stack build`: compile the Haskell package and surface warnings. CI
   (`.github/workflows/ci.yml`) runs `stack build --test --no-run-tests` and
   then `stack test`, both from `tersus/`.
-- The package builds two executables, `parity` and `tersus-exe`, and a bare
-  `stack run` runs the first of them (`parity`), so always name the CLI:
+- The package builds the executable `tersus-exe`:
   `stack run tersus-exe -- <command> <file>`. Commands (`src/Cli.hs`):
   - `check <file>`: parse and validate a program.
   - `run <file> [args]`: validate, compile to native code and run (needs
@@ -130,18 +142,36 @@ Work from `tersus/`.
   check the stage 0 / stage 1 fixpoint. Do not redirect straight into a seed
   file the running compiler is using: the shell truncates it before the
   compiler runs.
+- Production parsing uses native P1. Bootstrap readers (`StdLibDefs`,
+  `LibParsed`, `Compile`, default `Modules`) use the pinned native P0 leaf;
+  there is no Haskell grammar or fallback. Building Haskell needs no clang
+  or network; the first language parse needs clang and verified parser/emitter
+  seeds. The parser seed override is `TERSUS_PARSER_SEED_FILE` (the emitter's
+  remains `TERSUS_SEED_FILE`). `AST_DATA.md` describes seed regeneration through
+  the exact prepared parser package and its P0/P1/P2 fixpoint.
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`,
   which runs each registered group in a process of its own with `-N1`;
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
   `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
-  `testNative`, `testMirEmit`, `testMirVerify` and `testMirSelfHosted` each
-  register four batches named `<original>:1/4` through `<original>:4/4`.
+  `testNative`, `testMirEmit`, `testMirVerify`, `testMirSelfHosted`,
+  `testAstData`, `testParser` and `testAstReader` each register four batches named
+  `<original>:1/4` through `<original>:4/4`. The AST/parser corpora partition
+  samples without splitting package declaration contexts; all emitter
+  helper files share one prepared-parser comparison.
   Selecting an original name selects all its batches; shard filters intersect
   the full-suite assignment. Self-hosted batches share one shard and its full
   validated-program cache; Native memory-limit cases stay ordered in one batch.
-  `testBootstrap` remains one private cold group. CI partitions the full suite
-  across six runners, with four group worker processes per runner; the required
-  aggregate check still requires every shard to pass.
+  `testBootstrap` remains one private cold group. Parser bootstrap registers
+  `testParserBootstrap:1/2` for the genuine cold/refusal/reuse checks and
+  `testParserBootstrap:2/2` for repair and fixpoint checks from independent
+  private copies of the runner's ordinary tool cache. Ordinary preparation
+  is counted in the latter group and never credited to the cold pair.
+  CI reserves one runner for each of these three bootstrap groups; the
+  remaining groups use three runners, with four worker processes per runner.
+  The required aggregate check still requires every shard to pass.
+  `testHostValidation`, which validates the compiler's own programs (the MIR
+  reader, checker and eraser, and the emitter), runs only when named, since it
+  takes far longer than the rest of the suite (`TestTersus.optInGroups`).
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in
   `tersus/README.md`.
 
@@ -174,6 +204,5 @@ Recent history uses short, direct subjects such as `Minor cleanup` and feature-f
 
 ## Contributor Notes
 Keep experimental and development-only work out of the production Haskell
-library and the `tersus-exe` CLI; put it under `tersus/dev/` (as the `parity`
-harness is) or in examples, and wire it into `package.yaml` as its own
+library and the `tersus-exe` CLI; put it under `tersus/dev/` or in examples, and wire it into `package.yaml` as its own
 executable or test target rather than into the library.

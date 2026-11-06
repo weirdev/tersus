@@ -119,7 +119,7 @@ runProgramEnv env source =
     let program = monomorphize source
      in mapResult
         (\(value, (out, err), s) -> Outcome out err [(spelling, Map.findWithDefault "" key (sFiles s)) | (key, spelling) <- sOrder s] value)
-        (runE (fmap fst (runFunction program (progMain program) [] Map.empty)) env (startState (envInput env)))
+        (runE (fmap fst (runFunction program (progMain program) [] Map.empty)) env (startState program (envInput env)))
 
 -- What a program has written to the standard output and to the standard error
 type Written = (String, String)
@@ -142,6 +142,7 @@ data S = S
     , sFrame :: Frame
     , sCurrentFrame :: Maybe Integer
     , sNextFrame :: Integer
+    , sReferences :: Bool -- whether the program can make a reference at all: when it cannot, a call passes and returns values as they are
     }
 
 -- The memory of an allocation: its slots, each holding a value or nothing (POINTERS.md). An address is a number: allocation k starts at
@@ -151,8 +152,18 @@ data S = S
 -- this is a check of what a program assumes (Block::assume).
 data Allocation = Allocation {allocSize :: Integer, allocSlots :: Map Integer MirValue}
 
-startState :: String -> S
-startState input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1, sFrames = Map.empty, sFrame = Map.empty, sCurrentFrame = Nothing, sNextFrame = 1}
+startState :: Program -> String -> S
+startState program input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1, sFrames = Map.empty, sFrame = Map.empty, sCurrentFrame = Nothing, sNextFrame = 1, sReferences = makesReferences program}
+
+makesReferences :: Program -> Bool
+makesReferences program = any function (progMain program : Map.elems (progFunctions program))
+  where
+    function fn = not (null (specMutParams (fnSpec fn))) || any (referencePayload . localType) (Map.elems (fnLocals fn)) || any borrows (Map.elems (fnBlocks fn))
+    borrows (BasicBlock stmts _) = any referenceStatement stmts
+    referenceStatement (Assign _ Borrow{}) = True
+    referenceStatement (Assign _ (ListOp AddrBorrow _)) = True
+    referenceStatement AssignRef{} = True
+    referenceStatement _ = False
 
 allocationSpan :: Integer
 allocationSpan = 2 ^ (32 :: Integer)
@@ -185,8 +196,8 @@ readSlot taking address = heapE $ \s ->
 
 writeSlot :: Integer -> MirValue -> E ()
 writeSlot address value = do
-    frame <- currentFrame
-    v <- captureValue frame value
+    references <- E (\_ s -> Ok (sReferences s, none, s))
+    v <- if references then currentFrame >>= \frame -> captureValue frame value else pure value
     heapE $ \s ->
         slotAt s address `bindResult` \(k, a, slot) ->
             if Map.member slot (allocSlots a)
@@ -227,7 +238,7 @@ newtype E a = E {runE :: RunEnv -> S -> Result (a, Written, S) String}
 runNamedFunction :: Program -> Name -> [MirValue] -> Result (Maybe MirValue) String
 runNamedFunction program name args = case Map.lookup name (progFunctions program) of
     Nothing -> Error ("Function does not exist: " ++ name)
-    Just fn -> mapResult (\((value, _), _, _) -> value) (runE (runFunction program fn args Map.empty) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState ""))
+    Just fn -> mapResult (\((value, _), _, _) -> value) (runE (runFunction program fn args Map.empty) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState program ""))
 
 instance Functor E where
     fmap f (E r) = E (\env s -> mapResult (\(a, output, s') -> (f a, output, s')) (r env s))
@@ -335,7 +346,12 @@ runFunction program fn args extra
     | length args /= length (fnParams fn) =
         failE ("Function expected " ++ show (length (fnParams fn)) ++ " arguments, got " ++ show (length args))
     | otherwise = do
+        references <- E (\_ s -> Ok (sReferences s, none, s))
         let initial = Map.union extra (Map.fromList (zip (fnParams fn) args))
+        if not references then runBlock program fn (BlockId 0) initial else runReferenceFunction program fn initial
+
+runReferenceFunction :: Program -> Function -> Frame -> E (Maybe MirValue,Frame)
+runReferenceFunction program fn initial = do
         (_identity, parent) <- heapE $ \s ->
             if sCurrentFrame s == Nothing && any hasFrameReference (Map.elems initial)
                 then Error "A frame reference from another evaluation was used"
@@ -353,6 +369,9 @@ runFunction program fn args extra
                 Nothing -> Error "The suspended caller frame is not there"
                 Just callerFrame -> Ok ((), s{sFrames = Map.delete caller (sFrames s), sFrame = callerFrame, sCurrentFrame = parent})
         return (result, final)
+
+mapResults :: (a -> Result b String) -> [a] -> Result [b] String
+mapResults = flatResultMap
 
 type Frame = Map Local MirValue
 
@@ -385,7 +404,7 @@ storeFrame identity frame = E $ \_ s ->
             else Error "A reference to an exited frame was updated"
 
 storeCurrentFrame :: Frame -> E ()
-storeCurrentFrame frame = E $ \_ s -> case sCurrentFrame s of
+storeCurrentFrame frame = E $ \_ s -> if not(sReferences s) then Ok((),none,s) else case sCurrentFrame s of
     Nothing -> Error "No active reference frame"
     Just _ -> Ok ((), none, s{sFrame = frame})
 
@@ -418,14 +437,22 @@ runBlock program fn block frame =
                         MBool False -> runBlock program fn no frame'
                         _ -> failE "Condition must be a boolean"
                 Call callee args dest next -> do
-                    f <- intOrValue frame' callee
-                    target <- case f of
-                        MFn name -> maybe (failE ("Call of a function that does not exist: " ++ name)) return (Map.lookup name (progFunctions program))
-                        _ -> failE "Object being called must be a function"
-                    argValues <- prepareArguments fn target args
-                    (result, _) <- callFunction program f argValues Map.empty
-                    refreshed <- currentFrame
-                    runBlock program fn next (Map.insert dest result refreshed)
+                    references <- E (\_ s -> Ok (sReferences s, none, s))
+                    if not references
+                        then do
+                            f <- liftE (operandValue frame' callee)
+                            argValues <- liftE (mapResults (operandValue frame') args)
+                            (result, _) <- callFunction program f argValues Map.empty
+                            runBlock program fn next (Map.insert dest result frame')
+                        else do
+                            f <- intOrValue frame' callee
+                            target <- case f of
+                                MFn name -> maybe (failE ("Call of a function that does not exist: " ++ name)) return (Map.lookup name (progFunctions program))
+                                _ -> failE "Object being called must be a function"
+                            argValues <- prepareArguments fn target args
+                            (result, _) <- callFunction program f argValues Map.empty
+                            refreshed <- currentFrame
+                            runBlock program fn next (Map.insert dest result refreshed)
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
 

@@ -4,7 +4,8 @@ module PackageCompile
     ( CompiledModule (..)
     , CompiledPackage (..)
     , compileModules
-    , compileModulesValidated
+    , lowerCompiledPackage
+    , compileModulesLinked
     , assumptionsOfPackage
     ) where
 
@@ -13,15 +14,14 @@ import Data.Ord (comparing)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (librariesFor)
+import Compile (librariesFor, reservedHelperName, reservedError)
 import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv, withoutDeclaredNames)
 import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
 import ModuleResolve (rewriteFileReferences)
 import qualified Modules as Mod
-import Parse (ParsedFile (..))
+import ParsedFile (ParsedFile (..))
 import MirLower (lowerModuleWith)
-import MirValidate (validateProgram)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
 import TypeCheck (Elaborated (..), elaborateWith)
@@ -61,6 +61,7 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
                 else
                     case prepareModule pkg modu of
                         Left err -> Error err
+                        Right prepared | Just name <- reservedHelperName prepared -> Error (reservedError name)
                         Right prepared -> case orphanCheck moduId prepared of
                             Left err -> Error err
                             Right () -> case libPackage of
@@ -220,21 +221,25 @@ orphanCheck modu statements = case [message | ImplDef (Just trait) _ typeName _ 
         | otherwise = Just ("in module " ++ Mod.renderModuleId modu ++ ": orphan impl: impl " ++ trait ++ " for " ++ typeName ++ " defines neither a trait nor a type of this module; an impl must live in the module of its trait or of its type")
     baseOf name = baseNameOf name
 
-compileModulesValidated :: Mod.LoadedPackage -> Result M.Program String
-compileModulesValidated pkg =
-    compileModules pkg `bindResult` \compiled ->
-        let ifaceMap = Map.fromList [(compiledModuleId modu, compiledInterface modu) | modu <- compiledModules compiled]
-            loadedMap = Map.fromList [(Mod.loadedModuleId modu, modu) | modu <- Mod.packageModules pkg]
-            lowerOne modu = case Map.lookup (compiledModuleId modu) loadedMap of
-                Nothing -> Error ("internal: compiled module " ++ Mod.renderModuleId (compiledModuleId modu) ++ " is not in the loaded package")
-                Just loaded ->
-                    let depIfaces = [ifaceMap Map.! dep | dep <- Mod.loadedDependencies loaded, Map.member dep ifaceMap]
-                        allIfaces = compiledLibInterfaces modu ++ depIfaces
-                     in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv allIfaces) allIfaces (compiledElaborated modu)))
-            libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
-         in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units ->
-                linkPrograms (libUnits ++ units) `bindResult` \linked ->
-                    stage "Validation failed: " (validateProgram linked) `bindResult` \_ -> Ok linked
+-- The modules of a package lowered and linked into one program, not yet
+-- validated (Pipeline.compileModulesValidated validates it; the host's own
+-- programs are built from this, see MirHousekeeping.toolProgram)
+compileModulesLinked :: Mod.LoadedPackage -> Result M.Program String
+compileModulesLinked pkg = compileModules pkg `bindResult` lowerCompiledPackage pkg
+
+-- Callers must validate the linked program before erasure or execution.
+lowerCompiledPackage :: Mod.LoadedPackage -> CompiledPackage -> Result M.Program String
+lowerCompiledPackage pkg compiled =
+    let ifaceMap = Map.fromList [(compiledModuleId modu, compiledInterface modu) | modu <- compiledModules compiled]
+        loadedMap = Map.fromList [(Mod.loadedModuleId modu, modu) | modu <- Mod.packageModules pkg]
+        lowerOne modu = case Map.lookup (compiledModuleId modu) loadedMap of
+            Nothing -> Error ("internal: compiled module " ++ Mod.renderModuleId (compiledModuleId modu) ++ " is not in the loaded package")
+            Just loaded ->
+                let depIfaces = [ifaceMap Map.! dep | dep <- Mod.loadedDependencies loaded, Map.member dep ifaceMap]
+                    allIfaces = compiledLibInterfaces modu ++ depIfaces
+                 in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv allIfaces) allIfaces (compiledElaborated modu)))
+        libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
+     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
 
 assumptionsOfPackage :: CompiledPackage -> [String]
 assumptionsOfPackage compiled = concatMap perModule (compiledModules compiled)
