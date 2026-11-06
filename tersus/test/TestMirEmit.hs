@@ -4,7 +4,15 @@ module TestMirEmit (testMirEmit, testMirEmitPrograms) where
 
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
+
+import Bootstrap (compilerSnapshotHash, llvmOfOwned)
+import Hash (fingerprint)
+import LlvmRuntime (runtimeSource)
+import qualified Modules
+import Native (buildExecutable, cachedProgram)
+import qualified TersusParser
 
 import Cli (World (..), noWorld, runProgramIn)
 import Compile (lowerSource)
@@ -36,7 +44,8 @@ testMirEmit =
         , TestParallel
             "every example, natively"
             [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
-        , TestCase "what is not the MIR is refused" refusal
+        , TestCase "only outline invokes outline, once, without changing mode outputs" outlineDispatch
+        , TestCase "mode errors preserve parse-first diagnostics and returned values" refusal
         ]
 
 -- The validated programs of the sweep as a group of their own, so the suite's group processes balance: this sweep
@@ -101,7 +110,7 @@ orderedTypeClosure = do
     loaded <- linkedFromFile "examples/mir/emit/emit.tersus"
     pure $ case loaded of
         Error e -> Just e
-        Ok program -> firstFailure
+        Ok program -> firstTypeClosureProblem
             [ testAssertEq (Eval.runNamedFunction program "closeTypes" [Eval.MList declarations, Eval.MList roots]) (Ok (Just (Eval.MList expected)))
             | (declarations, roots, expected) <- cases
             ]
@@ -124,7 +133,7 @@ orderedTypeClosure = do
         , ([enum], [variant, named "E", int, variant], [named "E", bool, int])
         , ([struct "Node" addr], [node, addr, node], [node, addr])
         ]
-    firstFailure results = case [message | Just message <- results] of
+    firstTypeClosureProblem results = case [message | Just message <- results] of
         message : _ -> Just message
         [] -> Nothing
 
@@ -172,6 +181,9 @@ nativeCheck name source = withProgram "examples/mir/emit/emit.tersus" "emit" $ \
                             pure (o, b)
                         else pure ((ExitSuccess, "", ""), (ExitSuccess, "", ""))
                 everything <- runExecutableBytes exe [] dataText
+                explicit <- if name `elem` emitModeSubset
+                    then runExecutableBytes exe ["ir"] dataText
+                    else pure everything
                 roundTrip <- case readProgram dataText of
                     Error e -> pure ["the data does not read back: " ++ e]
                     Ok back -> do
@@ -186,13 +198,95 @@ nativeCheck name source = withProgram "examples/mir/emit/emit.tersus" "emit" $ \
                         , code /= ExitSuccess || not (null errors)
                         ]
                         ++ [name ++ ": the IR has no entry point" | (code, output, _) <- [everything], code == ExitSuccess, not ("@tersus_main" `isInfixOf` output)]
-                pure (modeProblems ++ roundTrip)
+                pure (modeProblems ++ roundTrip ++ [name ++ ": default and explicit ir differ" | everything /= explicit])
+
+outlineDispatch :: IO TestResult
+outlineDispatch = withProgram "examples/mir/emit/emit.tersus" "emit" $ \exe -> do
+    files <- Modules.snapshotFromFilesystem path
+    loaded <- ownedFromFiles path files
+    input <- mirDataOf "fn double(n: Int) -> Int { return n + n; }; return double(3);"
+    backend <- lookupEnv "TERSUS_PARSER"
+    parser <- TersusParser.parserKey
+    case (loaded, input, parser) of
+        (Error e, _, _) -> pure (Just e)
+        (_, Error e, _) -> pure (Just e)
+        (_, _, Error e) -> pure (Just e)
+        (Ok program, Ok text, Ok identity) -> case Map.lookup "outline" (progFunctions program) of
+            Nothing -> pure (Just "the emitter has no outline function")
+            Just fn -> case Map.lookup (BlockId 0) (fnBlocks fn) of
+                Nothing -> pure (Just "outline has no entry block")
+                Just entry -> do
+                    let marker = Local (1 + maximum [n | Local n <- Map.keys (fnLocals fn)])
+                        marked = fn
+                            { fnLocals = Map.insert marker (LocalDecl TInt Nothing) (fnLocals fn)
+                            , fnBlocks = Map.insert (BlockId 0)
+                                entry{blockStatements = Assign marker (ListOp WriteByte [Const (CInt 33)]) : blockStatements entry}
+                                (fnBlocks fn)
+                            }
+                        instrumented = program{progFunctions = Map.insert "outline" marked (progFunctions program)}
+                        key = fingerprint [packageCacheInput path files, writeProgram instrumented, show backend, compilerSnapshotHash, identity, runtimeSource]
+                        build output = do
+                            ir <- llvmOfOwned instrumented
+                            case ir of
+                                Error e -> pure (Error e)
+                                Ok outlineProbeIr -> buildExecutable output outlineProbeIr
+                    built <- cachedProgram "test-emit-outline-call" key "the outline call fixture" build
+                    case built of
+                        Error e -> pure (Just e)
+                        Ok markedExe -> do
+                            failures <- mapM (checkMode exe markedExe text) [[], ["ir"], ["outline"], ["bodies"]]
+                            pure (firstFailure failures)
+  where
+    path = "examples/mir/emit/emit.tersus"
+    checkMode exe markedExe text args = do
+        original@(code, output, errors) <- runExecutableBytes exe args text
+        observed <- runExecutableBytes markedExe args text
+        let prefix = if args == ["outline"] then "!" else ""
+            full = null args || args == ["ir"]
+            shape = if args == ["bodies"]
+                then "; function 0\n" `isPrefixOf` output && not ("define i32 @main" `isInfixOf` output)
+                else "define i32 @main" `isInfixOf` output
+                    && ("define internal i64 @\"fn.double\"" `isInfixOf` output) == full
+                    && ("define internal { i64, i1 } @tersus_main" `isInfixOf` output) == full
+        pure $ firstFailure
+            [ if code == ExitSuccess && null errors && shape then Nothing else Just ("wrong " ++ show args ++ " output: " ++ show original)
+            , if observed == (ExitSuccess, prefix ++ output, "") then Nothing
+                else Just ("outline calls in " ++ show args ++ ": " ++ show (fmapOutput observed))
+            ]
+    fmapOutput (code, output, errors) = (code, take 300 output, errors)
+
+firstFailure :: [TestResult] -> TestResult
+firstFailure results = case [message | Just message <- results] of
+    message : _ -> Just message
+    [] -> Nothing
 
 refusal :: IO TestResult
 refusal = withProgram "examples/mir/emit/emit.tersus" "emit" $ \exe -> do
-    (_, output, errors) <- runExecutableBytes exe ["outline"] "return 1;\n"
-    (_, output', errors') <- runExecutableBytes exe ["nonsense"] "tersus-mir 1\n"
-    pure $
-        if output == "1\n" && not (null errors) && output' == "1\n" && not (null errors')
-            then Nothing
-            else Just ("read as " ++ show output ++ " with " ++ show errors ++ ", and " ++ show output' ++ " with " ++ show errors')
+    owned <- ownedOnce "return 1;"
+    case owned of
+        Error e -> pure (Just e)
+        Ok program -> do
+            let valid = writeProgram program
+                main = progMain program
+                unsupported = writeProgram program{progMain = main
+                    { fnReturns = Just (TParam "T")
+                    , fnLocals = Map.adjust (\decl -> decl{localType = TParam "T"}) (Local 0) (fnLocals main)
+                    }}
+                modes = [[], ["ir"], ["outline"], ["bodies"], ["nonsense"]]
+                cases = [(args, text, message) | args <- modes, (text, message) <-
+                    [("return 1;\n", "the input is not the MIR as data\n")
+                    , ("tersus-mir 1\n", "the input is not the MIR as data\n")
+                    , ("tersus-mir 1\nstruct \"P 0\n", "the input is not the MIR as data: a bad name\n")]]
+            invalidMode <- runExecutableBytes exe ["nonsense"] valid
+            parseFailures <- mapM (\(args, text, message) -> do
+                actual <- runExecutableBytes exe args text
+                pure (testAssertEq actual (ExitSuccess, "1\n", message))) cases
+            defaultError <- runExecutableBytes exe [] unsupported
+            irError <- runExecutableBytes exe ["ir"] unsupported
+            outlineError <- runExecutableBytes exe ["outline"] unsupported
+            pure $ firstFailure
+                ( [ testAssertEq invalidMode (ExitSuccess, "1\n", "the first argument is ir, outline or bodies\n")
+                  , testAssertEq defaultError irError
+                  , testAssertEq defaultError (ExitSuccess, "1\n", "In " ++ fnName main ++ ": Native code does not support T yet\n")
+                  , testAssertEq outlineError (ExitSuccess, "1\n", "Native code does not support T yet\n")
+                  ] ++ parseFailures )
