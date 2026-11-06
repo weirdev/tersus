@@ -285,6 +285,11 @@ leafActions (TestParallel name tests) = under name tests
 under :: String -> [Test] -> [([String], IO TestResult)]
 under name tests = [(name : path, action) | test <- tests, (path, action) <- leafActions test]
 
+leafCaseObjects :: Test -> [([String], Test)]
+leafCaseObjects test@(TestCase name _) = [([name], test)]
+leafCaseObjects (TestList name tests) = [(name : path, leaf) | test <- tests, (path, leaf) <- leafCaseObjects test]
+leafCaseObjects (TestParallel name tests) = [(name : path, leaf) | test <- tests, (path, leaf) <- leafCaseObjects test]
+
 leafPaths :: Test -> [[String]]
 leafPaths = map fst . leafActions
 
@@ -473,6 +478,20 @@ testScheduling names batches = TestList "testScheduling"
     , TestCase "batches keep the original case action objects" $ do
         preserved <- mapM sameActions batches
         pure (testAssertTrue (and preserved))
+    , TestCase "batches reject replaced or wrapped cases without executing their actions" $ do
+        effects <- newIORef (0 :: Int)
+        let originalAction = modifyIORef' effects (+ 1) >> pure Nothing
+            originalCase = TestCase "same path" originalAction
+            original = TestList "identity" [originalCase]
+            split = splitTestGroups 4 original
+            changed action = [TestList "identity:1/1" [TestList "identity" [TestCase "same path" action]]]
+            replacement = modifyIORef' effects (+ 10) >> pure (Just "replacement")
+            wrapper = modifyIORef' effects (+ 100) >> originalAction
+        preserved <- sameActions (original, split)
+        replaced <- sameActions (original, changed replacement)
+        wrapped <- sameActions (original, changed wrapper)
+        observed <- readIORef effects
+        pure (testAssertTrue (preserved && not replaced && not wrapped) <> testAssertEq observed 0)
     , testCase "each expensive group has four nonempty registered batches and no original duplicate" $
         testAssertTrue (all (\(original, split) -> length split == 4
             && groupName original `notElem` names
@@ -569,11 +588,11 @@ testScheduling names batches = TestList "testScheduling"
             holders = [filter (elem "memory") (map (drop 1) (leafPaths batch)) | batch <- split]
          in null originalPaths || filter (not . null) holders == [originalPaths]
     sameActions (original, split) = do
-        before <- identities (leafActions original)
-        after <- identities [(drop 1 path, action) | batch <- split, (path, action) <- leafActions batch]
+        before <- identities (leafCaseObjects original)
+        after <- identities [(drop 1 path, test) | batch <- split, (path, test) <- leafCaseObjects batch]
         pure (length before == length after && null (foldl' (flip delete) after before))
-    identities = mapM (\(path, action) -> do
-        stable <- evaluate action >>= makeStableName
+    identities = mapM (\(path, test) -> do
+        stable <- evaluate test >>= makeStableName
         pure (path, stable))
     unique :: Eq a => [a] -> [a]
     unique = foldl' (\seen name -> if name `elem` seen then seen else name : seen) []
