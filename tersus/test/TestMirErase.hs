@@ -10,7 +10,7 @@ import MirData (writeProgram, writeProgramWithGhosts)
 import MirHousekeeping (eraseGhosts, toolProgram)
 import MirOwnership (insertOwnership)
 import Types (Type (..))
-import Pipeline (compileSource, validatedSource)
+import Pipeline (validatedSource)
 import TestHarness
 import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
@@ -57,10 +57,8 @@ eraserProgram :: IO (Result Program String)
 eraserProgram = bootstrapFromFile "examples/mir/mir_erase/mir_erase.tersus"
 
 -- What the host makes of the program before its ghosts are erased, as version 1 of the data
-expectedOf :: String -> Result String String
-expectedOf source = case validatedSource source of
-    Error e -> Error e
-    Ok program -> mapResult writeProgram (eraseGhosts program)
+expectedOf :: Program -> Result String String
+expectedOf program = mapResult writeProgram (eraseGhosts program)
 
 -- Run the interpreted eraser once and assert both the host erasure and the recorded golden output.
 interpretedGolden :: String -> String -> IO TestResult
@@ -70,7 +68,7 @@ interpretedGolden source recorded = do
         Error e -> Just ("the eraser does not compile: " ++ e)
         Ok eraserProgram -> case validatedSource source of
             Error e -> Just e
-            Ok program -> case expectedOf source of
+            Ok program -> case expectedOf program of
                 Error e -> Just ("the host refuses: " ++ e)
                 Ok expected -> case runProgramIn noWorld{worldInput = writeProgramWithGhosts program} eraserProgram of
                     Error e -> Just e
@@ -139,7 +137,7 @@ interpreted source = do
         Error e -> Just ("the eraser does not compile: " ++ e)
         Ok eraserProgram -> case validatedSource source of
             Error e -> Just e
-            Ok program -> case expectedOf source of
+            Ok program -> case expectedOf program of
                 Error e -> Just ("the host refuses: " ++ e)
                 Ok expected -> case runProgramIn noWorld{worldInput = writeProgramWithGhosts program} eraserProgram of
                     Error e -> Just e
@@ -209,7 +207,7 @@ everyProgram = withProgram "examples/mir/mir_erase/mir_erase.tersus" "mir-erase"
         bad -> Just (unlines (take 5 bad))
   where
     check exe (name, source) = do
-        validated <- if "examples/mir/" `isPrefixOf` name then linkedFromFile name else pure (validatedSource source)
+        validated <- if "examples/mir/" `isPrefixOf` name then linkedFromFile name else validatedOnce source
         case validated of
             Error e -> pure [name ++ ": " ++ e]
             Ok program -> case eraseGhosts program of

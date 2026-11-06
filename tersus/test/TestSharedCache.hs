@@ -26,6 +26,7 @@ import Seed (compilerSnapshotHash, parserSeedHash)
 import qualified TersusParser
 import qualified Modules
 import qualified Compile
+import qualified Pipeline
 import qualified Bootstrap
 import GHC.Clock (getMonotonicTime)
 import qualified PackageCompile
@@ -75,6 +76,7 @@ testSharedCache =
         (codecCases
         ++ [ TestCase "atomic close-on-exec writes keep published tools executable across spawns" atomicExecutableWrites
            , TestCase "captured process input closes on errors and preserves broken-pipe behavior" capturedInputErrors ]
+        ++ singleSourceCases
         ++ map requireParser
         [ TestCase "truncated named List declaration is refused natively" (rawNamedTruncation "List" "")
         , TestCase "truncated named Box element is refused natively" (rawNamedTruncation "Box" " type")
@@ -144,6 +146,169 @@ testSharedCache =
             Left e -> pure (Just e)
             Right _ -> action
     requireParser test = test
+
+singleSourceCases :: [Test]
+singleSourceCases =
+    [ TestCase "compileFromValidated reuses the exact validated sentinel" compileFromValidated
+    , TestCase "ownedFromCompile reuses the exact compiled sentinel" ownedFromCompile
+    , TestCase "warm compile does not traverse upstream" (hotSingleSource "compile")
+    , TestCase "warm owned does not traverse upstream" (hotSingleSource "owned")
+    , TestCase "single-source stages preserve complete Programs in both request orders" singleSourceOrders
+    , TestCase "fresh processes request mixed single-source stages without lock cycles" singleSourceProcesses
+    , TestCase "single-source ownership still refuses unsized references" singleSourceUnsized
+    ]
+
+sameProgram :: Result Program String -> Result Program String -> TestResult
+sameProgram actual expected = testAssertEq actual expected <> testAssertEq (show actual) (show expected)
+
+compileFromValidated :: IO TestResult
+compileFromValidated = withToolsCacheHome $ \_ -> do
+    let source = "return 991101;"
+        sentinel = Pipeline.validatedSource richSource
+    calls <- newIORef (0 :: Int)
+    seeded <- sharedProgram "validated" source $ do
+        atomicModifyIORef' calls (\n -> (n + 1, ()))
+        pure sentinel
+    reused <- sharedProgram "validated" source (throwIO (userError "validated sentinel recomputed"))
+    downstream <- compileOnce source
+    count <- readIORef calls
+    pure (sameProgram seeded sentinel <> sameProgram reused sentinel
+        <> testAssertTrue (case sentinel of Ok _ -> True; Error _ -> False)
+        <> testAssertEq count 1 <> sameProgram downstream (sentinel `bindResult` MirHousekeeping.eraseGhosts))
+
+ownedFromCompile :: IO TestResult
+ownedFromCompile = withToolsCacheHome $ \_ -> do
+    let source = "return 991102;"
+        sentinel = Pipeline.compileSource richSource
+    calls <- newIORef (0 :: Int)
+    seeded <- sharedProgram "compile" source $ do
+        atomicModifyIORef' calls (\n -> (n + 1, ()))
+        pure sentinel
+    reused <- sharedProgram "compile" source (throwIO (userError "compiled sentinel recomputed"))
+    downstream <- ownedOnce source
+    count <- readIORef calls
+    pure (sameProgram seeded sentinel <> sameProgram reused sentinel
+        <> testAssertTrue (case sentinel of Ok _ -> True; Error _ -> False)
+        <> testAssertEq count 1 <> sameProgram downstream (sentinel `bindResult` Pipeline.ownedOfProgram))
+
+singleSourceStage :: String -> String -> IO (Result Program String)
+singleSourceStage "validated" = validatedOnce
+singleSourceStage "compile" = compileOnce
+singleSourceStage "owned" = ownedOnce
+singleSourceStage stage = const (pure (Error ("unknown single-source stage: " ++ stage)))
+
+freshSingleSourceStage :: String -> String -> Result Program String
+freshSingleSourceStage "validated" = Pipeline.validatedSource
+freshSingleSourceStage "compile" = Pipeline.compileSource
+freshSingleSourceStage "owned" = Pipeline.ownedSource
+freshSingleSourceStage stage = const (Error ("unknown single-source stage: " ++ stage))
+
+hotSource :: String -> String
+hotSource stage = "return missing_hot_" ++ stage ++ "_991103(;"
+
+hotSingleSource :: String -> IO TestResult
+hotSingleSource stage = withToolsCacheHome $ \home -> do
+    let sentinel = freshSingleSourceStage stage richSource
+    seeded <- sharedProgram stage (hotSource stage) (pure sentinel)
+    checked <- runSingleSourceProbe home ("hot-" ++ stage)
+    pure (sameProgram seeded sentinel <> checked)
+
+withParserTrap :: FilePath -> IO a -> IO a
+withParserTrap marker action = do
+    tool <- TersusParser.parserExecutable
+    case tool of
+        Error e -> fail e
+        Ok parser -> bracket (renameFile parser (parser ++ ".held"))
+            (\_ -> renameFile (parser ++ ".held") parser)
+            (\_ -> do
+                withExecutableWrite $ do
+                    writeFile parser ("#!/bin/sh\nprintf trap >> '" ++ marker ++ "'\nprintf 'intentional upstream trap\\n' >&2\nexit 23\n")
+                    setFileMode parser 0o755
+                action)
+
+singleSourceProbe :: String -> IO TestResult
+singleSourceProbe mode = do
+    Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
+    result <- if "hot-" `isPrefixOf` mode then do
+        let stage = drop 4 mode
+            source = hotSource stage
+            trap = marker ++ ".upstream"
+            expected = freshSingleSourceStage stage richSource
+        _ <- Exception.evaluate (force (show expected))
+        withParserTrap trap $ do
+            downstream <- singleSourceStage stage source
+            eager <- doesFileExist trap
+            control <- validatedOnce source
+            reached <- doesFileExist trap
+            pure (sameProgram downstream expected
+                <> testAssertTrue (not eager) <> testAssertTrue reached
+                <> testAssertErrorContains "intentional upstream trap" control)
+      else do
+        Just home <- lookupEnv "XDG_CACHE_HOME"
+        when ("mixed-" `isPrefixOf` mode) $ do
+            writeFile (marker ++ ".ready") ""
+            awaitNativeFile (home </> "go")
+        let stages = case mode of
+                "forward" -> ["validated", "compile", "owned"]
+                "reverse" -> ["owned", "compile", "validated"]
+                _ -> [drop 6 mode]
+            source = richSource ++ "\n// single-source stage orders\n"
+        results <- mapM (\stage -> do
+            actual <- singleSourceStage stage source
+            _ <- Exception.evaluate (force (show actual))
+            pure (sameProgram actual (freshSingleSourceStage stage source))) stages
+        pure (firstFailure results)
+    writeFile marker (maybe "pass" id result)
+    pure result
+
+spawnSingleSourceProbe :: FilePath -> String -> IO ProcessHandle
+spawnSingleSourceProbe home mode = spawnProbeInGroup True home
+    [("TERSUS_SINGLE_SOURCE_PROBE", mode), ("TERSUS_SHARED_CACHE_PROBE", home </> mode)]
+
+withSingleSourceProbes :: [IO ProcessHandle] -> ([ProcessHandle] -> IO a) -> IO a
+withSingleSourceProbes [] use = use []
+withSingleSourceProbes (spawn : rest) use = bracket spawn (stopOwnedProcess True) $ \child ->
+    withSingleSourceProbes rest (\others -> use (child : others))
+
+runSingleSourceProbe :: FilePath -> String -> IO TestResult
+runSingleSourceProbe home mode = bracket
+    (spawnSingleSourceProbe home mode)
+    (stopOwnedProcess True)
+    (\child -> do
+        code <- waitChild 300 child
+        output <- readMarker (home </> mode)
+        pure (testAssertEq code (Just ExitSuccess) <> testAssertEq output (Right "pass")))
+
+singleSourceOrders :: IO TestResult
+singleSourceOrders = firstFailure <$> mapM (\mode -> withToolsCacheHome $ \home -> do
+    result <- runSingleSourceProbe home mode
+    entries <- entryFiles home
+    pure (result <> testAssertEq (length entries) 3)) ["forward", "reverse"]
+
+singleSourceProcesses :: IO TestResult
+singleSourceProcesses = withToolsCacheHome $ \home -> do
+    let modes = map ("mixed-" ++) ["validated", "compile", "owned"]
+    withSingleSourceProbes (map (spawnSingleSourceProbe home) modes) $ \children -> do
+        mapM_ (awaitNativeFile . (\mode -> home </> (mode ++ ".ready"))) modes
+        writeFile (home </> "go") ""
+        codes <- mapM (waitChild 300) children
+        outputs <- mapM (readMarker . (home </>)) modes
+        entries <- entryFiles home
+        before <- mapM getModificationTime entries
+        warm <- runSingleSourceProbe home "reverse"
+        after <- mapM getModificationTime entries
+        pure (testAssertEq codes (replicate 3 (Just ExitSuccess))
+            <> testAssertEq outputs (replicate 3 (Right "pass"))
+            <> testAssertEq (length entries) 3 <> testAssertEq after before <> warm)
+
+singleSourceUnsized :: IO TestResult
+singleSourceUnsized = do
+    let source = "fn f(b: Box<Array<Int>>) -> Int { a = &*b; return size(*a); }; return f(Box::new(#[10, 20]));"
+    compiled <- compileOnce source
+    owned <- ownedOnce source
+    pure ((case compiled of Error e -> Just e; Ok _ -> Nothing)
+        <> sameProgram owned (Pipeline.ownedSource source)
+        <> testAssertErrorContains "a reference to an unsized value" owned)
 
 testSharedCacheCodec :: Test
 testSharedCacheCodec = TestList "testSharedCacheCodec" codecCases
@@ -970,8 +1135,11 @@ contentRestoreProbe directory = do
 
 cacheProbe :: IO TestResult
 cacheProbe = do
+    singleSource <- lookupEnv "TERSUS_SINGLE_SOURCE_PROBE"
     binary <- lookupEnv "TERSUS_SHARED_BINARY_PROBE"
-    maybe ordinaryCacheProbe binaryProbe binary
+    case singleSource of
+        Just mode -> singleSourceProbe mode
+        Nothing -> maybe ordinaryCacheProbe binaryProbe binary
 
 ordinaryCacheProbe :: IO TestResult
 ordinaryCacheProbe = do
@@ -1426,12 +1594,12 @@ touchedExecutable = do
         first <- readMarker marker
         entries <- entryFiles home
         case (code1, first, entries) of
-            (ExitSuccess, Right original, [entry]) -> do
-                before <- getModificationTime entry
+            (ExitSuccess, Right original, [firstEntry, secondEntry]) -> do
+                before <- mapM getModificationTime [firstEntry, secondEntry]
                 setModificationTime copied (read "2000-01-01 00:00:00 UTC")
                 (code2, _, err2) <- runChild
                 second <- readMarker marker
-                after <- getModificationTime entry
+                after <- mapM getModificationTime [firstEntry, secondEntry]
                 afterEntries <- entryFiles home
                 pure $ firstFailure
                     [ testAssertEq code2 ExitSuccess <? err2
@@ -1452,7 +1620,9 @@ staleBuildEntry = do
         original <- readMarker marker
         entries <- entryFiles home
         case (firstCode, original, entries) of
-            (Just ExitSuccess, Right expected, [entry]) -> do
+            (Just ExitSuccess, Right expected, [_, _]) -> do
+                Just compiledFile <- sharedProgramCacheFile "compile" probeSource
+                let entry = home </> "tersus" </> "test-programs" </> takeFileName compiledFile
                 Right bytes <- readBinaryMarker entry
                 let stale = case decodeProgram expected of
                         Ok program -> ProgramBinary.encodeEntry (replicate 64 '0') program
@@ -1620,11 +1790,11 @@ independentProcesses = do
         first <- try (readFile marker >>= \t -> length t `seq` pure t) :: IO (Either IOError String)
         entries <- entryFiles home
         case (code1, first, entries) of
-            (ExitSuccess, Right text1, [entry]) -> do
-                before <- getModificationTime entry
+            (ExitSuccess, Right text1, [firstEntry, secondEntry]) -> do
+                before <- mapM getModificationTime [firstEntry, secondEntry]
                 (code2, _, err2) <- runChild
                 second <- try (readFile marker >>= \t -> length t `seq` pure t) :: IO (Either IOError String)
-                after <- getModificationTime entry
+                after <- mapM getModificationTime [firstEntry, secondEntry]
                 pure $ case (code2, second) of
                     (ExitSuccess, Right text2)
                         | text1 /= text2 -> Just "the second process wrote a different program"
@@ -1643,7 +1813,7 @@ concurrentProcesses = do
         markers <- mapM (readMarker . \i -> home </> ("marker" ++ show i)) [1 .. 4 :: Int]
         entries <- entryFiles home
         pure $ case (codes, markers, entries) of
-            ([Just ExitSuccess, Just ExitSuccess, Just ExitSuccess, Just ExitSuccess], [Right a, Right b, Right c, Right d], [_]) ->
+            ([Just ExitSuccess, Just ExitSuccess, Just ExitSuccess, Just ExitSuccess], [Right a, Right b, Right c, Right d], [_, _]) ->
                 if a == b && b == c && c == d
                     then case decodeProgram a of
                         Ok _ -> Nothing
@@ -1674,7 +1844,7 @@ killedOwnerReleases = do
                 entries <- entryFiles home
                 marker <- readMarker (home </> "waiter-marker")
                 pure $ case (code, entries, marker) of
-                    (Just ExitSuccess, [_], Right _) -> Nothing
+                    (Just ExitSuccess, [_, _], Right _) -> Nothing
                     _ -> Just ("the waiter did not finish after the owner was killed: " ++ show code ++ " entries " ++ show entries))
         `finally` removeDirectoryRecursive home
 
@@ -1731,14 +1901,17 @@ probeEnv home marker extra = do
     pure (("XDG_CACHE_HOME", home) : ("TERSUS_SHARED_CACHE_PROBE", marker) : extra ++ [(k, v) | (k, v) <- env0, k /= "XDG_CACHE_HOME", k /= "TERSUS_SHARED_CACHE_PROBE", k `notElem` map fst extra])
 
 spawnProbe :: FilePath -> [(String, String)] -> IO ProcessHandle
-spawnProbe home extra = do
+spawnProbe = spawnProbeInGroup False
+
+spawnProbeInGroup :: Bool -> FilePath -> [(String, String)] -> IO ProcessHandle
+spawnProbeInGroup grouped home extra = do
     self <- getExecutablePath
     let marker = case lookup "TERSUS_SHARED_CACHE_PROBE" extra of
             Just m -> m
             Nothing -> home </> "marker"
     env <- probeEnv home marker extra
     withFile "/dev/null" WriteMode $ \sink -> do
-        (_, _, _, handle) <- spawnShared (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just env, std_out = UseHandle sink, std_err = UseHandle sink}
+        (_, _, _, handle) <- spawnShared (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){create_group = grouped, env = Just env, std_out = UseHandle sink, std_err = UseHandle sink}
         pure handle
 
 waitChild :: Int -> ProcessHandle -> IO (Maybe ExitCode)
