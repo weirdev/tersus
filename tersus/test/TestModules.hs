@@ -1677,6 +1677,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                         let files = concatMap loadedModuleFiles (packageModules pkg)
                             declared = [name | modu <- PackageCompile.compiledModules compiled, Assign name (Val VFunct{}) <- PackageCompile.compiledStatements modu]
                             typeNames = [name | modu <- PackageCompile.compiledModules compiled, stmt <- PackageCompile.compiledStatements modu, name <- case stmt of StructDef n _ _ _ -> [n]; EnumDef n _ -> [n]; _ -> []]
+                            markers = [(name, source, top) | block <- Map.elems (M.fnBlocks (M.progMain raw)), M.Ghost _ (M.GhostFunction name source top) <- M.blockStatements block]
                             trapped = checker{M.progMain = (M.progMain checker){M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Unreachable)}}
                          in foldr (<>) Nothing
                             [ case reference of
@@ -1686,6 +1687,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Error e -> Just e
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
+                            , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
                             , testAssertEq (validatorMetadataFingerprint raw) "92c76165ad7bbb9b"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
