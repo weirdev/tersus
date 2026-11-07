@@ -32,7 +32,8 @@ import MirEval
 import MirLower
 import MirHousekeeping (verifyProgram, validationEntry)
 import Pipeline
-import SelfHostedMir (validateMirSubset, verdictProved)
+import SelfHostedMir (encode, validateMirSubset, verdictProved)
+import ValidatorNative (prepareTexts)
 import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
@@ -692,25 +693,7 @@ selfHostedQueryFamilies program =
                 boundContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList (map app [(10,20,[0]),(11,20,[1])])), ("constants", MList []), ("orders", MList (map mixedFact [(0,1,False),(1,0,False)])), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkBoundCongruence = testAssertEq (runNamedFunction program "entailsGoal" [boundContext, goal "Equal" 10 11]) (Ok (Just (MBool True)))
                 emptyContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                knownOrder = MData "ProofStep::KnownOrder" [("left", MInt 1), ("right", MInt 2), ("strict", MBool True)]
-                checkStep = MData "ProofStep::Check" [("goal", goal "Less" 1 2)]
-                proofResult ok index = Ok (Just (MData "ProofResult" [("valid", MBool ok), ("failedAt", MInt index)]))
-                checkProofSteps = testAssertEq (runNamedFunction program "validateProofSteps" [emptyContext, MList [knownOrder, checkStep]]) (proofResult True (-1))
-                checkProofOrder = testAssertEq (runNamedFunction program "validateProofSteps" [emptyContext, MList [checkStep, knownOrder]]) (proofResult False 0)
-                checkUnknownStep = testAssertEq (runNamedFunction program "validateProofSteps" [emptyContext, MList [MData "ProofStep::Unknown" []]]) (proofResult False 0)
                 checkUnknownGoal = testAssertEq (runNamedFunction program "entailsGoal" [emptyContext, MData "ValidatorGoal::Unknown" []]) (Ok (Just (MBool False)))
-                block i steps end = MData "FlowBlock" [("id", MInt i), ("steps", MList steps), ("end", end)]
-                done = MData "FlowEnd::Done" []
-                jump i = MData "FlowEnd::Jump" [("target", MInt i)]
-                branch = MData "FlowEnd::Branch" [("yes", MInt 1), ("no", MInt 2), ("yesFacts", MList [knownOrder]), ("noFacts", MList [])]
-                flowResult status b step = Ok (Just (MData "FlowResult" [("status", MInt status), ("block", MInt b), ("step", MInt step)]))
-                runFlow blocks = runNamedFunction program "validateFlow" [MList blocks, MInt 0, emptyContext]
-                checkFlow = testAssertEq (runFlow [block 0 [] branch, block 1 [checkStep] done, block 2 [] done]) (flowResult 0 2 (-1))
-                checkFlowBadBranch = testAssertEq (runFlow [block 0 [] branch, block 1 [checkStep] done, block 2 [checkStep] done]) (flowResult 1 2 0)
-                checkFlowCycle = testAssertEq (runFlow [block 0 [] (jump 0)]) (flowResult 4 0 (-1))
-                checkFlowMissing = testAssertEq (runFlow [block 0 [] (jump 2)]) (flowResult 3 2 (-1))
-                checkFlowDuplicate = testAssertEq (runFlow [block 0 [] done, block 0 [] done]) (flowResult 3 0 (-1))
-                checkFlowUnsupported = testAssertEq (runFlow [block 0 [] (MData "FlowEnd::Unsupported" [])]) (flowResult 2 0 (-1))
                 localsValue bindings = MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt k), ("value", MInt v)] | (k, v) <- bindings]]), ("count", MInt (toInteger (length bindings)))]
                 initialExecution = MData "ExecutionState" [("context", emptyContext), ("locals", localsValue []), ("templates", MList [])]
                 termRef i = MData "ValueRef::Term" [("term", MInt i)]
@@ -722,6 +705,68 @@ selfHostedQueryFamilies program =
                 checkExecution steps status step = case runNamedFunction program "executeSteps" [initialExecution, MList steps] of
                     Ok (Just (MData "ExecutionResult" fields)) -> testAssertEq (lookup "status" fields, lookup "failedAt" fields) (Just (MInt status), Just (MInt step))
                     result -> Just ("Unexpected execution result: " ++ show result)
+                checkTerms relation a b = MData "ExecutionStep::Check" [("relation", MInt relation), ("left", termRef a), ("right", termRef b)]
+                assumeTerms a b = MData "ExecutionStep::Assume" [("relation", MInt 0), ("left", termRef a), ("right", termRef b)]
+                scoped steps = MData "ExecutionStep::Scoped" [("steps", MList steps)]
+                nestScoped n = iterate (\inner -> scoped [inner]) (scoped []) !! (n - 1)
+                driverBytes text = MList [MInt (toInteger (fromEnum c)) | c <- text]
+                dInt n = MData "DriverValue::DriverInt" [("value", MInt n)]
+                dBool b = MData "DriverValue::DriverBool" [("value", MBool b)]
+                dList items = MData "DriverValue::DriverList" [("items", MList items)]
+                dData name fields = MData "DriverValue::DriverData" [("name", driverBytes name), ("fields", MList fields)]
+                dTerm i = dData "ValueRef::Term" [dInt i]
+                dLocal i = dData "ValueRef::Local" [dInt i]
+                dStep name fields = dData ("ExecutionStep::" ++ name) fields
+                dCheck left right = dStep "Check" [dInt 0, left, right]
+                dDone = dData "ExecutionEnd::Done" []
+                dBlockAt i steps end = dData "ExecutionBlock" [dInt i, steps, end]
+                dBlock = dBlockAt 0
+                toDriver value = case value of
+                    MInt n -> dInt n
+                    MBool b -> dBool b
+                    MList items -> dList (map toDriver items)
+                    MData name fields -> dData name (map (toDriver . snd) fields)
+                    other -> other
+                driven blocks entry state = case runNamedFunction program "driverValidate" [blocks, MInt entry, toDriver state] of
+                    Ok (Just (MData "ExecutionFlowResult" fields)) -> Right (lookup "status" fields)
+                    result -> Left ("Unexpected driven validation result: " ++ show result)
+                checkDrivenIn state blocks expected = either Just (`testAssertEq` Just (MInt expected)) (driven blocks 0 state)
+                checkDriven blocks = checkDrivenIn initialExecution (dList blocks)
+                checkDrivenSteps steps = checkDriven [dBlock (dList steps) dDone]
+                dNestScoped n = iterate (\inner -> dStep "Scoped" [dList [inner]]) (dStep "Scoped" [dList []]) !! (n - 1)
+                checkDrivenDepth n expected = testAssertEq (runNamedFunction program "driverSteps" [dList [dNestScoped n]]) (Ok (Just (MList [expected])))
+                onLoop change value = case value of
+                    MData "ExecutionEnd::Loop" fields -> MData "ExecutionEnd::Loop" (change fields)
+                    MData name fields -> MData name [(key, onLoop change field) | (key, field) <- fields]
+                    MList items -> MList (map (onLoop change) items)
+                    other -> other
+                checkDrivenLoop source change expected = case parseSource source `bindResult` elaborate `bindResult` lowerElaborated of
+                    Error e -> Just ("Could not lower test program: " ++ e)
+                    Ok mir -> case fmap (lookup "f") (encode mir) of
+                        Right (Just (blocks, initial, entry)) -> either Just (`testAssertEq` Just (MInt expected)) (driven (toDriver (onLoop change blocks)) entry initial)
+                        other -> Just ("Could not encode test program: " ++ show (fmap (fmap (const ())) other))
+                loopSource after = "fn f(n: Int) -> Int { x = 0; i = 0; while i < n [{ affirm i >= 0; }] shrinks n - i { x = 1; i = i + 1; }; " ++ after ++ " return x; }; return 0;"
+                setLoopField key value fields = [(k, if k == key then value else v) | (k, v) <- fields]
+                appendLoopField key extra fields = [(k, case v of MList items | k == key -> MList (items ++ [extra]); _ -> v) | (k, v) <- fields]
+                parsedValue text = case runNamedFunction program "driverParseValue" [driverBytes text, MInt 0] of
+                    Ok (Just (MData "DriverParsed" fields)) -> lookup "value" fields
+                    _ -> Nothing
+                malformed = Just (MData "DriverValue::DriverMalformed" [])
+                drivenTexts = parseSource "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` elaborate `bindResult` lowerElaborated `bindResult` prepareTexts False
+                checkDrivenInput edit expected = case drivenTexts of
+                    Error e -> Just ("Could not prepare test program: " ++ e)
+                    Ok texts -> case runProgramWith (edit (show (length texts) ++ "\n") (concatMap snd texts)) program of
+                        Ok (out, _) -> testAssertEq out expected
+                        Error e -> Just ("The driver did not run: " ++ e)
+                drivenProved = "0 -1 -1 -1\n"
+                drivenRefused = "2 -1 -1 0\n"
+                drivenContext constantTerms = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                drivenState constantTerms = MData "ExecutionState" [("context", drivenContext constantTerms), ("locals", localsValue []), ("templates", MList [])]
+                dBooleanBranch value = dData "ExecutionEnd::BooleanBranch" [dInt 1, dInt 2, dInt (-1), value, dTerm 20, dTerm 21]
+                checkDrivenBoolean value = checkDrivenIn (drivenState boolConstants) (dList [dBlock (dList []) (dBooleanBranch value), dBlockAt 1 (dList []) dDone, dBlockAt 2 (dList []) dDone])
+                checkDrivenConstant zero = checkDrivenIn (drivenState [constant (2, 0, 0), zero]) (dList [dBlock (dList [dCheck (dTerm 1) (dTerm 2)]) dDone])
+                dTemplate fields = dStep "AssumeForall" [dData "ForallTemplate" fields]
+                dRelation = dData "TemplateRelation" [dInt 0, dInt 0, dInt 0]
                 checkSavedComparison function truth relation left right =
                     let comparison = app (10, function, [0,1])
                         bool = constant (20, 1, if truth then 1 else 0)
@@ -836,8 +881,7 @@ selfHostedQueryFamilies program =
                       , checkContext "Equal" 0 1 True, checkContext "Less" 0 4 True, checkContext "AtMost" 0 2 True
                       , checkContext "Different" 0 4 True, checkContext "Less" 4 0 False
                       , checkBoundCongruence
-                      , checkProofSteps, checkProofOrder, checkUnknownStep, checkUnknownGoal
-                      , checkFlow, checkFlowBadBranch, checkFlowCycle, checkFlowMissing, checkFlowDuplicate, checkFlowUnsupported
+                      , checkUnknownGoal
                       ])
                 , ("execution",
                       [ checkExecution executionSteps 0 (-1), checkExecution [assignLocal 0 (localRef 99)] 2 0
@@ -853,6 +897,58 @@ selfHostedQueryFamilies program =
                       , checkBooleanBranch (boolConstants ++ [constant (0,0,2), constant (1,0,1)]) (99,1) [execBlock 1 [] execEndDone] 0
                       , checkBooleanBranch boolConstants (1,2) [execBlock 1 [] execEndDone, execBlock 2 [joinCheck] execEndDone] 2
                       , checkBooleanJoin 3 0, checkBooleanJoin 4 1, checkBooleanJoinKnown 0
+                      , checkExecution [scoped [assumeTerms 1 2, checkTerms 0 1 2]] 0 (-1)
+                      , checkExecution [assignLocal 0 (termRef 1), scoped [checkTerms 0 1 2]] 1 1
+                      , checkExecution [scoped [assumeTerms 1 2], checkTerms 0 1 2] 1 1
+                      , checkExecution [assignLocal 0 (termRef 1), scoped [assignLocal 1 (localRef 99)]] 2 1
+                      , checkExecution [nestScoped 16] 0 (-1), checkExecution [nestScoped 17] 2 0
+                      , checkExecution [MData "ExecutionStep::Unsupported" []] 2 0
+                      ])
+                , ("driver",
+                      [ checkDrivenSteps [dStep "Assign" [dInt 0, dTerm 1], dCheck (dLocal 0) (dTerm 1)] 0
+                      , checkDrivenSteps [dStep "Frobnicate" [dInt 0]] 2
+                      , checkDrivenSteps [dStep "Havoc" [dInt 5, dInt 6]] 2
+                      , checkDrivenSteps [dStep "Havoc" []] 2
+                      , checkDrivenSteps [dStep "Assign" [dInt 0, dData "ValueRef::Frobnicate" [dInt 1]]] 2
+                      , checkDrivenSteps [dStep "Assign" [dInt 0, dData "ValueRef::Term" []]] 2
+                      , checkDriven [dBlock (dList []) (dData "ExecutionEnd::Frobnicate" [])] 2
+                      , checkDriven [dBlock (dList []) (dData "ExecutionEnd::Jump" [])] 2
+                      , checkDriven [dBlock (dInt 0) dDone] 2
+                      , checkDriven [dData "ExecutionBlock" [dInt 0, dList [], dDone, dInt 0]] 2
+                      , checkDrivenSteps [dStep "Scoped" [dList [dCheck (dTerm 1) (dTerm 1)]]] 0
+                      , checkDrivenSteps [dStep "Scoped" [dList [dStep "Assume" [dInt 0, dTerm 1, dTerm 2]]], dCheck (dTerm 1) (dTerm 2)] 1
+                      , checkDrivenLoop (loopSource "") id 0, checkDrivenLoop (loopSource "affirm x = 0;") id 1
+                      , checkDrivenLoop (loopSource "") (++ [("extra", MInt 0)]) 2
+                      , checkDrivenLoop (loopSource "affirm x = 0;") (setLoopField "havoc" (MInt 0)) 2
+                      , checkDrivenSteps [dTemplate [dInt 0, dList [], dList [], dRelation]] 0
+                      , checkDrivenSteps [dTemplate [dInt 0, dList [], dList []]] 2
+                      , checkDrivenSteps [dStep "ApplyFresh" [dInt 0, dInt 7, dList [dTerm 1, dTerm 2]]] 0
+                      , checkDrivenSteps [dStep "ApplyFresh" [dInt 0, dInt 7, dList [dTerm 1, dInt 2]]] 2
+                      , checkDrivenBoolean (dTerm 10) 0, checkDrivenBoolean (dData "ValueRef::Term" [dInt 10, dInt 11]) 2
+                      , checkDrivenConstant (constant (1, 0, 0)) 0
+                      , checkDrivenConstant (MData "ConstantTerm" [("id", MInt 1), ("kind", MInt 0)]) 2
+                      , checkDrivenConstant (MData "ConstantTerm" [("id", MInt 1), ("kind", MInt 0), ("value", MBool False)]) 2
+                      , checkDrivenSteps [dStep "Assume" [dInt 0, dTerm 1, dTerm 2], dCheck (dTerm 1) (dTerm 2)] 0
+                      , checkDrivenSteps [dStep "Assume" [dBool False, dTerm 1, dTerm 2], dCheck (dTerm 1) (dTerm 2)] 2
+                      , checkDrivenSteps [dStep "Havoc" [dInt 0]] 0
+                      , checkDrivenSteps [dStep "Havoc" [dBool False]] 2
+                      , checkDrivenLoop (loopSource "") (appendLoopField "havoc" (MInt 0)) 0
+                      , checkDrivenLoop (loopSource "") (appendLoopField "havoc" (MBool False)) 2
+                      , testAssertEq (parsedValue "i 7") (Just (dInt 7))
+                      , testAssertEq (parsedValue "i x") (Just (MData "DriverValue::DriverMalformed" []))
+                      , testAssertEq (parsedValue "") (Just (MData "DriverValue::DriverMalformed" []))
+                      , testAssertEq (parsedValue "l 1 i 7") (Just (dList [dInt 7]))
+                      , testAssertEq (parsedValue "l x") malformed
+                      , testAssertEq (parsedValue "d n 1 a 0") (Just (dData "a" []))
+                      , testAssertEq (parsedValue "d n - 0") malformed
+                      , testAssertEq (parsedValue "d n 1 a x") malformed
+                      , checkDrivenInput (++) drivenProved
+                      , checkDrivenInput (\count body -> count ++ body ++ "\n \n") drivenProved
+                      , checkDrivenInput (\count body -> count ++ body ++ "i 0 ") drivenRefused
+                      , checkDrivenInput (\_ _ -> "") drivenRefused
+                      , checkDrivenInput (\count body -> count ++ dropWhile (/= '\n') body) drivenRefused
+                      , checkDrivenDepth 16 (nestScoped 16)
+                      , checkDrivenDepth 17 (iterate (\inner -> scoped [inner]) (MData "ExecutionStep::Unsupported" []) !! 16)
                       ])
                 , ("MIR contracts",
                       [ checkMirSubset "x = 1; y = x; affirm y = 1; return y;" (Just True)

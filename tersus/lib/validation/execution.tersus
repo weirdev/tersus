@@ -6,7 +6,7 @@ import validation::model { ApplicationTerm, ArgumentsLookup, CheckedStep, Consta
 import validation::relations { boolAt, containsValue, emptyIntMap, equalArguments, hasEquality, intAt, leastClasses, sameIn };
 import validation::saturation { noBlocked, noClosed, noDoneKeys, proveBySaturation };
 import validation::state { bindLocal, booleanCheck, noTemplates, resolveArguments, resolveValue, termInUse };
-import validation::validation { entailmentCache, entailsGoal, entailsGoalCached, entailsPlainCached, runProofSteps };
+import validation::validation { entailmentCache, entailsGoal, entailsGoalCached, entailsPlainCached };
 
 
 
@@ -421,6 +421,15 @@ fn existingApplication(context: &ValidatorContext, function: Int, args: &List<In
 
 // The steps of a block in order, as far as the first that fails (a step of a kind not known fails as unsupported)
 fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
+    return executeStepsWithin(initial, steps, maxScopeDepth());
+};
+
+// Scoped steps nested deeper than this are refused as unsupported.
+fn maxScopeDepth() -> Int [{ }] [{ affirm return >= 0; }] {
+    return 16;
+};
+
+fn executeStepsWithin(initial: ExecutionState, steps: &List<ExecutionStep>, depth: Int) -> ExecutionResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
     state = initial;
     shared = SharedEntailment::Missing;
     for i in 0..size(steps) {
@@ -432,7 +441,7 @@ fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> Executi
             shared = after;
         } else {
             before = contextSizes(state.context);
-            result = executeStep(state, get(steps, i), i);
+            result = executeStep(state, get(steps, i), i, depth);
             if result.status != 0 { return result; };
             state = result.state;
             // (and, should a step ever drop a fact, a list that got shorter drops it too)
@@ -460,10 +469,11 @@ fn addsFactsOnly(step: &ExecutionStep) -> Bool {
     if step is ExecutionStep::Push || step is ExecutionStep::Last || step is ExecutionStep::Set || step is ExecutionStep::Pop || step is ExecutionStep::NewArray { return true; };
     if step is ExecutionStep::Havoc || step is ExecutionStep::RequireDefined || step is ExecutionStep::Check || step is ExecutionStep::Assume { return true; };
     if step is ExecutionStep::AssumeVariant || step is ExecutionStep::RequireVariant || step is ExecutionStep::CheckWithin || step is ExecutionStep::AssumeForall { return true; };
+    if step is ExecutionStep::Scoped { return true; };
     return false;
 };
 
-fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int, depth: Int) -> ExecutionResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth {
     if step is ExecutionStep::Assign { return stepAssign(state, step, i); };
     if step is ExecutionStep::Apply { return stepApply(state, step, i); };
     if step is ExecutionStep::Literal { return stepLiteral(state, step, i); };
@@ -481,7 +491,11 @@ fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> Execution
     if step is ExecutionStep::CheckWithin { return stepCheckWithin(state, step, i); };
     if step is ExecutionStep::AssumeVariant { return stepAssumeVariant(state, step, i); };
     if step is ExecutionStep::RequireVariant { return stepRequireVariant(state, step, i); };
-    if step is ExecutionStep::Proof { return stepProof(state, step, i); };
+    if step is ExecutionStep::Scoped && depth > 0 {
+        inner = executeStepsWithin(clone(state), (step as ExecutionStep::Scoped).steps, depth - 1);
+        if inner.status != 0 { return ExecutionResult { status: inner.status, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
@@ -861,18 +875,6 @@ fn stepRequireVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> 
                 state = ExecutionState { context: context, ..state };
             } else { return ExecutionResult { status: 1, failedAt: i, state: state }; };
         } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
-    };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
-};
-
-fn stepProof(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
-    state = initial;
-    if step is ExecutionStep::Proof {
-        p = step as ExecutionStep::Proof;
-        result = runProofSteps(state.context, push([], p.step));
-        if result.valid = false { return ExecutionResult { status: 1, failedAt: i, state: state }; };
-        state = ExecutionState { context: result.state, ..state };
         return ExecutionResult { status: 0, failedAt: -1, state: state };
     };
     return ExecutionResult { status: 2, failedAt: i, state: state };
