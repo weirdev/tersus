@@ -2094,14 +2094,14 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
                         (trueRef, b5) <- operand (M.Const (M.CBool True)) b4
                         Just (Eq, localRef (localNumber local), trueRef, Just (object, familyId, constructorId), b5)
                     Nothing -> do
-                        value <- constBoolTest fn local
-                        (boolRef, b2) <- operand (M.Const (M.CBool value)) b1
-                        Just (Eq, localRef (localNumber local), boolRef, Nothing, b2)
+                        (trueRef, b2) <- operand (M.Const (M.CBool True)) b1
+                        Just (Eq, localRef (localNumber local), trueRef, Nothing, b2)
             (extra, loopEnd, b') <- encodeLoop spec yes no local resolution
             pure (extra, loopEnd, b')
         (Just spec, M.SwitchBool (M.Const (M.CBool value)) yes no) -> do
             (boolRef, b2) <- operand (M.Const (M.CBool value)) b1
-            (extra, loopEnd, b') <- encodeLoop spec yes no (M.Local 0) (Eq, boolRef, boolRef, Nothing, b2)
+            (trueRef, b3) <- operand (M.Const (M.CBool True)) b2
+            (extra, loopEnd, b') <- encodeLoop spec yes no (M.Local 0) (Eq, boolRef, trueRef, Nothing, b3)
             pure (extra, loopEnd, b')
         (Just spec, M.Call calleeOp args dest target) | allowCalls -> do
             next <- Map.lookup target (M.fnBlocks fn)
@@ -2646,9 +2646,6 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
             _ -> Nothing
       where
         indexed = zip [0 :: Int ..] stmts
-    constBoolTest f local = case [value | blk <- Map.elems (M.fnBlocks f), M.Assign dest (M.Use (M.Const (M.CBool value))) <- M.blockStatements blk, dest == local] of
-        value : _ -> Just value
-        [] -> Nothing
     normal r a b = case r of
                 Eq -> (0, a, b)
                 NotEq -> (1, a, b)
