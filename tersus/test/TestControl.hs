@@ -323,8 +323,9 @@ testTermination =
 -- Validation walks the control-flow graph of the MIR: the paths that meet are joined, loops are regions, a return ends a path
 testCfgValidation :: Test
 testCfgValidation =
-    testCaseSeq
+    testCaseNamedSeq
         "testCfgValidation"
+        (zip (map show [0 :: Int ..])
         [ -- Three paths meet at one block
           parseValidProgramHelper "fn f(c: Int) -> Int [{ }] [{ }] { x = 0; if c < 0 { x = 1; } else { if c = 0 { x = 2; } else { x = 3; }; }; affirm x > 0; affirm x < 4; return x; }; y = f(1);"
         , parseValidateFailProgramHelper "fn f(c: Int) -> Int [{ }] [{ }] { x = 0; if c < 0 { x = 1; } else { if c = 0 { x = 2; } else { x = -3; }; }; affirm x > 0; return x; }; y = f(1);" "Could not prove: x > 0"
@@ -368,7 +369,18 @@ testCfgValidation =
           parseValidateFailProgramHelper "enum E { A, B, C }; fn f(e: E) -> Int { y = 0; if e is E::A { y = 1; }; if e is E::B { return 2; }; affirm y = 0; return y; }; x = f(E::A);" "Could not prove: y = 0"
         , parseValidateFailProgramHelper "enum E { A, B, C }; fn f(e: E) -> Int { y = 0; if e is E::A { y = 1; }; if e is E::B { return 2; }; return 10 / (1 - y); }; x = f(E::A);" "Could not prove"
         , bothEdgesOfATestIntoOneBlock
-        ]
+        ] ++
+        [ ("p_constbool_a", parseValidateFailProgramHelper "fn f() -> Int { flag = false; flag = true; n = 1; while flag [{ affirm flag = true; }] shrinks n { affirm 1 = 2; flag = false; n = n - 1; }; return n; }; return f();" "Could not prove: an obligation could not be proved")
+        , ("p_constbool_crash", parseValidateFailProgramHelper "fn f() -> Int { flag = false; flag = true; n = 1; x = 0; while flag [{ affirm flag = true; }] shrinks n { x = 10 / (n - 1); flag = false; n = n - 1; }; return x; }; return f();" "Could not prove: an obligation could not be proved")
+        , ("q_while_false3", parseValidateFailProgramHelper "fn f() -> Int { n = 0; while false [{ affirm n >= 0; }] shrinks n { return 5; }; affirm 1 = 2; return n; }; return f();" "Could not prove: 1 = 2")
+        , ("q_while_false4", parseValidateFailProgramHelper "fn f() -> Int { n = 0; while false [{ affirm n >= 0; }] shrinks n { return 5; }; x = 10 / n; return x; }; return f();" "Could not prove: an obligation could not be proved")
+        , ("while-true-returns-inside", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 5; }] { n = 0; while true shrinks n { return 5; }; return 0; }; return f();" (Just (VInt 5)))
+        , ("while-true-counts-to-return", parseValidateEvalProgramHelper "i = 0; while true [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { if i = 3 { return i; }; i = i + 1; };" (Just (VInt 3)))
+        , ("true-bool-local-returns-inside", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 5; }] { flag = true; n = 0; while flag [{ affirm flag = true; }] shrinks n { return 5; }; return 0; }; return f();" (Just (VInt 5)))
+        , ("reassigned-true-bool-local-returns-inside", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 5; }] { flag = false; flag = true; n = 0; while flag [{ affirm flag = true; }] shrinks n { return 5; }; return 0; }; return f();" (Just (VInt 5)))
+        , ("false-bool-local-skips-body", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 0; }] { flag = false; n = 0; while flag [{ affirm flag = false; affirm n >= 0; }] shrinks n { return 5; }; affirm n = 0; return n; }; return f();" (Just (VInt 0)))
+        , ("while-false-skips-body", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 0; }] { n = 0; while false [{ affirm n >= 0; }] shrinks n { return 5; }; affirm n = 0; return n; }; return f();" (Just (VInt 0)))
+        ])
 
 -- A test whose two edges go to the same block is two ways into it. Source
 -- lowers each edge to a block of its own, so the program is lowered and its
