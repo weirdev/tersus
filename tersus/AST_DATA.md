@@ -30,8 +30,9 @@ Tersus (`examples/ast_reader/ast_reader.tersus`, entry of the `ast_reader` packa
 It imports `data::codec::codec` for the shared token, integer, escaping and
 size/type wire codec, and `data::ast::ast` for the AST arena schema and writer.
 The native parser imports those same modules. The AST reader's strict record
-and UTF-8 checks remain local; MIR records and legacy eraser type output remain
-in the MIR package.
+and UTF-8 checks remain local; MIR records remain in the MIR package. The
+codec's type writer has one mode for older MIR data (`printTypeWith` with
+`listTokens`), which the MIR eraser writes with.
 
 - `readAst() -> Parsed<AstProgram>` reads standard input. Only `ok: true` gives
   a usable program.
@@ -149,7 +150,7 @@ integer **value** literals have no such numeric limit.
 ## The parser written in Tersus
 
 `examples/parser/parser.tersus` is a hand-written parser over bytes (in the manner of
-`examples/mir_reader.tersus`) for the whole language. It builds the arena of
+`examples/mir/mir_reader/mir_reader.tersus`) for the whole language. It builds the arena of
 this document directly and writes `tersus-ast 1 parsed` for it, byte for byte
 as `AstData.writeParsed` writes the decoded syntax,
 including every desugaring (a `match` becomes an `if` chain of `Is` and

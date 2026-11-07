@@ -299,6 +299,13 @@ localCases =
     , cast "cast reports unknown layout" ["local 90 none block int", "local 7 none block param \"T\""] "move 7" unknownError
     , ("missing cast source remains non-ghost", wire 2 [] header ["local 90 none block int", "block 0", "assign 90 listop blockCast 1 copy 999", "return"], wire 1 [] header ["block 0", "return"], "")
     , ("malformed local type is refused", wire 2 [] header ["local 7 none text"], "1", "the input is not the MIR as data\n")
+    -- (older data writes a list and a Box with the `list` and `box` tokens; the erasure writes back what it read)
+    , ("list and box tokens are written back as read"
+      , wire 2 [] "main \"main\" params 0 returns some list int sizeparams 0 typeparams 0 borrowed 0" ["local 0 none list box int", "local 1 none fn 2 list int box list int list int", "block 0", "assign 0 use const list 1 int 3", "return"]
+      , wire 1 [] "main \"main\" params 0 returns some list int sizeparams 0 typeparams 0 borrowed 0" ["local 0 none list box int", "local 1 none fn 2 list int box list int list int", "block 0", "assign 0 use const list 1 int 3", "return"], "")
+    , ("list and box tokens in fields are written back as read, ghosts erased"
+      , wire 2 ["struct \"S\" 2 \"a\" list int \"b\" box array int c 2"] header ["local 0 none named \"S\" 0", "local 1 none block list int", "local 2 none uninit box int", "block 0", "ghost 3", "return"]
+      , wire 1 ["struct \"S\" 2 \"a\" list int \"b\" box array int c 2"] header ["local 0 none named \"S\" 0", "local 2 none box int", "block 0", "return"], "")
     ]
   where
     header = "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"

@@ -1,4 +1,4 @@
-import data::codec::codec { printInt, printWord, printName, printNames, printInts, newLine, printType, wordOf };
+import data::codec::codec { printInt, printWord, printName, printNames, printInts, newLine, printTypeWith, wordOf };
 import mir::reader::reader { Field, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords };
 
 
@@ -160,21 +160,21 @@ fn printBlock(b: &MirBlock) -> Int ~ {
     return n + printTerminator(b.term);
 };
 
-fn printLocal(d: &LocalDecl) -> Int ~ {
+fn printLocal(d: &LocalDecl, listTokens: Bool) -> Int ~ {
     n = "local".print() + printInt(d.id);
     if d.named { n = n + " some".print() + printName(d.name); } else { n = n + " none".print(); };
-    return n + printType(d.ty) + newLine();
+    return n + printTypeWith(d.ty, listTokens) + newLine();
 };
 
-fn printFunction(kind: &String, f: &Function) -> Int ~ {
+fn printFunction(kind: &String, f: &Function, listTokens: Bool) -> Int ~ {
     n = kind.print() + printName(f.name) + " params".print() + printInts(f.params) + " returns".print();
-    if f.hasReturn { n = n + " some".print() + printType(f.returns); } else { n = n + " none".print(); };
+    if f.hasReturn { n = n + " some".print() + printTypeWith(f.returns, listTokens); } else { n = n + " none".print(); };
     n = n + " sizeparams".print() + printNames(f.sizeParams) + " typeparams".print() + printNames(f.typeParams) + " borrowed".print() + printInts(f.borrowed);
     if size(f.mutBorrowed) + size(f.from) > 0 { n = n + " mutborrowed".print() + printInts(f.mutBorrowed) + " from".print() + printInts(f.from); };
     n = n + newLine();
     i = 0;
     while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] ~ {
-        n = n + printLocal(get(f.locals, i));
+        n = n + printLocal(get(f.locals, i), listTokens);
         i = i + 1;
     };
     j = 0;
@@ -185,22 +185,22 @@ fn printFunction(kind: &String, f: &Function) -> Int ~ {
     return n + "end".print() + newLine();
 };
 
-fn printFields(fields: &List<Field>) -> Int ~ {
+fn printFields(fields: &List<Field>, listTokens: Bool) -> Int ~ {
     n = printInt(size(fields));
     for f in fields {
-        n = n + printName(f.name) + printType(f.ty);
+        n = n + printName(f.name) + printTypeWith(f.ty, listTokens);
     };
     return n;
 };
 
-fn printDecl(d: &TypeDecl) -> Int ~ {
+fn printDecl(d: &TypeDecl, listTokens: Bool) -> Int ~ {
     n = 0;
     match d {
-        TypeDecl::DStruct { name: name, fields: fields } => { n = "struct".print() + printName(name) + printFields(fields); },
+        TypeDecl::DStruct { name: name, fields: fields } => { n = "struct".print() + printName(name) + printFields(fields, listTokens); },
         TypeDecl::DEnum { name: name, variants: variants } => {
             n = "enum".print() + printName(name) + printInt(size(variants));
             for v in variants {
-                n = n + printName(v.name) + printFields(v.fields);
+                n = n + printName(v.name) + printFields(v.fields, listTokens);
             };
         },
     };
@@ -208,20 +208,26 @@ fn printDecl(d: &TypeDecl) -> Int ~ {
 };
 
 fn printProgram(p: &Program) -> Int ~ {
-    return printProgramVersion(p, "tersus-mir 1");
+    return printProgramVersion(p, "tersus-mir 1", false);
 };
 
 fn printProgramWithGhosts(p: &Program) -> Int ~ {
-    return printProgramVersion(p, "tersus-mir 2");
+    return printProgramVersion(p, "tersus-mir 2", false);
 };
 
-fn printProgramVersion(p: &Program, header: &String) -> Int ~ {
+// Version 1 of the data, with a list or a Box that was read from a `list` or `box` token written with it again
+// (the ghost erasure writes back the types it read)
+fn printProgramAsRead(p: &Program) -> Int ~ {
+    return printProgramVersion(p, "tersus-mir 1", true);
+};
+
+fn printProgramVersion(p: &Program, header: &String, listTokens: Bool) -> Int ~ {
     n = header.print() + newLine();
     for d in p.types {
-        n = n + printDecl(d);
+        n = n + printDecl(d, listTokens);
     };
     for f in p.functions {
-        n = n + printFunction("function", f);
+        n = n + printFunction("function", f, listTokens);
     };
-    return n + printFunction("main", p.entry);
+    return n + printFunction("main", p.entry, listTokens);
 };

@@ -62,8 +62,9 @@ errors and restores proof metadata using numbered ghost identities (see `MIR.md`
 ## Starting point and alpha migration
 
 `LANGUAGE.md` documents `&T` only on parameters, read-only views, explicit clones
-and value semantics. `MirMoves` follows projected places; `MirOwnership` can
-copy a disturbed read-only view to preserve its old value. The validator reasons
+and value semantics. `MirMoves` follows projected places; the ownership pass
+(`examples/mir/ownership/`) copies a disturbed read-only view to preserve its
+old value. The validator reasons
 about immutable terms, not a mutable heap. These are foundations, not already a
 general borrow checker.
 

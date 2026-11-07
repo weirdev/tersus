@@ -3,7 +3,6 @@
 module TestOwnership
     ( testOwnership
     , runOwned
-    , referenceFree
     , usesArrays
     ) where
 
@@ -13,10 +12,8 @@ import qualified Data.Map.Strict as Map
 
 import Mir
 import MirEval (MirValue (..), runProgram)
-import MirOwnership (Role (..), operandLocal, roles)
-import TestOwnershipOracle (needsDrop)
+import MirMoves (Role (..), operandLocal, roles)
 import MirHousekeeping (expandRefWrites, insertOwnership, verifyProgram)
-import qualified TestOwnershipOracle as Oracle
 import MirLower (lowerProgram)
 import Modules (LoadResult (..))
 import TestParserFragments (parseStatementBlock)
@@ -27,7 +24,7 @@ import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pat
 import TestHarness
 import Utils
 
--- Ownership: MirOwnership says who owns each value of the heap, and native code frees values and changes lists in place on
+-- Ownership: the ownership pass says who owns each value of the heap, and native code frees values and changes lists in place on
 -- the strength of it. A wrong answer here is a value used after it was freed, freed twice, or changed under a reader, which
 -- the executor of the MIR cannot show, so these tests run the result on a model of the heap that fails on all of those, and
 -- on a value that is still there when the program ends.
@@ -228,6 +225,30 @@ putSlot l slot = do
     case stFrames s of
         f : rest -> putSt s{stFrames = f{frameSlots = Map.insert l slot (frameSlots f)} : rest}
         [] -> failM "no frame"
+
+-- Whether a value of the type owns something to free, as the model counts it: a list or a Box, a struct or an enum with a
+-- drop, or a struct, an enum or an array that holds one
+needsDrop :: Program -> Type -> Bool
+needsDrop program = owning
+  where
+    owning ty = case ty of
+        TBox{} -> True
+        TArrayOf t _ -> owning t
+        TNamed base args -> declared (instanceName base args)
+        TVariant v -> maybe False declared (ownerOf v)
+        _ -> False
+    declared n
+        | takeWhile (/= '<') n == "List" = True
+        | Just _ <- dropFunction program n = True
+        | otherwise = case Map.lookup n (progTypes program) of
+            Just (StructDecl fields) -> any (owning . snd) fields
+            Just (EnumDecl variants) -> any (owning . snd) (concatMap snd variants)
+            Nothing -> False
+    ownerOf v = case Map.lookup v (progTypes program) of
+        Just StructDecl{} -> Just v
+        _ -> case [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants] of
+            n : _ -> Just n
+            [] -> Nothing
 
 -- Whether a local owns what it holds
 localHeap :: Program -> Frame -> Local -> Bool
@@ -820,7 +841,7 @@ runOwned program =
 
 -- The ownership pass runs on a program that is lowered, and the result checks out on the model with the answer of the executor
 sameOnModel :: String -> Program -> TestResult
-sameOnModel what program = case differentialExpand program `bindResult` \_ -> nativeProgram program `bindResult` differentialOwnership of
+sameOnModel what program = case expandRefWrites program `bindResult` \_ -> nativeProgram program `bindResult` insertOwnership of
     Error e -> Just (what ++ ": " ++ e)
     Ok owned -> case verifyProgram owned of
         Error e -> Just (what ++ ": the owned MIR is ill formed: " ++ e)
@@ -829,24 +850,6 @@ sameOnModel what program = case differentialExpand program `bindResult` \_ -> na
             (Left e, Error e') | e == e' -> Nothing
             (Left e, _) -> Just (what ++ ": " ++ e)
             (Right a, Error e) -> Just (what ++ ": the model returns " ++ show a ++ " where the executor stops with " ++ e)
-
--- Exact agreement with the frozen oracle is required only of a program that makes no reference and writes through none: what
--- the oracle does with references is what the pass written in Tersus changes (a replaced referent is released, and a view of a
--- place that a reference can write, or that is borrowed, is a copy). Such a program is judged on the model and natively instead.
-referenceFree :: Program -> Bool
-referenceFree program = not (or [makesReference st | fn <- progMain program : Map.elems (progFunctions program), BasicBlock stmts _ <- Map.elems (fnBlocks fn), st <- stmts])
-  where
-    makesReference AssignRef{} = True
-    makesReference (Assign _ Borrow{}) = True
-    makesReference _ = False
-
-differentialExpand :: Program -> Result Program String
-differentialExpand program = expandRefWrites program `bindResult` \expanded ->
-    if not (referenceFree program) || expanded == Oracle.expandRefWrites program then Ok expanded else Error "reference-write MIR differs from the frozen Haskell oracle"
-
-differentialOwnership :: Program -> Result Program String
-differentialOwnership program = insertOwnership program `bindResult` \owned ->
-    if not (referenceFree program) || owned == Oracle.insertOwnership program then Ok owned else Error "owned MIR differs from the frozen Haskell oracle"
 
 -- A program lowered and run on the model, with the answer of the executor, as source
 -- (through TestHarness.compileOnce, so validated programs are compiled once and shared with other groups;
@@ -1204,7 +1207,7 @@ borrowedRootTests =
             fn = stub{fnName = "loan", fnParams = [Local 1] ++ [Local 2 | lookup (Local 2) locals == Just list], fnReturns = Just TInt, fnLocals = Map.fromList ((Local 0, LocalDecl TInt Nothing) : [(l, LocalDecl ty Nothing) | (l, ty) <- locals]), fnBlocks = Map.fromList blocks}
             dup = stub{fnName = "dup", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just list, fnLocals = Map.fromList [(Local 0, LocalDecl list Nothing), (Local 1, LocalDecl list Nothing)], fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (CopyOf (Copy (Local 1)))] Return)}
             program = (mainProgram [] []){progTypes = Map.fromList [("Holder", StructDecl [("xs", list), ("n", TInt)]), ("List<Int>", StructDecl [("addr", TAddr TInt), ("len", TInt), ("cap", TInt)])], progFunctions = Map.fromList [("loan", fn), ("dup", dup)]}
-         in case differentialOwnership program of
+         in case insertOwnership program of
                 Error e -> Just e
                 Ok owned -> check (progFunctions owned Map.! "loan")
 
@@ -1214,7 +1217,7 @@ usesArrays :: String -> Bool
 usesArrays source = any (`isInfixOf` source) ["Array<", "Array::", "array(", "#["]
 
 withOwnership :: Program -> (Program -> TestResult) -> TestResult
-withOwnership program check = case differentialOwnership program of
+withOwnership program check = case insertOwnership program of
     Error e -> Just e
     Ok owned -> check owned
 

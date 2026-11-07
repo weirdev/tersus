@@ -124,7 +124,7 @@ fn dropName(n: &String) -> String [{ }] [{ }] {
     return "<".then(n).then(" as Drop>::drop");
 };
 
-// Whether a value owns something to free: a Box, or an array, struct or enum that holds one or has a drop (MirOwnership.needsDrop). The names
+// Whether a value owns something to free: a Box, or an array, struct or enum that holds one or has a drop (the ownership pass's needsDrop). The names
 // are those of the functions of the program, which have the drop of a type that has one.
 fn needsDrop(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Bool ~ {
     if t is Type::TBox { return true; };

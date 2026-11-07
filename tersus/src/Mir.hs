@@ -101,7 +101,7 @@ data Function = Function
     , fnBlocks :: Map BlockId BasicBlock
     , fnSizeParams :: [Variable] -- the names of the last parameters, which are the sizes that a call of the function gives (see Mono)
     , fnTypeParams :: [Variable] -- the names of the type parameters, which a call gives and native code makes a copy of the function for (see MirMono)
-    , fnBorrowed :: [Local] -- the parameters that the function only reads, which a call lends (see MirOwnership)
+    , fnBorrowed :: [Local] -- the parameters that the function only reads, which a call lends (see the ownership pass, examples/mir/ownership)
     , fnMutBorrowed :: [Local] -- the parameters lent for updating (&mut T)
     , fnFrom :: [Local] -- the parameters a reference result is from
     , fnSpec :: FunctionSpec
@@ -124,14 +124,14 @@ data Statement
     = Assign Local Rvalue
     | -- Does nothing when the program runs; the validator's. The names are those the program can use at this point.
       Ghost Env GhostStatement
-    | -- The next two are added by MirOwnership, which makes who owns what explicit, and only native code needs them.
+    | -- The next two are added by the ownership pass (examples/mir/ownership), which makes who owns what explicit, and only native code needs them.
       -- Frees what the local owns, and leaves it holding nothing
       Drop Local
     | -- The local points into a value that something else owns: it does not own what it holds, and so does not free it
       Peek Local Rvalue
     | -- The place a reference is to is given a new value (REFERENCES.md, stage 3): the root local, the steps from it,
       -- and the value. It is not an assignment of the root: it goes through a live update loan to the place, and the
-      -- root gets a new version whose place at those steps is the value. Native code expands it (MirOwnership).
+      -- root gets a new version whose place at those steps is the value. Native code expands it (expandRefWrites).
       AssignRef Local [RefStep] Rvalue
     deriving (Show, Eq, Read)
 
@@ -173,9 +173,9 @@ data Rvalue
     | -- The same value, known to be that variant because the validator proved it (`value as Enum::Variant`). The value is
       -- not changed or checked, and the local that gets it has the variant's type, so its fields can be read.
       AsVariant Operand Name
-    | -- A copy of the value that shares nothing with it (MirOwnership)
+    | -- A copy of the value that shares nothing with it (the ownership pass)
       CopyOf Operand
-    | -- The field of the value the local owns, taken out of it: the local does not hold it any more (MirOwnership)
+    | -- The field of the value the local owns, taken out of it: the local does not hold it any more (the ownership pass)
       TakeField Local Name Variable
     | -- A reference to a place of a local (REFERENCES.md): the root local, the steps from it to the place, and whether
       -- it may update the place. It owns nothing and is never freed; reading it gives the place's current version.
@@ -217,7 +217,7 @@ data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBox
 ghostOp :: ListOp -> Bool
 ghostOp op = op `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast]
 
--- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns
+-- Move reads the local and leaves it holding nothing (the ownership pass); it is the last use of what the local owns
 data Operand = Copy Local | Move Local | Const Constant
     deriving (Show, Eq, Read)
 

@@ -447,22 +447,34 @@ fn printSize(s: &Size) -> Int [{ }] [{ }] {
 };
 
 fn printType(t: &Type) -> Int ~ {
+    return printTypeWith(t, false);
+};
+
+// A type as the data writes it. A list and a Box are named types; with listTokens set, one read from the
+// `list` or `box` token of older data (Type::TList, Type::TBox) is written with that token again.
+fn printTypeWith(t: &Type, listTokens: Bool) -> Int ~ {
     n = 0;
     match t {
         Type::TInt => { n = " int".print(); },
         Type::TByte => { n = " byte".print(); },
         Type::TBool => { n = " bool".print(); },
-        Type::TList { elem: e } => { n = " named \"List\" 1 type".print() + printType(Box::unbox(e)); },
-        Type::TArray { elem: e, size: s } => { n = " array".print() + printType(Box::unbox(e)) + printSize(s); },
-        Type::TBox { inner: e } => { n = " named \"Box\" 1 type".print() + printType(Box::unbox(e)); },
+        Type::TList { elem: e } => {
+            if listTokens { n = " list".print(); } else { n = " named \"List\" 1 type".print(); };
+            n = n + printTypeWith(Box::unbox(e), listTokens);
+        },
+        Type::TArray { elem: e, size: s } => { n = " array".print() + printTypeWith(Box::unbox(e), listTokens) + printSize(s); },
+        Type::TBox { inner: e } => {
+            if listTokens { n = " box".print(); } else { n = " named \"Box\" 1 type".print(); };
+            n = n + printTypeWith(Box::unbox(e), listTokens);
+        },
         Type::TFn { args: args, ret: r } => {
             n = " fn".print() + printInt(size(args));
             i = 0;
             while i < size(args) [{ affirm i >= 0; affirm i <= size(args); }] ~ {
-                n = n + printType(get(args, i));
+                n = n + printTypeWith(get(args, i), listTokens);
                 i = i + 1;
             };
-            n = n + printType(Box::unbox(r));
+            n = n + printTypeWith(Box::unbox(r), listTokens);
         },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             n = " named".print() + printName(base) + printInt(argc);
@@ -477,14 +489,14 @@ fn printType(t: &Type) -> Int ~ {
         Type::TVariant { name: name } => { n = " variant".print() + printName(name); },
         Type::TVar { n: v } => { n = " var".print() + printInt(v); },
         Type::TForall { sizes: sizes, types: types, body: body } => {
-            n = " forall".print() + printNames(sizes) + printNames(types) + printType(Box::unbox(body));
+            n = " forall".print() + printNames(sizes) + printNames(types) + printTypeWith(Box::unbox(body), listTokens);
         },
         Type::TParam { name: name } => { n = " param".print() + printName(name); },
-        Type::TRef { inner: e } => { n = " ref".print() + printType(Box::unbox(e)); },
-        Type::TMutRef { inner: e } => { n = " mutref".print() + printType(Box::unbox(e)); },
-        Type::TAddr { inner: e } => { n = " addr".print() + printType(Box::unbox(e)); },
-        Type::TBlock { inner: e } => { n = " block".print() + printType(Box::unbox(e)); },
-        Type::TUninit { inner: e } => { n = " uninit".print() + printType(Box::unbox(e)); },
+        Type::TRef { inner: e } => { n = " ref".print() + printTypeWith(Box::unbox(e), listTokens); },
+        Type::TMutRef { inner: e } => { n = " mutref".print() + printTypeWith(Box::unbox(e), listTokens); },
+        Type::TAddr { inner: e } => { n = " addr".print() + printTypeWith(Box::unbox(e), listTokens); },
+        Type::TBlock { inner: e } => { n = " block".print() + printTypeWith(Box::unbox(e), listTokens); },
+        Type::TUninit { inner: e } => { n = " uninit".print() + printTypeWith(Box::unbox(e), listTokens); },
         Type::TWord { signed: signed, bits: bits } => {
             w = " u32";
             if signed && bits = 8 { w = " i8"; };

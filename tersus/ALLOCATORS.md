@@ -122,7 +122,7 @@ This is unification, the rule every parameter of a type has. Only the last step 
 
 The messages: `tokens is in arena, and cannot be used after the with block that opened it; clone it into another region first`, and `names is a List<String, ctx>, and cannot hold a String in arena; clone it`.
 
-**Every exit drops.** At each edge out of the block (its end, `return`, `break`, `continue`), the locals of the block that are still owned are dropped, the latest made first, and then the lend of `arena` ends. This is a scope end in `MirOwnership`, at a block instead of a function. So nothing made in the arena is alive when `arena` can next be assigned, moved or dropped, and `arena = Arena::reset(arena);` after the block is sound with no proof about what points into it.
+**Every exit drops.** At each edge out of the block (its end, `return`, `break`, `continue`), the locals of the block that are still owned are dropped, the latest made first, and then the lend of `arena` ends. This is a scope end in the ownership pass, at a block instead of a function. So nothing made in the arena is alive when `arena` can next be assigned, moved or dropped, and `arena = Arena::reset(arena);` after the block is sound with no proof about what points into it.
 
 `with` blocks nest, and the inner one is the context inside it. A value made in an outer arena may be used in an inner block, since its region is in scope there.
 
@@ -185,7 +185,7 @@ A drop of a list of `Int` in an arena walks nothing, but it calls `free`, which 
 
 An allocator that frees in bulk says so by implementing the marker trait `trait BulkFree: Allocator { };`. Where the drop of a type is made for a region of such a kind, the frees are left out, and so is the walk of every part that owns nothing but memory. A part owns nothing but memory when it has no `impl Drop` and nothing linear in it (step 27), worked out over its fields. A file in an arena is still closed.
 
-The drops are made per type after `MirMono` (step 30 (a)), so the question "does this drop do anything" is asked of the type with its kinds known. `MirOwnership` still places every drop. The decision is only what the drop's code does, so the pass order does not change. The proof of `Box`'s drop is unchanged: `BulkFree` is a promise of the allocator's (trusted) code that `free` may be left out, and it is erased like the permission it would have consumed. This is a cost and not a meaning, and it is the reason for the comment in the example at the top.
+The drops are made per type after `MirMono` (step 30 (a)), so the question "does this drop do anything" is asked of the type with its kinds known. The ownership pass (`examples/mir/ownership/`) still places every drop. The decision is only what the drop's code does, so the pass order does not change. The proof of `Box`'s drop is unchanged: `BulkFree` is a promise of the allocator's (trusted) code that `free` may be left out, and it is erased like the permission it would have consumed. This is a cost and not a meaning, and it is the reason for the comment in the example at the top.
 
 ## Implementation
 
@@ -203,7 +203,7 @@ The stages, each with the tests that show it done:
 
 1. **Regions with only `System`.** The kind `Alloc`, region parameters on the types of the library, regions in the type checker (unwritten is the context, borrows and equality ignore regions, made values take the expected region, `tersus sig`), and their erasure. Every program means what it does today, and the IR, the descriptors and the bootstrap seed are byte for byte the same.
 2. **`with`, written regions, and `Arena`, `Checked` and `Fixed`.**
-   - The block, its fresh region, its scope and the drops at its exits, built on the CFG in `MirOwnership`.
+   - The block, its fresh region, its scope and the drops at its exits, built on the CFG in the ownership pass.
    - Hidden handles, and `MirMono` by kind.
    - The heap of `MirEval` keeps blocks per allocator, so the interpreter that `testNative` compares with reports a block freed by the wrong allocator.
    - A new group, `TestAllocators`: a tree in an arena, a list in a `Fixed`, a leak caught by `Checked`, and a recursive function that opens a `with` in each call.
