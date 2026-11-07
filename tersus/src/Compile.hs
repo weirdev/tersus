@@ -22,7 +22,7 @@ parseSource :: String -> Result [Statement] String
 parseSource source = mapResult (\(_, library, body) -> library ++ body) (parseSourceParts True source)
 
 parseSourceParts :: Bool -> String -> Result SourceParts String
-parseSourceParts = SourceParse.parseSourcePartsWith ParserSeed.parseFileWith
+parseSourceParts reserving = SourceParse.parseSourcePartsWith ParserSeed.parseFileWith reserving False
 
 parseWithEquality :: String -> Either String [Statement]
 parseWithEquality = SourceParse.parseWithEqualityWith ParserSeed.parseFileWith
@@ -35,6 +35,11 @@ lowerSourceParts :: Bool -> SourceParts -> Result M.Program String
 lowerSourceParts = lowerSourcePartsWith respond
 
 lowerSourcePartsWith :: Elaborator -> Bool -> SourceParts -> Result M.Program String
+lowerSourcePartsWith elaborator _reserving ([], _library, stmts) =
+    let importEnv = mergeInterfacesImportEnv []
+     in stage "Validation failed: " (acceptedElaboration (elaborator (Request (ModuleId "main" Nothing) False False NoInterface [] stmts))) `bindResult` \elaborated ->
+        stage "Lowering failed: " (lowerModuleWith importEnv [] elaborated) `bindResult` \entryProgram ->
+        mapResult completeSpecEnvs (linkPrograms [(ModuleId "main" Nothing, entryProgram)])
 lowerSourcePartsWith elaborator _reserving (names, _library, stmts) =
     case libPackage of
         Error err -> Error err

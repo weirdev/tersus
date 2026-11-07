@@ -10,7 +10,8 @@ import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Modules
 import Native (buildExecutable, runExecutable)
-import Pipeline (compileModulesToOwned, loadFromFilesystem)
+import Pipeline (compileModulesToOwned, compileSourceNoPrelude, ownedOfProgram, loadFromFilesystemWithOptions, loadFromSource)
+import qualified Data.Map.Strict as Map
 import Utils
 
 main :: IO ()
@@ -19,10 +20,10 @@ main = do
     -- (the arguments are the bytes they were given as, whatever the locale is: they are the arguments of the program too)
     setFileSystemEncoding char8
     args <- getArgs
-    case parseProgramArguments args of
+    case parseCompilerOptions args >>= \(options, rest) -> (\(command, file, programArgs) -> (options, command, file, programArgs)) <$> parseProgramArguments rest of
         Nothing -> hPutStr stderr usage >> exitWith (ExitFailure 2)
-        Just (command, file, programArgs) -> do
-            package <- loadPackage file
+        Just (options, command, file, programArgs) -> do
+            package <- loadPackage options file
             case package of
                 Just (Left err) -> failWith err
                 _ -> do
@@ -39,8 +40,11 @@ main = do
                                 Ok owned -> mapResult (\ir -> ((ir, ""), [])) <$> llvmOfOwned owned
                             | otherwise -> pure (runPackageFiles (World input programArgs readWorldFile) command pkg)
                         _
+                            | makesIr command, Modules.noPrelude options -> case compileSourceNoPrelude (Modules.noPrelude options) source `bindResult` ownedOfProgram of
+                                Error err -> pure (Error err)
+                                Ok owned -> mapResult (\ir -> ((ir, ""), [])) <$> llvmOfOwned owned
                             | makesIr command -> mapResult (\ir -> ((ir, ""), [])) <$> tersusLlvm source
-                            | otherwise -> pure (runSourceFiles (World input programArgs readWorldFile) command source)
+                            | otherwise -> pure (runSourceFilesNoPrelude (Modules.noPrelude options) (World input programArgs readWorldFile) command source)
                     case result of
                         Error e -> failWith e
                         Ok ((output, errors), files) -> case command of
@@ -67,15 +71,13 @@ failWith e = hPutStrLn stderr e >> exitWith (ExitFailure 1)
 readSource :: FilePath -> IO String
 readSource = readSourceFile
 
-loadPackage :: FilePath -> IO (Maybe (Either String Modules.LoadedPackage))
-loadPackage "-" = return Nothing
-loadPackage file = do
-    root <- Modules.findPackageRootIO file
-    case root of
-        Nothing -> return Nothing
-        Just _ -> do
-            loaded <- loadFromFilesystem file
-            return $ case loaded of
-                Left err -> Just (Left err)
-                Right (Modules.PackageResult pkg) -> Just (Right pkg)
-                Right _ -> Nothing
+loadPackage :: Modules.LoadOptions -> FilePath -> IO (Maybe (Either String Modules.LoadedPackage))
+loadPackage options file = do
+    root <- if file == "-" then pure Nothing else Modules.findPackageRootIO file
+    let configuredRoots = not (Map.null (Modules.packageRoots options)) || Modules.installedStdRoot options /= Nothing
+    if root == Nothing && not configuredRoots then pure Nothing else do
+        loaded <- if file == "-" then readSource file >>= loadFromSource options else loadFromFilesystemWithOptions options file
+        pure $ case loaded of
+            Left err -> Just (Left err)
+            Right (Modules.PackageResult pkg) -> Just (Right pkg)
+            Right _ -> Nothing

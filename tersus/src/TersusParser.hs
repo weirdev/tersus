@@ -1,6 +1,7 @@
 module TersusParser
     ( parseSource
     , parseSourceParts
+    , parseSourcePartsNoPrelude
     , parseFileWith
     , parseFileNative
     , parserExecutable
@@ -41,11 +42,14 @@ parseSource :: String -> Result [Statement] String
 parseSource source = mapResult (\(_, library, body) -> library ++ body) (parseSourceParts True source)
 
 parseSourceParts :: Bool -> String -> Result SourceParts String
-parseSourceParts reserving source = unsafePerformIO $ do
+parseSourceParts reserving = parseSourcePartsNoPrelude False reserving
+
+parseSourcePartsNoPrelude :: Bool -> Bool -> String -> Result SourceParts String
+parseSourcePartsNoPrelude noPrelude reserving source = unsafePerformIO $ do
     selected <- parserBackend
     pure $ case selected of
         Left e -> Error e
-        Right _ -> parseSourcePartsWith parseFileWith reserving source
+        Right _ -> parseSourcePartsWith parseFileWith reserving noPrelude source
 
 parseWithEquality :: String -> Either String [Statement]
 parseWithEquality = parseWithEqualityWith parseFileWith
@@ -92,7 +96,7 @@ parseFileInterpreted declarations source = case File.writeFileRequest declaratio
 -- The exact production source orchestration with the native parser.
 toolParseSource :: String -> IO (Either String String)
 toolParseSource source = do
-    parsed <- evaluate (parseSourcePartsWith (\declared text -> unsafePerformIO (parseFileNative declared text)) True source)
+    parsed <- evaluate (parseSourcePartsWith (\declared text -> unsafePerformIO (parseFileNative declared text)) True False source)
     pure $ case parsed of
         Error e -> Left e
         Ok (_, library, body) -> case A.writeParsed (library ++ body) of

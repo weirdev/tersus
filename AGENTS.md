@@ -119,6 +119,14 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
 ## Build, Test, and Development Commands
 Work from `tersus/`.
 
+- `--package-root name=directory` maps an ordinary package name to an external
+  root; `--std-root directory` supplies the installed `std` root without changing
+  default prelude activation. Both use the normal resolver. `--no-prelude`
+  disables implicit source declarations/interfaces for the entry unit; a
+  `package.tersus` marker may instead contain `noPrelude = true;` for all files
+  in that package, including dependencies. These options precede the command
+  and also apply to standalone files and stdin. Validation and native tools'
+  bootstrap proofs remain mandatory.
 - `stack build`: compile the Haskell package and surface warnings. CI
   (`.github/workflows/ci.yml`) runs `stack build --test --no-run-tests` and
   then `stack test`, both from `tersus/`.

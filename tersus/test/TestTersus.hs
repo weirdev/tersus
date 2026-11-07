@@ -196,8 +196,10 @@ originalGroups =
     , testHashMap
     , testHashSet
     , testModules
+    , testPhase1Packages
     , testBuiltinRegistry
     , testSharedCache
+    , testPhase1Cache
     , testVerdictLocks
     , testSharedCacheProbe
     , testScheduling (map groupName allGroups) batchedGroups

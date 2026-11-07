@@ -37,12 +37,17 @@ module TestHarness
     , validatedOnce
     , programFromFile
     , programFromFiles
+    , programFromFilesWith
+    , programFromFilesystemWith
+    , validatedOnceNoPrelude
+    , compileOnceNoPrelude
     , bootstrapFromFile
     , validatedFromFile
     , linkedFromFile
     , ownedFromFile
     , ownedFromFiles
     , packageCacheInput
+    , packageCacheInputWith
     , matchesEmbeddedPackage
     , embeddedToolFile
     , mirDataOf
@@ -96,7 +101,8 @@ import Native (cacheDirectory, readProcessOutput)
 import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
-import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import qualified Pipeline
+import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseWithEquality, runStatements, validateStatements)
 import Types
 import Syntax
 import Solver
@@ -394,9 +400,15 @@ decodeProgram text = case stripPrefix programCodecHeader text of
 -- validate the same big programs again. Only successful compilations are remembered,
 -- so a transient tool failure can be retried in the same process.
 compileOnce :: String -> IO (Result Program String)
-compileOnce source = sharedProgram "compile" source $ do
-    validated <- validatedOnce source
+compileOnce = compileOnceNoPrelude False
+
+compileOnceNoPrelude :: Bool -> String -> IO (Result Program String)
+compileOnceNoPrelude noPrelude source = sharedProgram (sourceStage "compile" noPrelude) source $ do
+    validated <- validatedOnceNoPrelude noPrelude source
     pure (validated `bindResult` eraseGhosts)
+
+sourceStage :: String -> Bool -> String
+sourceStage stage noPrelude = stage ++ if noPrelude then "-no-prelude" else ""
 
 -- A program of the compiler itself (the emitter, the MIR checker and eraser, the validator)
 -- as the host builds it, lowered with its ghosts erased and not validated: the validator is
@@ -411,16 +423,30 @@ ownedOnce source = sharedProgram "owned" source $ do
     pure (compiled `bindResult` ownedOfProgram)
 
 validatedOnce :: String -> IO (Result Program String)
-validatedOnce source = sharedProgram "validated" source (pure (validatedSource source))
+validatedOnce = validatedOnceNoPrelude False
+
+validatedOnceNoPrelude :: Bool -> String -> IO (Result Program String)
+validatedOnceNoPrelude noPrelude source = sharedProgram (sourceStage "validated" noPrelude) source (pure (Pipeline.validatedSourceNoPrelude noPrelude source))
 
 -- A program in a package, compiled from its entry file through the module
 -- pipeline (the same stages as compileOnce, ownedOnce and validatedOnce do
 -- for a single-file program given as text)
 programFromFile :: FilePath -> IO (Result Program String)
-programFromFile path = snapshotFromFilesystem path >>= programFromFiles path
+programFromFile = programFromFilesystemWith Modules.defaultLoadOptions
+
+programFromFilesystemWith :: Modules.LoadOptions -> FilePath -> IO (Result Program String)
+programFromFilesystemWith options = cachedFilesystemPackage options "program"
+
+cachedFilesystemPackage :: Modules.LoadOptions -> String -> FilePath -> IO (Result Program String)
+cachedFilesystemPackage options stage path = do
+    loaded <- Pipeline.loadFromFilesystemWithOptions options path
+    cachedLoadedPackage stage path loaded
 
 programFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
-programFromFiles = cachedFromPackage "program"
+programFromFiles = programFromFilesWith Modules.defaultLoadOptions
+
+programFromFilesWith :: Modules.LoadOptions -> FilePath -> [(FilePath, String)] -> IO (Result Program String)
+programFromFilesWith options = cachedFromPackageWith options "program"
 
 -- One of the compiler's own programs as the host builds it: linked, its ghosts erased, not
 -- validated (see cachedFromPackage)
@@ -432,17 +458,21 @@ linkedFromFile :: FilePath -> IO (Result Program String)
 linkedFromFile = validatedFromFile
 
 validatedFromFile :: FilePath -> IO (Result Program String)
-validatedFromFile path = snapshotFromFilesystem path >>= cachedFromPackage "validated" path
+validatedFromFile path = cachedFilesystemPackage Modules.defaultLoadOptions "validated" path
 
 ownedFromFile :: FilePath -> IO (Result Program String)
-ownedFromFile path = snapshotFromFilesystem path >>= ownedFromFiles path
+ownedFromFile path = cachedFilesystemPackage Modules.defaultLoadOptions "owned" path
 
 ownedFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
 ownedFromFiles = cachedFromPackage "owned"
 
 packageCacheInput :: FilePath -> [(FilePath, String)] -> String
-packageCacheInput path files = show (normalizePath path,
-    Map.toAscList (Map.fromList [(normalizePath file, source) | (file, source) <- files]))
+packageCacheInput = packageCacheInputWith Modules.defaultLoadOptions
+
+packageCacheInputWith :: Modules.LoadOptions -> FilePath -> [(FilePath, String)] -> String
+packageCacheInputWith options path files = case Modules.loadFromEntry (resolverFromFiles files){Modules.resolverOptions = options} path of
+    Right (PackageResult pkg) -> Modules.packageInputIdentity pkg
+    _ -> show (options, normalizePath path, Map.toAscList (Map.fromList [(normalizePath file, source) | (file, source) <- files]))
 
 embeddedToolFile :: FilePath -> Bool
 embeddedToolFile path = normalizePath path `elem` map fst toolPackageFiles
@@ -459,17 +489,22 @@ matchesEmbeddedPackage path actual
     files = if normalizePath path == validationEntry then validationPackageFiles else toolPackageFiles
 
 cachedFromPackage :: String -> FilePath -> [(FilePath, String)] -> IO (Result Program String)
-cachedFromPackage stage path files = do
-    let input = packageCacheInput path files
-        validated = case loadFromEntry (resolverFromFiles files) path of
-            Left e -> Error e
-            Right (PackageResult pkg)
-                -- (the compiler's own programs as the host builds them: linked, not
-                -- validated, MirHousekeeping.toolProgram; testHostValidation validates them)
-                | matchesEmbeddedPackage path pkg -> toolProgram (normalizePath path)
-                | otherwise -> compileModulesValidated pkg
-            Right _ -> Error (path ++ " is not in a package")
-    packageStage (if stage == "program" && normalizePath path == validationEntry then "validator-reference" else stage) input validated
+cachedFromPackage = cachedFromPackageWith Modules.defaultLoadOptions
+
+cachedFromPackageWith :: Modules.LoadOptions -> String -> FilePath -> [(FilePath, String)] -> IO (Result Program String)
+cachedFromPackageWith options stage path files =
+    cachedLoadedPackage stage path (loadFromEntry (resolverFromFiles files){Modules.resolverOptions = options} path)
+
+cachedLoadedPackage :: String -> FilePath -> Either String LoadResult -> IO (Result Program String)
+cachedLoadedPackage stage path loaded = case loaded of
+    Left err -> pure (Error err)
+    Right (PackageResult pkg) ->
+        let input = Modules.packageInputIdentity pkg
+            validated
+                | matchesEmbeddedPackage path pkg = toolProgram (normalizePath path)
+                | otherwise = compileModulesValidated pkg
+         in packageStage (if stage == "program" && normalizePath path == validationEntry then "validator-reference" else stage) input validated
+    Right _ -> pure (Error (path ++ " is not in a package"))
 
 packageStage :: String -> String -> Result Program String -> IO (Result Program String)
 packageStage stage input validated = sharedProgram ("package-" ++ stage) input $ case stage of

@@ -54,7 +54,7 @@ stack run -- build program.tersus -o program   # validate, then compile to an ex
 
 ## Modules
 
-A program may be split into a package. A package is a directory containing an (empty) `package.tersus` marker; the package name is the directory's name. The package root is one module (the root module), and each immediate subdirectory holding `.tersus` files is one more module, named for the directory. Directories deeper than that are not modules. The file given to the CLI is the entry file: only it may contain statements that run. Every other file in a package is declarations only (functions, structs, enums, traits, impls, `extern fn`, `axiom` and `proof` declarations): "modules declare, programs run". A file with no `package.tersus` in any ancestor is a standalone program, as before, and reading one from standard input (`-`) does not support `import`.
+A program may be split into a package. A package is a directory containing a `package.tersus` marker; the package name defaults to the directory's name. The package root is one module (the root module), and each immediate subdirectory holding `.tersus` files is one more module, named for the directory. Directories deeper than that are not modules. The file given to the CLI is the entry file: only it may contain statements that run. Every other file in a package is declarations only (functions, structs, enums, traits, impls, `extern fn`, `axiom` and `proof` declarations): "modules declare, programs run". A file with no `package.tersus` in any ancestor is a standalone program, as before, and reading one from standard input (`-`) supports `import` only when external roots are configured.
 
 Files name each other with a logical import at the top of the file, before any declaration:
 
@@ -65,7 +65,17 @@ import modules::geo::shapes { Point, make };  // only these names, bare
 import modules::geo::shapes::Point;           // the single type Point, bare
 ```
 
-An import path is `package[::module[::file[::symbol]]]`, rooted at a package name: this package, or a sibling package beside it (a directory next to the package root that also has a `package.tersus`). It is not a string and not a file-system path. The forms above differ only in what an importer may name and how; what is linked is decided by reachability from the entry program, not by the form (see Linking).
+An import path is `package[::module[::file[::symbol]]]`, rooted at a package name: this package, a sibling package beside it, a `--package-root name=directory` mapping, or the installed `std` root supplied by `--std-root directory`. External root names do not depend on the directory basename. All roots use ordinary import resolution, visibility, checking and linking. An imported package with a configured missing root and competing roots for one imported package name are errors; unimported mappings are not loaded. A mapping does not silently override a sibling. Standalone files and stdin resolve only configured roots, not packages from the working directory or its siblings. It is not a string or a file-system import path.
+
+Compiler options precede the command:
+
+```sh
+tersus --package-root vendor=/opt/vendor --std-root /opt/std --no-prelude check app/main.tersus
+```
+
+`--no-prelude` disables implicit library declaration seeding and interface/unit selection for the entry package or standalone compilation unit. All its files inherit that one boolean. A package marker may contain `noPrelude = true;` (or `false`; empty defaults to `false`); installed dependencies read their own marker, not the importing package's option. A marker accepts only this optional assignment and `//` line comments, not source declarations or block comments. Opting out does not disable typing or validation and does not remove the native parser/validator tools' own bootstrap dependencies. Scalar machine builtins remain available. Current selective implicit library behavior stays the default; supplying an installed std root does not activate a different prelude.
+
+Only reachable modules and the root declarations consulted to disambiguate imports contribute source contents to a snapshot. Unrelated siblings and unimported module bodies are neither read nor used to seed constructors on the filesystem or in-memory route. Relevant root probes read declaration names without traversing the imports of an otherwise unused root module. Selected roots, markers, effective unit policy and resolved imports participate in cache identity; loading a dependency does not make its roots eligible for a different importer's discovery. A new competing eligible root or ambiguous provider is refused before reuse. The forms above differ only in what an importer may name and how; what is linked is decided by reachability from the entry program, not by the import form (see Linking).
 
 | Import | What may be written in the importing file |
 | --- | --- |
@@ -2075,7 +2085,7 @@ return a;                             // [[1], [2, 3], [1]]
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call itself and the other functions defined at the top of the program, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums, and for a list, a Box, an array, `Int`, `Byte` and `Bool`, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
-- The CLI has no REPL. A standalone file, or `-` on standard input, is one program with no imports; a file inside a package (see Modules) is compiled with the modules it imports and linked into one program, and every command (`check`, `eval`, `mir`, `owned`, `llvm`, `build`, `run`, `assumptions`) works on that linked program.
+- The CLI has no REPL. A standalone file, or `-` on standard input, can import configured external roots; without root inputs it remains one source-only program. A file inside a package (see Modules) is compiled with the modules it imports and linked into one program, and every command (`check`, `eval`, `mir`, `owned`, `llvm`, `build`, `run`, `assumptions`) works on that linked program.
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
 - Source files are read as UTF-8 whatever the locale is (and `tersus` prints in UTF-8), so a program with a letter that is not ASCII in a name loads under any locale.
 - A program has no input or output: it computes and returns one value, which `run` and an executable print.

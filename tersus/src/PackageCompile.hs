@@ -70,9 +70,7 @@ compileModulesWith elaborator pkg = go (Mod.packageModules pkg) Map.empty []
                         Right prepared | Just name <- reservedHelperName prepared -> Error (reservedError name)
                         Right prepared -> case orphanCheck moduId prepared of
                             Left err -> Error err
-                            Right () -> case libPackage of
-                                Error err -> Error err
-                                Ok libPkg -> case moduleLibSelection libPkg depInterfaces modu prepared of
+                            Right () -> case selectLibraries depInterfaces modu prepared of
                                     Left err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
                                     Right (libIfaces, libUnits, checkOnlyIfaces) ->
                                         case elaborator (Request moduId True False extraction (libIfaces ++ checkOnlyIfaces ++ depInterfaces) prepared) of
@@ -81,6 +79,11 @@ compileModulesWith elaborator pkg = go (Mod.packageModules pkg) Map.empty []
                                             Refused err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
                                             RefusedInterface err -> Error err
                                             NotModelled what -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": the elaborator does not handle this module yet: " ++ what)
+    selectLibraries depInterfaces modu prepared
+        | Mod.loadedNoPrelude modu = Right ([], [], [])
+        | otherwise = case libPackage of
+            Error err -> Left err
+            Ok libPkg -> moduleLibSelection libPkg depInterfaces modu prepared
 
 -- The compiler libraries a module is checked against: the interfaces of
 -- the librariesFor-selected lib modules (synthesised implicit imports, all

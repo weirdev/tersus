@@ -210,7 +210,7 @@ recordedFile history parser declared source = unsafePerformIO $ do
 fileRecords :: (Decls -> String -> IO (Either String (ParsedFile, Decls))) -> String -> IO [Either String String]
 fileRecords parser source = do
     history <- newIORef []
-    let result = SourceParse.parseSourcePartsWith (recordedFile history parser) True source
+    let result = SourceParse.parseSourcePartsWith (recordedFile history parser) True False source
     _ <- evaluate (length (show result))
     reverse <$> readIORef history
 

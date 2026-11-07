@@ -43,25 +43,32 @@ probeFile parser seeded source = case parser seeded source of
 
 -- Do not force immutable library CAFs after a transient seed failure.
 {-# NOINLINE parseSourcePartsWith #-}
-parseSourcePartsWith :: FileParser -> Bool -> String -> Result SourceParts String
-parseSourcePartsWith parser reserving source = unsafePerformIO $ do
+parseSourcePartsWith :: FileParser -> Bool -> Bool -> String -> Result SourceParts String
+parseSourcePartsWith parser reserving noPrelude source = unsafePerformIO $ do
     seed <- cachedParserSeed
     pure $ case seed of
         Error e -> Error (ParserSeed.failure e)
         Ok _ -> readSource
   where
-    readSource = case probeDecls >>= (\declared -> probeFile parser (locating declared) source) of
-        Left e -> Error (ParserSeed.stageParseError e)
-        Right (probedFile, _) ->
-            let names = map fst (librariesFor (fileBody probedFile))
-             in case parsedLibraries names of
-                    Left e -> Error e
-                    Right (library, declared) -> case parser (locating declared) source of
-                        Left e -> Error (ParserSeed.stageParseError e)
-                        Right (ParsedFile imports body, _)
-                            | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
-                            | reserving, Just name <- reservedName body -> Error (reservedError name)
-                            | otherwise -> Ok (names, library, body)
+    readSource
+        | noPrelude = case parser (locating emptyDecls) source of
+            Left e -> Error (ParserSeed.stageParseError e)
+            Right (ParsedFile imports body, _)
+                | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
+                | reserving, Just name <- reservedName body -> Error (reservedError name)
+                | otherwise -> Ok ([], [], body)
+        | otherwise = case probeDecls >>= (\declared -> probeFile parser (locating declared) source) of
+            Left e -> Error (ParserSeed.stageParseError e)
+            Right (probedFile, _) ->
+                let names = map fst (librariesFor (fileBody probedFile))
+                 in case parsedLibraries names of
+                        Left e -> Error e
+                        Right (library, declared) -> case parser (locating declared) source of
+                            Left e -> Error (ParserSeed.stageParseError e)
+                            Right (ParsedFile imports body, _)
+                                | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
+                                | reserving, Just name <- reservedName body -> Error (reservedError name)
+                                | otherwise -> Ok (names, library, body)
 
 {-# NOINLINE parseWithEqualityWith #-}
 parseWithEqualityWith :: FileParser -> String -> Either String [Statement]
