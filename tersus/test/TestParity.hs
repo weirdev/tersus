@@ -130,7 +130,7 @@ approvedReaderNames =
     [ "example examples/array_sizes.tersus"
     , "example examples/basics.tersus"
     , "example examples/loop_return.tersus"
-    , "example examples/mir/emit/emit.tersus"
+    , "example lib/mir/emit/emit.tersus"
     , "example examples/recursion.tersus"
     , "example examples/rejected/axiom_input.tersus"
     , "example examples/rejected/call_violates_contract.tersus"
@@ -249,7 +249,7 @@ readerProgram :: IO (Result M.Program String)
 readerProgram = modifyMVar readerResult $ \cached -> case cached of
     Just result -> pure (cached, result)
     Nothing -> do
-        result <- bootstrapFromFile "examples/mir/mir_reader/mir_reader.tersus"
+        result <- bootstrapFromFile "lib/mir/mir_reader/mir_reader.tersus"
         pure (Just result, result)
 
 validationCase :: ParityCase -> IO TestResult

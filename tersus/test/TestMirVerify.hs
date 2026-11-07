@@ -2,7 +2,7 @@
 
 module TestMirVerify (testMirVerify, testMirVerifyPrograms) where
 
-import Data.List (isInfixOf, isPrefixOf)
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
@@ -21,7 +21,7 @@ import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, unvalidatedPrograms, validatedPrograms)
 import Utils
 
--- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir/mir_verify/mir_verify.tersus): the check that a program
+-- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (lib/mir/mir_verify/mir_verify.tersus): the check that a program
 -- as MirData writes it is well formed (the shape, and the types of statements, switches and calls), run over the data of
 -- a program. The verdict of each case below is the one the check has to give; the native sweep compares the verdict with
 -- the one the host gives (MirHousekeeping, which runs this program), program by program. Ghost erasure is not here:
@@ -89,7 +89,7 @@ testMirVerifyPrograms =
 
 contextMapsBorrowed :: IO TestResult
 contextMapsBorrowed =
-    pure $ case toolProgram "examples/mir/mir_verify/mir_verify.tersus" `bindResult` insertOwnership of
+    pure $ case toolProgram "lib/mir/mir_verify/mir_verify.tersus" `bindResult` insertOwnership of
         Error e -> Just e
         Ok owned ->
             let large ty = case ty of
@@ -109,7 +109,7 @@ contextMapsBorrowed =
 
 borrowedLookups :: IO TestResult
 borrowedLookups = do
-    loaded <- linkedFromFile "examples/mir/mir_verify/mir_verify.tersus"
+    loaded <- linkedFromFile "lib/mir/mir_verify/mir_verify.tersus"
     pure $ case loaded `bindResult` \program -> mapResult ((,) program) (insertOwnership program) of
         Error e -> Just e
         Ok (program, owned) ->
@@ -138,7 +138,7 @@ holderSource = "struct Holder<T> { x: T }; fn take2(h: Holder<Array<Int, 2>>) ->
 -- The verifier compiled once for every interpreted case: compiling it is the expensive part, and every case
 -- runs the same program over a different input (the pattern of TestMirEmit's emitterProgram).
 verifierProgram :: IO (Result Program String)
-verifierProgram = bootstrapFromFile "examples/mir/mir_verify/mir_verify.tersus"
+verifierProgram = bootstrapFromFile "lib/mir/mir_verify/mir_verify.tersus"
 
 -- Whether the host's check accepts the program, as MirData writes it
 referenceAccepts :: Program -> Bool
@@ -573,7 +573,7 @@ onEveryFunction change program =
         }
 
 withVerifier :: (FilePath -> IO TestResult) -> IO TestResult
-withVerifier = withProgram "examples/mir/mir_verify/mir_verify.tersus" "mir-verify"
+withVerifier = withProgram "lib/mir/mir_verify/mir_verify.tersus" "mir-verify"
 
 localExact :: String -> String -> String -> IO TestResult
 localExact input expected expectedErrors = do
@@ -667,7 +667,7 @@ nativeCheck name source = withVerifier $ \exe -> do
         bad -> Just (unlines bad)
   where
     check exe (name, source) = do
-        dataOf <- if "examples/mir/" `isPrefixOf` name then mirDataFromFile name else mirDataOf source
+        dataOf <- if embeddedToolFile name then mirDataFromFile name else mirDataOf source
         case dataOf of
             Error e -> pure [name ++ ": " ++ e]
             Ok text -> case readProgram text of

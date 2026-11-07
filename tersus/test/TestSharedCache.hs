@@ -1192,7 +1192,7 @@ contentRestoreProbe directory = do
     checked <- ValidatorNative.validatorKey
     validator <- MirHousekeeping.cachedPreparedInput "validator" [] (const True) (pure (Error "validator input was not prepared"))
     emitterInput <- MirHousekeeping.cachedPreparedInput MirHousekeeping.emitterEntry [] (const True) (pure (Error "emitter input was not prepared"))
-    parserInput <- MirHousekeeping.cachedPreparedInput "examples/parser/parser.tersus" [] (const True) (pure (Error "parser input was not prepared"))
+    parserInput <- MirHousekeeping.cachedPreparedInput "lib/parser/parser.tersus" [] (const True) (pure (Error "parser input was not prepared"))
     case (built, emitter, parser, checked, validator, emitterInput, parserInput) of
         (Ok ir, Ok e, Ok p, Ok v, Ok validatorBytes, Ok emitterBytes, Ok parserBytes) -> do
             createDirectoryIfMissing True directory

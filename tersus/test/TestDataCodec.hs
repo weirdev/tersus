@@ -19,13 +19,13 @@ import Utils
 
 entries :: [FilePath]
 entries =
-    [ "examples/ast_reader/ast_reader.tersus"
-    , "examples/parser/parser.tersus"
-    , "examples/mir/reader/reader.tersus"
-    , "examples/mir/mir_reader/mir_reader.tersus"
-    , "examples/mir/emit/emit.tersus"
-    , "examples/mir/mir_verify/mir_verify.tersus"
-    , "examples/mir/mir_erase/mir_erase.tersus"
+    [ "lib/ast_reader/ast_reader.tersus"
+    , "lib/parser/parser.tersus"
+    , "lib/mir/reader/reader.tersus"
+    , "lib/mir/mir_reader/mir_reader.tersus"
+    , "lib/mir/emit/emit.tersus"
+    , "lib/mir/mir_verify/mir_verify.tersus"
+    , "lib/mir/mir_erase/mir_erase.tersus"
     ]
 
 sharing :: FilePath -> TestResult
@@ -41,7 +41,7 @@ sharing entry = case Mod.loadFromEntry (Mod.resolverFromFiles toolPackageFiles) 
     Right _ -> Just "codec consumer is standalone"
 
 codecRun :: String -> (Outcome -> TestResult) -> IO TestResult
-codecRun source check = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles (toolPackageFiles ++ [("examples/codec_test/package.tersus", ""), ("examples/codec_test/main.tersus", source)])) "examples/codec_test/main.tersus" of
+codecRun source check = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles (toolPackageFiles ++ [("lib/codec_test/package.tersus", ""), ("lib/codec_test/main.tersus", source)])) "lib/codec_test/main.tersus" of
     Left err -> Just err
     Right (Mod.PackageResult pkg) -> -- (the codec is the compiler's own code, built as the host builds it, not validated)
         case PackageCompile.compileModulesLinked pkg `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of

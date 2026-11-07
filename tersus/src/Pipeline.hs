@@ -92,7 +92,7 @@ assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
     foldr1' f xs = foldr1 f xs
 
 -- The MIR of a program that passes every check, before its ghosts are erased: what the eraser written in Tersus
--- (examples/mir/mir_erase/mir_erase.tersus) is given, as `tersus mir --ghost-data` writes it
+-- (lib/mir/mir_erase/mir_erase.tersus) is given, as `tersus mir --ghost-data` writes it
 validatedSource :: String -> Result M.Program String
 validatedSource = validatedSourceWith TersusParser.parseSourceParts
 

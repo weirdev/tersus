@@ -15,7 +15,7 @@ import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The rest of the MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir/mir_erase/mir_erase.tersus): the erasure of the
+-- The rest of the MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (lib/mir/mir_erase/mir_erase.tersus): the erasure of the
 -- ghosts of a program over the data of the program as it is before the erasure (version 2 of the data, writeProgramWithGhosts),
 -- compared word for word with the erasure the host runs (MirHousekeeping, which runs this program), and for the programs
 -- below with the output recorded of the Haskell erasure it replaced. The erasure also makes each Uninit<T> a T.
@@ -53,7 +53,7 @@ mutSource = "x = 4; r = &mut x; *r = 9; return *r;"
 -- The eraser compiled once for every interpreted case: compiling it is the expensive part, and every case
 -- runs the same program over a different input (the pattern of TestMirVerify's verifierProgram).
 eraserProgram :: IO (Result Program String)
-eraserProgram = bootstrapFromFile "examples/mir/mir_erase/mir_erase.tersus"
+eraserProgram = bootstrapFromFile "lib/mir/mir_erase/mir_erase.tersus"
 
 -- What the host makes of the program before its ghosts are erased, as version 1 of the data
 expectedOf :: Program -> Result String String
@@ -198,7 +198,7 @@ castCase rewrite expected = do
                             | otherwise -> Just ("got output " ++ show (take 80 output) ++ " and errors " ++ show errors ++ " for\n" ++ text)
 
 everyProgram :: IO TestResult
-everyProgram = withProgram "examples/mir/mir_erase/mir_erase.tersus" "mir-erase" $ \exe -> do
+everyProgram = withProgram "lib/mir/mir_erase/mir_erase.tersus" "mir-erase" $ \exe -> do
     files <- mapM (\path -> (,) path <$> readFile path) nativeExamples
     failures <- mapM (check exe) (files ++ validatedPrograms)
     pure $ case concat failures of
@@ -206,7 +206,7 @@ everyProgram = withProgram "examples/mir/mir_erase/mir_erase.tersus" "mir-erase"
         bad -> Just (unlines (take 5 bad))
   where
     check exe (name, source) = do
-        validated <- if "examples/mir/" `isPrefixOf` name then linkedFromFile name else validatedOnce source
+        validated <- if embeddedToolFile name then linkedFromFile name else validatedOnce source
         case validated of
             Error e -> pure [name ++ ": " ++ e]
             Ok program -> case eraseGhosts program of
@@ -237,7 +237,7 @@ entryGhostsKept = pure $ case validatedSource "assume 1 = 1; return 1;" of
 -- Metadata construction must not reintroduce a whole LocalDecl/Type clone through a projection.
 metadataBorrows :: IO TestResult
 metadataBorrows =
-    pure $ case toolOwnedProgram "examples/mir/mir_erase/mir_erase.tersus" of
+    pure $ case toolOwnedProgram "lib/mir/mir_erase/mir_erase.tersus" of
         Error e -> Just e
         Ok owned ->
             let large ty = case ty of
@@ -272,7 +272,7 @@ rawExact input expected expectedErrors = do
                 | otherwise -> Just ("expected " ++ show (expected, expectedErrors) ++ ", got " ++ show (output, errors))
 
 localNative :: IO TestResult
-localNative = withProgram "examples/mir/mir_erase/mir_erase.tersus" "mir-erase" $ \exe -> do
+localNative = withProgram "lib/mir/mir_erase/mir_erase.tersus" "mir-erase" $ \exe -> do
     failures <- mapM (check exe) localCases
     pure $ case [failure | Just failure <- failures] of
         [] -> Nothing

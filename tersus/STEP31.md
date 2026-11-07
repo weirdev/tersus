@@ -8,7 +8,7 @@ The measurements and slices below describe the original emitter rewrite.
 ## Current source layout
 
 The LLVM emitter is now the Tersus module `mir::emit`, not `LlvmEmit.hs`.
-`examples/mir/emit/emit.tersus` keeps program assembly and stdin/mode/error handling.
+`lib/mir/emit/emit.tersus` keeps program assembly and stdin/mode/error handling.
 Its declaration-only sibling files separate model/layout/context (`types`),
 generation state and operands (`values`), rvalues/statements (`operations`),
 calls/control/function ABI (`functions`), and generated drop/clone/print functions
@@ -20,7 +20,7 @@ and `values/helpers -> types`. This graph has no cross-file call cycle;
 self-recursive routines stay with their helpers. All files remain one build unit
 so emitter names stay bare and the single foreign `String.then` stays module-local.
 The codec, reader and phase-neutral support remain separate ordinary dependencies.
-The emitter imports the ownership dispatcher in `examples/mir/ownership/`.
+The emitter imports the ownership dispatcher in `lib/mir/ownership/`.
 MIR v1 input still produces LLVM IR; `pass expand` or `pass ownership` followed
 by MIR v2 produces the transformed MIR v2. The emitter seed includes this
 dispatcher so ownership also runs natively during cold builds. The historical
@@ -111,7 +111,7 @@ Each slice is a PR, and nothing changes the default `build` until slice 8 adds a
    left test when it checks the right one; an `||` keeps only what both tests give), and in `lib/string.tersus` `String::fromInt`,
    `slice`, `find` and `startsWith` (equality of strings was there). Found while doing it: after an `||` the validator cannot use "this
    test or that one", which a loop condition with `||` has to live with.
-4. **The MIR types and the reader in Tersus.** Done: `examples/mir/mir_reader/mir_reader.tersus` (about 1,200 lines, 69 functions) has the types of the MIR as enums and structs,
+4. **The MIR types and the reader in Tersus.** Done: `lib/mir/mir_reader/mir_reader.tersus` (about 1,200 lines, 69 functions) has the types of the MIR as enums and structs,
    a tokenizer, a parser for each of them and a writer. It reads what `tersus mir --data` prints from the standard input and writes it
    again; `TestMirReader` builds it once and checks that the output is the input for every example, every program of the native tests and
    the reader's own data (22,000 lines, 440 KB), and that the texts that are not the data of a program are refused. It validates in 6 seconds,
@@ -130,7 +130,7 @@ Each slice is a PR, and nothing changes the default `build` until slice 8 adds a
      other); an `affirm p >= 0;` at the end of each branch keeps it.
    - `match` as a statement can `return` from an arm, and an `if x is A { ... } else { (x as B) }` cannot show the else is `B`, so a
      two-variant enum is taken apart with `match`.
-5. **Emitter part 1.** Done: `examples/mir/emit/emit.tersus` (the reader of `mir_reader.tersus` is now the shared module `examples/mir/reader/reader.tersus` of the mir package, which all four programs that read the MIR as data import; `TestMirEmit` checks that sharing) with `renderType`, `slotsOf`, `ownerOf`, `needsDrop`, `canonical`, `llvmType`, `escaped`, `closeTypes`,
+5. **Emitter part 1.** Done: `lib/mir/emit/emit.tersus` (the reader of `mir_reader.tersus` is now the shared module `lib/mir/reader/reader.tersus` of the mir package, which all four programs that read the MIR as data import; `TestMirEmit` checks that sharing) with `renderType`, `slotsOf`, `ownerOf`, `needsDrop`, `canonical`, `llvmType`, `escaped`, `closeTypes`,
    `typeDescriptors`, `declarations` and `entryPoint`, written as the Haskell is. It writes what `LlvmEmit.emitOutline` writes (the declarations, the descriptors
    of the types of the locals and what they contain, and the entry point), and `TestMirEmit` compares the two for every example and every program of the native
    tests, with the Haskell as the oracle. Found while doing it:
@@ -143,7 +143,7 @@ Each slice is a PR, and nothing changes the default `build` until slice 8 adds a
      from many pieces, so it uses `then`; a `String` method that is added in a program of its own works.
    - Output is a `List<String>` of lines that the caller prints at the end (the descriptors come before the code that decides which are needed), not a string that is
      appended to: a `push` is cheap, and a `concat` of the whole output would copy it every time.
-6. **Emitter part 2.** Done: `examples/mir/emit/emit.tersus bodies` writes the code of each function whose locals and statements are words (Int, Byte, Bool, a function):
+6. **Emitter part 2.** Done: `lib/mir/emit/emit.tersus bodies` writes the code of each function whose locals and statements are words (Int, Byte, Bool, a function):
    operands, constants, `sharedType`, arithmetic with the checks for an overflow (`checked`, `binary` for `/` and `%`), the operations of the runtime that give a number,
    `store`, the terminators (`goto`, `switch`, `call` of a function and of a function value, `return`, with the entry's `%returned`) and `call`. A function that has
    anything else gives `; unsupported` (slice 7 adds it). `LlvmEmit.emitBody` (new, the lines of the blocks of a function with its globals, temps and types; `emitFunction`
@@ -158,7 +158,7 @@ Each slice is a PR, and nothing changes the default `build` until slice 8 adds a
    - **`get(functions, i)` copies the function and all its blocks**, so the calls look up the signatures taken once (`Sig`, `Ctx`), and the names of the types and whether each
      owns something are in the `Ctx` too (`declIndex`, `needsDropIn`).
    - **Names that are in two files clash**: the reader's `operandAt` and `isWord` are not available as the names of the emitter's own functions, which are `operandValue` and so on.
-7. **Emitter part 3.** Done: `examples/mir/emit/emit.tersus` writes all of the IR, byte-identical to `LlvmEmit.emitOwned` for every example and every `TestNative` program (the
+7. **Emitter part 3.** Done: `lib/mir/emit/emit.tersus` writes all of the IR, byte-identical to `LlvmEmit.emitOwned` for every example and every `TestNative` program (the
    emitter's own data too: 44,000 lines of MIR, 10 seconds). It has now the values held inline (`assignAggregate`, `constantAggregate`, `writeConstant`, `operandAddress`,
    `dataBase`, the constructors and their offsets), the arrays and lists (`fillElements`, `arrayRead`, `elementAddress`), Boxes, `cloneInto`, `dropSlot`, the calls and
    returns of values held inline, and the function around its blocks (`emitFunction`: the header, the frame, the parameters, `%returned`). `TestMirEmit` runs it with no
@@ -171,7 +171,7 @@ Each slice is a PR, and nothing changes the default `build` until slice 8 adds a
      the words of each type, since walking the declarations for each field (and copying them to do it) was most of the time.
    - Mutual recursion is missing again: `operandValue` for a value moved from a local that holds an aggregate calls `operandAddress`, which has to come first, and the order of
      the functions follows what each needs.
-8. **Wire-in and bootstrap.** Done: `tersus --tersus-emitter build|llvm|run <file>` had the IR written by `examples/mir/emit/emit.tersus` instead of `LlvmEmit` (the flag came before the
+8. **Wire-in and bootstrap.** Done: `tersus --tersus-emitter build|llvm|run <file>` had the IR written by `lib/mir/emit/emit.tersus` instead of `LlvmEmit` (the flag came before the
    command, since the arguments after the file of `run` are the program's), with the two stages in `Bootstrap`:
    - **Stage 0** was the emitter built (`stageZero`) from the IR that `LlvmEmit` writes for `emit.tersus`, built the first time (about 35 seconds) and kept in the cache
      directory of the user (`$XDG_CACHE_HOME/tersus`, or `~/.cache/tersus`; with no fallback to a shared directory such as `/tmp`, where another user could plant a program
@@ -191,7 +191,7 @@ Each slice is a PR, and nothing changes the default `build` until slice 8 adds a
    - **The seed does not have to be the latest emitter.** Stage 0 is the seed built; stage 1 is the emitter as it is now, which stage 0 compiles (`stageOne`), and it is stage 1
      that compiles programs, so a change to `emit.tersus` takes effect with no new seed. The seed only has to be able to read the data (`tersus-mir 1`), compile the emitter
      as it is now (the language it is written in), and call the runtime as it is (`LlvmRuntime`). When one of those changes in a way it cannot follow, stage 0 fails or the
-     fixpoint test does, and the seed is made again with `tersus llvm examples/mir/emit/emit.tersus > bootstrap/emitter.ll` (from a build that works).
+     fixpoint test does, and the seed is made again with `tersus llvm lib/mir/emit/emit.tersus > bootstrap/emitter.ll` (from a build that works).
    - **Two programs are in the cache**, `seed-<hash>` and `emitter-<hash>`: the hash of the first is of the seed and the runtime, and that of the second adds the emitter and
      the library every program has. The first `build`, `run` or `llvm` takes about a minute and a half (two builds); the next ones are as fast as before.
    - **`TestBootstrap`** is the fixpoint again: stage 0 and stage 1 write the same IR for the emitter (so the emitter built from either is the same program), and stage 1

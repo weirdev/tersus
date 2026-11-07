@@ -185,7 +185,7 @@ A drop of a list of `Int` in an arena walks nothing, but it calls `free`, which 
 
 An allocator that frees in bulk says so by implementing the marker trait `trait BulkFree: Allocator { };`. Where the drop of a type is made for a region of such a kind, the frees are left out, and so is the walk of every part that owns nothing but memory. A part owns nothing but memory when it has no `impl Drop` and nothing linear in it (step 27), worked out over its fields. A file in an arena is still closed.
 
-The drops are made per type after `MirMono` (step 30 (a)), so the question "does this drop do anything" is asked of the type with its kinds known. The ownership pass (`examples/mir/ownership/`) still places every drop. The decision is only what the drop's code does, so the pass order does not change. The proof of `Box`'s drop is unchanged: `BulkFree` is a promise of the allocator's (trusted) code that `free` may be left out, and it is erased like the permission it would have consumed. This is a cost and not a meaning, and it is the reason for the comment in the example at the top.
+The drops are made per type after `MirMono` (step 30 (a)), so the question "does this drop do anything" is asked of the type with its kinds known. The ownership pass (`lib/mir/ownership/`) still places every drop. The decision is only what the drop's code does, so the pass order does not change. The proof of `Box`'s drop is unchanged: `BulkFree` is a promise of the allocator's (trusted) code that `free` may be left out, and it is erased like the permission it would have consumed. This is a cost and not a meaning, and it is the reason for the comment in the example at the top.
 
 ## Implementation
 
@@ -212,7 +212,7 @@ The stages, each with the tests that show it done:
 3. **`TERSUS_CHECK` in Tersus.** The native tests run under `with checked { ... }` in place of `-DTERSUS_CHECK`, and the checking code in `LlvmRuntime` is deleted (step 30 (c)). Valgrind stays the second opinion.
 4. **`BulkFree`.** A test that a dropped tree in an arena calls nothing, and that a file in an arena is still closed.
 
-Stage 1 is where the cost to users shows: every message about a type is now able to name a region. Before stage 2, the messages of the examples and of `examples/mir/emit/emit.tersus` (with only `System`, none should mention one) and the output of `tersus sig` are reviewed. That review is the checkpoint for whether the elision rules are right.
+Stage 1 is where the cost to users shows: every message about a type is now able to name a region. Before stage 2, the messages of the examples and of `lib/mir/emit/emit.tersus` (with only `System`, none should mention one) and the output of `tersus sig` are reviewed. That review is the checkpoint for whether the elision rules are right.
 
 ## Limitations, and what is left for later
 

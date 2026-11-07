@@ -312,7 +312,7 @@ splitTestGroups count original
     unitWeight :: Test -> Int
     unitWeight test = case concat (leafPaths test) of
         path | any (`elem` path) ["whole corpus parity", "whole parsed and elaborated source corpus", "whole corpus native round trip"] -> 60
-        path | "examples/mir/emit/emit.tersus" `elem` path || "examples/mir/mir_reader/mir_reader.tersus" `elem` path -> 30
+        path | "lib/mir/emit/emit.tersus" `elem` path || "lib/mir/mir_reader/mir_reader.tersus" `elem` path -> 30
         path | "the IR of a loop, interpreted" `elem` path || "raw lists and Boxes library" `elem` path -> 30
         path | "MIR loops" `elem` path -> 32
         path | "MIR branches" `elem` path -> 16

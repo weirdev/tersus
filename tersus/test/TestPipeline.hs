@@ -54,7 +54,7 @@ testExampleFile path expectation = TestCase path $ do
     lowered <- case root of
         Nothing -> compileSource <$> readFile path
         Just _ -> do
-            loaded <- if path == "examples/parser/parser.tersus"
+            loaded <- if path == "lib/parser/parser.tersus"
                 then pure (Modules.loadFromEntry (Modules.resolverFromFiles parserPackageFiles) path)
                 else loadFromFilesystem path
             case loaded of
@@ -89,18 +89,18 @@ testModulesPackageExample = TestCase "examples/modules/app/main.tersus" $ do
         Right other -> Just ("modules example should be a package, got: " ++ show other)
 
 -- The compiler's own programs (the AST reader, and the MIR reader, checker and eraser and the
--- emitter of the mir package) validated as examples. They are large enough that validating them takes far longer than
+-- emitter of the mir package, under lib/) validated. They are large enough that validating them takes far longer than
 -- the rest of the suite, so this group runs only when it is named (TestTersus.optInGroups); the
 -- groups that run them build them unvalidated, as the host does.
 testHostValidation :: Test
 testHostValidation =
     TestList
         "testHostValidation"
-        [ testExampleFile "examples/ast_reader/ast_reader.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "examples/mir/mir_reader/mir_reader.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "examples/mir/mir_verify/mir_verify.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "examples/mir/mir_erase/mir_erase.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "examples/mir/emit/emit.tersus" (ExpectReturn (VInt 1))
+        [ testExampleFile "lib/ast_reader/ast_reader.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "lib/mir/mir_reader/mir_reader.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "lib/mir/mir_verify/mir_verify.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "lib/mir/mir_erase/mir_erase.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "lib/mir/emit/emit.tersus" (ExpectReturn (VInt 1))
         ]
 
 testExamples :: Test

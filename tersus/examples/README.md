@@ -2,7 +2,7 @@
 
 Runnable programs showing what the language and standard library can do today. Each file carries `//` comments explaining what it shows; this page gives the overview.
 
-`stack test` loads every file in this directory and the entry programs of the mir package below (`testExamples` in `test/TestTersus.hs`), so the results below are checked.
+`stack test` loads every file in this directory (`testExamples` in `test/TestTersus.hs`), so the results below are checked. The compiler's own Tersus programs (the MIR tools and the emitter, the parser, the AST reader and their shared data package) are under `lib/`, beside the validator; `MIR.md` and `AST_DATA.md` describe them.
 
 Run one yourself from the `tersus/` directory:
 
@@ -43,12 +43,6 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `generic_structs.tersus` | `struct Pair<T>`, `struct Holder<T>` (a `Box` of an array of the type, with a contract) and `struct Vec<T, n>`: a struct for each type and size, written `Pair<Int>`; a function with type parameters over any of them; one native struct for each | returns `2224` |
 | `spec_functions.tersus` | A contract that calls functions of the program (`width(r)`, `offset(r, return)`: checked against the input contract of the function and known by its promise), and `struct Range` with an `invariant` that is proved where a Range is made and assumed for every Range a function is given | returns `25070` |
 | `text.tersus` | Text helpers of `lib/string.tersus` and the connectives: `String::fromInt(n)` (an Int as decimal text), `find(b, from)`, `slice(from, to)` and `startsWith(prefix)`, with `&&` guarding the slices (the validator knows the left test when it checks the right one) | writes `width` and `-120`, and returns `504` |
-| `parser/parser.tersus` | Native source/file parser (`AST_DATA.md`): builds exact AST arenas and reads imports plus declaration state. `PreludeSource.parserPackageFiles` embeds the parser package, generated Unicode root-module file and shared data dependencies for the embedded snapshot for P0-based package checking and parser example builds; ordinary source does not receive those helpers. `Pipeline.validatedSource`, `compileSource` and package loading consume its ASTs. `TERSUS_PARSER=haskell` is refused; a pinned native LLVM parser seed bootstraps the current parser | returns `1` with no input and reports that the input is not parser input |
-| `ast_reader/ast_reader.tersus` | Parsed and elaborated AST data, read into typed syntax arena payloads and written again, including contracts, proofs, builtin arguments and metadata, source marks and ordered occurrence types (`AST_DATA.md`). Reuses the MIR type/size codec; `mutate` changes `Plus` to `Minus` as a semantic edit demonstration | returns `1` with no input and reports that the input is not AST data |
-| `mir/mir_reader/mir_reader.tersus` | The MIR as data, read and written by a program (step 31, `STEP31.md`): the types of the MIR as enums and structs, a tokenizer, a parser for each of them in the style of the emitter to come (a `Parsed<T>` of the value, the index after it and whether it could be read; every index proved in range) and a writer. It reads the MIR as data from the standard input (the host feeds it what `tersus mir --data` prints, and programs before their ghosts are erased too) and writes the same text; it is made to read its own data too (the largest input, 22,000 lines) | returns `1` with no input (it says on the standard error that the input is not the MIR as data) |
-| `mir/mir_verify/mir_verify.tersus` | The MIR as data, checked by a program (REPLACING_HASKELL.md target 3): the shared reader of the mir package (below), then the MIR well-formedness and type checks the host runs on every program (through `MirHousekeeping`) (every block a jump names is there, every local and function used is declared, and the types of statements, switches and calls), with its own phase-specific full layout rules and the shared primitive layout helpers. It reads the MIR as data from the standard input (the host feeds it what `tersus mir --data` prints, and programs before their ghosts are erased too) and writes `OK` for a well formed program; for one that is not it says why on the standard error and returns `1`. What erases ghosts is not checked: the data has none left to erase | returns `1` with no input (it says on the standard error that the input is not the MIR as data) |
-| `mir/mir_erase/mir_erase.tersus` | The ghosts of a program, erased by a program (REPLACING_HASKELL.md target 3): the shared reader of the mir package (below) read as version 2 of the data (`tersus mir --ghost-data`: the types `block T` and `uninit T`, the statements `ghost` and `dissolve L`), then the ghost erasure the host runs on every program (through `MirHousekeeping`): the permissions out, each `Uninit<T>` made a `T`, and the refusal of the `Block::cast`s whose slots do not lay out alike. It reads the program before its ghosts are erased from the standard input and writes it as version 1 of the data, as `tersus mir --data` writes it | returns `1` with no input (it says on the standard error that the input is not the MIR as data) |
-| `mir/emit/emit.tersus` | The lowering from the MIR to LLVM IR written in Tersus (step 31, `STEP31.md`), first part: it reads `tersus mir --data` from the standard input (with the shared reader of the mir package, below) and writes all of the IR of the program for every example and program of the native tests; for the argument `outline` the declarations of the runtime, the descriptors of the types and the entry point, and for `bodies` the code of each function. It is the compiler's only emitter: `build`, `run` and `llvm` use it (built on first use, see `Bootstrap`), and the IR it wrote for itself is the seed `bootstrap/emitter.ll`. Written as the Haskell emitter it replaced was, with its local `String::then` for the long strings it builds (a `concat` that promises nothing, which keeps the time to validate down) | returns `1` with no input |
 | `upper.tersus` | Input: `readByte()` (the next byte of the standard input, or `-1` at its end) and `String::read(limit)` / `String::readLine(limit)` (a String of up to `limit` bytes; a line without its new line); it writes its input in capitals, with a loop that proves `size(text)` stays the same | returns `0` with no input |
 | `hashmap.tersus` | A `HashMap<K, V>` from the standard library (`lib/map.tersus`, which a program has when it mentions `HashMap`): word counts with `String` keys and squares by their root with `Int` keys, inserted past the count where the buckets spread, read back with `lookup` and one removed | returns `218420` |
 | `vec.tersus` | A growable list written in Tersus, as a library type of a program's own: `trait Sequence<E>` (`size`, `get`, `set`) and `trait Growable<E>` (`push`), with contracts that call `size(self)` (the traits are in the prelude), `struct Vec<T>` with an invariant (`0 <= len <= size(data)`), `impl<T> Sequence<T> for Vec<T>` and `impl<T> Growable<T> for Vec<T>` (`push` doubles the array when full), and `new` and `pop` in an `impl<T> Vec<T>`, and `fn total<S: Sequence<Int>>`, one function for a Vec, a List and an Array; used as `v.push(x)` and `size(v)`, with loops that say `size(v) = i` | returns `2491212381` |
@@ -100,32 +94,6 @@ The files are declarations-only modules, except the entry file, which runs. `tes
 | `modules/figures/figures.tersus` | A module importing `geo`: a whole-module import for its functions, and a selective single-type import (`import modules::geo::shapes::Point;`) used bare for its `Figure` struct |
 | `modules/parity/even.tersus`, `modules/parity/odd.tersus` | A mutually recursive pair inside one module: the two files import each other, and `isEven` / `isOdd` call each other on a smaller number, each saying it shrinks |
 | `modules/units/units.tersus` | Single-file collapse: the `units` module is this one file, so `feetToInches` is named at module level as `units::feetToInches` |
-
-## A package: mir
-
-`mir/` is a package (package name `mir`) whose four entry programs share one MIR reader. The round-trip reader, the eraser and the ownership passes share the declarations-only `writer` module; its `printProgramWithGhosts` preserves ghost IDs in MIR v2. The emitter imports the ownership request dispatcher as well as its LLVM lowering files. The checker, eraser and emitter also import `support` for phase-neutral metadata. Only the selected entry file runs; sibling files and the ownership module contain declarations. Full layouts stay local. The eraser writes with the shared writer too (`printProgramAsRead` keeps the `list` and `box` tokens of older data).
-
-```
-stack run tersus-exe -- eval examples/mir/mir_reader/mir_reader.tersus   # with MIR data on stdin, writes it again
-stack run tersus-exe -- check examples/mir/emit/emit.tersus              # prints OK
-```
-
-| File | Shows |
-| --- | --- |
-| `mir/reader/reader.tersus` | The MIR record types and parsers; imports the common token and type codec (`programAt` for version 1, `ghostProgramAt` for version 2 with `ghost`/`dissolve`). It declares only, and runs nothing |
-| `mir/support/support.tersus` | Shared declaration lookup, variant ownership, array classification, primitive layout results, type/name rendering and LLVM escaping. Owns its result records and Clone impls; reuses the codec's `catStrings` for text construction. Imports the codec and reader; full layouts and wire writers are not shared |
-| `mir/writer/writer.tersus` | Shared normalizing writer. `printProgram` writes MIR v1; `printProgramWithGhosts` writes MIR v2 with `ghost N` identities; `printProgramAsRead` writes MIR v1 with the `list` and `box` tokens of older data kept (the eraser's output). Structural type/size arguments and function metadata are retained |
-| `mir/ownership/ownership.tersus` | Declarations-only request dispatcher imported by the emitter. `pass ownership` or `pass expand` followed by MIR v2 produces MIR v2. `isOwnershipRequest` and `runOwnership` dispatch to the algorithms in `rewrite` and `refwrites`; `common`, `analysis` and `drops` provide their shared data and analyses. The host retains the Haskell monomorphization adapter and metadata sidecars |
-| `mir/mir_reader/mir_reader.tersus` | The round-trip entry: imports the shared reader and writer |
-| `mir/emit/emit.tersus` | Emitter entry and program assembly. It writes LLVM IR for MIR v1, or dispatches `pass ownership` and `pass expand` requests over MIR v2 to the ownership module. The pinned emitter seed includes both passes |
-| `mir/emit/types.tersus` | Emitter model, layouts, symbols, type closure and cached context; owns the module-local `String.then` |
-| `mir/emit/values.tersus` | Generation state, memory primitives, constants, operands and reference places |
-| `mir/emit/operations.tersus` | Arithmetic, array/address operations, rvalues, aggregate construction and statements |
-| `mir/emit/functions.tersus` | Calls, terminators, blocks, function signatures and frames |
-| `mir/emit/helpers.tersus` | Generated drop, clone and print functions |
-| `mir/mir_verify/mir_verify.tersus` | The checker the host runs on every program: imports the reader |
-| `mir/mir_erase/mir_erase.tersus` | The ghost erasure the host runs on every program: imports the reader and reads it with `ghostProgramAt` |
-
 
 ### The safe-access pattern
 
@@ -242,10 +210,3 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 - Lists can be read with `get`, extended with `push` and updated with `set`, which returns a new list (`a = set(a, i, x)`). `push` and `set` say which element they wrote (`element_facts.tersus`) and the frame rules say the others are unchanged (`frame_facts.tersus`), one index at a time. A `forall` states a fact about every index (`forall_facts.tersus`, `parallel_sum.tersus`), and with lists of structs it expresses the linked-list motivating case, whose link invariants are proved by `linked_list.tersus`.
 - `get` and `set` need `0 <= index < size(list)` proved at the call. Concrete lists and indexes are checked directly, and a symbolic index needs a contract or loop invariant that says so (`rewrite checkRel` establishes the fact for concrete arguments at the call).
 - Counters in list loops need no axioms (`parallel_sum.tersus`, `build_list.tersus`, `update_list.tersus`), and `affirm` and invariants see through equalities on their own, so a loop needs no `rewrite refl`.
-
-The sibling `data` package holds `codec/codec.tersus` (tokens, escaping, decimal
-numbers and size/type wire helpers) and `ast/ast.tersus` (AST arena schema and
-writer). The parser and AST reader have small separate package roots; unrelated
-standalone examples are not collected into a package. MIR program entry modules
-remain unchanged. The parser example is compiled from its embedded snapshot so
-its Unicode predicates match the serving Haskell compiler.

@@ -28,7 +28,7 @@ import TestMirReader (programExecutable)
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The lowering to LLVM IR written in Tersus (examples/mir/emit/emit.tersus, step 31 of the roadmap and STEP31.md) is the compiler's emitter. It is given the MIR as data,
+-- The lowering to LLVM IR written in Tersus (lib/mir/emit/emit.tersus, step 31 of the roadmap and STEP31.md) is the compiler's emitter. It is given the MIR as data,
 -- and writes all of the IR with no argument, the declarations, the descriptors of the types and the entry point for `outline`, and the code of each function for
 -- `bodies`. What it writes has to build and run as the program does, which TestNative checks for every example and program by building the IR; here the full
 -- mode is run on every one of them (outline/bodies only on a representative subset), and the data of a program and the data of the program read back from it have to make the same IR. A smaller input is run by the
@@ -60,10 +60,10 @@ testMirEmitPrograms =
 
 sharedReader :: IO TestResult
 sharedReader = do
-    codec <- readFile "examples/data/codec/codec.tersus"
-    reader <- readFile "examples/mir/reader/reader.tersus"
-    writer <- readFile "examples/mir/writer/writer.tersus"
-    programs <- mapM readFile ["examples/mir/mir_reader/mir_reader.tersus", "examples/mir/emit/emit.tersus", "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus", "examples/mir/ownership/ownership.tersus"]
+    codec <- readFile "lib/data/codec/codec.tersus"
+    reader <- readFile "lib/mir/reader/reader.tersus"
+    writer <- readFile "lib/mir/writer/writer.tersus"
+    programs <- mapM readFile ["lib/mir/mir_reader/mir_reader.tersus", "lib/mir/emit/emit.tersus", "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", "lib/mir/ownership/ownership.tersus"]
     pure $
         if "struct Token" `isInfixOf` codec
             && "struct Field" `isInfixOf` reader
@@ -74,10 +74,10 @@ sharedReader = do
             then Nothing
             else Just "a MIR program does not use the shared reader and codec, or contains its own Token declaration"
 
--- The emitter of examples/mir/emit/emit.tersus, compiled once: the three interpreted cases each run it for a part of the IR, and its
+-- The emitter of lib/mir/emit/emit.tersus, compiled once: the three interpreted cases each run it for a part of the IR, and its
 -- validation is the most expensive thing in this group.
 emitterProgram :: IO (Result Program String)
-emitterProgram = bootstrapFromFile "examples/mir/emit/emit.tersus"
+emitterProgram = bootstrapFromFile "lib/mir/emit/emit.tersus"
 
 runEmitter :: World -> Result Program String -> Result ((String, String), [(FilePath, String)]) String
 runEmitter world compiled = case compiled of
@@ -87,7 +87,7 @@ runEmitter world compiled = case compiled of
 -- The emitter linked and owned, made once in a process for the cases that look at its owned MIR
 {-# NOINLINE ownedEmitter #-}
 ownedEmitter :: Result Program String
-ownedEmitter = unsafePerformIO (linkedFromFile "examples/mir/emit/emit.tersus") `bindResult` insertOwnership
+ownedEmitter = unsafePerformIO (linkedFromFile "lib/mir/emit/emit.tersus") `bindResult` insertOwnership
 
 -- The emitter executable (TestMirReader.programExecutable, kept on disk for the run), looked up once in a process: the
 -- cases of a sweep would otherwise each hash its package again (TestHarness.memoizedTestExecutable keeps no failed build
@@ -102,7 +102,7 @@ withEmitter use = do
     if not available
         then pure Nothing
         else do
-            built <- memoizedTestExecutable emitterExecutable (programExecutable "examples/mir/emit/emit.tersus" "emit")
+            built <- memoizedTestExecutable emitterExecutable (programExecutable "lib/mir/emit/emit.tersus" "emit")
             case built of
                 Error e -> pure (Just e)
                 Ok exe -> use exe
@@ -131,7 +131,7 @@ threadedGen = do
 
 orderedTypeClosure :: IO TestResult
 orderedTypeClosure = do
-    loaded <- linkedFromFile "examples/mir/emit/emit.tersus"
+    loaded <- linkedFromFile "lib/mir/emit/emit.tersus"
     pure $ case loaded of
         Error e -> Just e
         Ok program -> firstTypeClosureProblem
@@ -193,7 +193,7 @@ nativeCheck name source = withEmitter $ \exe -> do
         problems -> Just (unlines problems)
   where
     check exe (name, source) = do
-        dataOf <- if "examples/mir/" `isPrefixOf` name then mirDataFromFile name else mirDataOf source
+        dataOf <- if embeddedToolFile name then mirDataFromFile name else mirDataOf source
         case dataOf of
             Error e -> pure [name ++ ": " ++ e]
             Ok dataText -> do
@@ -261,7 +261,7 @@ outlineDispatch = withEmitter $ \exe -> do
                             failures <- mapM (checkMode exe markedExe text) [[], ["ir"], ["outline"], ["bodies"]]
                             pure (firstFailure failures)
   where
-    path = "examples/mir/emit/emit.tersus"
+    path = "lib/mir/emit/emit.tersus"
     checkMode exe markedExe text args = do
         original@(code, output, errors) <- runExecutableBytes exe args text
         observed <- runExecutableBytes markedExe args text

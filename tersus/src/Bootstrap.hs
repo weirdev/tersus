@@ -21,7 +21,7 @@ import Seed (cachedSeed, compilerSnapshotHash, seedHash, seedSha256, seedUrl, st
 import ValidatorNative (cachedBootstrapEmitter)
 import Utils
 
--- The lowering to LLVM IR that is written in Tersus (examples/mir/emit/emit.tersus, step 31 and STEP31.md) is the compiler's only emitter. An executable of it reads the MIR of a
+-- The lowering to LLVM IR that is written in Tersus (lib/mir/emit/emit.tersus, step 31 and STEP31.md) is the compiler's only emitter. An executable of it reads the MIR of a
 -- program as data (MirData) and writes its LLVM IR; `tersus build`, `llvm` and `run` use it. It is a
 -- program of the language that needs a compiler, so it is made in stages from a seed:
 -- - the seed is the IR of an emitter. It is the IR that the emitter wrote for its own source when the seed was made, and
@@ -33,7 +33,7 @@ import Utils
 -- - stage 0 is the seed built with clang (`stageZero`);
 -- - stage 1 is the emitter as it is now, built from the IR that stage 0 writes for its source (`stageOne`). This is the one that compiles programs;
 -- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it). Making a new seed is
---   `tersus llvm examples/mir/emit/emit.tersus > emitter.ll.new`, then `sha256sum emitter.ll.new`, upload it as the asset `emitter.ll` of a new release tagged
+--   `tersus llvm lib/mir/emit/emit.tersus > emitter.ll.new`, then `sha256sum emitter.ll.new`, upload it as the asset `emitter.ll` of a new release tagged
 --   `bootstrap-<first 12 digits of that digest>`, and put the digest in bootstrap/emitter.sha256. Never redirect straight into a seed file that the
 --   running compiler is using: the shell truncates it before the compiler runs.
 --   When a change breaks the data the seed reads (the MirData format or native struct names), that command cannot run until there is a seed that reads it: build the emitter as it is now with stage 0 fed the emitter's data in the format and native struct names the seed reads, which gives an emitter that reads the new data, and make the seed with it (`<that emitter>`, fed the new data by hand, in place of `tersus llvm`); upload the result as the asset of a new release as above and put its digest in bootstrap/emitter.sha256. The result is a seed only when it writes the same IR for the emitter again.

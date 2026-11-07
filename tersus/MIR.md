@@ -1,6 +1,6 @@
 # Tersus MIR (design)
 
-Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, the checker written in Tersus run by `MirHousekeeping`, the validator package `lib/validation/` with its bridge `SelfHostedMir`, `MirEval.hs`; `tersus eval` validates and runs the MIR, `tersus run` validates, compiles and runs the native code, and `tersus mir` prints it) and the lowering to LLVM IR is written in Tersus (`examples/mir/emit/emit.tersus`, `tersus llvm` and `tersus build`; see Native code). The later steps are listed under Phases so the data model is shaped for them.
+Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, the checker written in Tersus run by `MirHousekeeping`, the validator package `lib/validation/` with its bridge `SelfHostedMir`, `MirEval.hs`; `tersus eval` validates and runs the MIR, `tersus run` validates, compiles and runs the native code, and `tersus mir` prints it) and the lowering to LLVM IR is written in Tersus (`lib/mir/emit/emit.tersus`, `tersus llvm` and `tersus build`; see Native code). The later steps are listed under Phases so the data model is shaped for them.
 
 ```
 step 1:   source -> AST -> validation -> MIR -> execution of the MIR
@@ -209,7 +209,7 @@ The validator does not run the MIR: a caller knows a callee by its contracts. Th
 
 1. **This step**: the model, the renderer, lowering, the executor, the flow change, the tests and docs above.
 2. **Done**: validation moved onto the MIR (first `MirValidate.hs`, now the validator written in Tersus, see Validation), and the AST evaluator and the AST validator (`Proof.hs`) are gone.
-3. **In progress**: LLVM lowering (`examples/mir/emit/emit.tersus`, see Native code): steps 1 to 4 (`Int`, `Bool`, control flow, calls, lists, structs, enums, function values and memory management) are done. What is left (borrowing a value to a function that only reads it, deep recursion, contracts as hints to LLVM, cheaper ownership, and valgrind in CI) is in the roadmap of `README.md`, item 17.
+3. **In progress**: LLVM lowering (`lib/mir/emit/emit.tersus`, see Native code): steps 1 to 4 (`Int`, `Bool`, control flow, calls, lists, structs, enums, function values and memory management) are done. What is left (borrowing a value to a function that only reads it, deep recursion, contracts as hints to LLVM, cheaper ownership, and valgrind in CI) is in the roadmap of `README.md`, item 17.
 
 ## Arithmetic and traps
 
@@ -224,7 +224,7 @@ So an operation of the MIR either gives a value or traps. Two kinds of trap:
 
 ## Native code
 
-The emitter written in Tersus (`examples/mir/emit/emit.tersus`, `Bootstrap`) lowers the owned MIR to LLVM IR as text; `tersus build` compiles it, with the C runtime of `LlvmRuntime` (embedded in the compiler; both are written to uniquely named files in the temporary directory, which are removed afterwards), with clang.
+The emitter written in Tersus (`lib/mir/emit/emit.tersus`, `Bootstrap`) lowers the owned MIR to LLVM IR as text; `tersus build` compiles it, with the C runtime of `LlvmRuntime` (embedded in the compiler; both are written to uniquely named files in the temporary directory, which are removed afterwards), with clang.
 
 - **Locals are stack slots.** Each local is an `alloca` in the entry block, and a statement loads its operands and stores its result, so the blocks need no phis; `-O2` runs `mem2reg`, which builds them. A block is a label `bbN`, `Goto` and `SwitchBool` are `br`, `Return` loads `_0` and returns it, and `Unreachable` is `unreachable`. `Ghost` statements and the `FunctionSpec` are dropped.
 - **Names.** A function of the program is `@"fn.<name>"` (internal, quoted, since a lifted function is named `outer::inner`), the statements of `main` are `@tersus_main` (names of the program may use any letter, so a name is written as its UTF-8 bytes, with every one that is not printable ASCII as `\hh`, and the file stays ASCII), and the C-level `main` calls that and prints the result by the descriptor of its type (`tersus_print`). A program can finish without returning on some path (`if c { return 1; };`), where `tersus run` prints nothing, so when `main` returns a value its function returns the value with a flag that says whether `_0` was assigned (kept in a slot that every assignment of `_0` sets), and the C-level `main` prints only then.
@@ -271,7 +271,7 @@ signature stubs remain present during those checks, then leave the unit.
 ## Ownership
 
 The production transformations are `insertOwnership` and `expandRefWrites` in
-`examples/mir/ownership/`, hosted by `MirHousekeeping`. The order is ghost
+`lib/mir/ownership/`, hosted by `MirHousekeeping`. The order is ghost
 erasure, reference-write expansion, list lowering, Haskell `MirMono`
 monomorphization, Tersus ownership, verification, then emission. The
 operand-role classification move checking uses is in `MirMoves`; the heap
@@ -348,7 +348,7 @@ A local is dropped before an assignment or call overwrites a value it still owns
 The MIR package imports `data::codec::codec` for `Token`, `Parsed`, `Size`,
 `Type`, tokenization, escaping, decimal numbers and size/type read/write helpers.
 AST consumers import that same module; the MIR record schema and program
-readers/writers stay in `examples/mir`. `mir::support::support` imports those
+readers/writers stay in `lib/mir`. `mir::support::support` imports those
 codec types and the reader's declarations. It owns the shared declaration
 lookup and variant ownership, array classification, primitive layout results,
 Tersus type/name rendering and LLVM name escaping. Its result records and
@@ -362,7 +362,7 @@ removing permissions. Their field layouts call those local rules.
 
 `tersus mir --data <file>` prints the MIR that native code is made from (the owned MIR of the Ownership section) as text that a program can read, and `MirData` reads and writes it (`readProgram (writeProgram p) = Ok (forNative p)`, for every example and every program of the native tests: `TestMirData`). It is what the lowering to LLVM IR written in Tersus is given (`STEP31.md`), and the emitter gives the same IR for the program read back from the data as for the program (`TestMirEmit`), so the data is all that the code made needs. Only what the emitter uses is in it: the ghost statements, the contracts and loop invariants, the structs with sizes and the invariants of structs are left out (`forNative`), since the validator is done with them and monomorphization has made their copies.
 
-The shared MIR record declarations and parsers are in `examples/mir/reader/reader.tersus`; the normalizing writer is in `examples/mir/writer/writer.tersus`. `examples/mir/mir_reader/mir_reader.tersus` imports both and reads/writes version 1. The writer also exports `printProgramWithGhosts` for version 2, retaining numbered ghost IDs, and `printProgramAsRead`, which the eraser writes version 1 with: a list or a Box read from the `list` or `box` token of older data is written with that token again (`printTypeWith` of `data::codec::codec`), where the other entries write every list and Box as its named struct. `tersus mir --data p.tersus | tersus run examples/mir/mir_reader/mir_reader.tersus` prints the data again, byte for byte (`TestMirReader` does it natively for every example, every program of the native tests, and for the reader's own data, and has it refuse the texts that are not the data of a program). It reads the file that the writer of `MirData` makes: the types, then the functions, then `main`, a record to a line, and it stops at the first empty line. `examples/mir/emit/emit.tersus` is the lowering to LLVM IR written with that reader; it writes all of the IR of the program (`TestMirEmit`), and with the arguments `outline` and `bodies` the declarations with the descriptors and the entry point, and the code of each function.
+The shared MIR record declarations and parsers are in `lib/mir/reader/reader.tersus`; the normalizing writer is in `lib/mir/writer/writer.tersus`. `lib/mir/mir_reader/mir_reader.tersus` imports both and reads/writes version 1. The writer also exports `printProgramWithGhosts` for version 2, retaining numbered ghost IDs, and `printProgramAsRead`, which the eraser writes version 1 with: a list or a Box read from the `list` or `box` token of older data is written with that token again (`printTypeWith` of `data::codec::codec`), where the other entries write every list and Box as its named struct. `tersus mir --data p.tersus | tersus run lib/mir/mir_reader/mir_reader.tersus` prints the data again, byte for byte (`TestMirReader` does it natively for every example, every program of the native tests, and for the reader's own data, and has it refuse the texts that are not the data of a program). It reads the file that the writer of `MirData` makes: the types, then the functions, then `main`, a record to a line, and it stops at the first empty line. `lib/mir/emit/emit.tersus` is the lowering to LLVM IR written with that reader; it writes all of the IR of the program (`TestMirEmit`), and with the arguments `outline` and `bodies` the declarations with the descriptors and the entry point, and the code of each function.
 
 The first line is `tersus-mir 1`. Every other line is a record of words and numbers separated by one space, with names in quotes (the UTF-8 bytes of the name; printable ASCII as it is, and the others, `"` and `\` as `\xHH`), so the text is ASCII and a reader needs only a line, its words and its numbers. The order of the records is that of the maps they were in, which the emitter keeps: the types (`struct` and `enum`) by name, the functions by name, then `main`. A function is its `function` (or `main`) line, a `local` line for each local, a `block` line for each block followed by its statements and the line of its terminator, and `end`:
 
@@ -378,6 +378,38 @@ end
 ```
 
 A type is `int`, `byte`, `bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`, `forall N "n"... N "n"... T`, `param "n"` or `ref T`, and a size is `c N`, `any`, `p "n"` or `v N`. An operand is `copy L`, `move L` or `const C`, and a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. A statement is `assign L RVALUE`, `peek L RVALUE` or `drop L`, and a terminator `goto B`, `switch O B B`, `call O N O... L B`, `return` or `unreachable`. An rvalue is `use O`, `binary OP O O` (`add sub mul div mod eq noteq lt lteq gt gteq`), `listop OP N O...` (the names of the `ListOp`s, as `get`, `newArray` and `writeByte`), `makelist N O...`, `makebox O`, `unbox O`, `unsize O`, `makedata "n" N ("f" O)...`, `readfield O "n" "f"`, `isvariant O "n"`, `asvariant O "n"`, `clone O` or `takefield L "n" "f"`.
+
+## The mir package
+
+`lib/mir/` is a package (package name `mir`) whose four entry programs share one MIR reader. The round-trip reader, the eraser and the ownership passes share the declarations-only `writer` module; its `printProgramWithGhosts` preserves ghost IDs in MIR v2. The emitter imports the ownership request dispatcher as well as its LLVM lowering files. The checker, eraser and emitter also import `support` for phase-neutral metadata. Only the selected entry file runs; sibling files and the ownership module contain declarations. Full layouts stay local. The eraser writes with the shared writer too (`printProgramAsRead` keeps the `list` and `box` tokens of older data).
+
+| Entry | What it does | With no input |
+| --- | --- | --- |
+| `mir/mir_reader/mir_reader.tersus` | The MIR as data, read and written by a program (step 31, `STEP31.md`): the types of the MIR as enums and structs, a tokenizer, a parser for each of them in the style of the emitter to come (a `Parsed<T>` of the value, the index after it and whether it could be read; every index proved in range) and a writer. It reads the MIR as data from the standard input (the host feeds it what `tersus mir --data` prints, and programs before their ghosts are erased too) and writes the same text; it is made to read its own data too (the largest input, 22,000 lines) | returns `1` with no input (it says on the standard error that the input is not the MIR as data) |
+| `mir/mir_verify/mir_verify.tersus` | The MIR as data, checked by a program (REPLACING_HASKELL.md target 3): the shared reader of the package, then the MIR well-formedness and type checks the host runs on every program (through `MirHousekeeping`) (every block a jump names is there, every local and function used is declared, and the types of statements, switches and calls), with its own phase-specific full layout rules and the shared primitive layout helpers. It reads the MIR as data from the standard input (the host feeds it what `tersus mir --data` prints, and programs before their ghosts are erased too) and writes `OK` for a well formed program; for one that is not it says why on the standard error and returns `1`. What erases ghosts is not checked: the data has none left to erase | returns `1` with no input (it says on the standard error that the input is not the MIR as data) |
+| `mir/mir_erase/mir_erase.tersus` | The ghosts of a program, erased by a program (REPLACING_HASKELL.md target 3): the shared reader of the package read as version 2 of the data (`tersus mir --ghost-data`: the types `block T` and `uninit T`, the statements `ghost` and `dissolve L`), then the ghost erasure the host runs on every program (through `MirHousekeeping`): the permissions out, each `Uninit<T>` made a `T`, and the refusal of the `Block::cast`s whose slots do not lay out alike. It reads the program before its ghosts are erased from the standard input and writes it as version 1 of the data, as `tersus mir --data` writes it | returns `1` with no input (it says on the standard error that the input is not the MIR as data) |
+| `mir/emit/emit.tersus` | The lowering from the MIR to LLVM IR written in Tersus (step 31, `STEP31.md`), first part: it reads `tersus mir --data` from the standard input (with the shared reader of the package) and writes all of the IR of the program for every example and program of the native tests; for the argument `outline` the declarations of the runtime, the descriptors of the types and the entry point, and for `bodies` the code of each function. It is the compiler's only emitter: `build`, `run` and `llvm` use it (built on first use, see `Bootstrap`), and the IR it wrote for itself is the seed `bootstrap/emitter.ll`. Written as the Haskell emitter it replaced was, with its local `String::then` for the long strings it builds (a `concat` that promises nothing, which keeps the time to validate down) | returns `1` with no input |
+
+```
+stack run tersus-exe -- eval lib/mir/mir_reader/mir_reader.tersus   # with MIR data on stdin, writes it again
+stack run tersus-exe -- check lib/mir/emit/emit.tersus              # prints OK
+```
+
+| File | Contents |
+| --- | --- |
+| `mir/reader/reader.tersus` | The MIR record types and parsers; imports the common token and type codec (`programAt` for version 1, `ghostProgramAt` for version 2 with `ghost`/`dissolve`). It declares only, and runs nothing |
+| `mir/support/support.tersus` | Shared declaration lookup, variant ownership, array classification, primitive layout results, type/name rendering and LLVM escaping. Owns its result records and Clone impls; reuses the codec's `catStrings` for text construction. Imports the codec and reader; full layouts and wire writers are not shared |
+| `mir/writer/writer.tersus` | Shared normalizing writer. `printProgram` writes MIR v1; `printProgramWithGhosts` writes MIR v2 with `ghost N` identities; `printProgramAsRead` writes MIR v1 with the `list` and `box` tokens of older data kept (the eraser's output). Structural type/size arguments and function metadata are retained |
+| `mir/ownership/ownership.tersus` | Declarations-only request dispatcher imported by the emitter. `pass ownership` or `pass expand` followed by MIR v2 produces MIR v2. `isOwnershipRequest` and `runOwnership` dispatch to the algorithms in `rewrite` and `refwrites`; `common`, `analysis` and `drops` provide their shared data and analyses. The host retains the Haskell monomorphization adapter and metadata sidecars |
+| `mir/mir_reader/mir_reader.tersus` | The round-trip entry: imports the shared reader and writer |
+| `mir/emit/emit.tersus` | Emitter entry and program assembly. It writes LLVM IR for MIR v1, or dispatches `pass ownership` and `pass expand` requests over MIR v2 to the ownership module. The pinned emitter seed includes both passes |
+| `mir/emit/types.tersus` | Emitter model, layouts, symbols, type closure and cached context; owns the module-local `String.then` |
+| `mir/emit/values.tersus` | Generation state, memory primitives, constants, operands and reference places |
+| `mir/emit/operations.tersus` | Arithmetic, array/address operations, rvalues, aggregate construction and statements |
+| `mir/emit/functions.tersus` | Calls, terminators, blocks, function signatures and frames |
+| `mir/emit/helpers.tersus` | Generated drop, clone and print functions |
+| `mir/mir_verify/mir_verify.tersus` | The checker the host runs on every program: imports the reader |
+| `mir/mir_erase/mir_erase.tersus` | The ghost erasure the host runs on every program: imports the reader and reads it with `ghostProgramAt` |
 
 ## Verification
 

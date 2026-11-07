@@ -47,7 +47,7 @@ reference API must not introduce a hidden escape from them.
 
 ## Reference-write implementation
 
-`examples/mir/ownership/refwrites.tersus` performs native reference-write
+`lib/mir/ownership/refwrites.tersus` performs native reference-write
 expansion through `MirHousekeeping.expandRefWrites`. It runs after ghost erasure
 and before list lowering or monomorphization: symbolic types and sizes, generic
 struct templates and function metadata must still be present. Reference-typed
@@ -63,7 +63,7 @@ errors and restores proof metadata using numbered ghost identities (see `MIR.md`
 
 `LANGUAGE.md` documents `&T` only on parameters, read-only views, explicit clones
 and value semantics. `MirMoves` follows projected places; the ownership pass
-(`examples/mir/ownership/`) copies a disturbed read-only view to preserve its
+(`lib/mir/ownership/`) copies a disturbed read-only view to preserve its
 old value. The validator reasons
 about immutable terms, not a mutable heap. These are foundations, not already a
 general borrow checker.
@@ -527,9 +527,9 @@ mid-implementation:
    the Tersus reader/validator of step 33 does not model references yet.
    The MIR-as-data format (`MirData`) carries `mutref`, `borrow`,
    `borrowmut`, `deref` and `assignref` rows, and
-   `examples/mir/mir_reader/mir_reader.tersus` reads and prints them (it shares the
+   `lib/mir/mir_reader/mir_reader.tersus` reads and prints them (it shares the
    reader with the emitter, which `TestMirEmit` keeps identical);
-   `examples/mir/mir_verify/mir_verify.tersus` does not model references yet.
+   `lib/mir/mir_verify/mir_verify.tersus` does not model references yet.
 
    **Checkpoint after stage 3.** Stages 1 to 3 are self-contained and are
    where most of the value is (no copies for reads, checked in-place update,
@@ -598,7 +598,7 @@ mid-implementation:
 Every stage updates `Types`/`Syntax`, elaboration, MIR serialization/verification,
 the interpreter, ownership lowering and both LLVM emitters as needed, and also
 the self-hosted path: `SelfHostedMir` (which today reports `TRef` as
-unsupported), `examples/mir/mir_reader/mir_reader.tersus`, `examples/mir/emit/emit.tersus` and the
+unsupported), `lib/mir/mir_reader/mir_reader.tersus`, `lib/mir/emit/emit.tersus` and the
 validator being written in Tersus for step 33 of the roadmap. A stage that
 adds a MIR operation or a type constructor is not done until the Tersus
 programs that read and emit MIR handle it, or explicitly refuse it with the
