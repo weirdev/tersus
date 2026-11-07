@@ -7,12 +7,16 @@ module TestControl
     , testCfgValidation
     ) where
 
+import Compile (lowerSource)
+import qualified Data.Map as Map
+import qualified Mir as M
 import TestParserFragments
 import Types
 import Syntax
 import TypeCheck
 import Utils
 import TestHarness
+import ValidatorNative (validateCompiled)
 
 -- A call nested in an expression keeps its callee's output contract, and the join of an `if` tries the function's own
 data ControlVerdict = ControlValid | ControlFails String
@@ -360,4 +364,31 @@ testCfgValidation =
         , parseValidateFailProgramHelper "h = first; x = h([]);" "Funct input validation failed"
         , -- A function that is called is the one that was defined, even when a local has its name later
           parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; fn g(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; }; h = f; { h = g; }; x = f(1); affirm x = 1;"
+        , -- The variants earlier tests excluded are excluded at a block only when their false edges are the only way into it
+          parseValidateFailProgramHelper "enum E { A, B, C }; fn f(e: E) -> Int { y = 0; if e is E::A { y = 1; }; if e is E::B { return 2; }; affirm y = 0; return y; }; x = f(E::A);" "Could not prove: y = 0"
+        , parseValidateFailProgramHelper "enum E { A, B, C }; fn f(e: E) -> Int { y = 0; if e is E::A { y = 1; }; if e is E::B { return 2; }; return 10 / (1 - y); }; x = f(E::A);" "Could not prove"
+        , bothEdgesOfATestIntoOneBlock
         ]
+
+-- A test whose two edges go to the same block is two ways into it. Source
+-- lowers each edge to a block of its own, so the program is lowered and its
+-- first test is then pointed straight at the block both arms jump to.
+bothEdgesOfATestIntoOneBlock :: TestResult
+bothEdgesOfATestIntoOneBlock = case lowerSource True "enum E { A, B, C }; fn f(e: E) -> Int { if e is E::A { } else { }; if e is E::B { return 2; }; if e is E::A { affirm 1 = 2; }; return 0; }; x = f(E::A);" of
+    Error e -> Just e
+    Ok program
+        | functions == M.progFunctions program -> Just "No test with two empty arms to join"
+        | otherwise -> testAssertErrorContains "Could not prove: 1 = 2" (validateCompiled program{M.progFunctions = functions})
+      where
+        functions = Map.map joinArms (M.progFunctions program)
+  where
+    joinArms fn = case Map.lookup (M.BlockId 0) (M.fnBlocks fn) of
+        Just (M.BasicBlock stmts (M.SwitchBool condition yes no))
+            | Just target <- jumpOnly yes
+            , jumpOnly no == Just target ->
+                fn{M.fnBlocks = Map.insert (M.BlockId 0) (M.BasicBlock stmts (M.SwitchBool condition target target)) (Map.delete yes (Map.delete no (M.fnBlocks fn)))}
+        _ -> fn
+      where
+        jumpOnly b = case Map.lookup b (M.fnBlocks fn) of
+            Just (M.BasicBlock [] (M.Goto target)) -> Just target
+            _ -> Nothing

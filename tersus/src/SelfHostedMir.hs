@@ -2068,8 +2068,8 @@ reachesName functions caller from target = go Set.empty [from]
         | Set.member x seen = go seen xs
         | otherwise = go (Set.insert x seen) (maybe [] callNamesOf (Map.lookup x allFns) ++ xs)
 
-block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Maybe (Bool, MirValue) -> Bool -> M.Function -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
-block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0' = do
+block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Maybe (Bool, MirValue) -> Bool -> M.Function -> Map.Map M.BlockId Int -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
+block types invariants functions rules termInfo allowCalls fn predecessors (blockId@(M.BlockId n), M.BasicBlock stmts end) b0' = do
     -- (the locals every path to a statement has assigned: a reference to an
     -- element is refreshed after a write of its root only where it exists)
     let b0 = b0'{buildDefined = Just (Map.findWithDefault Set.empty blockId (definitelyAssigned fn))}
@@ -2232,7 +2232,10 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                 && not (reachesName functions fn name (M.fnName fn))
         Nothing -> False
     -- The variants that the tests before this block, on the path that reaches
-    -- it by their false edges, found the same value not to be
+    -- it by their false edges, found the same value not to be, when that path
+    -- is the only way into each block on it
+    testedBefore _ here
+        | Map.findWithDefault 0 here predecessors /= 1 = []
     testedBefore source here = case [ (b, (v, before))
                                     | (b, M.BasicBlock tested (M.SwitchBool (M.Copy l) _ n)) <- Map.toList (M.fnBlocks fn)
                                     , n == here
@@ -2654,6 +2657,11 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                 Gt -> (2, b, a)
                 GtEq -> (3, b, a)
 
+-- How many edges of a function's graph enter each block, the function's own
+-- entry among them
+predecessorEdges :: M.Function -> Map.Map M.BlockId Int
+predecessorEdges fn = Map.fromListWith (+) ((M.BlockId 0, 1) : [(target, 1) | blk <- Map.elems (M.fnBlocks fn), target <- M.successors (M.blockTerminator blk)])
+
 -- The blocks of each loop: its header and every block that can get back to it
 -- without passing the header. A block that leaves the loop (a return, or an
 -- exit from inside the body) is not in the region, so the checker walks it as
@@ -2783,8 +2791,9 @@ encodeFunction physical types invariants functions rules allowCalls fn
                 (steps, variantRef, b1) <- exprOperand (M.specEnv spec) expr withRequires
                 pure (steps, Just (True, variantRef), b1)
             _ -> pure ([], Nothing, withRequires)
-        let addBlock (blocks, b) entry = do
-                (v, b') <- block types invariants functions rules termInfo allowCalls fn entry b
+        let predecessors = predecessorEdges fn
+            addBlock (blocks, b) entry = do
+                (v, b') <- block types invariants functions rules termInfo allowCalls fn predecessors entry b
                 pure (blocks ++ [v], b')
         (blocks, b) <- foldM addBlock ([], withVariant) (Map.toList (M.fnBlocks fn))
         let (entryLiterals, b') = literalFacts (paramFacts ++ sizeFacts ++ requires ++ variantSteps) b
