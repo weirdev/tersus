@@ -220,27 +220,6 @@ impl Clone for RelationFact { };
 impl Copy for RelationFact { };
 
 
-enum ProofStep {
-    KnownEquality { left: Int, right: Int },
-    KnownDifferent { left: Int, right: Int },
-    KnownOrder { left: Int, right: Int, strict: Bool },
-    KnownDifference { left: Int, right: Int, bound: Int },
-    Check { goal: ValidatorGoal },
-};
-
-impl Clone for ProofStep { };
-
-impl Copy for ProofStep { };
-
-struct ProofResult { valid: Bool, failedAt: Int };
-
-impl Clone for ProofResult { };
-
-impl Copy for ProofResult { };
-struct ProofRun { valid: Bool, failedAt: Int, state: ValidatorContext };
-
-impl Clone for ProofRun { };
-
 // A goal holds of a context when it holds of the context's facts, or of them
 // with the sum and refined orders derived. Several goals asked of one context
 // share its analysis and its derived context through the cache.
@@ -255,30 +234,6 @@ impl Clone for EntailmentCache { };
 struct CachedAnswer { holds: Bool, cache: EntailmentCache };
 
 impl Clone for CachedAnswer { };
-
-// A host translates verified MIR blocks to this form. Branch facts are trusted
-// consequences of taking that edge, not unchecked source assertions. A path
-// that contains an operation the bridge cannot encode ends in Unsupported.
-enum FlowEnd {
-    Done,
-    Jump { target: Int },
-    Branch { yes: Int, no: Int, yesFacts: List<ProofStep>, noFacts: List<ProofStep> },
-    Unsupported,
-};
-
-impl Clone for FlowEnd { };
-
-struct FlowBlock { id: Int, steps: List<ProofStep>, end: FlowEnd };
-
-impl Clone for FlowBlock { };
-
-// status 0: valid; 1: unproved obligation; 2: unsupported operation;
-// 3: invalid graph; 4: a cycle needs an invariant and has not been checked.
-struct FlowResult { status: Int, block: Int, step: Int };
-
-impl Clone for FlowResult { };
-
-impl Copy for FlowResult { };
 
 // Locals are names for immutable symbolic terms. A copy changes the binding,
 // not the term or the facts that describe it.
@@ -362,9 +317,11 @@ enum ExecutionStep {
     AssumeVariant { object: ValueRef, family: Int, constructor: Int, matches: Bool },
     RequireVariant { object: ValueRef, family: Int, constructor: Int },
     CheckWithin { inner: ValueRef, outer: ValueRef },
-    Proof { step: ProofStep },
     // the path assumes a forall, which saturate uses where a check fails
     AssumeForall { template: ForallTemplate },
+    // the steps run on a copy of the state, which is then dropped
+    Scoped { steps: List<ExecutionStep> },
+    Unsupported,
 };
 
 impl Clone for ExecutionStep { };
@@ -442,8 +399,8 @@ impl Clone for SatWork { };
 // state, and a later state of the block has those facts and more as long as
 // every step between only adds facts and binds locals (addsFactsOnly), so a
 // goal it proves holds there too; a goal it cannot prove is asked again of
-// the facts there are now. Any other step (a proof step, the application that
-// forgets a term) drops it.
+// the facts there are now. Any other step (an application that forgets a
+// term) drops it.
 enum SharedEntailment { Missing, Found { cache: EntailmentCache } };
 
 impl Clone for SharedEntailment { };

@@ -1246,7 +1246,7 @@ validatorCertificateRejections = do
                                 Just wire -> Ok (name, wire, map snd checks, "1")
                         malformed = "0\ni 0\nl 0\n"
                         wireChecks = malformed : map snd (drop 1 ownChecks)
-                        variants = [prepare "noTemplates", prepare "driverPrintVerdict", Ok ("wire-context", malformed, wireChecks, "3")]
+                        variants = [prepare "noTemplates", prepare "driverPrintVerdict", Ok ("wire-context", malformed, wireChecks, "2")]
                         baseKey = ValidatorNative.certificateKey unchecked (map snd libraryChecks) (map snd ownChecks)
                     withCacheHome $ \home -> do
                         results <- forM variants $ \variant -> case variant of
