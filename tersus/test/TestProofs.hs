@@ -81,6 +81,10 @@ testForallProof =
             , parseValidProgramHelper "n = 2; affirm forall j in 0..n: j < 2;"
             , parseValidateFailProgramHelper "n = 3; affirm forall j in 0..n: j < 2;" "Could not prove"
             , parseValidProgramHelper "affirm forall j in 3..3: 1 = 2;"
+            , -- Nothing proved inside a forall check is kept, so an empty range proves nothing after it
+              parseValidateFailProgramHelper "affirm forall j in 3..3: 1 = 2; affirm 1 = 2;" "Could not prove: 1 = 2"
+            , parseValidateFailProgramHelper "fn f(x: Int) -> Int { n = 0; affirm forall j in 0..n: x > 5; affirm x > 5; return x; }; y = f(1);" "Could not prove: x > 5"
+            , parseValidateFailProgramHelper "fn f(x: Int) -> Int { affirm forall j in 0..0: 10 / x >= 0; affirm x != 0; return x; }; y = f(1);" "Could not prove: x != 0"
             , -- Facts the program knows about other variables are used
               parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n <= 2; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };"
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n <= 3; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };" "Could not prove"

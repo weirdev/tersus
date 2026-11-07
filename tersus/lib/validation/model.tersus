@@ -399,8 +399,7 @@ impl Clone for SatWork { };
 // state, and a later state of the block has those facts and more as long as
 // every step between only adds facts and binds locals (addsFactsOnly), so a
 // goal it proves holds there too; a goal it cannot prove is asked again of
-// the facts there are now. Any other step (an application that forgets a
-// term) drops it.
+// the facts there are now. Any other step drops it.
 enum SharedEntailment { Missing, Found { cache: EntailmentCache } };
 
 impl Clone for SharedEntailment { };
