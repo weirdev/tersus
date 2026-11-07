@@ -43,6 +43,9 @@ testPointers =
             , testCase "a block of slots of another size" (rejected "(p, b) = Addr::alloc(2); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, true, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c);" "are not the same size")
             , testCase "the permission to memory the program did not allocate is an assumption" (valid "p = Addr::fromInt(4096); b = Block::assume(p, 2); b = Addr::write(p, 0, 5, b); b = Addr::dropValue(p, 0, b); return Addr::free(p, b);")
             , testCase "an emptied slot is known empty" (valid "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); b = Addr::dropValue(p, 0, b); affirm filled(b, 0) = false; return Addr::free(p, b);")
+            -- (what a function that only allocates gives is still one value a
+            -- proof may name, unlike what the world gives)
+            , testCase "a proof names a function that allocates" (valid "fn f() -> Int { (p, b) = Addr::alloc(1); x = Addr::free(p, b); return x; }; affirm f() = f(); return 0;")
             , testCase "a Vec on an address" (runs vec "1")
             ]
         , TestList
@@ -110,6 +113,7 @@ testPointers =
             [ testCase "assume gives a fact" (valid "fn f(x: Int) -> Int [{ }] [{ affirm return > 0; }] { assume x > 0; return x; }; return f(1);")
             , testCase "the assumptions of a program are listed" (testAssertEq (assumptionsOf "assume 1 > 0;\nfn f(n: Int) -> Int { assume n = n; return n; };\n(p, b) = Addr::alloc(1);\nc = Block::assume(p, 0);\naxiom twice(x) [{ }] [{ affirm x + x = 2 * x; }];\nd = Addr::free(p, b);\nreturn d;") (Ok ["line 1:1: assume 1 > 0", "line 2:23: assume n = n", "line 4:1: Block::assume(p, 0)", "line 5:1: axiom twice(x)"]))
             , testCase "none" (testAssertEq (runSource Assumptions "return 1;") (Ok "No assumptions"))
+            , testCase "each assumption of a permission is a permission of its own" (rejected "p = Addr::fromInt(4096); b1 = Block::assume(p, 2); b2 = Block::assume(p, 2); affirm origin(b1) = origin(b2); x = Addr::free(p, b1); return x + Addr::free(p, b2);" "Could not prove: origin(b1) = origin(b2)")
             ]
         ]
   where
