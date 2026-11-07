@@ -636,12 +636,8 @@ readersOfInput program = grow (Set.fromList [name | (name, fn) <- functions, any
         Peek _ (ListOp op _) -> readsWorldOp op
         _ -> False
     statementsOf fn = concatMap blockStatements (Map.elems (fnBlocks fn))
-    -- (the functions that a function names, as the callee of a call or anywhere a value is used)
-    mentions fn = Set.fromList (concatMap (concatMap operandFns . operandsOfRvalue) (concatMap rvaluesOf (statementsOf fn)) ++ concatMap terminatorFns (map blockTerminator (Map.elems (fnBlocks fn))))
-    rvaluesOf s = case s of
-        Assign _ rv -> [rv]
-        Peek _ rv -> [rv]
-        _ -> []
+    -- (the functions that a function names, as the callee of a call or anywhere a value is used: the same relation `SelfHostedMir.inputReadersOf` grows its set over)
+    mentions = functionsNamed
     grow known =
         let more = Set.fromList [name | (name, fn) <- functions, not (Set.member name known), not (Set.null (Set.intersection (mentions fn) known))]
          in if Set.null more then known else grow (Set.union known more)

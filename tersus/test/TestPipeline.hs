@@ -1032,6 +1032,29 @@ selfHostedQueryFamilies program =
                       , checkMirSubset "fn f(x: Int) -> Int { return x; }; a = f(1); b = f(2); affirm a = b; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int { return x; }; fn g(x: Int) -> Int { return x; }; a = f(1); b = g(1); affirm a = b; return 0;" (Just False)
                       , checkMirSubset "fn f() -> Int { return readByte(); }; a = f(); b = f(); affirm a = b; return 0;" (Just False)
+                      , checkMirSubset "fn f() -> Int { return fileStore(); }; a = f(); b = f(); affirm a = b; return 0;" (Just False)
+                      , checkMirSubset "fn f(x: Byte) -> Int { return storeByte(x); }; a = f(toByte(65)); b = f(toByte(65)); affirm a = b; return 0;" (Just False)
+                      -- (a proof cannot name a function whose result the world gives, so
+                      -- it cannot make two of its calls one value either)
+                      , checkMirSubset "fn f() -> Int { return fileStore(); }; affirm f() = f(); return 0;" Nothing
+                      , checkMirSubset "fn f(x: Byte) -> Int { return storeByte(x); }; affirm f(toByte(65)) = f(toByte(65)); return 0;" Nothing
+                      -- (naming it through a local is naming it: the set grows over every
+                      -- function a body names, not only over the callees of its calls)
+                      , checkMirSubset "fn f() -> Int { return fileStore(); }; fn g() -> Int { h = f; return h(); }; affirm g() = g(); return 0;" Nothing
+                      , checkMirSubset "fn f() -> Int { return readByte(); }; fn g() -> Int { h = f; return h(); }; affirm g() = g(); return 0;" Nothing
+                      , checkMirSubset "fn f(x: Byte) -> Int { return storeByte(x); }; fn g(x: Byte) -> Int { h = f; return h(x); }; affirm g(toByte(65)) = g(toByte(65)); return 0;" Nothing
+                      , checkMirSubset "fn f() -> Int { return fileStore(); }; fn g() -> Int { h = f; return h(); }; fn k() -> Int { return g(); }; affirm k() = k(); return 0;" Nothing
+                      -- (a wrapper that names only a pure function still has one value per argument)
+                      , checkMirSubset "fn f(x: Int) -> Int { return x + 1; }; fn g(x: Int) -> Int { h = f; return h(x); }; affirm g(3) = g(3); return 0;" (Just True)
+                      , checkMirSubset "a = fileStore(); b = fileStore(); affirm a = b; return 0;" (Just False)
+                      , checkMirSubset "a = fileStore(); affirm a >= 0 - 1; affirm a <= 0; return 0;" (Just True)
+                      , checkMirSubset "a = pathByte(toByte(65)); b = pathByte(toByte(65)); affirm a = b; return 0;" (Just False)
+                      -- (a byte added to a path or to a file gives the length so far, not the byte)
+                      , checkMirSubset "a = pathByte(toByte(65)); affirm a = 65; return 0;" (Just False)
+                      , checkMirSubset "a = pathByte(toByte(65)); affirm a >= 0; return 0;" (Just True)
+                      , checkMirSubset "a = storeByte(toByte(65)); b = storeByte(toByte(65)); affirm a = b; return 0;" (Just False)
+                      , checkMirSubset "a = storeByte(toByte(65)); affirm a = 65; return 0;" (Just False)
+                      , checkMirSubset "a = storeByte(toByte(65)); affirm a >= 0; return 0;" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return x; }; return f(1);" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return x; }; return f(0);" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; x = 3; x = f(x); affirm x = 3; return x;" (Just True)

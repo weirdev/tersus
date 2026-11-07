@@ -502,22 +502,26 @@ proofLastSteps dest listRef b0 = do
 ensuresOf :: M.FunctionSpec -> [ValidationStatement]
 ensuresOf spec = [clause | clause@(AssignProofVar _ _) <- M.specRequires spec] ++ M.specEnsures spec
 
--- The functions that read the input or the arguments, or call one that does:
--- a proof cannot name one (it has no one value). A function that only
--- allocates is not one of them; its calls are new values all the same.
+-- The functions whose result the world gives: they read the input or the
+-- arguments, or add a byte to the path or to the file being stored, or store
+-- it, or name one that does. A proof cannot name one (it has no one value).
+-- A function that only allocates is not one of them; its calls are new values
+-- all the same, so the allocating operations of `M.readsWorldOp` are left out.
 inputReadersOf :: Map.Map Name M.Function -> Set.Set Name
 inputReadersOf functions = grow seeds
   where
-    inputOps = [M.ReadByte, M.ArgCount, M.ArgByte, M.PathByte, M.FileLoad, M.FileByte]
+    inputOps = [M.ReadByte, M.ArgCount, M.ArgByte, M.PathByte, M.FileLoad, M.FileByte, M.StoreByte, M.FileStore]
     statementsOf fn = concatMap M.blockStatements (Map.elems (M.fnBlocks fn))
     reads s = case s of
         M.Assign _ (M.ListOp op _) -> op `elem` inputOps
         M.Peek _ (M.ListOp op _) -> op `elem` inputOps
         _ -> False
     seeds = Set.fromList [n | (n, fn) <- Map.toList functions, any reads (statementsOf fn)]
-    callees fn = [n | M.BasicBlock _ (M.Call (M.Const (M.CFn n)) _ _ _) <- Map.elems (M.fnBlocks fn)]
+    -- A direct callee is not the only way to reach one: `h = f; h();` calls f
+    -- through a local, so the closure follows every function a body names, the
+    -- way `M.readersOfInput` does.
     grow known =
-        let more = Set.fromList [n | (n, fn) <- Map.toList functions, Set.notMember n known, any (`Set.member` known) (callees fn)]
+        let more = Set.fromList [n | (n, fn) <- Map.toList functions, Set.notMember n known, not (Set.null (Set.intersection (M.functionsNamed fn) known))]
          in if Set.null more then known else grow (Set.union known more)
 
 -- The names a contract defines (define s = size(lst);), each as the term it
@@ -1436,13 +1440,14 @@ statement rules (M.Assign (M.Local dest) (M.ListOp (M.Narrow signed width) [sour
         (high, b4) <- operand (M.Const (M.CInt highValue)) b3
         let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
         pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [value])], step "Assume" [("relation", MInt 3), ("left", low), ("right", ref)], step "Assume" [("relation", MInt 2), ("left", ref), ("right", high)]], b4)
+-- (a write gives the byte it was given; what a byte added to a path or to a
+-- file to be stored gives is the length so far, which the clause below havocs)
 statement rules (M.Assign (M.Local dest) (M.ListOp op [source])) b
-    | op `elem` [M.WriteByte, M.WriteError, M.PathByte, M.StoreByte] = do
+    | op `elem` [M.WriteByte, M.WriteError] = do
     (value, b') <- operand source b
     let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
-        isWrite = op == M.WriteByte || op == M.WriteError
     pure
-        ( [ if isWrite then step "Assign" [("local", MInt (toInteger dest)), ("value", value)] else step "Havoc" [("local", MInt (toInteger dest))]
+        ( [ step "Assign" [("local", MInt (toInteger dest)), ("value", value)]
           , step "Assume" [("relation", MInt 3), ("left", value), ("right", ref)]
           , step "Assume" [("relation", MInt 3), ("left", ref), ("right", value)]
           ]
@@ -1488,7 +1493,7 @@ statement rules (M.Assign (M.Local dest) (M.ListOp op args)) b0
         -- An operation that makes a new address or permission is not a
         -- function of its arguments: doing it twice makes two things, so
         -- its application carries a tag no other application has.
-        (argRefs, b3) <- if op `elem` [M.AddrAlloc, M.BlockNew, M.UninitNew, M.UninitEmpty]
+        (argRefs, b3) <- if op `elem` [M.AddrAlloc, M.BlockNew, M.BlockAssume, M.UninitNew, M.UninitEmpty]
             then do
                 let (tag, bx) = fresh b3
                 (tagRef, bx') <- operand (M.Const (M.CInt tag)) bx
@@ -1549,7 +1554,9 @@ statement rules (M.Assign (M.Local dest) (M.ListOp M.FileStore [])) b0 = do
     (minusOne, b2) <- operand (M.Const (M.CInt (-1))) b1
     (zero, b3) <- operand (M.Const (M.CInt 0)) b2
     let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
-    pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [])], step "Assume" [("relation", MInt 3), ("left", minusOne), ("right", ref)], step "Assume" [("relation", MInt 3), ("left", ref), ("right", zero)]], b3)
+    -- (storing is a value of its own at each call, as loading is)
+    let _ = function
+    pure ([step "Havoc" [("local", MInt (toInteger dest))], step "Assume" [("relation", MInt 3), ("left", minusOne), ("right", ref)], step "Assume" [("relation", MInt 3), ("left", ref), ("right", zero)]], b3)
 statement rules (M.Assign (M.Local dest) (M.ListOp operation [source])) b0
     | operation == M.First || operation == M.Last = do
         (listRef, b1) <- operand source b0
