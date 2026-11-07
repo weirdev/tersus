@@ -52,16 +52,16 @@ fn parse(buf: &List<Int>) -> Parsed {
     return Parsed::Message { version: version, payload: slice(buf, 2, end) };
 };
 
-// The other direction: the buffer for a version and a payload, whose size and length field are proved. The loop's
-// invariants are inferred: out starts with two numbers and grows by one per element, and its first two numbers
-// stay as they were, so the length field is still there after the loop.
+// The other direction: the buffer for a version and a payload, whose size and length field are proved. The loop
+// carries its invariants: element properties are not inferred, so the length field's place is stated with the
+// bound its read needs.
 fn encode(version: Int, payload: &List<Int>) -> List<Int>
     [{ }]
     [{ affirm size(return) = size(payload) + 3; affirm get(return, 1) = size(payload); }]
 {
     out = push(push([], version), size(payload));
-    for x in payload {
-        out = push(out, x);
+    for i in 0..size(payload) [{ affirm size(out) = i + 2; affirm get(out, 1) = size(payload); }] {
+        out = push(out, get(payload, i));
     };
     sum = checksum(out, 0, size(out));
     return push(out, sum);

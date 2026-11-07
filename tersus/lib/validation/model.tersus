@@ -454,12 +454,14 @@ struct ExecutionFlowResult { status: Int, block: Int, step: Int, state: Executio
 
 impl Clone for ExecutionFlowResult { };
 
-struct InferSubject { local: Int, isSize: Bool, temp: Int, term: Int, kind: Int, indexTerm: Int };
+struct InferSubject { local: Int, isSize: Bool, temp: Int, term: Int };
 
 impl Clone for InferSubject { };
 
 impl Copy for InferSubject { };
 
+// left/right are entry-evaluation scratch terms, not replayable references.
+// assumes/checks replay through locals and constants from the initial state.
 struct InferGoal { relation: Int, left: Int, right: Int, assumes: List<ExecutionStep>, checks: List<ExecutionStep> };
 
 impl Clone for InferGoal { };

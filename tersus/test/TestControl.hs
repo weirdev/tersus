@@ -206,13 +206,13 @@ testInferredInvariants =
             , -- A loop that starts at a variable: the counter and the size differ by it
               parseValidProgramHelper "fn f(buf: List<Int>, lo: Int, hi: Int) -> List<Int> [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }] [{ affirm size(return) = hi - lo; }] { out = []; for i in lo..hi { out = push(out, get(buf, i)); }; return out; };"
             , parseValidateFailProgramHelper "fn f(buf: List<Int>, lo: Int, hi: Int) -> List<Int> [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }] [{ affirm size(return) = hi - lo; }] { out = []; for i in lo..hi { out = push(push(out, get(buf, i)), 0); }; return out; };" "Could not prove: size(return) = hi - lo"
-            , -- The first elements of a list stay as they were when the loop only pushes
-              parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 1) = size(p); }] { out = push(push([], v), size(p)); for x in p { out = push(out, x); }; return out; };"
-            , parseValidProgramHelper "fn f(p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 0) = 5; affirm get(return, 1) = 6; }] { out = [5, 6]; for x in p { out = push(out, x); }; return out; };"
+            , -- Element properties are explicit invariants, with their read bounds
+              parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 1) = size(p); }] { out = push(push([], v), size(p)); for x in p [{ affirm size(out) >= 2; affirm get(out, 1) = size(p); }] { out = push(out, x); }; return out; };"
+            , parseValidProgramHelper "fn f(p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 0) = 5; affirm get(return, 1) = 6; }] { out = [5, 6]; for x in p [{ affirm size(out) >= 2; affirm get(out, 0) = 5; affirm get(out, 1) = 6; }] { out = push(out, x); }; return out; };"
             , parseValidateFailProgramHelper "fn f(p: List<Int>) -> List<Int> [{ affirm size(p) > 0; }] [{ affirm get(return, 1) = 6; }] { out = [5, 6]; for i in 0..size(p) { out = set(out, 1, get(p, i)); }; return out; };" "Could not prove: index < size(list) (in f)"
-            , -- The elements of literal lists do not push a counter or a comparison out of the candidates
+            , -- Scalar inference still works beside changing lists
               parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm i = n; return 0; }; x = f(3);"
-            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm get(a, 1) = 2; return 0; }; x = f(3);"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n [{ affirm size(a) = 3; affirm get(a, 1) = 2; }] shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm get(a, 1) = 2; return 0; }; x = f(3);"
             , -- A loop that returns infers its invariants too, one candidate at a time
               parseValidProgramHelper "fn f(a: List<Int>) -> Int { out = []; for i in 0..size(a) { if get(a, i) > 2 { return i; }; out = push(out, 0); }; return -1; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = size(a); return -1; };"
@@ -380,7 +380,50 @@ testCfgValidation =
         , ("reassigned-true-bool-local-returns-inside", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 5; }] { flag = false; flag = true; n = 0; while flag [{ affirm flag = true; }] shrinks n { return 5; }; return 0; }; return f();" (Just (VInt 5)))
         , ("false-bool-local-skips-body", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 0; }] { flag = false; n = 0; while flag [{ affirm flag = false; affirm n >= 0; }] shrinks n { return 5; }; affirm n = 0; return n; }; return f();" (Just (VInt 0)))
         , ("while-false-skips-body", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 0; }] { n = 0; while false [{ affirm n >= 0; }] shrinks n { return 5; }; affirm n = 0; return n; }; return f();" (Just (VInt 0)))
-        ])
+        ] ++ loopCandidateRegressions)
+
+loopCandidateRegressions :: [(String, TestResult)]
+loopCandidateRegressions =
+    [ ("p_oob_withpush", rejected (emptyListBranch "a = push(clone(l), 7); affirm 1 = 2;"))
+    , ("p_oob_read", rejected (emptyListBranch "a = push(clone(l), 7); x = 10 / (size(a) - 1);"))
+    , ("p_oob_nopush", rejected (emptyListBranch "affirm 1 = 2;"))
+    , ("p_oob_read_ctl", parseValidateEvalProgramHelper (emptyListBranch "a = push(clone(l), 7); x = 10 / (size(a) - 2);") (Just (VInt (-10))))
+    , ("q_ic_crash", rejected "fn f(k: Int) -> Int [{ affirm k <= 20; }] [{ }] { l = [7, 8, 9]; i = k; x = 0; while i < 20 [{ affirm i <= 20; }] shrinks 20 - i { x = 10 / (i - i); l = set(l, 0, i); i = i + 1; }; return x; }; return f(0);")
+    , ("inferred-scalar-distance-through-temporaries", parseValidateEvalProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 10; }] { a = 10; b = 13; c = 16; while a < n [{ affirm a <= n; }] shrinks n - a { a = a + 1; b = b + 1; c = c + 1; }; affirm b = a + 3; affirm c = b + 3; return c; }; return f(12);" (Just (VInt 18)))
+    , ("inferred-size-counter-distance", parseValidateEvalProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { out = [7, 8, 9]; i = 0; while i < n [{ affirm i <= n; }] shrinks n - i { out = push(out, i); i = i + 1; }; affirm size(out) = i + 3; return size(out); }; return f(2);" (Just (VInt 5)))
+    ] ++
+    [ (name, rejected (constantLoop prefix ("affirm 1 = 2; " ++ body)))
+    | (name, prefix, body) <-
+        [ ("q_ic_a", "l = [7, 8, 9];", "x = get(l, 0); i = i + 1;")
+        , ("q_ic_b", "l = [7, 8, 3];", "l = set(l, 0, i); i = i + 1;")
+        , ("q_ic_c", "z = 3; l = [7, 8, 9];", "l = set(l, 0, i); i = i + 1;")
+        , ("q_ic_d", "l = [7, 8, 9];", "l = set(l, 1, i); i = i + 1;")
+        , ("q_ic_e", "l = [7, 8];", "l = set(l, 0, i); i = i + 1;")
+        , ("q_ic_f", "l = [7];", "l = set(l, 0, i); i = i + 1;")
+        , ("q_ic_g", "l = [7, 8, 9];", "l = push(l, i); i = i + 1;")
+        , ("q_ic_h", "l = [7, 8, 9, 10, 11];", "l = set(l, 0, i); i = i + 1;")
+        , ("q_ic_i", "l = [7, 8, 9];", "l = set(l, 2, i); i = i + 1;")
+        , ("q_ic_j", "l = [7, 8]; z = 2;", "l = set(l, 0, i); i = i + 1;")
+        , ("q_ic_k", "l = [7, 8, 9];", "l = set(l, 0, 7); i = i + 1;")
+        , ("q_ic_l", "l = [7, 8, 9]; j = 0;", "l = set(l, 0, i); j = j + 1; i = i + 1;")
+        , ("q_ic_m", "l = [7, 7, 7];", "l = set(l, 0, 7); i = i + 1;")
+        , ("q_ic_n", "l = [7, 8, 9];", "l = set(l, 0, i); i = i + 5;")
+        , ("q_ic_o", "l = [7, 8, 9];", "l = set(l, 0, 5); i = i + 5;")
+        , ("q_ic_counters", "a = 10; b = 13; c = 16;", "a = a + 1; b = b + 1; c = c + 1; i = i + 1;")
+        , ("q_ic_allconst_ctl", "l = [7, 8, 9];", "l = set(l, 0, 5); i = i + 5;")
+        , ("q_ic_allconst", allConstants ++ "l = [7, 8, 9];", "l = set(l, 0, 5); i = i + 5;")
+        ]
+    ] ++
+    [ ("q_ic_shift" ++ show count, rejected (constantLoop "l = [7, 8, 9];" ("affirm 1 = 2; " ++ concat ["w" ++ show w ++ " = i; " | w <- [1 .. count]] ++ "l = set(l, 0, 5); i = i + 5;")))
+    | count <- [0, 1, 2, 3, 4, 6 :: Int]
+    ] ++
+    [ ("q_ic_p", rejected "fn f(k: Int, l0: List<Int>) -> Int [{ affirm k <= 20; affirm size(l0) = 3; }] [{ }] { l = l0; i = k; while i < 20 [{ affirm i <= 20; }] shrinks 20 - i { affirm 1 = 2; l = set(l, 0, i); i = i + 1; }; return i; }; return f(0, [1, 2, 3]);")
+    ]
+  where
+    rejected source = parseValidateFailProgramHelper source "Could not prove: "
+    emptyListBranch body = "fn f() -> Int { l = [5]; x = 0; i = 0; while i < 2 [{ affirm i >= 0; }] shrinks 2 - i { if size(l) = 0 { " ++ body ++ " } else { l = pop(l); }; i = i + 1; }; return x; }; return f();"
+    constantLoop prefix body = "fn f(k: Int) -> Int [{ affirm k <= 20; }] [{ }] { " ++ prefix ++ " i = k; while i < 20 [{ affirm i <= 20; }] shrinks 20 - i { " ++ body ++ " }; return i; }; return f(0);"
+    allConstants = concat ["z" ++ show index ++ " = " ++ (if value < 0 then "0 - " ++ show (-value) else show value) ++ "; " | (index, value) <- zip [0 :: Int ..] [-12 .. 24 :: Int]]
 
 -- A test whose two edges go to the same block is two ways into it. Source
 -- lowers each edge to a block of its own, so the program is lowered and its
