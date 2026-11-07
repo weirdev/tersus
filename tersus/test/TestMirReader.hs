@@ -1,6 +1,8 @@
 module TestMirReader (testMirReader, withProgram, programExecutable, sameText) where
 
 import Control.Concurrent.MVar (MVar, newMVar)
+import Control.DeepSeq (force)
+import Control.Exception (evaluate)
 import System.IO.Unsafe (unsafePerformIO)
 import qualified TersusParser
 import System.Environment (lookupEnv)
@@ -99,9 +101,9 @@ programExecutable path name = do
                 Ok text -> buildExecutable output text
     case parser of
         Error e -> pure (Error e)
-        Ok identity -> cachedProgram ("test-" ++ name)
-            (fingerprint [packageCacheInput path files, show backend, compilerSnapshotHash, identity, runtimeSource])
-            ("the test " ++ name) build
+        Ok identity -> do
+            key <- evaluate (force (fingerprint [packageCacheInput path files, show backend, compilerSnapshotHash, identity, runtimeSource]))
+            cachedProgram ("test-" ++ name) key ("the test " ++ name) build
 
 {-# NOINLINE readerExecutable #-}
 readerExecutable :: MVar (Maybe FilePath)

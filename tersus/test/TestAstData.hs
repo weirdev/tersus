@@ -1,6 +1,8 @@
 module TestAstData (testAstData, testAstReader) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.DeepSeq (force)
+import Control.Exception (evaluate)
 import Control.Monad (forM)
 import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
@@ -507,7 +509,8 @@ buildAstReaderExe = do
     files <- Mod.snapshotFromFilesystem readerPath
     -- (the owned reader is kept in the shared cache, so the groups that need the executable do not each own it again)
     parser <- TersusParser.parserKey
-    owned <- sharedProgram "ast-reader-owned" (show (packageCacheInput readerPath files, keyText parser)) $ do
+    inputKey <- evaluate (force (show (packageCacheInput readerPath files, keyText parser)))
+    owned <- sharedProgram "ast-reader-owned" inputKey $ do
         checked <- programFromFiles readerPath files
         pure (checked `bindResult` nativeProgram `bindResult` insertOwnership)
     seed <- cachedSeed
@@ -521,7 +524,8 @@ buildAstReaderExe = do
                     case ir of
                         Error e -> pure (Error e)
                         Ok text -> buildExecutable output text
-            cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the AST reader" build
+            completeKey <- evaluate (force (fingerprint [packageCacheInput readerPath files, dataText, seedHash]))
+            cachedProgram "test-ast-reader" completeKey "the AST reader" build
   where
     keyText (Ok key) = key
     keyText (Error e) = "error: " ++ e
