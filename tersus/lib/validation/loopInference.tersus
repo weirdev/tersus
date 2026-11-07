@@ -1,7 +1,7 @@
 import validation::context { analyzeContext, unionOf };
 import validation::differences { semanticFacts };
 import validation::evaluation { evalListSize, evalTermValue };
-import validation::execution { executeSteps };
+import validation::execution { executeSteps, maxScopeDepth };
 import validation::joins { constantTermWithValue };
 import validation::model { ExecutionBlock, ExecutionEnd, ExecutionState, ExecutionStep, InferDistance, InferGoal, InferState, InferSubject, IntegerLookup, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef };
 import validation::relations { containsValue, intAt, leastClasses, sameIn, ufFind };
@@ -618,12 +618,16 @@ fn refsMentions(refs: &List<ValueRef>, into: HashSet<Int>) -> HashSet<Int> {
 };
 
 fn stepsMentions(steps: &List<ExecutionStep>, into: HashSet<Int>) -> HashSet<Int> {
+    return stepsMentionsWithin(steps, into, maxScopeDepth());
+};
+
+fn stepsMentionsWithin(steps: &List<ExecutionStep>, into: HashSet<Int>, depth: Int) -> HashSet<Int> [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
     mentioned = into;
-    for sPosition in 0..size(steps) { mentioned = stepMentions(get(steps, sPosition), mentioned); };
+    for sPosition in 0..size(steps) { mentioned = stepMentions(get(steps, sPosition), mentioned, depth); };
     return mentioned;
 };
 
-fn stepMentions(step: &ExecutionStep, into: HashSet<Int>) -> HashSet<Int> {
+fn stepMentions(step: &ExecutionStep, into: HashSet<Int>, depth: Int) -> HashSet<Int> [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth {
     if step is ExecutionStep::Assign { return refMention((step as ExecutionStep::Assign).value, into); };
     if step is ExecutionStep::Apply { return refsMentions((step as ExecutionStep::Apply).arguments, into); };
     if step is ExecutionStep::ApplyFresh { return refsMentions((step as ExecutionStep::ApplyFresh).arguments, into); };
@@ -641,6 +645,7 @@ fn stepMentions(step: &ExecutionStep, into: HashSet<Int>) -> HashSet<Int> {
     if step is ExecutionStep::AssumeVariant { return refMention((step as ExecutionStep::AssumeVariant).object, into); };
     if step is ExecutionStep::RequireVariant { return refMention((step as ExecutionStep::RequireVariant).object, into); };
     if step is ExecutionStep::CheckWithin { return refMention((step as ExecutionStep::CheckWithin).outer, refMention((step as ExecutionStep::CheckWithin).inner, into)); };
+    if step is ExecutionStep::Scoped && depth > 0 { return stepsMentionsWithin((step as ExecutionStep::Scoped).steps, into, depth - 1); };
     return into;
 };
 

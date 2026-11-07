@@ -5,7 +5,7 @@ module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateBy
 
 import Control.Monad (foldM)
 import Data.List (find, isInfixOf, isPrefixOf, nub)
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Control.Applicative ((<|>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -840,15 +840,10 @@ proofCheck env (Forall index guards body) b0 = do
         totalStep _ = False
     (guardSteps, b2a) <- foldM assumeGuard ([], b1) guards
     let (instances, b2) = indexInstances (M.Copy (M.Local (fromInteger local))) b2a
-    (bodyPrefix0, checked, b3) <- proofCheck env' body b2
-    let bodyPrefix = instances ++ bodyPrefix0
-    -- The check is scoped to the havoced index: everything the guards and
-    -- the body made of it is forgotten once the body is checked, because
-    -- an index whose guards cannot hold (an empty range) must not leave
-    -- the context contradictory for what follows.
-    let (fi, b4) = fresh b3
-        forget = step "ApplyFresh" [("local", MInt (negate fi - 1)), ("function", MInt (-40)), ("arguments", MList [record "ValueRef::Local" [("local", MInt local)]])]
-    pure (havoc : guardSteps ++ bodyPrefix ++ [checked], forget, b4)
+    (bodyPrefix, checked, b3) <- proofCheck env' body b2
+    -- Nothing the check learns is kept: an index whose guards cannot hold
+    -- (an empty range) proves anything inside it.
+    pure ([], step "Scoped" [("steps", MList (havoc : guardSteps ++ instances ++ bodyPrefix ++ [checked]))], b3)
 proofCheck env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is variantName)) _)) [arg]) b0 = do
     (prefix, value, b1) <- proofOperand env arg b0
     let (familyId, b2) = namedFunction ("enum:" ++ takeWhile (/= ':') variantName) b1
@@ -1057,8 +1052,8 @@ contractSteps rules assume env clauses b0 = do
             -- make the whole context contradictory.
             | assume, Forall _ _ _ <- substituteProof subst proof -> let (kept, b') = registerForall env (substituteProof subst proof) b in pure (steps ++ kept, subst, b')
             | otherwise -> do
-                (prefix0, checked0, b') <- proofCheck env (substituteProof subst proof) b
-                let (prefix, checked) = if assume then (prefix0, checked0) else notedProof proof prefix0 checked0
+                (prefix, checked0, b') <- proofCheck env (substituteProof subst proof) b
+                let checked = if assume then checked0 else notedProof proof checked0
                 if not assume || callsFunction env (substituteProof subst proof) || all droppable prefix then Just () else Nothing
                 encoded <- if assume then case checked of
                     MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
@@ -1589,8 +1584,7 @@ statement rules (M.Assign (M.Local dest) (M.BinaryOp op a b)) b0 = do
         pure ([check 1 y zero], b'')
 statement rules (M.Ghost env (M.GhostValidation (ProofAssert proof))) b = do
     (prefix, s, b') <- proofCheck env proof b
-    let (prefix', s') = notedProof proof prefix s
-    pure (prefix' ++ [s'], b')
+    pure (prefix ++ [notedProof proof s], b')
 statement rules (M.Ghost env (M.GhostValidation (Rewrite rule))) b = rewriteSteps rules env rule b
 statement rules (M.Ghost env (M.GhostValidation (Assume proof))) b = contractSteps rules True env [ProofAssert proof] b
 -- Definitions are skipped where they stand: a proof rule is checked once,
@@ -2380,15 +2374,15 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     invariant env (checks, assumptions, b) (ProofAssert p) = case forallFactSteps env p b of
         Just (fsteps, bF0) -> do
             let (kept, bF) = registerForall env p bF0
-            (prefix0, checkStep0, b') <- proofCheck env p bF
-            let (prefix, checkStep) = notedProof p prefix0 checkStep0
+            (prefix, checkStep0, b') <- proofCheck env p bF
+            let checkStep = notedProof p checkStep0
             pure (checks ++ prefix ++ [checkStep], assumptions ++ fsteps ++ kept, b')
         Nothing -> do
           let (kept, bK) = case p of
                 Forall _ _ _ -> registerForall env p b
                 _ -> ([], b)
-          (prefix0, checkStep0, b') <- proofCheck env p bK
-          let (prefix, checkStep) = notedProof p prefix0 checkStep0
+          (prefix, checkStep0, b') <- proofCheck env p bK
+          let checkStep = notedProof p checkStep0
           case () of
             _ -> case p of
             -- A forall in any other shape is checked, and assumed only at the
@@ -2416,8 +2410,8 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
         M.Ghost env0 (M.GhostValidation (ProofAssert proof)) -> do
             let env = Map.union env0 (buildExports b)
                 (instances, bI) = foldl (\(acc, bb) k -> let (more, bb') = indexInstances k bb in (acc ++ more, bb')) ([], b) (nub (proofIndexes env proof))
-            (prefix0, checked0, b') <- proofCheck env (substituteProof penv proof) bI
-            let (prefix, checked) = notedProof proof prefix0 checked0
+            (prefix, checked0, b') <- proofCheck env (substituteProof penv proof) bI
+            let checked = notedProof proof checked0
             pure (steps ++ instances ++ prefix ++ [checked], b', conditions, penv)
         M.Ghost env0 (M.GhostValidation (Rewrite rule)) -> do
             let env = Map.union env0 (buildExports b)
@@ -2859,16 +2853,8 @@ withNote :: String -> MirValue -> MirValue
 withNote text (MData name fields) = MData name (fields ++ [("note", MFn text)])
 withNote _ v = v
 
--- (a forall is checked at an index of its own, by checks before the step
--- that ends it: those checks are the forall's too)
-notedProof :: VariableProof -> [MirValue] -> MirValue -> ([MirValue], MirValue)
-notedProof proof prefix checked = case proof of
-    Forall _ _ _ -> (map noteCheck prefix, withNote text checked)
-    _ -> (prefix, withNote text checked)
-  where
-    text = renderVarProof proof
-    noteCheck st@(MData "ExecutionStep::Check" fields) | isNothing (lookup "note" fields) = withNote text st
-    noteCheck st = st
+notedProof :: VariableProof -> MirValue -> MirValue
+notedProof proof = withNote (renderVarProof proof)
 
 renote :: String -> MirValue -> MirValue
 renote text (MData name fields) | isJust (lookup "note" fields) = withNote text (MData name (filter ((/= "note") . fst) fields))

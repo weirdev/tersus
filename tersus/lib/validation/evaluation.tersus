@@ -494,74 +494,7 @@ fn recordEvaluatedSizeIn(state: ExecutionState, classes: &HashMap<Int, Int>, lis
     return state;
 };
 
-// Every fact that mentions a term is dropped when the term is forgotten.
-// Facts learned under an assumption scoped to one term (the havoced index
-// of a checked forall, whose guards are assumed for the check) must not
-// outlive that assumption: an index whose guards cannot hold would
-// otherwise leave the context contradictory and prove everything after.
-// Forgetting only removes facts, so it can never prove a new goal.
-fn termForgotten(tainted: &List<Int>, term: Int) -> Bool {
-    for t in tainted { if t = term { return true; }; };
-    return false;
-};
-
-fn forgetTerm(context: &ValidatorContext, root: Int) -> ValidatorContext {
-    tainted = push([], root);
-    for round in 0..size(context.applications) + 1 {
-        for appPosition in 0..size(context.applications) {
-            app = get(context.applications, appPosition);
-            if termForgotten(tainted, app.id) = false {
-                hit = false;
-                for arg in app.arguments { if termForgotten(tainted, arg) { hit = true; }; };
-                if hit { tainted = push(tainted, app.id); };
-            };
-        };
-    };
-    applications = [];
-    for appPosition in 0..size(context.applications) {
-        app = get(context.applications, appPosition);
-        keep = termForgotten(tainted, app.id) = false;
-        for arg in app.arguments { if termForgotten(tainted, arg) { keep = false; }; };
-        if keep { applications = push(applications, clone(app)); };
-    };
-    equalities = [];
-    for factPosition in 0..size(context.equalities) {
-        fact = get(context.equalities, factPosition);
-        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { equalities = push(equalities, clone(fact)); }; };
-    };
-    orders = [];
-    for factPosition in 0..size(context.orders) {
-        fact = get(context.orders, factPosition);
-        if termForgotten(tainted, fact.smaller) = false { if termForgotten(tainted, fact.greater) = false { orders = push(orders, clone(fact)); }; };
-    };
-    different = [];
-    for factPosition in 0..size(context.different) {
-        fact = get(context.different, factPosition);
-        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { different = push(different, clone(fact)); }; };
-    };
-    differences = [];
-    for factPosition in 0..size(context.differences) {
-        fact = get(context.differences, factPosition);
-        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { differences = push(differences, clone(fact)); }; };
-    };
-    variants = [];
-    for factPosition in 0..size(context.variants) {
-        fact = get(context.variants, factPosition);
-        if termForgotten(tainted, fact.object) = false { variants = push(variants, clone(fact)); };
-    };
-    constants = [];
-    for factPosition in 0..size(context.constants) {
-        fact = get(context.constants, factPosition);
-        if termForgotten(tainted, fact.id) = false { constants = push(constants, clone(fact)); };
-    };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
-};
-
 fn builtinFacts(context: ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
-    if function = -40 {
-        if size(args) = 1 { return forgetTerm(context, get(args, 0)); };
-        return context;
-    };
     // (a size is at least 0, as an order, so that a size known not to be 0 is
     // more than 0)
     if function = -13 && size(args) = 1 {

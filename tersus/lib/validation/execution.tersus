@@ -461,11 +461,7 @@ fn shrank(before: &List<Int>, after: &List<Int>) -> Bool {
 };
 
 fn addsFactsOnly(step: &ExecutionStep) -> Bool {
-    // (an application of -40 forgets what is known of a term)
-    if step is ExecutionStep::Apply { return (step as ExecutionStep::Apply).function != -40; };
-    if step is ExecutionStep::ApplyFresh { return (step as ExecutionStep::ApplyFresh).function != -40; };
-    if step is ExecutionStep::Literal { return (step as ExecutionStep::Literal).function != -40; };
-    if step is ExecutionStep::Assign { return true; };
+    if step is ExecutionStep::Assign || step is ExecutionStep::Apply || step is ExecutionStep::ApplyFresh || step is ExecutionStep::Literal { return true; };
     if step is ExecutionStep::Push || step is ExecutionStep::Last || step is ExecutionStep::Set || step is ExecutionStep::Pop || step is ExecutionStep::NewArray { return true; };
     if step is ExecutionStep::Havoc || step is ExecutionStep::RequireDefined || step is ExecutionStep::Check || step is ExecutionStep::Assume { return true; };
     if step is ExecutionStep::AssumeVariant || step is ExecutionStep::RequireVariant || step is ExecutionStep::CheckWithin || step is ExecutionStep::AssumeForall { return true; };
