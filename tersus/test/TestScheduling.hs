@@ -14,7 +14,7 @@ module TestScheduling
 
 import Control.Exception (evaluate)
 import Data.Char (isDigit)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (delete, foldl', isInfixOf, isPrefixOf, minimumBy, sort, sortBy)
 import System.Environment (getEnvironment, getExecutablePath)
 import System.Exit (ExitCode (..))
@@ -22,7 +22,6 @@ import System.Process (CreateProcess (..), proc)
 import Native (readProcessOutput)
 import System.Timeout (timeout)
 import Data.Ord (comparing)
-import System.Mem.StableName (makeStableName)
 import TestHarness (Test (..), TestResult, batchItems, testAssertEq, testAssertTrue, testCase)
 import TestParserBootstrap (testParserBootstrap, parserBootstrapGroups)
 import TestPipeline (selfHostedFamilyManifest)
@@ -290,11 +289,6 @@ leafActions (TestParallel name tests) = under name tests
 under :: String -> [Test] -> [([String], IO TestResult)]
 under name tests = [(name : path, action) | test <- tests, (path, action) <- leafActions test]
 
-leafCaseObjects :: Test -> [([String], Test)]
-leafCaseObjects test@(TestCase name _) = [([name], test)]
-leafCaseObjects (TestList name tests) = [(name : path, leaf) | test <- tests, (path, leaf) <- leafCaseObjects test]
-leafCaseObjects (TestParallel name tests) = [(name : path, leaf) | test <- tests, (path, leaf) <- leafCaseObjects test]
-
 leafPaths :: Test -> [[String]]
 leafPaths = map fst . leafActions
 
@@ -468,9 +462,6 @@ testScheduling names batches = TestList "testScheduling"
             && sort (concatMap (map (drop 1) . leafPaths) parserBootstrapGroups) == sort (leafPaths testParserBootstrap)
             && map last (leafPaths (last parserBootstrapGroups))
                 == ["same-process transient failures repair without stale library or executable caches", "P0 P1 current-source fixpoint regenerates identical IR and P2 behavior"])
-    , TestCase "parser bootstrap partitioning keeps the original action objects" $ do
-        preserved <- sameActions (testParserBootstrap, parserBootstrapGroups)
-        pure (testAssertTrue preserved)
     , testCase "parser bootstrap aliases and child names select the two registered partitions" $
         testAssertTrue (aliasComplete (testParserBootstrap, parserBootstrapGroups)
             && all (\batch -> selectGroupNames (Arguments Nothing [groupName batch] True Nothing) names
@@ -480,23 +471,6 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "all old leaf paths occur exactly once in the registered batches" $
         testAssertTrue (all (\(original, split) ->
             sort (leafPaths original) == sort (concatMap (map (drop 1) . leafPaths) split)) batches)
-    , TestCase "batches keep the original case action objects" $ do
-        preserved <- mapM sameActions batches
-        pure (testAssertTrue (and preserved))
-    , TestCase "batches reject replaced or wrapped cases without executing their actions" $ do
-        effects <- newIORef (0 :: Int)
-        let originalAction = modifyIORef' effects (+ 1) >> pure Nothing
-            originalCase = TestCase "same path" originalAction
-            original = TestList "identity" [originalCase]
-            split = splitTestGroups 4 original
-            changed action = [TestList "identity:1/1" [TestList "identity" [TestCase "same path" action]]]
-            replacement = modifyIORef' effects (+ 10) >> pure (Just "replacement")
-            wrapper = modifyIORef' effects (+ 100) >> originalAction
-        preserved <- sameActions (original, split)
-        replaced <- sameActions (original, changed replacement)
-        wrapped <- sameActions (original, changed wrapper)
-        observed <- readIORef effects
-        pure (testAssertTrue (preserved && not replaced && not wrapped) <> testAssertEq observed 0)
     , testCase "each expensive group has four nonempty registered batches and no original duplicate" $
         testAssertTrue (all (\(original, split) -> length split == 4
             && groupName original `notElem` names
@@ -536,14 +510,43 @@ testScheduling names batches = TestList "testScheduling"
                 == Right [groupName batch]) split) batches)
     , TestCase "mixed fixed and parallel leaves execute once with every prefix retained" $ do
         seen <- newIORef ([] :: [Int])
-        let leaf index = TestCase "duplicate label" (modifyIORef' seen (index :) >> pure Nothing)
-            fixture = TestList "root" [TestParallel "parallel" [leaf 1, leaf 2], TestList "fixed" [leaf 3, leaf 4]]
+        let action index = modifyIORef' seen (++ [index]) >> pure (Just ("result " ++ show index))
+            leaf index = TestCase "duplicate label" (action index)
+            fixture = TestList "root"
+                [ TestParallel "parallel" [leaf 1, leaf 2]
+                , TestList "fixed" [leaf 3, leaf 4]
+                , TestList "memory" [leaf 5, leaf 6]
+                ]
             split = splitTestGroups 4 fixture
-        results <- mapM snd (concatMap leafActions split)
-        executed <- readIORef seen
-        pure (testAssertTrue (sort executed == [1,2,3,4]
-            && results == replicate 4 Nothing
-            && sort (leafPaths fixture) == sort (concatMap (map (drop 1) . leafPaths) split)))
+            paths = concatMap (map (drop 1) . leafPaths) split
+            actions = [map snd (leafActions batch) | batch <- split]
+            traces = [[5,6], [1,4], [2], [3]]
+            expected = [(trace, [Just ("result " ++ show index) | index <- trace]) | trace <- traces]
+            observe = mapM (\batch -> do
+                writeIORef seen []
+                results <- sequence batch
+                trace <- readIORef seen
+                pure (trace, results))
+            replace batch = case batch of
+                [] -> []
+                _ : rest -> action 99 : rest
+            wrap original = modifyIORef' seen (++ [0]) >> original
+        _ <- evaluate (sum (map length paths))
+        beforeExecution <- readIORef seen
+        actual <- observe actions
+        equivalent <- observe (map (map (>>= pure)) actions)
+        changed <- mapM observe
+            [ map (drop 1) actions
+            , map (\batch -> batch ++ take 1 batch) actions
+            , map replace actions
+            , map (map wrap) actions
+            , map reverse actions
+            ]
+        pure (testAssertEq beforeExecution []
+            <> testAssertEq actual expected
+            <> testAssertEq equivalent expected
+            <> testAssertTrue (all (/= expected) changed)
+            <> testAssertEq (sort paths) (sort (leafPaths fixture)))
     , -- (the queries that compared the Haskell engine with the Tersus one went with the engine)
       testCase "all 460 self-hosted query assertions remain in their families" $
         testAssertEq selfHostedFamilyManifest
@@ -592,13 +595,6 @@ testScheduling names batches = TestList "testScheduling"
         let originalPaths = filter (elem "memory") (leafPaths original)
             holders = [filter (elem "memory") (map (drop 1) (leafPaths batch)) | batch <- split]
          in null originalPaths || filter (not . null) holders == [originalPaths]
-    sameActions (original, split) = do
-        before <- identities (leafCaseObjects original)
-        after <- identities [(drop 1 path, test) | batch <- split, (path, test) <- leafCaseObjects batch]
-        pure (length before == length after && null (foldl' (flip delete) after before))
-    identities = mapM (\(path, test) -> do
-        stable <- evaluate test >>= makeStableName
-        pure (path, stable))
     unique :: Eq a => [a] -> [a]
     unique = foldl' (\seen name -> if name `elem` seen then seen else name : seen) []
     invalidShards = ["", "1", "0/3", "1/0", "4/3", "-1/3", "1/-3", "1/3/2", "1//3", "/3", "1/", "one/3", "1/three", "1.0/3", " 1/3", "1/3 ", "1/+3", show (toInteger (maxBound :: Int) + 1) ++ "/3", "1/" ++ show (toInteger (maxBound :: Int) + 1)]

@@ -11,10 +11,15 @@ module TestPipeline
     , exampleExpectations
     ) where
 
-import Control.Exception (evaluate, finally)
+import Control.Exception (bracket, evaluate, finally)
 import Data.List (isInfixOf, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
-import System.Directory (getTemporaryDirectory, removeFile)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
+import System.Environment (getExecutablePath, lookupEnv)
+import System.FilePath ((</>), takeDirectory)
+import System.Exit (ExitCode (..))
+import System.Process (CreateProcess (..), proc)
+import Native (readProcessOutput)
 import CacheLock (openTempFileCloexec)
 import System.IO
 import qualified Data.Map as Map
@@ -283,8 +288,76 @@ testCliReadsUtf8 = TestCase "utf8 source" $ do
         return (if runSource Interpret source == Ok "42" then Nothing else Just ("got " ++ show (runSource Interpret source))))
         `finally` (setLocaleEncoding saved >> removeFile path)
 
+cliExecutable :: IO (Maybe FilePath)
+cliExecutable = do
+    supplied <- lookupEnv "TERSUS_TEST_CLI"
+    self <- getExecutablePath
+    adjacent <- doesFileExist (takeDirectory self </> "tersus-exe")
+    case supplied of
+        Just path -> pure (Just path)
+        Nothing | adjacent -> pure (Just (takeDirectory self </> "tersus-exe"))
+        Nothing -> do
+            stack <- findExecutable "stack"
+            case stack of
+                Nothing -> pure Nothing
+                Just command -> do
+                    (code, output, _) <- readProcessOutput (proc command ["path", "--local-install-root"]) ""
+                    let path = takeWhile (/= '\n') output </> "bin/tersus-exe"
+                    present <- doesFileExist path
+                    pure (if code == ExitSuccess && present then Just path else Nothing)
+
+testCliConfiguredSources :: Test
+testCliConfiguredSources = TestCase "real CLI isolates standalone/stdin roots and validates no-prelude IR" $ do
+    executable <- cliExecutable
+    case executable of
+        Nothing -> pure (Just "tersus-exe is required for CLI regression; build it or supply TERSUS_TEST_CLI")
+        Just cli -> bracket create removeDirectoryRecursive $ \root -> do
+            let proj = root </> "proj"
+                vendor = root </> "vendor"
+                cwdRoot = root </> "X"
+                standalone = proj </> "source.tersus"
+                source = "import vendor::api { answer }; return answer();"
+                config = ["--package-root", "vendor=" ++ vendor, "--no-prelude"]
+                write path text = createDirectoryIfMissing True (takeDirectory path) >> writeFile path text
+                run args input = readProcessOutput (proc cli args){cwd = Just (if ("X=" ++ cwdRoot) `elem` args then cwdRoot else proj)} input
+                cases =
+                    [ (config ++ ["eval", standalone], "", ExitSuccess, "42", "")
+                    , (config ++ ["eval", "-"], source, ExitSuccess, "42", "")
+                    , (config ++ ["check", "-"], "import foo::api; return 0;", ExitFailure 1, "", "not configured for standalone source")
+                    , (config ++ ["check", "-"], "import main; return 0;", ExitFailure 1, "", "not configured for standalone source")
+                    , (["--package-root", "X=" ++ cwdRoot, "--no-prelude", "eval", "-"], "import X::provider { answer }; return answer();", ExitSuccess, "42", "")
+                    , (["--no-prelude", "llvm", "-"], "affirm 1 = 2; return 42;", ExitFailure 1, "", "Could not prove:")
+                    , (["--package-root", "vendor=a", "--package-root", "vendor=b", "check", "-"], "return 0;", ExitFailure 2, "", "Usage:")
+                    ]
+            write (vendor </> "package.tersus") "noPrelude = true;"
+            write (vendor </> "api/api.tersus") "fn answer() -> Int { return 42; };"
+            write (root </> "foo/package.tersus") "noPrelude = true;"
+            write (root </> "foo/api/api.tersus") "fn answer() -> Int { return 99; };"
+            write standalone source
+            initial <- run (config ++ ["eval", standalone]) ""
+            write (cwdRoot </> "package.tersus") "noPrelude = true;"
+            write (cwdRoot </> "provider.tersus") "fn answer() -> Int { return 42; };"
+            results <- mapM (\(args, input, expectedCode, expectedOutput, expectedError) -> do
+                (code, output, errors) <- run args input
+                pure (testAssertEq code expectedCode <> testAssertEq (trim output) expectedOutput
+                    <> if expectedError `isInfixOf` errors then Nothing else Just ("wrong CLI diagnostic: " ++ errors))) cases
+            (irCode, ir, irErrors) <- run ["--no-prelude", "llvm", "-"] "return 42;"
+            pure (testAssertEq initial (ExitSuccess, "42\n", "")
+                <> foldr (<>) Nothing results
+                <> testAssertEq irCode ExitSuccess
+                <> testAssertTrue ("define" `isInfixOf` ir && null irErrors))
+  where
+    trim = reverse . dropWhile (`elem` "\r\n") . reverse
+    create = do
+        tmp <- getTemporaryDirectory
+        (path, handle) <- openTempFileCloexec tmp "tersus-phase1-cli"
+        hClose handle
+        removeFile path
+        createDirectory path
+        pure path
+
 testCli :: Test
-testCli = TestList "testCli" [testCliReadsUtf8, testCliCases]
+testCli = TestList "testCli" [testCliReadsUtf8, testCliConfiguredSources, testCliCases]
 
 -- Every entry point must refuse a program that does not validate, before it
 -- is evaluated or lowered: (mode, runner for that mode, source, expected error).

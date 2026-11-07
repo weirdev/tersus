@@ -6,10 +6,14 @@ module Pipeline
     , parseWithEquality
     , validatedSource
     , compileSource
+    , validatedSourceNoPrelude
+    , compileSourceNoPrelude
     , validatedSourceWith
     , compileSourceWith
     , loadFromEntry
     , loadFromFilesystem
+    , loadFromFilesystemWithOptions
+    , loadFromSource
     , CompiledModule (..)
     , CompiledPackage (..)
     , compileModules
@@ -26,6 +30,7 @@ module Pipeline
     , validateStatements
     , runStatements
     , assumptionsOf
+    , assumptionsOfNoPrelude
     ) where
 
 import qualified Data.Map as Map
@@ -64,7 +69,10 @@ import Utils
 -- allocate), each `extern fn` (whose contract is assumed) and each `axiom`, in the program and the libraries in front of it, with the place it is written at (a library's have none). The
 -- validator proves everything else, so this is the list to read to know what a program's proofs rest on.
 assumptionsOf :: String -> Result [String] String
-assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
+assumptionsOf = assumptionsOfNoPrelude False
+
+assumptionsOfNoPrelude :: Bool -> String -> Result [String] String
+assumptionsOfNoPrelude noPrelude source = mapResult (snd . statements Nothing . (\(_, library, body) -> library ++ body)) (TersusParser.parseSourcePartsNoPrelude noPrelude True source)
   where
     statements place = foldl (\(p, found) stmt -> let (p', more) = statement p stmt in (p', found ++ more)) (place, [])
     statement place stmt = case stmt of
@@ -94,7 +102,10 @@ assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
 -- The MIR of a program that passes every check, before its ghosts are erased: what the eraser written in Tersus
 -- (lib/mir/mir_erase/mir_erase.tersus) is given, as `tersus mir --ghost-data` writes it
 validatedSource :: String -> Result M.Program String
-validatedSource = validatedSourceWith TersusParser.parseSourceParts
+validatedSource = validatedSourceNoPrelude False
+
+validatedSourceNoPrelude :: Bool -> String -> Result M.Program String
+validatedSourceNoPrelude noPrelude = validatedSourceWith (TersusParser.parseSourcePartsNoPrelude noPrelude)
 
 validatedSourceWith :: (Bool -> String -> Result SourceParts String) -> String -> Result M.Program String
 validatedSourceWith readSource source =
@@ -105,7 +116,10 @@ validatedSourceWith readSource source =
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
-compileSource = compileSourceWith TersusParser.parseSourceParts
+compileSource = compileSourceNoPrelude False
+
+compileSourceNoPrelude :: Bool -> String -> Result M.Program String
+compileSourceNoPrelude noPrelude source = validatedSourceNoPrelude noPrelude source `bindResult` eraseGhosts
 
 compileSourceWith :: (Bool -> String -> Result SourceParts String) -> String -> Result M.Program String
 compileSourceWith readSource source = validatedSourceWith readSource source `bindResult` eraseGhosts
@@ -115,7 +129,13 @@ loadFromEntry :: Mod.Resolver -> FilePath -> Either String Mod.LoadResult
 loadFromEntry = Mod.loadFromEntryWith TersusParser.parseFileWith
 
 loadFromFilesystem :: FilePath -> IO (Either String Mod.LoadResult)
-loadFromFilesystem = Mod.loadFromFilesystemWith TersusParser.parseFileWith
+loadFromFilesystem = loadFromFilesystemWithOptions Mod.defaultLoadOptions
+
+loadFromFilesystemWithOptions :: Mod.LoadOptions -> FilePath -> IO (Either String Mod.LoadResult)
+loadFromFilesystemWithOptions = Mod.loadFromFilesystemWithOptions TersusParser.parseFileWith
+
+loadFromSource :: Mod.LoadOptions -> String -> IO (Either String Mod.LoadResult)
+loadFromSource = Mod.loadFromSourceWith TersusParser.parseFileWith
 
 -- A lowered program that the checker written in Tersus (MirHousekeeping) accepts; a refusal is the
 -- lowering's, as it was when the lowering checked its own work

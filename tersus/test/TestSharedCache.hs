@@ -1,6 +1,6 @@
 -- Scoped retry actions must not share a forced unsafePerformIO pipeline failure.
 {-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
-module TestSharedCache (testSharedCache, testSharedCacheCodec, testSharedCacheProbe, testVerdictLocks) where
+module TestSharedCache (testSharedCache, testSharedCacheCodec, testSharedCacheProbe, testVerdictLocks, testPhase1Cache) where
 
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as BC
@@ -52,6 +52,7 @@ import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), Loc
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
 import Native (availableProcessors, cacheDirectory, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresentWithArtifacts, parallelBuilds, readProcessOutput, runCommandWithInputFull, runExecutable, runWithInputFull, spawnShared, stopOwnedProcess, validSignalTarget, withSpawnedProcess)
+import qualified MirEval
 import MirData (forNative, writeProgram)
 import TestHarness
 import Types (Type (..))
@@ -67,6 +68,151 @@ probeSource = "return 987021;"
 
 invalidProbeSource :: String
 invalidProbeSource = "return missing_hash_probe_987099(;"
+
+testPhase1Cache :: Test
+testPhase1Cache = TestList "testPhase1Cache"
+    [ TestCase "source unit no-prelude policy isolates validated and compiled cache entries" phase1SourceCache
+    , TestCase "selected roots markers sources and resolution conflicts govern no-prelude package reuse" (phase1PackageCache True)
+    , TestCase "default package context does not widen filesystem source capture or mask new candidates" (phase1PackageCache False)
+    , TestCase "in-memory default cached program and ownership ignore unimported declarations and match filesystem loading" phase1InMemoryCache
+    ]
+
+phase1SourceCache :: IO TestResult
+phase1SourceCache = withToolsCacheHome $ \_ -> do
+    let source = "return 991421;"
+        invalid = "affirm 1 = 2; return 991421;"
+    ordinary <- compileOnceNoPrelude False source
+    optedOut <- compileOnceNoPrelude True source
+    replay <- compileOnceNoPrelude True source
+    ordinaryName <- compileOnceNoPrelude False "return hashCombine(1, 2);"
+    refusedName <- compileOnceNoPrelude True "return hashCombine(1, 2);"
+    refused <- validatedOnceNoPrelude True invalid
+    keys <- mapM (\stage -> sharedProgramCacheFile stage source) ["compile", "compile-no-prelude", "validated", "validated-no-prelude"]
+    badKey <- sharedProgramCacheFile "validated-no-prelude" invalid
+    badPresent <- maybe (pure False) doesFileExist badKey
+    pure $ case (ordinary, optedOut, replay) of
+        (Ok normal, Ok independent, Ok again) -> testAssertEq (MirEval.runProgram normal) (MirEval.runProgram independent)
+            <> testAssertEq independent again
+            <> testAssertEq (MirEval.runProgram independent) (Ok (Just (MirEval.MInt 991421)))
+            <> testAssertTrue (all (/= Nothing) keys && length (Map.fromList [(key, ()) | key <- keys]) == 4)
+            <> strictValidation refused <> testAssertTrue (not badPresent)
+            <> (case ordinaryName of Ok _ -> Nothing; Error err -> Just err)
+            <> (case refusedName of Error err | "Undefined variable: hashCombine" `isInfixOf` err -> Nothing; other -> Just ("implicit name reused across policy: " ++ show other))
+        other -> Just (show other)
+  where
+    strictValidation (Error err) | "Could not prove:" `isInfixOf` err = Nothing
+    strictValidation other = Just ("no-prelude validation did not refuse the actual false assertion: " ++ show other)
+
+phase1InMemoryCache :: IO TestResult
+phase1InMemoryCache = withToolsCacheHome $ \home -> do
+    let app = home </> "app"
+        vendor = home </> "vendor"
+        entry = app </> "main.tersus"
+        unused = app </> "unused" </> "unused.tersus"
+        files =
+            [ (app </> "package.tersus", "")
+            , (entry, "import vendor::api; return api::answer();")
+            , (vendor </> "package.tersus", "noPrelude = true;")
+            , (vendor </> "api" </> "api.tersus", "fn answer() -> Int { return 42; };")
+            , (unused, "enum Secret { A { n: Int }, B };")
+            ]
+        changed = [(path, if path == unused then "struct Secret { flag: Bool };" else source) | (path,source) <- files]
+        input = packageCacheInput entry files
+    mapM_ (\(path, source) -> createDirectoryIfMissing True (takeDirectory path) >> writeFile path source) files
+    before <- programFromFiles entry files
+    ownedBefore <- ownedFromFiles entry files
+    keys <- mapM (\stage -> sharedProgramCacheFile ("package-" ++ stage) input) ["program", "owned"]
+    times <- mapM (mapM getModificationTime) keys
+    after <- programFromFiles entry changed
+    ownedAfter <- ownedFromFiles entry changed
+    timesAfter <- mapM (mapM getModificationTime) keys
+    fromDisk <- Pipeline.loadFromFilesystem entry
+    let loaded = Pipeline.loadFromEntry (Modules.resolverFromFiles files) entry
+        identity value = case value of
+            Right (PackageResult pkg) -> Right (Modules.packageInputIdentity pkg)
+            Left err -> Left err
+            Right _ -> Left "expected package"
+    pure $ firstFailure
+        [ testAssertEq (before `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 42)))
+        , sameProgram before after
+        , sameProgram ownedBefore ownedAfter
+        , case ownedBefore of Error err -> Just err; Ok _ -> Nothing
+        , testAssertEq (packageCacheInput entry changed) input
+        , testAssertTrue (all (/= Nothing) keys && times == timesAfter)
+        , testAssertEq (identity fromDisk) (identity loaded)
+        , case loaded of Right (PackageResult pkg) -> testAssertTrue (unused `notElem` map fst (Modules.packageSources pkg)); _ -> Just "default in-memory load failed"
+        ]
+
+phase1PackageCache :: Bool -> IO TestResult
+phase1PackageCache noPrelude = withToolsCacheHome $ \home -> do
+    let project = home </> "project"
+        app = project </> "app"
+        vendor = home </> "installed-v1"
+        vendor2 = home </> "installed-v2"
+        entry = app </> "main.tersus"
+        dependency = vendor </> "api" </> "api.tersus"
+        marker = vendor </> "package.tersus"
+        options = Modules.defaultLoadOptions{Modules.packageRoots = Map.singleton "vendor" vendor, Modules.noPrelude = noPrelude}
+        write path text = createDirectoryIfMissing True (takeDirectory path) >> writeFile path text
+        request config = do
+            loaded <- Pipeline.loadFromFilesystemWithOptions config entry
+            result <- programFromFilesystemWith config entry
+            case loaded of
+                Right (PackageResult pkg) -> do
+                    key <- sharedProgramCacheFile "package-program" (Modules.packageInputIdentity pkg)
+                    pure (result, key, Modules.packageSources pkg)
+                _ -> pure (result, Nothing, [])
+        resultValue (Ok program, _, _) = MirEval.runProgram program
+        resultValue (Error err, _, _) = Error err
+        resultKey (_, key, _) = key
+    write (app </> "package.tersus") ""
+    write entry "import vendor::api; return api::answer();"
+    write marker "noPrelude = true;"
+    write dependency "fn answer() -> Int { return 42; };"
+    write (vendor </> "unused-root.tersus") "unrelated root body is deliberately not valid source"
+    write (project </> "noise" </> "package.tersus") "noPrelude = invalid;"
+    write (project </> "noise" </> "noise.tersus") "not a program"
+    write (app </> "unused" </> "unused.tersus") "also not a program"
+    before@(_, beforeKey, selected) <- request options
+    beforeTime <- mapM getModificationTime beforeKey
+    write (project </> "noise" </> "noise.tersus") "changed unrelated sibling"
+    write (app </> "unused" </> "unused.tersus") "changed unreachable module"
+    write (vendor </> "unused-root.tersus") "changed unreachable noncandidate root body"
+    after <- request options
+    afterTime <- mapM getModificationTime (resultKey after)
+    write dependency "fn answer() -> Int { return 43; };"
+    changed <- request options
+    write marker "noPrelude = false;"
+    configured <- request options
+    write (vendor2 </> "package.tersus") "noPrelude = true;"
+    write (vendor2 </> "api" </> "api.tersus") "fn answer() -> Int { return 42; };"
+    rerooted <- request options{Modules.packageRoots = Map.singleton "vendor" vendor2}
+    write marker "noPrelude = true;"
+    write dependency "fn answer() -> Int { affirm 1 = 2; return 43; };"
+    invalid <- request options
+    invalidPresent <- maybe (pure False) doesFileExist (resultKey invalid)
+    write dependency "fn answer() -> Int { return 42; };"
+    write (vendor </> "api.tersus") "fn answer() -> Int { return 99; };"
+    (ambiguous, _, _) <- request options
+    removeFile (vendor </> "api.tersus")
+    write (project </> "vendor" </> "package.tersus") ""
+    write (project </> "vendor" </> "api" </> "api.tersus") "fn answer() -> Int { return 99; };"
+    (conflict, _, _) <- request options
+    pure $ firstFailure
+        [ testAssertEq (resultValue before) (Ok (Just (MirEval.MInt 42)))
+        , testAssertEq (resultValue after) (resultValue before)
+        , testAssertEq (resultKey after) beforeKey
+        , testAssertTrue (beforeKey /= Nothing && beforeTime == afterTime)
+        , testAssertTrue (all (\(path, _) -> not ("/noise/" `isInfixOf` path || "/unused/" `isInfixOf` path || "unused-root.tersus" `isSuffixOf` path)) selected)
+        , testAssertEq (resultValue changed) (Ok (Just (MirEval.MInt 43)))
+        , testAssertTrue (resultKey changed /= beforeKey && resultKey configured /= resultKey changed && resultKey rerooted /= beforeKey)
+        , testAssertEq (resultValue configured) (Ok (Just (MirEval.MInt 43)))
+        , testAssertEq (resultValue rerooted) (Ok (Just (MirEval.MInt 42)))
+        , case invalid of (Error err, _, _) | "Could not prove:" `isInfixOf` err -> Nothing; other -> Just ("invalid dependency was not validated: " ++ show other)
+        , testAssertTrue (not invalidPresent)
+        , case ambiguous of Error err | "ambiguous import" `isInfixOf` err -> Nothing; other -> Just ("cached sources masked a new file/module candidate: " ++ show other)
+        , case conflict of Error err | "conflicting roots" `isInfixOf` err -> Nothing; other -> Just ("cached roots masked a new conflict: " ++ show other)
+        ]
 
 testSharedCache :: Test
 testSharedCache =

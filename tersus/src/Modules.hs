@@ -7,6 +7,9 @@ module Modules
     , declarationNames
     , canonicalizeDeclarations
     , Resolver (..)
+    , LoadOptions (..)
+    , defaultLoadOptions
+    , packageInputIdentity
     , resolverFromFiles
     , normalizePath
     , Discovery (..)
@@ -26,17 +29,25 @@ module Modules
     , loadFromEntryWith
     , loadFromFilesystem
     , loadFromFilesystemWith
+    , loadFromFilesystemWithOptions
+    , loadFromSourceWith
     , snapshotFromFilesystem
+    , snapshotFromFilesystemWith
     , findPackageRootIO
     ) where
 
-import Control.Monad (filterM)
-import Data.List (intercalate, isInfixOf, isPrefixOf, nub, sort, stripPrefix)
+import Control.Monad (filterM, forM_, when)
+import Control.Exception (IOException, try)
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.List (intercalate, isPrefixOf, nub, sort, stripPrefix)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
-import System.FilePath (takeDirectory, (</>))
+import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, getCurrentDirectory, listDirectory)
+import System.FilePath (isRelative, makeRelative, takeDirectory, (</>))
+import qualified Text.Parsec as Config
+import qualified Text.Parsec.Token as Token
+import Text.Parsec.Language (emptyDef)
 
 import qualified ParsedFile as Parse
 import qualified ParserSeed
@@ -237,9 +248,21 @@ canonicalizeDeclarations identity statements
 -- @/@-separated, with @.@ components dropped and @..@ resolved
 -- textually. The filesystem resolver ('loadFromFilesystem') snapshots
 -- the relevant directories into exactly this shape.
+data LoadOptions = LoadOptions
+    { packageRoots :: Map.Map String FilePath
+    , installedStdRoot :: Maybe FilePath
+    , noPrelude :: Bool
+    }
+    deriving (Eq, Show)
+
+defaultLoadOptions :: LoadOptions
+defaultLoadOptions = LoadOptions Map.empty Nothing False
+
 data Resolver = Resolver
     { resolverReadFile :: FilePath -> Maybe String
     , resolverListDir :: FilePath -> Maybe ([String], [String])
+    , resolverOptions :: LoadOptions
+    , resolverCanonicalRoot :: FilePath -> FilePath
     }
 
 normalizePath :: FilePath -> FilePath
@@ -276,7 +299,7 @@ baseNameOf path = case pathSegments (normalizePath path) of
 -- directory tree is derived from the file paths: a directory exists
 -- when some file lives at or below it.
 resolverFromFiles :: [(FilePath, String)] -> Resolver
-resolverFromFiles files = Resolver readFile listDir
+resolverFromFiles files = Resolver readFile listDir defaultLoadOptions normalizePath
   where
     contents = Map.fromList [(normalizePath path, text) | (path, text) <- files]
     readFile path = Map.lookup (normalizePath path) contents
@@ -392,6 +415,7 @@ data LoadedModule = LoadedModule
     , loadedModuleFiles :: [LoadedFile]
     , loadedModuleDeclNames :: [Name]
     , loadedDependencies :: [ModuleId]
+    , loadedNoPrelude :: Bool
     }
     deriving (Show)
 
@@ -401,8 +425,16 @@ data LoadedPackage = LoadedPackage
     , packageEntryFile :: FilePath
     , packageEntryModule :: ModuleId
     , packageModules :: [LoadedModule]
+    , packageSources :: [(FilePath, String)]
+    , packagePolicies :: [(String, FilePath, Bool)]
     }
     deriving (Show)
+
+packageInputIdentity :: LoadedPackage -> String
+packageInputIdentity pkg = show
+    ( normalizePath (packageEntryFile pkg), packagePolicies pkg, packageSources pkg
+    , [(loadedModuleId modu, [(loadedFilePath file, loadedImports file) | file <- loadedModuleFiles modu]) | modu <- packageModules pkg]
+    )
 
 -- | Loading an entry file either reports it as a standalone program
 -- (no package marker above it; imports are then unsupported) or loads
@@ -428,6 +460,8 @@ data Layout = Layout
     , layModules :: Map.Map String [FileEntry]
     , layModuleNested :: Map.Map String [String]
     , layRootSubdirs :: [String]
+    , layNoPrelude :: Bool
+    , layIsPackage :: Bool
     }
 
 tersusFiles :: FilePath -> [String] -> [FileEntry]
@@ -439,25 +473,51 @@ tersusFiles dir names =
   where
     isSuffixOf suffix text = drop (length text - length suffix) text == suffix
 
+packageNoPrelude :: Resolver -> FilePath -> Either String Bool
+packageNoPrelude resolver root = case resolverReadFile resolver marker of
+    Nothing -> Left ("package marker not found: " ++ marker)
+    Just source -> case Config.parse parser marker source of
+        Left err -> Left ("package configuration: " ++ show err)
+        Right enabled -> Right enabled
+  where
+    marker = joinPath root "package.tersus"
+    lexer = Token.makeTokenParser emptyDef
+        { Token.commentLine = "//", Token.commentStart = "", Token.commentEnd = ""
+        , Token.reservedNames = ["noPrelude", "true", "false"]
+        }
+    parser = do
+        Token.whiteSpace lexer
+        enabled <- Config.option False $ do
+            Token.reserved lexer "noPrelude"
+            _ <- Token.symbol lexer "="
+            value <- (Token.reserved lexer "true" >> pure True) Config.<|> (Token.reserved lexer "false" >> pure False)
+            _ <- Token.semi lexer
+            pure value
+        Config.eof
+        pure enabled
+
 buildLayout :: Resolver -> FilePath -> Either String Layout
 buildLayout resolver root = case resolverListDir resolver root of
     Nothing -> Left ("package directory " ++ root ++ " not found")
-    Just (subdirs, files) ->
+    Just (subdirs, files) -> do
+        enabled <- packageNoPrelude resolver root
         let moduleOf sub = case resolverListDir resolver (joinPath root sub) of
                 Nothing -> Nothing
                 Just (nested, subFiles) ->
                     let entries = tersusFiles (joinPath root sub) subFiles
                      in if null entries then Nothing else Just (sub, entries, nested)
             found = [entry | Just entry <- map moduleOf subdirs]
-         in Right
-                Layout
-                    { layName = baseNameOf root
-                    , layRoot = root
-                    , layRootFiles = [entry | entry <- tersusFiles root files, feName entry /= "package.tersus"]
-                    , layModules = Map.fromList [(sub, entries) | (sub, entries, _) <- found]
-                    , layModuleNested = Map.fromList [(sub, nested) | (sub, _, nested) <- found]
-                    , layRootSubdirs = subdirs
-                    }
+        Right
+            Layout
+                { layName = baseNameOf root
+                , layRoot = root
+                , layRootFiles = [entry | entry <- tersusFiles root files, feName entry /= "package.tersus"]
+                , layModules = Map.fromList [(sub, entries) | (sub, entries, _) <- found]
+                , layModuleNested = Map.fromList [(sub, nested) | (sub, _, nested) <- found]
+                , layRootSubdirs = subdirs
+                , layNoPrelude = enabled || noPrelude (resolverOptions resolver)
+                , layIsPackage = True
+                }
 
 layoutModuleId :: Layout -> Maybe String -> ModuleId
 layoutModuleId layout = ModuleId (layName layout)
@@ -473,6 +533,15 @@ layoutCollapsedFile layout moduleName =
      in case entries of
             [entry] | feStem entry == dirLabel -> Just entry
             _ -> Nothing
+
+rootProbeEntries :: Layout -> [String] -> [FileEntry]
+rootProbeEntries layout path = case path of
+    [name]
+        | Map.member name (layModules layout) || any ((== name) . feStem) (layRootFiles layout) -> maybe [] pure (layoutCollapsedFile layout Nothing)
+        | otherwise -> layRootFiles layout
+    [name, _, _] | Map.member name (layModules layout) -> []
+    name : _ -> filter ((== name) . feStem) (layRootFiles layout)
+    [] -> layRootFiles layout
 
 -- Loader state for the pure core.
 
@@ -503,6 +572,7 @@ data LState = LState
     , lsResolved :: Map.Map (ModuleId, String) [ResolvedImport]
     , lsOrder :: [ModuleId]
     , lsDone :: Set.Set ModuleId
+    , lsProbes :: Map.Map FilePath String
     }
 
 newtype LoadM a = LoadM {runLoadM :: LState -> Either String (LState, a)}
@@ -622,7 +692,9 @@ parseModule resolver entryPath layout moduleName = do
       where
         readEntry entry = case resolverReadFile resolver (fePath entry) of
             Nothing -> failM ("in module " ++ renderModuleId moduleId ++ ": file not found: " ++ fePath entry)
-            Just text -> pureM (entry, text)
+            Just text -> do
+                modifyM (\state -> state{lsProbes = Map.insert (fePath entry) text (lsProbes state)})
+                pureM (entry, text)
         checkOne ((entry, source), parsedFile) = case checkDeclarationsOnly moduleId entry (fePath entry == entryPath) (fileBody parsedFile) of
             Left err -> failM err
             Right () -> pureM (PFile entry parsedFile (declarationNames (fileBody parsedFile)) source)
@@ -690,38 +762,21 @@ withoutImportedDecls base imported parsed body = parsed
                 (Map.filterWithKey (\key value -> Map.lookup key incoming /= Just value || Map.member key declared) after)
                 (Map.intersection before (Map.filterWithKey unchanged incoming))
 
--- A file can name, in a struct or enum literal, a match pattern, an
--- `is`/`as` test or explicit generic arguments, a type declared in
--- another file of its package (its own module or an imported one), and
--- the parser needs that type's constructors before it can read the
--- file at all. So the files of a package are parsed iteratively: the
--- declarations of every file that parses are accumulated and the
--- remaining files are retried with them, until every file parses or a
--- round makes no progress. A file that still does not parse is
--- reported with the error it gives on its own, exactly as a
--- single-file parse reports it.
-parseModuleDeclarations :: Resolver -> Layout -> LoadM PModule
-parseModuleDeclarations resolver layout = do
-    state <- getM
-    let moduleId = layoutModuleId layout Nothing
-    files <- mapM_M (readNames (lsFileParser state)) (layRootFiles layout)
-    pureM (PModule layout moduleId Nothing files)
+parseModuleDeclarations :: Resolver -> Layout -> [FileEntry] -> LoadM PModule
+parseModuleDeclarations resolver layout entries = do
+    files <- mapM_M readNames entries
+    pureM (PModule layout (layoutModuleId layout Nothing) Nothing files)
   where
-    readNames fileParser entry = do
+    readNames entry = do
         source <- maybe (failM ("file not found: " ++ fePath entry)) pureM (resolverReadFile resolver (fePath entry))
-        declared <- either failM pureM libraryDecls
-        case fileParser (locating declared) source of
-            Right (parsed, _) -> pureM (PFile entry parsed (declarationNames (fileBody parsed)) source)
-            Left err
-                | "Parser tool failure:" `isInfixOf` err -> failM err
-                | otherwise -> case ParserSeed.parseDeclarationNames source of
-                    Left err' -> failM ("parse error in file " ++ fePath entry ++ ": " ++ show err')
-                    Right names -> pureM (PFile entry (ParsedFile [] []) names source)
+        modifyM (\state -> state{lsProbes = Map.insert (fePath entry) source (lsProbes state)})
+        names <- either failM pureM (ParserSeed.parseDeclarationNames source)
+        pureM (PFile entry (ParsedFile [] []) names source)
 
 parseModuleFiles :: FileParser -> Resolver -> Layout -> ModuleId -> [FileEntry] -> [(FilePath, Decls)] -> [(FileEntry, String)] -> Either String [ParsedFile]
 parseModuleFiles fileParser resolver layout moduleId ownEntries seeds ownTexts = do
-    declared <- libraryDecls
-    let seed = seedDecls fileParser resolver layout ownEntries seeds declared
+    declared <- if layNoPrelude layout then Right emptyDecls else libraryDecls
+    let seed = seedDecls fileParser resolver ownEntries seeds declared
         ordered = [entry | (entry, _) <- ownTexts]
     case iterateParses seed ownTexts [] of
             Right done -> Right [parsedFile | entry <- ordered, Just parsedFile <- [lookup (fePath entry) done]]
@@ -742,19 +797,15 @@ parseModuleFiles fileParser resolver layout moduleId ownEntries seeds ownTexts =
             Right (parsedFile, d') -> go (withoutImportedDecls d (fromMaybe emptyDecls (lookup (fePath entry) seeds)) d' (fileBody parsedFile)) rest remaining ((fePath entry, parsedFile) : done)
             Left _ -> go d rest ((entry, text) : remaining) done
 
--- The declarations the compiler libraries make, from their one parse
--- (LibParsed): the seed every package file is read with, so a file can
--- name a library type (a String literal, a HashMap) before the module's
--- libraries are selected.
+-- The declarations of implicit compiler libraries, used only by default
+-- package preparation before the existing library-selection decision.
 libraryDecls :: Either String Decls
 libraryDecls = lpDecls <$> libParsed
 
-seedDecls :: FileParser -> Resolver -> Layout -> [FileEntry] -> [(FilePath, Decls)] -> Decls -> Decls
-seedDecls fileParser resolver layout ownEntries seeds initial = loop initial texts
+seedDecls :: FileParser -> Resolver -> [FileEntry] -> [(FilePath, Decls)] -> Decls -> Decls
+seedDecls fileParser resolver ownEntries seeds initial = loop initial texts
   where
-    layoutEntries = layRootFiles layout ++ concat (Map.elems (layModules layout))
-    ordered = ownEntries ++ [entry | entry <- layoutEntries, fePath entry `notElem` map fePath ownEntries]
-    texts = [(entry, text) | entry <- ordered, Just text <- [resolverReadFile resolver (fePath entry)]]
+    texts = [(entry, text) | entry <- ownEntries, Just text <- [resolverReadFile resolver (fePath entry)]]
     loop decls [] = decls
     loop decls pending = case pass decls pending of
         (decls', []) -> decls'
@@ -786,7 +837,7 @@ fileWithDecl pmod name = case [feStem (pfEntry pf) | pf <- pmFiles pmod, name `e
     [] -> Nothing
 
 listDecls :: [Name] -> String
-listDecls names = case nub names of
+listDecls names = case nub (filter (notElem '<') names) of
     [] -> "(none)"
     unique -> intercalate ", " unique
 
@@ -818,41 +869,46 @@ resolveImport seeding resolver entryPath sourceLayout sourceModule sourceFile im
             ++ "): "
             ++ message
 
+requestedRoots :: LoadOptions -> String -> [FilePath]
+requestedRoots options pkg = nub (map normalizePath
+    (maybe [] pure (Map.lookup pkg (packageRoots options))
+        ++ [root | pkg == "std", Just root <- [installedStdRoot options]]))
+
+eligibleRoots :: LoadOptions -> Maybe (String, FilePath) -> String -> (FilePath -> Bool) -> [FilePath]
+eligibleRoots options context pkg marker = requestedRoots options pkg ++ case context of
+    Nothing -> []
+    Just (name, root) -> [root | pkg == name] ++ [sibling | marker sibling]
+      where sibling = joinPath (dirNameOf root) pkg
+
 ensureLayout :: Resolver -> Layout -> String -> LoadM (Either String Layout)
 ensureLayout resolver sourceLayout pkgName = do
     state <- getM
-    case Map.lookup pkgName (lsLayouts state) of
-        Just layout -> pureM (Right layout)
-        Nothing
+    let options = resolverOptions resolver
+        requested = requestedRoots options pkgName
+        sibling = joinPath (dirNameOf (layRoot sourceLayout)) pkgName
+        marker root = resolverReadFile resolver (joinPath root "package.tersus") /= Nothing
+        context = if layIsPackage sourceLayout then Just (layName sourceLayout, layRoot sourceLayout) else Nothing
+        candidates = nub (map (resolverCanonicalRoot resolver) (eligibleRoots options context pkgName marker))
+        missing = [root | root <- requested, not (marker root)]
+        aliases root = [layName layout | layout <- Map.elems (lsLayouts state), layIsPackage layout, layRoot layout == root, layName layout /= pkgName]
+    case (missing, candidates) of
+        (root : _, _) -> pureM (Left ("package " ++ show pkgName ++ " not found: no package.tersus in requested root " ++ root))
+        ([], []) -> pureM (Left (if layIsPackage sourceLayout
+            then "package " ++ show pkgName ++ " not found: no package.tersus in " ++ sibling
+            else "package " ++ show pkgName ++ " is not configured for standalone source"))
+        ([], _ : _ : _) -> pureM (Left ("conflicting roots for package " ++ show pkgName ++ ": " ++ intercalate ", " candidates))
+        ([], [root])
+            | name : _ <- aliases root -> pureM (Left ("conflicting package identities for root " ++ root ++ ": " ++ name ++ " and " ++ pkgName))
+            | Just layout <- Map.lookup pkgName (lsLayouts state) -> pureM (if layRoot layout == root
+                then Right layout
+                else Left ("conflicting roots for package " ++ show pkgName ++ ": " ++ intercalate ", " [layRoot layout, root]))
             | pkgName == layName sourceLayout -> pureM (Right sourceLayout)
-            | otherwise -> do
-                let parent = dirNameOf (layRoot sourceLayout)
-                    siblingRoot = joinPath parent pkgName
-                case resolverReadFile resolver (joinPath siblingRoot "package.tersus") of
-                    Nothing -> do
-                        let available = case resolverListDir resolver parent of
-                                Nothing -> []
-                                Just (subdirs, _) ->
-                                    [ sub
-                                    | sub <- subdirs
-                                    , resolverReadFile resolver (joinPath (joinPath parent sub) "package.tersus") /= Nothing
-                                    ]
-                        pureM
-                            ( Left
-                                ( "package "
-                                    ++ show pkgName
-                                    ++ " not found: no package.tersus in "
-                                    ++ siblingRoot
-                                    ++ if null available
-                                        then ""
-                                        else " (packages beside " ++ layName sourceLayout ++ ": " ++ intercalate ", " available ++ ")"
-                                )
-                            )
-                    Just _ -> case buildLayout resolver siblingRoot of
-                        Left err -> pureM (Left err)
-                        Right layout -> do
-                            modifyM (\s -> s{lsLayouts = Map.insert pkgName layout (lsLayouts s)})
-                            pureM (Right layout)
+            | otherwise -> case buildLayout resolver{resolverOptions = options{noPrelude = False}} root of
+                Left err -> pureM (Left err)
+                Right found -> do
+                    let layout = found{layName = pkgName}
+                    modifyM (\s -> s{lsLayouts = Map.insert pkgName layout (lsLayouts s)})
+                    pureM (Right layout)
 
 -- The level determination itself. @rest@ is the import path with the
 -- package segment removed.
@@ -911,17 +967,19 @@ resolveInPackage seeding resolver entryPath sourceModule sourceFile imp layout r
                 ++ message
         rootId = layoutModuleId layout Nothing
         moduleIdOf name = layoutModuleId layout (Just name)
-        parsedOf Nothing = do
+        rootProbe path = do
             state <- getM
             case Map.lookup rootId (lsParsed state) of
                 Just parsed -> pureM parsed
-                Nothing -> parseModuleDeclarations resolver layout
+                Nothing
+                    | null (rootProbeEntries layout path) -> pureM (PModule layout rootId Nothing [])
+                    | otherwise -> parseModuleDeclarations resolver layout (rootProbeEntries layout path)
         parsedOf name = parseModule resolver entryPath layout name
     case rest of
         [] -> finish LevelModule rootId Nothing Nothing
         [x] | seeding, Map.member x (layModules layout) -> finish LevelModule (moduleIdOf x) Nothing Nothing
         [x] -> do
-            rootParsed <- parsedOf Nothing
+            rootParsed <- rootProbe [x]
             let isModule = Map.member x (layModules layout)
                 rootFile = [feStem e | e <- layRootFiles layout, feStem e == x]
                 collapsed = layoutCollapsedFile layout Nothing
@@ -973,7 +1031,7 @@ resolveInPackage seeding resolver entryPath sourceModule sourceFile imp layout r
             let isModule = Map.member m (layModules layout)
                 rootFileStem = [feStem e | e <- layRootFiles layout, feStem e == m]
             modParsed <- if isModule then fmap Just (parsedOf (Just m)) else pureM Nothing
-            rootParsed <- if seeding && isModule then pureM (PModule layout rootId Nothing []) else parsedOf Nothing
+            rootParsed <- if seeding && isModule then pureM (PModule layout rootId Nothing []) else rootProbe [m, x]
             let moduleReading = case modParsed of
                     Just pmod ->
                         let entries = layoutModuleFiles layout (Just m)
@@ -1134,7 +1192,7 @@ resolveInPackage seeding resolver entryPath sourceModule sourceFile imp layout r
                                             )
                                         )
                 else do
-                    rootParsed <- parsedOf Nothing
+                    rootParsed <- rootProbe [m, f, s]
                     let rootFileStem = [feStem e | e <- layRootFiles layout, feStem e == m]
                     if not (null rootFileStem)
                         then
@@ -1226,74 +1284,52 @@ loadFromEntryWith :: FileParser -> Resolver -> FilePath -> Either String LoadRes
 loadFromEntryWith fileParser resolver rawEntry = case discoverEntry resolver entryPath of
     Standalone _ -> do
         text <- maybe (Left ("file not found: " ++ entryPath)) Right (resolverReadFile resolver entryPath)
-        parsedFile <- case fileParser (locating emptyDecls) text of
-            Left err -> Left ("parse error in file " ++ entryPath ++ ": " ++ err)
-            Right (parsed, _) -> Right parsed
-        if null (fileImports parsedFile)
-            then Right (StandaloneResult entryPath parsedFile)
-            else
-                Left
-                    ( "standalone program "
-                        ++ entryPath
-                        ++ ": imports are not supported without a package (no package.tersus found in any ancestor directory); first import: "
-                        ++ renderPath (importPath (head (fileImports parsedFile)))
-                    )
-    InPackage root pkgName -> do
-        layout <- buildLayout resolver root
-        let entryDir = dirNameOf entryPath
-            entryModuleName
-                | entryDir == root = Nothing
-                | otherwise = Just (baseNameOf entryDir)
-        if entryDir /= root && dirNameOf entryDir /= root
-            then Left ("entry file " ++ entryPath ++ " is in a directory nested below module level under package " ++ pkgName ++ "; deeper nesting is not a module")
+        if not (Map.null (packageRoots options)) || installedStdRoot options /= Nothing
+            then loadLayout fileParser resolver entryPath
+                (Layout "" (dirNameOf entryPath) [FileEntry (baseNameOf entryPath) (fileStem entryPath) entryPath] Map.empty Map.empty [] (noPrelude options) False)
             else do
-                let entryModuleId = layoutModuleId layout entryModuleName
-                    initial =
-                        LState
-                            fileParser
-                            (Map.singleton pkgName layout)
-                            Map.empty
-                            []
-                            Map.empty
-                            []
-                            Set.empty
-                (finalState, ()) <- runLoadM (visitModule resolver entryPath [] entryModuleId layout entryModuleName) initial
-                let modulesInOrder =
-                        [ LoadedModule
-                            moduleId'
-                            [ LoadedFile
-                                moduleId'
-                                (feName (pfEntry pf))
-                                (feStem (pfEntry pf))
-                                (fePath (pfEntry pf))
-                                (pfParsed pf)
-                                (pfDecls pf)
-                                (fromMaybe [] (Map.lookup (moduleId', feName (pfEntry pf)) (lsResolved finalState)))
-                                (pfSource pf)
-                            | pf <- pmFiles pmod
-                            ]
-                            (sort (nub (declsOfModule pmod)))
-                            (sort [dep | dep <- nub (concat [maybe [] pure (Just dep) | file <- pmFiles pmod, resolved <- fromMaybe [] (Map.lookup (moduleId', feName (pfEntry file)) (lsResolved finalState)), let target = resolvedTargetModule resolved, target /= moduleId', dep <- [target]])])
-                        | moduleId' <- lsOrder finalState
-                        , Just pmod <- [Map.lookup moduleId' (lsParsed finalState)]
-                        ]
-                Right
-                    ( PackageResult
-                        ( LoadedPackage
-                            root
-                            pkgName
-                            entryPath
-                            entryModuleId
-                            modulesInOrder
-                        )
-                    )
+                parsedFile <- case fileParser (locating emptyDecls) text of
+                    Left err -> Left ("parse error in file " ++ entryPath ++ ": " ++ err)
+                    Right (parsed, _) -> Right parsed
+                if null (fileImports parsedFile)
+                    then Right (StandaloneResult entryPath parsedFile)
+                    else Left ("standalone program " ++ entryPath ++ ": imports are not supported without a package (no package.tersus found in any ancestor directory); first import: " ++ renderPath (importPath (head (fileImports parsedFile))))
+    InPackage root _ -> buildLayout resolver root >>= loadLayout fileParser resolver entryPath
   where
     entryPath = normalizePath rawEntry
+    options = resolverOptions resolver
 
--- Filesystem resolver: walk the real filesystem from an entry file to
--- its marker, snapshot the package (and any sibling packages) into an
--- in-memory resolver, and run the pure core on it. Not yet wired into
--- the CLI (that is Phase 5).
+loadLayout :: FileParser -> Resolver -> FilePath -> Layout -> Either String LoadResult
+loadLayout fileParser resolver entryPath layout = do
+    let root = layRoot layout
+        pkgName = layName layout
+        entryDir = dirNameOf entryPath
+        entryName = if entryDir == root then Nothing else Just (baseNameOf entryDir)
+        entryId = layoutModuleId layout entryName
+    if entryDir /= root && dirNameOf entryDir /= root
+        then Left ("entry file " ++ entryPath ++ " is in a directory nested below module level under package " ++ pkgName ++ "; deeper nesting is not a module")
+        else do
+            let initial = LState fileParser (Map.singleton pkgName layout) Map.empty [] Map.empty [] Set.empty Map.empty
+            (state, ()) <- runLoadM (visitModule resolver entryPath [] entryId layout entryName) initial
+            let modules =
+                    [ LoadedModule moduleId'
+                        [ LoadedFile moduleId' (feName (pfEntry pf)) (feStem (pfEntry pf)) (fePath (pfEntry pf))
+                            (pfParsed pf) (pfDecls pf)
+                            (Map.findWithDefault [] (moduleId', feName (pfEntry pf)) (lsResolved state)) (pfSource pf)
+                        | pf <- pmFiles pmod ]
+                        (sort (nub (declsOfModule pmod)))
+                        (sort (nub [target | pf <- pmFiles pmod, ri <- Map.findWithDefault [] (moduleId', feName (pfEntry pf)) (lsResolved state), let target = resolvedTargetModule ri, target /= moduleId']))
+                        (layNoPrelude (pmLayout pmod))
+                    | moduleId' <- lsOrder state, Just pmod <- [Map.lookup moduleId' (lsParsed state)] ]
+                layouts = Map.elems (lsLayouts state)
+                markers = [(path, text) | found <- layouts, layIsPackage found, let path = joinPath (layRoot found) "package.tersus", Just text <- [resolverReadFile resolver path]]
+                sources = Map.toAscList (Map.unions
+                    [lsProbes state, Map.fromList markers, Map.fromList [(loadedFilePath file, loadedFileSource file) | modu <- modules, file <- loadedModuleFiles modu]])
+                policies = [(layName found, layRoot found, layNoPrelude found) | found <- layouts]
+            Right (PackageResult (LoadedPackage root pkgName entryPath entryId modules sources policies))
+
+-- Snapshot reachable modules and the root declarations used to disambiguate
+-- imports; directory metadata does not require unrelated source contents.
 
 findPackageRootIO :: FilePath -> IO (Maybe FilePath)
 findPackageRootIO entry = go (takeDirectory entry)
@@ -1310,53 +1346,162 @@ loadFromFilesystem :: FilePath -> IO (Either String LoadResult)
 loadFromFilesystem = loadFromFilesystemWith bootstrapFileParser
 
 loadFromFilesystemWith :: FileParser -> FilePath -> IO (Either String LoadResult)
-loadFromFilesystemWith fileParser entry = do
-    files <- snapshotFromFilesystem entry
-    return (loadFromEntryWith fileParser (resolverFromFiles files) entry)
+loadFromFilesystemWith fileParser = loadFromFilesystemWithOptions fileParser defaultLoadOptions
+
+loadFromFilesystemWithOptions :: FileParser -> LoadOptions -> FilePath -> IO (Either String LoadResult)
+loadFromFilesystemWithOptions fileParser options entry = loadFilesystemInput fileParser options entry Nothing
+
+loadFromSourceWith :: FileParser -> LoadOptions -> String -> IO (Either String LoadResult)
+loadFromSourceWith fileParser options source = loadFilesystemInput fileParser options "<stdin>.tersus" (Just source)
+
+loadFilesystemInput :: FileParser -> LoadOptions -> FilePath -> Maybe String -> IO (Either String LoadResult)
+loadFilesystemInput fileParser options rawEntry source = do
+    snapshot <- try (do
+        (resolved, entry) <- resolveFilesystemInputs options rawEntry
+        (resolver, _) <- filesystemSnapshot resolved entry source
+        pure (resolver, entry)) :: IO (Either IOException (Resolver, FilePath))
+    pure $ case snapshot of
+        Left err -> Left ("source snapshot for " ++ rawEntry ++ ": " ++ show err)
+        Right (resolver, entry) -> case source of
+            Just _ -> loadLayout fileParser resolver entry
+                (Layout "" (dirNameOf entry) [FileEntry (baseNameOf entry) (fileStem entry) entry] Map.empty Map.empty [] (noPrelude options) False)
+            Nothing -> loadFromEntryWith fileParser resolver (normalizePath entry)
+
+resolveFilesystemInputs :: LoadOptions -> FilePath -> IO (LoadOptions, FilePath)
+resolveFilesystemInputs options entry
+    | Map.null (packageRoots options) && installedStdRoot options == Nothing = do
+        physical <- canonicalizePath entry
+        cwd <- getCurrentDirectory
+        let path = if isRelative entry then makeRelative cwd physical else physical
+        pure (options, normalizePath path)
+    | otherwise = do
+        roots <- mapM canonicalizePath (packageRoots options)
+        std <- mapM canonicalizePath (installedStdRoot options)
+        canonical <- canonicalizePath entry
+        pure (options{packageRoots = roots, installedStdRoot = std}, normalizePath canonical)
 
 snapshotFromFilesystem :: FilePath -> IO [(FilePath, String)]
-snapshotFromFilesystem entry = do
-    root <- findPackageRootIO entry
-    case root of
+snapshotFromFilesystem = snapshotFromFilesystemWith defaultLoadOptions
+
+snapshotFromFilesystemWith :: LoadOptions -> FilePath -> IO [(FilePath, String)]
+snapshotFromFilesystemWith options rawEntry = do
+    (resolved, entry) <- resolveFilesystemInputs options rawEntry
+    snd <$> filesystemSnapshot resolved entry Nothing
+
+filesystemSnapshot :: LoadOptions -> FilePath -> Maybe String -> IO (Resolver, [(FilePath, String)])
+filesystemSnapshot options rawEntry source = do
+    contents <- newIORef Map.empty
+    directories <- newIORef Map.empty
+    visited <- newIORef Set.empty
+    roots <- newIORef Map.empty
+    canonicalRoots <- newIORef Map.empty
+    cwd <- getCurrentDirectory
+    let canonicalRoot root = do
+            physical <- canonicalizePath root
+            let path = normalizePath (if isRelative rawEntry then makeRelative cwd physical else physical)
+            modifyIORef' canonicalRoots (Map.insert (normalizePath root) path)
+            pure path
+        entry = normalizePath rawEntry
+        readSource path = do
+            saved <- readIORef contents
+            case Map.lookup path saved of
+                Just text -> pure text
+                Nothing -> do
+                    text <- readFile path
+                    length text `seq` modifyIORef' contents (Map.insert path text)
+                    pure text
+        readMarker root = do
+            let marker = joinPath root "package.tersus"
+            present <- doesFileExist marker
+            when present (readSource marker >> pure ())
+            pure present
+        readDirectory dir = do
+            saved <- readIORef directories
+            case Map.lookup dir saved of
+                Just names -> pure names
+                Nothing -> do
+                    exists <- doesDirectoryExist (if null dir then "." else dir)
+                    names <- if not exists then pure ([], []) else do
+                        allNames <- sort <$> listDirectory (if null dir then "." else dir)
+                        subdirs <- filterM (doesDirectoryExist . joinPath dir) allNames
+                        files <- filterM (doesFileExist . joinPath dir) allNames
+                        pure (subdirs, files)
+                    modifyIORef' directories (Map.insert dir names)
+                    pure names
+        rootDirectories root = do
+            (subdirs, _) <- readDirectory root
+            forM_ subdirs (\sub -> readDirectory (joinPath root sub) >> pure ())
+        readRootProbes root pkg path = do
+            saved <- readIORef contents
+            dirs <- readIORef directories
+            let resolver = (resolverFromFiles (Map.toAscList saved))
+                    {resolverListDir = \dir -> Map.lookup (normalizePath dir) dirs}
+            case buildLayout resolver root of
+                Left _ -> pure ()
+                Right layout -> forM_ (rootProbeEntries layout{layName = pkg} path) (\file -> readSource (fePath file) >> pure ())
+        walkModule root pkg name = do
+            seen <- readIORef visited
+            let key = (root, name)
+            when (Set.notMember key seen) $ do
+                modifyIORef' visited (Set.insert key)
+                rootDirectories root
+                let dir = maybe root (joinPath root) name
+                (_, files) <- readDirectory dir
+                forM_ [file | file <- tersusFiles dir files, feName file /= "package.tersus"] $ \file -> do
+                    text <- readSource (fePath file)
+                    walkImports root (Just pkg) text
+        walkImports root pkg text = case ParserSeed.parseImportPrefix text of
+            Left _ -> pure ()
+            Right imports -> forM_ imports $ \imp -> do
+                let targetPkg = head (importPath imp)
+                    rest = tail (importPath imp)
+                    requested = requestedRoots options targetPkg
+                    sibling = joinPath (dirNameOf root) targetPkg
+                known <- Map.lookup targetPkg <$> readIORef roots
+                siblingPresent <- if pkg == Nothing then pure False else readMarker sibling
+                forM_ requested (\candidate -> readMarker candidate >> pure ())
+                let context = fmap (\name -> (name, root)) pkg
+                candidates <- fmap nub (mapM canonicalRoot (eligibleRoots options context targetPkg (\path -> path == sibling && siblingPresent)))
+                present <- mapM readMarker candidates
+                when (and present && length candidates == 1 && maybe True (== head candidates) known) $ do
+                    let target = head candidates
+                    modifyIORef' roots (Map.insert targetPkg target)
+                    rootDirectories target
+                    dirs <- readIORef directories
+                    let isModule m = case Map.lookup (joinPath target m) dirs of
+                            Just (_, files) -> not (null (tersusFiles (joinPath target m) files))
+                            Nothing -> False
+                        name = case rest of
+                            m : _ | isModule m -> Just m
+                            _ -> Nothing
+                    readRootProbes target targetPkg rest
+                    walkModule target targetPkg name
+    case source of
+        Just text -> do
+            modifyIORef' contents (Map.insert entry text)
+            walkImports (dirNameOf entry) Nothing text
         Nothing -> do
-            exists <- doesFileExist entry
-            if not exists
-                then return []
-                else do
-                    text <- readFile entry
-                    return [(normalizePath entry, text)]
-        Just packageRoot -> do
-            packageFiles <- snapshotPackage packageRoot
-            let parent = takeDirectory packageRoot
-            siblings <- listDirectory parent >>= filterM (\name ->
-                if normalizePath (parent </> name) == normalizePath packageRoot
-                    then pure False
-                    else isSiblingPackage parent name)
-            siblingFiles <- fmap concat (mapM (\sib -> snapshotPackage (parent </> sib)) siblings)
-            return (sort (packageFiles ++ siblingFiles))
-  where
-    isSiblingPackage parent name = do
-        let dir = parent </> name
-        isDir <- doesDirectoryExist dir
-        if not isDir
-            then return False
-            else doesFileExist (dir </> "package.tersus")
-    snapshotPackage root = do
-        top <- snapshotDir root
-        names <- listDirectory root
-        dirs <- filterM (\name -> doesDirectoryExist (root </> name)) names
-        moduleFiles <- fmap concat (mapM (\name -> snapshotDir (root </> name)) dirs)
-        nestedFiles <-
-            fmap concat $
-                mapM
-                    ( \modName -> do
-                        subnames <- listDirectory (root </> modName)
-                        subdirs <- filterM (\name -> doesDirectoryExist (root </> modName </> name)) subnames
-                        fmap concat (mapM (\sub -> snapshotDir (root </> modName </> sub)) subdirs)
-                    )
-                    dirs
-        return (top ++ moduleFiles ++ nestedFiles)
-    snapshotDir dir = do
-        names <- listDirectory dir
-        files <- filterM (\name -> doesFileExist (dir </> name)) names
-        mapM (\name -> do text <- readFile (dir </> name); return (normalizePath (dir </> name), text)) files
+            root <- findPackageRootIO entry
+            case root of
+                Nothing -> do
+                    exists <- doesFileExist entry
+                    when exists $ do
+                        text <- readSource entry
+                        walkImports (dirNameOf entry) Nothing text
+                Just packageRoot -> do
+                    let normalized = normalizePath packageRoot
+                        pkg = baseNameOf normalized
+                        dir = dirNameOf entry
+                        name = if dir == normalized then Nothing else Just (baseNameOf dir)
+                    _ <- readMarker normalized
+                    modifyIORef' roots (Map.insert pkg normalized)
+                    walkModule normalized pkg name
+    files <- Map.toAscList <$> readIORef contents
+    dirs <- readIORef directories
+    canonical <- readIORef canonicalRoots
+    let resolver = (resolverFromFiles files)
+            { resolverOptions = options
+            , resolverListDir = \dir -> Map.lookup (normalizePath dir) dirs
+            , resolverCanonicalRoot = \root -> Map.findWithDefault (normalizePath root) (normalizePath root) canonical
+            }
+    pure (resolver, files)

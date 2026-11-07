@@ -2,11 +2,13 @@ module Cli
     ( Command (..)
     , parseCommandLine
     , parseProgramArguments
+    , parseCompilerOptions
     , makesIr
     , World (..)
     , noWorld
     , runSourceIn
     , runSourceFiles
+    , runSourceFilesNoPrelude
     , runPackageFiles
     , runProgramIn
     , readWorldFile
@@ -22,6 +24,9 @@ module Cli
     ) where
 
 import Data.List (intercalate)
+import Data.Char (isAlphaNum, isLetter)
+import qualified Data.Map.Strict as Map
+import qualified Modules
 import Control.Exception (IOException, try)
 import System.IO
 import System.IO.Unsafe (unsafePerformIO)
@@ -48,7 +53,7 @@ data Command = Check | Run | Interpret | Mir | MirText | GhostText | Owned | Llv
 usage :: String
 usage =
     unlines
-        [ "Usage: tersus <command> <file> [-o <output>]"
+        [ "Usage: tersus [--package-root <name>=<directory>] [--std-root <directory>] [--no-prelude] <command> <file> [-o <output>]"
         , ""
         , "Commands:"
         , "  check <file>  Parse and validate a program"
@@ -101,6 +106,27 @@ parseProgramArguments ("run" : file : args) = Just (Run, file, args)
 parseProgramArguments ("eval" : file : args) = Just (Interpret, file, args)
 parseProgramArguments args = (\(command, file) -> (command, file, [])) <$> parseCommandLine args
 
+parseCompilerOptions :: [String] -> Maybe (Modules.LoadOptions, [String])
+parseCompilerOptions = go Modules.defaultLoadOptions
+  where
+    go options ("--no-prelude" : rest)
+        | not (Modules.noPrelude options) = go options{Modules.noPrelude = True} rest
+        | otherwise = Nothing
+    go options ("--std-root" : root : rest)
+        | not (null root), Modules.installedStdRoot options == Nothing = go options{Modules.installedStdRoot = Just root} rest
+        | otherwise = Nothing
+    go options ("--package-root" : binding : rest) = case break (== '=') binding of
+        (name, '=' : root)
+            | validName name, not (null root) -> case Map.lookup name (Modules.packageRoots options) of
+                Just old | Modules.normalizePath old /= Modules.normalizePath root -> Nothing
+                _ -> go options{Modules.packageRoots = Map.insert name root (Modules.packageRoots options)} rest
+        _ -> Nothing
+    go _ ("--std-root" : []) = Nothing
+    go _ ("--package-root" : []) = Nothing
+    go options rest = Just (options, rest)
+    validName (first : rest) = (isLetter first || first == '_') && all (\c -> isAlphaNum c || c == '_') rest
+    validName [] = False
+
 -- What a program is run in, besides its source: the bytes of the standard input, and the bytes of each of its arguments (as characters from 0 to 255:
 -- `Utils.encodeUtf8` for a text). An executable has its own.
 data World = World
@@ -131,9 +157,22 @@ runSourceIn world command source = mapResult fst (runSourceFiles world command s
 
 -- The same with the files that the program wrote (each path once, with what the file holds at the end), which `Interpret` does not write itself
 runSourceFiles :: World -> Command -> String -> Result ((String, String), [(FilePath, String)]) String
-runSourceFiles _ Check source = mapResult (\_ -> (("OK", ""), [])) (compileSource source)
-runSourceFiles world Interpret source = compileSource source `bindResult` runProgramIn world
-runSourceFiles world command source = mapResult (\text -> ((text, ""), [])) (runOther (worldInput world) command source)
+runSourceFiles = runSourceFilesNoPrelude False
+
+runSourceFilesNoPrelude :: Bool -> World -> Command -> String -> Result ((String, String), [(FilePath, String)]) String
+runSourceFilesNoPrelude noPrelude world command source = case command of
+    Check -> mapResult (\_ -> (("OK", ""), [])) compiled
+    Interpret -> compiled `bindResult` runProgramIn world
+    Mir -> output renderProgram compiled
+    Owned -> output renderProgram owned
+    MirText -> output writeProgram owned
+    GhostText -> output writeProgramWithGhosts (validatedSourceNoPrelude noPrelude source)
+    Assumptions -> output (\found -> if null found then "No assumptions" else intercalate "\n" found) (assumptionsOfNoPrelude noPrelude source)
+    _ -> Error "not a command that is run on its own"
+  where
+    compiled = compileSourceNoPrelude noPrelude source
+    owned = compiled `bindResult` ownedOfProgram
+    output render = mapResult (\value -> ((render value, ""), []))
 
 -- What a validated program does when the reference interpreter runs it (what `Interpret` does after `compileSource`): the text it wrote to the
 -- standard output and to the standard error, and the files it wrote. A test that runs the same program in several ways compiles it once and calls this.
@@ -155,15 +194,6 @@ runPackageFiles _ Assumptions pkg = case compileModules pkg of
     Error err -> Error err
     Ok compiled -> let found = assumptionsOfPackage compiled in Ok ((if null found then "No assumptions" else intercalate "\n" found, ""), [])
 runPackageFiles _ _ _ = Error "not a command that is run on its own"
-
-runOther :: String -> Command -> String -> Result String String
-runOther _ Mir source = mapResult renderProgram (compileSource source)
-runOther _ Owned source = mapResult renderProgram (ownedSource source)
-runOther _ MirText source = mapResult writeProgram (ownedSource source)
-runOther _ GhostText source = mapResult writeProgramWithGhosts (validatedSource source)
-runOther _ Assumptions source = mapResult (\found -> if null found then "No assumptions" else intercalate "\n" found) (assumptionsOf source)
--- (making the IR, compiling it, and running it for `Run`, is left to the caller: the emitter is a program that is built and run, see Bootstrap and Main)
-runOther _ _ _ = Error "not a command that is run on its own"
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
