@@ -9,13 +9,13 @@ are measured on GitHub master `a9e12e6cc8aa0337e1a44b6fff570e58ada5732b`
 ## Survey baseline
 
 At `a9e12e6`, `tersus/src/` had 45 Haskell files and 21,816 lines. The table
-records that baseline; ownership is now a Tersus pass, and the 51-line
-`MirOwnership.hs` retains only operand-role helpers for move checking.
+records that baseline; ownership is now a Tersus pass, `MirOwnership.hs` is
+deleted, and its operand-role helpers for move checking are in `MirMoves`.
 
 | Area | Main modules |
 |---|---|
 | Elaboration | `TypeCheck` (1,790), `TypeCheckCore` (1,663), `Types`, `Syntax`, `Solver` |
-| MIR and passes | `MirLower` (1,247), `MirMoves` (719), `Mir` (698), `MirLists` (515), `MirMono` (276); the former 1,196-line ownership transform is retained only as the frozen test oracle |
+| MIR and passes | `MirLower` (1,247), `MirMoves` (719), `Mir` (698), `MirLists` (515), `MirMono` (276); the former 1,196-line ownership transform is deleted |
 | Parser and data bridges | `AstData`, `DataCodec`, `ParsedFile`, `TersusParser`, `SourceParse`, `FileParserProtocol`, `ParserSeed`, `MirData` |
 | Validation host | `SelfHostedMir` (3,090), `ValidatorNative` (349) |
 | Packages and linking | `Modules` (1,362), `ModuleResolve` (535), `Link` (347), `Interface` (269), `PackageCompile` (268), `LibPackage` (164) |
@@ -121,10 +121,9 @@ changes with the move.
 ## Ownership replacement
 
 `insertOwnership` and `expandRefWrites` now run in Tersus through the shared
-MIR reader/writer and the emitter executable. The production Haskell
-`MirOwnership` module retains only the operand-role helpers `MirMoves` needs.
-The old transformation is frozen in `test/TestOwnershipOracle.hs` for
-regression comparisons and the explicit development seed-migration command.
+MIR reader/writer and the emitter executable. The operand-role helpers move
+checking needs are in `MirMoves`. The old Haskell transformation, kept for a
+while as a frozen test oracle, is deleted with the comparisons against it.
 
 The native order is a correctness constraint:
 
@@ -167,17 +166,15 @@ sources the host builds for itself (the emitter, checker, eraser, parser and
 validator), so their prepared inputs need no stage 1 and are made concurrently;
 stage 1 emits the tools and owns and emits user programs. The bootstrap
 fixpoint makes stage 0 and stage 1 own the emitter alike. Ownership has no
-interpreted cold path or Haskell fallback. `dev/emitter-seed` provides an explicit migration
-command that uses the frozen test oracle only to make a prototype from the
-older seed; its production `emit` command checks independent stage-0/stage-1
-ownership and emission. The prototype is never the final seed. Publishing a PR
-requires a production-emitted seed that reproduces itself, its release asset
-and pin, and the full test evidence below.
+interpreted cold path or Haskell fallback. `dev/emitter-seed` has `advance`
+and `emit`; `emit` checks independent stage-0/stage-1 ownership and emission.
+Publishing a PR requires a production-emitted seed that reproduces itself, its
+release asset and pin, and the full test evidence below.
 
-Gate: exact differential MIR checks against the frozen Haskell oracle for
-corpus programs with neither reference construction nor reference writes; the independent heap model and native/
-reference parity for deliberate reference-write fixes; metadata and malformed-
-input checks; the complete suite and opt-in host validation; and independent
+Gate: the independent heap model against the executor and native/reference
+parity for the corpus and the reference-write fixtures; interpreted/native
+parity of the ownership tool on MIR fixtures; metadata and malformed-input
+checks; the complete suite and opt-in host validation; and independent
 stage-0/stage-1 ownership and emitter/parser bootstrap fixpoints. Cold bootstrap
 must also stay within the agreed performance budget against the same-host base.
 

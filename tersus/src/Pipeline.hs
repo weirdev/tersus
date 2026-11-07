@@ -124,7 +124,7 @@ checkedLowered program = case verifyProgram program of
     Ok () -> Ok program
     Error e -> Error ("Lowering failed: Lowering produced a malformed program: " ++ e)
 
--- The MIR of a program that passes every check, with who owns each value made explicit (MirOwnership), for native code
+-- The MIR of a program that passes every check, with who owns each value made explicit (the ownership pass), for native code
 ownedSource :: String -> Result M.Program String
 ownedSource source = compileSource source `bindResult` ownedOfProgram
 

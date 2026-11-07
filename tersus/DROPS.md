@@ -6,16 +6,16 @@
 
 > **Provisional.** This is a plan, not a decision, and it was revised once already: the first draft assumed implicit copies, and explicit `Clone`/`Copy` and the `MirMoves` check were built before any of it. Expect more changes when the drops are started (the flag word, the moment a drop runs and the `eval` change are open, see Decisions). Where the text says "now", it means the code as of the explicit-copies change.
 
-This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: `MirOwnership` (who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the emitter (`examples/mir/emit/emit.tersus`), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built, except what came first and changed the plan: copies are explicit (`clone`, `impl Clone for T { };`, `impl Copy for T { };`), statements carry their line (`Mark`, `GhostPosition`), and `MirMoves` finds a use of a moved value, see LANGUAGE.md, Moves, Clone And Copy.
+This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: the ownership pass (`examples/mir/ownership/`, who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the emitter (`examples/mir/emit/emit.tersus`), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built, except what came first and changed the plan: copies are explicit (`clone`, `impl Clone for T { };`, `impl Copy for T { };`), statements carry their line (`Mark`, `GhostPosition`), and `MirMoves` finds a use of a moved value, see LANGUAGE.md, Moves, Clone And Copy.
 
 **Ownership implementation (2026-11-05).** `examples/mir/ownership/`
 now performs reference-write expansion, liveness/loan analysis, move/copy/peek
 rewriting and drop elaboration. `MirHousekeeping` is the Result-returning host;
-`MirOwnership` retains only operand-role classification for the move checker. The
-heap model uses the frozen Haskell oracle's drop classification. The
-native monomorphization adapter remains Haskell. The frozen old transform is
-`test/TestOwnershipOracle.hs`, not a production or bootstrap fallback. This
-changes where ownership is implemented, not the drop signature or runtime ABI.
+the operand-role classification the move checker uses is in `MirMoves`. The
+heap model of `TestOwnership` has its own drop classification. The native
+monomorphization adapter remains Haskell, and no Haskell ownership transform
+remains. This changes where ownership is implemented, not the drop signature or
+runtime ABI.
 Ownership counts consuming reference writes when tracking moves and cleanup,
 and emits an explicit drop of the old owned referent before storing its
 replacement. Mutable parameters do not qualify as permanently stable
@@ -100,7 +100,7 @@ Lists of such values come with raw pointers (Part 3 and `POINTERS.md`): the slac
 ### Implementation
 
 1. Checker: `Drop` in the prelude (`Clone` is there already), `impl Drop for T` allowed for a struct or enum, one per type, a `~` drop refused, `impl Copy` refused for a type with a drop; `Program.progDrops` (and a table of the types with a `Clone` of their own). A `CopyDef`-like statement carries each to the lowering, as `CopyDef` does for Copy.
-2. `MirOwnership`: `needsDrop` is true for a type with a drop, whatever its fields; locals are dropped in reverse. The pass still clones a read-only view that cannot look at its value in place; for a value with a drop that is an error, since a clone of it runs the drop twice, so `MirMoves` must refuse a view of one that the pass would clone.
+2. The ownership pass: `needsDrop` is true for a type with a drop, whatever its fields; locals are dropped in reverse. The pass still clones a read-only view that cannot look at its value in place; for a value with a drop that is an error, since a clone of it runs the drop twice, so `MirMoves` must refuse a view of one that the pass would clone.
 3. `LlvmRuntime`: the descriptor gets `dropfn` (and `clonefn`); `tersus_drop` calls `dropfn(slot)` on a live value before the fields; the flag word counts in `words`.
 4. Both emitters, in step: `slotsOf` adds the flag, `MakeData` stores 1, the descriptor has the new fields, `MirData` writes `progDrops`, and `bootstrap/emitter.ll` is regenerated. `TestMirEmit` fails if they differ, so they cannot drift. (This is the main cost of the layout change; keeping the new behaviour in the descriptor and the runtime rather than in new MIR statements keeps it to this.)
 5. `MirEval`: `Move` leaves a moved-from marker, `Drop` runs the user drop for a live value and then the fields. `Cli.eval` runs the owned MIR whenever the program has an `impl Drop` (and everywhere, once nothing depends on `eval` being cheap), so the reference semantics of a drop live in one place.
@@ -108,7 +108,7 @@ Lists of such values come with raw pointers (Part 3 and `POINTERS.md`): the slac
 
 ## Part 2: linear and affine checking (step 27)
 
-A linear value must be consumed on every path, and a value that cannot be copied must not be used after it is moved. Both are one analysis of the MIR, written next to `MirOwnership` and sharing its notion of what an operand does (`roles`: `Read` or `Consume`). **The module is `MirMoves`, which exists** (`Linear.hs` is the Fourier-Motzkin solver of the proof engine, hence the name).
+A linear value must be consumed on every path, and a value that cannot be copied must not be used after it is moved. Both are one analysis of the MIR, written next to the ownership pass and sharing its notion of what an operand does (`roles`: `Read` or `Consume`). **The module is `MirMoves`, which exists** (`Linear.hs` is the Fourier-Motzkin solver of the proof engine, hence the name).
 
 ### Syntax
 

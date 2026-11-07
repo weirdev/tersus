@@ -53,12 +53,6 @@ cross a change in what ownership writes. For that, first run
 pin: stage 1 owns and emits the emitter. Then pin the candidate and run `emit`
 from it; the result is the seed only if it equals the candidate byte for byte.
 
-Only the initial migration from a seed that predates ownership needs
-`stack run emitter-seed -- oracle <old-stage0-executable> /tmp/emitter-prototype.ll`.
-That development executable links the frozen Haskell test oracle explicitly;
-the production host never calls it. The prototype must be followed by the
-production `emit` command, not published as the final seed.
-
 For a new candidate, put its digest in `bootstrap/emitter.sha256`, rebuild the
 host, and set `TERSUS_SEED_FILE` to its verified local bytes. Emit to another
 temporary file and require `cmp` to succeed against the candidate. Do not write
@@ -73,7 +67,7 @@ The parser override remains `TERSUS_PARSER_SEED_FILE` with its independent pin.
   and does about 15 map lookups.
 - It takes the **owned MIR** (after list lowering, monomorphization and `insertOwnership`), where the ghost statements and the
   contracts are already stripped. The Tersus emitter needs only the types, functions, locals, blocks, statements and
-  constants. `MirOwnership` and `MirVerify` stay in Haskell.
+  constants. Ownership and MIR checking stayed in Haskell then; both are Tersus programs now.
 - Small helpers to port with it: `renderType` (descriptor symbol names embed it), `slotsOf`, `ownerOf`, `needsDrop`, the
   escaping of names.
 - Scale: `examples/hello.tersus` is 742 lines of owned MIR and 1,610 lines (60 KB) of IR, mostly from the string and list

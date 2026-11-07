@@ -5,14 +5,9 @@ import System.Environment (getArgs, lookupEnv)
 
 import Bootstrap (cachedEmitter, cachedSeed, emitWith)
 import MirData (writeProgram)
-import MirHousekeeping (emitterEntry, emitterOwnedProgram, listLibrary, ownedToolWith, toolProgram)
-import MirLists (lowerLists)
-import qualified TestOwnershipOracle as Oracle
+import MirHousekeeping (emitterEntry, emitterOwnedProgram, ownedToolWith)
 import Utils
 
--- `oracle <stage 0> <output.ll>` is for a pinned seed that predates the ownership passes, so cannot own the emitter
--- for stage 1: the emitter as it is now, owned by the frozen Haskell oracle of the tests and compiled by that stage 0
--- executable. The output only has to run the passes; it is never the seed itself.
 -- `advance <output.ll>` is for a change to what ownership writes: stage 1 (built from the pinned seed) owns and emits the
 -- emitter. Its output is a candidate only; it is the seed when `emit` from it gives the same bytes.
 -- `emit <output.ll>` builds stage 0 from $TERSUS_SEED_FILE (or the pinned seed) and stage 1 from it, has each expand
@@ -22,12 +17,6 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
-        ["oracle", stageZero, output] -> do
-            library <- listLibrary
-            let owned = toolProgram emitterEntry `bindResult` (lowerLists library . Oracle.expandRefWrites)
-            case owned of
-                Error e -> fail e
-                Ok native -> emitWith stageZero (writeProgram (Oracle.insertOwnership native)) >>= written output
         ["advance", output] -> do
             one <- cachedEmitter
             case one of
@@ -62,7 +51,7 @@ main = do
                         (Error e, _, _) -> fail ("stage 0 owning the emitter: " ++ e)
                         (_, Error e, _) -> fail ("stage 1 owning the emitter: " ++ e)
                         (_, _, Error e) -> fail ("the owned emitter: " ++ e)
-        _ -> fail "usage: emitter-seed oracle <stage 0 executable> <output.ll> | emitter-seed advance <output.ll> | emitter-seed emit <output.ll>"
+        _ -> fail "usage: emitter-seed advance <output.ll> | emitter-seed emit <output.ll>"
   where
     -- (the output is written only once everything succeeded, and never over the seed the run was built from)
     written _ (Error e) = fail e

@@ -11,7 +11,7 @@ import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgramWithGhosts)
 import MirEval (MirValue (..), RunEnv (..), Outcome (..), runProgram, runProgramEnv)
-import TestOwnership (referenceFree, runOwned, usesArrays)
+import TestOwnership (runOwned, usesArrays)
 import MirMono (monomorphize, monomorphizeForValidation)
 import MirLists (lowerLists)
 import MirHousekeeping (Tool (..), eraseGhosts, expandRefWrites, insertOwnership, nativeProgram, ownershipTool, toolProgram, emitterEntry, verifyProgram)
@@ -23,7 +23,6 @@ import qualified Syntax as S
 import TestHarness
 import TestNative (nativeExamples, nativeMirCase, unvalidatedPrograms, validatedPrograms)
 import Pipeline (compileSource)
-import qualified TestOwnershipOracle as Oracle
 import Types (Arg (..), Size (..), Type (..), pattern TBox, pattern TList, instanceName)
 import Utils
 
@@ -68,12 +67,26 @@ testOwnershipMetadata = TestList "testOwnershipMetadata"
 
 testMirOwnership :: Test
 testMirOwnership = TestList "testMirOwnership"
-    [ TestList "differential examples" [TestCase path (do { text <- readFile path; compiled <- exampleProgram path; pure (differential text compiled) }) | path <- nativeExamples]
-    , TestList "differential source corpus" [testCase name (differential source (lowerSource True source)) | (name, source) <- validatedPrograms ++ unvalidatedPrograms]
+    [ TestList "examples own before list lowering" [TestCase path (do { text <- readFile path; compiled <- exampleProgram path; pure (ownedBeforeLowering text compiled) }) | path <- nativeExamples]
+    , TestList "source corpus owns before list lowering" [testCase name (ownedBeforeLowering source (lowerSource True source)) | (name, source) <- validatedPrograms ++ unvalidatedPrograms]
     , testCase "nested sequence writes retain each intermediate element type" nestedSequenceWrite
     , testCase "enum field writes retain unwritten sibling fields" enumFieldWrite
-    , testCase "pre-mono expansion retains symbolic types and generic templates" (testAssertEq (expandRefWrites metadataFixture) (Ok (Oracle.expandRefWrites metadataFixture)))
-    , testCase "the mono fast path keeps specifications and ghost payloads" (testAssertEq (insertOwnership ownershipFixture) (Ok (Oracle.insertOwnership ownershipFixture)))
+    , testCase "pre-mono expansion of a program with no reference write leaves it whole" (testAssertEq (expandRefWrites metadataFixture) (Ok metadataFixture))
+    , testCase "the mono fast path keeps specifications and ghost payloads" (case insertOwnership ownershipFixture of
+        Error e -> Just e
+        -- (main owns nothing and the drop does nothing, so both come back whole; the clone copies the `self` it is lent)
+        Ok owned -> firstFailure
+            [ testAssertEq (progTypes owned, progGenerics owned, progInvariants owned) (progTypes ownershipFixture, progGenerics ownershipFixture, progInvariants ownershipFixture)
+            , testAssertEq (progMain owned) (progMain ownershipFixture)
+            , testAssertEq (Map.lookup "<Plain as Drop>::drop" (progFunctions owned)) (Map.lookup "<Plain as Drop>::drop" (progFunctions ownershipFixture))
+            , case (Map.lookup "<Plain as Clone>::clone" (progFunctions owned), Map.lookup "<Plain as Clone>::clone" (progFunctions ownershipFixture)) of
+                (Just clone, Just original) -> firstFailure
+                    [ testAssertEq (fnParams clone, fnBorrowed clone, fnReturns clone, fnSpec clone) (fnParams original, fnBorrowed original, fnReturns original, fnSpec original)
+                    , testAssertTrue (fnLocals original `Map.isSubmapOf` fnLocals clone)
+                    , testAssertEq (blockStatements <$> Map.lookup (BlockId 0) (fnBlocks clone)) (Just [Assign (Local 0) (CopyOf (Copy (Local 1)))])
+                    ]
+                _ -> Just "the clone is missing"
+            ])
     , testCase "uncalled Drop and Clone implementations survive ownership" (case insertOwnership ownershipFixture of Error e -> Just e; Ok owned -> testAssertEq (Map.keys (progFunctions owned)) (Map.keys (progFunctions ownershipFixture)))
     , TestCase "the ownership tool is native after the cold boundary" nativeTool
     -- The fixtures of testOwnershipInterpreted, owned by the production tool and run natively (memory checks and valgrind)
@@ -90,20 +103,22 @@ testMirOwnership = TestList "testMirOwnership"
     , TestCase "a function with no block 0 is refused" (toolRefuses ("pass ownership\n" ++ writeProgramWithGhosts (withMainBlocks (Map.mapKeys (\(BlockId n) -> BlockId (n + 5))) (ownershipInput metadataFixture))))
     ]
   where
-    -- (a program that makes or writes through a reference is judged on the heap model, unless the model cannot hold its
-    -- values, arrays and blocks, where only the well-formedness of the owned MIR is checked here; testOwnership and
-    -- testNative judge those programs further)
-    differential text compiled = case compiled of
+    -- (here the passes run before list lowering, as on a generic body. A program with no reference write is left as it is by the
+    -- expansion. A program with arrays or blocks, which the heap model cannot hold, has the well-formedness of its MIR checked
+    -- after lowering and ownership in the order native code is made in. One that makes no reference is judged on the heap model
+    -- by testOwnership, in that order; one with references is judged on the heap model against the executor here. testNative
+    -- runs them all natively)
+    ownedBeforeLowering text compiled = case compiled of
         Error e -> Just e
         Ok raw -> case expandRefWrites raw of
             Error e -> Just e
-            Ok expanded | referenceFree raw && expanded /= Oracle.expandRefWrites raw -> Just "pre-mono reference-write MIR differs from the frozen oracle"
+            Ok expanded | not (any writesReference (statementsOf raw)) && expanded /= raw -> Just "the expansion changed a program with no reference write"
             Ok expanded -> case insertOwnership expanded of
                 Error e -> Just e
-                Ok owned | referenceFree raw -> testAssertEq owned (Oracle.insertOwnership expanded)
                 Ok _ | usesArrays text || "Block" `isInfixOf` text -> case eraseGhosts raw `bindResult` nativeProgram `bindResult` insertOwnership `bindResult` verifyProgram of
                     Error e -> Just ("the lowered owned MIR is ill formed: " ++ e)
                     Ok () -> Nothing
+                Ok _ | not (any makesReference (statementsOf raw)) -> Nothing
                 Ok owned -> case (runOwned owned, runProgram raw) of
                     (Right a, Ok b) -> testAssertEq a b
                     (Left e, Error e') | e == e' -> Nothing
@@ -142,14 +157,14 @@ testMirOwnership = TestList "testMirOwnership"
 
 testOwnershipInterpreted :: Test
 testOwnershipInterpreted = TestList "testOwnershipInterpreted"
-    ([testCase label (exact program) | (label, program) <- smallOwnershipFixtures] ++
-     [ testCase "a reference write releases the value it replaces" (model "ends with 1 values on the heap" storedOwnerFixture)
-     , testCase "a view of a replaced referent is a copy of its own" (model "ends with 2 values on the heap" mutableViewFixture)
-     , testCase "a field write through a reference releases the field it replaces" (model "ends with 1 values on the heap" storedFieldFixture)
-     , testCase "a view of a place written through a reborrow is a copy of its own" (firstFailure [model "on the heap" reborrowedWriteFixture, notPeeked (Local 4) reborrowedWriteFixture])
-     , testCase "a view of a place written through a reference is a copy of its own" (firstFailure [model "on the heap" writtenSourceFixture, notPeeked (Local 2) writtenSourceFixture])
-     , testCase "a view lent to a callee that writes its source is a copy of its own" (firstFailure [model "on the heap" calleeWriteFixture, notPeeked (Local 2) calleeWriteFixture])
-     , testCase "a borrowed view outlives a replacement of its source as a copy" (firstFailure [model "freed" borrowedViewFixture, notPeeked (Local 2) borrowedViewFixture])
+    ([testCase label (sameAsNative program) | (label, program) <- smallOwnershipFixtures] ++
+     [ testCase "a reference write releases the value it replaces" (model storedOwnerFixture)
+     , testCase "a view of a replaced referent is a copy of its own" (model mutableViewFixture)
+     , testCase "a field write through a reference releases the field it replaces" (model storedFieldFixture)
+     , testCase "a view of a place written through a reborrow is a copy of its own" (firstFailure [model reborrowedWriteFixture, notPeeked (Local 4) reborrowedWriteFixture])
+     , testCase "a view of a place written through a reference is a copy of its own" (firstFailure [model writtenSourceFixture, notPeeked (Local 2) writtenSourceFixture])
+     , testCase "a view lent to a callee that writes its source is a copy of its own" (firstFailure [model calleeWriteFixture, notPeeked (Local 2) calleeWriteFixture])
+     , testCase "a borrowed view outlives a replacement of its source as a copy" (firstFailure [model borrowedViewFixture, notPeeked (Local 2) borrowedViewFixture])
      -- Lowered programs name a list and a Box as their structs (`named "List" 1 type T`), and the Tersus passes must see
      -- through those names: to the references a list or a Box holds, and to the element an index of either reaches
      , testCase "a lowered list that holds a reference keeps a view of its referent a copy" (firstFailure [heapModel loweredListReferenceFixture, notPeeked (Local 5) loweredListReferenceFixture])
@@ -157,17 +172,20 @@ testOwnershipInterpreted = TestList "testOwnershipInterpreted"
      , testCase "a write at an index of a lowered list through a reference releases the element" (heapModel loweredIndexWriteFixture)
      ])
   where
-    exact program = case interpretedOwnership program of
-        Error e -> Just e
-        Ok owned -> testAssertEq owned (Oracle.insertOwnership program)
-    model oldError program = case interpretedOwnership program of
-        Error e -> Just e
-        Ok owned -> firstFailure
-            [ fmap (++ ("\n" ++ renderProgram owned)) (testAssertEq (runOwned owned) (Right (Just (MInt 1))))
-            , case runOwned (Oracle.insertOwnership program) of
-                Left e | oldError `isInfixOf` e -> Nothing
-                other -> Just ("the frozen oracle did not expose the intended ownership defect: " ++ show other ++ "\n" ++ renderProgram (Oracle.insertOwnership program))
+    -- (the interpreted emitter owns the program as the native tool does, and the owned program runs on the heap model to the executor's answer)
+    sameAsNative program = case (interpretedOwnership program, insertOwnership program) of
+        (Error e, _) -> Just e
+        (_, Error e) -> Just ("native: " ++ e)
+        (Ok owned, Ok native) -> firstFailure
+            [ testAssertEq owned native
+            , case (runOwned owned, runProgram program) of
+                (Right a, Ok b) -> testAssertEq a b
+                (Left e, _) -> Just ("the owned program fails on the heap model: " ++ e)
+                (Right a, Error e) -> Just ("the model returns " ++ show a ++ " where the executor stops with " ++ e)
             ]
+    model program = case interpretedOwnership program of
+        Error e -> Just e
+        Ok owned -> fmap (++ ("\n" ++ renderProgram owned)) (testAssertEq (runOwned owned) (Right (Just (MInt 1))))
     heapModel program = case interpretedOwnership program of
         Error e -> Just e
         Ok owned -> fmap (++ ("\n" ++ renderProgram owned)) (testAssertEq (runOwned owned) (Right (Just (MInt 1))))
@@ -189,7 +207,7 @@ interpretedOwnership program = interpretedEmitter `bindResult` \tool ->
     input = "pass ownership\n" ++ writeProgramWithGhosts (ownershipInput program)
 
 smallOwnershipFixtures :: [(String, Program)]
-smallOwnershipFixtures = [("repeated consumes match the oracle", plain), ("partial fields match the oracle", fields), ("conditional drops match the oracle", conditional)]
+smallOwnershipFixtures = [("repeated consumes are owned as natively and run", plain), ("partial fields are owned as natively and run", fields), ("conditional drops are owned as natively and run", conditional)]
   where
     list = TList TInt
     decl n ty = (Local n, LocalDecl ty Nothing)
@@ -311,7 +329,7 @@ calleeWriteFixture = wireEmpty{progFunctions = Map.singleton "f" callee, progMai
             ]
         }
 
--- An example as the differential reads it: a package linked, a single file lowered
+-- An example as these checks read it: a package linked, a single file lowered
 exampleProgram :: FilePath -> IO (Result Program String)
 exampleProgram path = do
     loaded <- loadFromFilesystem path
@@ -607,7 +625,6 @@ nestedSequenceWrite = case expandRefWrites input of
         [ testAssertEq (localType <$> Map.lookup (Local 3) locals) (Just (TList (TList TInt)))
         , testAssertEq (localType <$> Map.lookup (Local 4) locals) (Just (TList TInt))
         , testAssertEq (runProgram input) (runProgram output)
-        , testAssertTrue (output /= Oracle.expandRefWrites input)
         ]
       where locals = fnLocals (progMain output)
   where
@@ -630,7 +647,6 @@ enumFieldWrite = case expandRefWrites input of
         [ testAssertEq (localType <$> Map.lookup (Local 3) (fnLocals (progMain output))) (Just list)
         , testAssertEq [map fst fields | block <- Map.elems (fnBlocks (progMain output)), Assign (Local 1) (MakeData "E::Some" fields) <- blockStatements block] [["xs", "tag"]]
         , testAssertEq (runProgram input) (runProgram output)
-        , testAssertTrue (output /= Oracle.expandRefWrites input)
         ]
   where
     list = TList TInt
@@ -703,6 +719,17 @@ ghostRecord statement = unlines ["tersus-mir 2", "main \"main\" params 0 returns
 
 ghostIds :: Program -> [Int]
 ghostIds program = [ident | fn <- Map.elems (progFunctions program) ++ [progMain program], block <- Map.elems (fnBlocks fn), Ghost _ (GhostPosition (-1) ident) <- blockStatements block]
+
+statementsOf :: Program -> [Statement]
+statementsOf program = [st | fn <- progMain program : Map.elems (progFunctions program), block <- Map.elems (fnBlocks fn), st <- blockStatements block]
+
+writesReference :: Statement -> Bool
+writesReference AssignRef{} = True
+writesReference _ = False
+
+makesReference :: Statement -> Bool
+makesReference (Assign _ Borrow{}) = True
+makesReference st = writesReference st
 
 isGhost :: Statement -> Bool
 isGhost Ghost{} = True

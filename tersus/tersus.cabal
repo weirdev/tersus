@@ -99,7 +99,6 @@ library
       MirLower
       MirMono
       MirMoves
-      MirOwnership
       MirOwnershipData
       ModuleResolve
       Modules
@@ -197,10 +196,11 @@ executable cache-integration-probe
 executable emitter-seed
   main-is: Main.hs
   other-modules:
-      TestOwnershipOracle
+      Paths_tersus
+  autogen-modules:
+      Paths_tersus
   hs-source-dirs:
       dev/emitter-seed
-      test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
   build-depends:
       base >=4.7 && <5
@@ -291,7 +291,6 @@ test-suite tersus-test
       TestModules
       TestNative
       TestOwnership
-      TestOwnershipOracle
       TestParity
       TestParser
       TestParserBootstrap

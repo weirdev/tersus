@@ -7,7 +7,7 @@ import qualified Compile
 import qualified Mir as M
 import MirEval (MirValue (MInt), runProgramOutput)
 import MirHousekeeping (insertOwnership)
-import MirOwnership (operandLocal)
+import MirMoves (operandLocal)
 import Pipeline (compileSource)
 import Syntax
 import TestHarness

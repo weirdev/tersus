@@ -454,7 +454,7 @@ fn elementOf(g: Gen, cx: &Ctx, f: &Function, ty: &Type, container: &Operand, ind
 };
 
 // The statement that gives a value held inline to a local, made where the local is, with no pointer to it. What the local
-// held is dropped by the statements of the MIR before it (MirOwnership), never here. The contracts (an index in range) are assumed.
+// held is dropped by the statements of the MIR before it (the ownership pass), never here. The contracts (an index in range) are assumed.
 fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty: &Type, rv: &Rvalue) -> Gen ~ {
     bytes = bytesIn(cx, ty);
     owns = ownsIn(cx, ty);
