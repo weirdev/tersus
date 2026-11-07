@@ -30,7 +30,11 @@ testMirVerify :: Test
 testMirVerify =
     TestList
         "testMirVerify"
-        [ TestCase "local lookup contexts are borrowed" contextMapsBorrowed
+        [ TestCase "repeated verifier preparation completes parser-derived keys before locking" $ do
+            first <- withVerifier (\_ -> pure Nothing)
+            second <- withVerifier (\_ -> pure Nothing)
+            pure (first <> second)
+        , TestCase "local lookup contexts are borrowed" contextMapsBorrowed
         , TestCase "constructor and block lookups borrow aggregates" borrowedLookups
         , TestList
             "interpreted"

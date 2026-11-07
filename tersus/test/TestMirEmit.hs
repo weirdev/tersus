@@ -3,6 +3,8 @@
 module TestMirEmit (testMirEmit, testMirEmitPrograms) where
 
 import Control.Concurrent.MVar (MVar, newMVar)
+import Control.DeepSeq (force)
+import Control.Exception (evaluate)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import System.Environment (lookupEnv)
@@ -254,7 +256,8 @@ outlineDispatch = withEmitter $ \exe -> do
                             case ir of
                                 Error e -> pure (Error e)
                                 Ok outlineProbeIr -> buildExecutable output outlineProbeIr
-                    built <- cachedProgram "test-emit-outline-call" key "the outline call fixture" build
+                    completeKey <- evaluate (force key)
+                    built <- cachedProgram "test-emit-outline-call" completeKey "the outline call fixture" build
                     case built of
                         Error e -> pure (Just e)
                         Ok markedExe -> do
