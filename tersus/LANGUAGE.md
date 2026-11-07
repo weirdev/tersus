@@ -977,11 +977,12 @@ See `examples/parallel_sum.tersus`, `examples/build_list.tersus` and `examples/u
 The invariants of a loop are completed by the validator. For each variable the body assigns, it starts from what is known when the loop is entered:
 
 - a variable that is a number there is at least and at most that number, the size of a list likewise (a list that is not a literal can still have a size the facts know, such as `push(push([], a), b)`, which has size 2), and two of these differ by what they differed by on entry;
-- the first three elements of a list whose size is known on entry are terms of their own, so an element the loop leaves alone (the length field at index 1 of a buffer that only grows by `push`) keeps its value;
 - a term that starts at a variable the loop does not assign, next to a term that starts at a number, differ by that variable: `i = size(out) + lo` for a loop that starts at `lo` and pushes once per iteration (`slice` in `examples/packet_parser.tersus`);
 - a variable (or the size of a list) that is not known to be a number is compared with the variables the loop does not assign, and the comparison (`=`, `<=` or `>=`) is a candidate if the facts already imply it: `i <= n` when `i` starts at `0` and `n` is `size(a)`, or `size(out) = size(a)` when `out` starts as a copy of `a`.
 
-It keeps a candidate only if the body establishes it again, assuming the ones that are left. For a body without a `return` this is repeated until none is dropped (at most four rounds); for a body with one, a candidate that is not preserved is found from the error and dropped, one at a time (at most twelve). What is kept is an invariant like one the program wrote: it holds on entry, is preserved, and holds after the loop together with the negated condition. Eight terms (the numbers and sizes before the elements of lists), twelve variables to compare with and thirty-two candidates at most are tried.
+It keeps a candidate only if the body establishes it again, assuming the ones that are left. For a body without a `return` this is repeated until none is dropped (at most four rounds); for a body with one, a candidate that is not preserved is found from the error and dropped, one at a time (at most twelve). What is kept is an invariant like one the program wrote: it holds on entry, is preserved, and holds after the loop together with the negated condition. Eight terms (the numbers and the sizes of lists), twelve variables to compare with and thirty-two candidates at most are tried.
+
+The elements of a list are never candidates. A loop whose result depends on an element it leaves alone states that element as an invariant of its own, together with the bound the read needs, since the invariant's `get` is checked like any other read: `for i in 0..size(payload) [{ affirm size(out) = i + 2; affirm get(out, 1) = size(payload); }]` for the buffer whose length field is at index 1 (`encode` in `examples/packet_parser.tersus`).
 
 ```tersus
 out = [];

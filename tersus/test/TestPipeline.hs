@@ -12,7 +12,7 @@ module TestPipeline
     ) where
 
 import Control.Exception (bracket, evaluate, finally)
-import Data.List (isInfixOf, subsequences)
+import Data.List (isInfixOf, nub, sort, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.Environment (getExecutablePath, lookupEnv)
@@ -864,6 +864,54 @@ selfHostedQueryFamilies program =
                                 testAssertEq (runNamedFunction program "entailsGoal" [context, goal "Equal" found 10]) (Ok (Just (MBool True)))
                             other -> Just ("Merged state malformed: " ++ show other)
                     result -> Just ("Unexpected mergeStates result: " ++ show result)
+                -- A loop candidate is replayed in a state built from the loop's initial state, so
+                -- every term id it names has to be one of that state's: an id inference minted
+                -- while building the candidate denotes something else, or nothing, where the
+                -- candidate is replayed. The pair helpers take the initial context as a parameter,
+                -- and these calls give them a work context disjoint from it -- which a real work
+                -- context, the initial one plus the scratch terms, never is. That is deliberate:
+                -- it is what makes the parameter, rather than st.work.context, the thing the
+                -- assertion pins.
+                inferContextOf constantTerms = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                inferSubject local subjectTerm = MData "InferSubject" [("local", MInt local), ("isSize", MBool False), ("temp", MInt 0), ("term", MInt subjectTerm)]
+                scratchInferState constantTerms = MData "InferState" [("work", MData "ExecutionState" [("context", inferContextOf constantTerms), ("locals", localsValue [(20, 20), (21, 21)]), ("templates", MList [])]), ("index", MInt 0), ("candIndex", MInt 0), ("assigned", MList []), ("anchors", MList []), ("goals", MList [])]
+                replayedTerms value = case value of
+                    MData "ValueRef::Term" fields -> [named | Just (MInt named) <- [lookup "term" fields]]
+                    MData _ fields -> concatMap (replayedTerms . snd) fields
+                    MList items -> concatMap replayedTerms items
+                    _ -> []
+                inferredGoals result = case result of
+                    Ok (Just (MData "InferState" fields)) -> case lookup "goals" fields of
+                        Just (MList goals) -> Right (length goals, sort (nub (concatMap replayedTerms goals)))
+                        other -> Left ("Inference state without goals: " ++ show other)
+                    _ -> Left ("Unexpected inference result: " ++ show result)
+                checkPairProvenance name workConstants initialConstants expected =
+                    testAssertEq
+                        (inferredGoals (runNamedFunction program name [scratchInferState (map constant workConstants), inferContextOf (map constant initialConstants), inferSubject 20 20, inferSubject 21 21, MInt 7, MInt 4]))
+                        (Right expected)
+                inferredEntryState = MData "ExecutionState" [("context", MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList (map constant [(1, 0, 0), (2, 0, 1), (3, 0, 3), (4, 0, -1)])), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]), ("locals", localsValue [(1, 3), (2, 4)]), ("templates", MList [])]
+                -- The scans inside the phases are reached through no parameter, so the whole
+                -- inference is run over an entry state of its own: it has to keep candidates,
+                -- and every term they replay has to be one the entry state names. The two
+                -- subjects are 4 apart with no constant of 4 to name the distance, so the sum
+                -- of ones inference builds for it folds to 2 and records a constant of 2 in the
+                -- work state that the entry state does not have; the pair totals 2, which is
+                -- the value the last phase then looks a constant up by. A scan reading the work
+                -- state finds that minted constant and leaves its id in a candidate, which is
+                -- the id this assertion does not allow.
+                inferredEntryTerms = case inferredEntryState of
+                    MData _ stateFields -> case lookup "context" stateFields of
+                        Just (MData _ contextFields) -> case lookup "constants" contextFields of
+                            Just (MList entryConstants) -> sort [i | MData "ConstantTerm" fields <- entryConstants, Just (MInt i) <- [lookup "id" fields]]
+                            _ -> []
+                        _ -> []
+                    _ -> []
+                checkInferenceProvenance = case runNamedFunction program "inferLoopCandidateGoals" [inferredEntryState, MList [MInt 1, MInt 2], MData "HashSet" [("map", MData "HashMap" [("buckets", MList [MList []]), ("count", MInt 0)])]] of
+                    Ok (Just (MList goals)) ->
+                        let outside = [replayed | replayed <- sort (nub (concatMap replayedTerms goals)), replayed `notElem` inferredEntryTerms]
+                         in (if null goals then Just "Inference kept no loop candidate" else Nothing)
+                                `orElse` (if null outside then Nothing else Just ("Candidates replay terms the entry state does not name: " ++ show outside ++ ", named: " ++ show inferredEntryTerms))
+                    other -> Just ("Unexpected candidate result: " ++ show other)
              in [ ("products", [checkProduct a b (productResult a b) | a <- productValues, b <- productValues])
                 , ("relations",
                       [ checkDifferenceOverflow
@@ -1146,6 +1194,16 @@ selfHostedQueryFamilies program =
                       , checkCommonContext, checkMergeStates
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
                       , testAssertErrorContains "expected 3 arguments" (runNamedFunction program "hasEquality" [])
+                      ])
+                , ("loop candidate provenance",
+                      [ checkPairProvenance "inferPairGoal" [(900, 0, 7), (901, 0, 4)] [(10, 0, 7), (11, 0, 4)] (1, [10, 11])
+                      , checkPairProvenance "inferPairByConstants" [(900, 0, 7), (901, 0, 4)] [(10, 0, 7), (11, 0, 4)] (1, [10, 11])
+                      , checkPairProvenance "inferPairGoal" [(900, 0, 7), (901, 0, 4), (902, 0, 3)] [(10, 0, 7), (11, 0, 4), (12, 0, 3)] (1, [12])
+                      , checkPairProvenance "inferPairGoal" [(900, 0, 7), (901, 0, 4), (903, 0, 1)] [(10, 0, 7), (11, 0, 4), (13, 0, 1)] (1, [13])
+                      -- (the work state alone can name the distance: with none in the initial
+                      -- state there is no candidate, rather than one naming the work state's)
+                      , checkPairProvenance "inferPairGoal" [(900, 0, 7), (901, 0, 4)] [(11, 0, 4)] (0, [])
+                      , checkInferenceProvenance
                       ])
                 ]
 
