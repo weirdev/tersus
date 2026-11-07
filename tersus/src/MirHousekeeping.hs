@@ -81,21 +81,21 @@ import Utils
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and
 -- function used is declared), and the types (every operation is applied to operands of the types it takes,
--- and gives the type of the local that receives it), as examples/mir/mir_verify/mir_verify.tersus checks it over the data
+-- and gives the type of the local that receives it), as lib/mir/mir_verify/mir_verify.tersus checks it over the data
 -- of the program. The check of a specification that only the program itself holds (that a loop is at a
 -- block that is there, that a name of a specification stands for a declared local) is not in the data, and
 -- is the validator's (the validator written in Tersus), which runs after this in the pipeline.
 verifyProgram :: Program -> Result () String
 verifyProgram program = unsafePerformIO (verifyIO program)
 
--- The program with its permissions taken out (POINTERS.md): what examples/mir/mir_erase/mir_erase.tersus writes for the
+-- The program with its permissions taken out (POINTERS.md): what lib/mir/mir_erase/mir_erase.tersus writes for the
 -- program as data before the erasure (MirData.writeProgramWithGhosts), read back, with the parts the data
 -- does not carry put back as the head of this module says. A Block::cast whose slots are not the same size
 -- is refused, with the eraser's reason.
 eraseGhosts :: Program -> Result Program String
 eraseGhosts program = unsafePerformIO (eraseIO program)
 
--- The ownership passes (OWNERSHIP in MIR.md) are run by the emitter's executable (examples/mir/emit/emit.tersus):
+-- The ownership passes (OWNERSHIP in MIR.md) are run by the emitter's executable (lib/mir/emit/emit.tersus):
 -- stage 0 owns what the host builds for itself, stage 1 owns everything else; they never run in the executor.
 {-# NOINLINE insertOwnership #-}
 insertOwnership :: Program -> Result Program String
@@ -338,7 +338,7 @@ cachedParserExe = do
                 Error e -> pure (Error e)
                 Ok (Just exe) -> pure (Ok exe)
                 Ok Nothing -> do
-                    prepared <- preparedDerived "examples/parser/parser.tersus" (toolProgram "examples/parser/parser.tersus") []
+                    prepared <- preparedDerived "lib/parser/parser.tersus" (toolProgram "lib/parser/parser.tersus") []
                     case prepared of
                         Error e -> pure (Error e)
                         Ok (actual, _, input) -> cachedProgramWithArtifacts [".ll"] "tersus-parser" actual "the parser written in Tersus" $ \output -> do
@@ -366,7 +366,7 @@ parserInput = do
     ready <- prepareBootstrap
     case ready of
         Error e -> pure (Error e)
-        Ok () -> fmap (mapResult snd) (prepareProgram "examples/parser/parser.tersus" (toolProgram "examples/parser/parser.tersus"))
+        Ok () -> fmap (mapResult snd) (prepareProgram "lib/parser/parser.tersus" (toolProgram "lib/parser/parser.tersus"))
 
 parserIr :: IO (Result String String)
 parserIr = do
@@ -586,7 +586,7 @@ parserKey = do
     ready <- prepareBootstrap
     case ready of
         Error e -> pure (Error e)
-        Ok () -> derivedKey "examples/parser/parser.tersus" (toolProgram "examples/parser/parser.tersus") []
+        Ok () -> derivedKey "lib/parser/parser.tersus" (toolProgram "lib/parser/parser.tersus") []
 
 validationEntry :: FilePath
 validationEntry = "lib/validation/driver.tersus"
@@ -649,13 +649,13 @@ buildPrepared flags output input = do
 
 -- The entry files of the programs the host compiles itself, inside the mir package
 emitterEntry :: FilePath
-emitterEntry = "examples/mir/emit/emit.tersus"
+emitterEntry = "lib/mir/emit/emit.tersus"
 
 mirVerifyEntry :: FilePath
-mirVerifyEntry = "examples/mir/mir_verify/mir_verify.tersus"
+mirVerifyEntry = "lib/mir/mir_verify/mir_verify.tersus"
 
 mirEraseEntry :: FilePath
-mirEraseEntry = "examples/mir/mir_erase/mir_erase.tersus"
+mirEraseEntry = "lib/mir/mir_erase/mir_erase.tersus"
 
 -- A program of the mir package compiled through the module pipeline from the
 -- embedded package files: linked, and not validated. The validator is itself

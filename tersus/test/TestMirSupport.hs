@@ -147,23 +147,23 @@ phaseLocalOwners (loaded, _, _) = firstFailure
 
 emitterSourceSnapshot :: IO TestResult
 emitterSourceSnapshot = do
-    actual <- mapM (\stem -> let path = "examples/mir/emit/" ++ stem ++ ".tersus" in do source <- readFile path; pure (path, source)) emitterFiles
+    actual <- mapM (\stem -> let path = "lib/mir/emit/" ++ stem ++ ".tersus" in do source <- readFile path; pure (path, source)) emitterFiles
     pure (firstFailure [testAssertEq (lookup path mirPackageFiles) (Just source) | (path, source) <- actual])
 
 emitterImportRefusal :: TestResult
-emitterImportRefusal = case Mod.loadFromEntry (Mod.resolverFromFiles changed) "examples/mir/emit/emit.tersus" of
+emitterImportRefusal = case Mod.loadFromEntry (Mod.resolverFromFiles changed) "lib/mir/emit/emit.tersus" of
     Left err -> Just ("removing the values import unexpectedly failed loading: " ++ err)
     Right (Mod.PackageResult pkg) -> testAssertErrorContains "covering import" (Package.compileModules pkg)
     Right _ -> Just "emitter stopped being a package"
   where
-    changed = [(path, if path == "examples/mir/emit/functions.tersus" then unlines (filter (not . isPrefixOf "import mir::emit::values ") (lines source)) else source) | (path, source) <- mirPackageFiles]
+    changed = [(path, if path == "lib/mir/emit/functions.tersus" then unlines (filter (not . isPrefixOf "import mir::emit::values ") (lines source)) else source) | (path, source) <- mirPackageFiles]
 
 emitterDeclarationRefusal :: TestResult
-emitterDeclarationRefusal = case Mod.loadFromEntry (Mod.resolverFromFiles changed) "examples/mir/emit/emit.tersus" of
+emitterDeclarationRefusal = case Mod.loadFromEntry (Mod.resolverFromFiles changed) "lib/mir/emit/emit.tersus" of
     Left err -> testAssertEq ("modules declare, programs run" `isInfixOf` err) True
     Right _ -> Just "a non-entry emitter file executed"
   where
-    changed = [(path, if path == "examples/mir/emit/helpers.tersus" then source ++ "\nreturn 0;\n" else source) | (path, source) <- mirPackageFiles]
+    changed = [(path, if path == "lib/mir/emit/helpers.tersus" then source ++ "\nreturn 0;\n" else source) | (path, source) <- mirPackageFiles]
 
 snapshotInspectors :: [(String, (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult)]
 snapshotInspectors =
@@ -233,7 +233,7 @@ sharedFunctions =
 toolSnapshots :: [(String, Result (Mod.LoadedPackage, Package.CompiledPackage, M.Program) String)]
 toolSnapshots = [(name, snapshot name) | name <- ["emit", "mir_verify", "mir_erase"]]
   where
-    snapshot name = case Mod.loadFromEntry (Mod.resolverFromFiles mirPackageFiles) ("examples/mir/" ++ name ++ "/" ++ name ++ ".tersus") of
+    snapshot name = case Mod.loadFromEntry (Mod.resolverFromFiles mirPackageFiles) ("lib/mir/" ++ name ++ "/" ++ name ++ ".tersus") of
         Left err -> Error err
         Right (Mod.PackageResult loaded) -> Package.compileModules loaded `bindResult` \compiled ->
             mapResult (\program -> (loaded, compiled, program)) (Package.lowerCompiledPackage loaded compiled)
@@ -259,7 +259,7 @@ dependencyGraph (loaded, compiled, _) = firstFailure
     , testAssertEq (deps supportId) (Just (Set.fromList [Mod.ModuleId "data" (Just "codec"), Mod.ModuleId "mir" (Just "reader")]))
     , testAssertEq (deps (Mod.ModuleId "mir" (Just "reader"))) (Just (Set.singleton (Mod.ModuleId "data" (Just "codec"))))
     , testAssertEq (fmap (Set.member supportId) (deps (Mod.packageEntryModule loaded))) (Just True)
-    , testAssertEq [Mod.loadedFilePath file | modu <- Mod.packageModules loaded, Mod.loadedModuleId modu == supportId, file <- Mod.loadedModuleFiles modu] ["examples/mir/support/support.tersus"]
+    , testAssertEq [Mod.loadedFilePath file | modu <- Mod.packageModules loaded, Mod.loadedModuleId modu == supportId, file <- Mod.loadedModuleFiles modu] ["lib/mir/support/support.tersus"]
     ]
   where
     deps id0 = case [Set.fromList (Mod.loadedDependencies modu) | modu <- Mod.packageModules loaded, Mod.loadedModuleId modu == id0] of

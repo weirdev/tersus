@@ -6,16 +6,16 @@ module TestModules
 import Control.Exception (bracket, evaluate, try, SomeException)
 import Control.Monad (when)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removeDirectoryRecursive)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory, removeDirectoryRecursive)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO.Unsafe (unsafePerformIO)
 
 import qualified AstData
 import qualified PackageCompile
-import PreludeSource (parserPackageFiles, astReaderPackageFiles, validationPackageFiles)
+import PreludeSource (parserPackageFiles, astReaderPackageFiles, toolPackageFiles, validationPackageFiles)
 import qualified MirHousekeeping
 import qualified Compile
 import FileParserProtocol
@@ -1467,14 +1467,18 @@ testNativeModuleLoader = TestList "native-module-loader"
     , TestList "actual MIR package entries"
         [ nativeLoadCase path True (loadFromFilesystem path) (\parser -> loadFromFilesystemWith parser path) Nothing
         | path <-
-            [ "examples/mir/emit/emit.tersus", "examples/mir/mir_reader/mir_reader.tersus"
-            , "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus"
-            , "examples/mir/reader/reader.tersus"
+            [ "lib/mir/emit/emit.tersus", "lib/mir/mir_reader/mir_reader.tersus"
+            , "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus"
+            , "lib/mir/reader/reader.tersus"
             ]
+        ]
+    , TestList "compiler tool packages beside the validator and the libraries"
+        [ TestCase path (toolPackageIsolation path)
+        | path <- ["lib/mir/emit/emit.tersus", "lib/mir/mir_reader/mir_reader.tersus", "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", "lib/parser/parser.tersus", "lib/ast_reader/ast_reader.tersus"]
         ]
     , TestList "AST tool package snapshots"
         [ nativeLoadCase path True (pure (loadFromEntry resolver path)) (\parser -> pure (loadFromEntryWith parser resolver path)) Nothing
-        | (path, files) <- [("examples/ast_reader/ast_reader.tersus", astReaderPackageFiles), ("examples/parser/parser.tersus", parserPackageFiles)]
+        | (path, files) <- [("lib/ast_reader/ast_reader.tersus", astReaderPackageFiles), ("lib/parser/parser.tersus", parserPackageFiles)]
         , let resolver = resolverFromFiles files
         ]
     , testCase "loader tool failure is not a matching rejection" $
@@ -1491,6 +1495,31 @@ testNativeModuleLoader = TestList "native-module-loader"
         , ("app/main.tersus", "import app::geo; p = geo::make(21); q = clone(p); if q = p { return p.x + q.x; }; return 0;")
         , ("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
         ]
+
+-- A compiler tool under lib/ loads its own package and the data package only: with the validator package and the top-level
+-- library files beside it, it loads exactly what its embedded snapshot alone gives
+toolPackageIsolation :: FilePath -> IO TestResult
+toolPackageIsolation entry = do
+    names <- listDirectory "lib"
+    libFiles <- mapM (\name -> (,) ("lib/" ++ name) <$> readFile ("lib/" ++ name)) [name | name <- names, ".tersus" `isSuffixOf` name]
+    onDisk <- findPackageRootIO entry
+    let besideFiles = resolverFromFiles (toolPackageFiles ++ validationPackageFiles ++ libFiles)
+        alone = loadFromEntry (resolverFromFiles toolPackageFiles) entry
+        beside = loadFromEntry besideFiles entry
+        pkg = takeWhile (/= '/') (drop 4 entry)
+        root = "lib/" ++ pkg ++ "/"
+    pure $ case (alone, beside) of
+        (Right (PackageResult a), Right (PackageResult b)) -> mconcat
+            [ testAssertEq (show b) (show a)
+            , testAssertEq (packageRootDir b, onDisk) ("lib/" ++ pkg, Just ("lib/" ++ pkg))
+            , case discoverEntry besideFiles entry of
+                InPackage r name -> testAssertEq (r, name) ("lib/" ++ pkg, pkg)
+                _ -> Just (entry ++ " is not found in its own package")
+            , testAssertEq [path | modu <- packageModules b, file <- loadedModuleFiles modu, let path = loadedFilePath file, not (root `isPrefixOf` path || "lib/data/" `isPrefixOf` path)] []
+            ]
+        (Left e, _) -> Just e
+        (_, Left e) -> Just e
+        _ -> Just (entry ++ " is not a package")
 
 crossPackageFiles :: String -> Files
 crossPackageFiles source =

@@ -141,14 +141,14 @@ corpusParity batch = do
     pure (firstFailure results)
 
 emitterCorpusEntry :: FilePath
-emitterCorpusEntry = "examples/mir/emit/emit.tersus"
+emitterCorpusEntry = "lib/mir/emit/emit.tersus"
 
 -- (the emitter's package load reads its own files and every file of the ownership passes and the MIR writer it imports, so one
 -- paired load observes all of them)
 emitterCorpusFiles :: [FilePath]
-emitterCorpusFiles = ["examples/mir/emit/" ++ name ++ ".tersus" | name <- ["emit", "types", "values", "operations", "functions", "helpers"]]
-    ++ ["examples/mir/ownership/" ++ name ++ ".tersus" | name <- ["ownership", "analysis", "common", "drops", "refwrites", "rewrite"]]
-    ++ ["examples/mir/writer/writer.tersus"]
+emitterCorpusFiles = ["lib/mir/emit/" ++ name ++ ".tersus" | name <- ["emit", "types", "values", "operations", "functions", "helpers"]]
+    ++ ["lib/mir/ownership/" ++ name ++ ".tersus" | name <- ["ownership", "analysis", "common", "drops", "refwrites", "rewrite"]]
+    ++ ["lib/mir/writer/writer.tersus"]
 
 observedSource :: String -> ([String], TestResult) -> TestResult
 observedSource source (observations, result) = firstFailure
@@ -180,10 +180,10 @@ comparePreparedPackage resolver path = do
 
 preparedEmitterHelper :: IO TestResult
 preparedEmitterHelper = do
-    let helper = "examples/mir/emit/functions.tersus"
+    let helper = "lib/mir/emit/functions.tersus"
         source = "fn answer() -> Int [{ }] [{ }] { return 42; };"
         resolver = Modules.resolverFromFiles
-            [ ("examples/mir/package.tersus", "")
+            [ ("lib/mir/package.tersus", "")
             , (emitterCorpusEntry, "import mir::emit::functions { answer }; return answer();")
             , (helper, source)
             ]

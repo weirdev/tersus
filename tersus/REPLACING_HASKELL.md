@@ -27,7 +27,7 @@ They are separate from the source count. Reproduce current counts from
 
 ## Implemented replacements
 
-- **LLVM emission:** `examples/mir/emit/` is the production emitter.
+- **LLVM emission:** `lib/mir/emit/` is the production emitter.
   `LlvmEmit.hs` is deleted. Bootstrap uses the release asset pinned by
   `bootstrap/emitter.sha256`.
 - **Validation:** the `lib/validation/` package is the only production validator.
@@ -46,16 +46,16 @@ They are separate from the source count. Reproduce current counts from
   eraser, P1 and the unchecked validator) run concurrently; their prepared
   owned-MIR inputs are cached per compiler snapshot, entry and flags, and each
   executable's identity is the actual prepared bytes.
-- **Parsing:** `examples/parser/` supplies native P1. `Parse.hs` and the
+- **Parsing:** `lib/parser/` supplies native P1. `Parse.hs` and the
   Haskell-parser selector are deleted. P0 is the pinned native parser seed;
   the explicit interpreted selector executes the Tersus parser, not a
   different grammar. `AST_DATA.md` describes the P0/P1/P2 evidence.
-- **Ownership and reference-write expansion:** `examples/mir/ownership/`
+- **Ownership and reference-write expansion:** `lib/mir/ownership/`
   contains both transformations, and the emitter executable dispatches their
   native requests. `MirHousekeeping` keeps the monomorphization adapter and
   `MirOwnershipData` preserves omitted metadata. The replacement is implemented;
   performance optimization and final verification are still in progress.
-- **AST data:** `AstData` and `examples/ast_reader/` exchange parsed syntax
+- **AST data:** `AstData` and `lib/ast_reader/` exchange parsed syntax
   and complete elaborated occurrence types, contracts and builtin metadata.
   Parsed data is a production boundary; elaboration itself remains Haskell.
 

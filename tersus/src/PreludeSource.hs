@@ -158,25 +158,25 @@ mirPackageFiles :: [(FilePath, String)]
 mirPackageFiles = dataPackageFiles ++
     $( do
         let paths =
-                [ "examples/mir/package.tersus"
-                , "examples/mir/reader/reader.tersus"
-                , "examples/mir/support/support.tersus"
-                , "examples/mir/emit/emit.tersus"
-                , "examples/mir/emit/types.tersus"
-                , "examples/mir/emit/values.tersus"
-                , "examples/mir/emit/operations.tersus"
-                , "examples/mir/emit/functions.tersus"
-                , "examples/mir/emit/helpers.tersus"
-                , "examples/mir/mir_reader/mir_reader.tersus"
-                , "examples/mir/writer/writer.tersus"
-                , "examples/mir/ownership/ownership.tersus"
-                , "examples/mir/ownership/common.tersus"
-                , "examples/mir/ownership/analysis.tersus"
-                , "examples/mir/ownership/rewrite.tersus"
-                , "examples/mir/ownership/refwrites.tersus"
-                , "examples/mir/ownership/drops.tersus"
-                , "examples/mir/mir_verify/mir_verify.tersus"
-                , "examples/mir/mir_erase/mir_erase.tersus"
+                [ "lib/mir/package.tersus"
+                , "lib/mir/reader/reader.tersus"
+                , "lib/mir/support/support.tersus"
+                , "lib/mir/emit/emit.tersus"
+                , "lib/mir/emit/types.tersus"
+                , "lib/mir/emit/values.tersus"
+                , "lib/mir/emit/operations.tersus"
+                , "lib/mir/emit/functions.tersus"
+                , "lib/mir/emit/helpers.tersus"
+                , "lib/mir/mir_reader/mir_reader.tersus"
+                , "lib/mir/writer/writer.tersus"
+                , "lib/mir/ownership/ownership.tersus"
+                , "lib/mir/ownership/common.tersus"
+                , "lib/mir/ownership/analysis.tersus"
+                , "lib/mir/ownership/rewrite.tersus"
+                , "lib/mir/ownership/refwrites.tersus"
+                , "lib/mir/ownership/drops.tersus"
+                , "lib/mir/mir_verify/mir_verify.tersus"
+                , "lib/mir/mir_erase/mir_erase.tersus"
                 ]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
@@ -217,15 +217,15 @@ parserSeedSha256 =
 dataPackageFiles :: [(FilePath, String)]
 dataPackageFiles =
     $( do
-        let paths = ["examples/data/package.tersus", "examples/data/codec/codec.tersus", "examples/data/ast/ast.tersus"]
+        let paths = ["lib/data/package.tersus", "lib/data/codec/codec.tersus", "lib/data/ast/ast.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )
 
 parserPackageFiles :: [(FilePath, String)]
-parserPackageFiles = dataPackageFiles ++ [("examples/parser/unicode.tersus", parserUnicodeSource)] ++
+parserPackageFiles = dataPackageFiles ++ [("lib/parser/unicode.tersus", parserUnicodeSource)] ++
     $( do
-        let paths = ["examples/parser/package.tersus", "examples/parser/parser.tersus"]
+        let paths = ["lib/parser/package.tersus", "lib/parser/parser.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )
@@ -233,7 +233,7 @@ parserPackageFiles = dataPackageFiles ++ [("examples/parser/unicode.tersus", par
 astReaderPackageFiles :: [(FilePath, String)]
 astReaderPackageFiles = dataPackageFiles ++
     $( do
-        let paths = ["examples/ast_reader/package.tersus", "examples/ast_reader/ast_reader.tersus"]
+        let paths = ["lib/ast_reader/package.tersus", "lib/ast_reader/ast_reader.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )

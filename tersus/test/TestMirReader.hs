@@ -3,7 +3,6 @@ module TestMirReader (testMirReader, withProgram, programExecutable, sameText) w
 import Control.Concurrent.MVar (MVar, newMVar)
 import System.IO.Unsafe (unsafePerformIO)
 import qualified TersusParser
-import Data.List (isPrefixOf)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 
@@ -18,7 +17,7 @@ import TestHarness
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The MIR as data, read and written by a program in Tersus (examples/mir/mir_reader/mir_reader.tersus, step 31 of the roadmap): what `tersus mir --data` prints for a program
+-- The MIR as data, read and written by a program in Tersus (lib/mir/mir_reader/mir_reader.tersus, step 31 of the roadmap): what `tersus mir --data` prints for a program
 -- is read into the types of the MIR and written again, and the output is the input. The reader is built once (it needs clang, and the tests pass without it),
 -- and run on the data of every example and every program that native code is tested with; it also reads the data of itself. A smaller input is run by the
 -- interpreter, which needs no clang.
@@ -53,7 +52,7 @@ sameText a b = trim a == trim b
 interpreted :: String -> IO TestResult
 interpreted source = do
     -- (the reader as the host builds it, not validated: testHostValidation validates it)
-    reader <- bootstrapFromFile "examples/mir/mir_reader/mir_reader.tersus"
+    reader <- bootstrapFromFile "lib/mir/mir_reader/mir_reader.tersus"
     dataText <- dataOf source
     pure $ case (reader, dataText) of
         (Error e, _) -> Just e
@@ -88,7 +87,7 @@ programExecutable path name = do
     backend <- lookupEnv "TERSUS_PARSER"
     parser <- TersusParser.parserKey
     let build output = do
-            ir <- if "examples/mir/" `isPrefixOf` path
+            ir <- if embeddedToolFile path
                 then ownedFromFiles path files >>= \owned -> case owned of
                     Error e -> pure (Error e)
                     Ok prog -> llvmOfOwned prog
@@ -113,7 +112,7 @@ withReader use = do
     available <- clangAvailable
     if not available then pure Nothing else do
         built <- memoizedTestExecutable readerExecutable
-            (programExecutable "examples/mir/mir_reader/mir_reader.tersus" "mir-reader")
+            (programExecutable "lib/mir/mir_reader/mir_reader.tersus" "mir-reader")
         case built of
             Error e -> pure (Just e)
             Ok exe -> use exe
@@ -128,7 +127,7 @@ nativeCheck name source = withReader $ \exe -> do
         bad -> Just (unlines bad)
   where
     check exe (name, source) = do
-        dataText <- if "examples/mir/" `isPrefixOf` name then mirDataFromFile name else dataOf source
+        dataText <- if embeddedToolFile name then mirDataFromFile name else dataOf source
         case dataText of
             Error e -> pure [name ++ ": " ++ e]
             Ok text -> do

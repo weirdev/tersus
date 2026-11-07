@@ -76,22 +76,28 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     program without running the driver. `PreludeSource.validationPackageFiles`
     embeds all files and the package marker. `ValidatorNative` requires the
     full validator source and physical List/Box proofs before use.
+  - `mir/`, `data/`, `parser/` and `ast_reader/`: the compiler's own programs,
+    four packages beside `validation/` with their own `package.tersus`
+    markers. `testHostValidation` validates the AST reader and the MIR reader,
+    checker, eraser and emitter, and says what running them with no input does.
+    `mir/emit/emit.tersus` is the LLVM emitter written in Tersus, and
+    `mir/mir_reader/mir_reader.tersus` / `mir/mir_verify/mir_verify.tersus` /
+    `mir/mir_erase/mir_erase.tersus` are the MIR reader, the MIR checker and
+    the ghost erasure. The host runs the checker and the erasure on the MIR as
+    data (`MirHousekeeping`); they are the production path.
+    `mir/ownership/` holds the ownership and reference-write passes; the
+    emitter's executable runs them when its input starts with `pass ownership`
+    or `pass expand`. The emitter's declaration-only `types.tersus`,
+    `values.tersus`, `operations.tersus`, `functions.tersus` and
+    `helpers.tersus` files are siblings of `emit.tersus` in one `mir::emit`
+    module; only `emit.tersus` runs. `data/` holds the shared token, type and
+    AST codecs, `parser/parser.tersus` is the native parser and
+    `ast_reader/ast_reader.tersus` the AST reader (`AST_DATA.md`). All are
+    embedded by `PreludeSource` (`mirPackageFiles`, `dataPackageFiles`,
+    `parserPackageFiles`, `astReaderPackageFiles`) and listed in
+    `package.yaml`.
 - `tersus/examples/`: example programs, all loaded and checked by
-  `testExamples` (see Testing Guidelines), but for the compiler's own
-  programs below, which `testHostValidation` checks. `examples/mir/emit/emit.tersus` is the LLVM
-  emitter written in Tersus, and `examples/mir/mir_reader/mir_reader.tersus` /
-  `examples/mir/mir_verify/mir_verify.tersus` / `examples/mir/mir_erase/mir_erase.tersus` are the MIR
-  reader, the MIR checker and the ghost erasure written in Tersus. The host
-  runs the checker and the erasure on the MIR as data (`MirHousekeeping`);
-  they are the production path, and the examples' expectations in
-  `test/TestPipeline.hs` say what running them with no input does.
-  `examples/mir/ownership/` holds the ownership and reference-write passes;
-  the emitter's executable runs them when its input starts with
-  `pass ownership` or `pass expand`. The emitter's
-  declaration-only `types.tersus`, `values.tersus`, `operations.tersus`,
-  `functions.tersus` and `helpers.tersus` files are siblings of `emit.tersus`
-  in one `mir::emit` module; only `emit.tersus` runs. All six are embedded by
-  `PreludeSource.mirPackageFiles` and listed in `package.yaml`.
+  `testExamples` (see Testing Guidelines).
 - `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
   emitter is bootstrapped from; the seed itself is a GitHub release asset
   (see Build, Test, and Development Commands).
@@ -124,7 +130,7 @@ Work from `tersus/`.
   - `owned <file>`: print the MIR that native code is made from, with moves,
     copies and frees.
   - `llvm <file>`: print the LLVM IR of a validated program (written by the
-    emitter in Tersus, `examples/mir/emit/emit.tersus`, which is built with clang on
+    emitter in Tersus, `lib/mir/emit/emit.tersus`, which is built with clang on
     first use from the seed (a release asset pinned by
     `bootstrap/emitter.sha256`, fetched and verified on first use; a seed at
     `$TERSUS_SEED_FILE` or `bootstrap/emitter.ll` is used instead when
@@ -139,11 +145,11 @@ Work from `tersus/`.
   `testNative` also runs some programs under `valgrind` when it is installed;
   the heap model of `testOwnership` needs neither.
 - If a change alters what the emitter in Tersus produces (a change to
-  `examples/mir/emit/emit.tersus` or to what it is built from), regenerate the seed
+  `lib/mir/emit/emit.tersus` or to what it is built from), regenerate the seed
   into a temporary file only when that succeeds:
   `stack run emitter-seed -- emit /tmp/emitter.ll.new` (it checks that stage 0
   and stage 1 own and emit the emitter alike; after a change to what the
-  ownership passes in `examples/mir/ownership/` write, run
+  ownership passes in `lib/mir/ownership/` write, run
   `stack run emitter-seed -- advance` first, pin its output, and `emit` from it,
   which must give the same bytes; `STEP31.md`),
   then `sha256sum /tmp/emitter.ll.new`, upload it as the `emitter.ll` asset of a

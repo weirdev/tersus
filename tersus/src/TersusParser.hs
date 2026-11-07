@@ -200,7 +200,7 @@ emitParserIr = parserIr
 
 {-# NOINLINE validatedParserProgram #-}
 validatedParserProgram :: Result Program String
-validatedParserProgram = toolProgram "examples/parser/parser.tersus"
+validatedParserProgram = toolProgram "lib/parser/parser.tersus"
 
 ownedParserProgram :: Result Program String
 ownedParserProgram = validatedParserProgram `bindResult` \program ->

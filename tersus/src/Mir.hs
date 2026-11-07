@@ -101,7 +101,7 @@ data Function = Function
     , fnBlocks :: Map BlockId BasicBlock
     , fnSizeParams :: [Variable] -- the names of the last parameters, which are the sizes that a call of the function gives (see Mono)
     , fnTypeParams :: [Variable] -- the names of the type parameters, which a call gives and native code makes a copy of the function for (see MirMono)
-    , fnBorrowed :: [Local] -- the parameters that the function only reads, which a call lends (see the ownership pass, examples/mir/ownership)
+    , fnBorrowed :: [Local] -- the parameters that the function only reads, which a call lends (see the ownership pass, lib/mir/ownership)
     , fnMutBorrowed :: [Local] -- the parameters lent for updating (&mut T)
     , fnFrom :: [Local] -- the parameters a reference result is from
     , fnSpec :: FunctionSpec
@@ -124,7 +124,7 @@ data Statement
     = Assign Local Rvalue
     | -- Does nothing when the program runs; the validator's. The names are those the program can use at this point.
       Ghost Env GhostStatement
-    | -- The next two are added by the ownership pass (examples/mir/ownership), which makes who owns what explicit, and only native code needs them.
+    | -- The next two are added by the ownership pass (lib/mir/ownership), which makes who owns what explicit, and only native code needs them.
       -- Frees what the local owns, and leaves it holding nothing
       Drop Local
     | -- The local points into a value that something else owns: it does not own what it holds, and so does not free it
@@ -201,7 +201,7 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 -- into an empty slot), AddrTake p i b (the value moved out of a slot), AddrDropValue p i b and AddrDropRange p i n b (the values of slots
 -- dropped where they are), AddrResize p n b (the slots moved to an allocation of n) and AddrFree p b (the allocation given back) are given
 -- the permission b too, which only the validator reads. The Block operations make a permission and are ghost: the validator has them, and
--- they are erased (by the ghost erasure, `examples/mir/mir_erase/mir_erase.tersus`) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
+-- they are erased (by the ghost erasure, `lib/mir/mir_erase/mir_erase.tersus`) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
 -- and AddrDropRange, which give the permission after, give 0.
 data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | FromList | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
     | AddrNull | AddrOffset | AddrCast | AddrToInt | AddrFromInt | AddrAlloc | AddrGet | AddrWrite | AddrTake | AddrDropValue | AddrDropRange | AddrResize | AddrFree

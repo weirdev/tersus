@@ -50,7 +50,7 @@ jobs:
             stack-work-${{ runner.os }}-${{ hashFiles('tersus/package.yaml', 'tersus/stack.yaml', 'tersus/src/**', 'tersus/app/**', 'tersus/test/**', 'tersus/lib/**', 'tersus/examples/**', 'tersus/bootstrap/**') }}-
             stack-work-${{ runner.os }}-
 
-      # `build`, `llvm` and `run` write the IR with the emitter written in Tersus (examples/emit.tersus), which is built with clang the first time from the seed
+      # `build`, `llvm` and `run` write the IR with the emitter written in Tersus (lib/mir/emit/emit.tersus), which is built with clang the first time from the seed
       # (a release asset pinned by bootstrap/emitter.sha256, fetched and verified on first use) and kept in ~/.cache/tersus under a name made from what it is made of, so a cache entry that is out of date is only not used.
       # This has to be restored before the tests run: the test groups build the emitter (and the programs they build with it) into the same directory, and a restore
       # after them only ever helped the two CLI checks at the end. A restore key of an older entry is still useful, for the same reason: what it holds is named

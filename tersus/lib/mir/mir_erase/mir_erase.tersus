@@ -7,7 +7,7 @@ import data::codec::codec { Token, Size, Type, quoted, parseInt };
 // the validator's part out, makes each `Uninit<T>` a `T`, refuses the
 // `Block::cast`s whose slots are not the same size, and writes the program as version 1 of the data, as `tersus mir --data` writes it.
 //
-//     tersus mir --ghost-data examples/addresses.tersus | tersus run examples/mir/mir_erase/mir_erase.tersus | tersus run examples/mir/emit/emit.tersus
+//     tersus mir --ghost-data examples/addresses.tersus | tersus run lib/mir/mir_erase/mir_erase.tersus | tersus run lib/mir/emit/emit.tersus
 //
 // A permission (`Block<T>`) is a ghost value: the validator has it, and the program that runs does not. A local, a parameter or a
 // result that is one (or a struct made only of them) is gone, and so is what gives one a value; a permission given to an operation
@@ -15,8 +15,8 @@ import data::codec::codec { Token, Size, Type, quoted, parseInt };
 // value taken apart (a `dissolve`) is the clearing of its bytes. The contracts and specifications of a function are not in the
 // data: the erasure only scrubs them, and nothing that is written keeps them.
 //
-// The reader and writer are the shared ones of the mir package (`examples/mir/reader/reader.tersus` and
-// `examples/mir/writer/writer.tersus`), imported below: the program is read with `ghostProgramAt` (version 2 of the data,
+// The reader and writer are the shared ones of the mir package (`lib/mir/reader/reader.tersus` and
+// `lib/mir/writer/writer.tersus`), imported below: the program is read with `ghostProgramAt` (version 2 of the data,
 // with the `ghost` and `dissolve` statements) and written with `printProgramAsRead`, which writes a list or a Box read from
 // the `list` or `box` token of older data with that token again. The block
 // operations are numbers 46 to 53 in the table of the list operations, as in the other programs that read the

@@ -10,14 +10,14 @@ import mir::ownership::ownership { isOwnershipRequest, runOwnership };
 // The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
 // oracle. It reads the MIR as data from the standard input (what `tersus mir --data` prints) and writes the LLVM IR.
 //
-//     tersus mir --data examples/hello.tersus | tersus run examples/mir/emit/emit.tersus
+//     tersus mir --data examples/hello.tersus | tersus run lib/mir/emit/emit.tersus
 //
 // With no argument it writes all of the IR of the program (TestMirEmit runs every mode of it on every example and every
 // program of the native tests, and TestNative builds and runs the IR). The argument `outline` writes the declarations, the made functions of the types of the locals and the entry point,
 // and `bodies` the code of each function: the parts it was written in.
 //
 // The reader of the MIR as data (its types, tokenizer and parsers) is the shared reader of the mir package
-// (`examples/mir/reader/reader.tersus`), imported above. The lowering helpers are the declaration-only sibling files
+// (`lib/mir/reader/reader.tersus`), imported above. The lowering helpers are the declaration-only sibling files
 // types, values, operations, functions and helpers; this file keeps program assembly and the executable entry.
 // Output follows the same ordering and naming as the Haskell emitter it replaced:
 // - There are no maps: the types of the program are a list in the order of the Haskell map, and a lookup is a scan of it.
@@ -249,7 +249,7 @@ fn outline(program: &Program) -> Entry ~ {
 // The program is read from the standard input and its IR is written. The first argument says what: `ir` (or none) is all of it, `outline` the
 // declarations, the made functions and the entry point, and `bodies` the code of each function. What cannot be read or made is
 // reported on the standard error. An input whose first line is `pass ownership` or `pass expand` asks for that ownership pass
-// instead (examples/mir/ownership), so that the seed of the emitter also has them.
+// instead (lib/mir/ownership), so that the seed of the emitter also has them.
 mode = String::arg(0, 100);
 read = readLines();
 if !read.ok {

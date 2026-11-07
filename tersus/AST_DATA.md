@@ -1,6 +1,6 @@
 # AST as data
 
-`AstData` and `examples/ast_reader/ast_reader.tersus` exchange syntax without
+`AstData` and `lib/ast_reader/ast_reader.tersus` exchange syntax without
 running the proof engine. The parsed format is the production parser boundary.
 The elaborated format remains a bridge for the MIR lowering port in
 `REPLACING_HASKELL.md`; elaboration remains in Haskell, while
@@ -25,7 +25,7 @@ preserves **both** `[Statement]` and the complete ordered `[Type]` of
 bridge neither infers them again nor claims to validate an elaborated program.
 A parsed reader refuses an elaborated header, and vice versa.
 
-Tersus (`examples/ast_reader/ast_reader.tersus`, entry of the `ast_reader` package):
+Tersus (`lib/ast_reader/ast_reader.tersus`, entry of the `ast_reader` package):
 
 It imports `data::codec::codec` for the shared token, integer, escaping and
 size/type wire codec, and `data::ast::ast` for the AST arena schema and writer.
@@ -147,10 +147,23 @@ record exceeding the limit; they never wrap, truncate or emit unreadable
 data. Those cases are not supported by the exact MIR representation;
 integer **value** literals have no such numeric limit.
 
+## The packages
+
+`lib/data/` is the `data` package: `codec/codec.tersus` (tokens, escaping, decimal
+numbers and size/type wire helpers) and `ast/ast.tersus` (AST arena schema and
+writer). The parser (`lib/parser/`) and the AST reader (`lib/ast_reader/`) are
+packages of their own beside it. The parser is compiled from its embedded
+snapshot so its Unicode predicates match the serving Haskell compiler.
+
+| Entry | What it does | With no input |
+| --- | --- | --- |
+| `parser/parser.tersus` | Native source/file parser: builds exact AST arenas and reads imports plus declaration state. `PreludeSource.parserPackageFiles` embeds the parser package, generated Unicode root-module file and shared data dependencies for the embedded snapshot for P0-based package checking and parser builds; ordinary source does not receive those helpers. `Pipeline.validatedSource`, `compileSource` and package loading consume its ASTs. `TERSUS_PARSER=haskell` is refused; a pinned native LLVM parser seed bootstraps the current parser | |
+| `ast_reader/ast_reader.tersus` | Parsed and elaborated AST data, read into typed syntax arena payloads and written again, including contracts, proofs, builtin arguments and metadata, source marks and ordered occurrence types. Reuses the MIR type/size codec; `mutate` changes `Plus` to `Minus` as a semantic edit demonstration | returns `1` with no input and reports that the input is not AST data |
+
 ## The parser written in Tersus
 
-`examples/parser/parser.tersus` is a hand-written parser over bytes (in the manner of
-`examples/mir/mir_reader/mir_reader.tersus`) for the whole language. It builds the arena of
+`lib/parser/parser.tersus` is a hand-written parser over bytes (in the manner of
+`lib/mir/mir_reader/mir_reader.tersus`) for the whole language. It builds the arena of
 this document directly and writes `tersus-ast 1 parsed` for it, byte for byte
 as `AstData.writeParsed` writes the decoded syntax,
 including every desugaring (a `match` becomes an `if` chain of `Is` and
@@ -331,8 +344,8 @@ previous build's output.
 
 ## Refreshing the parser seed
 
-Use the development seed driver, not `llvm examples/parser/parser.tersus`: the raw
-example omits the generated Unicode classifier that the serving parser uses.
+Use the development seed driver, not `llvm lib/parser/parser.tersus`: the raw
+entry omits the generated Unicode classifier that the serving parser uses.
 From `tersus/`, with the current pinned seeds available:
 
 ```sh

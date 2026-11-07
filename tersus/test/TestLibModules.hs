@@ -250,8 +250,8 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         Ok pkg -> let p = libPrograms pkg Map.! "types"
                       erased = M.completeErasedInstances p
                    in testAssertTrue (Map.lookup "Box" (M.progGenerics p) == Just (["T"], [("addr", TAddr (TParam "T")), ("blk", TBlock (TParam "T"))]) && Map.lookup "Box" (M.progGenerics erased) == Just (["T"], [("addr", TAddr (TParam "T"))]) && M.completeInstances p == p && M.completeErasedInstances erased == erased)
-    , testCase "parser owned MIR constructs before guest compilation" (bootstrapOwned "examples/parser/parser.tersus")
-    , testCase "emitter owned MIR constructs before guest compilation" (bootstrapOwned "examples/mir/emit/emit.tersus")
+    , testCase "parser owned MIR constructs before guest compilation" (bootstrapOwned "lib/parser/parser.tersus")
+    , testCase "emitter owned MIR constructs before guest compilation" (bootstrapOwned "lib/mir/emit/emit.tersus")
     , testCase "imported lent signatures survive until checkMoves" $ importedLoan "xs = [1]; r = headOf(xs); n = size(xs); return *r + n;" False
     , testCase "imported from results still freeze their source" $ importedLoan "xs = [1]; r = headOf(xs); xs = [2]; return *r;" True
     ]

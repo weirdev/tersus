@@ -43,6 +43,7 @@ module TestHarness
     , ownedFromFiles
     , packageCacheInput
     , matchesEmbeddedPackage
+    , embeddedToolFile
     , mirDataOf
     , mirDataFromFile
     , encodeProgram
@@ -382,6 +383,9 @@ ownedFromFiles = cachedFromPackage "owned"
 packageCacheInput :: FilePath -> [(FilePath, String)] -> String
 packageCacheInput path files = show (normalizePath path,
     Map.toAscList (Map.fromList [(normalizePath file, source) | (file, source) <- files]))
+
+embeddedToolFile :: FilePath -> Bool
+embeddedToolFile path = normalizePath path `elem` map fst toolPackageFiles
 
 matchesEmbeddedPackage :: FilePath -> Modules.LoadedPackage -> Bool
 matchesEmbeddedPackage path actual

@@ -38,7 +38,7 @@ import Types
 import Utils
 
 readerPath :: FilePath
-readerPath = "examples/ast_reader/ast_reader.tersus"
+readerPath = "lib/ast_reader/ast_reader.tersus"
 
 corpus :: IO [(String, Result [Statement] String)]
 corpus = concat <$> corpusUnits
@@ -47,7 +47,7 @@ corpusUnits :: IO [[(String, Result [Statement] String)]]
 corpusUnits = do
     paths <- concat <$> mapM files ["examples", "examples/rejected", "lib"]
     fromFiles <- mapM (\p -> (,) p <$> readFile p) paths
-    let packages = ["examples/parser/parser.tersus", readerPath, validationEntry]
+    let packages = ["lib/parser/parser.tersus", readerPath, validationEntry]
         packageTrees entry = case Mod.loadFromEntry (Mod.resolverFromFiles (if entry == validationEntry then validationPackageFiles else toolPackageFiles)) entry of
             Left err -> [(entry, Error err)]
             Right (Mod.PackageResult pkg) -> [(Mod.loadedFilePath file, Ok (fileBody (Mod.loadedParsed file))) | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
@@ -153,11 +153,11 @@ packageElaboratedRoundTrips = pure $ firstFailure
     [case toolElaborated entry of
         Error err -> Just err
         Ok modules -> firstFailure (map elaboratedRoundTrip modules)
-    | entry <- [readerPath, "examples/parser/parser.tersus", validationEntry]]
+    | entry <- [readerPath, "lib/parser/parser.tersus", validationEntry]]
 
 nativeElaboratedPackages :: IO TestResult
 nativeElaboratedPackages = withAstReader $ \exe -> do
-    results <- forM [readerPath, "examples/parser/parser.tersus", validationEntry] $ \entry -> case toolElaborated entry of
+    results <- forM [readerPath, "lib/parser/parser.tersus", validationEntry] $ \entry -> case toolElaborated entry of
         Error err -> pure (Just err)
         Ok modules -> firstFailure <$> mapM (nativeText exe . dataElaborated) modules
     pure (firstFailure results)

@@ -26,7 +26,7 @@ import TestHarness
 import TestNative (clangAvailable)
 import Utils
 
--- The compiler that compiles itself (step 31 of the roadmap and STEP31.md). The emitter in Tersus (examples/mir/emit/emit.tersus) is built from a seed, the IR of an emitter that is
+-- The compiler that compiles itself (step 31 of the roadmap and STEP31.md). The emitter in Tersus (lib/mir/emit/emit.tersus) is built from a seed, the IR of an emitter that is
 -- a GitHub release asset pinned by bootstrap/emitter.sha256 (see Bootstrap):
 -- - stage 0 is the seed built;
 -- - stage 1 is the emitter as it is now, made from the IR that stage 0 writes for it.

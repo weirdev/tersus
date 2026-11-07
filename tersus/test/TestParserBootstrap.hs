@@ -641,7 +641,7 @@ parserFixpointRecipe = inPrimedWorker "fixpoint" [] $ do
         (_, _, _, _, Error e) -> pure (Just e)
   where
     packageBytes = encodeUtf8 . show
-    loadPackage parser = case Modules.loadFromEntryWith parser (resolverFromFiles toolPackageFiles) "examples/parser/parser.tersus" of
+    loadPackage parser = case Modules.loadFromEntryWith parser (resolverFromFiles toolPackageFiles) "lib/parser/parser.tersus" of
         Left e -> Error e
         Right (PackageResult pkg) -> Ok pkg
         Right _ -> Error "parser was not loaded as its current package"
