@@ -1,0 +1,14 @@
+// The Phase 0 spike of an elaborator written in Tersus (REPLACING_HASKELL.md): it reads a program's parsed AST
+// data and writes the elaborated data TypeCheck.elaborateWith would, for Int, Bool, functions, structs without
+// parameters, if/while and calls. Anything else is refused as not modelled.
+import elaborate::spike::records { readInput };
+import elaborate::spike::check { elaborateProgram };
+import elaborate::spike::emit { printElaborated };
+
+input = readInput();
+if !input.ok { "not the parsed AST as data\n".printError(); return 1; };
+st = elaborateProgram(input.recs, input.root);
+if st.status = 2 { "not modelled: ".concat(st.msg).concat("\n").printError(); return 2; };
+if st.status != 0 { st.msg.concat("\n").printError(); return 1; };
+printElaborated(input.recs, input.root, st);
+return 0;

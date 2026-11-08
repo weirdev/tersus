@@ -1,0 +1,248 @@
+import data::codec::codec { catStrings };
+
+// A type: kind 0 Int, 1 Bool, 2 the struct named name, 3 a function (args are its parameter types and then its
+// result), 4 an unknown, which subst may bind to another type
+struct Ty { kind: Int, name: String, args: List<Int> };
+impl Clone for Ty { };
+
+struct FieldTy { name: String, ty: Int };
+impl Clone for FieldTy { };
+
+// A binding an inner scope made, to undo when the scope ends: the name and the type it had before (-1 for none)
+struct Undo { name: String, previous: Int };
+impl Clone for Undo { };
+
+// The checker's state, threaded through every function. status 0 is ok, 1 a type error, 2 something the spike
+// does not model; msg says which. ty is the result of the last inference and ok the result of the last unify.
+struct St {
+    tys: List<Ty>,
+    subst: HashMap<Int, Int>,
+    structs: HashMap<String, Int>,
+    fields: List<List<FieldTy>>,
+    fns: HashMap<String, Int>,
+    vars: HashMap<String, Int>,
+    undo: List<Undo>,
+    out: List<Int>,
+    rewrites: HashMap<Int, Int>,
+    ret: Int,
+    progRet: Int,
+    ty: Int,
+    ok: Bool,
+    status: Int,
+    msg: String
+};
+
+fn newState() -> St [{ }] [{ }] {
+    return St {
+        tys: push(push([], Ty { kind: 0, name: "", args: [] }), Ty { kind: 1, name: "", args: [] }),
+        subst: HashMap::new(), structs: HashMap::new(), fields: [], fns: HashMap::new(), vars: HashMap::new(),
+        undo: [], out: [], rewrites: HashMap::new(), ret: 0 - 1, progRet: 0 - 1, ty: 0, ok: true, status: 0, msg: ""
+    };
+};
+
+fn fail(st: St, msg: String) -> St [{ }] [{ }] {
+    if st.status != 0 { return st; };
+    return St { status: 1, msg: msg, ..st };
+};
+
+fn notModelled(st: St, what: String) -> St [{ }] [{ }] {
+    if st.status != 0 { return st; };
+    return St { status: 2, msg: what, ..st };
+};
+
+fn typeError(st: St, what: &String) -> St [{ }] [{ }] {
+    return fail(st, "Type error: ".concat(what));
+};
+
+fn result(st: St, t: Int) -> St [{ }] [{ }] {
+    return St { ty: t, ..st };
+};
+
+fn addTy(st: St, kind: Int, name: String, args: List<Int>) -> St [{ }] [{ }] {
+    id = size(st.tys);
+    tys = push(st.tys, Ty { kind: kind, name: name, args: args });
+    return St { tys: tys, ty: id, ..st };
+};
+
+fn freshVar(st: St) -> St [{ }] [{ }] {
+    return addTy(st, 4, "", []);
+};
+
+fn namedTy(st: St, name: String) -> St [{ }] [{ }] {
+    return addTy(st, 2, name, []);
+};
+
+fn kindOf(st: &St, t: Int) -> Int [{ }] [{ }] {
+    if t < 0 || t >= size(st.tys) { return 0 - 1; };
+    return get(st.tys, t).kind;
+};
+
+fn nameOfTy(st: &St, t: Int) -> String [{ }] [{ }] {
+    if t < 0 || t >= size(st.tys) { return ""; };
+    return clone(get(st.tys, t).name);
+};
+
+fn argsOf(st: &St, t: Int) -> List<Int> [{ }] [{ }] {
+    if t < 0 || t >= size(st.tys) { return []; };
+    return clone(get(st.tys, t).args);
+};
+
+// What an unknown has been bound to, followed to the end
+fn resolve(st: &St, t: Int) -> Int ~ {
+    r = t;
+    while kindOf(st, r) = 4 && st.subst.contains(r) [{ }] ~ {
+        r = st.subst.lookup(r, r);
+    };
+    return r;
+};
+
+fn occurs(st: &St, v: Int, t: Int) -> Bool ~ {
+    r = resolve(st, t);
+    if r = v { return true; };
+    if kindOf(st, r) != 3 { return false; };
+    for a in argsOf(st, r) {
+        if occurs(st, v, a) { return true; };
+    };
+    return false;
+};
+
+fn bindVar(st: St, v: Int, t: Int) -> St [{ }] [{ }] {
+    subst = st.subst.insert(v, t);
+    return St { subst: subst, ok: true, ..st };
+};
+
+// Makes the two types equal if they can be; st.ok says whether they could
+fn unify(st: St, a: Int, b: Int) -> St ~ {
+    x = resolve(st, a);
+    y = resolve(st, b);
+    if x = y { return St { ok: true, ..st }; };
+    kx = kindOf(st, x);
+    ky = kindOf(st, y);
+    if kx = 4 {
+        if occurs(st, x, y) { return St { ok: false, ..st }; };
+        return bindVar(st, x, y);
+    };
+    if ky = 4 {
+        if occurs(st, y, x) { return St { ok: false, ..st }; };
+        return bindVar(st, y, x);
+    };
+    if kx != ky { return St { ok: false, ..st }; };
+    if kx = 2 { return St { ok: nameOfTy(st, x) = nameOfTy(st, y), ..st }; };
+    if kx = 3 {
+        xs = argsOf(st, x);
+        ys = argsOf(st, y);
+        if size(xs) != size(ys) { return St { ok: false, ..st }; };
+        i = 0;
+        while i < size(xs) [{ affirm i >= 0; affirm size(xs) = size(ys); }] shrinks size(xs) - i {
+            st = unify(st, get(xs, i), get(ys, i));
+            if !st.ok { return st; };
+            i = i + 1;
+        };
+        return St { ok: true, ..st };
+    };
+    return St { ok: true, ..st };
+};
+
+// A type as the checker's messages write it (Pretty.renderType)
+fn render(st: &St, t: Int) -> String ~ {
+    r = resolve(st, t);
+    k = kindOf(st, r);
+    if k = 0 { return "Int"; };
+    if k = 1 { return "Bool"; };
+    if k = 2 { return nameOfTy(st, r); };
+    if k = 3 {
+        args = argsOf(st, r);
+        if size(args) = 0 { return "?"; };
+        text = "fn(";
+        i = 0;
+        while i + 1 < size(args) [{ affirm i >= 0; }] shrinks size(args) - i {
+            if i > 0 { text = text.concat(", "); };
+            text = catStrings(text, render(st, get(args, i)));
+            i = i + 1;
+        };
+        return text.concat(") -> ").concat(render(st, last(args)));
+    };
+    return "?";
+};
+
+fn expect(st: St, context: &String, expected: Int, actual: Int) -> St ~ {
+    st = unify(st, expected, actual);
+    if st.ok { return st; };
+    message = clone(context).concat(": expected ").concat(render(st, expected)).concat(", got ").concat(render(st, actual));
+    return typeError(st, message);
+};
+
+// Whether the type is fully known, so that the data can write it
+fn known(st: &St, t: Int) -> Bool ~ {
+    r = resolve(st, t);
+    k = kindOf(st, r);
+    if k = 4 || k < 0 { return false; };
+    if k = 3 {
+        for a in argsOf(st, r) {
+            if !known(st, a) { return false; };
+        };
+    };
+    return true;
+};
+
+// Variables are one map, with an undo list for the bindings of inner scopes
+fn lookupVar(st: &St, name: &String) -> Int [{ }] [{ }] {
+    return st.vars.lookup(name, 0 - 1);
+};
+
+fn scopeMark(st: &St) -> Int [{ }] [{ }] {
+    return size(st.undo);
+};
+
+fn bindNew(st: St, name: &String, t: Int) -> St [{ }] [{ }] {
+    previous = st.vars.lookup(name, 0 - 1);
+    undo = push(st.undo, Undo { name: clone(name), previous: previous });
+    vars = st.vars.insert(clone(name), t);
+    return St { undo: undo, vars: vars, ..st };
+};
+
+fn endScope(st: St, mark: Int) -> St [{ }] [{ }] {
+    vars = st.vars;
+    undo = st.undo;
+    while size(undo) > mark && size(undo) > 0 [{ }] shrinks size(undo) {
+        u = clone(last(undo));
+        if u.previous < 0 { vars = vars.remove(u.name); } else { vars = vars.insert(clone(u.name), u.previous); };
+        undo = pop(undo);
+    };
+    return St { vars: vars, undo: undo, ..st };
+};
+
+// An assignment keeps the type of a variable that exists, and makes one in the innermost scope otherwise
+fn assignVar(st: St, name: &String, t: Int) -> St ~ {
+    existing = lookupVar(st, name);
+    if existing >= 0 { return expect(st, "assignment to ".concat(name), existing, t); };
+    return bindNew(st, name, t);
+};
+
+// The occurrence types: a slot is taken for an expression before the expressions inside it are visited
+fn takeSlot(st: St) -> St [{ }] [{ }] {
+    id = size(st.out);
+    out = push(st.out, 0 - 1);
+    return St { out: out, ty: id, ..st };
+};
+
+fn fillSlot(st: St, slot: Int, t: Int) -> St [{ }] [{ }] {
+    if slot < 0 || slot >= size(st.out) { return st; };
+    out = set(st.out, slot, t);
+    return St { out: out, ty: t, ..st };
+};
+
+// Forgets the occurrence types recorded since the mark (an expression of the validator records none)
+fn dropOccurrences(st: St, mark: Int) -> St [{ }] [{ }] {
+    out = st.out;
+    while size(out) > mark && size(out) > 0 [{ }] shrinks size(out) {
+        out = pop(out);
+    };
+    return St { out: out, ..st };
+};
+
+fn structFields(st: &St, name: &String) -> List<FieldTy> [{ }] [{ }] {
+    i = st.structs.lookup(name, 0 - 1);
+    if i < 0 || i >= size(st.fields) { return []; };
+    return clone(get(st.fields, i));
+};

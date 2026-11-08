@@ -1,0 +1,15 @@
+struct Point { x: Int, y: Int };
+struct Segment { a: Point, b: Point, closed: Bool };
+fn length(s: Segment) -> Int [{ }] [{ }] {
+    dx = s.b.x - s.a.x;
+    dy = s.b.y - s.a.y;
+    if dx < 0 { dx = 0 - dx; };
+    if dy < 0 { dy = 0 - dy; };
+    {
+        total = dx + dy;
+        if s.closed { total = total * 2; };
+        return total;
+    };
+};
+seg = Segment { a: Point { x: 1, y: 2 }, b: Point { x: 4, y: 6 }, closed: false };
+return length(seg);

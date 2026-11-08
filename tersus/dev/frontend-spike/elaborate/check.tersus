@@ -1,0 +1,641 @@
+import data::codec::codec { indexOf };
+import elaborate::spike::records { Rec, tagAt, numAt, textAt, wordAtRec, nameAt, itemsAt, builtinOf };
+import elaborate::spike::state { St, Ty, FieldTy, newState, fail, notModelled, typeError, result, addTy, freshVar, namedTy, kindOf, nameOfTy, argsOf, resolve, unify, render, expect, known, lookupVar, scopeMark, bindNew, endScope, assignVar, takeSlot, fillSlot, dropOccurrences, structFields };
+
+// The type a Type record writes. The spike models Int, Bool and structs without parameters.
+fn typeOfRecord(st: St, recs: &List<Rec>, id: Int) -> St [{ }] [{ }] {
+    if tagAt(recs, id) != 35 { return notModelled(st, "a type that is not a Type record"); };
+    word = wordAtRec(recs, id);
+    if word = "int" { return result(st, 0); };
+    if word = "bool" { return result(st, 1); };
+    if word = "named" && numAt(recs, id, 0) = 0 {
+        name = textAt(recs, id);
+        if name = "List" || name = "Box" || name = "String" || name = "HashMap" || name = "HashSet" {
+            return notModelled(st, "the library type ".concat(name));
+        };
+        return namedTy(st, name);
+    };
+    return notModelled(st, "the type ".concat(word));
+};
+
+// Every struct a type names must be declared (TypeCheckCore.checkType)
+fn checkType(st: St, t: Int) -> St ~ {
+    r = resolve(st, t);
+    k = kindOf(st, r);
+    if k = 2 {
+        name = nameOfTy(st, r);
+        if !st.structs.contains(name) { return typeError(st, "unknown type ".concat(name)); };
+    };
+    if k = 3 {
+        for a in argsOf(st, r) {
+            st = checkType(st, a);
+            if st.status != 0 { return st; };
+        };
+    };
+    return st;
+};
+
+// A function type of a signature: its parameter types, then its result type
+fn signatureType(st: St, recs: &List<Rec>, sig: Int) -> St ~ {
+    if tagAt(recs, sig) != 36 { return notModelled(st, "a function without a signature"); };
+    for i in 2..6 {
+        if tagAt(recs, numAt(recs, sig, i)) != 12 {
+            return notModelled(st, "a function with sizes, type parameters, writes or from");
+        };
+    };
+    args = [];
+    for p in itemsAt(recs, numAt(recs, sig, 0), 34) {
+        st = typeOfRecord(st, recs, p);
+        if st.status != 0 { return st; };
+        args = push(args, st.ty);
+    };
+    st = typeOfRecord(st, recs, numAt(recs, sig, 1));
+    if st.status != 0 { return st; };
+    args = push(args, st.ty);
+    return addTy(st, 3, "", args);
+};
+
+// A function definition at the top: Assign name (Val (VFunct params ins outs (NativeFunct sig term body) proofs))
+fn functionValue(recs: &List<Rec>, stmt: Int) -> Int [{ }] [{ }] {
+    if tagAt(recs, stmt) != 24 { return 0 - 1; };
+    e = numAt(recs, stmt, 1);
+    if tagAt(recs, e) != 5 { return 0 - 1; };
+    v = numAt(recs, e, 0);
+    if tagAt(recs, v) != 11 { return 0 - 1; };
+    if tagAt(recs, numAt(recs, v, 3)) != 20 { return 0 - 1; };
+    return v;
+};
+
+// The names the language gives a meaning to as a value or a proof function: the standard library's
+// (StdLibDefs.stdLibCtx) and what a proof knows of a permission (BuiltinRegistry). Their typing, and a program's
+// own function of such a name, are not modelled.
+fn languageNames() -> List<String> [{ }] [{ }] {
+    w = push([], "argByte");
+    w = push(w, "argCount");
+    w = push(w, "array");
+    w = push(w, "fileByte");
+    w = push(w, "fileLoad");
+    w = push(w, "fileStore");
+    w = push(w, "first");
+    w = push(w, "get");
+    w = push(w, "last");
+    w = push(w, "pathByte");
+    w = push(w, "pop");
+    w = push(w, "push");
+    w = push(w, "readByte");
+    w = push(w, "set");
+    w = push(w, "size");
+    w = push(w, "storeByte");
+    w = push(w, "toByte");
+    w = push(w, "toInt");
+    w = push(w, "writeByte");
+    w = push(w, "writeError");
+    w = push(w, "base");
+    w = push(w, "cap");
+    w = push(w, "filled");
+    w = push(w, "at");
+    w = push(w, "origin");
+    w = push(w, "start");
+    w = push(w, "extent");
+    w = push(w, "count");
+    w = push(w, "whole");
+    return w;
+};
+
+fn isLanguageName(name: &String) -> Bool [{ }] [{ }] {
+    return indexOf(languageNames(), name) >= 0;
+};
+
+// The signatures of the functions at the top are known before any body is checked (TypeCheck.gatheredSignatures)
+fn gatherSignatures(st: St, recs: &List<Rec>, stmts: &List<Int>) -> St ~ {
+    for s in stmts {
+        v = functionValue(recs, s);
+        if v >= 0 {
+            name = nameAt(recs, numAt(recs, s, 0));
+            if isLanguageName(name) { return notModelled(st, "a function named ".concat(name).concat(", which the language also names")); };
+            st = signatureType(st, recs, numAt(recs, numAt(recs, v, 3), 0));
+            if st.status != 0 { return st; };
+            fns = st.fns.insert(name, st.ty);
+            st = St { fns: fns, ..st };
+        };
+    };
+    return st;
+};
+
+// The type of a primitive builtin applied to arguments: its parameters, then its result
+fn primitiveType(st: St, name: &String) -> St [{ }] [{ }] {
+    if name = "Plus" || name = "Minus" || name = "Times" || name = "Div" || name = "Mod" { return addTy(st, 3, "", [0, 0, 0]); };
+    if name = "Lt" || name = "Gt" || name = "LtEq" || name = "GtEq" { return addTy(st, 3, "", [0, 0, 1]); };
+    if name = "And" || name = "Or" { return addTy(st, 3, "", [1, 1, 1]); };
+    if name = "Not" { return addTy(st, 3, "", [1, 1]); };
+    if name = "Eq" || name = "NotEq" {
+        st = freshVar(st);
+        v = st.ty;
+        return addTy(st, 3, "", push(push(push([], v), v), 1));
+    };
+    return notModelled(st, "the builtin ".concat(name));
+};
+
+// The name of a primitive or relation builtin record, or "" for any other builtin
+fn primitiveName(recs: &List<Rec>, b: Int) -> String [{ }] [{ }] {
+    t = tagAt(recs, b);
+    if t = 30 { return textAt(recs, b); };
+    if t = 29 { return wordAtRec(recs, b); };
+    return "";
+};
+
+// The result of applying a function type to argument types (TypeCheckCore.checkCall)
+fn checkCall(st: St, name: &String, ft: Int, args: &List<Int>) -> St ~ {
+    f = resolve(st, ft);
+    if kindOf(st, f) = 4 {
+        st = freshVar(st);
+        rty = st.ty;
+        wanted = push(clone(args), rty);
+        st = addTy(st, 3, "", wanted);
+        st = expect(st, "call of ".concat(name), f, st.ty);
+        return result(st, rty);
+    };
+    if kindOf(st, f) != 3 {
+        return typeError(st, clone(name).concat(" is not a function, it is ").concat(render(st, f)));
+    };
+    params = argsOf(st, f);
+    if size(params) != size(args) + 1 {
+        return typeError(st, clone(name).concat(" takes ").concat(String::fromInt(size(params) - 1)).concat(" arguments, got ").concat(String::fromInt(size(args))));
+    };
+    i = 0;
+    while i < size(args) [{ affirm i >= 0; affirm size(params) = size(args) + 1; }] shrinks size(args) - i {
+        st = expect(st, "argument ".concat(String::fromInt(i + 1)).concat(" of ").concat(name), get(params, i), get(args, i));
+        if st.status != 0 { return st; };
+        i = i + 1;
+    };
+    return result(st, last(params));
+};
+
+// The type of field of a value of type t (TypeCheckCore.fieldType)
+fn readField(st: St, field: &String, t: Int) -> St ~ {
+    r = resolve(st, t);
+    k = kindOf(st, r);
+    if k = 2 {
+        name = nameOfTy(st, r);
+        if !st.structs.contains(name) { return typeError(st, "unknown type ".concat(name)); };
+        for f in structFields(st, name) {
+            if f.name = field { return result(st, f.ty); };
+        };
+        return typeError(st, clone(name).concat(" has no field ").concat(field));
+    };
+    if k = 4 { return typeError(st, "the type of the value whose field ".concat(field).concat(" is read is not known yet; annotate it")); };
+    return typeError(st, "field ".concat(field).concat(" is read from a ").concat(render(st, r)).concat(", which is not a struct"));
+};
+
+// A struct built from values for its fields, in declaration order (TypeCheckCore.checkConstruct)
+fn checkConstruct(st: St, recs: &List<Rec>, ctor: Int, argTys: &List<Int>) -> St ~ {
+    name = nameAt(recs, numAt(recs, ctor, 0));
+    if tagAt(recs, numAt(recs, ctor, 1)) != 32 { return notModelled(st, "a struct with parameters"); };
+    if !st.structs.contains(name) { return notModelled(st, "the struct or variant ".concat(name)); };
+    declared = structFields(st, name);
+    given = itemsAt(recs, numAt(recs, ctor, 2), 13);
+    if size(declared) != size(given) || size(given) != size(argTys) {
+        return typeError(st, clone(name).concat(" is built with the wrong fields"));
+    };
+    i = 0;
+    while i < size(given) [{ affirm i >= 0; affirm size(declared) = size(given); affirm size(given) = size(argTys); }] shrinks size(given) - i {
+        f = get(declared, i);
+        if f.name != nameAt(recs, get(given, i)) { return typeError(st, clone(name).concat(" is built with the wrong fields")); };
+        i = i + 1;
+    };
+    i = 0;
+    while i < size(given) [{ affirm i >= 0; affirm size(declared) = size(given); affirm size(given) = size(argTys); }] shrinks size(given) - i {
+        f = get(declared, i);
+        st = expect(st, "field ".concat(f.name).concat(" of ").concat(name), f.ty, get(argTys, i));
+        if st.status != 0 { return st; };
+        i = i + 1;
+    };
+    st = namedTy(st, name);
+    return st;
+};
+
+// The type of a code expression. Each expression records its type before the types of the expressions inside it,
+// in the order the lowering visits them (Syntax.Elaborated): a call whose head is a name or a value does not
+// record the head.
+fn inferExpr(st: St, recs: &List<Rec>, e: Int) -> St ~ {
+    tag = tagAt(recs, e);
+    if tag = 5 {
+        v = numAt(recs, e, 0);
+        vt = tagAt(recs, v);
+        if vt = 9 { return pushOccurrence(st, 0); };
+        if vt = 10 { return pushOccurrence(st, 1); };
+        return notModelled(st, "a value that is not an Int or a Bool");
+    };
+    if tag = 4 {
+        name = nameAt(recs, numAt(recs, e, 0));
+        t = lookupVar(st, name);
+        if t < 0 { t = st.fns.lookup(name, 0 - 1); };
+        if t < 0 { return notModelled(st, "the name ".concat(name).concat(", which may be a builtin")); };
+        return pushOccurrence(st, t);
+    };
+    if tag = 6 { return inferCall(st, recs, e); };
+    return notModelled(st, "an expression of this kind");
+};
+
+fn pushOccurrence(st: St, t: Int) -> St [{ }] [{ }] {
+    out = push(st.out, t);
+    return St { out: out, ty: t, ..st };
+};
+
+fn inferCall(st: St, recs: &List<Rec>, e: Int) -> St ~ {
+    head = numAt(recs, e, 0);
+    args = itemsAt(recs, numAt(recs, e, 1), 8);
+    if tagAt(recs, head) = 5 {
+        b = builtinOf(recs, numAt(recs, head, 0));
+        bt = tagAt(recs, b);
+        if bt = 18 { return inferFieldRead(st, recs, b, args); };
+        if bt = 31 { return inferConstruct(st, recs, b, args); };
+        name = primitiveName(recs, b);
+        if name = "" { return notModelled(st, "a builtin of this kind"); };
+        if name = "Eq" || name = "NotEq" { return inferEquality(st, recs, name, args); };
+        return inferBuiltinCall(st, recs, name, args);
+    };
+    if tagAt(recs, head) = 4 {
+        name = nameAt(recs, numAt(recs, head, 0));
+        if size(name.bytes) = 0 || get(name.bytes, 0) = toByte(46) || get(name.bytes, 0) = toByte(60) || name.find(toByte(58), 0) < size(name.bytes) {
+            return notModelled(st, "the call of ".concat(name));
+        };
+        ft = lookupVar(st, name);
+        if ft < 0 { ft = st.fns.lookup(name, 0 - 1); };
+        if ft < 0 { return notModelled(st, "the call of ".concat(name).concat(", which may be a builtin")); };
+        return inferUserCall(st, recs, name, ft, args);
+    };
+    return notModelled(st, "a call of a computed function");
+};
+
+fn inferUserCall(st: St, recs: &List<Rec>, name: &String, ft: Int, args: &List<Int>) -> St ~ {
+    st = takeSlot(st);
+    slot = st.ty;
+    tys = [];
+    for a in args {
+        st = inferExpr(st, recs, a);
+        if st.status != 0 { return st; };
+        tys = push(tys, st.ty);
+    };
+    st = checkCall(st, name, ft, tys);
+    if st.status != 0 { return st; };
+    return fillSlot(st, slot, st.ty);
+};
+
+fn inferBuiltinCall(st: St, recs: &List<Rec>, name: &String, args: &List<Int>) -> St ~ {
+    st = primitiveType(st, name);
+    if st.status != 0 { return st; };
+    ft = st.ty;
+    st = takeSlot(st);
+    slot = st.ty;
+    tys = [];
+    for a in args {
+        st = inferExpr(st, recs, a);
+        if st.status != 0 { return st; };
+        tys = push(tys, st.ty);
+    };
+    st = checkCall(st, "call", ft, tys);
+    if st.status != 0 { return st; };
+    return fillSlot(st, slot, st.ty);
+};
+
+// a = b and a != b on Ints and Bools compare the words; any other type is compared by its Eq, which the spike
+// does not model
+fn inferEquality(st: St, recs: &List<Rec>, name: &String, args: &List<Int>) -> St ~ {
+    if size(args) != 2 { return notModelled(st, "a comparison without two operands"); };
+    st = takeSlot(st);
+    slot = st.ty;
+    st = inferExpr(st, recs, get(args, 0));
+    if st.status != 0 { return st; };
+    at = st.ty;
+    st = inferExpr(st, recs, get(args, 1));
+    if st.status != 0 { return st; };
+    bt = st.ty;
+    st = expect(st, "argument 2 of the comparison", at, bt);
+    if st.status != 0 { return st; };
+    r = resolve(st, at);
+    if kindOf(st, r) = 4 {
+        st = unify(st, r, 0);
+        r = 0;
+    };
+    k = kindOf(st, r);
+    if k = 3 { return typeError(st, "functions cannot be compared"); };
+    if k != 0 && k != 1 { return notModelled(st, "a comparison of ".concat(render(st, r)).concat(" by its Eq")); };
+    st = primitiveType(st, name);
+    st = checkCall(st, "call", st.ty, push(push([], at), bt));
+    if st.status != 0 { return st; };
+    return fillSlot(st, slot, st.ty);
+};
+
+fn inferFieldRead(st: St, recs: &List<Rec>, b: Int, args: &List<Int>) -> St ~ {
+    if tagAt(recs, numAt(recs, b, 0)) != 16 { return notModelled(st, "the base of a struct update"); };
+    if size(args) != 1 { return notModelled(st, "a field read of several values"); };
+    field = nameAt(recs, numAt(recs, b, 1));
+    st = takeSlot(st);
+    slot = st.ty;
+    st = inferExpr(st, recs, get(args, 0));
+    if st.status != 0 { return st; };
+    st = readField(st, field, st.ty);
+    if st.status != 0 { return st; };
+    return fillSlot(st, slot, st.ty);
+};
+
+fn inferConstruct(st: St, recs: &List<Rec>, ctor: Int, args: &List<Int>) -> St ~ {
+    st = takeSlot(st);
+    slot = st.ty;
+    tys = [];
+    for a in args {
+        st = inferExpr(st, recs, a);
+        if st.status != 0 { return st; };
+        tys = push(tys, st.ty);
+    };
+    st = checkConstruct(st, recs, ctor, tys);
+    if st.status != 0 { return st; };
+    return fillSlot(st, slot, st.ty);
+};
+
+// The type of a proof term, which records no occurrence types (TypeCheck.inferProofR); the spike's proofs are
+// given back as they are
+fn inferProof(st: St, recs: &List<Rec>, p: Int) -> St ~ {
+    tag = tagAt(recs, p);
+    if tag = 43 || tag = 51 {
+        name = nameAt(recs, numAt(recs, p, 0));
+        t = lookupVar(st, name);
+        if t < 0 { t = st.fns.lookup(name, 0 - 1); };
+        if t >= 0 { return result(st, t); };
+        if tag = 51 { return typeError(st, "Undefined variable: ".concat(name)); };
+        if isLanguageName(name) { return notModelled(st, "the name ".concat(name).concat(" in a proof")); };
+        return freshVar(st);
+    };
+    if tag = 44 {
+        vt = tagAt(recs, numAt(recs, p, 0));
+        if vt = 9 { return result(st, 0); };
+        if vt = 10 { return result(st, 1); };
+        return notModelled(st, "a constant of a proof that is not an Int or a Bool");
+    };
+    if tag = 42 { return inferProofApplication(st, recs, p); };
+    if tag = 50 {
+        index = nameAt(recs, numAt(recs, p, 0));
+        mark = scopeMark(st);
+        st = bindNew(st, index, 0);
+        for g in itemsAt(recs, numAt(recs, p, 1), 22) {
+            st = inferProof(st, recs, g);
+            st = expect(st, "guard of forall", 1, st.ty);
+            if st.status != 0 { return st; };
+        };
+        st = inferProof(st, recs, numAt(recs, p, 2));
+        st = expect(st, "body of forall", 1, st.ty);
+        st = endScope(st, mark);
+        return result(st, 1);
+    };
+    return notModelled(st, "a proof of this kind");
+};
+
+fn inferProofApplication(st: St, recs: &List<Rec>, p: Int) -> St ~ {
+    head = numAt(recs, p, 0);
+    args = itemsAt(recs, numAt(recs, p, 1), 22);
+    tys = [];
+    if tagAt(recs, head) = 44 {
+        b = builtinOf(recs, numAt(recs, head, 0));
+        bt = tagAt(recs, b);
+        for a in args {
+            st = inferProof(st, recs, a);
+            if st.status != 0 { return st; };
+            tys = push(tys, st.ty);
+        };
+        if bt = 18 {
+            if tagAt(recs, numAt(recs, b, 0)) != 16 || size(tys) != 1 { return notModelled(st, "a field of a proof of this kind"); };
+            return readField(st, nameAt(recs, numAt(recs, b, 1)), get(tys, 0));
+        };
+        if bt = 31 { return checkConstruct(st, recs, b, tys); };
+        name = primitiveName(recs, b);
+        if name = "" { return notModelled(st, "a builtin of a proof of this kind"); };
+        st = primitiveType(st, name);
+        if st.status != 0 { return st; };
+        st = checkCall(st, "call", st.ty, tys);
+        if st.status != 0 { return st; };
+        if (name = "Eq" || name = "NotEq") && size(tys) > 0 && kindOf(st, resolve(st, get(tys, 0))) = 3 {
+            return typeError(st, "functions cannot be compared");
+        };
+        return st;
+    };
+    if tagAt(recs, head) = 43 {
+        name = nameAt(recs, numAt(recs, head, 0));
+        if isLanguageName(name) && !st.fns.contains(name) { return notModelled(st, "the call of ".concat(name).concat(" in a proof")); };
+        ft = lookupVar(st, name);
+        if ft < 0 { ft = st.fns.lookup(name, 0 - 1); };
+        if ft < 0 { return notModelled(st, "the call of ".concat(name).concat(" in a proof, which may be a builtin")); };
+        for a in args {
+            st = inferProof(st, recs, a);
+            if st.status != 0 { return st; };
+            tys = push(tys, st.ty);
+        };
+        if lookupVar(st, name) >= 0 { return checkCall(st, "call", ft, tys); };
+        return checkCall(st, name, ft, tys);
+    };
+    return notModelled(st, "a proof applying a computed function");
+};
+
+fn checkValidations(st: St, recs: &List<Rec>, list: Int) -> St ~ {
+    for v in itemsAt(recs, list, 15) {
+        st = checkValidation(st, recs, v);
+        if st.status != 0 { return st; };
+    };
+    return st;
+};
+
+fn checkValidation(st: St, recs: &List<Rec>, v: Int) -> St ~ {
+    tag = tagAt(recs, v);
+    if tag = 41 || tag = 49 {
+        st = inferProof(st, recs, numAt(recs, v, 0));
+        if st.status != 0 { return st; };
+        context = "affirmed proof";
+        if tag = 49 { context = "assumed proof"; };
+        return expect(st, context, 1, st.ty);
+    };
+    if tag = 55 {
+        name = nameAt(recs, numAt(recs, v, 0));
+        mark = size(st.out);
+        st = inferExpr(st, recs, numAt(recs, v, 1));
+        if st.status != 0 { return st; };
+        t = st.ty;
+        st = dropOccurrences(st, mark);
+        return assignVar(st, name, t);
+    };
+    return notModelled(st, "a validation statement of this kind");
+};
+
+// shrinks e resolves by the type of e: an Int counts down, a struct loses a field at a time (TypeCheck.resolveTermination)
+fn resolveTermination(st: St, recs: &List<Rec>, opt: Int) -> St ~ {
+    if tagAt(recs, opt) != 38 { return st; };
+    term = numAt(recs, opt, 0);
+    if tagAt(recs, term) != 39 { return st; };
+    mark = size(st.out);
+    st = inferExpr(st, recs, numAt(recs, term, 0));
+    if st.status != 0 { return st; };
+    st = dropOccurrences(st, mark);
+    r = resolve(st, st.ty);
+    k = kindOf(st, r);
+    if k = 0 {
+        rewrites = st.rewrites.insert(term, 52);
+        return St { rewrites: rewrites, ..st };
+    };
+    if k = 2 {
+        rewrites = st.rewrites.insert(term, 53);
+        return St { rewrites: rewrites, ..st };
+    };
+    return typeError(st, "shrinks needs an Int, an enum or a struct, got ".concat(render(st, r)));
+};
+
+fn checkStatements(st: St, recs: &List<Rec>, list: Int, top: Bool) -> St ~ {
+    for s in itemsAt(recs, list, 1) {
+        st = checkStatement(st, recs, s, top);
+        if st.status != 0 { return st; };
+    };
+    return st;
+};
+
+fn checkScoped(st: St, recs: &List<Rec>, list: Int) -> St ~ {
+    mark = scopeMark(st);
+    st = checkStatements(st, recs, list, false);
+    return endScope(st, mark);
+};
+
+fn checkStatement(st: St, recs: &List<Rec>, s: Int, top: Bool) -> St ~ {
+    tag = tagAt(recs, s);
+    if tag = 25 { return st; };
+    if tag = 24 {
+        v = functionValue(recs, s);
+        if v >= 0 {
+            if !top { return notModelled(st, "a function defined in a block or a function"); };
+            return checkFunction(st, recs, s, v);
+        };
+        name = nameAt(recs, numAt(recs, s, 0));
+        st = inferExpr(st, recs, numAt(recs, s, 1));
+        if st.status != 0 { return st; };
+        return assignVar(st, name, st.ty);
+    };
+    if tag = 23 {
+        st = inferExpr(st, recs, numAt(recs, s, 0));
+        if st.status != 0 { return st; };
+        t = st.ty;
+        if st.ret >= 0 { return expect(st, "returned value", st.ret, t); };
+        if st.progRet < 0 { return St { progRet: t, ..st }; };
+        return expect(st, "returned value of the program", st.progRet, t);
+    };
+    if tag = 26 {
+        st = inferExpr(st, recs, numAt(recs, s, 0));
+        if st.status != 0 { return st; };
+        st = expect(st, "condition of if", 1, st.ty);
+        if st.status != 0 { return st; };
+        st = checkScoped(st, recs, numAt(recs, s, 1));
+        if st.status != 0 { return st; };
+        return checkScoped(st, recs, numAt(recs, s, 2));
+    };
+    if tag = 27 {
+        st = inferExpr(st, recs, numAt(recs, s, 0));
+        if st.status != 0 { return st; };
+        st = expect(st, "condition of while", 1, st.ty);
+        if st.status != 0 { return st; };
+        mark = scopeMark(st);
+        st = checkValidations(st, recs, numAt(recs, s, 1));
+        st = endScope(st, mark);
+        if st.status != 0 { return st; };
+        st = resolveTermination(st, recs, numAt(recs, s, 2));
+        if st.status != 0 { return st; };
+        return checkScoped(st, recs, numAt(recs, s, 3));
+    };
+    if tag = 28 { return checkScoped(st, recs, numAt(recs, s, 0)); };
+    if tag = 54 { return checkValidation(st, recs, numAt(recs, s, 0)); };
+    if tag = 45 { return checkStruct(st, recs, s); };
+    return notModelled(st, "a statement of this kind");
+};
+
+fn checkStruct(st: St, recs: &List<Rec>, s: Int) -> St ~ {
+    name = nameAt(recs, numAt(recs, s, 0));
+    if tagAt(recs, numAt(recs, s, 1)) != 12 { return notModelled(st, "a struct with parameters"); };
+    if st.structs.contains(name) { return fail(st, "Type already defined: ".concat(name)); };
+    index = size(st.fields);
+    structs = st.structs.insert(clone(name), index);
+    fields = push(st.fields, []);
+    st = St { structs: structs, fields: fields, ..st };
+    declared = [];
+    for f in itemsAt(recs, numAt(recs, s, 2), 48) {
+        st = typeOfRecord(st, recs, numAt(recs, f, 1));
+        if st.status != 0 { return st; };
+        t = st.ty;
+        st = checkType(st, t);
+        if st.status != 0 { return st; };
+        declared = push(declared, FieldTy { name: nameAt(recs, numAt(recs, f, 0)), ty: t });
+    };
+    for f in declared {
+        if kindOf(st, f.ty) = 2 && nameOfTy(st, f.ty) = name {
+            return typeError(st, clone(name).concat(" holds itself, so it would have no size: hold the recursion in a Box, as in Box<").concat(name).concat(">"));
+        };
+    };
+    // (the invariant sees the fields and the program's functions, and no other variable)
+    outerVars = st.vars;
+    outerUndo = st.undo;
+    if index >= size(st.fields) { return notModelled(st, "a struct table that lost an entry"); };
+    st = St { fields: set(st.fields, index, clone(declared)), vars: HashMap::new(), undo: [], ..st };
+    for f in declared { st = bindNew(st, f.name, f.ty); };
+    st = checkValidations(st, recs, numAt(recs, s, 3));
+    return St { vars: outerVars, undo: outerUndo, ..st };
+};
+
+// The body sees its parameters and the functions at the top, and nothing else (TypeCheck.checkFunction)
+fn checkFunction(st: St, recs: &List<Rec>, s: Int, v: Int) -> St ~ {
+    name = nameAt(recs, numAt(recs, s, 0));
+    native = numAt(recs, v, 3);
+    st = signatureType(st, recs, numAt(recs, native, 0));
+    if st.status != 0 { return st; };
+    fnTy = st.ty;
+    fns = st.fns.insert(clone(name), fnTy);
+    st = St { fns: fns, ..st };
+    st = assignVar(st, name, fnTy);
+    if st.status != 0 { return st; };
+    params = itemsAt(recs, numAt(recs, v, 0), 13);
+    tys = argsOf(st, fnTy);
+    if size(tys) = 0 { return notModelled(st, "a function without a type"); };
+    for t in tys {
+        st = checkType(st, t);
+        if st.status != 0 { return st; };
+    };
+    if size(params) + 1 != size(tys) {
+        return typeError(st, "function ".concat(name).concat(" has ").concat(String::fromInt(size(params))).concat(" parameters but ").concat(String::fromInt(size(tys) - 1)).concat(" types"));
+    };
+    rty = last(tys);
+    outerVars = st.vars;
+    outerUndo = st.undo;
+    outerRet = st.ret;
+    st = St { vars: HashMap::new(), undo: [], ret: rty, ..st };
+    i = 0;
+    while i < size(params) [{ affirm i >= 0; affirm size(params) + 1 = size(tys); }] shrinks size(params) - i {
+        st = bindNew(st, nameAt(recs, get(params, i)), get(tys, i));
+        i = i + 1;
+    };
+    mark = scopeMark(st);
+    st = checkValidations(st, recs, numAt(recs, v, 1));
+    st = resolveTermination(st, recs, numAt(recs, native, 1));
+    st = bindNew(st, "return", rty);
+    st = checkValidations(st, recs, numAt(recs, v, 2));
+    st = endScope(st, mark);
+    st = checkScoped(st, recs, numAt(recs, native, 2));
+    return St { vars: outerVars, undo: outerUndo, ret: outerRet, ..st };
+};
+
+fn elaborateProgram(recs: &List<Rec>, root: Int) -> St ~ {
+    st = newState();
+    for r in recs {
+        if r.tag < 0 { return notModelled(st, "a record of this kind: ".concat(r.line)); };
+    };
+    top = itemsAt(recs, root, 1);
+    st = gatherSignatures(st, recs, top);
+    if st.status != 0 { return st; };
+    st = checkStatements(st, recs, root, true);
+    if st.status != 0 { return st; };
+    for t in st.out {
+        if !known(st, t) { return notModelled(st, "a type that is not decided"); };
+    };
+    return st;
+};
