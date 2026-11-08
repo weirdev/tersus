@@ -1,6 +1,6 @@
 # References and borrowing (design plan)
 
-> Stages 1 to 5 implemented, 2026-10-31; stage 6 (concurrency) is still design. References to unsized values are interpreter-only for now (native code refuses them: it does not carry the size with the address yet).
+> Source stages 1 to 5 are implemented; stage 6 (concurrency) is still design. Native validation supports the reference layouts described below and refuses unresolved mutation targets or unsupported layouts. Unsized references remain unsupported natively.
 > What is in the language is in `LANGUAGE.md` (Lent parameters, References,
 > Updating through a reference); what is below is the rationale, the core
 > rules, and the plan for what is left. This complements `POINTERS.md`,
@@ -51,13 +51,34 @@ reference API must not introduce a hidden escape from them.
 expansion through `MirHousekeeping.expandRefWrites`. It runs after ghost erasure
 and before list lowering or monomorphization: symbolic types and sizes, generic
 struct templates and function metadata must still be present. Reference-typed
-roots stay `AssignRef` for the emitter. Value-root writes reconstruct logical
+roots stay `AssignRef` for the emitter. A borrow through `*expression` first
+loads the reference word produced by that expression; a reference field's
+pointer slot is not the place its pointee occupies. Value-root writes reconstruct logical
 fields and sequence elements using the accumulated temporary declarations and
 all fields of the selected enum variant, so nested sequence element types and
 unwritten sibling fields survive. `MirLists` lowers right-hand expressions and
 renames selectors on retained reference writes; `MirMono` substitutes their
 indices and concrete constructor names. The Haskell host returns explicit
 errors and restores proof metadata using numbered ghost identities (see `MIR.md`).
+
+## Native held-reference validation
+
+A holder with one stable mutable scalar reference leaf can expose fresh
+validation-only pointee postvalues at a call. Fixed variants, owned nesting and
+concrete finite List/Box member paths are supported. The holder's storage
+permission, declared parameter modes and `old` authority do not change.
+Precise postvalues come from verified declared output contracts, not the
+callee's final body values. Origin-only readonly results use fresh typed values
+whose invariants are checked before assumptions; `from` bounds do not establish
+pointer identity.
+
+Pointee writes check affected owner and dependent-holder invariants before
+replacing current values. Loop inference refreshes changed holders and aliases
+consistently. Private fields remain frozen only when complete direct and call
+write coverage leaves them untouched; unknown coverage prevents freezing.
+Entry snapshots remain immutable and backedges target a separate proof header.
+Unknown aggregate/index mutation paths, unsupported multi-leaf layouts and
+unsized references are refused rather than assigned guessed targets.
 
 ## Starting point and alpha migration
 
@@ -167,11 +188,13 @@ observe(&*s);                // observe takes &Point
 
 Deriving a child loan through a parent is permitted for a disjoint place even
 while another child is live. The parent cannot otherwise access the borrowed
-portion. `&mut *r` reborrows rather than moves `r`. An update parameter is given
-on to another function's update parameter as `&mut *r`: the MIR checker
-currently refuses `r` passed bare to an update parameter (a known limit, not a
-transfer of the reference). Giving it to a read parameter, bare or as `&*r`, is
-accepted. A read reference can be copied;
+portion. `&mut *r` reborrows rather than moves `r`. An incoming update parameter
+can be forwarded as `g(&mut *r)` or `g(r)`. For `g(r)`, the checker emits a
+reborrow; it does not transfer the incoming permission. An owned place still
+needs an explicit `&mut` borrow. Giving a reference parameter to a read
+parameter, bare or as `&*r`, is accepted unless another argument borrows an
+overlapping place for updating. Call arguments stay borrowed throughout the
+call. A read reference can be copied;
 an update reference cannot implement Copy or Clone. Reassigning the reference
 binding changes its target, whereas assigning through `*r` changes its referent.
 Ordinary access ends at the last dependent use, including uses stored elsewhere;
@@ -547,7 +570,26 @@ mid-implementation:
    struct holds read references, its holder freezes their places (a field
    read is a reference local with its own last use), struct updates carry
    the fields, and returning one is under the same `from` bound for every
-   field. The rest of the stage landed 2026-10-31: holders go anywhere a
+   field. Replacing a reference field transfers its source bounds and loans to
+   the holder. A definite full-field replacement removes the old field origin;
+   a write through a joined reference keeps the possible old and new origins
+   for every candidate owner. A reference copied from the field before the
+   replacement keeps its own old target and last-use interval.
+   A reference stored through a borrowed holder cannot point to a callee local
+   or a by-value input's own storage. This also applies when a readonly or
+   by-value carrier holds the update reference to that storage. Borrowed
+   contents of a by-value parameter are distinct from its own local storage.
+   Calls that can replace reference fields retain the possible existing targets
+   and declared input bounds in the caller, even when the call returns no
+   reference. A returned holder owns its own storage; its contained pointer
+   bounds are separate from that storage. A reference result keeps both input
+   storage and transitive contained-reference bounds: matching input and result
+   types does not prove that their pointers are identical.
+   Calls check update capabilities nested in arguments, including `W` and
+   `&W` containing `&mut T`, against live child loans and loans passed as other
+   arguments. This checks access to the pointees, not permission to change the
+   holder's own storage. Incoming reference fields are symbolic and may alias;
+   they do not establish disjoint pointees. The rest of the stage landed 2026-10-31: holders go anywhere a
    value goes (parameters, arguments, elements of lists, arrays and Boxes,
    fields of other values), fields and enum variants may hold update
    references, update references can be returned, a result's origin is
@@ -587,11 +629,10 @@ mid-implementation:
    memory — an `Addr` and its `Block` permission confer no reference
    permission — so references and `Block` permissions never alias and
    neither can bypass the other; `Addr::write`, `take`, `free`, splits
-   and joins remain governed by the permission alone. Native code takes
-   all of stages 1 to 5 except unsized references: a borrowed or update
-   parameter is passed by address, a returned reference is the address
-   of its place, and `mir_verify.tersus` checks the borrow, deref and
-   assignref rows like the Haskell verifier.*
+   and joins remain governed by the permission alone. Native calls pass
+   borrowed/update parameters by address and return references as addresses;
+   `mir_verify.tersus` checks the borrow, deref and assignref rows. Native
+   validation remains limited to the supported reference layouts above.*
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization
    contracts and frame/cancellation rules before enabling these uses.
 

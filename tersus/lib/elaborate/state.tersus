@@ -37,6 +37,7 @@ struct St {
     subst: HashMap<Int, Int>,
     sizeSubst: HashMap<Int, Int>,
     next: Int,
+    localNames: HashMap<String, Int>,
     types: HashMap<String, List<String>>,
     ctors: HashMap<String, CtorInfo>,
     generics: HashMap<String, Generic>,

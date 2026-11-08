@@ -47,7 +47,7 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (listToMaybe)
 
-import Pretty (renderType, renderVarProof)
+import Pretty (renderType, renderVarProof, renderExpression)
 import Text.ParserCombinators.ReadP (readS_to_P)
 import Text.ParserCombinators.ReadPrec (lift)
 import Text.Read (readPrec)
@@ -530,7 +530,7 @@ renderTermination MayDiverge = "~"
 renderTermination (Recursing t) = maybe "~" renderTermination t
 
 renderExpr :: Expression -> String
-renderExpr = renderVarProof . exprToProof
+renderExpr = renderExpression
 
 renderGhostList :: [ValidationStatement] -> String
 renderGhostList stmts = "{ " ++ intercalate "; " (map renderValidation stmts) ++ " }"

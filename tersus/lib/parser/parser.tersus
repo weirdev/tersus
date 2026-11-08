@@ -1,6 +1,6 @@
 import data::codec::codec { Token, Parsed, Size, Type, hexValue, quoted, catStrings, renderTypeForName, printInt, printName, printNames, newLine, printType };
 import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst };
-import data::arena::arena { reorderArena };
+import data::arena::arena { reorderArena, nodeChildren };
 
 // The Tersus parser, written in Tersus: reads source segments and writes the AST as data (`tersus-ast 1 parsed`, AST_DATA.md), using the shared AST/file codecs. The host protocol is documented in AST_DATA.md.
 
@@ -2021,9 +2021,301 @@ fn declaredCtorNode(sourceText: &Input, st: St) -> Res<String> ~ {
     return Res<String> { st: resultPartsqState, v: resultPartsqValue, ok: resultPartsqOk };
 };
 
+fn scopedExpr(st: St, stmts: &List<Int>, value: Int) -> Res<Int> ~ {
+    Res { st: next, v: xs, ok: valid } = statementsList(st, stmts);
+    if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+    return exprNode(next, AstExpression::BlockExpr { xs: xs, e: value });
+};
+
+fn emptyListExpr(st: St) -> Res<Int> ~ {
+    Res { st: s, v: xs, ok: valid } = valuesList(st, []);
+    if !valid { return Res<Int> { st: s, v: 0, ok: false }; };
+    Res { st: next, v: v, ok: good } = emit(s, AstNode::Value { value: AstValue::VList { xs: xs } });
+    if !good { return Res<Int> { st: next, v: 0, ok: false }; };
+    return valExpr(next, v);
+};
+
+fn listExpression(sourceText: &Input, st: St) -> Res<Int> ~ {
+    saved = checkpoint(st);
+    Res { st: literalState, v: literal, ok: literalOk } = valueNode(sourceText, st);
+    if literalOk { return valExpr(literalState, literal); };
+    s = restore(literalState, saved);
+    s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+    Res { st: emptyState, v: empty, ok: emptyOk } = emptyListExpr(s);
+    if !emptyOk { return Res<Int> { st: emptyState, v: 0, ok: false }; };
+    s = emptyState;
+    result = empty;
+    loop = byteAt(sourceText, s, s.pos) != 93;
+    while loop ~ {
+        Res { st: elementState, v: element, ok: elementOk } = expression(sourceText, s);
+        if !elementOk { return Res<Int> { st: elementState, v: 0, ok: false }; };
+        Res { st: pushState, v: pushed, ok: pushOk } = primExpr(elementState, "Push", push(push([], result), element));
+        if !pushOk { return Res<Int> { st: pushState, v: 0, ok: false }; };
+        s = skipWs(sourceText, pushState);
+        result = pushed;
+        if byteAt(sourceText, s, s.pos) = 44 {
+            s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+            loop = byteAt(sourceText, s, s.pos) != 93;
+        } else { loop = false; };
+    };
+    if byteAt(sourceText, s, s.pos) != 93 { return fail(s, 0, "expected ]"); };
+    s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+    return ok(s, result);
+};
+
+fn valueBlock(sourceText: &Input, st: St) -> Res<Int> ~ {
+    s = skipWs(sourceText, st);
+    if byteAt(sourceText, s, s.pos) != 123 { return fail(s, 0, "expected {"); };
+    s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+    body = [];
+    while !atEnd(sourceText, s) ~ {
+        if byteAt(sourceText, s, s.pos) = 125 { return fail(s, 0, "a value block needs a final expression"); };
+        start = s.pos;
+        saved = checkpoint(s);
+        Res { st: valueState, v: value, ok: valueOk } = expression(sourceText, s);
+        valueState = skipWs(sourceText, valueState);
+        if valueOk && byteAt(sourceText, valueState, valueState.pos) = 125 {
+            s = skipWs(sourceText, St { pos: valueState.pos + 1, ..valueState });
+            if s.locate {
+                lc = srcLineCol(sourceText, s, start);
+                Res { st: markState, v: mark, ok: markOk } = stmtNode(s, AstStatement::Mark { line: get(lc, 0), col: get(lc, 1) });
+                if !markOk { return Res<Int> { st: markState, v: 0, ok: false }; };
+                s = markState;
+                body = push(body, mark);
+            };
+            return scopedExpr(s, body, value);
+        };
+        s = restore(valueState, saved);
+        Res { st: groupState, v: group, ok: groupOk } = statements(sourceText, s);
+        if !groupOk { return Res<Int> { st: groupState, v: 0, ok: false }; };
+        s = skipWs(sourceText, groupState);
+        if s.locate {
+            lc = srcLineCol(sourceText, s, start);
+            Res { st: markState, v: mark, ok: markOk } = stmtNode(s, AstStatement::Mark { line: get(lc, 0), col: get(lc, 1) });
+            if !markOk { return Res<Int> { st: markState, v: 0, ok: false }; };
+            s = markState;
+            body = push(body, mark);
+        };
+        for item in group { body = push(body, item); };
+        if byteAt(sourceText, s, s.pos) != 59 { return fail(s, 0, "expected ; before the block result"); };
+        while byteAt(sourceText, s, s.pos) = 59 ~ { s = skipWs(sourceText, St { pos: s.pos + 1, ..s }); };
+    };
+    return fail(s, 0, "expected }");
+};
+
+fn ifExpression(sourceText: &Input, st: St) -> Res<Int> ~ {
+    Res { st: keywordState, v: ignored, ok: keywordOk } = eatKeyword(sourceText, st, "if");
+    s = skipWs(sourceText, keywordState);
+    if keywordAt(sourceText, s, "let") { return ifLet(sourceText, s, true); };
+    Res { st: condState, v: cond, ok: condOk } = expression(sourceText, s);
+    if !condOk { return Res<Int> { st: condState, v: 0, ok: false }; };
+    Res { st: yesState, v: yes, ok: yesOk } = valueBlock(sourceText, condState);
+    if !yesOk { return Res<Int> { st: yesState, v: 0, ok: false }; };
+    Res { st: elseState, v: hasElse, ok: elseOk } = eatKeyword(sourceText, yesState, "else");
+    if !hasElse { return fail(elseState, 0, "an if expression needs else"); };
+    s = skipWs(sourceText, elseState);
+    no = 0;
+    if keywordAt(sourceText, s, "if") {
+        Res { st: next, v: value, ok: valid } = ifExpression(sourceText, s);
+        if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+        s = next;
+        no = value;
+    } else {
+        Res { st: next, v: value, ok: valid } = valueBlock(sourceText, s);
+        if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+        s = next;
+        no = value;
+    };
+    return exprNode(s, AstExpression::IfExpr { c: cond, a: yes, b: no });
+};
+
+fn letStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
+    Res { st: keywordState, v: ignored, ok: keywordOk } = eatKeyword(sourceText, st, "let");
+    Res { st: nameState, v: name, ok: nameOk } = parseVariable(sourceText, skipWs(sourceText, keywordState));
+    if !nameOk { return Res<Int> { st: nameState, v: 0, ok: false }; };
+    s = skipWs(sourceText, nameState);
+    annotated = false;
+    ty = Type::TInt;
+    if byteAt(sourceText, s, s.pos) = 58 {
+        s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+        Res { st: typeState, v: parsedType, ok: typeOk } = typeAnnotation(sourceText, s);
+        if !typeOk { return Res<Int> { st: typeState, v: 0, ok: false }; };
+        s = skipWs(sourceText, typeState);
+        ty = parsedType;
+        annotated = true;
+    };
+    if byteAt(sourceText, s, s.pos) != 61 { return fail(s, 0, "expected = in local declaration"); };
+    s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+    Res { st: valueState, v: value, ok: valueOk } = expression(sourceText, s);
+    if !valueOk { return Res<Int> { st: valueState, v: 0, ok: false }; };
+    s = valueState;
+    result = value;
+    if annotated {
+        Res { st: typeState, v: typeId, ok: typeOk } = putTypeNode(s, ty);
+        if !typeOk { return Res<Int> { st: typeState, v: 0, ok: false }; };
+        Res { st: ascribedState, v: ascribed, ok: ascribedOk } = exprNode(typeState, AstExpression::Ascribed { e: value, ty: typeId });
+        if !ascribedOk { return Res<Int> { st: ascribedState, v: 0, ok: false }; };
+        s = ascribedState;
+        result = ascribed;
+    };
+    Res { st: next, v: nameId, ok: valid } = putName(s, name);
+    if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+    return stmtNode(next, AstStatement::Let { n: nameId, e: result });
+};
+
+fn matchExpression(sourceText: &Input, st: St) -> Res<Int> ~ {
+    Res { st: headState, v: head, ok: headOk } = matchHead(sourceText, st);
+    if !headOk { return Res<Int> { st: headState, v: 0, ok: false }; };
+    s = headState;
+    arms = [];
+    while byteAt(sourceText, s, s.pos) != 125 ~ {
+        Res { st: armState, v: arm, ok: armOk } = matchArmExpr(sourceText, s);
+        if !armOk { return Res<Int> { st: armState, v: 0, ok: false }; };
+        s = armState;
+        arms = push(arms, arm);
+    };
+    s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+    Res { st: checkedState, v: checked, ok: coverageOk } = matchCoverage(s, arms);
+    if !coverageOk { return Res<Int> { st: checkedState, v: 0, ok: false }; };
+    Res { st: chainState, v: chain, ok: chainOk } = matchExpressionChain(checkedState, arms, 0);
+    if !chainOk { return Res<Int> { st: chainState, v: 0, ok: false }; };
+    Res { st: nameState, v: name, ok: nameOk } = putName(chainState, "$match");
+    if !nameOk { return Res<Int> { st: nameState, v: 0, ok: false }; };
+    Res { st: letState, v: binding, ok: letOk } = stmtNode(nameState, AstStatement::Let { n: name, e: head.scrutinee });
+    if !letOk { return Res<Int> { st: letState, v: 0, ok: false }; };
+    return scopedExpr(letState, push([], binding), chain);
+};
+
+fn matchExpressionChain(st: St, arms: &List<Arm>, index: Int) -> Res<Int> ~ {
+    a = armAt(arms, index);
+    Res { st: bindingState, v: bindings, ok: bindingOk } = matchBindings(st, clone(a));
+    if !bindingOk { return Res<Int> { st: bindingState, v: 0, ok: false }; };
+    Res { st: yesState, v: yes, ok: yesOk } = scopedExpr(bindingState, bindings, intAtOr(&a.body, 0, 0));
+    if !yesOk { return Res<Int> { st: yesState, v: 0, ok: false }; };
+    if index = size(arms) - 1 { return ok(yesState, yes); };
+    Res { st: noState, v: no, ok: noOk } = matchExpressionChain(yesState, arms, index + 1);
+    if !noOk { return Res<Int> { st: noState, v: 0, ok: false }; };
+    Res { st: subjectState, v: subject, ok: subjectOk } = varExprNode(noState, "$match");
+    if !subjectOk { return Res<Int> { st: subjectState, v: 0, ok: false }; };
+    Res { st: condState, v: cond, ok: condOk } = isExprOf(subjectState, &a.name, subject);
+    if !condOk { return Res<Int> { st: condState, v: 0, ok: false }; };
+    return exprNode(condState, AstExpression::IfExpr { c: cond, a: yes, b: no });
+};
+
+fn conditionPattern(sourceText: &Input, st: St) -> Res<Arm> ~ {
+    Res { st: ctorState, v: ctor, ok: ctorOk } = declaredCtorNode(sourceText, st);
+    if !ctorOk { return Res<Arm> { st: ctorState, v: Arm { name: "", fields: [], vars: [], body: [] }, ok: false }; };
+    s = skipWs(sourceText, ctorState);
+    fields = [];
+    vars = [];
+    if byteAt(sourceText, s, s.pos) = 123 {
+        s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+        while byteAt(sourceText, s, s.pos) != 125 ~ {
+            Res { st: fieldState, v: field, ok: fieldOk } = parseVariable(sourceText, s);
+            if !fieldOk { return Res<Arm> { st: fieldState, v: Arm { name: "", fields: [], vars: [], body: [] }, ok: false }; };
+            s = skipWs(sourceText, fieldState);
+            if byteAt(sourceText, s, s.pos) != 58 { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, "expected :"); };
+            s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+            Res { st: varState, v: var, ok: varOk } = parseVariable(sourceText, s);
+            if !varOk { return Res<Arm> { st: varState, v: Arm { name: "", fields: [], vars: [], body: [] }, ok: false }; };
+            s = skipWs(sourceText, varState);
+            fields = push(fields, field);
+            vars = push(vars, var);
+            if byteAt(sourceText, s, s.pos) = 44 { s = skipWs(sourceText, St { pos: s.pos + 1, ..s }); }
+            else { if byteAt(sourceText, s, s.pos) != 125 { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, "expected }"); }; };
+        };
+        s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+    };
+    declared = findCtorPath(s, ctor);
+    for field in fields {
+        if !containsName(declared, field) { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, cat3("Variant ", ctor, " has no field in the pattern")); };
+    };
+    if hasDupStrings(fields) || hasDupStrings(vars) { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, "a pattern repeats a field or binding"); };
+    return ok(s, Arm { name: ctor, fields: fields, vars: vars, body: [] });
+};
+
+fn ifLet(sourceText: &Input, st: St, valueForm: Bool) -> Res<Int> ~ {
+    Res { st: keywordState, v: ignored, ok: keywordOk } = eatKeyword(sourceText, st, "let");
+    Res { st: patternState, v: pattern, ok: patternOk } = conditionPattern(sourceText, skipWs(sourceText, keywordState));
+    if !patternOk { return Res<Int> { st: patternState, v: 0, ok: false }; };
+    s = patternState;
+    if byteAt(sourceText, s, s.pos) != 61 { return fail(s, 0, "expected = in if let"); };
+    s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+    Res { st: subjectState, v: subject, ok: subjectOk } = expression(sourceText, s);
+    if !subjectOk { return Res<Int> { st: subjectState, v: 0, ok: false }; };
+    s = subjectState;
+    yes = 0;
+    yesBody = [];
+    if valueForm {
+        Res { st: next, v: value, ok: valid } = valueBlock(sourceText, s);
+        if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+        s = next;
+        yes = value;
+    } else {
+        Res { st: next, v: body, ok: valid } = curlyBlock(sourceText, s);
+        if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+        s = next;
+        yesBody = body;
+    };
+    Res { st: elseState, v: hasElse, ok: elseOk } = eatKeyword(sourceText, s, "else");
+    s = skipWs(sourceText, elseState);
+    no = 0;
+    noBody = [];
+    if valueForm && !hasElse { return fail(s, 0, "an if expression needs else"); };
+    if hasElse {
+        if valueForm {
+            Res { st: next, v: value, ok: valid } = valueBlock(sourceText, s);
+            if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+            s = next;
+            no = value;
+        } else {
+            Res { st: next, v: body, ok: valid } = curlyBlock(sourceText, s);
+            if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+            s = next;
+            noBody = body;
+        };
+    };
+    Res { st: bindingState, v: bindings, ok: bindingOk } = matchBindings(s, clone(pattern));
+    if !bindingOk { return Res<Int> { st: bindingState, v: 0, ok: false }; };
+    Res { st: variableState, v: variable, ok: variableOk } = varExprNode(bindingState, "$match");
+    if !variableOk { return Res<Int> { st: variableState, v: 0, ok: false }; };
+    Res { st: conditionState, v: condition, ok: conditionOk } = isExprOf(variableState, &pattern.name, variable);
+    if !conditionOk { return Res<Int> { st: conditionState, v: 0, ok: false }; };
+    Res { st: nameState, v: name, ok: nameOk } = putName(conditionState, "$match");
+    if !nameOk { return Res<Int> { st: nameState, v: 0, ok: false }; };
+    Res { st: letState, v: binding, ok: letOk } = stmtNode(nameState, AstStatement::Let { n: name, e: subject });
+    if !letOk { return Res<Int> { st: letState, v: 0, ok: false }; };
+    if valueForm {
+        Res { st: successState, v: success, ok: successOk } = scopedExpr(letState, bindings, yes);
+        if !successOk { return Res<Int> { st: successState, v: 0, ok: false }; };
+        Res { st: resultState, v: result, ok: resultOk } = exprNode(successState, AstExpression::IfExpr { c: condition, a: success, b: no });
+        if !resultOk { return Res<Int> { st: resultState, v: 0, ok: false }; };
+        return scopedExpr(resultState, push([], binding), result);
+    };
+    body = bindings;
+    for item in yesBody { body = push(body, item); };
+    Res { st: successState, v: success, ok: successOk } = statementsList(letState, body);
+    if !successOk { return Res<Int> { st: successState, v: 0, ok: false }; };
+    Res { st: failureState, v: failure, ok: failureOk } = statementsList(successState, noBody);
+    if !failureOk { return Res<Int> { st: failureState, v: 0, ok: false }; };
+    Res { st: ifState, v: branch, ok: ifOk } = stmtNode(failureState, AstStatement::If { e: condition, a: success, b: failure });
+    if !ifOk { return Res<Int> { st: ifState, v: 0, ok: false }; };
+    Res { st: bodyState, v: whole, ok: bodyOk } = statementsList(ifState, push(push([], binding), branch));
+    if !bodyOk { return Res<Int> { st: bodyState, v: 0, ok: false }; };
+    return stmtNode(bodyState, AstStatement::Block { xs: whole });
+};
+
 fn nonInfixExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = skipWs(sourceText, st);
     c = byteAt(sourceText, s, s.pos);
+    if keywordAt(sourceText, s, "if") { return ifExpression(sourceText, s); };
+    if keywordAt(sourceText, s, "match") { return matchExpression(sourceText, s); };
+    if c = 123 { return valueBlock(sourceText, s); };
+    if c = 91 {
+        Res { st: next, v: value, ok: valid } = listExpression(sourceText, s);
+        if !valid { return Res<Int> { st: next, v: 0, ok: false }; };
+        return withFieldsExpr(sourceText, next, value);
+    };
     // borrow
     if c = 38 {
         if peekIs(sourceText, s, "&mut") {
@@ -2277,6 +2569,16 @@ fn withFieldsExpr(sourceText: &Input, st: St, base: Int) -> Res<Int> ~ {
         return withFieldsExpr(sourceText, resultPartscastState, resultPartscastValue);
     };
     s = resultPartskState;
+    if byteAt(sourceText, s, s.pos) = 40 {
+        s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
+        Res { st: argState, v: args, ok: argsOk } = exprArgs(sourceText, s);
+        if !argsOk { return Res<Int> { st: argState, v: 0, ok: false }; };
+        Res { st: listState, v: xs, ok: listOk } = expressionsList(argState, args);
+        if !listOk { return Res<Int> { st: listState, v: 0, ok: false }; };
+        Res { st: callState, v: call, ok: callOk } = exprNode(listState, AstExpression::F { f: base, xs: xs });
+        if !callOk { return Res<Int> { st: callState, v: 0, ok: false }; };
+        return withFieldsExpr(sourceText, callState, call);
+    };
     if byteAt(sourceText, s, s.pos) = 46 && byteAt(sourceText, s, s.pos + 1) != 46 {
         s = St { pos: s.pos + 1, ..s };
         fname = "";
@@ -2374,6 +2676,9 @@ fn exprParts(st: &St, id: Int) -> List<Int> ~ {
             AstExpression::F { f: f, xs: xs } => push(push([], f), xs),
             AstExpression::Val { v: vv } => [],
             AstExpression::Var { n: nn } => [],
+            AstExpression::IfExpr { c: c, a: a, b: b } => [],
+            AstExpression::BlockExpr { xs: xs, e: e } => [],
+            AstExpression::Ascribed { e: e, ty: ty } => [],
         };
     };
     return [];
@@ -2387,6 +2692,9 @@ fn exprVarName(st: &St, id: Int) -> String ~ {
             AstExpression::Var { n: nn } => nameText( st, nn),
             AstExpression::Val { v: vv } => "",
             AstExpression::F { f: f, xs: xs } => "",
+            AstExpression::IfExpr { c: c, a: a, b: b } => "",
+            AstExpression::BlockExpr { xs: xs, e: e } => "",
+            AstExpression::Ascribed { e: e, ty: ty } => "",
         };
     };
     return "";
@@ -4132,18 +4440,6 @@ fn atImportKeyword(sourceText: &Input, st: &St) -> Bool ~ {
 fn statements(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     s = skipWs(sourceText, st);
     if atImportKeyword(sourceText, s) { return fail( s, [], "import statements must come before any declaration in a file"); };
-    ma = tryMatchAssign(sourceText, s); Res { st: resultPartsmaState, v: resultPartsmaValue, ok: resultPartsmaOk } = ma;
-    if resultPartsmaOk { return Res<List<Int>> { st: resultPartsmaState, v: resultPartsmaValue, ok: resultPartsmaOk }; };
-    return statementsAfterMatch(sourceText, resultPartsmaState);
-};
-
-fn statementsAfterMatch(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
-    s = st;
-    if keywordAt(sourceText, s, "return") {
-        mr = tryMatchReturn(sourceText, s); Res { st: resultPartsmrState, v: resultPartsmrValue, ok: resultPartsmrOk } = mr;
-        if resultPartsmrOk { return Res<List<Int>> { st: resultPartsmrState, v: resultPartsmrValue, ok: resultPartsmrOk }; };
-        return statementsAfterReturn(sourceText, resultPartsmrState);
-    };
     return statementsAfterReturn(sourceText, s);
 };
 
@@ -4475,6 +4771,7 @@ fn primBuiltinNode(st: St, prim: &String) -> Res<Int> ~ {
 
 fn statement(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = skipWs(sourceText, st);
+    if keywordAt(sourceText, s, "let") { return letStatement(sourceText, s); };
     if keywordAt(sourceText, s, "return") {
         k = eatKeyword(sourceText, s, "return"); Res { st: resultPartskState, v: resultPartskValue, ok: resultPartskOk } = k;
         s2 = skipWs(sourceText, resultPartskState);
@@ -4554,6 +4851,9 @@ fn nodeIsVar(st: &St, id: Int) -> Bool ~ {
             AstExpression::Var { n: a } => { out = true; },
             AstExpression::Val { v: a } => { out = false; },
             AstExpression::F { f: a, xs: b } => { out = false; },
+            AstExpression::IfExpr { c: c, a: a, b: b } => { out = false; },
+            AstExpression::BlockExpr { xs: xs, e: e } => { out = false; },
+            AstExpression::Ascribed { e: e, ty: ty } => { out = false; },
         };
         return out;
     };
@@ -4563,6 +4863,7 @@ fn nodeIsVar(st: &St, id: Int) -> Bool ~ {
 fn ifStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     k = eatKeyword(sourceText, st, "if"); Res { st: resultPartskState, v: resultPartskValue, ok: resultPartskOk } = k;
     s = skipWs(sourceText, resultPartskState);
+    if keywordAt(sourceText, s, "let") { return ifLet(sourceText, s, false); };
     cond = expression(sourceText, s); Res { st: resultPartscondState, v: resultPartscondValue, ok: resultPartscondOk } = cond;
     if !resultPartscondOk { return Res<Int> { st: resultPartscondState, v: resultPartscondValue, ok: resultPartscondOk }; };
     s = skipWs(sourceText, resultPartscondState);
@@ -4919,8 +5220,8 @@ fn variantIdentity(st: &St, name: &String) -> String ~ {
     return "";
 };
 
-fn desugarMatch(st: St, scrutinee: Int, arms: &List<Arm>) -> Res<List<Int>> ~ {
-    if size(arms) = 0 { return fail( st, [], "A match needs at least one arm"); };
+fn matchCoverage(st: St, arms: &List<Arm>) -> Res<Bool> ~ {
+    if size(arms) = 0 { return fail(st, false, "A match needs at least one arm"); };
     first = clone(get(arms, 0).name);
     identities = [];
     for a in arms { identities = push(identities, variantIdentity(st, a.name)); };
@@ -4932,20 +5233,26 @@ fn desugarMatch(st: St, scrutinee: Int, arms: &List<Arm>) -> Res<List<Int>> ~ {
             if firstIdentity = v { typeName = clone(c.name); variants = clone(c.variants); };
         };
     };
-    if size(typeName.bytes) = 0 { return fail(st, [], cat3("Unknown variant ", first, "")); };
+    if size(typeName.bytes) = 0 { return fail(st, false, cat3("Unknown variant ", first, "")); };
     for identity in identities {
-        if !containsName(variants, identity) { return fail(st, [], cat3("A match over ", typeName, " has an arm of another type")); };
+        if !containsName(variants, identity) { return fail(st, false, cat3("A match over ", typeName, " has an arm of another type")); };
     };
-    if hasDupStrings(identities) { return fail(st, [], cat3("A match over ", typeName, " repeats a variant")); };
+    if hasDupStrings(identities) { return fail(st, false, cat3("A match over ", typeName, " repeats a variant")); };
     missing = [];
     for v in variants { if !containsName(identities, v) { missing = push(missing, clone(v)); }; };
     if size(missing) > 0 {
         joined = "";
         j = 0;
         for m in missing { if j > 0 { joined = catStrings(joined, " "); }; joined = catStrings(joined, m); j = j + 1; };
-        return fail(st, [], cat3(cat3("A match over ", typeName, " does not cover "), joined, ""));
+        return fail(st, false, cat3(cat3("A match over ", typeName, " does not cover "), joined, ""));
     };
-    s = st;
+    return ok(st, true);
+};
+
+fn desugarMatch(st: St, scrutinee: Int, arms: &List<Arm>) -> Res<List<Int>> ~ {
+    Res { st: checkedState, v: checked, ok: coverageOk } = matchCoverage(st, arms);
+    if !coverageOk { return Res<List<Int>> { st: checkedState, v: [], ok: false }; };
+    s = checkedState;
     if size(arms) = 1 {
         a = clone(get(arms, 0));
         return desugarSingle( s, scrutinee, a);
@@ -5057,40 +5364,6 @@ fn matchChainRest(st: St, arms: &List<Arm>, index: Int) -> Res<List<Int>> ~ {
     return ok( resultPartsifNodeState, push([], resultPartsifNodeValue));
 };
 
-fn tryMatchAssign(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
-    save = checkpoint(st);
-    v = parseVariable(sourceText, st); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
-    if !resultPartsvOk { return Res<List<Int>> { st: restore(resultPartsvState, save), v: [], ok: false }; };
-    s = skipWs(sourceText, resultPartsvState);
-    if byteAt(sourceText, s, s.pos) != 61 || byteAt(sourceText, s, s.pos + 1) = 61 { return Res<List<Int>> { st: restore(s, save), v: [], ok: false }; };
-    s = St { pos: s.pos + 1, ..s };
-    s = skipWs(sourceText, s);
-    if !keywordAt(sourceText, s, "match") { return Res<List<Int>> { st: restore(s, save), v: [], ok: false }; };
-    head = matchHead(sourceText, s); Res { st: resultPartsheadState, v: resultPartsheadValue, ok: resultPartsheadOk } = head;
-    if !resultPartsheadOk { return Res<List<Int>> { st: resultPartsheadState, v: [], ok: false }; };
-    s = resultPartsheadState;
-    arms = [];
-    loop = true;
-    while loop ~ {
-        if byteAt(sourceText, s, s.pos) = 125 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); loop = false; }
-        else {
-            a = matchArmExpr(sourceText, s); Res { st: resultPartsaState, v: resultPartsaValue, ok: resultPartsaOk } = a;
-            if !resultPartsaOk { return Res<List<Int>> { st: resultPartsaState, v: [], ok: false }; };
-            s = resultPartsaState;
-            // body becomes [Assign var body]
-            bodyExpr = intAtOr(&resultPartsaValue.body, 0, 0);
-            an = putName( s, resultPartsvValue); Res { st: resultPartsanState, v: resultPartsanValue, ok: resultPartsanOk } = an;
-            if !resultPartsanOk { return Res<List<Int>> { st: resultPartsanState, v: [], ok: false }; };
-            s = resultPartsanState;
-            assign = stmtNode( s, AstStatement::Assign { n: resultPartsanValue, e: bodyExpr }); Res { st: resultPartsassignState, v: resultPartsassignValue, ok: resultPartsassignOk } = assign;
-            if !resultPartsassignOk { return Res<List<Int>> { st: resultPartsassignState, v: [], ok: false }; };
-            s = resultPartsassignState;
-            arms = push(arms, Arm { name: resultPartsaValue.name, fields: resultPartsaValue.fields, vars: resultPartsaValue.vars, body: push([], resultPartsassignValue) });
-        };
-    };
-    return desugarMatch( s, resultPartsheadValue.scrutinee, arms);
-};
-
 fn matchArmExpr(sourceText: &Input, st: St) -> Res<Arm> ~ {
     dc = declaredCtorNode(sourceText, st); Res { st: resultPartsdcState, v: resultPartsdcValue, ok: resultPartsdcOk } = dc;
     if !resultPartsdcOk { return Res<Arm> { st: resultPartsdcState, v: Arm { name: "", fields: [], vars: [], body: [] }, ok: false }; };
@@ -5134,67 +5407,66 @@ fn matchArmExpr(sourceText: &Input, st: St) -> Res<Arm> ~ {
     return ok( s, Arm { name: resultPartsdcValue, fields: fields, vars: vars, body: push([], resultPartsbodyValue) });
 };
 
-fn tryMatchReturn(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
-    save = checkpoint(st);
-    k = eatKeyword(sourceText, st, "return"); Res { st: resultPartskState, v: resultPartskValue, ok: resultPartskOk } = k;
-    if !resultPartskValue { return Res<List<Int>> { st: restore(resultPartskState, save), v: [], ok: false }; };
-    s = skipWs(sourceText, resultPartskState);
-    if !keywordAt(sourceText, s, "match") { return Res<List<Int>> { st: restore(s, save), v: [], ok: false }; };
-    head = matchHead(sourceText, s); Res { st: resultPartsheadState, v: resultPartsheadValue, ok: resultPartsheadOk } = head;
-    if !resultPartsheadOk { return Res<List<Int>> { st: resultPartsheadState, v: [], ok: false }; };
-    s = resultPartsheadState;
-    arms = [];
-    loop = true;
-    while loop ~ {
-        if byteAt(sourceText, s, s.pos) = 125 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); loop = false; }
-        else {
-            a = matchArmExpr(sourceText, s); Res { st: resultPartsaState, v: resultPartsaValue, ok: resultPartsaOk } = a;
-            if !resultPartsaOk { return Res<List<Int>> { st: resultPartsaState, v: [], ok: false }; };
-            s = resultPartsaState;
-            bodyExpr = intAtOr(&resultPartsaValue.body, 0, 0);
-            rn = stmtNode( s, AstStatement::Return { e: bodyExpr }); Res { st: resultPartsrnState, v: resultPartsrnValue, ok: resultPartsrnOk } = rn;
-            if !resultPartsrnOk { return Res<List<Int>> { st: resultPartsrnState, v: [], ok: false }; };
-            s = resultPartsrnState;
-            arms = push(arms, Arm { name: resultPartsaValue.name, fields: resultPartsaValue.fields, vars: resultPartsaValue.vars, body: push([], resultPartsrnValue) });
-        };
-    };
-    return desugarMatch( s, resultPartsheadValue.scrutinee, arms);
-};
-
 // ---- for loops ----
 
 fn assignsVar(st: &St, var: &String, stmts: &List<Int>) -> Bool ~ {
-    for id in &stmts {
-        n = nodeAt( st, id);
+    return assignsScope(st, var, stmts, -1);
+};
+
+fn assignsScope(st: &St, var: &String, stmts: &List<Int>, result: Int) -> Bool ~ {
+    for id in stmts {
+        n = nodeAt(st, id);
         if n is AstNode::Statement {
             v = (n as AstNode::Statement).value;
-            found = false;
-            match v {
-                AstStatement::Assign { n: a, e: b } => { found = nameText( st, a) = var; },
-                AstStatement::Block { xs: xs } => { found = assignsVar( st, var, statementsListIds( st, xs)); },
-                AstStatement::If { e: a, a: b, b: c } => { found = assignsVar( st, var, statementsListIds( st, b)) || assignsVar( st, var, statementsListIds( st, c)); },
-                AstStatement::While { e: a, vs: b, t: c, xs: xs } => { found = assignsVar( st, var, statementsListIds( st, xs)); },
-                AstStatement::AssignDeref { a: a, b: b } => { found = false; },
-                AstStatement::Let { n: a, e: b } => { found = false; },
-                AstStatement::Return { e: a } => { found = false; },
-                AstStatement::ValidationStatement { v: a } => { found = false; },
-                AstStatement::StructDef { n: a, ps: b, fs: c, vs: d } => { found = false; },
-                AstStatement::EnumDef { n: a, vs: b } => { found = false; },
-                AstStatement::AxiomDef { n: a, ps: b, ins: c, outs: d } => { found = false; },
-                AstStatement::ProofDef { n: a, ps: b, ins: c, outs: d, body: e } => { found = false; },
-                AstStatement::TraitDef { n: a, ps: b, fs: c } => { found = false; },
-                AstStatement::ImplDef { traitName: a, args: b, n: c, ty: d, bs: e, xs: f } => { found = false; },
-                AstStatement::BoundedDef { bs: a, s: b } => { found = false; },
-                AstStatement::Mark { line: a, col: b } => { found = false; },
-                AstStatement::CopyDef { n: a } => { found = false; },
-                AstStatement::LinearDef { n: a } => { found = false; },
-                AstStatement::ExternDef { n: a } => { found = false; },
-                AstStatement::DropDef { n: a } => { found = false; },
-                AstStatement::Dissolve { n: a } => { found = false; },
+            if v is AstStatement::Let {
+                binding = v as AstStatement::Let;
+                if assignsNode(st, var, binding.e) { return true; };
+                if nameText(st, binding.n) = var { return false; };
+            } else {
+                if v is AstStatement::Assign {
+                    assignment = v as AstStatement::Assign;
+                    if nameText(st, assignment.n) = var { return true; };
+                };
+                for child in nodeChildren(n) { if assignsNode(st, var, child) { return true; }; };
             };
-            if found { return true; };
         };
     };
+    return assignsNode(st, var, result);
+};
+
+fn assignsNode(st: &St, var: &String, id: Int) -> Bool ~ {
+    if id < 0 { return false; };
+    n = nodeAt(st, id);
+    if n is AstNode::Value {
+        if (n as AstNode::Value).value is AstValue::VFunct { return false; };
+    };
+    if n is AstNode::Expressions {
+        for child in exprListIds(st, id) { if assignsNode(st, var, child) { return true; }; };
+        return false;
+    };
+    if n is AstNode::Statements { return assignsVar(st, var, statementsListIds(st, id)); };
+    if n is AstNode::Statement { return assignsVar(st, var, push([], id)); };
+    if n is AstNode::Expression {
+        value = (n as AstNode::Expression).value;
+        if value is AstExpression::F {
+            call = value as AstExpression::F;
+            head = nodeAt(st, call.f);
+            if head is AstNode::Expression {
+                headValue = (head as AstNode::Expression).value;
+                if headValue is AstExpression::Val {
+                    if valueBuiltinPrim(st, (headValue as AstExpression::Val).v) = "BorrowMutOf" {
+                        args = exprListIds(st, call.xs);
+                        if size(args) = 1 { if exprVarName(st, get(args, 0)) = var { return true; }; };
+                    };
+                };
+            };
+        };
+        if value is AstExpression::BlockExpr {
+            block = value as AstExpression::BlockExpr;
+            return assignsScope(st, var, statementsListIds(st, block.xs), block.e);
+        };
+    };
+    for child in nodeChildren(n) { if assignsNode(st, var, child) { return true; }; };
     return false;
 };
 
@@ -5431,8 +5703,12 @@ fn countingLoop(st: St, var: &String, lo: Int, hi: Int, inv: &List<Int>, body: &
     step = stmtNode( s, AstStatement::Assign { n: resultPartsan4Value, e: resultPartsplusValue }); Res { st: resultPartsstepState, v: resultPartsstepValue, ok: resultPartsstepOk } = step;
     if !resultPartsstepOk { return Res<List<Int>> { st: resultPartsstepState, v: [], ok: false }; };
     s = resultPartsstepState;
-    loopBody = clone(body);
-    loopBody = push(loopBody, resultPartsstepValue);
+    userBody = statementsList(s, body); Res { st: userBodyState, v: userBodyValue, ok: userBodyOk } = userBody;
+    if !userBodyOk { return Res<List<Int>> { st: userBodyState, v: [], ok: false }; };
+    scopedBody = stmtNode(userBodyState, AstStatement::Block { xs: userBodyValue }); Res { st: scopedBodyState, v: scopedBodyValue, ok: scopedBodyOk } = scopedBody;
+    if !scopedBodyOk { return Res<List<Int>> { st: scopedBodyState, v: [], ok: false }; };
+    s = scopedBodyState;
+    loopBody = push(push([], scopedBodyValue), resultPartsstepValue);
     vs = validationsList( s, allInv); Res { st: resultPartsvsState, v: resultPartsvsValue, ok: resultPartsvsOk } = vs;
     if !resultPartsvsOk { return Res<List<Int>> { st: resultPartsvsState, v: [], ok: false }; };
     s = resultPartsvsState;

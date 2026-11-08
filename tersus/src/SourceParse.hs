@@ -188,6 +188,9 @@ hasStringLiteral = any statementLiteral
     expressionLiteral e = case e of
         Val v -> valueLiteral v
         F f args -> expressionLiteral f || any expressionLiteral args
+        IfExpr c yes no -> any expressionLiteral [c, yes, no]
+        BlockExpr body result -> any statementLiteral body || expressionLiteral result
+        Ascribed inner _ -> expressionLiteral inner
         _ -> False
     valueLiteral v = case v of
         VList vs -> any valueLiteral vs
@@ -269,6 +272,9 @@ expressionNames e = case e of
     Val v -> valueNames v
     Var name -> nameParts name
     F f args -> expressionNames f ++ concatMap expressionNames args
+    IfExpr c yes no -> concatMap expressionNames [c, yes, no]
+    BlockExpr body result -> concatMap statementNames body ++ expressionNames result
+    Ascribed inner ty -> expressionNames inner ++ typeNames ty
 
 valueNames :: Value -> [String]
 valueNames v = case v of

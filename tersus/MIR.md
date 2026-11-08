@@ -17,7 +17,7 @@ Facts about Tersus that decide the shape (from `Parse` and the semantics of the 
 - **Values are immutable and unaliased.** `push`/`set` return new lists; there is no heap to model, so a place is just a local. No projections, no borrows, no storage markers.
 - **`match` and `for` are already desugared by the parser** into `if` chains over `Is` tests and `while` loops, so the MIR needs neither.
 - **Functions are first-class but do not capture.** A body sees its parameters, the standard library and the top-level functions, so a nested `fn` lifts to a top-level MIR function with no environment.
-- **Scopes decide which variable an assignment means** (`x = ...` updates the nearest enclosing `x`, else defines a new one in the current scope). Lowering resolves that once; the MIR has numbered locals and no scopes.
+- **Scopes decide which variable an assignment means** (`x = ...` updates the nearest enclosing `x`, else defines a new one in the current scope). `let` always declares a fresh binding; `TypeCheckScope` separates its identity from shadowed bindings before checking reference provenance. Lowering resolves bindings once; the MIR has numbered locals and no lexical scopes.
 - **Partial operations have contracts the validator discharged** (`get` in range, `/` and `%` by non-zero, `first`/`last` of a non-empty list, `Cast`). The MIR keeps them as ordinary operations with documented preconditions, as `unreachable` would be in LLVM; the interpreter still checks them and reports an error, which turns any validator bug into a test failure instead of a wrong answer.
 - **Proof-only constructs** (`affirm`, `define`, `rewrite`, `axiom`, `proof`, invariants, `shrinks`, contracts) have no run-time meaning. The validator reads them from the MIR (see Specifications and Validation); the executor ignores them.
 
@@ -156,6 +156,8 @@ fn main() -> Int {
 ```
 
 `if` is a `SwitchBool` into two blocks that meet at a join block (or that both `Return`); `else if` nests; a `return` is an assignment to `_0` and `Return`, and statements after it are not lowered (nothing can reach them).
+
+`IfExpr` uses these same guarded blocks, with each selected branch assigning a fresh typed result local before joining. A scoped `BlockExpr` evaluates its statements and moves or copies its final expression into a result local outside the scope. Composable `match` retains scoped subject and pattern bindings until this lowering; `if let` uses the same `Is` and checked projections in its success branch. No eager value-select operation or new MIR opcode is used. Expression lists reuse typed `Push` construction in source order, while constant lists retain `MakeList`/constant semantics.
 
 ## Canonical names and linking (packages)
 

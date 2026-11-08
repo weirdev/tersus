@@ -152,6 +152,9 @@ fn nodeChildren(node: &AstNode) -> List<Int> ~ {
             AstExpression::Val { v: v } => { out = push([], v); },
             AstExpression::Var { n: n } => { out = push([], n); },
             AstExpression::F { f: f, xs: xs } => { out = push(push([], f), xs); },
+            AstExpression::IfExpr { c: c, a: a, b: b } => { out = push(push(push([], c), a), b); },
+            AstExpression::BlockExpr { xs: xs, e: e } => { out = push(push([], xs), e); },
+            AstExpression::Ascribed { e: e, ty: ty } => { out = push(push([], e), ty); },
         };
     };
     if node is AstNode::Termination { v = (node as AstNode::Termination).value;
@@ -313,6 +316,9 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
             AstExpression::Val { v: v } => { result = AstNode::Expression { value: AstExpression::Val { v: intAtOr(map, v, v) } }; },
             AstExpression::Var { n: n } => { result = AstNode::Expression { value: AstExpression::Var { n: intAtOr(map, n, n) } }; },
             AstExpression::F { f: f, xs: xs } => { result = AstNode::Expression { value: AstExpression::F { f: intAtOr(map, f, f), xs: intAtOr(map, xs, xs) } }; },
+            AstExpression::IfExpr { c: c, a: a, b: b } => { result = AstNode::Expression { value: AstExpression::IfExpr { c: intAtOr(map, c, c), a: intAtOr(map, a, a), b: intAtOr(map, b, b) } }; },
+            AstExpression::BlockExpr { xs: xs, e: e } => { result = AstNode::Expression { value: AstExpression::BlockExpr { xs: intAtOr(map, xs, xs), e: intAtOr(map, e, e) } }; },
+            AstExpression::Ascribed { e: e, ty: ty } => { result = AstNode::Expression { value: AstExpression::Ascribed { e: intAtOr(map, e, e), ty: intAtOr(map, ty, ty) } }; },
         };
     };
     if node is AstNode::Termination { v = clone((node as AstNode::Termination).value);

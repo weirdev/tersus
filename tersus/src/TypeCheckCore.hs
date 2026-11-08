@@ -17,17 +17,31 @@ import Utils
 
 -- An expression with the type the checker gave it, and the typed expressions inside it that the lowering
 -- visits (see Elaborated): for an application whose head is a name or a value, the head is not one of them.
-data TExpr = TExpr Type Expression [TExpr]
+data TExpr
+    = TExpr Type Expression [TExpr]
+    | TBlockExpr [Statement] [Type] TExpr
+    | TReferenceExpr [(Variable, [Maybe Variable])] [Variable] TExpr
 
 tType :: TExpr -> Type
 tType (TExpr t _ _) = t
+tType (TBlockExpr _ _ result) = tType result
+tType (TReferenceExpr _ _ inner) = tType inner
 
 tExpr :: TExpr -> Expression
 tExpr (TExpr _ e _) = e
+tExpr (TBlockExpr stmts _ result) = BlockExpr stmts (tExpr result)
+tExpr (TReferenceExpr _ _ inner) = tExpr inner
 
 -- The types of an expression and of the typed expressions inside it, in the order the lowering visits them
 tTypes :: TExpr -> [Type]
 tTypes (TExpr t _ inner) = t : concatMap tTypes inner
+tTypes (TBlockExpr _ types result) = tType result : types ++ tTypes result
+tTypes (TReferenceExpr _ _ inner) = tTypes inner
+
+tWithType :: Type -> TExpr -> TExpr
+tWithType ty (TExpr _ e inner) = TExpr ty e inner
+tWithType ty (TBlockExpr stmts types result) = TBlockExpr stmts types (tWithType ty result)
+tWithType ty (TReferenceExpr places origins inner) = TReferenceExpr places origins (tWithType ty inner)
 
 tLeaf :: Type -> Expression -> TExpr
 tLeaf t e = TExpr t e []
@@ -64,7 +78,7 @@ data TcState = TcState
     , tcLinear :: Set.Set Name -- the structs and enums that are linear
     , tcDrops :: Set.Set Name -- the structs and enums that have a drop
     , tcGhost :: Bool -- whether the expression being checked is the validator's (of a `define`), where what is known of a permission can be read
-    , tcRefAliases :: Map Variable (Variable, [Maybe Variable]) -- each local that holds a reference, and the place it is to: a root and its steps (a field, or an element)
+    , tcRefAliases :: Map Variable [(Variable, [Maybe Variable])] -- each local that holds a reference, and the place it is to: a root and its steps (a field, or an element)
     , tcRefResults :: Map Name ([Variable], [Variable]) -- each function that returns a reference: its parameters, and the ones the result is from
     , tcResultFrom :: Maybe [Variable] -- the parameters the result of the function being checked is from, when it is a reference
     , tcParams :: [Variable] -- the parameters of the function being checked
@@ -255,12 +269,21 @@ variantOf typeName variant = do
 -- array of a size can be given where a Box of an array of any size is wanted: the unsizing conversion, which keeps the value and
 -- makes the size part of the Box. It is written into the expression, since the Box is not the same in memory afterwards.
 coerce :: Type -> TExpr -> TC TExpr
+coerce wanted (TReferenceExpr places origins inner) = TReferenceExpr places origins <$> coerce wanted inner
+coerce wanted (TBlockExpr stmts types result) = TBlockExpr stmts types <$> coerce wanted result
+coerce wanted (TExpr _ (IfExpr cond _ _) [condT, yesT, noT]) = do
+    yes <- coerce wanted yesT
+    no <- coerce wanted noT
+    expect "then result" wanted (tType yes)
+    expect "else result" wanted (tType no)
+    return (TExpr wanted (IfExpr cond (tExpr yes) (tExpr no)) [condT, yes, no])
 coerce wanted texpr = do
     let actual = tType texpr
         expr = tExpr texpr
     w <- zonk wanted
     a <- zonk actual
     case (w, a) of
+        (TMutRef _, TRef _) -> failTc "Type error: a read reference cannot initialize an update reference"
         (TBox (TArrayOf x SizeAny), TBox (TArrayOf y size)) | size /= SizeAny -> do
             same <- unify x y
             return (if same then TExpr w (F (Val (builtinFunct Unsize)) [expr]) [texpr] else texpr)
@@ -296,13 +319,13 @@ coerceArguments ft inferred = do
     refArg pt arg = do
         let at = tType arg
             expr = tExpr arg
-            withType ty = case arg of TExpr _ e inner -> TExpr ty e inner
+            withType ty = tWithType ty arg
         ptz <- zonk pt
         atz <- zonk at
         case (ptz, atz) of
             (TRef t, TRef u) -> expect "reference argument" t u >> return (withType ptz)
             (TRef t, TMutRef u) -> expect "reference argument" t u >> return arg
-            (TMutRef t, TMutRef u) -> expect "reference argument" t u >> checkCallWrites expr >> return (withType ptz)
+            (TMutRef t, TMutRef u) -> expect "reference argument" t u >> checkReferenceWrites arg >> return (withType ptz)
             (TMutRef _, TRef _) -> failTc "Type error: a read reference (&T) cannot be given where an update reference (&mut T) is wanted: borrow the place for updating, as in &mut x"
             (TMutRef t, _) -> do
                 expect "reference argument" t at
@@ -310,9 +333,10 @@ coerceArguments ft inferred = do
                     -- (an update parameter given on is a reborrow, and is written &mut *x where it is not the parameter itself)
                     Var var -> do
                         st <- getState
-                        if var `elem` tcMutParams st
-                            then checkCallWrites expr >> return (withType ptz)
-                            else failTc "Type error: an update reference (&mut T) is not lent silently: write &mut and the place, as in &mut x"
+                        if var `elem` tcMutParams st then do
+                            checkCallWrites expr
+                            return (TExpr ptz (F (Val (builtinFunct BorrowMutOf)) [expr]) [arg])
+                        else failTc "Type error: an update reference (&mut T) is not lent silently: write &mut and the place, as in &mut x"
                     _ -> failTc "Type error: an update reference (&mut T) is not lent silently: write &mut and the place, as in &mut x"
             _ -> coerce (unref ptz) arg
 
@@ -702,13 +726,18 @@ placeSteps expr = case expr of
 
 -- The place a root and steps are really of, through the references a local holds
 resolveRefPlace :: TcState -> Variable -> [Maybe Variable] -> (Variable, [Maybe Variable])
-resolveRefPlace st = go []
+resolveRefPlace st var steps = case resolveRefPlaces st var steps of
+    [place] -> place
+    _ -> (var, steps)
+
+resolveRefPlaces :: TcState -> Variable -> [Maybe Variable] -> [(Variable, [Maybe Variable])]
+resolveRefPlaces st = go []
   where
     go seen var steps
-        | var `elem` seen = (var, steps)
+        | var `elem` seen = [(var, steps)]
         | otherwise = case Map.lookup var (tcRefAliases st) of
-            Just (root, rootSteps) -> go (var : seen) root (rootSteps ++ steps)
-            Nothing -> (var, steps)
+            Just places -> concat [go (var : seen) root (rootSteps ++ steps) | (root, rootSteps) <- places]
+            Nothing -> [(var, steps)]
 
 -- The target a writes entry names: the whole root, or its first field
 writesTarget :: (Variable, [Maybe Variable]) -> Variable
@@ -719,23 +748,47 @@ writesTarget (root, steps) = root ++ case steps of
 withinWrites :: [Variable] -> (Variable, [Maybe Variable]) -> Bool
 withinWrites writes place = any (\w -> w == fst place || w == writesTarget place) writes
 
--- The place an expression that is given for updating is of, where it is one
-updatePlaceOf :: TcState -> Expression -> Maybe (Variable, [Maybe Variable])
-updatePlaceOf st expr = case expr of
-    F (Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _)) [place] -> fmap (\(r, ss) -> resolveRefPlace st r ss) (placeSteps place)
-    Var var -> Just (resolveRefPlace st var [])
-    _ -> Nothing
+updatePlacesOf :: TcState -> Expression -> [(Variable, [Maybe Variable])]
+updatePlacesOf st expr = case expr of
+    F (Val (VFunct _ _ _ (BuiltinFunct b) _)) [place] | b `elem` [BorrowOf, BorrowMutOf] -> maybe [] (uncurry (resolveRefPlaces st)) (placeSteps place)
+    Var var -> resolveRefPlaces st var []
+    IfExpr _ yes no -> updatePlacesOf st yes ++ updatePlacesOf st no
+    BlockExpr _ result -> updatePlacesOf st result
+    Ascribed inner _ -> updatePlacesOf st inner
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> [(root, []) | (root, _) <- updatePlacesOf st sub]
+    F (Var name) args -> case Map.lookup name (tcRefResults st) of
+        Just (params, froms) -> [(root, []) | (param, arg) <- zip params args, param `elem` froms, (root, _) <- updatePlacesOf st arg]
+        Nothing -> []
+    _ -> []
 
--- A call that is given a place of an update parameter for updating may change it: the writes clause bounds that too
+writePlacesOf :: TcState -> Expression -> [(Variable, [Maybe Variable])]
+writePlacesOf st expr = case expr of
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub] -> extend (Just field) sub
+    F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _] -> extend Nothing sub
+    F (Var "get") [sub, _] -> extend Nothing sub
+    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> updatePlacesOf st inner
+    _ -> []
+  where
+    extend step sub = [(root, steps ++ [step]) | (root, steps) <- writePlacesOf st sub]
+
 checkCallWrites :: Expression -> TC ()
 checkCallWrites expr = do
     st <- getState
-    case (tcWrites st, updatePlaceOf st expr) of
-        (writes@(_ : _), Just place@(root, _))
-            | root `elem` tcMutParams st ->
+    checkWriteCandidates (updatePlacesOf st expr)
+
+checkReferenceWrites :: TExpr -> TC ()
+checkReferenceWrites (TReferenceExpr places _ _) = checkWriteCandidates places
+checkReferenceWrites value = checkCallWrites (tExpr value)
+
+checkWriteCandidates :: [(Variable, [Maybe Variable])] -> TC ()
+checkWriteCandidates places = do
+    st <- getState
+    forM_ places $ \place@(root, _) ->
+        case tcWrites st of
+            writes@(_ : _) | root `elem` tcMutParams st ->
                 unless (withinWrites writes place) $
                     failTc ("Type error: this call may change " ++ writesTarget place ++ ", which the writes clause of the function does not allow (writes(" ++ intercalate ", " writes ++ "))")
-        _ -> return ()
+            _ -> return ()
 
 -- The parameters a reference result is from: those written (`from xs`, `from (a, b)`), or the one reference
 -- parameter when there is only one. A reference result with no reference parameter, or with several and
@@ -761,6 +814,17 @@ refResultFrom name params ptys rty fromNames = do
                 [] -> failTc ("Type error: " ++ name ++ " returns a reference, but no parameter of it is a reference for the result to be from: write the result as -> &T from <parameter>")
                 _ -> failTc ("Type error: " ++ name ++ " returns a reference and has more than one reference parameter: say which the result is from, as in -> &T from (a, b)")
 
+branchReferences :: TC a -> TC b -> TC (a, b)
+branchReferences yes no = do
+    before <- getState
+    a <- yes
+    left <- getState
+    putState left{tcRefAliases = tcRefAliases before, tcRefOrigins = tcRefOrigins before}
+    b <- no
+    right <- getState
+    putState right{tcRefAliases = Map.unionWith (\x y -> Set.toList (Set.fromList (x ++ y))) (tcRefAliases left) (tcRefAliases right), tcRefOrigins = Map.unionWith (\x y -> Set.toList (Set.fromList (x ++ y))) (tcRefOrigins left) (tcRefOrigins right)}
+    return (a, b)
+
 -- What a value that is or holds references is from, as the roots its places start from, where that can be
 -- told: a borrow of a place, a local that holds references (whose own origins are recorded), a field of one,
 -- a struct made of them, or a call of a function whose signature says what its result is from
@@ -768,6 +832,10 @@ exprRefOrigins :: Ctx -> Env -> Expression -> TC [Variable]
 exprRefOrigins ctx env expr = do
     st <- getState
     case expr of
+        F (Val (VFunct _ _ _ (BuiltinFunct b) _)) [_] | b `elem` [BorrowOf, BorrowMutOf] -> return (map fst (updatePlacesOf st expr))
+        IfExpr _ yes no -> (++) <$> exprRefOrigins ctx env yes <*> exprRefOrigins ctx env no
+        BlockExpr _ result -> exprRefOrigins ctx env result
+        Ascribed inner _ -> exprRefOrigins ctx env inner
         F (Val (VFunct _ _ _ (BuiltinFunct (Ctor _ _ _)) _)) args -> concat <$> mapM (exprRefOrigins ctx env) args
         F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> exprRefOrigins ctx env sub
         -- (what a local that holds references was made from is what it is from, before any alias of it;
@@ -810,6 +878,10 @@ exprOriginCandidates :: Expression -> TC [Variable]
 exprOriginCandidates expr = do
     st <- getState
     case expr of
+        IfExpr _ yes no -> (++) <$> exprOriginCandidates yes <*> exprOriginCandidates no
+        BlockExpr _ result -> exprOriginCandidates result
+        Ascribed inner _ -> exprOriginCandidates inner
+        Var var | Just origins <- Map.lookup var (tcRefOrigins st) -> return origins
         F (Var name) args -> case Map.lookup name (tcRefResults st) of
             Just (params, froms) -> concat <$> mapM (argCandidates st) [arg | (p, arg) <- zip params args, p `elem` froms]
             Nothing
@@ -831,21 +903,12 @@ recordAlias var ty expr = do
         _ -> return ()
     st <- getState
     tyz <- zonk ty
-    let alias = if not (isRefType tyz)
-            then Nothing
-            else case expr of
-                F (Val (VFunct _ _ _ (BuiltinFunct BorrowOf) _)) [place] -> placeSteps place
-                F (Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _)) [place] -> placeSteps place
-                Var other -> Just (other, [])
-                _ -> Nothing
-    case alias of
-        Just (root, steps) -> putState st{tcRefAliases = Map.insert var (resolveRefPlace st root steps) (tcRefAliases st)}
-        Nothing -> do
-            -- (a result that may be from several places is not an alias of one of them)
-            origins <- exprOriginCandidates expr
-            case origins of
-                [root] -> putState st{tcRefAliases = Map.insert var (root, []) (tcRefAliases st)}
-                _ -> putState st{tcRefAliases = Map.delete var (tcRefAliases st)}
+    places <- if isRefType tyz
+        then do
+            let direct = updatePlacesOf st expr
+            if null direct then map (\root -> (root, [])) <$> exprOriginCandidates expr else return direct
+        else return []
+    putState st{tcRefAliases = if null places then Map.delete var (tcRefAliases st) else Map.insert var (Set.toList (Set.fromList places)) (tcRefAliases st)}
 
 -- The roots a binding's places are from, when its value is or holds references; forgotten when it does not
 recordOrigins :: Ctx -> Env -> Variable -> Type -> Expression -> TC ()
