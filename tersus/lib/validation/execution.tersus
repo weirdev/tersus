@@ -115,11 +115,17 @@ fn sequenceLength(state: &ExecutionState, list: Int) -> ValueLookup {
 // Trusted list construction: the new length is the old length plus one,
 // and the element at the old length is the appended value. The MIR bridge
 // supplies a validated list and a literal zero.
-// The reads a recorded fact speaks of are known to be in range: their bounds
-// were checked at the read, or when the place read through was borrowed or
-// written. This function, popSequence and readThroughSequence only carry such
-// a read to a state where it is still in range, so a path state holds no
-// unchecked read, and loop inference needs no element terms of its own.
+// A recorded read is not known to be in range: a get written in a contract,
+// an affirm or a loop invariant is a term with no bounds of its own
+// (SelfHostedMir proofOperand), and builtinFacts hands every such get to
+// readThroughSequence, so being recorded says nothing about where it came
+// from. Four routes therefore require the index to be proved in the old
+// list before a read crosses a push: this function, readThroughSequence's
+// push case, writeOf for the goal splitter, and forallPairInRange for a
+// range fact. The shift fact (-33) reads a push in forallShiftFromFact
+// under a bound on the length alone; it was left as it is, with no failing
+// program found for it. popSequence keeps a read only at an index it knows
+// is in the shortened list.
 fn pushSequence(initial: &ExecutionState, local: Int, list: Int, value: Int, zero: Int) -> ExecutionResult {
     z = integerValue(initial.context, zero);
     if z is IntegerLookup::Found {
@@ -154,17 +160,30 @@ fn pushSequence(initial: &ExecutionState, local: Int, list: Int, value: Int, zer
     lengthApp = ApplicationTerm { id: newLength, function: -13, arguments: push([], result) };
     elementApp = ApplicationTerm { id: value, function: -14, arguments: push(push([], result), oldLength) };
     apps = push(push(clone(state.context.applications), lengthApp), elementApp);
-    // Every recorded read of the old list was checked before it was added.
-    // Appending preserves its value at that index.
+    // A read of the old list holds of the new one at the same index, but
+    // only where that index is in the old list: push defines the element at
+    // the old length, so carrying a read at an index the old list did not
+    // have would contradict it. An index that is not proved in range drops
+    // its read, which can only lose proofs.
     equalities = semanticFacts(state.context.equalities, state.context.applications, state.context.constants);
     equalitiesClasses = leastClasses(equalities);
+    cache = entailmentCache(state.context);
     for previousPosition in 0..size(state.context.applications) {
         previous = get(state.context.applications, previousPosition);
         if previous.function = -14 {
             if size(previous.arguments) = 2 {
                 if sameIn(equalitiesClasses, get(previous.arguments, 0), list) {
-                    kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) };
-                    apps = push(apps, kept);
+                    index = get(previous.arguments, 1);
+                    nonnegativeIndex = entailsGoalCached(cache, ValidatorGoal::AtMost { left: zero, right: index });
+                    cache = nonnegativeIndex.cache;
+                    if nonnegativeIndex.holds {
+                        below = entailsGoalCached(cache, ValidatorGoal::Less { left: index, right: oldLength });
+                        cache = below.cache;
+                        if below.holds {
+                            kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), index) };
+                            apps = push(apps, kept);
+                        };
+                    };
                 };
             };
         };

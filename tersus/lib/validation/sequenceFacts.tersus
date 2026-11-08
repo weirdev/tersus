@@ -1,4 +1,4 @@
-import validation::context { analyzeContext, contextEqual, integerValue, integerValueIn };
+import validation::context { analyzeContext, contextEqual, integerValue, integerValueIn, knownNonnegativeWith, signFacts };
 import validation::linear { linearEntails, linearEntailsIn };
 import validation::model { ContextAnalysis, EqualityFact, FactLists, GetFact, IntegerLookup, OrderFact, SizeFact, ValidatorContext };
 import validation::relations { hasDifferenceIn, sameIn };
@@ -277,8 +277,13 @@ fn forallPairInRange(context: &ValidatorContext, analysis: &ContextAnalysis, lef
         if lists.pushed {
             st = sizeTermOf(context, analysis.classes, lists.inner);
             if st.found {
-                if hasDifferenceIn(analysis.classes, differences, lg.at, st.term, -1) { return true; };
-                if linearEntailsIn(context, analysis.classes, lg.at, st.term, -1) { return true; };
+                // The read of the push holds of the list pushed to only at an
+                // index that list has, and the fact's own lower bound can be
+                // below zero, so being under the length is only half of it.
+                if knownNonnegativeWith(context, signFacts(context), lg.at) {
+                    if hasDifferenceIn(analysis.classes, differences, lg.at, st.term, -1) { return true; };
+                    if linearEntailsIn(context, analysis.classes, lg.at, st.term, -1) { return true; };
+                };
             };
         } else { return true; };
     };

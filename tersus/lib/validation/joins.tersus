@@ -1,7 +1,7 @@
-import validation::context { analyzeContext, contextDifferent, integerValue };
+import validation::context { analyzeContext, contextDifferent, integerValue, knownNonnegativeWith, signFacts };
 import validation::differences { semanticFacts };
 import validation::linear { linearEntails };
-import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, IntegerLookup, MergePair, OrderFact, SplitResult, StateMergeLookup, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
+import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, IntegerLookup, MergePair, OrderFact, SignFacts, SplitResult, StateMergeLookup, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
 import validation::relations { applicationAt, containsValue, emptyIntMap, emptyPositions, intAt, leastClasses, minInt, sameIn };
 import validation::saturation { withInstances };
 import validation::sequenceFacts { sizeTermOf };
@@ -10,7 +10,7 @@ import validation::validation { entailmentCache, entailsGoal, entailsGoalCached 
 
 
 
-fn writeOf(context: &ValidatorContext, classes: &HashMap<Int, Int>, k: Int, setApp: &ApplicationTerm) -> WriteOf {
+fn writeOf(context: &ValidatorContext, classes: &HashMap<Int, Int>, signs: &SignFacts, k: Int, setApp: &ApplicationTerm) -> WriteOf {
     if setApp.function = -17 && size(setApp.arguments) = 3 {
         return WriteOf { written: true, pushed: false, inner: get(setApp.arguments, 0), idx: get(setApp.arguments, 1), value: get(setApp.arguments, 2) };
     };
@@ -18,7 +18,15 @@ fn writeOf(context: &ValidatorContext, classes: &HashMap<Int, Int>, k: Int, setA
         st = sizeTermOf(context, classes, get(setApp.arguments, 0));
         if st.found {
             if linearEntails(context, k, st.term, 0) {
-                return WriteOf { written: true, pushed: true, inner: get(setApp.arguments, 0), idx: st.term, value: get(setApp.arguments, 1) };
+                // At or below the old length is only half of being in the list
+                // pushed to. The read split here can be a get written in a
+                // proof, which carries no bounds of its own, so without a lower
+                // bound splitAtWrite's elsewhere arm would equate it with a
+                // fresh read of the old list at an index that list need not
+                // have. At the write index itself there is no such equation.
+                if sameIn(classes, k, st.term) || knownNonnegativeWith(context, signs, k) {
+                    return WriteOf { written: true, pushed: true, inner: get(setApp.arguments, 0), idx: st.term, value: get(setApp.arguments, 1) };
+                };
             };
         };
     };
@@ -48,6 +56,9 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
     if depth <= 0 || budget <= 0 { return SplitResult { holds: false, used: 0 }; };
     used = 0;
     analysis = analyzeContext(state.context);
+    // (writeOf needs the signs; a goal with no read to split never asks)
+    signs = SignFacts { classes: emptyIntMap(), equalities: [], orders: [], zero: 0, zeroFound: false };
+    signsReady = false;
     near = nearTerms(state.context, analysis.classes, goalSides(goal));
     tried = 0;
     // (the newest reads first: a read a split made is the one to split next)
@@ -57,8 +68,9 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
         if app.function = -14 && size(app.arguments) = 2 && tried < 3 && used < budget && size(state.templates) = 0 {
             if equalToAny(analysis.classes, app.id, near) {
                 k = get(app.arguments, 1);
+                if signsReady = false { signs = signFacts(state.context); signsReady = true; };
                 for setAppPosition in 0..size(state.context.applications) {
-                    w = writeOf(state.context, analysis.classes, k, get(state.context.applications, setAppPosition));
+                    w = writeOf(state.context, analysis.classes, signs, k, get(state.context.applications, setAppPosition));
                     if w.written {
                         if sameIn(analysis.classes, get(state.context.applications, setAppPosition).id, get(app.arguments, 0)) {
                             tried = tried + 1;
@@ -105,7 +117,8 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
 };
 
 // The goal at a read of a write: at the write's index the read is the value written; elsewhere it is a read of the
-// list written to, at an index other than the write's (below it, for a push)
+// list written to, at an index other than the write's (below it, for a push, where writeOf has also required the
+// index to be in the list pushed to)
 fn splitAtWrite(state: &ExecutionState, analysis: &ContextAnalysis, goal: &ValidatorGoal, depth: Int, budget: Int, readId: Int, k: Int, w: &WriteOf) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
     used = 0;
     context = clone(state.context);

@@ -20,7 +20,7 @@ fn addOffsetFacts(context: &ValidatorContext, result: Int, base: Int, offset: In
     return ValidatorContext { differences: facts, ..clone(context) };
 };
 
-// A checked read can be traced through a sequence operation when its index
+// A recorded read can be traced through a sequence operation when its index
 // is known to survive. The scan is bounded and omits any case it cannot
 // establish, rather than guessing about a symbolic index.
 fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index: Int) -> ValidatorContext {
@@ -114,12 +114,16 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
                                             if moved = false {
                                                 orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
                                                 differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
-                                                if hasDifferenceIn(equalitiesClasses, differences, index, lengthApp.id, -1) {
-                                                    current = original;
-                                                    moved = true;
-                                                };
-                                                if moved = false {
-                                                    if linearEntails(context, index, lengthApp.id, -1) {
+                                                below = hasDifferenceIn(equalitiesClasses, differences, index, lengthApp.id, -1);
+                                                if below = false { below = linearEntails(context, index, lengthApp.id, -1); };
+                                                // Below the old length is only half of being in the old list.
+                                                // The read traced here can be a get written in a proof, which
+                                                // carries no bounds of its own, so without a lower bound this
+                                                // would equate it with a read of the pushed list at an index
+                                                // the old list need not have.
+                                                if below {
+                                                    signs = signFacts(context);
+                                                    if knownNonnegativeWith(context, signs, index) {
                                                         current = original;
                                                         moved = true;
                                                     };
