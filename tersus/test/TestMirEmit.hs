@@ -3,8 +3,6 @@
 module TestMirEmit (testMirEmit, testMirEmitPrograms) where
 
 import Control.Concurrent.MVar (MVar, newMVar)
-import Control.DeepSeq (force)
-import Control.Exception (evaluate)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import System.Environment (lookupEnv)
@@ -12,7 +10,6 @@ import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
 
 import Bootstrap (compilerSnapshotHash, llvmOfOwned)
-import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import qualified Modules
 import Native (buildExecutable, cachedProgram)
@@ -228,16 +225,19 @@ nativeCheck name source = withEmitter $ \exe -> do
 
 outlineDispatch :: IO TestResult
 outlineDispatch = withEmitter $ \exe -> do
-    files <- Modules.snapshotFromFilesystem path
-    loaded <- ownedFromFiles path files
+    snapshot <- Modules.captureFilesystemInput Modules.defaultLoadOptions path Nothing
+    loaded <- case snapshot of
+        Left err -> pure (Error err)
+        Right captured -> cachedFilesystemSnapshot "owned" captured
     input <- mirDataOf "fn double(n: Int) -> Int { return n + n; }; return double(3);"
     backend <- lookupEnv "TERSUS_PARSER"
     parser <- TersusParser.parserKey
-    case (loaded, input, parser) of
-        (Error e, _, _) -> pure (Just e)
-        (_, Error e, _) -> pure (Just e)
-        (_, _, Error e) -> pure (Just e)
-        (Ok program, Ok text, Ok identity) -> case Map.lookup "outline" (progFunctions program) of
+    case (loaded, input, parser, snapshot) of
+        (Error e, _, _, _) -> pure (Just e)
+        (_, Error e, _, _) -> pure (Just e)
+        (_, _, Error e, _) -> pure (Just e)
+        (_, _, _, Left e) -> pure (Just e)
+        (Ok program, Ok text, Ok identity, Right (_, _, snapshotInput)) -> case Map.lookup "outline" (progFunctions program) of
             Nothing -> pure (Just "the emitter has no outline function")
             Just fn -> case Map.lookup (BlockId 0) (fnBlocks fn) of
                 Nothing -> pure (Just "outline has no entry block")
@@ -250,14 +250,16 @@ outlineDispatch = withEmitter $ \exe -> do
                                 (fnBlocks fn)
                             }
                         instrumented = program{progFunctions = Map.insert "outline" marked (progFunctions program)}
-                        key = fingerprint [packageCacheInput path files, writeProgram instrumented, show backend, compilerSnapshotHash, identity, runtimeSource]
+                        inputs = [snapshotInput, writeProgram instrumented, show backend, compilerSnapshotHash, identity, runtimeSource]
                         build output = do
                             ir <- llvmOfOwned instrumented
                             case ir of
                                 Error e -> pure (Error e)
                                 Ok outlineProbeIr -> buildExecutable output outlineProbeIr
-                    completeKey <- evaluate (force key)
-                    built <- cachedProgram "test-emit-outline-call" completeKey "the outline call fixture" build
+                    key <- nativeCacheKey inputs
+                    built <- case key of
+                        Error err -> pure (Error err)
+                        Ok completeKey -> cachedProgram "test-emit-outline-call" completeKey "the outline call fixture" build
                     case built of
                         Error e -> pure (Just e)
                         Ok markedExe -> do

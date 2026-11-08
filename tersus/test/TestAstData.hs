@@ -1,12 +1,11 @@
 module TestAstData (testAstData, testAstReader) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
-import Control.DeepSeq (force)
-import Control.Exception (evaluate)
 import Control.Monad (forM)
 import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (listDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -25,7 +24,6 @@ import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
 import Cli (World (..), noWorld, runProgramIn)
 import qualified ParserSeed
 import qualified TersusParser
-import Hash (fingerprint)
 import qualified Mir as M
 import MirData (writeProgram)
 import MirHousekeeping (insertOwnership)
@@ -33,7 +31,8 @@ import Native (buildExecutable, cachedProgram, runWithInput)
 import ParsedFile (emptyDecls, locating)
 import TestParserFragments (parseStatementBlockWith)
 import Pipeline (nativeProgram, parseSource, runStatements)
-import Seed (cachedSeed, seedHash)
+import Seed (cachedSeed, compilerSnapshotHash, seedHash)
+import LlvmRuntime (runtimeSource)
 import MirEval (fromMirValue)
 import StdLibDefs (stdlibBuiltin)
 import Syntax
@@ -506,29 +505,32 @@ astReaderExe = modifyMVar astReaderExeCache $ \cached -> case cached of
 
 buildAstReaderExe :: IO (Result FilePath String)
 buildAstReaderExe = do
-    files <- Mod.snapshotFromFilesystem readerPath
-    -- (the owned reader is kept in the shared cache, so the groups that need the executable do not each own it again)
-    parser <- TersusParser.parserKey
-    inputKey <- evaluate (force (show (packageCacheInput readerPath files, keyText parser)))
-    owned <- sharedProgram "ast-reader-owned" inputKey $ do
-        checked <- programFromFiles readerPath files
-        pure (checked `bindResult` nativeProgram `bindResult` insertOwnership)
-    seed <- cachedSeed
-    case (owned, seed) of
-        (Error e, _) -> pure (Error e)
-        (_, Error e) -> pure (Error e)
-        (Ok native, Ok compiler) -> do
-            let dataText = writeProgram native
-                build output = do
-                    ir <- runWithInput compiler dataText
-                    case ir of
-                        Error e -> pure (Error e)
-                        Ok text -> buildExecutable output text
-            completeKey <- evaluate (force (fingerprint [packageCacheInput readerPath files, dataText, seedHash]))
-            cachedProgram "test-ast-reader" completeKey "the AST reader" build
-  where
-    keyText (Ok key) = key
-    keyText (Error e) = "error: " ++ e
+    snapshot <- Mod.captureFilesystemInput Mod.defaultLoadOptions readerPath Nothing
+    case snapshot of
+        Left err -> pure (Error err)
+        Right captured@(_, _, input) -> do
+            backend <- lookupEnv "TERSUS_PARSER"
+            parser <- TersusParser.parserKey
+            seed <- cachedSeed
+            case (parser, seed) of
+                (Error e, _) -> pure (Error e)
+                (_, Error e) -> pure (Error e)
+                (Ok identity, Ok compiler) -> do
+                    key <- nativeCacheKey [input, show backend, compilerSnapshotHash, identity, seedHash, runtimeSource]
+                    let build completeKey output = do
+                            owned <- sharedProgram "ast-reader-owned" completeKey $ do
+                                checked <- cachedFilesystemSnapshot "program" captured
+                                pure (checked `bindResult` nativeProgram `bindResult` insertOwnership)
+                            case owned of
+                                Error e -> pure (Error e)
+                                Ok native -> do
+                                    ir <- runWithInput compiler (writeProgram native)
+                                    case ir of
+                                        Error e -> pure (Error e)
+                                        Ok text -> buildExecutable output text
+                    case key of
+                        Error err -> pure (Error err)
+                        Ok completeKey -> cachedProgram "test-ast-reader" completeKey "the AST reader" (build completeKey)
 
 withAstReader :: (FilePath -> IO TestResult) -> IO TestResult
 withAstReader use = do

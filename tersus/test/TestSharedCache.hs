@@ -23,6 +23,9 @@ import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import PreludeSource (mirPackageFiles, listsSource, boxSource, validationPackageFiles)
 import Seed (compilerSnapshotHash, parserSeedHash)
+import qualified TestMirReader
+import TestNative (runExecutableBytes)
+import qualified Seed
 import qualified TersusParser
 import qualified Modules
 import qualified Compile
@@ -74,10 +77,81 @@ testPhase1Cache = TestList "testPhase1Cache"
     [ TestCase "source unit no-prelude policy isolates validated and compiled cache entries" phase1SourceCache
     , TestCase "selected roots markers sources and resolution conflicts govern no-prelude package reuse" (phase1PackageCache True)
     , TestCase "default package context does not widen filesystem source capture or mask new candidates" (phase1PackageCache False)
+    , TestCase "native executable warm keys avoid P0 bodies and retain source marker and backend invalidation" nativeSnapshotReuse
     , TestCase "filesystem validator warm hits retain all helpers without another P1 body request" filesystemWarmParserReuse
     , TestCase "filesystem snapshot keys bind structure and misses parse exactly their captured bytes" filesystemSnapshotMisses
     , TestCase "in-memory default cached program and ownership ignore unimported declarations and match filesystem loading" phase1InMemoryCache
     ]
+
+nativeSnapshotReuse :: IO TestResult
+nativeSnapshotReuse = withToolsCacheHome $ \home -> do
+    python <- findExecutable "python3"
+    parser <- Seed.cachedParserSeed
+    case (python, parser) of
+        (Nothing, _) -> pure (Just "python3 is required for the private P0 request observer")
+        (_, Error err) -> pure (Just err)
+        (Just _, Ok exe) | not ((home ++ "/") `isPrefixOf` exe) -> pure (Just "P0 observation requires a private copied cache")
+        (Just py, Ok exe) -> do
+            let delegated = exe ++ ".native"
+                requests = home </> "p0-bodies"
+                entry = home </> "app" </> "source.tersus"
+                count = do
+                    present <- doesFileExist requests
+                    if present then readFile requests >>= Exception.evaluate . length . lines else pure 0
+                proxy = unlines
+                    [ "#!" ++ py
+                    , "import os, subprocess, sys"
+                    , "data = sys.stdin.buffer.read()"
+                    , "if data.startswith(b'tersus-file-parse 1\\n'):"
+                    , "    with open(" ++ show requests ++ ", 'ab') as out: out.write(b'body\\n')"
+                    , "status = subprocess.run([" ++ show delegated ++ "] + sys.argv[1:], input=data).returncode"
+                    , "if status < 0: os.kill(os.getpid(), -status)"
+                    , "sys.exit(status)"
+                    ]
+                install = withExecutableWrite $ do
+                    renameFile exe delegated
+                    writeFile exe proxy
+                    setFileMode exe 0o700
+                restore _ = withExecutableWrite (removeFile exe >> renameFile delegated exe)
+                request = TestMirReader.programExecutable entry "snapshot-reuse"
+            bracket install restore $ \_ -> do
+                createDirectoryIfMissing True (takeDirectory entry)
+                writeFile entry "return 1;"
+                first <- request
+                before <- count
+                second <- request
+                after <- count
+                writeFile entry "return 2;"
+                changed <- request
+                actual <- case changed of Error err -> pure (ExitFailure 1, "", err); Ok path -> runExecutableBytes path [] ""
+                writeFile entry "affirm 1 = 2; return 2;"
+                refused <- request
+                writeFile entry "return 2;"
+                writeFile (takeDirectory entry </> "package.tersus") "noPrelude = false;"
+                marked <- request
+                wrongBackend <- withCacheVariable "TERSUS_PARSER" "invalid-native-key-backend" request
+                let brokenSeed = home </> "invalid-parser-override.ll"
+                writeFile brokenSeed "not a pinned parser seed"
+                wrongProducer <- withCacheVariable "TERSUS_PARSER_SEED_FILE" brokenSeed request
+                let noise = takeDirectory entry </> "noise" </> "noise.tersus"
+                createDirectoryIfMissing True (takeDirectory noise)
+                writeFile noise "unread invalid source"
+                withNoise <- request
+                writeFile noise "different unread invalid source"
+                sameNoise <- request
+                pure $ firstFailure
+                    [ namedResult "native first/second key" (case (first, second) of
+                        (Ok a, Ok b) -> testAssertEq a b
+                        other -> Just (show other))
+                    , namedResult "native warm P0 body requests" (testAssertEq after before)
+                    , case (second, changed) of (Ok a, Ok b) -> testAssertTrue (a /= b); other -> Just (show other)
+                    , testAssertEq actual (ExitSuccess, "2\n", "")
+                    , testAssertErrorContains "Could not prove:" refused
+                    , case (changed, marked) of (Ok a, Ok b) -> testAssertTrue (a /= b); other -> Just (show other)
+                    , testAssertErrorContains "Unknown TERSUS_PARSER backend:" wrongBackend
+                    , testAssertErrorContains "Could not verify the native test build identity or seed overrides" wrongProducer
+                    , namedResult "native unrelated body key" (testAssertEq withNoise sameNoise)
+                    ]
 
 filesystemCacheFile :: Modules.LoadOptions -> String -> FilePath -> IO (Maybe FilePath)
 filesystemCacheFile options stage entry = do
