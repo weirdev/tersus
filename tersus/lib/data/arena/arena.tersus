@@ -1,4 +1,5 @@
-import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram };
+import data::reader::reader { nodeRefs };
+import data::ast::ast { AstEntries, AstEntry, AstInterface, AstOptNames, AstOptType, AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram };
 
 // An arena's records reachable from a root, renumbered into the order AstData writes them: each record after the
 // records it refers to, and a list as its end record and then each element (with its records) and its link, last
@@ -88,7 +89,11 @@ fn chainOf(old: &List<AstNode>, id: Int) -> List<Int> ~ {
         if node is AstNode::Args { v = (node as AstNode::Args).value; match v { AstArgs::End => { endId = cur; loop = false; }, AstArgs::Cons { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; }, }; } else {
         if node is AstNode::TraitFns { v = (node as AstNode::TraitFns).value; match v { AstTraitFns::End => { endId = cur; loop = false; }, AstTraitFns::Cons { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; }, }; } else {
         if node is AstNode::Bounds { v = (node as AstNode::Bounds).value; match v { AstBounds::End => { endId = cur; loop = false; }, AstBounds::Cons { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; }, }; } else {
+        if node is AstNode::Entries { v = (node as AstNode::Entries).value; match v { AstEntries::End => { endId = cur; loop = false; }, AstEntries::Cons { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; }, }; } else {
+        if node is AstNode::OptNames { v = (node as AstNode::OptNames).value; match v { AstOptNames::End => { endId = cur; loop = false; }, AstOptNames::Cons { head: h, tail: t } => { heads = push(heads, h); cons = push(cons, cur); cur = t; }, }; } else {
         loop = false;
+        };
+        };
         };
         };
         };
@@ -120,10 +125,14 @@ fn isListNode(node: &AstNode) -> Bool ~ {
     if node is AstNode::Args { return true; };
     if node is AstNode::TraitFns { return true; };
     if node is AstNode::Bounds { return true; };
+    if node is AstNode::Entries { return true; };
+    if node is AstNode::OptNames { return true; };
     return false;
 };
 
 fn nodeChildren(node: &AstNode) -> List<Int> ~ {
+    // (the records of an interface refer to their parts as the reader reads them)
+    if node is AstNode::Entry || node is AstNode::Interface || node is AstNode::OptType { return nodeRefs(node); };
     out = [];
     if node is AstNode::Name { v = (node as AstNode::Name).value;
         match v {
@@ -440,5 +449,43 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
     if node is AstNode::Args { v = clone((node as AstNode::Args).value); match v { AstArgs::End => { result = clone(node); }, AstArgs::Cons { head: h, tail: t } => { result = AstNode::Args { value: AstArgs::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::TraitFns { v = clone((node as AstNode::TraitFns).value); match v { AstTraitFns::End => { result = clone(node); }, AstTraitFns::Cons { head: h, tail: t } => { result = AstNode::TraitFns { value: AstTraitFns::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Bounds { v = clone((node as AstNode::Bounds).value); match v { AstBounds::End => { result = clone(node); }, AstBounds::Cons { head: h, tail: t } => { result = AstNode::Bounds { value: AstBounds::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
+    if node is AstNode::Entries { v = clone((node as AstNode::Entries).value); match v { AstEntries::End => { result = clone(node); }, AstEntries::Cons { head: h, tail: t } => { result = AstNode::Entries { value: AstEntries::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
+    if node is AstNode::OptNames { v = clone((node as AstNode::OptNames).value); match v { AstOptNames::End => { result = clone(node); }, AstOptNames::Cons { head: h, tail: t } => { result = AstNode::OptNames { value: AstOptNames::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
+    if node is AstNode::OptType { v = clone((node as AstNode::OptType).value); match v { AstOptType::NoType => { result = clone(node); }, AstOptType::SomeType { t: t } => { result = AstNode::OptType { value: AstOptType::SomeType { t: intAtOr(map, t, t) } }; }, }; };
+    if node is AstNode::Entry { result = AstNode::Entry { value: remapEntry(clone((node as AstNode::Entry).value), map) }; };
+    if node is AstNode::Interface {
+        v = clone((node as AstNode::Interface).value);
+        result = AstNode::Interface { value: AstInterface {
+            pkg: intAtOr(map, v.pkg, v.pkg), modu: intAtOr(map, v.modu, v.modu), types: intAtOr(map, v.types, v.types), ctors: intAtOr(map, v.ctors, v.ctors),
+            generics: intAtOr(map, v.generics, v.generics), invariants: intAtOr(map, v.invariants, v.invariants), traits: intAtOr(map, v.traits, v.traits),
+            traitParams: intAtOr(map, v.traitParams, v.traitParams), functions: intAtOr(map, v.functions, v.functions), impls: intAtOr(map, v.impls, v.impls),
+            assoc: intAtOr(map, v.assoc, v.assoc), implArgs: intAtOr(map, v.implArgs, v.implArgs), implBounds: intAtOr(map, v.implBounds, v.implBounds),
+            copies: intAtOr(map, v.copies, v.copies), linear: intAtOr(map, v.linear, v.linear), drops: intAtOr(map, v.drops, v.drops),
+            axioms: intAtOr(map, v.axioms, v.axioms), proofs: intAtOr(map, v.proofs, v.proofs), externs: intAtOr(map, v.externs, v.externs),
+            templates: intAtOr(map, v.templates, v.templates), companions: intAtOr(map, v.companions, v.companions) } };
+    };
     return result;
+};
+
+fn remapEntry(e: AstEntry, map: &List<Int>) -> AstEntry ~ {
+    match e {
+        AstEntry::NamesEntry { n: n, ns: ns } => { return AstEntry::NamesEntry { n: intAtOr(map, n, n), ns: intAtOr(map, ns, ns) }; },
+        AstEntry::CtorEntry { n: n, owner: o, fs: fs } => { return AstEntry::CtorEntry { n: intAtOr(map, n, n), owner: intAtOr(map, o, o), fs: intAtOr(map, fs, fs) }; },
+        AstEntry::GenericEntry { n: n, ps: ps, fs: fs } => { return AstEntry::GenericEntry { n: intAtOr(map, n, n), ps: intAtOr(map, ps, ps), fs: intAtOr(map, fs, fs) }; },
+        AstEntry::InvariantEntry { n: n, vs: vs } => { return AstEntry::InvariantEntry { n: intAtOr(map, n, n), vs: intAtOr(map, vs, vs) }; },
+        AstEntry::TraitEntry { n: n, fs: fs } => { return AstEntry::TraitEntry { n: intAtOr(map, n, n), fs: intAtOr(map, fs, fs) }; },
+        AstEntry::FunctionEntry { n: n, ps: ps, sig: sig, ins: ins, outs: outs, term: term, exports: ex } => {
+            return AstEntry::FunctionEntry { n: intAtOr(map, n, n), ps: intAtOr(map, ps, ps), sig: intAtOr(map, sig, sig), ins: intAtOr(map, ins, ins), outs: intAtOr(map, outs, outs), term: intAtOr(map, term, term), exports: intAtOr(map, ex, ex) };
+        },
+        AstEntry::PairEntry { a: a, b: b } => { return AstEntry::PairEntry { a: intAtOr(map, a, a), b: intAtOr(map, b, b) }; },
+        AstEntry::AssocEntry { a: a, b: b, origins: os } => { return AstEntry::AssocEntry { a: intAtOr(map, a, a), b: intAtOr(map, b, b), origins: intAtOr(map, os, os) }; },
+        AstEntry::ImplArgsEntry { a: a, b: b, ty: ty, args: args } => { return AstEntry::ImplArgsEntry { a: intAtOr(map, a, a), b: intAtOr(map, b, b), ty: intAtOr(map, ty, ty), args: intAtOr(map, args, args) }; },
+        AstEntry::ImplBoundsEntry { a: a, b: b, bs: bs } => { return AstEntry::ImplBoundsEntry { a: intAtOr(map, a, a), b: intAtOr(map, b, b), bs: intAtOr(map, bs, bs) }; },
+        AstEntry::TemplateEntry { n: n, bs: bs, fns: fns, ret: ret, ps: ps, sig: sig, ins: ins, outs: outs, term: term, body: body } => {
+            return AstEntry::TemplateEntry { n: intAtOr(map, n, n), bs: intAtOr(map, bs, bs), fns: intAtOr(map, fns, fns), ret: intAtOr(map, ret, ret), ps: intAtOr(map, ps, ps), sig: intAtOr(map, sig, sig), ins: intAtOr(map, ins, ins), outs: intAtOr(map, outs, outs), term: intAtOr(map, term, term), body: intAtOr(map, body, body) };
+        },
+        AstEntry::TypeEntry { n: n, ty: ty } => { return AstEntry::TypeEntry { n: intAtOr(map, n, n), ty: intAtOr(map, ty, ty) }; },
+        AstEntry::SurfaceEntry { space: space, n: n } => { return AstEntry::SurfaceEntry { space: clone(space), n: intAtOr(map, n, n) }; },
+        AstEntry::BuiltinEntry { b: b, surface: surface, scheme: scheme, value: value } => { return AstEntry::BuiltinEntry { b: intAtOr(map, b, b), surface: intAtOr(map, surface, surface), scheme: intAtOr(map, scheme, scheme), value: intAtOr(map, value, value) }; },
+    };
 };

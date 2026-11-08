@@ -231,7 +231,7 @@ data LINES          (the module's `tersus-ast 1 parsed` syntax)
 The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
 the elaborated syntax and `interface none` or `interface` with a `data` block of
 the interface; or `refused "MESSAGE"` (the module does not check),
-`refused-interface "MESSAGE"` (it checks, but its interface cannot be given,
+`interfaceRefused "MESSAGE"` (it checks, but its interface cannot be given,
 as for an exported function with bounds) or `unmodelled "WHAT"` (the elaborator
 does not handle the program yet, which is no verdict on it).
 `ElaborateRequest.respond` is the Haskell elaborator answering a request. The

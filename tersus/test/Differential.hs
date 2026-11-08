@@ -37,6 +37,7 @@ import qualified PackageCompile as Package
 import PreludeSource (toolPackageFiles, validationPackageFiles)
 import qualified TersusParser
 import Utils
+import ValidatorNative (raiseStack)
 
 -- What the compiler elaborates: a program read from a file, a program a test checks as it is given (with a name:
 -- no libraries in front of it, as Pipeline.validateStatements has it), a package (its modules in order), or the
@@ -156,7 +157,8 @@ executableCandidate :: FilePath -> Candidate
 executableCandidate exe rq = case writeRequest rq of
     Error e -> pure (Error e)
     Ok text -> do
-        (code, out, err) <- readProcessWithExitCode exe [] text
+        -- (the elaborator recurses over the nesting of expressions, deeper than a default stack allows for a deep one)
+        (code, out, err) <- readProcessWithExitCode "/bin/sh" ["-c", raiseStack, exe] text
         pure $ case code of
             ExitSuccess -> readResponse out
             ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 err)

@@ -1,12 +1,14 @@
 import data::ast::ast { AstBody, AstExpression, AstNode, AstOptTermination, AstRule, AstSignature, AstStatement, AstTermination, AstValidation, AstValue };
 import data::codec::codec { catStrings };
-import elaborate::calls { assignVar, bindIn, bindInner, coerce, head, lookupVar, popScope, pushScope, scopeLookup };
-import elaborate::core { checkFieldType, checkFinite, checkType, declareTypeWith, holdsRef, isBoxTy, isListTy, mentionsRef, registerCtors, unrefOf };
-import elaborate::expr { derefStepNeeded, exprOf, inferExpr };
-import elaborate::out { emit, emitProofs, emitStatements, emitVal, emitValidations };
+import elaborate::calls { assignVar, bindIn, bindInner, coerce, head, lookupVar, popScope, pushScope, scopeLookup, teHead, withType };
+import elaborate::core { checkFieldType, checkFinite, checkType, declareTypeWith, holdsRef, isBoxTy, isListTy, readField, registerCtors, unrefOf };
+import elaborate::expr { derefExpr, inferExpr };
+import elaborate::out { emit, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations };
 import elaborate::proofs { inferProof, rewriteOldStatements };
-import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData, signatureOf };
-import elaborate::state { Generic, St, TE, expect, fail, indexIn, intText, isSize, isTypeName, joinWith, kindOf, notModelled, oneScope, render, simpleTy, tyAt, typeError, zonk };
+import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nodeIn, signatureOf, varName };
+import elaborate::refs { derefRoot, exprRefOrigins, placeSteps, putRefResult, recordAlias, recordOrigins, resolveRefPlace, withinWrites, writesTarget, writesText };
+import elaborate::state { FnSig, Generic, St, TE, Ty, addTy, argAt, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, oneScope, render, simpleTy, tyAt, typeError, zonk };
+import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, templateOf };
 
 fn stmtOf(st: &St, s: Int) -> AstStatement [{ }] [{ }] {
     node = nodeIn(&st.nodes, s);
@@ -21,6 +23,12 @@ fn checkStatements(st: St, top: Bool, stmts: &List<Int>) -> St ~ {
     for s in stmts {
         st = checkItem(st, top, s);
         if st.status != 0 { return st; };
+        // (the functions that templates were made into while it was checked come before it)
+        if top {
+            for m in &st.emitted { out = push(out, m); };
+            for t in &st.emittedTypes { types = push(types, t); };
+            st = St { emitted: [], emittedTypes: [], ..st };
+        };
         for o in &st.outs { out = push(out, o); };
         for t in &st.te.types { types = push(types, t); };
     };
@@ -30,8 +38,35 @@ fn checkStatements(st: St, top: Bool, stmts: &List<Int>) -> St ~ {
 
 fn checkItem(st: St, top: Bool, s: Int) -> St ~ {
     stmt = stmtOf(st, s);
-    if stmt is AstStatement::TraitDef || stmt is AstStatement::ImplDef || stmt is AstStatement::BoundedDef {
-        return notModelled(st, "traits, impls and functions with bounds");
+    if stmt is AstStatement::TraitDef {
+        if !top { return fail(st, "Type error: a trait can only be defined at the top of the program"); };
+        td = stmt as AstStatement::TraitDef;
+        return checkTrait(st, nameText(&st.nodes, td.n), namesText(&st.nodes, td.ps), listItems(&st.nodes, td.fs));
+    };
+    if stmt is AstStatement::ImplDef {
+        d = stmt as AstStatement::ImplDef;
+        return checkImplDef(st, top, d.traitName, d.args, d.n, d.ty, d.bs, d.xs);
+    };
+    if stmt is AstStatement::BoundedDef {
+        bd = stmt as AstStatement::BoundedDef;
+        inner = stmtOf(st, bd.s);
+        if inner is AstStatement::Assign {
+            a = inner as AstStatement::Assign;
+            v = functionValue(st, a.e);
+            if v >= 0 {
+                if !top { return fail(st, "Type error: a function with bounds on its types can only be defined at the top of the program"); };
+                st = boundsOf(st, bd.bs);
+                bounds = clone(st.boundsOut);
+                value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
+                native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
+                st = fnSigOf(st, value.ps, native.sig);
+                fs = clone(st.fnSig);
+                tm = templateOf(st, v, &bounds, bd.bs, &fs, 0 - 1);
+                st = declareTemplate(st, nameText(&st.nodes, a.n), bounds, tm);
+                return St { outs: [], te: TE { node: 0 - 1, types: [] }, ..st };
+            };
+        };
+        return fail(st, "Type error: only a function can have bounds on its types");
     };
     st = checkStatement(st, top, s);
     if st.status != 0 { return st; };
@@ -57,7 +92,8 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
                 texpr = clone(st.te);
             };
             st = assignVar(st, &name, head(&texpr.types));
-            st = recordAlias(st, head(&texpr.types));
+            st = recordAlias(st, &name, head(&texpr.types), texpr.node);
+            st = recordOrigins(st, &name, head(&texpr.types), texpr.node);
             if st.status != 0 { return st; };
             st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: n, e: texpr.node } });
             return St { te: TE { node: st.nid, types: texpr.types }, ..st };
@@ -68,7 +104,9 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
             st = inferExpr(st, e);
             if st.status != 0 { return st; };
             texpr = clone(st.te);
-            st = recordAlias(st, head(&texpr.types));
+            st = recordAlias(st, &name, head(&texpr.types), texpr.node);
+            st = recordOrigins(st, &name, head(&texpr.types), texpr.node);
+            if st.status != 0 { return st; };
             st = bindInner(st, &name, head(&texpr.types));
             st = emit(st, AstNode::Statement { value: AstStatement::Let { n: n, e: texpr.node } });
             return St { te: TE { node: st.nid, types: texpr.types }, ..st };
@@ -78,17 +116,38 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
             if st.status != 0 { return st; };
             inferred = clone(st.te);
             if st.ret >= 0 {
-                st = coerce(st, st.ret, inferred);
+                rty = st.ret;
+                // (a reference parameter returned is the reference to the caller's place)
+                rk = kindOf(st, rty);
+                if (rk = 10 || rk = 11) && isVar(st, e) {
+                    v = varName(st, e);
+                    st = zonk(st, head(&inferred.types));
+                    tz = st.ty;
+                    tk = kindOf(st, tz);
+                    if tk = 10 || tk = 11 || indexIn(&st.readOnly, &v) >= 0 || indexIn(&st.mutParams, &v) >= 0 {
+                        st = expect(st, "returned value", argAt(st, rty, 0), tz);
+                        inferred = withType(&inferred, rty);
+                    };
+                };
+                st = coerce(st, rty, inferred);
                 if st.status != 0 { return st; };
                 texpr = clone(st.te);
-                st = expect(st, "returned value", st.ret, head(&texpr.types));
+                st = expect(st, "returned value", rty, head(&texpr.types));
                 if st.status != 0 { return st; };
+                if size(st.resultFrom) > 0 {
+                    st = exprRefOrigins(st, e);
+                    if st.status != 0 { return st; };
+                    allFrom = size(st.names) > 0;
+                    for o in &st.names { if indexIn(&st.resultFrom, o) < 0 { allFrom = false; }; };
+                    if !allFrom {
+                        return typeError(st, catStrings(catStrings("the value returned is not a reference from ", joinWith(&st.resultFrom, ", ")), ", which the signature names: return a reference to a place of one of them"));
+                    };
+                };
                 st = emit(st, AstNode::Statement { value: AstStatement::Return { e: texpr.node } });
                 return St { te: TE { node: st.nid, types: texpr.types }, ..st };
             };
             t = head(&inferred.types);
-            st = zonk(st, t);
-            k = kindOf(st, st.ty);
+            k = kindOf(st, t);
             if k = 10 || k = 11 { return fail(st, "Type error: the program cannot return a reference: a reference is from a place in the program, and no place outlives it"); };
             if st.programReturn < 0 { st = St { programReturn: t, ..st }; } else { st = expect(st, "returned value of the program", st.programReturn, t); };
             if st.status != 0 { return st; };
@@ -229,10 +288,10 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
             st = St { linearTypes: st.linearTypes.insert(nameText(&st.nodes, n)), ..st };
             return St { nid: s, te: TE { node: s, types: [] }, ..st };
         },
-        AstStatement::AssignDeref { a: a, b: b } => { return notModelled(st, "references"); },
-        AstStatement::TraitDef { n: n, ps: ps, fs: fs } => { return notModelled(st, "traits"); },
-        AstStatement::ImplDef { traitName: tn, args: args, n: n, ty: ty, bs: bs, xs: xs } => { return notModelled(st, "impls"); },
-        AstStatement::BoundedDef { bs: bs, s: inner } => { return notModelled(st, "functions with bounds"); },
+        AstStatement::AssignDeref { a: a, b: b } => { return checkAssignDeref(st, a, b); },
+        AstStatement::TraitDef { n: n, ps: ps, fs: fs } => { return fail(st, "Type error: a trait can only be defined at the top of the program"); },
+        AstStatement::ImplDef { traitName: tn, args: args, n: n, ty: ty, bs: bs, xs: xs } => { return fail(st, "Type error: an impl can only be written at the top of the program"); },
+        AstStatement::BoundedDef { bs: bs, s: inner } => { return fail(st, "Type error: a function with bounds on its types cannot be written in an impl or a block"); },
     };
     return st;
 };
@@ -249,14 +308,6 @@ fn functionValue(st: &St, e: Int) -> Int [{ }] [{ }] {
     body = nodeIn(&st.nodes, (value as AstValue::VFunct).body);
     if body is AstNode::Body && (body as AstNode::Body).value is AstBody::NativeFunct { return v; };
     return 0 - 1;
-};
-
-// A value that holds references is followed by its place (recordAlias and recordOrigins); none here hold one
-fn recordAlias(st: St, t: Int) -> St ~ {
-    st = zonk(st, t);
-    k = kindOf(st, st.ty);
-    if k = 10 || k = 11 { return notModelled(st, "references"); };
-    return st;
 };
 
 // A size, a borrowed parameter and an update parameter are not assigned (notSize)
@@ -276,38 +327,78 @@ fn notSize(st: St, name: &String) -> St [{ }] [{ }] {
 
 // x = fn ...: the function is visible to itself and, at the top, to what comes after it (checkStatement, Assign of a VFunct)
 fn checkFunctionDef(st: St, top: Bool, name: String, n: Int, v: Int) -> St ~ {
+    value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
+    native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
+    st = fnSigOf(st, value.ps, native.sig);
+    return checkFunctionWith(st, top, name, n, v, clone(st.fnSig), false);
+};
+
+// A function definition with its signature as types (rewritten: they are not the ones its record writes, as an impl's Self
+// replaced), giving back the definition with its contracts, termination and body checked (checkStatement)
+fn checkFunctionWith(st: St, top: Bool, name: String, n: Int, v: Int, fs: FnSig, rewritten: Bool) -> St ~ {
     if st.templates.contains(&name) { return typeError(st, catStrings(clone(name), " is already defined")); };
     value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
     native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
     sig = signatureOf(&st.nodes, native.sig);
-    sd = sigData(&st.nodes, native.sig); st = functionTypeFrom(st, &sd);
+    st = fnTypeOf(st, &fs);
     fnT = st.ty;
     if top { st = St { fns: st.fns.insert(clone(name), fnT), ..st }; };
     st = assignVar(st, &name, fnT);
     if st.status != 0 { return st; };
-    st = checkFunction(st, &name, value.ps, sig, value.ins, value.outs, native.term, native.stmts);
+    st = checkFunction(st, &name, clone(fs), value.ins, value.outs, native.term, native.stmts);
     if st.status != 0 { return st; };
     // (st.outs: the requires, the ensures, the termination and the body)
     parts = clone(st.outs);
     bodyTypes = clone(st.te.types);
-    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: native.sig, term: get(parts, 2), stmts: get(parts, 3) } });
+    from = clone(st.names);
+    if size(from) > 0 { st = putRefResult(st, clone(name), clone(fs.params), clone(from)); };
+    sigNode = native.sig;
+    if rewritten || from != fs.froms {
+        tsNode = sig.ts;
+        retNode = sig.ret;
+        if rewritten {
+            st = emitTypes(st, &fs.ptys);
+            tsNode = st.nid;
+            st = emitType(st, fs.rty);
+            retNode = st.nid;
+        };
+        st = emitNames(st, &from);
+        st = emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: sig.ss, ps: sig.ps, ws: sig.ws, fs: st.nid } });
+        sigNode = st.nid;
+    };
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: get(parts, 2), stmts: get(parts, 3) } });
     st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: value.ps, ins: get(parts, 0), outs: get(parts, 1), body: st.nid, exports: value.exports } });
     st = emitVal(st, st.nid);
     st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: n, e: st.nid } });
-    return St { te: TE { node: st.nid, types: bodyTypes }, ..st };
+    return St { te: TE { node: st.nid, types: bodyTypes }, sigNode: sigNode, ..st };
 };
 
-// The body sees its parameters and the functions known at the top, itself among them (checkFunction)
-fn checkFunction(st: St, name: &String, ps: Int, sig: AstSignature, ins: Int, outs: Int, term: Int, body: Int) -> St ~ {
-    params = namesText(&st.nodes, ps);
-    sizes = namesText(&st.nodes, sig.ss);
-    types = namesText(&st.nodes, sig.ps);
-    writes = namesText(&st.nodes, sig.ws);
-    froms = namesText(&st.nodes, sig.fs);
+// The type of a function of a signature (TypeCheckCore.functionType)
+fn fnTypeOf(st: St, fs: &FnSig) -> St ~ {
+    st = fnTy(st, clone(fs.ptys), fs.rty);
+    if size(fs.sizes) = 0 && size(fs.types) = 0 { return st; };
+    return addTy(st, Ty { kind: 13, name: "", args: push([], st.ty), n: 0, flag: false, sizes: clone(fs.sizes), types: clone(fs.types) });
+};
+
+// The parameters and signature of a function value, with its types made in the arena
+fn fnSigOf(st: St, ps: Int, sigNode: Int) -> St ~ {
+    sig = signatureOf(&st.nodes, sigNode);
     tycs = codecTypesAt(&st.nodes, sig.ts); st = fromCodecs(st, &tycs);
     ptys = clone(st.te.types);
     tyc = codecTypeAt(&st.nodes, sig.ret); st = fromCodec(st, &tyc);
-    rty = st.ty;
+    fs = FnSig { params: namesText(&st.nodes, ps), ptys: ptys, rty: st.ty, sizes: namesText(&st.nodes, sig.ss), types: namesText(&st.nodes, sig.ps), writes: namesText(&st.nodes, sig.ws), froms: namesText(&st.nodes, sig.fs) };
+    return St { fnSig: fs, ..st };
+};
+
+// The body sees its parameters and the functions known at the top, itself among them (checkFunction)
+fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: Int, body: Int) -> St ~ {
+    params = clone(fs.params);
+    sizes = clone(fs.sizes);
+    types = clone(fs.types);
+    writes = clone(fs.writes);
+    froms = clone(fs.froms);
+    ptys = clone(fs.ptys);
+    rty = fs.rty;
     outerSizes = clone(st.sizeScope);
     outerTypes = clone(st.typeScope);
     outerCurrent = clone(st.current);
@@ -329,46 +420,96 @@ fn checkFunction(st: St, name: &String, ps: Int, sig: AstSignature, ins: Int, ou
     };
     if !distinct { return typeError(st, catStrings(catStrings("function ", clone(name)), " names a size twice, or the same as a parameter")); };
     rk = kindOf(st, rty);
-    if rk = 10 || rk = 11 { return notModelled(st, "references"); };
-    st = holdsRef(st, rty);
+    isRefResult = false;
+    if rk = 10 || rk = 11 {
+        st = checkType(st, argAt(st, rty, 0));
+        isRefResult = true;
+    } else {
+        st = holdsRef(st, rty);
+        isRefResult = st.ok;
+    };
     if st.status != 0 { return st; };
-    if st.ok { return notModelled(st, "references"); };
-    if size(froms) > 0 {
-        return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), joinWith(&froms, ", ")), ", but its result is not a reference"));
+    from = [];
+    if !isRefResult {
+        if size(froms) > 0 {
+            return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), joinWith(&froms, ", ")), ", but its result is not a reference"));
+        };
+    } else {
+        if size(froms) > 0 {
+            for p in &froms {
+                at = indexIn(&params, p);
+                ok = at >= 0 && at < size(ptys);
+                if ok { pk = kindOf(st, get(ptys, at)); ok = pk = 10 || pk = 11; };
+                if !ok { return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), clone(p)), ", which is not a reference parameter of it")); };
+            };
+            from = clone(froms);
+        } else {
+            refParams = [];
+            i = 0;
+            while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
+                pk = kindOf(st, get(ptys, i));
+                if pk = 10 || pk = 11 { refParams = push(refParams, clone(get(params, i))); };
+                i = i + 1;
+            };
+            if size(refParams) = 0 {
+                return typeError(st, catStrings(clone(name), " returns a reference, but no parameter of it is a reference for the result to be from: write the result as -> &T from <parameter>"));
+            };
+            if size(refParams) > 1 {
+                return typeError(st, catStrings(clone(name), " returns a reference and has more than one reference parameter: say which the result is from, as in -> &T from (a, b)"));
+            };
+            from = refParams;
+        };
     };
     for p in &ptys { st = checkType(st, p); };
-    st = checkType(st, rty);
+    if rk = 10 { st = checkType(st, argAt(st, rty, 0)); } else { st = checkType(st, rty); };
     if st.status != 0 { return st; };
     if size(params) != size(ptys) {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("function ", clone(name)), " has "), intText(size(params))), " parameters but "), catStrings(intText(size(ptys)), " types")));
     };
-    for p in &ptys {
-        if mentionsRef(st, p) { return notModelled(st, "references"); };
-        st = holdsRef(st, p);
-        if st.status != 0 { return st; };
-        if st.ok { return notModelled(st, "references"); };
+    readOnly = [];
+    mutParams = [];
+    i = 0;
+    while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
+        pk = kindOf(st, get(ptys, i));
+        if pk = 10 { readOnly = push(readOnly, clone(get(params, i))); };
+        if pk = 11 { mutParams = push(mutParams, clone(get(params, i))); };
+        i = i + 1;
     };
-    if mentionsRef(st, rty) { return notModelled(st, "references"); };
+    outerReadOnly = clone(st.readOnly);
+    outerMut = clone(st.mutParams);
+    outerWrites = clone(st.writes);
+    outerAliasNames = clone(st.aliasNames);
+    outerAliasPlaces = clone(st.aliasPlaces);
+    outerResultFrom = clone(st.resultFrom);
+    outerParams = clone(st.params);
+    outerOriginNames = clone(st.originNames);
+    outerOriginRoots = clone(st.originRoots);
+    st = St { readOnly: readOnly, mutParams: clone(mutParams), writes: clone(writes), aliasNames: [], aliasPlaces: [], resultFrom: clone(from), params: clone(params), originNames: [], originRoots: [], ..st };
+    // (writes(...) names update parameters, whole or by a field)
     for w in &writes {
         root = clone(w);
+        field = "";
         dot = indexOfByte(w, 46);
-        if dot >= 0 { root = w.slice(0, dot); };
+        if dot >= 0 { root = w.slice(0, dot); field = w.slice(dot + 1, size(w.bytes)); };
         at = indexIn(&params, &root);
         if at < 0 || at >= size(ptys) || kindOf(st, get(ptys, at)) != 11 {
             return typeError(st, catStrings(catStrings(catStrings(catStrings("writes(", clone(w)), ") in "), clone(name)), " does not name an update parameter (&mut T) of the function"));
         };
+        if dot >= 0 {
+            st = readField(st, "", &field, argAt(st, get(ptys, at), 0));
+            if st.status != 0 { return st; };
+            st = zonk(st, st.ty);
+        };
     };
     outerRet = st.ret;
     outerScopes = clone(st.scopes);
-    outerReadOnly = clone(st.readOnly);
-    outerMut = clone(st.mutParams);
     paramScope = oneScope();
     i = 0;
     while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
         paramScope = bindIn(paramScope, &get(params, i), unrefOf(st, get(ptys, i)));
         i = i + 1;
     };
-    st = St { ret: rty, scopes: clone(paramScope), readOnly: [], mutParams: [], ..st };
+    st = St { ret: rty, scopes: clone(paramScope), ..st };
     st = checkValidations(st, ins);
     if st.status != 0 { return st; };
     insNode = st.nid;
@@ -376,6 +517,14 @@ fn checkFunction(st: St, name: &String, ps: Int, sig: AstSignature, ins: Int, ou
     if st.status != 0 { return st; };
     termNode = st.nid;
     // (the ensures see return and the requires' defines, in the parameters' scope)
+    i = 0;
+    while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
+        if kindOf(st, get(ptys, i)) = 11 {
+            oldName = catStrings("$old ", get(params, i));
+            st = bindInner(st, &oldName, unrefOf(st, get(ptys, i)));
+        };
+        i = i + 1;
+    };
     st = bindInner(st, "return", rty);
     st = rewriteOldStatements(st, outs);
     outsOld = st.nid;
@@ -388,8 +537,8 @@ fn checkFunction(st: St, name: &String, ps: Int, sig: AstSignature, ins: Int, ou
     st = checkStatements(st, false, &bodyStmts);
     if st.status != 0 { return st; };
     bodyTE = clone(st.te);
-    st = St { sizeScope: outerSizes, typeScope: outerTypes, current: outerCurrent, ret: outerRet, scopes: outerScopes, readOnly: outerReadOnly, mutParams: outerMut, ..st };
-    return St { outs: push(push(push(push([], insNode), outsNode), termNode), bodyTE.node), te: bodyTE, ..st };
+    st = St { sizeScope: outerSizes, typeScope: outerTypes, current: outerCurrent, ret: outerRet, scopes: outerScopes, readOnly: outerReadOnly, mutParams: outerMut, writes: outerWrites, aliasNames: outerAliasNames, aliasPlaces: outerAliasPlaces, resultFrom: outerResultFrom, params: outerParams, originNames: outerOriginNames, originRoots: outerOriginRoots, ..st };
+    return St { outs: push(push(push(push([], insNode), outsNode), termNode), bodyTE.node), te: bodyTE, names: from, ..st };
 };
 
 // What shrinks is an Int, which counts down to 0, or a struct or enum value, which loses a field at a time (resolveTermination)
@@ -405,9 +554,9 @@ fn resolveTermination(st: St, t: Int) -> St ~ {
     variant = (term as AstTermination::Shrinks).e;
     st = inferExpr(st, variant);
     if st.status != 0 { return st; };
-    v0 = clone(st.te);
-    st = derefStepNeeded(st, head(&v0.types));
+    st = derefExpr(st, clone(st.te));
     if st.status != 0 { return st; };
+    v0 = clone(st.te);
     st = zonk(st, head(&v0.types));
     ty = st.ty;
     k = kindOf(st, ty);
@@ -507,7 +656,7 @@ fn checkRule(st: St, r: Int) -> St ~ {
     scrutinee = (node as AstNode::Rule).value;
     match scrutinee {
         AstRule::Refl { p: p } => { st = inferProof(st, p); return emit(st, AstNode::Rule { value: AstRule::Refl { p: st.nid } }); },
-        AstRule::Eval { n: n } => { varName = nameText(&st.nodes, n); st = lookupVar(st, &varName); return St { nid: r, ..st }; },
+        AstRule::Eval { n: n } => { termName = nameText(&st.nodes, n); st = lookupVar(st, &termName); return St { nid: r, ..st }; },
         AstRule::EvalAll => { return St { nid: r, ..st }; },
         AstRule::CheckGtZero { p: p } => { st = inferProof(st, p); return emit(st, AstNode::Rule { value: AstRule::CheckGtZero { p: st.nid } }); },
         AstRule::CheckRel { p: p } => { st = inferProof(st, p); return emit(st, AstNode::Rule { value: AstRule::CheckRel { p: st.nid } }); },
@@ -605,4 +754,43 @@ fn indexOfByte(text: &String, b: Int) -> Int [{ }] [{ }] {
         i = i + 1;
     };
     return 0 - 1;
+};
+
+// *r = value; and (*r).field = value;: the place must be through an update reference, and the value is
+// evaluated before the replacement, so its types come first (checkStatement, AssignDeref)
+fn checkAssignDeref(st: St, lhs: Int, value: Int) -> St ~ {
+    st = inferExpr(st, lhs);
+    if st.status != 0 { return st; };
+    lhsT = clone(st.te);
+    targetTy = head(&lhsT.types);
+    refExpr = derefRoot(st, lhs);
+    if refExpr < 0 { return fail(st, "Type error: assignment through a reference is written *r = value; or (*r).field = value;"); };
+    mutable = false;
+    refName = varName(st, refExpr);
+    if isVar(st, refExpr) && indexIn(&st.mutParams, &refName) >= 0 {
+        mutable = true;
+    } else {
+        st = inferExpr(st, refExpr);
+        if st.status != 0 { return st; };
+        st = zonk(st, teHead(&st.te));
+        mutable = kindOf(st, st.ty) = 11;
+    };
+    if !mutable { return fail(st, "Type error: assignment is through a read reference (&T), which does not allow updating what it is to: borrow the place with &mut"); };
+    steps = placeSteps(st, lhs);
+    if steps.ok && size(st.writes) > 0 {
+        place = resolveRefPlace(st, clone(steps.root), clone(steps.steps));
+        if indexIn(&st.mutParams, &place.root) >= 0 && !withinWrites(&st.writes, &place) {
+            return typeError(st, catStrings(catStrings(catStrings("this assignment changes ", writesTarget(&place)), ", which the writes clause of the function does not allow "), writesText(st)));
+        };
+    };
+    st = inferExpr(st, value);
+    if st.status != 0 { return st; };
+    inferred = clone(st.te);
+    st = coerce(st, targetTy, inferred);
+    if st.status != 0 { return st; };
+    exprT = clone(st.te);
+    st = emit(st, AstNode::Statement { value: AstStatement::AssignDeref { a: lhsT.node, b: exprT.node } });
+    types = clone(exprT.types);
+    for t in &lhsT.types { types = push(types, t); };
+    return St { te: TE { node: st.nid, types: types }, ..st };
 };

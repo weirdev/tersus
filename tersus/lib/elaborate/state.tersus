@@ -29,6 +29,31 @@ fn oneScope() -> Scopes [{ }] [{ }] {
     return Scopes { names: [], types: [], marks: push([], 0) };
 };
 
+// A bound on a type parameter: the parameter, the trait and the types it gives the trait
+struct BoundInfo { p: String, n: String, ts: List<Int> };
+impl Clone for BoundInfo { };
+
+// For a trait and a type that implements it, the impl's type and the types (and sizes) it gives the trait
+struct ImplArgs { ty: Int, args: List<Int>, tyNode: Int, argsNode: Int };
+impl Clone for ImplArgs { };
+
+// A function with bounds on its types (Template): its bounds, the functions it sees beside the caller's, its parameters,
+// its signature as types, and the records of its contracts, termination and body
+struct Template {
+    bounds: List<BoundInfo>, fnNames: List<String>, fnTypes: List<Int>, params: List<String>, ptys: List<Int>, rty: Int,
+    sizes: List<String>, types: List<String>, from: List<String>, ins: Int, outs: Int, term: Int, body: Int,
+    boundsNode: Int, paramsNode: Int, sigNode: Int, retNode: Int
+};
+impl Clone for Template { };
+
+// A function's parameters and signature, its types as types of the arena (Signature)
+struct FnSig { params: List<String>, ptys: List<Int>, rty: Int, sizes: List<String>, types: List<String>, writes: List<String>, froms: List<String> };
+impl Clone for FnSig { };
+
+// A place as the root it starts from and its steps: a field's name, or "" for an element
+struct Place { ok: Bool, root: String, steps: List<String> };
+impl Clone for Place { };
+
 // The checker's state. status: 0 checking, 1 refused, 2 not modelled; msg says why.
 // ty is the result of the last function that makes a type, ok of the last unify, te of the last inference.
 struct St {
@@ -43,7 +68,26 @@ struct St {
     linearTypes: HashSet<String>,
     drops: HashSet<String>,
     traits: HashSet<String>,
-    templates: HashSet<String>,
+    traitFns: HashMap<String, List<Int>>,
+    traitParams: HashMap<String, List<String>>,
+    traitSelf: List<Int>,
+    inTrait: Bool,
+    assoc: HashMap<String, List<String>>,
+    implArgs: HashMap<String, ImplArgs>,
+    implBounds: HashMap<String, List<BoundInfo>>,
+    implBoundsNodes: HashMap<String, Int>,
+    ownerViews: List<String>,
+    logging: Bool,
+    big: List<Int>,
+    undo: List<Int>,
+    sizeUndo: List<Int>,
+    templates: HashMap<String, Template>,
+    instances: HashMap<String, Int>,
+    emitted: List<Int>,
+    emittedTypes: List<Int>,
+    activeNames: List<String>,
+    activeSizes: List<Int>,
+    companions: HashMap<String, List<String>>,
     fns: HashMap<String, Int>,
     scopes: Scopes,
     ret: Int,
@@ -52,6 +96,16 @@ struct St {
     typeScope: List<String>,
     readOnly: List<String>,
     mutParams: List<String>,
+    writes: List<String>,
+    aliasNames: List<String>,
+    aliasPlaces: List<Place>,
+    originNames: List<String>,
+    originRoots: List<List<String>>,
+    refResultNames: List<String>,
+    refResultParams: List<List<String>>,
+    refResultFroms: List<List<String>>,
+    resultFrom: List<String>,
+    params: List<String>,
     current: String,
     inGhost: Bool,
     predeclared: HashSet<String>,
@@ -75,6 +129,9 @@ struct St {
     gen: Generic,
     ctor: CtorInfo,
     names: List<String>,
+    fnSig: FnSig,
+    boundsOut: List<BoundInfo>,
+    sigNode: Int,
     seen: List<String>,
     status: Int,
     msg: String
@@ -251,6 +308,7 @@ fn occurs(st: &St, v: Int, t: Int) -> Bool ~ {
 };
 
 fn bindVar(st: St, n: Int, t: Int) -> St [{ }] [{ }] {
+    if st.logging { st = St { undo: push(st.undo, n), ..st }; };
     return St { subst: st.subst.insert(n, t), ok: true, ..st };
 };
 
@@ -260,8 +318,14 @@ fn unifySize(st: St, a: Int, b: Int) -> St ~ {
     kx = kindOf(st, x);
     ky = kindOf(st, y);
     if kx = 23 && ky = 23 && numberOf(st, x) = numberOf(st, y) { return St { ok: true, ..st }; };
-    if kx = 23 { return St { sizeSubst: st.sizeSubst.insert(numberOf(st, x), y), ok: true, ..st }; };
-    if ky = 23 { return St { sizeSubst: st.sizeSubst.insert(numberOf(st, y), x), ok: true, ..st }; };
+    if kx = 23 {
+        if st.logging { st = St { sizeUndo: push(st.sizeUndo, numberOf(st, x)), ..st }; };
+        return St { sizeSubst: st.sizeSubst.insert(numberOf(st, x), y), ok: true, ..st };
+    };
+    if ky = 23 {
+        if st.logging { st = St { sizeUndo: push(st.sizeUndo, numberOf(st, y)), ..st }; };
+        return St { sizeSubst: st.sizeSubst.insert(numberOf(st, y), x), ok: true, ..st };
+    };
     return St { ok: sameTy(st, x, y), ..st };
 };
 
@@ -542,3 +606,17 @@ fn expect(st: St, context: String, expected: Int, actual: Int) -> St ~ {
     message = catStrings(catStrings(catStrings(catStrings(context, ": expected "), render(st, expected)), ", got "), render(st, actual));
     return typeError(st, message);
 };
+
+// A try (tryTc): what follows is undone if it fails. The bindings it makes are logged, so they can be taken back.
+fn beginTry(st: St) -> St [{ }] [{ }] { return St { logging: true, undo: [], sizeUndo: [], ..st }; };
+
+// The try failed: its bindings and fresh variables are taken back, and its failure forgotten
+fn undoTry(st: St, next: Int) -> St ~ {
+    subst = st.subst;
+    for n in &st.undo { subst = subst.remove(n); };
+    sizes = st.sizeSubst;
+    for n in &st.sizeUndo { sizes = sizes.remove(n); };
+    return St { subst: subst, sizeSubst: sizes, next: next, status: 0, msg: "", logging: false, undo: [], sizeUndo: [], ..st };
+};
+
+fn endTry(st: St) -> St [{ }] [{ }] { return St { logging: false, undo: [], sizeUndo: [], ..st }; };

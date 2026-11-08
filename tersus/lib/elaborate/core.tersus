@@ -1,6 +1,6 @@
 import data::codec::codec { catStrings };
 import elaborate::builtins { substitute };
-import elaborate::state { CtorInfo, Generic, St, TE, Ty, addTy, expect, fail, freshSize, freshVar, indexIn, instanceName, intText, isSize, isTypeName, joinWith, kindOf, maxInt, namedTy, notModelled, productFits, rawInstanceName, render, resolve, tyAt, typeError, unify, withTy, zonk };
+import elaborate::state { CtorInfo, Generic, St, TE, Ty, addTy, expect, fail, freshSize, freshVar, indexIn, instanceName, intText, isSize, isTypeName, joinWith, kindOf, namedTy, rawInstanceName, render, resolve, tyAt, typeError, unify, withTy, zonk };
 
 // Types.tupleGeneric: TupleN for N from 2 to 16 is a struct with parameters T0..T(N-1) and fields 0..N-1
 fn tupleArity(base: &String) -> Int [{ }] [{ }] {
@@ -653,16 +653,6 @@ fn refGo(st: St, t0: Int) -> St ~ {
     return St { ok: false, ..st };
 };
 
-// Whether a type is or has a reference among its parts as written (a list, a Box, an array, a function)
-fn mentionsRef(st: &St, t: Int) -> Bool ~ {
-    x = tyAt(st, resolve(st, t));
-    if x.kind = 10 || x.kind = 11 { return true; };
-    for a in x.args {
-        if !isSize(st, a) && mentionsRef(st, a) { return true; };
-    };
-    return false;
-};
-
 // Whether a value of a type owns something on the heap (ownsHeap); st.ok
 fn ownsHeap(st: St, t: Int) -> St ~ {
     return ownsGo(st, t, []);
@@ -755,9 +745,10 @@ fn arrayOk(st: St, t: Int) -> St ~ {
         if sz.n < 0 { return typeError(st, catStrings("the size of an array cannot be negative, got ", intText(sz.n))); };
         if !arrayElement(st, e) { return fail(st, notAnElement(st, e)); };
         st = typeWords(st, t);
-        words = st.n;
-        if words > 8192 {
-            return typeError(st, catStrings(catStrings(catStrings(render(st, t), " takes "), intText(words)), " words, more than the 8192 that an array held in a frame can have"));
+        words = clone(st.big);
+        limit = bigOf(8192);
+        if bigLess(&limit, &words) {
+            return typeError(st, catStrings(catStrings(catStrings(render(st, t), " takes "), bigText(&words)), " words, more than the 8192 that an array held in a frame can have"));
         };
         return st;
     };
@@ -774,24 +765,25 @@ fn literalOk(st: St, e0: Int) -> St ~ {
     return st;
 };
 
-// The 8-byte words a value of the type takes where it is held (typeWords); st.n
+// The 8-byte words a value of the type takes where it is held (typeWords), counted without bound as Haskell's
+// Integer does: st.big, base-10000 digits from the lowest
 fn typeWords(st: St, t0: Int) -> St ~ {
-    if st.status != 0 { return St { n: 1, ..st }; };
+    if st.status != 0 { return St { big: bigOf(1), ..st }; };
     st = zonk(st, t0);
     t = st.ty;
     x = tyAt(st, t);
     if isBoxTy(st, t) {
         inner = tyAt(st, get(x.args, 0));
-        if inner.kind = 6 && kindOf(st, get(inner.args, 1)) = 21 { return St { n: 2, ..st }; };
+        if inner.kind = 6 && kindOf(st, get(inner.args, 1)) = 21 { return St { big: bigOf(2), ..st }; };
     };
     if x.kind = 6 {
         sz = tyAt(st, resolve(st, get(x.args, 1)));
         if sz.kind = 20 {
             st = typeWords(st, get(x.args, 0));
-            if !productFits(sz.n, st.n) { return notModelled(st, "an array of more words than an Int counts"); };
-            return St { n: sz.n * st.n, ..st };
+            count = bigOf(sz.n);
+            return St { big: bigMul(&count, &st.big), ..st };
         };
-        return St { n: 1, ..st };
+        return St { big: bigOf(1), ..st };
     };
     if x.kind = 4 {
         st = ensureInstance(st, t);
@@ -802,35 +794,112 @@ fn typeWords(st: St, t0: Int) -> St ~ {
             st = namedTy(st, clone(st.ctors.lookup(&x.name, noCtor()).owner), []);
             return typeWords(st, st.ty);
         };
-        return St { n: 1, ..st };
+        return St { big: bigOf(1), ..st };
     };
-    return St { n: 1, ..st };
+    return St { big: bigOf(1), ..st };
 };
 
 fn wordsOfType(st: St, name: String) -> St ~ {
-    if !st.types.contains(&name) { return St { n: 1, ..st }; };
+    if !st.types.contains(&name) { return St { big: bigOf(1), ..st }; };
     ctors = st.types.lookup(&name, []);
     if size(ctors) = 1 && get(ctors, 0) = name && st.ctors.contains(&name) {
-        total = 0;
+        total = bigOf(0);
         for ft in st.ctors.lookup(&name, noCtor()).types {
             st = typeWords(st, ft);
-            if total > maxInt() - st.n { return notModelled(st, "an array of more words than an Int counts"); };
-            total = total + st.n;
+            total = bigAdd(&total, &st.big);
         };
-        return St { n: total, ..st };
+        return St { big: total, ..st };
     };
-    widest = 0;
+    widest = bigOf(0);
     for c in ctors {
-        width = 0;
+        width = bigOf(0);
         if st.ctors.contains(&c) {
             for ft in st.ctors.lookup(&c, noCtor()).types {
                 st = typeWords(st, ft);
-                if width > maxInt() - st.n { return notModelled(st, "an array of more words than an Int counts"); };
-                width = width + st.n;
+                width = bigAdd(&width, &st.big);
             };
         };
-        if width > widest { widest = width; };
+        if bigLess(&widest, &width) { widest = width; };
     };
-    if widest = maxInt() { return notModelled(st, "an array of more words than an Int counts"); };
-    return St { n: 1 + widest, ..st };
+    tag = bigOf(1);
+    return St { big: bigAdd(&tag, &widest), ..st };
+};
+
+// A natural number as base-10000 digits from the lowest
+fn bigOf(n: Int) -> List<Int> ~ {
+    out = [];
+    m = n;
+    if m <= 0 { return push([], 0); };
+    while m > 0 [{ }] shrinks m { out = push(out, m % 10000); m = m / 10000; };
+    return out;
+};
+
+fn digitAt(a: &List<Int>, i: Int) -> Int [{ }] [{ }] {
+    if i < 0 || i >= size(a) { return 0; };
+    return get(a, i);
+};
+
+fn bigTrim(a: List<Int>) -> List<Int> ~ {
+    n = size(a);
+    while n > 1 && get(a, n - 1) = 0 [{ affirm n <= size(a); }] shrinks n { n = n - 1; };
+    out = [];
+    i = 0;
+    while i < n [{ affirm i >= 0; }] shrinks n - i { out = push(out, get(a, i)); i = i + 1; };
+    return out;
+};
+
+fn bigAdd(a: &List<Int>, b: &List<Int>) -> List<Int> ~ {
+    out = [];
+    carry = 0;
+    i = 0;
+    while i < size(a) || i < size(b) || carry > 0 [{ affirm i >= 0; }] ~ {
+        d = digitAt(a, i) + digitAt(b, i) + carry;
+        out = push(out, d % 10000);
+        carry = d / 10000;
+        i = i + 1;
+    };
+    return bigTrim(out);
+};
+
+fn bigMul(a: &List<Int>, b: &List<Int>) -> List<Int> ~ {
+    out = [];
+    k = 0;
+    while k < size(a) + size(b) [{ affirm k >= 0; }] shrinks size(a) + size(b) - k { out = push(out, 0); k = k + 1; };
+    i = 0;
+    while i < size(a) [{ affirm i >= 0; }] shrinks size(a) - i {
+        carry = 0;
+        j = 0;
+        while j < size(b) || carry > 0 [{ affirm j >= 0; }] ~ {
+            d = digitAt(&out, i + j) + get(a, i) * digitAt(b, j) + carry;
+            if i + j < size(out) { out = set(out, i + j, d % 10000); } else { out = push(out, d % 10000); };
+            carry = d / 10000;
+            j = j + 1;
+        };
+        i = i + 1;
+    };
+    return bigTrim(out);
+};
+
+fn bigLess(a: &List<Int>, b: &List<Int>) -> Bool ~ {
+    if size(a) != size(b) { return size(a) < size(b); };
+    i = size(a) - 1;
+    while i >= 0 [{ affirm i < size(a); }] shrinks i + 1 {
+        if get(a, i) != get(b, i) { return get(a, i) < get(b, i); };
+        i = i - 1;
+    };
+    return false;
+};
+
+fn bigText(a: &List<Int>) -> String ~ {
+    if size(a) = 0 { return "0"; };
+    out = intText(get(a, size(a) - 1));
+    i = size(a) - 2;
+    while i >= 0 [{ affirm i < size(a); }] shrinks i + 1 {
+        d = get(a, i);
+        part = intText(d);
+        while size(part.bytes) < 4 [{ }] shrinks 4 - size(part.bytes) { part = catStrings("0", part); };
+        out = catStrings(out, part);
+        i = i - 1;
+    };
+    return out;
 };

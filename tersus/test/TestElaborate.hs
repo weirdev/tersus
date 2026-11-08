@@ -1,63 +1,95 @@
 module TestElaborate (testElaborate) where
 
-import Data.List (isInfixOf, isPrefixOf)
+import Data.List (isPrefixOf)
 import Control.Exception (finally)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly)
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath ((</>))
 import System.Posix.Process (getProcessID)
 
 import Differential
+import Hash (fingerprint)
+import Native (cachedProgram)
 import PreludeSource (elaboratePackageFiles)
+import Seed (compilerSnapshotHash)
 import TestData (typeCheckSources)
 import TestHarness
 import Utils
 
--- The elaborator written in Tersus (lib/elaborate) against the Haskell one: it agrees on every request it handles,
--- and answers "not modelled" for the rest (REPLACING_HASKELL.md)
+-- The elaborator written in Tersus (lib/elaborate) against the Haskell one (REPLACING_HASKELL.md)
 testElaborate :: Test
 testElaborate = TestList "testElaborate"
-    [ TestCase "the elaborator agrees with the Haskell one over the corpus" corpusAgreement
+    [ TestCase "the elaborator agrees with the Haskell one over the single-file programs" (agreement "single files" (const singleFiles) True)
+    , TestCase "the elaborator agrees with the Haskell one over the packages and the compiler libraries" (agreement "packages" packages False)
     , TestCase "an elaborator that unifies Int and Bool is caught" unificationMutant
     ]
 
--- Runs a test on the elaborator of the given package files, built in a directory of its own that is removed after
-withElaborator :: String -> [(FilePath, String)] -> (FilePath -> IO TestResult) -> IO TestResult
+-- Runs a test on the elaborator of the given package files and a scratch directory of its own, removed after. The
+-- elaborator is built once for those files and this compiler, and kept in the cache the batches share.
+withElaborator :: String -> [(FilePath, String)] -> (FilePath -> FilePath -> IO TestResult) -> IO TestResult
 withElaborator name files use = do
     temp <- getTemporaryDirectory
     pid <- getProcessID
     let dir = temp </> ("tersus-" ++ name ++ "-" ++ show pid)
-        exe = dir </> name
+        key = fingerprint (compilerSnapshotHash : concatMap (\(path, text) -> [path, text]) files)
     createDirectoryIfMissing True dir
     flip finally (removePathForcibly dir) $ do
-        built <- buildElaborator files exe
+        built <- cachedProgram ("test-" ++ name) key ("the elaborator written in Tersus (" ++ name ++ ")") (buildElaborator files)
         case built of
             Error e -> pure (Just (name ++ " does not build: " ++ e))
-            Ok () -> use exe
+            Ok exe -> use exe dir
 
-corpusAgreement :: IO TestResult
-corpusAgreement = withElaborator "elaborate" elaboratePackageFiles $ \exe -> do
-        files <- filter singleFile <$> corpusUnits
-        let control = takeDirectory exe </> "mismatch.tersus"
-            units = files ++ [SourceText name source | (name, source) <- typeCheckSources] ++ [SourceFile control]
+-- The elaborator agrees with the Haskell one, with no "not modelled" answer, over the programs the units give
+agreement :: String -> (FilePath -> IO [Unit]) -> Bool -> IO TestResult
+agreement label unitsOf withControl = withElaborator "elaborate" elaboratePackageFiles $ \exe scratch -> do
+        given <- unitsOf scratch
+        let control = scratch </> "mismatch.tersus"
+            units = given ++ [SourceFile control | withControl]
         writeFile control mismatch
         results <- runDifferential (executableCandidate exe) units
         let (agree, wording, disagree, unmodelled, failed) = tally [o | (_, _, o) <- results]
-        putStrLn ("elaborate: " ++ show (length units) ++ " units, " ++ show agree ++ " agree, " ++ show wording ++ " wording, " ++ show disagree ++ " disagree, " ++ show unmodelled ++ " not modelled, " ++ show failed ++ " failed")
-        pure $ case [(unit, modu, o) | (unit, modu, o) <- results, not (accepted o)] of
-            [] | [o | (SourceFile path, _, o) <- results, path == control] /= [Agree] -> Just "the program the mutant is tried on does not agree"
+        putStrLn (label ++ ": " ++ show (length units) ++ " units, " ++ show agree ++ " agree, " ++ show wording ++ " wording, " ++ show disagree ++ " disagree, " ++ show unmodelled ++ " not modelled, " ++ show failed ++ " failed")
+        pure $ case [(unit, modu, o) | (unit, modu, o) <- results, o /= Agree] of
+            [] | withControl && [o | (SourceFile path, _, o) <- results, path == control] /= [Agree] -> Just "the program the mutant is tried on does not agree"
             [] | agree > 0 -> Nothing
             [] -> Just "no request agrees"
             (unit, modu, o) : _ -> Just (show unit ++ " " ++ modu ++ ": " ++ show o)
+
+singleFiles :: IO [Unit]
+singleFiles = do
+    files <- filter isSingleFile <$> corpusUnits
+    pure (files ++ [SourceText name source | (name, source) <- typeCheckSources])
+
+-- The corpus's packages and the compiler libraries, and small packages written into the scratch directory whose module
+-- tries the edges of predeclaration and of its interface
+packages :: FilePath -> IO [Unit]
+packages scratch = do
+    corpus <- filter (not . isSingleFile) <$> corpusUnits
+    edges <- mapM edgePackage (zip [1 :: Int ..] edgeModules)
+    pure (corpus ++ edges)
   where
-    -- (the modules of packages and of the compiler libraries are elaborated module by module, which is not built yet)
-    singleFile unit = case unit of
-        SourceFile _ -> True
-        _ -> False
-    -- (what the elaborator answers "not modelled" for is only what is not built yet)
-    accepted o = case o of
-        Agree -> True
-        NotModelledBy what -> any (`isInfixOf` what) ["reference", "trait", "impl", "bounds", "clone", "Clone", "Deref", "Eq", "modules"]
-        _ -> False
+    edgePackage (i, source) = do
+        let root = scratch </> ("edge" ++ show i)
+        createDirectoryIfMissing True (root </> "app")
+        createDirectoryIfMissing True (root </> "parts")
+        writeFile (root </> "package.tersus") ""
+        writeFile (root </> "parts" </> "parts.tersus") source
+        writeFile (root </> "app" </> "main.tersus") ("import edge" ++ show i ++ "::parts;\nreturn 0;\n")
+        pure (FilePackage (root </> "app" </> "main.tersus"))
+
+-- A module that exports a function with bounds, one whose types hold each other by value, one with a struct and a
+-- variant of one name, and one whose function names a type declared after it
+edgeModules :: [String]
+edgeModules =
+    [ "trait Sz { fn sz(self: &Self) -> Int; };\nfn f<T: Sz>(x: &T) -> Int { return Sz::sz(x); };\n"
+    , "struct A { b: B };\nstruct B { a: A };\n"
+    , "struct A { x: Int };\nenum E { A { y: Int }, B { z: Int } };\n"
+    , "fn f(p: P) -> Int { return p.v; };\nstruct P { v: Int };\n"
+    ]
+
+isSingleFile :: Unit -> Bool
+isSingleFile unit = case unit of
+    SourceFile _ -> True
+    _ -> False
 
 -- A program the Haskell elaborator refuses because a condition is an Int
 mismatch :: String
@@ -68,8 +100,8 @@ mismatch = "x = 1;\nif x { x = 2; };\nreturn x;\n"
 unificationMutant :: IO TestResult
 unificationMutant = case mutate elaboratePackageFiles of
     Nothing -> pure (Just "the mutation does not apply to lib/elaborate/state.tersus")
-    Just files -> withElaborator "elaborate-mutant" files $ \exe -> do
-        let program = takeDirectory exe </> "mismatch.tersus"
+    Just files -> withElaborator "elaborate-mutant" files $ \exe scratch -> do
+        let program = scratch </> "mismatch.tersus"
         writeFile program mismatch
         results <- runDifferential (executableCandidate exe) [SourceFile program]
         pure $ case [o | (_, _, o) <- results] of

@@ -1,4 +1,4 @@
-import data::ast::ast { AstExpression, AstExpressions, AstName, AstNode, AstProofs, AstStatements, AstTypes, AstValidations };
+import data::ast::ast { AstExpression, AstExpressions, AstName, AstNames, AstNode, AstProofs, AstStatements, AstTypes, AstValidations };
 import data::codec::codec { catStrings, tokenize, typeAt };
 import elaborate::builtins { builtinValueOf };
 import elaborate::state { St, intText, isSize, notModelled, resolve, tyAt, zonk };
@@ -13,6 +13,23 @@ fn emitName(st: St, text: String) -> St [{ }] [{ }] {
     st = emit(st, AstNode::Name { value: AstName::End });
     if size(text.bytes) = 0 { return st; };
     return emit(st, AstNode::Name { value: AstName::Part { text: text, tail: st.nid } });
+};
+
+fn emitNames(st: St, names: &List<String>) -> St ~ {
+    ids = [];
+    for n in names {
+        st = emitName(st, clone(n));
+        ids = push(ids, st.nid);
+    };
+    st = emit(st, AstNode::Names { value: AstNames::End });
+    tail = st.nid;
+    i = size(ids) - 1;
+    while i >= 0 [{ affirm i < size(ids); }] shrinks i + 1 {
+        st = emit(st, AstNode::Names { value: AstNames::Cons { head: get(ids, i), tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    return St { nid: tail, ..st };
 };
 
 fn emitVal(st: St, value: Int) -> St [{ }] [{ }] {

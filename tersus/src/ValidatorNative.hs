@@ -11,7 +11,7 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits, withVerdictLock, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits, withVerdictLock, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, takeMVar, withMVar)
 import Data.List (sortOn)

@@ -1,4 +1,4 @@
-import data::ast::ast { AstName, AstNode, AstSignature };
+import data::ast::ast { AstExpression, AstName, AstNode, AstSignature };
 import data::codec::codec { Size, Type, sizeAt, typeAt, wordAt };
 import data::reader::reader { nameValue, nodeKind, nodeRefs };
 import elaborate::state { St, TE, Ty, addTy, arrayTy, boxTy, fnTy, listTy, namedTy, notModelled, simpleTy, sizeConst, wordTy, wrapTy };
@@ -39,6 +39,13 @@ fn codecTypeAt(nodes: &List<AstNode>, id: Int) -> Type [{ }] [{ }] {
     node = nodeIn(nodes, id);
     if node is AstNode::Type { return clone((node as AstNode::Type).value); };
     return Type::TInt;
+};
+
+// The codec size of a Size record
+fn codecSizeAt(nodes: &List<AstNode>, id: Int) -> Size [{ }] [{ }] {
+    node = nodeIn(nodes, id);
+    if node is AstNode::Size { return clone((node as AstNode::Size).value); };
+    return Size::SAny;
 };
 
 fn codecSize(st: St, s: &Size) -> St [{ }] [{ }] {
@@ -166,4 +173,21 @@ fn functionTypeFrom(st: St, sig: &SigData) -> St ~ {
     st = fnTy(st, params, st.ty);
     if size(sig.sizes) = 0 && size(sig.types) = 0 { return st; };
     return addTy(st, Ty { kind: 13, name: "", args: push([], st.ty), n: 0, flag: false, sizes: clone(sig.sizes), types: clone(sig.types) });
+};
+
+fn exprOf(st: &St, e: Int) -> AstExpression [{ }] [{ }] {
+    node = nodeIn(&st.nodes, e);
+    if node is AstNode::Expression { return clone((node as AstNode::Expression).value); };
+    return AstExpression::Var { n: 0 - 1 };
+};
+
+fn varName(st: &St, e: Int) -> String [{ }] [{ }] {
+    ex = exprOf(st, e);
+    if ex is AstExpression::Var { return nameText(&st.nodes, (ex as AstExpression::Var).n); };
+    return "";
+};
+
+fn isVar(st: &St, e: Int) -> Bool [{ }] [{ }] {
+    node = nodeIn(&st.nodes, e);
+    return node is AstNode::Expression && (node as AstNode::Expression).value is AstExpression::Var;
 };
