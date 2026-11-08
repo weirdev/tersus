@@ -33,6 +33,7 @@ module Modules
     , loadFromSourceWith
     , snapshotFromFilesystem
     , snapshotFromFilesystemWith
+    , captureFilesystemInput
     , findPackageRootIO
     ) where
 
@@ -1356,16 +1357,23 @@ loadFromSourceWith fileParser options source = loadFilesystemInput fileParser op
 
 loadFilesystemInput :: FileParser -> LoadOptions -> FilePath -> Maybe String -> IO (Either String LoadResult)
 loadFilesystemInput fileParser options rawEntry source = do
-    snapshot <- try (do
-        (resolved, entry) <- resolveFilesystemInputs options rawEntry
-        (resolver, _) <- filesystemSnapshot resolved entry source
-        pure (resolver, entry)) :: IO (Either IOException (Resolver, FilePath))
+    snapshot <- captureFilesystemInput options rawEntry source
     pure $ case snapshot of
-        Left err -> Left ("source snapshot for " ++ rawEntry ++ ": " ++ show err)
-        Right (resolver, entry) -> case source of
+        Left err -> Left err
+        Right (resolver, entry, _) -> case source of
             Just _ -> loadLayout fileParser resolver entry
                 (Layout "" (dirNameOf entry) [FileEntry (baseNameOf entry) (fileStem entry) entry] Map.empty Map.empty [] (noPrelude options) False)
             Nothing -> loadFromEntryWith fileParser resolver (normalizePath entry)
+
+captureFilesystemInput :: LoadOptions -> FilePath -> Maybe String -> IO (Either String (Resolver, FilePath, String))
+captureFilesystemInput options rawEntry source = do
+    snapshot <- try (do
+        (resolved, entry) <- resolveFilesystemInputs options rawEntry
+        (resolver, _, identity) <- filesystemSnapshot resolved entry source
+        pure (resolver, entry, identity)) :: IO (Either IOException (Resolver, FilePath, String))
+    pure $ case snapshot of
+        Left err -> Left ("source snapshot for " ++ rawEntry ++ ": " ++ show err)
+        Right captured -> Right captured
 
 resolveFilesystemInputs :: LoadOptions -> FilePath -> IO (LoadOptions, FilePath)
 resolveFilesystemInputs options entry
@@ -1386,9 +1394,10 @@ snapshotFromFilesystem = snapshotFromFilesystemWith defaultLoadOptions
 snapshotFromFilesystemWith :: LoadOptions -> FilePath -> IO [(FilePath, String)]
 snapshotFromFilesystemWith options rawEntry = do
     (resolved, entry) <- resolveFilesystemInputs options rawEntry
-    snd <$> filesystemSnapshot resolved entry Nothing
+    (_, files, _) <- filesystemSnapshot resolved entry Nothing
+    pure files
 
-filesystemSnapshot :: LoadOptions -> FilePath -> Maybe String -> IO (Resolver, [(FilePath, String)])
+filesystemSnapshot :: LoadOptions -> FilePath -> Maybe String -> IO (Resolver, [(FilePath, String)], String)
 filesystemSnapshot options rawEntry source = do
     contents <- newIORef Map.empty
     directories <- newIORef Map.empty
@@ -1499,9 +1508,12 @@ filesystemSnapshot options rawEntry source = do
     files <- Map.toAscList <$> readIORef contents
     dirs <- readIORef directories
     canonical <- readIORef canonicalRoots
+    selectedRoots <- readIORef roots
     let resolver = (resolverFromFiles files)
             { resolverOptions = options
             , resolverListDir = \dir -> Map.lookup (normalizePath dir) dirs
             , resolverCanonicalRoot = \root -> Map.findWithDefault (normalizePath root) (normalizePath root) canonical
             }
-    pure (resolver, files)
+        identity = show (options, entry, if isRelative entry then Just cwd else Nothing,
+            files, Map.toAscList dirs, Map.toAscList selectedRoots, Map.toAscList canonical)
+    pure (resolver, files, identity)
