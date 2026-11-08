@@ -128,6 +128,26 @@ ownsHeap program = go Set.empty
         Just (EnumDecl variants) -> any (go seen . snd) (concatMap snd variants)
         Nothing -> False
 
+-- Whether a value of the type may hold a reference, at any depth
+holdsReference :: Program -> Type -> Bool
+holdsReference program = go Set.empty
+  where
+    go seen ty = case ty of
+        TRef _ -> True
+        TMutRef _ -> True
+        TList t -> go seen t
+        TBox t -> go seen t
+        TArrayOf t _ -> go seen t
+        TUninit t -> go seen t
+        TNamed base args | Set.member (instanceName base args) seen -> False
+        TNamed base args -> declared (Set.insert (instanceName base args) seen) (instanceName base args)
+        TVariant v -> maybe False (declared seen) (ownerOf program v)
+        _ -> False
+    declared seen n = case Map.lookup n (progTypes program) of
+        Just (StructDecl fields) -> any (go seen . snd) fields
+        Just (EnumDecl variants) -> any (go seen . snd) (concatMap snd variants)
+        Nothing -> False
+
 -- A step from a value to a part of it: a field, an element of a list, the tag of an enum, or a slot of the memory a permission is for
 data Step = SField Name String | SElem (Maybe Integer) | STag | SSlot | SDeref
     deriving (Eq, Ord)
@@ -352,20 +372,27 @@ accesses rv = case rv of
 
 -- The place a place is ultimately of: through the loans of the reference locals it starts from, and the views
 -- it was read by, so that a reborrow overlaps what its parent borrow is of
-resolvePlace :: St -> Place -> Place
-resolvePlace st place = fst (resolvePlaceChain st place)
+resolvePlace :: Cx -> St -> Place -> Place
+resolvePlace cx st place = fst (resolvePlaceChain cx st place)
 
 -- As resolvePlace, with the reference locals the place was resolved through: a borrow of one is a reborrow of
--- its loan, not a second loan that conflicts with it
-resolvePlaceChain :: St -> Place -> (Place, [Local])
-resolvePlaceChain st = go (8 :: Int) []
+-- its loan, not a second loan that conflicts with it. A value that holds references has loans too, but its
+-- places are its own: what its references are to is carried with a borrow of it (`heldBy`), not resolved to
+resolvePlaceChain :: Cx -> St -> Place -> (Place, [Local])
+resolvePlaceChain cx st = go (8 :: Int) []
   where
     go 0 chain place = (place, chain)
     go n chain (root, steps) = case Map.lookup root (stLoans st) of
-        Just ((r2, s2), _, _) -> go (n - 1) (root : chain) (r2, s2 ++ steps)
-        Nothing -> case Map.lookup root (stViews st) of
+        Just ((r2, s2), _, _) | isReference cx root -> go (n - 1) (root : chain) (r2, s2 ++ steps)
+        _ -> case Map.lookup root (stViews st) of
             Just ps | not (Set.null ps) -> let (r2, s2) = head (Set.toList ps) in go (n - 1) chain (r2, s2 ++ steps)
             _ -> ((root, steps), chain)
+
+isReference :: Cx -> Local -> Bool
+isReference cx l = case typeOf cx l of
+    TRef _ -> True
+    TMutRef _ -> True
+    _ -> False
 
 -- The places a local stands for: those it is a view of, or itself
 placesOf :: St -> Local -> [Place]
@@ -397,7 +424,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
             let made = [(f, loansOf l) | (f, o) <- fields, Just l <- [operandLocal o], not (null (loansOf l))]
              in (loans', if null made then Map.delete d (stExtraLoans base) else Map.insert d (concatMap snd made) (stExtraLoans base), foldl' (\m (f, places) -> Map.insert (d, f) places m) clearedFields made)
         ReadField o _ field
-            | (case typeOf cx d of TRef _ -> True; TMutRef _ -> True; _ -> False), Just src <- operandLocal o, Just places <- Map.lookup (src, field) (stFieldLoans st1) ->
+            | isReference cx d, Just src <- operandLocal o, Just places <- fieldLoansThrough src field ->
                 case places of
                     place : more -> (Map.insert d (place, case typeOf cx d of TMutRef _ -> True; _ -> False, pos) (stLoans base), if null more then Map.delete d (stExtraLoans base) else Map.insert d more (stExtraLoans base), clearedFields)
                     [] -> (loans', Map.delete d (stExtraLoans base), clearedFields)
@@ -420,10 +447,27 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
         ListOp Get args
             | (case typeOf cx d of TRef _ -> True; TMutRef _ -> True; _ -> False), [srcOp, _] <- args, Just src <- operandLocal srcOp, (place : more) <- Map.findWithDefault [] src (stExtraLoans st1) ->
                 (Map.insert d (place, case typeOf cx d of TMutRef _ -> True; _ -> False, pos) (stLoans base), if null more then Map.delete d (stExtraLoans base) else Map.insert d more (stExtraLoans base), clearedFields)
+        Borrow{} | Just (place, _) <- borrowPlace, carried@(_ : _) <- heldBy place -> (loans', Map.insert d carried (stExtraLoans base), clearedFields)
         Use (Move src) -> (loans', transferExtras src, transferFields src True)
         Use (Copy src) -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
         CopyOf o | Just src <- operandLocal o -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
         _ -> (loans', Map.delete d (stExtraLoans base), clearedFields)
+    -- (a reference field read through a view of its holder, or through a reference to it, is to what the holder's field
+    -- is to; a holder whose fields are not followed one by one, such as a Box, an enum or a call result, gives all its loans)
+    fieldLoansThrough src field = case Map.lookup (src, field) (stFieldLoans st1) of
+        Just places -> Just places
+        Nothing -> case concat [heldThrough field (resolvePlace cx st1 place) | place <- placesOf st1 src] of
+            [] -> Nothing
+            found -> Just found
+    heldThrough field (root, steps) = case filter (/= SDeref) steps of
+        [] -> fromMaybe (loansOf root) (Map.lookup (root, field) (stFieldLoans st1))
+        SField _ f : _ -> fromMaybe (loansOf root) (Map.lookup (root, f) (stFieldLoans st1))
+        _ -> loansOf root
+    -- (a borrow of a value that holds references, or of a field of it that does, keeps what they are to frozen)
+    heldBy place@(root, steps) = case steps of
+        _ | Just ty <- placeType cx place, not (holdsReference (cxProgram cx) ty) -> []
+        SField _ f : _ | any ((== root) . fst) (Map.keys (stFieldLoans st1)) -> Map.findWithDefault [] (root, f) (stFieldLoans st1)
+        _ -> loansOf root
     transferExtras src = case Map.lookup src (stExtraLoans st1) of
         Just places -> Map.insert d places (Map.delete src (stExtraLoans base))
         Nothing -> Map.delete d (stExtraLoans base)
@@ -432,7 +476,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
             kept = if move then Map.filterWithKey (\(root, _) _ -> root /= src) clearedFields else clearedFields
          in foldl' (\m (f, places) -> Map.insert (d, f) places m) kept from
     (borrowPlace, borrowChain) = case rv of
-        Borrow root steps mutable -> let (place, chain) = resolvePlaceChain st1 (root, map (refStepConst (stConst st1)) steps) in (Just (place, mutable), chain)
+        Borrow root steps mutable -> let (place, chain) = resolvePlaceChain cx st1 (root, map (refStepConst (stConst st1)) steps) in (Just (place, mutable), chain)
         _ -> (Nothing, [])
     loans' = case borrowPlace of
         Just (place, mutable) -> Map.insert d (place, mutable, pos) (stLoans base)
@@ -502,7 +546,7 @@ updatePlace :: Cx -> Pos -> St -> Local -> [RefStep] -> Rvalue -> (St, [String])
 updatePlace cx pos st0 root steps rv = (define cx st1 root [], errs ++ conflicts)
   where
     (st1, errs) = foldl' (access cx pos) (st0, []) (accesses rv ++ [(root, map refStepOf steps, Read)])
-    place = resolvePlace st1 (root, map refStepOf steps)
+    place = resolvePlace cx st1 (root, map refStepOf steps)
     conflicts =
         [ message cx pos (describe cx place ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be changed through another reference while that borrow is live: the borrow ends at the last use of " ++ describeLocal cx ref)
         | (ref, lplace, lmut) <- loanEntries st1
@@ -585,19 +629,9 @@ lentAndMoved cx pos st how lent consumed =
     , overlaps h q
     ]
   where
-    -- (a place read through a reference is a place of what the reference is to, which `*` does not change; a
-    -- value that holds references owns its other fields, so only a reference is followed to its loan)
-    readPlace = dropDeref . follow (8 :: Int)
-    follow 0 place = place
-    follow n (root, steps)
-        | isReference root, Just ((r2, s2), _, _) <- Map.lookup root (stLoans st) = follow (n - 1) (r2, s2 ++ steps)
-        | Just ps <- Map.lookup root (stViews st), (r2, s2) : _ <- Set.toList ps = follow (n - 1) (r2, s2 ++ steps)
-        | otherwise = (root, steps)
-    dropDeref (root, steps) = if isReference root then (root, steps) else (root, filter (/= SDeref) steps)
-    isReference root = case typeOf cx root of
-        TRef _ -> True
-        TMutRef _ -> True
-        _ -> False
+    -- (a place read through a reference is a place of what the reference is to, which `*` does not change)
+    readPlace place = case resolvePlace cx st place of
+        (root, steps) -> if isReference cx root then (root, steps) else (root, filter (/= SDeref) steps)
     text h q
         | h == q = describe cx h ++ " is " ++ how ++ " and moved by it too: write clone(" ++ describe cx h ++ ") for one of them"
         | length (snd q) < length (snd h) = describe cx h ++ " is " ++ how ++ ", and " ++ describe cx q ++ ", which holds it, is moved by it too: write clone(" ++ describe cx q ++ ") where it is moved"
