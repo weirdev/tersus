@@ -1,7 +1,9 @@
 module LibPackage
     ( LibPackage (..)
     , libPackage
+    , compileLibPackageWith
     , nativeStorageUnits
+    , nativeStorageUnitsWith
     , libModuleNames
     , libModuleId
     , libModuleOfDisplay
@@ -15,14 +17,14 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.IO.Unsafe (unsafePerformIO)
 
-import Interface (ModuleInterface (..), extractLibInterface, mergeInterfacesImportEnv, predeclareOwnEnv)
+import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..), respond)
+import Interface (ModuleInterface (..), mergeInterfacesImportEnv)
 import Syntax (Statement (..))
 import LibParsed (LibParsed (..), libModules, libParsed)
 import qualified LibParsed
 import qualified Mir as M
 import MirLower (lowerModuleWith)
 import Modules (ModuleId (..), renderModuleId)
-import TypeCheck (ImportEnv (..), Elaborated (..), elaborateWith)
 import Utils (Result (..), bindResult, flatResultMap)
 
 -- The implicit libraries and native storage helpers share one compiler-owned
@@ -70,40 +72,41 @@ data LibPackage = LibPackage
     deriving (Show)
 
 compileLibPackage :: Result LibPackage String
-compileLibPackage = case libParsed of
+compileLibPackage = compileLibPackageWith respond
+
+compileLibPackageWith :: Elaborator -> Result LibPackage String
+compileLibPackageWith elaborator = case libParsed of
     Left err -> Error ("the lib package does not parse: " ++ err)
     Right parsed -> go (lpOrder parsed) (lpStatements parsed) Map.empty Map.empty []
   where
     go [] _ ifaces programs done = Ok (LibPackage ifaces programs (reverse done))
-    go (name : rest) statements ifaces programs done = case compileLibModule ifaces (libDependencies name) name (Map.findWithDefault [] name statements) of
+    go (name : rest) statements ifaces programs done = case compileLibModule elaborator ifaces (libDependencies name) name (Map.findWithDefault [] name statements) of
         Error err -> Error err
         Ok (iface, program) -> go rest statements (Map.insert name iface ifaces) (Map.insert name program programs) (name : done)
 
-compileLibModule :: Map.Map String ModuleInterface -> [String] -> String -> [Statement] -> Result (ModuleInterface, M.Program) String
-compileLibModule ifaces deps name statements =
+compileLibModule :: Elaborator -> Map.Map String ModuleInterface -> [String] -> String -> [Statement] -> Result (ModuleInterface, M.Program) String
+compileLibModule elaborator ifaces deps name statements =
     let moduId = libModuleId name
         depIfaces = [ifaces Map.! dep | dep <- deps]
-        imported = mergeInterfacesImportEnv depIfaces
-        -- Generic constructor owners are compiler-only physical views, not
-        -- additions to user import visibility or the logical List/Box API.
-        owners = Map.fromList [(owner, [ctor]) | iface <- depIfaces, (ctor, (owner, _)) <- Map.toList (ifCtors iface), ctor == owner]
-        importEnv = imported{ieTypes = Map.union (ieTypes imported) owners}
-        env = predeclareOwnEnv importEnv
-     in case elaborateWith env statements of
-            Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
-            Ok (elaborated@(Elaborated elaboratedStatements _), state) -> case extractLibInterface moduId statements elaboratedStatements state of
-                Error err -> Error err
-                Ok iface -> case lowerModuleWith importEnv depIfaces elaborated of
-                    Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
-                    Ok program -> Ok (iface, program)
+     in case elaborator (Request moduId True True LibInterfaceOf depIfaces statements) of
+            Accepted elaborated (Just iface) -> case lowerModuleWith (mergeInterfacesImportEnv depIfaces) depIfaces elaborated of
+                Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
+                Ok program -> Ok (iface, program)
+            Accepted _ Nothing -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator gave no interface")
+            Refused err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
+            RefusedInterface err -> Error err
+            NotModelled what -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator does not handle this module yet: " ++ what)
 
 nativeStorageUnits :: Result [(ModuleId, ModuleInterface, M.Program)] String
-nativeStorageUnits = libPackage `bindResult` \pkg -> case LibParsed.nativeLibParsed of
+nativeStorageUnits = nativeStorageUnitsWith respond
+
+nativeStorageUnitsWith :: Elaborator -> Result [(ModuleId, ModuleInterface, M.Program)] String
+nativeStorageUnitsWith elaborator = libPackage `bindResult` \pkg -> case LibParsed.nativeLibParsed of
     Left err -> Error err
     Right parsed -> flatResultMap (compileNative pkg parsed) LibParsed.nativeStorageModules
   where
     compileNative pkg parsed name =
-        compileLibModule (libInterfaces pkg) (Map.findWithDefault [] name (lpDependencies parsed)) name (lpStatements parsed Map.! name)
+        compileLibModule elaborator (libInterfaces pkg) (Map.findWithDefault [] name (lpDependencies parsed)) name (lpStatements parsed Map.! name)
             `bindResult` \(iface, program) -> Ok (libModuleId name, iface, program)
 
 {-# NOINLINE libPackageCache #-}

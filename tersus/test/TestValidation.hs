@@ -500,7 +500,7 @@ testRecursion =
             , -- Partial correctness: a function declared ~ that never returns satisfies any output contract
               parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ affirm return = 0; }] ~ { return spin(n); };"
             , -- A name is still defined once
-              parseValidateFailProgramHelper (upTo ++ upTo) "is already defined"
+              parseValidateFailProgramHelper (upTo ++ upTo) "does not model yet: two functions with one name"
             , -- An affirm that is proved becomes a fact: it links i to size(l) - 1 so get(l, i) is get(l, size(l) - 1)
               parseValidProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { affirm i = size(l) - 1; return get(l, i); };"
             , parseValidProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };"

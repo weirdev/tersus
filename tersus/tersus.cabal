@@ -41,6 +41,8 @@ extra-source-files:
     lib/data/package.tersus
     lib/data/codec/codec.tersus
     lib/data/ast/ast.tersus
+    lib/data/reader/reader.tersus
+    lib/data/builtins.ast
     lib/ast_reader/package.tersus
     lib/ast_reader/ast_reader.tersus
     AST_DATA.md
@@ -80,13 +82,16 @@ library
       AstData
       Bootstrap
       BuiltinRegistry
+      BuiltinTable
       CacheLock
       Cli
       Compile
       DataCodec
+      ElaborateRequest
       FileParserProtocol
       Hash
       Interface
+      InterfaceData
       LibPackage
       LibParsed
       Link
@@ -214,6 +219,26 @@ executable emitter-seed
     , unix
   default-language: Haskell2010
 
+executable frontend-diff
+  main-is: Main.hs
+  other-modules:
+      Differential
+  hs-source-dirs:
+      dev/frontend-diff
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
+  build-depends:
+      base >=4.7 && <5
+    , containers
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+    , unix
+  default-language: Haskell2010
+
 executable frontend-spike
   main-is: Main.hs
   other-modules:
@@ -281,6 +306,7 @@ test-suite tersus-test
   type: exitcode-stdio-1.0
   main-is: TestTersus.hs
   other-modules:
+      Differential
       TestArrays
       TestAstData
       TestBasics
@@ -295,6 +321,7 @@ test-suite tersus-test
       TestData
       TestDataCodec
       TestDeref
+      TestDifferential
       TestEq
       TestGenerics
       TestHarness

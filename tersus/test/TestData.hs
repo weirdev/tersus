@@ -1,5 +1,6 @@
 module TestData
     ( testTypeCheck
+    , typeCheckSources
     , testGenericLists
     , testStructs
     , testEnums
@@ -16,6 +17,72 @@ import Utils
 import TestHarness
 
 data TypeCheckStage = TypeOkStage | TypeErrorStage | ParseFailStage | ValidateFailStage
+    deriving (Eq)
+
+-- The programs of testTypeCheck that parse, by name (the differential harness elaborates them)
+typeCheckSources :: [(String, String)]
+typeCheckSources = [(name, source) | (name, stage, source, _) <- typeCheckRows, stage /= ParseFailStage]
+
+typeCheckRows :: [(String, TypeCheckStage, String, String)]
+typeCheckRows =
+    [
+      -- Well typed programs
+      ( "type-ok-x-1-l-1-2-y-size-l-x-b", TypeOkStage, "x = 1; l = [1, 2]; y = size(l) + x; b = y < 3; affirm b = b;", "" )
+    , ( "type-ok-fn-f-l-list-int-i-int-list-int-return", TypeOkStage, "fn f(l: List<Int>, i: Int) -> List<Int> { return push(l, get(l, i)); }; r = f([1], 0);", "" )
+    , ( "type-ok-fn-isbig-n-int-bool-return-n-9-if-isbig", TypeOkStage, "fn isBig(n: Int) -> Bool { return n > 9; }; if isBig(10) { x = 1; };", "" )
+    , ( "type-ok-fn-apply-g-fn-int-int-n-int-int-return", TypeOkStage, "fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; r = apply(inc, 1);", "" )
+    , ( "type-ok-fn-f-n-int-int-affirm-n-0-affirm-return", TypeOkStage, "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; x = f(2);", "" )
+    , ( "type-ok-l-l-push-l-1-m-set-l-0-5", TypeOkStage, "l = []; l = push(l, 1); m = set(l, 0, 5); x = first(m) + last(m);", "" )
+      -- Equality works on any type, ordering only on Int
+    , ( "type-ok-affirm-1-1-affirm-true-true", TypeOkStage, "affirm [1] = [1]; affirm true = true;", "" )
+    , ( "type-error-affirm-1-2-expected-int-got-list-int", TypeErrorStage, "affirm [1] < [2];", "expected Int, got List<Int>" )
+    , ( "type-error-for-i-in-0-true-x-1-expected-int-got", TypeErrorStage, "for i in 0..true { x = 1; };", "expected Int, got Bool" )
+    , ( "type-error-for-i-in-1-3-x-1-expected-int-got", TypeErrorStage, "for i in [1]..3 { x = 1; };", "expected Int, got List<Int>" )
+    , ( "type-error-for-x-in-3-y-1-expected-list-got-int", TypeErrorStage, "for x in 3 { y = 1; };", "expected List<?>, got Int" )
+    , ( "type-error-while-1-2-shrinks-true-x-2-shrinks-needs-an", TypeErrorStage, "while 1 < 2 shrinks true { x = 2; };", "shrinks needs an Int, an enum or a struct, got Bool" )
+      -- Builtins
+    , ( "type-error-x-size-5-argument-1-of-size-expected-list-got", TypeErrorStage, "x = size(5);", "argument 1 of size: expected List<?>, got Int" )
+    , ( "type-error-l-1-x-push-l-2-argument-2-of-push", TypeErrorStage, "l = [1]; x = push(l, [2]);", "argument 2 of push: expected Int, got List<Int>" )
+    , ( "type-error-x-set-1-0-true-argument-3-of-set-expected", TypeErrorStage, "x = set([1], 0, true);", "argument 3 of set: expected Int, got Bool" )
+    , ( "type-error-x-get-1-0-argument-2-of-get-expected-int", TypeErrorStage, "x = get([1], [0]);", "argument 2 of get: expected Int, got List<Int>" )
+    , ( "type-error-x-1-1-expected-int-got-list-int", TypeErrorStage, "x = 1 + [1];", "expected Int, got List<Int>" )
+      -- Variables keep their type
+    , ( "type-error-x-1-x-1-assignment-to-x-expected-int-got", TypeErrorStage, "x = 1; x = [1];", "assignment to x: expected Int, got List<Int>" )
+    , ( "type-error-x-y-undefined-variable-y", TypeErrorStage, "x = y;", "Undefined variable: y" )
+    , ( "type-error-if-1-x-2-condition-of-if-expected-bool-got", TypeErrorStage, "if 1 { x = 2; };", "condition of if: expected Bool, got Int" )
+    , ( "type-error-while-1-x-2-condition-of-while-expected-bool-got", TypeErrorStage, "while 1 [{ }] { x = 2; };", "condition of while: expected Bool, got Int" )
+      -- A variable assigned in a branch is local to it
+    , ( "type-error-if-true-t-1-x-t-undefined-variable-t", TypeErrorStage, "if true { t = 1; }; x = t;", "Undefined variable: t" )
+      -- Functions: parameters, return and arity
+    , ( "type-error-fn-f-n-int-int-l-1-return-l-returned", TypeErrorStage, "fn f(n: Int) -> Int { l = [1]; return l; };", "returned value: expected Int, got List<Int>" )
+    , ( "type-error-fn-f-n-int-int-return-n-x-f-1", TypeErrorStage, "fn f(n: Int) -> Int { return n; }; x = f([1]);", "argument 1 of f: expected Int, got List<Int>" )
+    , ( "type-error-fn-f-n-int-int-return-n-x-f-1-2", TypeErrorStage, "fn f(n: Int) -> Int { return n; }; x = f(1, 2);", "f takes 1 arguments, got 2" )
+    , ( "type-error-fn-f-n-int-bool-return-n-returned-value-expected", TypeErrorStage, "fn f(n: Int) -> Bool { return n; };", "returned value: expected Bool, got Int" )
+    , ( "type-error-x-1-y-x-2-x-is-not-a-function", TypeErrorStage, "x = 1; y = x(2);", "x is not a function" )
+      -- The program has one return type, the first return's, as a function has its declared one
+    , ( "type-error-if-true-return-1-else-return-false-returned-value-of", TypeErrorStage, "if true { return 1; } else { return false; };", "returned value of the program: expected Int, got Bool" )
+    , ( "type-error-x-1-if-x-1-return-1-return-2-returned", TypeErrorStage, "x = 1; if x = 1 { return [1]; }; return 2;", "returned value of the program: expected List<Int>, got Int" )
+      -- (a function has its own, and a return in it does not count for the program)
+    , ( "type-ok-fn-f-n-int-bool-return-n-1-if-true", TypeOkStage, "fn f(n: Int) -> Bool { return n = 1; }; if true { return 1; } else { return 2; };", "" )
+      -- Equality is structural, which functions do not have
+    , ( "type-error-fn-f-n-int-int-return-n-b-f-f", TypeErrorStage, "fn f(n: Int) -> Int { return n; }; b = f = f;", "functions cannot be compared" )
+    , ( "type-error-fn-f-n-int-int-return-n-fn-g-n", TypeErrorStage, "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; affirm f != g;", "functions cannot be compared" )
+      -- Bodies see only their parameters and the functions defined at the top
+    , ( "type-error-y-1-fn-f-n-int-int-return-y-undefined", TypeErrorStage, "y = 1; fn f(n: Int) -> Int { return y; };", "Undefined variable: y" )
+    , ( "type-ok-fn-f-n-int-int-return-g-n-fn-g", TypeOkStage, "fn f(n: Int) -> Int { return g(n); }; fn g(n: Int) -> Int { return n; };", "" )
+    , ( "type-ok-fn-f-n-int-int-return-n-fn-g-n", TypeOkStage, "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return f(n); };", "" )
+      -- Contracts and proofs are typed too
+    , ( "type-error-fn-f-n-int-int-affirm-n-return-n-affirmed", TypeErrorStage, "fn f(n: Int) -> Int [{ affirm n; }] [{ }] { return n; };", "affirmed proof: expected Bool, got Int" )
+    , ( "type-error-fn-f-l-list-int-int-affirm-return-l-return", TypeErrorStage, "fn f(l: List<Int>) -> Int [{ }] [{ affirm return = l; }] { return 1; };", "expected Int, got List<Int>" )
+    , ( "type-error-fn-f-l-list-int-int-affirm-forall-j-in", TypeErrorStage, "fn f(l: List<Int>) -> Int [{ affirm forall j in 0..size(l): get(l, j); }] [{ }] { return 1; };", "body of forall: expected Bool" )
+    , ( "type-ok-fn-f-l-list-int-int-affirm-size-l-0", TypeOkStage, "fn f(l: List<Int>) -> Int [{ affirm size(l) > 0; define s = size(l); }] [{ affirm s > 0; }] { return first(l); };", "" )
+      -- Annotations are required
+    , ( "parse-fail-fn-f-n-int-return-n", ParseFailStage, "fn f(n) -> Int { return n; };", "" )
+    , ( "parse-fail-fn-f-n-int-return-n-2", ParseFailStage, "fn f(n: Int) { return n; };", "" )
+    , ( "type-error-fn-f-n-float-int-return-1-unknown-type-float", TypeErrorStage, "fn f(n: Float) -> Int { return 1; };", "unknown type Float" )
+      -- validate runs the check first
+    , ( "validate-fail-fn-f-n-int-list-int-return-n-x-1", ValidateFailStage, "fn f(n: Int) -> List<Int> { return n; }; x = 1;", "returned value: expected List<Int>, got Int" )
+    ]
 
 testTypeCheck :: Test
 testTypeCheck =
@@ -29,76 +96,16 @@ testTypeCheck =
                 Right stmts -> case typeCheck stmts of
                     Ok () -> Nothing
                     Error e -> Just ("Type check failed: " ++ e)
-        rows :: [(String, TypeCheckStage, String, String)]
-        rows =
-            [
-              -- Well typed programs
-              ( "type-ok-x-1-l-1-2-y-size-l-x-b", TypeOkStage, "x = 1; l = [1, 2]; y = size(l) + x; b = y < 3; affirm b = b;", "" )
-            , ( "type-ok-fn-f-l-list-int-i-int-list-int-return", TypeOkStage, "fn f(l: List<Int>, i: Int) -> List<Int> { return push(l, get(l, i)); }; r = f([1], 0);", "" )
-            , ( "type-ok-fn-isbig-n-int-bool-return-n-9-if-isbig", TypeOkStage, "fn isBig(n: Int) -> Bool { return n > 9; }; if isBig(10) { x = 1; };", "" )
-            , ( "type-ok-fn-apply-g-fn-int-int-n-int-int-return", TypeOkStage, "fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; r = apply(inc, 1);", "" )
-            , ( "type-ok-fn-f-n-int-int-affirm-n-0-affirm-return", TypeOkStage, "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; x = f(2);", "" )
-            , ( "type-ok-l-l-push-l-1-m-set-l-0-5", TypeOkStage, "l = []; l = push(l, 1); m = set(l, 0, 5); x = first(m) + last(m);", "" )
-              -- Equality works on any type, ordering only on Int
-            , ( "type-ok-affirm-1-1-affirm-true-true", TypeOkStage, "affirm [1] = [1]; affirm true = true;", "" )
-            , ( "type-error-affirm-1-2-expected-int-got-list-int", TypeErrorStage, "affirm [1] < [2];", "expected Int, got List<Int>" )
-            , ( "type-error-for-i-in-0-true-x-1-expected-int-got", TypeErrorStage, "for i in 0..true { x = 1; };", "expected Int, got Bool" )
-            , ( "type-error-for-i-in-1-3-x-1-expected-int-got", TypeErrorStage, "for i in [1]..3 { x = 1; };", "expected Int, got List<Int>" )
-            , ( "type-error-for-x-in-3-y-1-expected-list-got-int", TypeErrorStage, "for x in 3 { y = 1; };", "expected List<?>, got Int" )
-            , ( "type-error-while-1-2-shrinks-true-x-2-shrinks-needs-an", TypeErrorStage, "while 1 < 2 shrinks true { x = 2; };", "shrinks needs an Int, an enum or a struct, got Bool" )
-              -- Builtins
-            , ( "type-error-x-size-5-argument-1-of-size-expected-list-got", TypeErrorStage, "x = size(5);", "argument 1 of size: expected List<?>, got Int" )
-            , ( "type-error-l-1-x-push-l-2-argument-2-of-push", TypeErrorStage, "l = [1]; x = push(l, [2]);", "argument 2 of push: expected Int, got List<Int>" )
-            , ( "type-error-x-set-1-0-true-argument-3-of-set-expected", TypeErrorStage, "x = set([1], 0, true);", "argument 3 of set: expected Int, got Bool" )
-            , ( "type-error-x-get-1-0-argument-2-of-get-expected-int", TypeErrorStage, "x = get([1], [0]);", "argument 2 of get: expected Int, got List<Int>" )
-            , ( "type-error-x-1-1-expected-int-got-list-int", TypeErrorStage, "x = 1 + [1];", "expected Int, got List<Int>" )
-              -- Variables keep their type
-            , ( "type-error-x-1-x-1-assignment-to-x-expected-int-got", TypeErrorStage, "x = 1; x = [1];", "assignment to x: expected Int, got List<Int>" )
-            , ( "type-error-x-y-undefined-variable-y", TypeErrorStage, "x = y;", "Undefined variable: y" )
-            , ( "type-error-if-1-x-2-condition-of-if-expected-bool-got", TypeErrorStage, "if 1 { x = 2; };", "condition of if: expected Bool, got Int" )
-            , ( "type-error-while-1-x-2-condition-of-while-expected-bool-got", TypeErrorStage, "while 1 [{ }] { x = 2; };", "condition of while: expected Bool, got Int" )
-              -- A variable assigned in a branch is local to it
-            , ( "type-error-if-true-t-1-x-t-undefined-variable-t", TypeErrorStage, "if true { t = 1; }; x = t;", "Undefined variable: t" )
-              -- Functions: parameters, return and arity
-            , ( "type-error-fn-f-n-int-int-l-1-return-l-returned", TypeErrorStage, "fn f(n: Int) -> Int { l = [1]; return l; };", "returned value: expected Int, got List<Int>" )
-            , ( "type-error-fn-f-n-int-int-return-n-x-f-1", TypeErrorStage, "fn f(n: Int) -> Int { return n; }; x = f([1]);", "argument 1 of f: expected Int, got List<Int>" )
-            , ( "type-error-fn-f-n-int-int-return-n-x-f-1-2", TypeErrorStage, "fn f(n: Int) -> Int { return n; }; x = f(1, 2);", "f takes 1 arguments, got 2" )
-            , ( "type-error-fn-f-n-int-bool-return-n-returned-value-expected", TypeErrorStage, "fn f(n: Int) -> Bool { return n; };", "returned value: expected Bool, got Int" )
-            , ( "type-error-x-1-y-x-2-x-is-not-a-function", TypeErrorStage, "x = 1; y = x(2);", "x is not a function" )
-              -- The program has one return type, the first return's, as a function has its declared one
-            , ( "type-error-if-true-return-1-else-return-false-returned-value-of", TypeErrorStage, "if true { return 1; } else { return false; };", "returned value of the program: expected Int, got Bool" )
-            , ( "type-error-x-1-if-x-1-return-1-return-2-returned", TypeErrorStage, "x = 1; if x = 1 { return [1]; }; return 2;", "returned value of the program: expected List<Int>, got Int" )
-              -- (a function has its own, and a return in it does not count for the program)
-            , ( "type-ok-fn-f-n-int-bool-return-n-1-if-true", TypeOkStage, "fn f(n: Int) -> Bool { return n = 1; }; if true { return 1; } else { return 2; };", "" )
-              -- Equality is structural, which functions do not have
-            , ( "type-error-fn-f-n-int-int-return-n-b-f-f", TypeErrorStage, "fn f(n: Int) -> Int { return n; }; b = f = f;", "functions cannot be compared" )
-            , ( "type-error-fn-f-n-int-int-return-n-fn-g-n", TypeErrorStage, "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; affirm f != g;", "functions cannot be compared" )
-              -- Bodies see only their parameters and the functions defined at the top
-            , ( "type-error-y-1-fn-f-n-int-int-return-y-undefined", TypeErrorStage, "y = 1; fn f(n: Int) -> Int { return y; };", "Undefined variable: y" )
-            , ( "type-ok-fn-f-n-int-int-return-g-n-fn-g", TypeOkStage, "fn f(n: Int) -> Int { return g(n); }; fn g(n: Int) -> Int { return n; };", "" )
-            , ( "type-ok-fn-f-n-int-int-return-n-fn-g-n", TypeOkStage, "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return f(n); };", "" )
-              -- Contracts and proofs are typed too
-            , ( "type-error-fn-f-n-int-int-affirm-n-return-n-affirmed", TypeErrorStage, "fn f(n: Int) -> Int [{ affirm n; }] [{ }] { return n; };", "affirmed proof: expected Bool, got Int" )
-            , ( "type-error-fn-f-l-list-int-int-affirm-return-l-return", TypeErrorStage, "fn f(l: List<Int>) -> Int [{ }] [{ affirm return = l; }] { return 1; };", "expected Int, got List<Int>" )
-            , ( "type-error-fn-f-l-list-int-int-affirm-forall-j-in", TypeErrorStage, "fn f(l: List<Int>) -> Int [{ affirm forall j in 0..size(l): get(l, j); }] [{ }] { return 1; };", "body of forall: expected Bool" )
-            , ( "type-ok-fn-f-l-list-int-int-affirm-size-l-0", TypeOkStage, "fn f(l: List<Int>) -> Int [{ affirm size(l) > 0; define s = size(l); }] [{ affirm s > 0; }] { return first(l); };", "" )
-              -- Annotations are required
-            , ( "parse-fail-fn-f-n-int-return-n", ParseFailStage, "fn f(n) -> Int { return n; };", "" )
-            , ( "parse-fail-fn-f-n-int-return-n-2", ParseFailStage, "fn f(n: Int) { return n; };", "" )
-            , ( "type-error-fn-f-n-float-int-return-1-unknown-type-float", TypeErrorStage, "fn f(n: Float) -> Int { return 1; };", "unknown type Float" )
-              -- validate runs the check first
-            , ( "validate-fail-fn-f-n-int-list-int-return-n-x-1", ValidateFailStage, "fn f(n: Int) -> List<Int> { return n; }; x = 1;", "returned value: expected List<Int>, got Int" )
-            ]
         runRow (name, stage, source, expected) =
             ( name
-            , case stage of
+            , recordSource source `seq` case stage of
                 TypeOkStage -> typeOk source
                 TypeErrorStage -> typeError source expected
                 -- ParseFailStage: "" is a substring of every parse error, so this keeps the old parseFails check (any parse error) via parseFailsWithHelper
                 ParseFailStage -> parseFailsWithHelper source expected
                 ValidateFailStage -> parseValidateFailProgramHelper source expected
             )
-     in testCaseNamedSeq "testTypeCheck" (map runRow rows)
+     in testCaseNamedSeq "testTypeCheck" (map runRow typeCheckRows)
 
 testGenericLists :: Test
 testGenericLists =

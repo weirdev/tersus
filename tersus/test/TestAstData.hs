@@ -15,6 +15,10 @@ import PreludeSource (toolPackageFiles, validationPackageFiles)
 import MirHousekeeping (validationEntry)
 import qualified LibParsed as Lib
 import qualified AstData as A
+import BuiltinTable (builtinTableText)
+import Interface (ModuleInterface)
+import InterfaceData (readInterface, writeInterface)
+import LibPackage (LibPackage (..), libPackage)
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
 import Cli (World (..), noWorld, runProgramIn)
 import qualified ParserSeed
@@ -162,10 +166,102 @@ nativeElaboratedPackages = withAstReader $ \exe -> do
         Ok modules -> firstFailure <$> mapM (nativeText exe . dataElaborated) modules
     pure (firstFailure results)
 
+-- Every interface the compiler makes of the compiler's own packages and libraries
+toolInterfaces :: Result [ModuleInterface] String
+toolInterfaces =
+    libPackage `bindResult` \pkg ->
+        foldr (\entry rest -> rest `bindResult` \done -> interfacesOf entry `bindResult` \more -> Ok (more ++ done)) (Ok (Map.elems (libInterfaces pkg))) toolEntries
+  where
+    interfacesOf entry = case Mod.loadFromEntry (Mod.resolverFromFiles (if entry == validationEntry then validationPackageFiles else toolPackageFiles)) entry of
+        Left err -> Error err
+        Right (Mod.PackageResult pkg) -> Package.compileModules pkg `bindResult` \compiled -> Ok (map Package.compiledInterface (Package.compiledModules compiled))
+        Right _ -> Error "not a package"
+
+toolEntries :: [FilePath]
+toolEntries = [readerPath, "lib/parser/parser.tersus", "lib/mir/emit/emit.tersus", "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", validationEntry]
+
+interfaceText :: ModuleInterface -> String
+interfaceText iface = case writeInterface iface of
+    Ok text -> text
+    Error e -> error e
+
+interfaceRoundTrip :: ModuleInterface -> TestResult
+interfaceRoundTrip iface =
+    let text = interfaceText iface
+     in case readInterface text of
+            Error e -> Just e
+            Ok back
+                | back /= iface -> Just "the interface changed"
+                | interfaceText back /= text -> Just "reserialization changed"
+                | otherwise -> Nothing
+
+interfaceRoundTrips :: IO TestResult
+interfaceRoundTrips = pure $ case toolInterfaces of
+    Error e -> Just e
+    Ok ifaces -> firstFailure (testAssertTrue (length ifaces > 20) : map interfaceRoundTrip ifaces)
+
+-- The checked-in table is the one BuiltinRegistry gives, and reads back as written
+builtinTableCurrent :: IO TestResult
+builtinTableCurrent = do
+    checkedIn <- readFile "lib/data/builtins.ast"
+    pure $ case builtinTableText of
+        Error e -> Just e
+        Ok text
+            | text /= checkedIn -> Just "lib/data/builtins.ast is not BuiltinTable.builtinTableText: regenerate it with `stack run frontend-diff -- builtins lib/data/builtins.ast`"
+            | otherwise -> case A.readBuiltinTable text `bindResult` A.writeBuiltinTable of
+                Error e -> Just e
+                Ok back -> testAssertTrue (back == text)
+
+-- An interface whose types are given where its constructors go, or whose map entries or set members are out of
+-- order, is refused (each beside the interface it was made from, which is not)
+interfaceRefusals :: [(String, String, String)]
+interfaceRefusals = case toolInterfaces of
+    Error e -> [("tool interfaces", e, e)]
+    Ok ifaces -> case [(interfaceText iface, r) | iface <- ifaces, length (lines (interfaceText iface)) < 4000, Ok r <- [A.readInterfaceRecord (interfaceText iface)], length (A.irTypes r) > 1, length (A.irImpls r) > 1, not (null (A.irCtors r))] of
+        [] -> []
+        (text, r) : _ ->
+            [ ("constructors where the types go", text, unlines (map swap (lines text)))
+            , ("types out of order", text, written r{A.irTypes = reverse (A.irTypes r)})
+            , ("impls out of order", text, written r{A.irImpls = reverse (A.irImpls r)})
+            , ("a type twice", text, written r{A.irTypes = take 1 (A.irTypes r) ++ A.irTypes r})
+            ]
+  where
+    swap line = case words line of
+        ("Interface" : p : m : t : c : rest) -> unwords ("Interface" : p : m : c : t : rest)
+        _ -> line
+    written r = case A.writeInterfaceRecord r of
+        Ok text -> text
+        Error e -> e
+
+-- (one case, not a case for each: the test tree is made in every process, before any test runs)
+malformedInterfaces :: TestResult
+malformedInterfaces = firstFailure $
+    testAssertTrue (length interfaceRefusals == 4)
+        : [ prefix name (firstFailure [either Just (const Nothing) (resultEither (readInterface control)), either (const Nothing) (const (Just "accepted")) (resultEither (readInterface bad))])
+          | (name, control, bad) <- interfaceRefusals
+          ]
+
+nativeInterfaces :: IO TestResult
+nativeInterfaces = withAstReader $ \exe -> case toolInterfaces of
+    Error e -> pure (Just e)
+    Ok ifaces -> do
+        table <- readFile "lib/data/builtins.ast"
+        results <- mapM (nativeText exe) (table : map interfaceText ifaces)
+        refused <- forM interfaceRefusals $ \(name, control, bad) -> do
+            accepted <- nativeText exe control
+            (code, out, err) <- runExecutableBytes exe [] bad
+            pure (prefix name (firstFailure [accepted, if code == ExitSuccess && out == "1\n" && err == "not the AST as data\n" then Nothing else Just ("did not refuse: " ++ show (code, take 200 out, take 200 err))]))
+        pure (firstFailure (testAssertTrue (length interfaceRefusals == 4) : results ++ refused))
+
 firstFailure :: [TestResult] -> TestResult
 firstFailure [] = Nothing
 firstFailure (Nothing : xs) = firstFailure xs
 firstFailure (e : _) = e
+
+resultEither :: Result a String -> Either String a
+resultEither r = case r of
+    Ok a -> Right a
+    Error e -> Left e
 
 prefix :: String -> TestResult -> TestResult
 prefix n = fmap ((n ++ ": ") ++)
@@ -508,6 +604,9 @@ testAstData = TestList "testAstData"
     , TestList "chunked decimal integers" [testCase n (haskellChunkedInteger text expected) | (n, text, expected) <- chunkedIntegers]
     , TestList "malformed protocol" [testCase n (firstFailure [haskellAccepted control, haskellRefused bad]) | (n, control, bad) <- refusals]
     , TestCase "packaged tools retain elaborated AST and occurrence types" packageElaboratedRoundTrips
+    , TestCase "module interfaces of the tools and libraries round trip" interfaceRoundTrips
+    , TestCase "the builtin table is BuiltinRegistry's" builtinTableCurrent
+    , TestCase "malformed interfaces are refused" (pure malformedInterfaces)
     , TestList "whole parsed and elaborated source corpus"
         [TestCase (show batch ++ "/4") (corpusHaskell batch) | batch <- [1 .. 4]]
     ]
@@ -523,6 +622,7 @@ testAstReader = TestList "testAstReader"
     , TestCase "native malformed protocol" nativeRefusals
     , TestCase "native semantic mutation" nativeMutation
     , TestCase "packaged elaborated tools native round trip" nativeElaboratedPackages
+    , TestCase "interfaces and the builtin table native round trip" nativeInterfaces
     , TestList "whole corpus native round trip"
         [TestCase (show batch ++ "/4") (nativeCorpus batch) | batch <- [1 .. 4]]
     ]

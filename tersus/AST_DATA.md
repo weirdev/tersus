@@ -4,7 +4,10 @@
 running the proof engine. The parsed format is the production parser boundary.
 The elaborated format remains a bridge for the MIR lowering port in
 `REPLACING_HASKELL.md`; elaboration remains in Haskell, while
-`ValidatorNative` runs the validator written in Tersus.
+`ValidatorNative` runs the validator written in Tersus. The interface and
+builtin-table formats and the elaboration request (below) are the data an
+elaborator written in Tersus works from (`REPLACING_HASKELL.md`, "Moving
+elaboration into Tersus").
 
 ## APIs
 
@@ -15,7 +18,16 @@ writeParsed     :: [Statement] -> Result String String
 readParsed      :: String -> Result [Statement] String
 writeElaborated :: Elaborated -> Result String String
 readElaborated  :: String -> Result Elaborated String
+writeInterfaceRecord :: InterfaceRecord -> Result String String
+readInterfaceRecord  :: String -> Result InterfaceRecord String
+writeBuiltinTable    :: [BuiltinRecord] -> Result String String
+readBuiltinTable     :: String -> Result [BuiltinRecord] String
 ```
+
+`InterfaceData.writeInterface`/`readInterface` write and read an
+`Interface.ModuleInterface` through `InterfaceRecord`, its plain-syntax form
+(`AstData` stays below the checker). `BuiltinTable.builtinTable` is the
+builtin table made from `BuiltinRegistry`.
 
 `writeParsed` writes the supplied syntax, including `Mark`s when the parser
 kept locations. It also handles the resolved syntax inside `Elaborated`, but
@@ -25,12 +37,15 @@ preserves **both** `[Statement]` and the complete ordered `[Type]` of
 bridge neither infers them again nor claims to validate an elaborated program.
 A parsed reader refuses an elaborated header, and vice versa.
 
-Tersus (`lib/ast_reader/ast_reader.tersus`, entry of the `ast_reader` package):
+Tersus (`lib/data/reader/reader.tersus`, read by the entry of the
+`ast_reader` package, `lib/ast_reader/ast_reader.tersus`):
 
-It imports `data::codec::codec` for the shared token, integer, escaping and
-size/type wire codec, and `data::ast::ast` for the AST arena schema and writer.
-The native parser imports those same modules. The AST reader's strict record
-and UTF-8 checks remain local; MIR records remain in the MIR package. The
+The reader imports `data::codec::codec` for the shared token, integer, escaping
+and size/type wire codec, and `data::ast::ast` for the AST arena schema and
+writer. The native parser imports those same modules but not the reader, which
+is a module of its own (`data::reader`) with the strict record, reference and
+UTF-8 checks, so that anything written in Tersus that reads the data reads it
+the same way. MIR records remain in the MIR package. The
 codec's type writer has one mode for older MIR data (`printTypeWith` with
 `listTokens`), which the MIR eraser writes with.
 
@@ -72,6 +87,8 @@ The first record is exactly one of:
 ```
 tersus-ast 1 parsed
 tersus-ast 1 elaborated
+tersus-ast 1 interface
+tersus-ast 1 builtins
 ```
 
 Each subsequent line is one node. Its zero-based ID is its position after the
@@ -128,6 +145,43 @@ constructor order. Options are `NoName`/`SomeName NAME` and
 `NoTermination`/`SomeTermination TERMINATION`. Booleans are `true`/`false`;
 relations are `Eq`, `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq`.
 
+An interface root is `Interface PACKAGE MODULE TYPES CTORS GENERICS INVARIANTS
+TRAITS TRAITPARAMS FUNCTIONS IMPLS ASSOC IMPLARGS IMPLBOUNDS COPIES LINEAR DROPS
+AXIOMS PROOFS EXTERNS TEMPLATES COMPANIONS`, the fields of
+`Interface.ModuleInterface` in order (`MODULE` is an optional name). A map is
+an `Entries` list (`EntriesEnd`, `EntriesCons ENTRY TAIL`) in ascending key
+order, with no key twice, and every entry of one map is of the one kind it
+holds: `NamesEntry NAME NAMES` (types, trait parameters, companions),
+`CtorEntry NAME OWNER FIELDS`, `GenericEntry NAME NAMES FIELDS`,
+`InvariantEntry NAME VALIDATIONS`, `TraitEntry NAME TRAITFNS`,
+`FunctionEntry NAME NAMES SIGNATURE VALIDATIONS VALIDATIONS OPTTERMINATION
+PROOFS`, `PairEntry NAME NAME` (impls), `AssocEntry NAME NAME OPTNAMES`,
+`ImplArgsEntry NAME NAME TYPE ARGS`, `ImplBoundsEntry NAME NAME BOUNDS` and
+`TemplateEntry NAME BOUNDS TYPEENTRIES OPTTYPE NAMES SIGNATURE VALIDATIONS
+VALIDATIONS OPTTERMINATION STATEMENTS`, whose `TypeEntry NAME TYPE` list and
+optional type are the functions and the return type of the context the template
+was declared in. A set is a `Names` list in ascending order; `OptNames` is a
+list of `NoName`/`SomeName`, and `NoType`/`SomeType TYPE` an optional type.
+Both readers refuse an entry of the wrong kind for its map and entries or set
+members out of order (Haskell in `InterfaceData`; names compare by code point,
+which is UTF-8 byte order, and a pair by its first name, then its second).
+
+A builtin-table root is an `Entries` list of `BuiltinEntry BUILTIN SURFACES
+SCHEME VALUE`: the builtin, the names a program calls it by (`SurfaceEntry
+SPACE NAME`, `SPACE` one of `std`, `pointer`, `ghost`, `proof`, `method`,
+`syntax`), its signature scheme (`SigFn TYPES TYPE`, with `param` types for its
+type parameters; `SigDynamic` when the program's declarations give it, as for a
+constructor; `SigValueError MESSAGE` when it cannot be used as a value) and the
+value the checker writes for it (`StdLib.builtinFunct`: its parameter names and,
+for a primitive contract, its contract). It lists every instance of
+`BuiltinRegistry`; the parameterized constructors, fields, projections, `is`
+tests and casts are made from a program's declarations. The functions of the
+standard library and the contracts of its `builtin fn` declarations are not in
+the table: they are `lib/stdlib.tersus`'s (`StdLibDefs`), which an elaborator
+reads as the Haskell one does. `lib/data/builtins.ast`
+is the table; `testAstData` checks that it is still `BuiltinTable`'s, and
+`stack run frontend-diff -- builtins lib/data/builtins.ast` writes it again.
+
 `Type TYPE` and `Size SIZE` use the exact MIR recursive codecs and Tersus
 `Type`/`Size` enums, including the MIR `TNamed`'s preserved argument tokens.
 The builtin's `Arg` is structural even when its type contains such a named
@@ -147,18 +201,57 @@ record exceeding the limit; they never wrap, truncate or emit unreadable
 data. Those cases are not supported by the exact MIR representation;
 integer **value** literals have no such numeric limit.
 
+## Elaboration requests
+
+An elaborator answers a request for one module (`ElaborateRequest`). The request
+is the module, whether it predeclares its own types (a package module does),
+whether it is a module of the compiler libraries (which see a generic struct's
+constructor as the struct it builds), which interface to give back (none for a
+single-file program, `module` for a package module, `lib` for a compiler-library
+module or a package's entry module), the interfaces it sees in merge order (the
+first wins a name; the compiler libraries a module selects are among them), and
+its statements as read:
+
+```
+tersus-elaborate 1
+module "PACKAGE" none|"MODULE"
+predeclare true|false
+library true|false
+extract none|module|lib
+interfaces N
+data LINES          (N times: a `tersus-ast 1 interface` block of LINES lines)
+...
+data LINES          (the module's `tersus-ast 1 parsed` syntax)
+...
+```
+
+The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
+the elaborated syntax and `interface none` or `interface` with a `data` block of
+the interface; or `refused "MESSAGE"` (the module does not check),
+`refused-interface "MESSAGE"` (it checks, but its interface cannot be given,
+as for an exported function with bounds) or `unmodelled "WHAT"` (the elaborator
+does not handle the program yet, which is no verdict on it).
+`ElaborateRequest.respond` is the Haskell elaborator answering a request. The
+compiler makes its requests through an `Elaborator` (`Compile.lowerSourcePartsWith`
+and `lowerStatementsWith`, `PackageCompile.compileModulesWith`,
+`LibPackage.compileLibPackageWith` and `nativeStorageUnitsWith`), which is
+`respond` in production; only test conveniences (`MirLower.lowerProgram`,
+`TypeCheck.typeCheck`) call the checker themselves, with the request
+`lowerStatementsWith` makes. The differential harness (`test/Differential.hs`)
+records the requests and puts them to another elaborator too.
+
 ## The packages
 
 `lib/data/` is the `data` package: `codec/codec.tersus` (tokens, escaping, decimal
-numbers and size/type wire helpers) and `ast/ast.tersus` (AST arena schema and
-writer). The parser (`lib/parser/`) and the AST reader (`lib/ast_reader/`) are
+numbers and size/type wire helpers), `ast/ast.tersus` (AST arena schema and
+writer) and `reader/reader.tersus` (the reader of every stage of the data). The parser (`lib/parser/`) and the AST reader (`lib/ast_reader/`) are
 packages of their own beside it. The parser is compiled from its embedded
 snapshot so its Unicode predicates match the serving Haskell compiler.
 
 | Entry | What it does | With no input |
 | --- | --- | --- |
 | `parser/parser.tersus` | Native source/file parser: builds exact AST arenas and reads imports plus declaration state. `PreludeSource.parserPackageFiles` embeds the parser package, generated Unicode root-module file and shared data dependencies for the embedded snapshot for P0-based package checking and parser builds; ordinary source does not receive those helpers. `Pipeline.validatedSource`, `compileSource` and package loading consume its ASTs. `TERSUS_PARSER=haskell` is refused; a pinned native LLVM parser seed bootstraps the current parser | |
-| `ast_reader/ast_reader.tersus` | Parsed and elaborated AST data, read into typed syntax arena payloads and written again, including contracts, proofs, builtin arguments and metadata, source marks and ordered occurrence types. Reuses the MIR type/size codec; `mutate` changes `Plus` to `Minus` as a semantic edit demonstration | returns `1` with no input and reports that the input is not AST data |
+| `ast_reader/ast_reader.tersus` | Parsed, elaborated, interface and builtin-table data, read into typed syntax arena payloads and written again, including contracts, proofs, builtin arguments and metadata, source marks and ordered occurrence types. Reuses the MIR type/size codec; `mutate` changes `Plus` to `Minus` as a semantic edit demonstration | returns `1` with no input and reports that the input is not AST data |
 
 ## The parser written in Tersus
 
@@ -321,6 +414,21 @@ elaboration is round-tripped wherever it succeeds, without validation. The
 one fixture rejected by the parser itself, `rejected/for_assigns_counter.tersus`,
 is counted separately with its exact expected parser error; it has no AST.
 Unexpected parser failures fail the corpus test.
+
+It also round-trips every module interface of the compiler's tools and
+libraries, checks that `lib/data/builtins.ast` is the registry's table and
+refuses interfaces with entries out of order or of the wrong kind;
+`testAstReader` round-trips those interfaces and the table natively and refuses
+the malformed interfaces. `testDifferential` records every request the compiler
+makes over the corpus (single files, the tool packages, `examples/modules` and
+the compiler libraries, and the programs of `testTypeCheck`) and requires the
+Haskell elaborator behind the text protocol to agree with itself on each, so a request or a response that loses
+something fails; it also checks that a candidate with a wrong type, other words
+or nothing modelled is not counted as agreeing, and that the lowering takes
+exactly the elaborated expression types, in their order. With
+`TERSUS_DIFFERENTIAL_SOURCES=DIR`, the test helpers write each program they check
+to `DIR`, and `stack run frontend-diff -- compare EXE --sources DIR` puts those
+to an elaborator too.
 
 `testParser` compares P0 and P1 over the same corpus and generated snippets.
 The language tests keep their independent literal ASTs, verdicts and rejected

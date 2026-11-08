@@ -293,6 +293,32 @@ stack run frontend-spike -- compare --runs 7 /tmp/elaborate /tmp/synth/*.tersus
 stack run frontend-spike -- validate --cold
 ```
 
+#### Data contracts and the differential harness
+
+Built: what an elaborator written in Tersus needs from the host and gives back
+is data (`AST_DATA.md`). A module interface is `tersus-ast 1 interface`
+(`InterfaceData`, read in Tersus by `data::reader`), the builtins the checker
+knows are the table `lib/data/builtins.ast` (`BuiltinTable`, made from
+`BuiltinRegistry` and checked against it), and an elaboration is a
+`tersus-elaborate 1` request answered by a `tersus-elaborated 1` response
+(`ElaborateRequest`). The compiler already elaborates every program and module
+through that request, in process (`respond`), and `test/Differential.hs` records
+the requests
+it makes over the corpus and compares another elaborator's responses with
+`respond`'s: agreement, a refusal in other words, disagreement, not modelled
+(`testDifferential`; `stack run frontend-diff -- compare EXE` for an
+executable). A test holds the lowering to taking exactly the expression types the
+elaboration gives (one more or one fewer is refused), and a test that expects a refusal in the checker's words
+no longer passes when the validator refuses instead (`TestHarness`).
+
+The checker accepts two top-level functions of one name and a function named
+like a builtin (duplicate definitions were left to the validator,
+`e35b571`); the validator written in Tersus refuses both as something it does
+not model yet ("two functions with one name", "a function named like a
+builtin"), and the tests say so. An elaborator written in Tersus has to accept
+them too, or the differential reports a disagreement, until they become the
+checker's errors.
+
 ### Deferred or coordinated work
 
 Draft [PR #157](https://github.com/weirdev/tersus/pull/157) changes collection

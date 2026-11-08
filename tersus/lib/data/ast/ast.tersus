@@ -177,6 +177,44 @@ impl Clone for AstBounds { };
 struct AstElaborated { statements: Int, types: Int };
 impl Clone for AstElaborated { };
 
+// The entries of a module interface (`tersus-ast 1 interface`) and of the builtin table (`tersus-ast 1 builtins`)
+enum AstEntry {
+    NamesEntry { n: Int, ns: Int },
+    CtorEntry { n: Int, owner: Int, fs: Int },
+    GenericEntry { n: Int, ps: Int, fs: Int },
+    InvariantEntry { n: Int, vs: Int },
+    TraitEntry { n: Int, fs: Int },
+    FunctionEntry { n: Int, ps: Int, sig: Int, ins: Int, outs: Int, term: Int, exports: Int },
+    PairEntry { a: Int, b: Int },
+    AssocEntry { a: Int, b: Int, origins: Int },
+    ImplArgsEntry { a: Int, b: Int, ty: Int, args: Int },
+    ImplBoundsEntry { a: Int, b: Int, bs: Int },
+    TemplateEntry { n: Int, bs: Int, fns: Int, ret: Int, ps: Int, sig: Int, ins: Int, outs: Int, term: Int, body: Int },
+    TypeEntry { n: Int, ty: Int },
+    SurfaceEntry { space: String, n: Int },
+    BuiltinEntry { b: Int, surface: Int, scheme: Int, value: Int },
+};
+impl Clone for AstEntry { };
+
+enum AstEntries { End, Cons { head: Int, tail: Int } };
+impl Clone for AstEntries { };
+
+enum AstOptNames { End, Cons { head: Int, tail: Int } };
+impl Clone for AstOptNames { };
+
+enum AstOptType { NoType, SomeType { t: Int } };
+impl Clone for AstOptType { };
+
+enum AstScheme { SigFn { ts: Int, ret: Int }, SigDynamic, SigValueError { n: Int } };
+impl Clone for AstScheme { };
+
+struct AstInterface {
+    pkg: Int, modu: Int, types: Int, ctors: Int, generics: Int, invariants: Int, traits: Int, traitParams: Int,
+    functions: Int, impls: Int, assoc: Int, implArgs: Int, implBounds: Int, copies: Int, linear: Int, drops: Int,
+    axioms: Int, proofs: Int, externs: Int, templates: Int, companions: Int
+};
+impl Clone for AstInterface { };
+
 enum AstNode {
     Name { value: AstName },
     Type { value: Type },
@@ -213,10 +251,17 @@ enum AstNode {
     TraitFns { value: AstTraitFns },
     Bounds { value: AstBounds },
     Elaborated { value: AstElaborated },
+    Entry { value: AstEntry },
+    Entries { value: AstEntries },
+    OptNames { value: AstOptNames },
+    OptType { value: AstOptType },
+    Interface { value: AstInterface },
+    Scheme { value: AstScheme },
 };
 impl Clone for AstNode { };
 
-struct AstProgram { elaborated: Bool, nodes: List<AstNode>, root: Int };
+// stage is the last word of the header: parsed, elaborated, interface or builtins
+struct AstProgram { stage: String, nodes: List<AstNode>, root: Int };
 impl Clone for AstProgram { };
 
 fn relationWords() -> List<String> [{ }] [{ }] {
@@ -369,16 +414,55 @@ fn printNode(node: &AstNode) -> Int ~ {
         AstNode::TraitFns { value: v } => { match v { AstTraitFns::End => { bytesWritten = "TraitFnsEnd".print(); }, AstTraitFns::Cons { head: h, tail: t } => { bytesWritten = "TraitFnsCons".print() + printInt(h) + printInt(t); }, }; },
         AstNode::Bounds { value: v } => { match v { AstBounds::End => { bytesWritten = "BoundsEnd".print(); }, AstBounds::Cons { head: h, tail: t } => { bytesWritten = "BoundsCons".print() + printInt(h) + printInt(t); }, }; },
         AstNode::Elaborated { value: v } => { bytesWritten = "Elaborated".print() + printInt(v.statements) + printInt(v.types); },
+        AstNode::Entry { value: v } => { bytesWritten = printEntry(v); },
+        AstNode::Entries { value: v } => { match v { AstEntries::End => { bytesWritten = "EntriesEnd".print(); }, AstEntries::Cons { head: h, tail: t } => { bytesWritten = "EntriesCons".print() + printInt(h) + printInt(t); }, }; },
+        AstNode::OptNames { value: v } => { match v { AstOptNames::End => { bytesWritten = "OptNamesEnd".print(); }, AstOptNames::Cons { head: h, tail: t } => { bytesWritten = "OptNamesCons".print() + printInt(h) + printInt(t); }, }; },
+        AstNode::OptType { value: v } => { match v { AstOptType::NoType => { bytesWritten = "NoType".print(); }, AstOptType::SomeType { t: t } => { bytesWritten = "SomeType".print() + printInt(t); }, }; },
+        AstNode::Interface { value: v } => { bytesWritten = printInterface(v); },
+        AstNode::Scheme { value: v } => {
+            match v {
+                AstScheme::SigFn { ts: ts, ret: ret } => { bytesWritten = "SigFn".print() + printInt(ts) + printInt(ret); },
+                AstScheme::SigDynamic => { bytesWritten = "SigDynamic".print(); },
+                AstScheme::SigValueError { n: n } => { bytesWritten = "SigValueError".print() + printInt(n); },
+            };
+        },
     };
     return bytesWritten + newLine();
+};
+
+fn printEntry(e: &AstEntry) -> Int [{ }] [{ }] {
+    return match e {
+        AstEntry::NamesEntry { n: n, ns: ns } => "NamesEntry".print() + printInt(n) + printInt(ns),
+        AstEntry::CtorEntry { n: n, owner: o, fs: fs } => "CtorEntry".print() + printInt(n) + printInt(o) + printInt(fs),
+        AstEntry::GenericEntry { n: n, ps: ps, fs: fs } => "GenericEntry".print() + printInt(n) + printInt(ps) + printInt(fs),
+        AstEntry::InvariantEntry { n: n, vs: vs } => "InvariantEntry".print() + printInt(n) + printInt(vs),
+        AstEntry::TraitEntry { n: n, fs: fs } => "TraitEntry".print() + printInt(n) + printInt(fs),
+        AstEntry::FunctionEntry { n: n, ps: ps, sig: sig, ins: ins, outs: outs, term: term, exports: exports } =>
+            "FunctionEntry".print() + printInt(n) + printInt(ps) + printInt(sig) + printInt(ins) + printInt(outs) + printInt(term) + printInt(exports),
+        AstEntry::PairEntry { a: a, b: b } => "PairEntry".print() + printInt(a) + printInt(b),
+        AstEntry::AssocEntry { a: a, b: b, origins: os } => "AssocEntry".print() + printInt(a) + printInt(b) + printInt(os),
+        AstEntry::ImplArgsEntry { a: a, b: b, ty: ty, args: args } => "ImplArgsEntry".print() + printInt(a) + printInt(b) + printInt(ty) + printInt(args),
+        AstEntry::ImplBoundsEntry { a: a, b: b, bs: bs } => "ImplBoundsEntry".print() + printInt(a) + printInt(b) + printInt(bs),
+        AstEntry::TemplateEntry { n: n, bs: bs, fns: fns, ret: ret, ps: ps, sig: sig, ins: ins, outs: outs, term: term, body: body } =>
+            "TemplateEntry".print() + printInt(n) + printInt(bs) + printInt(fns) + printInt(ret) + printInt(ps) + printInt(sig) + printInt(ins) + printInt(outs) + printInt(term) + printInt(body),
+        AstEntry::TypeEntry { n: n, ty: ty } => "TypeEntry".print() + printInt(n) + printInt(ty),
+        AstEntry::SurfaceEntry { space: space, n: n } => "SurfaceEntry".print() + printWord(space) + printInt(n),
+        AstEntry::BuiltinEntry { b: b, surface: surface, scheme: scheme, value: value } => "BuiltinEntry".print() + printInt(b) + printInt(surface) + printInt(scheme) + printInt(value),
+    };
+};
+
+fn printInterface(v: &AstInterface) -> Int [{ }] [{ }] {
+    n = "Interface".print() + printInt(v.pkg) + printInt(v.modu) + printInt(v.types) + printInt(v.ctors) + printInt(v.generics);
+    n = n + printInt(v.invariants) + printInt(v.traits) + printInt(v.traitParams) + printInt(v.functions) + printInt(v.impls);
+    n = n + printInt(v.assoc) + printInt(v.implArgs) + printInt(v.implBounds) + printInt(v.copies) + printInt(v.linear);
+    n = n + printInt(v.drops) + printInt(v.axioms) + printInt(v.proofs) + printInt(v.externs) + printInt(v.templates);
+    return n + printInt(v.companions);
 };
 
 fn printBool(b: Bool) -> Int [{ }] [{ }] { if b { return " true".print(); }; return " false".print(); };
 
 fn printAst(p: &AstProgram) -> Int ~ {
-    n = "tersus-ast 1".print();
-    if p.elaborated { n = n + " elaborated".print(); } else { n = n + " parsed".print(); };
-    n = n + newLine();
+    n = "tersus-ast 1 ".print() + p.stage.print() + newLine();
     for node in &p.nodes { n = n + printNode(node); };
     return n + "root".print() + printInt(p.root) + newLine();
 };

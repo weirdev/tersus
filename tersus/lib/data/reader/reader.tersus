@@ -1,0 +1,1437 @@
+import data::codec::codec { Token, Parsed, Size, Type, failed, done, noInts, quoted, tokenize, parseInt, wordAt, nameAt, intAt, sizeAt, catStrings, typeAt, isWord, indexOf };
+import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstEntry, AstEntries, AstOptNames, AstOptType, AstScheme, AstInterface, AstNode, AstProgram, relationWords };
+
+// The reader of the AST arena data (AST_DATA.md): every stage, with its strict record, reference and UTF-8 checks.
+// The AST reader, and anything else written in Tersus that reads the data, read it with readAst.
+fn nodeKind(node: &AstNode) -> Int [{ }] [{ }] {
+    return match node {
+        AstNode::Name { value: v } => 1,
+        AstNode::Type { value: v } => 2,
+        AstNode::Size { value: v } => 3,
+        AstNode::Value { value: v } => 4,
+        AstNode::Body { value: v } => 5,
+        AstNode::Expression { value: v } => 6,
+        AstNode::Termination { value: v } => 7,
+        AstNode::Validation { value: v } => 8,
+        AstNode::Proof { value: v } => 9,
+        AstNode::Rule { value: v } => 10,
+        AstNode::Statement { value: v } => 11,
+        AstNode::Signature { value: v } => 12,
+        AstNode::TraitFn { value: v } => 13,
+        AstNode::Bound { value: v } => 14,
+        AstNode::Field { value: v } => 15,
+        AstNode::Variant { value: v } => 16,
+        AstNode::ValueField { value: v } => 17,
+        AstNode::Arg { value: v } => 18,
+        AstNode::OptName { value: v } => 19,
+        AstNode::OptTermination { value: v } => 20,
+        AstNode::Builtin { value: v } => 21,
+        AstNode::Names { value: v } => 22,
+        AstNode::Values { value: v } => 23,
+        AstNode::Statements { value: v } => 24,
+        AstNode::Expressions { value: v } => 25,
+        AstNode::Validations { value: v } => 26,
+        AstNode::Proofs { value: v } => 27,
+        AstNode::Fields { value: v } => 28,
+        AstNode::Variants { value: v } => 29,
+        AstNode::ValueFields { value: v } => 30,
+        AstNode::Types { value: v } => 31,
+        AstNode::Args { value: v } => 32,
+        AstNode::TraitFns { value: v } => 33,
+        AstNode::Bounds { value: v } => 34,
+        AstNode::Elaborated { value: v } => 35,
+        AstNode::Entry { value: v } => 36,
+        AstNode::Entries { value: v } => 37,
+        AstNode::OptNames { value: v } => 38,
+        AstNode::OptType { value: v } => 39,
+        AstNode::Interface { value: v } => 40,
+        AstNode::Scheme { value: v } => 41,
+    };
+};
+
+fn refAt(ts: &List<Token>, pos: Int, nodes: &List<AstNode>, kind: Int) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ }] {
+    r = intAt(ts, pos);
+    if !r.ok || r.value < 0 || r.value >= size(nodes) { return Parsed<Int> { value: 0, pos: r.pos, ok: false }; };
+    if nodeKind(get(nodes, r.value)) != kind { return Parsed<Int> { value: 0, pos: r.pos, ok: false }; };
+    return r;
+};
+
+fn boolAt(ts: &List<Token>, pos: Int) -> Parsed<Bool> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ }] {
+    w = wordAt(ts, pos);
+    if w.ok && w.value = "true" { return done(true, w.pos); };
+    if w.ok && w.value = "false" { return done(false, w.pos); };
+    return Parsed<Bool> { value: false, pos: w.pos, ok: false };
+};
+
+fn relAt(ts: &List<Token>, pos: Int) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ }] {
+    w = wordAt(ts, pos);
+    i = indexOf(relationWords(), w.value);
+    return Parsed<Int> { value: i, pos: w.pos, ok: w.ok && i >= 0 };
+};
+
+fn primitiveWords() -> List<String> [{ }] [{ }] {
+    w = push([], "Size");
+    w = push(w, "First");
+    w = push(w, "Last");
+    w = push(w, "Get");
+    w = push(w, "Push");
+    w = push(w, "Pop");
+    w = push(w, "Set");
+    w = push(w, "Plus");
+    w = push(w, "Minus");
+    w = push(w, "Times");
+    w = push(w, "Div");
+    w = push(w, "Mod");
+    w = push(w, "NewArray");
+    w = push(w, "ArrayFrom");
+    w = push(w, "ArrayFromList");
+    w = push(w, "NewBoxedArray");
+    w = push(w, "NewEmptyArray");
+    w = push(w, "WriteByte");
+    w = push(w, "WriteError");
+    w = push(w, "ReadByte");
+    w = push(w, "ArgCount");
+    w = push(w, "ArgByte");
+    w = push(w, "PathByte");
+    w = push(w, "FileLoad");
+    w = push(w, "FileByte");
+    w = push(w, "StoreByte");
+    w = push(w, "FileStore");
+    w = push(w, "ToByte");
+    w = push(w, "FromByte");
+    w = push(w, "BytesFrom");
+    w = push(w, "Unsize");
+    w = push(w, "NewBox");
+    w = push(w, "UnBox");
+    w = push(w, "CloneOf");
+    w = push(w, "BorrowOf");
+    w = push(w, "BorrowMutOf");
+    w = push(w, "DerefOf");
+    w = push(w, "OldOf");
+    w = push(w, "AddrNull");
+    w = push(w, "AddrOffset");
+    w = push(w, "AddrCast");
+    w = push(w, "AddrToInt");
+    w = push(w, "AddrFromInt");
+    w = push(w, "AddrAlloc");
+    w = push(w, "AddrGet");
+    w = push(w, "AddrWrite");
+    w = push(w, "AddrTake");
+    w = push(w, "AddrDropValue");
+    w = push(w, "AddrDropRange");
+    w = push(w, "AddrResize");
+    w = push(w, "AddrFree");
+    w = push(w, "AllocPair");
+    w = push(w, "TakePair");
+    w = push(w, "ResizePair");
+    w = push(w, "SplitPair");
+    w = push(w, "BlockNew");
+    w = push(w, "BlockTaken");
+    w = push(w, "BlockResized");
+    w = push(w, "BlockSplitLo");
+    w = push(w, "BlockSplitHi");
+    w = push(w, "BlockJoin");
+    w = push(w, "BlockAssume");
+    w = push(w, "BlockCast");
+    w = push(w, "BlockBase");
+    w = push(w, "BlockCap");
+    w = push(w, "BlockFilled");
+    w = push(w, "BlockContents");
+    w = push(w, "BlockOrigin");
+    w = push(w, "BlockStart");
+    w = push(w, "BlockExtent");
+    w = push(w, "BlockCount");
+    w = push(w, "UninitEmpty");
+    w = push(w, "UninitNew");
+    w = push(w, "UninitGet");
+    w = push(w, "UninitTake");
+    w = push(w, "UninitDiscard");
+    w = push(w, "UninitFilled");
+    w = push(w, "UninitAt");
+    w = push(w, "Replace");
+    w = push(w, "And");
+    w = push(w, "Or");
+    w = push(w, "Not");
+    w = push(w, "Within");
+    return w;
+};
+
+fn noNode() -> AstNode [{ }] [{ }] { return AstNode::Name { value: AstName::End }; };
+
+// A record of the arena: the parser of its tag's group, each of which refuses a tag it does not have (no tag is in
+// two groups)
+fn nodeAt(ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if size(ts) < 1 { return bad; };
+    tag = wordAt(ts, 0);
+    if !tag.ok { return bad; };
+    rleafNodeAt = leafNodeAt(tag.value, ts, nodes);
+    if rleafNodeAt.ok { return rleafNodeAt; };
+    rvalueNodeAt = valueNodeAt(tag.value, ts, nodes);
+    if rvalueNodeAt.ok { return rvalueNodeAt; };
+    rvalidationNodeAt = validationNodeAt(tag.value, ts, nodes);
+    if rvalidationNodeAt.ok { return rvalidationNodeAt; };
+    rproofNodeAt = proofNodeAt(tag.value, ts, nodes);
+    if rproofNodeAt.ok { return rproofNodeAt; };
+    rstatementNodeAt = statementNodeAt(tag.value, ts, nodes);
+    if rstatementNodeAt.ok { return rstatementNodeAt; };
+    rpartNodeAt = partNodeAt(tag.value, ts, nodes);
+    if rpartNodeAt.ok { return rpartNodeAt; };
+    rlistNodeAt = listNodeAt(tag.value, ts, nodes);
+    if rlistNodeAt.ok { return rlistNodeAt; };
+    rentryNodeAt = entryNodeAt(tag.value, ts, nodes);
+    if rentryNodeAt.ok { return rentryNodeAt; };
+    return bad;
+};
+
+fn leafNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if tag = "NameEnd" && size(ts) = 1 { return done(AstNode::Name { value: AstName::End }, size(ts)); };
+    if tag = "NamePart" && size(ts) = 3 {
+        text = nameAt(ts, 1);
+        tail = refAt(ts, 2, nodes, 1);
+        if !text.ok || !tail.ok { return bad; };
+        return done(AstNode::Name { value: AstName::Part { text: text.value, tail: tail.value } }, size(ts));
+    };
+    if tag = "Type" && size(ts) > 1 {
+        t = typeAt(ts, 1);
+        if !t.ok || t.pos != size(ts) { return bad; };
+        return done(AstNode::Type { value: t.value }, size(ts));
+    };
+    if tag = "Size" && size(ts) > 1 {
+        s = sizeAt(ts, 1);
+        if !s.ok || s.pos != size(ts) { return bad; };
+        return done(AstNode::Size { value: s.value }, size(ts));
+    };
+    if tag = "Primitive" && size(ts) = 2 {
+        n = nameAt(ts, 1);
+        if !n.ok || indexOf(primitiveWords(), n.value) < 0 { return bad; };
+        return done(AstNode::Builtin { value: AstBuiltin::Primitive { name: n.value } }, size(ts));
+    };
+    return bad;
+};
+
+fn valueNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if tag = "VInt" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        if !validDecimal(nameValue(nodes, n.value)) { return bad; };
+        return done(AstNode::Value { value: AstValue::VInt { n: n.value } }, size(ts));
+    };
+    if tag = "VList" && size(ts) = 2 {
+        xs = refAt(ts, 1, nodes, 23);
+        if !xs.ok { return bad; };
+        return done(AstNode::Value { value: AstValue::VList { xs: xs.value } }, size(ts));
+    };
+    if tag = "VBool" && size(ts) = 2 {
+        b = boolAt(ts, 1);
+        if !b.ok { return bad; };
+        return done(AstNode::Value { value: AstValue::VBool { b: b.value } }, size(ts));
+    };
+    if tag = "VData" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        xs = refAt(ts, 2, nodes, 30);
+        if !n.ok || !xs.ok { return bad; };
+        return done(AstNode::Value { value: AstValue::VData { n: n.value, xs: xs.value } }, size(ts));
+    };
+    if tag = "VFnRef" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Value { value: AstValue::VFnRef { n: n.value } }, size(ts));
+    };
+    if tag = "VFunct" && size(ts) = 6 {
+        ps = refAt(ts, 1, nodes, 22);
+        ins = refAt(ts, 2, nodes, 26);
+        outs = refAt(ts, 3, nodes, 26);
+        body = refAt(ts, 4, nodes, 5);
+        exports = refAt(ts, 5, nodes, 27);
+        if !ps.ok || !ins.ok || !outs.ok || !body.ok || !exports.ok { return bad; };
+        return done(AstNode::Value { value: AstValue::VFunct { ps: ps.value, ins: ins.value, outs: outs.value, body: body.value, exports: exports.value } }, size(ts));
+    };
+    if tag = "NativeFunct" && size(ts) = 4 {
+        sig = refAt(ts, 1, nodes, 12);
+        term = refAt(ts, 2, nodes, 20);
+        stmts = refAt(ts, 3, nodes, 24);
+        if !sig.ok || !term.ok || !stmts.ok { return bad; };
+        return done(AstNode::Body { value: AstBody::NativeFunct { sig: sig.value, term: term.value, stmts: stmts.value } }, size(ts));
+    };
+    if tag = "BuiltinFunct" && size(ts) = 2 {
+        b = refAt(ts, 1, nodes, 21);
+        if !b.ok { return bad; };
+        return done(AstNode::Body { value: AstBody::BuiltinFunct { b: b.value } }, size(ts));
+    };
+    if tag = "Val" && size(ts) = 2 {
+        v = refAt(ts, 1, nodes, 4);
+        if !v.ok { return bad; };
+        return done(AstNode::Expression { value: AstExpression::Val { v: v.value } }, size(ts));
+    };
+    if tag = "Var" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Expression { value: AstExpression::Var { n: n.value } }, size(ts));
+    };
+    if tag = "F" && size(ts) = 3 {
+        f = refAt(ts, 1, nodes, 6);
+        xs = refAt(ts, 2, nodes, 25);
+        if !f.ok || !xs.ok { return bad; };
+        return done(AstNode::Expression { value: AstExpression::F { f: f.value, xs: xs.value } }, size(ts));
+    };
+    return bad;
+};
+
+fn validationNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if tag = "Shrinks" && size(ts) = 2 {
+        e = refAt(ts, 1, nodes, 6);
+        if !e.ok { return bad; };
+        return done(AstNode::Termination { value: AstTermination::Shrinks { e: e.value } }, size(ts));
+    };
+    if tag = "Counting" && size(ts) = 2 {
+        e = refAt(ts, 1, nodes, 6);
+        if !e.ok { return bad; };
+        return done(AstNode::Termination { value: AstTermination::Counting { e: e.value } }, size(ts));
+    };
+    if tag = "Parts" && size(ts) = 2 {
+        e = refAt(ts, 1, nodes, 6);
+        if !e.ok { return bad; };
+        return done(AstNode::Termination { value: AstTermination::Parts { e: e.value } }, size(ts));
+    };
+    if tag = "MayDiverge" && size(ts) = 1 {
+        return done(AstNode::Termination { value: AstTermination::MayDiverge }, size(ts));
+    };
+    if tag = "Recursing" && size(ts) = 2 {
+        t = refAt(ts, 1, nodes, 20);
+        if !t.ok { return bad; };
+        return done(AstNode::Termination { value: AstTermination::Recursing { t: t.value } }, size(ts));
+    };
+    if tag = "Rewrite" && size(ts) = 2 {
+        r = refAt(ts, 1, nodes, 10);
+        if !r.ok { return bad; };
+        return done(AstNode::Validation { value: AstValidation::Rewrite { r: r.value } }, size(ts));
+    };
+    if tag = "ProofAssert" && size(ts) = 2 {
+        p = refAt(ts, 1, nodes, 9);
+        if !p.ok { return bad; };
+        return done(AstNode::Validation { value: AstValidation::ProofAssert { p: p.value } }, size(ts));
+    };
+    if tag = "AssignProofVar" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        e = refAt(ts, 2, nodes, 6);
+        if !n.ok || !e.ok { return bad; };
+        return done(AstNode::Validation { value: AstValidation::AssignProofVar { n: n.value, e: e.value } }, size(ts));
+    };
+    if tag = "Assume" && size(ts) = 2 {
+        p = refAt(ts, 1, nodes, 9);
+        if !p.ok { return bad; };
+        return done(AstNode::Validation { value: AstValidation::Assume { p: p.value } }, size(ts));
+    };
+    return bad;
+};
+
+fn proofNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if tag = "FApp" && size(ts) = 3 {
+        f = refAt(ts, 1, nodes, 9);
+        xs = refAt(ts, 2, nodes, 27);
+        if !f.ok || !xs.ok { return bad; };
+        return done(AstNode::Proof { value: AstProof::FApp { f: f.value, xs: xs.value } }, size(ts));
+    };
+    if tag = "ATerm" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Proof { value: AstProof::ATerm { n: n.value } }, size(ts));
+    };
+    if tag = "CTerm" && size(ts) = 2 {
+        v = refAt(ts, 1, nodes, 4);
+        if !v.ok { return bad; };
+        return done(AstNode::Proof { value: AstProof::CTerm { v: v.value } }, size(ts));
+    };
+    if tag = "Forall" && size(ts) = 4 {
+        n = refAt(ts, 1, nodes, 1);
+        gs = refAt(ts, 2, nodes, 27);
+        b = refAt(ts, 3, nodes, 9);
+        if !n.ok || !gs.ok || !b.ok { return bad; };
+        return done(AstNode::Proof { value: AstProof::Forall { n: n.value, gs: gs.value, b: b.value } }, size(ts));
+    };
+    if tag = "BVar" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Proof { value: AstProof::BVar { n: n.value } }, size(ts));
+    };
+    if tag = "Refl" && size(ts) = 2 {
+        p = refAt(ts, 1, nodes, 9);
+        if !p.ok { return bad; };
+        return done(AstNode::Rule { value: AstRule::Refl { p: p.value } }, size(ts));
+    };
+    if tag = "Eval" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Rule { value: AstRule::Eval { n: n.value } }, size(ts));
+    };
+    if tag = "EvalAll" && size(ts) = 1 {
+        return done(AstNode::Rule { value: AstRule::EvalAll }, size(ts));
+    };
+    if tag = "CheckGtZero" && size(ts) = 2 {
+        p = refAt(ts, 1, nodes, 9);
+        if !p.ok { return bad; };
+        return done(AstNode::Rule { value: AstRule::CheckGtZero { p: p.value } }, size(ts));
+    };
+    if tag = "CheckRel" && size(ts) = 2 {
+        p = refAt(ts, 1, nodes, 9);
+        if !p.ok { return bad; };
+        return done(AstNode::Rule { value: AstRule::CheckRel { p: p.value } }, size(ts));
+    };
+    if tag = "UserRewrite" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        xs = refAt(ts, 2, nodes, 27);
+        if !n.ok || !xs.ok { return bad; };
+        return done(AstNode::Rule { value: AstRule::UserRewrite { n: n.value, xs: xs.value } }, size(ts));
+    };
+    return bad;
+};
+
+fn statementNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if tag = "Assign" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        e = refAt(ts, 2, nodes, 6);
+        if !n.ok || !e.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::Assign { n: n.value, e: e.value } }, size(ts));
+    };
+    if tag = "AssignDeref" && size(ts) = 3 {
+        a = refAt(ts, 1, nodes, 6);
+        b = refAt(ts, 2, nodes, 6);
+        if !a.ok || !b.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::AssignDeref { a: a.value, b: b.value } }, size(ts));
+    };
+    if tag = "Let" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        e = refAt(ts, 2, nodes, 6);
+        if !n.ok || !e.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::Let { n: n.value, e: e.value } }, size(ts));
+    };
+    if tag = "Return" && size(ts) = 2 {
+        e = refAt(ts, 1, nodes, 6);
+        if !e.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::Return { e: e.value } }, size(ts));
+    };
+    if tag = "ValidationStatement" && size(ts) = 2 {
+        v = refAt(ts, 1, nodes, 8);
+        if !v.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::ValidationStatement { v: v.value } }, size(ts));
+    };
+    if tag = "StructDef" && size(ts) = 5 {
+        n = refAt(ts, 1, nodes, 1);
+        ps = refAt(ts, 2, nodes, 22);
+        fs = refAt(ts, 3, nodes, 28);
+        vs = refAt(ts, 4, nodes, 26);
+        if !n.ok || !ps.ok || !fs.ok || !vs.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::StructDef { n: n.value, ps: ps.value, fs: fs.value, vs: vs.value } }, size(ts));
+    };
+    if tag = "EnumDef" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        vs = refAt(ts, 2, nodes, 29);
+        if !n.ok || !vs.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::EnumDef { n: n.value, vs: vs.value } }, size(ts));
+    };
+    if tag = "AxiomDef" && size(ts) = 5 {
+        n = refAt(ts, 1, nodes, 1);
+        ps = refAt(ts, 2, nodes, 22);
+        ins = refAt(ts, 3, nodes, 26);
+        outs = refAt(ts, 4, nodes, 26);
+        if !n.ok || !ps.ok || !ins.ok || !outs.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::AxiomDef { n: n.value, ps: ps.value, ins: ins.value, outs: outs.value } }, size(ts));
+    };
+    if tag = "ProofDef" && size(ts) = 6 {
+        n = refAt(ts, 1, nodes, 1);
+        ps = refAt(ts, 2, nodes, 22);
+        ins = refAt(ts, 3, nodes, 26);
+        outs = refAt(ts, 4, nodes, 26);
+        body = refAt(ts, 5, nodes, 26);
+        if !n.ok || !ps.ok || !ins.ok || !outs.ok || !body.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::ProofDef { n: n.value, ps: ps.value, ins: ins.value, outs: outs.value, body: body.value } }, size(ts));
+    };
+    if tag = "Block" && size(ts) = 2 {
+        xs = refAt(ts, 1, nodes, 24);
+        if !xs.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::Block { xs: xs.value } }, size(ts));
+    };
+    if tag = "If" && size(ts) = 4 {
+        e = refAt(ts, 1, nodes, 6);
+        a = refAt(ts, 2, nodes, 24);
+        b = refAt(ts, 3, nodes, 24);
+        if !e.ok || !a.ok || !b.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::If { e: e.value, a: a.value, b: b.value } }, size(ts));
+    };
+    if tag = "While" && size(ts) = 5 {
+        e = refAt(ts, 1, nodes, 6);
+        vs = refAt(ts, 2, nodes, 26);
+        t = refAt(ts, 3, nodes, 20);
+        xs = refAt(ts, 4, nodes, 24);
+        if !e.ok || !vs.ok || !t.ok || !xs.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::While { e: e.value, vs: vs.value, t: t.value, xs: xs.value } }, size(ts));
+    };
+    if tag = "TraitDef" && size(ts) = 4 {
+        n = refAt(ts, 1, nodes, 1);
+        ps = refAt(ts, 2, nodes, 22);
+        fs = refAt(ts, 3, nodes, 33);
+        if !n.ok || !ps.ok || !fs.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::TraitDef { n: n.value, ps: ps.value, fs: fs.value } }, size(ts));
+    };
+    if tag = "ImplDef" && size(ts) = 7 {
+        traitName = refAt(ts, 1, nodes, 19);
+        args = refAt(ts, 2, nodes, 32);
+        n = refAt(ts, 3, nodes, 1);
+        ty = refAt(ts, 4, nodes, 2);
+        bs = refAt(ts, 5, nodes, 34);
+        xs = refAt(ts, 6, nodes, 24);
+        if !traitName.ok || !args.ok || !n.ok || !ty.ok || !bs.ok || !xs.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::ImplDef { traitName: traitName.value, args: args.value, n: n.value, ty: ty.value, bs: bs.value, xs: xs.value } }, size(ts));
+    };
+    if tag = "BoundedDef" && size(ts) = 3 {
+        bs = refAt(ts, 1, nodes, 34);
+        s = refAt(ts, 2, nodes, 11);
+        if !bs.ok || !s.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::BoundedDef { bs: bs.value, s: s.value } }, size(ts));
+    };
+    if tag = "Mark" && size(ts) = 3 {
+        line = intAt(ts, 1);
+        col = intAt(ts, 2);
+        if !line.ok || !col.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::Mark { line: line.value, col: col.value } }, size(ts));
+    };
+    if tag = "CopyDef" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::CopyDef { n: n.value } }, size(ts));
+    };
+    if tag = "LinearDef" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::LinearDef { n: n.value } }, size(ts));
+    };
+    if tag = "ExternDef" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::ExternDef { n: n.value } }, size(ts));
+    };
+    if tag = "DropDef" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::DropDef { n: n.value } }, size(ts));
+    };
+    if tag = "Dissolve" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::Dissolve { n: n.value } }, size(ts));
+    };
+    return bad;
+};
+
+fn partNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if tag = "Signature" && size(ts) = 7 {
+        params = refAt(ts, 1, nodes, 31);
+        ret = refAt(ts, 2, nodes, 2);
+        ss = refAt(ts, 3, nodes, 22);
+        ps = refAt(ts, 4, nodes, 22);
+        ws = refAt(ts, 5, nodes, 22);
+        fs = refAt(ts, 6, nodes, 22);
+        if !params.ok || !ret.ok || !ss.ok || !ps.ok || !ws.ok || !fs.ok { return bad; };
+        return done(AstNode::Signature { value: AstSignature { ts: params.value, ret: ret.value, ss: ss.value, ps: ps.value, ws: ws.value, fs: fs.value } }, size(ts));
+    };
+    if tag = "TraitFn" && size(ts) = 6 {
+        n = refAt(ts, 1, nodes, 1);
+        ps = refAt(ts, 2, nodes, 22);
+        sig = refAt(ts, 3, nodes, 12);
+        ins = refAt(ts, 4, nodes, 26);
+        outs = refAt(ts, 5, nodes, 26);
+        if !n.ok || !ps.ok || !sig.ok || !ins.ok || !outs.ok { return bad; };
+        return done(AstNode::TraitFn { value: AstTraitFn { n: n.value, ps: ps.value, sig: sig.value, ins: ins.value, outs: outs.value } }, size(ts));
+    };
+    if tag = "Bound" && size(ts) = 4 {
+        p = refAt(ts, 1, nodes, 1);
+        n = refAt(ts, 2, nodes, 1);
+        params = refAt(ts, 3, nodes, 31);
+        if !p.ok || !n.ok || !params.ok { return bad; };
+        return done(AstNode::Bound { value: AstBound { p: p.value, n: n.value, ts: params.value } }, size(ts));
+    };
+    if tag = "Field" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        ty = refAt(ts, 2, nodes, 2);
+        if !n.ok || !ty.ok { return bad; };
+        return done(AstNode::Field { value: AstField { n: n.value, ty: ty.value } }, size(ts));
+    };
+    if tag = "Variant" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        fs = refAt(ts, 2, nodes, 28);
+        if !n.ok || !fs.ok { return bad; };
+        return done(AstNode::Variant { value: AstVariant { n: n.value, fs: fs.value } }, size(ts));
+    };
+    if tag = "ValueField" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        v = refAt(ts, 2, nodes, 4);
+        if !n.ok || !v.ok { return bad; };
+        return done(AstNode::ValueField { value: AstValueField { n: n.value, v: v.value } }, size(ts));
+    };
+    if tag = "ArgSize" && size(ts) = 2 {
+        s = refAt(ts, 1, nodes, 3);
+        if !s.ok { return bad; };
+        return done(AstNode::Arg { value: AstArg::ArgSize { s: s.value } }, size(ts));
+    };
+    if tag = "ArgType" && size(ts) = 2 {
+        t = refAt(ts, 1, nodes, 2);
+        if !t.ok { return bad; };
+        return done(AstNode::Arg { value: AstArg::ArgType { t: t.value } }, size(ts));
+    };
+    if tag = "NoName" && size(ts) = 1 {
+        return done(AstNode::OptName { value: AstOptName::NoName }, size(ts));
+    };
+    if tag = "SomeName" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::OptName { value: AstOptName::SomeName { n: n.value } }, size(ts));
+    };
+    if tag = "NoTermination" && size(ts) = 1 {
+        return done(AstNode::OptTermination { value: AstOptTermination::NoTermination }, size(ts));
+    };
+    if tag = "SomeTermination" && size(ts) = 2 {
+        t = refAt(ts, 1, nodes, 7);
+        if !t.ok { return bad; };
+        return done(AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: t.value } }, size(ts));
+    };
+    if tag = "Ctor" && size(ts) = 4 {
+        n = refAt(ts, 1, nodes, 1);
+        args = refAt(ts, 2, nodes, 32);
+        fs = refAt(ts, 3, nodes, 22);
+        if !n.ok || !args.ok || !fs.ok { return bad; };
+        return done(AstNode::Builtin { value: AstBuiltin::Ctor { n: n.value, args: args.value, fs: fs.value } }, size(ts));
+    };
+    if tag = "FieldBuiltin" && size(ts) = 3 {
+        owner = refAt(ts, 1, nodes, 19);
+        n = refAt(ts, 2, nodes, 1);
+        if !owner.ok || !n.ok { return bad; };
+        return done(AstNode::Builtin { value: AstBuiltin::FieldBuiltin { owner: owner.value, n: n.value } }, size(ts));
+    };
+    if tag = "Is" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Builtin { value: AstBuiltin::Is { n: n.value } }, size(ts));
+    };
+    if tag = "Project" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        f = refAt(ts, 2, nodes, 1);
+        if !n.ok || !f.ok { return bad; };
+        return done(AstNode::Builtin { value: AstBuiltin::Project { n: n.value, f: f.value } }, size(ts));
+    };
+    if tag = "Cast" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Builtin { value: AstBuiltin::Cast { n: n.value } }, size(ts));
+    };
+    if tag = "ToWord" && size(ts) = 3 {
+        signed = boolAt(ts, 1);
+        bits = intAt(ts, 2);
+        if !signed.ok || !bits.ok { return bad; };
+        return done(AstNode::Builtin { value: AstBuiltin::ToWord { signed: signed.value, bits: bits.value } }, size(ts));
+    };
+    if tag = "Rel" && size(ts) = 2 {
+        r = relAt(ts, 1);
+        if !r.ok { return bad; };
+        return done(AstNode::Builtin { value: AstBuiltin::Rel { r: r.value } }, size(ts));
+    };
+    return bad;
+};
+
+fn listNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if tag = "NamesEnd" && size(ts) = 1 { return done(AstNode::Names { value: AstNames::End }, size(ts)); };
+    if tag = "NamesCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 1);
+        t = refAt(ts, 2, nodes, 22);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Names { value: AstNames::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "ValuesEnd" && size(ts) = 1 { return done(AstNode::Values { value: AstValues::End }, size(ts)); };
+    if tag = "ValuesCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 4);
+        t = refAt(ts, 2, nodes, 23);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Values { value: AstValues::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "StatementsEnd" && size(ts) = 1 { return done(AstNode::Statements { value: AstStatements::End }, size(ts)); };
+    if tag = "StatementsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 11);
+        t = refAt(ts, 2, nodes, 24);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Statements { value: AstStatements::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "ExpressionsEnd" && size(ts) = 1 { return done(AstNode::Expressions { value: AstExpressions::End }, size(ts)); };
+    if tag = "ExpressionsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 6);
+        t = refAt(ts, 2, nodes, 25);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Expressions { value: AstExpressions::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "ValidationsEnd" && size(ts) = 1 { return done(AstNode::Validations { value: AstValidations::End }, size(ts)); };
+    if tag = "ValidationsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 8);
+        t = refAt(ts, 2, nodes, 26);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Validations { value: AstValidations::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "ProofsEnd" && size(ts) = 1 { return done(AstNode::Proofs { value: AstProofs::End }, size(ts)); };
+    if tag = "ProofsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 9);
+        t = refAt(ts, 2, nodes, 27);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Proofs { value: AstProofs::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "FieldsEnd" && size(ts) = 1 { return done(AstNode::Fields { value: AstFields::End }, size(ts)); };
+    if tag = "FieldsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 15);
+        t = refAt(ts, 2, nodes, 28);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Fields { value: AstFields::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "VariantsEnd" && size(ts) = 1 { return done(AstNode::Variants { value: AstVariants::End }, size(ts)); };
+    if tag = "VariantsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 16);
+        t = refAt(ts, 2, nodes, 29);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Variants { value: AstVariants::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "ValueFieldsEnd" && size(ts) = 1 { return done(AstNode::ValueFields { value: AstValueFields::End }, size(ts)); };
+    if tag = "ValueFieldsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 17);
+        t = refAt(ts, 2, nodes, 30);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::ValueFields { value: AstValueFields::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "TypesEnd" && size(ts) = 1 { return done(AstNode::Types { value: AstTypes::End }, size(ts)); };
+    if tag = "TypesCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 2);
+        t = refAt(ts, 2, nodes, 31);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Types { value: AstTypes::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "ArgsEnd" && size(ts) = 1 { return done(AstNode::Args { value: AstArgs::End }, size(ts)); };
+    if tag = "ArgsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 18);
+        t = refAt(ts, 2, nodes, 32);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Args { value: AstArgs::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "TraitFnsEnd" && size(ts) = 1 { return done(AstNode::TraitFns { value: AstTraitFns::End }, size(ts)); };
+    if tag = "TraitFnsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 13);
+        t = refAt(ts, 2, nodes, 33);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::TraitFns { value: AstTraitFns::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "BoundsEnd" && size(ts) = 1 { return done(AstNode::Bounds { value: AstBounds::End }, size(ts)); };
+    if tag = "BoundsCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 14);
+        t = refAt(ts, 2, nodes, 34);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Bounds { value: AstBounds::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "Elaborated" && size(ts) = 3 {
+        s = refAt(ts, 1, nodes, 24);
+        t = refAt(ts, 2, nodes, 31);
+        if !s.ok || !t.ok { return bad; };
+        return done(AstNode::Elaborated { value: AstElaborated { statements: s.value, types: t.value } }, size(ts));
+    };
+    return bad;
+};
+
+// The entries of an interface or of the builtin table, and the nodes only they hold
+fn entryNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if tag = "NamesEntry" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        ns = refAt(ts, 2, nodes, 22);
+        if !n.ok || !ns.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::NamesEntry { n: n.value, ns: ns.value } }, size(ts));
+    };
+    if tag = "CtorEntry" && size(ts) = 4 {
+        n = refAt(ts, 1, nodes, 1);
+        o = refAt(ts, 2, nodes, 1);
+        fs = refAt(ts, 3, nodes, 28);
+        if !n.ok || !o.ok || !fs.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::CtorEntry { n: n.value, owner: o.value, fs: fs.value } }, size(ts));
+    };
+    if tag = "GenericEntry" && size(ts) = 4 {
+        n = refAt(ts, 1, nodes, 1);
+        ps = refAt(ts, 2, nodes, 22);
+        fs = refAt(ts, 3, nodes, 28);
+        if !n.ok || !ps.ok || !fs.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::GenericEntry { n: n.value, ps: ps.value, fs: fs.value } }, size(ts));
+    };
+    if tag = "InvariantEntry" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        vs = refAt(ts, 2, nodes, 26);
+        if !n.ok || !vs.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::InvariantEntry { n: n.value, vs: vs.value } }, size(ts));
+    };
+    if tag = "TraitEntry" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        fs = refAt(ts, 2, nodes, 33);
+        if !n.ok || !fs.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::TraitEntry { n: n.value, fs: fs.value } }, size(ts));
+    };
+    if tag = "FunctionEntry" && size(ts) = 8 {
+        n = refAt(ts, 1, nodes, 1);
+        ps = refAt(ts, 2, nodes, 22);
+        sig = refAt(ts, 3, nodes, 12);
+        ins = refAt(ts, 4, nodes, 26);
+        outs = refAt(ts, 5, nodes, 26);
+        term = refAt(ts, 6, nodes, 20);
+        exports = refAt(ts, 7, nodes, 27);
+        if !n.ok || !ps.ok || !sig.ok || !ins.ok || !outs.ok || !term.ok || !exports.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::FunctionEntry { n: n.value, ps: ps.value, sig: sig.value, ins: ins.value, outs: outs.value, term: term.value, exports: exports.value } }, size(ts));
+    };
+    if tag = "PairEntry" && size(ts) = 3 {
+        a = refAt(ts, 1, nodes, 1);
+        b = refAt(ts, 2, nodes, 1);
+        if !a.ok || !b.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::PairEntry { a: a.value, b: b.value } }, size(ts));
+    };
+    if tag = "AssocEntry" && size(ts) = 4 {
+        a = refAt(ts, 1, nodes, 1);
+        b = refAt(ts, 2, nodes, 1);
+        os = refAt(ts, 3, nodes, 38);
+        if !a.ok || !b.ok || !os.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::AssocEntry { a: a.value, b: b.value, origins: os.value } }, size(ts));
+    };
+    if tag = "ImplArgsEntry" && size(ts) = 5 {
+        a = refAt(ts, 1, nodes, 1);
+        b = refAt(ts, 2, nodes, 1);
+        ty = refAt(ts, 3, nodes, 2);
+        args = refAt(ts, 4, nodes, 32);
+        if !a.ok || !b.ok || !ty.ok || !args.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::ImplArgsEntry { a: a.value, b: b.value, ty: ty.value, args: args.value } }, size(ts));
+    };
+    if tag = "ImplBoundsEntry" && size(ts) = 4 {
+        a = refAt(ts, 1, nodes, 1);
+        b = refAt(ts, 2, nodes, 1);
+        bs = refAt(ts, 3, nodes, 34);
+        if !a.ok || !b.ok || !bs.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::ImplBoundsEntry { a: a.value, b: b.value, bs: bs.value } }, size(ts));
+    };
+    if tag = "TemplateEntry" && size(ts) = 11 {
+        n = refAt(ts, 1, nodes, 1);
+        bs = refAt(ts, 2, nodes, 34);
+        fns = refAt(ts, 3, nodes, 37);
+        ret = refAt(ts, 4, nodes, 39);
+        ps = refAt(ts, 5, nodes, 22);
+        sig = refAt(ts, 6, nodes, 12);
+        ins = refAt(ts, 7, nodes, 26);
+        outs = refAt(ts, 8, nodes, 26);
+        term = refAt(ts, 9, nodes, 20);
+        body = refAt(ts, 10, nodes, 24);
+        if !n.ok || !bs.ok || !fns.ok || !ret.ok || !ps.ok || !sig.ok || !ins.ok || !outs.ok || !term.ok || !body.ok { return bad; };
+        if !entriesAre(nodes, fns.value, 11) || !entriesAscending(nodes, fns.value) { return bad; };
+        return done(AstNode::Entry { value: AstEntry::TemplateEntry { n: n.value, bs: bs.value, fns: fns.value, ret: ret.value, ps: ps.value, sig: sig.value, ins: ins.value, outs: outs.value, term: term.value, body: body.value } }, size(ts));
+    };
+    if tag = "TypeEntry" && size(ts) = 3 {
+        n = refAt(ts, 1, nodes, 1);
+        ty = refAt(ts, 2, nodes, 2);
+        if !n.ok || !ty.ok { return bad; };
+        return done(AstNode::Entry { value: AstEntry::TypeEntry { n: n.value, ty: ty.value } }, size(ts));
+    };
+    if tag = "SurfaceEntry" && size(ts) = 3 {
+        space = wordAt(ts, 1);
+        n = refAt(ts, 2, nodes, 1);
+        if !space.ok || !n.ok || indexOf(spaceWords(), space.value) < 0 { return bad; };
+        return done(AstNode::Entry { value: AstEntry::SurfaceEntry { space: space.value, n: n.value } }, size(ts));
+    };
+    if tag = "BuiltinEntry" && size(ts) = 5 {
+        b = refAt(ts, 1, nodes, 21);
+        surface = refAt(ts, 2, nodes, 37);
+        scheme = refAt(ts, 3, nodes, 41);
+        value = refAt(ts, 4, nodes, 4);
+        if !b.ok || !surface.ok || !scheme.ok || !value.ok { return bad; };
+        if !entriesAre(nodes, surface.value, 12) { return bad; };
+        return done(AstNode::Entry { value: AstEntry::BuiltinEntry { b: b.value, surface: surface.value, scheme: scheme.value, value: value.value } }, size(ts));
+    };
+    if tag = "SigFn" && size(ts) = 3 {
+        params = refAt(ts, 1, nodes, 31);
+        ret = refAt(ts, 2, nodes, 2);
+        if !params.ok || !ret.ok { return bad; };
+        return done(AstNode::Scheme { value: AstScheme::SigFn { ts: params.value, ret: ret.value } }, size(ts));
+    };
+    if tag = "SigDynamic" && size(ts) = 1 { return done(AstNode::Scheme { value: AstScheme::SigDynamic }, size(ts)); };
+    if tag = "SigValueError" && size(ts) = 2 {
+        n = refAt(ts, 1, nodes, 1);
+        if !n.ok { return bad; };
+        return done(AstNode::Scheme { value: AstScheme::SigValueError { n: n.value } }, size(ts));
+    };
+    if tag = "NoType" && size(ts) = 1 { return done(AstNode::OptType { value: AstOptType::NoType }, size(ts)); };
+    if tag = "SomeType" && size(ts) = 2 {
+        t = refAt(ts, 1, nodes, 2);
+        if !t.ok { return bad; };
+        return done(AstNode::OptType { value: AstOptType::SomeType { t: t.value } }, size(ts));
+    };
+    if tag = "EntriesEnd" && size(ts) = 1 { return done(AstNode::Entries { value: AstEntries::End }, size(ts)); };
+    if tag = "EntriesCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 36);
+        t = refAt(ts, 2, nodes, 37);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::Entries { value: AstEntries::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "OptNamesEnd" && size(ts) = 1 { return done(AstNode::OptNames { value: AstOptNames::End }, size(ts)); };
+    if tag = "OptNamesCons" && size(ts) = 3 {
+        h = refAt(ts, 1, nodes, 19);
+        t = refAt(ts, 2, nodes, 38);
+        if !h.ok || !t.ok { return bad; };
+        return done(AstNode::OptNames { value: AstOptNames::Cons { head: h.value, tail: t.value } }, size(ts));
+    };
+    if tag = "Interface" && size(ts) = 22 { return interfaceNodeAt(ts, nodes); };
+    return bad;
+};
+
+fn interfaceNodeAt(ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ affirm size(ts) = 22; }] [{ }] {
+    bad = failed(noNode(), ts);
+    pkg = refAt(ts, 1, nodes, 1);
+    modu = refAt(ts, 2, nodes, 19);
+    types = mapAt(ts, 3, nodes, 0);
+    ctors = mapAt(ts, 4, nodes, 1);
+    generics = mapAt(ts, 5, nodes, 2);
+    invariants = mapAt(ts, 6, nodes, 3);
+    traits = mapAt(ts, 7, nodes, 4);
+    traitParams = mapAt(ts, 8, nodes, 0);
+    functions = mapAt(ts, 9, nodes, 5);
+    impls = mapAt(ts, 10, nodes, 6);
+    assoc = mapAt(ts, 11, nodes, 7);
+    implArgs = mapAt(ts, 12, nodes, 8);
+    implBounds = mapAt(ts, 13, nodes, 9);
+    copySet = setAt(ts, 14, nodes);
+    linearSet = setAt(ts, 15, nodes);
+    dropSet = setAt(ts, 16, nodes);
+    axioms = refAt(ts, 17, nodes, 24);
+    proofs = refAt(ts, 18, nodes, 24);
+    externSet = setAt(ts, 19, nodes);
+    templates = mapAt(ts, 20, nodes, 10);
+    companions = mapAt(ts, 21, nodes, 0);
+    if !pkg.ok || !modu.ok || !types.ok || !ctors.ok || !generics.ok || !invariants.ok || !traits.ok || !traitParams.ok || !functions.ok || !impls.ok || !assoc.ok { return bad; };
+    if !implArgs.ok || !implBounds.ok || !copySet.ok || !linearSet.ok || !dropSet.ok || !axioms.ok || !proofs.ok || !externSet.ok || !templates.ok || !companions.ok { return bad; };
+    v = AstInterface {
+        pkg: pkg.value, modu: modu.value, types: types.value, ctors: ctors.value, generics: generics.value, invariants: invariants.value,
+        traits: traits.value, traitParams: traitParams.value, functions: functions.value, impls: impls.value, assoc: assoc.value,
+        implArgs: implArgs.value, implBounds: implBounds.value, copies: copySet.value, linear: linearSet.value, drops: dropSet.value,
+        axioms: axioms.value, proofs: proofs.value, externs: externSet.value, templates: templates.value, companions: companions.value
+    };
+    return done(AstNode::Interface { value: v }, size(ts));
+};
+
+// A map of an interface: entries of one kind, in ascending order of their keys, no key twice
+fn mapAt(ts: &List<Token>, pos: Int, nodes: &List<AstNode>, kind: Int) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ }] {
+    r = refAt(ts, pos, nodes, 37);
+    if !r.ok || !entriesAre(nodes, r.value, kind) || !entriesAscending(nodes, r.value) { return Parsed<Int> { value: 0, pos: r.pos, ok: false }; };
+    return r;
+};
+
+// A set of an interface: names in ascending order, none twice
+fn setAt(ts: &List<Token>, pos: Int, nodes: &List<AstNode>) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ }] {
+    r = refAt(ts, pos, nodes, 22);
+    if !r.ok || !namesAscending(nodes, r.value) { return Parsed<Int> { value: 0, pos: r.pos, ok: false }; };
+    return r;
+};
+
+// Whether a comes before b, byte by byte (the order of their code points, as Haskell orders a String)
+fn before(a: &String, b: &String) -> Bool [{ }] [{ }] {
+    n = size(a.bytes);
+    m = size(b.bytes);
+    i = 0;
+    while i < n && i < m [{ affirm i >= 0; affirm n = size(a.bytes); affirm m = size(b.bytes); }] shrinks n - i {
+        x = toInt(get(a.bytes, i));
+        y = toInt(get(b.bytes, i));
+        if x != y { return x < y; };
+        i = i + 1;
+    };
+    return n < m;
+};
+
+// The key of an entry: its name, or its two names
+fn entryKey(nodes: &List<AstNode>, e: &AstEntry) -> List<String> [{ }] [{ }] {
+    return match e {
+        AstEntry::NamesEntry { n: n, ns: ns } => push([], nameValue(nodes, n)),
+        AstEntry::CtorEntry { n: n, owner: o, fs: fs } => push([], nameValue(nodes, n)),
+        AstEntry::GenericEntry { n: n, ps: ps, fs: fs } => push([], nameValue(nodes, n)),
+        AstEntry::InvariantEntry { n: n, vs: vs } => push([], nameValue(nodes, n)),
+        AstEntry::TraitEntry { n: n, fs: fs } => push([], nameValue(nodes, n)),
+        AstEntry::FunctionEntry { n: n, ps: ps, sig: sig, ins: ins, outs: outs, term: term, exports: exports } => push([], nameValue(nodes, n)),
+        AstEntry::PairEntry { a: a, b: b } => push(push([], nameValue(nodes, a)), nameValue(nodes, b)),
+        AstEntry::AssocEntry { a: a, b: b, origins: os } => push(push([], nameValue(nodes, a)), nameValue(nodes, b)),
+        AstEntry::ImplArgsEntry { a: a, b: b, ty: ty, args: args } => push(push([], nameValue(nodes, a)), nameValue(nodes, b)),
+        AstEntry::ImplBoundsEntry { a: a, b: b, bs: bs } => push(push([], nameValue(nodes, a)), nameValue(nodes, b)),
+        AstEntry::TemplateEntry { n: n, bs: bs, fns: fns, ret: ret, ps: ps, sig: sig, ins: ins, outs: outs, term: term, body: body } => push([], nameValue(nodes, n)),
+        AstEntry::TypeEntry { n: n, ty: ty } => push([], nameValue(nodes, n)),
+        AstEntry::SurfaceEntry { space: space, n: n } => push([], nameValue(nodes, n)),
+        AstEntry::BuiltinEntry { b: b, surface: surface, scheme: scheme, value: value } => [],
+    };
+};
+
+// Whether key a comes before key b: by the first name, then by the second
+fn keyBefore(a: &List<String>, b: &List<String>) -> Bool [{ }] [{ }] {
+    if size(a) = 0 || size(b) = 0 { return false; };
+    x = get(a, 0);
+    y = get(b, 0);
+    if before(x, y) { return true; };
+    if before(y, x) { return false; };
+    if size(a) < 2 || size(b) < 2 { return false; };
+    return before(get(a, 1), get(b, 1));
+};
+
+// Whether the keys of a list of entries ascend. A list only refers to earlier records.
+fn entriesAscending(nodes: &List<AstNode>, start: Int) -> Bool [{ }] [{ }] {
+    id = start;
+    previous = [];
+    first = true;
+    while id >= 0 && id < size(nodes) [{ }] shrinks id + 1 {
+        node = get(nodes, id);
+        if !(node is AstNode::Entries) { return false; };
+        match (node as AstNode::Entries).value {
+            AstEntries::End => { return true; },
+            AstEntries::Cons { head: h, tail: t } => {
+                if h < 0 || h >= size(nodes) || t >= id { return false; };
+                e = get(nodes, h);
+                if !(e is AstNode::Entry) { return false; };
+                key = entryKey(nodes, (e as AstNode::Entry).value);
+                if !first && !keyBefore(&previous, &key) { return false; };
+                previous = key;
+                first = false;
+                id = t;
+            },
+        };
+    };
+    return false;
+};
+
+// Whether a list of names ascends
+fn namesAscending(nodes: &List<AstNode>, start: Int) -> Bool [{ }] [{ }] {
+    id = start;
+    previous = "";
+    first = true;
+    while id >= 0 && id < size(nodes) [{ }] shrinks id + 1 {
+        node = get(nodes, id);
+        if !(node is AstNode::Names) { return false; };
+        match (node as AstNode::Names).value {
+            AstNames::End => { return true; },
+            AstNames::Cons { head: h, tail: t } => {
+                if t >= id { return false; };
+                name = nameValue(nodes, h);
+                if !first && !before(&previous, &name) { return false; };
+                previous = name;
+                first = false;
+                id = t;
+            },
+        };
+    };
+    return false;
+};
+
+fn spaceWords() -> List<String> [{ }] [{ }] {
+    w = push([], "std");
+    w = push(w, "pointer");
+    w = push(w, "ghost");
+    w = push(w, "proof");
+    w = push(w, "method");
+    w = push(w, "syntax");
+    return w;
+};
+
+// The variant of an entry, in the order of AstEntry
+fn entryKind(e: &AstEntry) -> Int [{ }] [{ }] {
+    return match e {
+        AstEntry::NamesEntry { n: n, ns: ns } => 0,
+        AstEntry::CtorEntry { n: n, owner: o, fs: fs } => 1,
+        AstEntry::GenericEntry { n: n, ps: ps, fs: fs } => 2,
+        AstEntry::InvariantEntry { n: n, vs: vs } => 3,
+        AstEntry::TraitEntry { n: n, fs: fs } => 4,
+        AstEntry::FunctionEntry { n: n, ps: ps, sig: sig, ins: ins, outs: outs, term: term, exports: exports } => 5,
+        AstEntry::PairEntry { a: a, b: b } => 6,
+        AstEntry::AssocEntry { a: a, b: b, origins: os } => 7,
+        AstEntry::ImplArgsEntry { a: a, b: b, ty: ty, args: args } => 8,
+        AstEntry::ImplBoundsEntry { a: a, b: b, bs: bs } => 9,
+        AstEntry::TemplateEntry { n: n, bs: bs, fns: fns, ret: ret, ps: ps, sig: sig, ins: ins, outs: outs, term: term, body: body } => 10,
+        AstEntry::TypeEntry { n: n, ty: ty } => 11,
+        AstEntry::SurfaceEntry { space: space, n: n } => 12,
+        AstEntry::BuiltinEntry { b: b, surface: surface, scheme: scheme, value: value } => 13,
+    };
+};
+
+// Whether every entry of a list of entries is of one variant. A list only refers to earlier records.
+fn entriesAre(nodes: &List<AstNode>, start: Int, kind: Int) -> Bool [{ }] [{ }] {
+    id = start;
+    while id >= 0 && id < size(nodes) [{ }] shrinks id + 1 {
+        node = get(nodes, id);
+        if !(node is AstNode::Entries) { return false; };
+        match (node as AstNode::Entries).value {
+            AstEntries::End => { return true; },
+            AstEntries::Cons { head: h, tail: t } => {
+                if h < 0 || h >= size(nodes) || t >= id { return false; };
+                e = get(nodes, h);
+                if !(e is AstNode::Entry) || entryKind((e as AstNode::Entry).value) != kind { return false; };
+                id = t;
+            },
+        };
+    };
+    return false;
+};
+
+fn nodeRefs(node: &AstNode) -> List<Int> [{ }] [{ }] {
+    refs = noInts();
+    match node {
+        AstNode::Name { value: v } => { match v { AstName::End => { }, AstName::Part { text: s, tail: t } => { refs = push(refs, t); }, }; },
+        AstNode::Type { value: v } => { },
+        AstNode::Size { value: v } => { },
+        AstNode::Value { value: v } => {
+            match v {
+                AstValue::VInt { n: n } => { refs = push(refs, n); },
+                AstValue::VList { xs: xs } => { refs = push(refs, xs); },
+                AstValue::VBool { b: b } => {  },
+                AstValue::VData { n: n, xs: xs } => { refs = push(refs, n); refs = push(refs, xs); },
+                AstValue::VFnRef { n: n } => { refs = push(refs, n); },
+                AstValue::VFunct { ps: ps, ins: ins, outs: outs, body: body, exports: exports } => { refs = push(refs, ps); refs = push(refs, ins); refs = push(refs, outs); refs = push(refs, body); refs = push(refs, exports); },
+            };
+        },
+        AstNode::Body { value: v } => {
+            match v {
+                AstBody::NativeFunct { sig: sig, term: term, stmts: stmts } => { refs = push(refs, sig); refs = push(refs, term); refs = push(refs, stmts); },
+                AstBody::BuiltinFunct { b: b } => { refs = push(refs, b); },
+            };
+        },
+        AstNode::Expression { value: v } => {
+            match v {
+                AstExpression::Val { v: v } => { refs = push(refs, v); },
+                AstExpression::Var { n: n } => { refs = push(refs, n); },
+                AstExpression::F { f: f, xs: xs } => { refs = push(refs, f); refs = push(refs, xs); },
+            };
+        },
+        AstNode::Termination { value: v } => {
+            match v {
+                AstTermination::Shrinks { e: e } => { refs = push(refs, e); },
+                AstTermination::Counting { e: e } => { refs = push(refs, e); },
+                AstTermination::Parts { e: e } => { refs = push(refs, e); },
+                AstTermination::MayDiverge => {  },
+                AstTermination::Recursing { t: t } => { refs = push(refs, t); },
+            };
+        },
+        AstNode::Validation { value: v } => {
+            match v {
+                AstValidation::Rewrite { r: r } => { refs = push(refs, r); },
+                AstValidation::ProofAssert { p: p } => { refs = push(refs, p); },
+                AstValidation::AssignProofVar { n: n, e: e } => { refs = push(refs, n); refs = push(refs, e); },
+                AstValidation::Assume { p: p } => { refs = push(refs, p); },
+            };
+        },
+        AstNode::Proof { value: v } => {
+            match v {
+                AstProof::FApp { f: f, xs: xs } => { refs = push(refs, f); refs = push(refs, xs); },
+                AstProof::ATerm { n: n } => { refs = push(refs, n); },
+                AstProof::CTerm { v: v } => { refs = push(refs, v); },
+                AstProof::Forall { n: n, gs: gs, b: b } => { refs = push(refs, n); refs = push(refs, gs); refs = push(refs, b); },
+                AstProof::BVar { n: n } => { refs = push(refs, n); },
+            };
+        },
+        AstNode::Rule { value: v } => {
+            match v {
+                AstRule::Refl { p: p } => { refs = push(refs, p); },
+                AstRule::Eval { n: n } => { refs = push(refs, n); },
+                AstRule::EvalAll => {  },
+                AstRule::CheckGtZero { p: p } => { refs = push(refs, p); },
+                AstRule::CheckRel { p: p } => { refs = push(refs, p); },
+                AstRule::UserRewrite { n: n, xs: xs } => { refs = push(refs, n); refs = push(refs, xs); },
+            };
+        },
+        AstNode::Statement { value: v } => {
+            match v {
+                AstStatement::Assign { n: n, e: e } => { refs = push(refs, n); refs = push(refs, e); },
+                AstStatement::AssignDeref { a: a, b: b } => { refs = push(refs, a); refs = push(refs, b); },
+                AstStatement::Let { n: n, e: e } => { refs = push(refs, n); refs = push(refs, e); },
+                AstStatement::Return { e: e } => { refs = push(refs, e); },
+                AstStatement::ValidationStatement { v: v } => { refs = push(refs, v); },
+                AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs } => { refs = push(refs, n); refs = push(refs, ps); refs = push(refs, fs); refs = push(refs, vs); },
+                AstStatement::EnumDef { n: n, vs: vs } => { refs = push(refs, n); refs = push(refs, vs); },
+                AstStatement::AxiomDef { n: n, ps: ps, ins: ins, outs: outs } => { refs = push(refs, n); refs = push(refs, ps); refs = push(refs, ins); refs = push(refs, outs); },
+                AstStatement::ProofDef { n: n, ps: ps, ins: ins, outs: outs, body: body } => { refs = push(refs, n); refs = push(refs, ps); refs = push(refs, ins); refs = push(refs, outs); refs = push(refs, body); },
+                AstStatement::Block { xs: xs } => { refs = push(refs, xs); },
+                AstStatement::If { e: e, a: a, b: b } => { refs = push(refs, e); refs = push(refs, a); refs = push(refs, b); },
+                AstStatement::While { e: e, vs: vs, t: t, xs: xs } => { refs = push(refs, e); refs = push(refs, vs); refs = push(refs, t); refs = push(refs, xs); },
+                AstStatement::TraitDef { n: n, ps: ps, fs: fs } => { refs = push(refs, n); refs = push(refs, ps); refs = push(refs, fs); },
+                AstStatement::ImplDef { traitName: traitName, args: args, n: n, ty: ty, bs: bs, xs: xs } => { refs = push(refs, traitName); refs = push(refs, args); refs = push(refs, n); refs = push(refs, ty); refs = push(refs, bs); refs = push(refs, xs); },
+                AstStatement::BoundedDef { bs: bs, s: s } => { refs = push(refs, bs); refs = push(refs, s); },
+                AstStatement::Mark { line: line, col: col } => {  },
+                AstStatement::CopyDef { n: n } => { refs = push(refs, n); },
+                AstStatement::LinearDef { n: n } => { refs = push(refs, n); },
+                AstStatement::ExternDef { n: n } => { refs = push(refs, n); },
+                AstStatement::DropDef { n: n } => { refs = push(refs, n); },
+                AstStatement::Dissolve { n: n } => { refs = push(refs, n); },
+            };
+        },
+        AstNode::Signature { value: v } => { refs = push(refs, v.ts); refs = push(refs, v.ret); refs = push(refs, v.ss); refs = push(refs, v.ps); refs = push(refs, v.ws); refs = push(refs, v.fs); },
+        AstNode::TraitFn { value: v } => { refs = push(refs, v.n); refs = push(refs, v.ps); refs = push(refs, v.sig); refs = push(refs, v.ins); refs = push(refs, v.outs); },
+        AstNode::Bound { value: v } => { refs = push(refs, v.p); refs = push(refs, v.n); refs = push(refs, v.ts); },
+        AstNode::Field { value: v } => { refs = push(refs, v.n); refs = push(refs, v.ty); },
+        AstNode::Variant { value: v } => { refs = push(refs, v.n); refs = push(refs, v.fs); },
+        AstNode::ValueField { value: v } => { refs = push(refs, v.n); refs = push(refs, v.v); },
+        AstNode::Arg { value: v } => {
+            match v {
+                AstArg::ArgSize { s: s } => { refs = push(refs, s); },
+                AstArg::ArgType { t: t } => { refs = push(refs, t); },
+            };
+        },
+        AstNode::OptName { value: v } => {
+            match v {
+                AstOptName::NoName => {  },
+                AstOptName::SomeName { n: n } => { refs = push(refs, n); },
+            };
+        },
+        AstNode::OptTermination { value: v } => {
+            match v {
+                AstOptTermination::NoTermination => {  },
+                AstOptTermination::SomeTermination { t: t } => { refs = push(refs, t); },
+            };
+        },
+        AstNode::Builtin { value: v } => {
+            match v {
+                AstBuiltin::Ctor { n: n, args: args, fs: fs } => { refs = push(refs, n); refs = push(refs, args); refs = push(refs, fs); },
+                AstBuiltin::FieldBuiltin { owner: owner, n: n } => { refs = push(refs, owner); refs = push(refs, n); },
+                AstBuiltin::Is { n: n } => { refs = push(refs, n); },
+                AstBuiltin::Project { n: n, f: f } => { refs = push(refs, n); refs = push(refs, f); },
+                AstBuiltin::Cast { n: n } => { refs = push(refs, n); },
+                AstBuiltin::ToWord { signed: signed, bits: bits } => {  },
+                AstBuiltin::Rel { r: r } => {  },
+                AstBuiltin::Primitive { name: n } => { },
+            };
+        },
+        AstNode::Names { value: v } => { match v { AstNames::End => { }, AstNames::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Values { value: v } => { match v { AstValues::End => { }, AstValues::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Statements { value: v } => { match v { AstStatements::End => { }, AstStatements::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Expressions { value: v } => { match v { AstExpressions::End => { }, AstExpressions::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Validations { value: v } => { match v { AstValidations::End => { }, AstValidations::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Proofs { value: v } => { match v { AstProofs::End => { }, AstProofs::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Fields { value: v } => { match v { AstFields::End => { }, AstFields::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Variants { value: v } => { match v { AstVariants::End => { }, AstVariants::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::ValueFields { value: v } => { match v { AstValueFields::End => { }, AstValueFields::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Types { value: v } => { match v { AstTypes::End => { }, AstTypes::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Args { value: v } => { match v { AstArgs::End => { }, AstArgs::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::TraitFns { value: v } => { match v { AstTraitFns::End => { }, AstTraitFns::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Bounds { value: v } => { match v { AstBounds::End => { }, AstBounds::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::Elaborated { value: v } => { refs = push(refs, v.statements); refs = push(refs, v.types); },
+        AstNode::Entry { value: v } => { refs = entryRefs(v); },
+        AstNode::Entries { value: v } => { match v { AstEntries::End => { }, AstEntries::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::OptNames { value: v } => { match v { AstOptNames::End => { }, AstOptNames::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
+        AstNode::OptType { value: v } => { match v { AstOptType::NoType => { }, AstOptType::SomeType { t: t } => { refs = push(refs, t); }, }; },
+        AstNode::Interface { value: v } => { refs = interfaceRefs(v); },
+        AstNode::Scheme { value: v } => {
+            match v {
+                AstScheme::SigFn { ts: ts, ret: ret } => { refs = push(refs, ts); refs = push(refs, ret); },
+                AstScheme::SigDynamic => { },
+                AstScheme::SigValueError { n: n } => { refs = push(refs, n); },
+            };
+        },
+    };
+    return refs;
+};
+
+fn entryRefs(e: &AstEntry) -> List<Int> [{ }] [{ }] {
+    refs = noInts();
+    match e {
+        AstEntry::NamesEntry { n: n, ns: ns } => { refs = push(push(refs, n), ns); },
+        AstEntry::CtorEntry { n: n, owner: o, fs: fs } => { refs = push(push(push(refs, n), o), fs); },
+        AstEntry::GenericEntry { n: n, ps: ps, fs: fs } => { refs = push(push(push(refs, n), ps), fs); },
+        AstEntry::InvariantEntry { n: n, vs: vs } => { refs = push(push(refs, n), vs); },
+        AstEntry::TraitEntry { n: n, fs: fs } => { refs = push(push(refs, n), fs); },
+        AstEntry::FunctionEntry { n: n, ps: ps, sig: sig, ins: ins, outs: outs, term: term, exports: exports } => {
+            refs = push(push(push(push(push(push(push(refs, n), ps), sig), ins), outs), term), exports);
+        },
+        AstEntry::PairEntry { a: a, b: b } => { refs = push(push(refs, a), b); },
+        AstEntry::AssocEntry { a: a, b: b, origins: os } => { refs = push(push(push(refs, a), b), os); },
+        AstEntry::ImplArgsEntry { a: a, b: b, ty: ty, args: args } => { refs = push(push(push(push(refs, a), b), ty), args); },
+        AstEntry::ImplBoundsEntry { a: a, b: b, bs: bs } => { refs = push(push(push(refs, a), b), bs); },
+        AstEntry::TemplateEntry { n: n, bs: bs, fns: fns, ret: ret, ps: ps, sig: sig, ins: ins, outs: outs, term: term, body: body } => {
+            refs = push(push(push(push(push(refs, n), bs), fns), ret), ps);
+            refs = push(push(push(push(push(refs, sig), ins), outs), term), body);
+        },
+        AstEntry::TypeEntry { n: n, ty: ty } => { refs = push(push(refs, n), ty); },
+        AstEntry::SurfaceEntry { space: space, n: n } => { refs = push(refs, n); },
+        AstEntry::BuiltinEntry { b: b, surface: surface, scheme: scheme, value: value } => { refs = push(push(push(push(refs, b), surface), scheme), value); },
+    };
+    return refs;
+};
+
+fn interfaceRefs(v: &AstInterface) -> List<Int> [{ }] [{ }] {
+    refs = push(push(push(push(push(noInts(), v.pkg), v.modu), v.types), v.ctors), v.generics);
+    refs = push(push(push(push(push(refs, v.invariants), v.traits), v.traitParams), v.functions), v.impls);
+    refs = push(push(push(push(push(refs, v.assoc), v.implArgs), v.implBounds), v.copies), v.linear);
+    refs = push(push(push(push(push(refs, v.drops), v.axioms), v.proofs), v.externs), v.templates);
+    return push(refs, v.companions);
+};
+
+fn nameValue(nodes: &List<AstNode>, start: Int) -> String [{ }] [{ }] {
+    out = "";
+    id = start;
+    fuel = size(nodes);
+    while fuel > 0 [{ affirm fuel >= 0; }] shrinks fuel {
+        if id < 0 || id >= size(nodes) { return out; };
+        node = get(nodes, id);
+        if node is AstNode::Name {
+            v = node as AstNode::Name;
+            match v.value {
+                AstName::End => { return out; },
+                AstName::Part { text: text, tail: tail } => { out = out.concat(text); id = tail; },
+            };
+        } else { return out; };
+        fuel = fuel - 1;
+    };
+    return out;
+};
+
+fn validDecimal(text: &String) -> Bool [{ }] [{ }] {
+    n = size(text.bytes);
+    i = 0;
+    if n > 0 && get(text.bytes, 0) = toByte(45) { i = 1; };
+    if i >= n { return false; };
+    while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+        c = toInt(get(text.bytes, i));
+        if c < 48 || c > 57 { return false; };
+        i = i + 1;
+    };
+    return true;
+};
+
+fn badAst() -> Parsed<AstProgram> [{ }] [{ }] {
+    return Parsed<AstProgram> { value: AstProgram { stage: "", nodes: [], root: 0 }, pos: 0, ok: false };
+};
+
+// The kind of the root of each stage of the data: Statements, Elaborated, Interface, or Entries of builtins
+fn rootKindOf(stage: &String) -> Int [{ }] [{ }] {
+    if stage = "parsed" { return 24; };
+    if stage = "elaborated" { return 35; };
+    if stage = "interface" { return 40; };
+    if stage = "builtins" { return 37; };
+    return 0 - 1;
+};
+
+fn readRecord() -> Parsed<String> [{ }] [{ }] {
+    bytes = [];
+    c = readByte();
+    if c < 0 { return Parsed<String> { value: "", pos: 0, ok: true }; };
+    n = 0;
+    while c >= 0 && c != 10 [{ affirm n >= 0; affirm n <= 1000000; }] shrinks 1000000 - n {
+        if n >= 1000000 { return Parsed<String> { value: "", pos: 1, ok: false }; };
+        if c < 32 || c > 126 { return Parsed<String> { value: "", pos: 1, ok: false }; };
+        bytes = push(bytes, toByte(c));
+        n = n + 1;
+        c = readByte();
+    };
+    return Parsed<String> { value: String { bytes: bytes }, pos: 1, ok: true };
+};
+
+fn readAst() -> Parsed<AstProgram> ~ {
+    header = readRecord();
+    if !header.ok || header.pos = 0 || size(header.value.bytes) < 14 || !header.value.startsWith("tersus-ast 1 ") { return badAst(); };
+    stage = header.value.slice(13, size(header.value.bytes));
+    rootKind = rootKindOf(stage);
+    if rootKind < 0 { return badAst(); };
+    nodes = [];
+    uses = noInts();
+    while true [{ }] ~ {
+        line = readRecord();
+        if !line.ok || line.pos = 0 || size(line.value.bytes) = 0 { return badAst(); };
+        tokens = tokenizeStrict(line.value);
+        if !tokens.ok { return badAst(); };
+        ts = tokens.value;
+        if isWord(ts, 0, "root") {
+            if size(ts) != 2 { return badAst(); };
+            root = intAt(ts, 1);
+            if !root.ok || root.value < 0 || root.value != size(nodes) - 1 { return badAst(); };
+            if nodeKind(get(nodes, root.value)) != rootKind { return badAst(); };
+            if stage = "builtins" && !entriesAre(nodes, root.value, 13) { return badAst(); };
+            for i in 0..size(uses) {
+                expected = 1;
+                if i = root.value { expected = 0; };
+                if get(uses, i) != expected { return badAst(); };
+            };
+            end = readRecord();
+            if !end.ok || end.pos != 0 { return badAst(); };
+            count = size(nodes);
+            return done(AstProgram { stage: stage, nodes: nodes, root: root.value }, count);
+        };
+        node = nodeAt(ts, nodes);
+        if !node.ok { return badAst(); };
+        refs = nodeRefs(node.value);
+        for r in refs {
+            if r < 0 || r >= size(uses) { return badAst(); };
+            if get(uses, r) != 0 { return badAst(); };
+            uses = set(uses, r, 1);
+        };
+        nodes = push(nodes, node.value);
+        uses = push(uses, 0);
+    };
+    return badAst();
+};
+
+fn validUtf8(s: &String) -> Bool [{ }] [{ }] {
+    i = 0;
+    n = size(s.bytes);
+    while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+        c = toInt(get(s.bytes, i));
+        count = 0;
+        point = c;
+        least = 0;
+        if c >= 128 {
+            if c >= 194 && c <= 223 { count = 1; point = c - 192; least = 128; }
+            else { if c >= 224 && c <= 239 { count = 2; point = c - 224; least = 2048; }
+            else { if c >= 240 && c <= 244 { count = 3; point = c - 240; least = 65536; }
+            else { return false; }; }; };
+        };
+        if count < 0 || i + count >= n { return false; };
+        for j in 0..count [{ affirm count >= 0; affirm i >= 0; affirm i + count < n; }] {
+            b = toInt(get(s.bytes, i + j + 1));
+            if b < 128 || b > 191 { return false; };
+            point = point * 64 + b - 128;
+        };
+        if point < least || point > 1114111 || (point >= 55296 && point <= 57343) { return false; };
+        i = i + count + 1;
+    };
+    return true;
+};
+
+fn tokenizeStrict(line: &String) -> Parsed<List<Token>> [{ }] [{ }] {
+    bad = Parsed<List<Token>> { value: [], pos: 0, ok: false };
+    ts = tokenize(line);
+    if !ts.ok { return bad; };
+    i = 0;
+    n = size(line.bytes);
+    while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+        c = toInt(get(line.bytes, i));
+        if c = 32 { i = i + 1; }
+        else {
+            if c = 34 {
+                q = quoted(line, i + 1);
+                if !q.ok || !validUtf8(q.value) { return bad; };
+                if q.pos < n && get(line.bytes, q.pos) != toByte(32) { return bad; };
+                i = q.pos;
+            } else {
+                if c = 92 { return bad; };
+                j = i + 1;
+                while j < n && get(line.bytes, j) != toByte(32) [{ affirm j >= i + 1; affirm j <= n; }] shrinks n - j {
+                    b = toInt(get(line.bytes, j));
+                    if b = 34 || b = 92 { return bad; };
+                    j = j + 1;
+                };
+                if (c >= 48 && c <= 57) || c = 45 {
+                    v = parseInt(line.slice(i, j));
+                    if !v.ok { return bad; };
+                };
+                i = j;
+            };
+        };
+    };
+    return ts;
+};

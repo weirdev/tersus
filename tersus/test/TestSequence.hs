@@ -147,7 +147,7 @@ testSequence =
                 , testCase "an array has them too" (runs "a = #[1, 2]; a = a.set(0, 9); return a.get(0) * 10 + a.size();" (VInt 92))
                 , testCase "and a Box of an array" (runs "b = Array::boxed(3, 7); return b.size() + b.get(0);" (VInt 10))
                 , testCase "a method that is not one" (rejected "l = [1]; return l.nothing();" "List::nothing is not defined before this call")
-                , testCase "pop is a name of the language" (rejected "fn pop(l: List<Int>) -> List<Int> { return l; }; return 0;" "Function already defined: pop")
+                , testCase "pop is a name of the language" (rejected "fn pop(l: List<Int>) -> List<Int> { return l; }; return 0;" "does not model yet: a function named like a builtin")
                 ]
             , TestList
                 "the prelude"

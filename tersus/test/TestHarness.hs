@@ -15,6 +15,7 @@ module TestHarness
     , parseFailsWithHelper
     , parseValidateEvalProgramHelper
     , batchItems
+    , recordSource
     , forceTestResult
     , runTest
     , testAssertTrue
@@ -78,6 +79,7 @@ import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (SeekMode (AbsoluteSeek), hClose)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.IO (FileLock, LockRequest (WriteLock), closeFd, waitToSetLock)
+import System.Posix.Process (getProcessID)
 import System.Posix.Types (Fd)
 import System.Process (proc)
 
@@ -221,10 +223,11 @@ testAssertEq actual expected =
         else Just $ "Expected: " ++ show expected ++ "\nGot: " ++ show actual
 
 -- The validator written in Tersus names the obligation it could not prove in the words of the
--- contract (`Could not prove: x = 2`), as the old engine did, and is held to them; the old
--- engine's other words (`Relation does not hold`, `Loop invariant is not preserved`) are not its
--- own, and a program it refuses for not proving something, or for using what it does not model
--- yet, has failed as expected there.
+-- contract (`Could not prove: x = 2`), as the old engine did, and is held to them. The old engine's
+-- other words (`Relation does not hold`, `Loop invariant is not preserved`, ...) are not its own: a
+-- test that still expects one of them has failed as expected when the validator refuses the program
+-- for not proving something or for using what it does not model yet. Any other expectation, the
+-- checker's above all, has to be met as written, so a type error cannot pass as a validator refusal.
 testAssertErrorContains :: String -> Result a String -> TestResult
 testAssertErrorContains expectedSubstring result =
     case result of
@@ -232,6 +235,7 @@ testAssertErrorContains expectedSubstring result =
         Error err ->
             if expectedSubstring `isInfixOf` err
                 || not ("Could not prove: " `isPrefixOf` expectedSubstring)
+                    && any (`isPrefixOf` expectedSubstring) oldValidatorWords
                     && any (`isInfixOf` err) ["Could not prove: ", "could not prove ", "the Tersus validator does not model yet"]
                 then Nothing
                 else
@@ -240,6 +244,47 @@ testAssertErrorContains expectedSubstring result =
                             ++ show expectedSubstring
                             ++ "\nGot: "
                             ++ show err
+
+-- The refusals of the validator written in Haskell that tests still name. A test of a refusal by
+-- the checker must not name one of these.
+oldValidatorWords :: [String]
+oldValidatorWords =
+    [ "A Counter is made that does not meet its invariant"
+    , "A proof calls "
+    , "A reference is to an index that is not known to be in the value it borrows"
+    , "Could not prove"
+    , "Funct input validation failed"
+    , "Function variant is not bounded below"
+    , "Loop invariant does not hold on entry"
+    , "Loop invariant is not preserved"
+    , "Loop must say how it ends"
+    , "Loop variant does not shrink"
+    , "Loop variant is not bounded below"
+    , "Mutually recursive functions must say what shrinks"
+    , "Not guaranteed to terminate"
+    , "Proof term is not greater than 0"
+    , "Recursive call does not shrink the variant"
+    , "Relation does not hold"
+    , "Relation lacks a proof"
+    , "Return value not found"
+    , "Rewrite rule "
+    , "Unknown rewrite rule"
+    , "Variable not found in proof map"
+    , "a loop is declared ~"
+    , "cannot take a forall"
+    , "declared ~"
+    , "does not meet its invariant"
+    , "does not shrink the variant"
+    , "input validation failed"
+    , "is not greater than 0"
+    , "it calls a function that is declared ~"
+    , "not from a function defined inside it"
+    , "not known to be in the value it borrows"
+    , "reads the input"
+    , "requires a relation"
+    , "the list given to Array::fromList has "
+    , "the range has to be known to end at or after its start"
+    ]
 
 parseValFailStmtHelper :: String -> TestResult
 parseValFailStmtHelper stmtStr =
@@ -275,9 +320,8 @@ parseValidProgramHelper source = withProgram source $
             Error e -> Just $ "Validation failed with error: " ++ e
 
 -- Assert validation fails and the error contains the expected substring
--- (via testAssertErrorContains, whose documented fallback accepts any
--- "Could not prove: ..." / unmodelled-feature verdict for a specific
--- "Could not prove: <obligation>" expectation).
+-- (via testAssertErrorContains, which accepts the Tersus validator's refusal for an expectation
+-- in the old validator's words).
 parseValidateFailProgramHelper :: String -> String -> TestResult
 parseValidateFailProgramHelper source expectedError = withProgram source $
     case parseWithEquality source of
@@ -312,7 +356,23 @@ pipelineRejected source expected = case parseSource source of
 
 -- A failure says which program it was about (the start of it)
 withProgram :: String -> TestResult -> TestResult
-withProgram source = fmap (\message -> message ++ "\nProgram: " ++ take 500 source)
+withProgram source result = recordSource source `seq` fmap (\message -> message ++ "\nProgram: " ++ take 500 source) result
+
+-- With TERSUS_DIFFERENTIAL_SOURCES set to a directory, each program a helper checks is written there, for the
+-- differential harness (`stack run frontend-diff -- compare EXE --sources DIR`). Groups run at once, so a file
+-- appears whole or not at all, and a failure to write one fails no test.
+{-# NOINLINE recordSource #-}
+recordSource :: String -> ()
+recordSource source = unsafePerformIO $ do
+    dir <- lookupEnv "TERSUS_DIFFERENTIAL_SOURCES"
+    case dir of
+        Nothing -> pure ()
+        Just d -> do
+            pid <- getProcessID
+            let path = d </> fingerprint [source] ++ ".tersus"
+                part = path ++ ".part" ++ show pid
+            written <- try (writeFile part source >> renameFile part path)
+            either (\e -> putStrLn ("[WARN] could not record a program: " ++ show (e :: IOException))) pure written
 
 -- Textual markers used by test probes. Disk entries use TestProgramBinary,
 -- whose structural codec retains specs, invariants, generics and ghost contents.

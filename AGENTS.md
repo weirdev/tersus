@@ -25,7 +25,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   compiler libraries compiled once as a synthetic `tersuslib` package, one
   module per lib file, from the `PreludeSource` texts) and `src/Link.hs`
   (merging the lowered modules into one program and pruning what the entry
-  program does not reach); `src/Pipeline.hs` compiles each module with the
+  program does not reach); `src/ElaborateRequest.hs` is the elaborator's request and response
+  for one module (the compiler elaborates every program and module through it,
+  with the Haskell `respond`; `AST_DATA.md`); `src/Pipeline.hs` compiles each module with the
   implicit libraries its own text calls for (`Compile.librariesFor`, consumed
   via synthesised implicit imports on both the single-file and package paths,
   the package path in `src/PackageCompile.hs`) and links the package.
@@ -91,7 +93,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     `values.tersus`, `operations.tersus`, `functions.tersus` and
     `helpers.tersus` files are siblings of `emit.tersus` in one `mir::emit`
     module; only `emit.tersus` runs. `data/` holds the shared token, type and
-    AST codecs, `parser/parser.tersus` is the native parser and
+    AST codecs and the reader of AST data (`data::reader`, which the AST
+    reader runs and an elaborator written in Tersus will), `parser/parser.tersus` is the native parser and
     `ast_reader/ast_reader.tersus` the AST reader (`AST_DATA.md`). All are
     embedded by `PreludeSource` (`mirPackageFiles`, `dataPackageFiles`,
     `parserPackageFiles`, `astReaderPackageFiles`) and listed in
@@ -109,7 +112,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`,
   `TestCopies`, `TestEq`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
   `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
-  `TestMirEmit`, `TestBootstrap` and `TestParity`, with the shared harness in `TestHarness`.
+  `TestMirEmit`, `TestBootstrap`, `TestParity`, `TestAstData` and `TestDifferential`
+  (the differential harness of `test/Differential.hs`, also run on an elaborator
+  executable by `stack run frontend-diff`), with the shared harness in `TestHarness`.
 
 ## Build, Test, and Development Commands
 Work from `tersus/`.
