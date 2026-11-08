@@ -17,7 +17,7 @@ Facts about Tersus that decide the shape (from `Parse` and the semantics of the 
 - **Values are immutable and unaliased.** `push`/`set` return new lists; there is no heap to model, so a place is just a local. No projections, no borrows, no storage markers.
 - **`match` and `for` are already desugared by the parser** into `if` chains over `Is` tests and `while` loops, so the MIR needs neither.
 - **Functions are first-class but do not capture.** A body sees its parameters, the standard library and the top-level functions, so a nested `fn` lifts to a top-level MIR function with no environment.
-- **Scopes decide which variable an assignment means** (`x = ...` updates the nearest enclosing `x`, else defines a new one in the current scope). Lowering resolves that once; the MIR has numbered locals and no scopes.
+- **Scopes decide which variable an assignment means** (`x = ...` updates the nearest enclosing `x`, else defines a new one in the current scope). `let` always declares a fresh binding; `TypeCheckScope` separates its identity from shadowed bindings before checking reference provenance. Lowering resolves bindings once; the MIR has numbered locals and no lexical scopes.
 - **Partial operations have contracts the validator discharged** (`get` in range, `/` and `%` by non-zero, `first`/`last` of a non-empty list, `Cast`). The MIR keeps them as ordinary operations with documented preconditions, as `unreachable` would be in LLVM; the interpreter still checks them and reports an error, which turns any validator bug into a test failure instead of a wrong answer.
 - **Proof-only constructs** (`affirm`, `define`, `rewrite`, `axiom`, `proof`, invariants, `shrinks`, contracts) have no run-time meaning. The validator reads them from the MIR (see Specifications and Validation); the executor ignores them.
 
@@ -156,6 +156,8 @@ fn main() -> Int {
 ```
 
 `if` is a `SwitchBool` into two blocks that meet at a join block (or that both `Return`); `else if` nests; a `return` is an assignment to `_0` and `Return`, and statements after it are not lowered (nothing can reach them).
+
+`IfExpr` uses these same guarded blocks, with each selected branch assigning a fresh typed result local before joining. A scoped `BlockExpr` evaluates its statements and moves or copies its final expression into a result local outside the scope. Composable `match` retains scoped subject and pattern bindings until this lowering; `if let` uses the same `Is` and checked projections in its success branch. No eager value-select operation or new MIR opcode is used. Expression lists reuse typed `Push` construction in source order, while constant lists retain `MakeList`/constant semantics.
 
 ## Canonical names and linking (packages)
 
@@ -458,7 +460,7 @@ drops N "x"...
 stubs N "x"...                         the imported functions seeded as stubs
 declared N "x"...                      the names the module declares at its top
 nested N "x"...                        the names it declares inside its functions
-assumes N P...                         every `assume` of its statements
+assumes N P...                         every `assume` and `Block::assume` call of its statements
 data N
 N lines of AST data, stage mir
 ```
@@ -486,8 +488,8 @@ functions at its top and in its impls, the names a package module's library
 units do not declare again (`PackageCompile.moduleDeclaredNames`); `nested`
 holds the structs, enums and traits declared inside its functions and blocks,
 which a single file's library units do not declare again either
-(`Compile.ownNames` is both). `assumes` holds every `assume` in order, dead
-code included.
+(`Compile.ownNames` is both). `assumes` holds every `assume` and every
+`Block::assume` call in order, dead code included.
 
 A count is nonnegative and no more than the tokens that follow it in its
 record. A local, a block, a line or column and an index are signed 64-bit
@@ -507,7 +509,7 @@ does for its payloads.
 | `ghost proof` | `ProofDef NAME PARAMS REQUIRES ENSURES BODY` |
 | `requires`, `ensures`, `invariant` (of a loop or a struct) | `Block STATEMENTS`, each a `ValidationStatement` |
 | `termination` | `While` with the condition `true` (`Val (VBool true)`), no invariant, the termination and no body |
-| `assumes` | `ValidationStatement (Assume PROOF)` |
+| `assumes` | `ValidationStatement (Assume PROOF)` for an `assume`; `Return CALL` for a `Block::assume` call, which is trusted, never a proof |
 
 The reader refuses a payload of the wrong kind, an index with no payload, a
 payload referred to twice or not at all, a shared environment that does not

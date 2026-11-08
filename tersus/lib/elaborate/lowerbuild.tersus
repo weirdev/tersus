@@ -3,6 +3,7 @@ import parser::syntax::syntax as ps;
 import data::codec::codec { Size, Token, Type, sizeAt, typeAt, wordAt };
 import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nodeIn };
 import elaborate::state { intText };
+import elaborate::exports { breakOn, startsWith };
 import elaborate::lowerstate { Binding, EnvRec, LBlock, LDecl, LowSt, Op, RefTarget, Rv, Step, Stmt, Term, Visible, hasText, intAt, lfail, lwCat, lwCat3, lwSort, lwTextAt, lwTextLess, noVisible, quote, lwSp, tyText };
 
 fn stmtAt(src: &List<AstNode>, i: Int) -> AstStatement ~ {
@@ -405,8 +406,17 @@ fn setBlock(blocks: List<LBlock>, i: Int, blk: LBlock) -> List<LBlock> ~ {
 
 fn newLocal(ls: LowSt, hasName: Bool, name: String, ty: Int) -> LowSt ~ {
     l = ls.bNextLocal;
-    locals = setDecl(ls.bLocals, l, LDecl { present: true, ty: ty, hasName: hasName, name: name });
+    locals = setDecl(ls.bLocals, l, LDecl { present: true, ty: ty, hasName: hasName, name: lwSourceName(name) });
     return LowSt { bNextLocal: l + 1, bLocals: locals, root: l, ..ls };
+};
+
+// The name the program wrote for a local that a scoped declaration renamed ($local N name)
+fn lwSourceName(name: String) -> String ~ {
+    if size(name.bytes) < 7 || !startsWith(&name, "$local ") { return name; };
+    after = name.slice(7, size(name.bytes));
+    parts = breakOn(" ", &after);
+    if !parts.ok { return name; };
+    return lwSourceName(clone(parts.after));
 };
 
 fn tempLocal(ls: LowSt, ty: Int) -> LowSt ~ { return newLocal(ls, false, "", ty); };

@@ -89,6 +89,7 @@ struct St {
     wireVersion: Bool,
     wireProtocols: HashMap<String, List<String>>,
     wireOwnership: HashMap<String, List<String>>,
+    localNames: HashMap<String, Int>,
     types: HashMap<String, List<String>>,
     ctors: HashMap<String, CtorInfo>,
     generics: HashMap<String, Generic>,

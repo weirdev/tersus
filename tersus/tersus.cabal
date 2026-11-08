@@ -338,11 +338,13 @@ test-suite tersus-test
       TestDifferential
       TestElaborate
       TestEq
+      TestErgonomics
       TestFrontendBootstrap
       TestGenerics
       TestHarness
       TestHashMap
       TestHashSet
+      TestHeldReferences
       TestLibModules
       TestLibraryShapes
       TestMirCopies

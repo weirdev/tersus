@@ -125,7 +125,7 @@ Each slice is a PR, and nothing changes the default `build` until slice 8 adds a
    - An empty list `[]` as the argument of a generic function (`failed([], ts)`) is a `List<Int>` natively whatever the result is used for.
      The checker accepts it and the verifier of the native code refuses it (`is ill typed`); a function that returns the empty list
      gives it its type. Documented in LANGUAGE.md, not fixed: the type is not kept in the expression.
-   - A list literal cannot hold string literals or structs, so the tables of words are built with `push`.
+   - List literals now accept string, record and arbitrary element expressions; these tables no longer require `push` chains.
    - After a join of two branches the validator does not keep a bound on an index that each branch set (`p = t.pos` in one, `p = 3` in the
      other); an `affirm p >= 0;` at the end of each branch keeps it.
    - `match` as a statement can `return` from an arm, and an `if x is A { ... } else { (x as B) }` cannot show the else is `B`, so a

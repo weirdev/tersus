@@ -138,6 +138,8 @@ struct LowSt {
     bBlocks: List<LBlock>, bNextBlock: Int, bHasOpen: Bool, bOpenId: Int, bOpenStmts: List<Int>,
     bScopeNames: List<String>, bScopeBinds: List<Binding>, bScopeMarks: List<Int>, bLoops: List<LoopRec>,
     bHasPlace: Bool, bLine: Int, bCol: Int, bPackLoops: List<PackLoopRec>,
+    globalTys: HashMap<String, Int>, typeFields: HashMap<String, List<Int>>, variantFields: HashMap<String, List<Int>>, genericFields: HashMap<String, List<Int>>,
+    tyList: List<Int>, yes: Bool,
     ty: Int, op: Op, pend: Pend, root: Int, steps: List<Step>, name: String, id: Int, sig: Sig
 };
 
@@ -196,6 +198,8 @@ fn newLowSt(pbase: Int) -> LowSt ~ {
         bHasReturns: false, bReturns: 0 - 1, bParams: [], bLocals: [], bNextLocal: 1, bBlocks: [], bNextBlock: 1,
         bHasOpen: true, bOpenId: 0, bOpenStmts: [], bScopeNames: [], bScopeBinds: [], bScopeMarks: push([], 0), bLoops: [],
         bHasPlace: false, bLine: 0, bCol: 0, bPackLoops: [],
+        globalTys: HashMap::new(), typeFields: HashMap::new(), variantFields: HashMap::new(), genericFields: HashMap::new(),
+        tyList: [], yes: false,
         ty: 0 - 1, op: noOp(), pend: noPend(), root: 0 - 1, steps: [], name: "", id: 0 - 1,
         sig: Sig { ptys: [], rty: 0 - 1, sizes: [], types: [], writes: [], froms: [] }
     };

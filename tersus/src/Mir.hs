@@ -51,7 +51,7 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (listToMaybe)
 
-import Pretty (renderType, renderVarProof)
+import Pretty (renderType, renderVarProof, renderExpression)
 import Text.ParserCombinators.ReadP (readS_to_P)
 import Text.ParserCombinators.ReadPrec (lift)
 import Text.Read (readPrec)
@@ -309,7 +309,7 @@ data Lowered = Lowered
     , lowStubs :: Set.Set Name
     , lowDeclared :: Set.Set Name -- the structs, enums and traits at the module's top and the functions at its top and in its impls (what a package module's library units do not declare again)
     , lowNested :: Set.Set Name -- the structs, enums and traits declared inside its functions and blocks (which a single file's library units do not declare again either)
-    , lowAssumes :: [VariableProof] -- every `assume` of the module's statements, in order, dead code included
+    , lowAssumes :: [Either VariableProof Expression] -- every `assume` of the module's statements (Left) and every Block::assume call (Right), in order, dead code included
     }
     deriving (Show, Eq)
 
@@ -579,7 +579,7 @@ renderTermination MayDiverge = "~"
 renderTermination (Recursing t) = maybe "~" renderTermination t
 
 renderExpr :: Expression -> String
-renderExpr = renderVarProof . exprToProof
+renderExpr = renderExpression
 
 renderGhostList :: [ValidationStatement] -> String
 renderGhostList stmts = "{ " ++ intercalate "; " (map renderValidation stmts) ++ " }"

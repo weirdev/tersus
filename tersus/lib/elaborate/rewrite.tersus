@@ -757,6 +757,25 @@ fn rwExpr(rw: Rw, e: Int) -> Rw ~ {
         rw = rwExpr(rw, a.f);
         for y in listItems(&rw.nodes, a.xs) { rw = rwExpr(rw, y); };
     };
+    if x is AstExpression::IfExpr {
+        a = x as AstExpression::IfExpr;
+        rw = rwExpr(rw, a.c);
+        rw = rwExpr(rw, a.a);
+        return rwExpr(rw, a.b);
+    };
+    // (a block expression's statements bind names its result sees, and nothing after it)
+    if x is AstExpression::BlockExpr {
+        a = x as AstExpression::BlockExpr;
+        bound = clone(rw.bound);
+        rw = rwStatements(rw, a.xs);
+        rw = rwExpr(rw, a.e);
+        return Rw { bound: bound, ..rw };
+    };
+    if x is AstExpression::Ascribed {
+        a = x as AstExpression::Ascribed;
+        rw = rwExpr(rw, a.e);
+        return rwTypeAt(rw, a.ty);
+    };
     return rw;
 };
 

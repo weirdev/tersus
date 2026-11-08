@@ -320,6 +320,19 @@ putExpression value b0 = case value of
         let (r0, b1) = putExpression f b0
             (r1, b2) = putExpressions xs b1
          in emit "F" [show r0, show r1] b2
+    IfExpr cond yes no ->
+        let (r0, b1) = putExpression cond b0
+            (r1, b2) = putExpression yes b1
+            (r2, b3) = putExpression no b2
+         in emit "IfExpr" [show r0, show r1, show r2] b3
+    BlockExpr stmts result ->
+        let (r0, b1) = putStatements stmts b0
+            (r1, b2) = putExpression result b1
+         in emit "BlockExpr" [show r0, show r1] b2
+    Ascribed expr ty ->
+        let (r0, b1) = putExpression expr b0
+            (r1, b2) = putType ty b1
+         in emit "Ascribed" [show r0, show r1] b2
 
 putTermination :: Termination -> Build -> (Int, Build)
 putTermination value b0 = case value of
@@ -997,6 +1010,22 @@ nodeParsers = Map.fromList
         (f, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         (xs, r1) <- ref nodes (\node -> case node of NExpressions payload -> Just payload; _ -> Nothing)
         pure (NExpression (F f xs), [r0, r1])
+      )
+    , ("IfExpr", \nodes -> do
+        (c, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
+        (a, r1) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
+        (b, r2) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
+        pure (NExpression (IfExpr c a b), [r0, r1, r2])
+      )
+    , ("BlockExpr", \nodes -> do
+        (ss, r0) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
+        (e, r1) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
+        pure (NExpression (BlockExpr ss e), [r0, r1])
+      )
+    , ("Ascribed", \nodes -> do
+        (e, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
+        (t, r1) <- ref nodes (\node -> case node of NType payload -> Just payload; _ -> Nothing)
+        pure (NExpression (Ascribed e t), [r0, r1])
       )
     , ("Shrinks", \nodes -> do
         (e, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
