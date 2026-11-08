@@ -195,10 +195,11 @@ interfaceRoundTrip iface =
                 | interfaceText back /= text -> Just "reserialization changed"
                 | otherwise -> Nothing
 
+-- (one case: each batch of the group is a process of its own, which would compile the tools again)
 interfaceRoundTrips :: IO TestResult
 interfaceRoundTrips = pure $ case toolInterfaces of
     Error e -> Just e
-    Ok ifaces -> firstFailure (testAssertTrue (length ifaces > 20) : map interfaceRoundTrip ifaces)
+    Ok ifaces -> firstFailure (testAssertTrue (length ifaces > 20) : map interfaceRoundTrip ifaces ++ [malformedInterfaces])
 
 -- The checked-in table is the one BuiltinRegistry gives, and reads back as written
 builtinTableCurrent :: IO TestResult
@@ -233,7 +234,7 @@ interfaceRefusals = case toolInterfaces of
         Ok text -> text
         Error e -> e
 
--- (one case, not a case for each: the test tree is made in every process, before any test runs)
+-- (not a case for each: the test tree is made in every process, before any test runs)
 malformedInterfaces :: TestResult
 malformedInterfaces = firstFailure $
     testAssertTrue (length interfaceRefusals == 4)
@@ -604,9 +605,8 @@ testAstData = TestList "testAstData"
     , TestList "chunked decimal integers" [testCase n (haskellChunkedInteger text expected) | (n, text, expected) <- chunkedIntegers]
     , TestList "malformed protocol" [testCase n (firstFailure [haskellAccepted control, haskellRefused bad]) | (n, control, bad) <- refusals]
     , TestCase "packaged tools retain elaborated AST and occurrence types" packageElaboratedRoundTrips
-    , TestCase "module interfaces of the tools and libraries round trip" interfaceRoundTrips
+    , TestCase "module interfaces of the tools and libraries round trip, and malformed ones are refused" interfaceRoundTrips
     , TestCase "the builtin table is BuiltinRegistry's" builtinTableCurrent
-    , TestCase "malformed interfaces are refused" (pure malformedInterfaces)
     , TestList "whole parsed and elaborated source corpus"
         [TestCase (show batch ++ "/4") (corpusHaskell batch) | batch <- [1 .. 4]]
     ]
