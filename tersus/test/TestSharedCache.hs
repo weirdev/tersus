@@ -21,7 +21,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import PreludeSource (mirPackageFiles, listsSource, boxSource)
+import PreludeSource (mirPackageFiles, listsSource, boxSource, validationPackageFiles)
 import Seed (compilerSnapshotHash, parserSeedHash)
 import qualified TersusParser
 import qualified Modules
@@ -32,7 +32,7 @@ import GHC.Clock (getMonotonicTime)
 import qualified PackageCompile
 import qualified MirHousekeeping
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime, setPermissions)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime, setPermissions, withCurrentDirectory)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
@@ -74,8 +74,79 @@ testPhase1Cache = TestList "testPhase1Cache"
     [ TestCase "source unit no-prelude policy isolates validated and compiled cache entries" phase1SourceCache
     , TestCase "selected roots markers sources and resolution conflicts govern no-prelude package reuse" (phase1PackageCache True)
     , TestCase "default package context does not widen filesystem source capture or mask new candidates" (phase1PackageCache False)
+    , TestCase "filesystem validator warm hits retain all helpers without another P1 body request" filesystemWarmParserReuse
+    , TestCase "filesystem snapshot keys bind structure and misses parse exactly their captured bytes" filesystemSnapshotMisses
     , TestCase "in-memory default cached program and ownership ignore unimported declarations and match filesystem loading" phase1InMemoryCache
     ]
+
+filesystemCacheFile :: Modules.LoadOptions -> String -> FilePath -> IO (Maybe FilePath)
+filesystemCacheFile options stage entry = do
+    input <- filesystemPackageCacheInput options entry
+    case input of
+        Error err -> fail err
+        Ok key -> sharedProgramCacheFile ("package-" ++ stage) key
+
+filesystemWarmParserReuse :: IO TestResult
+filesystemWarmParserReuse = withNativeHome $ \home -> withCurrentDirectory home $ do
+    mapM_ (\(path, source) -> createDirectoryIfMissing True (takeDirectory path) >> writeFile path source) validationPackageFiles
+    requests <- newIORef (0 :: Int)
+    let beforeParse = atomicModifyIORef' requests (\n -> (n + 1, ()))
+        request = programFromFilesystemObserved beforeParse Modules.defaultLoadOptions MirHousekeeping.validationEntry
+    first <- request
+    before <- readIORef requests
+    second <- request
+    after <- readIORef requests
+    pure $ case (first, second) of
+        (Ok a, Ok b) -> firstFailure
+            [ testAssertTrue (before > 0)
+            , testAssertEq after before
+            , testAssertEq a b
+            , testAssertEq (Map.size (progFunctions a)) 772
+            , testAssertTrue (all (`Map.member` progFunctions a) ["safeProduct", "containsValue", "commonContext", "driverReadAll"])
+            ]
+        other -> Just (show other)
+
+filesystemSnapshotMisses :: IO TestResult
+filesystemSnapshotMisses = withNativeHome $ \home -> do
+    (entry, dependency) <- packageFixture home
+    let original = "import app::geo; return geo::value();"
+        noise = takeDirectory entry </> "noise" </> "noise.tersus"
+    createDirectoryIfMissing True (takeDirectory noise)
+    writeFile noise "unread invalid source"
+    requests <- newIORef (0 :: Int)
+    changed <- newIORef False
+    let beforeParse = do
+            atomicModifyIORef' requests (\n -> (n + 1, ()))
+            first <- atomicModifyIORef' changed (\done -> (True, not done))
+            when first (writeFile entry "return missingCapturedSource();")
+        request = programFromFilesystemObserved beforeParse Modules.defaultLoadOptions entry
+    first <- request
+    before <- readIORef requests
+    changedResult <- request
+    afterChange <- readIORef requests
+    writeFile entry original
+    restored <- request
+    beforeNoise <- readIORef requests
+    writeFile noise "different unread invalid source"
+    noiseResult <- request
+    afterNoise <- readIORef requests
+    writeFile dependency "fn value() -> Int { affirm 1 = 2; return 1; };"
+    falseResult <- request
+    afterFalse <- readIORef requests
+    writeFile dependency "fn value() -> Int { return 1; };"
+    writeFile (takeDirectory entry </> "geo.tersus") "fn extra() -> Int { return 9; };"
+    competitor <- request
+    pure $ firstFailure
+        [ testAssertEq (first `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 1)))
+        , testAssertErrorContains "missingCapturedSource" changedResult
+        , testAssertTrue (afterChange > before)
+        , testAssertEq first restored
+        , testAssertEq restored noiseResult
+        , testAssertEq afterNoise beforeNoise
+        , testAssertErrorContains "Could not prove:" falseResult
+        , testAssertTrue (afterFalse > afterNoise)
+        , testAssertErrorContains "ambiguous import:" competitor
+        ]
 
 phase1SourceCache :: IO TestResult
 phase1SourceCache = withToolsCacheHome $ \_ -> do
@@ -159,7 +230,7 @@ phase1PackageCache noPrelude = withToolsCacheHome $ \home -> do
             result <- programFromFilesystemWith config entry
             case loaded of
                 Right (PackageResult pkg) -> do
-                    key <- sharedProgramCacheFile "package-program" (Modules.packageInputIdentity pkg)
+                    key <- filesystemCacheFile config "program" entry
                     pure (result, key, Modules.packageSources pkg)
                 _ -> pure (result, Nothing, [])
         resultValue (Ok program, _, _) = MirEval.runProgram program
@@ -2408,9 +2479,7 @@ packageStages = withToolsCacheHome $ \home -> do
     owned <- ownedFromFile entry
     program <- programFromFile entry
     validated <- validatedFromFile entry
-    sources <- Modules.snapshotFromFilesystem entry
-    files <- mapM (\stage -> sharedProgramCacheFile ("package-" ++ stage)
-        (packageCacheInput entry sources)) ["owned", "program", "validated"]
+    files <- mapM (\stage -> filesystemCacheFile Modules.defaultLoadOptions stage entry) ["owned", "program", "validated"]
     present <- mapM (maybe (pure False) doesFileExist) files
     pure $ case (owned, program, validated) of
         (Ok _, Ok _, Ok original) -> firstFailure
@@ -2429,8 +2498,7 @@ packageInputs = withToolsCacheHome $ \home -> do
         ]
     let changed = stepResult "dependency contents" early
         invalid = stepResult "invalid dependency" early
-    sources <- Modules.snapshotFromFilesystem entry
-    invalidFile <- sharedProgramCacheFile "package-validated" (packageCacheInput entry sources)
+    invalidFile <- filesystemCacheFile Modules.defaultLoadOptions "validated" entry
     filed <- maybe (pure False) doesFileExist invalidFile
     late <- runPackageSteps entry
         [ ("module layout", writeFile dependency "fn answer() -> Int [{ }] [{ }] { return 41; };" >> writeFile (takeDirectory dependency </> "extra.tersus") "fn extra() -> Int { return 1; };")

@@ -39,6 +39,8 @@ module TestHarness
     , programFromFiles
     , programFromFilesWith
     , programFromFilesystemWith
+    , programFromFilesystemObserved
+    , filesystemPackageCacheInput
     , validatedOnceNoPrelude
     , compileOnceNoPrelude
     , bootstrapFromFile
@@ -102,6 +104,7 @@ import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
 import qualified Pipeline
+import qualified TersusParser
 import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseWithEquality, runStatements, validateStatements)
 import Types
 import Syntax
@@ -438,9 +441,28 @@ programFromFilesystemWith :: Modules.LoadOptions -> FilePath -> IO (Result Progr
 programFromFilesystemWith options = cachedFilesystemPackage options "program"
 
 cachedFilesystemPackage :: Modules.LoadOptions -> String -> FilePath -> IO (Result Program String)
-cachedFilesystemPackage options stage path = do
-    loaded <- Pipeline.loadFromFilesystemWithOptions options path
-    cachedLoadedPackage stage path loaded
+cachedFilesystemPackage options stage = cachedFilesystemPackageWith (pure ()) options stage
+
+programFromFilesystemObserved :: IO () -> Modules.LoadOptions -> FilePath -> IO (Result Program String)
+programFromFilesystemObserved beforeParse options = cachedFilesystemPackageWith beforeParse options "program"
+
+filesystemPackageCacheInput :: Modules.LoadOptions -> FilePath -> IO (Result String String)
+filesystemPackageCacheInput options path = do
+    snapshot <- Modules.captureFilesystemInput options path Nothing
+    pure $ case snapshot of
+        Left err -> Error err
+        Right (_, _, input) -> Ok input
+
+cachedFilesystemPackageWith :: IO () -> Modules.LoadOptions -> String -> FilePath -> IO (Result Program String)
+cachedFilesystemPackageWith beforeParse options stage path = do
+    snapshot <- Modules.captureFilesystemInput options path Nothing
+    case snapshot of
+        Left err -> pure (Error err)
+        Right (resolver, entry, input) -> do
+            key <- Exception.evaluate (force input)
+            let parser decls source = unsafePerformIO (beforeParse >> Exception.evaluate (TersusParser.parseFileWith decls source))
+            packageStage (packageStageName stage entry) key
+                (validatedPackage entry (Modules.loadFromEntryWith parser resolver entry))
 
 programFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
 programFromFiles = programFromFilesWith Modules.defaultLoadOptions
@@ -499,12 +521,19 @@ cachedLoadedPackage :: String -> FilePath -> Either String LoadResult -> IO (Res
 cachedLoadedPackage stage path loaded = case loaded of
     Left err -> pure (Error err)
     Right (PackageResult pkg) ->
-        let input = Modules.packageInputIdentity pkg
-            validated
-                | matchesEmbeddedPackage path pkg = toolProgram (normalizePath path)
-                | otherwise = compileModulesValidated pkg
-         in packageStage (if stage == "program" && normalizePath path == validationEntry then "validator-reference" else stage) input validated
+        packageStage (packageStageName stage path) (Modules.packageInputIdentity pkg) (validatedPackage path loaded)
     Right _ -> pure (Error (path ++ " is not in a package"))
+
+packageStageName :: String -> FilePath -> String
+packageStageName stage path = if stage == "program" && normalizePath path == validationEntry then "validator-reference" else stage
+
+validatedPackage :: FilePath -> Either String LoadResult -> Result Program String
+validatedPackage path loaded = case loaded of
+    Left err -> Error err
+    Right (PackageResult pkg)
+        | matchesEmbeddedPackage path pkg -> toolProgram (normalizePath path)
+        | otherwise -> compileModulesValidated pkg
+    Right _ -> Error (path ++ " is not in a package")
 
 packageStage :: String -> String -> Result Program String -> IO (Result Program String)
 packageStage stage input validated = sharedProgram ("package-" ++ stage) input $ case stage of
