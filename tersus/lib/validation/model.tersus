@@ -271,7 +271,7 @@ struct ExecutionState { context: ValidatorContext, locals: HashMap<Int, Int>, te
 
 impl Clone for ExecutionState { };
 
-struct MergePair { left: Int, right: Int, joined: Int, ambiguous: Bool };
+struct MergePair { left: Int, right: Int, joined: Int };
 
 impl Clone for MergePair { };
 
