@@ -777,6 +777,18 @@ selfHostedQueryFamilies program =
                      in case runNamedFunction program "executeSteps" [initial, MList [assume, obligation]] of
                             Ok (Just (MData "ExecutionResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt 0))
                             result -> Just ("Unexpected saved-comparison result: " ++ show result)
+                -- Term 3 is push(1, 2), term 4 is size(1), term 6 is a get of the
+                -- old list at term 5 (an index below size(1) with no lower bound),
+                -- and term 40 is the same read of the pushed list. Tracing 40 back
+                -- to the old list would recover the element fact a push refuses to
+                -- carry, so it must happen only with the index proved in range.
+                readThroughPushContext extraConstants extraOrders = MData "ValidatorContext" [("equalities", MList []), ("applications", MList (map app [(3, -16, [1, 2]), (4, -13, [1]), (6, -14, [1, 5]), (40, -14, [3, 5])])), ("constants", MList (map constant ((7, 0, 0) : extraConstants))), ("orders", MList (map mixedFact extraOrders)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [diffFact (5, 4, -1)])]
+                checkReadThroughPush extraConstants extraOrders expected =
+                    case runNamedFunction program "readThroughSequence" [readThroughPushContext extraConstants extraOrders, MInt 40, MInt 3, MInt 5] of
+                        Ok (Just (MData "ValidatorContext" fields)) -> case lookup "applications" fields of
+                            Just (MList traced) -> testAssertEq (app (40, -14, [1, 5]) `elem` traced) expected
+                            other -> Just ("Unexpected traced applications: " ++ show other)
+                        result -> Just ("Unexpected read-through result: " ++ show result)
                 execEndDone = MData "ExecutionEnd::Done" []
                 execJump i = MData "ExecutionEnd::Jump" [("target", MInt i)]
                 execBranch = MData "ExecutionEnd::Branch" [("yes", MInt 1), ("no", MInt 2), ("yesSteps", MList []), ("noSteps", MList [])]
@@ -950,6 +962,9 @@ selfHostedQueryFamilies program =
                       , checkExecution [scoped [assumeTerms 1 2], checkTerms 0 1 2] 1 1
                       , checkExecution [assignLocal 0 (termRef 1), scoped [assignLocal 1 (localRef 99)]] 2 1
                       , checkExecution [nestScoped 16] 0 (-1), checkExecution [nestScoped 17] 2 0
+                      , checkReadThroughPush [] [] False
+                      , checkReadThroughPush [] [(7, 5, False)] True
+                      , checkReadThroughPush [(5, 0, -1), (4, 0, 2)] [] False
                       , checkExecution [MData "ExecutionStep::Unsupported" []] 2 0
                       ])
                 , ("driver",

@@ -303,6 +303,23 @@ testListProofs :: Test
 testListProofs =
     let node = "struct Node { value: Int, prev: Int, next: Int };"
         nonNegative l = "affirm forall i in 0..size(" ++ l ++ "): get(" ++ l ++ ", i) >= 0;"
+        readOverPush bounds affirmed argument =
+            "fn f(l: &List<Int>, j: Int) -> Int [{ "
+                ++ bounds
+                ++ " }] [{ }] { assume get(l, j) = 5; a = push(clone(l), 7); affirm "
+                ++ affirmed
+                ++ "; return 0; };\nreturn f("
+                ++ argument
+                ++ ");\n"
+        negativeIndex = "affirm size(l) = 0; affirm j < size(l);"
+        rangeOverPush bounds affirmed argument =
+            "fn f(b: &List<Int>, c: &List<Int>) -> Int [{ "
+                ++ bounds
+                ++ " }] [{ }] { a = push(clone(b), 7); affirm "
+                ++ affirmed
+                ++ "; return 0; };\nreturn f("
+                ++ argument
+                ++ ");\n"
      in testCaseSeq
             "testListProofs"
             [ -- Case splits on the guards that block a forall: the index set by one update, then another
@@ -316,6 +333,40 @@ testListProofs =
             , parseValidateFailProgramHelper (node ++ "fn f(nodes: List<Node>, p: Int, v: Int) -> List<Node> [{ affirm size(nodes) > 0; affirm p >= 0; affirm p < size(nodes); affirm forall i in 0..size(nodes): get(nodes, i).next >= 0; affirm forall i in 0..size(nodes): get(nodes, i).next < size(nodes); }] [{ affirm forall i in 0..size(return): get(return, i).next < size(return); }] { q = get(nodes, p).next; n = size(nodes); out = push(nodes, Node { value: v, prev: p, next: n + 1 }); return out; };") "Could not prove: forall i in 0..size(return): get(return, i).next < size(return)"
             , -- A disequality is the same in both directions
               parseValidProgramHelper "fn f(a: Int, b: Int) -> Int [{ affirm a != b; }] [{ }] { affirm b != a; return 0; };"
+            , -- A get written in a proof is a term with no bounds of its own, so
+              -- a push does not carry it: this invariant holds on entry and is
+              -- assumed of a list havoced to an unknown size, where the element
+              -- the push defines (index size(l), which is 0 here) would
+              -- otherwise contradict it and prove everything on that path --
+              -- including that the divisor below is not zero, which it is.
+              pipelineRejected "fn f() -> Int { l = [5]; i = 0; x = 9; while i < 2 [{ affirm i >= 0; affirm get(l, 0) = 5; }] shrinks 2 - i { if size(l) = 0 { a = push(clone(l), 7); x = 10 / (size(a) - 1); } else { l = pop(l); }; i = i + 1; }; return x; };\nreturn f();\n" "Could not prove: an obligation could not be proved by the Tersus validator"
+            , -- A read the code made is in range, and a push keeps it: at an
+              -- index that is a number, and at one that is only known to be
+              -- between zero and the size
+              parseValidProgramHelper "l = [4, 5]; v = get(l, 1); r = push(l, 9); affirm get(r, 1) = v; affirm get(r, 1) = 5;"
+            , parseValidProgramHelper "fn f(l: List<Int>, j: Int) -> Int [{ affirm j >= 0; affirm j < size(l); }] [{ }] { v = get(l, j); r = push(l, 7); affirm get(r, j) = v; return 0; };"
+            , -- The goal splitter is the third way a read crosses a push: it
+              -- splits a read of the pushed list at the write index and
+              -- elsewhere, and the elsewhere arm equates the read with a fresh
+              -- read of the old list. That equation needs the index to be in
+              -- the old list, so a ghost get below the old length whose sign is
+              -- unknown, or known negative, does not reach it.
+              pipelineRejected (readOverPush "affirm j < size(l);" "get(a, j) = 5" "[3], 0") "Could not prove: get(a, j) = 5"
+            , pipelineRejected (readOverPush negativeIndex "get(a, j) = 5" "[], 0 - 1") "Could not prove: get(a, j) = 5"
+            , -- and the refusal is a refusal, not a contradictory path: the
+              -- opposite element value and a false equation stay unproved there
+              pipelineRejected (readOverPush negativeIndex "get(a, j) = 6" "[], 0 - 1") "Could not prove: get(a, j) = 6"
+            , pipelineRejected (readOverPush negativeIndex "1 = 2" "[], 0 - 1") "Could not prove: 1 = 2"
+            , -- with the index proved to be in the old list, the same program passes
+              pipelineValid (readOverPush "affirm j >= 0; affirm j < size(l);" "get(a, j) = 5" "[5], 0")
+            , -- A fact that two lists agree over a range is used at a read of a
+              -- push onto one of them, and its own lower bound is where that
+              -- read's lower bound came from. A range that starts below zero
+              -- gave one for free, so the index needs a bound of its own.
+              pipelineRejected (rangeOverPush "affirm size(b) = 0; affirm forall i in (0 - 1)..size(b): get(c, i) = get(b, i);" "get(a, 0 - 1) = get(c, 0 - 1)" "[], []") "Could not prove: get(a, 0 - 1) = get(c, 0 - 1)"
+            , pipelineRejected (rangeOverPush "affirm size(b) = 0; affirm forall i in (0 - 1)..size(b): get(c, i) = get(b, i);" "1 = 2" "[], []") "Could not prove: 1 = 2"
+            , -- and over a range that starts at zero the read still crosses
+              pipelineValid (rangeOverPush "affirm size(b) = 1; affirm forall i in 0..size(b): get(c, i) = get(b, i);" "get(a, 0) = get(c, 0)" "[4], [4]")
             ]
 
 testMulDivNegative :: Test
