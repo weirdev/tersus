@@ -1,12 +1,15 @@
-import data::ast::ast { AstBuiltin, AstNode, AstOptName, AstProof, AstValidation, AstValue };
+import data::ast::ast { AstBuiltin, AstExpression, AstNode, AstOptName, AstProof, AstValidation, AstValue };
 import data::codec::codec { catStrings };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, builtinValueOf };
-import elaborate::calls { bindInner, builtinIndexType, builtinRecord, checkCall, ctorArgTypes, inScope, keyType, lookupProofVar, lookupVar, popScope, pushScope, valueInt, valueType };
+import elaborate::calls { bindInner, builtinIndexType, builtinRecord, checkCall, ctorArgTypes, emitIntValue, inScope, keyType, lookupProofVar, lookupVar, popScope, pushScope, teHead, valueInt, valueType };
+import elaborate::check { fnSigOf };
 import elaborate::core { arrayOk, baseNameOf, checkConstruct, holdsGhost, isBoxTy, isListTy, literalOk, readField };
-import elaborate::expr { Folded, argsCountText, arrayCall, constantArithmetic, derefOnFailure, derefStepNeeded, isLookThroughKey, noConstantSize, pathOf, permissionType, takesNoPermission, traitPath };
-import elaborate::out { emit, emitName, emitProofs, emitValidations };
-import elaborate::records { listItems, nameText, namesText, nodeIn };
-import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, expect, fail, freshVar, indexIn, kindOf, listTy, namedTy, notModelled, render, simpleTy, sizeConst, tyAt, typeError, zonk };
+import elaborate::expr { Folded, argsCountText, arrayCall, constantArithmetic, derefOwner, derefTarget, emitFieldValue, functionOf, genericCall, isLookThroughKey, noConstantSize, nodesOf, pathOf, permissionType, takesNoPermission, traitPath };
+import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
+import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
+import elaborate::refs { callOf };
+import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, endTry, expect, fail, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk };
+import elaborate::traits { emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof [{ }] [{ }] {
     node = nodeIn(&st.nodes, p);
@@ -43,8 +46,8 @@ fn inferProof(st: St, p: Int) -> St ~ {
     if st.status != 0 { return st; };
     scrutinee = proofOf(st, p);
     match scrutinee {
-        AstProof::ATerm { n: n } => { varName = nameText(&st.nodes, n); st = lookupProofVar(st, &varName); return St { nid: p, ..st }; },
-        AstProof::BVar { n: n } => { varName = nameText(&st.nodes, n); st = lookupVar(st, &varName); return St { nid: p, ..st }; },
+        AstProof::ATerm { n: n } => { termName = nameText(&st.nodes, n); st = lookupProofVar(st, &termName); return St { nid: p, ..st }; },
+        AstProof::BVar { n: n } => { termName = nameText(&st.nodes, n); st = lookupVar(st, &termName); return St { nid: p, ..st }; },
         AstProof::CTerm { v: v } => { st = valueType(st, v); return St { nid: p, ..st }; },
         AstProof::Forall { n: n, gs: gs, b: b } => {
             index = nameText(&st.nodes, n);
@@ -85,7 +88,18 @@ fn inferProofCall(st: St, p: Int, funct: Int, args: &List<Int>) -> St ~ {
         rec = builtinRecord(st, b);
         key = builtinKey(st, b);
         if key = "OldOf" { return fail(st, "Type error: old(...) is only written in a postcondition, of the place an update parameter is to"); };
-        if key = "DerefOf" && size(args) = 1 { return notModelled(st, "references"); };
+        if key = "DerefOf" && size(args) = 1 {
+            st = inferProof(st, get(args, 0));
+            if st.status != 0 { return st; };
+            innerNode = st.nid;
+            st = zonk(st, st.ty);
+            referent = st.ty;
+            rk = kindOf(st, referent);
+            if rk = 10 || rk = 11 { referent = argAt(st, referent, 0); };
+            innerArgs = push([], innerNode);
+            st = emitFApp(st, funct, &innerArgs);
+            return St { ty: referent, ..st };
+        };
         if rec is AstBuiltin::FieldBuiltin && size(args) = 1 { return proofField(st, funct, rec as AstBuiltin::FieldBuiltin, get(args, 0)); };
         if rec is AstBuiltin::Ctor {
             ctor = rec as AstBuiltin::Ctor;
@@ -169,14 +183,44 @@ fn inferProofCall(st: St, p: Int, funct: Int, args: &List<Int>) -> St ~ {
     if fb >= 0 && size(argTys) > 0 {
         key = builtinKey(st, fb);
         if isLookThroughKey(&key) {
-            st = derefStepNeeded(st, get(argTys, 0));
-            if st.status != 0 { return st; };
+            looking = true;
+            t = get(argTys, 0);
+            n = get(argNodes, 0);
+            while looking [{ }] ~ {
+                st = derefStepProof(st, t, n);
+                if st.status != 0 { return st; };
+                if st.ok { t = st.ty; n = st.nid; } else { looking = false; };
+            };
+            argTys = set(argTys, 0, t);
+            argNodes = set(argNodes, 0, n);
         };
         i = builtinIndex(st, &key);
         if st.methodOf.contains(i) {
+            fname = st.methodOf.lookup(i, "");
             st = zonk(st, get(argTys, 0));
             x = tyAt(st, st.ty);
-            if x.kind = 4 && x.name != "List" && x.name != "Box" { return notModelled(st, "a function of a struct's impl"); };
+            if x.kind = 4 && x.name = "Self" {
+                found = 0 - 1;
+                for f in &st.traitSelf {
+                    if found < 0 && traitFnName(st, f) = fname { found = f; };
+                };
+                if found >= 0 {
+                    tf = traitFnOf(st, found);
+                    st = fnSigOf(st, tf.ps, tf.sig);
+                    if size(st.fnSig.ptys) = size(argTys) {
+                        rty = st.fnSig.rty;
+                        st = emitFApp(st, functNode, &argNodes);
+                        return St { ty: rty, ..st };
+                    };
+                };
+                return typeError(st, catStrings(catStrings(catStrings(clone(fname), " is called on a Self, which the trait has no function "), clone(fname)), " for"));
+            };
+            if x.kind = 4 && x.name != "List" && x.name != "Box" {
+                owner = clone(x.name);
+                st = resolveAssociated(st, &owner, &fname);
+                if st.status != 0 { return st; };
+                return ghostCall(st, 0 - 1, clone(get(st.names, 0)), &argTys, &argNodes);
+            };
         };
     };
     return proofGeneral(st, functNode, &argTys, &argNodes);
@@ -272,14 +316,32 @@ fn proofField(st: St, funct: Int, field: AstBuiltin::FieldBuiltin, structProof: 
     if st.status != 0 { return st; };
     structNode = st.nid;
     structTy = st.ty;
-    st = readField(st, &owner, &name, structTy);
-    if st.status = 1 { return derefOnFailure(st, structTy); };
+    reading = true;
+    while reading [{ }] ~ {
+        next = st.next;
+        st = beginTry(st);
+        st = readField(st, &owner, &name, structTy);
+        if st.status = 1 {
+            st = undoTry(st, next);
+            st = derefStepProof(st, structTy, structNode);
+            if st.status != 0 { return st; };
+            if st.ok { structTy = st.ty; structNode = st.nid; } else {
+                st = readField(st, &owner, &name, structTy);
+                reading = false;
+            };
+        } else { st = endTry(st); reading = false; };
+    };
     if st.status != 0 { return st; };
     t = st.ty;
     st = zonk(st, structTy);
-    if size(owner.bytes) = 0 && isBoxTy(st, st.ty) && (name = "addr" || name = "blk") { return notModelled(st, "the storage of a Box"); };
+    fieldHead = funct;
+    if size(owner.bytes) = 0 && isBoxTy(st, st.ty) && (name = "addr" || name = "blk") {
+        st = emitFieldValue(st, instanceName(st, st.ty), clone(name));
+        st = emit(st, AstNode::Proof { value: AstProof::CTerm { v: st.nid } });
+        fieldHead = st.nid;
+    };
     callArgs = push([], structNode);
-    st = emitFApp(st, funct, &callArgs);
+    st = emitFApp(st, fieldHead, &callArgs);
     return St { ty: t, ..st };
 };
 
@@ -289,15 +351,92 @@ fn proofOrdinaryCall(st: St, funct: Int, name: String, args: &List<Int>) -> St ~
     if st.status != 0 { return st; };
     argTys = clone(st.te.types);
     argNodes = clone(st.outs);
-    if st.templates.contains(&name) { return notModelled(st, "functions with bounds"); };
-    if size(name.bytes) > 0 && get(name.bytes, 0) = toByte(60) { return notModelled(st, "impls"); };
+    // (a function with bounds is the function made for the types of the arguments)
+    if st.templates.contains(&name) {
+        tm = st.templates.lookup(&name, emptyTemplate());
+        st = zeroArguments(st, &argTys);
+        fakes = clone(st.tes);
+        st = templateCall(st, clone(name), tm, &fakes);
+        if st.status != 0 { return st; };
+        t = teHead(&st.te);
+        call = callOf(st, st.te.node);
+        instance = varName(st, call.head);
+        st = sizeProofs(st, &call.args, size(argTys));
+        all = clone(argNodes);
+        for n in &st.outs { all = push(all, n); };
+        st = emitATerm(st, instance);
+        st = emitFApp(st, st.nid, &all);
+        return St { ty: t, ..st };
+    };
+    if size(name.bytes) > 0 && get(name.bytes, 0) = toByte(60) { return ghostCall(st, funct, name, &argTys, &argNodes); };
     if traitPath(&name) {
         path = pathOf(&name);
-        if st.traits.contains(&path) || st.types.contains(&path) || st.generics.contains(&path) { return notModelled(st, "traits and impls"); };
+        function = functionOf(&name);
+        if st.traitFns.contains(&path) {
+            fns = st.traitFns.lookup(&path, []);
+            st = ownerThroughTrait(st, &path, &fns, &function, &argTys);
+            if st.status != 0 { return st; };
+            owner = clone(get(st.names, 0));
+            return ghostCall(st, funct, implFunctionName(&owner, &path, &function), &argTys, &argNodes);
+        };
+        if st.types.contains(&path) || st.generics.contains(&path) {
+            st = resolveAssociated(st, &path, &function);
+            if st.status != 0 { return st; };
+            return ghostCall(st, funct, clone(get(st.names, 0)), &argTys, &argNodes);
+        };
         return proofGeneral(st, funct, &argTys, &argNodes);
     };
     if st.fns.contains(&name) { return ghostCall(st, funct, name, &argTys, &argNodes); };
     return proofGeneral(st, funct, &argTys, &argNodes);
+};
+
+// The arguments a proof's call gives, as expressions of their types (tLeaf t (Val (VInt 0))); st.tes
+fn zeroArguments(st: St, argTys: &List<Int>) -> St ~ {
+    st = emitIntValue(st, 0);
+    st = emitVal(st, st.nid);
+    zero = st.nid;
+    out = [];
+    for t in argTys { out = push(out, TE { node: zero, types: push([], t) }); };
+    return St { tes: out, ..st };
+};
+
+// The size arguments a call was given after its first n arguments, as proofs (exprToProof); st.outs
+fn sizeProofs(st: St, args: &List<Int>, n: Int) -> St ~ {
+    out = [];
+    i = n;
+    while i < size(args) [{ affirm i >= 0; }] ~ {
+        e = get(args, i);
+        ex = exprOf(st, e);
+        if ex is AstExpression::Val { st = emit(st, AstNode::Proof { value: AstProof::CTerm { v: (ex as AstExpression::Val).v } }); } else {
+            st = emitATerm(st, varName(st, e));
+        };
+        out = push(out, st.nid);
+        i = i + 1;
+    };
+    return St { outs: out, ..st };
+};
+
+fn emitATerm(st: St, name: String) -> St [{ }] [{ }] {
+    st = emitName(st, name);
+    return emit(st, AstNode::Proof { value: AstProof::ATerm { n: st.nid } });
+};
+
+// A proof looked through one step, by a call of its type's deref (derefStepProof): st.ok, st.ty and st.nid the call
+fn derefStepProof(st: St, t0: Int, node: Int) -> St ~ {
+    st = zonk(st, t0);
+    t = st.ty;
+    if isBoxTy(st, t) { return St { ok: false, ty: t0, nid: node, ..st }; };
+    st = derefTarget(st, t);
+    if st.status != 0 { return st; };
+    if !st.ok { return St { ty: t0, nid: node, ..st }; };
+    st = derefOwner(st, t);
+    if st.status != 0 { return st; };
+    owner = clone(get(st.names, 0));
+    argTys = push([], t);
+    argNodes = push([], node);
+    st = ghostCall(st, 0 - 1, implFunctionName(&owner, "Deref", "deref"), &argTys, &argNodes);
+    if st.status != 0 { return st; };
+    return St { ok: true, ..st };
 };
 
 fn ghostCall(st: St, funct: Int, name: String, argTys: &List<Int>, argNodes: &List<Int>) -> St ~ {
@@ -306,11 +445,25 @@ fn ghostCall(st: St, funct: Int, name: String, argTys: &List<Int>, argNodes: &Li
     ft = st.ty;
     st = zonk(st, ft);
     x = tyAt(st, st.ty);
-    if x.kind = 13 { return notModelled(st, "a function with sizes in a proof"); };
+    if x.kind = 13 {
+        st = zeroArguments(st, argTys);
+        fakes = clone(st.tes);
+        st = genericCall(st, clone(name), &x.sizes, &x.types, get(x.args, 0), &fakes);
+        if st.status != 0 { return st; };
+        t = st.ty;
+        given = nodesOf(&st.tes);
+        st = sizeProofs(st, &given, size(argTys));
+        all = clone(argNodes);
+        for n in &st.outs { all = push(all, n); };
+        st = emitATerm(st, name);
+        st = emitFApp(st, st.nid, &all);
+        return St { ty: t, ..st };
+    };
     st = checkCall(st, &name, ft, argTys);
     if st.status != 0 { return st; };
     t = st.ty;
-    st = emitFApp(st, funct, argNodes);
+    st = emitATerm(st, name);
+    st = emitFApp(st, st.nid, argNodes);
     return St { ty: t, ..st };
 };
 

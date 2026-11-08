@@ -1,0 +1,363 @@
+import data::ast::ast { AstBuiltin, AstExpression };
+import data::codec::codec { catStrings };
+import elaborate::builtins { builtinKey, builtinOfValue };
+import elaborate::calls { builtinRecord, lookupVar };
+import elaborate::core { holdsRef };
+import elaborate::records { exprOf, isVar, listItems, nameText, varName };
+import elaborate::state { Place, St, indexIn, joinWith, kindOf, typeError, zonk };
+
+// A call of an expression record: its head, its arguments, the key of the builtin its head is when that is a
+// value (key), the name its head is when that is a variable (callee), and the field a field builtin reads
+struct Call { ok: Bool, head: Int, args: List<Int>, key: String, callee: String, field: String };
+impl Clone for Call { };
+
+fn callOf(st: &St, e: Int) -> Call [{ }] [{ }] {
+    none = Call { ok: false, head: 0 - 1, args: [], key: "", callee: "", field: "" };
+    ex = exprOf(st, e);
+    if !(ex is AstExpression::F) { return none; };
+    f = ex as AstExpression::F;
+    args = listItems(&st.nodes, f.xs);
+    hd = exprOf(st, f.f);
+    if hd is AstExpression::Var { return Call { ok: true, head: f.f, args: args, key: "", callee: nameText(&st.nodes, (hd as AstExpression::Var).n), field: "" }; };
+    if hd is AstExpression::Val {
+        b = builtinOfValue(st, (hd as AstExpression::Val).v);
+        if b >= 0 {
+            field = "";
+            rec = builtinRecord(st, b);
+            if rec is AstBuiltin::FieldBuiltin { field = nameText(&st.nodes, (rec as AstBuiltin::FieldBuiltin).n); };
+            return Call { ok: true, head: f.f, args: args, key: builtinKey(st, b), callee: "", field: field };
+        };
+    };
+    return Call { ok: true, head: f.f, args: args, key: "", callee: "", field: "" };
+};
+
+fn noPlace() -> Place [{ }] [{ }] { return Place { ok: false, root: "", steps: [] }; };
+
+fn isGetCall(c: &Call) -> Bool [{ }] [{ }] {
+    return size(c.args) = 2 && (c.key = "Get" || c.callee = "get");
+};
+
+fn placeSteps(st: &St, e: Int) -> Place ~ {
+    if isVar(st, e) { return Place { ok: true, root: varName(st, e), steps: [] }; };
+    c = callOf(st, e);
+    if !c.ok { return noPlace(); };
+    if c.key = "Field" && size(c.args) = 1 {
+        p = placeSteps(st, get(c.args, 0));
+        if !p.ok { return p; };
+        return Place { steps: push(p.steps, clone(c.field)), ..p };
+    };
+    if isGetCall(&c) {
+        p = placeSteps(st, get(c.args, 0));
+        if !p.ok { return p; };
+        return Place { steps: push(p.steps, ""), ..p };
+    };
+    if c.key = "DerefOf" && size(c.args) = 1 && isVar(st, get(c.args, 0)) {
+        return Place { ok: true, root: varName(st, get(c.args, 0)), steps: [] };
+    };
+    return noPlace();
+};
+
+// The reference a dereference place is through (derefRoot); -1 for none
+fn derefRoot(st: &St, e: Int) -> Int ~ {
+    c = callOf(st, e);
+    if !c.ok { return 0 - 1; };
+    if c.key = "Field" && size(c.args) = 1 { return derefRoot(st, get(c.args, 0)); };
+    if isGetCall(&c) { return derefRoot(st, get(c.args, 0)); };
+    if c.key = "DerefOf" && size(c.args) = 1 { return get(c.args, 0); };
+    return 0 - 1;
+};
+
+fn placeForm(st: &St, e: Int) -> Bool ~ {
+    if isVar(st, e) { return true; };
+    c = callOf(st, e);
+    if !c.ok { return false; };
+    if c.key = "Field" && size(c.args) = 1 { return placeForm(st, get(c.args, 0)); };
+    if isGetCall(&c) { return placeForm(st, get(c.args, 0)); };
+    return c.key = "DerefOf" && size(c.args) = 1;
+};
+
+// The variable a place starts from (placeRoot); "" for none
+fn placeRoot(st: &St, e: Int) -> String ~ {
+    if isVar(st, e) { return varName(st, e); };
+    c = callOf(st, e);
+    if !c.ok { return ""; };
+    if (c.key = "Field" && size(c.args) = 1) || isGetCall(&c) || (c.key = "DerefOf" && size(c.args) = 1) { return placeRoot(st, get(c.args, 0)); };
+    return "";
+};
+
+fn aliasIndex(st: &St, name: &String) -> Int [{ }] [{ }] { return indexIn(&st.aliasNames, name); };
+
+// The place a root and steps are really of, through the references a local holds (resolveRefPlace)
+fn resolveRefPlace(st: &St, root: String, steps: List<String>) -> Place ~ {
+    seen = [];
+    var = root;
+    path = steps;
+    going = true;
+    while going [{ }] ~ {
+        if indexIn(&seen, &var) >= 0 { going = false; } else {
+            i = aliasIndex(st, &var);
+            if i < 0 || i >= size(st.aliasPlaces) { going = false; } else {
+                alias = get(st.aliasPlaces, i);
+                seen = push(seen, clone(var));
+                joined = clone(alias.steps);
+                for s in &path { joined = push(joined, clone(s)); };
+                var = clone(alias.root);
+                path = joined;
+            };
+        };
+    };
+    return Place { ok: true, root: var, steps: path };
+};
+
+fn writesTarget(place: &Place) -> String [{ }] [{ }] {
+    if size(place.steps) > 0 && size(get(place.steps, 0).bytes) > 0 { return catStrings(catStrings(place.root, "."), get(place.steps, 0)); };
+    return clone(place.root);
+};
+
+fn withinWrites(writes: &List<String>, place: &Place) -> Bool [{ }] [{ }] {
+    target = writesTarget(place);
+    for w in writes {
+        if w = place.root || w = target { return true; };
+    };
+    return false;
+};
+
+// The place an expression that is given for updating is of (updatePlaceOf)
+fn updatePlaceOf(st: &St, e: Int) -> Place ~ {
+    if isVar(st, e) { return resolveRefPlace(st, varName(st, e), []); };
+    c = callOf(st, e);
+    if c.ok && c.key = "BorrowMutOf" && size(c.args) = 1 {
+        p = placeSteps(st, get(c.args, 0));
+        if !p.ok { return p; };
+        return resolveRefPlace(st, clone(p.root), clone(p.steps));
+    };
+    return noPlace();
+};
+
+fn writesText(st: &St) -> String [{ }] [{ }] {
+    return catStrings(catStrings("(writes(", joinWith(&st.writes, ", ")), "))");
+};
+
+// A call that is given a place of an update parameter for updating may change it (checkCallWrites)
+fn checkCallWrites(st: St, e: Int) -> St ~ {
+    if st.status != 0 || size(st.writes) = 0 { return st; };
+    place = updatePlaceOf(st, e);
+    if place.ok && indexIn(&st.mutParams, &place.root) >= 0 && !withinWrites(&st.writes, &place) {
+        return typeError(st, catStrings(catStrings(catStrings("this call may change ", writesTarget(&place)), ", which the writes clause of the function does not allow "), writesText(st)));
+    };
+    return st;
+};
+
+fn refResultIndex(st: &St, name: &String) -> Int [{ }] [{ }] { return indexIn(&st.refResultNames, name); };
+
+fn putRefResult(st: St, name: String, params: List<String>, froms: List<String>) -> St [{ }] [{ }] {
+    i = indexIn(&st.refResultNames, &name);
+    if i >= 0 && i < size(st.refResultParams) && i < size(st.refResultFroms) {
+        return St { refResultParams: set(st.refResultParams, i, params), refResultFroms: set(st.refResultFroms, i, froms), ..st };
+    };
+    return St { refResultNames: push(st.refResultNames, name), refResultParams: push(st.refResultParams, params), refResultFroms: push(st.refResultFroms, froms), ..st };
+};
+
+// The parameters and the from-parameters of a function that returns a reference, as the table of them has them (ok false
+// when it has none)
+struct Froms { ok: Bool, params: List<String>, froms: List<String> };
+impl Clone for Froms { };
+
+fn fromsOf(st: &St, name: &String) -> Froms [{ }] [{ }] {
+    i = refResultIndex(st, name);
+    if i >= 0 && i < size(st.refResultParams) && i < size(st.refResultFroms) {
+        return Froms { ok: true, params: clone(get(st.refResultParams, i)), froms: clone(get(st.refResultFroms, i)) };
+    };
+    return Froms { ok: false, params: [], froms: [] };
+};
+
+// What a returned reference is from, as the root it starts from (exprReturnOrigin)
+fn exprReturnOrigin(st: &St, e: Int) -> Place ~ {
+    if isVar(st, e) { return resolveRefPlace(st, varName(st, e), []); };
+    c = callOf(st, e);
+    if !c.ok { return noPlace(); };
+    if (c.key = "BorrowOf" || c.key = "BorrowMutOf") && size(c.args) = 1 {
+        p = placeSteps(st, get(c.args, 0));
+        if !p.ok { return p; };
+        return resolveRefPlace(st, clone(p.root), clone(p.steps));
+    };
+    if size(c.callee.bytes) > 0 {
+        known = fromsOf(st, &c.callee);
+        if known.ok { return firstOrigin(st, &known.params, &known.froms, &c.args); };
+        if c.callee = st.current { return firstOrigin(st, &st.params, &st.resultFrom, &c.args); };
+    };
+    return noPlace();
+};
+
+fn firstOrigin(st: &St, params: &List<String>, froms: &List<String>, args: &List<Int>) -> Place ~ {
+    i = 0;
+    while i < size(params) && i < size(args) [{ affirm i >= 0; }] ~ {
+        if indexIn(froms, &get(params, i)) >= 0 {
+            arg = get(args, i);
+            p = placeSteps(st, arg);
+            if p.ok { return resolveRefPlace(st, clone(p.root), []); };
+            return exprReturnOrigin(st, arg);
+        };
+        i = i + 1;
+    };
+    return noPlace();
+};
+
+// Every root a returned value's places may be from (exprOriginCandidates)
+fn exprOriginCandidates(st: &St, e: Int) -> List<String> ~ {
+    c = callOf(st, e);
+    if c.ok && size(c.callee.bytes) > 0 {
+        known = fromsOf(st, &c.callee);
+        if known.ok { return argCandidates(st, &known.params, &known.froms, &c.args); };
+        if c.callee = st.current { return argCandidates(st, &st.params, &st.resultFrom, &c.args); };
+    };
+    single = exprReturnOrigin(st, e);
+    if single.ok { return push([], clone(single.root)); };
+    return [];
+};
+
+fn argCandidates(st: &St, params: &List<String>, froms: &List<String>, args: &List<Int>) -> List<String> ~ {
+    out = [];
+    i = 0;
+    while i < size(params) && i < size(args) [{ affirm i >= 0; }] ~ {
+        if indexIn(froms, &get(params, i)) >= 0 {
+            arg = get(args, i);
+            p = placeSteps(st, arg);
+            if p.ok {
+                out = push(out, clone(resolveRefPlace(st, clone(p.root), []).root));
+            } else {
+                for r in exprOriginCandidates(st, arg) { out = push(out, clone(r)); };
+            };
+        };
+        i = i + 1;
+    };
+    return out;
+};
+
+// What a value that is or holds references is from, as the roots its places start from (exprRefOrigins); st.names
+fn exprRefOrigins(st: St, e: Int) -> St ~ {
+    if st.status != 0 { return St { names: [], ..st }; };
+    if isVar(st, e) {
+        v = varName(st, e);
+        i = indexIn(&st.originNames, &v);
+        if i >= 0 && i < size(st.originRoots) { return St { names: clone(get(st.originRoots, i)), ..st }; };
+        if indexIn(&st.readOnly, &v) >= 0 || indexIn(&st.mutParams, &v) >= 0 {
+            return St { names: push([], clone(resolveRefPlace(st, clone(v), []).root)), ..st };
+        };
+        st = lookupVar(st, &v);
+        if st.status != 0 { return St { names: [], ..st }; };
+        st = zonk(st, st.ty);
+        k = kindOf(st, st.ty);
+        if k = 10 || k = 11 { return St { names: exprOriginCandidates(st, e), ..st }; };
+        return St { names: [], ..st };
+    };
+    c = callOf(st, e);
+    if c.ok && c.key = "Ctor" {
+        out = [];
+        for a in &c.args {
+            st = exprRefOrigins(st, a);
+            for r in &st.names { out = push(out, clone(r)); };
+        };
+        return St { names: out, ..st };
+    };
+    if c.ok && c.key = "Field" && size(c.args) = 1 { return exprRefOrigins(st, get(c.args, 0)); };
+    return St { names: exprOriginCandidates(st, e), ..st };
+};
+
+fn putAlias(st: St, name: &String, place: Place) -> St [{ }] [{ }] {
+    i = indexIn(&st.aliasNames, name);
+    if i >= 0 && i < size(st.aliasPlaces) { return St { aliasPlaces: set(st.aliasPlaces, i, place), ..st }; };
+    return St { aliasNames: push(st.aliasNames, clone(name)), aliasPlaces: push(st.aliasPlaces, place), ..st };
+};
+
+fn dropAlias(st: St, name: &String) -> St [{ }] [{ }] {
+    names = [];
+    places = [];
+    i = 0;
+    while i < size(st.aliasNames) && i < size(st.aliasPlaces) [{ affirm i >= 0; }] ~ {
+        if get(st.aliasNames, i) != clone(name) {
+            names = push(names, clone(get(st.aliasNames, i)));
+            places = push(places, clone(get(st.aliasPlaces, i)));
+        };
+        i = i + 1;
+    };
+    return St { aliasNames: names, aliasPlaces: places, ..st };
+};
+
+// What a binding makes the variable an alias of (recordAlias)
+fn recordAlias(st: St, var: &String, t: Int, e: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    if isVar(st, e) {
+        fname = varName(st, e);
+        known = fromsOf(st, &fname);
+        i = refResultIndex(st, &fname);
+        if i >= 0 { st = putRefResult(st, clone(var), known.params, known.froms); };
+    };
+    st = zonk(st, t);
+    k = kindOf(st, st.ty);
+    alias = noPlace();
+    if k = 10 || k = 11 {
+        c = callOf(st, e);
+        if c.ok && (c.key = "BorrowOf" || c.key = "BorrowMutOf") && size(c.args) = 1 {
+            alias = placeSteps(st, get(c.args, 0));
+        } else {
+            if isVar(st, e) { alias = Place { ok: true, root: varName(st, e), steps: [] }; };
+        };
+    };
+    if alias.ok {
+        resolved = resolveRefPlace(st, clone(alias.root), clone(alias.steps));
+        return putAlias(st, var, resolved);
+    };
+    origins = exprOriginCandidates(st, e);
+    if size(origins) = 1 { return putAlias(st, var, Place { ok: true, root: clone(get(origins, 0)), steps: [] }); };
+    return dropAlias(st, var);
+};
+
+fn putOrigins(st: St, name: &String, roots: List<String>) -> St [{ }] [{ }] {
+    i = indexIn(&st.originNames, name);
+    if i >= 0 && i < size(st.originRoots) { return St { originRoots: set(st.originRoots, i, roots), ..st }; };
+    return St { originNames: push(st.originNames, clone(name)), originRoots: push(st.originRoots, roots), ..st };
+};
+
+fn dropOrigins(st: St, name: &String) -> St [{ }] [{ }] {
+    names = [];
+    roots = [];
+    i = 0;
+    while i < size(st.originNames) && i < size(st.originRoots) [{ affirm i >= 0; }] ~ {
+        if get(st.originNames, i) != clone(name) {
+            names = push(names, clone(get(st.originNames, i)));
+            roots = push(roots, clone(get(st.originRoots, i)));
+        };
+        i = i + 1;
+    };
+    return St { originNames: names, originRoots: roots, ..st };
+};
+
+// The roots a binding's places are from, when its value is or holds references (recordOrigins). The fresh variables
+// working them out makes are taken back, as Haskell puts back the state it read before.
+fn recordOrigins(st: St, var: &String, t: Int, e: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    st = zonk(st, t);
+    st = holdsRef(st, st.ty);
+    if st.status != 0 { return st; };
+    if !st.ok { return dropOrigins(st, var); };
+    next = st.next;
+    st = exprRefOrigins(st, e);
+    if st.status != 0 { return st; };
+    roots = clone(st.names);
+    st = St { next: next, ..st };
+    return putOrigins(st, var, roots);
+};
+
+// What a function of a trait that returns a reference is from: the parameters it names, or its one reference parameter
+fn traitResultFrom(named: &List<String>, params: &List<String>, isRef: &List<Bool>) -> List<String> ~ {
+    if size(named) > 0 { return clone(named); };
+    refs = [];
+    i = 0;
+    while i < size(params) && i < size(isRef) [{ affirm i >= 0; }] shrinks size(params) - i {
+        if get(isRef, i) { refs = push(refs, clone(get(params, i))); };
+        i = i + 1;
+    };
+    if size(refs) = 1 { return refs; };
+    return [];
+};

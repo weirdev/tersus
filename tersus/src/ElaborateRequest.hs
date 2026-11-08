@@ -128,7 +128,7 @@ writeResponse response = case response of
             maybe (Ok Nothing) (mapResult Just . writeInterface) iface `bindResult` \ifaceText ->
                 Ok (unlines (["tersus-elaborated 1", "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceText))
     Refused message -> Ok (unlines ["tersus-elaborated 1", "refused " ++ quote message])
-    RefusedInterface message -> Ok (unlines ["tersus-elaborated 1", "refused-interface " ++ quote message])
+    RefusedInterface message -> Ok (unlines ["tersus-elaborated 1", "interfaceRefused " ++ quote message])
     NotModelled what -> Ok (unlines ["tersus-elaborated 1", "unmodelled " ++ quote what])
   where
     block text = ("data " ++ show (length (lines text))) : lines text
@@ -137,7 +137,7 @@ readResponse :: String -> Result Response String
 readResponse text = case lines text of
     ["tersus-elaborated 1", line] -> strictTokenize line `bindResult` \ts -> case ts of
         [Word "refused", Str message] -> Ok (Refused message)
-        [Word "refused-interface", Str message] -> Ok (RefusedInterface message)
+        [Word "interfaceRefused", Str message] -> Ok (RefusedInterface message)
         [Word "unmodelled", Str what] -> Ok (NotModelled what)
         _ -> Error "ElaborateRequest: malformed response"
     "tersus-elaborated 1" : "accepted" : rest ->

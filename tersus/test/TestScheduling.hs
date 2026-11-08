@@ -144,8 +144,9 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         work -> maximum work
 
 -- Measured four-CPU warm-tool work on eb8bb49 (2026-11-05), rounded up; the testAstData, testAstReader and
--- testDifferential batches on the commit that added interface data (2026-11-08); the testElaborate batches,
--- each of which builds an elaborator, scaled by the testDifferential batches measured beside them.
+-- testDifferential batches on the commit that added interface data (2026-11-08); the testElaborate batches
+-- (the first two share one build of the elaborator, the mutant's batch builds its own) on the commit that made
+-- it cover packages, scaled as the earlier testDifferential batches measured beside them were.
 -- The native preparation prefix is measured separately; genuine cold A and
 -- Bootstrap include their cold work. Unmeasured rows retain run 41978818567.
 groupWeight :: String -> Int
@@ -264,8 +265,9 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testDifferential:2/4", 41)
         , ("testDifferential:3/4", 170)
         , ("testDifferential:4/4", 95)
-        , ("testElaborate:1/2", 199)
-        , ("testElaborate:2/2", 172)
+        , ("testElaborate:1/3", 450)
+        , ("testElaborate:2/3", 763)
+        , ("testElaborate:3/3", 714)
         , ("testParity", 170)
         , ("testLibModules", 5)
         , ("testNativeStorageModules", 201)

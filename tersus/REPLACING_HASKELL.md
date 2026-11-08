@@ -330,20 +330,29 @@ response. Types live in an arena of the checker's state; the output is the
 request's parsed arena with the new records appended, renumbered into the order
 `AstData` writes (`data::arena`, which the parser writes through too).
 
-It covers single-file programs: primitive, list, struct, enum, generic-struct,
-tuple and array types and their instances, finiteness, unification, coercion
-(unsizing, word and byte literals), scoped variables, statements, functions
-and gathered signatures, generic calls, termination, contracts and proof
-terms, and the builtins of addresses and permissions. It answers `unmodelled`
-for references, traits and impls, functions with bounds, `clone`, and the
-modules of packages and of the compiler libraries, which come next. The
-programs the test helpers check all answer `unmodelled` for now, since each
-carries the clone and equality libraries, which declare traits. `testElaborate` builds the
+It covers the whole checker: types and their instances, finiteness,
+unification and coercion, statements, functions and gathered signatures,
+generic calls, termination, contracts and proof terms, the builtins of
+addresses and permissions, references (places, borrows, `writes(...)`
+footprints, `from` origins and aliases), `clone` and the Copy and Clone
+markers, traits and impls (method resolution, `Type::f`, `Trait::f(x)`, `Eq`
+behind `=`, Deref look-through and the functions that check an impl against
+its trait), functions with bounds (made for each list of types a call gives
+them, placed before the statement that called them), and the modules of
+packages and of the compiler libraries: a module predeclares its own types,
+a library module sees a generic constructor's owner as a type, and the
+elaborator gives back the interface the module exposes
+(`Interface.extractInterface` and `extractLibInterface`). It answers
+`unmodelled` only for data it cannot read and for a builtin whose type only
+the program's declarations give, which no request carries. `testElaborate` builds the
 elaborator from the embedded sources (`PreludeSource.elaboratePackageFiles`)
 and runs the differential over every single-file corpus program and every
-`testTypeCheck` source: no disagreement, and nothing answered `unmodelled`
-for any other reason. A mutant whose unification lets Int and Bool stand for
-each other is caught.
+`testTypeCheck` source (with the clone, equality and list libraries in front
+of it), and over the packages and the compiler libraries: every request
+agrees, interfaces included. A mutant whose unification lets Int and Bool
+stand for each other is caught. The differential runs the elaborator with the
+largest stack the system allows, as the validator is run: it recurses over
+the nesting of expressions.
 `stack run frontend-diff -- build EXE` builds it from the sources on disk.
 
 ### Deferred or coordinated work

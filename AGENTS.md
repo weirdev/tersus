@@ -79,9 +79,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     embeds all files and the package marker. `ValidatorNative` requires the
     full validator source and physical List/Box proofs before use.
   - `elaborate/`: the elaborator written in Tersus (`REPLACING_HASKELL.md`),
-    a port of `TypeCheck`/`TypeCheckCore` that answers an elaboration request
-    (`AST_DATA.md`) for a single-file program, and "not modelled" for what it
-    does not cover yet. Its declarative sibling files are one root module with
+    a port of `TypeCheck`/`TypeCheckCore` (and the interface extraction of
+    `Interface`) that answers an elaboration request (`AST_DATA.md`) for a
+    program or a module. Its declarative sibling files are one root module with
     `elaborate.tersus` as the entry. `PreludeSource.elaboratePackageFiles`
     embeds it; only `testElaborate` and `frontend-diff` build and run it.
   - `mir/`, `data/`, `parser/` and `ast_reader/`: the compiler's own programs,
@@ -193,7 +193,8 @@ Work from `tersus/`.
   `testNative`, `testMirEmit`, `testMirVerify`, `testMirSelfHosted`,
   `testAstData`, `testParser`, `testAstReader` and `testDifferential` each
   register four batches named `<original>:1/4` through `<original>:4/4`, and
-  `testElaborate` two (`:1/2` and `:2/2`, each building an elaborator). The AST/parser corpora partition
+  `testElaborate` three (`:1/3` through `:3/3`; the first two share one cached
+  build of the elaborator and the mutant's builds its own). The AST/parser corpora partition
   samples without splitting package declaration contexts; all emitter
   helper files share one prepared-parser comparison.
   Selecting an original name selects all its batches; shard filters intersect

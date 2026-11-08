@@ -85,7 +85,7 @@ protocolRoundTrip = do
     pure $ case requests of
         Error e -> Just e
         Ok [] -> Just "no requests"
-        Ok answered -> firstFailure (map (one . fst) answered ++ [malformed (fst (last answered))])
+        Ok answered -> firstFailure (map (one . fst) answered ++ [malformed (fst (last answered))] ++ map verdict [Refused "a \"refusal\"", RefusedInterface "in module p::m: no interface", NotModelled "what"])
   where
     malformed rq = case (writeRequest rq, writeResponse (respond rq)) of
         (Ok request, Ok response) ->
@@ -121,6 +121,10 @@ protocolRoundTrip = do
                     ]
         (Error e, _) -> Just e
         (_, Error e) -> Just e
+    -- (every verdict reads back as it was written)
+    verdict response = case writeResponse response `bindResult` readResponse of
+        Error e -> Just e
+        Ok back -> testAssertEq (show back) (show response)
     one rq = case writeRequest rq `bindResult` readRequest of
         Error e -> Just e
         Ok rq' | rq' /= rq -> Just "request changed"

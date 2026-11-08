@@ -422,6 +422,13 @@ fn prepend(t: Int, xs: &List<Int>) -> List<Int> [{ }] [{ }] {
     return out;
 };
 
+// The typed expression with another type at its head (TExpr with another type)
+fn withType(te: &TE, t: Int) -> TE [{ }] [{ }] {
+    types = clone(te.types);
+    if size(types) = 0 { return TE { node: te.node, types: push([], t) }; };
+    return TE { node: te.node, types: set(types, 0, t) };
+};
+
 fn power2(n: Int) -> Int [{ }] [{ }] {
     out = 1;
     i = 0;

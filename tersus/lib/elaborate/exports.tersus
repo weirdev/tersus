@@ -1,0 +1,639 @@
+import data::ast::ast { AstBody, AstEntries, AstEntry, AstInterface, AstNode, AstOptName, AstOptNames, AstOptType, AstStatement, AstValue };
+import data::codec::codec { Type, catStrings };
+import elaborate::check { functionValue, stmtOf };
+import elaborate::core { baseNameOf };
+import elaborate::out { emit, emitName, emitNames, emitStatements, emitType };
+import elaborate::records { fieldCodecTypes, fieldNames, fromCodecs, listItems, nameText, namesText, nodeIn };
+import elaborate::state { CtorInfo, Generic, St, Template, indexIn, isTypeName, joinWith, typeError };
+import elaborate::traits { optName, sortTexts, textBefore };
+
+// What a module of a package brings to its own checking: its declarations predeclared, so that a definition can name a
+// type or trait declared after it (predeclareOwn), and none of its types holding itself by value (checkOwnFinite)
+
+// The declarations predeclared, the first of a name winning (predeclareOwn)
+fn predeclareOwn(st: St, stmts: &List<Int>) -> St ~ {
+    i = size(stmts) - 1;
+    while i >= 0 [{ affirm i < size(stmts); }] shrinks i + 1 {
+        stmt = stmtOf(st, get(stmts, i));
+        if (stmt is AstStatement::StructDef) {
+                sd = stmt as AstStatement::StructDef;
+                n = sd.n; ps = sd.ps; fs = sd.fs;
+                name = nameText(&st.nodes, n);
+                params = namesText(&st.nodes, ps);
+                tycs = fieldCodecTypes(&st.nodes, fs);
+                st = fromCodecs(st, &tycs);
+                fieldTypes = clone(st.te.types);
+                if size(params) = 0 {
+                    st = St { types: st.types.insert(clone(name), push([], clone(name))), ctors: st.ctors.insert(clone(name), CtorInfo { owner: clone(name), names: fieldNames(&st.nodes, fs), types: fieldTypes }), ..st };
+                } else {
+                    st = St { generics: st.generics.insert(clone(name), Generic { params: params, names: fieldNames(&st.nodes, fs), types: fieldTypes }), ..st };
+                };
+                st = St { predeclared: st.predeclared.insert(name), ..st };
+        };
+        if (stmt is AstStatement::EnumDef) {
+                ed = stmt as AstStatement::EnumDef;
+                n = ed.n; vs = ed.vs;
+                name = nameText(&st.nodes, n);
+                variantNames = [];
+                variantRecords = [];
+                for v in listItems(&st.nodes, vs) {
+                    node = nodeIn(&st.nodes, v);
+                    if (node is AstNode::Variant) {
+                        variantNames = push(variantNames, nameText(&st.nodes, (node as AstNode::Variant).value.n));
+                        variantRecords = push(variantRecords, v);
+                    };
+                };
+                // (foldr: the first variant of a name wins)
+                k = size(variantRecords) - 1;
+                while k >= 0 [{ affirm k < size(variantRecords); }] shrinks k + 1 {
+                    variant = (nodeIn(&st.nodes, get(variantRecords, k)) as AstNode::Variant).value;
+                    tycs = fieldCodecTypes(&st.nodes, variant.fs);
+                    st = fromCodecs(st, &tycs);
+                    st = St { ctors: st.ctors.insert(nameText(&st.nodes, variant.n), CtorInfo { owner: clone(name), names: fieldNames(&st.nodes, variant.fs), types: clone(st.te.types) }), ..st };
+                    k = k - 1;
+                };
+                st = St { types: st.types.insert(clone(name), variantNames), predeclared: st.predeclared.insert(name), ..st };
+        };
+        if (stmt is AstStatement::TraitDef) {
+                td = stmt as AstStatement::TraitDef;
+                n = td.n; ps = td.ps; fs = td.fs;
+                name = nameText(&st.nodes, n);
+                st = St { traits: st.traits.insert(clone(name)), traitFns: st.traitFns.insert(clone(name), listItems(&st.nodes, fs)), traitParams: st.traitParams.insert(clone(name), namesText(&st.nodes, ps)), predeclared: st.predeclared.insert(name), ..st };
+        };
+        i = i - 1;
+    };
+    return st;
+};
+
+// The types a field holds by value, by the names of their declarations (checkOwnFinite's heldBase)
+fn heldBases(t: &Type) -> List<String> ~ {
+    if (t is Type::TNamed) { return push([], clone((t as Type::TNamed).base)); };
+    if (t is Type::TVariant) {
+        name = clone((t as Type::TVariant).name);
+        i = 0;
+        while i < size(name.bytes) && get(name.bytes, i) != toByte(58) [{ affirm i >= 0; }] shrinks size(name.bytes) - i { i = i + 1; };
+        return push([], name.slice(0, i));
+    };
+    if (t is Type::TArray) { inner = Box::unbox(clone((t as Type::TArray).elem)); return heldBases(&inner); };
+    if (t is Type::TList) { return push([], "List"); };
+    if (t is Type::TBox) { return push([], "Box"); };
+    return [];
+};
+
+struct Search { visited: List<String>, cycle: List<String>, found: Bool };
+impl Clone for Search { };
+
+// None of the module's own types holds itself by value (checkOwnFinite)
+fn checkOwnFinite(st: St, stmts: &List<Int>) -> St ~ {
+    names = [];
+    held = [];
+    // (all the structs and then all the enums, a later declaration of a name holding first: Map.fromListWith (++))
+    sweep = 0;
+    while sweep < 2 [{ affirm sweep >= 0; }] shrinks 2 - sweep {
+        for s in stmts {
+            stmt = stmtOf(st, s);
+            name = "";
+            bases = [];
+            isType = false;
+            if sweep = 0 && (stmt is AstStatement::StructDef) {
+                sd = stmt as AstStatement::StructDef;
+                name = nameText(&st.nodes, sd.n);
+                for t in fieldCodecTypes(&st.nodes, sd.fs) { for b in heldBases(&t) { bases = push(bases, clone(b)); }; };
+                isType = true;
+            };
+            if sweep = 1 && (stmt is AstStatement::EnumDef) {
+                ed = stmt as AstStatement::EnumDef;
+                name = nameText(&st.nodes, ed.n);
+                for v in listItems(&st.nodes, ed.vs) {
+                    node = nodeIn(&st.nodes, v);
+                    if (node is AstNode::Variant) {
+                        for t in fieldCodecTypes(&st.nodes, (node as AstNode::Variant).value.fs) { for b in heldBases(&t) { bases = push(bases, clone(b)); }; };
+                    };
+                };
+                isType = true;
+            };
+            if isType {
+                at = indexIn(&names, &name);
+                if at >= 0 && at < size(held) {
+                    joined = clone(bases);
+                    for b in get(held, at) { joined = push(joined, clone(b)); };
+                    held = set(held, at, joined);
+                } else {
+                    names = push(names, name);
+                    held = push(held, bases);
+                };
+            };
+        };
+        sweep = sweep + 1;
+    };
+    search = Search { visited: [], cycle: [], found: false };
+    start = push([], "");
+    for k in sortTexts(clone(names)) {
+        if !search.found { search = holdsCycle(&names, &held, search, &start, clone(k)); };
+    };
+    if search.found {
+        return typeError(st, catStrings(catStrings(catStrings(clone(get(search.cycle, 0)), " holds itself by value, so it would have no size: hold the recursion in a Box (cycle: "), joinWith(&search.cycle, " -> ")), ")"));
+    };
+    return st;
+};
+
+// The depth-first search of findCycle: a node on the stack again closes a cycle (stack starts with a placeholder "")
+fn holdsCycle(names: &List<String>, held: &List<List<String>>, search: Search, stack: &List<String>, node: String) -> Search ~ {
+    path = [];
+    i = 1;
+    while i < size(stack) [{ affirm i >= 1; }] shrinks size(stack) - i { path = push(path, clone(get(stack, i))); i = i + 1; };
+    at = indexIn(&path, &node);
+    if at >= 0 {
+        cycle = [];
+        j = at;
+        while j < size(path) [{ affirm j >= 0; }] shrinks size(path) - j { cycle = push(cycle, clone(get(path, j))); j = j + 1; };
+        return Search { cycle: push(cycle, node), found: true, ..search };
+    };
+    if indexIn(&search.visited, &node) >= 0 { return search; };
+    out = Search { visited: push(search.visited, clone(node)), ..search };
+    next = push(clone(stack), clone(node));
+    k = indexIn(names, &node);
+    if k < 0 || k >= size(held) { return out; };
+    for target in get(held, k) {
+        if !out.found && indexIn(names, &target) >= 0 {
+            out = holdsCycle(names, held, out, &next, clone(target));
+        };
+    };
+    return out;
+};
+
+// An entry of a map of an interface, by its key (a name, or a pair of names compared by the first and then the second)
+struct Keyed { a: String, b: String, node: Int };
+impl Clone for Keyed { };
+
+fn keyedBefore(x: &Keyed, y: &Keyed) -> Bool [{ }] [{ }] {
+    if x.a != y.a { return textBefore(&x.a, &y.a); };
+    return textBefore(&x.b, &y.b);
+};
+
+fn sortKeyed(xs: List<Keyed>) -> List<Keyed> ~ {
+    out = [];
+    for x in &xs {
+        placed = [];
+        done = false;
+        for y in &out {
+            if !done && keyedBefore(x, y) { placed = push(placed, clone(x)); done = true; };
+            placed = push(placed, clone(y));
+        };
+        if !done { placed = push(placed, clone(x)); };
+        out = placed;
+    };
+    return out;
+};
+
+// A map's entries in ascending key order (the caller gives each key once)
+fn emitEntries(st: St, entries: &List<Keyed>) -> St ~ {
+    sorted = sortKeyed(clone(entries));
+    st = emit(st, AstNode::Entries { value: AstEntries::End });
+    tail = st.nid;
+    i = size(sorted) - 1;
+    while i >= 0 [{ affirm i < size(sorted); }] shrinks i + 1 {
+        st = emit(st, AstNode::Entries { value: AstEntries::Cons { head: get(sorted, i).node, tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    return St { nid: tail, ..st };
+};
+
+fn emitSortedNames(st: St, names: &List<String>) -> St ~ {
+    sorted = sortTexts(clone(names));
+    return emitNames(st, &sorted);
+};
+
+fn keyIn(entries: &List<Keyed>, a: &String, b: &String) -> Bool [{ }] [{ }] {
+    for e in entries {
+        if e.a = clone(a) && e.b = clone(b) { return true; };
+    };
+    return false;
+};
+
+fn startsWith(text: &String, prefix: &String) -> Bool [{ }] [{ }] {
+    return size(text.bytes) >= size(prefix.bytes) && text.slice(0, size(prefix.bytes)) = clone(prefix);
+};
+
+// The text after the first occurrence of a separator, and before it (breakOn); ok false when it does not occur
+struct Broken { ok: Bool, before: String, after: String };
+impl Clone for Broken { };
+
+fn breakOn(needle: &String, text: &String) -> Broken ~ {
+    i = 0;
+    while i + size(needle.bytes) <= size(text.bytes) [{ affirm i >= 0; }] shrinks size(text.bytes) - i {
+        if text.slice(i, i + size(needle.bytes)) = clone(needle) {
+            return Broken { ok: true, before: text.slice(0, i), after: text.slice(i + size(needle.bytes), size(text.bytes)) };
+        };
+        i = i + 1;
+    };
+    return Broken { ok: false, before: "", after: "" };
+};
+
+fn takeUntil(text: &String, stop: Int) -> String ~ {
+    i = 0;
+    while i < size(text.bytes) && toInt(get(text.bytes, i)) != stop [{ affirm i >= 0; }] shrinks size(text.bytes) - i { i = i + 1; };
+    return text.slice(0, i);
+};
+
+// Which names are the module's own, and the rules of what its interface keeps (Interface.extractInterfaceWith)
+struct Scope { isLib: Bool, prefix: String, ownNames: List<String>, declaredImpls: List<String>, bounded: List<String> };
+impl Clone for Scope { };
+
+fn inModule(sc: &Scope, name: &String) -> Bool ~ {
+    if sc.isLib { return true; };
+    if startsWith(name, &sc.prefix) { return true; };
+    if size(name.bytes) = 0 { return false; };
+    rest = name.slice(1, size(name.bytes));
+    i = 0;
+    while i < size(rest.bytes) && get(rest.bytes, i) != toByte(36) [{ affirm i >= 0; }] shrinks size(rest.bytes) - i { i = i + 1; };
+    tail = rest.slice(i, size(rest.bytes));
+    return startsWith(&tail, &sc.prefix);
+};
+
+fn implHere(sc: &Scope, tname: &String, ty: &String) -> Bool ~ {
+    pair = catStrings(catStrings(clone(tname), " "), clone(ty));
+    base = baseNameOf(ty);
+    return indexIn(&sc.declaredImpls, &pair) >= 0 || indexIn(&sc.ownNames, tname) >= 0 || indexIn(&sc.ownNames, &base) >= 0;
+};
+
+fn implVisible(sc: &Scope, tname: &String, ty: &String) -> Bool ~ {
+    if sc.isLib { return implHere(sc, tname, ty); };
+    return inModule(sc, tname) || inModule(sc, ty);
+};
+
+fn typeVisible(sc: &Scope, name: &String) -> Bool ~ {
+    base = baseNameOf(name);
+    if sc.isLib { return indexIn(&sc.ownNames, &base) >= 0; };
+    return inModule(sc, name);
+};
+
+fn templateHere(sc: &Scope, name: &String) -> Bool ~ {
+    if indexIn(&sc.bounded, name) >= 0 { return true; };
+    if size(name.bytes) > 0 && get(name.bytes, 0) = toByte(60) {
+        rest = name.slice(1, size(name.bytes));
+        inner = takeUntil(&rest, 62);
+        b = breakOn(" as ", &inner);
+        if b.ok {
+            owner = baseNameOf(&b.before);
+            return indexIn(&sc.ownNames, &owner) >= 0 || indexIn(&sc.ownNames, &b.after) >= 0;
+        };
+        base = baseNameOf(&inner);
+        return indexIn(&sc.ownNames, &base) >= 0;
+    };
+    b = breakOn(" for ", name);
+    if b.ok {
+        typePart = takeUntil(&b.after, 58);
+        base = baseNameOf(&typePart);
+        return indexIn(&sc.ownNames, &b.before) >= 0 || indexIn(&sc.ownNames, &base) >= 0;
+    };
+    return false;
+};
+
+// The names of the functions a module declares: at the top, in its impls, with bounds (declaredFunctions)
+fn declaredIn(st: &St, s: Int) -> List<String> ~ {
+    stmt = stmtOf(st, s);
+    if (stmt is AstStatement::Assign) {
+        a = stmt as AstStatement::Assign;
+        if functionValue(st, a.e) >= 0 { return push([], nameText(&st.nodes, a.n)); };
+        return [];
+    };
+    if (stmt is AstStatement::ImplDef) {
+        out = [];
+        for f in listItems(&st.nodes, (stmt as AstStatement::ImplDef).xs) { for n in declaredIn(st, f) { out = push(out, clone(n)); }; };
+        return out;
+    };
+    if (stmt is AstStatement::BoundedDef) { return declaredIn(st, (stmt as AstStatement::BoundedDef).s); };
+    return [];
+};
+
+fn pairParts(key: &String) -> Broken ~ { return breakOn(" ", key); };
+
+// The interface a checked module exposes to its importers (Interface.extractInterface and extractLibInterface): st.nid
+// the interface root, or status 3 with why it cannot be given
+fn extractInterface(st: St, isLib: Bool, pkg: String, modu: String, hasModule: Bool, original: &List<Int>, elaborated: &List<Int>) -> St ~ {
+    prefix = catStrings(clone(pkg), "$");
+    if hasModule { prefix = catStrings(catStrings(prefix, clone(modu)), "$"); };
+    bounded = [];
+    ownNames = [];
+    declaredImpls = [];
+    declaredFns = [];
+    // (PreludeSource.nativeStorageModules)
+    storage = (pkg = "tersuslib") && hasModule && (modu = "lists" || modu = "box");
+    for s in original {
+        stmt = stmtOf(st, s);
+        if (stmt is AstStatement::BoundedDef) {
+            inner = stmtOf(st, (stmt as AstStatement::BoundedDef).s);
+            if (inner is AstStatement::Assign) { bounded = push(bounded, nameText(&st.nodes, (inner as AstStatement::Assign).n)); };
+        };
+        if (stmt is AstStatement::StructDef) { ownNames = push(ownNames, nameText(&st.nodes, (stmt as AstStatement::StructDef).n)); };
+        if (stmt is AstStatement::EnumDef) { ownNames = push(ownNames, nameText(&st.nodes, (stmt as AstStatement::EnumDef).n)); };
+        if (stmt is AstStatement::TraitDef) { ownNames = push(ownNames, nameText(&st.nodes, (stmt as AstStatement::TraitDef).n)); };
+        if storage && (stmt is AstStatement::ImplDef) {
+            d = stmt as AstStatement::ImplDef;
+            tn = optName(st, d.traitName);
+            if size(tn.bytes) > 0 { declaredImpls = push(declaredImpls, catStrings(catStrings(tn, " "), nameText(&st.nodes, d.n))); };
+        };
+        for n in declaredIn(st, s) { declaredFns = push(declaredFns, clone(n)); };
+    };
+    if !isLib && size(bounded) > 0 {
+        moduleName = clone(pkg);
+        if hasModule { moduleName = catStrings(catStrings(moduleName, "::"), clone(modu)); };
+        return St { status: 3, msg: catStrings(catStrings(catStrings(catStrings("in module ", moduleName), ": bounded function "), clone(get(bounded, 0))), " cannot be exported in a module interface: a function with bounds on its types (BoundedDef) is usable inside its home module only"), ..st };
+    };
+    sc = Scope { isLib: isLib, prefix: prefix, ownNames: ownNames, declaredImpls: declaredImpls, bounded: clone(bounded) };
+    types = [];
+    ctors = [];
+    generics = [];
+    invariants = [];
+    functions = [];
+    copies = [];
+    axiomDefs = [];
+    proofDefs = [];
+    externs = [];
+    genericInsts = [];
+    structTypes = [];
+    enumTypes = [];
+    structCtors = [];
+    variantCtors = [];
+    for s in elaborated {
+        stmt = stmtOf(st, s);
+        if (stmt is AstStatement::StructDef) {
+            sd = stmt as AstStatement::StructDef;
+            name = nameText(&st.nodes, sd.n);
+            params = namesText(&st.nodes, sd.ps);
+            st = emitName(st, clone(name));
+            nameNode = st.nid;
+            one = push([], clone(name));
+            st = emitNames(st, &one);
+            st = emit(st, AstNode::Entry { value: AstEntry::NamesEntry { n: nameNode, ns: st.nid } });
+            structTypes = replaceKeyed(structTypes, Keyed { a: clone(name), b: "", node: st.nid });
+            if size(params) = 0 {
+                st = emitName(st, clone(name));
+                nameNode = st.nid;
+                st = emitName(st, clone(name));
+                st = emit(st, AstNode::Entry { value: AstEntry::CtorEntry { n: nameNode, owner: st.nid, fs: sd.fs } });
+                structCtors = replaceKeyed(structCtors, Keyed { a: clone(name), b: "", node: st.nid });
+            } else {
+                st = emitName(st, clone(name));
+                st = emit(st, AstNode::Entry { value: AstEntry::GenericEntry { n: st.nid, ps: sd.ps, fs: sd.fs } });
+                generics = replaceKeyed(generics, Keyed { a: clone(name), b: "", node: st.nid });
+                parts = [];
+                for p in &params {
+                    if isTypeName(p) { parts = push(parts, catStrings("'", clone(p))); } else { parts = push(parts, clone(p)); };
+                };
+                inst = catStrings(catStrings(catStrings(clone(name), "<"), joinWith(&parts, ", ")), ">");
+                genericInsts = replaceKeyed(genericInsts, Keyed { a: inst, b: "", node: sd.fs });
+            };
+            if size(listItems(&st.nodes, sd.vs)) > 0 {
+                st = emitName(st, clone(name));
+                st = emit(st, AstNode::Entry { value: AstEntry::InvariantEntry { n: st.nid, vs: sd.vs } });
+                invariants = replaceKeyed(invariants, Keyed { a: name, b: "", node: st.nid });
+            };
+        };
+        if (stmt is AstStatement::EnumDef) {
+            ed = stmt as AstStatement::EnumDef;
+            name = nameText(&st.nodes, ed.n);
+            variantNames = [];
+            for v in listItems(&st.nodes, ed.vs) {
+                node = nodeIn(&st.nodes, v);
+                if (node is AstNode::Variant) {
+                    variant = (node as AstNode::Variant).value;
+                    variantName = nameText(&st.nodes, variant.n);
+                    variantNames = push(variantNames, clone(variantName));
+                    st = emitName(st, clone(variantName));
+                    vnode = st.nid;
+                    st = emitName(st, clone(name));
+                    st = emit(st, AstNode::Entry { value: AstEntry::CtorEntry { n: vnode, owner: st.nid, fs: variant.fs } });
+                    variantCtors = replaceKeyed(variantCtors, Keyed { a: variantName, b: "", node: st.nid });
+                };
+            };
+            st = emitName(st, clone(name));
+            nameNode = st.nid;
+            st = emitNames(st, &variantNames);
+            st = emit(st, AstNode::Entry { value: AstEntry::NamesEntry { n: nameNode, ns: st.nid } });
+            enumTypes = replaceKeyed(enumTypes, Keyed { a: name, b: "", node: st.nid });
+        };
+        if (stmt is AstStatement::Assign) {
+            asg = stmt as AstStatement::Assign;
+            name = nameText(&st.nodes, asg.n);
+            v = functionValue(st, asg.e);
+            if v >= 0 && indexIn(&declaredFns, &name) >= 0 {
+                value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
+                body = nodeIn(&st.nodes, value.body);
+                if (body is AstNode::Body) && ((body as AstNode::Body).value is AstBody::NativeFunct) {
+                    native = (body as AstNode::Body).value as AstBody::NativeFunct;
+                    st = emitName(st, clone(name));
+                    st = emit(st, AstNode::Entry { value: AstEntry::FunctionEntry { n: st.nid, ps: value.ps, sig: native.sig, ins: value.ins, outs: value.outs, term: native.term, exports: value.exports } });
+                    functions = replaceKeyed(functions, Keyed { a: name, b: "", node: st.nid });
+                };
+            };
+        };
+        if (stmt is AstStatement::CopyDef) { copies = push(copies, nameText(&st.nodes, (stmt as AstStatement::CopyDef).n)); };
+        if (stmt is AstStatement::AxiomDef) { axiomDefs = push(axiomDefs, s); };
+        if (stmt is AstStatement::ProofDef) { proofDefs = push(proofDefs, s); };
+        if (stmt is AstStatement::ExternDef) { externs = push(externs, nameText(&st.nodes, (stmt as AstStatement::ExternDef).n)); };
+    };
+    // (Map.union: a struct's type entry wins over an enum's of the name, and a constructor over a generic's instance)
+    types = clone(structTypes);
+    for e in &enumTypes { if !keyIn(&types, &e.a, "") { types = push(types, clone(e)); }; };
+    for c in &structCtors { ctors = replaceKeyed(ctors, clone(c)); };
+    for c in &variantCtors { ctors = replaceKeyed(ctors, clone(c)); };
+    if isLib {
+        for g in &genericInsts {
+            if !keyIn(&ctors, &g.a, "") {
+                st = emitName(st, clone(g.a));
+                nameNode = st.nid;
+                st = emitName(st, clone(g.a));
+                st = emit(st, AstNode::Entry { value: AstEntry::CtorEntry { n: nameNode, owner: st.nid, fs: g.node } });
+                ctors = push(ctors, Keyed { a: clone(g.a), b: "", node: st.nid });
+            };
+        };
+    };
+    traits = [];
+    traitParams = [];
+    for s in original {
+        stmt = stmtOf(st, s);
+        if (stmt is AstStatement::TraitDef) {
+            td = stmt as AstStatement::TraitDef;
+            name = nameText(&st.nodes, td.n);
+            st = emitName(st, clone(name));
+            st = emit(st, AstNode::Entry { value: AstEntry::TraitEntry { n: st.nid, fs: td.fs } });
+            traits = replaceKeyed(traits, Keyed { a: clone(name), b: "", node: st.nid });
+            st = emitName(st, clone(name));
+            st = emit(st, AstNode::Entry { value: AstEntry::NamesEntry { n: st.nid, ns: td.ps } });
+            traitParams = replaceKeyed(traitParams, Keyed { a: name, b: "", node: st.nid });
+        };
+    };
+    impls = [];
+    for k in st.impls.elements() {
+        p = pairParts(&k);
+        if p.ok && implVisible(&sc, &p.before, &p.after) {
+            st = emitName(st, clone(p.before));
+            an = st.nid;
+            st = emitName(st, clone(p.after));
+            st = emit(st, AstNode::Entry { value: AstEntry::PairEntry { a: an, b: st.nid } });
+            impls = push(impls, Keyed { a: clone(p.before), b: clone(p.after), node: st.nid });
+        };
+        if p.ok && p.before = "Copy" && indexIn(&copies, &p.after) < 0 {
+            copyHere = inModule(&sc, &p.after);
+            if isLib { copyHere = implHere(&sc, "Copy", &p.after); };
+            if copyHere { copies = push(copies, clone(p.after)); };
+        };
+    };
+    assoc = [];
+    for e in st.assoc.entries() {
+        p = pairParts(&e.key);
+        keep = false;
+        if p.ok {
+            if isLib {
+                ownerBase = baseNameOf(&p.before);
+                keep = indexIn(&sc.ownNames, &ownerBase) >= 0;
+                owner = baseNameOf(&p.before);
+                for o in &e.value {
+                    if size(o.bytes) > 0 && implHere(&sc, o, &owner) { keep = true; };
+                };
+            } else { keep = inModule(&sc, &p.before); };
+        };
+        if keep {
+            originNodes = [];
+            for o in &e.value {
+                if size(o.bytes) = 0 { st = emit(st, AstNode::OptName { value: AstOptName::NoName }); } else {
+                    st = emitName(st, clone(o));
+                    st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: st.nid } });
+                };
+                originNodes = push(originNodes, st.nid);
+            };
+            st = emit(st, AstNode::OptNames { value: AstOptNames::End });
+            tail = st.nid;
+            i = size(originNodes) - 1;
+            while i >= 0 [{ affirm i < size(originNodes); }] shrinks i + 1 {
+                st = emit(st, AstNode::OptNames { value: AstOptNames::Cons { head: get(originNodes, i), tail: tail } });
+                tail = st.nid;
+                i = i - 1;
+            };
+            originsNode = tail;
+            st = emitName(st, clone(p.before));
+            an = st.nid;
+            st = emitName(st, clone(p.after));
+            st = emit(st, AstNode::Entry { value: AstEntry::AssocEntry { a: an, b: st.nid, origins: originsNode } });
+            assoc = push(assoc, Keyed { a: clone(p.before), b: clone(p.after), node: st.nid });
+        };
+    };
+    implArgs = [];
+    for e in st.implArgs.entries() {
+        p = pairParts(&e.key);
+        if p.ok && implVisible(&sc, &p.before, &p.after) {
+            st = emitName(st, clone(p.before));
+            an = st.nid;
+            st = emitName(st, clone(p.after));
+            st = emit(st, AstNode::Entry { value: AstEntry::ImplArgsEntry { a: an, b: st.nid, ty: e.value.tyNode, args: e.value.argsNode } });
+            implArgs = push(implArgs, Keyed { a: clone(p.before), b: clone(p.after), node: st.nid });
+        };
+    };
+    implBounds = [];
+    for e in st.implBoundsNodes.entries() {
+        p = pairParts(&e.key);
+        if p.ok && implVisible(&sc, &p.before, &p.after) {
+            st = emitName(st, clone(p.before));
+            an = st.nid;
+            st = emitName(st, clone(p.after));
+            st = emit(st, AstNode::Entry { value: AstEntry::ImplBoundsEntry { a: an, b: st.nid, bs: e.value } });
+            implBounds = push(implBounds, Keyed { a: clone(p.before), b: clone(p.after), node: st.nid });
+        };
+    };
+    linearNames = [];
+    for n in st.linearTypes.elements() {
+        if typeVisible(&sc, &n) { linearNames = push(linearNames, clone(n)); };
+    };
+    drops = [];
+    for n in st.drops.elements() {
+        dropPair = catStrings("Drop ", baseNameOf(&n));
+        if typeVisible(&sc, &n) || (isLib && indexIn(&sc.declaredImpls, &dropPair) >= 0) { drops = push(drops, clone(n)); };
+    };
+    templates = [];
+    for e in st.templates.entries() {
+        keep = templateHere(&sc, &e.key);
+        if !isLib { keep = indexIn(&bounded, &e.key) >= 0; };
+        if keep {
+            st = templateEntry(st, &e.key, &e.value);
+            templates = push(templates, Keyed { a: clone(e.key), b: "", node: st.nid });
+        };
+    };
+    companions = [];
+    for e in st.companions.entries() {
+        keep = templateHere(&sc, &e.key);
+        if !isLib { keep = indexIn(&bounded, &e.key) >= 0; };
+        if keep {
+            st = emitName(st, clone(e.key));
+            nameNode = st.nid;
+            st = emitNames(st, &e.value);
+            st = emit(st, AstNode::Entry { value: AstEntry::NamesEntry { n: nameNode, ns: st.nid } });
+            companions = push(companions, Keyed { a: clone(e.key), b: "", node: st.nid });
+        };
+    };
+    st = emitName(st, clone(pkg));
+    pkgNode = st.nid;
+    if !hasModule { st = emit(st, AstNode::OptName { value: AstOptName::NoName }); } else {
+        st = emitName(st, clone(modu));
+        st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: st.nid } });
+    };
+    moduNode = st.nid;
+    st = emitEntries(st, &types); typesNode = st.nid;
+    st = emitEntries(st, &ctors); ctorsNode = st.nid;
+    st = emitEntries(st, &generics); genericsNode = st.nid;
+    st = emitEntries(st, &invariants); invariantsNode = st.nid;
+    st = emitEntries(st, &traits); traitsNode = st.nid;
+    st = emitEntries(st, &traitParams); traitParamsNode = st.nid;
+    st = emitEntries(st, &functions); functionsNode = st.nid;
+    st = emitEntries(st, &impls); implsNode = st.nid;
+    st = emitEntries(st, &assoc); assocNode = st.nid;
+    st = emitEntries(st, &implArgs); implArgsNode = st.nid;
+    st = emitEntries(st, &implBounds); implBoundsNode = st.nid;
+    st = emitSortedNames(st, &copies); copiesNode = st.nid;
+    st = emitSortedNames(st, &linearNames); linearNode = st.nid;
+    st = emitSortedNames(st, &drops); dropsNode = st.nid;
+    st = emitStatements(st, &axiomDefs); axiomsNode = st.nid;
+    st = emitStatements(st, &proofDefs); proofsNode = st.nid;
+    st = emitSortedNames(st, &externs); externsNode = st.nid;
+    st = emitEntries(st, &templates); templatesNode = st.nid;
+    st = emitEntries(st, &companions); companionsNode = st.nid;
+    return emit(st, AstNode::Interface { value: AstInterface { pkg: pkgNode, modu: moduNode, types: typesNode, ctors: ctorsNode, generics: genericsNode, invariants: invariantsNode, traits: traitsNode, traitParams: traitParamsNode, functions: functionsNode, impls: implsNode, assoc: assocNode, implArgs: implArgsNode, implBounds: implBoundsNode, copies: copiesNode, linear: linearNode, drops: dropsNode, axioms: axiomsNode, proofs: proofsNode, externs: externsNode, templates: templatesNode, companions: companionsNode } });
+};
+
+fn replaceKeyed(xs: List<Keyed>, k: Keyed) -> List<Keyed> ~ {
+    out = [];
+    replaced = false;
+    for x in &xs {
+        if x.a = k.a && x.b = k.b { out = push(out, clone(k)); replaced = true; } else { out = push(out, clone(x)); };
+    };
+    if !replaced { out = push(out, k); };
+    return out;
+};
+
+// A template as an interface writes it, with the functions it saw where it was declared
+fn templateEntry(st: St, name: &String, tm: &Template) -> St ~ {
+    fnEntries = [];
+    i = 0;
+    while i < size(tm.fnNames) && i < size(tm.fnTypes) [{ affirm i >= 0; }] ~ {
+        fname = clone(get(tm.fnNames, i));
+        if !keyIn(&fnEntries, &fname, "") {
+            st = emitName(st, clone(fname));
+            nameNode = st.nid;
+            st = emitType(st, get(tm.fnTypes, i));
+            st = emit(st, AstNode::Entry { value: AstEntry::TypeEntry { n: nameNode, ty: st.nid } });
+            fnEntries = push(fnEntries, Keyed { a: fname, b: "", node: st.nid });
+        };
+        i = i + 1;
+    };
+    st = emitEntries(st, &fnEntries);
+    fnsNode = st.nid;
+    retNode = tm.retNode;
+    if retNode < 0 {
+        st = emit(st, AstNode::OptType { value: AstOptType::NoType });
+        retNode = st.nid;
+    };
+    st = emitName(st, clone(name));
+    return emit(st, AstNode::Entry { value: AstEntry::TemplateEntry { n: st.nid, bs: tm.boundsNode, fns: fnsNode, ret: retNode, ps: tm.paramsNode, sig: tm.sigNode, ins: tm.ins, outs: tm.outs, term: tm.term, body: tm.body } });
+};
