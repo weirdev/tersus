@@ -1,4 +1,4 @@
-module TestDifferential (testDifferential) where
+module TestDifferential (testDifferential, ergonomicsUnits) where
 
 import AstData (writeBuiltinTable)
 import BuiltinTable (builtinTable)
@@ -13,12 +13,20 @@ import TypeCheck (elaborate)
 import Types (Type (..))
 import Utils
 
+ergonomicsUnits :: [Unit]
+ergonomicsUnits =
+    [ SourceText "if expression protocol" "x = if true { 3 } else { 4 }; return x;"
+    , SourceText "block expression protocol" "return if true { let x = 3; x + 1 } else { 5 };"
+    , SourceText "ascribed declaration protocol" "let x: Int = 3; return x;"
+    , SourceText "generic template expression protocol" "fn choose<T>(c: Bool, a: T, b: T) -> T { let result: T = if c { a } else { b }; return result; }; return choose(true, 1, 2);"
+    ]
+
 -- The Haskell elaborator behind the text protocol agrees with itself on every request of a share of the corpus
 -- (with the programs of testTypeCheck)
 protocolAgreement :: Int -> IO TestResult
 protocolAgreement batch = do
     files <- corpusUnits
-    let units = batchItems 4 batch (files ++ [SourceText name source | (name, source) <- typeCheckSources])
+    let units = batchItems 4 batch (files ++ [SourceText name source | (name, source) <- typeCheckSources] ++ ergonomicsUnits)
     results <- runDifferential throughText units
     let (agree, wording, disagree, unmodelled, failed) = tally [o | (_, _, o) <- results]
     putStrLn ("differential batch " ++ show batch ++ "/4: " ++ show (length units) ++ " units, " ++ show agree ++ " agree, " ++ show wording ++ " wording, " ++ show disagree ++ " disagree, " ++ show unmodelled ++ " not modelled, " ++ show failed ++ " failed")

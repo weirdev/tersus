@@ -201,11 +201,19 @@ assignedNames = foldMap names
   where
     names stmt = case stmt of
         Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> assignedNames body
-        Assign var _ -> Set.singleton var
-        Let var _ -> Set.singleton var
+        Assign var expr -> Set.singleton var <> expressions expr
+        Let var expr -> Set.singleton var <> expressions expr
+        AssignDeref lhs rhs -> expressions lhs <> expressions rhs
+        Return expr -> expressions expr
         Block body -> assignedNames body
-        If _ thenStmts elseStmts -> assignedNames thenStmts <> assignedNames elseStmts
-        While _ _ _ body -> assignedNames body
+        If cond thenStmts elseStmts -> expressions cond <> assignedNames thenStmts <> assignedNames elseStmts
+        While cond _ _ body -> expressions cond <> assignedNames body
+        _ -> Set.empty
+    expressions expr = case expr of
+        F f args -> foldMap expressions (f : args)
+        IfExpr cond yes no -> foldMap expressions [cond, yes, no]
+        BlockExpr body result -> assignedNames body <> expressions result
+        Ascribed inner _ -> expressions inner
         _ -> Set.empty
 
 newBuilder :: Name -> Bool -> Maybe Type -> Builder
@@ -242,7 +250,7 @@ newLocal :: Maybe Variable -> Type -> L M.Local
 newLocal name ty = do
     b <- builder
     let l = M.Local (bNextLocal b)
-    modifyB (\b' -> b'{bNextLocal = bNextLocal b' + 1, bLocals = Map.insert l (M.LocalDecl ty name) (bLocals b')})
+    modifyB (\b' -> b'{bNextLocal = bNextLocal b' + 1, bLocals = Map.insert l (M.LocalDecl ty (sourceVariable <$> name)) (bLocals b')})
     return l
 
 newBlock :: L M.BlockId
@@ -279,6 +287,18 @@ scoped action = do
     a <- action
     modifyB (\b -> b{bScopes = drop 1 (bScopes b)})
     return a
+
+branchRefTargets :: L a -> L b -> L (a, b)
+branchRefTargets yes no = do
+    before <- bRefTargets <$> builder
+    a <- yes
+    left <- bRefTargets <$> builder
+    modifyB (\b -> b{bRefTargets = before})
+    c <- no
+    right <- bRefTargets <$> builder
+    let common = Map.mergeWithKey (\_ x y -> if x == y then Just x else Nothing) (const Map.empty) (const Map.empty) left right
+    modifyB (\b -> b{bRefTargets = common})
+    return (a, c)
 
 bindName :: Variable -> Binding -> L ()
 bindName var binding = modifyB (\b -> case bScopes b of
@@ -495,6 +515,9 @@ skipExpr expr = do
     _ <- claim
     case expr of
         F funct args -> skipHead funct >> mapM_ skipExpr args
+        IfExpr c yes no -> mapM_ skipExpr [c, yes, no]
+        BlockExpr stmts result -> skipStatements stmts >> skipExpr result
+        Ascribed{} -> failL "An annotated expression reached the lowering"
         _ -> return ()
   where
     skipHead funct = case funct of
@@ -586,23 +609,7 @@ assignTarget var ty = do
 
 lowerReturn :: Expression -> L ()
 lowerReturn expr = do
-    -- (a reference parameter that is returned is returned as a reference to its place: in the body the
-    -- parameter is the value it is to, and the caller is given the reference, which `from` names)
-    b0 <- builder
-    (pending, ty) <- case (bReturns b0, expr) of
-        (Just (TRef rt), Var v) -> do
-            _ <- claim
-            binding <- lookupBinding v
-            case binding of
-                Just (BLocal l _) | l `elem` bBorrowed b0 || l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] False), TRef rt)
-                _ -> lowerLast expr
-        (Just (TMutRef rt), Var v) -> do
-            _ <- claim
-            binding <- lookupBinding v
-            case binding of
-                Just (BLocal l _) | l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] True), TMutRef rt)
-                _ -> lowerLast expr
-        _ -> lowerLast expr
+    (pending, ty) <- lowerLast expr
     b <- builder
     case bReturns b of
         Just _ -> return ()
@@ -618,14 +625,19 @@ lowerIf cond thenStmts elseStmts = do
     elseB <- newBlock
     joinB <- newBlock
     lowerCondition "condition of if" cond thenB elseB
-    openBlock thenB
-    scoped (lowerStatements thenStmts)
-    thenOpen <- isOpen
-    when thenOpen (terminate (M.Goto joinB))
-    openBlock elseB
-    scoped (lowerStatements elseStmts)
-    elseOpen <- isOpen
-    when elseOpen (terminate (M.Goto joinB))
+    (thenOpen, elseOpen) <- branchRefTargets
+        (do
+            openBlock thenB
+            scoped (lowerStatements thenStmts)
+            open <- isOpen
+            when open (terminate (M.Goto joinB))
+            return open)
+        (do
+            openBlock elseB
+            scoped (lowerStatements elseStmts)
+            open <- isOpen
+            when open (terminate (M.Goto joinB))
+            return open)
     -- when both branches returned nothing reaches the join, and nothing after the if runs
     when (thenOpen || elseOpen) (openBlock joinB)
 
@@ -662,6 +674,9 @@ connective _ = Nothing
 
 lowerWhile :: Expression -> [ValidationStatement] -> Maybe Termination -> [Statement] -> L ()
 lowerWhile cond invariant term body = do
+    carried <- mapM lookupBinding (Set.toList (assignedNames (If cond body [] : [])))
+    let changed = Set.fromList [local | Just (BLocal local ty) <- carried, isRefType ty]
+    modifyB (\b -> b{bRefTargets = Map.filterWithKey (\local (root, _) -> local `Set.notMember` changed && root `Set.notMember` changed) (bRefTargets b)})
     header <- newBlock
     bodyB <- newBlock
     exit <- newBlock
@@ -671,7 +686,7 @@ lowerWhile cond invariant term body = do
     modifyB (\b -> b{bLoops = Map.insert header (M.LoopSpec invariant term env bodyB) (bLoops b)})
     lowerCondition "condition of while" cond bodyB exit
     openBlock bodyB
-    scoped (lowerStatements body)
+    _ <- branchRefTargets (scoped (lowerStatements body)) (return ())
     open <- isOpen
     when open (terminate (M.Goto header))
     openBlock exit
@@ -744,11 +759,22 @@ data Pending = PRvalue M.Rvalue | PCall M.Operand [M.Operand]
 finishInto :: M.Local -> Pending -> L ()
 finishInto dest (PRvalue rv@(M.Borrow root steps _)) = do
     emit (M.Assign dest rv)
-    modifyB (\b -> b{bRefTargets = Map.insert dest (root, steps) (bRefTargets b)})
-finishInto dest (PRvalue rv) = emit (M.Assign dest rv)
+    b <- builder
+    let rootIsRef = maybe False (isRefType . M.localType) (Map.lookup root (bLocals b))
+        target = if rootIsRef then fmap (\(base, prefix) -> (base, prefix ++ steps)) (Map.lookup root (bRefTargets b)) else Just (root, steps)
+    modifyB (\current -> current{bRefTargets = maybe (Map.delete dest (bRefTargets current)) (\place -> Map.insert dest place (bRefTargets current)) target})
+finishInto dest (PRvalue (M.Use (M.Copy source))) = do
+    b <- builder
+    let target = Map.lookup source (bRefTargets b)
+    modifyB (\current -> current{bRefTargets = maybe (Map.delete dest (bRefTargets current)) (\place -> Map.insert dest place (bRefTargets current)) target})
+    emit (M.Assign dest (M.Use (M.Copy source)))
+finishInto dest (PRvalue rv) = do
+    modifyB (\b -> b{bRefTargets = Map.delete dest (bRefTargets b)})
+    emit (M.Assign dest rv)
 finishInto dest (PCall callee args) = do
     open <- isOpen
     when open $ do
+        modifyB (\b -> b{bRefTargets = Map.delete dest (bRefTargets b)})
         next <- newBlock
         terminate (M.Call callee args dest next)
         openBlock next
@@ -772,6 +798,112 @@ lowerOperandWith expr ty = do
             finishInto temp pending
             return (M.Copy temp, ty)
 
+parametersOf :: Type -> [Type]
+parametersOf (TFn params _) = params
+parametersOf (TForall _ _ inner) = parametersOf inner
+parametersOf _ = []
+
+referenceKind :: Type -> Maybe Bool
+referenceKind TRef{} = Just False
+referenceKind TMutRef{} = Just True
+referenceKind _ = Nothing
+
+expressionEffects :: Expression -> L Bool
+expressionEffects expr = case expr of
+    IfExpr c yes no -> or <$> mapM expressionEffects [c, yes, no]
+    BlockExpr body result -> (||) <$> statementsEffect body <*> expressionEffects result
+    Ascribed inner _ -> expressionEffects inner
+    F f args -> do
+        inner <- or <$> mapM expressionEffects (f : args)
+        mutating <- case f of
+            Var name -> do
+                binding <- lookupBinding name
+                globals <- lsGlobals <$> getS
+                let ty = case binding of
+                        Just (BLocal _ t) -> Just t
+                        Just (BFn _ t) -> Just t
+                        _ -> snd <$> Map.lookup name globals
+                case ty of
+                    Just signature -> or <$> mapM (mutableValueType Set.empty) (parametersOf signature)
+                    Nothing -> case Map.lookup name stdLibCtx of
+                        Just (VFunct _ _ _ (BuiltinFunct b) _) -> return (b == BorrowMutOf)
+                        _ -> return True
+            Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _) -> return True
+            Val (VFunct _ _ _ (BuiltinFunct _) _) -> return False
+            _ -> return True
+        return (inner || mutating)
+    _ -> return False
+  where
+    statementsEffect = fmap or . mapM statementEffect
+    statementEffect stmt = case stmt of
+        Assign _ (Val (VFunct _ _ _ (NativeFunct (Signature params _ _ _ _ _) _ _) _)) -> or <$> mapM (mutableValueType Set.empty) params
+        Assign _ (Val VFunct{}) -> return False
+        Assign{} -> return True
+        AssignDeref{} -> return True
+        Let _ e -> expressionEffects e
+        Return e -> expressionEffects e
+        Block body -> statementsEffect body
+        If c yes no -> (||) <$> expressionEffects c <*> statementsEffect (yes ++ no)
+        While c _ _ body -> (||) <$> expressionEffects c <*> statementsEffect body
+        _ -> return False
+
+mutableValueType :: Set.Set Name -> Type -> L Bool
+mutableValueType seen ty = case ty of
+    TMutRef{} -> return True
+    TRef inner -> mutableValueType seen inner
+    TParam{} -> return True
+    TVar{} -> return True
+    TList element -> mutableValueType seen element
+    TBox element -> mutableValueType seen element
+    TArrayOf element _ -> mutableValueType seen element
+    TUninit element -> mutableValueType seen element
+    TVariant name | Set.member name seen -> return False
+    TVariant name -> do
+        s <- getS
+        let fields = [ty' | (owner, M.EnumDecl variants) <- Map.toList (lsTypes s), (variant, members) <- variants, variant == name || owner ++ "::" ++ variant == name, (_, ty') <- members]
+        or <$> mapM (mutableValueType (Set.insert name seen)) fields
+    TNamed base args -> do
+        s <- getS
+        let name = instanceName base args
+        if name `Set.member` seen then return False else do
+            let declared = case Map.lookup name (lsTypes s) of
+                    Just (M.StructDecl fields) -> Just fields
+                    Just (M.EnumDecl variants) -> Just (concatMap snd variants)
+                    Nothing -> case Map.lookup base (lsGenerics s) of
+                        Just (params, fields) -> instanceFields params args fields
+                        _ -> Nothing
+            case declared of
+                Just fields -> or <$> mapM (mutableValueType (Set.insert name seen) . snd) fields
+                Nothing -> or <$> mapM (\arg -> case arg of ArgType inner -> mutableValueType seen inner; _ -> return False) args
+    _ -> return False
+
+captureOperand :: Maybe Bool -> (M.Operand, Type) -> L (M.Operand, Type)
+captureOperand reference (M.Copy local, ty) = do
+    b <- builder
+    let declared = M.localType <$> Map.lookup local (bLocals b)
+    case reference of
+        Just mutable | maybe False (not . isRefType) declared -> do
+            let refTy = if mutable then TMutRef (unrefType ty) else TRef (unrefType ty)
+            captured <- newLocal Nothing refTy
+            finishInto captured (PRvalue (M.Borrow local [] mutable))
+            return (M.Copy captured, refTy)
+        _ -> do
+            captured <- newLocal Nothing ty
+            finishInto captured (PRvalue (M.Use (M.Copy local)))
+            return (M.Copy captured, ty)
+captureOperand _ original = return original
+
+lowerOperands :: [Maybe Bool] -> [Expression] -> L [(M.Operand, Type)]
+lowerOperands references = go (references ++ repeat Nothing)
+  where
+    go _ [] = return []
+    go (reference : refs) (expr : rest) = do
+        operand <- lowerOperand expr
+        effects <- or <$> mapM expressionEffects rest
+        captured <- if effects then captureOperand reference operand else return operand
+        (captured :) <$> go refs rest
+    go [] _ = failL "Missing operand roles"
+
 -- The arguments are evaluated left to right, then the operation or call is the last step
 lowerLast :: Expression -> L (Pending, Type)
 lowerLast expr = do
@@ -783,13 +915,44 @@ lowerLastWith :: Expression -> Type -> L (Pending, Type)
 lowerLastWith (Val v) ty = (\(o, _) -> (PRvalue (M.Use o), ty)) <$> valueOperand v ty
 lowerLastWith (Var name) ty = (\(o, _) -> (PRvalue (M.Use o), ty)) <$> varOperand name ty
 lowerLastWith expr ty | Just (b, [_, _]) <- connective expr, b `elem` [And, Or] = lowerValueOfConnective expr ty
+lowerLastWith (BlockExpr stmts result) ty = do
+    dest <- newLocal Nothing ty
+    scoped $ do
+        lowerStatements stmts
+        open <- isOpen
+        if open then lowerLast result >>= finishInto dest . fst else skipExpr result
+    return (PRvalue (M.Use (M.Copy dest)), ty)
+lowerLastWith (IfExpr cond yes no) ty = do
+    result <- newLocal Nothing ty
+    yesB <- newBlock
+    noB <- newBlock
+    joinB <- newBlock
+    lowerCondition "condition of if" cond yesB noB
+    (yesOpen, noOpen) <- branchRefTargets
+        (do
+            openBlock yesB
+            lowerLast yes >>= finishInto result . fst
+            open <- isOpen
+            when open (terminate (M.Goto joinB))
+            return open)
+        (do
+            openBlock noB
+            lowerLast no >>= finishInto result . fst
+            open <- isOpen
+            when open (terminate (M.Goto joinB))
+            return open)
+    when (yesOpen || noOpen) (openBlock joinB)
+    return (PRvalue (M.Use (M.Copy result)), ty)
+lowerLastWith Ascribed{} _ = failL "An annotated expression reached the lowering"
 lowerLastWith (F funct args) ty = do
     target <- resolveHead funct
     case target of
         Builtin b -> lowerBuiltin b args ty
-        Callable callee -> do
-            operands <- mapM lowerOperand args
-            return (PCall callee (map fst operands), ty)
+        Callable callee signature -> do
+            effects <- or <$> mapM expressionEffects args
+            captured <- if effects then captureOperand Nothing (callee, signature) else return (callee, signature)
+            operands <- lowerOperands (map referenceKind (parametersOf signature)) args
+            return (PCall (fst captured) (map fst operands), ty)
 
 -- A connective where the Bool is wanted (`ok = a && b;`): the whole expression is lowered as a condition, so every test is known to the ones after it (`i >= 0
 -- && i < size(l) && get(l, i) = 0`), and the local that holds the value is assigned in each of the two ways to get there
@@ -810,7 +973,7 @@ lowerValueOfConnective expr ty = do
     return (PRvalue (M.Use (M.Copy result)), ty)
 
 -- What is being applied
-data Head = Builtin BuiltinFunct | Callable M.Operand
+data Head = Builtin BuiltinFunct | Callable M.Operand Type
 
 resolveHead :: Expression -> L Head
 resolveHead (Val (VFunct _ _ _ (BuiltinFunct b) _)) = return (Builtin b)
@@ -818,14 +981,16 @@ resolveHead (Var name) = do
     binding <- lookupBinding name
     s <- getS
     case binding of
-        Just (BLocal l _) -> return (Callable (M.Copy l))
-        Just (BFn fn _) -> return (Callable (M.Const (M.CFn fn)))
+        Just (BLocal l ty) -> return (Callable (M.Copy l) ty)
+        Just (BFn fn ty) -> return (Callable (M.Const (M.CFn fn)) ty)
         Nothing -> case Map.lookup name (lsGlobals s) of
-            Just (fn, _) -> return (Callable (M.Const (M.CFn fn)))
+            Just (fn, ty) -> return (Callable (M.Const (M.CFn fn)) ty)
             Nothing -> case Map.lookup name stdLibCtx of
                 Just (VFunct _ _ _ (BuiltinFunct b) _) -> return (Builtin b)
                 _ -> failL ("Undefined variable: " ++ name)
-resolveHead other = Callable . fst <$> lowerOperand other
+resolveHead other = do
+    (operand, ty) <- lowerOperand other
+    return (Callable operand ty)
 
 -- A place as the root local it starts from, the steps from there, and its type (REFERENCES.md). Each
 -- expression of the place takes the type `elaborate` gave it (`claim`), in the order it gave them: the
@@ -856,8 +1021,8 @@ lowerPlace expr = case expr of
     F (Var "get") [sub, index] -> lowerIndexPlace sub index
     F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
         ty <- claim
-        (root, steps, _) <- lowerPlace inner
-        return (root, steps, ty)
+        (root, _) <- lowerRefRoot inner
+        return (root, [], ty)
     _ -> do
         (operand, ty) <- lowerOperand expr
         case operand of
@@ -868,9 +1033,20 @@ lowerPlace expr = case expr of
     lowerIndexPlace sub index = do
         elementTy <- claim
         (root, steps, _) <- lowerPlace sub
+        stableRoot <- capturePlaceRoot root index
         (indexOperand, _) <- lowerOperand index
         captured <- captureIndex indexOperand
-        return (root, steps ++ [M.RefIndex captured], elementTy)
+        return (stableRoot, steps ++ [M.RefIndex captured], elementTy)
+
+capturePlaceRoot :: M.Local -> Expression -> L M.Local
+capturePlaceRoot root later = do
+    effects <- expressionEffects later
+    b <- builder
+    case Map.lookup root (bLocals b) of
+        Just decl | effects, isRefType (M.localType decl) -> do
+            (operand, _) <- captureOperand Nothing (M.Copy root, M.localType decl)
+            case operand of M.Copy stable -> return stable; _ -> return root
+        _ -> return root
 
 captureIndex :: M.Operand -> L M.Operand
 captureIndex operand@M.Const{} = return operand
@@ -945,9 +1121,7 @@ localTypeOf l = do
         Just (M.LocalDecl ty _) -> return ty
         Nothing -> return TInt
 
--- The place an assignment through a reference is to: through an update parameter (the parameter local itself), or
--- through a reference local made by &mut place in this function (the place it was made to). Like `lowerPlace`,
--- each expression of the place takes the type `elaborate` gave it.
+-- Keep the update reference word so loan checking distinguishes it from other aliases.
 lowerDerefPlace :: Expression -> L (M.Local, [M.RefStep], Type)
 lowerDerefPlace expr = case expr of
     F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
@@ -960,11 +1134,8 @@ lowerDerefPlace expr = case expr of
                 case binding of
                     Just (BLocal l bty)
                         | l `elem` bMutBorrowed b -> return (l, [], ty)
-                        | isRefType bty -> case Map.lookup l (bRefTargets b) of
-                            Just (root, steps) -> return (root, steps, ty)
-                            Nothing
-                                | isMutRefType bty -> return (l, [], ty)
-                                | otherwise -> failL ("Lowering failed: the place that " ++ name ++ " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter")
+                        | isMutRefType bty -> return (l, [], ty)
+                        | isRefType bty -> failL ("Lowering failed: " ++ name ++ " is a read reference, so it cannot be assigned through")
                         | otherwise -> failL ("Lowering failed: " ++ name ++ " is not a reference")
                     _ -> failL ("Lowering failed: " ++ name ++ " is not a reference")
             _ -> do
@@ -982,8 +1153,9 @@ lowerDerefPlace expr = case expr of
     lowerDerefIndex sub index = do
         elementTy <- claim
         (root, steps, _) <- lowerDerefPlace sub
+        stableRoot <- capturePlaceRoot root index
         (indexOperand, _) <- lowerOperand index
-        return (root, steps ++ [M.RefIndex indexOperand], elementTy)
+        return (stableRoot, steps ++ [M.RefIndex indexOperand], elementTy)
 
 -- The result type is the one `elaborate` gave the application; the checker has already folded the
 -- size of an array into it, and decided what a field read, a constructor and each builtin gives
@@ -1000,7 +1172,8 @@ lowerBuiltin DerefOf args result = case args of
         return (PRvalue (M.Deref operand), result)
     _ -> failL "* takes a reference"
 lowerBuiltin b args result = do
-    operands <- mapM lowerOperand args
+    let references = if b `elem` [Get, First, Last, Size] then [Just False] else []
+    operands <- lowerOperands references args
     let tys = map snd operands
     rv <- case (pairParts b, b, map fst operands) of
         (Just (first, second), _, ops) -> pairRvalue b first second result ops

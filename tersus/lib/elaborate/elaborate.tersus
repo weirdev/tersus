@@ -3,7 +3,7 @@ import data::ast::ast { AstBody, AstElaborated, AstEntry, AstNode, AstProgram, A
 import data::codec::codec { Parsed, Token, catStrings, intAt, tokenize };
 import data::reader::reader { readAstRecords, readRecord };
 import elaborate::builtins { loadBuiltins };
-import elaborate::check { checkStatements, functionValue, stmtOf };
+import elaborate::check { checkStatements, functionValue, localScopes, stmtOf };
 import elaborate::out { emit, emitTypes, quotedName };
 import elaborate::records { fieldCodecTypes, fieldNames, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData };
 import elaborate::state { CtorInfo, Generic, St, TE, intText, notModelled, oneScope };
@@ -13,7 +13,7 @@ import elaborate::state { CtorInfo, Generic, St, TE, intText, notModelled, oneSc
 
 fn newState() -> St [{ }] [{ }] {
     return St {
-        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0,
+        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0, localNames: HashMap::new(),
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
         traits: HashSet::new(), templates: HashSet::new(), fns: HashMap::new(), scopes: oneScope(),
         ret: 0 - 1, programReturn: 0 - 1, sizeScope: [], typeScope: [], readOnly: [], mutParams: [], current: "", inGhost: false,
@@ -195,15 +195,18 @@ end = readRecord();
 if !end.ok || end.pos != 0 { return malformed(); };
 parsed = programBlock.value;
 st = St { nodes: clone(parsed.nodes), ..st };
+rawStmts = listItems(&st.nodes, parsed.root);
+st = localScopes(st, &rawStmts);
+scopedStmts = listItems(&st.nodes, st.nid);
+st = St { localNames: HashMap::new(), ..st };
 st = loadBuiltins(st, &table.value);
 for iface in &ifaces { st = loadInterface(st, iface); };
 if !wordIs(&predeclare, 1, "false") { st = notModelled(st, "the modules of a package"); };
 if !wordIs(&extract, 1, "none") { st = notModelled(st, "interfaces"); };
 if !wordIs(&library, 1, "false") { st = notModelled(st, "the modules of the compiler libraries"); };
 if st.status = 0 {
-    stmts = listItems(&st.nodes, parsed.root);
-    st = gatherSignatures(st, &stmts);
-    st = checkStatements(st, true, &stmts);
+    st = gatherSignatures(st, &rawStmts);
+    st = checkStatements(st, true, &scopedStmts);
 };
 out = AstProgram { stage: "elaborated", nodes: [], root: 0 };
 if st.status = 0 {

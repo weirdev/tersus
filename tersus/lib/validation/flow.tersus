@@ -194,9 +194,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                                             joinedYes = clone(headerState);
                                                             haveYes = false;
                                                             pathContexts = [];
-                                                            testRelations = [];
-                                                            testLefts = [];
-                                                            testRights = [];
+                                                            resolvedTests = [];
                                                             for testPosition in 0..size(tests) {
                                                                 test = get(tests, testPosition);
                                                                 if done = false {
@@ -213,9 +211,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                                                         pathFacts = push(pathFacts, EqualityFact { left: priorOther, right: priorOther });
                                                                         pathState = ExecutionState { context: ValidatorContext { equalities: pathFacts, ..pathContext }, ..clone(headerState) };
                                                                         if contextContradictory(pathState.context) = false { pathContexts = push(pathContexts, clone(pathState.context)); };
-                                                                        testRelations = push(testRelations, test.relation);
-                                                                        testLefts = push(testLefts, ta);
-                                                                        testRights = push(testRights, tb);
+                                                                        resolvedTests = push(resolvedTests, (test.relation, ta, tb));
                                                                         if haveYes = false {
                                                                             joinedYes = pathState;
                                                                             haveYes = true;
@@ -235,10 +231,10 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                                             };
                                                             if done = false {
                                                                 if size(tests) > 1 {
-                                                                    for ti in 0..size(testRelations) {
-                                                                        rel = get(testRelations, ti);
-                                                                        tl = get(testLefts, ti);
-                                                                        tr = get(testRights, ti);
+                                                                    for resolvedTest in resolvedTests {
+                                                                        rel = resolvedTest.0;
+                                                                        tl = resolvedTest.1;
+                                                                        tr = resolvedTest.2;
                                                                         everyPath = size(pathContexts) > 0;
                                                                         for pcPosition in 0..size(pathContexts) {
                                                                             pc = get(pathContexts, pcPosition);
@@ -449,10 +445,13 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
             branch = end as ExecutionEnd::Branch;
             yes = executeSteps(clone(run.state), branch.yesSteps);
             if yes.status != 0 { return ExecutionFlowResult { status: yes.status, block: id, step: yes.failedAt, state: yes.state }; };
-            yesResult = walkExecution(blocks, branch.yes, yes.state, fuel - 1, clone(loops));
-            if yesResult.status != 0 { return yesResult; };
+            if contextContradictory(yes.state.context) = false {
+                yesResult = walkExecution(blocks, branch.yes, yes.state, fuel - 1, clone(loops));
+                if yesResult.status != 0 { return yesResult; };
+            };
             no = executeSteps(run.state, branch.noSteps);
             if no.status != 0 { return ExecutionFlowResult { status: no.status, block: id, step: no.failedAt, state: no.state }; };
+            if contextContradictory(no.state.context) { return ExecutionFlowResult { status: 0, block: id, step: -1, state: no.state }; };
             return walkExecution(blocks, branch.no, no.state, fuel - 1, loops);
         };
         return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };

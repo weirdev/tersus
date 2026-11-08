@@ -1,4 +1,4 @@
--- The validator written in Tersus (lib/validation/validation.tersus), compiled to
+-- The validator written in Tersus (lib/validation/), compiled to
 -- native code and run as a program: this is how every program is
 -- validated. The bridge (SelfHostedMir.encode) makes the data the
 -- validator checks; this module writes it in the text the validator's

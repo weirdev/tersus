@@ -27,6 +27,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `safe_access.tersus` | A function that only accepts non-empty lists, so `first` and `last` are provably safe | returns `38` |
 | `contracts.tersus` | Output contracts, and a proof variable (`s`) exported from a callee to its caller | returns `8` |
 | `rules.tersus` | User-defined `axiom` and `proof` rewrite rules | validates |
+| `language_ergonomics.tersus` | Expression lists, composable `if`/`match`, typed local shadowing and a single-variant `if let` | returns `17` |
 | `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
 | `arithmetic.tersus` | `*`, `/` (rounding down, with a non-zero divisor contract), operator precedence and negative literals | returns `6` |
 | `helper_functions.tersus` | Functions calling other functions, with each call checked against the callee's contract | returns `11` |

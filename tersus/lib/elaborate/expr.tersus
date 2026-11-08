@@ -85,6 +85,9 @@ fn inferExpr(st: St, e: Int) -> St ~ {
         };
         return leaf(st, t, e);
     };
+    if ex is AstExpression::IfExpr || ex is AstExpression::BlockExpr || ex is AstExpression::Ascribed {
+        return notModelled(st, "expression control flow");
+    };
     call = ex as AstExpression::F;
     args = listItems(&st.nodes, call.xs);
     funct = call.f;

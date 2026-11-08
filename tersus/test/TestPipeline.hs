@@ -126,6 +126,7 @@ exampleExpectations =
     , ("examples/contracts.tersus", ((ExpectReturn (VInt 8))))
     , ("examples/rules.tersus", ExpectValid)
     , ("examples/branching.tersus", ((ExpectReturn (VInt 106))))
+    , ("examples/language_ergonomics.tersus", ExpectReturn (VInt 17))
     , ("examples/arithmetic.tersus", ((ExpectReturn (VInt 6))))
     , ("examples/types.tersus", ((ExpectReturn (VInt 6))))
     , ("examples/structs.tersus", ((ExpectReturn (VInt 11))))

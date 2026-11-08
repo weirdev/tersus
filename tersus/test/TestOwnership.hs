@@ -19,6 +19,7 @@ import Modules (LoadResult (..))
 import TestParserFragments (parseStatementBlock)
 import Pipeline
 import TestCopies (boxedClonePrograms)
+import TestErgonomics (ergonomicsPrograms)
 import TestNative (nativeExamples, referenceWritePrograms, unvalidatedPrograms, validatedPrograms)
 import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
 import TestHarness
@@ -878,6 +879,12 @@ arrayExamples =
 ownershipExamples :: [FilePath]
 ownershipExamples = [path | path <- nativeExamples, path `notElem` arrayExamples]
 
+arrayErgonomicsPrograms :: [(String, String)]
+arrayErgonomicsPrograms = [(name, source) | (name, source) <- ergonomicsPrograms, usesArrays source]
+
+ownershipPrograms :: [(String, String)]
+ownershipPrograms = [program | program <- validatedPrograms, program `notElem` arrayErgonomicsPrograms]
+
 onFile :: FilePath -> IO TestResult
 onFile path = do
     loaded <- loadFromFilesystem path
@@ -1269,7 +1276,9 @@ testOwnership =
         [ TestList "examples" [TestCase path (onFile path) | path <- ownershipExamples]
         , TestCase "array examples are excluded: the heap model has no array model (blind spot)" . pure $
             testAssertTrue (all (`notElem` ownershipExamples) arrayExamples && not (null arrayExamples) && usesArrays "a = array(3, 0); return get(a, 0);")
-        , TestList "programs" [TestCase name (onSource name source) | (name, source) <- validatedPrograms]
+        , TestCase "array ergonomics retain native coverage and stay out of the arrayless heap model" . pure $
+            testAssertTrue (not (null arrayErgonomicsPrograms) && all (`elem` validatedPrograms) arrayErgonomicsPrograms && all (`notElem` ownershipPrograms) arrayErgonomicsPrograms)
+        , TestList "programs" [TestCase name (onSource name source) | (name, source) <- ownershipPrograms]
         , TestList "boxed Clone" [TestCase name (onSource name source) | (name, source, _, _) <- boxedClonePrograms]
         , TestList "reference writes" [TestCase name (onSource name source) | (name, source) <- referenceWritePrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]

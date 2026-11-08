@@ -23,6 +23,9 @@ enum AstExpression {
     Val { v: Int },
     Var { n: Int },
     F { f: Int, xs: Int },
+    IfExpr { c: Int, a: Int, b: Int },
+    BlockExpr { xs: Int, e: Int },
+    Ascribed { e: Int, ty: Int },
 };
 impl Clone for AstExpression { };
 
@@ -301,6 +304,9 @@ fn printNode(node: &AstNode) -> Int ~ {
                 AstExpression::Val { v: v } => { bytesWritten = "Val".print() + printInt(v); },
                 AstExpression::Var { n: n } => { bytesWritten = "Var".print() + printInt(n); },
                 AstExpression::F { f: f, xs: xs } => { bytesWritten = "F".print() + printInt(f) + printInt(xs); },
+                AstExpression::IfExpr { c: c, a: a, b: b } => { bytesWritten = "IfExpr".print() + printInt(c) + printInt(a) + printInt(b); },
+                AstExpression::BlockExpr { xs: xs, e: e } => { bytesWritten = "BlockExpr".print() + printInt(xs) + printInt(e); },
+                AstExpression::Ascribed { e: e, ty: ty } => { bytesWritten = "Ascribed".print() + printInt(e) + printInt(ty); },
             };
         },
         AstNode::Termination { value: v } => {

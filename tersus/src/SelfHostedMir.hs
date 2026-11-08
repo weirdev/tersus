@@ -3,13 +3,14 @@
 -- does not fully model is reported as an Unmodeled verdict, never accepted.
 module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode, encodeLibrary, obligationNote, sourceContainerView) where
 
-import Control.Monad (foldM)
-import Data.List (find, isInfixOf, isPrefixOf, nub)
+import Control.Monad (foldM, guard)
+import Data.List (find, isInfixOf, isPrefixOf, nub, sortOn)
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Control.Applicative ((<|>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
+import MirMoves (liveness)
 import Pretty (renderVarProof)
 import MirEval (MirValue (..), runNamedFunction)
 import LibPackage (LibPackage (..), libPackage)
@@ -22,13 +23,18 @@ import Syntax
 import Types
 import Utils (Result (..), bindResult, inIntRange)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool, buildReferences :: Maybe (RefTargets, RefMembers), buildLive :: Maybe (Set.Set M.Local), buildLiveness :: Maybe (Map.Map M.BlockId [Set.Set M.Local], Map.Map M.BlockId (Set.Set M.Local)), buildParents :: Map.Map M.Local (Set.Set M.Local), buildExtraBlocks :: [MirValue], buildPreheader :: [MirValue], buildNextBlock :: Integer, buildLoopHeaders :: Map.Map M.BlockId Integer }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False
+emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False Nothing Nothing Nothing Map.empty [] [] (-2) Map.empty
 
 record :: String -> [(String, MirValue)] -> MirValue
 record = MData
+
+operandLocal :: M.Operand -> Maybe M.Local
+operandLocal (M.Copy local) = Just local
+operandLocal (M.Move local) = Just local
+operandLocal _ = Nothing
 
 localNum :: M.Local -> Integer
 localNum (M.Local n) = toInteger n
@@ -1659,11 +1665,87 @@ builtinCall name args (M.Local dest) b0 = case (name, args) of
         pure (map (renote "size(list) > 0") steps, b3)
     _ -> Nothing
 
--- A direct call uses only contracts of bodies checked separately. Snapshot
--- arguments before writing the result, and decline callees that reassign a
--- parameter: their postconditions can refer to its final value.
-directCall :: Rules -> M.Function -> M.Function -> [M.Operand] -> M.Local -> Maybe (Bool, MirValue) -> Bool -> Build -> Maybe ([MirValue], [(Name, MirValue)], Build)
-directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = do
+localValue :: M.Local -> MirValue
+localValue local = record "ValueRef::Local" [("local", MInt (localNum local))]
+
+temporary :: Build -> (M.Local, MirValue, Build)
+temporary b = let (i, next) = fresh b; local = M.Local (fromInteger (negate i - 1)) in (local, localValue local, next)
+
+readPlace :: Bool -> MirValue -> [M.RefStep] -> Build -> Maybe ([MirValue], MirValue, Build)
+readPlace checked ref path b0 = case path of
+    [] -> pure ([], ref, b0)
+    M.RefField _ field : rest -> do
+        let (function, b1) = namedFunction ("field:" ++ field) b0
+            (local, value, b2) = temporary b1
+        (more, result, b3) <- readPlace checked value rest b2
+        pure (step "ApplyFresh" [("local", MInt (localNum local)), ("function", MInt function), ("arguments", MList [ref])] : more, result, b3)
+    M.RefIndex index : rest -> do
+        (indexRef, b1) <- operand index b0
+        let (local, value, b2) = temporary b1
+        (prefix, b3) <- if checked then getSteps (localNum local) ref indexRef b2 else pure ([step "ApplyFresh" [("local", MInt (localNum local)), ("function", MInt (-14)), ("arguments", MList [ref, indexRef])]], b2)
+        (more, result, b4) <- readPlace checked value rest b3
+        pure (prefix ++ more, result, b4)
+
+invariantAt :: Bool -> Rules -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Type -> MirValue -> Build -> Maybe ([MirValue], Build)
+invariantAt assumeMode rules types invariants ty ref b0 = case fieldsOf types (unref ty) of
+    Nothing -> pure ([], b0)
+    Just (ctor, _) | null (Map.findWithDefault [] (baseNameOf ctor) invariants) -> pure ([], b0)
+    Just (ctor, fields) -> do
+        let clauses = Map.findWithDefault [] (baseNameOf ctor) invariants
+        (reads, env, b1) <- foldM (\(acc, env, b) (field, _) -> do
+            (more, value, next) <- readPlace False ref [M.RefField ctor field] b
+            op <- refOperandOf next value
+            pure (acc ++ more, Map.insert field op env, next)) ([], Map.empty, b0) fields
+        (checks, b2) <- contractSteps rules assumeMode env clauses b1
+        pure (reads ++ checks, b2)
+
+variantSteps :: Bool -> Map.Map Name M.TypeDecl -> Name -> MirValue -> Build -> ([MirValue], Build)
+variantSteps assumeMode types ctor ref b
+    | not (any (\(family, decl) -> case decl of M.EnumDecl variants -> any (\(name, _) -> name == ctor || family ++ "::" ++ name == ctor) variants; _ -> False) (Map.toList types)) = ([], b)
+    | otherwise =
+        let (family, b1) = namedFunction ("enum:" ++ takeWhile (/= ':') ctor) b
+            (constructor, b2) = namedFunction ("variant:" ++ ctor) b1
+            fields = [("object", ref), ("family", MInt family), ("constructor", MInt constructor)]
+         in ([step (if assumeMode then "AssumeVariant" else "RequireVariant") (fields ++ [("matches", MBool True) | assumeMode])], b2)
+
+replacePlace :: Bool -> Rules -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> MirValue -> [M.RefStep] -> MirValue -> Build -> Maybe ([MirValue], MirValue, Build)
+replacePlace assumeMode rules types invariants rootRef path valueRef b0 = case path of
+    [] -> pure ([], valueRef, b0)
+    M.RefField ctor field : rest -> do
+        let extended = maybe False (not . null . snd) (buildReferences b0)
+            (guards, bGuard) = if extended then variantSteps False types ctor rootRef b0 else ([], b0)
+        (s1, inner, b1) <- readPlace False rootRef [M.RefField ctor field] bGuard
+        (s2, changed, b2) <- replacePlace assumeMode rules types invariants inner rest valueRef b1
+        (_, fields) <- fieldsOf types (TNamed ctor []) <|> fieldsOf types (TVariant ctor)
+        (s3, refs, b3) <- foldM (\(acc, refs, b) (f, _) -> if f == field then pure (acc, refs ++ [changed], b) else do
+            (more, ref, next) <- readPlace False rootRef [M.RefField ctor f] b
+            pure (acc ++ more, refs ++ [ref], next)) ([], [], b2) fields
+        let (constructor, b4) = namedFunction ("ctor:" ++ ctor) b3
+            (local, newRef, b5) = temporary b4
+            create = step "ApplyFresh" [("local", MInt (localNum local)), ("function", MInt constructor), ("arguments", MList refs)]
+            register (ids, b) (f, _) = let (fid, next) = namedFunction ("field:" ++ f) b in (ids ++ [fid], next)
+            (fieldIds, b6) = foldl register ([], b5) fields
+            b7 = if maybe False (not . null . snd) (buildReferences b6) then b6{ctorFields = nub ([(constructor, fid, toInteger idx) | (idx, fid) <- zip [0 ..] fieldIds] ++ ctorFields b6)} else b6
+        (projections, b8) <- foldM (\(acc, b) ((f, _), original) -> do
+            (more, ref, next) <- readPlace False newRef [M.RefField ctor f] b
+            pure (acc ++ more ++ [step "Assume" [("relation", MInt 0), ("left", ref), ("right", original)]], next)) ([], b7) (zip fields refs)
+        let (tag, bTag) = if extended then variantSteps True types ctor newRef b8 else ([], b8)
+            clauses = Map.findWithDefault [] (baseNameOf ctor) invariants
+        (checks, b9) <- if null clauses then pure ([], bTag) else do
+            pairs <- mapM (\((field, _), ref) -> do op <- refOperandOf bTag ref; pure (field, op)) (zip fields refs)
+            contractSteps rules assumeMode (Map.fromList pairs) clauses bTag
+        pure (guards ++ s1 ++ s2 ++ s3 ++ [create] ++ projections ++ tag ++ checks, newRef, b9)
+    M.RefIndex index : rest -> do
+        (indexRef, b1) <- operand index b0
+        (s1, inner, b2) <- readPlace False rootRef [M.RefIndex index] b1
+        (s2, changed, b3) <- replacePlace assumeMode rules types invariants inner rest valueRef b2
+        let (local, newRef, b4) = temporary b3
+        (s3, b5) <- setSteps (localNum local) rootRef indexRef changed b4
+        pure (s1 ++ s2 ++ s3, newRef, b5)
+
+-- Post-holder invariants are justified by the checks at every callee return.
+directCall :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Rules -> M.Function -> M.Function -> [M.Operand] -> M.Local -> Maybe (Bool, MirValue) -> Bool -> Build -> Maybe ([MirValue], [(Name, Maybe [M.RefStep], MirValue, Maybe MirValue)], Build)
+directCall types invariants rules caller callee args (M.Local dest) termInfo recursiveCall b0 = do
     if length args == length params then Just () else Nothing
     if all validSizeArg (drop (length args - length (M.fnSizeParams callee)) args) then Just () else Nothing
     let calleeStmts = concatMap M.blockStatements (Map.elems (M.fnBlocks callee))
@@ -1682,34 +1764,42 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
             Just (TRef _) | all (`elem` map fst paramNameLocals) froms -> Just ()
             _ -> Nothing
     case M.fnReturns callee of Just _ -> Just (); Nothing -> Nothing
+    held <- heldParams types (buildFunctions b0) callee
+    guard (all (\param -> param `notElem` M.fnMutBorrowed callee || maybe False (not . any (\(_, ty) -> case ty of TMutRef{} -> True; _ -> False)) (M.localType <$> Map.lookup param (M.fnLocals callee) >>= referenceLeaves types . unref)) params)
     (snapshots, b1) <- foldM snapshot ([], b0) args
     (postSteps, postLocals, b1') <- foldM (addPost snapshots) ([], [], b1) (zip params args)
+    (heldSteps, heldLocals, bHeld) <- foldM (heldPost snapshots) ([], [], b1') held
     let bindings = Map.fromList (zip params [local | (local, _) <- snapshots])
         remap (M.Copy local) = M.Copy <$> Map.lookup local bindings
         remap constant@(M.Const _) = Just constant
         remap _ = Nothing
         env = Map.mapMaybe remap (M.specEnv (M.fnSpec callee))
-    (sizeChecks, withSizes) <- sizeParameterSteps False callee (map fst snapshots) b1'
+    (sizeChecks, withSizes) <- sizeParameterSteps False callee (map fst snapshots) bHeld
     (checks, b2) <- contractSteps rules False env (M.specRequires (M.fnSpec callee)) withSizes
+    let (definitionSteps, bDefinitions) = if null held then ([], b2) else
+            foldl (defineLocal False env) ([], b2) (contractDefinitions (M.specRequires (M.fnSpec callee)))
     (variantSteps, b2') <- case (termInfo, recursiveCall, M.specTermination (M.fnSpec callee)) of
         (Just (isParts, callerRef), True, Just term) -> do
             expr <- case term of
                 Counting e -> Just e
                 Parts e -> Just e
                 _ -> Nothing
-            (steps, callRef, b') <- exprOperand env expr b2
+            (steps, callRef, b') <- exprOperand env expr bDefinitions
             let chk = if isParts then step "CheckWithin" [("inner", callRef), ("outer", callerRef)] else check 2 callRef callerRef
             pure (steps ++ [chk], b')
-        (_, True, Nothing) -> impossible b2
-        (_, _, Just MayDiverge) | not (mayDivergeFn caller) -> impossible b2
-        _ -> pure ([], b2)
-    let postEnv = foldl (\e (name, postLocal, snapLocal) -> Map.insert name (M.Copy postLocal) (Map.insert ("$old " ++ name) (M.Copy snapLocal) e)) env [(name, post, snap) | (name, post, snap) <- postLocals]
-        resultEnv = Map.insert "return" (M.Copy (M.Local dest)) postEnv
-    (assumptions0, b3a) <- contractSteps rules True resultEnv (ensuresOf (M.fnSpec callee)) b2'
+        (_, True, Nothing) -> impossible bDefinitions
+        (_, _, Just MayDiverge) | not (mayDivergeFn caller) -> impossible bDefinitions
+        _ -> pure ([], bDefinitions)
+    let declaredPostEnv = foldl (\e (name, postLocal, snapLocal) -> Map.insert name (M.Copy postLocal) (Map.insert ("$old " ++ name) (M.Copy snapLocal) e)) env [(name, post, snap) | (name, post, snap) <- postLocals]
+        postEnv = foldl (\e (name, holder, _, _) -> Map.insert name (M.Copy holder) e) declaredPostEnv heldLocals
+        resultEnv = Map.insert "return" (M.Copy (M.Local dest)) (if null held then postEnv else Map.union postEnv (buildExports b2'))
+        outputClauses = if null held then ensuresOf (M.fnSpec callee) else M.specEnsures (M.fnSpec callee)
+    (assumptions0, b3a) <- contractSteps rules True resultEnv outputClauses b2'
     -- What the callee's contracts define (define s = size(lst);) is the
     -- caller's to name after the call: each is computed here, at the call,
     -- into a local of its own.
-    let (exportSteps, b3) = foldl (defineLocal False resultEnv) ([], b3a) (contractDefinitions (M.specRequires (M.fnSpec callee) ++ M.specEnsures (M.fnSpec callee)))
+    let exports = if null held then M.specRequires (M.fnSpec callee) ++ M.specEnsures (M.fnSpec callee) else M.specEnsures (M.fnSpec callee)
+        (exportSteps, b3) = foldl (defineLocal False resultEnv) ([], b3a) (contractDefinitions exports)
         assumptions = assumptions0 ++ exportSteps
     let (function, b4a) = namedFunction ("call:" ++ M.fnName callee) b3
     -- A function that reads the input (or calls one that does) gives a new
@@ -1723,11 +1813,27 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
     let argumentRefs = [record "ValueRef::Local" [("local", MInt (toInteger n))] | (M.Local n, _) <- snapshots] ++ tagRefs
         applyResult = step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList argumentRefs)]
         result = case M.specFrom (M.fnSpec callee) of
-            [from] | Just (_, postLocal, _snapLocal) <- find (\(name, _, _) -> name == from) postLocals -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum postLocal)))])]
-            [from] | Just snapLocal <- lookup from (zip (map fst paramNameLocals) [local | (local, _) <- snapshots]) -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum snapLocal)))])]
+            [from] | scalarFrom from, Just (_, postLocal, _snapLocal) <- find (\(name, _, _) -> name == from) postLocals -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum postLocal)))])]
+            [from] | scalarFrom from, Just snapLocal <- lookup from (zip (map fst paramNameLocals) [local | (local, _) <- snapshots]) -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum snapLocal)))])]
             _ -> applyResult
-    pure ([save | (_, save) <- snapshots] ++ postSteps ++ sizeChecks ++ checks ++ variantSteps ++ [result] ++ assumptions, [(name, record "ValueRef::Local" [("local", MInt (toInteger (localNum post)))]) | (name, post, _) <- postLocals], b4)
+    pure ([save | (_, save) <- snapshots] ++ postSteps ++ sizeChecks ++ checks ++ definitionSteps ++ variantSteps ++ heldSteps ++ [result] ++ assumptions,
+        [(name, Nothing, localValue post, Nothing) | (name, post, _) <- postLocals] ++ [(name, Just path, value, Just (localValue holder)) | (name, holder, path, value) <- heldLocals], b4)
   where
+    heldPost snaps (steps, entries, b) (param, [(path, refTy)]) = do
+        name <- lookup param [(p, n) | (n, p) <- paramNameLocals]
+        snap <- lookup param (zip params (map fst snaps))
+        let (valueLocal, value, b1) = temporary b
+            fake = callee{M.fnLocals = Map.insert valueLocal (M.LocalDecl (unref refTy) Nothing) (M.fnLocals callee)}
+        (facts, b2) <- typeSteps rules types invariants fake valueLocal b1
+        (rebuild, post, b3) <- replacePlace True rules types invariants (localValue snap) path value b2
+        postOperand <- refOperandOf b3 post
+        postLocal <- operandLocal postOperand
+        pure (steps ++ [step "Havoc" [("local", MInt (localNum valueLocal))]] ++ facts ++ rebuild, entries ++ [(name, postLocal, path, value)], b3)
+    heldPost _ _ _ = Nothing
+    scalarFrom name = case (M.fnReturns callee, lookup name paramNameLocals >>= (\local -> M.localType <$> Map.lookup local (M.fnLocals callee))) of
+        (Just (TRef result), Just source) -> scalarType result && result == unref source
+        (Just (TMutRef result), Just source) -> scalarType result && result == unref source
+        _ -> False
     paramNameLocals = [(n, p) | p <- params, Just d <- [Map.lookup p (M.fnLocals callee)], Just n <- [M.localName d]]
     addPost snaps (steps, posts, b) (param, _) = case [name | (name, p) <- paramNameLocals, p == param] of
         [name] | name `elem` M.specMutParams (M.fnSpec callee) -> do
@@ -1791,6 +1897,7 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
     facts (TArrayOf _ (SizeConst size)) b = sized size b
     -- (a value lent is a value of its type, with the facts of its type)
     facts (TRef inner) b = facts inner b
+    facts (TMutRef inner) b | maybe False (not . null . snd) (buildReferences b) = facts inner b
     -- (in the library a list and a Box are the structs they are made of)
     facts ty@(TNamed base _) b | buildPhysical b, base `elem` ["List", "Box"] = structFacts ty b
     facts (TBox (TArrayOf _ (SizeConst size))) b = sized size b
@@ -1803,6 +1910,7 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
         let (i, b1) = fresh b
             localId = negate i - 1
         pure ([step "ApplyFresh" [("local", MInt localId), ("function", MInt (-13)), ("arguments", MList [value])]], b1)
+    facts (TVariant ctor) b | maybe False (not . null . snd) (buildReferences b) = pure (variantSteps True types ctor value b)
     facts ty@(TNamed _ _) b = structFacts ty b
     facts _ b = Just ([], b)
     structFacts (TNamed base args) b = do
@@ -2003,36 +2111,286 @@ fnValueLocals f = Map.fromList [(d, n) | (d, _) <- fnAssignments, Just n <- [res
             [M.Copy src] -> resolve (Set.insert d seen) src
             _ -> Nothing
 
--- The place each reference local of a function is to, when the whole function
--- agrees on it: a borrow, a copy of a reference, or a call that returns a
--- reference from one of its arguments. A local that is lent two different
--- places is outside the bridge's subset.
-borrowsOf :: Map.Map Name M.Function -> M.Function -> Maybe (Map.Map M.Local (M.Local, [M.RefStep]))
-borrowsOf functions fn = loop Map.empty
+-- Targets and reference-valued members share one fixed point. A holder's own
+-- storage is distinct from the storage its reference fields depend on.
+type RefTargets = Map.Map M.Local [(M.Local, Maybe [M.RefStep])]
+type RefMembers = [((M.Local, [M.RefStep]), [(M.Local, Maybe [M.RefStep])])]
+
+memberLookup :: (M.Local, [M.RefStep]) -> RefMembers -> [(M.Local, Maybe [M.RefStep])]
+memberLookup key = fromMaybe [] . lookup key
+
+memberInsert :: (M.Local, [M.RefStep]) -> [(M.Local, Maybe [M.RefStep])] -> RefMembers -> RefMembers
+memberInsert key points members = (key, nub (points ++ memberLookup key members)) : filter ((/= key) . fst) members
+
+unref :: Type -> Type
+unref (TRef inner) = inner
+unref (TMutRef inner) = inner
+unref ty = ty
+
+referenceType :: Type -> Bool
+referenceType TRef{} = True
+referenceType TMutRef{} = True
+referenceType _ = False
+
+scalarType :: Type -> Bool
+scalarType TInt = True
+scalarType TBool = True
+scalarType TByte = True
+scalarType TWord{} = True
+scalarType _ = False
+
+fieldsOf :: Map.Map Name M.TypeDecl -> Type -> Maybe (Name, [(Variable, Type)])
+fieldsOf types (TNamed base args) = do
+    let name = instanceName base args
+    M.StructDecl fields <- Map.lookup name types <|> Map.lookup base types
+    pure (name, fields)
+fieldsOf types (TVariant name) = case Map.lookup name types of
+    Just (M.StructDecl fields) -> Just (name, fields)
+    _ -> case [fields | (family, M.EnumDecl variants) <- Map.toList types, (variant, fields) <- variants, name == variant || name == family ++ "::" ++ variant] of
+        [fields] -> Just (name, fields)
+        _ -> Nothing
+fieldsOf _ _ = Nothing
+
+typeContainsReferences :: Map.Map Name M.TypeDecl -> Type -> Bool
+typeContainsReferences types = go []
+  where
+    go _ ty | referenceType ty = True
+    go seen ty | Just (ctor, fields) <- fieldsOf types ty = ctor `notElem` seen && any (go (ctor : seen) . snd) fields
+    go seen (TNamed base args) = case Map.lookup (instanceName base args) types <|> Map.lookup base types of
+        Just (M.EnumDecl variants) -> base `notElem` seen && any (any (go (base : seen) . snd) . snd) variants
+        _ -> False
+    go seen (TList inner) = go seen inner
+    go seen (TUninit inner) = go seen inner
+    go seen (TArrayOf inner _) = go seen inner
+    go seen (TBox inner) = go seen inner
+    go _ _ = False
+
+referenceLeaves :: Map.Map Name M.TypeDecl -> Type -> Maybe [([M.RefStep], Type)]
+referenceLeaves types = go [] 0
+  where
+    go _ _ ty | not (typeContainsReferences types ty) = Just []
+    go _ _ ty | referenceType ty = do guard (not (typeContainsReferences types (unref ty))); pure [([], ty)]
+    go seen depth ty | Just (ctor, fields) <- fieldsOf types ty =
+        if ctor `elem` seen || depth >= 16 then do guard (not (typeContainsReferences types ty)); pure [] else
+            concat <$> mapM (\(field, fieldTy) -> map (\(path, leaf) -> (M.RefField ctor field : path, leaf)) <$> go (ctor : seen) (depth + 1) fieldTy) fields
+    go seen depth (TNamed base args) | Just (M.EnumDecl variants) <- Map.lookup (instanceName base args) types <|> Map.lookup base types = do
+        guard (depth < 16 && base `notElem` seen)
+        concat <$> mapM (\(variant, fields) -> concat <$> mapM (\(field, ty) -> map (\(path, leaf) -> (M.RefField (if "::" `isInfixOf` variant then variant else base ++ "::" ++ variant) field : path, leaf)) <$> go (base : seen) (depth + 1) ty) fields) variants
+    go _ _ ty@(TList _) = do guard (not (typeContainsReferences types ty)); pure []
+    go _ _ ty@(TArrayOf _ _) = do guard (not (typeContainsReferences types ty)); pure []
+    go seen depth (TBox inner) = go seen (depth + 1) inner
+    go _ _ ty = do guard (not (typeContainsReferences types ty)); pure []
+
+heldParams :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> M.Function -> Maybe [(M.Local, [([M.RefStep], Type)])]
+heldParams types functions fn = do
+    parts <- mapM one (M.fnParams fn)
+    let held = [(param, leaves) | (param, leaves) <- parts, param `notElem` M.fnMutBorrowed fn, any (\(_, ty) -> case ty of TMutRef{} -> True; _ -> False) leaves]
+    guard (all (\(param, leaves) -> length leaves == 1 && all (\(path, ty) -> not (null path) && scalarType (unref ty)) leaves && not (assigned param)) held)
+    guard (null held || not ("extern " `isPrefixOf` M.fnName fn))
+    guard (null held || not (any mutatesSlots blocks))
+    pure held
+  where
+    blocks = Map.elems (M.fnBlocks fn)
+    one param = do
+        ty <- M.localType <$> Map.lookup param (M.fnLocals fn)
+        leaves <- if referenceType ty then pure [] else referenceLeaves types ty
+        pure (param, leaves)
+    assigned param = any (\blk -> any (\st -> case st of M.Assign d _ -> d == param; M.Peek d _ -> d == param; _ -> False) (M.blockStatements blk) || case M.blockTerminator blk of M.Call _ _ d _ -> d == param; _ -> False) blocks
+    mutatesSlots blk = any slotWrite (M.blockStatements blk) || case M.blockTerminator blk of
+        M.Call (M.Const (M.CFn name)) _ _ _ -> case Map.lookup name functions of
+            Just callee -> any (\p -> p `elem` M.fnMutBorrowed callee && maybe True (not . null) (M.localType <$> Map.lookup p (M.fnLocals callee) >>= referenceLeaves types . unref)) (M.fnParams callee)
+            Nothing -> True
+        M.Call _ _ _ _ -> True
+        _ -> False
+    slotWrite (M.AssignRef root _ (M.Use value)) = maybe False (typeContainsReferences types . unref) (M.localType <$> Map.lookup root (M.fnLocals fn)) || case operandLocal value >>= (\l -> M.localType <$> Map.lookup l (M.fnLocals fn)) of
+        Just ty -> maybe True (not . null) (referenceLeaves types ty)
+        Nothing -> False
+    slotWrite M.AssignRef{} = True
+    slotWrite _ = False
+
+literalListLength :: M.Function -> M.Operand -> Maybe Integer
+literalListLength fn = operandLength []
+  where
+    operandLength _ (M.Const (M.CList values)) = Just (toInteger (length values))
+    operandLength seen op = do
+        local <- operandLocal op
+        guard (local `notElem` seen && local `notElem` M.fnParams fn)
+        let definitions = [rv | blk <- Map.elems (M.fnBlocks fn), M.Assign dest rv <- M.blockStatements blk, dest == local]
+            returned = any (\blk -> case M.blockTerminator blk of M.Call _ _ dest _ -> dest == local; _ -> False) (Map.elems (M.fnBlocks fn))
+        guard (not returned && not (null definitions))
+        sizes <- mapM (rvalueLength (local : seen)) definitions
+        case nub sizes of [size] -> Just size; _ -> Nothing
+    rvalueLength _ (M.MakeList values) = Just (toInteger (length values))
+    rvalueLength seen (M.ListOp M.Push [source, _]) = (+ 1) <$> operandLength seen source
+    rvalueLength seen (M.Use source) = operandLength seen source
+    rvalueLength seen (M.CopyOf source) = operandLength seen source
+    rvalueLength _ _ = Nothing
+
+localReferenceLeaves :: Map.Map Name M.TypeDecl -> M.Function -> M.Local -> Maybe [([M.RefStep], Type)]
+localReferenceLeaves types fn = go []
+  where
+    go seen local = do
+        guard (local `notElem` seen)
+        ty <- unref . M.localType <$> Map.lookup local (M.fnLocals fn)
+        case ty of
+            TList inner | typeContainsReferences types inner -> do
+                let definitions = [rv | blk <- Map.elems (M.fnBlocks fn), M.Assign dest rv <- M.blockStatements blk, dest == local]
+                    called = any (\blk -> case M.blockTerminator blk of M.Call _ _ dest _ -> dest == local; _ -> False) (Map.elems (M.fnBlocks fn))
+                guard (not (null definitions) && not called && local `notElem` M.fnParams fn)
+                paths <- mapM (shape (local : seen) inner) definitions
+                pure (nub (concat paths))
+            _ -> referenceLeaves types ty
+    shape _ inner (M.MakeList values) = do
+        leaves <- referenceLeaves types inner
+        pure [(M.RefIndex (M.Const (M.CInt index)) : path, leaf) | (index, _) <- zip [0 ..] values, (path, leaf) <- leaves]
+    shape _ inner (M.ListOp M.Push [source, _]) = do
+        count <- (+ 1) <$> literalListLength fn source
+        leaves <- referenceLeaves types inner
+        pure [(M.RefIndex (M.Const (M.CInt index)) : path, leaf) | index <- [0 .. count - 1], (path, leaf) <- leaves]
+    shape seen _ (M.Use op) = operandLocal op >>= go seen
+    shape seen _ (M.CopyOf op) = operandLocal op >>= go seen
+    shape _ _ _ = Nothing
+
+borrowInfo :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> M.Function -> Maybe (RefTargets, RefMembers)
+borrowInfo types functions fn = do
+    paramLeaves <- mapM (\p -> do ty <- localTy p; leaves <- referenceLeaves types (unref ty); pure (p, leaves)) (M.fnParams fn)
+    held <- heldParams types functions fn
+    let virtual = [p | (p, _) <- held]
+        initialMembers = [((p, path), [(p, if p `elem` virtual then Just path else Nothing)]) | (p, leaves) <- paramLeaves, (path, _) <- leaves]
+    close held 0 (initialTargets, initialMembers)
   where
     stmts = concatMap M.blockStatements (Map.elems (M.fnBlocks fn))
-    terms = map M.blockTerminator (Map.elems (M.fnBlocks fn))
-    seeds = [(d, (root, steps)) | M.Assign d (M.Borrow root steps _) <- stmts]
-    edges = [(d, src) | M.Assign d (M.Use (M.Copy src)) <- stmts] ++ [(d, src) | M.Assign d (M.Use (M.Move src)) <- stmts] ++ callEdges
-    callEdges =
-        [ (dest, src)
-        | M.Call (M.Const (M.CFn name)) args dest _ <- terms
-        , Just callee <- [Map.lookup name functions]
-        , [from] <- [M.specFrom (M.fnSpec callee)]
-        , Just idx <- [lookup from (zip (paramNamesOf callee) [0 ..])]
-        , idx < length args
-        , M.Copy src <- [args !! idx]
-        ]
-    paramNamesOf f = [n | p <- M.fnParams f, Just d <- [Map.lookup p (M.fnLocals f)], Just n <- [M.localName d]]
-    loop known = case extend known of
-        Nothing -> Nothing
-        Just m -> if m == known then Just known else loop m
-    extend known = do
-        m1 <- foldM (\m (d, place) -> put m d place) known seeds
-        foldM (\m (d, src) -> case Map.lookup src m of Just place -> put m d place; Nothing -> Just m) m1 edges
-    put m d place = case Map.lookup d m of
-        Nothing -> Just (Map.insert d place m)
-        Just p -> if p == place then Just m else Nothing
+    terms = [(bid, M.blockTerminator blk) | (bid, blk) <- Map.toList (M.fnBlocks fn)]
+    localTy l = M.localType <$> Map.lookup l (M.fnLocals fn)
+    isReference l = maybe False referenceType (localTy l)
+    initialTargets = Map.fromList [(p, [(p, Nothing)]) | p <- M.fnParams fn, isReference p]
+    produced = [d | M.Assign d _ <- stmts, isReference d] ++ [d | (_, M.Call _ _ d _) <- terms, isReference d]
+    add table key values = Map.insertWith (\a b -> nub (a ++ b)) key values table
+    roots targets source
+        | not (isReference source) = [(source, Just [])]
+        | otherwise = Map.findWithDefault [] source targets
+    bounded targets members source = nub (roots targets source ++ concat
+        [points | (root, Just prefix) <- roots targets source, ((owner, path), points) <- members, owner == root, prefix `isPrefixOf` path])
+    member targets members source path = concat [case prefix of
+        Just steps -> memberLookup (root, steps ++ path) members
+        Nothing -> [(root, Nothing)] | (root, prefix) <- roots targets source]
+    copies targets members dest source prefix = case localReferenceLeaves types fn dest of
+        Just leaves -> foldl (\m (path, _) -> memberInsert (dest, path) (member targets members source (prefix ++ path)) m) members leaves
+        Nothing -> members
+    transfer (targets, members) stmt = case stmt of
+        M.Assign dest (M.Borrow root steps _) -> (add targets dest [(base, (++) <$> prefix <*> Just steps) | (base, prefix) <- roots targets root], members)
+        M.Assign dest (M.Use source) | Just src <- operandLocal source -> copy dest src
+        M.Assign dest (M.CopyOf source) | Just src <- operandLocal source -> copy dest src
+        M.Assign dest (M.Deref source) | Just src <- operandLocal source -> copy dest src
+        M.Assign dest (M.MakeBox source) | Just src <- operandLocal source ->
+            if isReference src then (targets, memberInsert (dest, []) (roots targets src) members) else (targets, copies targets members dest src [])
+        M.Assign dest (M.Unbox source) | Just src <- operandLocal source ->
+            if isReference dest then (add targets dest (member targets members src []), members) else (targets, copies targets members dest src [])
+        M.Assign dest (M.AsVariant source _) | Just src <- operandLocal source -> copy dest src
+        M.Assign dest (M.ReadField source owner field) | Just src <- operandLocal source ->
+            let path = [M.RefField owner field] in if isReference dest then (add targets dest (member targets members src path), members) else (targets, copies targets members dest src path)
+        M.Assign dest (M.MakeData ctor fields) -> (targets, foldl (made ctor dest) members fields)
+        M.Assign dest (M.MakeList values) -> (targets, foldl (\table (index, op) -> case operandLocal op of
+            Just source | isReference source -> memberInsert (dest, [M.RefIndex (M.Const (M.CInt index))]) (roots targets source) table
+            Just source -> foldl (\m ((root, path), points) -> if root == source then memberInsert (dest, M.RefIndex (M.Const (M.CInt index)) : path) points m else m) table members
+            Nothing -> table) members (zip [0 ..] values))
+        M.Assign dest (M.ListOp M.Push [source, value]) | Just index <- literalListLength fn source, Just child <- operandLocal value ->
+            let copied = case operandLocal source of
+                    Just src -> foldl (\m ((root, path), points) -> if root == src then memberInsert (dest, path) points m else m) members members
+                    Nothing -> members
+                appended = if isReference child then memberInsert (dest, [M.RefIndex (M.Const (M.CInt index))]) (roots targets child) copied else foldl (\m ((root, path), points) -> if root == child then memberInsert (dest, M.RefIndex (M.Const (M.CInt index)) : path) points m else m) copied members
+             in (targets, appended)
+        M.Assign dest (M.ListOp M.First [source]) | Just src <- operandLocal source -> element dest src (M.Const (M.CInt 0))
+        M.Assign dest (M.ListOp M.Get [source, index]) | Just src <- operandLocal source -> element dest src index
+        M.AssignRef root steps (M.Use source) | Just src <- operandLocal source ->
+            (targets, foldl (replace src) members [(base, prefix ++ steps) | (base, Just prefix) <- roots targets root])
+        _ -> (targets, members)
+      where
+        element dest src index = if isReference dest then (add targets dest [(root, (++ [M.RefIndex index]) <$> prefix) | (root, prefix) <- roots targets src], members) else (targets, copies targets members dest src [M.RefIndex index])
+        copy dest src = if isReference dest then (add targets dest (roots targets src), members) else (targets, copies targets members dest src [])
+        made ctor dest table (field, source) = case (operandLocal source, (fieldsOf types (TNamed ctor []) <|> fieldsOf types (TVariant ctor)) >>= lookup field . snd) of
+            (Just src, Just ty) | referenceType ty -> memberInsert (dest, [M.RefField ctor field]) (roots targets src) table
+            (Just src, Just ty) | typeContainsReferences types ty -> foldl (\m ((root, path), points) -> if root == src then memberInsert (dest, M.RefField ctor field : path) points m else m) table (members)
+            _ -> table
+        replace src table (root, path)
+            | isReference src = memberInsert (root, path) (roots targets src) table
+            | otherwise = foldl (\m ((r, sub), points) -> if r == src then memberInsert (root, path ++ sub) points m else m) table (members)
+    calleeAt bid called = case called of
+        M.Const (M.CFn name) -> Map.lookup name functions
+        M.Copy l -> (Map.lookup l (Map.findWithDefault Map.empty bid (fnValuesAtEnd fn)) <|> Map.lookup l (fnValueLocals fn)) >>= (`Map.lookup` functions)
+        _ -> Nothing
+    call (targets, members) (bid, M.Call called args dest _) = case calleeAt bid called of
+        Just callee ->
+            let sources = [(src, scalarIdentity callee p) | (p, arg) <- zip (M.fnParams callee) args, p `elem` M.fnFrom callee, Just src <- [operandLocal arg]]
+                points = [(root, if exact then path else Nothing) | (src, exact) <- sources, (root, path) <- bounded targets members src]
+                leaves = fromMaybe [] (localReferenceLeaves types fn dest)
+                unknown = nub [(root, Nothing) | arg <- args, Just source <- [operandLocal arg], (root, _) <- bounded targets members source]
+                invalidated = foldl (\m (param, arg) -> case (M.localType <$> Map.lookup param (M.fnLocals callee), operandLocal arg) of
+                    (Just ty, Just source) | param `elem` M.fnMutBorrowed callee, typeContainsReferences types (unref ty) ->
+                        foldl (\table ((owner, prefix), (path, _)) -> memberInsert (owner, prefix ++ path) unknown table) m
+                            [((owner, prefix), leaf) | (owner, Just prefix) <- roots targets source, leaf <- fromMaybe [] (referenceLeaves types (unref ty))]
+                    _ -> m) members (zip (M.fnParams callee) args)
+             in if isReference dest then (add targets dest points, invalidated) else (targets, foldl (\m (path, _) -> memberInsert (dest, path) points m) invalidated leaves)
+        Nothing -> (targets, members)
+    call info _ = info
+    scalarIdentity callee param = case (M.fnReturns callee, M.localType <$> Map.lookup param (M.fnLocals callee)) of
+        (Just result, Just source) -> referenceType result && scalarType (unref result) && unref result == unref source
+        _ -> False
+    supported st = case st of
+        M.Assign d _ | maybe False (typeContainsReferences types . unref) (localTy d), not (isJust (localReferenceLeaves types fn d)) -> False
+        M.Assign d _ | isReference d && maybe False (referenceType . unref) (localTy d) -> False
+        M.Assign d rv | maybe False (typeContainsReferences types . unref) (localTy d) || isReference d -> case rv of
+            M.Borrow{} -> True
+            M.MakeData{} -> not (isReference d)
+            M.MakeList{} -> not (isReference d)
+            M.ListOp M.Push [source, value] -> not (isReference d) && isJust (literalListLength fn source) && isJust (operandLocal value)
+            M.ListOp M.First [source] -> isJust (operandLocal source >>= localReferenceLeaves types fn)
+            M.ListOp M.Get [source, M.Const (M.CInt _)] -> isJust (operandLocal source >>= localReferenceLeaves types fn)
+            M.AsVariant o _ -> not (isReference d) && isJust (operandLocal o)
+            M.Use o -> isJust (operandLocal o)
+            M.CopyOf o -> isJust (operandLocal o)
+            M.ReadField o _ _ -> isJust (operandLocal o)
+            M.Deref o -> not (isReference d) && isJust (operandLocal o)
+            M.MakeBox o -> not (isReference d) && isJust (operandLocal o)
+            M.Unbox o -> isJust (operandLocal o)
+            _ -> False
+        M.Peek d _ | isReference d || maybe False (typeContainsReferences types . unref) (localTy d) -> False
+        _ -> True
+    covered (bid, M.Call called args dest _) | isReference dest || maybe False (typeContainsReferences types . unref) (localTy dest) = case calleeAt bid called of
+        Just callee -> isJust (localReferenceLeaves types fn dest) && not (null (M.fnFrom callee)) && all (\param -> case lookup param (zip (M.fnParams callee) [0 ..]) of Just idx -> idx < length args && isJust (operandLocal (args !! idx)); Nothing -> False) (M.fnFrom callee)
+        Nothing -> False
+    covered _ = True
+    assigned = [d | M.Assign d _ <- stmts] ++ [d | (_, M.Call _ _ d _) <- terms]
+    unstable = Set.fromList ([d | d <- assigned, length (filter (== d) assigned) > 1] ++ [d | (bid, blk) <- Map.toList (M.fnBlocks fn), any (Set.member bid) (Map.elems (loopRegions fn)), M.Assign d _ <- M.blockStatements blk])
+    stabilize (root, Just path) | any (\s -> case s of M.RefIndex o -> maybe False (`Set.member` unstable) (operandLocal o); _ -> False) path = (root, Nothing)
+    stabilize point = point
+    permitted held targets root suffix = all (\(owner, prefix) -> case lookup owner held of
+        Nothing -> True
+        Just leaves -> case prefix of Just path -> path ++ suffix `elem` map fst leaves; Nothing -> False) (roots targets root)
+    preservesPrivate held targets st = case st of
+        M.AssignRef root suffix _ -> permitted held targets root suffix
+        _ -> True
+    preservesCall held targets (bid, M.Call called args _ _) = case calleeAt bid called of
+        Just callee -> all (\(param, arg) -> param `notElem` M.fnMutBorrowed callee || maybe False (\root -> permitted held targets root []) (operandLocal arg)) (zip (M.fnParams callee) args)
+        Nothing -> null held
+    preservesCall _ _ _ = True
+    close held count info@(targets, members) = do
+        guard (count <= 100 && all supported stmts && all covered terms)
+        let (nextTargets, nextMembers) = foldl call (foldl transfer info stmts) terms
+            next = (Map.map (sortOn show . nub . map stabilize) nextTargets, sortOn (show . fst) [(key, sortOn show (nub (map stabilize values))) | (key, values) <- nextMembers])
+            points = concat (Map.elems (fst next)) ++ concatMap snd (snd next)
+        guard (all (\(_, path) -> maybe True ((<= 16) . length) path) points)
+        if next == info then do
+            guard (all (\d -> not (null (Map.findWithDefault [] d targets))) produced)
+            guard (all (preservesPrivate held targets) stmts && all (preservesCall held targets) terms)
+            pure (targets, members)
+        else close held (count + 1) next
+
+borrowsOf :: RefTargets -> Map.Map M.Local (M.Local, [M.RefStep])
+borrowsOf = Map.mapMaybe singleton
+  where
+    singleton [(root, Just steps)] = Just (root, steps)
+    singleton _ = Nothing
 
 -- The locals every path from the entry has assigned when a block starts (the
 -- parameters at the entry; a call's destination once its block ends)
@@ -2075,20 +2433,73 @@ reachesName functions caller from target = go Set.empty [from]
         | Set.member x seen = go seen xs
         | otherwise = go (Set.insert x seen) (maybe [] callNamesOf (Map.lookup x allFns) ++ xs)
 
+invariantParents :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> M.Function -> Map.Map M.Local (Set.Set M.Local)
+invariantParents types functions fn = close Map.empty
+  where
+    tracked local = maybe False (\ty -> referenceType ty || typeContainsReferences types ty) (M.localType <$> Map.lookup local (M.fnLocals fn))
+    holder local = maybe False (typeContainsReferences types . unref) (M.localType <$> Map.lookup local (M.fnLocals fn))
+    owner parents local = Map.findWithDefault Set.empty local parents `Set.union` (if holder local then Set.singleton local else Set.empty)
+    parentsOf parents local = Map.findWithDefault Set.empty local parents
+    put parents dest sources = if tracked dest then Map.insertWith Set.union dest sources parents else parents
+    transfer parents stmt = case stmt of
+        M.Assign dest (M.ReadField op _ _) | Just source <- operandLocal op -> put parents dest (owner parents source)
+        M.Assign dest (M.Borrow source _ _) -> put parents dest (owner parents source)
+        M.Assign dest (M.MakeData _ fields) -> put parents dest (Set.unions [parentsOf parents source | (_, op) <- fields, Just source <- [operandLocal op]])
+        M.Assign dest rv | [op] <- case rv of M.Use value -> [value]; M.CopyOf value -> [value]; M.MakeBox value -> [value]; M.Unbox value -> [value]; M.Deref value -> [value]; M.AsVariant value _ -> [value]; _ -> [], Just source <- operandLocal op -> put parents dest (parentsOf parents source)
+        _ -> parents
+    call parents bid (M.Call called args dest _) = case resolved of
+        Just callee -> put parents dest (Set.unions [owner parents source | (param, arg) <- zip (M.fnParams callee) args, param `elem` M.fnFrom callee, Just source <- [operandLocal arg]])
+        Nothing -> parents
+      where
+        resolved = case called of
+            M.Const (M.CFn name) -> Map.lookup name functions
+            M.Copy local -> (Map.lookup local (Map.findWithDefault Map.empty bid (fnValuesAtEnd fn)) <|> Map.lookup local (fnValueLocals fn)) >>= (`Map.lookup` functions)
+            _ -> Nothing
+    call parents _ _ = parents
+    close parents =
+        let next = foldl (\p (bid, blk) -> call (foldl transfer p (M.blockStatements blk)) bid (M.blockTerminator blk)) parents (Map.toList (M.fnBlocks fn))
+         in if next == parents then parents else close next
+
+validationLiveness :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> M.Function -> (Map.Map M.BlockId [Set.Set M.Local], Map.Map M.BlockId (Set.Set M.Local))
+validationLiveness types functions fn = liveness fn{M.fnBlocks = Map.mapWithKey observes (M.fnBlocks fn)}
+  where
+    peek values = M.Peek (M.Local (-1)) (M.MakeList values)
+    used env names = [op | name <- nub names, Just op <- [Map.lookup name env]]
+    proofUse env validation = case validation of
+        ProofAssert proof -> used env (proofNames proof)
+        Assume proof -> used env (proofNames proof)
+        AssignProofVar _ expr -> used env (proofNames (exprToProof expr))
+        _ -> Map.elems env
+    statement st = case st of
+        M.Ghost env (M.GhostValidation validation) -> peek (proofUse env validation)
+        _ -> st
+    held = map fst (fromMaybe [] (heldParams types functions fn))
+    observes bid (M.BasicBlock stmts end) =
+        let clauses = case Map.lookup bid (M.specLoops (M.fnSpec fn)) of
+                Just spec -> concatMap (proofUse (M.loopEnv spec)) (M.loopInvariant spec)
+                Nothing -> []
+            outputs = case end of
+                M.Return -> map M.Copy held ++ concatMap (proofUse (M.specEnv (M.fnSpec fn))) (M.specEnsures (M.fnSpec fn)) ++ [M.Copy (M.Local 0) | isJust (M.fnReturns fn)]
+                _ -> []
+         in M.BasicBlock (map statement stmts ++ [peek (clauses ++ outputs) | not (null clauses && null outputs)]) end
+
 block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Maybe (Bool, MirValue) -> Bool -> M.Function -> Map.Map M.BlockId Int -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
 block types invariants functions rules termInfo allowCalls fn predecessors (blockId@(M.BlockId n), M.BasicBlock stmts end) b0' = do
     -- (the locals every path to a statement has assigned: a reference to an
     -- element is refreshed after a write of its root only where it exists)
-    let b0 = b0'{buildDefined = Just (Map.findWithDefault Set.empty blockId (definitelyAssigned fn))}
-        addTracked acc s = do
-            (st, bb, c, pe) <- add acc s
+    let (liveAfter, liveOut) = fromMaybe (Map.empty, Map.empty) (buildLiveness b0')
+        liveEnd = Map.findWithDefault Set.empty blockId liveOut
+        b0 = b0'{buildPreheader = [], buildDefined = Just (Map.findWithDefault Set.empty blockId (definitelyAssigned fn)), buildLive = if maybe False (not . null . snd) (buildReferences b0') then Just liveEnd else Nothing}
+        addTracked (index, (steps, state, conditions, env)) s = do
+            let currentLive = case drop index (Map.findWithDefault [] blockId liveAfter) of after : _ -> after; _ -> liveEnd
+            (st, bb, c, pe) <- add (steps, state{buildLive = if extended then Just currentLive else Nothing}, conditions, env) s
             let assigned = case s of
                     M.Assign d _ -> Set.singleton d
                     M.AssignRef r _ _ -> Set.singleton r
                     _ -> Set.empty
-            pure (st, bb{buildDefined = fmap (Set.union assigned) (buildDefined bb)}, c, pe)
-    (steps, b1d, conditions, _) <- foldM addTracked ([], b0, Map.empty, Map.empty) stmts
-    let b1 = b1d{buildDefined = Nothing}
+            pure (index + 1, (st, bb{buildDefined = fmap (Set.union assigned) (buildDefined bb)}, c, pe))
+    (_, (steps, b1d, conditions, _)) <- foldM addTracked (0, ([], b0, Map.empty, Map.empty)) stmts
+    let b1 = b1d{buildDefined = if extended then buildDefined b1d else Nothing, buildLive = if extended then Just liveEnd else Nothing}
     (extra, ending, b2) <- case (Map.lookup blockId (M.specLoops (M.fnSpec fn)), end) of
         (Just spec, M.SwitchBool (M.Copy local) yes no) -> do
             resolution <- case Map.lookup local conditions of
@@ -2123,7 +2534,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
                     Nothing -> Map.lookup local (fnValueLocals fn)
                 _ -> Nothing
             (callSteps, posts, b2) <- case Map.lookup name functions of
-                Just callee -> directCall rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+                Just callee -> directCall types invariants rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
                 _ -> do
                     (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
                     pure (cs, [], bb)
@@ -2142,11 +2553,16 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
             let entryValues = foldl (\e (name, local) -> Map.insert name (M.Copy (M.Local (-(2000000 + fromInteger (localNum local))))) e) (M.specEnv (M.fnSpec fn)) (reassignedParams fn)
                 env = Map.insert "return" (M.Copy (M.Local 0)) (foldl (\e (name, local) -> Map.insert ("$old " ++ name) (M.Copy (M.Local (-(1000000 + fromInteger (localNum local))))) e) entryValues [(name, p) | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], Just name <- [M.localName d], name `elem` M.specMutParams (M.fnSpec fn)])
             (postconditions, b') <- contractSteps rules False (Map.union env (buildExports b1)) (M.specEnsures (M.fnSpec fn)) b1
+            held <- heldParams types functions fn
+            (holderChecks, b'') <- foldM (\(acc, b) (param, _) -> do
+                ty <- M.localType <$> Map.lookup param (M.fnLocals fn)
+                (more, next) <- invariantAt False rules types invariants ty (localValue param) b
+                pure (acc ++ more, next)) ([], b') held
             -- (the program itself may end without a value: it then prints none)
             let resultCheck = case M.fnReturns fn of
                     Just _ | not (isProgramMain fn) -> [step "RequireDefined" [("value", localRef 0)]]
                     _ -> []
-            Just (resultCheck ++ postconditions, record "ExecutionEnd::Done" [], b')
+            Just (resultCheck ++ postconditions ++ holderChecks, record "ExecutionEnd::Done" [], b'')
         (Nothing, M.Goto target) -> Just ([], jump target, b1)
         (Nothing, M.SwitchBool (M.Const (M.CBool choice)) yes no) -> Just ([], jump (if choice then yes else no), b1)
         (Nothing, M.SwitchBool (M.Copy local) yes no) | Just (source, variantName) <- variantTestIn stmts local -> do
@@ -2210,11 +2626,11 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
                     Nothing -> Map.lookup local (fnValueLocals fn)
                 _ -> Nothing
             (callSteps, posts, b') <- case Map.lookup name functions of
-                Just callee | not ("builtin::" `isPrefixOf` name) -> directCall rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+                Just callee | not ("builtin::" `isPrefixOf` name) -> directCall types invariants rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
                 _ -> do
                     (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
                     pure (cs, [], bb)
-            borrows <- borrowsOf functions fn
+            borrows <- stableReferences
             (mutSteps, b'') <- case Map.lookup name functions of
                 Just callee -> foldM (versionArg borrows callee posts) ([], b') (zip (M.fnParams callee) args)
                 _ -> pure ([], b')
@@ -2222,8 +2638,21 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
             Just (callSteps ++ mutSteps ++ typeFacts, jump target, b''')
         _ -> Nothing
     let (literalSteps, b3) = literalFacts (steps ++ extra ++ [ending]) b2
-    pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (literalSteps ++ steps ++ extra)), ("end", ending)], b3)
+    let body = record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (literalSteps ++ steps ++ extra)), ("end", ending)]
+    case (buildPreheader b3, ending) of
+        (copies@(_ : _), MData "ExecutionEnd::Loop" fields) -> do
+            let header = buildNextBlock b3
+                region = case lookup "region" fields of Just (MList values) -> MList (MInt header : values); _ -> MList [MInt header]
+                loopEnd = record "ExecutionEnd::Loop" [(key, if key == "region" then region else value) | (key, value) <- fields]
+                loopBlock = record "ExecutionBlock" [("id", MInt header), ("steps", MList (literalSteps ++ steps ++ extra)), ("end", loopEnd)]
+                preheader = record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList copies), ("end", record "ExecutionEnd::Jump" [("target", MInt header)])]
+            pure (preheader, b3{buildPreheader = [], buildNextBlock = header - 1, buildExtraBlocks = loopBlock : buildExtraBlocks b3, buildLoopHeaders = Map.insert blockId header (buildLoopHeaders b3)})
+        _ -> pure (body, b3)
   where
+    references = buildReferences b0'
+    extended = maybe False (not . null . snd) references
+    candidatesOf = fst <$> references
+    stableReferences = borrowsOf <$> candidatesOf
     -- A function a call can be made to without knowing which: it needs
     -- nothing of its arguments, changes none of them, returns no reference,
     -- terminates, and is not the function itself or one that reaches it
@@ -2232,6 +2661,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
             not ("builtin::" `isPrefixOf` name)
                 && null [() | ProofAssert _ <- M.specRequires (M.fnSpec callee)]
                 && null [() | Rewrite _ <- M.specRequires (M.fnSpec callee)]
+                && not (any (\p -> maybe True (typeContainsReferences types . unref) (M.localType <$> Map.lookup p (M.fnLocals callee))) (M.fnParams callee))
                 && null (M.specMutParams (M.fnSpec callee))
                 && null (M.specFrom (M.fnSpec callee))
                 && M.specTermination (M.fnSpec callee) /= Just MayDiverge
@@ -2286,11 +2716,14 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
         (exitBlock, orTestsRaw) <- orChainOf Set.empty no
         if (testChainToBody spec no yes || not (null orTestsRaw)) && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
         let region = Map.findWithDefault (Set.singleton blockId) blockId (loopRegions fn)
+            explicitAssignments = [dest | member <- Set.toList region, Just blk <- [Map.lookup member (M.fnBlocks fn)], dest <- [d | M.Assign d _ <- M.blockStatements blk] ++ [d | M.Call _ _ d _ <- [M.blockTerminator blk]]]
+            headerLive = Map.findWithDefault Set.empty blockId (definitelyAssigned fn)
             assigned = nub
                 [ v
                 | member <- Set.toList region
                 , Just (M.BasicBlock blockStmts term) <- [Map.lookup member (M.fnBlocks fn)]
-                , v <- [d | M.Assign d _ <- blockStmts] ++ [r | M.AssignRef r _ _ <- blockStmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> []) ++ mutCallRoots term
+                , v <- [owner | M.Assign d _ <- blockStmts, owner <- if extended then affectedStorage [d] else [d]] ++ [owner | M.AssignRef reference _ _ <- blockStmts, owner <- referenceOwners reference] ++ (case term of M.Call _ _ d _ -> [d]; _ -> []) ++ mutCallRoots member term
+                , not extended || v `elem` explicitAssignments || Set.member v headerLive
                 ]
         (genVariant, withCondition') <- case M.loopTermination spec of
             Just (Counting expr) -> case expr of
@@ -2324,7 +2757,22 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
                 Just (vRef, [], b')
         (upperSteps, upperRef, b2) <- exprOperand (M.loopEnv spec) upper b1
         (zeroRef, b3) <- operand (M.Const (M.CInt 0)) b2
-        (typeAssumptions, withTypes) <- foldM (loopType fn) ([], b3) assigned
+        held <- heldParams types functions fn
+        (_, members) <- references
+        let retained = [((holder, path), points) | ((holder, path), points) <- members, holder `elem` assigned, holder `notElem` explicitAssignments || holder `elem` map fst held]
+            retainedLocals = nub [holder | ((holder, _), _) <- retained]
+            havocLocals = assigned
+            frozen = [holder | ((holder, path), _) <- retained, all (\(bid, blk) -> all (frameWrite holder path) (M.blockStatements blk) && frameCall holder path bid (M.blockTerminator blk)) [(bid, blk) | bid <- Set.toList region, Just blk <- [Map.lookup bid (M.fnBlocks fn)]]]
+        (snapshotCopies, snapshots, bSnapshots) <- foldM (\(copies, table, b) holder -> do
+            let (local, value, next) = temporary b
+            pure (copies ++ [step "Assign" [("local", MInt (localNum local)), ("value", localValue holder)]], Map.insert holder value table, next)) ([], Map.fromList [(holder, localValue holder) | holder <- retainedLocals, holder `notElem` frozen], b3) (nub frozen)
+        (initialTypes, bTypes) <- foldM (loopType fn) ([], bSnapshots) assigned
+        (holderFrames, bFrames) <- foldM (loopHolder snapshots) ([], bTypes) retained
+        stable <- stableReferences
+        let liveFrames = bFrames{buildLive = Just headerLive, buildDefined = Just (Map.findWithDefault Set.empty blockId (definitelyAssigned fn))}
+        (aliasFrames, bAliases) <- if extended then foldM (\(acc, b) root -> do (more, next) <- rebindAfter stable root b; pure (acc ++ more, next)) ([], liveFrames) (nub (havocLocals ++ retainedLocals)) else pure ([], bFrames)
+        let typeAssumptions = initialTypes ++ holderFrames ++ aliasFrames
+            withTypes = bAliases
         (checks, assumptions, b4) <- foldM (invariant (Map.union (M.loopEnv spec) (buildExports withTypes))) (variantSteps, typeAssumptions, withTypes) (expandDefinitions (M.loopInvariant spec))
         (orTestValues, b5) <- foldM (\(acc, bb) (r2, a2, c2) -> do
             (lref, bb1) <- operand a2 bb
@@ -2337,22 +2785,67 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
         let divergeGuard = if M.loopTermination spec == Just MayDiverge && not (mayDivergeFn fn) then [check 2 zeroRef zeroRef] else []
         pure (variantSteps ++ upperSteps ++ divergeGuard, record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MInt (toInteger bodyId)),
              ("region", MList [MInt (toInteger number) | M.BlockId number <- Set.toList region]),
-             ("checks", MList checks), ("assumptions", MList assumptions), ("havoc", MList (map (MInt . localNumber) assigned)),
+             ("checks", MList checks), ("assumptions", MList assumptions), ("havoc", MList (map (MInt . localNumber) havocLocals)),
              ("relation", MInt kind), ("left", left), ("right", right), ("variant", variantRef), ("variantMode", MInt (if genVariant /= Nothing then 0 else mode)),
              ("variantOther", upperRef), ("zero", zeroRef),
              ("variantObject", maybe (localRef (localNumber dummyLocal)) (\(object, _, _) -> object) variantTestInfo),
              ("variantFamily", MInt (maybe (-1) (\(_, familyId, _) -> familyId) variantTestInfo)),
              ("variantConstructor", MInt (maybe (-1) (\(_, _, constructorId) -> constructorId) variantTestInfo)),
-             ("orTests", MList orTestValues)], b5)
-    mutCallRoots (M.Call (M.Const (M.CFn name)) args _ _) = case Map.lookup name functions of
-        Just callee ->
-            [ root
-            | (pname, arg) <- zip [n | p <- M.fnParams callee, Just d <- [Map.lookup p (M.fnLocals callee)], Just n <- [M.localName d]] args
-            , pname `elem` M.specMutParams (M.fnSpec callee)
-            , Just (root, _) <- [case arg of M.Copy l -> Just (maybe (l, []) id (Map.lookup l (fromMaybe Map.empty (borrowsOf functions fn)))); M.Move l -> Just (maybe (l, []) id (Map.lookup l (fromMaybe Map.empty (borrowsOf functions fn)))); _ -> Nothing]
-            ]
+             ("orTests", MList orTestValues)], b5{buildPreheader = snapshotCopies})
+    frameCall holder path bid term@M.Call{} = case callMutationPlaces bid term of
+        Just places -> all (\(root, changed) -> root /= holder || changed == Just path) places
+        Nothing -> False
+    frameCall _ _ _ _ = True
+    frameWrite holder path (M.AssignRef reference suffix value) = case references of
+        Just (targets, _) ->
+            let places = if maybe False referenceType (M.localType <$> Map.lookup reference (M.fnLocals fn)) then Map.findWithDefault [] reference targets else [(reference, Just [])]
+                slotChange = case value of
+                    M.Use op -> maybe False (\local -> maybe False referenceType (M.localType <$> Map.lookup local (M.fnLocals fn))) (operandLocal op)
+                    M.Borrow{} -> True
+                    M.BinaryOp{} -> False
+                    _ -> True
+             in all (\(root, prefix) -> root /= holder || maybe False (\steps -> steps ++ suffix == path) prefix && not slotChange) places
+        Nothing -> False
+    frameWrite _ _ _ = True
+    mutCallRoots _ (M.Call (M.Const (M.CFn name)) args _ _) | not extended = case Map.lookup name functions of
+        Just callee -> [root | (pname, arg) <- zip [n | p <- M.fnParams callee, Just d <- [Map.lookup p (M.fnLocals callee)], Just n <- [M.localName d]] args, pname `elem` M.specMutParams (M.fnSpec callee), Just reference <- [operandLocal arg], root <- referenceOwners reference]
         _ -> []
-    mutCallRoots _ = []
+    mutCallRoots _ _ | not extended = []
+    mutCallRoots bid term@M.Call{} = maybe [] (affectedStorage . map fst) (callMutationPlaces bid term)
+    mutCallRoots _ _ = []
+    callMutationPlaces bid (M.Call called args _ _) = do
+        callee <- case called of
+            M.Const (M.CFn name) -> Map.lookup name functions
+            M.Copy local -> (Map.lookup local (Map.findWithDefault Map.empty bid (fnValuesAtEnd fn)) <|> Map.lookup local (fnValueLocals fn)) >>= (`Map.lookup` functions)
+            _ -> Nothing
+        (targets, members) <- references
+        held <- heldParams types functions callee
+        concat <$> mapM (\(param, arg) -> case lookup param held of
+            Just leaves -> do
+                reference <- operandLocal arg
+                pure (concat [memberPoints targets members reference path | (path, _) <- leaves])
+            Nothing | param `elem` M.fnMutBorrowed callee -> do
+                reference <- operandLocal arg
+                pure (if maybe False referenceType (M.localType <$> Map.lookup reference (M.fnLocals fn)) then Map.findWithDefault [] reference targets else [(reference, Just [])])
+            _ -> pure []) (zip (M.fnParams callee) args)
+    callMutationPlaces _ _ = Just []
+    memberPoints targets members reference fieldPath = concat [case prefix of
+        Just ownerPath -> memberLookup (root, ownerPath ++ fieldPath) members
+        Nothing -> [(root, Nothing)] | (root, prefix) <- if maybe False referenceType (M.localType <$> Map.lookup reference (M.fnLocals fn)) then Map.findWithDefault [] reference targets else [(reference, Just [])]]
+    referenceOwners reference = affectedStorage (reference : case candidatesOf of
+        Just candidates -> nub [root | (root, _) <- Map.findWithDefault [] reference candidates]
+        Nothing -> [])
+    affectedStorage roots = case references of
+        Just (targets, members) | not extended -> nub (roots ++ [ref | (ref, points) <- Map.toList targets, any ((`elem` roots) . fst) points])
+        Just (targets, members) -> close (Set.fromList roots)
+          where
+            close known =
+                let next = known `Set.union` Set.fromList ([ref | (ref, points) <- Map.toList targets, any ((`Set.member` known) . fst) points] ++ [holder | ((holder, _), points) <- members, any ((`Set.member` known) . fst) points])
+                 in if next == known then Set.toList known else close next
+        Nothing -> roots
+    rebindChanged stable roots b = foldM (\(acc, current) root -> do
+        (more, next) <- rebindAfter stable root current
+        pure (acc ++ more, next)) ([], b) (affectedStorage roots)
     expressionVars expr = case expr of
         Var name -> [name]
         F (Var _) args -> concatMap expressionVars args
@@ -2403,6 +2896,21 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
                     assumption <- asAssumption checkStep
                     pure (checks ++ prefix ++ [checkStep], assumptions ++ prefix ++ [assumption], b')
     invariant _ _ _ = Nothing
+    loopHolder snapshots (steps, b) ((holder, path), points) = do
+        ty <- M.localType <$> Map.lookup holder (M.fnLocals fn)
+        leaves <- referenceLeaves types (unref ty)
+        guard (length leaves == 1 && scalarType (unref (snd (head leaves))))
+        (prefix, value, b1) <- case points of
+            [(root, Just sourcePath)] | root /= holder -> readPlace False (localValue root) sourcePath b
+            _ -> do
+                let (local, ref, next) = temporary b
+                    fake = fn{M.fnLocals = Map.insert local (M.LocalDecl (unref (snd (head leaves))) Nothing) (M.fnLocals fn)}
+                (facts, after) <- typeSteps rules types invariants fake local next
+                pure (step "Havoc" [("local", MInt (localNum local))] : facts, ref, after)
+        before <- Map.lookup holder snapshots
+        (rebuild, post, b2) <- replacePlace True rules types invariants before path value b1
+        pure (steps ++ prefix ++ rebuild ++ [step "Assign" [("local", MInt (localNum holder)), ("value", post)]], b2)
+
     loopType current (steps, b) local = do
         (more, b') <- typeSteps rules types invariants current local b
         pure (steps ++ more, b')
@@ -2440,7 +2948,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
                 rightLocal = negate y - 1
                 save i v = step "Assign" [("local", MInt i), ("value", v)]
             (more, b5) <- statement rules s b4
-            (typeFacts, b6) <- typeSteps rules types invariants fn dest b5
+            (typeFacts, b6) <- typedAssignment dest b5
             pure (steps ++ [save leftLocal left, save rightLocal right] ++ more ++ typeFacts, b6,
                   Map.insert dest (r, localRef leftLocal, localRef rightLocal) conditions, penv)
         M.Assign dest (M.Borrow root place _) -> do
@@ -2449,26 +2957,21 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
             (typeFacts, b3) <- typeSteps rules types invariants fn dest b2
             pure (steps ++ pSteps ++ [step "Assign" [("local", MInt (localNumber dest)), ("value", placeRef)]] ++ typeFacts, b3, Map.delete dest conditions, penv)
         M.AssignRef root place (M.Use value) -> do
-            borrows <- borrowsOf functions fn
             (valueRef, b1) <- operand value b
             let (i, b2) = fresh b1
                 tempLocal = negate i - 1
                 tempRef = localRef tempLocal
                 save = step "Assign" [("local", MInt tempLocal), ("value", valueRef)]
-            (rootRef, _) <- operand (M.Copy root) b2
-            (checkSteps, _, b3) <- placeRefOf True rootRef place b2
-            (updSteps, newRootRef, b4) <- updateRefOf rootRef place tempRef b3
-            (typeFacts, b5) <- typeSteps rules types invariants fn root b4
-            (rebindSteps, b6) <- rebindAfter borrows root b5
-            pure (steps ++ [save] ++ checkSteps ++ updSteps ++ [step "Assign" [("local", MInt (localNumber root)), ("value", newRootRef)]] ++ typeFacts ++ rebindSteps, b6, conditions, penv)
+            (writes, b3) <- writeReference root place tempRef b2
+            pure (steps ++ [save] ++ writes, b3, conditions, penv)
         M.AssignRef _ _ _ -> Nothing
         M.Assign dest (M.MakeData name fields) -> do
             let base = baseNameOf name
                 clauses = Map.findWithDefault [] base invariants
             (checks, b1) <- contractSteps rules False (Map.fromList fields) clauses b
             (more, b2) <- statement rules s b1
-            (typeFacts, b3) <- typeSteps rules types invariants fn dest b2
-            pure (steps ++ checks ++ more ++ typeFacts, b3, Map.delete dest conditions, penv)
+            (after, b3) <- typedAssignment dest b2
+            pure (steps ++ checks ++ more ++ after, b3, Map.delete dest conditions, penv)
         -- Array::fromList(l) is l read as an array: the type's size is
         -- checked against the list's before it is assumed of the array.
         M.Assign dest (M.ListOp M.FromList [_]) -> do
@@ -2489,8 +2992,8 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
                     [] -> Nothing
                 -- (an array whose size is not in its type: nothing to check)
                 _ -> Just ([], b2)
-            (typeFacts, b4) <- typeSteps rules types invariants fn dest b3
-            pure (steps ++ more ++ sizeCheck ++ typeFacts, b4, Map.delete dest conditions, penv)
+            (after, b4) <- typedAssignment dest b3
+            pure (steps ++ more ++ sizeCheck ++ after, b4, Map.delete dest conditions, penv)
         M.Assign dest (M.ListOp M.NewArray [lengthValue, _]) -> do
             decl <- Map.lookup dest (M.fnLocals fn)
             case M.localType decl of
@@ -2500,120 +3003,180 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
                         _ -> Nothing
                 _ -> Just ()
             (more, b1) <- statement rules s b
-            (typeFacts, b2) <- typeSteps rules types invariants fn dest b1
-            pure (steps ++ more ++ typeFacts, b2, Map.delete dest conditions, penv)
+            (after, b2) <- typedAssignment dest b1
+            pure (steps ++ more ++ after, b2, Map.delete dest conditions, penv)
         M.Assign dest _ -> do
             (more, b') <- statement rules s b
-            (typeFacts, b'') <- typeSteps rules types invariants fn dest b'
-            borrows <- borrowsOf functions fn
-            (rebindSteps, b''') <- rebindAfter borrows dest b''
-            pure (steps ++ more ++ typeFacts ++ rebindSteps, b''', Map.delete dest conditions, penv)
+            (after, b'') <- assignedValue dest b'
+            pure (steps ++ more ++ after, b'', Map.delete dest conditions, penv)
         _ -> do
             (more, b') <- statement rules s b
             pure (steps ++ more, b', conditions, penv)
 
+    typedAssignment dest b = if extended then assignedValue dest b else typeSteps rules types invariants fn dest b
+
+    assignedValue dest b | not extended = do
+        (facts, b1) <- typeSteps rules types invariants fn dest b
+        stable <- stableReferences
+        (aliases, b2) <- rebindAfter stable dest b1
+        pure (facts ++ aliases, b2)
+    assignedValue dest b = do
+        ty <- M.localType <$> Map.lookup dest (M.fnLocals fn)
+        (checks, holders, b1) <- if referenceType ty then pure ([], [], b) else dependentUpdates dest (localValue dest) b
+        (facts, b2) <- typeSteps rules types invariants fn dest b1
+        stable <- stableReferences
+        (aliases, b3) <- rebindChanged stable [dest] b2
+        pure (checks ++ holders ++ facts ++ aliases, b3)
+
+    writeReference reference suffix valueRef b0 = do
+        candidates <- candidatesOf
+        stable <- stableReferences
+        referenceType <- M.localType <$> Map.lookup reference (M.fnLocals fn)
+        let points = if isReferenceType referenceType then Map.findWithDefault [] reference candidates else [(reference, Just [])]
+        targets <- traverse (\(root, path) -> (,) root . (++ suffix) <$> path) points
+        let required = Map.findWithDefault Set.empty reference (buildParents b0)
+            state = b0{buildLive = fmap (`Set.union` required) (buildLive b0)}
+        writeTargets (Just reference) suffix valueRef targets state
+
+    writeTargets selected suffix valueRef targets b0 = do
+        stable <- stableReferences
+        guard (not (null targets))
+        case nub targets of
+            [(root, path)] -> do
+                (oldRoot, _) <- operand (M.Copy root) b0
+                (checks, _, b1) <- placeRefOf True oldRoot path b0
+                (updates, newRoot, b2) <- updateRefOf oldRoot path valueRef b1
+                (holderChecks, holderUpdates, bH) <- dependentUpdates root newRoot b2
+                (facts, b3) <- typeSteps rules types invariants fn root bH
+                (refresh, b4) <- rebindChanged stable [root] b3
+                pure (checks ++ updates ++ holderChecks ++ [step "Assign" [("local", MInt (localNumber root)), ("value", newRoot)]] ++ holderUpdates ++ facts ++ refresh, b4)
+            many -> do
+                guard (all (not . any isIndex . snd) many)
+                (checks, b1) <- foldM (\(acc, b) (root, path) -> do
+                    (oldRoot, _) <- operand (M.Copy root) b
+                    (more, hypothetical, next) <- updateRefOf oldRoot path valueRef b
+                    (holderChecks, _, after) <- dependentUpdates root hypothetical next
+                    pure (acc ++ more ++ holderChecks, after)) ([], b0) many
+                let roots = nub (map fst many)
+                (refUpdates, newValue, b2) <- case selected of
+                    Just reference -> updateRefOf (localValue reference) suffix valueRef b1
+                    Nothing -> pure ([], valueRef, b1)
+                (havocs, b3) <- foldM (\(acc, b) root -> do
+                    (facts, next) <- typeSteps rules types invariants fn root b
+                    pure (acc ++ [step "Havoc" [("local", MInt (localNumber root))]] ++ facts, next)) ([], b2) roots
+                (holders, bH) <- forgetHolders roots b3
+                (refresh, b4) <- rebindChanged stable roots bH
+                let restore = maybe [] (\reference -> [step "Assign" [("local", MInt (localNumber reference)), ("value", newValue)]]) selected
+                pure (checks ++ refUpdates ++ havocs ++ holders ++ refresh ++ restore, b4)
+
+    modelLive b = case (buildLive b, references) of
+        (Just live, Just (targets, members)) -> Just (close live)
+          where
+            close known =
+                let next = known `Set.union` Set.fromList ([root | (ref, points) <- Map.toList targets, Set.member ref known, (root, _) <- points] ++ [root | ((holder, _), points) <- members, Set.member holder known, (root, _) <- points])
+                 in if next == known then known else close next
+        _ -> buildLive b
+    dependentMembers roots b = do
+        (_, members) <- references
+        pure [((holder, path), points) | ((holder, path), points) <- members, holder `notElem` roots, maybe True (Set.member holder) (buildDefined b), maybe True (Set.member holder) (modelLive b), any ((`elem` roots) . fst) points]
+
+    dependentUpdates root newRoot b = do
+        members <- dependentMembers [root] b
+        foldM (\(checks, updates, current) ((holder, path), points) -> do
+            leaves <- localReferenceLeaves types fn holder
+            guard (length leaves == 1)
+            (alternatives, values, next) <- foldM (\(acc, values, state) (owner, alias) -> if owner /= root then pure (acc, values, state) else do
+                (reads, pointee, afterRead) <- case alias of
+                    Just aliasPath -> readPlace True newRoot aliasPath state
+                    Nothing -> do
+                        let (local, value, next) = temporary state
+                            fake = fn{M.fnLocals = Map.insert local (M.LocalDecl (unref (snd (head leaves))) Nothing) (M.fnLocals fn)}
+                        (facts, after) <- typeSteps rules types invariants fake local next
+                        pure (step "Havoc" [("local", MInt (localNum local))] : facts, value, after)
+                (rebuild, newHolder, afterCheck) <- updateRefOf (localValue holder) path pointee afterRead
+                pure (acc ++ reads ++ rebuild, values ++ [newHolder], afterCheck)) ([], [], current) points
+            case (points, values) of
+                ([_], [newHolder]) -> pure (checks ++ alternatives, updates ++ [step "Assign" [("local", MInt (localNum holder)), ("value", newHolder)]], next)
+                _ -> do
+                    (forgotten, after) <- forgetHolder holder path (snd (head leaves)) next
+                    pure (checks ++ alternatives, updates ++ forgotten, after)) ([], [], b) members
+
+    forgetHolder holder path refTy b = do
+        let (freshLocal, value, b1) = temporary b
+            fake = fn{M.fnLocals = Map.insert freshLocal (M.LocalDecl (unref refTy) Nothing) (M.fnLocals fn)}
+        (facts, b2) <- typeSteps rules types invariants fake freshLocal b1
+        (rebuild, newHolder, b3) <- replacePlace True rules types invariants (localValue holder) path value b2
+        pure ([step "Havoc" [("local", MInt (localNum freshLocal))]] ++ facts ++ rebuild ++ [step "Assign" [("local", MInt (localNum holder)), ("value", newHolder)]], b3)
+
+    forgetHolders roots b = do
+        members <- dependentMembers roots b
+        foldM (\(steps, current) ((holder, path), _) -> do
+            leaves <- localReferenceLeaves types fn holder
+            guard (length leaves == 1)
+            (more, next) <- forgetHolder holder path (snd (head leaves)) current
+            pure (steps ++ more, next)) ([], b) members
+    isReferenceType TRef{} = True
+    isReferenceType TMutRef{} = True
+    isReferenceType _ = False
+    isIndex M.RefIndex{} = True
+    isIndex _ = False
+
     localNumber (M.Local i) = toInteger i
     localRef i = record "ValueRef::Local" [("local", MInt i)]
-    -- The term for the value at a place, from a reference to its root. Making
-    -- a borrow checks the index steps; reading a place back after its root
-    -- changed does not (the reference validator checks a place only where
-    -- the borrow is made and where it is written through).
-    placeRefOf checked ref steps b0 = case steps of
-        [] -> Just ([], ref, b0)
-        M.RefField _ field : rest -> do
-            let (function, b1) = namedFunction ("field:" ++ field) b0
-                (i, b2) = fresh b1
-                local = negate i - 1
-                ref' = localRef local
-            (more, ref'', b3) <- placeRefOf checked ref' rest b2
-            pure ([step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [ref])]] ++ more, ref'', b3)
-        M.RefIndex index : rest -> do
-            (indexRef, b1) <- operand index b0
-            let (i, b2) = fresh b1
-                local = negate i - 1
-                ref' = localRef local
-            (first, b3) <- if checked then getSteps local ref indexRef b2 else pure ([step "ApplyFresh" [("local", MInt local), ("function", MInt (-14)), ("arguments", MList [ref, indexRef])]], b2)
-            (more, ref'', b4) <- placeRefOf checked ref' rest b3
-            pure (first ++ more, ref'', b4)
-    -- A root whose place at the steps is given a new value: the new root,
-    -- built from the old one with that place replaced.
-    updateRefOf rootRef steps valueRef b0 = case steps of
-        [] -> Just ([], valueRef, b0)
-        M.RefField ctor field : rest -> do
-            (s1, innerRef, b1) <- placeRefOf False rootRef [M.RefField ctor field] b0
-            (s2, newInner, b2) <- updateRefOf innerRef rest valueRef b1
-            fields <- case Map.lookup ctor types of
-                Just (M.StructDecl fs) -> Just (map fst fs)
-                Just (M.EnumDecl variants) -> case [fs | (vname, fs) <- variants, vname == ctor || snd (break (== ':') ctor) == vname || ctor == vname] of
-                    fs : _ -> Just (map fst fs)
-                    [] -> Nothing
-                Nothing -> case [map fst fs | (ename, M.EnumDecl variants) <- Map.toList types, (vname, fs) <- variants, ename ++ "::" ++ vname == ctor] of
-                    fs : _ -> Just fs
-                    [] -> Nothing
-            (s3, argRefs, b3) <- foldM (fieldArg rootRef newInner field) ([], [], b2) fields
-            let (constructor, b4) = namedFunction ("ctor:" ++ ctor) b3
-                (i, b5) = fresh b4
-                local = negate i - 1
-                newRef = localRef local
-                create = step "ApplyFresh" [("local", MInt local), ("function", MInt constructor), ("arguments", MList argRefs)]
-            (projections, b6) <- foldM (projectNew newRef) ([], b5) (zip fields argRefs)
-            (checks, b7) <- invariantChecks ctor newRef argRefs fields b6
-            pure (s1 ++ s2 ++ s3 ++ [create] ++ projections ++ checks, newRef, b7)
-        M.RefIndex index : rest -> do
-            (indexRef, b1) <- operand index b0
-            (s1, elemRef, b2) <- placeRefOf False rootRef [M.RefIndex index] b1
-            (s2, newInner, b3) <- updateRefOf elemRef rest valueRef b2
-            let (i, b4) = fresh b3
-                local = negate i - 1
-                newRef = localRef local
-            (s3, b5) <- setSteps local rootRef indexRef newInner b4
-            pure (s1 ++ s2 ++ s3, newRef, b5)
-      where
-        fieldArg rootRef newInner wanted (steps', refs, b) f
-            | f == wanted = pure (steps', refs ++ [newInner], b)
-            | otherwise = do
-                let (function, b1) = namedFunction ("field:" ++ f) b
-                    (i, b2) = fresh b1
-                    local = negate i - 1
-                    ref = localRef local
-                pure (steps' ++ [step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [rootRef])]], refs ++ [ref], b2)
-        projectNew newRef (steps', b) (f, argRef) = do
-            let (function, b1) = namedFunction ("field:" ++ f) b
-                (i, b2) = fresh b1
-                local = negate i - 1
-                ref = localRef local
-            pure (steps' ++ [step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [newRef])], step "Assume" [("relation", MInt 0), ("left", ref), ("right", argRef)]], b2)
-        invariantChecks ctor newRef argRefs fields b = do
-            let base = baseNameOf ctor
-                clauses = Map.findWithDefault [] base invariants
-            if null clauses then pure ([], b) else do
-                env <- case traverse refOperand (zip fields argRefs) of Just pairs -> Just (Map.fromList pairs); Nothing -> Nothing
-                (checks, b') <- contractSteps rules False env clauses b
-                pure (checks, b')
-          where
-            refOperand (f, MData "ValueRef::Local" fields') = case lookup "local" fields' of Just (MInt n) -> Just (f, M.Copy (M.Local (fromInteger n))); _ -> Nothing
-            refOperand _ = Nothing
+    placeRefOf = readPlace
+    updateRefOf = replacePlace False rules types invariants
     -- After a call, what an update argument is to gets the version the
     -- callee's contract gave it.
-    versionArg borrows callee posts (steps, b) (param, arg) = case [name | p <- [param], Just d <- [Map.lookup p (M.fnLocals callee)], Just name <- [M.localName d]] of
-        [name] -> case lookup name posts of
-            Nothing -> pure (steps, b)
-            Just postRef -> do
-                (root, placeSteps) <- case arg of
-                    M.Copy l -> Just (maybe (l, []) id (Map.lookup l borrows))
-                    M.Move l -> Just (maybe (l, []) id (Map.lookup l borrows))
-                    _ -> Nothing
-                (updSteps, newRootRef, b1) <- updateRefOf (localRef (localNumber root)) placeSteps postRef b
-                (rebindSteps, b2) <- rebindAfter borrows root b1
-                pure (steps ++ updSteps ++ [step "Assign" [("local", MInt (localNumber root)), ("value", newRootRef)]] ++ rebindSteps, b2)
-        _ -> pure (steps, b)
+    versionArg _ _ [] acc _ = Just acc
+    versionArg _ callee posts (steps, b) (param, arg) = do
+        name <- M.localName =<< Map.lookup param (M.fnLocals callee)
+        foldM (\(acc, current) (_, path, postRef, postHolder) -> do
+            reference <- operandLocal arg
+            case path of
+                Nothing -> do
+                    (updates, next) <- writeReference reference [] postRef current
+                    pure (acc ++ updates, next)
+                Just fieldPath -> do
+                    (targets, members) <- references
+                    let roots = if maybe False referenceType (M.localType <$> Map.lookup reference (M.fnLocals fn)) then Map.findWithDefault [] reference targets else [(reference, Just [])]
+                        points = concat [case prefix of Just ownerPath -> memberLookup (root, ownerPath ++ fieldPath) members; Nothing -> [(root, Nothing)] | (root, prefix) <- roots]
+                    places <- traverse (\(root, path) -> (,) root <$> path) points
+                    let required = Set.insert reference (Map.findWithDefault Set.empty reference (buildParents current))
+                        live = current{buildLive = fmap (`Set.union` required) (buildLive current)}
+                    (updates, next) <- writeTargets Nothing [] postRef places live
+                    holder <- postHolder
+                    (restore, after) <- restoreReceiver reference holder next
+                    pure (acc ++ updates ++ restore, after)) (steps, b) [entry | entry@(n, _, _, _) <- posts, n == name]
+    restoreReceiver reference holder b = do
+        ty <- M.localType <$> Map.lookup reference (M.fnLocals fn)
+        targets <- candidatesOf
+        stable <- stableReferences
+        case if referenceType ty then Map.findWithDefault [] reference targets else [(reference, Just [])] of
+            [(root, Just path)] -> do
+                (updates, postRoot, b1) <- updateRefOf (localValue root) path holder b
+                (aliases, b2) <- rebindChanged stable [root] b1
+                pure (updates ++ [step "Assign" [("local", MInt (localNum root)), ("value", postRoot)]] ++ aliases, b2)
+            _ -> pure ([step "Assign" [("local", MInt (localNum reference)), ("value", holder)]], b)
     -- After a root gets a new version, the references to places of it are
     -- bound again to the place in the new version.
-    rebindAfter borrows root b0 = foldM add ([], b0) [(ref, steps) | (ref, (r, steps)) <- Map.toList borrows, r == root, ref /= root, maybe True (Set.member ref) (buildDefined b0)]
+    rebindAfter borrows root b0 = do
+        candidates <- candidatesOf
+        let inLoop = extended && any (Set.member blockId) (Map.elems (loopRegions fn))
+            exists ref = maybe True (Set.member ref) (buildDefined b0) && (inLoop || maybe True (Set.member ref) (modelLive b0))
+            affected = affectedStorage [root]
+            exact = [(ref, steps) | (ref, (r, steps)) <- Map.toList borrows, r == root, ref `elem` affected, ref /= root, exists ref]
+            ambiguous = [ref | ref <- affected, Map.member ref candidates, Map.notMember ref borrows, ref /= root, exists ref]
+        (knownSteps, b1) <- foldM add ([], b0) exact
+        foldM havoc (knownSteps, b1) ambiguous
       where
+        -- A dead alias can still be a loop candidate; its checked version cannot retain pre-write facts.
+        add (steps, b) (ref, placeSteps) | maybe False (not . Set.member ref) (modelLive b) = pure (steps ++ [step "Havoc" [("local", MInt (localNum ref))]], b)
         add (steps, b) (ref, placeSteps) = do
-            (more, placeRef, b') <- placeRefOf False (localRef (localNumber root)) placeSteps b
+            (more, placeRef, b') <- placeRefOf extended (localRef (localNumber root)) placeSteps b
             pure (steps ++ more ++ [step "Assign" [("local", MInt (localNumber ref)), ("value", placeRef)]], b')
+        havoc (steps, b) ref = do
+            (facts, b') <- typeSteps rules types invariants fn ref b
+            pure (steps ++ [step "Havoc" [("local", MInt (localNumber ref))]] ++ facts, b')
     jump (M.BlockId target) = record "ExecutionEnd::Jump" [("target", MInt (toInteger target))]
     -- The join of a branch is the first block both successors reach by straight
     -- jumps alone, when neither the branch nor the join is inside a loop region:
@@ -2761,6 +3324,23 @@ genericClauses rules assumeMode env0 clauses b0 next0 = foldM go ([], b0, env0, 
         (more, b') <- contractSteps rules True env [ProofAssert proof] b
         pure (steps ++ more, b', env, next)
 
+loopEdges :: M.Function -> Map.Map M.BlockId Integer -> MirValue -> MirValue
+loopEdges fn headers blockValue@(MData "ExecutionBlock" fields) = case lookup "id" fields of
+    Just (MInt number) ->
+        let origin = case [source | (source, generated) <- Map.toList headers, generated == number] of source : _ -> source; _ -> M.BlockId (fromInteger number)
+            edge (MInt target) = case Map.lookup (M.BlockId (fromInteger target)) headers of
+                Just generated | origin /= M.BlockId (fromInteger target), Set.member origin (Map.findWithDefault Set.empty (M.BlockId (fromInteger target)) (loopRegions fn)) -> MInt generated
+                _ -> MInt target
+            edge value = value
+            ending (MData name endFields) = MData name [(key, case (key, value) of
+                ("region", MList members) -> MList (nub (members ++ [MInt generated | (M.BlockId source, generated) <- Map.toList headers, MInt (toInteger source) `elem` members]))
+                _ | key `elem` ["target", "yes", "no", "body", "exit"] -> edge value
+                _ -> value) | (key, value) <- endFields]
+            ending value = value
+         in MData "ExecutionBlock" [(key, if key == "end" then ending value else value) | (key, value) <- fields]
+    _ -> blockValue
+loopEdges _ _ value = value
+
 encodeFunction :: Bool -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
 encodeFunction physical types invariants functions rules allowCalls fn
     | any (\(M.Local n) -> n < 0) (Map.keys (M.fnLocals fn)) = Nothing
@@ -2777,7 +3357,8 @@ encodeFunction physical types invariants functions rules allowCalls fn
     -- in every other program, is not one it may use)
     | physical && any logicalContainerUse (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))) = Nothing
     | otherwise = do
-        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
+        references <- borrowInfo types functions fn
+        let (params, start) = foldl addParam ([], emptyBuild{buildParents = invariantParents types functions fn, buildLiveness = if null (snd references) then Nothing else Just (validationLiveness types functions fn), buildReferences = Just references, buildPhysical = physical, buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires0, withRequires0) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes
@@ -2805,7 +3386,7 @@ encodeFunction physical types invariants functions rules allowCalls fn
             oldSteps = [step "Assign" [("local", MInt (-(1000000 + localNum p))), ("value", record "ValueRef::Local" [("local", MInt (localNum p))])] | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], Just name <- [M.localName d], name `elem` M.specMutParams spec]
             entrySteps = [step "Assign" [("local", MInt (-(2000000 + localNum p))), ("value", record "ValueRef::Local" [("local", MInt (localNum p))])] | (_, p) <- reassignedParams fn]
             entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (entryLiterals ++ paramFacts ++ sizeFacts ++ requires ++ variantSteps ++ oldSteps ++ entrySteps)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
-        pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", localsMap params), ("templates", MList [])], -1)
+        pure (MList (map (loopEdges fn (buildLoopHeaders b')) (entry : blocks ++ reverse (buildExtraBlocks b'))), record "ExecutionState" [("context", context), ("locals", localsMap params), ("templates", MList [])], -1)
   where
     logicalContainerUse st = case st of
         M.Assign _ rv -> logicalRvalue rv

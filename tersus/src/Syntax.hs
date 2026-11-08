@@ -65,8 +65,13 @@ instance Ord Value where
         rank VFunct{} = 4
         rank VFnRef{} = 5
 
--- TODO: Call
-data Expression = Val Value | Var Variable | F Expression [Expression]
+data Expression
+    = Val Value
+    | Var Variable
+    | F Expression [Expression]
+    | IfExpr Expression Expression Expression
+    | BlockExpr [Statement] Expression
+    | Ascribed Expression Type
     deriving (Show, Eq, Ord, Read)
 data ValidationStatement
     = Rewrite RwRule
@@ -82,7 +87,7 @@ data Statement
       -- expression is a dereference, possibly of a field or an element of one. Only the parser writes it.
       AssignDeref Expression Expression
     | -- Binds a variable in the innermost scope, hiding any variable of that name outside it instead of assigning it.
-      -- Never parsed: a match uses it for its scrutinee and the fields its patterns name.
+      -- A local declaration (also used for match subjects and pattern fields).
       Let Variable Expression
     | Return Expression
     | ValidationStatement ValidationStatement
@@ -195,11 +200,30 @@ proofHasForall :: Proof i -> Bool
 proofHasForall Forall{} = True
 proofHasForall (FApp funct args) = proofHasForall funct || any proofHasForall args
 proofHasForall _ = False
+sourceVariable :: Variable -> Variable
+sourceVariable name = case dropLocal name of
+    Just original -> sourceVariable original
+    Nothing -> name
+  where
+    dropLocal text | "$local " `isPrefixOf` text = Just (drop 1 (dropWhile (/= ' ') (drop 7 text)))
+    dropLocal _ = Nothing
+
+proofExpression :: Expression -> Bool
+proofExpression expr = case expr of
+    Val{} -> True
+    Var{} -> True
+    F f args -> all proofExpression (f : args)
+    Ascribed inner _ -> proofExpression inner
+    _ -> False
+
 -- The proof term for an expression: variables are abstract terms, values and builtins constant ones
 exprToProof :: Expression -> VariableProof
 exprToProof (Val val) = CTerm val
 exprToProof (Var var) = ATerm var
 exprToProof (F fnExpr argExprs) = FApp (exprToProof fnExpr) (map exprToProof argExprs)
+exprToProof (Ascribed expr _) = exprToProof expr
+exprToProof IfExpr{} = error "An if expression cannot be converted to a proof term"
+exprToProof BlockExpr{} = error "A block expression cannot be converted to a proof term"
 
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable

@@ -24,10 +24,10 @@ import ModuleResolve (rewriteFileReferences)
 import qualified Modules as Mod
 import ParsedFile (ParsedFile (..))
 import MirLower (lowerModuleWith)
-import Pretty (renderVarProof)
+import Pretty (renderVarProof, renderExpression)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
 import TypeCheck (Elaborated (..))
-import Types (Signature (..), Type (..), pattern TBox, pattern TList, baseNameOf)
+import Types (BuiltinFunct (..), Signature (..), Type (..), pattern TBox, pattern TList, baseNameOf)
 import Utils
 
 data CompiledModule = CompiledModule
@@ -258,18 +258,30 @@ assumptionsOfPackage compiled = concatMap perModule (compiledModules compiled)
             iface = compiledInterface modu
             axioms = [prefix ++ "axiom " ++ localName name ++ "(" ++ commas args ++ ")" | AxiomDef name args _ _ <- ifAxioms iface]
             externs = [prefix ++ "extern fn " ++ localName name | name <- foldr (:) [] (ifExterns iface)]
-            assumes = [prefix ++ "assume " ++ renderVarProof proof | proof <- concatMap assumesIn (compiledStatements modu)]
+            assumes = [prefix ++ text | text <- concatMap assumesIn (compiledStatements modu)]
          in axioms ++ externs ++ assumes
     localName name = reverse (takeWhile (/= '$') (reverse name))
     commas = foldr (\a b -> if null b then a else a ++ ", " ++ b) ""
     assumesIn stmt = case stmt of
-        ValidationStatement (Assume proof) -> [proof]
-        Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> concatMap assumesIn body
+        ValidationStatement (Assume proof) -> ["assume " ++ renderVarProof proof]
+        Assign _ expr -> expressions expr
+        Let _ expr -> expressions expr
+        AssignDeref lhs rhs -> expressions lhs ++ expressions rhs
+        Return expr -> expressions expr
         Block body -> concatMap assumesIn body
-        If _ yes no -> concatMap assumesIn (yes ++ no)
-        While _ _ _ body -> concatMap assumesIn body
+        If cond yes no -> expressions cond ++ concatMap assumesIn (yes ++ no)
+        While cond _ _ body -> expressions cond ++ concatMap assumesIn body
         ImplDef _ _ _ _ _ body -> concatMap assumesIn body
         BoundedDef _ inner -> assumesIn inner
+        _ -> []
+    expressions expr = case expr of
+        Val (VFunct _ _ _ (NativeFunct _ _ body) _) -> concatMap assumesIn body
+        F (Var "Block::assume") args -> renderExpression expr : concatMap expressions args
+        F (Val (VFunct _ _ _ (BuiltinFunct BlockAssume) _)) args -> renderExpression expr : concatMap expressions args
+        F f args -> concatMap expressions (f : args)
+        IfExpr cond yes no -> concatMap expressions [cond, yes, no]
+        BlockExpr body result -> concatMap assumesIn body ++ expressions result
+        Ascribed inner _ -> expressions inner
         _ -> []
 
 stage :: String -> Result a String -> Result a String

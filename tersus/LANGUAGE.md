@@ -2,7 +2,7 @@
 
 Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, booleans, lists, user-defined functions, nested blocks, and a validator written in Tersus itself, reasoning over equality, simple rewrites, and builtin function contracts.
 
-This guide describes the implementation in this package. Source and module files use the native parser written in Tersus (`lib/parser/parser.tersus`). Its first build needs clang and the pinned emitter seed; subsequent runs use the fingerprinted cache. Native tool failures are errors. `TERSUS_PARSER=interpreted` explicitly selects the reference parser interpreter, and `TERSUS_PARSER=haskell` keeps the Haskell oracle for one release. Parser diagnostics retain the Tersus parser's wording. Runnable programs are in [`examples/`](examples/README.md).
+This guide describes the implementation in this package. Production source and module files use native P1 (`lib/parser/parser.tersus`), built from the pinned native P0 seed and the exact prepared parser package. The first build needs clang and verified parser/emitter seeds; subsequent runs use the fingerprinted cache. Native tool failures are errors, not a parser fallback. `TERSUS_PARSER=interpreted` explicitly selects the reference parser interpreter; there is no Haskell grammar backend. Parser diagnostics retain the Tersus parser's wording. Runnable programs are in [`examples/`](examples/README.md).
 
 The parser bootstrap uses the embedded `parser` package and its shared
 `data::codec` / `data::ast` imports, including generated Unicode predicates.
@@ -131,7 +131,7 @@ A `forall` fact is only used at elements that appear in the context, so naming o
 Tersus currently has four runtime value categories:
 
 - Integers: `0`, `1`, `42`
-- Lists of one element type: `[]`, `[1]`, `[3, 6, 9]`, `[true, false]`, `[[1, 2], [3]]`. List literals contain literals only.
+- Lists of one element type: `[]`, `[1]`, `[3, 6, 9]`, `[true, false]`, `[[1, 2], [3]]`. Elements may be arbitrary expressions: `[x, f(x), x + 1]`, `["a", "b"]`, records, enum values, tuples and nested expression lists. Elements are evaluated from left to right, exactly once. A non-Copy element is moved into the list; write `clone(x)` to keep it. Lists containing only literal values retain their constant representation and proof facts.
 - Booleans: `true`, `false`
 - Functions: builtin functions from the standard library or user-defined functions
 
@@ -261,7 +261,7 @@ match s {                                   // as a statement, the arms are bloc
 };
 ```
 
-- `return match ...` and `variable = match ...` take an expression in each arm. A `match` is not an expression inside a larger expression, and `variable = match ...` needs the variable to exist already, like any variable assigned in a branch (declare it first: `area = 0;`).
+- An expression `match` can initialize a new variable and compose with other expressions: `let area = match s { ... };`, `f(match s { ... })`, `(match s { ... }, n)` and `[match s { ... }]`. Each arm supplies a compatible result type; only the selected arm runs. A block arm used as an expression ends in a result expression without a semicolon.
 - A `match` is rewritten into an `if` chain of `is` tests, with the last variant in the final `else`, so it is validated like an `if`: an arm that cannot run is vacuous, and the facts of the arms that can are joined. A match with a missing, repeated or foreign variant is a parse error.
 - What an arm binds, and any variable first assigned in it, is local to the arm. A bound name hides a variable of the same name outside the match, which keeps its value. The value matched is read once.
 - A struct can be matched as the only variant of its type: `match p { Point { x: a } => a }`.
@@ -647,7 +647,7 @@ fn add<S: Sequence<Int> + Growable<Int>>(s: S, x: Int) -> S { return push(s, x);
 
 ## Expressions
 
-Expressions can be literals, variables, function calls, parenthesized expressions, or infix operations.
+Expressions can be literals, variables, function calls, parenthesized expressions, infix operations, expression-valued `if`/`else` and exhaustive `match`. A value block contains statements followed by its result expression without a semicolon.
 
 ```tersus
 5
@@ -777,6 +777,21 @@ xs = [3, 6, 9];
 n = size(xs);
 ```
 
+### Local declarations
+
+`let name = expression;` introduces a local instead of assigning an existing binding. `let name: Type = expression;` also checks the initializer against that type, so an empty list can have an explicit element type. An initializer sees the previous binding; the new local is visible only after the declaration and only in its scope. It can be reassigned normally; `let` does not add immutability or require `mut`.
+
+```tersus
+let names: List<String> = [];
+let x = 3;
+{
+    let x: Bool = true;
+    x = false;
+};
+affirm x = 3;
+let first = if size(names) > 0 { clone(get(names, 0)) } else { "none" };
+```
+
 ### Return
 
 `return` evaluates an expression, stores it as the return value of the program or function call, and ends it. Statements after a `return` do not run, including when the `return` is inside a nested block, `if` or `while`; since nothing can run them, the validator does not check them either (an `affirm` there is not proved).
@@ -821,9 +836,32 @@ return label;
 - The condition is any expression that evaluates to a boolean, including one made with `&&`, `||` and `!` (see Connectives); anything else fails evaluation with `Condition must be a boolean`.
 - Like `fn` definitions and blocks, an `if` statement is ended with `;`.
 - Each branch is a block. Assignments to variables that already exist outside update them, and a variable first assigned inside a branch is local to it. Declare the variable before the `if` (`label = 0;` above) to use it afterwards.
-- `if`, `else` and `while` are reserved words; `iffy` and `elsewhere` are still ordinary names.
+- `if`, `else`, `let` and `while` are reserved words; `iffy` and `elsewhere` are still ordinary names.
 - `return` is allowed inside an `if` body (see Early return below).
 - Loops are described in the next section.
+
+#### Expression results
+
+An `if` expression requires `else`, and each branch ends with a compatible result expression without a semicolon. Earlier statements in a branch keep their ordinary meaning and local scope. The selected branch alone runs. The result may initialize a variable, be returned, passed to a call, or appear in a tuple, list, record or larger expression. Validation uses the same branch facts and sound joins as statement `if`, so guarded bounds and casts remain checked inside the branch rather than being evaluated before its guard.
+
+```tersus
+fn firstOr(items: &List<Int>, fallback: Int) -> Int {
+    return if size(items) > 0 { first(items) } else { fallback };
+};
+let n = if true { let base = 3; base + 1 } else { 0 };
+```
+
+#### Single-variant conditions
+
+`if let Variant { field: name, ... } = subject { ... } else { ... }` tests one pattern without requiring a full match. The subject is evaluated once. Pattern bindings exist only in the success branch and hide outer bindings; the failure branch sees the outer names. Field names must be explicit. The success branch knows the subject's variant, with the same checked casts, views, borrows and moves as a match arm. `else` is optional for a statement and required when the condition produces a value.
+
+```tersus
+if let Shape::Circle { radius: radius } = shape {
+    area = radius * radius * 3;
+} else {
+    area = 0;
+};
+```
 
 #### Validating branches
 
@@ -1046,7 +1084,7 @@ while i < hi [{ affirm i >= lo; affirm i <= hi; }] shrinks hi - i {
 };
 ```
 
-An invariant of the program's own goes between the range and the body, `for i in 0..n [{ affirm ... }] { ... }`, and is added to those; the loop also gets the inferred invariants above. A `return` in the body leaves the function. A body that assigns `i`, in a branch or a nested loop too, is refused when the program is read (`The body of a for loop cannot assign its loop variable i`), so `i` is always the counter the loop advances; `lo` and `hi` must be integers. A range with `hi < lo` runs the body no times when the program runs, but the validator wants `lo <= hi` to be known, as the bounds of `i` are an invariant that has to hold on entry and that is what gives `i = hi` afterwards: `for i in 0..n` needs `affirm n >= 0` in the contract (`size(l)` is known to be at least 0), and is refused otherwise with `Loop invariant does not hold on entry`. `for` is a reserved word; `form` is still an ordinary name. See `examples/for_loops.tersus`.
+An invariant of the program's own goes between the range and the body, `for i in 0..n [{ affirm ... }] { ... }`, and is added to those; the loop also gets the inferred invariants above. A `return` in the body leaves the function. A body that assigns `i` or takes `&mut i`, including inside an expression, branch or nested loop, is refused when the program is read (`The body of a for loop cannot assign its loop variable i`). A body may use `let i` to introduce a local shadow; its initializer still sees the previous binding, and assignments or borrows of that shadow do not change the compiler's counter. The generated step runs outside the user body's local scope, so the outer `i` is always the counter the loop advances; `lo` and `hi` must be integers. A range with `hi < lo` runs the body no times when the program runs, but the validator wants `lo <= hi` to be known, as the bounds of `i` are an invariant that has to hold on entry and that is what gives `i = hi` afterwards: `for i in 0..n` needs `affirm n >= 0` in the contract (`size(l)` is known to be at least 0), and is refused otherwise with `Loop invariant does not hold on entry`. `for` is a reserved word; `form` is still an ordinary name. See `examples/for_loops.tersus`.
 
 #### Through the elements of a list
 
@@ -1218,13 +1256,14 @@ a = size(*r);         // the last use of r
 xs = push(xs, 4);     // xs is the program's again
 ```
 
-- **A borrow ends at the last use of the reference**, including uses through what is borrowed from it (`&*r` is a *reborrow*). A function gives an update parameter on to another function's update parameter as a reborrow, `g(&mut *r)`; passing it bare (`g(r)`) to an update parameter is refused when the program is lowered, which is a current limit. Giving a reference parameter to a read parameter, bare or as `&*r`, is accepted. While a borrow is live, what it is to cannot be moved, assigned, or borrowed incompatibly: read borrows may coexist; borrowing for updating, or moving or assigning the place, waits until every live borrow of it has ended. Two borrows of two fields of one struct are of different places, so both may update. So are borrows of two different elements of one list when both indices are known (`&get(xs, 0)` and `&mut get(xs, 1)` may be live together); an index that is not known counts as any element.
+- **A borrow ends at the last use of the reference**, including uses through what is borrowed from it (`&*r` is a *reborrow*). An incoming update parameter can be forwarded as `g(&mut *r)` or `g(r)`; the checker inserts a reborrow for `g(r)` rather than transferring the incoming permission. Giving a reference parameter to a read parameter, bare or as `&*r`, is accepted unless another argument borrows an overlapping place for updating. Arguments stay borrowed throughout the call. While a borrow is live, what it is to cannot be moved, assigned, or borrowed incompatibly: read borrows may coexist; borrowing for updating, or moving or assigning the place, waits until every live borrow of it has ended. Two borrows of two fields of one struct are of different places, so both may update. So are borrows of two different elements of one list when both indices are known (`&get(xs, 0)` and `&mut get(xs, 1)` may be live together); an index that is not known counts as any element.
+- **A read reference is Copy**, including a reference to a List, Box or other owning value. Copying the reference word keeps its pointee targets and extends their borrow through the last use of the copies; it does not copy or move the pointee. An update reference is not Copy.
 - **Reading through a reference is a view** of the place (as a field read is): it is not a move, and taking the value for itself (returning `*r`, giving it where a value is taken) is an error for a value that is not Copy: write `clone(*r)`, or replace it through an update reference.
-- **Method receivers are the one place a call does not write the borrow**: `x.size()` borrows `x` as the signature of `size` declares (`self: &Self`), as it did before references could be held by locals.
+- **Method receivers infer their borrow**: `x.size()` borrows `x` as the signature of `size` declares (`self: &Self`), as it did before references could be held by locals.
 
 #### Updating through a reference
 
-A parameter written `&mut T` is lent *for updating*. A call to one is never silent: it is written with `&mut` and the place (`increment(&mut count)`), and when the call returns the caller has the new value. In the function, the parameter is assigned only through itself (`*n = *n + 1;`), never assigned itself, and is read as `*n`.
+A parameter written `&mut T` is lent *for updating*. An owned place is lent with `&mut` (`increment(&mut count)`), and when the call returns the caller has the new value. An incoming update parameter can also be forwarded bare (`increment(n)`); the checker inserts a reborrow without transferring the incoming permission. In the function, the parameter is assigned only through itself (`*n = *n + 1;`), never assigned itself, and is read as `*n`.
 
 ```tersus
 fn increment(n: &mut Int) -> Int writes(n)
@@ -1279,9 +1318,18 @@ return *f;     // 10; ys is frozen while w, or a reference read out of it, is li
 - **Returning one is under the same `from`**: every field of the returned value has to be from a named parameter (one bound covers all the fields), and the caller's holder freezes those places.
 - **Such a value goes anywhere a value goes**: it can be given to a function, put in a list, an array or a `Box`, and held in another struct, and the places its fields are to stay frozen while any of those is live. A field may be an update reference (`&mut T`), which the holder may then assign through (`*w.r = v;`), and a variant of an enum may hold a reference in the same way. A reference cannot be made from raw memory: an `Addr` and its `Block` permission confer no reference permission, so the two never alias — `Addr::write`, `take`, `free`, splits and joins are governed by the permission alone, and references by loans alone.
 
+Native validation supports holders with one stable mutable scalar reference leaf,
+fixed variants, owned nesting and concrete finite List/Box member paths. A
+readonly or by-value holder does not gain permission to mutate its own storage
+or use `old` as though it were an update parameter. Calls give changed pointees
+fresh logical values; precise postvalues come from verified output contracts.
+Owner and dependent-holder invariants are checked on pointee writes. Unknown
+aggregate/index mutation paths, unsupported multi-leaf layouts and unsized
+references are refused.
+
 ## Moves, Clone And Copy
 
-A value is moved to where it is wanted, and a copy is made only where the program writes `clone`. Int, Byte, Bool and functions are *Copy*: they are copied wherever they are wanted, and a variable that holds one can be used again. Every other value is *moved* when it is given to a function, put in a struct, list or Box, assigned to another variable or returned, and the variable it came from holds nothing afterwards.
+A value is moved to where it is wanted, and a copy is made only where the program writes `clone`. Int, Byte, Bool, functions and read references are *Copy*: they are copied wherever they are wanted, and a variable that holds one can be used again. Every other value is *moved* when it is given to a function, put in a struct, list or Box, assigned to another variable or returned, and the variable it came from holds nothing afterwards.
 
 ```tersus
 xs = [1, 2, 3];
@@ -1300,7 +1348,7 @@ ys = clone(xs);          // a copy, which has the value of xs and shares nothing
   impl Copy for Point { };        // a Point is used wherever it is wanted, as an Int is
   ```
 - **A use of a moved value is an error**, along any path to it: after an `if` that moves it in one branch, and in the next iteration of a loop that moves it (`x was moved at line 5:9 and cannot be used again`). Assigning the variable gives it a value again, so `xs = push(xs, 1);` moves `xs` into `push` and gives the result back. A field can be moved out of a struct while the others are kept (`a = p.name;`), and the struct as a whole cannot be used after that.
-- **A part of a value that is read is not a move.** `get(rows, i)`, `first`, `last`, a field, the contents of a `Box`, and the value a `match` or `for` is over are *views* of the value they come from: `size(get(rows, i))`, `row = get(rows, i)` followed by reads of `row`, and `for x in xs { total = total + size(x); }` move and copy nothing. Taking a view for itself is the move that is an error: `get(rows, i)` cannot be moved out of `rows`, which still holds it (`cannot move row (rows[..]) out of a list, which still holds it: write clone(row)`), and a field of a value that is lent cannot be moved out of it (`p.name is lent (&T)`). Write `clone(get(rows, i))`, `clone(p.name)`. These calls lend a stable original place to `Clone`, without first cloning the element or field into a temporary. Each element or field's custom `Clone` runs once on that path, including in a derived impl. An indexed place is optimized only when its indexes are variables, integer literals or scalar builtin arithmetic; other index expressions retain the usual materialization path so later calls cannot change an earlier container snapshot, and that fallback may retain incidental native Clone callbacks. Indexes in a borrowed path are captured from left to right as each is evaluated. A terminal Box-valued field can be lent as a Box. For a non-array payload with a lent Clone implementation, `clone(Box::unbox(place))` lends the pointee of a stable Box place through the existing `&*place` borrow, without consuming the source Box or cloning it first; recursive derived Clone and the library's Box Clone therefore visit each recursive child once. Sized boxed arrays retain whole-array materialization: native storage represents their elements as a List, not a Box slot containing an inline array. Their terminal Box handles can still be lent as handles. Other Box-traversing clone expressions retain the ordinary materialization path; optimizing those is outside this change. A named intermediate (`tmp = get(rows, i); copy = clone(tmp);`) retains the usual view materialization rules, and two explicit `clone` calls still make two clones. Incidental native copies are not additional logical `clone` operations: removing their extra custom-Clone callbacks from a directly cloned place corrects native behavior to match the documented view behavior and the interpreter. A variant field still requires proof of its variant. A user function named `get` remains a function call, not an indexed place; its result is evaluated before cloning. `clone(r)` copies a reference, while `clone(*r)` clones the value it refers to.
+- **A part of a value that is read is not a move.** `get(rows, i)`, `first`, `last`, a field, the contents of a `Box`, and the value a `match` or `for` is over are *views* of the value they come from: `size(get(rows, i))`, `row = get(rows, i)` followed by reads of `row`, and `for x in xs { total = total + size(x); }` move and copy nothing. Taking a view for itself is the move that is an error: `get(rows, i)` cannot be moved out of `rows`, which still holds it (`cannot move row (rows[..]) out of a list, which still holds it: write clone(row)`), and a field of a value that is lent cannot be moved out of it (`p.name is lent (&T)`). Write `clone(get(rows, i))`, `clone(p.name)`. These calls lend a stable original place to `Clone`, without first cloning the element or field into a temporary. Each element or field's custom `Clone` runs once on that path, including in a derived impl. Pure index expressions, including conditional and match indexes, keep this borrowed path. For other indexes on an owned List or Array, the checker clones the earlier collection before evaluating the index, then clones the selected element. This preserves the earlier snapshot if the index changes the original collection. Indexes in a borrowed path are captured from left to right as each is evaluated. A terminal Box-valued field can be lent as a Box. For a non-array payload with a lent Clone implementation, `clone(Box::unbox(place))` lends the pointee of a stable Box place through the existing `&*place` borrow, without consuming the source Box or cloning it first; recursive derived Clone and the library's Box Clone therefore visit each recursive child once. Sized boxed arrays retain whole-array materialization: native storage represents their elements as a List, not a Box slot containing an inline array. Their terminal Box handles can still be lent as handles. Other Box-traversing clone expressions retain the ordinary materialization path; optimizing those is outside this change. A named intermediate (`tmp = get(rows, i); copy = clone(tmp);`) retains the usual view materialization rules, and two explicit `clone` calls still make two clones. Incidental native copies are not additional logical `clone` operations: removing their extra custom-Clone callbacks from a directly cloned place corrects native behavior to match the documented view behavior and the interpreter. A variant field still requires proof of its variant. A user function named `get` remains a function call, not an indexed place; its result is evaluated before cloning. `clone(r)` copies a reference, while `clone(*r)` clones the value it refers to.
 - **A struct update from a value that is still wanted** says `..clone(base)`: `P { n: p.n + 1, ..clone(p) }` clones the fields that are not given, one by one, and not the whole of `p`. It needs those fields to be Clone, not `P`. A base that is not a clone moves the fields that are not given.
 - **`array(n, x)` and `Array::boxed(n, x)`** make `n` copies of `x`, so `x` is moved into them and its type has to be Clone.
 - **Type parameters.** Inside a function written for any type (checked once, for all of them), `clone(x)` for an `x` of a type made of a type parameter is a copy the compiler makes for its own reasons, and the types a call gives are not asked to be Clone for it (a `T` is not Copy, only moved or cloned in this way). In native code such a copy, like every copy, is made by the `Clone` impl of the type the value turns out to have, when it has one (the impl has to give `return = self`, so the copy has the value of the value either way), and by a copy of the words and of what the fields and elements hold when it does not. To have the `clone` of a type parameter be that type's own `Clone` as a call, bound it: `fn twice<T: Clone>(x: T) -> List<T>` is made for each type it is called with and checked for it, as any function with a bound is (see Bounded types), and a call with a type that is not Clone is refused (`twice needs T to implement Clone, and S does not`). The copies the compiler makes for its own reasons (of a part of a value it reads, of an element of `array(n, x)`, of a value of a type made of a type parameter) are made the same way: by the type's `Clone` impl when it has one, and a copy inside that impl of a value of its own type is the copy it is made of, not the impl called again.
@@ -2069,20 +2117,19 @@ return a;                             // [[1], [2, 3], [1]]
 - Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field (or is an element of a list it held) at each step. Nothing else is a variant: not a lexicographic pair of integers, and not the length of a list that shrinks (`size(l)` is an integer that can be used, but one that shrinks only if the program says so). The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: it never runs a function of the program (see Function Contracts).
 - A condition is one relation or boolean: there is no `&&` or `||`, so a guard with several parts is nested `if`s or sequential early returns (see `parse` in `examples/packet_parser.tersus`). The intended form is short-circuit sugar for nested `if`s, with a boolean value that a proof can mention left out.
 - An output contract cannot depend on which variant is returned, so "if `parse` returns `Parsed::Message`, its payload fits in the buffer" cannot be stated to a caller. The intended form is an implication in contracts, `affirm return is Parsed::Message => ...;`, proved for each way out of the function and assumed by a caller once it knows the variant.
-- No declarations separate from assignment.
 - The recursion of a function over a tree whose children are in a list (`enum Type { TFn { args: List<Type>, ret: Box<Type> } }`) cannot say that it ends: `shrinks` knows a field or a part of a field to be smaller, not an element of a list, so a function that goes through the elements and calls itself on each is declared `~` (`printType` in `lib/mir/mir_reader/mir_reader.tersus`). A function that recurses on a position in a list of tokens can (`shrinks size(ts) - pos`, as `typeAt` does there).
 - The proof of a function that puts text together carries the facts of every `concat` it calls (the size and the bytes of each result), and the time to validate it grows quickly with the number of them: ten in a chain took about thirty seconds. A function can add a method to `String` that says nothing of its result (`impl String { fn then(self: Self, other: &String) -> Self [{ }] [{ }] { return self.concat(other); }; }`, as `lib/mir/emit/emit.tersus` does) when it does not need the facts.
 - A local variable cannot have the name of a generic function of the program: `fn done<T>(...)` and then `done = 1;` in another function is accepted by the checker and the validator, and the native build fails (`Ownership failed: ... names the function done, which is not there`).
-- A list literal holds numbers, Booleans and lists written out, not string literals or structs (`["a", "b"]` does not parse): such a list is built with `push`.
-- An empty list `[]` that is the argument of a generic function has no type of its own: native code takes it as a `List<Int>`, whatever the result is used for (`failed([], ts)` for a `Parsed<List<Field>>` is accepted by the checker and refused when native code is made, with `is ill typed`), so a function that returns the list gives it its type (`fn noFields() -> List<Field> { return []; }`).
+- An empty list passed directly to a generic call still needs enough context to determine its element type. Use `let fields: List<Field> = [];` when that context is absent, then pass `fields`; a function with an explicit `List<Field>` result can return `[]` too.
 - `Array<T, N>` is a second sequence type beside `List<T>`: an array is held inline with its size in the type (or on the heap, in a Box), and `h = size;` is the function for lists, so `h` cannot be applied to an array. An array literal holds literals only (`#[1, 2]`); an array of variables is made with `array` and `set`. A list is what `push` makes, and in native code it is made of an array (see Lists In Native Code).
-- Strings are a library struct of bytes (see Strings) that can be written to the standard output and read from the standard input (see Output and Input) and have no text operations yet, and there are no floats (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
+- Strings are a library struct of bytes (see Strings); there are no floats or interpolation. Lists accept arbitrary expressions of one element type; array literals remain literal-only.
 - Arithmetic is linear (see Arithmetic): comparisons, sums and differences, multiples by a known constant and division by a known constant. A product of two unknowns, and a division by an unknown, are evaluated when their operands are known, but otherwise opaque. `x / c` is rounded down, so `x / c * c = x` is not known.
 - The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - Addresses (see Addresses and permissions): no ghost collections of permissions, no permissions finer than a slot and no address of a local (POINTERS.md, Order of work and Decisions). A fact that has a `forall` (a slot of a block that is filled, say) is not kept where two paths meet: a function that changes a block in one branch of an `if` returns in that branch, as `push` of the `Vec` in `examples/addresses.tersus` does.
 - Drops (see Drops): only a type that holds a permission has one. The ownership pass drops a local only where the flow of the program leaves it holding a value, under a flag local where the paths differ, so a value that was moved out is not dropped; and the drop of a value whose bytes are all 0 (a part of it was taken out) is not run either.
+- Branching expressions and value blocks are runtime code, not proof terms; a `define` or termination measure cannot contain their control flow. Pattern alternatives, field shorthand and wildcard/default arms are not supported.
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call itself and the other functions defined at the top of the program, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums, and for a list, a Box, an array, `Int`, `Byte` and `Bool`, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.

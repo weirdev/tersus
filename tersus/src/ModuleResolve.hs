@@ -389,6 +389,11 @@ rewriteExpr maps bound typeParams expr = case expr of
     Val value -> Val <$> rewriteValue maps bound typeParams value
     Var name -> Var <$> rewriteFnName maps bound name
     F func args -> F <$> rewriteExpr maps bound typeParams func <*> mapM (rewriteExpr maps bound typeParams) args
+    IfExpr cond yes no -> IfExpr <$> rewriteExpr maps bound typeParams cond <*> rewriteExpr maps bound typeParams yes <*> rewriteExpr maps bound typeParams no
+    BlockExpr stmts result -> do
+        (stmts', bound') <- rewriteStatements maps bound typeParams stmts
+        BlockExpr stmts' <$> rewriteExpr maps bound' typeParams result
+    Ascribed inner ty -> Ascribed <$> rewriteExpr maps bound typeParams inner <*> rewriteType maps typeParams ty
 
 rewriteProof :: Maps -> Set.Set Variable -> Set.Set Name -> VariableProof -> Either String VariableProof
 rewriteProof maps bound typeParams proof = case proof of

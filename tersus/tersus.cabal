@@ -137,6 +137,7 @@ library
       TersusParser
       TypeCheck
       TypeCheckCore
+      TypeCheckScope
       Types
       Utils
       ValidatorNative
@@ -336,10 +337,12 @@ test-suite tersus-test
       TestDifferential
       TestElaborate
       TestEq
+      TestErgonomics
       TestGenerics
       TestHarness
       TestHashMap
       TestHashSet
+      TestHeldReferences
       TestLibModules
       TestMirData
       TestMirEmit

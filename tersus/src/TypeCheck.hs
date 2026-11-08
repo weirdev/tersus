@@ -26,6 +26,7 @@ import StdLibDefs (stdLibCtx)
 import Types
 import Syntax
 import Utils
+import TypeCheckScope (localScopes)
 import TypeCheckCore
 
 -- Types are checked between parsing and validation. Parameters and return types are written in the
@@ -46,7 +47,7 @@ typeCheck stmts = mapResult (const ()) (elaborate stmts)
 data PreparedPrefix = PreparedPrefix Ctx Env [Statement] [Type] TcState
 
 preparePrefix :: Map Variable Type -> [Statement] -> Result PreparedPrefix String
-preparePrefix gathered stmts = case runTcState (checkStatementsWithContext True (Ctx gathered Nothing) [Map.empty] stmts) initialTcState of
+preparePrefix gathered stmts = case runTcState (localScopes stmts >>= checkStatementsWithContext True (Ctx gathered Nothing) [Map.empty]) initialTcState of
     Left err -> Error err
     Right ((ctx, env, stmts', types), state) -> Ok (PreparedPrefix ctx env stmts' types state)
 
@@ -57,7 +58,8 @@ elaborateAfter (PreparedPrefix ctx env prefix prefixTypes state) stmts =
         Right (elaborated, _) -> Ok elaborated
   where
     checked = do
-        (_, stmts', types) <- checkStatements True ctx env stmts
+        scoped <- localScopes stmts
+        (_, stmts', types) <- checkStatements True ctx env scoped
         resolved <- mapM zonk (prefixTypes ++ types)
         return (Elaborated (prefix ++ stmts') resolved)
 
@@ -125,7 +127,8 @@ checkProgramWith env stmts = do
     when (iePredeclareOwn env) $ do
         predeclareOwn stmts
         checkOwnFinite stmts
-    (_, stmts', types) <- checkStatements True (Ctx gathered Nothing) [Map.empty] stmts
+    scoped <- localScopes stmts
+    (_, stmts', types) <- checkStatements True (Ctx gathered Nothing) [Map.empty] scoped
     return (stmts', types)
   where
     gathered = Map.union (gatheredSignatures stmts) (ieFunctions env)
@@ -288,30 +291,28 @@ checkStatement top ctx env stmt =
         AssignDeref lhs expr -> do
             -- (the place must be through an update reference; the value is evaluated before the replacement, which
             -- the lowering keeps by lowering the value first, so its types come first here too)
+            beforePlace <- getState
+            probe <- inferExprR ctx env lhs
+            afterProbe <- getState
+            putState afterProbe{tcRefAliases = tcRefAliases beforePlace, tcRefOrigins = tcRefOrigins beforePlace}
+            exprT <- inferExpected "expression result" False (tType probe) ctx env expr
             lhsT <- inferExprR ctx env lhs
-            let targetTy = tType lhsT
-            case derefRoot lhs of
-                Just refExpr -> do
+            case derefTypedRoot lhsT of
+                Just refT -> do
                     st <- getState
-                    mutable <- case refExpr of
-                        Var var | var `elem` tcMutParams st -> return True
-                        _ -> do
-                            rtT <- inferExprR ctx env refExpr
-                            rtz <- zonk (tType rtT)
-                            return (isMutRef rtz)
+                    let mutable = case tExpr refT of
+                            Var var | var `elem` tcMutParams st -> True
+                            _ -> isMutRef (tType refT)
                     unless mutable $ failTc "Type error: assignment is through a read reference (&T), which does not allow updating what it is to: borrow the place with &mut"
-                    -- (a writes footprint bounds which places of an update parameter this function may change,
-                    -- through a reference a local holds as much as through the parameter itself)
-                    case (placeSteps lhs, tcWrites st) of
-                        (Just (root, steps), writes@(_ : _)) -> do
-                            let place = resolveRefPlace st root steps
-                            when (fst place `elem` tcMutParams st) $
+                    places <- valuePlaces ctx env lhsT
+                    forM_ places $ \place@(root, _) ->
+                        case tcWrites st of
+                            writes@(_ : _) | root `elem` tcMutParams st ->
                                 unless (withinWrites writes place) $
                                     failTc ("Type error: this assignment changes " ++ writesTarget place ++ ", which the writes clause of the function does not allow (writes(" ++ intercalate ", " writes ++ "))")
-                        _ -> return ()
+                            _ -> return ()
+                    recordPlaceReferences ctx env places exprT
                 Nothing -> failTc "Type error: assignment through a reference is written *r = value; or (*r).field = value;"
-            inferred <- inferExprR ctx env expr
-            exprT <- coerce targetTy inferred
             return (ctx, env, AssignDeref (tExpr lhsT) (tExpr exprT), tTypes exprT ++ tTypes lhsT)
         Assign var expr -> do
             notSize var
@@ -321,31 +322,19 @@ checkStatement top ctx env stmt =
                 existing : _ -> coerce existing inferred
                 [] -> return inferred
             env' <- assignVar ctx env var (tType texpr)
-            recordAlias var (tType texpr) (tExpr texpr)
-            recordOrigins ctx env var (tType texpr) (tExpr texpr)
+            recordReference ctx env var texpr
             return (ctx, env', Assign var (tExpr texpr), tTypes texpr)
         Let var expr -> do
             notSize var
             texpr <- inferExprR ctx env expr
-            recordAlias var (tType texpr) (tExpr texpr)
-            recordOrigins ctx env var (tType texpr) (tExpr texpr)
+            recordReference ctx env var texpr
             case env of
                 scope : outer -> return (ctx, Map.insert var (tType texpr) scope : outer, Let var (tExpr texpr), tTypes texpr)
                 [] -> return (ctx, [Map.singleton var (tType texpr)], Let var (tExpr texpr), tTypes texpr)
         Return expr -> do
-            inferred0 <- inferExprR ctx env expr
-            -- (a reference parameter returned is the reference: in the body the parameter is the value it is to,
-            -- and returning it is returning a reference to the caller's place, which `from` names)
-            inferred <- case (ctxReturn ctx, inferred0, expr) of
-                (Just rty, texpr@(TExpr _ _ _), Var v)
-                    | Just rt <- refTarget rty -> do
-                        tz <- zonk (tType texpr)
-                        st <- getState
-                        if isRefType tz || (v `elem` tcReadOnly st || v `elem` tcMutParams st)
-                            then case texpr of TExpr _ e inner -> expect "returned value" rt tz >> return (TExpr rty e inner)
-                            else return inferred0
-                _ -> return inferred0
-            texpr <- maybe (return inferred) (\rty -> coerce rty inferred) (ctxReturn ctx)
+            texpr <- case ctxReturn ctx of
+                Just rty -> inferExpected "returned value" True rty ctx env expr
+                Nothing -> inferExprR ctx env expr
             let t = tType texpr
             case ctxReturn ctx of
                 Just rty -> do
@@ -354,9 +343,12 @@ checkStatement top ctx env stmt =
                     st <- getState
                     case tcResultFrom st of
                         Just froms -> do
-                            origins <- exprRefOrigins ctx env expr
-                            unless (not (null origins) && all (`elem` froms) origins) $
-                                failTc ("Type error: the value returned is not a reference from " ++ intercalate ", " froms ++ ", which the signature names: return a reference to a place of one of them")
+                            localStorage <- ownedParameterStorageBorrows ctx env texpr
+                            unless (null localStorage) $ failTc "Type error: a reference to a by-value parameter's own storage cannot escape the function"
+                            origins <- referenceOrigins ctx env texpr
+                            let declared root = fromMaybe root (case [p | p <- tcParams st, root == parameterContents p] of p : _ -> Just p; _ -> Nothing)
+                            unless (not (null origins) && all ((`elem` froms) . declared) origins) $
+                                failTc ("Type error: the value returned is not a reference from " ++ intercalate ", " froms ++ ", which the signature names: return a reference to a place of one of them (in " ++ fromMaybe "function" (tcCurrent st) ++ ")")
                         Nothing -> return ()
                 -- the program has no declared type: every return in it has the type of the first
                 Nothing -> do
@@ -407,15 +399,17 @@ checkStatement top ctx env stmt =
         If cond thenStmts elseStmts -> do
             cond' <- inferExprR ctx env cond
             expect "condition of if" TBool (tType cond')
-            (_, thenStmts', thenTypes) <- checkStatements False ctx (Map.empty : env) thenStmts
-            (_, elseStmts', elseTypes) <- checkStatements False ctx (Map.empty : env) elseStmts
+            ((_, thenStmts', thenTypes), (_, elseStmts', elseTypes)) <- branchReferences
+                (checkStatements False ctx (Map.empty : env) thenStmts)
+                (checkStatements False ctx (Map.empty : env) elseStmts)
             return (ctx, env, If (tExpr cond') thenStmts' elseStmts', tTypes cond' ++ thenTypes ++ elseTypes)
         While cond invariant term body -> do
+            prepareLoopAliases ctx (Map.empty : env) cond body
             cond' <- inferExprR ctx env cond
             expect "condition of while" TBool (tType cond')
             (_, invariant') <- checkValidations ctx env invariant
             term' <- resolveTermination ctx env term
-            (_, body', bodyTypes) <- checkStatements False ctx (Map.empty : env) body
+            ((_, body', bodyTypes), _) <- branchReferences (checkStatements False ctx (Map.empty : env) body) (return ())
             return (ctx, env, While (tExpr cond') invariant' term' body', tTypes cond' ++ bodyTypes)
 
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
@@ -437,8 +431,9 @@ checkFunction ctx name params ptys rty sizes types ins outs writes fromNames ter
     let bodyCtx = ctx{ctxReturn = Just rty}
         paramEnv = [Map.fromList (zip params (map unref ptys))]
     -- (a parameter that is borrowed is only read; one that may update is assigned only through it)
+    referenceParams <- filterM (holdsRef . snd) (zip params ptys)
     withBorrowed <- getState
-    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty, tcResultFrom = if null from then Nothing else Just from, tcParams = params, tcRefOrigins = Map.empty}
+    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty, tcResultFrom = if null from then Nothing else Just from, tcParams = params, tcRefOrigins = Map.fromList [(p, [if isRefType ty then p else parameterContents p]) | (p, ty) <- referenceParams]}
     -- (writes(...) names update parameters, whole or by a field)
     forM_ writes $ \w -> do
         let (root, field) = case break (== '.') w of
@@ -475,9 +470,44 @@ notSize var = do
     when (var `elem` tcSizeScope s) $
         failTc ("Type error: " ++ var ++ " is a size parameter of the function, which a call gives, and it cannot be assigned")
 
+prepareLoopAliases :: Ctx -> Env -> Expression -> [Statement] -> TC ()
+prepareLoopAliases ctx env cond body = do
+    before <- getState
+    let carried = (Map.keysSet (tcRefAliases before) <> Map.keysSet (tcRefOrigins before)) `Set.intersection` (assigned body <> expressionAssignments cond)
+    if Set.null carried then return () else do
+        (aliases, origins) <- close before (tcRefAliases before) (tcRefOrigins before) (0 :: Int)
+        putState before{tcRefAliases = aliases, tcRefOrigins = origins}
+  where
+    assigned = foldMap (\stmt -> case stmt of
+        Assign var expr -> Set.insert var (expressionAssignments expr)
+        AssignDeref lhs rhs -> expressionAssignments lhs <> expressionAssignments rhs
+        Let _ expr -> expressionAssignments expr
+        Return expr -> expressionAssignments expr
+        If c yes no -> expressionAssignments c <> assigned yes <> assigned no
+        While c _ _ stmts -> expressionAssignments c <> assigned stmts
+        Block stmts -> assigned stmts
+        _ -> Set.empty)
+    expressionAssignments expr = case expr of
+        BlockExpr stmts result -> assigned stmts <> expressionAssignments result
+        IfExpr c yes no -> foldMap expressionAssignments [c, yes, no]
+        F f args -> foldMap expressionAssignments (f : args)
+        Ascribed inner _ -> expressionAssignments inner
+        _ -> Set.empty
+    close before aliases origins count = do
+        when (count > 100) $ failTc "Type error: reference aliases of this loop do not reach a bounded fixed point"
+        putState before{tcRefAliases = aliases, tcRefOrigins = origins, tcWrites = []}
+        _ <- inferExprR ctx env cond
+        _ <- checkStatements False ctx env body
+        after <- getState
+        let normalize = Map.map (unique . map (\(root, steps) -> (root, take 1 steps)))
+            aliases' = normalize (Map.unionWith (++) aliases (tcRefAliases after))
+            origins' = Map.unionWith (\a b -> unique (a ++ b)) origins (tcRefOrigins after)
+        if aliases' == aliases && origins' == origins then return (aliases', origins') else close before aliases' origins' (count + 1)
+
 -- What shrinks is an integer, which counts down to 0, or a struct or enum value, which loses a field at a time
 resolveTermination :: Ctx -> Env -> Maybe Termination -> TC (Maybe Termination)
 resolveTermination ctx env (Just (Shrinks variant)) = do
+    unless (proofExpression variant) $ failTc "Type error: a termination measure cannot contain expression control flow"
     variant0 <- inferExprR ctx env variant
     -- (what shrinks is what the value is looked through to, as for a Box: the parts of that are smaller)
     variant'' <- derefExpr ctx env variant0
@@ -529,11 +559,325 @@ checkValidation ctx env vs =
 
 -- Expressions and proofs
 
+derefTypedRoot :: TExpr -> Maybe TExpr
+derefTypedRoot (TReferenceExpr _ _ inner) = derefTypedRoot inner
+derefTypedRoot (TExpr _ (F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [_]) [ref]) = Just ref
+derefTypedRoot (TExpr _ (F _ _) (base : _)) = derefTypedRoot base
+derefTypedRoot _ = Nothing
+
+captureReference :: Ctx -> Env -> TExpr -> TC TExpr
+captureReference _ _ value@TReferenceExpr{} = return value
+captureReference ctx env value = do
+    ty <- zonk (tType value)
+    contains <- holdsRef ty
+    if not contains then return value else do
+        places <- if isRefType ty then referencePlaces ctx env value else return []
+        origins <- if isRefType ty then return (map fst places) else referenceOrigins ctx env value
+        return (TReferenceExpr (unique places) (unique origins) value)
+
+unique :: Ord a => [a] -> [a]
+unique = Set.toList . Set.fromList
+
+referenceOrigins :: Ctx -> Env -> TExpr -> TC [Variable]
+referenceOrigins _ _ (TReferenceExpr _ roots _) = return roots
+referenceOrigins ctx env (TBlockExpr _ _ result) = referenceOrigins ctx env result
+referenceOrigins ctx env value@(TExpr _ expr children) = case expr of
+    IfExpr{} -> concat <$> mapM (referenceOrigins ctx env) (drop 1 children)
+    F (Val (VFunct _ _ _ (BuiltinFunct b) _)) _ | b `elem` [BorrowOf, BorrowMutOf] -> map fst <$> referencePlaces ctx env value
+    F _ _ -> do
+        st <- getState
+        case expr of
+            F (Var name) args | Just (params, froms) <- Map.lookup name (tcRefResults st) ->
+                concat <$> mapM (referenceOrigins ctx env) [arg | (param, arg) <- zip params (lastArgs args children), param `elem` froms]
+            _ -> concat <$> mapM (referenceOrigins ctx env) children
+    _ -> exprRefOrigins ctx env expr
+
+lastArgs :: [Expression] -> [TExpr] -> [TExpr]
+lastArgs args children = drop (length children - length args) children
+
+referencePlaces :: Ctx -> Env -> TExpr -> TC [(Variable, [Maybe Variable])]
+referencePlaces _ _ (TReferenceExpr places _ _) = return places
+referencePlaces ctx env (TBlockExpr _ _ result) = referencePlaces ctx env result
+referencePlaces ctx env value@(TExpr _ expr children) = do
+    st <- getState
+    case expr of
+        Var var -> return (resolveRefPlaces st var [])
+        IfExpr{} -> concat <$> mapM (referencePlaces ctx env) (drop 1 children)
+        F (Val (VFunct _ _ _ (BuiltinFunct b) _)) [_] | b `elem` [BorrowOf, BorrowMutOf] -> case children of
+            [place] -> valuePlaces ctx env place
+            _ -> return []
+        F (Var name) args | Just (params, froms) <- Map.lookup name (tcRefResults st) ->
+            concat <$> mapM (argumentPlaces ctx env) [arg | (param, arg) <- zip params (lastArgs args children), param `elem` froms]
+        F _ _ -> do
+            roots <- concat <$> mapM (referenceOrigins ctx env) children
+            return [(root, []) | root <- unique roots]
+        _ -> return (updatePlacesOf st (tExpr value))
+
+argumentPlaces :: Ctx -> Env -> TExpr -> TC [(Variable, [Maybe Variable])]
+argumentPlaces ctx env value = do
+    ty <- zonk (tType value)
+    if isRefType ty then referencePlaces ctx env value else case tExpr value of
+        Var var -> do st <- getState; return (resolveRefPlaces st var [])
+        _ -> return [("$temporary reference argument", [])]
+
+valuePlaces :: Ctx -> Env -> TExpr -> TC [(Variable, [Maybe Variable])]
+valuePlaces ctx env (TReferenceExpr places _ inner)
+    | storedPart (tExpr inner) = valuePlaces ctx env inner
+    | isRefType (tType inner) = return places
+    | otherwise = valuePlaces ctx env inner
+  where
+    storedPart (F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [_]) = True
+    storedPart (F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [_, _]) = True
+    storedPart (F (Var "get") [_, _]) = True
+    storedPart _ = False
+valuePlaces ctx env value@(TExpr _ expr children) = case (expr, children) of
+    (Var var, _) -> do st <- getState; return (resolveRefPlaces st var [])
+    (F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [_], [base]) -> extend (Just field) base
+    (F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [_, _], base : _) -> extend Nothing base
+    (F (Var "get") [_, _], base : _) -> extend Nothing base
+    (F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [_], [inner]) -> do
+        ty <- zonk (tType inner)
+        if isRefType ty then referencePlaces ctx env inner else valuePlaces ctx env inner
+    _ -> argumentPlaces ctx env value
+  where
+    extend step base = map (\(root, steps) -> (root, steps ++ [step])) <$> valuePlaces ctx env base
+valuePlaces ctx env (TBlockExpr _ _ result) = valuePlaces ctx env result
+
+parameterContents :: Variable -> Variable
+parameterContents name = "$parameter contents " ++ name
+
+ownedParameterStorageBorrows :: Ctx -> Env -> TExpr -> TC [Variable]
+ownedParameterStorageBorrows ctx env (TReferenceExpr places _ inner) = do
+    ty <- zonk (tType inner)
+    if isRefType ty then do
+        st <- getState
+        return [root | (root, _) <- places, root `elem` tcParams st, root `notElem` (tcReadOnly st ++ tcMutParams st)]
+    else ownedParameterStorageBorrows ctx env inner
+ownedParameterStorageBorrows ctx env (TBlockExpr _ _ result) = ownedParameterStorageBorrows ctx env result
+ownedParameterStorageBorrows ctx env value@(TExpr before expression children) = do
+    own <- case (expression, children) of
+        (F (Val (VFunct _ _ _ (BuiltinFunct builtin) _)) [_], [place]) | builtin `elem` [BorrowOf, BorrowMutOf] -> do
+            ty <- zonk (tType place)
+            if isRefType ty then return [] else do
+                targets <- valuePlaces ctx env place
+                st <- getState
+                return [root | (root, _) <- targets, root `elem` tcParams st, root `notElem` (tcReadOnly st ++ tcMutParams st)]
+        _ -> do
+            ty <- zonk before
+            if isRefType ty then do
+                targets <- referencePlaces ctx env value
+                st <- getState
+                return [root | (root, _) <- targets, root `elem` tcParams st, root `notElem` (tcReadOnly st ++ tcMutParams st)]
+            else return []
+    nested <- concat <$> mapM (ownedParameterStorageBorrows ctx env) children
+    return (unique (own ++ nested))
+
+recordPlaceReferences :: Ctx -> Env -> [(Variable, [Maybe Variable])] -> TExpr -> TC ()
+recordPlaceReferences ctx env targets value = do
+    contains <- holdsRef (tType value)
+    when contains $ do
+        when (null targets) $ failTc "Type error: a reference store needs resolved target origin bounds"
+        incoming <- referenceOrigins ctx env value
+        ownSources <- ownedParameterStorageBorrows ctx env value
+        forM_ (unique targets) $ \(root, path) -> do
+            strong <- if length (unique targets) /= 1 then return False else case path of
+                [] -> return True
+                [Just changed] -> case [ty | scope <- env, Just ty <- [Map.lookup root scope]] of
+                    ty : _ -> do
+                        _ <- holdsRef ty
+                        st <- getState
+                        let constructors = case ty of TNamed name args -> Map.findWithDefault [] (instanceName name args) (tcTypes st); TVariant name -> [name]; _ -> []
+                            otherFields = [fieldTy | ctor <- constructors, Just (_, fields) <- [Map.lookup ctor (tcCtors st)], (name, fieldTy) <- fields, name /= changed]
+                        not . or <$> mapM holdsRef otherFields
+                    _ -> return False
+                _ -> return False
+            st <- getState
+            let contents = map parameterContents (tcParams st)
+                outbound = root `elem` (tcReadOnly st ++ tcMutParams st ++ contents)
+                permitted = tcReadOnly st ++ tcMutParams st ++ contents
+            when (outbound && (null incoming || not (null ownSources) || any (`notElem` permitted) incoming)) $
+                failTc "Type error: a local or unresolved reference cannot be stored through a borrowed holder because it could escape the function"
+            let old = Map.findWithDefault (if root `elem` (tcParams st ++ map parameterContents (tcParams st)) then [root] else []) root (tcRefOrigins st)
+            putState st{tcRefOrigins = Map.insert root (unique (incoming ++ if strong then [] else old)) (tcRefOrigins st)}
+
+recordReference :: Ctx -> Env -> Variable -> TExpr -> TC ()
+recordReference ctx env var value = do
+    ty <- zonk (tType value)
+    recordAlias var ty (tExpr value)
+    contains <- holdsRef ty
+    st <- getState
+    if not contains then putState st{tcRefOrigins = Map.delete var (tcRefOrigins st)} else do
+        roots <- referenceOrigins ctx env value
+        places <- if isRefType ty then referencePlaces ctx env value else return []
+        after <- getState
+        putState after{tcRefOrigins = Map.insert var (unique roots) (tcRefOrigins after), tcRefAliases = if isRefType ty then Map.insert var (unique places) (tcRefAliases after) else Map.delete var (tcRefAliases after)}
+
+inferExpected :: String -> Bool -> Type -> Ctx -> Env -> Expression -> TC TExpr
+inferExpected context returning wanted ctx env expr = inferExpectedCore context returning wanted ctx env expr >>= captureReference ctx env
+
+inferExpectedCore :: String -> Bool -> Type -> Ctx -> Env -> Expression -> TC TExpr
+inferExpectedCore context returning wanted ctx env expr = case expr of
+    IfExpr cond yes no -> do
+        ghostly <- tcGhost <$> getState
+        when ghostly $ failTc "Type error: a proof cannot contain an if expression"
+        cond' <- inferExprR ctx env cond
+        expect "condition of if" TBool (tType cond')
+        (yes', no') <- branchReferences (inferExpected context returning wanted ctx env yes) (inferExpected context returning wanted ctx env no)
+        return (TExpr wanted (IfExpr (tExpr cond') (tExpr yes') (tExpr no')) [cond', yes', no'])
+    BlockExpr body result -> do
+        ghostly <- tcGhost <$> getState
+        when ghostly $ failTc "Type error: a proof cannot contain a block expression"
+        (env', body', types) <- checkStatements False ctx (Map.empty : env) body
+        result' <- inferExpected context returning wanted ctx env' result
+        return (TBlockExpr body' types result')
+    F funct [xs, value] | TList element <- wanted, builtinHead ctx env funct == Just Push -> do
+        xs' <- inferExpected "argument 1 of push" False wanted ctx env xs
+        value' <- inferExpected "argument 2 of push" False element ctx env value
+        return (TExpr wanted (F funct [tExpr xs', tExpr value']) [xs', value'])
+    _ -> do
+        inferred <- inferExprR ctx env expr
+        st <- getState
+        reified <- case (returning, wanted, expr) of
+            (True, rty, Var var) | Just target <- refTarget rty, var `elem` tcReadOnly st || var `elem` tcMutParams st -> do
+                when (isMutRef rty && var `notElem` tcMutParams st) $ failTc "Type error: a read reference cannot be returned for updating"
+                expect "returned value" target (tType inferred)
+                return (TExpr rty (F (Val (builtinFunct (if isMutRef rty then BorrowMutOf else BorrowOf))) [tExpr inferred]) [inferred])
+            _ -> coerce wanted inferred
+        expect context wanted (tType reified)
+        return (tWithType wanted reified)
+
+branchType :: Type -> Type -> TC Type
+branchType a b = do
+    x <- zonk a
+    y <- zonk b
+    case (x, y) of
+        (TVariant v, TVariant w) | v /= w -> do
+            (owner, _) <- ctorInfo v
+            (other, _) <- ctorInfo w
+            unless (owner == other) $ failTc "Type error: branches have variants of different enums"
+            return (TNamed owner [])
+        (TVariant _, TNamed _ _) -> branchType y x
+        (TRef p, TMutRef q) -> TRef <$> branchType p q
+        (TMutRef p, TRef q) -> TRef <$> branchType p q
+        (TByte, TInt) -> return TByte
+        (TInt, TByte) -> return TByte
+        (word@TWord{}, TInt) -> return word
+        (TInt, word@TWord{}) -> return word
+        (TBox (TArrayOf p n), TBox (TArrayOf q m)) | n /= m -> do
+            element <- branchType p q
+            return (TBox (TArrayOf element SizeAny))
+        (TList p, TList q) -> TList <$> branchType p q
+        (TBox p, TBox q) -> TBox <$> branchType p q
+        _ -> expect "branch result" x y >> return x
+
 -- The type of an expression, and the expression with each call of a function that belongs to a type resolved: x.f(a) and
 -- Trait::f(x, a) are calls of Type::f for the type of x, and nothing after the checker sees anything else.
 inferExprR :: Ctx -> Env -> Expression -> TC TExpr
-inferExprR ctx env expr =
+inferExprR ctx env expr = do
+    value <- inferExprCore ctx env expr
+    recordCallFieldOrigins ctx env value
+    captureReference ctx env value
+
+mutableReferenceStores :: Type -> TC Bool
+mutableReferenceStores = go Set.empty
+  where
+    go seen before = do
+        ty <- zonk before
+        case ty of
+            TMutRef inner -> holdsRef inner
+            TRef inner -> go seen inner
+            TList inner -> go seen inner
+            TBox inner -> go seen inner
+            TArrayOf inner _ -> go seen inner
+            TUninit inner -> go seen inner
+            TNamed name args -> do
+                let key = instanceName name args
+                if key `Set.member` seen then return False else do
+                    _ <- holdsRef ty
+                    st <- getState
+                    let fields = [fieldTy | ctor <- Map.findWithDefault [] key (tcTypes st), Just (_, members) <- [Map.lookup ctor (tcCtors st)], (_, fieldTy) <- members]
+                    or <$> mapM (go (Set.insert key seen)) fields
+            TVariant name -> do
+                st <- getState
+                if name `Set.member` seen then return False else or <$> mapM (go (Set.insert name seen) . snd) (maybe [] (snd) (Map.lookup name (tcCtors st)))
+            _ -> return False
+
+recordCallFieldOrigins :: Ctx -> Env -> TExpr -> TC ()
+recordCallFieldOrigins ctx env (TExpr _ (F headExpr args) children) | isCall headExpr = do
+    st <- getState
+    unless (tcGhost st) $ do
+        let inputs = lastArgs args children
+            known = case headExpr of
+                Var name -> [ty | Just ty <- Map.lookup name (tcInstances st) : [Map.lookup name scope | scope <- env] ++ [Map.lookup name (ctxFns ctx)]]
+                Val (VFunct _ _ _ (NativeFunct (Signature tys result _ _ _ _) _ _) _) -> [TFn tys result]
+                _ -> [tType headValue | headValue : _ <- [children], length children > length args]
+        when (null known) $ forM_ inputs $ \input -> do
+            stores <- mutableReferenceStores (tType input)
+            when stores $ failTc "Type error: a call that can replace reference fields needs declared input origin bounds"
+        declared <- case known of
+            ty : _ -> do signature <- zonk ty; return (case signature of TFn tys _ -> tys; TForall _ _ (TFn tys _) -> tys; _ -> map tType inputs)
+            [] -> return (map tType inputs)
+        let actualMode (TRef _) actual = TRef (unref actual)
+            actualMode (TMutRef _) actual = TMutRef (unref actual)
+            actualMode _ actual = actual
+            unref (TRef inner) = inner
+            unref (TMutRef inner) = inner
+            unref other = other
+            parameters = zipWith actualMode declared (map tType inputs)
+            arguments = zip parameters inputs
+        inputBounds <- unique . concat <$> mapM borrowedOrigins arguments
+        let reachable seen [] = Set.toList seen
+            reachable seen (root : rest)
+                | root `Set.member` seen = reachable seen rest
+                | otherwise = reachable (Set.insert root seen) (Map.findWithDefault [] root (tcRefOrigins st) ++ rest)
+            bounds = reachable Set.empty inputBounds
+        forM_ arguments $ \(wanted, input) -> do
+            ty <- zonk wanted
+            stores <- mutableReferenceStores ty
+            when stores $ do
+                contained <- referenceOrigins ctx env input
+                direct <- case ty of TMutRef _ -> map fst <$> referencePlaces ctx env input; _ -> return []
+                let targets = reachable Set.empty (direct ++ contained)
+                when (null targets) $ failTc "Type error: a call that can replace reference fields needs resolved target origin bounds"
+                forM_ targets $ \root -> do
+                    after <- getState
+                    let old = Map.findWithDefault (if root `elem` (tcParams after ++ map parameterContents (tcParams after)) then [root] else []) root (tcRefOrigins after)
+                    putState after{tcRefOrigins = Map.insert root (unique (old ++ bounds)) (tcRefOrigins after)}
+  where
+    isCall Var{} = True
+    isCall (Val (VFunct _ _ _ BuiltinFunct{} _)) = False
+    isCall _ = True
+    borrowedOrigins (wanted, input) = do
+        ty <- zonk wanted
+        if isRefType ty then map fst <$> argumentPlaces ctx env input else do
+            contains <- holdsRef (tType input)
+            if contains then referenceOrigins ctx env input else return []
+recordCallFieldOrigins _ _ _ = return ()
+
+inferExprCore :: Ctx -> Env -> Expression -> TC TExpr
+inferExprCore ctx env expr =
     case expr of
+        Ascribed inner wanted -> do
+            checkType wanted
+            inferExpected "expression result" False wanted ctx env inner
+        BlockExpr stmts result -> do
+            ghostly <- tcGhost <$> getState
+            when ghostly $ failTc "Type error: a proof cannot contain a block expression"
+            (env', stmts', types) <- checkStatements False ctx (Map.empty : env) stmts
+            result' <- inferExprR ctx env' result
+            return (TBlockExpr stmts' types result')
+        IfExpr cond yes no -> do
+            ghostly <- tcGhost <$> getState
+            when ghostly $ failTc "Type error: a proof cannot contain an if expression"
+            cond' <- inferExprR ctx env cond
+            expect "condition of if" TBool (tType cond')
+            (yes', no') <- branchReferences (inferExprR ctx env yes) (inferExprR ctx env no)
+            resultTy <- branchType (tType yes') (tType no')
+            yes'' <- coerce resultTy yes'
+            no'' <- coerce resultTy no'
+            expect "then result" resultTy (tType yes'')
+            expect "else result" resultTy (tType no'')
+            return (TExpr resultTy (IfExpr (tExpr cond') (tExpr yes'') (tExpr no'')) [cond', yes'', no''])
         Val value -> (\t -> tLeaf t expr) <$> valueType value
         Var var -> do
             t <- lookupVar ctx env var
@@ -565,11 +909,11 @@ inferExprR ctx env expr =
                     _ -> funct
             return (TExpr t (F funct' [tExpr struct'']) [struct''])
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name ctorArgs fields)) _)) args -> do
-            inferred0 <- mapM (inferExprR ctx env) args
-            -- (a tuple's parts are what they are: it is made of their types)
             unless (isJust (tupleGeneric (baseNameOf name))) $ ensureInstance (TNamed (baseNameOf name) ctorArgs)
             declared <- if isJust (tupleGeneric (baseNameOf name)) then return [] else snd <$> ctorInfo name
-            inferred <- if length declared == length inferred0 then mapM (uncurry coerce) (zip (map snd declared) inferred0) else return inferred0
+            inferred <- if length declared == length args
+                then mapM (\((field, ty), arg) -> if mentionsParameter ty then inferExprR ctx env arg >>= coerce ty else inferExpected ("field " ++ field ++ " of " ++ name) False ty ctx env arg) (zip declared args)
+                else mapM (inferExprR ctx env) args
             t <- checkConstruct (TNamed (baseNameOf name) ctorArgs) fields (map tType inferred)
             return (TExpr t (F funct (map tExpr inferred)) inferred)
         -- &place, &mut place: a reference to a place (REFERENCES.md, stages 2 and 3)
@@ -894,6 +1238,7 @@ inferExprR ctx env expr =
                     return (TExpr xt (F (Val (builtinFunct (Ctor name args (map fst fields)))) (map tExpr parts)) parts)
                 _ -> cloneTrait x'
         _ -> failTc ("Type error: clone takes 1 argument, got " ++ show (length args))
+    cloneInput (TReferenceExpr places origins inner) = TReferenceExpr places origins <$> cloneInput inner
     cloneInput x = case x of
         -- Only a lent Clone input may replace consuming unbox with a payload borrow.
         TExpr ty (F (Val (VFunct _ _ _ (BuiltinFunct UnBox) _)) [box]) [boxed]
@@ -905,6 +1250,11 @@ inferExprR ctx env expr =
                 if arrayPayload || crossesBox then return x else do
                     let pointee = TExpr ty (F (Val (builtinFunct DerefOf)) [box]) [boxed]
                     return (TExpr (TRef ty) (F (Val (builtinFunct BorrowOf)) [tExpr pointee]) [pointee])
+        TExpr ty (F funct [sub, index]) [subT, indexT]
+            | builtinHead ctx env funct == Just Get, not (stableCloneIndex index), not (isRefType (tType subT)) -> do
+                requireClone (tType subT)
+                let snapshot = TExpr (tType subT) (F (Val (builtinFunct CloneOf)) [sub]) [subT]
+                return (TExpr ty (F funct [tExpr snapshot, index]) [snapshot, indexT])
         _ -> do
             boxed <- or <$> mapM throughBox (childrenOf x)
             let projection = case tExpr x of Var _ -> False; expr -> clonePlace expr
@@ -912,8 +1262,11 @@ inferExprR ctx env expr =
                 then TExpr (TRef (tType x)) (F (Val (builtinFunct BorrowOf)) [tExpr x]) [x]
                 else x)
     childrenOf (TExpr _ _ children) = children
-    throughBox (TExpr ty _ children) = do
-        resolved <- unref <$> zonk ty
+    childrenOf (TBlockExpr _ _ result) = [result]
+    childrenOf (TReferenceExpr _ _ inner) = [inner]
+    throughBox expression = do
+        resolved <- unref <$> zonk (tType expression)
+        let children = childrenOf expression
         case resolved of
             TBox _ -> return True
             _ -> or <$> mapM throughBox children
@@ -939,8 +1292,23 @@ inferExprR ctx env expr =
     stableCloneIndex expr = case expr of
         Var _ -> True
         Val (VInt _) -> True
-        F funct args | Just b <- builtinHead ctx env funct, b `elem` [Plus, Minus, Times, Div, Mod, FromByte] -> all stableCloneIndex args
+        Val (VBool _) -> True
+        IfExpr cond yes no -> all stableCloneIndex [cond, yes, no]
+        BlockExpr statements result -> all stableCloneStatement statements && stableCloneIndex result
+        Ascribed inner _ -> stableCloneIndex inner
+        F funct args | Just b <- builtinHead ctx env funct, stableCloneBuiltin b -> all stableCloneIndex args
         _ -> False
+    stableCloneStatement stmt = case stmt of
+        Mark{} -> True
+        Let _ expr -> stableCloneIndex expr
+        ValidationStatement{} -> True
+        _ -> False
+    stableCloneBuiltin builtin = case builtin of
+        Rel{} -> True
+        Is{} -> True
+        Field{} -> True
+        Cast{} -> True
+        _ -> builtin `elem` [Plus, Minus, Times, Div, Mod, FromByte, Get, First, Last, Size, Not, And, Or]
     methodCall method (receiver : args) = do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
             receiverTy <- unref <$> zonk (tType (head inferred))
@@ -1002,10 +1370,20 @@ inferExprR ctx env expr =
                 return (TExpr result (F (tExpr funct') (map tExpr args')) (headTExpr funct' ++ args'))
             _ -> ordinary funct funct' ft args
     headTExpr funct' = case tExpr funct' of
-        F{} -> [funct']
-        _ -> []
+        Var{} -> []
+        Val{} -> []
+        _ -> [funct']
+    inferArg (ty, arg) | TList{} <- unref ty, literalContext arg = inferExpected "expression result" False (unref ty) ctx env arg
+    inferArg (_, arg) = inferExprR ctx env arg
+    literalContext (Val VList{}) = True
+    literalContext (F funct [_, _]) = builtinHead ctx env funct == Just Push
+    literalContext (IfExpr _ yes no) = literalContext yes || literalContext no
+    literalContext (BlockExpr _ result) = literalContext result
+    literalContext _ = False
     ordinary funct funct' ft args = do
-        inferred0 <- mapM (inferExprR ctx env) args
+        inferred0 <- case ft of
+            TFn params _ | length params == length args -> mapM inferArg (zip params args)
+            _ -> mapM (inferExprR ctx env) args
         -- (size(v), get(v, i), ... on a value of a struct are the functions of its impl)
         owner <- case (builtinHead ctx env funct, inferred0) of
             (Just b, xt : _) | Just fname <- sequenceFunction b -> (,) fname <$> structOwner (tType xt)

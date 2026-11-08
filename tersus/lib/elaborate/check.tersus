@@ -1,9 +1,9 @@
-import data::ast::ast { AstBody, AstExpression, AstNode, AstOptTermination, AstRule, AstSignature, AstStatement, AstTermination, AstValidation, AstValue };
+import data::ast::ast { AstBody, AstExpression, AstNode, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstValidation, AstValue };
 import data::codec::codec { catStrings };
 import elaborate::calls { assignVar, bindIn, bindInner, coerce, head, lookupVar, popScope, pushScope, scopeLookup };
 import elaborate::core { checkFieldType, checkFinite, checkType, declareTypeWith, holdsRef, isBoxTy, isListTy, mentionsRef, registerCtors, unrefOf };
 import elaborate::expr { derefStepNeeded, exprOf, inferExpr };
-import elaborate::out { emit, emitProofs, emitStatements, emitVal, emitValidations };
+import elaborate::out { emit, emitExpressions, emitName, emitProofs, emitStatements, emitVal, emitValidations };
 import elaborate::proofs { inferProof, rewriteOldStatements };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData, signatureOf };
 import elaborate::state { Generic, St, TE, expect, fail, indexIn, intText, isSize, isTypeName, joinWith, kindOf, notModelled, oneScope, render, simpleTy, tyAt, typeError, zonk };
@@ -12,6 +12,282 @@ fn stmtOf(st: &St, s: Int) -> AstStatement [{ }] [{ }] {
     node = nodeIn(&st.nodes, s);
     if node is AstNode::Statement { return clone((node as AstNode::Statement).value); };
     return AstStatement::Mark { line: 0, col: 0 };
+};
+
+// Local declarations receive their identities before any type variables are allocated.
+fn localScopes(st: St, stmts: &List<Int>) -> St ~ {
+    out = [];
+    for s in stmts {
+        st = scopeStatement(st, s);
+        if st.status != 0 { return st; };
+        out = push(out, st.nid);
+    };
+    return emitStatements(st, &out);
+};
+
+fn scopeName(st: St, n: Int) -> St [{ }] [{ }] {
+    name = nameText(&st.nodes, n);
+    if st.localNames.contains(&name) {
+        identity = st.localNames.lookup(&name, n);
+        return emitName(st, nameText(&st.nodes, identity));
+    };
+    return St { nid: n, ..st };
+};
+
+fn scopeStatement(st: St, s: Int) -> St ~ {
+    stmt = stmtOf(st, s);
+    if stmt is AstStatement::Let {
+        a = stmt as AstStatement::Let;
+        name = nameText(&st.nodes, a.n);
+        st = scopeExpression(st, a.e);
+        if st.status != 0 { return st; };
+        rhs = st.nid;
+        fresh = catStrings(catStrings(catStrings("$local ", intText(st.next)), " "), clone(name));
+        st = emitName(st, fresh);
+        n = st.nid;
+        st = St { next: st.next + 1, localNames: st.localNames.insert(name, n), ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::Let { n: n, e: rhs } });
+    };
+    if stmt is AstStatement::Assign {
+        a = stmt as AstStatement::Assign;
+        st = scopeExpression(st, a.e);
+        rhs = st.nid;
+        st = scopeName(st, a.n);
+        return emit(st, AstNode::Statement { value: AstStatement::Assign { n: st.nid, e: rhs } });
+    };
+    if stmt is AstStatement::AssignDeref {
+        a = stmt as AstStatement::AssignDeref;
+        st = scopeExpression(st, a.a);
+        lhs = st.nid;
+        st = scopeExpression(st, a.b);
+        return emit(st, AstNode::Statement { value: AstStatement::AssignDeref { a: lhs, b: st.nid } });
+    };
+    if stmt is AstStatement::Return {
+        st = scopeExpression(st, (stmt as AstStatement::Return).e);
+        return emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
+    };
+    if stmt is AstStatement::ValidationStatement {
+        st = scopeValidation(st, (stmt as AstStatement::ValidationStatement).v);
+        return emit(st, AstNode::Statement { value: AstStatement::ValidationStatement { v: st.nid } });
+    };
+    if stmt is AstStatement::Block {
+        outer = clone(st.localNames);
+        body = listItems(&st.nodes, (stmt as AstStatement::Block).xs);
+        st = localScopes(st, &body);
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::Block { xs: st.nid } });
+    };
+    if stmt is AstStatement::If {
+        a = stmt as AstStatement::If;
+        outer = clone(st.localNames);
+        st = scopeExpression(st, a.e);
+        cond = st.nid;
+        yes = listItems(&st.nodes, a.a);
+        st = localScopes(st, &yes);
+        y = st.nid;
+        st = St { localNames: clone(outer), ..st };
+        no = listItems(&st.nodes, a.b);
+        st = localScopes(st, &no);
+        n = st.nid;
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::If { e: cond, a: y, b: n } });
+    };
+    if stmt is AstStatement::While {
+        a = stmt as AstStatement::While;
+        outer = clone(st.localNames);
+        st = scopeExpression(st, a.e);
+        cond = st.nid;
+        st = scopeValidations(st, a.vs);
+        vs = st.nid;
+        st = scopeOptTermination(st, a.t);
+        term = st.nid;
+        body = listItems(&st.nodes, a.xs);
+        st = localScopes(st, &body);
+        b = st.nid;
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::While { e: cond, vs: vs, t: term, xs: b } });
+    };
+    if stmt is AstStatement::ImplDef {
+        a = stmt as AstStatement::ImplDef;
+        outer = clone(st.localNames);
+        st = St { localNames: HashMap::new(), ..st };
+        body = listItems(&st.nodes, a.xs);
+        st = localScopes(st, &body);
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: a.traitName, args: a.args, n: a.n, ty: a.ty, bs: a.bs, xs: st.nid } });
+    };
+    if stmt is AstStatement::BoundedDef {
+        a = stmt as AstStatement::BoundedDef;
+        outer = clone(st.localNames);
+        st = scopeStatement(st, a.s);
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::BoundedDef { bs: a.bs, s: st.nid } });
+    };
+    if stmt is AstStatement::Dissolve {
+        st = scopeName(st, (stmt as AstStatement::Dissolve).n);
+        return emit(st, AstNode::Statement { value: AstStatement::Dissolve { n: st.nid } });
+    };
+    return St { nid: s, ..st };
+};
+
+fn scopeExpression(st: St, e: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr || ex is AstExpression::BlockExpr || ex is AstExpression::Ascribed {
+        return notModelled(st, "expression control flow");
+    };
+    if ex is AstExpression::Var {
+        st = scopeName(st, (ex as AstExpression::Var).n);
+        return emit(st, AstNode::Expression { value: AstExpression::Var { n: st.nid } });
+    };
+    if ex is AstExpression::F {
+        a = ex as AstExpression::F;
+        st = scopeExpression(st, a.f);
+        f = st.nid;
+        args = [];
+        for x in listItems(&st.nodes, a.xs) {
+            st = scopeExpression(st, x);
+            if st.status != 0 { return st; };
+            args = push(args, st.nid);
+        };
+        st = emitExpressions(st, &args);
+        return emit(st, AstNode::Expression { value: AstExpression::F { f: f, xs: st.nid } });
+    };
+    if ex is AstExpression::Val {
+        v = (ex as AstExpression::Val).v;
+        node = nodeIn(&st.nodes, v);
+        if node is AstNode::Value && (node as AstNode::Value).value is AstValue::VFunct {
+            value = (node as AstNode::Value).value as AstValue::VFunct;
+            bodyNode = nodeIn(&st.nodes, value.body);
+            if bodyNode is AstNode::Body && (bodyNode as AstNode::Body).value is AstBody::NativeFunct {
+                body = (bodyNode as AstNode::Body).value as AstBody::NativeFunct;
+                outer = clone(st.localNames);
+                st = St { localNames: HashMap::new(), ..st };
+                stmts = listItems(&st.nodes, body.stmts);
+                st = localScopes(st, &stmts);
+                st = St { localNames: outer, ..st };
+                st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: body.sig, term: body.term, stmts: st.nid } });
+                st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: value.ps, ins: value.ins, outs: value.outs, body: st.nid, exports: value.exports } });
+                return emitVal(st, st.nid);
+            };
+        };
+    };
+    return St { nid: e, ..st };
+};
+
+fn scopeValidations(st: St, v: Int) -> St ~ {
+    out = [];
+    for p in listItems(&st.nodes, v) {
+        st = scopeValidation(st, p);
+        if st.status != 0 { return st; };
+        out = push(out, st.nid);
+    };
+    return emitValidations(st, &out);
+};
+
+fn scopeValidation(st: St, v: Int) -> St ~ {
+    node = nodeIn(&st.nodes, v);
+    if !(node is AstNode::Validation) { return St { nid: v, ..st }; };
+    a = (node as AstNode::Validation).value;
+    if a is AstValidation::ProofAssert {
+        st = scopeProof(st, (a as AstValidation::ProofAssert).p);
+        return emit(st, AstNode::Validation { value: AstValidation::ProofAssert { p: st.nid } });
+    };
+    if a is AstValidation::Assume {
+        st = scopeProof(st, (a as AstValidation::Assume).p);
+        return emit(st, AstNode::Validation { value: AstValidation::Assume { p: st.nid } });
+    };
+    if a is AstValidation::AssignProofVar {
+        x = a as AstValidation::AssignProofVar;
+        st = scopeName(st, x.n);
+        name = st.nid;
+        st = scopeExpression(st, x.e);
+        return emit(st, AstNode::Validation { value: AstValidation::AssignProofVar { n: name, e: st.nid } });
+    };
+    if a is AstValidation::Rewrite {
+        st = scopeRule(st, (a as AstValidation::Rewrite).r);
+        return emit(st, AstNode::Validation { value: AstValidation::Rewrite { r: st.nid } });
+    };
+    return St { nid: v, ..st };
+};
+
+fn scopeProofs(st: St, ps: Int) -> St ~ {
+    out = [];
+    for p in listItems(&st.nodes, ps) {
+        st = scopeProof(st, p);
+        out = push(out, st.nid);
+    };
+    return emitProofs(st, &out);
+};
+
+fn scopeProof(st: St, p: Int) -> St ~ {
+    node = nodeIn(&st.nodes, p);
+    if !(node is AstNode::Proof) { return St { nid: p, ..st }; };
+    a = (node as AstNode::Proof).value;
+    if a is AstProof::ATerm {
+        st = scopeName(st, (a as AstProof::ATerm).n);
+        return emit(st, AstNode::Proof { value: AstProof::ATerm { n: st.nid } });
+    };
+    if a is AstProof::FApp {
+        x = a as AstProof::FApp;
+        st = scopeProof(st, x.f);
+        f = st.nid;
+        st = scopeProofs(st, x.xs);
+        return emit(st, AstNode::Proof { value: AstProof::FApp { f: f, xs: st.nid } });
+    };
+    if a is AstProof::Forall {
+        x = a as AstProof::Forall;
+        name = nameText(&st.nodes, x.n);
+        outer = clone(st.localNames);
+        inner = HashMap::new();
+        for entry in outer.entries() { if entry.key != name { inner = inner.insert(clone(entry.key), entry.value); }; };
+        st = St { localNames: inner, ..st };
+        st = scopeProofs(st, x.gs);
+        gs = st.nid;
+        st = scopeProof(st, x.b);
+        b = st.nid;
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Proof { value: AstProof::Forall { n: x.n, gs: gs, b: b } });
+    };
+    return St { nid: p, ..st };
+};
+
+fn scopeRule(st: St, r: Int) -> St ~ {
+    node = nodeIn(&st.nodes, r);
+    if !(node is AstNode::Rule) { return St { nid: r, ..st }; };
+    a = (node as AstNode::Rule).value;
+    if a is AstRule::Eval { st = scopeName(st, (a as AstRule::Eval).n); return emit(st, AstNode::Rule { value: AstRule::Eval { n: st.nid } }); };
+    if a is AstRule::Refl { st = scopeProof(st, (a as AstRule::Refl).p); return emit(st, AstNode::Rule { value: AstRule::Refl { p: st.nid } }); };
+    if a is AstRule::CheckGtZero { st = scopeProof(st, (a as AstRule::CheckGtZero).p); return emit(st, AstNode::Rule { value: AstRule::CheckGtZero { p: st.nid } }); };
+    if a is AstRule::CheckRel { st = scopeProof(st, (a as AstRule::CheckRel).p); return emit(st, AstNode::Rule { value: AstRule::CheckRel { p: st.nid } }); };
+    if a is AstRule::UserRewrite {
+        x = a as AstRule::UserRewrite;
+        st = scopeProofs(st, x.xs);
+        return emit(st, AstNode::Rule { value: AstRule::UserRewrite { n: x.n, xs: st.nid } });
+    };
+    return St { nid: r, ..st };
+};
+
+fn scopeOptTermination(st: St, t: Int) -> St ~ {
+    node = nodeIn(&st.nodes, t);
+    if !(node is AstNode::OptTermination) { return St { nid: t, ..st }; };
+    a = (node as AstNode::OptTermination).value;
+    if a is AstOptTermination::SomeTermination {
+        st = scopeTermination(st, (a as AstOptTermination::SomeTermination).t);
+        return emit(st, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: st.nid } });
+    };
+    return St { nid: t, ..st };
+};
+
+fn scopeTermination(st: St, t: Int) -> St ~ {
+    node = nodeIn(&st.nodes, t);
+    if !(node is AstNode::Termination) { return St { nid: t, ..st }; };
+    a = (node as AstNode::Termination).value;
+    if a is AstTermination::Shrinks { st = scopeExpression(st, (a as AstTermination::Shrinks).e); return emit(st, AstNode::Termination { value: AstTermination::Shrinks { e: st.nid } }); };
+    if a is AstTermination::Counting { st = scopeExpression(st, (a as AstTermination::Counting).e); return emit(st, AstNode::Termination { value: AstTermination::Counting { e: st.nid } }); };
+    if a is AstTermination::Parts { st = scopeExpression(st, (a as AstTermination::Parts).e); return emit(st, AstNode::Termination { value: AstTermination::Parts { e: st.nid } }); };
+    if a is AstTermination::Recursing { st = scopeOptTermination(st, (a as AstTermination::Recursing).t); return emit(st, AstNode::Termination { value: AstTermination::Recursing { t: st.nid } }); };
+    return St { nid: t, ..st };
 };
 
 // Statements: each gives back the statement it stands for (st.nid) and the types of its code (st.te.types)
