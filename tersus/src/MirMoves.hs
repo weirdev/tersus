@@ -538,6 +538,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
         ReadField _ name field -> SField name field
         ListOp AddrGet _ -> SSlot
         ListOp UninitGet _ -> SSlot
+        ListOp Get [_, i] -> refStepConst (stConst st1) (RefIndex i)
         _ -> SElem Nothing
 
 -- An assignment through a reference: the root gets a new version, and no other live loan to the place may be
@@ -617,6 +618,11 @@ mayPlacesOf st l = nub (placesOf st l ++ maybe [] Set.toList (Map.lookup l (stMa
 loanPlacesOf :: St -> [Local] -> [Place]
 loanPlacesOf st ls = [place | (ref, place, _) <- loanEntries st, ref `elem` ls]
 
+-- A place read through a reference is a place of what the reference is to, which `*` does not change
+readPlace :: Cx -> St -> Place -> Place
+readPlace cx st place = case resolvePlace cx st place of
+    (root, steps) -> if isReference cx root then (root, steps) else (root, filter (/= SDeref) steps)
+
 -- A place lent to an operation stays in use until the operation ends, so the operation cannot also move it, a
 -- value that holds it, or a part of it
 lentAndMoved :: Cx -> Pos -> St -> String -> [Place] -> [Local] -> [String]
@@ -625,13 +631,10 @@ lentAndMoved cx pos st how lent consumed =
     | c <- consumed
     , not (isCopy cx c)
     , q <- mayPlacesOf st c
-    , h <- map readPlace lent
+    , h <- map (readPlace cx st) lent
     , overlaps h q
     ]
   where
-    -- (a place read through a reference is a place of what the reference is to, which `*` does not change)
-    readPlace place = case resolvePlace cx st place of
-        (root, steps) -> if isReference cx root then (root, steps) else (root, filter (/= SDeref) steps)
     text h q
         | h == q = describe cx h ++ " is " ++ how ++ " and moved by it too: write clone(" ++ describe cx h ++ ") for one of them"
         | length (snd q) < length (snd h) = describe cx h ++ " is " ++ how ++ ", and " ++ describe cx q ++ ", which holds it, is moved by it too: write clone(" ++ describe cx q ++ ") where it is moved"
@@ -725,6 +728,15 @@ terminator cx pos st term = case term of
                 , ref /= l
                 , overlaps (argPlace l) lplace
                 ]
+            mutLocals = [l | (a, True) <- zip args mut, Just l <- [operandLocal a]]
+            readAndUpdated =
+                [ message cx pos (describe cx h ++ " is lent to this call" ++ (if h == argPlace m then " and lent to it for updating too" else ", and " ++ describe cx (argPlace m) ++ " is lent to it for updating") ++ ": write clone(" ++ describe cx h ++ ") for the one that is read")
+                | m <- mutLocals
+                , (l, True) <- argLocals
+                , l `notElem` mutLocals
+                , h <- map (readPlace cx st) (mayPlacesOf st l)
+                , overlaps h (argPlace m)
+                ]
             (st', errs) = foldl' (access cx pos) (st, []) ([(l, [], Read) | Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
             defined = define cx st' dest []
             -- (a result that is a reference is a borrow of a place of one of the arguments it is from, made here)
@@ -735,7 +747,7 @@ terminator cx pos st term = case term of
             windowed = case (refFieldNames cx (typeOf cx dest), resultFromPlaces cx st' callee args) of
                 (fields@(_ : _), places@(_ : _)) -> loaned{stFieldLoans = foldl' (\m f -> Map.insert (dest, f) places m) (Map.filterWithKey (\(root, _) _ -> root /= dest) (stFieldLoans loaned)) fields, stExtraLoans = Map.insert dest places (stExtraLoans loaned)}
                 _ -> loaned
-         in (hold cx pos windowed dest [], take 1 conflicts ++ errs ++ mutErrs ++ lost cx pos st' dest)
+         in (hold cx pos windowed dest [], take 1 conflicts ++ take 1 readAndUpdated ++ errs ++ mutErrs ++ lost cx pos st' dest)
     -- (what a function returns is given to its caller, and a permission it has not used by then is lost)
     Return ->
         let (st', errs) = if Local 0 `Map.member` fnLocals (cxFn cx) then accessAll [(Local 0, [], Consume)] else (st, [])

@@ -800,6 +800,7 @@ lentPartPrograms =
     , ("a value is moved once a borrow of its field has ended", "struct S { xs: List<Int>, n: Int }; fn g(xs: &List<Int>) -> Int { return size(xs); }; fn f(s: S, k: Int) -> Int { return k * 10 + size(s.xs); }; s = S { xs: [1, 2, 3], n: 0 }; return f(s, g(&s.xs));")
     , ("a field a returned holder owns is lent while what it borrows is moved", "struct S { xs: List<Int>, n: Int }; struct W { r: &List<Int>, ys: List<Int> }; fn mk(s: &S) -> W from s { return W { r: &s.xs, ys: [7] }; }; fn f(s: S, ys: &List<Int>) -> Int { return size(ys) * 10 + s.n; }; s = S { xs: [1, 2, 3], n: 4 }; w = mk(&s); return f(s, &w.ys);")
     , ("a borrow of a field a holder owns outlives a move of what it borrows", "struct S { xs: List<Int>, n: Int }; struct W { r: &List<Int>, ys: List<Int> }; fn mk(s: &S) -> W from s { return W { r: &s.xs, ys: [7] }; }; fn g(s: S) -> Int { return s.n; }; s = S { xs: [1, 2, 3], n: 4 }; w = mk(&s); q = &w.ys; a = g(s); return size(*q) * 10 + a;")
+    , ("a Copy field lent for updating is read as it was before the call", "struct S { xs: List<Int>, n: Int }; fn f(a: &mut Int, b: &Int) -> Int writes(a) { *a = 9; return b; }; s = S { xs: [1, 2, 3], n: 5 }; return f(&mut s.n, s.n) * 10 + s.n;")
     , ("a clone is moved while the field of the original is lent", "struct S { xs: List<Int>, n: Int }; impl Clone for S { }; fn f(s: S, xs: &List<Int>) -> Int { return size(xs) * 10 + size(push(s.xs, 9)); }; s = S { xs: [1, 2, 3], n: 0 }; return f(clone(s), &s.xs) * 10 + size(s.xs);")
     ]
 

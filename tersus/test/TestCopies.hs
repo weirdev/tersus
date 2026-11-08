@@ -38,7 +38,7 @@ testCopies =
             [ ("the error has the line of the statement / and the line where it was moved", "xs = [1];\nys = xs;\nn = size(xs);\nreturn n;", ["line 3:1", "moved at line 2:1"], False)
             , ("in a function", "fn f(xs: List<Int>) -> Int {\n    ys = xs;\n    return size(xs);\n};\nreturn f([1]);", ["in f, line 3:5"], False)
             , ("in a branch", "fn f(c: Bool, xs: List<Int>) -> Int {\n    if c {\n        ys = xs;\n    };\n    return size(xs);\n};\nreturn f(true, [1]);", ["in f, line 5:5"], False)
-            , ("and the name of a variable that is read", "rows = push([], [1]);\nrow = get(rows, 0);\nrow = push(row, 2);\nreturn 0;", ["cannot move row (rows[..]) out of a list"], False)
+            , ("and the name of a variable that is read", "rows = push([], [1]);\nrow = get(rows, 0);\nrow = push(row, 2);\nreturn 0;", ["cannot move row (rows[0]) out of a list"], False)
             , ("a program that is fine is accepted", "xs = [1];\nys = clone(xs);\nreturn size(xs) + size(ys);", [], True)
             , ("several errors are reported", "xs = [1];\nys = xs;\nzs = xs;\nn = size(xs);\nreturn n;", ["line 4:1"], False)
             ]
