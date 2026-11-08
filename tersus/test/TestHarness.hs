@@ -40,6 +40,8 @@ module TestHarness
     , programFromFilesWith
     , programFromFilesystemWith
     , programFromFilesystemObserved
+    , nativeCacheKey
+    , cachedFilesystemSnapshot
     , filesystemPackageCacheInput
     , validatedOnceNoPrelude
     , compileOnceNoPrelude
@@ -458,11 +460,24 @@ cachedFilesystemPackageWith beforeParse options stage path = do
     snapshot <- Modules.captureFilesystemInput options path Nothing
     case snapshot of
         Left err -> pure (Error err)
-        Right (resolver, entry, input) -> do
-            key <- Exception.evaluate (force input)
-            let parser decls source = unsafePerformIO (beforeParse >> Exception.evaluate (TersusParser.parseFileWith decls source))
-            packageStage (packageStageName stage entry) key
-                (validatedPackage entry (Modules.loadFromEntryWith parser resolver entry))
+        Right captured -> consumeFilesystemSnapshot beforeParse stage captured
+
+nativeCacheKey :: [String] -> IO (Result String String)
+nativeCacheKey inputs = do
+    scope <- cacheBuildScope
+    case scope of
+        Nothing -> pure (Error "Could not verify the native test build identity or seed overrides")
+        Just identity -> Ok <$> Exception.evaluate (force (fingerprint (inputs ++ [compilerIdentity, identity])))
+
+cachedFilesystemSnapshot :: String -> (Modules.Resolver, FilePath, String) -> IO (Result Program String)
+cachedFilesystemSnapshot = consumeFilesystemSnapshot (pure ())
+
+consumeFilesystemSnapshot :: IO () -> String -> (Modules.Resolver, FilePath, String) -> IO (Result Program String)
+consumeFilesystemSnapshot beforeParse stage (resolver, entry, input) = do
+    key <- Exception.evaluate (force input)
+    let parser decls source = unsafePerformIO (beforeParse >> Exception.evaluate (TersusParser.parseFileWith decls source))
+    packageStage (packageStageName stage entry) key
+        (validatedPackage entry (Modules.loadFromEntryWith parser resolver entry))
 
 programFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
 programFromFiles = programFromFilesWith Modules.defaultLoadOptions

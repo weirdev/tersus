@@ -1,8 +1,6 @@
 module TestMirReader (testMirReader, withProgram, programExecutable, sameText) where
 
 import Control.Concurrent.MVar (MVar, newMVar)
-import Control.DeepSeq (force)
-import Control.Exception (evaluate)
 import System.IO.Unsafe (unsafePerformIO)
 import qualified TersusParser
 import System.Environment (lookupEnv)
@@ -11,7 +9,6 @@ import System.Exit (ExitCode (..))
 import Bootstrap (compilerSnapshotHash, llvmOfOwned, tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runProgramIn, runSourceIn)
 import MirHousekeeping (toolOwnedProgram)
-import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Native (buildExecutable, cachedProgram)
 import qualified Modules
@@ -85,25 +82,30 @@ withProgram path name use = do
 
 programExecutable :: FilePath -> String -> IO (Result FilePath String)
 programExecutable path name = do
-    files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
-    backend <- lookupEnv "TERSUS_PARSER"
-    parser <- TersusParser.parserKey
-    let build output = do
-            ir <- if embeddedToolFile path
-                then ownedFromFiles path files >>= \owned -> case owned of
-                    Error e -> pure (Error e)
-                    Ok prog -> llvmOfOwned prog
-                else case lookup (Modules.normalizePath path) files of
-                    Nothing -> pure (Error ("file not found: " ++ path))
-                    Just source -> tersusLlvm source
-            case ir of
+    snapshot <- Modules.captureFilesystemInput Modules.defaultLoadOptions path Nothing
+    case snapshot of
+        Left err -> pure (Error err)
+        Right captured@(resolver, entry, input) -> do
+            backend <- lookupEnv "TERSUS_PARSER"
+            parser <- TersusParser.parserKey
+            let build output = do
+                    ir <- if embeddedToolFile entry
+                        then cachedFilesystemSnapshot "owned" captured >>= \owned -> case owned of
+                            Error e -> pure (Error e)
+                            Ok prog -> llvmOfOwned prog
+                        else case Modules.resolverReadFile resolver entry of
+                            Nothing -> pure (Error ("file not found: " ++ entry))
+                            Just source -> tersusLlvm source
+                    case ir of
+                        Error e -> pure (Error e)
+                        Ok text -> buildExecutable output text
+            case parser of
                 Error e -> pure (Error e)
-                Ok text -> buildExecutable output text
-    case parser of
-        Error e -> pure (Error e)
-        Ok identity -> do
-            key <- evaluate (force (fingerprint [packageCacheInput path files, show backend, compilerSnapshotHash, identity, runtimeSource]))
-            cachedProgram ("test-" ++ name) key ("the test " ++ name) build
+                Ok identity -> do
+                    key <- nativeCacheKey [input, show backend, compilerSnapshotHash, identity, runtimeSource]
+                    case key of
+                        Error err -> pure (Error err)
+                        Ok completeKey -> cachedProgram ("test-" ++ name) completeKey ("the test " ++ name) build
 
 {-# NOINLINE readerExecutable #-}
 readerExecutable :: MVar (Maybe FilePath)
