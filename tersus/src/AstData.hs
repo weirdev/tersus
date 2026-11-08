@@ -1,16 +1,91 @@
-module AstData (writeParsed, readParsed, writeElaborated, readElaborated) where
+module AstData
+    ( writeParsed
+    , readParsed
+    , writeElaborated
+    , readElaborated
+    , InterfaceRecord (..)
+    , FunctionRecord (..)
+    , TemplateRecord (..)
+    , writeInterfaceRecord
+    , readInterfaceRecord
+    , BuiltinRecord (..)
+    , writeBuiltinTable
+    , readBuiltinTable
+    ) where
 
 import Control.Monad (replicateM)
 import qualified Data.Map.Strict as Map
 import qualified Data.IntSet as IS
 import Data.List (foldl')
-import BuiltinRegistry (builtinRegistry, entryInstances)
+import BuiltinRegistry (NameSpace (..), SigScheme (..), builtinRegistry, entryInstances)
 import DataCodec
 import Syntax
 import Types
 import Utils
 
 type Build = (Int, [String])
+
+-- A module interface as plain syntax (InterfaceData converts Interface.ModuleInterface to and from it):
+-- each map is its entries in ascending key order and each set its members in ascending order.
+data InterfaceRecord = InterfaceRecord
+    { irPackage :: Name
+    , irModule :: Maybe Name
+    , irTypes :: [(Name, [Name])]
+    , irCtors :: [(Name, (Name, [(Variable, Type)]))]
+    , irGenerics :: [(Name, ([Variable], [(Variable, Type)]))]
+    , irInvariants :: [(Name, [ValidationStatement])]
+    , irTraits :: [(Name, [TraitFn])]
+    , irTraitParams :: [(Name, [Variable])]
+    , irFunctions :: [(Name, FunctionRecord)]
+    , irImpls :: [(Name, Name)]
+    , irAssoc :: [((Name, Name), [Maybe Name])]
+    , irImplArgs :: [((Name, Name), (Type, [Arg]))]
+    , irImplBounds :: [((Name, Name), [Bound])]
+    , irCopies :: [Name]
+    , irLinear :: [Name]
+    , irDrops :: [Name]
+    , irAxioms :: [Statement]
+    , irProofs :: [Statement]
+    , irExterns :: [Name]
+    , irTemplates :: [(Name, TemplateRecord)]
+    , irCompanions :: [(Name, [Name])]
+    }
+    deriving (Show, Eq)
+
+-- Parameters, signature, requires, ensures, termination and exported proofs
+data FunctionRecord = FunctionRecord [Variable] Signature [ValidationStatement] [ValidationStatement] (Maybe Termination) [VariableProof]
+    deriving (Show, Eq)
+
+-- Bounds, the functions and the return type of the context it was declared in, parameters, signature,
+-- requires, ensures, termination and body
+data TemplateRecord = TemplateRecord [Bound] [(Variable, Type)] (Maybe Type) [Variable] Signature [ValidationStatement] [ValidationStatement] (Maybe Termination) [Statement]
+    deriving (Show, Eq)
+
+-- A builtin as the checker uses it (BuiltinRegistry): the builtin, the names a program calls it by, its
+-- signature scheme, and the value the checker writes for it
+data BuiltinRecord = BuiltinRecord
+    { brBuiltin :: BuiltinFunct
+    , brSurface :: [(NameSpace, Name)]
+    , brScheme :: SigScheme
+    , brValue :: Value
+    }
+    deriving (Show, Eq)
+
+data Entry
+    = ENames Name [Name]
+    | ECtor Name Name [(Variable, Type)]
+    | EGeneric Name [Variable] [(Variable, Type)]
+    | EInvariant Name [ValidationStatement]
+    | ETrait Name [TraitFn]
+    | EFunction Name FunctionRecord
+    | EPair Name Name
+    | EAssoc Name Name [Maybe Name]
+    | EImplArgs Name Name Type [Arg]
+    | EImplBounds Name Name [Bound]
+    | ETemplate Name TemplateRecord
+    | EType Name Type
+    | ESurface NameSpace Name
+    | EBuiltin BuiltinRecord
 
 emit :: String -> [String] -> Build -> (Int, Build)
 emit tag fields (n, records) = (n, (n + 1, unwords (tag : fields) : records))
@@ -23,6 +98,12 @@ writeElaborated (Elaborated ss ts) =
     let (s, b) = putStatements ss (0, [])
         (t, b') = putTypes ts b
      in finish "elaborated" (emit "Elaborated" [show s, show t] b')
+
+writeInterfaceRecord :: InterfaceRecord -> Result String String
+writeInterfaceRecord r = finish "interface" (putInterface r (0, []))
+
+writeBuiltinTable :: [BuiltinRecord] -> Result String String
+writeBuiltinTable rs = finish "builtins" (putEntries (map EBuiltin rs) (0, []))
 
 finish :: String -> (Int, Build) -> Result String String
 finish stage (root, (_, records)) =
@@ -96,6 +177,12 @@ data Node = NName String | NType Type | NSize Size | NElaborated Elaborated
     | NArgs ([Arg])
     | NTraitFns ([TraitFn])
     | NBounds ([Bound])
+    | NEntry Entry
+    | NEntries [Entry]
+    | NOptNames [Maybe Name]
+    | NOptType (Maybe Type)
+    | NInterface InterfaceRecord
+    | NScheme SigScheme
 
 putValue :: Value -> Build -> (Int, Build)
 putValue value b0 = case value of
@@ -498,6 +585,159 @@ putBounds xs b = foldl' cons (emit "BoundsEnd" [] b) (reverse xs)
         let (headId, state') = putBound x state
          in emit "BoundsCons" [show headId, show tailId] state'
 
+putInterface :: InterfaceRecord -> Build -> (Int, Build)
+putInterface r b0 =
+    let (r0, b1) = putName (irPackage r) b0
+        (r1, b2) = putOptName (irModule r) b1
+        (r2, b3) = putEntries [ENames k v | (k, v) <- irTypes r] b2
+        (r3, b4) = putEntries [ECtor k o fs | (k, (o, fs)) <- irCtors r] b3
+        (r4, b5) = putEntries [EGeneric k ps fs | (k, (ps, fs)) <- irGenerics r] b4
+        (r5, b6) = putEntries [EInvariant k vs | (k, vs) <- irInvariants r] b5
+        (r6, b7) = putEntries [ETrait k fs | (k, fs) <- irTraits r] b6
+        (r7, b8) = putEntries [ENames k v | (k, v) <- irTraitParams r] b7
+        (r8, b9) = putEntries [EFunction k f | (k, f) <- irFunctions r] b8
+        (r9, b10) = putEntries [EPair a b | (a, b) <- irImpls r] b9
+        (r10, b11) = putEntries [EAssoc a b os | ((a, b), os) <- irAssoc r] b10
+        (r11, b12) = putEntries [EImplArgs a b t as | ((a, b), (t, as)) <- irImplArgs r] b11
+        (r12, b13) = putEntries [EImplBounds a b bs | ((a, b), bs) <- irImplBounds r] b12
+        (r13, b14) = putNames (irCopies r) b13
+        (r14, b15) = putNames (irLinear r) b14
+        (r15, b16) = putNames (irDrops r) b15
+        (r16, b17) = putStatements (irAxioms r) b16
+        (r17, b18) = putStatements (irProofs r) b17
+        (r18, b19) = putNames (irExterns r) b18
+        (r19, b20) = putEntries [ETemplate k t | (k, t) <- irTemplates r] b19
+        (r20, b21) = putEntries [ENames k v | (k, v) <- irCompanions r] b20
+     in emit "Interface" (map show [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20]) b21
+
+putEntry :: Entry -> Build -> (Int, Build)
+putEntry e b0 = case e of
+    ENames k v ->
+        let (r0, b1) = putName k b0
+            (r1, b2) = putNames v b1
+         in emit "NamesEntry" [show r0, show r1] b2
+    ECtor k o fs ->
+        let (r0, b1) = putName k b0
+            (r1, b2) = putName o b1
+            (r2, b3) = putFields fs b2
+         in emit "CtorEntry" [show r0, show r1, show r2] b3
+    EGeneric k ps fs ->
+        let (r0, b1) = putName k b0
+            (r1, b2) = putNames ps b1
+            (r2, b3) = putFields fs b2
+         in emit "GenericEntry" [show r0, show r1, show r2] b3
+    EInvariant k vs ->
+        let (r0, b1) = putName k b0
+            (r1, b2) = putValidations vs b1
+         in emit "InvariantEntry" [show r0, show r1] b2
+    ETrait k fs ->
+        let (r0, b1) = putName k b0
+            (r1, b2) = putTraitFns fs b1
+         in emit "TraitEntry" [show r0, show r1] b2
+    EFunction k (FunctionRecord ps sig ins outs term exports) ->
+        let (r0, b1) = putName k b0
+            (r1, b2) = putNames ps b1
+            (r2, b3) = putSignature sig b2
+            (r3, b4) = putValidations ins b3
+            (r4, b5) = putValidations outs b4
+            (r5, b6) = putOptTermination term b5
+            (r6, b7) = putProofs exports b6
+         in emit "FunctionEntry" (map show [r0, r1, r2, r3, r4, r5, r6]) b7
+    EPair a b ->
+        let (r0, b1) = putName a b0
+            (r1, b2) = putName b b1
+         in emit "PairEntry" [show r0, show r1] b2
+    EAssoc a b os ->
+        let (r0, b1) = putName a b0
+            (r1, b2) = putName b b1
+            (r2, b3) = putOptNames os b2
+         in emit "AssocEntry" [show r0, show r1, show r2] b3
+    EImplArgs a b t as ->
+        let (r0, b1) = putName a b0
+            (r1, b2) = putName b b1
+            (r2, b3) = putType t b2
+            (r3, b4) = putArgs as b3
+         in emit "ImplArgsEntry" [show r0, show r1, show r2, show r3] b4
+    EImplBounds a b bs ->
+        let (r0, b1) = putName a b0
+            (r1, b2) = putName b b1
+            (r2, b3) = putBounds bs b2
+         in emit "ImplBoundsEntry" [show r0, show r1, show r2] b3
+    ETemplate k (TemplateRecord bs fns ret ps sig ins outs term body) ->
+        let (r0, b1) = putName k b0
+            (r1, b2) = putBounds bs b1
+            (r2, b3) = putEntries [EType n t | (n, t) <- fns] b2
+            (r3, b4) = putOptType ret b3
+            (r4, b5) = putNames ps b4
+            (r5, b6) = putSignature sig b5
+            (r6, b7) = putValidations ins b6
+            (r7, b8) = putValidations outs b7
+            (r8, b9) = putOptTermination term b8
+            (r9, b10) = putStatements body b9
+         in emit "TemplateEntry" (map show [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]) b10
+    EType k t ->
+        let (r0, b1) = putName k b0
+            (r1, b2) = putType t b1
+         in emit "TypeEntry" [show r0, show r1] b2
+    ESurface space n ->
+        let (r0, b1) = putName n b0
+         in emit "SurfaceEntry" [spaceWord space, show r0] b1
+    EBuiltin (BuiltinRecord b surface scheme value) ->
+        let (r0, b1) = putBuiltin b b0
+            (r1, b2) = putEntries [ESurface space n | (space, n) <- surface] b1
+            (r2, b3) = putScheme scheme b2
+            (r3, b4) = putValue value b3
+         in emit "BuiltinEntry" [show r0, show r1, show r2, show r3] b4
+  where
+    putScheme scheme b = case scheme of
+        SigFn params result ->
+            let (s0, c1) = putTypes params b
+                (s1, c2) = putType result c1
+             in emit "SigFn" [show s0, show s1] c2
+        SigDynamic -> emit "SigDynamic" [] b
+        SigValueError message ->
+            let (s0, c1) = putName message b
+             in emit "SigValueError" [show s0] c1
+
+spaceWords :: [(NameSpace, String)]
+spaceWords = [(StdName, "std"), (PointerName, "pointer"), (GhostName, "ghost"), (ProofName, "proof"), (MethodName, "method"), (SyntaxName, "syntax")]
+
+spaceWord :: NameSpace -> String
+spaceWord space = maybe "" id (lookup space spaceWords)
+
+putEntries :: [Entry] -> Build -> (Int, Build)
+putEntries xs b = foldl' cons (emit "EntriesEnd" [] b) (reverse xs)
+  where
+    cons (tailId, state) x =
+        let (headId, state') = putEntry x state
+         in emit "EntriesCons" [show headId, show tailId] state'
+
+putOptNames :: [Maybe Name] -> Build -> (Int, Build)
+putOptNames xs b = foldl' cons (emit "OptNamesEnd" [] b) (reverse xs)
+  where
+    cons (tailId, state) x =
+        let (headId, state') = putOptName x state
+         in emit "OptNamesCons" [show headId, show tailId] state'
+
+putOptType :: Maybe Type -> Build -> (Int, Build)
+putOptType value b0 = case value of
+    Nothing -> emit "NoType" [] b0
+    Just t ->
+        let (r0, b1) = putType t b0
+         in emit "SomeType" [show r0] b1
+
+readInterfaceRecord :: String -> Result InterfaceRecord String
+readInterfaceRecord text = decode "interface" text `bindResult` \n -> case n of
+    NInterface r -> Ok r
+    _ -> Error "AstData: wrong root kind"
+
+readBuiltinTable :: String -> Result [BuiltinRecord] String
+readBuiltinTable text = decode "builtins" text `bindResult` \n -> case n of
+    NEntries es -> case [r | EBuiltin r <- es] of
+        rs | length rs == length es -> Ok rs
+        _ -> Error "AstData: a builtin table holds builtin entries"
+    _ -> Error "AstData: wrong root kind"
+
 readParsed :: String -> Result [Statement] String
 readParsed text = decode "parsed" text `bindResult` \n -> case n of
     NStatements ss -> Ok ss
@@ -892,7 +1132,142 @@ nodeP nodes = word >>= \tag -> case tag of
         (x, a) <- ref nodes (\node -> case node of NBound v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NBounds v -> Just v; _ -> Nothing)
         pure (NBounds (x : xs), [a, b])
+    "Interface" -> do
+        (pkg, r0) <- refName
+        (modu, r1) <- ref nodes (\node -> case node of NOptName payload -> Just payload; _ -> Nothing)
+        (types, r2) <- entries (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
+        (ctors, r3) <- entries (\e -> case e of ECtor k o fs -> Just (k, (o, fs)); _ -> Nothing)
+        (generics, r4) <- entries (\e -> case e of EGeneric k ps fs -> Just (k, (ps, fs)); _ -> Nothing)
+        (invariants, r5) <- entries (\e -> case e of EInvariant k vs -> Just (k, vs); _ -> Nothing)
+        (traits, r6) <- entries (\e -> case e of ETrait k fs -> Just (k, fs); _ -> Nothing)
+        (traitParams, r7) <- entries (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
+        (functions, r8) <- entries (\e -> case e of EFunction k f -> Just (k, f); _ -> Nothing)
+        (impls, r9) <- entries (\e -> case e of EPair a b -> Just (a, b); _ -> Nothing)
+        (assoc, r10) <- entries (\e -> case e of EAssoc a b os -> Just ((a, b), os); _ -> Nothing)
+        (implArgs, r11) <- entries (\e -> case e of EImplArgs a b t as -> Just ((a, b), (t, as)); _ -> Nothing)
+        (implBounds, r12) <- entries (\e -> case e of EImplBounds a b bs -> Just ((a, b), bs); _ -> Nothing)
+        (copies, r13) <- refNames
+        (linear, r14) <- refNames
+        (drops, r15) <- refNames
+        (axioms, r16) <- refStatements
+        (proofs, r17) <- refStatements
+        (externs, r18) <- refNames
+        (templates, r19) <- entries (\e -> case e of ETemplate k t -> Just (k, t); _ -> Nothing)
+        (companions, r20) <- entries (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
+        pure (NInterface (InterfaceRecord pkg modu types ctors generics invariants traits traitParams functions impls assoc implArgs implBounds copies linear drops axioms proofs externs templates companions), [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20])
+    "NamesEntry" -> do
+        (k, r0) <- refName
+        (v, r1) <- refNames
+        pure (NEntry (ENames k v), [r0, r1])
+    "CtorEntry" -> do
+        (k, r0) <- refName
+        (o, r1) <- refName
+        (fs, r2) <- refFields
+        pure (NEntry (ECtor k o fs), [r0, r1, r2])
+    "GenericEntry" -> do
+        (k, r0) <- refName
+        (ps, r1) <- refNames
+        (fs, r2) <- refFields
+        pure (NEntry (EGeneric k ps fs), [r0, r1, r2])
+    "InvariantEntry" -> do
+        (k, r0) <- refName
+        (vs, r1) <- refValidations
+        pure (NEntry (EInvariant k vs), [r0, r1])
+    "TraitEntry" -> do
+        (k, r0) <- refName
+        (fs, r1) <- ref nodes (\node -> case node of NTraitFns payload -> Just payload; _ -> Nothing)
+        pure (NEntry (ETrait k fs), [r0, r1])
+    "FunctionEntry" -> do
+        (k, r0) <- refName
+        (ps, r1) <- refNames
+        (sig, r2) <- refSignature
+        (ins, r3) <- refValidations
+        (outs, r4) <- refValidations
+        (term, r5) <- refOptTermination
+        (exports, r6) <- ref nodes (\node -> case node of NProofs payload -> Just payload; _ -> Nothing)
+        pure (NEntry (EFunction k (FunctionRecord ps sig ins outs term exports)), [r0, r1, r2, r3, r4, r5, r6])
+    "PairEntry" -> do
+        (a, r0) <- refName
+        (b, r1) <- refName
+        pure (NEntry (EPair a b), [r0, r1])
+    "AssocEntry" -> do
+        (a, r0) <- refName
+        (b, r1) <- refName
+        (os, r2) <- ref nodes (\node -> case node of NOptNames payload -> Just payload; _ -> Nothing)
+        pure (NEntry (EAssoc a b os), [r0, r1, r2])
+    "ImplArgsEntry" -> do
+        (a, r0) <- refName
+        (b, r1) <- refName
+        (t, r2) <- refType
+        (as, r3) <- ref nodes (\node -> case node of NArgs payload -> Just payload; _ -> Nothing)
+        pure (NEntry (EImplArgs a b t as), [r0, r1, r2, r3])
+    "ImplBoundsEntry" -> do
+        (a, r0) <- refName
+        (b, r1) <- refName
+        (bs, r2) <- refBounds
+        pure (NEntry (EImplBounds a b bs), [r0, r1, r2])
+    "TemplateEntry" -> do
+        (k, r0) <- refName
+        (bs, r1) <- refBounds
+        (fns, r2) <- entries (\e -> case e of EType n t -> Just (n, t); _ -> Nothing)
+        (ret, r3) <- ref nodes (\node -> case node of NOptType payload -> Just payload; _ -> Nothing)
+        (ps, r4) <- refNames
+        (sig, r5) <- refSignature
+        (ins, r6) <- refValidations
+        (outs, r7) <- refValidations
+        (term, r8) <- refOptTermination
+        (body, r9) <- refStatements
+        pure (NEntry (ETemplate k (TemplateRecord bs fns ret ps sig ins outs term body)), [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9])
+    "TypeEntry" -> do
+        (k, r0) <- refName
+        (t, r1) <- refType
+        pure (NEntry (EType k t), [r0, r1])
+    "SurfaceEntry" -> do
+        w <- word
+        (n, r0) <- refName
+        case [space | (space, w') <- spaceWords, w' == w] of
+            [space] -> pure (NEntry (ESurface space n), [r0])
+            _ -> failP "AstData: unknown name space"
+    "BuiltinEntry" -> do
+        (b, r0) <- ref nodes (\node -> case node of NBuiltin payload -> Just payload; _ -> Nothing)
+        (surface, r1) <- entries (\e -> case e of ESurface space n -> Just (space, n); _ -> Nothing)
+        (scheme, r2) <- ref nodes (\node -> case node of NScheme payload -> Just payload; _ -> Nothing)
+        (value, r3) <- ref nodes (\node -> case node of NValue payload -> Just payload; _ -> Nothing)
+        pure (NEntry (EBuiltin (BuiltinRecord b surface scheme value)), [r0, r1, r2, r3])
+    "SigFn" -> do
+        (params, r0) <- ref nodes (\node -> case node of NTypes payload -> Just payload; _ -> Nothing)
+        (result, r1) <- refType
+        pure (NScheme (SigFn params result), [r0, r1])
+    "SigDynamic" -> pure (NScheme SigDynamic, [])
+    "SigValueError" -> do
+        (message, r0) <- refName
+        pure (NScheme (SigValueError message), [r0])
+    "NoType" -> pure (NOptType Nothing, [])
+    "SomeType" -> do
+        (t, r0) <- refType
+        pure (NOptType (Just t), [r0])
+    "EntriesEnd" -> pure (NEntries [], [])
+    "EntriesCons" -> do
+        (x, a) <- ref nodes (\node -> case node of NEntry v -> Just v; _ -> Nothing)
+        (xs, b) <- ref nodes (\node -> case node of NEntries v -> Just v; _ -> Nothing)
+        pure (NEntries (x : xs), [a, b])
+    "OptNamesEnd" -> pure (NOptNames [], [])
+    "OptNamesCons" -> do
+        (x, a) <- ref nodes (\node -> case node of NOptName v -> Just v; _ -> Nothing)
+        (xs, b) <- ref nodes (\node -> case node of NOptNames v -> Just v; _ -> Nothing)
+        pure (NOptNames (x : xs), [a, b])
     _ -> failP ("AstData: unknown tag " ++ tag)
+  where
+    refName = ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
+    refNames = ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
+    refType = ref nodes (\node -> case node of NType payload -> Just payload; _ -> Nothing)
+    refFields = ref nodes (\node -> case node of NFields payload -> Just payload; _ -> Nothing)
+    refValidations = ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
+    refStatements = ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
+    refBounds = ref nodes (\node -> case node of NBounds payload -> Just payload; _ -> Nothing)
+    refSignature = ref nodes (\node -> case node of NSignature payload -> Just payload; _ -> Nothing)
+    refOptTermination = ref nodes (\node -> case node of NOptTermination payload -> Just payload; _ -> Nothing)
+    entries project = ref nodes (\node -> case node of NEntries es -> mapM project es; _ -> Nothing)
 
 astTypeP :: P Type
 astTypeP = word >>= \w -> case w of

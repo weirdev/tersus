@@ -6784,7 +6784,7 @@ fn reorderArena(nodes: &List<AstNode>, root: Int) -> AstProgram ~ {
     for n in &nodes { mapInit = push(mapInit, 0 - 1); };
     a = Arena { old: clone(nodes), nodes: [], map: mapInit };
     a = arenaEmit(a, root);
-    return AstProgram { elaborated: false, nodes: a.nodes, root: intAtOr(&a.map, root, root) };
+    return AstProgram { stage: "parsed", nodes: a.nodes, root: intAtOr(&a.map, root, root) };
 };
 
 

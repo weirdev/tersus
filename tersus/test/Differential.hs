@@ -1,0 +1,175 @@
+-- The differential harness (REPLACING_HASKELL.md): an elaborator other than the Haskell one, answering the
+-- requests the compiler makes over the corpus, compared request by request with `respond`. TestDifferential
+-- runs it on in-process candidates; `stack run frontend-diff` runs it on an executable.
+module Differential
+    ( Unit (..)
+    , Outcome (..)
+    , Candidate
+    , corpusUnits
+    , unitRequests
+    , compareResponses
+    , throughText
+    , executableCandidate
+    , runDifferential
+    , tally
+    ) where
+
+import Control.Exception (SomeException, evaluate, try)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.List (isSuffixOf, sort)
+import System.Directory (listDirectory)
+import System.Exit (ExitCode (..))
+import System.IO.Unsafe (unsafePerformIO)
+import System.Process (readProcessWithExitCode)
+
+import AstData (writeElaborated)
+import Compile (lowerSourcePartsWith, lowerStatementsWith, parseWithEquality)
+import ElaborateRequest
+import InterfaceData (writeInterface)
+import LibPackage (compileLibPackageWith, nativeStorageUnitsWith)
+import MirHousekeeping (validationEntry)
+import qualified Modules as Mod
+import qualified PackageCompile as Package
+import PreludeSource (toolPackageFiles, validationPackageFiles)
+import qualified TersusParser
+import Utils
+
+-- What the compiler elaborates: a program read from a file, a program a test checks as it is given (with a name:
+-- no libraries in front of it, as Pipeline.validateStatements has it), a package (its modules in order), or the
+-- compiler libraries
+data Unit = SourceFile FilePath | SourceText String String | EmbeddedPackage FilePath | FilePackage FilePath | Libraries
+    deriving (Show, Eq)
+
+data Outcome
+    = Agree
+    | -- both refuse, at the same stage, in different words
+      Wording String String
+    | Disagree String
+    | NotModelledBy String
+    | CandidateFailed String
+    deriving (Show, Eq)
+
+type Candidate = Request -> IO (Result Response String)
+
+corpusUnits :: IO [Unit]
+corpusUnits = do
+    files <- concat <$> mapM tersusFiles ["examples", "examples/rejected"]
+    pure $
+        map SourceFile files
+            ++ map EmbeddedPackage ["lib/parser/parser.tersus", "lib/ast_reader/ast_reader.tersus", "lib/mir/emit/emit.tersus", "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", validationEntry]
+            ++ [FilePackage "examples/modules/app/main.tersus", Libraries]
+  where
+    tersusFiles dir = map ((dir ++ "/") ++) . filter (".tersus" `isSuffixOf`) . sort <$> listDirectory dir
+
+-- The requests the compiler makes compiling a unit, in the order it makes them, with `respond`'s answers. A unit
+-- that does not parse makes none.
+unitRequests :: Unit -> IO (Result [(Request, Response)] String)
+unitRequests unit = do
+    ref <- newIORef []
+    let elaborator = recording ref
+    outcome <- case unit of
+        SourceFile path -> program elaborator <$> readFile path
+        SourceText _ source -> pure $ case parseWithEquality source of
+            Left e -> Error ("does not parse: " ++ e)
+            Right stmts -> discard (lowerStatementsWith elaborator stmts)
+        EmbeddedPackage entry -> pure (package elaborator (if entry == validationEntry then validationPackageFiles else toolPackageFiles) entry)
+        FilePackage entry -> do
+            files <- Mod.snapshotFromFilesystem entry
+            pure (package elaborator files entry)
+        Libraries -> pure (discard (compileLibPackageWith elaborator) `bindResult` \() -> discard (nativeStorageUnitsWith elaborator))
+    forced <- try (evaluate (either id (const "") (resultEither outcome)) >>= evaluate . length)
+    requests <- reverse <$> readIORef ref
+    pure $ case (forced :: Either SomeException Int, outcome) of
+        (Left e, _) -> Error (show e)
+        (_, Error e) | null requests -> Error e
+        _ -> Ok requests
+  where
+    program elaborator source = case TersusParser.parseSourceParts True source of
+        Error e -> Error ("does not parse: " ++ e)
+        Ok parts -> discard (lowerSourcePartsWith elaborator True parts)
+    package elaborator files entry = case Mod.loadFromEntry (Mod.resolverFromFiles files) entry of
+        Left e -> Error e
+        Right (Mod.PackageResult pkg) -> discard (Package.compileModulesWith elaborator pkg)
+        Right _ -> Error (entry ++ " is not a package")
+    discard r = mapResult (const ()) r
+    resultEither r = case r of
+        Ok a -> Right a
+        Error e -> Left e
+
+-- `respond`, with each request and its answer kept (in reverse order). The compiler takes each response apart as
+-- soon as it has it, so a request is kept when it is made.
+{-# NOINLINE recording #-}
+recording :: IORef [(Request, Response)] -> Elaborator
+recording ref rq = unsafePerformIO $ do
+    let response = respond rq
+    modifyIORef' ref ((rq, response) :)
+    pure response
+
+compareResponses :: Response -> Response -> Outcome
+compareResponses reference candidate = case (reference, candidate) of
+    (_, NotModelled what) -> NotModelledBy what
+    (Accepted e i, Accepted e' i')
+        | e /= e' -> Disagree ("elaborations differ" ++ firstDifference (writeElaborated e) (writeElaborated e'))
+        | i /= i' -> Disagree ("interfaces differ" ++ firstDifference (maybeText i) (maybeText i'))
+        | otherwise -> Agree
+    (Refused m, Refused m') -> if m == m' then Agree else Wording m m'
+    (RefusedInterface m, RefusedInterface m') -> if m == m' then Agree else Wording m m'
+    _ -> Disagree ("verdicts differ: " ++ verdict reference ++ " / " ++ verdict candidate)
+  where
+    maybeText = maybe (Ok "none") writeInterface
+    verdict r = case r of
+        Accepted _ _ -> "accepted"
+        Refused m -> "refused: " ++ m
+        RefusedInterface m -> "interface refused: " ++ m
+        NotModelled m -> "not modelled: " ++ m
+    firstDifference (Ok a) (Ok b) = case [(n, x, y) | (n, x, y) <- zip3 [1 :: Int ..] (lines a ++ repeat "") (lines b ++ repeat ""), x /= y] of
+        (n, x, y) : _ -> " at record " ++ show n ++ ": " ++ take 120 x ++ " / " ++ take 120 y
+        [] -> ""
+    firstDifference _ _ = ""
+
+-- The Haskell elaborator behind the text protocol: what a request and a response lose shows up as a disagreement
+throughText :: Candidate
+throughText rq = pure $
+    writeRequest rq `bindResult` \text ->
+        readRequest text `bindResult` \rq' ->
+            if rq' /= rq
+                then Error "the request does not read back as written"
+                else writeResponse (respond rq') `bindResult` readResponse
+
+-- An elaborator executable: the request on its standard input, the response on its standard output
+executableCandidate :: FilePath -> Candidate
+executableCandidate exe rq = case writeRequest rq of
+    Error e -> pure (Error e)
+    Ok text -> do
+        (code, out, err) <- readProcessWithExitCode exe [] text
+        pure $ case code of
+            ExitSuccess -> readResponse out
+            ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 err)
+
+-- Each request of each unit, with the module it elaborates and how the candidate's response compares
+runDifferential :: Candidate -> [Unit] -> IO [(Unit, String, Outcome)]
+runDifferential candidate units = concat <$> mapM one units
+  where
+    one unit = do
+        requests <- unitRequests unit
+        case requests of
+            Error e -> pure [(unit, "", CandidateFailed ("the compiler made no requests: " ++ e)) | not (notParsed e)]
+            Ok answered -> mapM (compareOne unit) answered
+    notParsed e = take 15 e == "does not parse:"
+    compareOne unit (rq, reference) = do
+        answer <- candidate rq
+        let outcome = case answer of
+                Error e -> CandidateFailed e
+                Ok response -> compareResponses reference response
+        pure (unit, Mod.renderModuleId (rqModule rq), outcome)
+
+-- Agreements, wording differences, disagreements, not modelled and candidate failures
+tally :: [Outcome] -> (Int, Int, Int, Int, Int)
+tally outcomes = (count isAgree, count isWording, count isDisagree, count isNotModelled, count isFailed)
+  where
+    count p = length (filter p outcomes)
+    isAgree o = o == Agree
+    isWording o = case o of Wording _ _ -> True; _ -> False
+    isDisagree o = case o of Disagree _ -> True; _ -> False
+    isNotModelled o = case o of NotModelledBy _ -> True; _ -> False
+    isFailed o = case o of CandidateFailed _ -> True; _ -> False

@@ -51,6 +51,7 @@ import TestBuiltinRegistry
 import TestSharedCache
 import TestScheduling
 import TestAstData
+import TestDifferential
 import TestDataCodec
 import TestModules
 import TestParity
@@ -206,6 +207,7 @@ originalGroups =
     , testParserBootstrap
     , testParserUnicode
     , testAstReader
+    , testDifferential
     , testParity
     , testLibModules
     , testNativeStorageModules

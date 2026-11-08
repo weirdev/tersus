@@ -706,7 +706,7 @@ testFunctionCalls =
             , parseValidateFailProgramHelper (inc ++ "fn twice(n: Int) -> Int [{ }] [{ affirm return = (n + 3); }] { return inc(inc(n)); };") "Could not prove"
             , -- A function can call one defined after it, and a name is defined once
               parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return g(n); }; fn g(n: Int) -> Int [{ }] [{ }] { return n; }; x = f(1);"
-            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "is already defined"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "does not model yet: two functions with one name"
             , -- A function defined inside a body is local to it: a later local function cannot call it
               parseValidProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; return helper(n); }; x = outer(1);"
             , parseValidateFailProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; fn user(m: Int) -> Int { return helper(m); }; return user(n); };" "Undefined variable: helper"

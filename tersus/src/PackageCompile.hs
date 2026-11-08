@@ -4,6 +4,7 @@ module PackageCompile
     ( CompiledModule (..)
     , CompiledPackage (..)
     , compileModules
+    , compileModulesWith
     , lowerCompiledPackage
     , compileModulesLinked
     , assumptionsOfPackage
@@ -15,7 +16,8 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import Compile (librariesFor, reservedHelperName, reservedError, completeSpecEnvs)
-import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, extractLibInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv, withoutDeclaredNames)
+import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..), respond)
+import Interface (InterfaceFunction (..), ModuleInterface (..), mergeInterfacesImportEnv, nameInModule, withoutDeclaredNames)
 import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
 import ModuleResolve (rewriteFileReferences)
@@ -24,7 +26,7 @@ import ParsedFile (ParsedFile (..))
 import MirLower (lowerModuleWith)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
-import TypeCheck (Elaborated (..), elaborateWith)
+import TypeCheck (Elaborated (..))
 import Types (Signature (..), Type (..), pattern TBox, pattern TList, baseNameOf)
 import Utils
 
@@ -45,7 +47,10 @@ data CompiledPackage = CompiledPackage
     deriving (Show)
 
 compileModules :: Mod.LoadedPackage -> Result CompiledPackage String
-compileModules pkg = go (Mod.packageModules pkg) Map.empty []
+compileModules = compileModulesWith respond
+
+compileModulesWith :: Elaborator -> Mod.LoadedPackage -> Result CompiledPackage String
+compileModulesWith elaborator pkg = go (Mod.packageModules pkg) Map.empty []
   where
     go [] _ done = Ok (CompiledPackage (Mod.packageEntryModule pkg) (reverse done))
     go (modu : rest) interfaces done =
@@ -54,7 +59,7 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
             Ok compiled -> go rest (Map.insert (Mod.loadedModuleId modu) (compiledInterface compiled) interfaces) (compiled : done)
     compileOne interfaces modu =
         let moduId = Mod.loadedModuleId modu
-            extract = if moduId == Mod.packageEntryModule pkg then extractLibInterface else extractInterface
+            extraction = if moduId == Mod.packageEntryModule pkg then LibInterfaceOf else ModuleInterfaceOf
             depInterfaces = [interfaces Map.! dep | dep <- Mod.loadedDependencies modu, Map.member dep interfaces]
             missing = [dep | dep <- Mod.loadedDependencies modu, not (Map.member dep interfaces)]
          in if not (null missing)
@@ -70,12 +75,12 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
                                 Ok libPkg -> case moduleLibSelection libPkg depInterfaces modu prepared of
                                     Left err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
                                     Right (libIfaces, libUnits, checkOnlyIfaces) ->
-                                        let env = predeclareOwnEnv (mergeInterfacesImportEnv (libIfaces ++ checkOnlyIfaces ++ depInterfaces))
-                                         in case elaborateWith env prepared of
-                                                Error err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
-                                                Ok (elaborated@(Elaborated elaboratedStmts _), state) -> case extract moduId prepared elaboratedStmts state of
-                                                    Error err -> Error err
-                                                    Ok iface -> Ok (CompiledModule moduId elaboratedStmts elaborated iface (libIfaces ++ checkOnlyIfaces) libUnits)
+                                        case elaborator (Request moduId True False extraction (libIfaces ++ checkOnlyIfaces ++ depInterfaces) prepared) of
+                                            Accepted elaborated@(Elaborated elaboratedStmts _) (Just iface) -> Ok (CompiledModule moduId elaboratedStmts elaborated iface (libIfaces ++ checkOnlyIfaces) libUnits)
+                                            Accepted _ Nothing -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": the elaborator gave no interface")
+                                            Refused err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
+                                            RefusedInterface err -> Error err
+                                            NotModelled what -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": the elaborator does not handle this module yet: " ++ what)
 
 -- The compiler libraries a module is checked against: the interfaces of
 -- the librariesFor-selected lib modules (synthesised implicit imports, all

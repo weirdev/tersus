@@ -60,7 +60,7 @@ testTraits =
             , ("wrong result type", "trait Step { fn a() -> Self; }; impl Step for Counter { fn a() -> Int { return 1; }; };", "a is fn() -> Int, but Step declares fn() -> Counter")
             , ("unknown trait", "impl Missing for Counter { };", "unknown trait Missing")
             , ("implemented twice", "trait Step { }; impl Step for Counter { }; impl Step for Counter { };", "Counter already implements Step")
-            , ("two functions of one name", "impl Counter { fn a() -> Int { return 1; }; }; impl Counter { fn a() -> Int { return 2; }; };", "Function already defined: <Counter>::a")
+            , ("two functions of one name", "impl Counter { fn a() -> Int { return 1; }; }; impl Counter { fn a() -> Int { return 2; }; };", "does not model yet: two functions with one name")
             , ("a type does not implement the trait", (measure ++ "return Measure::sides(Counter { value: 1 });"), "Counter does not implement Measure")
             , ("no function of the type", "x = Counter { value: 1 }.nothing();", "Counter::nothing is not defined before this call")
             , ("a function of the type is defined later", "c = Counter { value: 1 }; x = c.later(); impl Counter { fn later(self: Self) -> Int { return 1; }; };", "Counter::later is not defined before this call")

@@ -6,7 +6,7 @@ import Data.Map (Map)
 import Types
 
 data Elaborated = Elaborated [Statement] [Type]
-    deriving (Show)
+    deriving (Show, Eq)
 
 -- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
 -- terminate, and so may not call itself.

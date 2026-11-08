@@ -1,7 +1,7 @@
 module Compile
     ( parseSource, SourceParts, parseSourceParts, parsedLibraries, probeDecls
-    , lowerSourceParts, parseWithEquality, librariesFor, lowerSource
-    , lowerStatements, reservedName, reservedHelperName, reservedError, completeSpecEnvs
+    , lowerSourceParts, lowerSourcePartsWith, parseWithEquality, librariesFor, lowerSource
+    , lowerStatements, lowerStatementsWith, reservedName, reservedHelperName, reservedError, completeSpecEnvs
     ) where
 
 import qualified Data.Map as Map
@@ -15,7 +15,7 @@ import qualified ParserSeed
 import SourceParse (SourceParts, parsedLibraries, probeDecls, librariesFor, reservedName, reservedHelperName, reservedError, declaredNames, definedFunctionNames)
 import qualified SourceParse
 import Syntax (Statement)
-import TypeCheck (elaborate, elaborateWith)
+import ElaborateRequest (Elaborator, Extraction (..), Request (..), acceptedElaboration, respond)
 import Utils
 
 parseSource :: String -> Result [Statement] String
@@ -32,7 +32,10 @@ lowerSource reserving source =
     parseSourceParts reserving source `bindResult` lowerSourceParts reserving
 
 lowerSourceParts :: Bool -> SourceParts -> Result M.Program String
-lowerSourceParts _reserving (names, _library, stmts) =
+lowerSourceParts = lowerSourcePartsWith respond
+
+lowerSourcePartsWith :: Elaborator -> Bool -> SourceParts -> Result M.Program String
+lowerSourcePartsWith elaborator _reserving (names, _library, stmts) =
     case libPackage of
         Error err -> Error err
         Ok pkg ->
@@ -43,7 +46,7 @@ lowerSourceParts _reserving (names, _library, stmts) =
                         let own = concatMap declaredNames stmts ++ concatMap definedFunctionNames stmts
                             ifaces = map (withoutDeclaredNames own) selectedIfaces
                             importEnv = mergeInterfacesImportEnv ifaces
-                         in stage "Validation failed: " (mapResult fst (elaborateWith importEnv stmts)) `bindResult` \elaborated ->
+                         in stage "Validation failed: " (acceptedElaboration (elaborator (Request (ModuleId "main" Nothing) False False NoInterface ifaces stmts))) `bindResult` \elaborated ->
                                 stage "Lowering failed: " (lowerModuleWith importEnv ifaces elaborated) `bindResult` \entryProgram ->
                                     mapResult completeSpecEnvs (linkPrograms (stripDeclaredFromUnits own units ++ [(ModuleId "main" Nothing, entryProgram)]))
 
@@ -61,7 +64,12 @@ completeSpecEnvs program = program{M.progFunctions = Map.map completeFunction (M
     completeEnv env = Map.union env functionEnv
 
 lowerStatements :: [Statement] -> Result M.Program String
-lowerStatements stmts = elaborate stmts `bindResult` lowerElaborated
+lowerStatements = lowerStatementsWith respond
+
+-- A program as given, with no libraries in front of it
+lowerStatementsWith :: Elaborator -> [Statement] -> Result M.Program String
+lowerStatementsWith elaborator stmts =
+    acceptedElaboration (elaborator (Request (ModuleId "main" Nothing) False False NoInterface [] stmts)) `bindResult` lowerElaborated
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a
