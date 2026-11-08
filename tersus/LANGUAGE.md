@@ -1276,7 +1276,7 @@ f = w.first;   // the reference the field holds
 return *f;     // 10; ys is frozen while w, or a reference read out of it, is live
 ```
 
-- **The holder freezes the places**, as a reference local does: while the struct is held (or a reference read out of it is live), what its fields are to cannot be assigned or moved. A field read gives the reference the field holds, with its own last use from there.
+- **The holder freezes the places**, as a reference local does: while the struct is held (or a reference read out of it, or a borrow of it, is live), what its fields are to cannot be assigned or moved. A borrow of a field the holder owns (`&w.ys`, with `ys` a list) is a borrow of that field only, and freezes nothing the references are to. A field read gives the reference the field holds, with its own last use from there.
 - **Returning one is under the same `from`**: every field of the returned value has to be from a named parameter (one bound covers all the fields), and the caller's holder freezes those places.
 - **Such a value goes anywhere a value goes**: it can be given to a function, put in a list, an array or a `Box`, and held in another struct, and the places its fields are to stay frozen while any of those is live. A field may be an update reference (`&mut T`), which the holder may then assign through (`*w.r = v;`), and a variant of an enum may hold a reference in the same way. A reference cannot be made from raw memory: an `Addr` and its `Block` permission confer no reference permission, so the two never alias — `Addr::write`, `take`, `free`, splits and joins are governed by the permission alone, and references by loans alone.
 
