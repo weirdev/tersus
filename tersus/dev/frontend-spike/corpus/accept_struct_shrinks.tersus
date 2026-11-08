@@ -1,0 +1,6 @@
+struct Wrap { n: Int };
+fn down(w: Wrap) -> Int [{ affirm w.n >= 0; }] [{ }] shrinks w.n {
+    if w.n = 0 { return 0; };
+    return 1 + down(Wrap { n: w.n - 1 });
+};
+return down(Wrap { n: 4 });

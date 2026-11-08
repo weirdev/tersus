@@ -1,0 +1,3 @@
+struct S { n: Int };
+struct S { m: Int };
+return 0;

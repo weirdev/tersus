@@ -1,0 +1,15 @@
+fn clamp(n: Int, lo: Int, hi: Int) -> Int [{ affirm lo <= hi; }] [{ affirm return >= lo; affirm return <= hi; }] {
+    if n < lo { return lo; };
+    if n > hi { return hi; };
+    return n;
+};
+fn counted(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] {
+    i = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+        define before = i;
+        i = i + 1;
+        affirm i = before + 1;
+    };
+    return i;
+};
+return clamp(counted(5), 0, 3) + counted(2);

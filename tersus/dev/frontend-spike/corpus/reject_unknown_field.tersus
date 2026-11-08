@@ -1,0 +1,3 @@
+struct P { x: Int };
+p = P { x: 1 };
+return p.y;

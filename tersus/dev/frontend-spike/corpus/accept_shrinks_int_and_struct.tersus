@@ -1,0 +1,4 @@
+struct P { a: Int };
+fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ }] shrinks x { return 0; };
+fn g(x: P) -> Int [{ }] [{ }] shrinks x { return 0; };
+return 0;

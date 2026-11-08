@@ -1,0 +1,46 @@
+import data::codec::codec { printInt, printName, newLine };
+import elaborate::spike::records { Rec, numAt };
+import elaborate::spike::state { St, resolve, kindOf, nameOfTy, argsOf };
+
+// A type as the AST data writes it (DataCodec, without the leading "Type")
+fn printTy(st: &St, t: Int) -> Int ~ {
+    r = resolve(st, t);
+    k = kindOf(st, r);
+    if k = 0 { return " int".print(); };
+    if k = 1 { return " bool".print(); };
+    if k = 2 { return " named".print() + printName(nameOfTy(st, r)) + printInt(0); };
+    args = argsOf(st, r);
+    n = " fn".print() + printInt(size(args) - 1);
+    for a in args { n = n + printTy(st, a); };
+    return n;
+};
+
+fn printRecord(recs: &List<Rec>, st: &St, id: Int) -> Int ~ {
+    if id < 0 || id >= size(recs) { return 0; };
+    change = st.rewrites.lookup(id, 0 - 1);
+    if change = 52 { return "Counting".print() + printInt(numAt(recs, id, 0)) + newLine(); };
+    if change = 53 { return "Parts".print() + printInt(numAt(recs, id, 0)) + newLine(); };
+    return get(recs, id).line.print() + newLine();
+};
+
+// The elaborated data: the statements as they were read (each resolved shrinks rewritten in place, so every
+// reference keeps its number), then the occurrence types, last first, then the root (AstData.writeElaborated)
+fn printElaborated(recs: &List<Rec>, root: Int, st: &St) -> Int ~ {
+    n = "tersus-ast 1 elaborated".print() + newLine();
+    for i in 0..size(recs) { n = n + printRecord(recs, st, i); };
+    next = size(recs);
+    n = n + "TypesEnd".print() + newLine();
+    tail = next;
+    next = next + 1;
+    k = size(st.out);
+    while k > 0 [{ affirm k >= 0; affirm k <= size(st.out); }] shrinks k {
+        k = k - 1;
+        n = n + "Type".print() + printTy(st, get(st.out, k)) + newLine();
+        n = n + "TypesCons".print() + printInt(next) + printInt(tail) + newLine();
+        tail = next + 1;
+        next = next + 2;
+    };
+    n = n + "Elaborated".print() + printInt(root) + printInt(tail) + newLine();
+    n = n + "root".print() + printInt(next) + newLine();
+    return n;
+};

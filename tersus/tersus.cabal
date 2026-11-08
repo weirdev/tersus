@@ -214,6 +214,27 @@ executable emitter-seed
     , unix
   default-language: Haskell2010
 
+executable frontend-spike
+  main-is: Main.hs
+  other-modules:
+      Paths_tersus
+  autogen-modules:
+      Paths_tersus
+  hs-source-dirs:
+      dev/frontend-spike
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
+  build-depends:
+      base >=4.7 && <5
+    , containers
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+    , unix
+  default-language: Haskell2010
+
 executable parser-seed
   main-is: Main.hs
   other-modules:

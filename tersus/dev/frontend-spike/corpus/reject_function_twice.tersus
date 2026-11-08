@@ -1,0 +1,3 @@
+fn f(a: Int) -> Int [{ }] [{ }] { return a; };
+fn f(a: Bool) -> Bool [{ }] [{ }] { return a; };
+return 0;

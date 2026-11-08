@@ -162,6 +162,15 @@ executables:
     dependencies:
     - tersus
 
+  frontend-spike:
+    main:                Main.hs
+    source-dirs:         dev/frontend-spike
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    dependencies:
+    - tersus
+
 tests:
   tersus-test:
     main:                TestTersus.hs
