@@ -319,6 +319,33 @@ builtin"), and the tests say so. An elaborator written in Tersus has to accept
 them too, or the differential reports a disagreement, until they become the
 checker's errors.
 
+#### Elaborator core
+
+Built: `lib/elaborate/` is the elaborator written in Tersus, a port of
+`TypeCheck`/`TypeCheckCore` function by function, so that it numbers fresh
+type variables and words refusals as the Haskell checker does. It reads a
+`tersus-elaborate 1` request (which carries the builtin table, so the
+elaborator types builtins from data) and writes the `tersus-elaborated 1`
+response. Types live in an arena of the checker's state; the output is the
+request's parsed arena with the new records appended, renumbered into the order
+`AstData` writes (`data::arena`, which the parser writes through too).
+
+It covers single-file programs: primitive, list, struct, enum, generic-struct,
+tuple and array types and their instances, finiteness, unification, coercion
+(unsizing, word and byte literals), scoped variables, statements, functions
+and gathered signatures, generic calls, termination, contracts and proof
+terms, and the builtins of addresses and permissions. It answers `unmodelled`
+for references, traits and impls, functions with bounds, `clone`, and the
+modules of packages and of the compiler libraries, which come next. The
+programs the test helpers check all answer `unmodelled` for now, since each
+carries the clone and equality libraries, which declare traits. `testElaborate` builds the
+elaborator from the embedded sources (`PreludeSource.elaboratePackageFiles`)
+and runs the differential over every single-file corpus program and every
+`testTypeCheck` source: no disagreement, and nothing answered `unmodelled`
+for any other reason. A mutant whose unification lets Int and Bool stand for
+each other is caught.
+`stack run frontend-diff -- build EXE` builds it from the sources on disk.
+
 ### Deferred or coordinated work
 
 Draft [PR #157](https://github.com/weirdev/tersus/pull/157) changes collection

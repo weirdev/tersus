@@ -1,5 +1,7 @@
 module TestDifferential (testDifferential) where
 
+import AstData (writeBuiltinTable)
+import BuiltinTable (builtinTable)
 import Compile (parseWithEquality)
 import Differential
 import ElaborateRequest
@@ -92,6 +94,14 @@ protocolRoundTrip = do
                     Ok _ -> Just ("accepted " ++ name)
                 swapLine old new text = unlines [if l == old then new else l | l <- lines text]
                 firstData text = head [l | l <- lines text, take 5 l == "data "]
+                resultEither r = case r of
+                    Ok a -> Right a
+                    Error e -> Left e
+                withTable table text =
+                    let (before, rest) = break (== "builtins") (lines text)
+                        after = drop 1 (dropWhile (\l -> take 11 l /= "interfaces ") rest)
+                        interfacesLine = head [l | l <- rest, take 11 l == "interfaces "]
+                     in unlines (before ++ ["builtins", "data " ++ show (length (lines table))] ++ lines table ++ [interfacesLine] ++ after)
              in firstFailure
                     [ refused "a request with another header" (readRequest (swapLine "tersus-elaborate 1" "tersus-elaborate 2" request))
                     , refused "an unknown extraction" (readRequest (unlines [if take 8 l == "extract " then "extract all" else l | l <- lines request]))
@@ -99,6 +109,13 @@ protocolRoundTrip = do
                     , refused "a block cut short" (readRequest (unlines (init (lines request))))
                     , refused "a line after the syntax" (readRequest (request ++ "more\n"))
                     , refused "two spaces after a key" (readRequest (swapLine "predeclare true" "predeclare  true" request))
+                    , case (writeBuiltinTable builtinTable, writeBuiltinTable (take 1 builtinTable)) of
+                        (Ok same, Ok other) -> firstFailure
+                            [ either (Just . ("the same table put back: " ++)) (const Nothing) (resultEither (readRequest (withTable same request)))
+                            , refused "another builtin table" (readRequest (withTable other request))
+                            ]
+                        (Error e, _) -> Just e
+                        (_, Error e) -> Just e
                     , refused "a response with no interface line" (readResponse (unlines (takeWhile (/= "interface") (lines response))))
                     , refused "a response with another header" (readResponse (swapLine "tersus-elaborated 1" "tersus-elaborated 2" response))
                     ]

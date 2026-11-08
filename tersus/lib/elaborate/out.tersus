@@ -1,0 +1,190 @@
+import data::ast::ast { AstExpression, AstExpressions, AstName, AstNode, AstProofs, AstStatements, AstTypes, AstValidations };
+import data::codec::codec { catStrings, tokenize, typeAt };
+import elaborate::builtins { builtinValueOf };
+import elaborate::state { St, intText, isSize, notModelled, resolve, tyAt, zonk };
+
+// A new record of the arena; st.nid is its number
+fn emit(st: St, node: AstNode) -> St [{ }] [{ }] {
+    id = size(st.nodes);
+    return St { nodes: push(st.nodes, node), nid: id, ..st };
+};
+
+fn emitName(st: St, text: String) -> St [{ }] [{ }] {
+    st = emit(st, AstNode::Name { value: AstName::End });
+    if size(text.bytes) = 0 { return st; };
+    return emit(st, AstNode::Name { value: AstName::Part { text: text, tail: st.nid } });
+};
+
+fn emitVal(st: St, value: Int) -> St [{ }] [{ }] {
+    return emit(st, AstNode::Expression { value: AstExpression::Val { v: value } });
+};
+
+fn emitVar(st: St, name: String) -> St [{ }] [{ }] {
+    st = emitName(st, name);
+    return emit(st, AstNode::Expression { value: AstExpression::Var { n: st.nid } });
+};
+
+fn emitExpressions(st: St, xs: &List<Int>) -> St ~ {
+    st = emit(st, AstNode::Expressions { value: AstExpressions::End });
+    tail = st.nid;
+    i = size(xs) - 1;
+    while i >= 0 [{ affirm i < size(xs); }] shrinks i + 1 {
+        st = emit(st, AstNode::Expressions { value: AstExpressions::Cons { head: get(xs, i), tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    return St { nid: tail, ..st };
+};
+
+fn emitStatements(st: St, xs: &List<Int>) -> St ~ {
+    st = emit(st, AstNode::Statements { value: AstStatements::End });
+    tail = st.nid;
+    i = size(xs) - 1;
+    while i >= 0 [{ affirm i < size(xs); }] shrinks i + 1 {
+        st = emit(st, AstNode::Statements { value: AstStatements::Cons { head: get(xs, i), tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    return St { nid: tail, ..st };
+};
+
+fn emitValidations(st: St, xs: &List<Int>) -> St ~ {
+    st = emit(st, AstNode::Validations { value: AstValidations::End });
+    tail = st.nid;
+    i = size(xs) - 1;
+    while i >= 0 [{ affirm i < size(xs); }] shrinks i + 1 {
+        st = emit(st, AstNode::Validations { value: AstValidations::Cons { head: get(xs, i), tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    return St { nid: tail, ..st };
+};
+
+fn emitProofs(st: St, xs: &List<Int>) -> St ~ {
+    st = emit(st, AstNode::Proofs { value: AstProofs::End });
+    tail = st.nid;
+    i = size(xs) - 1;
+    while i >= 0 [{ affirm i < size(xs); }] shrinks i + 1 {
+        st = emit(st, AstNode::Proofs { value: AstProofs::Cons { head: get(xs, i), tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    return St { nid: tail, ..st };
+};
+
+// The call F(funct, args) of an expression record and argument records
+fn emitCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
+    st = emitExpressions(st, args);
+    return emit(st, AstNode::Expression { value: AstExpression::F { f: funct, xs: st.nid } });
+};
+
+// The call of a builtin of the table (StdLib.builtinFunct), by its key
+fn emitBuiltinCall(st: St, key: String, args: &List<Int>) -> St ~ {
+    v = builtinValueOf(st, &key);
+    if v < 0 { return notModelled(st, catStrings("the builtin ", key)); };
+    st = emitVal(st, v);
+    return emitCall(st, st.nid, args);
+};
+
+// The data tokens of a type, which the codec reads into its type record
+fn typeTokenText(st: &St, t: Int) -> String ~ {
+    r = resolve(st, t);
+    x = tyAt(st, r);
+    k = x.kind;
+    if k = 0 { return " int"; };
+    if k = 1 { return " byte"; };
+    if k = 2 { return " bool"; };
+    if k = 3 {
+        if x.flag && x.n = 8 { return " i8"; };
+        if x.flag && x.n = 16 { return " i16"; };
+        if x.flag && x.n = 32 { return " i32"; };
+        if !x.flag && x.n = 16 { return " u16"; };
+        return " u32";
+    };
+    if k = 4 {
+        out = catStrings(catStrings(" named ", quotedName(&x.name)), catStrings(" ", intText(size(x.args))));
+        for a in x.args {
+            if isSize(st, a) { out = catStrings(catStrings(out, " size"), sizeTokenText(st, a)); } else { out = catStrings(catStrings(out, " type"), typeTokenText(st, a)); };
+        };
+        return out;
+    };
+    if k = 5 { return catStrings(" variant ", quotedName(&x.name)); };
+    if k = 6 { return catStrings(catStrings(" array", typeTokenText(st, get(x.args, 0))), sizeTokenText(st, get(x.args, 1))); };
+    if k = 7 { return catStrings(" addr", typeTokenText(st, get(x.args, 0))); };
+    if k = 8 { return catStrings(" block", typeTokenText(st, get(x.args, 0))); };
+    if k = 9 { return catStrings(" uninit", typeTokenText(st, get(x.args, 0))); };
+    if k = 10 { return catStrings(" ref", typeTokenText(st, get(x.args, 0))); };
+    if k = 11 { return catStrings(" mutref", typeTokenText(st, get(x.args, 0))); };
+    if k = 12 { return catStrings(" param ", quotedName(&x.name)); };
+    if k = 13 {
+        out = catStrings(" forall ", intText(size(x.sizes)));
+        for s in &x.sizes { out = catStrings(catStrings(out, " "), quotedName(s)); };
+        out = catStrings(catStrings(out, " "), intText(size(x.types)));
+        for s in &x.types { out = catStrings(catStrings(out, " "), quotedName(s)); };
+        return catStrings(out, typeTokenText(st, get(x.args, 0)));
+    };
+    if k = 14 {
+        out = catStrings(" fn ", intText(size(x.args) - 1));
+        for a in x.args { out = catStrings(out, typeTokenText(st, a)); };
+        return out;
+    };
+    return catStrings(" var ", intText(x.n));
+};
+
+fn sizeTokenText(st: &St, t: Int) -> String ~ {
+    r = resolve(st, t);
+    x = tyAt(st, r);
+    if x.kind = 20 { return catStrings(" c ", intText(x.n)); };
+    if x.kind = 21 { return " any"; };
+    if x.kind = 22 { return catStrings(" p ", quotedName(&x.name)); };
+    return catStrings(" v ", intText(x.n));
+};
+
+// A name as the data quotes it: printable ASCII as it is, apart from " and \, and every other byte as \xHH
+fn quotedName(name: &String) -> String [{ }] [{ }] {
+    out = push([], toByte(34));
+    for b in &name.bytes {
+        c = toInt(b);
+        if c >= 32 && c <= 126 && c != 34 && c != 92 {
+            out = push(out, b);
+        } else {
+            out = push(push(out, toByte(92)), toByte(120));
+            out = push(push(out, hexByte(c / 16)), hexByte(c % 16));
+        };
+    };
+    return String { bytes: push(out, toByte(34)) };
+};
+
+fn hexByte(d: Int) -> Byte [{ }] [{ }] {
+    if d >= 0 && d < 10 { return toByte(48 + d); };
+    if d >= 10 && d < 16 { return toByte(55 + d); };
+    return toByte(48);
+};
+
+// A type as a Type record of the data
+fn emitType(st: St, t: Int) -> St ~ {
+    text = typeTokenText(st, t);
+    tokens = tokenize(&text);
+    if !tokens.ok || size(tokens.value) = 0 { return notModelled(st, "a type the data cannot write"); };
+    parsed = typeAt(&tokens.value, 0);
+    if !parsed.ok { return notModelled(st, "a type the data cannot write"); };
+    return emit(st, AstNode::Type { value: parsed.value });
+};
+
+fn emitTypes(st: St, ts: &List<Int>) -> St ~ {
+    ids = [];
+    for t in ts {
+        st = zonk(st, t);
+        st = emitType(st, st.ty);
+        ids = push(ids, st.nid);
+    };
+    st = emit(st, AstNode::Types { value: AstTypes::End });
+    tail = st.nid;
+    i = size(ids) - 1;
+    while i >= 0 [{ affirm i < size(ids); }] shrinks i + 1 {
+        st = emit(st, AstNode::Types { value: AstTypes::Cons { head: get(ids, i), tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    return St { nid: tail, ..st };
+};

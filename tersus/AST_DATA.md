@@ -218,6 +218,9 @@ module "PACKAGE" none|"MODULE"
 predeclare true|false
 library true|false
 extract none|module|lib
+builtins
+data LINES          (the builtin table, `tersus-ast 1 builtins`)
+...
 interfaces N
 data LINES          (N times: a `tersus-ast 1 interface` block of LINES lines)
 ...

@@ -1,0 +1,169 @@
+import data::ast::ast { AstName, AstNode, AstSignature };
+import data::codec::codec { Size, Type, sizeAt, typeAt, wordAt };
+import data::reader::reader { nameValue, nodeKind, nodeRefs };
+import elaborate::state { St, TE, Ty, addTy, arrayTy, boxTy, fnTy, listTy, namedTy, notModelled, simpleTy, sizeConst, wordTy, wrapTy };
+
+// The elements of a list record of an arena, in order
+fn listItems(nodes: &List<AstNode>, start: Int) -> List<Int> ~ {
+    out = [];
+    id = start;
+    while id >= 0 && id < size(nodes) [{ }] ~ {
+        node = get(nodes, id);
+        k = nodeKind(node);
+        if !((k >= 22 && k <= 34) || k = 37 || k = 38) { return out; };
+        refs = nodeRefs(node);
+        if size(refs) != 2 { return out; };
+        out = push(out, get(refs, 0));
+        id = get(refs, 1);
+    };
+    return out;
+};
+
+fn nodeIn(nodes: &List<AstNode>, id: Int) -> AstNode [{ }] [{ }] {
+    if id < 0 || id >= size(nodes) { return AstNode::Name { value: AstName::End }; };
+    return clone(get(nodes, id));
+};
+
+fn nameText(nodes: &List<AstNode>, id: Int) -> String [{ }] [{ }] {
+    return nameValue(nodes, id);
+};
+
+fn namesText(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    out = [];
+    for n in listItems(nodes, id) { out = push(out, nameText(nodes, n)); };
+    return out;
+};
+
+// The codec type of a Type record
+fn codecTypeAt(nodes: &List<AstNode>, id: Int) -> Type [{ }] [{ }] {
+    node = nodeIn(nodes, id);
+    if node is AstNode::Type { return clone((node as AstNode::Type).value); };
+    return Type::TInt;
+};
+
+fn codecSize(st: St, s: &Size) -> St [{ }] [{ }] {
+    return match s {
+        Size::SConst { n: n } => sizeConst(st, n),
+        Size::SAny => simpleTy(st, 21),
+        Size::SParam { name: name } => addTy(st, Ty { kind: 22, name: clone(name), args: [], n: 0, flag: false, sizes: [], types: [] }),
+        Size::SVar { n: n } => addTy(st, Ty { kind: 23, name: "", args: [], n: n, flag: false, sizes: [], types: [] }),
+    };
+};
+
+// A type of the data, made a type of the checker
+fn fromCodec(st: St, t: &Type) -> St ~ {
+    match t {
+        Type::TInt => { return simpleTy(st, 0); },
+        Type::TByte => { return simpleTy(st, 1); },
+        Type::TBool => { return simpleTy(st, 2); },
+        Type::TWord { signed: signed, bits: bits } => { return wordTy(st, signed, bits); },
+        Type::TList { elem: e } => { inner = Box::unbox(clone(e)); st = fromCodec(st, &inner); return listTy(st, st.ty); },
+        Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); st = fromCodec(st, &inner); return boxTy(st, st.ty); },
+        Type::TArray { elem: e, size: s } => {
+            inner = Box::unbox(clone(e));
+            st = fromCodec(st, &inner);
+            elem = st.ty;
+            st = codecSize(st, s);
+            return arrayTy(st, elem, st.ty);
+        },
+        Type::TFn { args: args, ret: r } => {
+            params = [];
+            for a in args { st = fromCodec(st, a); params = push(params, st.ty); };
+            inner = Box::unbox(clone(r));
+            st = fromCodec(st, &inner);
+            return fnTy(st, params, st.ty);
+        },
+        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
+            args = [];
+            p = 0;
+            while p < size(argTokens) [{ affirm p >= 0; }] ~ {
+                w = wordAt(argTokens, p);
+                if !w.ok || w.pos >= size(argTokens) { return notModelled(st, "a named type the data does not give whole"); };
+                if w.value = "size" {
+                    s = sizeAt(argTokens, w.pos);
+                    if !s.ok { return notModelled(st, "a size the data does not give whole"); };
+                    st = codecSize(st, &s.value);
+                    args = push(args, st.ty);
+                    p = s.pos;
+                } else {
+                    a = typeAt(argTokens, w.pos);
+                    if !a.ok { return notModelled(st, "a type the data does not give whole"); };
+                    st = fromCodec(st, &a.value);
+                    args = push(args, st.ty);
+                    p = a.pos;
+                };
+            };
+            return namedTy(st, clone(base), args);
+        },
+        Type::TVariant { name: name } => { return addTy(st, Ty { kind: 5, name: clone(name), args: [], n: 0, flag: false, sizes: [], types: [] }); },
+        Type::TVar { n: n } => { return addTy(st, Ty { kind: 15, name: "", args: [], n: n, flag: false, sizes: [], types: [] }); },
+        Type::TForall { sizes: sizes, types: types, body: body } => {
+            inner = Box::unbox(clone(body));
+            st = fromCodec(st, &inner);
+            return addTy(st, Ty { kind: 13, name: "", args: push([], st.ty), n: 0, flag: false, sizes: clone(sizes), types: clone(types) });
+        },
+        Type::TParam { name: name } => { return addTy(st, Ty { kind: 12, name: clone(name), args: [], n: 0, flag: false, sizes: [], types: [] }); },
+        Type::TRef { inner: e } => { inner = Box::unbox(clone(e)); st = fromCodec(st, &inner); return wrapTy(st, 10, st.ty); },
+        Type::TMutRef { inner: e } => { inner = Box::unbox(clone(e)); st = fromCodec(st, &inner); return wrapTy(st, 11, st.ty); },
+        Type::TAddr { inner: e } => { inner = Box::unbox(clone(e)); st = fromCodec(st, &inner); return wrapTy(st, 7, st.ty); },
+        Type::TBlock { inner: e } => { inner = Box::unbox(clone(e)); st = fromCodec(st, &inner); return wrapTy(st, 8, st.ty); },
+        Type::TUninit { inner: e } => { inner = Box::unbox(clone(e)); st = fromCodec(st, &inner); return wrapTy(st, 9, st.ty); },
+    };
+    return st;
+};
+
+fn codecTypesAt(nodes: &List<AstNode>, id: Int) -> List<Type> ~ {
+    out = [];
+    for t in listItems(nodes, id) { out = push(out, codecTypeAt(nodes, t)); };
+    return out;
+};
+
+// The types of a Fields list, as the data gives them
+fn fieldCodecTypes(nodes: &List<AstNode>, id: Int) -> List<Type> ~ {
+    out = [];
+    for f in listItems(nodes, id) {
+        node = nodeIn(nodes, f);
+        if node is AstNode::Field { out = push(out, codecTypeAt(nodes, (node as AstNode::Field).value.ty)); };
+    };
+    return out;
+};
+
+fn fromCodecs(st: St, ts: &List<Type>) -> St ~ {
+    ids = [];
+    for t in ts { st = fromCodec(st, t); ids = push(ids, st.ty); };
+    return St { te: TE { node: 0 - 1, types: ids }, ..st };
+};
+
+fn fieldNames(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    out = [];
+    for f in listItems(nodes, id) {
+        node = nodeIn(nodes, f);
+        if node is AstNode::Field { out = push(out, nameText(nodes, (node as AstNode::Field).value.n)); };
+    };
+    return out;
+};
+
+fn signatureOf(nodes: &List<AstNode>, id: Int) -> AstSignature [{ }] [{ }] {
+    node = nodeIn(nodes, id);
+    if node is AstNode::Signature { return clone((node as AstNode::Signature).value); };
+    return AstSignature { ts: 0 - 1, ret: 0 - 1, ss: 0 - 1, ps: 0 - 1, ws: 0 - 1, fs: 0 - 1 };
+};
+
+// A signature as the data gives it
+struct SigData { ts: List<Type>, ret: Type, sizes: List<String>, types: List<String> };
+impl Clone for SigData { };
+
+fn sigData(nodes: &List<AstNode>, id: Int) -> SigData ~ {
+    sig = signatureOf(nodes, id);
+    return SigData { ts: codecTypesAt(nodes, sig.ts), ret: codecTypeAt(nodes, sig.ret), sizes: namesText(nodes, sig.ss), types: namesText(nodes, sig.ps) };
+};
+
+// The type of a function of a signature (TypeCheckCore.functionType)
+fn functionTypeFrom(st: St, sig: &SigData) -> St ~ {
+    st = fromCodecs(st, &sig.ts);
+    params = clone(st.te.types);
+    st = fromCodec(st, &sig.ret);
+    st = fnTy(st, params, st.ty);
+    if size(sig.sizes) = 0 && size(sig.types) = 0 { return st; };
+    return addTy(st, Ty { kind: 13, name: "", args: push([], st.ty), n: 0, flag: false, sizes: clone(sig.sizes), types: clone(sig.types) });
+};

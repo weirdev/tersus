@@ -1,0 +1,498 @@
+import data::ast::ast { AstArg, AstBody, AstBuiltin, AstExpression, AstNode, AstValue };
+import data::codec::codec { catStrings };
+import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, schemeType, substitute };
+import elaborate::core { baseNameOf, ctorInfo, ctorResultType, ensureInstance, fieldOf, hasColons, isBoxTy, isListTy, unrefOf };
+import elaborate::out { emit, emitBuiltinCall, emitName, emitVal, emitVar };
+import elaborate::records { codecSize, codecTypeAt, fromCodec, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData };
+import elaborate::state { Scopes, St, TE, Ty, addTy, argAt, expect, fail, fnTy, freshSize, freshVar, intText, kindOf, listTy, maxInt, minInt, namedTy, notModelled, render, resolve, simpleTy, tyAt, typeError, unify, withTy, wordName, zonk };
+
+// Variables: the scopes innermost first, then the functions every body sees, then the standard library (lookupVar)
+fn scopeLookup(st: &St, name: &String) -> Int [{ }] [{ }] {
+    i = size(st.scopes.names) - 1;
+    while i >= 0 [{ affirm i < size(st.scopes.names); }] shrinks i + 1 {
+        if get(st.scopes.names, i) = clone(name) && i < size(st.scopes.types) { return get(st.scopes.types, i); };
+        i = i - 1;
+    };
+    return 0 - 1;
+};
+
+fn inScope(st: &St, name: &String) -> Bool [{ }] [{ }] { return scopeLookup(st, name) >= 0; };
+
+fn lookupVar(st: St, name: &String) -> St ~ {
+    if st.status != 0 { return st; };
+    t = scopeLookup(st, name);
+    if t >= 0 { return withTy(st, t); };
+    if st.fns.contains(name) { return withTy(st, st.fns.lookup(name, 0 - 1)); };
+    if st.stdNames.contains(name) { return builtinIndexType(st, st.stdNames.lookup(name, 0 - 1)); };
+    return fail(st, catStrings("Undefined variable: ", clone(name)));
+};
+
+// A name in a proof that nothing defines is an unknown, which the validator decides (lookupProofVar)
+fn lookupProofVar(st: St, name: &String) -> St ~ {
+    if st.status != 0 { return st; };
+    t = scopeLookup(st, name);
+    if t >= 0 { return withTy(st, t); };
+    if st.fns.contains(name) { return withTy(st, st.fns.lookup(name, 0 - 1)); };
+    if st.stdNames.contains(name) { return builtinIndexType(st, st.stdNames.lookup(name, 0 - 1)); };
+    return freshVar(st);
+};
+
+// Assigning an existing variable keeps its type, and a new one is local to the innermost scope (assignVar)
+fn assignVar(st: St, name: &String, t: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    existing = scopeLookup(st, name);
+    if existing >= 0 { return expect(st, catStrings("assignment to ", clone(name)), existing, t); };
+    return bindInner(st, name, t);
+};
+
+fn bindInner(st: St, name: &String, t: Int) -> St [{ }] [{ }] {
+    return St { scopes: bindIn(st.scopes, name, t), ..st };
+};
+
+// A binding in the innermost scope, which replaces one of the same name there
+fn bindIn(scopes: Scopes, name: &String, t: Int) -> Scopes [{ }] [{ }] {
+    start = 0;
+    if size(scopes.marks) > 0 { start = last(scopes.marks); };
+    i = size(scopes.names) - 1;
+    while i >= start && i >= 0 [{ affirm i < size(scopes.names); }] shrinks i + 1 {
+        if get(scopes.names, i) = clone(name) && i < size(scopes.types) { return Scopes { types: set(scopes.types, i, t), ..scopes }; };
+        i = i - 1;
+    };
+    return Scopes { names: push(scopes.names, clone(name)), types: push(scopes.types, t), ..scopes };
+};
+
+fn pushScope(st: St) -> St [{ }] [{ }] {
+    scopes = st.scopes;
+    return St { scopes: Scopes { marks: push(scopes.marks, size(scopes.names)), ..scopes }, ..st };
+};
+
+fn popScope(st: St) -> St [{ }] [{ }] {
+    scopes = st.scopes;
+    if size(scopes.marks) = 0 { return St { scopes: scopes, ..st }; };
+    mark = last(scopes.marks);
+    names = [];
+    types = [];
+    i = 0;
+    while i < mark && i < size(scopes.names) && i < size(scopes.types) [{ affirm i >= 0; }] shrinks mark - i {
+        names = push(names, clone(get(scopes.names, i)));
+        types = push(types, get(scopes.types, i));
+        i = i + 1;
+    };
+    return St { scopes: Scopes { names: names, types: types, marks: pop(scopes.marks) }, ..st };
+};
+
+// The type of the builtin with this index of the table (builtinType for a scheme)
+fn builtinIndexType(st: St, index: Int) -> St ~ {
+    if index < 0 || index >= size(st.builtinSchemes) { return notModelled(st, "a builtin the table does not have"); };
+    return schemeType(st, get(st.builtinSchemes, index));
+};
+
+fn builtinRecord(st: &St, b: Int) -> AstBuiltin [{ }] [{ }] {
+    node = nodeIn(&st.nodes, b);
+    if node is AstNode::Builtin { return clone((node as AstNode::Builtin).value); };
+    return AstBuiltin::Primitive { name: "" };
+};
+
+// The type of a builtin (builtinType), given its Builtin record
+fn builtinType(st: St, b: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    scrutinee = builtinRecord(st, b);
+    match scrutinee {
+        AstBuiltin::Ctor { n: n, args: args, fs: fs } => {
+            name = nameText(&st.nodes, n);
+            st = ctorArgTypes(st, args);
+            st = namedTy(st, baseNameOf(&name), clone(st.te.types));
+            ty0 = st.ty;
+            if !hasColons(&name) { st = ensureInstance(st, ty0); };
+            st = ctorInfo(st, &name);
+            if st.status != 0 { return st; };
+            declared = clone(st.ctor);
+            fields = namesText(&st.nodes, fs);
+            if declared.names != fields { return typeError(st, catStrings(name, " is built with the wrong fields")); };
+            resultTy = ty0;
+            if size(listItems(&st.nodes, args)) = 0 {
+                st = ctorResultType(st, &declared.owner, &declared.types);
+                resultTy = st.ty;
+            };
+            return fnTy(st, clone(declared.types), resultTy);
+        },
+        AstBuiltin::Is { n: n } => {
+            variant = nameText(&st.nodes, n);
+            st = ctorInfo(st, &variant);
+            if st.status != 0 { return st; };
+            st = namedTy(st, clone(st.ctor.owner), []);
+            owner = st.ty;
+            st = simpleTy(st, 2);
+            return fnTy(st, push([], owner), st.ty);
+        },
+        AstBuiltin::Cast { n: n } => {
+            variant = nameText(&st.nodes, n);
+            st = ctorInfo(st, &variant);
+            if st.status != 0 { return st; };
+            st = namedTy(st, clone(st.ctor.owner), []);
+            owner = st.ty;
+            st = addTy(st, Ty { kind: 5, name: variant, args: [], n: 0, flag: false, sizes: [], types: [] });
+            return fnTy(st, push([], owner), st.ty);
+        },
+        AstBuiltin::Project { n: n, f: f } => {
+            variant = nameText(&st.nodes, n);
+            field = nameText(&st.nodes, f);
+            st = ctorInfo(st, &variant);
+            if st.status != 0 { return st; };
+            ft = fieldOf(&st.ctor, &field);
+            if ft < 0 { return typeError(st, catStrings(catStrings(variant, " has no field "), field)); };
+            st = namedTy(st, clone(st.ctor.owner), []);
+            return fnTy(st, push([], st.ty), ft);
+        },
+        AstBuiltin::FieldBuiltin { owner: o, n: n } => {
+            field = nameText(&st.nodes, n);
+            return typeError(st, catStrings(catStrings(catStrings("field ", clone(field)), " must be read from a struct, as in value."), field));
+        },
+        AstBuiltin::ToWord { signed: s, bits: bits } => { return keyType(st, builtinKey(st, b)); },
+        AstBuiltin::Rel { r: r } => { return keyType(st, builtinKey(st, b)); },
+        AstBuiltin::Primitive { name: n } => { return keyType(st, clone(n)); },
+    };
+    return st;
+};
+
+fn keyType(st: St, key: String) -> St ~ {
+    i = builtinIndex(st, &key);
+    if i < 0 { return notModelled(st, catStrings("the builtin ", key)); };
+    return builtinIndexType(st, i);
+};
+
+fn ctorArgTypes(st: St, args: Int) -> St ~ {
+    ids = [];
+    for a in listItems(&st.nodes, args) {
+        node = nodeIn(&st.nodes, a);
+        if node is AstNode::Arg {
+            scrutinee = (node as AstNode::Arg).value;
+            match scrutinee {
+                AstArg::ArgSize { s: s } => {
+                    sz = nodeIn(&st.nodes, s);
+                    if sz is AstNode::Size { szv = (sz as AstNode::Size).value; st = codecSize(st, &szv); ids = push(ids, st.ty); };
+                },
+                AstArg::ArgType { t: t } => { tyc = codecTypeAt(&st.nodes, t); st = fromCodec(st, &tyc); ids = push(ids, st.ty); },
+            };
+        };
+    };
+    return St { te: TE { node: 0 - 1, types: ids }, ..st };
+};
+
+// The type of a value (valueType)
+fn valueType(st: St, v: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    node = nodeIn(&st.nodes, v);
+    if !(node is AstNode::Value) { return notModelled(st, "a value record the data does not give"); };
+    scrutinee = (node as AstNode::Value).value;
+    match scrutinee {
+        AstValue::VInt { n: n } => { return simpleTy(st, 0); },
+        AstValue::VBool { b: b } => { return simpleTy(st, 2); },
+        AstValue::VData { n: n, xs: xs } => {
+            name = nameText(&st.nodes, n);
+            st = ctorInfo(st, &name);
+            if st.status != 0 { return st; };
+            c = clone(st.ctor);
+            return ctorResultType(st, &c.owner, &c.types);
+        },
+        AstValue::VList { xs: xs } => {
+            st = freshVar(st);
+            element = st.ty;
+            types = [];
+            for x in listItems(&st.nodes, xs) {
+                st = valueType(st, x);
+                types = push(types, st.ty);
+            };
+            for t in types { st = expect(st, "list element", element, t); };
+            return listTy(st, element);
+        },
+        AstValue::VFnRef { n: n } => {
+            fnName = nameText(&st.nodes, n);
+            return typeError(st, catStrings(fnName, " is a function of the MIR, which a program cannot write"));
+        },
+        AstValue::VFunct { ps: ps, ins: ins, outs: outs, body: body, exports: exports } => {
+            b = builtinOfValue(st, v);
+            if b >= 0 { return builtinType(st, b); };
+            bodyNode = nodeIn(&st.nodes, body);
+            if bodyNode is AstNode::Body {
+                bv = (bodyNode as AstNode::Body).value;
+                if bv is AstBody::NativeFunct { sd = sigData(&st.nodes, (bv as AstBody::NativeFunct).sig); return functionTypeFrom(st, &sd); };
+            };
+            return notModelled(st, "a function value the data does not give");
+        },
+    };
+    return st;
+};
+
+// The builtin a call's head names, unless a variable of the program hides it (builtinHead); -1 for none
+fn builtinHead(st: &St, funct: Int) -> Int [{ }] [{ }] {
+    node = nodeIn(&st.nodes, funct);
+    if !(node is AstNode::Expression) { return 0 - 1; };
+    e = (node as AstNode::Expression).value;
+    if e is AstExpression::Val { return builtinOfValue(st, (e as AstExpression::Val).v); };
+    if e is AstExpression::Var {
+        name = nameText(&st.nodes, (e as AstExpression::Var).n);
+        if inScope(st, &name) || st.fns.contains(&name) { return 0 - 1; };
+        if st.stdNames.contains(&name) {
+            i = st.stdNames.lookup(&name, 0 - 1);
+            if i >= 0 && i < size(st.builtinValues) { return builtinOfValue(st, get(st.builtinValues, i)); };
+        };
+    };
+    return 0 - 1;
+};
+
+// The key of the builtin a head names ("" for none)
+fn headKey(st: &St, funct: Int) -> String ~ {
+    b = builtinHead(st, funct);
+    if b < 0 { return ""; };
+    return builtinKey(st, b);
+};
+
+// Checks a call of a function of a type with arguments of types (checkCall)
+fn checkCall(st: St, name: &String, ft: Int, ats: &List<Int>) -> St ~ {
+    if st.status != 0 { return st; };
+    st = zonk(st, ft);
+    f = st.ty;
+    x = tyAt(st, f);
+    if x.kind = 13 {
+        st = instantiateGenerics(st, &x.sizes, &x.types, get(x.args, 0));
+        return checkCall(st, name, st.ty, ats);
+    };
+    if x.kind = 14 {
+        pts = argsOfFn(&x);
+        if size(pts) != size(ats) {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " takes "), intText(size(pts))), " arguments, got "), intText(size(ats))));
+        };
+        i = 0;
+        while i < size(pts) [{ affirm i >= 0; affirm size(pts) = size(ats); }] ~ {
+            st = checkArgument(st, name, i + 1, get(pts, i), get(ats, i));
+            if st.status != 0 { return st; };
+            i = i + 1;
+        };
+        return withTy(st, last(x.args));
+    };
+    if x.kind = 15 {
+        st = freshVar(st);
+        rty = st.ty;
+        st = fnTy(st, clone(ats), rty);
+        st = expect(st, catStrings("call of ", clone(name)), f, st.ty);
+        return withTy(st, rty);
+    };
+    return typeError(st, catStrings(catStrings(clone(name), " is not a function, it is "), render(st, f)));
+};
+
+fn argsOfFn(x: &Ty) -> List<Int> [{ }] [{ }] {
+    out = [];
+    i = 0;
+    while i + 1 < size(x.args) [{ affirm i >= 0; }] shrinks size(x.args) - i {
+        out = push(out, get(x.args, i));
+        i = i + 1;
+    };
+    return out;
+};
+
+fn argContext(name: &String, i: Int) -> String [{ }] [{ }] {
+    return catStrings(catStrings(catStrings("argument ", intText(i)), " of "), clone(name));
+};
+
+fn checkArgument(st: St, name: &String, i: Int, pt: Int, at: Int) -> St ~ {
+    st = zonk(st, pt);
+    ptz = st.ty;
+    st = zonk(st, at);
+    atz = st.ty;
+    pk = kindOf(st, ptz);
+    ak = kindOf(st, atz);
+    if pk = 10 && (ak = 10 || ak = 11) { return expect(st, argContext(name, i), argAt(st, ptz, 0), argAt(st, atz, 0)); };
+    if pk = 11 && ak = 11 { return expect(st, argContext(name, i), argAt(st, ptz, 0), argAt(st, atz, 0)); };
+    if pk = 11 && ak = 10 {
+        return typeError(st, catStrings(argContext(name, i), " is a read reference (&T), and an update reference (&mut T) is wanted"));
+    };
+    if pk = 11 {
+        st = expect(st, argContext(name, i), argAt(st, ptz, 0), atz);
+        return typeError(st, catStrings(argContext(name, i), " is lent for updating (&mut), so the call writes it with &mut: write &mut and the place, as in &mut x"));
+    };
+    return expect(st, argContext(name, i), unrefOf(st, ptz), atz);
+};
+
+// A function with size and type parameters, each a new unknown (instantiateGenerics); st.te.types are the sizes and then the types
+fn instantiateGenerics(st: St, sizeNames: &List<String>, typeNames: &List<String>, t: Int) -> St ~ {
+    sizes = [];
+    for n in sizeNames { st = freshSize(st); sizes = push(sizes, st.ty); };
+    types = [];
+    for n in typeNames { st = freshVar(st); types = push(types, st.ty); };
+    st = substitute(st, t, sizeNames, &sizes, typeNames, &types);
+    out = st.ty;
+    all = sizes;
+    for ty in types { all = push(all, ty); };
+    return St { ty: out, te: TE { node: 0 - 1, types: all }, ..st };
+};
+
+// The argument a call gives a size parameter: a constant, or a size parameter of the caller (sizeArgument)
+fn sizeArgument(st: St, name: &String, n: &String, sz: Int) -> St [{ }] [{ }] {
+    x = tyAt(st, sz);
+    if x.kind = 20 {
+        st = emitIntValue(st, x.n);
+        return emitVal(st, st.nid);
+    };
+    if x.kind = 22 { return emitVar(st, clone(x.name)); };
+    return typeError(st, catStrings(catStrings(catStrings(catStrings("the size ", clone(n)), " of "), clone(name)), " cannot be worked out from its arguments: an argument has to be an array of that size"));
+};
+
+fn emitIntValue(st: St, n: Int) -> St [{ }] [{ }] {
+    st = emitName(st, intText(n));
+    return emit(st, AstNode::Value { value: AstValue::VInt { n: st.nid } });
+};
+
+// Where a value is given to something that has a type, the conversions written into the expression (coerce)
+fn coerce(st: St, wanted: Int, arg: TE) -> St ~ {
+    if st.status != 0 { return St { te: arg, ..st }; };
+    actual = head(arg.types);
+    st = zonk(st, wanted);
+    w = st.ty;
+    st = zonk(st, actual);
+    a = st.ty;
+    wx = tyAt(st, w);
+    ax = tyAt(st, a);
+    if isBoxTy(st, w) && isBoxTy(st, a) {
+        wi = tyAt(st, get(wx.args, 0));
+        ai = tyAt(st, get(ax.args, 0));
+        if wi.kind = 6 && ai.kind = 6 && kindOf(st, get(wi.args, 1)) = 21 && kindOf(st, resolve(st, get(ai.args, 1))) != 21 {
+            st = unify(st, get(wi.args, 0), get(ai.args, 0));
+            if !st.ok { return St { te: arg, ..st }; };
+            callArgs = push([], arg.node);
+            st = emitBuiltinCall(st, "Unsize", &callArgs);
+            return St { te: TE { node: st.nid, types: prepend(w, &arg.types) }, ..st };
+        };
+    };
+    literal = intLiteral(st, arg.node);
+    if wx.kind = 3 && ax.kind = 0 && literal.ok {
+        n = literal.value;
+        low = 0;
+        high = 0;
+        if wx.flag { low = 0 - power2(wx.n - 1); high = power2(wx.n - 1); } else { high = power2(wx.n); };
+        if n >= low && n < high {
+            callArgs = push([], arg.node);
+            st = emitBuiltinCall(st, catStrings(wordName(wx.flag, wx.n), " ToWord"), &callArgs);
+            return St { te: TE { node: st.nid, types: prepend(w, &arg.types) }, ..st };
+        };
+        nm = wordName(wx.flag, wx.n);
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(intText(n), " is not a "), clone(nm)), catStrings(": a ", clone(nm))), " is from "), intText(low)), catStrings(" to ", intText(high - 1))));
+    };
+    if wx.kind = 1 && ax.kind = 0 && literal.ok {
+        n = literal.value;
+        if n >= 0 && n < 256 {
+            callArgs = push([], arg.node);
+            st = emitBuiltinCall(st, "ToByte", &callArgs);
+            st = simpleTy(st, 1);
+            return St { te: TE { node: st.nid, types: prepend(st.ty, &arg.types) }, ..st };
+        };
+        return typeError(st, catStrings(intText(n), " is not a Byte: a Byte is from 0 to 255"));
+    };
+    if isListTy(st, w) && isListTy(st, a) && kindOf(st, get(wx.args, 0)) = 1 && kindOf(st, get(ax.args, 0)) = 0 {
+        items = listLiteralInts(st, arg.node);
+        if items.ok {
+            inRange = true;
+            for n in &items.value { if n < 0 || n >= 256 { inRange = false; }; };
+            if inRange {
+                callArgs = push([], arg.node);
+                st = emitBuiltinCall(st, "BytesFrom", &callArgs);
+                node = st.nid;
+                st = simpleTy(st, 1);
+                st = listTy(st, st.ty);
+                return St { te: TE { node: node, types: prepend(st.ty, &arg.types) }, ..st };
+            };
+            return fail(st, "Type error: a list of Bytes is written with numbers from 0 to 255");
+        };
+    };
+    return St { te: arg, ..st };
+};
+
+fn teHead(te: &TE) -> Int [{ }] [{ }] {
+    return head(&te.types);
+};
+
+fn head(xs: &List<Int>) -> Int [{ }] [{ }] {
+    if size(xs) = 0 { return 0 - 1; };
+    return get(xs, 0);
+};
+
+fn prepend(t: Int, xs: &List<Int>) -> List<Int> [{ }] [{ }] {
+    out = push([], t);
+    for x in xs { out = push(out, x); };
+    return out;
+};
+
+fn power2(n: Int) -> Int [{ }] [{ }] {
+    out = 1;
+    i = 0;
+    while i < n && i < 62 [{ affirm i >= 0; }] shrinks n - i { out = out * 2; i = i + 1; };
+    return out;
+};
+
+struct IntResult { value: Int, ok: Bool };
+impl Clone for IntResult { };
+
+struct IntsResult { value: List<Int>, ok: Bool };
+impl Clone for IntsResult { };
+
+// The integer an expression writes out (Val (VInt n)); only literals that fit an Int
+fn intLiteral(st: &St, e: Int) -> IntResult [{ }] [{ }] {
+    node = nodeIn(&st.nodes, e);
+    if !(node is AstNode::Expression) { return IntResult { value: 0, ok: false }; };
+    ex = (node as AstNode::Expression).value;
+    if !(ex is AstExpression::Val) { return IntResult { value: 0, ok: false }; };
+    return valueInt(st, (ex as AstExpression::Val).v);
+};
+
+fn valueInt(st: &St, v: Int) -> IntResult [{ }] [{ }] {
+    node = nodeIn(&st.nodes, v);
+    if !(node is AstNode::Value) { return IntResult { value: 0, ok: false }; };
+    value = (node as AstNode::Value).value;
+    if !(value is AstValue::VInt) { return IntResult { value: 0, ok: false }; };
+    text = nameText(&st.nodes, (value as AstValue::VInt).n);
+    return decimalValue(&text);
+};
+
+fn decimalValue(text: &String) -> IntResult [{ }] [{ }] {
+    n = size(text.bytes);
+    if n = 0 { return IntResult { value: 0, ok: false }; };
+    negative = get(text.bytes, 0) = toByte(45);
+    i = 0;
+    if negative { i = 1; };
+    if i >= n { return IntResult { value: 0, ok: false }; };
+    value = 0;
+    while i < n [{ affirm i >= 0; affirm n = size(text.bytes); }] shrinks n - i {
+        c = toInt(get(text.bytes, i));
+        if c < 48 || c > 57 { return IntResult { value: 0, ok: false }; };
+        d = c - 48;
+        // (a negative literal is gathered below zero, so the least Int is one too)
+        if negative {
+            if value < (minInt() + d) / 10 || (value = (minInt() + d) / 10 && (minInt() + d) % 10 != 0) { return IntResult { value: 0, ok: false }; };
+            value = value * 10 - d;
+        } else {
+            if value > (maxInt() - d) / 10 { return IntResult { value: 0, ok: false }; };
+            value = value * 10 + d;
+        };
+        i = i + 1;
+    };
+    return IntResult { value: value, ok: true };
+};
+
+fn listLiteralInts(st: &St, e: Int) -> IntsResult ~ {
+    bad = IntsResult { value: [], ok: false };
+    node = nodeIn(&st.nodes, e);
+    if !(node is AstNode::Expression) { return bad; };
+    ex = (node as AstNode::Expression).value;
+    if !(ex is AstExpression::Val) { return bad; };
+    vnode = nodeIn(&st.nodes, (ex as AstExpression::Val).v);
+    if !(vnode is AstNode::Value) { return bad; };
+    value = (vnode as AstNode::Value).value;
+    if !(value is AstValue::VList) { return bad; };
+    out = [];
+    for item in listItems(&st.nodes, (value as AstValue::VList).xs) {
+        r = valueInt(st, item);
+        if !r.ok { return bad; };
+        out = push(out, r.value);
+    };
+    return IntsResult { value: out, ok: true };
+};

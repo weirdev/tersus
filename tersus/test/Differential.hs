@@ -10,6 +10,7 @@ module Differential
     , compareResponses
     , throughText
     , executableCandidate
+    , buildElaborator
     , runDifferential
     , tally
     ) where
@@ -23,11 +24,14 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.Process (readProcessWithExitCode)
 
 import AstData (writeElaborated)
+import Bootstrap (llvmOfOwned)
 import Compile (lowerSourcePartsWith, lowerStatementsWith, parseWithEquality)
 import ElaborateRequest
 import InterfaceData (writeInterface)
 import LibPackage (compileLibPackageWith, nativeStorageUnitsWith)
 import MirHousekeeping (validationEntry)
+import Native (buildExecutable)
+import Pipeline (compileModulesBootstrap, ownedModuleProgram)
 import qualified Modules as Mod
 import qualified PackageCompile as Package
 import PreludeSource (toolPackageFiles, validationPackageFiles)
@@ -135,6 +139,17 @@ throughText rq = pure $
             if rq' /= rq
                 then Error "the request does not read back as written"
                 else writeResponse (respond rq') `bindResult` readResponse
+
+-- The elaborator of lib/elaborate in the given package files, built unvalidated as the host builds its own tools
+buildElaborator :: [(FilePath, String)] -> FilePath -> IO (Result () String)
+buildElaborator files out = case Mod.loadFromEntry (Mod.resolverFromFiles files) "lib/elaborate/elaborate.tersus" of
+    Left e -> pure (Error e)
+    Right (Mod.PackageResult pkg) -> case compileModulesBootstrap pkg `bindResult` ownedModuleProgram of
+        Error e -> pure (Error e)
+        Ok owned -> llvmOfOwned owned >>= \ir -> case ir of
+            Error e -> pure (Error e)
+            Ok text -> buildExecutable out text
+    Right _ -> pure (Error "lib/elaborate is not a package")
 
 -- An elaborator executable: the request on its standard input, the response on its standard output
 executableCandidate :: FilePath -> Candidate

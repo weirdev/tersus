@@ -14,6 +14,7 @@ module PreludeSource
     , nativeStorageModules
     , libPackageFiles
     , mirPackageFiles
+    , elaboratePackageFiles
     , parserPackageFiles
     , astReaderPackageFiles
     , toolPackageFiles
@@ -217,7 +218,7 @@ parserSeedSha256 =
 dataPackageFiles :: [(FilePath, String)]
 dataPackageFiles =
     $( do
-        let paths = ["lib/data/package.tersus", "lib/data/codec/codec.tersus", "lib/data/ast/ast.tersus", "lib/data/reader/reader.tersus"]
+        let paths = ["lib/data/package.tersus", "lib/data/codec/codec.tersus", "lib/data/ast/ast.tersus", "lib/data/reader/reader.tersus", "lib/data/arena/arena.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )
@@ -234,6 +235,15 @@ astReaderPackageFiles :: [(FilePath, String)]
 astReaderPackageFiles = dataPackageFiles ++
     $( do
         let paths = ["lib/ast_reader/package.tersus", "lib/ast_reader/ast_reader.tersus"]
+        files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
+        lift files
+     )
+
+-- The elaborator written in Tersus (REPLACING_HASKELL.md), which only the tests and frontend-diff build and run
+elaboratePackageFiles :: [(FilePath, String)]
+elaboratePackageFiles = dataPackageFiles ++
+    $( do
+        let paths = ["lib/elaborate/package.tersus", "lib/elaborate/builtins.tersus", "lib/elaborate/calls.tersus", "lib/elaborate/check.tersus", "lib/elaborate/core.tersus", "lib/elaborate/elaborate.tersus", "lib/elaborate/expr.tersus", "lib/elaborate/out.tersus", "lib/elaborate/proofs.tersus", "lib/elaborate/records.tersus", "lib/elaborate/state.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )

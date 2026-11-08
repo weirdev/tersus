@@ -78,6 +78,12 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     program without running the driver. `PreludeSource.validationPackageFiles`
     embeds all files and the package marker. `ValidatorNative` requires the
     full validator source and physical List/Box proofs before use.
+  - `elaborate/`: the elaborator written in Tersus (`REPLACING_HASKELL.md`),
+    a port of `TypeCheck`/`TypeCheckCore` that answers an elaboration request
+    (`AST_DATA.md`) for a single-file program, and "not modelled" for what it
+    does not cover yet. Its declarative sibling files are one root module with
+    `elaborate.tersus` as the entry. `PreludeSource.elaboratePackageFiles`
+    embeds it; only `testElaborate` and `frontend-diff` build and run it.
   - `mir/`, `data/`, `parser/` and `ast_reader/`: the compiler's own programs,
     four packages beside `validation/` with their own `package.tersus`
     markers. `testHostValidation` validates the AST reader and the MIR reader,
@@ -93,8 +99,10 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     `values.tersus`, `operations.tersus`, `functions.tersus` and
     `helpers.tersus` files are siblings of `emit.tersus` in one `mir::emit`
     module; only `emit.tersus` runs. `data/` holds the shared token, type and
-    AST codecs and the reader of AST data (`data::reader`, which the AST
-    reader runs and an elaborator written in Tersus will), `parser/parser.tersus` is the native parser and
+    AST codecs, the reader of AST data (`data::reader`, which the AST
+    reader runs and the elaborator written in Tersus reads its requests with)
+    and the renumbering of an arena into the order the data is written in
+    (`data::arena`), `parser/parser.tersus` is the native parser and
     `ast_reader/ast_reader.tersus` the AST reader (`AST_DATA.md`). All are
     embedded by `PreludeSource` (`mirPackageFiles`, `dataPackageFiles`,
     `parserPackageFiles`, `astReaderPackageFiles`) and listed in
@@ -112,9 +120,10 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`,
   `TestCopies`, `TestEq`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
   `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
-  `TestMirEmit`, `TestBootstrap`, `TestParity`, `TestAstData` and `TestDifferential`
+  `TestMirEmit`, `TestBootstrap`, `TestParity`, `TestAstData`, `TestDifferential`
   (the differential harness of `test/Differential.hs`, also run on an elaborator
-  executable by `stack run frontend-diff`), with the shared harness in `TestHarness`.
+  executable by `stack run frontend-diff`) and `TestElaborate` (the differential
+  on the elaborator of `lib/elaborate/`), with the shared harness in `TestHarness`.
 
 ## Build, Test, and Development Commands
 Work from `tersus/`.
@@ -182,8 +191,9 @@ Work from `tersus/`.
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
   `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
   `testNative`, `testMirEmit`, `testMirVerify`, `testMirSelfHosted`,
-  `testAstData`, `testParser` and `testAstReader` each register four batches named
-  `<original>:1/4` through `<original>:4/4`. The AST/parser corpora partition
+  `testAstData`, `testParser`, `testAstReader` and `testDifferential` each
+  register four batches named `<original>:1/4` through `<original>:4/4`, and
+  `testElaborate` two (`:1/2` and `:2/2`, each building an elaborator). The AST/parser corpora partition
   samples without splitting package declaration contexts; all emitter
   helper files share one prepared-parser comparison.
   Selecting an original name selects all its batches; shard filters intersect

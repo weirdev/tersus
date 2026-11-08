@@ -1,0 +1,504 @@
+import data::ast::ast { AstBuiltin, AstNode, AstOptName, AstProof, AstValidation, AstValue };
+import data::codec::codec { catStrings };
+import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, builtinValueOf };
+import elaborate::calls { bindInner, builtinIndexType, builtinRecord, checkCall, ctorArgTypes, inScope, keyType, lookupProofVar, lookupVar, popScope, pushScope, valueInt, valueType };
+import elaborate::core { arrayOk, baseNameOf, checkConstruct, holdsGhost, isBoxTy, isListTy, literalOk, readField };
+import elaborate::expr { Folded, argsCountText, arrayCall, constantArithmetic, derefOnFailure, derefStepNeeded, isLookThroughKey, noConstantSize, pathOf, permissionType, takesNoPermission, traitPath };
+import elaborate::out { emit, emitName, emitProofs, emitValidations };
+import elaborate::records { listItems, nameText, namesText, nodeIn };
+import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, expect, fail, freshVar, indexIn, kindOf, listTy, namedTy, notModelled, render, simpleTy, sizeConst, tyAt, typeError, zonk };
+
+fn proofOf(st: &St, p: Int) -> AstProof [{ }] [{ }] {
+    node = nodeIn(&st.nodes, p);
+    if node is AstNode::Proof { return clone((node as AstNode::Proof).value); };
+    return AstProof::ATerm { n: 0 - 1 };
+};
+
+// The builtin a proof term is (proofBuiltin): the Builtin record of a CTerm of a builtin value, or -1
+fn proofBuiltin(st: &St, p: Int) -> Int [{ }] [{ }] {
+    pr = proofOf(st, p);
+    if pr is AstProof::CTerm { return builtinOfValue(st, (pr as AstProof::CTerm).v); };
+    return 0 - 1;
+};
+
+fn emitFApp(st: St, f: Int, args: &List<Int>) -> St ~ {
+    st = emitProofs(st, args);
+    return emit(st, AstNode::Proof { value: AstProof::FApp { f: f, xs: st.nid } });
+};
+
+fn inferProofs(st: St, args: &List<Int>) -> St ~ {
+    types = [];
+    nodes = [];
+    for a in args {
+        st = inferProof(st, a);
+        if st.status != 0 { return st; };
+        types = push(types, st.ty);
+        nodes = push(nodes, st.nid);
+    };
+    return St { te: TE { node: 0 - 1, types: types }, outs: nodes, ..st };
+};
+
+// The type of a proof (st.ty) and the proof with its calls resolved (st.nid) (inferProofR)
+fn inferProof(st: St, p: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    scrutinee = proofOf(st, p);
+    match scrutinee {
+        AstProof::ATerm { n: n } => { varName = nameText(&st.nodes, n); st = lookupProofVar(st, &varName); return St { nid: p, ..st }; },
+        AstProof::BVar { n: n } => { varName = nameText(&st.nodes, n); st = lookupVar(st, &varName); return St { nid: p, ..st }; },
+        AstProof::CTerm { v: v } => { st = valueType(st, v); return St { nid: p, ..st }; },
+        AstProof::Forall { n: n, gs: gs, b: b } => {
+            index = nameText(&st.nodes, n);
+            st = simpleTy(st, 0);
+            st = pushScope(st);
+            st = bindInner(st, &index, st.ty);
+            guards = [];
+            for g in listItems(&st.nodes, gs) {
+                st = inferProof(st, g);
+                if st.status != 0 { return st; };
+                gn = st.nid;
+                gt = st.ty;
+                st = simpleTy(st, 2);
+                st = expect(st, "guard of forall", st.ty, gt);
+                guards = push(guards, gn);
+            };
+            st = inferProof(st, b);
+            if st.status != 0 { return st; };
+            bn = st.nid;
+            bt = st.ty;
+            st = simpleTy(st, 2);
+            boolTy = st.ty;
+            st = expect(st, "body of forall", boolTy, bt);
+            st = popScope(st);
+            if st.status != 0 { return st; };
+            st = emitProofs(st, &guards);
+            st = emit(st, AstNode::Proof { value: AstProof::Forall { n: n, gs: st.nid, b: bn } });
+            return St { ty: boolTy, ..st };
+        },
+        AstProof::FApp { f: f, xs: xs } => { items = listItems(&st.nodes, xs); return inferProofCall(st, p, f, &items); },
+    };
+    return st;
+};
+
+fn inferProofCall(st: St, p: Int, funct: Int, args: &List<Int>) -> St ~ {
+    b = proofBuiltin(st, funct);
+    if b >= 0 {
+        rec = builtinRecord(st, b);
+        key = builtinKey(st, b);
+        if key = "OldOf" { return fail(st, "Type error: old(...) is only written in a postcondition, of the place an update parameter is to"); };
+        if key = "DerefOf" && size(args) = 1 { return notModelled(st, "references"); };
+        if rec is AstBuiltin::FieldBuiltin && size(args) = 1 { return proofField(st, funct, rec as AstBuiltin::FieldBuiltin, get(args, 0)); };
+        if rec is AstBuiltin::Ctor {
+            ctor = rec as AstBuiltin::Ctor;
+            st = inferProofs(st, args);
+            if st.status != 0 { return st; };
+            argTys = clone(st.te.types);
+            argNodes = clone(st.outs);
+            name = nameText(&st.nodes, ctor.n);
+            st = ctorArgTypes(st, ctor.args);
+            st = namedTy(st, baseNameOf(&name), clone(st.te.types));
+            ctorFields = namesText(&st.nodes, ctor.fs);
+            st = checkConstruct(st, st.ty, &ctorFields, &argTys);
+            if st.status != 0 { return st; };
+            t = st.ty;
+            st = emitFApp(st, funct, &argNodes);
+            return St { ty: t, ..st };
+        };
+        if key = "NewArray" {
+            if size(args) != 2 { return typeError(st, argsCountText("array", 2, size(args))); };
+            st = inferProof(st, get(args, 0));
+            if st.status != 0 { return st; };
+            n1 = st.nid;
+            nt = st.ty;
+            st = simpleTy(st, 0);
+            st = expect(st, "argument 1 of array", st.ty, nt);
+            st = inferProof(st, get(args, 1));
+            if st.status != 0 { return st; };
+            x1 = st.nid;
+            xt = st.ty;
+            st = proofSize(st, get(args, 0));
+            if st.status != 0 { return st; };
+            st = arrayTy(st, xt, st.ty);
+            t = st.ty;
+            st = arrayOk(st, t);
+            callArgs = push(push([], n1), x1);
+            st = emitFApp(st, funct, &callArgs);
+            return St { ty: t, ..st };
+        };
+        if key = "ArrayFrom" && size(args) = 1 {
+            lit = proofOf(st, get(args, 0));
+            if lit is AstProof::CTerm {
+                v = (lit as AstProof::CTerm).v;
+                vnode = nodeIn(&st.nodes, v);
+                if vnode is AstNode::Value && (vnode as AstNode::Value).value is AstValue::VList {
+                    items = listItems(&st.nodes, ((vnode as AstNode::Value).value as AstValue::VList).xs);
+                    st = valueType(st, v);
+                    if st.status != 0 { return st; };
+                    listT = st.ty;
+                    if !isListTy(st, listT) { return fail(st, "Type error: an array literal is made from a list"); };
+                    elem = argAt(st, listT, 0);
+                    st = sizeConst(st, size(items));
+                    st = arrayTy(st, elem, st.ty);
+                    t = st.ty;
+                    st = arrayOk(st, t);
+                    st = literalOk(st, elem);
+                    return St { ty: t, nid: p, ..st };
+                };
+            };
+        };
+    };
+    fp = proofOf(st, funct);
+    if fp is AstProof::ATerm {
+        name = nameText(&st.nodes, (fp as AstProof::ATerm).n);
+        if !shadowedByFunction(st, &name) && !st.fns.contains(&name) && st.ghostNames.contains(&name) {
+            return ghostProof(st, funct, name, st.ghostNames.lookup(&name, 0 - 1), args);
+        };
+        if !inScope(st, &name) && !st.fns.contains(&name) && name = "whole" {
+            return fail(st, "Type error: whole(b) is a statement of its own, affirm whole(b); (it is two facts: start(b) = 0 and cap(b) = extent(origin(b)))");
+        };
+        if !inScope(st, &name) { return proofOrdinaryCall(st, funct, name, args); };
+    };
+    // (any other head: its type, then a builtin's look-through and the impl of a struct's sequence function)
+    st = inferProof(st, funct);
+    if st.status != 0 { return st; };
+    functNode = st.nid;
+    st = inferProofs(st, args);
+    if st.status != 0 { return st; };
+    argTys = clone(st.te.types);
+    argNodes = clone(st.outs);
+    fb = proofBuiltin(st, functNode);
+    if fb >= 0 && size(argTys) > 0 {
+        key = builtinKey(st, fb);
+        if isLookThroughKey(&key) {
+            st = derefStepNeeded(st, get(argTys, 0));
+            if st.status != 0 { return st; };
+        };
+        i = builtinIndex(st, &key);
+        if st.methodOf.contains(i) {
+            st = zonk(st, get(argTys, 0));
+            x = tyAt(st, st.ty);
+            if x.kind = 4 && x.name != "List" && x.name != "Box" { return notModelled(st, "a function of a struct's impl"); };
+        };
+    };
+    return proofGeneral(st, functNode, &argTys, &argNodes);
+};
+
+// The CTerm of the value of a builtin of the table
+fn emitBuiltinTerm(st: St, key: String) -> St ~ {
+    v = builtinValueOf(st, &key);
+    if v < 0 { return notModelled(st, catStrings("the builtin ", key)); };
+    return emit(st, AstNode::Proof { value: AstProof::CTerm { v: v } });
+};
+
+// What is known of a permission, in a proof (inferProofR, of a ghost function)
+fn ghostProof(st: St, funct: Int, name: String, index: Int, args: &List<Int>) -> St ~ {
+    key = clone(get(st.builtinKinds, index));
+    if !takesNoPermission(&key) {
+        if size(args) = 0 { return proofOrdinaryCall(st, funct, name, args); };
+        st = inferProof(st, get(args, 0));
+        if st.status != 0 { return st; };
+        st = permissionType(st, &key, st.ty);
+        if !st.ok { return proofOrdinaryCall(st, funct, name, args); };
+    };
+    st = inferProofs(st, args);
+    if st.status != 0 { return st; };
+    argTys = clone(st.te.types);
+    argNodes = clone(st.outs);
+    st = builtinIndexType(st, index);
+    if st.status != 0 { return st; };
+    ft = st.ty;
+    filled = key = "BlockFilled" || key = "BlockContents";
+    if filled && size(argTys) = 1 {
+        uninitKey = "UninitAt";
+        if key = "BlockFilled" { uninitKey = "UninitFilled"; };
+        st = keyType(st, clone(uninitKey));
+        if st.status != 0 { return st; };
+        st = checkCall(st, &name, st.ty, &argTys);
+        if st.status != 0 { return st; };
+        resultT = st.ty;
+        st = emitBuiltinTerm(st, uninitKey);
+        st = emitFApp(st, st.nid, &argNodes);
+        return St { ty: resultT, ..st };
+    };
+    if filled {
+        if size(argTys) != 2 { return typeError(st, catStrings(catStrings(clone(name), " takes a permission and a slot, as in "), catStrings(clone(name), "(b, i)"))); };
+        blockTys = push([], get(argTys, 0));
+        st = checkCall(st, &name, ft, &blockTys);
+        if st.status != 0 { return st; };
+        listT = st.ty;
+        st = simpleTy(st, 0);
+        st = expect(st, catStrings("argument 2 of ", clone(name)), st.ty, get(argTys, 1));
+        st = freshVar(st);
+        elementT = st.ty;
+        st = listTy(st, elementT);
+        st = expect(st, clone(name), st.ty, listT);
+        if st.status != 0 { return st; };
+        st = emitBuiltinTerm(st, clone(key));
+        blockArgs = push([], get(argNodes, 0));
+        st = emitFApp(st, st.nid, &blockArgs);
+        innerNode = st.nid;
+        st = emitBuiltinTerm(st, "Get");
+        getArgs = push(push([], innerNode), get(argNodes, 1));
+        st = emitFApp(st, st.nid, &getArgs);
+        return St { ty: elementT, ..st };
+    };
+    st = checkCall(st, &name, ft, &argTys);
+    if st.status != 0 { return st; };
+    resultT = st.ty;
+    st = emitBuiltinTerm(st, key);
+    st = emitFApp(st, st.nid, &argNodes);
+    return St { ty: resultT, ..st };
+};
+
+fn shadowedByFunction(st: &St, name: &String) -> Bool [{ }] [{ }] {
+    i = 0;
+    while i < size(st.scopes.names) && i < size(st.scopes.types) [{ affirm i >= 0; }] shrinks size(st.scopes.names) - i {
+        if get(st.scopes.names, i) = clone(name) {
+            k = kindOf(st, get(st.scopes.types, i));
+            if k = 14 || k = 13 { return true; };
+        };
+        i = i + 1;
+    };
+    return false;
+};
+
+fn proofField(st: St, funct: Int, field: AstBuiltin::FieldBuiltin, structProof: Int) -> St ~ {
+    owner = "";
+    on = nodeIn(&st.nodes, field.owner);
+    if on is AstNode::OptName && (on as AstNode::OptName).value is AstOptName::SomeName {
+        owner = nameText(&st.nodes, ((on as AstNode::OptName).value as AstOptName::SomeName).n);
+    };
+    name = nameText(&st.nodes, field.n);
+    st = inferProof(st, structProof);
+    if st.status != 0 { return st; };
+    structNode = st.nid;
+    structTy = st.ty;
+    st = readField(st, &owner, &name, structTy);
+    if st.status = 1 { return derefOnFailure(st, structTy); };
+    if st.status != 0 { return st; };
+    t = st.ty;
+    st = zonk(st, structTy);
+    if size(owner.bytes) = 0 && isBoxTy(st, st.ty) && (name = "addr" || name = "blk") { return notModelled(st, "the storage of a Box"); };
+    callArgs = push([], structNode);
+    st = emitFApp(st, funct, &callArgs);
+    return St { ty: t, ..st };
+};
+
+// A call of a function of the program by name in a proof (ordinaryCall and ghostTarget)
+fn proofOrdinaryCall(st: St, funct: Int, name: String, args: &List<Int>) -> St ~ {
+    st = inferProofs(st, args);
+    if st.status != 0 { return st; };
+    argTys = clone(st.te.types);
+    argNodes = clone(st.outs);
+    if st.templates.contains(&name) { return notModelled(st, "functions with bounds"); };
+    if size(name.bytes) > 0 && get(name.bytes, 0) = toByte(60) { return notModelled(st, "impls"); };
+    if traitPath(&name) {
+        path = pathOf(&name);
+        if st.traits.contains(&path) || st.types.contains(&path) || st.generics.contains(&path) { return notModelled(st, "traits and impls"); };
+        return proofGeneral(st, funct, &argTys, &argNodes);
+    };
+    if st.fns.contains(&name) { return ghostCall(st, funct, name, &argTys, &argNodes); };
+    return proofGeneral(st, funct, &argTys, &argNodes);
+};
+
+fn ghostCall(st: St, funct: Int, name: String, argTys: &List<Int>, argNodes: &List<Int>) -> St ~ {
+    st = lookupVar(st, &name);
+    if st.status != 0 { return st; };
+    ft = st.ty;
+    st = zonk(st, ft);
+    x = tyAt(st, st.ty);
+    if x.kind = 13 { return notModelled(st, "a function with sizes in a proof"); };
+    st = checkCall(st, &name, ft, argTys);
+    if st.status != 0 { return st; };
+    t = st.ty;
+    st = emitFApp(st, funct, argNodes);
+    return St { ty: t, ..st };
+};
+
+fn proofGeneral(st: St, funct: Int, argTys: &List<Int>, argNodes: &List<Int>) -> St ~ {
+    st = inferProof(st, funct);
+    if st.status != 0 { return st; };
+    ft = st.ty;
+    st = checkProofBuiltinCall(st, funct, ft, argTys);
+    if st.status != 0 { return st; };
+    t = st.ty;
+    st = comparingProof(st, funct, argTys);
+    if st.status != 0 { return st; };
+    st = emitFApp(st, funct, argNodes);
+    return St { ty: t, ..st };
+};
+
+// checkBuiltinCall for a proof head (proofBuiltin), named "call"
+fn checkProofBuiltinCall(st: St, funct: Int, ft: Int, ats: &List<Int>) -> St ~ {
+    b = proofBuiltin(st, funct);
+    key = "";
+    if b >= 0 { key = builtinKey(st, b); };
+    if size(ats) > 0 && (key = "Size" || key = "First" || key = "Last" || key = "Get" || key = "Set" || key = "Replace") {
+        st = zonk(st, get(ats, 0));
+        t = st.ty;
+        x = tyAt(st, t);
+        if x.kind = 6 { return arrayCall(st, &key, "call", false, get(x.args, 1), ats); };
+        if isBoxTy(st, t) && kindOf(st, get(x.args, 0)) = 6 { return arrayCall(st, &key, "call", true, argAt(st, get(x.args, 0), 1), ats); };
+        return checkCall(st, "call", ft, ats);
+    };
+    if size(ats) > 0 && isLookThroughKey(&key) {
+        st = zonk(st, get(ats, 0));
+        t = st.ty;
+        lookedThrough = set(clone(ats), 0, argAt(st, t, 0));
+        if isBoxTy(st, t) { return checkCall(st, "call", ft, &lookedThrough); };
+        return checkCall(st, "call", ft, ats);
+    };
+    if size(ats) = 1 && key = "FromByte" {
+        st = zonk(st, get(ats, 0));
+        if kindOf(st, st.ty) = 3 { return simpleTy(st, 0); };
+        return checkCall(st, "call", ft, ats);
+    };
+    return checkCall(st, "call", ft, ats);
+};
+
+// comparing (proofHead): a CTerm head is compared as the value it is
+fn comparingProof(st: St, funct: Int, ats: &List<Int>) -> St ~ {
+    b = proofBuiltin(st, funct);
+    if b < 0 || size(ats) = 0 { return st; };
+    key = builtinKey(st, b);
+    if key != "Rel 0" && key != "Rel 1" { return st; };
+    st = zonk(st, get(ats, 0));
+    t = st.ty;
+    k = kindOf(st, t);
+    if k = 14 { return fail(st, "Type error: functions cannot be compared"); };
+    if k = 9 { return fail(st, "Type error: an Uninit cannot be compared, since it may hold nothing: what it holds is compared, as in Uninit::get(a) = Uninit::get(b)"); };
+    st = holdsGhost(st, t);
+    if st.ok {
+        return typeError(st, catStrings(render(st, t), " holds a permission, which cannot be compared: what a permission says is compared, as in at(a, 0) = at(b, 0)"));
+    };
+    return st;
+};
+
+// The size of array(n, x) in a proof: a constant, or a size parameter of the function (proofSize)
+fn proofSize(st: St, n: Int) -> St ~ {
+    pr = proofOf(st, n);
+    if pr is AstProof::ATerm {
+        v = nameText(&st.nodes, (pr as AstProof::ATerm).n);
+        if indexIn(&st.sizeScope, &v) >= 0 { return addTy(st, Ty { kind: 22, name: v, args: [], n: 0, flag: false, sizes: [], types: [] }); };
+    };
+    c = constantProofInt(st, n);
+    if c.status = 1 { return fail(st, noConstantSize()); };
+    if c.status = 2 { return fail(st, c.msg); };
+    return sizeConst(st, c.value);
+};
+
+fn constantProofInt(st: &St, p: Int) -> Folded ~ {
+    pr = proofOf(st, p);
+    if pr is AstProof::CTerm {
+        r = valueInt(st, (pr as AstProof::CTerm).v);
+        if r.ok { return Folded { value: r.value, status: 0, msg: "" }; };
+        return Folded { value: 0, status: 1, msg: "" };
+    };
+    if !(pr is AstProof::FApp) { return Folded { value: 0, status: 1, msg: "" }; };
+    call = pr as AstProof::FApp;
+    b = proofBuiltin(st, call.f);
+    if b < 0 { return Folded { value: 0, status: 1, msg: "" }; };
+    key = builtinKey(st, b);
+    args = listItems(&st.nodes, call.xs);
+    if size(args) != 2 || !(key = "Plus" || key = "Minus" || key = "Times" || key = "Div" || key = "Mod") { return Folded { value: 0, status: 1, msg: "" }; };
+    a = constantProofInt(st, get(args, 0));
+    if a.status = 1 { return a; };
+    c = constantProofInt(st, get(args, 1));
+    if c.status = 1 { return c; };
+    if a.status = 2 { return a; };
+    if c.status = 2 { return c; };
+    return constantArithmetic(&key, a.value, c.value);
+};
+
+// In a postcondition, old(place) is the entry snapshot of the place's root: the proof name `$old x`
+// (rewriteOld); st.nid is the proof, the same record when there is nothing to rewrite
+fn rewriteOld(st: St, p: Int) -> St ~ {
+    pr = proofOf(st, p);
+    if pr is AstProof::FApp {
+        call = pr as AstProof::FApp;
+        args = listItems(&st.nodes, call.xs);
+        b = proofBuiltin(st, call.f);
+        if b >= 0 && builtinKey(st, b) = "OldOf" && size(args) = 1 { return snapshot(st, get(args, 0)); };
+        st = rewriteOld(st, call.f);
+        f = st.nid;
+        changed = f != call.f;
+        out = [];
+        for a in &args {
+            st = rewriteOld(st, a);
+            if st.nid != a { changed = true; };
+            out = push(out, st.nid);
+        };
+        if !changed { return St { nid: p, ..st }; };
+        return emitFApp(st, f, &out);
+    };
+    if pr is AstProof::Forall {
+        fa = pr as AstProof::Forall;
+        guards = listItems(&st.nodes, fa.gs);
+        changed = false;
+        out = [];
+        for g in &guards {
+            st = rewriteOld(st, g);
+            if st.nid != g { changed = true; };
+            out = push(out, st.nid);
+        };
+        st = rewriteOld(st, fa.b);
+        body = st.nid;
+        if !changed && body = fa.b { return St { nid: p, ..st }; };
+        st = emitProofs(st, &out);
+        return emit(st, AstNode::Proof { value: AstProof::Forall { n: fa.n, gs: st.nid, b: body } });
+    };
+    return St { nid: p, ..st };
+};
+
+fn snapshot(st: St, q: Int) -> St ~ {
+    pr = proofOf(st, q);
+    if pr is AstProof::ATerm { return oldTerm(st, nameText(&st.nodes, (pr as AstProof::ATerm).n)); };
+    if pr is AstProof::FApp {
+        call = pr as AstProof::FApp;
+        args = listItems(&st.nodes, call.xs);
+        b = proofBuiltin(st, call.f);
+        if b >= 0 && builtinKey(st, b) = "DerefOf" && size(args) = 1 {
+            inner = proofOf(st, get(args, 0));
+            if inner is AstProof::ATerm { return oldTerm(st, nameText(&st.nodes, (inner as AstProof::ATerm).n)); };
+        };
+        out = [];
+        for a in &args {
+            st = snapshot(st, a);
+            out = push(out, st.nid);
+        };
+        return emitFApp(st, call.f, &out);
+    };
+    return St { nid: q, ..st };
+};
+
+fn oldTerm(st: St, name: String) -> St ~ {
+    st = emitName(st, catStrings("$old ", name));
+    return emit(st, AstNode::Proof { value: AstProof::ATerm { n: st.nid } });
+};
+
+// The postconditions with old(...) rewritten (rewriteOldStatement); st.nid is the Validations list
+fn rewriteOldStatements(st: St, outs: Int) -> St ~ {
+    items = listItems(&st.nodes, outs);
+    changed = false;
+    out = [];
+    for v in &items {
+        node = nodeIn(&st.nodes, v);
+        id = v;
+        if node is AstNode::Validation {
+            val = (node as AstNode::Validation).value;
+            if val is AstValidation::ProofAssert {
+                p0 = (val as AstValidation::ProofAssert).p;
+                st = rewriteOld(st, p0);
+                if st.nid != p0 { st = emit(st, AstNode::Validation { value: AstValidation::ProofAssert { p: st.nid } }); id = st.nid; };
+            };
+            if val is AstValidation::Assume {
+                p0 = (val as AstValidation::Assume).p;
+                st = rewriteOld(st, p0);
+                if st.nid != p0 { st = emit(st, AstNode::Validation { value: AstValidation::Assume { p: st.nid } }); id = st.nid; };
+            };
+        };
+        if id != v { changed = true; };
+        out = push(out, id);
+    };
+    if !changed { return St { nid: outs, ..st }; };
+    return emitValidations(st, &out);
+};

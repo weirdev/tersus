@@ -17,6 +17,7 @@ module ElaborateRequest
 import qualified Data.Map as Map
 
 import AstData (readElaborated, readParsed, writeElaborated, writeParsed)
+import BuiltinTable (builtinTableText)
 import DataCodec (Token (..), quote, strictTokenize)
 import Interface (ModuleInterface (..), extractInterface, extractLibInterface, mergeInterfacesImportEnv, predeclareOwnEnv)
 import InterfaceData (readInterface, writeInterface)
@@ -60,6 +61,7 @@ type Elaborator = Request -> Response
 
 writeRequest :: Request -> Result String String
 writeRequest rq =
+    builtinTableText `bindResult` \builtins ->
     mapAll writeInterface (rqInterfaces rq) `bindResult` \ifaces ->
         writeParsed (rqStatements rq) `bindResult` \ast ->
             Ok $
@@ -69,8 +71,10 @@ writeRequest rq =
                       , "predeclare " ++ boolWord (rqPredeclare rq)
                       , "library " ++ boolWord (rqLibrary rq)
                       , "extract " ++ extractionWord (rqExtraction rq)
-                      , "interfaces " ++ show (length ifaces)
+                      , "builtins"
                       ]
+                        ++ block builtins
+                        ++ ["interfaces " ++ show (length ifaces)]
                         ++ concatMap block ifaces
                     )
                     ++ block' ast
@@ -81,7 +85,7 @@ writeRequest rq =
 
 readRequest :: String -> Result Request String
 readRequest text = case lines text of
-    "tersus-elaborate 1" : moduleLine : predeclareLine : libraryLine : extractLine : countLine : rest ->
+    "tersus-elaborate 1" : moduleLine : predeclareLine : libraryLine : extractLine : "builtins" : afterBuiltins ->
         moduleOf moduleLine `bindResult` \modu ->
         wordAfter "predeclare" predeclareLine `bindResult` \predeclare ->
         boolOf predeclare `bindResult` \flag ->
@@ -89,6 +93,10 @@ readRequest text = case lines text of
         boolOf library `bindResult` \libraryFlag ->
         wordAfter "extract" extractLine `bindResult` \extract ->
         extractionOf extract `bindResult` \extraction ->
+        blocks 1 afterBuiltins `bindResult` \(builtinTexts, afterTable) ->
+        builtinTableText `bindResult` \table ->
+        (if map lines builtinTexts == [lines table] then Ok () else Error "ElaborateRequest: the request's builtin table is not this compiler's") `bindResult` \() ->
+        firstLine afterTable `bindResult` \(countLine, rest) ->
         wordAfter "interfaces" countLine `bindResult` \countText ->
         countOf countText `bindResult` \count ->
         blocks count rest `bindResult` \(ifaceTexts, rest') ->
@@ -198,6 +206,11 @@ blocks n (header : rest) =
                 then Error "ElaborateRequest: a block is cut short"
                 else blocks (n - 1) after `bindResult` \(more, rest') -> Ok (unlines block : more, rest')
 blocks _ [] = Error "ElaborateRequest: missing data block"
+
+firstLine :: [String] -> Result (String, [String]) String
+firstLine ls = case ls of
+    l : rest -> Ok (l, rest)
+    [] -> Error "ElaborateRequest: the request ends early"
 
 mapAll :: (a -> Result b String) -> [a] -> Result [b] String
 mapAll f = foldr (\x rest -> f x `bindResult` \y -> rest `bindResult` \ys -> Ok (y : ys)) (Ok [])

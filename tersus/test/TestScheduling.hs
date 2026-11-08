@@ -144,7 +144,8 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         work -> maximum work
 
 -- Measured four-CPU warm-tool work on eb8bb49 (2026-11-05), rounded up; the testAstData, testAstReader and
--- testDifferential batches on the commit that added interface data (2026-11-08).
+-- testDifferential batches on the commit that added interface data (2026-11-08); the testElaborate batches,
+-- each of which builds an elaborator, scaled by the testDifferential batches measured beside them.
 -- The native preparation prefix is measured separately; genuine cold A and
 -- Bootstrap include their cold work. Unmeasured rows retain run 41978818567.
 groupWeight :: String -> Int
@@ -263,6 +264,8 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testDifferential:2/4", 41)
         , ("testDifferential:3/4", 170)
         , ("testDifferential:4/4", 95)
+        , ("testElaborate:1/2", 199)
+        , ("testElaborate:2/2", 172)
         , ("testParity", 170)
         , ("testLibModules", 5)
         , ("testNativeStorageModules", 201)
@@ -471,8 +474,8 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "all old leaf paths occur exactly once in the registered batches" $
         testAssertTrue (all (\(original, split) ->
             sort (leafPaths original) == sort (concatMap (map (drop 1) . leafPaths) split)) batches)
-    , testCase "each expensive group has four nonempty registered batches and no original duplicate" $
-        testAssertTrue (all (\(original, split) -> length split == 4
+    , testCase "each expensive group has four nonempty registered batches (fewer if it has fewer cases) and no original duplicate" $
+        testAssertTrue (all (\(original, split) -> length split == min 4 (length (leafTests original))
             && groupName original `notElem` names
             && all (\batch -> groupName batch `elem` names && not (null (leafPaths batch))) split) batches)
     -- The unprofiled fallback is weight 1, so weight > 1 for every batched and

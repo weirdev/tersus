@@ -8,11 +8,13 @@
 --                                          also the programs the tests wrote to DIR (run the suite with
 --                                          TERSUS_DIFFERENTIAL_SOURCES=DIR: each program a test helper checks)
 --   frontend-diff builtins OUT             write the builtin table (lib/data/builtins.ast) from BuiltinRegistry
+--   frontend-diff build OUT                build the elaborator of lib/elaborate (and lib/data) as it is on disk, unvalidated
 --
 -- compare prints each request the candidate does not agree on and the counts, and exits 1 on a disagreement or a
 -- candidate failure (a wording difference or a program it does not handle yet is reported, not a failure).
 module Main (main) where
 
+import Control.Exception (evaluate)
 import Control.Monad (forM_, when)
 import Data.List (isSuffixOf, sort)
 import System.Directory (listDirectory)
@@ -28,6 +30,11 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
+        ["build", out] -> do
+            files <- packageFromDisk ["lib/elaborate", "lib/data", "lib/data/codec", "lib/data/ast", "lib/data/reader", "lib/data/arena"]
+            buildElaborator files out >>= \r -> case r of
+                Error e -> failWith e
+                Ok () -> putStrLn ("built " ++ out)
         ["builtins", out] -> case builtinTableText of
             Error e -> failWith e
             Ok text -> writeFile out text
@@ -46,7 +53,7 @@ main = do
             let (agree, wording, disagree, unmodelled, failed) = tally [o | (_, _, o) <- results]
             putStrLn (show (length units) ++ " units, " ++ show (length results) ++ " requests: " ++ show agree ++ " agree, " ++ show wording ++ " wording, " ++ show disagree ++ " disagree, " ++ show unmodelled ++ " not modelled, " ++ show failed ++ " failed")
             when (disagree + failed > 0) exitFailure
-        _ -> failWith "usage: frontend-diff compare (EXE | --haskell) [FILE...] | frontend-diff builtins OUT"
+        _ -> failWith "usage: frontend-diff compare (EXE | --haskell) [FILE...] | frontend-diff builtins OUT | frontend-diff build OUT"
   where
     unitsOf args = case args of
         "--package" : entry : more -> FilePackage entry : unitsOf more
@@ -58,6 +65,16 @@ main = do
         EmbeddedPackage entry -> entry
         FilePackage entry -> entry
         Libraries -> "lib"
+
+packageFromDisk :: [FilePath] -> IO [(FilePath, String)]
+packageFromDisk dirs = concat <$> mapM files dirs
+  where
+    files dir = do
+        names <- sort . filter (".tersus" `isSuffixOf`) <$> listDirectory dir
+        mapM (\name -> do
+            text <- readFile (dir </> name)
+            _ <- evaluate (length text)
+            pure (dir </> name, text)) names
 
 failWith :: String -> IO a
 failWith message = putStrLn message >> exitFailure

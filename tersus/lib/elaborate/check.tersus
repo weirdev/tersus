@@ -1,0 +1,608 @@
+import data::ast::ast { AstBody, AstExpression, AstNode, AstOptTermination, AstRule, AstSignature, AstStatement, AstTermination, AstValidation, AstValue };
+import data::codec::codec { catStrings };
+import elaborate::calls { assignVar, bindIn, bindInner, coerce, head, lookupVar, popScope, pushScope, scopeLookup };
+import elaborate::core { checkFieldType, checkFinite, checkType, declareTypeWith, holdsRef, isBoxTy, isListTy, mentionsRef, registerCtors, unrefOf };
+import elaborate::expr { derefStepNeeded, exprOf, inferExpr };
+import elaborate::out { emit, emitProofs, emitStatements, emitVal, emitValidations };
+import elaborate::proofs { inferProof, rewriteOldStatements };
+import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData, signatureOf };
+import elaborate::state { Generic, St, TE, expect, fail, indexIn, intText, isSize, isTypeName, joinWith, kindOf, notModelled, oneScope, render, simpleTy, tyAt, typeError, zonk };
+
+fn stmtOf(st: &St, s: Int) -> AstStatement [{ }] [{ }] {
+    node = nodeIn(&st.nodes, s);
+    if node is AstNode::Statement { return clone((node as AstNode::Statement).value); };
+    return AstStatement::Mark { line: 0, col: 0 };
+};
+
+// Statements: each gives back the statement it stands for (st.nid) and the types of its code (st.te.types)
+fn checkStatements(st: St, top: Bool, stmts: &List<Int>) -> St ~ {
+    out = [];
+    types = [];
+    for s in stmts {
+        st = checkItem(st, top, s);
+        if st.status != 0 { return st; };
+        for o in &st.outs { out = push(out, o); };
+        for t in &st.te.types { types = push(types, t); };
+    };
+    st = emitStatements(st, &out);
+    return St { te: TE { node: st.nid, types: types }, ..st };
+};
+
+fn checkItem(st: St, top: Bool, s: Int) -> St ~ {
+    stmt = stmtOf(st, s);
+    if stmt is AstStatement::TraitDef || stmt is AstStatement::ImplDef || stmt is AstStatement::BoundedDef {
+        return notModelled(st, "traits, impls and functions with bounds");
+    };
+    st = checkStatement(st, top, s);
+    if st.status != 0 { return st; };
+    return St { outs: push([], st.nid), ..st };
+};
+
+// The statement and the types of its code expressions in visit order (checkStatement)
+fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
+    stmt = stmtOf(st, s);
+    match stmt {
+        AstStatement::Assign { n: n, e: e } => {
+            name = nameText(&st.nodes, n);
+            v = functionValue(st, e);
+            if v >= 0 { return checkFunctionDef(st, top, name, n, v); };
+            st = notSize(st, &name);
+            st = inferExpr(st, e);
+            if st.status != 0 { return st; };
+            inferred = clone(st.te);
+            texpr = clone(inferred);
+            existing = scopeLookup(st, &name);
+            if existing >= 0 {
+                st = coerce(st, existing, inferred);
+                texpr = clone(st.te);
+            };
+            st = assignVar(st, &name, head(&texpr.types));
+            st = recordAlias(st, head(&texpr.types));
+            if st.status != 0 { return st; };
+            st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: n, e: texpr.node } });
+            return St { te: TE { node: st.nid, types: texpr.types }, ..st };
+        },
+        AstStatement::Let { n: n, e: e } => {
+            name = nameText(&st.nodes, n);
+            st = notSize(st, &name);
+            st = inferExpr(st, e);
+            if st.status != 0 { return st; };
+            texpr = clone(st.te);
+            st = recordAlias(st, head(&texpr.types));
+            st = bindInner(st, &name, head(&texpr.types));
+            st = emit(st, AstNode::Statement { value: AstStatement::Let { n: n, e: texpr.node } });
+            return St { te: TE { node: st.nid, types: texpr.types }, ..st };
+        },
+        AstStatement::Return { e: e } => {
+            st = inferExpr(st, e);
+            if st.status != 0 { return st; };
+            inferred = clone(st.te);
+            if st.ret >= 0 {
+                st = coerce(st, st.ret, inferred);
+                if st.status != 0 { return st; };
+                texpr = clone(st.te);
+                st = expect(st, "returned value", st.ret, head(&texpr.types));
+                if st.status != 0 { return st; };
+                st = emit(st, AstNode::Statement { value: AstStatement::Return { e: texpr.node } });
+                return St { te: TE { node: st.nid, types: texpr.types }, ..st };
+            };
+            t = head(&inferred.types);
+            st = zonk(st, t);
+            k = kindOf(st, st.ty);
+            if k = 10 || k = 11 { return fail(st, "Type error: the program cannot return a reference: a reference is from a place in the program, and no place outlives it"); };
+            if st.programReturn < 0 { st = St { programReturn: t, ..st }; } else { st = expect(st, "returned value of the program", st.programReturn, t); };
+            if st.status != 0 { return st; };
+            st = emit(st, AstNode::Statement { value: AstStatement::Return { e: inferred.node } });
+            return St { te: TE { node: st.nid, types: inferred.types }, ..st };
+        },
+        AstStatement::ValidationStatement { v: v } => {
+            st = checkValidation(st, v);
+            if st.status != 0 { return st; };
+            st = emit(st, AstNode::Statement { value: AstStatement::ValidationStatement { v: st.nid } });
+            return St { te: TE { node: st.nid, types: [] }, ..st };
+        },
+        AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs } => {
+            name = nameText(&st.nodes, n);
+            params = namesText(&st.nodes, ps);
+            fieldNamesList = fieldNames(&st.nodes, fs);
+            tycs = fieldCodecTypes(&st.nodes, fs); st = fromCodecs(st, &tycs);
+            fieldTys = clone(st.te.types);
+            if size(params) > 0 {
+                st = declareGeneric(st, &name, &params, &fieldNamesList, &fieldTys);
+                sizes = [];
+                types = [];
+                for p in &params { if isTypeName(p) { types = push(types, clone(p)); } else { sizes = push(sizes, clone(p)); }; };
+                outerSizes = clone(st.sizeScope);
+                outerTypes = clone(st.typeScope);
+                st = St { sizeScope: sizes, typeScope: types, ..st };
+                st = checkInvariant(st, &fieldNamesList, &fieldTys, vs);
+                st = St { sizeScope: outerSizes, typeScope: outerTypes, ..st };
+            } else {
+                st = declareTypeWith(st, &name, push([], clone(name)));
+                for t in &fieldTys { st = checkFieldType(st, t); };
+                ctorNames = push([], clone(name));
+                ctorFieldNames = push([], clone(fieldNamesList));
+                ctorFieldTypes = push([], clone(fieldTys));
+                st = registerCtors(st, &name, &ctorNames, &ctorFieldNames, &ctorFieldTypes);
+                variantTypes = push([], clone(fieldTys));
+                st = checkFinite(st, &name, &variantTypes);
+                st = checkInvariant(st, &fieldNamesList, &fieldTys, vs);
+            };
+            if st.status != 0 { return st; };
+            st = emit(st, AstNode::Statement { value: AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: st.nid } });
+            return St { te: TE { node: st.nid, types: [] }, ..st };
+        },
+        AstStatement::EnumDef { n: n, vs: vs } => {
+            name = nameText(&st.nodes, n);
+            variantNames = [];
+            variantFieldNames = [];
+            variantFieldTypes = [];
+            for v in listItems(&st.nodes, vs) {
+                vn = nodeIn(&st.nodes, v);
+                if vn is AstNode::Variant {
+                    variant = (vn as AstNode::Variant).value;
+                    variantNames = push(variantNames, nameText(&st.nodes, variant.n));
+                    variantFieldNames = push(variantFieldNames, fieldNames(&st.nodes, variant.fs));
+                    tycs = fieldCodecTypes(&st.nodes, variant.fs); st = fromCodecs(st, &tycs);
+                    variantFieldTypes = push(variantFieldTypes, clone(st.te.types));
+                };
+            };
+            st = declareTypeWith(st, &name, clone(variantNames));
+            for tys in &variantFieldTypes { for t in tys { st = checkFieldType(st, t); }; };
+            st = registerCtors(st, &name, &variantNames, &variantFieldNames, &variantFieldTypes);
+            st = checkFinite(st, &name, &variantFieldTypes);
+            if st.status != 0 { return st; };
+            return St { nid: s, te: TE { node: s, types: [] }, ..st };
+        },
+        AstStatement::Block { xs: xs } => {
+            st = pushScope(st);
+            blockStmts = listItems(&st.nodes, xs);
+            st = checkStatements(st, false, &blockStmts);
+            st = popScope(st);
+            if st.status != 0 { return st; };
+            types = clone(st.te.types);
+            st = emit(st, AstNode::Statement { value: AstStatement::Block { xs: st.te.node } });
+            return St { te: TE { node: st.nid, types: types }, ..st };
+        },
+        AstStatement::If { e: e, a: a, b: b } => {
+            st = inferExpr(st, e);
+            if st.status != 0 { return st; };
+            cond = clone(st.te);
+            st = simpleTy(st, 2);
+            st = expect(st, "condition of if", st.ty, head(&cond.types));
+            st = pushScope(st);
+            thenStmts = listItems(&st.nodes, a);
+            st = checkStatements(st, false, &thenStmts);
+            st = popScope(st);
+            if st.status != 0 { return st; };
+            thenPart = clone(st.te);
+            st = pushScope(st);
+            elseStmts = listItems(&st.nodes, b);
+            st = checkStatements(st, false, &elseStmts);
+            st = popScope(st);
+            if st.status != 0 { return st; };
+            elsePart = clone(st.te);
+            st = emit(st, AstNode::Statement { value: AstStatement::If { e: cond.node, a: thenPart.node, b: elsePart.node } });
+            types = clone(cond.types);
+            for t in &thenPart.types { types = push(types, t); };
+            for t in &elsePart.types { types = push(types, t); };
+            return St { te: TE { node: st.nid, types: types }, ..st };
+        },
+        AstStatement::While { e: e, vs: vs, t: t, xs: xs } => {
+            st = inferExpr(st, e);
+            if st.status != 0 { return st; };
+            cond = clone(st.te);
+            st = simpleTy(st, 2);
+            st = expect(st, "condition of while", st.ty, head(&cond.types));
+            // (what the invariant defines is only its own)
+            beforeInvariant = clone(st.scopes);
+            st = checkValidations(st, vs);
+            if st.status != 0 { return st; };
+            invariant = st.nid;
+            st = St { scopes: beforeInvariant, ..st };
+            st = resolveTermination(st, t);
+            if st.status != 0 { return st; };
+            term = st.nid;
+            st = pushScope(st);
+            loopStmts = listItems(&st.nodes, xs);
+            st = checkStatements(st, false, &loopStmts);
+            st = popScope(st);
+            if st.status != 0 { return st; };
+            body = clone(st.te);
+            st = emit(st, AstNode::Statement { value: AstStatement::While { e: cond.node, vs: invariant, t: term, xs: body.node } });
+            types = clone(cond.types);
+            for ty in &body.types { types = push(types, ty); };
+            return St { te: TE { node: st.nid, types: types }, ..st };
+        },
+        AstStatement::AxiomDef { n: n, ps: ps, ins: ins, outs: outs } => { return St { nid: s, te: TE { node: s, types: [] }, ..st }; },
+        AstStatement::ProofDef { n: n, ps: ps, ins: ins, outs: outs, body: body } => { return St { nid: s, te: TE { node: s, types: [] }, ..st }; },
+        AstStatement::Mark { line: line, col: col } => { return St { nid: s, te: TE { node: s, types: [] }, ..st }; },
+        AstStatement::Dissolve { n: n } => {
+            name = nameText(&st.nodes, n);
+            st = lookupVar(st, &name);
+            return St { nid: s, te: TE { node: s, types: [] }, ..st };
+        },
+        AstStatement::CopyDef { n: n } => { return St { nid: s, te: TE { node: s, types: [] }, ..st }; },
+        AstStatement::DropDef { n: n } => { return St { nid: s, te: TE { node: s, types: [] }, ..st }; },
+        AstStatement::ExternDef { n: n } => { return St { nid: s, te: TE { node: s, types: [] }, ..st }; },
+        AstStatement::LinearDef { n: n } => {
+            st = St { linearTypes: st.linearTypes.insert(nameText(&st.nodes, n)), ..st };
+            return St { nid: s, te: TE { node: s, types: [] }, ..st };
+        },
+        AstStatement::AssignDeref { a: a, b: b } => { return notModelled(st, "references"); },
+        AstStatement::TraitDef { n: n, ps: ps, fs: fs } => { return notModelled(st, "traits"); },
+        AstStatement::ImplDef { traitName: tn, args: args, n: n, ty: ty, bs: bs, xs: xs } => { return notModelled(st, "impls"); },
+        AstStatement::BoundedDef { bs: bs, s: inner } => { return notModelled(st, "functions with bounds"); },
+    };
+    return st;
+};
+
+// The value of a function definition, x = fn ...: the VFunct record with a native body (or -1)
+fn functionValue(st: &St, e: Int) -> Int [{ }] [{ }] {
+    ex = exprOf(st, e);
+    if !(ex is AstExpression::Val) { return 0 - 1; };
+    v = (ex as AstExpression::Val).v;
+    node = nodeIn(&st.nodes, v);
+    if !(node is AstNode::Value) { return 0 - 1; };
+    value = (node as AstNode::Value).value;
+    if !(value is AstValue::VFunct) { return 0 - 1; };
+    body = nodeIn(&st.nodes, (value as AstValue::VFunct).body);
+    if body is AstNode::Body && (body as AstNode::Body).value is AstBody::NativeFunct { return v; };
+    return 0 - 1;
+};
+
+// A value that holds references is followed by its place (recordAlias and recordOrigins); none here hold one
+fn recordAlias(st: St, t: Int) -> St ~ {
+    st = zonk(st, t);
+    k = kindOf(st, st.ty);
+    if k = 10 || k = 11 { return notModelled(st, "references"); };
+    return st;
+};
+
+// A size, a borrowed parameter and an update parameter are not assigned (notSize)
+fn notSize(st: St, name: &String) -> St [{ }] [{ }] {
+    if st.status != 0 { return st; };
+    if indexIn(&st.readOnly, name) >= 0 {
+        return typeError(st, catStrings(clone(name), " is borrowed (&), so it is only read: a copy of it can be assigned to another variable"));
+    };
+    if indexIn(&st.mutParams, name) >= 0 {
+        return typeError(st, catStrings(catStrings(catStrings(clone(name), " is borrowed (&mut), so it is assigned through it, as in *"), clone(name)), " = value;: the parameter itself cannot be assigned"));
+    };
+    if indexIn(&st.sizeScope, name) >= 0 {
+        return typeError(st, catStrings(clone(name), " is a size parameter of the function, which a call gives, and it cannot be assigned"));
+    };
+    return st;
+};
+
+// x = fn ...: the function is visible to itself and, at the top, to what comes after it (checkStatement, Assign of a VFunct)
+fn checkFunctionDef(st: St, top: Bool, name: String, n: Int, v: Int) -> St ~ {
+    if st.templates.contains(&name) { return typeError(st, catStrings(clone(name), " is already defined")); };
+    value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
+    native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
+    sig = signatureOf(&st.nodes, native.sig);
+    sd = sigData(&st.nodes, native.sig); st = functionTypeFrom(st, &sd);
+    fnT = st.ty;
+    if top { st = St { fns: st.fns.insert(clone(name), fnT), ..st }; };
+    st = assignVar(st, &name, fnT);
+    if st.status != 0 { return st; };
+    st = checkFunction(st, &name, value.ps, sig, value.ins, value.outs, native.term, native.stmts);
+    if st.status != 0 { return st; };
+    // (st.outs: the requires, the ensures, the termination and the body)
+    parts = clone(st.outs);
+    bodyTypes = clone(st.te.types);
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: native.sig, term: get(parts, 2), stmts: get(parts, 3) } });
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: value.ps, ins: get(parts, 0), outs: get(parts, 1), body: st.nid, exports: value.exports } });
+    st = emitVal(st, st.nid);
+    st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: n, e: st.nid } });
+    return St { te: TE { node: st.nid, types: bodyTypes }, ..st };
+};
+
+// The body sees its parameters and the functions known at the top, itself among them (checkFunction)
+fn checkFunction(st: St, name: &String, ps: Int, sig: AstSignature, ins: Int, outs: Int, term: Int, body: Int) -> St ~ {
+    params = namesText(&st.nodes, ps);
+    sizes = namesText(&st.nodes, sig.ss);
+    types = namesText(&st.nodes, sig.ps);
+    writes = namesText(&st.nodes, sig.ws);
+    froms = namesText(&st.nodes, sig.fs);
+    tycs = codecTypesAt(&st.nodes, sig.ts); st = fromCodecs(st, &tycs);
+    ptys = clone(st.te.types);
+    tyc = codecTypeAt(&st.nodes, sig.ret); st = fromCodec(st, &tyc);
+    rty = st.ty;
+    outerSizes = clone(st.sizeScope);
+    outerTypes = clone(st.typeScope);
+    outerCurrent = clone(st.current);
+    st = St { sizeScope: clone(sizes), typeScope: clone(types), current: clone(name), ..st };
+    distinct = true;
+    i = 0;
+    while i < size(sizes) [{ affirm i >= 0; }] shrinks size(sizes) - i {
+        j = 0;
+        while j < size(sizes) [{ affirm j >= 0; }] shrinks size(sizes) - j {
+            if i != j && get(sizes, i) = get(sizes, j) { distinct = false; };
+            j = j + 1;
+        };
+        k = 0;
+        while k < size(params) - size(sizes) && k < size(params) [{ affirm k >= 0; }] shrinks size(params) - k {
+            if get(params, k) = get(sizes, i) { distinct = false; };
+            k = k + 1;
+        };
+        i = i + 1;
+    };
+    if !distinct { return typeError(st, catStrings(catStrings("function ", clone(name)), " names a size twice, or the same as a parameter")); };
+    rk = kindOf(st, rty);
+    if rk = 10 || rk = 11 { return notModelled(st, "references"); };
+    st = holdsRef(st, rty);
+    if st.status != 0 { return st; };
+    if st.ok { return notModelled(st, "references"); };
+    if size(froms) > 0 {
+        return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), joinWith(&froms, ", ")), ", but its result is not a reference"));
+    };
+    for p in &ptys { st = checkType(st, p); };
+    st = checkType(st, rty);
+    if st.status != 0 { return st; };
+    if size(params) != size(ptys) {
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("function ", clone(name)), " has "), intText(size(params))), " parameters but "), catStrings(intText(size(ptys)), " types")));
+    };
+    for p in &ptys {
+        if mentionsRef(st, p) { return notModelled(st, "references"); };
+        st = holdsRef(st, p);
+        if st.status != 0 { return st; };
+        if st.ok { return notModelled(st, "references"); };
+    };
+    if mentionsRef(st, rty) { return notModelled(st, "references"); };
+    for w in &writes {
+        root = clone(w);
+        dot = indexOfByte(w, 46);
+        if dot >= 0 { root = w.slice(0, dot); };
+        at = indexIn(&params, &root);
+        if at < 0 || at >= size(ptys) || kindOf(st, get(ptys, at)) != 11 {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings("writes(", clone(w)), ") in "), clone(name)), " does not name an update parameter (&mut T) of the function"));
+        };
+    };
+    outerRet = st.ret;
+    outerScopes = clone(st.scopes);
+    outerReadOnly = clone(st.readOnly);
+    outerMut = clone(st.mutParams);
+    paramScope = oneScope();
+    i = 0;
+    while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
+        paramScope = bindIn(paramScope, &get(params, i), unrefOf(st, get(ptys, i)));
+        i = i + 1;
+    };
+    st = St { ret: rty, scopes: clone(paramScope), readOnly: [], mutParams: [], ..st };
+    st = checkValidations(st, ins);
+    if st.status != 0 { return st; };
+    insNode = st.nid;
+    st = resolveTermination(st, term);
+    if st.status != 0 { return st; };
+    termNode = st.nid;
+    // (the ensures see return and the requires' defines, in the parameters' scope)
+    st = bindInner(st, "return", rty);
+    st = rewriteOldStatements(st, outs);
+    outsOld = st.nid;
+    st = checkValidations(st, outsOld);
+    if st.status != 0 { return st; };
+    outsNode = st.nid;
+    st = St { scopes: paramScope, ..st };
+    st = pushScope(st);
+    bodyStmts = listItems(&st.nodes, body);
+    st = checkStatements(st, false, &bodyStmts);
+    if st.status != 0 { return st; };
+    bodyTE = clone(st.te);
+    st = St { sizeScope: outerSizes, typeScope: outerTypes, current: outerCurrent, ret: outerRet, scopes: outerScopes, readOnly: outerReadOnly, mutParams: outerMut, ..st };
+    return St { outs: push(push(push(push([], insNode), outsNode), termNode), bodyTE.node), te: bodyTE, ..st };
+};
+
+// What shrinks is an Int, which counts down to 0, or a struct or enum value, which loses a field at a time (resolveTermination)
+fn resolveTermination(st: St, t: Int) -> St ~ {
+    node = nodeIn(&st.nodes, t);
+    if !(node is AstNode::OptTermination) { return St { nid: t, ..st }; };
+    ot = (node as AstNode::OptTermination).value;
+    if !(ot is AstOptTermination::SomeTermination) { return St { nid: t, ..st }; };
+    termNode = nodeIn(&st.nodes, (ot as AstOptTermination::SomeTermination).t);
+    if !(termNode is AstNode::Termination) { return St { nid: t, ..st }; };
+    term = (termNode as AstNode::Termination).value;
+    if !(term is AstTermination::Shrinks) { return St { nid: t, ..st }; };
+    variant = (term as AstTermination::Shrinks).e;
+    st = inferExpr(st, variant);
+    if st.status != 0 { return st; };
+    v0 = clone(st.te);
+    st = derefStepNeeded(st, head(&v0.types));
+    if st.status != 0 { return st; };
+    st = zonk(st, head(&v0.types));
+    ty = st.ty;
+    k = kindOf(st, ty);
+    if k = 0 {
+        st = emit(st, AstNode::Termination { value: AstTermination::Counting { e: v0.node } });
+    } else {
+        if k = 4 || k = 5 {
+            st = emit(st, AstNode::Termination { value: AstTermination::Parts { e: v0.node } });
+        } else {
+            return typeError(st, catStrings("shrinks needs an Int, an enum or a struct, got ", render(st, ty)));
+        };
+    };
+    st = emit(st, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: st.nid } });
+    return st;
+};
+
+fn checkValidations(st: St, vs: Int) -> St ~ {
+    out = [];
+    for v in listItems(&st.nodes, vs) {
+        st = checkValidation(st, v);
+        if st.status != 0 { return st; };
+        out = push(out, st.nid);
+    };
+    return emitValidations(st, &out);
+};
+
+// The invariant of a struct is written with the names of its fields (checkInvariant); st.nid the checked invariant
+fn checkInvariant(st: St, names: &List<String>, types: &List<Int>, vs: Int) -> St ~ {
+    if size(listItems(&st.nodes, vs)) = 0 { return St { nid: vs, ..st }; };
+    outerScopes = clone(st.scopes);
+    scope = oneScope();
+    i = 0;
+    while i < size(names) && i < size(types) [{ affirm i >= 0; }] ~ {
+        scope = bindIn(scope, &get(names, i), get(types, i));
+        i = i + 1;
+    };
+    st = St { scopes: scope, ..st };
+    st = checkValidations(st, vs);
+    return St { scopes: outerScopes, ..st };
+};
+
+fn validationOf(st: &St, v: Int) -> AstValidation [{ }] [{ }] {
+    node = nodeIn(&st.nodes, v);
+    if node is AstNode::Validation { return clone((node as AstNode::Validation).value); };
+    return AstValidation::Assume { p: 0 - 1 };
+};
+
+// checkValidation: st.nid the checked validation statement
+fn checkValidation(st: St, v: Int) -> St ~ {
+    scrutinee = validationOf(st, v);
+    match scrutinee {
+        AstValidation::ProofAssert { p: p } => {
+            st = inferProof(st, p);
+            if st.status != 0 { return st; };
+            checked = st.nid;
+            t = st.ty;
+            st = simpleTy(st, 2);
+            st = expect(st, "affirmed proof", st.ty, t);
+            st = emit(st, AstNode::Validation { value: AstValidation::ProofAssert { p: checked } });
+            return st;
+        },
+        AstValidation::Assume { p: p } => {
+            st = inferProof(st, p);
+            if st.status != 0 { return st; };
+            checked = st.nid;
+            t = st.ty;
+            st = simpleTy(st, 2);
+            st = expect(st, "assumed proof", st.ty, t);
+            st = emit(st, AstNode::Validation { value: AstValidation::Assume { p: checked } });
+            return st;
+        },
+        AstValidation::AssignProofVar { n: n, e: e } => {
+            name = nameText(&st.nodes, n);
+            outer = st.inGhost;
+            st = St { inGhost: true, ..st };
+            st = inferExpr(st, e);
+            st = St { inGhost: outer, ..st };
+            if st.status != 0 { return st; };
+            texpr = clone(st.te);
+            st = assignVar(st, &name, head(&texpr.types));
+            st = emit(st, AstNode::Validation { value: AstValidation::AssignProofVar { n: n, e: texpr.node } });
+            return st;
+        },
+        AstValidation::Rewrite { r: r } => {
+            st = checkRule(st, r);
+            if st.status != 0 { return st; };
+            st = emit(st, AstNode::Validation { value: AstValidation::Rewrite { r: st.nid } });
+            return st;
+        },
+    };
+    return st;
+};
+
+fn checkRule(st: St, r: Int) -> St ~ {
+    node = nodeIn(&st.nodes, r);
+    if !(node is AstNode::Rule) { return St { nid: r, ..st }; };
+    scrutinee = (node as AstNode::Rule).value;
+    match scrutinee {
+        AstRule::Refl { p: p } => { st = inferProof(st, p); return emit(st, AstNode::Rule { value: AstRule::Refl { p: st.nid } }); },
+        AstRule::Eval { n: n } => { varName = nameText(&st.nodes, n); st = lookupVar(st, &varName); return St { nid: r, ..st }; },
+        AstRule::EvalAll => { return St { nid: r, ..st }; },
+        AstRule::CheckGtZero { p: p } => { st = inferProof(st, p); return emit(st, AstNode::Rule { value: AstRule::CheckGtZero { p: st.nid } }); },
+        AstRule::CheckRel { p: p } => { st = inferProof(st, p); return emit(st, AstNode::Rule { value: AstRule::CheckRel { p: st.nid } }); },
+        AstRule::UserRewrite { n: n, xs: xs } => {
+            out = [];
+            for p in listItems(&st.nodes, xs) {
+                st = inferProof(st, p);
+                if st.status != 0 { return st; };
+                out = push(out, st.nid);
+            };
+            st = emitProofs(st, &out);
+            return emit(st, AstNode::Rule { value: AstRule::UserRewrite { n: n, xs: st.nid } });
+        },
+    };
+    return st;
+};
+
+// A struct with sizes and types (declareGeneric)
+fn declareGeneric(st: St, name: &String, params: &List<String>, names: &List<String>, types: &List<Int>) -> St ~ {
+    if st.status != 0 { return st; };
+    predeclared = st.predeclared.contains(name);
+    if !predeclared && (st.types.contains(name) || st.traits.contains(name) || st.generics.contains(name)) {
+        return fail(st, catStrings("Type already defined: ", clone(name)));
+    };
+    distinct = true;
+    i = 0;
+    while i < size(params) [{ affirm i >= 0; }] shrinks size(params) - i {
+        j = i + 1;
+        while j < size(params) [{ affirm j > i; }] shrinks size(params) - j {
+            if get(params, i) = get(params, j) { distinct = false; };
+            j = j + 1;
+        };
+        i = i + 1;
+    };
+    if predeclared {
+        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), predeclared: st.predeclared.remove(name), ..st };
+        if !distinct { return typeError(st, catStrings(clone(name), " names a parameter twice")); };
+    } else {
+        if !distinct { return typeError(st, catStrings(clone(name), " names a parameter twice")); };
+        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), ..st };
+    };
+    for t in types {
+        if selfExpands(st, name, t) {
+            return typeError(st, catStrings(clone(name), " uses itself with a type made of its own parameters, which would make a struct for each depth (Node<List<T>> inside Node<T>): a struct that holds itself gives its own parameters as they are"));
+        };
+    };
+    sizes = [];
+    typeNames = [];
+    for p in params { if isTypeName(p) { typeNames = push(typeNames, clone(p)); } else { sizes = push(sizes, clone(p)); }; };
+    outerSizes = clone(st.sizeScope);
+    outerTypes = clone(st.typeScope);
+    st = St { sizeScope: sizes, typeScope: typeNames, ..st };
+    for t in types { st = checkFieldType(st, t); };
+    st = St { sizeScope: outerSizes, typeScope: outerTypes, ..st };
+    variantTypes = push([], clone(types));
+    return checkFinite(st, name, &variantTypes);
+};
+
+fn selfExpands(st: &St, name: &String, t: Int) -> Bool ~ {
+    x = tyAt(st, t);
+    // (a list and a Box are looked into before their names are, as Haskell's TList and TBox patterns are)
+    if isListTy(st, t) || isBoxTy(st, t) { return selfExpands(st, name, get(x.args, 0)); };
+    if x.kind = 4 {
+        if x.name = clone(name) {
+            for a in x.args {
+                if !isSize(st, a) && kindOf(st, a) != 12 && mentionsParameter(st, a) { return true; };
+            };
+        };
+        for a in x.args { if !isSize(st, a) && selfExpands(st, name, a) { return true; }; };
+        return false;
+    };
+    if x.kind = 6 || (x.kind >= 7 && x.kind <= 10) { return selfExpands(st, name, get(x.args, 0)); };
+    if x.kind = 14 { for a in x.args { if selfExpands(st, name, a) { return true; }; }; };
+    return false;
+};
+
+fn mentionsParameter(st: &St, t: Int) -> Bool ~ {
+    x = tyAt(st, t);
+    if x.kind = 12 { return true; };
+    if x.kind = 6 { return mentionsParameter(st, get(x.args, 0)) || kindOf(st, get(x.args, 1)) = 22; };
+    if x.kind = 4 {
+        for a in x.args {
+            if isSize(st, a) { if kindOf(st, a) = 22 { return true; }; } else { if mentionsParameter(st, a) { return true; }; };
+        };
+        return false;
+    };
+    if x.kind = 14 || (x.kind >= 7 && x.kind <= 11) { for a in x.args { if mentionsParameter(st, a) { return true; }; }; };
+    return false;
+};
+
+fn indexOfByte(text: &String, b: Int) -> Int [{ }] [{ }] {
+    i = 0;
+    for c in &text.bytes {
+        if toInt(c) = b { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
