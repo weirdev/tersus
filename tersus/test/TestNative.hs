@@ -4,6 +4,7 @@ module TestNative
     , validatedPrograms
     , unvalidatedPrograms
     , referenceWritePrograms
+    , lentPartPrograms
     , nativeMirCase
     , clangAvailable
     , runExecutableBytes
@@ -790,7 +791,15 @@ referencePrograms =
     , ("a field reference is returned", "struct P { a: Int, b: Int }; fn getb(p: &P) -> &Int from p { return &p.b; }; p = P { a: 1, b: 41 }; r = getb(&p); return *r + 1;")
     , ("a holder is given to a function", "struct W { r: &Int }; fn rd(w: W) -> Int { return *w.r; }; a = 7; w = W { r: &a }; return rd(w);")
     , ("an update reference in a field is written through", "struct W { r: &mut Int }; a = 1; w = W { r: &mut a }; *w.r = 9; return a;")
-    ] ++ referenceWritePrograms
+    ] ++ referenceWritePrograms ++ lentPartPrograms
+
+-- Calls that lend a part of a value and move another part, or move the value once the borrow has ended
+lentPartPrograms :: [(String, String)]
+lentPartPrograms =
+    [ ("a field is moved while another field is lent", "struct S { xs: List<Int>, n: Int }; fn f(xs: List<Int>, n: &Int) -> Int { return size(push(xs, 9)) * 10 + *n; }; s = S { xs: [1, 2, 3], n: 4 }; return f(s.xs, &s.n);")
+    , ("a value is moved once a borrow of its field has ended", "struct S { xs: List<Int>, n: Int }; fn g(xs: &List<Int>) -> Int { return size(xs); }; fn f(s: S, k: Int) -> Int { return k * 10 + size(s.xs); }; s = S { xs: [1, 2, 3], n: 0 }; return f(s, g(&s.xs));")
+    , ("a clone is moved while the field of the original is lent", "struct S { xs: List<Int>, n: Int }; impl Clone for S { }; fn f(s: S, xs: &List<Int>) -> Int { return size(xs) * 10 + size(push(s.xs, 9)); }; s = S { xs: [1, 2, 3], n: 0 }; return f(clone(s), &s.xs) * 10 + size(s.xs);")
+    ]
 
 -- Owned values written through references, and views of the places they write: native code frees each replaced value once
 -- and no view outlives what it looks at
@@ -974,7 +983,7 @@ valgrindCases =
     , "examples/termination.tersus", "examples/packet_parser.tersus"
     , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
     , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
-    ] ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms
+    ] ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms ++ map fst lentPartPrograms
 
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to

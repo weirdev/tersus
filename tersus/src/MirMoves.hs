@@ -32,7 +32,8 @@ import Types (Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf
 --   * a use of a place after it was moved (or of a part of it, or of the whole it is a part of), along any path to the use;
 --   * a move of an element of a list, which the list still holds: write `clone(get(l, i))`;
 --   * a move of a parameter that is lent (`&T`), or of a part of one, which the caller still has;
---   * a local that is lent to a call and moved by the same call.
+--   * a place that an operation is lent (a lent argument of a call, or what a reference it is given is to) and
+--     that the same operation moves, or a value that holds it or a part of it.
 --
 -- A field or an element that is read into a local (`row = get(rows, i)`, `l = t.left`) is a *view* of the place it comes from, so
 -- reading it moves nothing, and moving it moves the place. A Copy value is copied wherever it is wanted and is never moved. A
@@ -446,7 +447,9 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
             [ message cx pos (describeLocal cx d ++ " cannot be assigned while it is borrowed by " ++ describeLocal cx ref ++ ": the borrow ends at the last use of " ++ describeLocal cx ref)
             | (ref, lplace, _) <- activeLoans, fst lplace == d
             ]
-    (st1, errs) = takenApart (foldl' (access cx pos) (st0, []) (if forLoopList then [(l, ps, Read) | (l, ps, _) <- accesses rv] else if tuplePart then [(l, ps, Consume) | (l, ps, _) <- accesses rv] else accesses rv))
+    used = if forLoopList then [(l, ps, Read) | (l, ps, _) <- accesses rv] else if tuplePart then [(l, ps, Consume) | (l, ps, _) <- accesses rv] else accesses rv
+    sameStatement = take 1 (lentAndMoved cx pos st0 "borrowed in this expression" (loanPlacesOf st0 (rvalueUses rv)) [l | (l, _, Consume) <- used])
+    (st1, errs) = takenApart (foldl' (access cx pos) (st0, sameStatement) used)
     -- (a value of a linear type is used when a function of its own impl takes it apart: reads a field of it, or tests or casts its variant)
     takenApart (st, es) = case rv of
         ReadField o _ _ | Just l <- operandLocal o, ownImpl l -> (consumed st l, es)
@@ -562,6 +565,44 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++
         | otherwise = st
     at p = maybe "" (\(line, column) -> " at line " ++ show line ++ ":" ++ show column) p
 
+-- The places a local may stand for on some path
+mayPlacesOf :: St -> Local -> [Place]
+mayPlacesOf st l = nub (placesOf st l ++ maybe [] Set.toList (Map.lookup l (stMay st)))
+
+-- The places that the references among these locals, and the values among them that hold references, are to
+loanPlacesOf :: St -> [Local] -> [Place]
+loanPlacesOf st ls = [place | (ref, place, _) <- loanEntries st, ref `elem` ls]
+
+-- A place lent to an operation stays in use until the operation ends, so the operation cannot also move it, a
+-- value that holds it, or a part of it
+lentAndMoved :: Cx -> Pos -> St -> String -> [Place] -> [Local] -> [String]
+lentAndMoved cx pos st how lent consumed =
+    [ message cx pos (text h q)
+    | c <- consumed
+    , not (isCopy cx c)
+    , q <- mayPlacesOf st c
+    , h <- map readPlace lent
+    , overlaps h q
+    ]
+  where
+    -- (a place read through a reference is a place of what the reference is to, which `*` does not change; a
+    -- value that holds references owns its other fields, so only a reference is followed to its loan)
+    readPlace = dropDeref . follow (8 :: Int)
+    follow 0 place = place
+    follow n (root, steps)
+        | isReference root, Just ((r2, s2), _, _) <- Map.lookup root (stLoans st) = follow (n - 1) (r2, s2 ++ steps)
+        | Just ps <- Map.lookup root (stViews st), (r2, s2) : _ <- Set.toList ps = follow (n - 1) (r2, s2 ++ steps)
+        | otherwise = (root, steps)
+    dropDeref (root, steps) = if isReference root then (root, steps) else (root, filter (/= SDeref) steps)
+    isReference root = case typeOf cx root of
+        TRef _ -> True
+        TMutRef _ -> True
+        _ -> False
+    text h q
+        | h == q = describe cx h ++ " is " ++ how ++ " and moved by it too: write clone(" ++ describe cx h ++ ") for one of them"
+        | length (snd q) < length (snd h) = describe cx h ++ " is " ++ how ++ ", and " ++ describe cx q ++ ", which holds it, is moved by it too: write clone(" ++ describe cx q ++ ") where it is moved"
+        | otherwise = describe cx h ++ " is " ++ how ++ ", and " ++ describe cx q ++ ", a part of it, is moved by it too: write clone(" ++ describe cx q ++ ") where it is moved"
+
 -- A local that gets a value that is or holds a permission, of its own (not a view of one), holds it
 hold :: Cx -> Pos -> St -> Local -> [Place] -> St
 hold cx pos st d view
@@ -637,7 +678,8 @@ terminator cx pos st term = case term of
         let lent = lentArguments cx callee (length args)
             mut = mutArguments cx callee (length args)
             argLocals = [(l, b) | (a, b) <- zip args lent, Just l <- [operandLocal a]]
-            conflicts = [message cx pos (describeLocal cx l ++ " is lent to this call and moved by it too: write clone(" ++ describeLocal cx l ++ ") for one of them") | (l, True) <- argLocals, (l', False) <- argLocals, l == l', not (isCopy cx l)]
+            lentPlaces = [q | (l, True) <- argLocals, q <- mayPlacesOf st l] ++ loanPlacesOf st (map fst argLocals)
+            conflicts = lentAndMoved cx pos st "lent to this call" lentPlaces [l | (l, False) <- argLocals]
             argPlace l = maybe (l, []) (\(place, _, _) -> place) (Map.lookup l (stLoans st))
             mutErrs =
                 [ message cx pos (describe cx (argPlace l) ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be lent for updating to this call: the borrow ends at the last use of " ++ describeLocal cx ref)
@@ -659,7 +701,7 @@ terminator cx pos st term = case term of
             windowed = case (refFieldNames cx (typeOf cx dest), resultFromPlaces cx st' callee args) of
                 (fields@(_ : _), places@(_ : _)) -> loaned{stFieldLoans = foldl' (\m f -> Map.insert (dest, f) places m) (Map.filterWithKey (\(root, _) _ -> root /= dest) (stFieldLoans loaned)) fields, stExtraLoans = Map.insert dest places (stExtraLoans loaned)}
                 _ -> loaned
-         in (hold cx pos windowed dest [], errs ++ take 1 conflicts ++ mutErrs ++ lost cx pos st' dest)
+         in (hold cx pos windowed dest [], take 1 conflicts ++ errs ++ mutErrs ++ lost cx pos st' dest)
     -- (what a function returns is given to its caller, and a permission it has not used by then is lost)
     Return ->
         let (st', errs) = if Local 0 `Map.member` fnLocals (cxFn cx) then accessAll [(Local 0, [], Consume)] else (st, [])
@@ -712,7 +754,7 @@ resultFromPlaces cx st callee args = case calleeName of
         Just l -> case Map.lookup l (stLoans st) of
             Just (place, _, _) -> place : Map.findWithDefault [] l (stExtraLoans st)
             Nothing -> case Map.findWithDefault [] l (stExtraLoans st) of
-                [] -> [(l, [])]
+                [] -> placesOf st l
                 places -> places
         Nothing -> []
 

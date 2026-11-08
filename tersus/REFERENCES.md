@@ -265,7 +265,10 @@ disjointness. User assertions alone cannot mint permissions.
 Use control-flow-sensitive last-use analysis, including uses through returned
 references and aggregates. At joins, conservatively retain possible outstanding
 loans; loops require a fixed point. Moving an inline owner invalidates its address
-and is forbidden while borrowed. A heap owner may eventually move without
+and is forbidden while borrowed. A borrow given to a call (or used by the
+operation that makes an aggregate) is live while the call or operation runs,
+even when that is its last use, so the same call cannot move the borrowed place,
+an owner that holds it, or a part of it: `f(s, &s.xs)` is refused. A heap owner may eventually move without
 moving its allocation, but start with the conservative restriction.
 
 Borrowing an element prevents container operations that can relocate, remove or

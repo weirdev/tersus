@@ -19,7 +19,7 @@ import Modules (LoadResult (..))
 import TestParserFragments (parseStatementBlock)
 import Pipeline
 import TestCopies (boxedClonePrograms)
-import TestNative (nativeExamples, referenceWritePrograms, unvalidatedPrograms, validatedPrograms)
+import TestNative (lentPartPrograms, nativeExamples, referenceWritePrograms, unvalidatedPrograms, validatedPrograms)
 import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
 import TestHarness
 import Utils
@@ -1272,6 +1272,7 @@ testOwnership =
         , TestList "programs" [TestCase name (onSource name source) | (name, source) <- validatedPrograms]
         , TestList "boxed Clone" [TestCase name (onSource name source) | (name, source, _, _) <- boxedClonePrograms]
         , TestList "reference writes" [TestCase name (onSource name source) | (name, source) <- referenceWritePrograms]
+        , TestList "lent parts" [TestCase name (onSource name source) | (name, source) <- lentPartPrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests
         , TestList "what a part may be read after" windowTests
