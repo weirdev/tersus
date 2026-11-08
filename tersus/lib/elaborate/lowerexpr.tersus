@@ -1,10 +1,13 @@
-import data::ast::ast { AstExpression, AstNode, AstValue };
+import data::ast::ast { AstExpression, AstNode, AstStatement, AstValue };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::state { intText };
-import elaborate::lowerstate { lwMalformed, Swapped, swapBuilder, Builder, LowSt, Op, Pend, RefTarget, Rv, Step, Term, argOf, boxInner, claim, fnType, forNameOf, hasInt, hasText, intAt, isMutRefTy, isTupleBase, lfail, lwBaseName, lwCat, lwCat3, lwHasByte, lwInstanceText, lwKind, lwTextAt, newBuilder, noOp, noRv, quote, lwSp, tupleParts, tyOf, typeNameOf };
-import elaborate::lowerbuild { Bi, packLocalOf, packReadMark, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, forgetRefTarget, fnConst, gotoTerm, isPrim, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valueAt, varNameOf };
-import elaborate::lower { buildFunction };
+import elaborate::lowerstate { lwMalformed, Swapped, swapBuilder, Builder, LowSt, Op, Pend, RefTarget, Rv, Step, Term, argOf, boxInner, claim, fnType, forNameOf, hasInt, hasText, intAt, isRefTy, isTupleBase, lfail, lwBaseName, lwCat, lwCat3, lwHasByte, lwInstanceText, lwKind, lwTextAt, newBuilder, noOp, noRv, quote, lwSp, tupleParts, tyOf, typeNameOf, unrefTy, wrapType, isMutRefTy };
+import elaborate::lowerbuild { Bi, packLocalOf, packReadMark, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, definedFunction, emitAssign, emitStmt, exprAt, enterScope, findRefTarget, fnConst, gotoTerm, isFunct, isPrim, leaveScope, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, stepsText, stmtAt, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valOf, valueAt, varNameOf, forgetRefTarget };
+import elaborate::lower { buildFunction, definedParamTypes, lowerStatements, skipExpr };
 import elaborate::lowerplace { fieldCtor, lowerPlace };
+
+// The operands of arguments, each captured when a later argument can change it (lowerOperands)
+struct LoweredOps { ls: LowSt, ops: List<Op>, tys: List<Int> };
 
 // The operand that holds the value of an expression (ls.op), and the type of the value (ls.ty)
 fn lowerOperand(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
@@ -244,6 +247,15 @@ fn lowerLastWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ {
         o = clone(ls.op);
         return LowSt { pend: rvPend(useRv(o)), ty: ty, ..ls };
     };
+    if x is AstExpression::BlockExpr {
+        block = x as AstExpression::BlockExpr;
+        return lowerBlockExpr(ls, src, block.xs, block.e, ty);
+    };
+    if x is AstExpression::IfExpr {
+        branch = x as AstExpression::IfExpr;
+        return lowerIfExpr(ls, src, branch.c, branch.a, branch.b, ty);
+    };
+    if x is AstExpression::Ascribed { return lfail(ls, "An annotated expression reached the lowering"); };
     if !(x is AstExpression::F) { return lfail(ls, "Lowering: a record that is not an expression"); };
     c = connectiveOf(src, e);
     args = listItems(src, (x as AstExpression::F).xs);
@@ -256,18 +268,94 @@ fn lowerLastWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ {
         return lowerBuiltin(ls, src, b, &args, ty);
     };
     callee = clone(ls.op);
+    signature = ls.ty;
+    ls = anyEffects(ls, src, &args);
+    if ls.yes {
+        ls = captureOperand(ls, 0 - 1, callee, signature);
+        callee = clone(ls.op);
+    };
     method = false;
     fx = exprAt(src, funct);
     if fx is AstExpression::Var { calleeName = nameText(src, (fx as AstExpression::Var).n); method = hasPathSep(&calleeName); };
-    ops = [];
-    first = true;
-    for a in &args {
-        if first && method { ls = lowerReceiver(ls, src, a); } else { ls = lowerOperand(ls, src, a); };
-        first = false;
-        if !ls.ok { return ls; };
-        ops = push(ops, clone(ls.op));
-    };
+    references = [];
+    for p in lwParameters(&ls, signature) { references = push(references, lwReferenceKind(&ls, p)); };
+    LoweredOps { ls: next, ops: ops, tys: tys } = lowerOperands(ls, src, &references, &args, method);
+    ls = next;
+    if !ls.ok { return ls; };
     return LowSt { pend: Pend { isCall: true, rv: noRv(), callee: callee, args: ops }, ty: ty, ..ls };
+};
+
+// A block that gives a value: its statements in a scope of their own, then the value its last expression gives, in a
+// fresh local
+fn lowerBlockExpr(ls: LowSt, src: &List<AstNode>, xs: Int, result: Int, ty: Int) -> LowSt ~ {
+    ls = tempLocal(ls, ty);
+    dest = ls.root;
+    ls = enterScope(ls);
+    ls = lowerStatements(ls, src, listItems(src, xs));
+    if ls.bHasOpen {
+        ls = lowerLast(ls, src, result);
+        if !ls.ok { return ls; };
+        pend = clone(ls.pend);
+        ls = finishInto(ls, dest, pend);
+    } else {
+        ls = skipExpr(ls, src, result);
+    };
+    ls = leaveScope(ls);
+    return LowSt { pend: rvPend(useRv(copyOp(dest))), ty: ty, ..ls };
+};
+
+// An if that gives a value: each branch gives it to the same fresh local, and the references whose places the two
+// branches leave alike keep them after the join
+fn lowerIfExpr(ls: LowSt, src: &List<AstNode>, cond: Int, yes: Int, no: Int, ty: Int) -> LowSt ~ {
+    ls = tempLocal(ls, ty);
+    result = ls.root;
+    ls = newBlock(ls);
+    yesB = ls.id;
+    ls = newBlock(ls);
+    noB = ls.id;
+    ls = newBlock(ls);
+    joinB = ls.id;
+    ls = lowerCondition(ls, src, cond, yesB, noB);
+    before = clone(ls.bRefTargets);
+    ls = openBlock(ls, yesB);
+    ls = lowerLast(ls, src, yes);
+    if !ls.ok { return ls; };
+    pend = clone(ls.pend);
+    ls = finishInto(ls, result, pend);
+    yesOpen = ls.bHasOpen;
+    if yesOpen { ls = terminate(ls, gotoTerm(joinB)); };
+    left = clone(ls.bRefTargets);
+    ls = LowSt { bRefTargets: before, ..ls };
+    ls = openBlock(ls, noB);
+    ls = lowerLast(ls, src, no);
+    if !ls.ok { return ls; };
+    pend = clone(ls.pend);
+    ls = finishInto(ls, result, pend);
+    noOpen = ls.bHasOpen;
+    if noOpen { ls = terminate(ls, gotoTerm(joinB)); };
+    common = commonRefTargets(&left, &ls.bRefTargets);
+    ls = LowSt { bRefTargets: common, ..ls };
+    if yesOpen || noOpen { ls = openBlock(ls, joinB); };
+    return LowSt { pend: rvPend(useRv(copyOp(result))), ty: ty, ..ls };
+};
+
+// The places two branches both leave each reference local at
+fn commonRefTargets(left: &List<RefTarget>, right: &List<RefTarget>) -> List<RefTarget> ~ {
+    out = [];
+    for l in left {
+        for r in right {
+            if l.local = r.local && l.root = r.root && stepsText(&l.steps) = stepsText(&r.steps) { out = push(out, clone(l)); };
+        };
+    };
+    return out;
+};
+
+// The place a reference local is to after an assignment: one, or none
+fn setRefTarget(ls: LowSt, dest: Int, known: Bool, root: Int, steps: List<Step>) -> LowSt ~ {
+    targets = [];
+    for t in &ls.bRefTargets { if t.local != dest { targets = push(targets, clone(t)); }; };
+    if known { targets = push(targets, RefTarget { local: dest, root: root, steps: steps }); };
+    return LowSt { bRefTargets: targets, ..ls };
 };
 
 fn hasPathSep(name: &String) -> Bool ~ {
@@ -308,12 +396,13 @@ fn resolveHead(ls: LowSt, src: &List<AstNode>, funct: Int) -> LowSt ~ {
         name = nameText(src, (x as AstExpression::Var).n);
         found = lookupBinding(&ls, &name);
         if found.found {
-            if found.b.isLocal { return LowSt { id: 0 - 1, op: copyOp(found.b.local), ..ls }; };
-            return LowSt { id: 0 - 1, op: fnConst(&found.b.fname), ..ls };
+            if found.b.isLocal { return LowSt { id: 0 - 1, op: copyOp(found.b.local), ty: found.b.ty, ..ls }; };
+            return LowSt { id: 0 - 1, op: fnConst(&found.b.fname), ty: found.b.ty, ..ls };
         };
         if HashMap::contains(&ls.globals, &name) {
             g = HashMap::lookup(&ls.globals, &name, "");
-            return LowSt { id: 0 - 1, op: fnConst(&g), ..ls };
+            t = HashMap::lookup(&ls.globalTys, &name, 0 - 1);
+            return LowSt { id: 0 - 1, op: fnConst(&g), ty: t, ..ls };
         };
         if HashMap::contains(&ls.std, &name) {
             sb = HashMap::lookup(&ls.std, &name, 0 - 1);
@@ -436,14 +525,12 @@ fn lowerBuiltin(ls: LowSt, src: &List<AstNode>, b: Int, args: &List<Int>, result
         o = clone(ls.op);
         return LowSt { pend: rvPend(unaryRv("deref", &o)), ty: result, ..ls };
     };
-    ops = [];
-    tys = [];
-    for a in args {
-        ls = lowerOperand(ls, src, a);
-        if !ls.ok { return ls; };
-        ops = push(ops, clone(ls.op));
-        tys = push(tys, ls.ty);
-    };
+    // (the sequence a read of it is from is lent to the read, so a later argument that changes it is not seen)
+    references = [];
+    if isPrim(&bi, "Get") || isPrim(&bi, "First") || isPrim(&bi, "Last") || isPrim(&bi, "Size") { references = push(references, 0); };
+    LoweredOps { ls: next, ops: ops, tys: tys } = lowerOperands(ls, src, &references, args, false);
+    ls = next;
+    if !ls.ok { return ls; };
     pair = pairWords(&bi);
     if size(pair) = 2 {
         ls = pairRvalue(ls, &bi, &pair, result, &ops);
@@ -679,4 +766,233 @@ fn pointerNames() -> List<String> ~ {
     t = push(push(push(push(push(push(push(t, "AddrWrite"), "AddrTake"), "AddrDropValue"), "AddrDropRange"), "AddrResize"), "AddrFree"), "BlockNew");
     t = push(push(push(push(push(push(push(t, "BlockTaken"), "BlockResized"), "BlockSplitLo"), "BlockSplitHi"), "BlockJoin"), "BlockAssume"), "BlockCast");
     return push(push(push(push(push(t, "UninitEmpty"), "UninitNew"), "UninitGet"), "UninitTake"), "UninitDiscard");
+};
+
+// ---- what a later argument of a call can change ----
+
+// The parameters of a function type, none for another type
+fn lwParameters(ls: &LowSt, t: Int) -> List<Int> ~ {
+    k = lwKind(ls, t);
+    if k = 13 { return lwParameters(ls, argOf(ls, t, 0)); };
+    if k != 14 { return []; };
+    args = tyOf(ls, t).args;
+    out = [];
+    i = 0;
+    for a in &args {
+        if i + 1 < size(args) { out = push(out, a); };
+        i = i + 1;
+    };
+    return out;
+};
+
+// How a parameter of this type is lent: 0 for reading, 1 for updating, -1 not lent
+fn lwReferenceKind(ls: &LowSt, t: Int) -> Int ~ {
+    k = lwKind(ls, t);
+    if k = 10 { return 0; };
+    if k = 11 { return 1; };
+    return 0 - 1;
+};
+
+// Whether a value of the type can hold an update reference, or a type not known here (a type parameter, a type not yet
+// decided) that may be one
+fn mutableValueType(ls: &LowSt, seen: &List<String>, t: Int) -> Bool ~ {
+    k = lwKind(ls, t);
+    if k = 11 || k = 12 || k = 15 { return true; };
+    if k = 10 || k = 6 || k = 9 { return mutableValueType(ls, seen, argOf(ls, t, 0)); };
+    if k = 5 {
+        variant = tyOf(ls, t).name;
+        if hasText(seen, &variant) { return false; };
+        inner = push(clone(seen), clone(variant));
+        members = HashMap::lookup(&ls.variantFields, &variant, []);
+        return anyMutable(ls, &inner, &members);
+    };
+    if k != 4 { return false; };
+    x = tyOf(ls, t);
+    name = lwInstanceText(ls, &x.name, &x.args);
+    if hasText(seen, &name) { return false; };
+    inner = push(clone(seen), clone(name));
+    if HashMap::contains(&ls.typeFields, &name) {
+        fields = HashMap::lookup(&ls.typeFields, &name, []);
+        return anyMutable(ls, &inner, &fields);
+    };
+    if HashMap::contains(&ls.genericFields, &x.name) {
+        fields = HashMap::lookup(&ls.genericFields, &x.name, []);
+        return anyMutable(ls, &inner, &fields);
+    };
+    for a in &x.args { if lwKind(ls, a) != 20 && mutableValueType(ls, seen, a) { return true; }; };
+    return false;
+};
+
+fn anyMutable(ls: &LowSt, seen: &List<String>, tys: &List<Int>) -> Bool ~ {
+    for t in tys { if mutableValueType(ls, seen, t) { return true; }; };
+    return false;
+};
+
+// Whether evaluating an expression can change a variable (ls.yes): an assignment, or a call of a function that can
+// update through one of its parameters, in it
+fn exprEffects(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return LowSt { yes: false, ..ls }; };
+    x = exprAt(src, e);
+    if x is AstExpression::IfExpr {
+        branch = x as AstExpression::IfExpr;
+        parts = push(push(push([], branch.c), branch.a), branch.b);
+        return anyEffects(ls, src, &parts);
+    };
+    if x is AstExpression::BlockExpr {
+        block = x as AstExpression::BlockExpr;
+        stmts = listItems(src, block.xs);
+        ls = stmtsEffect(ls, src, &stmts);
+        if ls.yes { return ls; };
+        return exprEffects(ls, src, block.e);
+    };
+    if x is AstExpression::Ascribed { return exprEffects(ls, src, (x as AstExpression::Ascribed).e); };
+    if !(x is AstExpression::F) { return LowSt { yes: false, ..ls }; };
+    call = x as AstExpression::F;
+    parts = push(listItems(src, call.xs), call.f);
+    ls = anyEffects(ls, src, &parts);
+    if ls.yes { return ls; };
+    mutates = headMutates(&ls, src, call.f);
+    return LowSt { yes: mutates, ..ls };
+};
+
+fn anyEffects(ls: LowSt, src: &List<AstNode>, es: &List<Int>) -> LowSt ~ {
+    for e in es {
+        ls = exprEffects(ls, src, e);
+        if ls.yes { return ls; };
+    };
+    return LowSt { yes: false, ..ls };
+};
+
+// (a function whose type is not known, other than a builtin, may update anything)
+fn headMutates(ls: &LowSt, src: &List<AstNode>, f: Int) -> Bool ~ {
+    b = builtinOfExpr(src, f);
+    if b >= 0 { return isPrim(&biOf(src, b), "BorrowMutOf"); };
+    x = exprAt(src, f);
+    if !(x is AstExpression::Var) { return true; };
+    name = nameText(src, (x as AstExpression::Var).n);
+    found = lookupBinding(ls, &name);
+    t = 0 - 1;
+    if found.found {
+        t = found.b.ty;
+    } else {
+        if !HashMap::contains(&ls.globalTys, &name) {
+            if !HashMap::contains(&ls.std, &name) { return true; };
+            return isPrim(&biOf(src, HashMap::lookup(&ls.std, &name, 0 - 1)), "BorrowMutOf");
+        };
+        t = HashMap::lookup(&ls.globalTys, &name, 0 - 1);
+    };
+    params = lwParameters(ls, t);
+    none = [];
+    return anyMutable(ls, &none, &params);
+};
+
+fn stmtsEffect(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
+    for s in stmts {
+        ls = stmtEffect(ls, src, s);
+        if ls.yes { return ls; };
+    };
+    return LowSt { yes: false, ..ls };
+};
+
+fn stmtEffect(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
+    if !(nodeIn(src, s) is AstNode::Statement) { return LowSt { yes: false, ..ls }; };
+    stmt = stmtAt(src, s);
+    if stmt is AstStatement::Assign {
+        if !isFunctionValue(src, (stmt as AstStatement::Assign).e) { return LowSt { yes: true, ..ls }; };
+        f = definedFunction(src, clone(stmt));
+        if f < 0 { return LowSt { yes: false, ..ls }; };
+        ls = definedParamTypes(ls, src, f);
+        params = clone(ls.tyList);
+        none = [];
+        mutates = anyMutable(&ls, &none, &params);
+        return LowSt { yes: mutates, ..ls };
+    };
+    if stmt is AstStatement::AssignDeref || stmt is AstStatement::PackLoop { return LowSt { yes: true, ..ls }; };
+    if stmt is AstStatement::Let { return exprEffects(ls, src, (stmt as AstStatement::Let).e); };
+    if stmt is AstStatement::Return { return exprEffects(ls, src, (stmt as AstStatement::Return).e); };
+    if stmt is AstStatement::Block {
+        inner = listItems(src, (stmt as AstStatement::Block).xs);
+        return stmtsEffect(ls, src, &inner);
+    };
+    if stmt is AstStatement::If {
+        branch = stmt as AstStatement::If;
+        ls = exprEffects(ls, src, branch.e);
+        if ls.yes { return ls; };
+        yes = listItems(src, branch.a);
+        ls = stmtsEffect(ls, src, &yes);
+        if ls.yes { return ls; };
+        no = listItems(src, branch.b);
+        return stmtsEffect(ls, src, &no);
+    };
+    if stmt is AstStatement::While {
+        w = stmt as AstStatement::While;
+        ls = exprEffects(ls, src, w.e);
+        if ls.yes { return ls; };
+        body = listItems(src, w.xs);
+        return stmtsEffect(ls, src, &body);
+    };
+    return LowSt { yes: false, ..ls };
+};
+
+// (a function value: a function defined here, or a builtin)
+fn isFunctionValue(src: &List<AstNode>, e: Int) -> Bool ~ {
+    v = valOf(src, e);
+    return v >= 0 && isFunct(src, v);
+};
+
+// A copy of an operand made before the later arguments run (ls.op, ls.ty): for a parameter lent (reference 0 for
+// reading, 1 for updating), a borrow of the local instead, unless the local is already a reference
+fn captureOperand(ls: LowSt, reference: Int, o: Op, ty: Int) -> LowSt ~ {
+    if o.k != 0 { return LowSt { op: o, ty: ty, ..ls }; };
+    l = o.l;
+    declared = false;
+    declTy = 0 - 1;
+    if l >= 0 && l < size(ls.bLocals) {
+        d = clone(get(ls.bLocals, l));
+        if d.present { declared = true; declTy = d.ty; };
+    };
+    if reference >= 0 && declared && !isRefTy(&ls, declTy) {
+        kind = 10;
+        if reference = 1 { kind = 11; };
+        inner = unrefTy(&ls, ty);
+        ls = wrapType(ls, kind, inner);
+        refTy = ls.ty;
+        ls = tempLocal(ls, refTy);
+        captured = ls.root;
+        ls = finishInto(ls, captured, rvPend(borrowRv(l, [], reference = 1)));
+        return LowSt { op: copyOp(captured), ty: refTy, ..ls };
+    };
+    ls = tempLocal(ls, ty);
+    captured = ls.root;
+    ls = finishInto(ls, captured, rvPend(useRv(copyOp(l))));
+    return LowSt { op: copyOp(captured), ty: ty, ..ls };
+};
+
+// The operands of arguments, left to right, each captured when a later argument can change it
+fn lowerOperands(ls: LowSt, src: &List<AstNode>, references: &List<Int>, args: &List<Int>, method: Bool) -> LoweredOps ~ {
+    ops = [];
+    tys = [];
+    i = 0;
+    for e in args {
+        if i = 0 && method { ls = lowerReceiver(ls, src, e); } else { ls = lowerOperand(ls, src, e); };
+        if !ls.ok { return LoweredOps { ls: ls, ops: ops, tys: tys }; };
+        o = clone(ls.op);
+        t = ls.ty;
+        rest = [];
+        j = 0;
+        for later in args {
+            if j > i { rest = push(rest, later); };
+            j = j + 1;
+        };
+        ls = anyEffects(ls, src, &rest);
+        if ls.yes {
+            ls = captureOperand(ls, intAt(references, i), o, t);
+            o = clone(ls.op);
+            t = ls.ty;
+        };
+        ops = push(ops, o);
+        tys = push(tys, t);
+        i = i + 1;
+    };
+    return LoweredOps { ls: ls, ops: ops, tys: tys };
 };

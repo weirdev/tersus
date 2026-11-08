@@ -3,7 +3,7 @@ import data::ast::ast { AstElaborated, AstEntry, AstNode, AstOptName, AstProgram
 import data::codec::codec { Parsed, Token, Type, catStrings, done, intAt, tokenize };
 import data::reader::reader { parseAstLines, readAstRecords, readRecord, readRecords };
 import elaborate::builtins { loadBuiltins };
-import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
+import elaborate::check { checkStatements, fnSigOf, functionValue, localScopes, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
 import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, localName, shapedLibraries, definedFunctions, entryOf, implsEq, libIndex, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
 import elaborate::decls { fileDeclarations };
@@ -25,7 +25,7 @@ import elaborate::lowerout { MirOut, lowerUnit, noMir };
 
 fn newState() -> St ~ {
     return St {
-        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0,
+        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0, localNames: HashMap::new(),
         wireVersion: false, wireProtocols: HashMap::new(), wireOwnership: HashMap::new(),
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
         traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), references: HashMap::new(), referenceList: [], boundStubs: HashMap::new(), boundStubSigs: [], builtinStubs: HashSet::new(), genericOut: [], genericTypes: [], fns: HashMap::new(), scopes: oneScope(),
@@ -655,6 +655,10 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         };
     };
     if !prepared.ok { st = unresolvedState(st, prepared.msg); };
+    rawStmts = stmts;
+    st = localScopes(st, &rawStmts);
+    scopedStmts = listItems(&st.nodes, st.nid);
+    st = St { localNames: HashMap::new(), ..st };
     st = loadBuiltins(st, table);
     selected = [];
     if unit.hasCatalog && st.status = 0 { selected = shapedLibraries(&available, librariesFor(&probe)); };
@@ -694,16 +698,16 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     };
     if st.status = 0 {
         if st.wireVersion {
-            st = wireBindDeclarations(st, &stmts);
-            st = wireStorageDeclarations(st, &stmts);
+            st = wireBindDeclarations(st, &rawStmts);
+            st = wireStorageDeclarations(st, &rawStmts);
             st = wireValidateBindings(st);
         };
-        st = gatherSignatures(st, &stmts);
+        st = gatherSignatures(st, &rawStmts);
         if unit.predeclaring {
-            st = predeclareOwn(st, &stmts);
-            st = checkOwnFinite(st, &stmts);
+            st = predeclareOwn(st, &rawStmts);
+            st = checkOwnFinite(st, &rawStmts);
         };
-        if st.status = 0 { st = checkStatements(st, true, &stmts); };
+        if st.status = 0 { st = checkStatements(st, true, &scopedStmts); };
     };
     out = noProgram("elaborated");
     iface = noProgram("interface");

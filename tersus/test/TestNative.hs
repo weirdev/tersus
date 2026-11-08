@@ -1,5 +1,6 @@
 module TestNative
     ( testNative
+    , testNativeErgonomics
     , nativeExamples
     , validatedPrograms
     , unvalidatedPrograms
@@ -36,6 +37,7 @@ import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShare
 import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
 import Pipeline
+import TestErgonomics (ergonomicsPrograms, ergonomicsFunctionPrograms)
 import TestHarness
 import TestCopies (boxedClonePrograms, boxedArrayClonePrograms)
 import Utils
@@ -43,6 +45,11 @@ import Utils
 -- Native code: the LLVM IR of a program, and the executable clang builds from it. The executable has to do what the
 -- executor of the MIR does, so each program here is built, run, and compared with `tersus eval`: the same output, the same
 -- error and the same exit status. The builds need clang, and pass without it.
+
+testNativeErgonomics :: Test
+testNativeErgonomics = TestList "testNativeErgonomics"
+    ([TestCase name (sameAsMir name source) | (name, source) <- ergonomicsPrograms]
+    ++ [TestCase name (sameAsUnvalidated name source) | (name, source) <- ergonomicsFunctionPrograms])
 
 testNative :: Test
 testNative =
@@ -66,8 +73,9 @@ testNative =
         , TestParallel "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
-        , TestParallel "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
+        , TestParallel "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms ++ ergonomicsFunctionPrograms]
         , TestParallel "references given two places" [TestCase name (sameValueUnvalidated name source value) | (name, source, value) <- twoPlacePrograms]
+        , TestParallel "ergonomics" [TestCase name (sameAsMir name source) | (name, source) <- ergonomicsPrograms]
         , TestParallel "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestParallel "references" [TestCase name (sameAsMir name source) | (name, source) <- referencePrograms]
         , TestParallel "boxed Clone" [TestCase name (sameAsMir name source) | (name, source, _, _) <- boxedClonePrograms]
@@ -122,7 +130,7 @@ nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "args", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
-        , "enums", "files", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
+        , "enums", "language_ergonomics", "files", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text"
         ]
@@ -845,7 +853,7 @@ referenceWritePrograms =
 
 -- Every program of these tests that validates, and every one that is lowered without being validated
 validatedPrograms :: [(String, String)]
-validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ nativeStoragePrograms ++ stopPrograms
+validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ nativeStoragePrograms ++ ergonomicsPrograms ++ stopPrograms
 
 nativeStoragePrograms :: [(String, String)]
 nativeStoragePrograms =
@@ -918,7 +926,7 @@ sameValueUnvalidated name source value = case Compile.lowerSource True source of
         other -> pure (Just ("expected " ++ show value ++ ", got " ++ show other))
 
 unvalidatedPrograms :: [(String, String)]
-unvalidatedPrograms = functionPrograms
+unvalidatedPrograms = functionPrograms ++ ergonomicsFunctionPrograms
 
 -- Programs that stop on an overflow, with the message and status of `tersus run`
 stopPrograms :: [(String, String)]

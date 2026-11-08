@@ -1,10 +1,11 @@
-import data::ast::ast { AstBuiltin, AstExpression };
+import data::ast::ast { AstBuiltin, AstExpression, AstNode };
 import data::codec::codec { catStrings };
 import elaborate::builtins { builtinKey, builtinOfValue };
-import elaborate::calls { builtinRecord, lookupVar };
-import elaborate::core { holdsRef };
+import elaborate::calls { argsOfFn, builtinRecord, lookupVar, scopeLookup, typedChild, valueType };
+import elaborate::core { holdsRef, isBoxTy, isListTy, unrefOf };
+import elaborate::out { emit };
 import elaborate::records { exprOf, isVar, listItems, nameText, varName };
-import elaborate::state { Place, St, indexIn, joinWith, kindOf, nth, typeError, zonk };
+import elaborate::state { CtorInfo, Place, St, TE, indexIn, instanceName, intText, joinWith, kindOf, nth, tyAt, typeError, wrapTy, zonk };
 
 // A call of an expression record: its head, its arguments, the key of the builtin its head is when that is a
 // value (key), the name its head is when that is a variable (callee), and the field a field builtin reads
@@ -67,6 +68,15 @@ fn derefRoot(st: &St, e: Int) -> Int ~ {
     return 0 - 1;
 };
 
+fn derefSteps(st: &St, e: Int) -> List<String> ~ {
+    c = callOf(st, e);
+    if c.ok && c.key = "Field" && size(c.args) = 1 {
+        return push(derefSteps(st, get(c.args, 0)), clone(c.field));
+    };
+    if c.ok && isGetCall(&c) { return push(derefSteps(st, get(c.args, 0)), ""); };
+    return [];
+};
+
 fn placeForm(st: &St, e: Int) -> Bool ~ {
     if isVar(st, e) { return true; };
     c = callOf(st, e);
@@ -85,28 +95,281 @@ fn placeRoot(st: &St, e: Int) -> String ~ {
     return "";
 };
 
+fn expressionOriginName(e: Int) -> String [{ }] [{ }] {
+    return catStrings("$expression ", intText(e));
+};
+
+fn isExpressionOrigin(name: &String) -> Bool [{ }] [{ }] {
+    return name.startsWith("$expression ");
+};
+
+fn aliasesOf(st: &St, name: &String) -> List<Place> ~ {
+    out = [];
+    i = 0;
+    while i < size(st.aliasNames) && i < size(st.aliasPlaces) [{ affirm i >= 0; }] ~ {
+        if get(st.aliasNames, i) = clone(name) { out = push(out, clone(get(st.aliasPlaces, i))); };
+        i = i + 1;
+    };
+    return out;
+};
+
+fn uniquePlaces(places: &List<Place>) -> List<Place> ~ {
+    out = [];
+    for place in places {
+        found = false;
+        for old in &out { if old.root = place.root && old.steps = place.steps && old.ok = place.ok { found = true; }; };
+        if !found { out = push(out, clone(place)); };
+    };
+    return out;
+};
+
+fn uniqueOrigins(names: &List<String>) -> List<String> ~ {
+    out = [];
+    for name in names { if indexIn(&out, name) < 0 { out = push(out, clone(name)); }; };
+    return out;
+};
+
+fn resolveRefPlaces(st: &St, root: String, steps: List<String>) -> List<Place> ~ {
+    return resolvePlacesSeen(st, root, steps, []);
+};
+
+fn resolvePlacesSeen(st: &St, root: String, steps: List<String>, seen: List<String>) -> List<Place> ~ {
+    if indexIn(&seen, &root) >= 0 { return push([], Place { ok: true, root: root, steps: steps }); };
+    aliases = aliasesOf(st, &root);
+    if size(aliases) = 0 { return push([], Place { ok: true, root: root, steps: steps }); };
+    seen = push(seen, clone(root));
+    out = [];
+    for alias in &aliases {
+        joined = clone(alias.steps);
+        for step in &steps { joined = push(joined, clone(step)); };
+        for place in resolvePlacesSeen(st, clone(alias.root), joined, clone(seen)) { out = push(out, place); };
+    };
+    return uniquePlaces(&out);
+};
+
+fn putAliases(st: St, name: &String, places: &List<Place>) -> St ~ {
+    st = dropAlias(st, name);
+    names = st.aliasNames;
+    aliases = st.aliasPlaces;
+    for place in uniquePlaces(places) { names = push(names, clone(name)); aliases = push(aliases, place); };
+    return St { aliasNames: names, aliasPlaces: aliases, ..st };
+};
+
+fn argumentPlaces(st: &St, e: Int) -> List<Place> ~ {
+    name = expressionOriginName(e);
+    captured = aliasesOf(st, &name);
+    if size(captured) > 0 { return captured; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::BlockExpr { return argumentPlaces(st, (ex as AstExpression::BlockExpr).e); };
+    if ex is AstExpression::Ascribed { return argumentPlaces(st, (ex as AstExpression::Ascribed).e); };
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        out = argumentPlaces(st, a.a);
+        for place in argumentPlaces(st, a.b) { out = push(out, place); };
+        return uniquePlaces(&out);
+    };
+    place = placeSteps(st, e);
+    if place.ok { return resolveRefPlaces(st, clone(place.root), clone(place.steps)); };
+    return expressionPlaces(st, e);
+};
+
+fn fromArgumentPlaces(st: &St, params: &List<String>, froms: &List<String>, args: &List<Int>) -> List<Place> ~ {
+    out = [];
+    i = 0;
+    while i < size(params) && i < size(args) [{ affirm i >= 0; }] ~ {
+        if indexIn(froms, &get(params, i)) >= 0 {
+            for place in argumentPlaces(st, get(args, i)) { out = push(out, place); };
+        };
+        i = i + 1;
+    };
+    return uniquePlaces(&out);
+};
+
+fn expressionPlaces(st: &St, e: Int) -> List<Place> ~ {
+    name = expressionOriginName(e);
+    captured = aliasesOf(st, &name);
+    if size(captured) > 0 { return captured; };
+    if isVar(st, e) { return resolveRefPlaces(st, varName(st, e), []); };
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        out = expressionPlaces(st, a.a);
+        for place in expressionPlaces(st, a.b) { out = push(out, place); };
+        return uniquePlaces(&out);
+    };
+    if ex is AstExpression::BlockExpr { return expressionPlaces(st, (ex as AstExpression::BlockExpr).e); };
+    if ex is AstExpression::Ascribed { return expressionPlaces(st, (ex as AstExpression::Ascribed).e); };
+    c = callOf(st, e);
+    if c.ok && c.key = "DerefOf" && size(c.args) = 1 { return expressionPlaces(st, get(c.args, 0)); };
+    if c.ok && (c.key = "BorrowOf" || c.key = "BorrowMutOf") && size(c.args) = 1 {
+        place = placeSteps(st, get(c.args, 0));
+        if place.ok { return resolveRefPlaces(st, clone(place.root), clone(place.steps)); };
+        return expressionPlaces(st, get(c.args, 0));
+    };
+    if c.ok && c.key = "Field" && size(c.args) = 1 {
+        working = exprRefOrigins(clone(st), get(c.args, 0));
+        roots = clone(working.names);
+        out = [];
+        for root in &roots { out = push(out, Place { ok: true, root: clone(root), steps: push([], "") }); };
+        return out;
+    };
+    // Declared from bounds identify possible roots, not an exact body-derived place.
+    out = [];
+    if c.ok && size(c.callee.bytes) > 0 {
+        known = fromsOf(st, &c.callee);
+        if known.ok {
+            for place in fromArgumentPlaces(st, &known.params, &known.froms, &c.args) { out = push(out, place); };
+        } else {
+            if c.callee = st.current { for place in fromArgumentPlaces(st, &st.params, &st.resultFrom, &c.args) { out = push(out, place); }; };
+        };
+    };
+    return uniquePlaces(&out);
+};
+
+fn captureExpression(st: St, te: &TE) -> St ~ {
+    if st.status != 0 || size(te.types) = 0 { return st; };
+    name = expressionOriginName(te.node);
+    if indexIn(&st.originNames, &name) >= 0 { return st; };
+    st = zonk(st, get(te.types, 0));
+    k = kindOf(st, st.ty);
+    st = holdsRef(st, st.ty);
+    if st.status != 0 { return st; };
+    if !st.ok { return St { te: TE { node: te.node, types: clone(te.types) }, ..st }; };
+    next = st.next;
+    roots = [];
+    places = [];
+    if k = 10 || k = 11 {
+        places = expressionPlaces(st, te.node);
+        for place in &places { roots = push(roots, clone(place.root)); };
+    } else {
+        st = exprRefOrigins(st, te.node);
+        if st.status != 0 { return st; };
+        roots = clone(st.names);
+    };
+    st = St { next: next, ..st };
+    st = emit(st, AstNode::Expression { value: exprOf(st, te.node) });
+    captured = TE { node: st.nid, types: clone(te.types) };
+    name = expressionOriginName(captured.node);
+    st = putOrigins(st, &name, uniqueOrigins(&roots));
+    st = putAliases(st, &name, &places);
+    return St { te: captured, ..st };
+};
+
+fn copyExpressionOrigins(st: St, source: Int, dest: Int) -> St ~ {
+    before = expressionOriginName(source);
+    after = expressionOriginName(dest);
+    i = indexIn(&st.originNames, &before);
+    if i < 0 || i >= size(st.originRoots) { return st; };
+    roots = clone(get(st.originRoots, i));
+    places = aliasesOf(st, &before);
+    st = putOrigins(st, &after, roots);
+    return putAliases(st, &after, &places);
+};
+
+fn resetBranchReferences(st: St, before: &St) -> St ~ {
+    names = clone(before.aliasNames);
+    aliases = clone(before.aliasPlaces);
+    i = 0;
+    while i < size(st.aliasNames) && i < size(st.aliasPlaces) [{ affirm i >= 0; }] ~ {
+        name = get(st.aliasNames, i);
+        if isExpressionOrigin(name) && indexIn(&before.aliasNames, name) < 0 { names = push(names, clone(name)); aliases = push(aliases, clone(get(st.aliasPlaces, i))); };
+        i = i + 1;
+    };
+    origins = clone(before.originNames);
+    roots = clone(before.originRoots);
+    i = 0;
+    while i < size(st.originNames) && i < size(st.originRoots) [{ affirm i >= 0; }] ~ {
+        name = get(st.originNames, i);
+        if isExpressionOrigin(name) && indexIn(&before.originNames, name) < 0 { origins = push(origins, clone(name)); roots = push(roots, clone(get(st.originRoots, i))); };
+        i = i + 1;
+    };
+    return St { aliasNames: names, aliasPlaces: aliases, originNames: origins, originRoots: roots, ..st };
+};
+
+fn joinBranchReferences(st: St, left: &St) -> St ~ {
+    allNames = uniqueOrigins(&left.aliasNames);
+    for name in allNames {
+        places = aliasesOf(st, &name);
+        for place in aliasesOf(left, &name) { places = push(places, place); };
+        st = putAliases(st, &name, &places);
+    };
+    i = 0;
+    while i < size(left.originNames) && i < size(left.originRoots) [{ affirm i >= 0; }] ~ {
+        name = get(left.originNames, i);
+        at = indexIn(&st.originNames, name);
+        roots = clone(get(left.originRoots, i));
+        if at >= 0 && at < size(st.originRoots) { for root in &get(st.originRoots, at) { roots = push(roots, clone(root)); }; };
+        st = putOrigins(st, name, uniqueOrigins(&roots));
+        i = i + 1;
+    };
+    return st;
+};
+
+fn namedReferences(st: &St, before: St) -> St ~ {
+    names = [];
+    aliases = [];
+    i = 0;
+    while i < size(st.aliasNames) && i < size(st.aliasPlaces) [{ affirm i >= 0; }] ~ {
+        name = get(st.aliasNames, i);
+        if !isExpressionOrigin(name) {
+            place = clone(get(st.aliasPlaces, i));
+            steps = [];
+            if size(place.steps) > 0 { steps = push(steps, clone(get(place.steps, 0))); };
+            names = push(names, clone(name));
+            aliases = push(aliases, Place { steps: steps, ..place });
+        };
+        i = i + 1;
+    };
+    roots = [];
+    originNames = [];
+    i = 0;
+    while i < size(st.originNames) && i < size(st.originRoots) [{ affirm i >= 0; }] ~ {
+        name = get(st.originNames, i);
+        if !isExpressionOrigin(name) { originNames = push(originNames, clone(name)); roots = push(roots, uniqueOrigins(&get(st.originRoots, i))); };
+        i = i + 1;
+    };
+    named = St { aliasNames: names, aliasPlaces: aliases, originNames: originNames, originRoots: roots, ..before };
+    return resetBranchReferences(before, &named);
+};
+
+fn sameReferences(left: &St, right: &St) -> Bool ~ {
+    names = uniqueOrigins(&left.aliasNames);
+    others = uniqueOrigins(&right.aliasNames);
+    if size(names) != size(others) { return false; };
+    for name in names {
+        leftPlaces = aliasesOf(left, &name);
+        rightPlaces = aliasesOf(right, &name);
+        a = uniquePlaces(&leftPlaces);
+        b = uniquePlaces(&rightPlaces);
+        if size(a) != size(b) { return false; };
+        for place in &a {
+            found = false;
+            for other in &b { if place.root = other.root && place.steps = other.steps && place.ok = other.ok { found = true; }; };
+            if !found { return false; };
+        };
+    };
+    names = uniqueOrigins(&left.originNames);
+    others = uniqueOrigins(&right.originNames);
+    if size(names) != size(others) { return false; };
+    for name in names {
+        li = indexIn(&left.originNames, &name);
+        ri = indexIn(&right.originNames, &name);
+        if ri < 0 || li < 0 || ri >= size(right.originRoots) || li >= size(left.originRoots) { return false; };
+        a = uniqueOrigins(&get(left.originRoots, li));
+        b = uniqueOrigins(&get(right.originRoots, ri));
+        if size(a) != size(b) { return false; };
+        for root in &a { if indexIn(&b, root) < 0 { return false; }; };
+    };
+    return true;
+};
+
 fn aliasIndex(st: &St, name: &String) -> Int ~ { return indexIn(&st.aliasNames, name); };
 
 // The place a root and steps are really of, through the references a local holds (resolveRefPlace)
 fn resolveRefPlace(st: &St, root: String, steps: List<String>) -> Place ~ {
-    seen = [];
-    var = root;
-    path = steps;
-    going = true;
-    while going [{ }] ~ {
-        if indexIn(&seen, &var) >= 0 { going = false; } else {
-            i = aliasIndex(st, &var);
-            if i < 0 || i >= size(st.aliasPlaces) { going = false; } else {
-                alias = get(st.aliasPlaces, i);
-                seen = push(seen, clone(var));
-                joined = clone(alias.steps);
-                for s in &path { joined = push(joined, clone(s)); };
-                var = clone(alias.root);
-                path = joined;
-            };
-        };
-    };
-    return Place { ok: true, root: var, steps: path };
+    places = resolveRefPlaces(st, root, steps);
+    if size(places) = 1 { return clone(get(places, 0)); };
+    return noPlace();
 };
 
 fn writesTarget(place: &Place) -> String ~ {
@@ -141,9 +404,11 @@ fn writesText(st: &St) -> String ~ {
 // A call that is given a place of an update parameter for updating may change it (checkCallWrites)
 fn checkCallWrites(st: St, e: Int) -> St ~ {
     if st.status != 0 || size(st.writes) = 0 { return st; };
-    place = updatePlaceOf(st, e);
-    if place.ok && indexIn(&st.mutParams, &place.root) >= 0 && !withinWrites(&st.writes, &place) {
-        return typeError(st, catStrings(catStrings(catStrings("this call may change ", writesTarget(&place)), ", which the writes clause of the function does not allow "), writesText(st)));
+    places = expressionPlaces(st, e);
+    for place in &places {
+        if place.ok && indexIn(&st.mutParams, &place.root) >= 0 && !withinWrites(&st.writes, &place) {
+            return typeError(st, catStrings(catStrings(catStrings("this call may change ", writesTarget(&place)), ", which the writes clause of the function does not allow "), writesText(st)));
+        };
     };
     return st;
 };
@@ -173,19 +438,8 @@ fn fromsOf(st: &St, name: &String) -> Froms ~ {
 
 // What a returned reference is from, as the root it starts from (exprReturnOrigin)
 fn exprReturnOrigin(st: &St, e: Int) -> Place ~ {
-    if isVar(st, e) { return resolveRefPlace(st, varName(st, e), []); };
-    c = callOf(st, e);
-    if !c.ok { return noPlace(); };
-    if (c.key = "BorrowOf" || c.key = "BorrowMutOf") && size(c.args) = 1 {
-        p = placeSteps(st, nth(&c.args, 0));
-        if !p.ok { return p; };
-        return resolveRefPlace(st, clone(p.root), clone(p.steps));
-    };
-    if size(c.callee.bytes) > 0 {
-        known = fromsOf(st, &c.callee);
-        if known.ok { return firstOrigin(st, &known.params, &known.froms, &c.args); };
-        if c.callee = st.current { return firstOrigin(st, &st.params, &st.resultFrom, &c.args); };
-    };
+    places = expressionPlaces(st, e);
+    if size(places) = 1 { return clone(get(places, 0)); };
     return noPlace();
 };
 
@@ -205,7 +459,31 @@ fn firstOrigin(st: &St, params: &List<String>, froms: &List<String>, args: &List
 
 // Every root a returned value's places may be from (exprOriginCandidates)
 fn exprOriginCandidates(st: &St, e: Int) -> List<String> ~ {
+    name = expressionOriginName(e);
+    i = indexIn(&st.originNames, &name);
+    if i >= 0 && i < size(st.originRoots) { return clone(get(st.originRoots, i)); };
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        out = exprOriginCandidates(st, a.a);
+        for root in exprOriginCandidates(st, a.b) { out = push(out, root); };
+        return uniqueOrigins(&out);
+    };
+    if ex is AstExpression::BlockExpr { return exprOriginCandidates(st, (ex as AstExpression::BlockExpr).e); };
+    if ex is AstExpression::Ascribed { return exprOriginCandidates(st, (ex as AstExpression::Ascribed).e); };
+    if isVar(st, e) {
+        out = [];
+        for place in resolveRefPlaces(st, varName(st, e), []) { out = push(out, clone(place.root)); };
+        return uniqueOrigins(&out);
+    };
     c = callOf(st, e);
+    if c.ok && (c.key = "BorrowOf" || c.key = "BorrowMutOf") && size(c.args) = 1 {
+        p = placeSteps(st, get(c.args, 0));
+        out = [];
+        if p.ok { for place in resolveRefPlaces(st, clone(p.root), clone(p.steps)) { out = push(out, clone(place.root)); }; };
+        return uniqueOrigins(&out);
+    };
+    if c.ok && ((c.key = "Field" || c.key = "DerefOf") && size(c.args) = 1) { return exprOriginCandidates(st, get(c.args, 0)); };
     if c.ok && size(c.callee.bytes) > 0 {
         known = fromsOf(st, &c.callee);
         if known.ok { return argCandidates(st, &known.params, &known.froms, &c.args); };
@@ -221,13 +499,7 @@ fn argCandidates(st: &St, params: &List<String>, froms: &List<String>, args: &Li
     i = 0;
     while i < size(params) && i < size(args) [{ affirm i >= 0; }] ~ {
         if indexIn(froms, &get(params, i)) >= 0 {
-            arg = get(args, i);
-            p = placeSteps(st, arg);
-            if p.ok {
-                out = push(out, clone(resolveRefPlace(st, clone(p.root), []).root));
-            } else {
-                for r in exprOriginCandidates(st, arg) { out = push(out, clone(r)); };
-            };
+            for place in argumentPlaces(st, get(args, i)) { out = push(out, clone(place.root)); };
         };
         i = i + 1;
     };
@@ -237,6 +509,20 @@ fn argCandidates(st: &St, params: &List<String>, froms: &List<String>, args: &Li
 // What a value that is or holds references is from, as the roots its places start from (exprRefOrigins); st.names
 fn exprRefOrigins(st: St, e: Int) -> St ~ {
     if st.status != 0 { return St { names: [], ..st }; };
+    captured = expressionOriginName(e);
+    at = indexIn(&st.originNames, &captured);
+    if at >= 0 && at < size(st.originRoots) { return St { names: clone(get(st.originRoots, at)), ..st }; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        st = exprRefOrigins(st, a.a);
+        out = clone(st.names);
+        st = exprRefOrigins(st, a.b);
+        for root in &st.names { out = push(out, clone(root)); };
+        return St { names: uniqueOrigins(&out), ..st };
+    };
+    if ex is AstExpression::BlockExpr { return exprRefOrigins(st, (ex as AstExpression::BlockExpr).e); };
+    if ex is AstExpression::Ascribed { return exprRefOrigins(st, (ex as AstExpression::Ascribed).e); };
     if isVar(st, e) {
         v = varName(st, e);
         i = indexIn(&st.originNames, &v);
@@ -245,8 +531,8 @@ fn exprRefOrigins(st: St, e: Int) -> St ~ {
             return St { names: roots, ..st };
         };
         if indexIn(&st.readOnly, &v) >= 0 || indexIn(&st.mutParams, &v) >= 0 {
-            root = resolveRefPlace(st, clone(v), []).root;
-            return St { names: push([], root), ..st };
+            candidates = exprOriginCandidates(st, e);
+            return St { names: candidates, ..st };
         };
         st = lookupVar(st, &v);
         if st.status != 0 { return St { names: [], ..st }; };
@@ -267,7 +553,7 @@ fn exprRefOrigins(st: St, e: Int) -> St ~ {
         };
         return St { names: out, ..st };
     };
-    if c.ok && c.key = "Field" && size(c.args) = 1 { return exprRefOrigins(st, nth(&c.args, 0)); };
+    if c.ok && ((c.key = "Field" || c.key = "DerefOf") && size(c.args) = 1) { return exprRefOrigins(st, nth(&c.args, 0)); };
     candidates = exprOriginCandidates(st, e);
     return St { names: candidates, ..st };
 };
@@ -303,21 +589,10 @@ fn recordAlias(st: St, var: &String, t: Int, e: Int) -> St ~ {
     };
     st = zonk(st, t);
     k = kindOf(st, st.ty);
-    alias = noPlace();
     if k = 10 || k = 11 {
-        c = callOf(st, e);
-        if c.ok && (c.key = "BorrowOf" || c.key = "BorrowMutOf") && size(c.args) = 1 {
-            alias = placeSteps(st, nth(&c.args, 0));
-        } else {
-            if isVar(st, e) { alias = Place { ok: true, root: varName(st, e), steps: [] }; };
-        };
+        places = expressionPlaces(st, e);
+        return putAliases(st, var, &places);
     };
-    if alias.ok {
-        resolved = resolveRefPlace(st, clone(alias.root), clone(alias.steps));
-        return putAlias(st, var, resolved);
-    };
-    origins = exprOriginCandidates(st, e);
-    if size(origins) = 1 { return putAlias(st, var, Place { ok: true, root: clone(get(origins, 0)), steps: [] }); };
     return dropAlias(st, var);
 };
 
@@ -355,6 +630,247 @@ fn recordOrigins(st: St, var: &String, t: Int, e: Int) -> St ~ {
     roots = clone(st.names);
     st = St { next: next, ..st };
     return putOrigins(st, var, roots);
+};
+
+fn parameterContents(name: &String) -> String [{ }] [{ }] {
+    return catStrings("$parameter contents ", clone(name));
+};
+
+fn declaredOrigin(st: &St, name: &String) -> String ~ {
+    for param in &st.params { if parameterContents(param) = clone(name) { return clone(param); }; };
+    return clone(name);
+};
+
+fn ownParameterSources(st: &St, value: &TE) -> List<String> ~ {
+    out = [];
+    if size(value.types) = 0 { return out; };
+    working = zonk(clone(st), get(value.types, 0));
+    kind = kindOf(&working, working.ty);
+    if kind = 10 || kind = 11 {
+        for place in expressionPlaces(st, value.node) {
+            if indexIn(&st.params, &place.root) >= 0 && indexIn(&st.readOnly, &place.root) < 0 && indexIn(&st.mutParams, &place.root) < 0 { out = push(out, clone(place.root)); };
+        };
+        return uniqueOrigins(&out);
+    };
+    ex = exprOf(st, value.node);
+    children = [];
+    if ex is AstExpression::BlockExpr { children = push([], (ex as AstExpression::BlockExpr).e); };
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        children = push(push(push([], a.c), a.a), a.b);
+    };
+    if ex is AstExpression::F {
+        a = ex as AstExpression::F;
+        head = exprOf(st, a.f);
+        if !(head is AstExpression::Var) && !(head is AstExpression::Val) { children = push(children, a.f); };
+        for arg in listItems(&st.nodes, a.xs) { children = push(children, arg); };
+    };
+    for node in children {
+        child = typedChild(st, value, node);
+        if child.node >= 0 {
+            for root in ownParameterSources(st, &child) { out = push(out, root); };
+        };
+    };
+    return uniqueOrigins(&out);
+};
+
+fn strongStore(st: St, targets: &List<Place>, place: &Place) -> St ~ {
+    if size(targets) != 1 { return St { ok: false, ..st }; };
+    if size(place.steps) = 0 { return St { ok: true, ..st }; };
+    if size(place.steps) != 1 || size(get(place.steps, 0).bytes) = 0 { return St { ok: false, ..st }; };
+    t = scopeLookup(st, &place.root);
+    if t < 0 { return St { ok: false, ..st }; };
+    st = zonk(st, t);
+    ty = tyAt(st, st.ty);
+    ctors = [];
+    if ty.kind = 4 {
+        name = instanceName(st, st.ty);
+        ctors = HashMap::lookup(&st.types, &name, []);
+    };
+    if ty.kind = 5 { ctors = push([], clone(ty.name)); };
+    if size(ctors) = 0 { return St { ok: false, ..st }; };
+    changed = get(place.steps, 0);
+    for ctor in &ctors {
+        if !st.ctors.contains(ctor) { return St { ok: false, ..st }; };
+        fields = HashMap::lookup(&st.ctors, ctor, CtorInfo { owner: "", names: [], types: [] });
+        i = 0;
+        while i < size(fields.names) && i < size(fields.types) [{ affirm i >= 0; }] ~ {
+            if get(fields.names, i) != changed {
+                st = holdsRef(st, get(fields.types, i));
+                if st.status != 0 || st.ok { return St { ok: false, ..st }; };
+            };
+            i = i + 1;
+        };
+    };
+    return St { ok: true, ..st };
+};
+
+fn recordPlaceReferences(st: St, targets: &List<Place>, value: &TE) -> St ~ {
+    st = zonk(st, get(value.types, 0));
+    st = holdsRef(st, st.ty);
+    if st.status != 0 { return st; };
+    if !st.ok { return st; };
+    places = uniquePlaces(targets);
+    if size(places) = 0 { return typeError(st, "a reference store needs resolved target origin bounds"); };
+    st = exprRefOrigins(st, value.node);
+    if st.status != 0 { return st; };
+    incoming = uniqueOrigins(&st.names);
+    own = ownParameterSources(st, value);
+    permitted = clone(st.readOnly);
+    for name in &st.mutParams { permitted = push(permitted, clone(name)); };
+    for name in &st.params { permitted = push(permitted, parameterContents(name)); };
+    for place in &places {
+        outbound = indexIn(&permitted, &place.root) >= 0;
+        if outbound {
+            allowed = size(incoming) > 0 && size(own) = 0;
+            for root in &incoming { if indexIn(&permitted, root) < 0 { allowed = false; }; };
+            if !allowed { return typeError(st, "a local or unresolved reference cannot be stored through a borrowed holder because it could escape the function"); };
+        };
+        st = strongStore(st, &places, &place);
+        if st.status != 0 { return st; };
+        strong = st.ok;
+        roots = clone(incoming);
+        if !strong {
+            i = indexIn(&st.originNames, &place.root);
+            if i >= 0 && i < size(st.originRoots) {
+                for root in &get(st.originRoots, i) { roots = push(roots, clone(root)); };
+            } else {
+                if indexIn(&st.params, &place.root) >= 0 || indexIn(&permitted, &place.root) >= 0 { roots = push(roots, clone(place.root)); };
+            };
+        };
+        st = putOrigins(st, &place.root, uniqueOrigins(&roots));
+    };
+    return st;
+};
+
+fn reachableOrigins(st: &St, initial: &List<String>) -> List<String> ~ {
+    roots = uniqueOrigins(initial);
+    i = 0;
+    while i < size(roots) [{ affirm i >= 0; }] ~ {
+        root = get(roots, i);
+        at = indexIn(&st.originNames, &root);
+        if at >= 0 && at < size(st.originRoots) {
+            for next in &get(st.originRoots, at) { if indexIn(&roots, next) < 0 { roots = push(roots, clone(next)); }; };
+        };
+        i = i + 1;
+    };
+    return roots;
+};
+
+fn mutableReferenceStores(st: St, t: Int, seen: List<String>) -> St ~ {
+    st = zonk(st, t);
+    resolvedType = st.ty;
+    ty = tyAt(st, resolvedType);
+    if ty.kind = 11 { return holdsRef(st, get(ty.args, 0)); };
+    if ty.kind = 10 || ty.kind = 6 || ty.kind = 9 || isListTy(st, resolvedType) || isBoxTy(st, resolvedType) {
+        return mutableReferenceStores(st, get(ty.args, 0), seen);
+    };
+    if ty.kind = 4 || ty.kind = 5 {
+        name = clone(ty.name);
+        if ty.kind = 4 { name = instanceName(st, resolvedType); };
+        if indexIn(&seen, &name) >= 0 { return St { ok: false, ..st }; };
+        seen = push(seen, clone(name));
+        ctors = push([], clone(name));
+        if ty.kind = 4 { st = holdsRef(st, resolvedType); ctors = HashMap::lookup(&st.types, &name, []); };
+        for ctor in &ctors {
+            info = HashMap::lookup(&st.ctors, ctor, CtorInfo { owner: "", names: [], types: [] });
+            for field in &info.types {
+                st = mutableReferenceStores(st, field, clone(seen));
+                if st.status != 0 || st.ok { return st; };
+            };
+        };
+    };
+    return St { ok: false, ..st };
+};
+
+fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
+    if st.status != 0 || st.inGhost { return st; };
+    c = callOf(st, value.node);
+    if !c.ok { return st; };
+    headExpr = exprOf(st, c.head);
+    if headExpr is AstExpression::Val && builtinOfValue(st, (headExpr as AstExpression::Val).v) >= 0 { return st; };
+    signature = 0 - 1;
+    if headExpr is AstExpression::Var {
+        name = varName(st, c.head);
+        signature = HashMap::lookup(&st.instances, &name, 0 - 1);
+        if signature < 0 { signature = scopeLookup(st, &name); };
+        if signature < 0 { signature = HashMap::lookup(&st.fns, &name, 0 - 1); };
+    } else {
+        if headExpr is AstExpression::Val {
+            st = valueType(st, (headExpr as AstExpression::Val).v);
+            if st.status != 0 { return st; };
+            signature = st.ty;
+        } else {
+            head = typedChild(st, value, c.head);
+            if head.node >= 0 && size(head.types) > 0 { signature = get(head.types, 0); };
+        };
+    };
+    declared = [];
+    if signature >= 0 {
+        st = zonk(st, signature);
+        ty = tyAt(st, st.ty);
+        if ty.kind = 13 { st = zonk(st, get(ty.args, 0)); ty = tyAt(st, st.ty); };
+        if ty.kind = 14 { declared = argsOfFn(&ty); };
+    };
+    inputs = [];
+    types = [];
+    i = 0;
+    while i < size(c.args) [{ affirm i >= 0; }] ~ {
+        input = typedChild(st, value, get(c.args, i));
+        if input.node < 0 || size(input.types) = 0 { return typeError(st, "a call argument has no recorded expression type"); };
+        actual = get(input.types, 0);
+        wanted = actual;
+        if i < size(declared) {
+            st = zonk(st, get(declared, i));
+            mode = kindOf(st, st.ty);
+            if mode = 10 || mode = 11 { st = wrapTy(st, mode, unrefOf(st, actual)); wanted = st.ty; };
+        };
+        st = mutableReferenceStores(st, wanted, []);
+        if st.status != 0 { return st; };
+        if signature < 0 && st.ok { return typeError(st, "a call that can replace reference fields needs declared input origin bounds"); };
+        inputs = push(inputs, input);
+        types = push(types, wanted);
+        i = i + 1;
+    };
+    bounds = [];
+    i = 0;
+    while i < size(inputs) [{ affirm i >= 0; }] ~ {
+        input = get(inputs, i);
+        st = zonk(st, get(types, i));
+        mode = kindOf(st, st.ty);
+        if mode = 10 || mode = 11 {
+            for place in argumentPlaces(st, input.node) { bounds = push(bounds, clone(place.root)); };
+        } else {
+            st = holdsRef(st, get(input.types, 0));
+            if st.status != 0 { return st; };
+            if st.ok { st = exprRefOrigins(st, input.node); for root in &st.names { bounds = push(bounds, clone(root)); }; };
+        };
+        i = i + 1;
+    };
+    bounds = reachableOrigins(st, &bounds);
+    before = clone(st);
+    i = 0;
+    while i < size(inputs) [{ affirm i >= 0; }] ~ {
+        input = get(inputs, i);
+        st = mutableReferenceStores(st, get(types, i), []);
+        if st.status != 0 { return st; };
+        if st.ok {
+            st = exprRefOrigins(st, input.node);
+            targets = clone(st.names);
+            st = zonk(st, get(types, i));
+            if kindOf(st, st.ty) = 11 { for place in expressionPlaces(st, input.node) { targets = push(targets, clone(place.root)); }; };
+            targets = reachableOrigins(&before, &targets);
+            if size(targets) = 0 { return typeError(st, "a call that can replace reference fields needs resolved target origin bounds"); };
+            for target in &targets {
+                at = indexIn(&st.originNames, target);
+                roots = clone(bounds);
+                if at >= 0 && at < size(st.originRoots) { for root in &get(st.originRoots, at) { roots = push(roots, clone(root)); }; } else { if indexIn(&st.params, target) >= 0 { roots = push(roots, clone(target)); }; };
+                st = putOrigins(st, target, uniqueOrigins(&roots));
+            };
+        };
+        i = i + 1;
+    };
+    return st;
 };
 
 // What a function of a trait that returns a reference is from: the parameters it names, or its one reference parameter

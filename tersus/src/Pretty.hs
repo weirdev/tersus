@@ -1,4 +1,4 @@
-module Pretty (renderProof, renderVarProof, renderValue, renderType) where
+module Pretty (renderProof, renderVarProof, renderExpression, renderValue, renderType) where
 
 import Data.List (intercalate, stripPrefix)
 
@@ -16,7 +16,20 @@ renderVarProof = renderProof sourceName
         | Just loop <- stripPrefix "$lo " name = "(start of " ++ loopName loop ++ ")"
         | Just place <- stripPrefix "$list " name = "(the list of the for loop at " ++ place ++ ")"
         | Just place <- stripPrefix "$index " name = "(the index of the for loop at " ++ place ++ ")"
-        | otherwise = name
+        | otherwise = sourceVariable name
+
+renderExpression :: Expression -> String
+renderExpression expr
+    | proofExpression expr = renderVarProof (exprToProof expr)
+renderExpression (IfExpr cond yes no) = "if " ++ renderExpression cond ++ " { " ++ renderExpression yes ++ " } else { " ++ renderExpression no ++ " }"
+renderExpression (BlockExpr _ result) = "{ ...; " ++ renderExpression result ++ " }"
+renderExpression (Ascribed inner ty) = "(" ++ renderExpression inner ++ ": " ++ renderType ty ++ ")"
+renderExpression (F f args) = headName f ++ "(" ++ intercalate ", " (map renderExpression args) ++ ")"
+  where
+    headName (Val (VFunct _ _ _ (BuiltinFunct b) _)) = builtinName b
+    headName other = renderExpression other
+renderExpression (Val value) = renderValue value
+renderExpression (Var name) = sourceVariable name
 
 renderProof :: (i -> String) -> Proof i -> String
 renderProof name = go 0
@@ -96,6 +109,7 @@ builtinName Pop = "pop"
 builtinName Set = "set"
 builtinName NewArray = "array"
 builtinName ArrayFrom = "array"
+builtinName ArrayFromList = "Array::fromList"
 builtinName NewBoxedArray = "Array::boxed"
 builtinName NewEmptyArray = "Array::empty"
 builtinName Unsize = "unsize"

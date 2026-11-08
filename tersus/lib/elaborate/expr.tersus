@@ -1,13 +1,13 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstValue };
 import data::codec::codec { catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
-import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType, withType };
-import elaborate::check { fnSigOf, mentionsParameter };
-import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureInstance, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
+import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, popScope, pushScope, sizeArgument, teHead, valueType, withResultType, withType };
+import elaborate::check { checkStatements, fnSigOf, mentionsParameter };
+import elaborate::core { arrayOk, baseNameOf, checkConstruct, checkType, ctorInfo, ensureInstance, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
-import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
-import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
-import elaborate::state { stubTraitParameter, forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
+import elaborate::records { codecTypeAt, exprOf, fromCodec, isVar, listItems, nameText, namesText, nodeIn, varName };
+import elaborate::refs { Call, callOf, captureExpression, checkCallWrites, copyExpressionOrigins, joinBranchReferences, placeForm, placeRoot, recordCallFieldOrigins, refResultIndex, resetBranchReferences };
+import elaborate::state { forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, maxInt, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, render, resolve, sameTy, simpleTy, sizeConst, teHeadAt, tyAt, typeError, unclonedParameter, undoTry, unify, withTy, wrapTy, zonk, stubTraitParameter };
 import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, fnBoundCall, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
@@ -52,10 +52,207 @@ fn argsCountText(name: String, n: Int, args: Int) -> String ~ {
 // The type of an expression, and the expression with its calls resolved (inferExprR)
 fn inferExpr(st: St, e: Int) -> St ~ {
     if st.status != 0 { return st; };
+    st = inferExprCore(st, e);
+    value = clone(st.te);
+    st = recordCallFieldOrigins(st, &value);
+    if st.status != 0 { return st; };
+    st = St { te: clone(value), ..st };
+    return captureExpression(st, &value);
+};
+
+fn inferExprCore(st: St, e: Int) -> St ~ {
     ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        return inferIf(st, a.c, a.a, a.b, 0 - 1, false, "branch result");
+    };
+    if ex is AstExpression::BlockExpr {
+        a = ex as AstExpression::BlockExpr;
+        return inferBlock(st, a.xs, a.e, 0 - 1, false, "expression result");
+    };
+    if ex is AstExpression::Ascribed {
+        a = ex as AstExpression::Ascribed;
+        st = fromCodec(st, codecTypeAt(&st.nodes, a.ty));
+        wanted = st.ty;
+        st = checkType(st, wanted);
+        if st.status != 0 { return st; };
+        return inferExpected(st, "expression result", wanted, a.e, false);
+    };
     if ex is AstExpression::Val { return inferValueExpr(st, e, (ex as AstExpression::Val).v); };
     if ex is AstExpression::Var { return inferVarExpr(st, e, (ex as AstExpression::Var).n); };
     return inferCall(st, e);
+};
+
+fn inferExpected(st: St, context: String, wanted: Int, e: Int, returning: Bool) -> St ~ {
+    if st.status != 0 { return st; };
+    st = inferExpectedCore(st, context, wanted, e, returning);
+    value = clone(st.te);
+    return captureExpression(st, &value);
+};
+
+fn inferExpectedCore(st: St, context: String, wanted: Int, e: Int, returning: Bool) -> St ~ {
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        return inferIf(st, a.c, a.a, a.b, wanted, returning, context);
+    };
+    if ex is AstExpression::BlockExpr {
+        a = ex as AstExpression::BlockExpr;
+        return inferBlock(st, a.xs, a.e, wanted, returning, context);
+    };
+    c = callOf(st, e);
+    if isListTy(st, wanted) && c.ok && c.key = "Push" && size(c.args) = 2 {
+        st = inferExpected(st, "argument 1 of push", wanted, get(c.args, 0), false);
+        if st.status != 0 { return st; };
+        list = clone(st.te);
+        element = argAt(st, wanted, 0);
+        st = inferExpected(st, "argument 2 of push", element, get(c.args, 1), false);
+        if st.status != 0 { return st; };
+        value = clone(st.te);
+        args = push(push([], list.node), value.node);
+        st = emitCall(st, c.head, &args);
+        parts = push(push([], list), value);
+        return typed(st, st.nid, wanted, &parts);
+    };
+    st = inferExpr(st, e);
+    if st.status != 0 { return st; };
+    arg = clone(st.te);
+    st = zonk(st, wanted);
+    target = st.ty;
+    k = kindOf(st, target);
+    if returning && (k = 10 || k = 11) && isVar(st, e) {
+        name = varName(st, e);
+        if indexIn(&st.readOnly, &name) >= 0 || indexIn(&st.mutParams, &name) >= 0 {
+            if k = 11 && indexIn(&st.mutParams, &name) < 0 { return typeError(st, "a read reference cannot be returned for updating"); };
+            st = expect(st, "returned value", argAt(st, target, 0), teHead(&arg));
+            if st.status != 0 { return st; };
+            args = push([], arg.node);
+            key = "BorrowOf";
+            if k = 11 { key = "BorrowMutOf"; };
+            st = emitBuiltinCall(st, key, &args);
+            parts = push([], arg);
+            st = typed(st, st.nid, wanted, &parts);
+            arg = clone(st.te);
+        };
+    };
+    st = coerce(st, wanted, arg);
+    if st.status != 0 { return st; };
+    arg = clone(st.te);
+    st = expect(st, context, wanted, teHead(&arg));
+    if st.status != 0 { return st; };
+    return St { te: withResultType(st, &arg, wanted), ..st };
+};
+
+fn inferIf(st: St, c: Int, a: Int, b: Int, wanted: Int, returning: Bool, context: String) -> St ~ {
+    if st.inGhost { return typeError(st, "a proof cannot contain an if expression"); };
+    st = inferExpr(st, c);
+    if st.status != 0 { return st; };
+    cond = clone(st.te);
+    st = simpleTy(st, 2);
+    st = expect(st, "condition of if", st.ty, teHead(&cond));
+    if st.status != 0 { return st; };
+    before = clone(st);
+    if wanted >= 0 { st = inferExpected(st, clone(context), wanted, a, returning); } else { st = inferExpr(st, a); };
+    if st.status != 0 { return st; };
+    yes = clone(st.te);
+    left = clone(st);
+    st = resetBranchReferences(st, &before);
+    if wanted >= 0 { st = inferExpected(st, context, wanted, b, returning); } else { st = inferExpr(st, b); };
+    if st.status != 0 { return st; };
+    no = clone(st.te);
+    st = joinBranchReferences(st, &left);
+    result = wanted;
+    if result < 0 {
+        st = branchType(st, teHead(&yes), teHead(&no));
+        if st.status != 0 { return st; };
+        result = st.ty;
+        st = coerce(st, result, yes);
+        if st.status != 0 { return st; };
+        yes = clone(st.te);
+        st = coerce(st, result, no);
+        if st.status != 0 { return st; };
+        no = clone(st.te);
+        st = expect(st, "then result", result, teHead(&yes));
+        st = expect(st, "else result", result, teHead(&no));
+        if st.status != 0 { return st; };
+    };
+    st = emit(st, AstNode::Expression { value: AstExpression::IfExpr { c: cond.node, a: yes.node, b: no.node } });
+    parts = push(push(push([], cond), yes), no);
+    return typed(st, st.nid, result, &parts);
+};
+
+fn inferBlock(st: St, xs: Int, e: Int, wanted: Int, returning: Bool, context: String) -> St ~ {
+    if st.inGhost { return typeError(st, "a proof cannot contain a block expression"); };
+    st = pushScope(st);
+    body = listItems(&st.nodes, xs);
+    st = checkStatements(st, false, &body);
+    if st.status != 0 { return st; };
+    statements = st.te.node;
+    bodyTypes = clone(st.te.types);
+    if wanted >= 0 { st = inferExpected(st, context, wanted, e, returning); } else { st = inferExpr(st, e); };
+    if st.status != 0 { return st; };
+    result = clone(st.te);
+    st = captureExpression(st, &result);
+    if st.status != 0 { return st; };
+    result = clone(st.te);
+    st = popScope(st);
+    st = emit(st, AstNode::Expression { value: AstExpression::BlockExpr { xs: statements, e: result.node } });
+    types = push([], teHead(&result));
+    for t in &bodyTypes { types = push(types, t); };
+    for t in &result.types { types = push(types, t); };
+    return St { te: TE { node: st.nid, types: types }, ..st };
+};
+
+fn branchType(st: St, a: Int, b: Int) -> St ~ {
+    st = zonk(st, a);
+    x = st.ty;
+    xt = tyAt(st, x);
+    st = zonk(st, b);
+    y = st.ty;
+    yt = tyAt(st, y);
+    if xt.kind = 5 && yt.kind = 5 && xt.name != yt.name {
+        st = ctorInfo(st, &xt.name);
+        if st.status != 0 { return st; };
+        owner = clone(st.ctor.owner);
+        st = ctorInfo(st, &yt.name);
+        if st.status != 0 { return st; };
+        if owner != st.ctor.owner { return typeError(st, "branches have variants of different enums"); };
+        return namedTy(st, owner, []);
+    };
+    if xt.kind = 5 && yt.kind = 4 { return branchType(st, y, x); };
+    if (xt.kind = 10 && yt.kind = 11) || (xt.kind = 11 && yt.kind = 10) {
+        st = branchType(st, get(xt.args, 0), get(yt.args, 0));
+        if st.status != 0 { return st; };
+        return wrapTy(st, 10, st.ty);
+    };
+    if xt.kind = 1 && yt.kind = 0 { return withTy(st, x); };
+    if xt.kind = 0 && yt.kind = 1 { return withTy(st, y); };
+    if xt.kind = 3 && yt.kind = 0 { return withTy(st, x); };
+    if xt.kind = 0 && yt.kind = 3 { return withTy(st, y); };
+    if isBoxTy(st, x) && isBoxTy(st, y) {
+        xi = tyAt(st, get(xt.args, 0));
+        yi = tyAt(st, get(yt.args, 0));
+        if xi.kind = 6 && yi.kind = 6 && !sameTy(st, get(xi.args, 1), get(yi.args, 1)) {
+            st = branchType(st, get(xi.args, 0), get(yi.args, 0));
+            if st.status != 0 { return st; };
+            element = st.ty;
+            st = simpleTy(st, 21);
+            st = arrayTy(st, element, st.ty);
+            return boxTy(st, st.ty);
+        };
+    };
+    if isListTy(st, x) && isListTy(st, y) {
+        st = branchType(st, get(xt.args, 0), get(yt.args, 0));
+        if st.status != 0 { return st; };
+        return listTy(st, st.ty);
+    };
+    if isBoxTy(st, x) && isBoxTy(st, y) {
+        st = branchType(st, get(xt.args, 0), get(yt.args, 0));
+        if st.status != 0 { return st; };
+        return boxTy(st, st.ty);
+    };
+    st = expect(st, "branch result", x, y);
+    return withTy(st, x);
 };
 
 fn inferValueExpr(st: St, e: Int, v: Int) -> St ~ {
@@ -1621,7 +1818,7 @@ fn describe(st: &St, funct: Int) -> String ~ {
 // The head of a call is visited when it is itself computed (not a name or a value)
 fn headTExpr(st: &St, functT: &TE) -> List<TE> ~ {
     ex = exprOf(st, functT.node);
-    if ex is AstExpression::F { return push([], clone(functT)); };
+    if !(ex is AstExpression::Var) && !(ex is AstExpression::Val) { return push([], clone(functT)); };
     return [];
 };
 
@@ -1702,12 +1899,12 @@ fn coerceArguments(st: St, ft: Int, inferred: &List<TE>) -> St ~ {
         ak = kindOf(st, atz);
         if pk = 10 && (ak = 10 || ak = 11) {
             st = expect(st, "reference argument", argAt(st, ptz, 0), argAt(st, atz, 0));
-            if ak = 10 { arg = withType(&arg, ptz); };
+            if ak = 10 { arg = withResultType(st, &arg, ptz); };
         } else {
             if pk = 11 && ak = 11 {
                 st = expect(st, "reference argument", argAt(st, ptz, 0), argAt(st, atz, 0));
                 st = checkCallWrites(st, arg.node);
-                arg = withType(&arg, ptz);
+                arg = withResultType(st, &arg, ptz);
             } else {
                 if pk = 11 && ak = 10 {
                     return fail(st, "Type error: a read reference (&T) cannot be given where an update reference (&mut T) is wanted: borrow the place for updating, as in &mut x");
@@ -1720,7 +1917,13 @@ fn coerceArguments(st: St, ft: Int, inferred: &List<TE>) -> St ~ {
                         return fail(st, "Type error: an update reference (&mut T) is not lent silently: write &mut and the place, as in &mut x");
                     };
                     st = checkCallWrites(st, arg.node);
-                    arg = withType(&arg, ptz);
+                    child = clone(arg);
+                    args = push([], child.node);
+                    st = emitBuiltinCall(st, "BorrowMutOf", &args);
+                    children = push([], child);
+                    st = typed(st, st.nid, ptz, &children);
+                    st = copyExpressionOrigins(st, child.node, st.te.node);
+                    arg = clone(st.te);
                 } else {
                     st = coerce(st, unrefOf(st, ptz), arg);
                     arg = clone(st.te);

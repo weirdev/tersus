@@ -522,7 +522,7 @@ everyRecord =
         , lowStubs = Set.singleton "g"
         , lowDeclared = Set.fromList ["P", "f"]
         , lowNested = Set.singleton "Q"
-        , lowAssumes = [S.CTerm (S.VBool False)]
+        , lowAssumes = [Left (S.CTerm (S.VBool False)), Right (S.F (S.Var "Block::assume") [S.Var "n", S.Var "n"])]
         }
   where
     holds = S.ProofAssert (S.CTerm (S.VBool True))

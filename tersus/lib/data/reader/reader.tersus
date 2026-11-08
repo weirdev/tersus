@@ -190,6 +190,9 @@ fn recordTags() -> Tags [{ }] [{ }] {
     codes = codes.insert("Val", 19);
     codes = codes.insert("Var", 20);
     codes = codes.insert("F", 24);
+    codes = codes.insert("IfExpr", 25);
+    codes = codes.insert("BlockExpr", 26);
+    codes = codes.insert("Ascribed", 27);
     codes = codes.insert("NamesEnd", 32);
     codes = codes.insert("NamesCons", 33);
     codes = codes.insert("ValuesEnd", 34);
@@ -574,6 +577,25 @@ fn valueNodeAt3(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNo
         xs = refAt(ts, 2, nodes, 25);
         if !f.ok || !xs.ok { return bad; };
         return done(AstNode::Expression { value: AstExpression::F { f: f.value, xs: xs.value } }, size(ts));
+    };
+    if k = 1 && size(ts) = 4 {
+        c = refAt(ts, 1, nodes, 6);
+        a = refAt(ts, 2, nodes, 6);
+        b = refAt(ts, 3, nodes, 6);
+        if !c.ok || !a.ok || !b.ok { return bad; };
+        return done(AstNode::Expression { value: AstExpression::IfExpr { c: c.value, a: a.value, b: b.value } }, size(ts));
+    };
+    if k = 2 && size(ts) = 3 {
+        xs = refAt(ts, 1, nodes, 24);
+        e = refAt(ts, 2, nodes, 6);
+        if !xs.ok || !e.ok { return bad; };
+        return done(AstNode::Expression { value: AstExpression::BlockExpr { xs: xs.value, e: e.value } }, size(ts));
+    };
+    if k = 3 && size(ts) = 3 {
+        e = refAt(ts, 1, nodes, 6);
+        ty = refAt(ts, 2, nodes, 2);
+        if !e.ok || !ty.ok { return bad; };
+        return done(AstNode::Expression { value: AstExpression::Ascribed { e: e.value, ty: ty.value } }, size(ts));
     };
     return bad;
 };
@@ -1535,6 +1557,9 @@ fn nodeRefs(node: &AstNode) -> List<Int> [{ }] [{ }] {
                 AstExpression::Val { v: v } => { refs = push(refs, v); },
                 AstExpression::Var { n: n } => { refs = push(refs, n); },
                 AstExpression::F { f: f, xs: xs } => { refs = push(refs, f); refs = push(refs, xs); },
+                AstExpression::IfExpr { c: c, a: a, b: b } => { refs = push(push(push(refs, c), a), b); },
+                AstExpression::BlockExpr { xs: xs, e: e } => { refs = push(push(refs, xs), e); },
+                AstExpression::Ascribed { e: e, ty: ty } => { refs = push(push(refs, e), ty); },
             };
         },
         AstNode::Termination { value: v } => {

@@ -24,7 +24,7 @@ import qualified Modules as Mod
 import Lowering (lowerAccepted)
 import Mir (Lowered (..))
 import MirMoves (finishLowered)
-import Pretty (renderVarProof)
+import Pretty (renderExpression, renderVarProof)
 import Syntax (Statement (..))
 import Utils
 
@@ -121,7 +121,7 @@ assumptionsOfPackage compiled = mapResult concat (flatResultMap perModule (compi
             externs = [prefix ++ "extern fn " ++ localName name | name <- foldr (:) [] (ifExterns iface)]
          in case compiledLowered modu of
                 Error err -> Error (prefix ++ err)
-                Ok lowered -> Ok (axioms ++ externs ++ [prefix ++ "assume " ++ renderVarProof proof | proof <- lowAssumes lowered])
+                Ok lowered -> Ok (axioms ++ externs ++ [prefix ++ either (("assume " ++) . renderVarProof) renderExpression trusted | trusted <- lowAssumes lowered])
     localName name = reverse (takeWhile (/= '$') (reverse name))
     commas = foldr (\a b -> if null b then a else a ++ ", " ++ b) ""
 
