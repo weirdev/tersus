@@ -1,0 +1,978 @@
+import data::ast::ast { AstBuiltin, AstExpression, AstNode, AstOptName, AstValue };
+import data::codec::codec { catStrings };
+import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
+import elaborate::calls { argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType };
+import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureInstance, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, noCtor, ownsHeap, readField, tupleType, unrefOf };
+import elaborate::out { emitBuiltinCall, emitCall, emitVal };
+import elaborate::records { listItems, nameText, namesText, nodeIn };
+import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, boxTy, expect, fail, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, maxInt, minInt, namedTy, notModelled, productFits, render, resolve, simpleTy, sizeConst, tyAt, typeError, unify, wrapTy, zonk };
+
+fn exprOf(st: &St, e: Int) -> AstExpression [{ }] [{ }] {
+    node = nodeIn(&st.nodes, e);
+    if node is AstNode::Expression { return clone((node as AstNode::Expression).value); };
+    return AstExpression::Var { n: 0 - 1 };
+};
+
+fn varName(st: &St, e: Int) -> String [{ }] [{ }] {
+    ex = exprOf(st, e);
+    if ex is AstExpression::Var { return nameText(&st.nodes, (ex as AstExpression::Var).n); };
+    return "";
+};
+
+fn isVar(st: &St, e: Int) -> Bool [{ }] [{ }] {
+    node = nodeIn(&st.nodes, e);
+    return node is AstNode::Expression && (node as AstNode::Expression).value is AstExpression::Var;
+};
+
+fn leaf(st: St, t: Int, node: Int) -> St [{ }] [{ }] {
+    return St { te: TE { node: node, types: push([], t) }, ..st };
+};
+
+// A typed expression of a node, its type, and the typed expressions inside it in visit order
+fn typed(st: St, node: Int, t: Int, inner: &List<TE>) -> St [{ }] [{ }] {
+    types = push([], t);
+    for te in inner { for x in &te.types { types = push(types, x); }; };
+    return St { te: TE { node: node, types: types }, ..st };
+};
+
+fn nodesOf(tes: &List<TE>) -> List<Int> [{ }] [{ }] {
+    out = [];
+    for te in tes { out = push(out, te.node); };
+    return out;
+};
+
+fn typesHeads(tes: &List<TE>) -> List<Int> [{ }] [{ }] {
+    out = [];
+    for te in tes { out = push(out, head(&te.types)); };
+    return out;
+};
+
+fn inferAll(st: St, args: &List<Int>) -> St ~ {
+    tes = [];
+    for a in args {
+        st = inferExpr(st, a);
+        if st.status != 0 { return St { tes: tes, ..st }; };
+        tes = push(tes, clone(st.te));
+    };
+    return St { tes: tes, ..st };
+};
+
+fn argsCountText(name: String, n: Int, args: Int) -> String [{ }] [{ }] {
+    word = " arguments, got ";
+    if n = 1 { word = " argument, got "; };
+    return catStrings(catStrings(catStrings(catStrings(name, " takes "), intText(n)), word), intText(args));
+};
+
+// The type of an expression, and the expression with its calls resolved (inferExprR)
+fn inferExpr(st: St, e: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::Val {
+        st = valueType(st, (ex as AstExpression::Val).v);
+        return leaf(st, st.ty, e);
+    };
+    if ex is AstExpression::Var {
+        name = nameText(&st.nodes, (ex as AstExpression::Var).n);
+        st = lookupVar(st, &name);
+        if st.status != 0 { return st; };
+        t = st.ty;
+        st = zonk(st, t);
+        x = tyAt(st, st.ty);
+        if x.kind = 13 {
+            names = clone(x.types);
+            for s in &x.sizes { names = push(names, clone(s)); };
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " has parameters <"), joinWith(&names, ", ")), ">, so it is called, as in "), clone(name)), "(...), and cannot be used as a value"));
+        };
+        return leaf(st, t, e);
+    };
+    call = ex as AstExpression::F;
+    args = listItems(&st.nodes, call.xs);
+    funct = call.f;
+    fex = exprOf(st, funct);
+    if fex is AstExpression::Val {
+        b = builtinOfValue(st, (fex as AstExpression::Val).v);
+        if b >= 0 {
+            rec = builtinRecord(st, b);
+            if rec is AstBuiltin::FieldBuiltin && size(args) = 1 { return inferField(st, funct, rec as AstBuiltin::FieldBuiltin, get(args, 0)); };
+            if rec is AstBuiltin::Ctor { return inferCtor(st, funct, rec as AstBuiltin::Ctor, &args); };
+            key = builtinKey(st, b);
+            if key = "BorrowOf" || key = "BorrowMutOf" || key = "DerefOf" { return notModelled(st, "references"); };
+            if key = "OldOf" { return fail(st, "Type error: old(...) is only written in a postcondition, of the place an update parameter is to"); };
+        };
+    };
+    if fex is AstExpression::Var {
+        fname = nameText(&st.nodes, (fex as AstExpression::Var).n);
+        if fname = "Box::new" {
+            if size(args) != 1 { return typeError(st, argsCountText("Box::new", 1, size(args))); };
+            st = inferExpr(st, get(args, 0));
+            if st.status != 0 { return st; };
+            x = clone(st.te);
+            st = boxTy(st, head(&x.types));
+            t = st.ty;
+            callArgs = push([], x.node);
+            st = emitBuiltinCall(st, "NewBox", &callArgs);
+            parts = push([], x);
+            return typed(st, st.nid, t, &parts);
+        };
+        if fname = "Box::unbox" {
+            if size(args) != 1 { return typeError(st, argsCountText("Box::unbox", 1, size(args))); };
+            st = inferExpr(st, get(args, 0));
+            if st.status != 0 { return st; };
+            x = clone(st.te);
+            st = zonk(st, head(&x.types));
+            t = st.ty;
+            if isBoxTy(st, t) {
+                inner = argAt(st, t, 0);
+                ix = tyAt(st, inner);
+                if ix.kind = 6 && kindOf(st, get(ix.args, 1)) = 21 {
+                    return fail(st, "Type error: Box::unbox cannot take an array of no size out of its Box, since it would not know how much to take: read its elements with get and size");
+                };
+                callArgs = push([], x.node);
+                st = emitBuiltinCall(st, "UnBox", &callArgs);
+                parts = push([], x);
+                return typed(st, st.nid, inner, &parts);
+            };
+            return typeError(st, catStrings("Box::unbox takes a Box, got ", render(st, t)));
+        };
+        if fname = "Array::empty" {
+            if size(args) != 0 { return typeError(st, catStrings("Array::empty takes no arguments, got ", intText(size(args)))); };
+            st = freshVar(st);
+            elem = st.ty;
+            st = simpleTy(st, 21);
+            st = arrayTy(st, elem, st.ty);
+            st = boxTy(st, st.ty);
+            t = st.ty;
+            callArgs = [];
+            st = emitBuiltinCall(st, "NewEmptyArray", &callArgs);
+            parts = [];
+            return typed(st, st.nid, t, &parts);
+        };
+        if fname = "Array::fromList" {
+            if size(args) != 1 { return typeError(st, argsCountText("Array::fromList", 1, size(args))); };
+            st = inferExpr(st, get(args, 0));
+            if st.status != 0 { return st; };
+            x = clone(st.te);
+            st = zonk(st, head(&x.types));
+            xt = st.ty;
+            if isListTy(st, xt) {
+                elem = argAt(st, xt, 0);
+                st = freshSize(st);
+                st = arrayTy(st, elem, st.ty);
+                t = st.ty;
+                st = arrayOk(st, t);
+                callArgs = push([], x.node);
+                st = emitBuiltinCall(st, "ArrayFromList", &callArgs);
+                parts = push([], x);
+                return typed(st, st.nid, t, &parts);
+            };
+            return typeError(st, catStrings("Array::fromList takes a list, got ", render(st, xt)));
+        };
+        if fname = "Array::uninit" { return notModelled(st, "Uninit"); };
+        if fname = "Array::boxed" {
+            if size(args) != 2 { return typeError(st, argsCountText("Array::boxed", 2, size(args))); };
+            st = inferExpr(st, get(args, 0));
+            if st.status != 0 { return st; };
+            n = clone(st.te);
+            st = simpleTy(st, 0);
+            st = expect(st, "argument 1 of Array::boxed", st.ty, head(&n.types));
+            st = inferExpr(st, get(args, 1));
+            if st.status != 0 { return st; };
+            x = clone(st.te);
+            st = simpleTy(st, 21);
+            st = arrayTy(st, head(&x.types), st.ty);
+            arr = st.ty;
+            st = arrayOk(st, arr);
+            st = requireClone(st, head(&x.types));
+            st = boxTy(st, arr);
+            t = st.ty;
+            callArgs = push(push([], n.node), x.node);
+            st = emitBuiltinCall(st, "NewBoxedArray", &callArgs);
+            parts = push(push([], n), x);
+            return typed(st, st.nid, t, &parts);
+        };
+    };
+    if headKey(st, funct) = "NewArray" {
+        if size(args) != 2 { return typeError(st, argsCountText("array", 2, size(args))); };
+        st = inferExpr(st, get(args, 0));
+        if st.status != 0 { return st; };
+        n = clone(st.te);
+        st = simpleTy(st, 0);
+        intTy = st.ty;
+        st = expect(st, "argument 1 of array", intTy, head(&n.types));
+        st = inferExpr(st, get(args, 1));
+        if st.status != 0 { return st; };
+        x = clone(st.te);
+        st = arraySize(st, n.node);
+        if st.status != 0 { return st; };
+        sz = st.ty;
+        sizeArg = st.nid;
+        st = arrayTy(st, head(&x.types), sz);
+        t = st.ty;
+        st = arrayOk(st, t);
+        st = requireClone(st, head(&x.types));
+        callArgs = push(push([], sizeArg), x.node);
+        st = emitCall(st, funct, &callArgs);
+        parts = push(push([], TE { node: sizeArg, types: push([], intTy) }), x);
+        return typed(st, st.nid, t, &parts);
+    };
+    if fex is AstExpression::Val && headKey(st, funct) = "ArrayFrom" && size(args) = 1 {
+        lit = exprOf(st, get(args, 0));
+        if lit is AstExpression::Val {
+            v = (lit as AstExpression::Val).v;
+            vnode = nodeIn(&st.nodes, v);
+            if vnode is AstNode::Value && (vnode as AstNode::Value).value is AstValue::VList {
+                items = listItems(&st.nodes, ((vnode as AstNode::Value).value as AstValue::VList).xs);
+                st = valueType(st, v);
+                if st.status != 0 { return st; };
+                listT = st.ty;
+                if !isListTy(st, listT) { return fail(st, "Type error: an array literal is made from a list"); };
+                elem = argAt(st, listT, 0);
+                st = sizeConst(st, size(items));
+                st = arrayTy(st, elem, st.ty);
+                t = st.ty;
+                st = arrayOk(st, t);
+                st = literalOk(st, elem);
+                parts = push([], TE { node: get(args, 0), types: push([], listT) });
+                return typed(st, e, t, &parts);
+            };
+        };
+    };
+    if headKey(st, funct) = "CloneOf" { return notModelled(st, "clone"); };
+    if fex is AstExpression::Var {
+        fname = nameText(&st.nodes, (fex as AstExpression::Var).n);
+        if fname = "clone" && !st.fns.contains("clone") && !inScope(st, "clone") { return notModelled(st, "clone"); };
+        if fname = ".clone" && size(args) = 1 { return notModelled(st, "clone"); };
+        if size(fname.bytes) > 1 && get(fname.bytes, 0) = toByte(46) && size(args) > 0 {
+            return methodCall(st, fname.slice(1, size(fname.bytes)), &args);
+        };
+        if st.ghostNames.contains(&fname) && !inScope(st, &fname) && !st.fns.contains(&fname) {
+            index = st.ghostNames.lookup(&fname, 0 - 1);
+            key = clone(get(st.builtinKinds, index));
+            if !isAddressKey(&key) { return ghostExpr(st, fname, index, key, funct, &args); };
+        };
+        if st.pointer.contains(&fname) && !inScope(st, &fname) && !st.fns.contains(&fname) {
+            return pointerCall(st, fname, st.pointer.lookup(&fname, 0 - 1), &args);
+        };
+        if size(fname.bytes) > 0 && get(fname.bytes, 0) = toByte(60) { return notModelled(st, "impls"); };
+        if traitPath(&fname) {
+            path = pathOf(&fname);
+            if st.traits.contains(&path) || st.types.contains(&path) || st.generics.contains(&path) { return notModelled(st, "traits and impls"); };
+        };
+    };
+    if fex is AstExpression::Val && size(args) = 2 {
+        key = headKey(st, funct);
+        if key = "Rel 0" || key = "Rel 1" {
+            if st.inGhost { return general(st, funct, &args); };
+            return inferEquality(st, funct, key = "Rel 1", &args);
+        };
+    };
+    return general(st, funct, &args);
+};
+
+fn isAddressKey(key: &String) -> Bool [{ }] [{ }] {
+    return key = "AddrNull" || key = "AddrOffset" || key = "AddrCast" || key = "AddrToInt" || key = "AddrFromInt";
+};
+
+// Whether a function of what is known of a permission is called on one, given the type of its first argument
+// (permissionArgument)
+fn permissionType(st: St, key: &String, t0: Int) -> St ~ {
+    st = zonk(st, t0);
+    t = st.ty;
+    k = kindOf(st, t);
+    inner = t;
+    if k = 10 || k = 11 { inner = argAt(st, t, 0); };
+    ik = kindOf(st, inner);
+    if ik = 8 { return St { ok: true, ..st }; };
+    if ik = 9 { return St { ok: key = "BlockFilled" || key = "BlockContents", ..st }; };
+    return St { ok: false, ..st };
+};
+
+fn takesNoPermission(key: &String) -> Bool [{ }] [{ }] {
+    return isAddressKey(key) || key = "BlockExtent";
+};
+
+// What is known of a permission, in an expression of the validator (a define); in code it is not a value there is
+fn ghostExpr(st: St, name: String, index: Int, key: String, funct: Int, args: &List<Int>) -> St ~ {
+    if !takesNoPermission(&key) {
+        if size(args) = 0 { return general(st, funct, args); };
+        st = inferExpr(st, get(args, 0));
+        if st.status != 0 { return st; };
+        first = teHead(&st.te);
+        st = permissionType(st, &key, first);
+        if !st.ok { return general(st, funct, args); };
+    };
+    if !st.inGhost {
+        return typeError(st, catStrings(clone(name), " is what the validator knows of a permission, and is not a value the program has: it is written in an affirm, a contract, an invariant or a define"));
+    };
+    st = inferAll(st, args);
+    if st.status != 0 { return st; };
+    inferred = clone(st.tes);
+    st = builtinIndexType(st, index);
+    if st.status != 0 { return st; };
+    ft = st.ty;
+    filled = key = "BlockFilled" || key = "BlockContents";
+    if filled && size(inferred) = 1 {
+        uninitKey = "UninitAt";
+        if key = "BlockFilled" { uninitKey = "UninitFilled"; };
+        st = keyType(st, clone(uninitKey));
+        if st.status != 0 { return st; };
+        argTys = typesHeads(&inferred);
+        st = checkCall(st, &name, st.ty, &argTys);
+        if st.status != 0 { return st; };
+        resultT = st.ty;
+        argNodes = nodesOf(&inferred);
+        st = emitBuiltinCall(st, uninitKey, &argNodes);
+        return typed(st, st.nid, resultT, &inferred);
+    };
+    if filled {
+        if size(inferred) != 2 { return typeError(st, catStrings(catStrings(clone(name), " takes a permission and a slot, as in "), catStrings(clone(name), "(b, i)"))); };
+        blockT = clone(get(inferred, 0));
+        indexT = clone(get(inferred, 1));
+        blockTys = push([], teHead(&blockT));
+        st = checkCall(st, &name, ft, &blockTys);
+        if st.status != 0 { return st; };
+        listT = st.ty;
+        st = simpleTy(st, 0);
+        st = expect(st, catStrings("argument 2 of ", clone(name)), st.ty, teHead(&indexT));
+        st = freshVar(st);
+        elementT = st.ty;
+        st = listTy(st, elementT);
+        st = expect(st, clone(name), st.ty, listT);
+        if st.status != 0 { return st; };
+        blockNodes = push([], blockT.node);
+        st = emitBuiltinCall(st, clone(key), &blockNodes);
+        innerParts = push([], blockT);
+        st = typed(st, st.nid, listT, &innerParts);
+        inner = clone(st.te);
+        getNodes = push(push([], inner.node), indexT.node);
+        st = emitBuiltinCall(st, "Get", &getNodes);
+        parts = push(push([], inner), indexT);
+        return typed(st, st.nid, elementT, &parts);
+    };
+    argTys = typesHeads(&inferred);
+    st = checkCall(st, &name, ft, &argTys);
+    if st.status != 0 { return st; };
+    resultT = st.ty;
+    argNodes = nodesOf(&inferred);
+    st = emitBuiltinCall(st, key, &argNodes);
+    return typed(st, st.nid, resultT, &inferred);
+};
+
+// Addr::alloc(n), Addr::get(p, i, b), Block::split(b, i), ...: the operations on addresses and permissions
+fn pointerCall(st: St, name: String, index: Int, args: &List<Int>) -> St ~ {
+    st = inferAll(st, args);
+    if st.status != 0 { return st; };
+    inferred0 = clone(st.tes);
+    st = builtinIndexType(st, index);
+    if st.status != 0 { return st; };
+    ft = st.ty;
+    st = coerceArguments(st, ft, &inferred0);
+    if st.status != 0 { return st; };
+    inferred = clone(st.tes);
+    key = clone(get(st.builtinKinds, index));
+    argTys = typesHeads(&inferred);
+    st = checkBuiltinCall(st, clone(key), name, ft, &argTys);
+    if st.status != 0 { return st; };
+    resultT = st.ty;
+    argNodes = nodesOf(&inferred);
+    st = emitBuiltinCall(st, key, &argNodes);
+    return typed(st, st.nid, resultT, &inferred);
+};
+
+fn pathOf(name: &String) -> String [{ }] [{ }] {
+    n = size(name.bytes);
+    i = 1;
+    while i + 2 < n [{ affirm i >= 1; affirm n = size(name.bytes); }] shrinks n - i {
+        if get(name.bytes, i) = toByte(58) && get(name.bytes, i + 1) = toByte(58) { return name.slice(0, i); };
+        i = i + 1;
+    };
+    return "";
+};
+
+// A name that names a function of a trait or a type, as Type::f (traitPath)
+fn traitPath(name: &String) -> Bool [{ }] [{ }] {
+    n = size(name.bytes);
+    i = 1;
+    while i + 2 < n [{ affirm i >= 1; affirm n = size(name.bytes); }] shrinks n - i {
+        if get(name.bytes, i) = toByte(58) && get(name.bytes, i + 1) = toByte(58) { return true; };
+        i = i + 1;
+    };
+    return false;
+};
+
+fn inferField(st: St, funct: Int, field: AstBuiltin::FieldBuiltin, structExpr: Int) -> St ~ {
+    owner = "";
+    on = nodeIn(&st.nodes, field.owner);
+    if on is AstNode::OptName && (on as AstNode::OptName).value is AstOptName::SomeName {
+        owner = nameText(&st.nodes, ((on as AstNode::OptName).value as AstOptName::SomeName).n);
+    };
+    name = nameText(&st.nodes, field.n);
+    st = inferExpr(st, structExpr);
+    if st.status != 0 { return st; };
+    s = clone(st.te);
+    st = readField(st, &owner, &name, head(&s.types));
+    if st.status = 1 { return derefOnFailure(st, head(&s.types)); };
+    if st.status != 0 { return st; };
+    t = st.ty;
+    st = zonk(st, head(&s.types));
+    ty = st.ty;
+    f = funct;
+    if size(owner.bytes) = 0 && isBoxTy(st, ty) && (name = "addr" || name = "blk") { return notModelled(st, "the storage of a Box"); };
+    callArgs = push([], s.node);
+    st = emitCall(st, f, &callArgs);
+    parts = push([], s);
+    return typed(st, st.nid, t, &parts);
+};
+
+// A field the value does not have would be looked for through its Deref impl
+fn derefOnFailure(st: St, t: Int) -> St ~ {
+    x = tyAt(st, resolve(st, t));
+    owner = "";
+    if x.kind = 4 && x.name != "Box" { owner = clone(x.name); };
+    if x.kind = 5 && st.ctors.contains(&x.name) { owner = clone(st.ctors.lookup(&x.name, noCtor()).owner); };
+    if size(owner.bytes) > 0 && st.impls.contains(catStrings("Deref ", owner)) { return St { status: 2, msg: "Deref", ..st }; };
+    return st;
+};
+
+// What derefStepExpr would do for a value whose field is not its own: nothing for a Box or a type with no Deref impl
+fn derefStepNeeded(st: St, t: Int) -> St ~ {
+    st = zonk(st, t);
+    x = tyAt(st, st.ty);
+    if isBoxTy(st, st.ty) { return st; };
+    if x.kind = 4 && st.impls.contains(catStrings("Deref ", x.name)) { return notModelled(st, "Deref"); };
+    if x.kind = 5 && st.ctors.contains(&x.name) && st.impls.contains(catStrings("Deref ", st.ctors.lookup(&x.name, noCtor()).owner)) { return notModelled(st, "Deref"); };
+    return st;
+};
+
+fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St ~ {
+    name = nameText(&st.nodes, ctor.n);
+    fields = namesText(&st.nodes, ctor.fs);
+    st = inferAll(st, args);
+    if st.status != 0 { return st; };
+    inferred0 = clone(st.tes);
+    base = baseNameOf(&name);
+    st = ctorArgTypes(st, ctor.args);
+    ctorArgs = clone(st.te.types);
+    st = namedTy(st, clone(base), ctorArgs);
+    ty0 = st.ty;
+    tuple = isTuple(&base);
+    if !tuple { st = ensureInstance(st, ty0); };
+    declared = [];
+    if !tuple {
+        st = ctorInfo(st, &name);
+        if st.status != 0 { return st; };
+        declared = clone(st.ctor.types);
+    };
+    inferred = clone(inferred0);
+    if size(declared) = size(inferred0) {
+        inferred = [];
+        i = 0;
+        while i < size(declared) [{ affirm i >= 0; affirm size(declared) = size(inferred0); }] ~ {
+            st = coerce(st, get(declared, i), clone(get(inferred0, i)));
+            inferred = push(inferred, clone(st.te));
+            i = i + 1;
+        };
+    };
+    argTypes = typesHeads(&inferred);
+    st = checkConstruct(st, ty0, &fields, &argTypes);
+    if st.status != 0 { return st; };
+    t = st.ty;
+    argNodes = nodesOf(&inferred);
+    st = emitCall(st, funct, &argNodes);
+    return typed(st, st.nid, t, &inferred);
+};
+
+fn methodCall(st: St, method: String, args: &List<Int>) -> St ~ {
+    st = inferAll(st, args);
+    if st.status != 0 { return st; };
+    inferred = clone(st.tes);
+    st = zonk(st, teHead(&get(inferred, 0)));
+    receiverTy = unrefOf(st, st.ty);
+    if st.methods.contains(&method) && sequenceType(st, receiverTy) {
+        index = st.methods.lookup(&method, 0 - 1);
+        value = get(st.builtinValues, index);
+        st = emitVal(st, value);
+        functNode = st.nid;
+        st = inferExpr(st, functNode);
+        if st.status != 0 { return st; };
+        functT = clone(st.te);
+        return ordinaryBuiltin(st, functNode, functT, head(&functT.types), &inferred);
+    };
+    return notModelled(st, "a method of a struct (impls)");
+};
+
+fn sequenceType(st: &St, t: Int) -> Bool [{ }] [{ }] {
+    x = tyAt(st, t);
+    if isListTy(st, t) || x.kind = 6 { return true; };
+    if isBoxTy(st, t) { return kindOf(st, get(x.args, 0)) = 6; };
+    return false;
+};
+
+fn primitiveEq(st: &St, t: Int) -> Bool [{ }] [{ }] {
+    k = kindOf(st, t);
+    return k = 0 || k = 1 || k = 2 || k = 3 || k = 7;
+};
+
+// a = b and a != b in code: the words of a primitive value are compared, and any other value by its Eq
+fn inferEquality(st: St, funct: Int, negated: Bool, args: &List<Int>) -> St ~ {
+    st = inferAll(st, args);
+    if st.status != 0 { return st; };
+    inferred = clone(st.tes);
+    st = zonk(st, teHead(&get(inferred, 0)));
+    at = unrefOf(st, st.ty);
+    st = zonk(st, teHead(&get(inferred, 1)));
+    bt = unrefOf(st, st.ty);
+    st = expect(st, "argument 2 of the comparison", at, bt);
+    if st.status != 0 { return st; };
+    st = zonk(st, at);
+    st = defaultUnknown(st, st.ty);
+    st = zonk(st, at);
+    t = st.ty;
+    operands = clone(inferred);
+    // (a Box has the value of what it holds, so two Boxes are compared by what they hold)
+    unboxing = true;
+    while unboxing [{ }] ~ {
+        unboxing = false;
+        if isBoxTy(st, t) {
+            inner = argAt(st, t, 0);
+            ix = tyAt(st, inner);
+            if !(ix.kind = 6 && kindOf(st, get(ix.args, 1)) = 21) {
+                unboxed = [];
+                for e in &operands {
+                    callArgs = push([], e.node);
+                    st = emitBuiltinCall(st, "UnBox", &callArgs);
+                    parts = push([], clone(e));
+                    st = typed(st, st.nid, inner, &parts);
+                    unboxed = push(unboxed, clone(st.te));
+                };
+                operands = unboxed;
+                t = inner;
+                st = zonk(st, t);
+                t = st.ty;
+                unboxing = true;
+            };
+        };
+    };
+    if primitiveEq(st, t) {
+        st = inferExpr(st, funct);
+        if st.status != 0 { return st; };
+        functT = clone(st.te);
+        return ordinaryBuiltin(st, funct, functT, head(&functT.types), &operands);
+    };
+    compared = push([], t);
+    st = comparing(st, funct, &compared);
+    if st.status != 0 { return st; };
+    return notModelled(st, "comparing with Eq");
+};
+
+fn defaultUnknown(st: St, t: Int) -> St ~ {
+    x = tyAt(st, t);
+    if x.kind = 15 {
+        st = simpleTy(st, 0);
+        return unify(st, t, st.ty);
+    };
+    if isListTy(st, t) || isBoxTy(st, t) || x.kind = 6 { return defaultUnknown(st, get(x.args, 0)); };
+    return st;
+};
+
+// A call that is not one of the forms above (general and generalCall)
+fn general(st: St, funct: Int, args: &List<Int>) -> St ~ {
+    fex = exprOf(st, funct);
+    if fex is AstExpression::Var {
+        name = nameText(&st.nodes, (fex as AstExpression::Var).n);
+        if st.templates.contains(&name) && !inScope(st, &name) { return notModelled(st, "functions with bounds"); };
+    };
+    st = generalCall(st, funct, args);
+    if st.status != 0 { return st; };
+    k = kindOf(st, resolve(st, head(&st.te.types)));
+    if k = 10 || k = 11 { return notModelled(st, "a call that returns a reference"); };
+    return st;
+};
+
+fn generalCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
+    ft = 0 - 1;
+    functT = TE { node: funct, types: [] };
+    if isVar(st, funct) && builtinHead(st, funct) < 0 {
+        name = varName(st, funct);
+        st = lookupVar(st, &name);
+        if st.status != 0 { return st; };
+        ft = st.ty;
+        functT = TE { node: funct, types: push([], ft) };
+    } else {
+        st = inferExpr(st, funct);
+        if st.status != 0 { return st; };
+        functT = clone(st.te);
+        ft = head(&functT.types);
+    };
+    st = zonk(st, ft);
+    ftz = tyAt(st, st.ty);
+    if ftz.kind = 13 {
+        st = inferAll(st, args);
+        if st.status != 0 { return st; };
+        inferredG = clone(st.tes);
+        st = genericCall(st, describe(st, funct), &ftz.sizes, &ftz.types, get(ftz.args, 0), &inferredG);
+        if st.status != 0 { return st; };
+        resultT = st.ty;
+        argsG = clone(st.tes);
+        argNodes = nodesOf(&argsG);
+        st = emitCall(st, functT.node, &argNodes);
+        all = headTExpr(st, &functT);
+        for a in &argsG { all = push(all, clone(a)); };
+        return typed(st, st.nid, resultT, &all);
+    };
+    return ordinary(st, funct, functT, ft, args);
+};
+
+fn describe(st: &St, funct: Int) -> String [{ }] [{ }] {
+    if isVar(st, funct) { return varName(st, funct); };
+    return "call";
+};
+
+// The head of a call is visited when it is itself computed (not a name or a value)
+fn headTExpr(st: &St, functT: &TE) -> List<TE> [{ }] [{ }] {
+    ex = exprOf(st, functT.node);
+    if ex is AstExpression::F { return push([], clone(functT)); };
+    return [];
+};
+
+fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
+    st = inferAll(st, args);
+    if st.status != 0 { return st; };
+    inferred0 = clone(st.tes);
+    b = builtinHead(st, funct);
+    if b >= 0 && size(inferred0) > 0 {
+        key = builtinKey(st, b);
+        i = builtinIndex(st, &key);
+        if st.methodOf.contains(i) {
+            st = zonk(st, teHead(&get(inferred0, 0)));
+            x = tyAt(st, st.ty);
+            if x.kind = 4 && x.name != "List" && x.name != "Box" { return notModelled(st, "a function of a struct's impl"); };
+        };
+    };
+    return ordinaryBuiltin(st, funct, functT, ft, &inferred0);
+};
+
+fn isLookThroughKey(key: &String) -> Bool [{ }] [{ }] { return key = "Is" || key = "Cast" || key = "Project"; };
+
+fn ordinaryBuiltin(st: St, funct: Int, functT: TE, ft: Int, inferred0: &List<TE>) -> St ~ {
+    key = headKey(st, funct);
+    if isLookThroughKey(&key) && size(inferred0) > 0 {
+        st = derefStepNeeded(st, teHead(&get(inferred0, 0)));
+        if st.status != 0 { return st; };
+    };
+    inferred = clone(inferred0);
+    if key = "WriteByte" || key = "WriteError" || key = "PathByte" || key = "StoreByte" || size(key.bytes) = 0 {
+        st = coerceArguments(st, ft, inferred0);
+        if st.status != 0 { return st; };
+        inferred = clone(st.tes);
+    };
+    ats = typesHeads(&inferred);
+    st = checkBuiltinCall(st, headKey(st, funct), describe(st, funct), ft, &ats);
+    if st.status != 0 { return st; };
+    resultT = st.ty;
+    st = comparing(st, funct, &ats);
+    if st.status != 0 { return st; };
+    argNodes = nodesOf(&inferred);
+    st = emitCall(st, functT.node, &argNodes);
+    all = headTExpr(st, &functT);
+    for a in &inferred { all = push(all, clone(a)); };
+    return typed(st, st.nid, resultT, &all);
+};
+
+// The arguments of a call of a function of the program, with the conversions its parameters ask for (coerceArguments)
+fn coerceArguments(st: St, ft: Int, inferred: &List<TE>) -> St ~ {
+    st = zonk(st, ft);
+    x = tyAt(st, st.ty);
+    if x.kind != 14 || size(x.args) - 1 != size(inferred) { return St { tes: clone(inferred), ..st }; };
+    out = [];
+    i = 0;
+    while i < size(inferred) [{ affirm i >= 0; }] ~ {
+        arg = clone(get(inferred, i));
+        st = zonk(st, get(x.args, i));
+        ptz = st.ty;
+        st = zonk(st, head(&arg.types));
+        atz = st.ty;
+        pk = kindOf(st, ptz);
+        ak = kindOf(st, atz);
+        if pk = 10 || pk = 11 || ak = 10 || ak = 11 { return notModelled(st, "references"); };
+        st = coerce(st, ptz, arg);
+        if st.status != 0 { return st; };
+        out = push(out, clone(st.te));
+        i = i + 1;
+    };
+    return St { tes: out, ..st };
+};
+
+// size, first, last, get, set and replace on an array, toInt of a word, and is/as of a Box (checkBuiltinCall)
+fn checkBuiltinCall(st: St, key: String, name: String, ft: Int, ats: &List<Int>) -> St ~ {
+    if size(ats) > 0 && (key = "Size" || key = "First" || key = "Last" || key = "Get" || key = "Set" || key = "Replace") {
+        st = zonk(st, get(ats, 0));
+        t = st.ty;
+        x = tyAt(st, t);
+        if x.kind = 6 { return arrayCall(st, &key, &name, false, get(x.args, 1), ats); };
+        if isBoxTy(st, t) && kindOf(st, get(x.args, 0)) = 6 { return arrayCall(st, &key, &name, true, argAt(st, get(x.args, 0), 1), ats); };
+        return checkCall(st, &name, ft, ats);
+    };
+    if size(ats) > 0 && isLookThroughKey(&key) {
+        st = zonk(st, get(ats, 0));
+        t = st.ty;
+        lookedThrough = set(clone(ats), 0, argAt(st, t, 0));
+        if isBoxTy(st, t) { return checkCall(st, &name, ft, &lookedThrough); };
+        return checkCall(st, &name, ft, ats);
+    };
+    if size(ats) = 1 && key = "FromByte" {
+        st = zonk(st, get(ats, 0));
+        if kindOf(st, st.ty) = 3 { return simpleTy(st, 0); };
+        return checkCall(st, &name, ft, ats);
+    };
+    return checkCall(st, &name, ft, ats);
+};
+
+fn arrayCall(st: St, key: &String, name: &String, boxed: Bool, sz: Int, ats: &List<Int>) -> St ~ {
+    st = freshVar(st);
+    a = st.ty;
+    st = arrayTy(st, a, sz);
+    seq = st.ty;
+    if boxed { st = boxTy(st, seq); seq = st.ty; };
+    st = wrapTy(st, 10, seq);
+    refSeq = st.ty;
+    st = simpleTy(st, 0);
+    intTy = st.ty;
+    if key = "Size" { st = fnTy(st, push([], refSeq), intTy); };
+    if key = "Get" { st = fnTy(st, push(push([], refSeq), intTy), a); };
+    if key = "Set" { st = fnTy(st, push(push(push([], seq), intTy), a), seq); };
+    if key = "Replace" {
+        pair = push(push([], seq), a);
+        st = tupleType(st, &pair);
+        st = fnTy(st, push(push(push([], seq), intTy), a), st.ty);
+    };
+    if key = "First" || key = "Last" { st = fnTy(st, push([], refSeq), a); };
+    return checkCall(st, name, st.ty, ats);
+};
+
+// Equality is structural, which functions do not have (comparing): only the first argument of = and != is looked at
+fn comparing(st: St, funct: Int, ats: &List<Int>) -> St ~ {
+    if st.status != 0 { return st; };
+    ex = exprOf(st, funct);
+    if !(ex is AstExpression::Val) || size(ats) = 0 { return st; };
+    key = headKey(st, funct);
+    if key != "Rel 0" && key != "Rel 1" { return st; };
+    st = zonk(st, get(ats, 0));
+    t = st.ty;
+    k = kindOf(st, t);
+    if k = 14 { return fail(st, "Type error: functions cannot be compared"); };
+    if k = 9 { return fail(st, "Type error: an Uninit cannot be compared, since it may hold nothing: what it holds is compared, as in Uninit::get(a) = Uninit::get(b)"); };
+    st = holdsGhost(st, t);
+    if st.ok {
+        return typeError(st, catStrings(render(st, t), " holds a permission, which cannot be compared: what a permission says is compared, as in at(a, 0) = at(b, 0)"));
+    };
+    return st;
+};
+
+// The size of an array made by array(n, x): a constant, or a size parameter of the function (arraySize); st.ty the
+// size and st.nid the argument as it is written in the result
+fn arraySize(st: St, n: Int) -> St ~ {
+    if isVar(st, n) {
+        v = varName(st, n);
+        if indexIn(&st.sizeScope, &v) >= 0 {
+            st = addTy(st, Ty { kind: 22, name: v, args: [], n: 0, flag: false, sizes: [], types: [] });
+            return St { nid: n, ..st };
+        };
+    };
+    c = constantInt(st, n);
+    if c.status = 1 { return fail(st, noConstantSize()); };
+    if c.status = 2 { return fail(st, c.msg); };
+    st = sizeConst(st, c.value);
+    sz = st.ty;
+    st = emitIntValue(st, c.value);
+    st = emitVal(st, st.nid);
+    return St { ty: sz, ..st };
+};
+
+fn noConstantSize() -> String [{ }] [{ }] {
+    return "Type error: the size of an array must be a constant (a number, arithmetic on numbers, or a size parameter of the function), since the array is held inline (for a size that the program works out, use Array::boxed(n, x), which puts the array on the heap in a Box)";
+};
+
+// The value of an expression made of numbers and arithmetic (constantInt): status 0 a value, 1 not one, 2 an error
+struct Folded { value: Int, status: Int, msg: String };
+impl Clone for Folded { };
+
+fn constantInt(st: &St, e: Int) -> Folded ~ {
+    lit = intLiteral(st, e);
+    if lit.ok { return Folded { value: lit.value, status: 0, msg: "" }; };
+    ex = exprOf(st, e);
+    if !(ex is AstExpression::F) { return Folded { value: 0, status: 1, msg: "" }; };
+    call = ex as AstExpression::F;
+    fex = exprOf(st, call.f);
+    if !(fex is AstExpression::Val) { return Folded { value: 0, status: 1, msg: "" }; };
+    key = headKey(st, call.f);
+    args = listItems(&st.nodes, call.xs);
+    if size(args) != 2 || !(key = "Plus" || key = "Minus" || key = "Times" || key = "Div" || key = "Mod") { return Folded { value: 0, status: 1, msg: "" }; };
+    a = constantInt(st, get(args, 0));
+    if a.status = 1 { return a; };
+    c = constantInt(st, get(args, 1));
+    if c.status = 1 { return c; };
+    if a.status = 2 { return a; };
+    if c.status = 2 { return c; };
+    return constantArithmetic(&key, a.value, c.value);
+};
+
+// One step of the arithmetic of a size, which has to stay in the Int range and not divide by zero, as when the
+// program runs (constantArithmetic)
+fn constantArithmetic(key: &String, a: Int, c: Int) -> Folded [{ }] [{ }] {
+    overflow = Folded { value: 0, status: 2, msg: "Type error: integer overflow in the size of an array (an Int is 64 bits)" };
+    if key = "Div" && c = 0 { return Folded { value: 0, status: 2, msg: "Type error: division by zero in the size of an array" }; };
+    if key = "Mod" && c = 0 { return Folded { value: 0, status: 2, msg: "Type error: modulo by zero in the size of an array" }; };
+    if key = "Plus" {
+        if (c > 0 && a > maxInt() - c) || (c < 0 && a < minInt() - c) { return overflow; };
+        return Folded { value: a + c, status: 0, msg: "" };
+    };
+    if key = "Minus" {
+        if (c > 0 && a < minInt() + c) || (c < 0 && a > maxInt() + c) { return overflow; };
+        return Folded { value: a - c, status: 0, msg: "" };
+    };
+    if key = "Times" {
+        if !productFits(a, c) { return overflow; };
+        return Folded { value: a * c, status: 0, msg: "" };
+    };
+    if key = "Div" {
+        if a = minInt() && c = 0 - 1 { return overflow; };
+        return Folded { value: a / c, status: 0, msg: "" };
+    };
+    if a = minInt() && c = 0 - 1 { return Folded { value: 0, status: 0, msg: "" }; };
+    return Folded { value: a % c, status: 0, msg: "" };
+};
+
+// A call of a function with size and type parameters (genericCall): st.ty the result, st.tes the arguments and the sizes
+fn genericCall(st: St, name: String, names: &List<String>, types: &List<String>, inner: Int, inferred: &List<TE>) -> St ~ {
+    st = instantiateGenerics(st, names, types, inner);
+    instantiated = st.ty;
+    vars = clone(st.te.types);
+    x = tyAt(st, instantiated);
+    if x.kind != 14 { return typeError(st, catStrings(name, " is not a function")); };
+    pts = argsOfFn(&x);
+    if size(pts) - size(names) != size(inferred) {
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " takes "), intText(size(pts) - size(names))), " arguments, got "), intText(size(inferred))));
+    };
+    out = [];
+    i = 0;
+    while i < size(inferred) [{ affirm i >= 0; }] ~ {
+        st = zonk(st, get(pts, i));
+        ptz = st.ty;
+        st = coerce(st, unrefOf(st, ptz), clone(get(inferred, i)));
+        if st.status != 0 { return st; };
+        arg = clone(st.te);
+        st = zonk(st, head(&arg.types));
+        atz = st.ty;
+        pk = kindOf(st, ptz);
+        ak = kindOf(st, atz);
+        if (pk = 10 && (ak = 10 || ak = 11)) || (pk = 11 && ak = 11) {
+            st = expect(st, argContext(&name, i + 1), argAt(st, ptz, 0), argAt(st, atz, 0));
+        } else {
+            st = expect(st, argContext(&name, i + 1), unrefOf(st, ptz), atz);
+        };
+        if st.status != 0 { return st; };
+        out = push(out, arg);
+        i = i + 1;
+    };
+    given = [];
+    j = 0;
+    while j < size(names) [{ affirm j >= 0; }] ~ {
+        st = zonk(st, get(vars, j));
+        st = sizeArgument(st, &name, &get(names, j), st.ty);
+        if st.status != 0 { return st; };
+        given = push(given, st.nid);
+        j = j + 1;
+    };
+    k = 0;
+    while k < size(types) [{ affirm k >= 0; }] ~ {
+        st = zonk(st, get(vars, size(names) + k));
+        t = st.ty;
+        n = get(types, k);
+        if hasFunction(st, t) {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("the type ", clone(n)), " of "), clone(name)), catStrings(" would be ", render(st, t))), ", and a type parameter is not a function"));
+        };
+        st = holdsGhost(st, t);
+        if st.ok {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("the type ", clone(n)), " of "), clone(name)), catStrings(" would be ", render(st, t))), ", which holds a permission, and a type parameter is not one (a function that takes any type may drop or keep a value of it, and a permission is used exactly once)"));
+        };
+        if st.current = name && isExpanding(st, &st.typeScope, t) {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " calls itself with the type "), render(st, t)), catStrings(" for ", clone(n))), ", which is made of its own type parameters: a call of itself gives each type parameter as it is, or a type that does not use them, since a copy of the function is made for each type and would be needed for each depth"));
+        };
+        k = k + 1;
+    };
+    st = zonk(st, last(x.args));
+    resultT = st.ty;
+    st = simpleTy(st, 0);
+    intTy = st.ty;
+    for g in given { out = push(out, TE { node: g, types: push([], intTy) }); };
+    return St { ty: resultT, tes: out, ..st };
+};
+
+fn isExpanding(st: &St, scope: &List<String>, t: Int) -> Bool ~ {
+    if kindOf(st, resolve(st, t)) = 12 { return false; };
+    return usesParam(st, scope, t);
+};
+
+fn usesParam(st: &St, scope: &List<String>, t: Int) -> Bool ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 12 { return indexIn(scope, &x.name) >= 0; };
+    if x.kind = 6 { return usesParam(st, scope, get(x.args, 0)); };
+    if x.kind = 4 || x.kind = 14 || (x.kind >= 7 && x.kind <= 11) {
+        for a in x.args { if !isSize(st, a) && usesParam(st, scope, a) { return true; }; };
+    };
+    return false;
+};
+
+// A copy is made of a type that implements Clone (requireClone, implementsMarker)
+fn requireClone(st: St, t: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    st = implementsMarker(st, "Clone", t, 0);
+    if st.ok { return st; };
+    return notModelled(st, "a copy of a value that is not Clone");
+};
+
+fn implementsMarker(st: St, marker: String, t0: Int, depth: Int) -> St ~ {
+    if depth > 16 { return St { ok: true, ..st }; };
+    st = zonk(st, t0);
+    t = st.ty;
+    x = tyAt(st, t);
+    if x.kind <= 3 || x.kind = 14 || x.kind = 15 || x.kind = 7 { return St { ok: true, ..st }; };
+    if x.kind = 10 { return implementsMarker(st, marker, get(x.args, 0), depth + 1); };
+    if x.kind = 12 { return St { ok: marker = "Clone", ..st }; };
+    if x.kind = 6 { return implementsMarker(st, marker, get(x.args, 0), depth + 1); };
+    if isListTy(st, t) || isBoxTy(st, t) {
+        if marker = "Clone" { return implementsMarker(st, marker, get(x.args, 0), depth + 1); };
+        return St { ok: false, ..st };
+    };
+    if x.kind = 8 { return St { ok: false, ..st }; };
+    if x.kind = 9 {
+        st = ownsHeap(st, get(x.args, 0));
+        if st.ok { return St { ok: false, ..st }; };
+        return implementsMarker(st, marker, get(x.args, 0), depth + 1);
+    };
+    if x.kind = 4 && x.name = "Self" { return St { ok: marker = "Clone", ..st }; };
+    if x.kind = 4 && isTuple(&x.name) {
+        for a in x.args {
+            if !isSize(st, a) {
+                st = implementsMarker(st, clone(marker), a, depth + 1);
+                if !st.ok { return st; };
+            };
+        };
+        return St { ok: true, ..st };
+    };
+    if x.kind = 4 { return declaredMarker(st, marker, depth, instanceName(st, t)); };
+    if x.kind = 5 {
+        st = ctorInfo(st, &x.name);
+        if st.status != 0 { return st; };
+        return declaredMarker(st, marker, depth, clone(st.ctor.owner));
+    };
+    return St { ok: false, ..st };
+};
+
+fn declaredMarker(st: St, marker: String, depth: Int, name: String) -> St ~ {
+    base = baseNameOf(&name);
+    if !st.impls.contains(catStrings(catStrings(marker, " "), clone(base))) { return St { ok: false, ..st }; };
+    if marker = "Copy" && base != name { return notModelled(st, "Copy of a struct with types"); };
+    return St { ok: true, ..st };
+};

@@ -17,7 +17,7 @@ import qualified TersusParser
 import MirHousekeeping (cachedEmitter, validationEntry)
 import ParsedFile (Decls, ParsedFile, emptyDecls, fileBody, locating)
 import qualified FileParserProtocol as File
-import PreludeSource (toolPackageFiles, validationPackageFiles)
+import PreludeSource (elaboratePackageFiles, toolPackageFiles, validationPackageFiles)
 import qualified Modules
 import qualified SourceParse
 import qualified ParserSeed
@@ -113,7 +113,11 @@ corpusParity batch = do
     paths <- corpusPaths
     allSources <- forM paths $ \path -> do source <- readFile path; pure (path, source)
     let resolver = Modules.resolverFromFiles (allSources ++ toolPackageFiles)
-        fixtures = [(emitterCorpusEntry, emitterCorpusFiles), (validationEntry, [path | (path, _) <- validationPackageFiles, takeFileName path /= "package.tersus"])]
+        fixtures =
+            [ (emitterCorpusEntry, emitterCorpusFiles)
+            , (validationEntry, [path | (path, _) <- validationPackageFiles, takeFileName path /= "package.tersus"])
+            , ("lib/elaborate/elaborate.tersus", [path | (path, _) <- elaboratePackageFiles, "lib/elaborate/" `isPrefixOf` path, takeFileName path /= "package.tersus"])
+            ]
         fixturePaths = concatMap snd fixtures
         units = [filter ((`elem` members) . fst) allSources | (_, members) <- fixtures]
             ++ [[sample] | sample <- allSources, fst sample `notElem` fixturePaths]

@@ -52,6 +52,7 @@ import TestSharedCache
 import TestScheduling
 import TestAstData
 import TestDifferential
+import TestElaborate
 import TestDataCodec
 import TestModules
 import TestParity
@@ -113,7 +114,7 @@ allGroups = concatMap registered originalGroups
             Nothing -> [original]
 
 batchedGroups :: [(Test, [Test])]
-batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader, testDifferential]]
+batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader, testDifferential, testElaborate]]
 
 originalGroups :: [Test]
 originalGroups =
@@ -210,6 +211,7 @@ originalGroups =
     , testParserUnicode
     , testAstReader
     , testDifferential
+    , testElaborate
     , testParity
     , testLibModules
     , testNativeStorageModules

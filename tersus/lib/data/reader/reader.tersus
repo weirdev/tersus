@@ -1333,6 +1333,12 @@ fn readRecord() -> Parsed<String> [{ }] [{ }] {
 };
 
 fn readAst() -> Parsed<AstProgram> ~ {
+    return readAstRecords(0 - 1);
+};
+
+// An AST block of exactly count records on standard input (a header, the nodes and the root), with more input
+// after it; with a negative count, the whole input
+fn readAstRecords(count: Int) -> Parsed<AstProgram> ~ {
     header = readRecord();
     if !header.ok || header.pos = 0 || size(header.value.bytes) < 14 || !header.value.startsWith("tersus-ast 1 ") { return badAst(); };
     stage = header.value.slice(13, size(header.value.bytes));
@@ -1341,6 +1347,7 @@ fn readAst() -> Parsed<AstProgram> ~ {
     nodes = [];
     uses = noInts();
     while true [{ }] ~ {
+        if count >= 0 && size(nodes) + 2 > count { return badAst(); };
         line = readRecord();
         if !line.ok || line.pos = 0 || size(line.value.bytes) = 0 { return badAst(); };
         tokens = tokenizeStrict(line.value);
@@ -1357,10 +1364,14 @@ fn readAst() -> Parsed<AstProgram> ~ {
                 if i = root.value { expected = 0; };
                 if get(uses, i) != expected { return badAst(); };
             };
-            end = readRecord();
-            if !end.ok || end.pos != 0 { return badAst(); };
-            count = size(nodes);
-            return done(AstProgram { stage: stage, nodes: nodes, root: root.value }, count);
+            if count < 0 {
+                end = readRecord();
+                if !end.ok || end.pos != 0 { return badAst(); };
+            } else {
+                if size(nodes) + 2 != count { return badAst(); };
+            };
+            total = size(nodes);
+            return done(AstProgram { stage: stage, nodes: nodes, root: root.value }, total);
         };
         node = nodeAt(ts, nodes);
         if !node.ok { return badAst(); };

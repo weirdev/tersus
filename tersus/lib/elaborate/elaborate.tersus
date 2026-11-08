@@ -1,0 +1,218 @@
+import data::arena::arena { reorderArena };
+import data::ast::ast { AstBody, AstElaborated, AstEntry, AstNode, AstProgram, AstStatement, AstValue, printAst };
+import data::codec::codec { Parsed, Token, catStrings, intAt, tokenize };
+import data::reader::reader { readAstRecords, readRecord };
+import elaborate::builtins { loadBuiltins };
+import elaborate::check { checkStatements, functionValue, stmtOf };
+import elaborate::out { emit, emitTypes, quotedName };
+import elaborate::records { fieldCodecTypes, fieldNames, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData };
+import elaborate::state { CtorInfo, Generic, St, TE, intText, notModelled, oneScope };
+
+// The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
+// response on standard output (AST_DATA.md). It answers `unmodelled` for what it does not handle yet.
+
+fn newState() -> St [{ }] [{ }] {
+    return St {
+        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0,
+        types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
+        traits: HashSet::new(), templates: HashSet::new(), fns: HashMap::new(), scopes: oneScope(),
+        ret: 0 - 1, programReturn: 0 - 1, sizeScope: [], typeScope: [], readOnly: [], mutParams: [], current: "", inGhost: false,
+        predeclared: HashSet::new(), impls: HashSet::new(), builtinNames: HashMap::new(), builtinValues: [], builtinSchemes: [],
+        builtinKinds: [], stdNames: HashMap::new(), pointer: HashMap::new(), ghostNames: HashMap::new(), methods: HashMap::new(),
+        methodOf: HashMap::new(), ty: 0, ok: true, te: TE { node: 0 - 1, types: [] }, tes: [], outs: [], nid: 0 - 1, n: 0,
+        gen: Generic { params: [], names: [], types: [] }, ctor: CtorInfo { owner: "", names: [], types: [] }, names: [],
+        seen: [], status: 0, msg: ""
+    };
+};
+
+struct Line { words: List<Token>, ok: Bool };
+impl Clone for Line { };
+
+fn readLine() -> Line [{ }] [{ }] {
+    r = readRecord();
+    if !r.ok || r.pos = 0 { return Line { words: [], ok: false }; };
+    t = tokenize(&r.value);
+    if !t.ok { return Line { words: [], ok: false }; };
+    return Line { words: t.value, ok: true };
+};
+
+fn wordIs(line: &Line, i: Int, w: &String) -> Bool [{ }] [{ }] {
+    if !line.ok || i < 0 || i >= size(line.words) { return false; };
+    tok = get(line.words, i);
+    return !tok.quoted && tok.text = clone(w);
+};
+
+// `data N` and then an AST block of N records
+fn readBlock() -> Parsed<AstProgram> ~ {
+    bad = Parsed<AstProgram> { value: AstProgram { stage: "", nodes: [], root: 0 }, pos: 0, ok: false };
+    line = readLine();
+    if !wordIs(&line, 0, "data") || size(line.words) != 2 { return bad; };
+    n = intAt(&line.words, 1);
+    if !n.ok || n.value < 2 { return bad; };
+    return readAstRecords(n.value);
+};
+
+// What an interface gives the checker (Interface.interfaceImportEnv, merged so that the first interface wins a name)
+fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
+    root = nodeIn(&iface.nodes, iface.root);
+    if !(root is AstNode::Interface) { return notModelled(st, "an interface the data does not give"); };
+    v = (root as AstNode::Interface).value;
+    nodes = &iface.nodes;
+    for e in listItems(nodes, v.types) {
+        entry = entryOf(nodes, e);
+        if entry is AstEntry::NamesEntry {
+            ne = entry as AstEntry::NamesEntry;
+            name = nameText(nodes, ne.n);
+            if !st.types.contains(&name) { st = St { types: st.types.insert(name, namesText(nodes, ne.ns)), ..st }; };
+        };
+    };
+    for e in listItems(nodes, v.ctors) {
+        entry = entryOf(nodes, e);
+        if entry is AstEntry::CtorEntry {
+            ce = entry as AstEntry::CtorEntry;
+            name = nameText(nodes, ce.n);
+            if !st.ctors.contains(&name) {
+                tycs = fieldCodecTypes(nodes, ce.fs); st = fromCodecs(st, &tycs);
+                st = St { ctors: st.ctors.insert(name, CtorInfo { owner: nameText(nodes, ce.owner), names: fieldNames(nodes, ce.fs), types: clone(st.te.types) }), ..st };
+            };
+        };
+    };
+    for e in listItems(nodes, v.generics) {
+        entry = entryOf(nodes, e);
+        if entry is AstEntry::GenericEntry {
+            ge = entry as AstEntry::GenericEntry;
+            name = nameText(nodes, ge.n);
+            if !st.generics.contains(&name) {
+                tycs = fieldCodecTypes(nodes, ge.fs); st = fromCodecs(st, &tycs);
+                st = St { generics: st.generics.insert(name, Generic { params: namesText(nodes, ge.ps), names: fieldNames(nodes, ge.fs), types: clone(st.te.types) }), ..st };
+            };
+        };
+    };
+    for e in listItems(nodes, v.traits) {
+        entry = entryOf(nodes, e);
+        if entry is AstEntry::TraitEntry { st = St { traits: st.traits.insert(nameText(nodes, (entry as AstEntry::TraitEntry).n)), ..st }; };
+    };
+    for e in listItems(nodes, v.functions) {
+        entry = entryOf(nodes, e);
+        if entry is AstEntry::FunctionEntry {
+            fe = entry as AstEntry::FunctionEntry;
+            name = nameText(nodes, fe.n);
+            if !st.fns.contains(&name) {
+                sd = sigData(nodes, fe.sig); st = functionTypeFrom(st, &sd);
+                st = St { fns: st.fns.insert(name, st.ty), ..st };
+            };
+        };
+    };
+    for e in listItems(nodes, v.impls) {
+        entry = entryOf(nodes, e);
+        if entry is AstEntry::PairEntry {
+            pe = entry as AstEntry::PairEntry;
+            st = St { impls: st.impls.insert(catStrings(catStrings(nameText(nodes, pe.a), " "), nameText(nodes, pe.b))), ..st };
+        };
+    };
+    for n in namesText(nodes, v.linear) { st = St { linearTypes: st.linearTypes.insert(clone(n)), ..st }; };
+    for n in namesText(nodes, v.drops) { st = St { drops: st.drops.insert(clone(n)), ..st }; };
+    for e in listItems(nodes, v.templates) {
+        entry = entryOf(nodes, e);
+        if entry is AstEntry::TemplateEntry { st = St { templates: st.templates.insert(nameText(nodes, (entry as AstEntry::TemplateEntry).n)), ..st }; };
+    };
+    return st;
+};
+
+fn entryOf(nodes: &List<AstNode>, e: Int) -> AstEntry [{ }] [{ }] {
+    node = nodeIn(nodes, e);
+    if node is AstNode::Entry { return clone((node as AstNode::Entry).value); };
+    return AstEntry::PairEntry { a: 0 - 1, b: 0 - 1 };
+};
+
+// The signatures of the functions defined at the top, known before any body is checked (gatheredSignatures)
+fn gatherSignatures(st: St, stmts: &List<Int>) -> St ~ {
+    gathered = HashMap::new();
+    for s in stmts {
+        stmt = stmtOf(st, s);
+        if stmt is AstStatement::Assign {
+            a = stmt as AstStatement::Assign;
+            v = functionValue(st, a.e);
+            name = nameText(&st.nodes, a.n);
+            if v >= 0 && !st.stdNames.contains(&name) && !st.ghostNames.contains(&name) {
+                value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
+                native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
+                sd = sigData(&st.nodes, native.sig); st = functionTypeFrom(st, &sd);
+                gathered = gathered.insert(name, st.ty);
+            };
+        };
+    };
+    fns = st.fns;
+    for e in gathered.entries() { fns = fns.insert(clone(e.key), e.value); };
+    return St { fns: fns, ..st };
+};
+
+fn respond(st: &St, program: &AstProgram) -> Int ~ {
+    n = "tersus-elaborated 1\n".print();
+    if st.status = 0 {
+        n = n + "accepted\ndata".print() + printIntWord(size(program.nodes) + 2) + "\n".print();
+        n = n + printAst(program);
+        return n + "interface none\n".print();
+    };
+    if st.status = 2 { return n + "unmodelled ".print() + printQuoted(&st.msg) + "\n".print(); };
+    return n + "refused ".print() + printQuoted(&st.msg) + "\n".print();
+};
+
+fn printIntWord(n: Int) -> Int [{ }] [{ }] { return " ".print() + intText(n).print(); };
+
+fn printQuoted(text: &String) -> Int [{ }] [{ }] { return quotedName(text).print(); };
+
+fn malformed() -> Int [{ }] [{ }] {
+    "not an elaboration request\n".printError();
+    return 1;
+};
+
+st = newState();
+header = readLine();
+if !wordIs(&header, 0, "tersus-elaborate") || !wordIs(&header, 1, "1") { return malformed(); };
+moduleLine = readLine();
+predeclare = readLine();
+library = readLine();
+extract = readLine();
+if !wordIs(&moduleLine, 0, "module") || size(moduleLine.words) != 3 || !wordIs(&predeclare, 0, "predeclare") || !wordIs(&library, 0, "library") || !wordIs(&extract, 0, "extract") { return malformed(); };
+builtinsLine = readLine();
+if !wordIs(&builtinsLine, 0, "builtins") { return malformed(); };
+table = readBlock();
+if !table.ok { return malformed(); };
+countLine = readLine();
+if !wordIs(&countLine, 0, "interfaces") || size(countLine.words) != 2 { return malformed(); };
+count = intAt(&countLine.words, 1);
+if !count.ok || count.value < 0 { return malformed(); };
+ifaces = [];
+for i in 0..count.value {
+    b = readBlock();
+    if !b.ok { return malformed(); };
+    ifaces = push(ifaces, b.value);
+};
+programBlock = readBlock();
+if !programBlock.ok || programBlock.value.stage != "parsed" { return malformed(); };
+end = readRecord();
+if !end.ok || end.pos != 0 { return malformed(); };
+parsed = programBlock.value;
+st = St { nodes: clone(parsed.nodes), ..st };
+st = loadBuiltins(st, &table.value);
+for iface in &ifaces { st = loadInterface(st, iface); };
+if !wordIs(&predeclare, 1, "false") { st = notModelled(st, "the modules of a package"); };
+if !wordIs(&extract, 1, "none") { st = notModelled(st, "interfaces"); };
+if !wordIs(&library, 1, "false") { st = notModelled(st, "the modules of the compiler libraries"); };
+if st.status = 0 {
+    stmts = listItems(&st.nodes, parsed.root);
+    st = gatherSignatures(st, &stmts);
+    st = checkStatements(st, true, &stmts);
+};
+out = AstProgram { stage: "elaborated", nodes: [], root: 0 };
+if st.status = 0 {
+    statementsNode = st.te.node;
+    types = clone(st.te.types);
+    st = emitTypes(st, &types);
+    if st.status = 0 {
+        st = emit(st, AstNode::Elaborated { value: AstElaborated { statements: statementsNode, types: st.nid } });
+        out = reorderArena(&st.nodes, st.nid, "elaborated");
+    };
+};
+respond(&st, &out);

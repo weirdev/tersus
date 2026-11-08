@@ -1,0 +1,544 @@
+import data::ast::ast { AstNode };
+import data::codec::codec { catStrings };
+
+// A type. kind: 0 Int, 1 Byte, 2 Bool, 3 a word (flag signed, n bits), 4 a named type (name, args: its arguments,
+// a size kind among them an ArgSize), 5 a variant (name), 6 an array (args: element, size), 7 Addr, 8 Block,
+// 9 Uninit, 10 &, 11 &mut (args: what it is of), 12 a type parameter (name), 13 a function with parameters (sizes,
+// types, args: its type), 14 a function (args: parameters, then the result), 15 an unknown (n), and the sizes: 20 a
+// constant (n), 21 any, 22 a size parameter (name), 23 an unknown size (n).
+struct Ty { kind: Int, name: String, args: List<Int>, n: Int, flag: Bool, sizes: List<String>, types: List<String> };
+impl Clone for Ty { };
+
+// An expression with the types of it and of the expressions inside it, in the order the lowering visits them
+struct TE { node: Int, types: List<Int> };
+impl Clone for TE { };
+
+// A constructor: the type it makes and its fields
+struct CtorInfo { owner: String, names: List<String>, types: List<Int> };
+impl Clone for CtorInfo { };
+
+// A struct with parameters: the parameters, and its fields with them in their types
+struct Generic { params: List<String>, names: List<String>, types: List<Int> };
+impl Clone for Generic { };
+
+// The variables in scope: a stack of scopes, each the bindings from its mark to the next one's
+struct Scopes { names: List<String>, types: List<Int>, marks: List<Int> };
+impl Clone for Scopes { };
+
+fn oneScope() -> Scopes [{ }] [{ }] {
+    return Scopes { names: [], types: [], marks: push([], 0) };
+};
+
+// The checker's state. status: 0 checking, 1 refused, 2 not modelled; msg says why.
+// ty is the result of the last function that makes a type, ok of the last unify, te of the last inference.
+struct St {
+    nodes: List<AstNode>,
+    tys: List<Ty>,
+    subst: HashMap<Int, Int>,
+    sizeSubst: HashMap<Int, Int>,
+    next: Int,
+    types: HashMap<String, List<String>>,
+    ctors: HashMap<String, CtorInfo>,
+    generics: HashMap<String, Generic>,
+    linearTypes: HashSet<String>,
+    drops: HashSet<String>,
+    traits: HashSet<String>,
+    templates: HashSet<String>,
+    fns: HashMap<String, Int>,
+    scopes: Scopes,
+    ret: Int,
+    programReturn: Int,
+    sizeScope: List<String>,
+    typeScope: List<String>,
+    readOnly: List<String>,
+    mutParams: List<String>,
+    current: String,
+    inGhost: Bool,
+    predeclared: HashSet<String>,
+    impls: HashSet<String>,
+    builtinNames: HashMap<String, Int>,
+    builtinValues: List<Int>,
+    builtinSchemes: List<Int>,
+    builtinKinds: List<String>,
+    stdNames: HashMap<String, Int>,
+    pointer: HashMap<String, Int>,
+    ghostNames: HashMap<String, Int>,
+    methods: HashMap<String, Int>,
+    methodOf: HashMap<Int, String>,
+    ty: Int,
+    ok: Bool,
+    te: TE,
+    tes: List<TE>,
+    outs: List<Int>,
+    nid: Int,
+    n: Int,
+    gen: Generic,
+    ctor: CtorInfo,
+    names: List<String>,
+    seen: List<String>,
+    status: Int,
+    msg: String
+};
+
+fn fail(st: St, msg: String) -> St [{ }] [{ }] {
+    if st.status != 0 { return st; };
+    return St { status: 1, msg: msg, ..st };
+};
+
+fn notModelled(st: St, what: String) -> St [{ }] [{ }] {
+    if st.status != 0 { return st; };
+    return St { status: 2, msg: what, ..st };
+};
+
+fn typeError(st: St, what: String) -> St [{ }] [{ }] {
+    return fail(st, "Type error: ".concat(what));
+};
+
+fn withTy(st: St, t: Int) -> St [{ }] [{ }] {
+    return St { ty: t, ..st };
+};
+
+fn noTy() -> Ty [{ }] [{ }] {
+    return Ty { kind: 0 - 1, name: "", args: [], n: 0, flag: false, sizes: [], types: [] };
+};
+
+fn tyAt(st: &St, t: Int) -> Ty [{ }] [{ }] {
+    if t < 0 || t >= size(st.tys) { return noTy(); };
+    return clone(get(st.tys, t));
+};
+
+fn kindOf(st: &St, t: Int) -> Int [{ }] [{ }] {
+    if t < 0 || t >= size(st.tys) { return 0 - 1; };
+    return get(st.tys, t).kind;
+};
+
+fn nameOf(st: &St, t: Int) -> String [{ }] [{ }] {
+    if t < 0 || t >= size(st.tys) { return ""; };
+    return clone(get(st.tys, t).name);
+};
+
+fn argsOf(st: &St, t: Int) -> List<Int> [{ }] [{ }] {
+    if t < 0 || t >= size(st.tys) { return []; };
+    return clone(get(st.tys, t).args);
+};
+
+fn argAt(st: &St, t: Int, i: Int) -> Int [{ }] [{ }] {
+    args = argsOf(st, t);
+    if i < 0 || i >= size(args) { return 0 - 1; };
+    return get(args, i);
+};
+
+fn numberOf(st: &St, t: Int) -> Int [{ }] [{ }] {
+    if t < 0 || t >= size(st.tys) { return 0; };
+    return get(st.tys, t).n;
+};
+
+fn addTy(st: St, t: Ty) -> St [{ }] [{ }] {
+    id = size(st.tys);
+    return St { tys: push(st.tys, t), ty: id, ..st };
+};
+
+fn simpleTy(st: St, kind: Int) -> St [{ }] [{ }] {
+    return addTy(st, Ty { kind: kind, name: "", args: [], n: 0, flag: false, sizes: [], types: [] });
+};
+
+fn wrapTy(st: St, kind: Int, inner: Int) -> St [{ }] [{ }] {
+    return addTy(st, Ty { kind: kind, name: "", args: push([], inner), n: 0, flag: false, sizes: [], types: [] });
+};
+
+fn namedTy(st: St, base: String, args: List<Int>) -> St [{ }] [{ }] {
+    return addTy(st, Ty { kind: 4, name: base, args: args, n: 0, flag: false, sizes: [], types: [] });
+};
+
+fn listTy(st: St, elem: Int) -> St [{ }] [{ }] {
+    return namedTy(st, "List", push([], elem));
+};
+
+fn boxTy(st: St, inner: Int) -> St [{ }] [{ }] {
+    return namedTy(st, "Box", push([], inner));
+};
+
+fn fnTy(st: St, params: List<Int>, ret: Int) -> St [{ }] [{ }] {
+    return addTy(st, Ty { kind: 14, name: "", args: push(params, ret), n: 0, flag: false, sizes: [], types: [] });
+};
+
+fn arrayTy(st: St, elem: Int, sz: Int) -> St [{ }] [{ }] {
+    return addTy(st, Ty { kind: 6, name: "", args: push(push([], elem), sz), n: 0, flag: false, sizes: [], types: [] });
+};
+
+fn wordTy(st: St, signed: Bool, bits: Int) -> St [{ }] [{ }] {
+    return addTy(st, Ty { kind: 3, name: "", args: [], n: bits, flag: signed, sizes: [], types: [] });
+};
+
+fn sizeConst(st: St, n: Int) -> St [{ }] [{ }] {
+    return addTy(st, Ty { kind: 20, name: "", args: [], n: n, flag: false, sizes: [], types: [] });
+};
+
+fn freshVar(st: St) -> St [{ }] [{ }] {
+    n = st.next;
+    st = St { next: n + 1, ..st };
+    return addTy(st, Ty { kind: 15, name: "", args: [], n: n, flag: false, sizes: [], types: [] });
+};
+
+fn freshSize(st: St) -> St [{ }] [{ }] {
+    n = st.next;
+    st = St { next: n + 1, ..st };
+    return addTy(st, Ty { kind: 23, name: "", args: [], n: n, flag: false, sizes: [], types: [] });
+};
+
+fn isSize(st: &St, t: Int) -> Bool [{ }] [{ }] {
+    k = kindOf(st, t);
+    return k >= 20 && k <= 23;
+};
+
+// What an unknown or an unknown size has come to, followed to the end
+fn resolve(st: &St, t: Int) -> Int ~ {
+    r = t;
+    going = true;
+    while going [{ }] ~ {
+        k = kindOf(st, r);
+        if k = 15 && st.subst.contains(numberOf(st, r)) {
+            r = st.subst.lookup(numberOf(st, r), r);
+        } else {
+            if k = 23 && st.sizeSubst.contains(numberOf(st, r)) {
+                r = st.sizeSubst.lookup(numberOf(st, r), r);
+            } else {
+                going = false;
+            };
+        };
+    };
+    return r;
+};
+
+// The type with everything known of its unknowns put in (TypeCheckCore.zonk), as a type of its own
+fn zonk(st: St, t: Int) -> St ~ {
+    r = resolve(st, t);
+    x = tyAt(st, r);
+    if size(x.args) = 0 { return withTy(st, r); };
+    args = [];
+    changed = false;
+    for a in x.args {
+        st = zonk(st, a);
+        if st.ty != a { changed = true; };
+        args = push(args, st.ty);
+    };
+    if !changed { return withTy(st, r); };
+    return addTy(st, Ty { args: args, ..x });
+};
+
+// Whether two types are the same, as Haskell's == on zonked types says
+fn sameTy(st: &St, a: Int, b: Int) -> Bool ~ {
+    x = tyAt(st, resolve(st, a));
+    y = tyAt(st, resolve(st, b));
+    if x.kind != y.kind || x.name != y.name || x.n != y.n || x.flag != y.flag || size(x.args) != size(y.args) { return false; };
+    if x.sizes != y.sizes || x.types != y.types { return false; };
+    i = 0;
+    while i < size(x.args) [{ affirm i >= 0; affirm size(x.args) = size(y.args); }] ~ {
+        if !sameTy(st, get(x.args, i), get(y.args, i)) { return false; };
+        i = i + 1;
+    };
+    return true;
+};
+
+fn occurs(st: &St, v: Int, t: Int) -> Bool ~ {
+    r = resolve(st, t);
+    x = tyAt(st, r);
+    if x.kind = 15 { return x.n = v; };
+    for a in x.args {
+        if kindOf(st, a) < 20 && occurs(st, v, a) { return true; };
+    };
+    return false;
+};
+
+fn bindVar(st: St, n: Int, t: Int) -> St [{ }] [{ }] {
+    return St { subst: st.subst.insert(n, t), ok: true, ..st };
+};
+
+fn unifySize(st: St, a: Int, b: Int) -> St ~ {
+    x = resolve(st, a);
+    y = resolve(st, b);
+    kx = kindOf(st, x);
+    ky = kindOf(st, y);
+    if kx = 23 && ky = 23 && numberOf(st, x) = numberOf(st, y) { return St { ok: true, ..st }; };
+    if kx = 23 { return St { sizeSubst: st.sizeSubst.insert(numberOf(st, x), y), ok: true, ..st }; };
+    if ky = 23 { return St { sizeSubst: st.sizeSubst.insert(numberOf(st, y), x), ok: true, ..st }; };
+    return St { ok: sameTy(st, x, y), ..st };
+};
+
+fn unifyArg(st: St, a: Int, b: Int) -> St ~ {
+    sa = isSize(st, a);
+    sb = isSize(st, b);
+    if sa && sb { return unifySize(st, a, b); };
+    if !sa && !sb { return unify(st, a, b); };
+    return St { ok: false, ..st };
+};
+
+fn unifyAll(st: St, xs: &List<Int>, ys: &List<Int>, args: Bool) -> St ~ {
+    if size(xs) != size(ys) { return St { ok: false, ..st }; };
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm size(xs) = size(ys); }] ~ {
+        if args { st = unifyArg(st, get(xs, i), get(ys, i)); } else { st = unify(st, get(xs, i), get(ys, i)); };
+        if !st.ok { return st; };
+        i = i + 1;
+    };
+    return St { ok: true, ..st };
+};
+
+// Makes the two types equal if they can be (TypeCheckCore.unify); st.ok says whether they could
+fn unify(st: St, a: Int, b: Int) -> St ~ {
+    x = resolve(st, a);
+    y = resolve(st, b);
+    kx = kindOf(st, x);
+    ky = kindOf(st, y);
+    if kx = 15 && ky = 15 && numberOf(st, x) = numberOf(st, y) { return St { ok: true, ..st }; };
+    if kx = 15 && !occurs(st, numberOf(st, x), y) { return bindVar(st, numberOf(st, x), y); };
+    if ky = 15 && !occurs(st, numberOf(st, y), x) { return bindVar(st, numberOf(st, y), x); };
+    if kx = 4 && ky = 4 {
+        xs = argsOf(st, x);
+        ys = argsOf(st, y);
+        if nameOf(st, x) = nameOf(st, y) && size(xs) = size(ys) { return unifyAll(st, &xs, &ys, true); };
+        return St { ok: false, ..st };
+    };
+    if kx = 4 && ky = 5 {
+        variant = nameOf(st, y);
+        whole = instanceName(st, x);
+        variants = st.types.lookup(&whole, []);
+        return St { ok: indexIn(&variants, &variant) >= 0, ..st };
+    };
+    if kx != ky {
+        // (&mut T and &T unify as their referents do)
+        if (kx = 10 || kx = 11) && (ky = 10 || ky = 11) { return unify(st, argAt(st, x, 0), argAt(st, y, 0)); };
+        return St { ok: false, ..st };
+    };
+    if kx <= 2 { return St { ok: true, ..st }; };
+    if kx = 3 { return St { ok: numberOf(st, x) = numberOf(st, y) && tyAt(st, x).flag = tyAt(st, y).flag, ..st }; };
+    if kx = 5 || kx = 12 { return St { ok: nameOf(st, x) = nameOf(st, y), ..st }; };
+    if kx = 6 {
+        st = unifySize(st, argAt(st, x, 1), argAt(st, y, 1));
+        if !st.ok { return st; };
+        return unify(st, argAt(st, x, 0), argAt(st, y, 0));
+    };
+    if kx >= 7 && kx <= 11 { return unify(st, argAt(st, x, 0), argAt(st, y, 0)); };
+    if kx = 14 {
+        xs = argsOf(st, x);
+        ys = argsOf(st, y);
+        if size(xs) != size(ys) { return St { ok: false, ..st }; };
+        // (the result first, then the parameters, as Haskell unifies them)
+        st = unify(st, last(xs), last(ys));
+        if !st.ok { return st; };
+        i = 0;
+        while i + 1 < size(xs) [{ affirm i >= 0; affirm size(xs) = size(ys); }] ~ {
+            st = unify(st, get(xs, i), get(ys, i));
+            if !st.ok { return st; };
+            i = i + 1;
+        };
+        return St { ok: true, ..st };
+    };
+    return St { ok: false, ..st };
+};
+
+fn indexIn(names: &List<String>, name: &String) -> Int [{ }] [{ }] {
+    i = 0;
+    for n in names {
+        if n = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn joinWith(parts: &List<String>, sep: &String) -> String [{ }] [{ }] {
+    out = "";
+    i = 0;
+    for p in parts {
+        if i > 0 { out = catStrings(out, sep); };
+        out = catStrings(out, p);
+        i = i + 1;
+    };
+    return out;
+};
+
+fn maxInt() -> Int [{ }] [{ }] { return 9223372036854775807; };
+fn minInt() -> Int [{ }] [{ }] { return 0 - 9223372036854775807 - 1; };
+
+fn productFits(a: Int, c: Int) -> Bool [{ }] [{ }] {
+    if a = 0 || c = 0 { return true; };
+    if a = minInt() { return c = 1; };
+    if c = minInt() { return a = 1; };
+    ua = a;
+    if a < 0 { ua = 0 - a; };
+    uc = c;
+    if c < 0 { uc = 0 - c; };
+    if (a < 0) = (c < 0) { return ua <= maxInt() / uc; };
+    // (a negative product may be the least Int, 2^63 below zero)
+    return ua <= maxInt() / uc || (maxInt() % uc = uc - 1 && ua = maxInt() / uc + 1);
+};
+
+fn intText(n: Int) -> String [{ }] [{ }] {
+    if n = 0 { return "0"; };
+    if n = minInt() { return "-9223372036854775808"; };
+    negative = n < 0;
+    m = n;
+    if negative { m = 0 - n; };
+    digits = [];
+    while m > 0 [{ }] shrinks m {
+        digits = push(digits, toByte(48 + m % 10));
+        m = m / 10;
+    };
+    out = [];
+    if negative { out = push(out, toByte(45)); };
+    i = size(digits) - 1;
+    while i >= 0 [{ affirm i < size(digits); }] shrinks i + 1 {
+        out = push(out, get(digits, i));
+        i = i - 1;
+    };
+    return String { bytes: out };
+};
+
+fn wordName(signed: Bool, bits: Int) -> String [{ }] [{ }] {
+    if signed { return catStrings("I", intText(bits)); };
+    return catStrings("U", intText(bits));
+};
+
+fn renderSize(st: &St, t: Int) -> String ~ {
+    return sizeText(st, t, true);
+};
+
+fn sizeText(st: &St, t: Int, deep: Bool) -> String ~ {
+    r = t;
+    if deep { r = resolve(st, t); };
+    x = tyAt(st, r);
+    if x.kind = 20 { return intText(x.n); };
+    if x.kind = 21 { return "?"; };
+    if x.kind = 22 { return clone(x.name); };
+    return catStrings("_", intText(x.n));
+};
+
+fn isLowerByte(c: Int) -> Bool [{ }] [{ }] { return c >= 97 && c <= 122; };
+fn isUpperByte(c: Int) -> Bool [{ }] [{ }] { return c >= 65 && c <= 90; };
+
+// Whether a name is bare and starts with a small letter (Types.bareLower)
+fn bareLower(name: &String) -> Bool [{ }] [{ }] {
+    n = size(name.bytes);
+    if n = 0 || !isLowerByte(toInt(get(name.bytes, 0))) { return false; };
+    i = 1;
+    while i < n [{ affirm i >= 1; affirm n = size(name.bytes); }] shrinks n - i {
+        c = toInt(get(name.bytes, i));
+        if !(isLowerByte(c) || isUpperByte(c) || (c >= 48 && c <= 57)) { return false; };
+        i = i + 1;
+    };
+    return true;
+};
+
+// A parameter that starts with a capital letter is a type, and any other is a size
+fn isTypeName(name: &String) -> Bool [{ }] [{ }] {
+    return size(name.bytes) > 0 && isUpperByte(toInt(get(name.bytes, 0)));
+};
+
+// The rendered name of an instance (Types.instanceName)
+fn instanceName(st: &St, t: Int) -> String ~ {
+    return instanceText(st, t, true);
+};
+
+// The name of an instance as the type is, its unknowns not looked up (as Haskell names one it has not zonked)
+fn rawInstanceName(st: &St, t: Int) -> String ~ {
+    return instanceText(st, t, false);
+};
+
+fn instanceText(st: &St, t: Int, deep: Bool) -> String ~ {
+    r = t;
+    if deep { r = resolve(st, t); };
+    x = tyAt(st, r);
+    if size(x.args) = 0 { return clone(x.name); };
+    parts = [];
+    for a in x.args {
+        if isSize(st, a) { parts = push(parts, sizeText(st, a, deep)); } else { parts = push(parts, typeNameText(st, a, deep)); };
+    };
+    return catStrings(catStrings(catStrings(x.name, "<"), joinWith(&parts, ", ")), ">");
+};
+
+fn wrapped(prefix: &String, inner: String, suffix: &String) -> String [{ }] [{ }] {
+    return catStrings(catStrings(prefix, inner), suffix);
+};
+
+// A type as the rendered name of an instance writes it (Types.renderTypeForName)
+fn typeNameText(st: &St, t: Int, deep: Bool) -> String ~ {
+    r = t;
+    if deep { r = resolve(st, t); };
+    x = tyAt(st, r);
+    k = x.kind;
+    if k = 0 { return "Int"; };
+    if k = 1 { return "Byte"; };
+    if k = 2 { return "Bool"; };
+    if k = 3 { return wordName(x.flag, x.n); };
+    if k = 4 {
+        if size(x.args) = 0 && bareLower(&x.name) { return catStrings("`", x.name); };
+        return instanceText(st, r, deep);
+    };
+    if k = 5 { return clone(x.name); };
+    if k = 6 { return wrapped("Array<", catStrings(catStrings(typeNameText(st, get(x.args, 0), deep), ", "), sizeText(st, get(x.args, 1), deep)), ">"); };
+    if k = 7 { return wrapped("Addr<", typeNameText(st, get(x.args, 0), deep), ">"); };
+    if k = 8 { return wrapped("Block<", typeNameText(st, get(x.args, 0), deep), ">"); };
+    if k = 9 { return wrapped("Uninit<", typeNameText(st, get(x.args, 0), deep), ">"); };
+    if k = 10 { return catStrings("&", typeNameText(st, get(x.args, 0), deep)); };
+    if k = 11 { return catStrings("&mut ", typeNameText(st, get(x.args, 0), deep)); };
+    if k = 12 { return catStrings("'", x.name); };
+    if k = 13 { return typeNameText(st, get(x.args, 0), deep); };
+    if k = 14 {
+        parts = [];
+        i = 0;
+        while i + 1 < size(x.args) [{ affirm i >= 0; }] ~ {
+            parts = push(parts, typeNameText(st, get(x.args, i), deep));
+            i = i + 1;
+        };
+        return catStrings(wrapped("fn(", joinWith(&parts, ", "), ") -> "), typeNameText(st, last(x.args), deep));
+    };
+    return catStrings("?", intText(x.n));
+};
+
+// A type in Tersus syntax, as messages write it (Pretty.renderType)
+fn render(st: &St, t: Int) -> String ~ {
+    r = resolve(st, t);
+    x = tyAt(st, r);
+    k = x.kind;
+    if k = 0 { return "Int"; };
+    if k = 1 { return "Byte"; };
+    if k = 2 { return "Bool"; };
+    if k = 3 { return wordName(x.flag, x.n); };
+    if k = 4 {
+        if x.name = "List" && size(x.args) = 1 && !isSize(st, get(x.args, 0)) { return wrapped("List<", render(st, get(x.args, 0)), ">"); };
+        if x.name = "Box" && size(x.args) = 1 && !isSize(st, get(x.args, 0)) { return wrapped("Box<", render(st, get(x.args, 0)), ">"); };
+        return instanceName(st, r);
+    };
+    if k = 5 { return clone(x.name); };
+    if k = 6 { return wrapped("Array<", catStrings(catStrings(render(st, get(x.args, 0)), ", "), renderSize(st, get(x.args, 1))), ">"); };
+    if k = 7 { return wrapped("Addr<", render(st, get(x.args, 0)), ">"); };
+    if k = 8 { return wrapped("Block<", render(st, get(x.args, 0)), ">"); };
+    if k = 9 { return wrapped("Uninit<", render(st, get(x.args, 0)), ">"); };
+    if k = 10 { return catStrings("&", render(st, get(x.args, 0))); };
+    if k = 11 { return catStrings("&mut ", render(st, get(x.args, 0))); };
+    if k = 12 { return clone(x.name); };
+    if k = 13 {
+        names = clone(x.types);
+        for s in x.sizes { names = push(names, clone(s)); };
+        return catStrings(wrapped("<", joinWith(&names, ", "), ">"), render(st, get(x.args, 0)));
+    };
+    if k = 14 {
+        parts = [];
+        i = 0;
+        while i + 1 < size(x.args) [{ affirm i >= 0; }] ~ {
+            parts = push(parts, render(st, get(x.args, i)));
+            i = i + 1;
+        };
+        return catStrings(wrapped("fn(", joinWith(&parts, ", "), ") -> "), render(st, last(x.args)));
+    };
+    return "?";
+};
+
+// Fails with the context if the types cannot be made equal (TypeCheckCore.expect)
+fn expect(st: St, context: String, expected: Int, actual: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    st = unify(st, expected, actual);
+    if st.ok { return st; };
+    message = catStrings(catStrings(catStrings(catStrings(context, ": expected "), render(st, expected)), ", got "), render(st, actual));
+    return typeError(st, message);
+};

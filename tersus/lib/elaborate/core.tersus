@@ -1,0 +1,836 @@
+import data::codec::codec { catStrings };
+import elaborate::builtins { substitute };
+import elaborate::state { CtorInfo, Generic, St, TE, Ty, addTy, expect, fail, freshSize, freshVar, indexIn, instanceName, intText, isSize, isTypeName, joinWith, kindOf, maxInt, namedTy, notModelled, productFits, rawInstanceName, render, resolve, tyAt, typeError, unify, withTy, zonk };
+
+// Types.tupleGeneric: TupleN for N from 2 to 16 is a struct with parameters T0..T(N-1) and fields 0..N-1
+fn tupleArity(base: &String) -> Int [{ }] [{ }] {
+    n = size(base.bytes);
+    if n < 6 || !base.startsWith("Tuple") { return 0; };
+    digits = base.slice(5, n);
+    if size(digits.bytes) = 0 || get(digits.bytes, 0) = toByte(48) { return 0; };
+    value = 0;
+    for b in &digits.bytes {
+        c = toInt(b);
+        if c < 48 || c > 57 || value > 100 { return 0; };
+        value = value * 10 + (c - 48);
+    };
+    if value < 2 || value > 16 { return 0; };
+    return value;
+};
+
+fn isTuple(base: &String) -> Bool [{ }] [{ }] { return tupleArity(base) > 0; };
+
+// The declaration of a struct with parameters, the program's or a tuple's, in st.gen (st.ok false when there is none)
+fn genericOf(st: St, base: &String) -> St [{ }] [{ }] {
+    if st.generics.contains(base) { return St { gen: st.generics.lookup(base, Generic { params: [], names: [], types: [] }), ok: true, ..st }; };
+    n = tupleArity(base);
+    if n = 0 { return St { ok: false, ..st }; };
+    params = [];
+    names = [];
+    types = [];
+    for i in 0..n {
+        p = catStrings("T", intText(i));
+        st = addTy(st, Ty { kind: 12, name: clone(p), args: [], n: 0, flag: false, sizes: [], types: [] });
+        params = push(params, p);
+        names = push(names, intText(i));
+        types = push(types, st.ty);
+    };
+    return St { gen: Generic { params: params, names: names, types: types }, ok: true, ..st };
+};
+
+// Types.instanceFields: the fields for the arguments, or ok false
+fn instanceFields(st: St, params: &List<String>, args: &List<Int>, types: &List<Int>) -> St ~ {
+    if size(params) != size(args) { return St { ok: false, ..st }; };
+    sizeNames = [];
+    sizes = [];
+    typeNames = [];
+    given = [];
+    i = 0;
+    while i < size(params) [{ affirm i >= 0; affirm size(params) = size(args); }] shrinks size(params) - i {
+        p = get(params, i);
+        a = get(args, i);
+        if isSize(st, a) && !isTypeName(p) {
+            sizeNames = push(sizeNames, clone(p));
+            sizes = push(sizes, a);
+        } else {
+            if !isSize(st, a) && isTypeName(p) {
+                typeNames = push(typeNames, clone(p));
+                given = push(given, a);
+            } else {
+                return St { ok: false, ..st };
+            };
+        };
+        i = i + 1;
+    };
+    out = [];
+    for t in types {
+        st = substitute(st, t, &sizeNames, &sizes, &typeNames, &given);
+        out = push(out, st.ty);
+    };
+    return St { te: TE { node: 0 - 1, types: out }, ok: true, ..st };
+};
+
+fn genericParamsText(params: &List<String>) -> String [{ }] [{ }] { return joinWith(params, ", "); };
+
+// A struct with sizes and types is a struct for each list of them, declared the first time it is looked at (ensureInstance)
+fn ensureInstance(st: St, t: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    x = tyAt(st, t);
+    if x.kind != 4 { return st; };
+    name = rawInstanceName(st, t);
+    if st.ctors.contains(&name) || size(x.args) = 0 { return st; };
+    tuple = isTuple(&x.name);
+    st = genericOf(st, &x.name);
+    if !st.ok { return st; };
+    g = clone(st.gen);
+    if size(x.args) != size(g.params) {
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(x.name), " has "), intText(size(g.params))), catStrings(" parameters (", genericParamsText(&g.params))), "), got "), intText(size(x.args))));
+    };
+    for a in x.args {
+        if kindOf(st, a) = 21 {
+            return typeError(st, catStrings(clone(name), " has a size that is not given: a struct with a size of ? cannot be held yet"));
+        };
+    };
+    if !tuple {
+        i = 0;
+        while i < size(g.params) [{ affirm i >= 0; affirm size(g.params) = size(x.args); }] ~ {
+            st = argKnown(st, get(g.params, i), get(x.args, i), &name);
+            if st.status != 0 { return st; };
+            i = i + 1;
+        };
+    };
+    st = instanceFields(st, &g.params, &x.args, &g.types);
+    if !st.ok {
+        parts = [];
+        for p in &g.params {
+            if isTypeName(p) { parts = push(parts, catStrings(p, " is a type")); } else { parts = push(parts, catStrings(p, " is a size")); };
+        };
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " gives a size where "), catStrings(x.name, " wants a type, or a type where it wants a size (")), joinWith(&parts, ", ")), ")"));
+    };
+    fields = clone(st.te.types);
+    return St { types: st.types.insert(clone(name), push([], clone(name))), ctors: st.ctors.insert(clone(name), CtorInfo { owner: clone(name), names: clone(g.names), types: fields }), ..st };
+};
+
+fn argKnown(st: St, p: &String, a: Int, name: &String) -> St ~ {
+    if isSize(st, a) {
+        if kindOf(st, a) = 22 { return sizeInScope(st, a); };
+        return st;
+    };
+    st = zonk(st, a);
+    t = st.ty;
+    if hasFunction(st, t) {
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("the type ", clone(p)), " of "), clone(name)), catStrings(" would be ", render(st, t))), ", and a type parameter is not a function"));
+    };
+    return checkType(st, t);
+};
+
+fn noCtor() -> CtorInfo [{ }] [{ }] { return CtorInfo { owner: "", names: [], types: [] }; };
+
+fn ctorInfo(st: St, name: &String) -> St [{ }] [{ }] {
+    if st.status != 0 { return st; };
+    if !st.ctors.contains(name) { return typeError(st, catStrings("unknown struct or variant ", clone(name))); };
+    return St { ctor: st.ctors.lookup(name, noCtor()), ..st };
+};
+
+fn typeCtors(st: St, name: &String) -> St [{ }] [{ }] {
+    if st.status != 0 { return st; };
+    if st.types.contains(name) { return St { names: st.types.lookup(name, []), ..st }; };
+    if st.generics.contains(name) {
+        g = st.generics.lookup(name, Generic { params: [], names: [], types: [] });
+        ps = genericParamsText(&g.params);
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " has parameters <"), ps), catStrings(">, which a type gives, as in ", clone(name))), catStrings(catStrings("<", ps), ">")));
+    };
+    return typeError(st, catStrings("unknown type ", clone(name)));
+};
+
+fn baseNameOf(name: &String) -> String [{ }] [{ }] {
+    i = 0;
+    for b in &name.bytes {
+        if b = toByte(60) { return name.slice(0, i); };
+        i = i + 1;
+    };
+    return clone(name);
+};
+
+fn hasColons(name: &String) -> Bool [{ }] [{ }] {
+    n = size(name.bytes);
+    i = 0;
+    while i + 1 < n [{ affirm i >= 0; affirm n = size(name.bytes); }] shrinks n - i {
+        if get(name.bytes, i) = toByte(58) && get(name.bytes, i + 1) = toByte(58) { return true; };
+        i = i + 1;
+    };
+    return false;
+};
+
+struct Bindings { sizeNames: List<String>, sizes: List<Int>, typeNames: List<String>, types: List<Int> };
+impl Clone for Bindings { };
+
+fn matchType(st: &St, bs: Bindings, pattern: Int, actual: Int) -> Bindings ~ {
+    p = tyAt(st, pattern);
+    a = tyAt(st, actual);
+    if p.kind = 12 { return Bindings { typeNames: concatFront(push([], clone(p.name)), bs.typeNames), types: concatInts(push([], actual), bs.types), ..bs }; };
+    if p.kind = 10 { return matchType(st, bs, get(p.args, 0), actual); };
+    if a.kind = 10 { return matchType(st, bs, pattern, get(a.args, 0)); };
+    if p.kind = 4 && a.kind = 4 && p.name = a.name {
+        out = bs;
+        i = 0;
+        while i < size(p.args) && i < size(a.args) [{ affirm i >= 0; }] ~ {
+            out = matchArg(st, out, get(p.args, i), get(a.args, i));
+            i = i + 1;
+        };
+        return out;
+    };
+    if (p.kind = 7 || p.kind = 8 || p.kind = 9) && a.kind = p.kind { return matchType(st, bs, get(p.args, 0), get(a.args, 0)); };
+    if p.kind = 6 && a.kind = 6 {
+        out = matchType(st, bs, get(p.args, 0), get(a.args, 0));
+        ps = tyAt(st, get(p.args, 1));
+        if ps.kind = 22 { return Bindings { sizeNames: concatFront(push([], clone(ps.name)), out.sizeNames), sizes: concatInts(push([], get(a.args, 1)), out.sizes), ..out }; };
+        return out;
+    };
+    if p.kind = 14 && a.kind = 14 {
+        out = matchType(st, bs, last(p.args), last(a.args));
+        i = 0;
+        while i + 1 < size(p.args) && i + 1 < size(a.args) [{ affirm i >= 0; }] ~ {
+            out = matchType(st, out, get(p.args, i), get(a.args, i));
+            i = i + 1;
+        };
+        return out;
+    };
+    return bs;
+};
+
+fn matchArg(st: &St, bs: Bindings, x: Int, y: Int) -> Bindings ~ {
+    if !isSize(st, x) && !isSize(st, y) { return matchType(st, bs, x, y); };
+    px = tyAt(st, x);
+    if px.kind = 22 && isSize(st, y) { return Bindings { sizeNames: concatFront(push([], clone(px.name)), bs.sizeNames), sizes: concatInts(push([], y), bs.sizes), ..bs }; };
+    return bs;
+};
+
+// (a binding is put in front of the earlier ones, which Haskell's lookup then finds first)
+fn concatFront(front: List<String>, rest: List<String>) -> List<String> [{ }] [{ }] {
+    out = front;
+    for r in rest { out = push(out, clone(r)); };
+    return out;
+};
+
+fn concatInts(front: List<Int>, rest: List<Int>) -> List<Int> [{ }] [{ }] {
+    out = front;
+    for r in rest { out = push(out, r); };
+    return out;
+};
+
+// The arguments a generic struct is given, by matching its fields' types against the types at hand (solveInstanceArgs)
+fn solveInstanceArgs(st: St, params: &List<String>, template: &List<Int>, actuals: &List<Int>) -> St ~ {
+    bs = Bindings { sizeNames: [], sizes: [], typeNames: [], types: [] };
+    i = 0;
+    while i < size(template) && i < size(actuals) [{ affirm i >= 0; }] ~ {
+        bs = matchType(st, bs, get(template, i), get(actuals, i));
+        i = i + 1;
+    };
+    args = [];
+    for p in params {
+        if isTypeName(p) {
+            j = indexIn(&bs.typeNames, p);
+            if j >= 0 { args = push(args, get(bs.types, j)); } else { st = addTy(st, Ty { kind: 12, name: clone(p), args: [], n: 0, flag: false, sizes: [], types: [] }); args = push(args, st.ty); };
+        } else {
+            j = indexIn(&bs.sizeNames, p);
+            if j >= 0 { args = push(args, get(bs.sizes, j)); } else { st = addTy(st, Ty { kind: 22, name: clone(p), args: [], n: 0, flag: false, sizes: [], types: [] }); args = push(args, st.ty); };
+        };
+    };
+    return St { te: TE { node: 0 - 1, types: args }, ..st };
+};
+
+// The type of a constructor's value, from its owner name and its declared fields (ctorResultType)
+fn ctorResultType(st: St, typeName: &String, declared: &List<Int>) -> St ~ {
+    base = baseNameOf(typeName);
+    if isTuple(&base) { return tupleType(st, declared); };
+    if st.generics.contains(&base) {
+        g = st.generics.lookup(&base, Generic { params: [], names: [], types: [] });
+        st = solveInstanceArgs(st, &g.params, &g.types, declared);
+        return namedTy(st, base, clone(st.te.types));
+    };
+    return namedTy(st, clone(typeName), []);
+};
+
+fn tupleType(st: St, parts: &List<Int>) -> St [{ }] [{ }] {
+    return namedTy(st, catStrings("Tuple", intText(size(parts))), clone(parts));
+};
+
+// The instance type a constructor with these argument types builds (instanceTypeFor); st.ty -1 for none
+fn instanceTypeFor(st: St, base: &String, argTys: &List<Int>) -> St ~ {
+    if !st.generics.contains(base) { return withTy(st, 0 - 1); };
+    g = st.generics.lookup(base, Generic { params: [], names: [], types: [] });
+    vars = [];
+    sizeNames = [];
+    sizes = [];
+    typeNames = [];
+    types = [];
+    for p in &g.params {
+        if isTypeName(p) {
+            st = freshVar(st);
+            typeNames = push(typeNames, clone(p));
+            types = push(types, st.ty);
+        } else {
+            st = freshSize(st);
+            sizeNames = push(sizeNames, clone(p));
+            sizes = push(sizes, st.ty);
+        };
+        vars = push(vars, st.ty);
+    };
+    i = 0;
+    while i < size(g.types) && i < size(argTys) [{ affirm i >= 0; }] ~ {
+        st = substitute(st, get(g.types, i), &sizeNames, &sizes, &typeNames, &types);
+        st = unify(st, st.ty, get(argTys, i));
+        i = i + 1;
+    };
+    args = [];
+    for v in vars {
+        st = zonk(st, v);
+        args = push(args, st.ty);
+    };
+    return namedTy(st, clone(base), args);
+};
+
+// A struct built from values for its fields, in declaration order (checkConstruct)
+fn checkConstruct(st: St, ty0: Int, fields: &List<String>, argTys0: &List<Int>) -> St ~ {
+    if st.status != 0 { return st; };
+    argTys = [];
+    for a in argTys0 { st = zonk(st, a); argTys = push(argTys, st.ty); };
+    x = tyAt(st, ty0);
+    ty = ty0;
+    if x.kind = 4 {
+        if isTuple(&x.name) {
+            st = tupleType(st, &argTys);
+            ty = st.ty;
+        } else {
+            if hasColons(&x.name) {
+                st = ctorInfo(st, &x.name);
+                if st.status != 0 { return st; };
+                st = namedTy(st, clone(st.ctor.owner), []);
+                ty = st.ty;
+            } else {
+                if size(x.args) = 0 {
+                    st = instanceTypeFor(st, &x.name, &argTys);
+                    if st.ty >= 0 { ty = st.ty; };
+                };
+            };
+        };
+    };
+    st = ensureInstance(st, ty);
+    if st.status != 0 { return st; };
+    name = "";
+    if kindOf(st, ty) = 4 { name = instanceName(st, ty); };
+    ctorName = clone(name);
+    if x.kind = 4 && hasColons(&x.name) { ctorName = clone(x.name); };
+    st = ctorInfo(st, &ctorName);
+    if st.status != 0 { return st; };
+    declared = clone(st.ctor);
+    if declared.names != clone(fields) || size(fields) != size(argTys) {
+        return typeError(st, catStrings(ctorName, " is built with the wrong fields"));
+    };
+    i = 0;
+    while i < size(declared.types) && i < size(argTys) [{ affirm i >= 0; }] ~ {
+        st = expect(st, catStrings(catStrings(catStrings("field ", clone(get(declared.names, i))), " of "), clone(ctorName)), get(declared.types, i), get(argTys, i));
+        if st.status != 0 { return st; };
+        i = i + 1;
+    };
+    return withTy(st, ty);
+};
+
+// The type of reading a field (readField); owner "" for none
+fn readField(st: St, owner: &String, field: &String, structTy: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    st = zonk(st, structTy);
+    typed = st.ty;
+    held = typed;
+    tx = tyAt(st, typed);
+    if tx.kind = 4 && tx.name = "Box" && size(tx.args) = 1 && !isSize(st, get(tx.args, 0)) {
+        if size(owner.bytes) = 0 || instanceName(st, typed) != clone(owner) { held = get(tx.args, 0); };
+    };
+    if size(owner.bytes) > 0 {
+        st = zonk(st, held);
+        h = st.ty;
+        if !(kindOf(st, h) = 4 && instanceName(st, h) = clone(owner)) {
+            st = namedTy(st, clone(owner), []);
+            st = expect(st, catStrings("base of an update of ", clone(owner)), st.ty, held);
+            if st.status != 0 { return st; };
+        };
+        return fieldType(st, field, held);
+    };
+    return fieldType(st, field, typed);
+};
+
+fn fieldOf(info: &CtorInfo, field: &String) -> Int [{ }] [{ }] {
+    i = indexIn(&info.names, field);
+    if i < 0 || i >= size(info.types) { return 0 - 1; };
+    return get(info.types, i);
+};
+
+// The type of reading a field from a value of the type (fieldType)
+fn fieldType(st: St, field: &String, structTy: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    st = zonk(st, structTy);
+    t = st.ty;
+    x = tyAt(st, t);
+    if x.kind = 4 && x.name = "Box" && size(x.args) = 1 && !isSize(st, get(x.args, 0)) && field != "addr" && field != "blk" {
+        return fieldType(st, field, get(x.args, 0));
+    };
+    if x.kind = 4 && x.name = "Self" {
+        return typeError(st, catStrings(catStrings("a trait does not know the fields of Self, so field ", clone(field)), " cannot be read from it"));
+    };
+    if x.kind = 4 {
+        name = instanceName(st, t);
+        st = ensureInstance(st, t);
+        st = typeCtors(st, &name);
+        if st.status != 0 { return st; };
+        ctors = clone(st.names);
+        if size(ctors) = 1 {
+            st = ctorInfo(st, &get(ctors, 0));
+            if st.status != 0 { return st; };
+            ft = fieldOf(&st.ctor, field);
+            if ft < 0 { return typeError(st, catStrings(catStrings(name, " has no field "), clone(field))); };
+            return withTy(st, ft);
+        };
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " has several variants, so its field "), clone(field)), catStrings(" may be absent: cast the value to a variant first, as in (value as ", clone(name))), catStrings("::Variant).", clone(field))), ", or take it apart with match"));
+    };
+    if x.kind = 5 {
+        st = ctorInfo(st, &x.name);
+        if st.status != 0 { return st; };
+        ft = fieldOf(&st.ctor, field);
+        if ft < 0 { return typeError(st, catStrings(catStrings(clone(x.name), " has no field "), clone(field))); };
+        return withTy(st, ft);
+    };
+    if x.kind = 15 {
+        return typeError(st, catStrings(catStrings("the type of the value whose field ", clone(field)), " is read is not known yet; annotate it"));
+    };
+    return typeError(st, catStrings(catStrings(catStrings(catStrings("field ", clone(field)), " is read from a "), render(st, t)), ", which is not a struct"));
+};
+
+fn declareTypeWith(st: St, name: &String, ctors: List<String>) -> St [{ }] [{ }] {
+    if st.status != 0 { return st; };
+    if st.predeclared.contains(name) {
+        return St { types: st.types.insert(clone(name), ctors), predeclared: st.predeclared.remove(name), ..st };
+    };
+    if st.types.contains(name) || st.traits.contains(name) { return fail(st, catStrings("Type already defined: ", clone(name))); };
+    return St { types: st.types.insert(clone(name), ctors), ..st };
+};
+
+fn registerCtors(st: St, typeName: &String, ctors: &List<String>, fieldNames: &List<List<String>>, fieldTypes: &List<List<Int>>) -> St [{ }] [{ }] {
+    // (foldr: the first constructor of a name wins)
+    i = size(ctors) - 1;
+    while i >= 0 [{ affirm i < size(ctors); }] shrinks i + 1 {
+        if i < size(fieldNames) && i < size(fieldTypes) {
+            st = St { ctors: st.ctors.insert(clone(get(ctors, i)), CtorInfo { owner: clone(typeName), names: clone(get(fieldNames, i)), types: clone(get(fieldTypes, i)) }), ..st };
+        };
+        i = i - 1;
+    };
+    return st;
+};
+
+// A struct or an enum that holds itself by value would have no size (checkFinite)
+fn holdsRoot(st: &St, root: &String, t: Int) -> Bool ~ {
+    x = tyAt(st, t);
+    if x.kind = 4 { return x.name = clone(root); };
+    if x.kind = 5 {
+        if !st.ctors.contains(&x.name) { return false; };
+        return st.ctors.lookup(&x.name, noCtor()).owner = clone(root);
+    };
+    if x.kind = 6 { return holdsRoot(st, root, get(x.args, 0)); };
+    return false;
+};
+
+fn checkFinite(st: St, root: &String, variants: &List<List<Int>>) -> St ~ {
+    if st.status != 0 { return st; };
+    for fields in variants {
+        for t in fields {
+            if holdsRoot(st, root, t) {
+                return typeError(st, catStrings(catStrings(catStrings(clone(root), " holds itself, so it would have no size: hold the recursion in a Box, as in Box<"), clone(root)), ">"));
+            };
+        };
+    };
+    return st;
+};
+
+fn hasFunction(st: &St, t: Int) -> Bool ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 14 { return true; };
+    if x.kind = 4 && (x.name = "List" || x.name = "Box") && size(x.args) = 1 && !isSize(st, get(x.args, 0)) { return hasFunction(st, get(x.args, 0)); };
+    if x.kind >= 6 && x.kind <= 11 { return hasFunction(st, get(x.args, 0)); };
+    return false;
+};
+
+fn isListTy(st: &St, t: Int) -> Bool [{ }] [{ }] {
+    x = tyAt(st, t);
+    return x.kind = 4 && x.name = "List" && size(x.args) = 1 && !isSize(st, get(x.args, 0));
+};
+
+fn isBoxTy(st: &St, t: Int) -> Bool [{ }] [{ }] {
+    x = tyAt(st, t);
+    return x.kind = 4 && x.name = "Box" && size(x.args) = 1 && !isSize(st, get(x.args, 0));
+};
+
+fn checkType(st: St, t: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    x = tyAt(st, t);
+    if isListTy(st, t) {
+        st = noGhostIn(st, "a list", get(x.args, 0));
+        return checkType(st, get(x.args, 0));
+    };
+    if isBoxTy(st, t) {
+        inner = tyAt(st, get(x.args, 0));
+        if inner.kind = 6 && kindOf(st, get(inner.args, 1)) = 21 {
+            st = checkType(st, get(inner.args, 0));
+            return arrayOk(st, get(x.args, 0));
+        };
+        st = noGhostIn(st, "a Box", get(x.args, 0));
+        return checkType(st, get(x.args, 0));
+    };
+    if x.kind = 4 {
+        st = ensureInstance(st, t);
+        name = rawInstanceName(st, t);
+        return typeCtors(st, &name);
+    };
+    if x.kind = 5 { return ctorInfo(st, &x.name); };
+    if x.kind = 7 || x.kind = 8 { return addressable(st, get(x.args, 0)); };
+    if x.kind = 9 {
+        st = noGhostIn(st, "an Uninit", get(x.args, 0));
+        return checkType(st, get(x.args, 0));
+    };
+    if x.kind = 6 {
+        if kindOf(st, get(x.args, 1)) = 21 { return fail(st, unsizedByValue()); };
+        st = noGhostIn(st, "an array", get(x.args, 0));
+        st = checkType(st, get(x.args, 0));
+        st = sizeInScope(st, get(x.args, 1));
+        return arrayOk(st, t);
+    };
+    if x.kind = 13 { return checkType(st, get(x.args, 0)); };
+    if x.kind = 12 {
+        if indexIn(&st.typeScope, &x.name) < 0 {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(x.name), " is not a type here: a function declares a type parameter, as in fn f<"), clone(x.name)), catStrings(">(a: ", clone(x.name))), ")"));
+        };
+        return st;
+    };
+    if x.kind = 14 {
+        st = noGhostIn(st, "a function value", last(x.args));
+        i = 0;
+        while i + 1 < size(x.args) [{ affirm i >= 0; }] ~ {
+            st = noGhostIn(st, "a function value", unrefOf(st, get(x.args, i)));
+            i = i + 1;
+        };
+        st = checkType(st, last(x.args));
+        i = 0;
+        while i + 1 < size(x.args) [{ affirm i >= 0; }] ~ {
+            st = checkType(st, get(x.args, i));
+            i = i + 1;
+        };
+        return st;
+    };
+    if x.kind = 10 || x.kind = 11 {
+        inner = tyAt(st, get(x.args, 0));
+        if inner.kind = 6 && kindOf(st, get(inner.args, 1)) = 21 { return checkType(st, get(inner.args, 0)); };
+        return checkType(st, get(x.args, 0));
+    };
+    return st;
+};
+
+fn unrefOf(st: &St, t: Int) -> Int [{ }] [{ }] {
+    x = tyAt(st, t);
+    if x.kind = 10 || x.kind = 11 { return get(x.args, 0); };
+    return t;
+};
+
+fn unsizedByValue() -> String [{ }] [{ }] {
+    return "Type error: an array with no size (Array<T> is Array<T, ?>) can only be used behind a Box, as in Box<Array<Int>>, or be given a size, as in Array<Int, 3>";
+};
+
+fn noGhostIn(st: St, what: String, t: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    st = zonk(st, t);
+    t2 = st.ty;
+    st = holdsGhost(st, t2);
+    if st.ok {
+        return typeError(st, catStrings(catStrings(catStrings(catStrings("a permission and a value of a linear type are used exactly once, so ", what), " cannot hold "), render(st, t2)), ", which is or holds one"));
+    };
+    return st;
+};
+
+// Whether a value of a type is or holds a permission or a value of a linear type (holdsGhost); st.ok
+fn holdsGhost(st: St, t: Int) -> St ~ {
+    outer = clone(st.seen);
+    st = St { seen: [], ..st };
+    st = ghostGo(st, t);
+    return St { seen: outer, ..st };
+};
+
+fn ghostGo(st: St, t0: Int) -> St ~ {
+    if st.status != 0 { return St { ok: false, ..st }; };
+    st = zonk(st, t0);
+    t = st.ty;
+    x = tyAt(st, t);
+    if x.kind = 8 { return St { ok: true, ..st }; };
+    if x.kind = 9 {
+        st = ownsHeap(st, get(x.args, 0));
+        if st.ok { return St { ok: true, ..st }; };
+        return ghostGo(st, get(x.args, 0));
+    };
+    if x.kind = 10 { return ghostGo(st, get(x.args, 0)); };
+    if isListTy(st, t) || isBoxTy(st, t) { return ghostGo(st, get(x.args, 0)); };
+    if x.kind = 6 { return ghostGo(st, get(x.args, 0)); };
+    if x.kind = 4 && x.name = "Self" { return St { ok: false, ..st }; };
+    if x.kind = 4 {
+        n = instanceName(st, t);
+        if indexIn(&st.seen, &n) >= 0 { return St { ok: false, ..st }; };
+        if st.drops.contains(&x.name) { return St { ok: false, ..st }; };
+        if st.linearTypes.contains(&x.name) { return St { ok: true, ..st }; };
+        if size(x.args) > 0 && !st.ctors.contains(&n) { st = ensureInstance(st, t); };
+        st = St { seen: push(st.seen, clone(n)), ..st };
+        for c in st.types.lookup(&n, []) {
+            if st.ctors.contains(&c) {
+                for ft in st.ctors.lookup(&c, noCtor()).types {
+                    st = ghostGo(st, ft);
+                    if st.ok { return st; };
+                };
+            };
+        };
+        return St { ok: false, ..st };
+    };
+    if x.kind = 5 {
+        if indexIn(&st.seen, &x.name) >= 0 { return St { ok: false, ..st }; };
+        st = St { seen: push(st.seen, clone(x.name)), ..st };
+        if st.ctors.contains(&x.name) {
+            for ft in st.ctors.lookup(&x.name, noCtor()).types {
+                st = ghostGo(st, ft);
+                if st.ok { return st; };
+            };
+        };
+        return St { ok: false, ..st };
+    };
+    return St { ok: false, ..st };
+};
+
+// Whether a value of a type is or holds a reference, in a field or a part, at any depth (holdsRef); st.ok
+fn holdsRef(st: St, t: Int) -> St ~ {
+    outer = clone(st.seen);
+    st = St { seen: [], ..st };
+    st = refGo(st, t);
+    return St { seen: outer, ..st };
+};
+
+fn refGo(st: St, t0: Int) -> St ~ {
+    if st.status != 0 { return St { ok: false, ..st }; };
+    st = zonk(st, t0);
+    t = st.ty;
+    x = tyAt(st, t);
+    if x.kind = 10 || x.kind = 11 { return St { ok: true, ..st }; };
+    if isListTy(st, t) || isBoxTy(st, t) || x.kind = 6 || x.kind = 9 { return refGo(st, get(x.args, 0)); };
+    if x.kind = 4 && x.name = "Self" { return St { ok: false, ..st }; };
+    if x.kind = 4 {
+        n = instanceName(st, t);
+        if indexIn(&st.seen, &n) >= 0 { return St { ok: false, ..st }; };
+        if size(x.args) > 0 && !st.ctors.contains(&n) { st = ensureInstance(st, t); };
+        st = St { seen: push(st.seen, clone(n)), ..st };
+        for c in st.types.lookup(&n, []) {
+            if st.ctors.contains(&c) {
+                for ft in st.ctors.lookup(&c, noCtor()).types {
+                    st = refGo(st, ft);
+                    if st.ok { return st; };
+                };
+            };
+        };
+        return St { ok: false, ..st };
+    };
+    if x.kind = 5 {
+        if indexIn(&st.seen, &x.name) >= 0 { return St { ok: false, ..st }; };
+        st = St { seen: push(st.seen, clone(x.name)), ..st };
+        if st.ctors.contains(&x.name) {
+            for ft in st.ctors.lookup(&x.name, noCtor()).types {
+                st = refGo(st, ft);
+                if st.ok { return st; };
+            };
+        };
+        return St { ok: false, ..st };
+    };
+    return St { ok: false, ..st };
+};
+
+// Whether a type is or has a reference among its parts as written (a list, a Box, an array, a function)
+fn mentionsRef(st: &St, t: Int) -> Bool ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 10 || x.kind = 11 { return true; };
+    for a in x.args {
+        if !isSize(st, a) && mentionsRef(st, a) { return true; };
+    };
+    return false;
+};
+
+// Whether a value of a type owns something on the heap (ownsHeap); st.ok
+fn ownsHeap(st: St, t: Int) -> St ~ {
+    return ownsGo(st, t, []);
+};
+
+fn ownsGo(st: St, t0: Int, seen: List<String>) -> St ~ {
+    if st.status != 0 { return St { ok: false, ..st }; };
+    st = zonk(st, t0);
+    t = st.ty;
+    x = tyAt(st, t);
+    if isListTy(st, t) || isBoxTy(st, t) { return St { ok: true, ..st }; };
+    if x.kind = 6 || x.kind = 9 { return ownsGo(st, get(x.args, 0), seen); };
+    if x.kind = 4 {
+        n = instanceName(st, t);
+        if indexIn(&seen, &n) >= 0 || x.name = "Self" { return St { ok: false, ..st }; };
+        if size(x.args) > 0 && !st.ctors.contains(&n) { st = ensureInstance(st, t); };
+        inner = push(clone(seen), clone(n));
+        owns = false;
+        for c in st.types.lookup(&n, []) {
+            if st.ctors.contains(&c) {
+                for ft in st.ctors.lookup(&c, noCtor()).types {
+                    st = ownsGo(st, ft, clone(inner));
+                    if st.ok { owns = true; };
+                };
+            };
+        };
+        return St { ok: owns, ..st };
+    };
+    if x.kind = 5 {
+        owns = false;
+        if st.ctors.contains(&x.name) {
+            for ft in st.ctors.lookup(&x.name, noCtor()).types {
+                st = ownsGo(st, ft, clone(seen));
+                if st.ok { owns = true; };
+            };
+        };
+        return St { ok: owns, ..st };
+    };
+    return St { ok: false, ..st };
+};
+
+fn checkFieldType(st: St, t0: Int) -> St ~ {
+    st = zonk(st, t0);
+    t = st.ty;
+    x = tyAt(st, t);
+    if x.kind = 10 || x.kind = 11 { return checkType(st, get(x.args, 0)); };
+    return checkType(st, t);
+};
+
+fn addressable(st: St, t0: Int) -> St ~ {
+    st = zonk(st, t0);
+    if kindOf(st, st.ty) = 8 { return fail(st, "Type error: a permission is not held in memory, so there is no Addr<Block<T>> or Block<Block<T>>"); };
+    return checkType(st, st.ty);
+};
+
+fn sizeInScope(st: St, s: Int) -> St [{ }] [{ }] {
+    x = tyAt(st, s);
+    if x.kind = 22 && indexIn(&st.sizeScope, &x.name) < 0 {
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(x.name), " is not a size here: a size is a number, ?, or a name that the function declares, as in fn f<"), clone(x.name)), catStrings(">(a: Array<Int, ", clone(x.name))), ">)"));
+    };
+    return st;
+};
+
+fn arrayElement(st: &St, t: Int) -> Bool ~ {
+    x = tyAt(st, t);
+    if x.kind = 14 || x.kind = 13 || x.kind = 10 || x.kind = 11 { return false; };
+    if x.kind = 6 { return arrayElement(st, get(x.args, 0)); };
+    return true;
+};
+
+fn plainElement(st: &St, t: Int) -> Bool ~ {
+    x = tyAt(st, t);
+    if x.kind <= 2 || x.kind = 15 { return true; };
+    if x.kind = 6 { return plainElement(st, get(x.args, 0)); };
+    return false;
+};
+
+fn notAnElement(st: &St, t: Int) -> String ~ {
+    return catStrings("Type error: an array holds values that have a size (Int, Bool, a list, a struct, an enum, a Box or an array), not ", render(st, t));
+};
+
+fn arrayOk(st: St, t: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    x = tyAt(st, t);
+    if x.kind != 6 { return st; };
+    st = zonk(st, get(x.args, 0));
+    e = st.ty;
+    sz = tyAt(st, get(x.args, 1));
+    if sz.kind = 20 {
+        if sz.n < 0 { return typeError(st, catStrings("the size of an array cannot be negative, got ", intText(sz.n))); };
+        if !arrayElement(st, e) { return fail(st, notAnElement(st, e)); };
+        st = typeWords(st, t);
+        words = st.n;
+        if words > 8192 {
+            return typeError(st, catStrings(catStrings(catStrings(render(st, t), " takes "), intText(words)), " words, more than the 8192 that an array held in a frame can have"));
+        };
+        return st;
+    };
+    if !arrayElement(st, e) { return fail(st, notAnElement(st, e)); };
+    return st;
+};
+
+fn literalOk(st: St, e0: Int) -> St ~ {
+    st = zonk(st, e0);
+    e = st.ty;
+    if !plainElement(st, e) {
+        return typeError(st, catStrings(catStrings("an array literal holds Int, Bool or arrays of them, not ", render(st, e)), " (make an array of other values with array(n, x) and set)"));
+    };
+    return st;
+};
+
+// The 8-byte words a value of the type takes where it is held (typeWords); st.n
+fn typeWords(st: St, t0: Int) -> St ~ {
+    if st.status != 0 { return St { n: 1, ..st }; };
+    st = zonk(st, t0);
+    t = st.ty;
+    x = tyAt(st, t);
+    if isBoxTy(st, t) {
+        inner = tyAt(st, get(x.args, 0));
+        if inner.kind = 6 && kindOf(st, get(inner.args, 1)) = 21 { return St { n: 2, ..st }; };
+    };
+    if x.kind = 6 {
+        sz = tyAt(st, resolve(st, get(x.args, 1)));
+        if sz.kind = 20 {
+            st = typeWords(st, get(x.args, 0));
+            if !productFits(sz.n, st.n) { return notModelled(st, "an array of more words than an Int counts"); };
+            return St { n: sz.n * st.n, ..st };
+        };
+        return St { n: 1, ..st };
+    };
+    if x.kind = 4 {
+        st = ensureInstance(st, t);
+        return wordsOfType(st, instanceName(st, t));
+    };
+    if x.kind = 5 {
+        if st.ctors.contains(&x.name) {
+            st = namedTy(st, clone(st.ctors.lookup(&x.name, noCtor()).owner), []);
+            return typeWords(st, st.ty);
+        };
+        return St { n: 1, ..st };
+    };
+    return St { n: 1, ..st };
+};
+
+fn wordsOfType(st: St, name: String) -> St ~ {
+    if !st.types.contains(&name) { return St { n: 1, ..st }; };
+    ctors = st.types.lookup(&name, []);
+    if size(ctors) = 1 && get(ctors, 0) = name && st.ctors.contains(&name) {
+        total = 0;
+        for ft in st.ctors.lookup(&name, noCtor()).types {
+            st = typeWords(st, ft);
+            if total > maxInt() - st.n { return notModelled(st, "an array of more words than an Int counts"); };
+            total = total + st.n;
+        };
+        return St { n: total, ..st };
+    };
+    widest = 0;
+    for c in ctors {
+        width = 0;
+        if st.ctors.contains(&c) {
+            for ft in st.ctors.lookup(&c, noCtor()).types {
+                st = typeWords(st, ft);
+                if width > maxInt() - st.n { return notModelled(st, "an array of more words than an Int counts"); };
+                width = width + st.n;
+            };
+        };
+        if width > widest { widest = width; };
+    };
+    if widest = maxInt() { return notModelled(st, "an array of more words than an Int counts"); };
+    return St { n: 1 + widest, ..st };
+};
