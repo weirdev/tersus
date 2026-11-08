@@ -548,11 +548,12 @@ testScheduling names batches = TestList "testScheduling"
             <> testAssertTrue (all (/= expected) changed)
             <> testAssertEq (sort paths) (sort (leafPaths fixture)))
     , -- (the queries that compared the Haskell engine with the Tersus one went with the engine)
-      testCase "all 460 self-hosted query assertions remain in their families" $
+      testCase "every self-hosted query assertion remains in its family" $
         testAssertEq selfHostedFamilyManifest
-            [("products", 225), ("relations", 28), ("execution", 23),
-             ("MIR contracts", 43), ("MIR arithmetic", 22), ("MIR sequences", 32), ("MIR data", 21),
-             ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 22), ("bridges", 11)]
+            [("products", 225), ("relations", 19), ("execution", 33), ("driver", 46),
+             ("MIR contracts", 60), ("MIR arithmetic", 22), ("MIR sequences", 32), ("MIR data", 21),
+             ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 22), ("bridges", 11),
+             ("loop candidate provenance", 6)]
     , testCase "self-hosted cache-sharing batches belong to one shard for every count" $
         testAssertTrue (all (\count ->
             length (unique [index | (name, index) <- assignShards count names, isSelfHosted name]) == 1)
