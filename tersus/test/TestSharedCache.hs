@@ -861,8 +861,9 @@ survivingChildLock = withCacheHome $ \home -> do
     let marker = home </> "surviving-grandchild"
         make = cachedProgram "native-cloexec" "key" "close-on-exec lock probe"
         spawn = do
+            -- Publish by rename: a plain redirect creates the marker before the pid is in it.
             (_, _, _, child) <- spawnShared (proc "/bin/sh"
-                ["-c", "/bin/sleep 60 & printf '%s\\n' \"$!\" > \"$1\"; wait", "surviving-grandchild", marker])
+                ["-c", "/bin/sleep 60 & printf '%s\\n' \"$!\" > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"; wait", "surviving-grandchild", marker])
                 {create_group = True, std_in = NoStream, std_out = NoStream, std_err = NoStream}
             pure child
         cleanup = readMVar childBox >>= mapM_ (stopOwnedProcess True)
