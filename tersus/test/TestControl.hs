@@ -99,6 +99,23 @@ testIfJoin =
             , ( "fail-fn-f-n-int-int-affirm-n-0-lo-0", "fn f(n: Int) -> Int [{ affirm n >= 0; }] { lo = 0; hi = n; while lo < hi [{ affirm lo <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid > 100 { return mid; }; if mid < 7 { lo = mid; } else { hi = mid; }; }; return lo; };", ControlFails "Loop variant does not shrink" )
               -- A fact that needs a forall is not looked for, and is not wrongly kept
             , ( "fail-fn-f-a-list-int-c-int-int-affirm-size", "fn f(a: List<Int>, c: Int) -> Int [{ affirm size(a) > 1; }] { l = a; if c > 0 { l = set(l, 0, 1); } else { l = set(l, 0, 2); }; affirm get(l, 0) = 1; return 0; };", ControlFails "Could not prove: get(l, 0) = 1" )
+              -- A term both arms inherit but no local names keeps what both of them hold
+              -- of it: the intermediate n * 2, and the size ghost a later goal reuses
+            , ( "valid-intermediate-term-survives-join", "fn f(n: Int, c: Bool) -> Int { a = n * 2; a = a + 1; y = 0; if c { y = 1; } else { y = 2; }; affirm a > n * 2; return a; }; return f(3, true);", ControlValid )
+            , ( "valid-ghost-size-term-survives-join", "fn f(xs: List<Int>, c: Bool) -> Int { n = size(xs) + 1; y = 0; if c { y = 1; } else { y = 2; }; affirm n > size(xs); return n; }; return 0;", ControlValid )
+              -- The arms mint fresh terms from the same state, so the same id on the two
+              -- sides is two values: a fact one arm holds of its own is not the other's
+            , ( "fail-swapped-fresh-terms-across-arms", "fn f(c: Bool, p: Int) -> Int { x = p; y = p; if c { x = p + 1; } else { y = p + 1; }; affirm x = y + 1; return 0; }; return 0;", ControlFails "Could not prove: x = y + 1" )
+            , ( "fail-swapped-locals-order-across-arms", "fn f(c: Bool, p: Int, q: Int) -> Int [{ affirm p < q; }] [{ }] { x = p; y = q; if c { } else { x = q; y = p; }; affirm x < y; return 0; }; return 0;", ControlFails "Could not prove: x < y" )
+              -- One term the arms take in two directions, and an alias only one arm keeps
+            , ( "fail-one-source-two-joined-locals", "fn f(c: Bool, p: Int) -> Int { s = p + 1; x = s; y = s; if c { x = s + 1; y = s + 2; }; affirm x = y; return 0; }; return 0;", ControlFails "Could not prove: x = y" )
+            , ( "fail-alias-not-kept-when-one-side-reassigns", "fn f(c: Bool, p: Int) -> Int { x = p; z = p; if c { x = p + 1; }; affirm x = z; return 0; }; return 0;", ControlFails "Could not prove: x = z" )
+              -- A bound has to hold on both sides: the strict one is kept, the unsound one is not
+            , ( "valid-strict-local-bound-kept-through-join", "fn f(c: Bool, n: Int) -> Int [{ affirm n > 0; }] [{ }] { x = 0; if c { x = n + 1; } else { x = n + 2; }; affirm x > n; return 0; }; return 0;", ControlValid )
+            , ( "fail-sign-not-kept-through-join", "fn f(c: Bool, n: Int) -> Int [{ affirm n >= 0; }] [{ }] { x = 0; if c { x = n; } else { x = 0 - n; }; affirm x >= 0; return 0; }; return 0;", ControlFails "Could not prove: x >= 0" )
+              -- An arm the path condition rules out contributes nothing to the join
+            , ( "valid-infeasible-arm-contributes-nothing", "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ }] { x = 0; if n < 0 { x = 1; } else { x = 2; }; affirm x = 2; return 0; }; return 0;", ControlValid )
+            , ( "fail-infeasible-arm-contributes-nothing", "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ }] { x = 0; if n < 0 { x = 1; } else { x = 2; }; affirm x = 1; return 0; }; return 0;", ControlFails "Could not prove: x = 1" )
             ]
         runRow (name, source, verdict) =
             ( name

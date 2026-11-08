@@ -274,8 +274,7 @@ fn unionContexts(left: &ValidatorContext, right: &ValidatorContext) -> Validator
 fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashSet<Int>, term: Int) -> ValueLookup {
     if ambiguous.contains(term) { return ValueLookup::Missing; };
     if joined.contains(term) { return ValueLookup::Found { term: joined.lookup(term, 0) }; };
-    if term >= 0 { return ValueLookup::Found { term: term }; };
-    return ValueLookup::Missing;
+    return ValueLookup::Found { term: term };
 };
 
 fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> ValidatorContext {
@@ -303,8 +302,6 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
         if source >= 0 {
         } else if kept.contains(source) {
             if pair.joined != source { sameAsKept = push(sameAsKept, EqualityFact { left: pair.joined, right: source }); };
-        } else if pair.ambiguous {
-            ambiguous = ambiguous.insert(source);
         } else if ambiguous.contains(source) = false {
             if joined.contains(source) {
                 if joined.lookup(source, 0) != pair.joined {
@@ -618,26 +615,24 @@ fn addJoinedSums(state: &ExecutionState, pairs: &List<MergePair>, left: &Executi
             if i < j && added < 8 {
                 p = get(pairs, i);
                 q = get(pairs, j);
-                if p.ambiguous = false && q.ambiguous = false {
-                    lp = integerValue(left.context, p.left);
-                    lq = integerValue(left.context, q.left);
-                    rp = integerValue(right.context, p.right);
-                    rq = integerValue(right.context, q.right);
-                    if lp is IntegerLookup::Found && lq is IntegerLookup::Found && rp is IntegerLookup::Found && rq is IntegerLookup::Found {
-                        a = (lp as IntegerLookup::Found).value;
-                        b = (lq as IntegerLookup::Found).value;
-                        c = (rp as IntegerLookup::Found).value;
-                        d = (rq as IntegerLookup::Found).value;
-                        if a + b = c + d && a != c {
-                            total = constantTermWithValue(result.context, a + b);
-                            fresh = freshValue(result);
-                            if total is ValueLookup::Found && fresh is ValueLookup::Found {
-                                sumTerm = (fresh as ValueLookup::Found).term;
-                                apps = push(clone(result.context.applications), ApplicationTerm { id: sumTerm, function: -1, arguments: push(push([], p.joined), q.joined) });
-                                facts = push(clone(result.context.equalities), EqualityFact { left: sumTerm, right: (total as ValueLookup::Found).term });
-                                result = ExecutionState { context: ValidatorContext { applications: apps, equalities: facts, ..clone(result.context) }, ..clone(result) };
-                                added = added + 1;
-                            };
+                lp = integerValue(left.context, p.left);
+                lq = integerValue(left.context, q.left);
+                rp = integerValue(right.context, p.right);
+                rq = integerValue(right.context, q.right);
+                if lp is IntegerLookup::Found && lq is IntegerLookup::Found && rp is IntegerLookup::Found && rq is IntegerLookup::Found {
+                    a = (lp as IntegerLookup::Found).value;
+                    b = (lq as IntegerLookup::Found).value;
+                    c = (rp as IntegerLookup::Found).value;
+                    d = (rq as IntegerLookup::Found).value;
+                    if a + b = c + d && a != c {
+                        total = constantTermWithValue(result.context, a + b);
+                        fresh = freshValue(result);
+                        if total is ValueLookup::Found && fresh is ValueLookup::Found {
+                            sumTerm = (fresh as ValueLookup::Found).term;
+                            apps = push(clone(result.context.applications), ApplicationTerm { id: sumTerm, function: -1, arguments: push(push([], p.joined), q.joined) });
+                            facts = push(clone(result.context.equalities), EqualityFact { left: sumTerm, right: (total as ValueLookup::Found).term });
+                            result = ExecutionState { context: ValidatorContext { applications: apps, equalities: facts, ..clone(result.context) }, ..clone(result) };
+                            added = added + 1;
                         };
                     };
                 };
@@ -647,12 +642,56 @@ fn addJoinedSums(state: &ExecutionState, pairs: &List<MergePair>, left: &Executi
     return result;
 };
 
+fn neighboursOf(context: &ValidatorContext, term: Int) -> HashSet<Int> {
+    near = HashSet::new();
+    for factPosition in 0..size(context.equalities) {
+        fact = get(context.equalities, factPosition);
+        if fact.left = term { near = near.insert(fact.right); };
+        if fact.right = term { near = near.insert(fact.left); };
+    };
+    for factPosition in 0..size(context.orders) {
+        fact = get(context.orders, factPosition);
+        if fact.smaller = term { near = near.insert(fact.greater); };
+        if fact.greater = term { near = near.insert(fact.smaller); };
+    };
+    for factPosition in 0..size(context.different) {
+        fact = get(context.different, factPosition);
+        if fact.left = term { near = near.insert(fact.right); };
+        if fact.right = term { near = near.insert(fact.left); };
+    };
+    for factPosition in 0..size(context.differences) {
+        fact = get(context.differences, factPosition);
+        if fact.left = term { near = near.insert(fact.right); };
+        if fact.right = term { near = near.insert(fact.left); };
+    };
+    for appPosition in 0..size(context.applications) {
+        app = get(context.applications, appPosition);
+        mentioned = app.id = term;
+        for argumentPosition in 0..size(app.arguments) {
+            if get(app.arguments, argumentPosition) = term { mentioned = true; };
+        };
+        if mentioned {
+            near = near.insert(app.id);
+            for argumentPosition in 0..size(app.arguments) { near = near.insert(get(app.arguments, argumentPosition)); };
+        };
+    };
+    return near;
+};
+
 fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &ExecutionState, right: &ExecutionState) -> ExecutionState {
     result = clone(state);
     leftCache = entailmentCache(left.context);
     rightCache = entailmentCache(right.context);
     for pairPosition in 0..size(pairs) {
         pair = get(pairs, pairPosition);
+        // (a constant the branch never put in a fact with either of the pair's
+        // own terms is asked nothing: it is the constants that grow with the
+        // program, and a bound on the joined term is proved from the facts its
+        // side's term takes part in. The locals in scope are bounded by the
+        // function and stay candidates: capping them too loses the strict
+        // bound of r = n + 1 against r = n + 2.)
+        leftNear = neighboursOf(left.context, pair.left);
+        rightNear = neighboursOf(right.context, pair.right);
         mergedCandidates = [];
         leftCandidates = [];
         rightCandidates = [];
@@ -664,11 +703,15 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
                 rc = constantTermWithValue(right.context, constant.value);
                 if lc is ValueLookup::Found {
                     if rc is ValueLookup::Found {
-                        if containsValue(mergedCandidates, constant.id) = false {
-                            mergedCandidates = push(mergedCandidates, constant.id);
-                            candidateValues = push(candidateValues, constant.value);
-                            leftCandidates = push(leftCandidates, (lc as ValueLookup::Found).term);
-                            rightCandidates = push(rightCandidates, (rc as ValueLookup::Found).term);
+                        lcTerm = (lc as ValueLookup::Found).term;
+                        rcTerm = (rc as ValueLookup::Found).term;
+                        if leftNear.contains(lcTerm) || rightNear.contains(rcTerm) {
+                            if containsValue(mergedCandidates, constant.id) = false {
+                                mergedCandidates = push(mergedCandidates, constant.id);
+                                candidateValues = push(candidateValues, constant.value);
+                                leftCandidates = push(leftCandidates, lcTerm);
+                                rightCandidates = push(rightCandidates, rcTerm);
+                            };
                         };
                     };
                 };
@@ -703,15 +746,21 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
             // (a bound both sides keep strictly against a local is kept strictly:
             // r > n after r = n + 1 on one side and r = n + 2 on the other; a
             // constant's own value says as much without the cost)
-            lowerLeft = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: lc, right: pair.left });
-            leftCache = lowerLeft.cache;
-            if lowerLeft.holds {
-                lowerRight = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: rc, right: pair.right });
-                rightCache = lowerRight.cache;
-                if lowerRight.holds {
+            leftAnswer = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: lc, right: pair.left });
+            leftCache = leftAnswer.cache;
+            if leftAnswer.holds {
+                rightAnswer = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: rc, right: pair.right });
+                rightCache = rightAnswer.cache;
+                if rightAnswer.holds {
                     strict = false;
-                    if i >= firstLocal && entailsGoal(left.context, ValidatorGoal::Less { left: lc, right: pair.left }) {
-                        strict = entailsGoal(right.context, ValidatorGoal::Less { left: rc, right: pair.right });
+                    if i >= firstLocal {
+                        leftAnswer = entailsGoalCached(leftCache, ValidatorGoal::Less { left: lc, right: pair.left });
+                        leftCache = leftAnswer.cache;
+                        if leftAnswer.holds {
+                            rightAnswer = entailsGoalCached(rightCache, ValidatorGoal::Less { left: rc, right: pair.right });
+                            rightCache = rightAnswer.cache;
+                            strict = rightAnswer.holds;
+                        };
                     };
                     if i < firstLocal {
                         // (of the constants below both sides only the greatest is kept:
@@ -723,15 +772,21 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
                     };
                 };
             };
-            upperLeft = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: pair.left, right: lc });
-            leftCache = upperLeft.cache;
-            if upperLeft.holds {
-                upperRight = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: pair.right, right: rc });
-                rightCache = upperRight.cache;
-                if upperRight.holds {
+            leftAnswer = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: pair.left, right: lc });
+            leftCache = leftAnswer.cache;
+            if leftAnswer.holds {
+                rightAnswer = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: pair.right, right: rc });
+                rightCache = rightAnswer.cache;
+                if rightAnswer.holds {
                     strict = false;
-                    if i >= firstLocal && entailsGoal(left.context, ValidatorGoal::Less { left: pair.left, right: lc }) {
-                        strict = entailsGoal(right.context, ValidatorGoal::Less { left: pair.right, right: rc });
+                    if i >= firstLocal {
+                        leftAnswer = entailsGoalCached(leftCache, ValidatorGoal::Less { left: pair.left, right: lc });
+                        leftCache = leftAnswer.cache;
+                        if leftAnswer.holds {
+                            rightAnswer = entailsGoalCached(rightCache, ValidatorGoal::Less { left: pair.right, right: rc });
+                            rightCache = rightAnswer.cache;
+                            strict = rightAnswer.holds;
+                        };
                     };
                     if i < firstLocal {
                         v = intAt(candidateValues, i, 0);
@@ -778,6 +833,20 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
     return result;
 };
 
+// A merge keeps a fact only when both sides hold it, after each side renames
+// its own terms into the joined ones. That is sound whatever a term id means
+// on either side, because:
+//   1. each side's renaming is injective -- a local the sides bind to
+//      different terms gets one joined term of its own, fresh below every
+//      term either side mentions, and a term with two joined images on a side
+//      is dropped from that side rather than renamed;
+//   2. a term neither side renames keeps its id, and a fact about it is kept
+//      only when both sides state it, so it holds of whichever value the path
+//      that ran produced -- the two sides mint fresh ids independently, so the
+//      same id can be two values, and nothing here assumes otherwise. A local
+//      the two sides bind to one such id is still joined, because the bounds
+//      below are what the two values have in common.
+// Hence ids need not be globally unique (plan clarification 8).
 fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
     poolContext = unionContexts(left.context, right.context);
     poolEqualities = clone(poolContext.equalities);
@@ -796,13 +865,15 @@ fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionSt
             } else if binding.value = rightTerm && termInUse(fork, binding.value) {
                 // (a term the checker made before the branch, as size(digits)
                 // from a contract, is the same on both sides: it is kept as
-                // itself, and the joined state keeps what both sides know of
-                // it; the same number made separately on each side after the
-                // branch is two values, and is joined)
+                // itself, and another local joined from it is said equal to it
+                // rather than renamed into it, which would take from this local
+                // what is known of it. The same number made separately on each
+                // side after the branch is two values, so it is joined below,
+                // which is also what gets it the bounds both sides entail.)
                 locals = bindLocal(locals, binding.key, binding.value);
                 known = false;
                 for pair in pairs { if pair.left = binding.value && pair.right = binding.value { known = true; }; };
-                if known = false { pairs = push(pairs, MergePair { left: binding.value, right: binding.value, joined: binding.value, ambiguous: false }); };
+                if known = false { pairs = push(pairs, MergePair { left: binding.value, right: binding.value, joined: binding.value }); };
             } else {
                 joined = 0;
                 found = false;
@@ -817,7 +888,7 @@ fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionSt
                     fresh = freshValue(pool);
                     if fresh is ValueLookup::Found {
                         joined = (fresh as ValueLookup::Found).term;
-                        pairs = push(pairs, MergePair { left: binding.value, right: rightTerm, joined: joined, ambiguous: binding.value < 0 && binding.value = rightTerm });
+                        pairs = push(pairs, MergePair { left: binding.value, right: rightTerm, joined: joined });
                         poolEqualities = push(clone(poolEqualities), EqualityFact { left: joined, right: joined });
                         pool = ExecutionState { context: ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) }, locals: HashMap::new(), templates: noTemplates() };
                         found = true;
