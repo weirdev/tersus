@@ -6,7 +6,10 @@ module Differential
     , Outcome (..)
     , Candidate
     , corpusUnits
+    , suiteUnits
     , unitRequests
+    , unitThrough
+    , executableElaborator
     , compareResponses
     , throughText
     , executableCandidate
@@ -57,31 +60,25 @@ data Outcome
 type Candidate = Request -> IO (Result Response String)
 
 corpusUnits :: IO [Unit]
-corpusUnits = do
+corpusUnits = (++ map EmbeddedPackage toolPackages) <$> suiteUnits
+
+-- The corpus without the compiler's own packages, whose Haskell elaboration alone takes most of the corpus's time
+suiteUnits :: IO [Unit]
+suiteUnits = do
     files <- concat <$> mapM tersusFiles ["examples", "examples/rejected"]
-    pure $
-        map SourceFile files
-            ++ map EmbeddedPackage ["lib/parser/parser.tersus", "lib/ast_reader/ast_reader.tersus", "lib/mir/emit/emit.tersus", "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", validationEntry]
-            ++ [FilePackage "examples/modules/app/main.tersus", Libraries]
+    pure (map SourceFile files ++ [FilePackage "examples/modules/app/main.tersus", Libraries])
   where
     tersusFiles dir = map ((dir ++ "/") ++) . filter (".tersus" `isSuffixOf`) . sort <$> listDirectory dir
+
+toolPackages :: [FilePath]
+toolPackages = ["lib/parser/parser.tersus", "lib/ast_reader/ast_reader.tersus", "lib/mir/emit/emit.tersus", "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", validationEntry]
 
 -- The requests the compiler makes compiling a unit, in the order it makes them, with `respond`'s answers. A unit
 -- that does not parse makes none.
 unitRequests :: Unit -> IO (Result [(Request, Response)] String)
 unitRequests unit = do
     ref <- newIORef []
-    let elaborator = recording ref
-    outcome <- case unit of
-        SourceFile path -> program elaborator <$> readFile path
-        SourceText _ source -> pure $ case parseWithEquality source of
-            Left e -> Error ("does not parse: " ++ e)
-            Right stmts -> discard (lowerStatementsWith elaborator stmts)
-        EmbeddedPackage entry -> pure (package elaborator (if entry == validationEntry then validationPackageFiles else toolPackageFiles) entry)
-        FilePackage entry -> do
-            files <- Mod.snapshotFromFilesystem entry
-            pure (package elaborator files entry)
-        Libraries -> pure (discard (compileLibPackageWith elaborator) `bindResult` \() -> discard (nativeStorageUnitsWith elaborator))
+    outcome <- unitThrough False (recording ref) unit
     forced <- try (evaluate (either id (const "") (resultEither outcome)) >>= evaluate . length)
     requests <- reverse <$> readIORef ref
     pure $ case (forced :: Either SomeException Int, outcome) of
@@ -89,17 +86,32 @@ unitRequests unit = do
         (_, Error e) | null requests -> Error e
         _ -> Ok requests
   where
-    program elaborator source = case TersusParser.parseSourceParts True source of
-        Error e -> Error ("does not parse: " ++ e)
-        Ok parts -> discard (lowerSourcePartsWith elaborator True parts)
-    package elaborator files entry = case Mod.loadFromEntry (Mod.resolverFromFiles files) entry of
-        Left e -> Error e
-        Right (Mod.PackageResult pkg) -> discard (Package.compileModulesWith elaborator pkg)
-        Right _ -> Error (entry ++ " is not a package")
-    discard r = mapResult (const ()) r
     resultEither r = case r of
         Ok a -> Right a
         Error e -> Left e
+
+-- The compiler's compilation of a unit as far as lowering, each module elaborated by the given elaborator, made anew each
+-- time the action runs; deep, the length of what it lowered to, which forces all of it
+unitThrough :: Bool -> Elaborator -> Unit -> IO (Result Int String)
+unitThrough deep elaborator given = pure given >>= \unit -> case unit of
+    SourceFile path -> program <$> readFile path
+    SourceText _ source -> pure $ case parseWithEquality source of
+        Left e -> Error ("does not parse: " ++ e)
+        Right stmts -> measured (lowerStatementsWith elaborator stmts)
+    EmbeddedPackage entry -> pure (package (if entry == validationEntry then validationPackageFiles else toolPackageFiles) entry)
+    FilePackage entry -> do
+        files <- Mod.snapshotFromFilesystem entry
+        pure (package files entry)
+    Libraries -> pure (measured (compileLibPackageWith elaborator) `bindResult` \a -> mapResult (+ a) (measured (nativeStorageUnitsWith elaborator)))
+  where
+    program source = case TersusParser.parseSourceParts True source of
+        Error e -> Error ("does not parse: " ++ e)
+        Ok parts -> measured (lowerSourcePartsWith elaborator True parts)
+    package files entry = case Mod.loadFromEntry (Mod.resolverFromFiles files) entry of
+        Left e -> Error e
+        Right (Mod.PackageResult pkg) -> measured (Package.compileModulesWith elaborator pkg)
+        Right _ -> Error (entry ++ " is not a package")
+    measured r = mapResult (\lowered -> if deep then length (show lowered) else 0) r
 
 -- `respond`, with each request and its answer kept (in reverse order). The compiler takes each response apart as
 -- soon as it has it, so a request is kept when it is made.
@@ -151,6 +163,15 @@ buildElaborator files out = case Mod.loadFromEntry (Mod.resolverFromFiles files)
             Error e -> pure (Error e)
             Ok text -> buildExecutable out text
     Right _ -> pure (Error "lib/elaborate is not a package")
+
+-- The elaborator executable as the compiler's elaborator: what it cannot answer is not modelled
+{-# NOINLINE executableElaborator #-}
+executableElaborator :: FilePath -> Elaborator
+executableElaborator exe rq = unsafePerformIO $ do
+    answer <- executableCandidate exe rq
+    pure $ case answer of
+        Ok response -> response
+        Error e -> NotModelled e
 
 -- An elaborator executable: the request on its standard input, the response on its standard output
 executableCandidate :: FilePath -> Candidate

@@ -133,6 +133,16 @@ fn isListNode(node: &AstNode) -> Bool ~ {
 fn nodeChildren(node: &AstNode) -> List<Int> ~ {
     // (the records of an interface refer to their parts as the reader reads them)
     if node is AstNode::Entry || node is AstNode::Interface || node is AstNode::OptType { return nodeRefs(node); };
+    if node is AstNode::Name || node is AstNode::Value || node is AstNode::Body || node is AstNode::Expression || node is AstNode::Termination || node is AstNode::Validation { return nodeChildren1(node); };
+    if node is AstNode::Proof || node is AstNode::Rule || node is AstNode::Statement || node is AstNode::Arg || node is AstNode::OptName || node is AstNode::OptTermination { return nodeChildren2(node); };
+    if node is AstNode::Builtin || node is AstNode::Signature || node is AstNode::TraitFn || node is AstNode::Bound || node is AstNode::Field || node is AstNode::Variant { return nodeChildren3(node); };
+    if node is AstNode::ValueField || node is AstNode::Elaborated || node is AstNode::Type || node is AstNode::Size || node is AstNode::Names || node is AstNode::Values { return nodeChildren4(node); };
+    if node is AstNode::Statements || node is AstNode::Expressions || node is AstNode::Validations || node is AstNode::Proofs || node is AstNode::Fields || node is AstNode::Variants { return nodeChildren5(node); };
+    if node is AstNode::ValueFields || node is AstNode::Types || node is AstNode::Args || node is AstNode::TraitFns || node is AstNode::Bounds { return nodeChildren6(node); };
+    return [];
+};
+
+fn nodeChildren1(node: &AstNode) -> List<Int> ~ {
     out = [];
     if node is AstNode::Name { v = (node as AstNode::Name).value;
         match v {
@@ -180,6 +190,11 @@ fn nodeChildren(node: &AstNode) -> List<Int> ~ {
             AstValidation::Assume { p: p } => { out = push([], p); },
         };
     };
+    return out;
+};
+
+fn nodeChildren2(node: &AstNode) -> List<Int> ~ {
+    out = [];
     if node is AstNode::Proof { v = (node as AstNode::Proof).value;
         match v {
             AstProof::FApp { f: f, xs: xs } => { out = push(push([], f), xs); },
@@ -242,6 +257,11 @@ fn nodeChildren(node: &AstNode) -> List<Int> ~ {
             AstOptTermination::SomeTermination { t: t } => { out = push([], t); },
         };
     };
+    return out;
+};
+
+fn nodeChildren3(node: &AstNode) -> List<Int> ~ {
+    out = [];
     if node is AstNode::Builtin { v = (node as AstNode::Builtin).value;
         match v {
             AstBuiltin::Ctor { n: n, args: args, fs: fs } => { out = push(push(push([], n), args), fs); },
@@ -269,6 +289,11 @@ fn nodeChildren(node: &AstNode) -> List<Int> ~ {
     if node is AstNode::Variant { v = (node as AstNode::Variant).value;
         out = push(push([], v.n), v.fs);
     };
+    return out;
+};
+
+fn nodeChildren4(node: &AstNode) -> List<Int> ~ {
+    out = [];
     if node is AstNode::ValueField { v = (node as AstNode::ValueField).value;
         out = push(push([], v.n), v.v);
     };
@@ -279,12 +304,22 @@ fn nodeChildren(node: &AstNode) -> List<Int> ~ {
     if node is AstNode::Size { out = []; };
     if node is AstNode::Names { out = []; };
     if node is AstNode::Values { out = []; };
+    return out;
+};
+
+fn nodeChildren5(node: &AstNode) -> List<Int> ~ {
+    out = [];
     if node is AstNode::Statements { out = []; };
     if node is AstNode::Expressions { out = []; };
     if node is AstNode::Validations { out = []; };
     if node is AstNode::Proofs { out = []; };
     if node is AstNode::Fields { out = []; };
     if node is AstNode::Variants { out = []; };
+    return out;
+};
+
+fn nodeChildren6(node: &AstNode) -> List<Int> ~ {
+    out = [];
     if node is AstNode::ValueFields { out = []; };
     if node is AstNode::Types { out = []; };
     if node is AstNode::Args { out = []; };
@@ -294,6 +329,17 @@ fn nodeChildren(node: &AstNode) -> List<Int> ~ {
 };
 
 fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
+    if node is AstNode::Name || node is AstNode::Value || node is AstNode::Body || node is AstNode::Expression || node is AstNode::Termination || node is AstNode::Validation { return remapNode1(node, map); };
+    if node is AstNode::Proof || node is AstNode::Rule || node is AstNode::Statement || node is AstNode::Arg || node is AstNode::OptName || node is AstNode::OptTermination { return remapNode2(node, map); };
+    if node is AstNode::Builtin || node is AstNode::Signature || node is AstNode::TraitFn || node is AstNode::Bound || node is AstNode::Field || node is AstNode::Variant { return remapNode3(node, map); };
+    if node is AstNode::ValueField || node is AstNode::Elaborated || node is AstNode::Names || node is AstNode::Values || node is AstNode::Statements || node is AstNode::Expressions { return remapNode4(node, map); };
+    if node is AstNode::Validations || node is AstNode::Proofs || node is AstNode::Fields || node is AstNode::Variants || node is AstNode::ValueFields || node is AstNode::Types { return remapNode5(node, map); };
+    if node is AstNode::Args || node is AstNode::TraitFns || node is AstNode::Bounds || node is AstNode::Entries || node is AstNode::OptNames || node is AstNode::OptType { return remapNode6(node, map); };
+    if node is AstNode::Entry || node is AstNode::Interface { return remapNode7(node, map); };
+    return node;
+};
+
+fn remapNode1(node: AstNode, map: &List<Int>) -> AstNode ~ {
     result = clone(node);
     if node is AstNode::Name { v = clone((node as AstNode::Name).value);
         match v {
@@ -341,6 +387,11 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
             AstValidation::Assume { p: p } => { result = AstNode::Validation { value: AstValidation::Assume { p: intAtOr(map, p, p) } }; },
         };
     };
+    return result;
+};
+
+fn remapNode2(node: AstNode, map: &List<Int>) -> AstNode ~ {
+    result = clone(node);
     if node is AstNode::Proof { v = clone((node as AstNode::Proof).value);
         match v {
             AstProof::FApp { f: f, xs: xs } => { result = AstNode::Proof { value: AstProof::FApp { f: intAtOr(map, f, f), xs: intAtOr(map, xs, xs) } }; },
@@ -403,6 +454,11 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
             AstOptTermination::SomeTermination { t: t } => { result = AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: intAtOr(map, t, t) } }; },
         };
     };
+    return result;
+};
+
+fn remapNode3(node: AstNode, map: &List<Int>) -> AstNode ~ {
+    result = clone(node);
     if node is AstNode::Builtin { v = clone((node as AstNode::Builtin).value);
         match v {
             AstBuiltin::Ctor { n: n, args: args, fs: fs } => { result = AstNode::Builtin { value: AstBuiltin::Ctor { n: intAtOr(map, n, n), args: intAtOr(map, args, args), fs: intAtOr(map, fs, fs) } }; },
@@ -430,6 +486,11 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
     if node is AstNode::Variant { v = clone((node as AstNode::Variant).value);
         result = AstNode::Variant { value: AstVariant { n: intAtOr(map, v.n, v.n), fs: intAtOr(map, v.fs, v.fs) } };
     };
+    return result;
+};
+
+fn remapNode4(node: AstNode, map: &List<Int>) -> AstNode ~ {
+    result = clone(node);
     if node is AstNode::ValueField { v = clone((node as AstNode::ValueField).value);
         result = AstNode::ValueField { value: AstValueField { n: intAtOr(map, v.n, v.n), v: intAtOr(map, v.v, v.v) } };
     };
@@ -440,18 +501,33 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
     if node is AstNode::Values { v = clone((node as AstNode::Values).value); match v { AstValues::End => { result = clone(node); }, AstValues::Cons { head: h, tail: t } => { result = AstNode::Values { value: AstValues::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Statements { v = clone((node as AstNode::Statements).value); match v { AstStatements::End => { result = clone(node); }, AstStatements::Cons { head: h, tail: t } => { result = AstNode::Statements { value: AstStatements::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Expressions { v = clone((node as AstNode::Expressions).value); match v { AstExpressions::End => { result = clone(node); }, AstExpressions::Cons { head: h, tail: t } => { result = AstNode::Expressions { value: AstExpressions::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
+    return result;
+};
+
+fn remapNode5(node: AstNode, map: &List<Int>) -> AstNode ~ {
+    result = clone(node);
     if node is AstNode::Validations { v = clone((node as AstNode::Validations).value); match v { AstValidations::End => { result = clone(node); }, AstValidations::Cons { head: h, tail: t } => { result = AstNode::Validations { value: AstValidations::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Proofs { v = clone((node as AstNode::Proofs).value); match v { AstProofs::End => { result = clone(node); }, AstProofs::Cons { head: h, tail: t } => { result = AstNode::Proofs { value: AstProofs::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Fields { v = clone((node as AstNode::Fields).value); match v { AstFields::End => { result = clone(node); }, AstFields::Cons { head: h, tail: t } => { result = AstNode::Fields { value: AstFields::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Variants { v = clone((node as AstNode::Variants).value); match v { AstVariants::End => { result = clone(node); }, AstVariants::Cons { head: h, tail: t } => { result = AstNode::Variants { value: AstVariants::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::ValueFields { v = clone((node as AstNode::ValueFields).value); match v { AstValueFields::End => { result = clone(node); }, AstValueFields::Cons { head: h, tail: t } => { result = AstNode::ValueFields { value: AstValueFields::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Types { v = clone((node as AstNode::Types).value); match v { AstTypes::End => { result = clone(node); }, AstTypes::Cons { head: h, tail: t } => { result = AstNode::Types { value: AstTypes::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
+    return result;
+};
+
+fn remapNode6(node: AstNode, map: &List<Int>) -> AstNode ~ {
+    result = clone(node);
     if node is AstNode::Args { v = clone((node as AstNode::Args).value); match v { AstArgs::End => { result = clone(node); }, AstArgs::Cons { head: h, tail: t } => { result = AstNode::Args { value: AstArgs::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::TraitFns { v = clone((node as AstNode::TraitFns).value); match v { AstTraitFns::End => { result = clone(node); }, AstTraitFns::Cons { head: h, tail: t } => { result = AstNode::TraitFns { value: AstTraitFns::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Bounds { v = clone((node as AstNode::Bounds).value); match v { AstBounds::End => { result = clone(node); }, AstBounds::Cons { head: h, tail: t } => { result = AstNode::Bounds { value: AstBounds::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::Entries { v = clone((node as AstNode::Entries).value); match v { AstEntries::End => { result = clone(node); }, AstEntries::Cons { head: h, tail: t } => { result = AstNode::Entries { value: AstEntries::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::OptNames { v = clone((node as AstNode::OptNames).value); match v { AstOptNames::End => { result = clone(node); }, AstOptNames::Cons { head: h, tail: t } => { result = AstNode::OptNames { value: AstOptNames::Cons { head: intAtOr(map, h, h), tail: intAtOr(map, t, t) } }; }, }; };
     if node is AstNode::OptType { v = clone((node as AstNode::OptType).value); match v { AstOptType::NoType => { result = clone(node); }, AstOptType::SomeType { t: t } => { result = AstNode::OptType { value: AstOptType::SomeType { t: intAtOr(map, t, t) } }; }, }; };
+    return result;
+};
+
+fn remapNode7(node: AstNode, map: &List<Int>) -> AstNode ~ {
+    result = clone(node);
     if node is AstNode::Entry { result = AstNode::Entry { value: remapEntry(clone((node as AstNode::Entry).value), map) }; };
     if node is AstNode::Interface {
         v = clone((node as AstNode::Interface).value);

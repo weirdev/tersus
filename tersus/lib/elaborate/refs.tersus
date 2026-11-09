@@ -4,14 +4,14 @@ import elaborate::builtins { builtinKey, builtinOfValue };
 import elaborate::calls { builtinRecord, lookupVar };
 import elaborate::core { holdsRef };
 import elaborate::records { exprOf, isVar, listItems, nameText, varName };
-import elaborate::state { Place, St, indexIn, joinWith, kindOf, typeError, zonk };
+import elaborate::state { Place, St, indexIn, joinWith, kindOf, nth, typeError, zonk };
 
 // A call of an expression record: its head, its arguments, the key of the builtin its head is when that is a
 // value (key), the name its head is when that is a variable (callee), and the field a field builtin reads
 struct Call { ok: Bool, head: Int, args: List<Int>, key: String, callee: String, field: String };
 impl Clone for Call { };
 
-fn callOf(st: &St, e: Int) -> Call [{ }] [{ }] {
+fn callOf(st: &St, e: Int) -> Call ~ {
     none = Call { ok: false, head: 0 - 1, args: [], key: "", callee: "", field: "" };
     ex = exprOf(st, e);
     if !(ex is AstExpression::F) { return none; };
@@ -31,9 +31,9 @@ fn callOf(st: &St, e: Int) -> Call [{ }] [{ }] {
     return Call { ok: true, head: f.f, args: args, key: "", callee: "", field: "" };
 };
 
-fn noPlace() -> Place [{ }] [{ }] { return Place { ok: false, root: "", steps: [] }; };
+fn noPlace() -> Place ~ { return Place { ok: false, root: "", steps: [] }; };
 
-fn isGetCall(c: &Call) -> Bool [{ }] [{ }] {
+fn isGetCall(c: &Call) -> Bool ~ {
     return size(c.args) = 2 && (c.key = "Get" || c.callee = "get");
 };
 
@@ -42,17 +42,17 @@ fn placeSteps(st: &St, e: Int) -> Place ~ {
     c = callOf(st, e);
     if !c.ok { return noPlace(); };
     if c.key = "Field" && size(c.args) = 1 {
-        p = placeSteps(st, get(c.args, 0));
+        p = placeSteps(st, nth(&c.args, 0));
         if !p.ok { return p; };
         return Place { steps: push(p.steps, clone(c.field)), ..p };
     };
     if isGetCall(&c) {
-        p = placeSteps(st, get(c.args, 0));
+        p = placeSteps(st, nth(&c.args, 0));
         if !p.ok { return p; };
         return Place { steps: push(p.steps, ""), ..p };
     };
-    if c.key = "DerefOf" && size(c.args) = 1 && isVar(st, get(c.args, 0)) {
-        return Place { ok: true, root: varName(st, get(c.args, 0)), steps: [] };
+    if c.key = "DerefOf" && size(c.args) = 1 && isVar(st, nth(&c.args, 0)) {
+        return Place { ok: true, root: varName(st, nth(&c.args, 0)), steps: [] };
     };
     return noPlace();
 };
@@ -61,9 +61,9 @@ fn placeSteps(st: &St, e: Int) -> Place ~ {
 fn derefRoot(st: &St, e: Int) -> Int ~ {
     c = callOf(st, e);
     if !c.ok { return 0 - 1; };
-    if c.key = "Field" && size(c.args) = 1 { return derefRoot(st, get(c.args, 0)); };
-    if isGetCall(&c) { return derefRoot(st, get(c.args, 0)); };
-    if c.key = "DerefOf" && size(c.args) = 1 { return get(c.args, 0); };
+    if c.key = "Field" && size(c.args) = 1 { return derefRoot(st, nth(&c.args, 0)); };
+    if isGetCall(&c) { return derefRoot(st, nth(&c.args, 0)); };
+    if c.key = "DerefOf" && size(c.args) = 1 { return nth(&c.args, 0); };
     return 0 - 1;
 };
 
@@ -71,8 +71,8 @@ fn placeForm(st: &St, e: Int) -> Bool ~ {
     if isVar(st, e) { return true; };
     c = callOf(st, e);
     if !c.ok { return false; };
-    if c.key = "Field" && size(c.args) = 1 { return placeForm(st, get(c.args, 0)); };
-    if isGetCall(&c) { return placeForm(st, get(c.args, 0)); };
+    if c.key = "Field" && size(c.args) = 1 { return placeForm(st, nth(&c.args, 0)); };
+    if isGetCall(&c) { return placeForm(st, nth(&c.args, 0)); };
     return c.key = "DerefOf" && size(c.args) = 1;
 };
 
@@ -81,11 +81,11 @@ fn placeRoot(st: &St, e: Int) -> String ~ {
     if isVar(st, e) { return varName(st, e); };
     c = callOf(st, e);
     if !c.ok { return ""; };
-    if (c.key = "Field" && size(c.args) = 1) || isGetCall(&c) || (c.key = "DerefOf" && size(c.args) = 1) { return placeRoot(st, get(c.args, 0)); };
+    if (c.key = "Field" && size(c.args) = 1) || isGetCall(&c) || (c.key = "DerefOf" && size(c.args) = 1) { return placeRoot(st, nth(&c.args, 0)); };
     return "";
 };
 
-fn aliasIndex(st: &St, name: &String) -> Int [{ }] [{ }] { return indexIn(&st.aliasNames, name); };
+fn aliasIndex(st: &St, name: &String) -> Int ~ { return indexIn(&st.aliasNames, name); };
 
 // The place a root and steps are really of, through the references a local holds (resolveRefPlace)
 fn resolveRefPlace(st: &St, root: String, steps: List<String>) -> Place ~ {
@@ -109,12 +109,12 @@ fn resolveRefPlace(st: &St, root: String, steps: List<String>) -> Place ~ {
     return Place { ok: true, root: var, steps: path };
 };
 
-fn writesTarget(place: &Place) -> String [{ }] [{ }] {
+fn writesTarget(place: &Place) -> String ~ {
     if size(place.steps) > 0 && size(get(place.steps, 0).bytes) > 0 { return catStrings(catStrings(place.root, "."), get(place.steps, 0)); };
     return clone(place.root);
 };
 
-fn withinWrites(writes: &List<String>, place: &Place) -> Bool [{ }] [{ }] {
+fn withinWrites(writes: &List<String>, place: &Place) -> Bool ~ {
     target = writesTarget(place);
     for w in writes {
         if w = place.root || w = target { return true; };
@@ -127,14 +127,14 @@ fn updatePlaceOf(st: &St, e: Int) -> Place ~ {
     if isVar(st, e) { return resolveRefPlace(st, varName(st, e), []); };
     c = callOf(st, e);
     if c.ok && c.key = "BorrowMutOf" && size(c.args) = 1 {
-        p = placeSteps(st, get(c.args, 0));
+        p = placeSteps(st, nth(&c.args, 0));
         if !p.ok { return p; };
         return resolveRefPlace(st, clone(p.root), clone(p.steps));
     };
     return noPlace();
 };
 
-fn writesText(st: &St) -> String [{ }] [{ }] {
+fn writesText(st: &St) -> String ~ {
     return catStrings(catStrings("(writes(", joinWith(&st.writes, ", ")), "))");
 };
 
@@ -148,9 +148,9 @@ fn checkCallWrites(st: St, e: Int) -> St ~ {
     return st;
 };
 
-fn refResultIndex(st: &St, name: &String) -> Int [{ }] [{ }] { return indexIn(&st.refResultNames, name); };
+fn refResultIndex(st: &St, name: &String) -> Int ~ { return indexIn(&st.refResultNames, name); };
 
-fn putRefResult(st: St, name: String, params: List<String>, froms: List<String>) -> St [{ }] [{ }] {
+fn putRefResult(st: St, name: String, params: List<String>, froms: List<String>) -> St ~ {
     i = indexIn(&st.refResultNames, &name);
     if i >= 0 && i < size(st.refResultParams) && i < size(st.refResultFroms) {
         return St { refResultParams: set(st.refResultParams, i, params), refResultFroms: set(st.refResultFroms, i, froms), ..st };
@@ -163,7 +163,7 @@ fn putRefResult(st: St, name: String, params: List<String>, froms: List<String>)
 struct Froms { ok: Bool, params: List<String>, froms: List<String> };
 impl Clone for Froms { };
 
-fn fromsOf(st: &St, name: &String) -> Froms [{ }] [{ }] {
+fn fromsOf(st: &St, name: &String) -> Froms ~ {
     i = refResultIndex(st, name);
     if i >= 0 && i < size(st.refResultParams) && i < size(st.refResultFroms) {
         return Froms { ok: true, params: clone(get(st.refResultParams, i)), froms: clone(get(st.refResultFroms, i)) };
@@ -177,7 +177,7 @@ fn exprReturnOrigin(st: &St, e: Int) -> Place ~ {
     c = callOf(st, e);
     if !c.ok { return noPlace(); };
     if (c.key = "BorrowOf" || c.key = "BorrowMutOf") && size(c.args) = 1 {
-        p = placeSteps(st, get(c.args, 0));
+        p = placeSteps(st, nth(&c.args, 0));
         if !p.ok { return p; };
         return resolveRefPlace(st, clone(p.root), clone(p.steps));
     };
@@ -260,17 +260,17 @@ fn exprRefOrigins(st: St, e: Int) -> St ~ {
         };
         return St { names: out, ..st };
     };
-    if c.ok && c.key = "Field" && size(c.args) = 1 { return exprRefOrigins(st, get(c.args, 0)); };
+    if c.ok && c.key = "Field" && size(c.args) = 1 { return exprRefOrigins(st, nth(&c.args, 0)); };
     return St { names: exprOriginCandidates(st, e), ..st };
 };
 
-fn putAlias(st: St, name: &String, place: Place) -> St [{ }] [{ }] {
+fn putAlias(st: St, name: &String, place: Place) -> St ~ {
     i = indexIn(&st.aliasNames, name);
     if i >= 0 && i < size(st.aliasPlaces) { return St { aliasPlaces: set(st.aliasPlaces, i, place), ..st }; };
     return St { aliasNames: push(st.aliasNames, clone(name)), aliasPlaces: push(st.aliasPlaces, place), ..st };
 };
 
-fn dropAlias(st: St, name: &String) -> St [{ }] [{ }] {
+fn dropAlias(st: St, name: &String) -> St ~ {
     names = [];
     places = [];
     i = 0;
@@ -299,7 +299,7 @@ fn recordAlias(st: St, var: &String, t: Int, e: Int) -> St ~ {
     if k = 10 || k = 11 {
         c = callOf(st, e);
         if c.ok && (c.key = "BorrowOf" || c.key = "BorrowMutOf") && size(c.args) = 1 {
-            alias = placeSteps(st, get(c.args, 0));
+            alias = placeSteps(st, nth(&c.args, 0));
         } else {
             if isVar(st, e) { alias = Place { ok: true, root: varName(st, e), steps: [] }; };
         };
@@ -313,13 +313,13 @@ fn recordAlias(st: St, var: &String, t: Int, e: Int) -> St ~ {
     return dropAlias(st, var);
 };
 
-fn putOrigins(st: St, name: &String, roots: List<String>) -> St [{ }] [{ }] {
+fn putOrigins(st: St, name: &String, roots: List<String>) -> St ~ {
     i = indexIn(&st.originNames, name);
     if i >= 0 && i < size(st.originRoots) { return St { originRoots: set(st.originRoots, i, roots), ..st }; };
     return St { originNames: push(st.originNames, clone(name)), originRoots: push(st.originRoots, roots), ..st };
 };
 
-fn dropOrigins(st: St, name: &String) -> St [{ }] [{ }] {
+fn dropOrigins(st: St, name: &String) -> St ~ {
     names = [];
     roots = [];
     i = 0;

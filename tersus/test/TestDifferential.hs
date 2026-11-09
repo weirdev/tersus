@@ -13,15 +13,15 @@ import TypeCheck (elaborate)
 import Types (Type (..))
 import Utils
 
--- The Haskell elaborator behind the text protocol agrees with itself on every request of a share of the corpus
--- (with the programs of testTypeCheck)
-protocolAgreement :: Int -> IO TestResult
-protocolAgreement batch = do
-    files <- corpusUnits
-    let units = batchItems 4 batch (files ++ [SourceText name source | (name, source) <- typeCheckSources])
+-- The Haskell elaborator behind the text protocol agrees with itself on the requests of a package, of the compiler
+-- libraries, of the smallest compiler package (whose interfaces have every kind of entry), of a refused program and of
+-- the programs of testTypeCheck
+protocolAgreement :: IO TestResult
+protocolAgreement = do
+    let units = [FilePackage "examples/modules/app/main.tersus", Libraries, EmbeddedPackage "lib/mir/mir_erase/mir_erase.tersus", SourceFile "examples/rejected/type_argument_mismatch.tersus"] ++ [SourceText name source | (name, source) <- typeCheckSources]
     results <- runDifferential throughText units
     let (agree, wording, disagree, unmodelled, failed) = tally [o | (_, _, o) <- results]
-    putStrLn ("differential batch " ++ show batch ++ "/4: " ++ show (length units) ++ " units, " ++ show agree ++ " agree, " ++ show wording ++ " wording, " ++ show disagree ++ " disagree, " ++ show unmodelled ++ " not modelled, " ++ show failed ++ " failed")
+    putStrLn ("differential: " ++ show (length units) ++ " units, " ++ show agree ++ " agree, " ++ show wording ++ " wording, " ++ show disagree ++ " disagree, " ++ show unmodelled ++ " not modelled, " ++ show failed ++ " failed")
     pure $ case [(unit, modu, o) | (unit, modu, o) <- results, o /= Agree] of
         [] | agree > 0 -> Nothing
         [] -> Just "no requests"
@@ -142,6 +142,5 @@ testDifferential = TestList "testDifferential"
     [ TestCase "requests and responses read back as written" protocolRoundTrip
     , TestCase "a candidate's mistakes are not agreements" mutationControls
     , testCase "the lowering takes exactly the elaborated expression types" visitOrder
-    , TestList "the text protocol loses nothing over the corpus"
-        [TestCase (show batch ++ "/4") (protocolAgreement batch) | batch <- [1 .. 4]]
+    , TestCase "the text protocol loses nothing" protocolAgreement
     ]

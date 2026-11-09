@@ -2,7 +2,7 @@ import data::arena::arena { remapNode };
 import data::ast::ast { AstBody, AstBuiltin, AstEntry, AstNode, AstProgram, AstScheme, AstValue };
 import data::codec::codec { catStrings };
 import elaborate::records { codecTypeAt, codecTypesAt, fromCodec, fromCodecs, listItems, nameText, nodeIn };
-import elaborate::state { St, Ty, addTy, fail, fnTy, freshVar, indexIn, intText, isSize, kindOf, nameOf, notModelled, tyAt, withTy, wordName };
+import elaborate::state { St, Ty, addTy, builtinValueAt, fail, fnTy, freshVar, indexIn, intText, isSize, kindOf, nameOf, notModelled, nth, tyAt, withTy, wordName };
 
 // The key a builtin is known by here: its primitive name, or the kind and arguments of a parameterized one
 fn builtinKey(st: &St, b: Int) -> String ~ {
@@ -22,7 +22,7 @@ fn builtinKey(st: &St, b: Int) -> String ~ {
 };
 
 // The builtin a value is, when it is one: the Builtin record of the BuiltinFunct body of a VFunct value (or -1)
-fn builtinOfValue(st: &St, v: Int) -> Int [{ }] [{ }] {
+fn builtinOfValue(st: &St, v: Int) -> Int ~ {
     node = nodeIn(&st.nodes, v);
     if !(node is AstNode::Value) { return 0 - 1; };
     value = (node as AstNode::Value).value;
@@ -97,15 +97,15 @@ fn schemeFn(st: St, nodes: &List<AstNode>, ts: Int, ret: Int) -> St ~ {
     return fnTy(st, params, st.ty);
 };
 
-fn builtinIndex(st: &St, key: &String) -> Int [{ }] [{ }] {
+fn builtinIndex(st: &St, key: &String) -> Int ~ {
     return st.builtinNames.lookup(key, 0 - 1);
 };
 
 // The record of the value StdLib.builtinFunct gives for a builtin, in the arena (-1 when the table has none)
-fn builtinValueOf(st: &St, key: &String) -> Int [{ }] [{ }] {
+fn builtinValueOf(st: &St, key: &String) -> Int ~ {
     i = builtinIndex(st, key);
     if i < 0 || i >= size(st.builtinValues) { return 0 - 1; };
-    return get(st.builtinValues, i);
+    return builtinValueAt(st, i);
 };
 
 // Every occurrence of a type parameter in a type, the result of a function before its parameters (schemeVars
@@ -114,7 +114,7 @@ fn schemeVarsOf(st: &St, t: Int, out: List<String>) -> List<String> ~ {
     x = tyAt(st, t);
     if x.kind = 12 { return push(out, clone(x.name)); };
     if x.kind = 14 {
-        out = schemeVarsOf(st, last(x.args), out);
+        out = schemeVarsOf(st, nth(&x.args, size(x.args) - 1), out);
         i = 0;
         while i + 1 < size(x.args) [{ affirm i >= 0; }] ~ {
             out = schemeVarsOf(st, get(x.args, i), out);
@@ -122,7 +122,7 @@ fn schemeVarsOf(st: &St, t: Int, out: List<String>) -> List<String> ~ {
         };
         return out;
     };
-    if x.kind = 6 { return schemeVarsOf(st, get(x.args, 0), out); };
+    if x.kind = 6 { return schemeVarsOf(st, nth(&x.args, 0), out); };
     for a in x.args {
         if !isSize(st, a) { out = schemeVarsOf(st, a, out); };
     };
@@ -160,8 +160,8 @@ fn substitute(st: St, t: Int, sizeNames: &List<String>, sizes: &List<Int>, names
             if indexIn(&x.types, &get(names, i)) < 0 { tn = push(tn, clone(get(names, i))); ts = push(ts, get(given, i)); };
             i = i + 1;
         };
-        st = substitute(st, get(x.args, 0), &sn, &ss, &tn, &ts);
-        if st.ty = get(x.args, 0) { return withTy(st, t); };
+        st = substitute(st, nth(&x.args, 0), &sn, &ss, &tn, &ts);
+        if st.ty = nth(&x.args, 0) { return withTy(st, t); };
         return addTy(st, Ty { args: push([], st.ty), ..x });
     };
     args = [];

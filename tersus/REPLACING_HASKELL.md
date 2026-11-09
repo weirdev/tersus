@@ -348,11 +348,44 @@ the program's declarations give, which no request carries. `testElaborate` build
 elaborator from the embedded sources (`PreludeSource.elaboratePackageFiles`)
 and runs the differential over every single-file corpus program and every
 `testTypeCheck` source (with the clone, equality and list libraries in front
-of it), and over the packages and the compiler libraries: every request
-agrees, interfaces included. A mutant whose unification lets Int and Bool
-stand for each other is caught. The differential runs the elaborator with the
-largest stack the system allows, as the validator is run: it recurses over
-the nesting of expressions.
+of it), the example package, the compiler libraries and four small packages
+that try the edges of predeclaration and interfaces: every request agrees,
+interfaces included. The compiler's own packages are left to
+`stack run frontend-diff -- compare EXE`, whose default corpus has them (their
+Haskell elaboration alone would take most of the suite's time): run it after
+a change to `lib/elaborate`. `testElaborateMutant`, run only when named, checks that a mutant whose
+unification lets Int and Bool stand for each other is caught. The
+differential runs the elaborator with the largest stack the system allows,
+as the validator is run: it recurses over the nesting of expressions.
+
+The elaborator is validated (`testHostValidation`) by the unmodified
+validator, with no `assume`, axiom or fuel: all 1,026 functions of its
+program, with the libraries it links, validate (`tersus-exe check
+lib/elaborate/elaborate.tersus`). The host validates one function at a time,
+so a check with no verdicts cached takes hours, as for the AST reader. The
+elaborator's own functions are `~`: they walk the program recursively, as
+the AST writer and the ownership passes do, and a function that terminates
+cannot call one that may not. What the validator needs, the code gives
+locally: a list is read through `nth`, `firstText` and the like, which answer
+-1 or nothing where the data has no such element; a record is cast only after
+its variant is checked; and a search loop carries `i <= size` for the slice
+that follows it. The validator's cost follows the size and branching of a
+function, so the dispatchers are split: `data::reader` reads a record through
+groups of at most five tags, `data::arena` renumbers through groups of node
+kinds, and the elaborator's large functions (`checkStatement`,
+`extractInterface`, `checkImpl`, `templateCall` and others) are made of
+smaller ones.
+
+Cost: the compiler elaborating and lowering a unit with the elaborator
+written in Tersus instead of the Haskell one (`frontend-diff pipeline`, one
+CPU, best of three) takes 1.6 times as long on the six compiler packages
+(203 s against 127 s on the host this was measured on) and 0.1 to 0.2 s more
+on a small program. Most of the elaborator's time is reading
+its request, which carries the interfaces of every module the module
+imports. `holdsGhost` and `holdsRef` keep what they found for a named type
+until a type, a linear type or a drop is declared, and a state built with
+`St { f: g(&st.nodes), ..st }` (which clones the arena to lend it) is built
+from locals instead.
 `stack run frontend-diff -- build EXE` builds it from the sources on disk.
 
 ### Deferred or coordinated work

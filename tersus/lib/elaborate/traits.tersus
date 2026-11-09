@@ -6,22 +6,22 @@ import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, ch
 import elaborate::core { checkType, concatFront, concatInts, ctorInfo, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
 import elaborate::expr { coerceArguments, genericCall, implementsMarker, nodesOf, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitCall, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
-import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, fromCodec, fromCodecs, listItems, nameText, namesText, nodeIn, signatureOf };
+import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, fromCodec, fromCodecs, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf };
 import elaborate::refs { putRefResult, traitResultFrom };
-import elaborate::state { BoundInfo, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, expect, fail, fnTy, indexIn, intText, isSize, joinWith, kindOf, namedTy, notModelled, oneScope, rawInstanceName, render, resolve, simpleTy, tyAt, typeError, typeNameText, unify, withTy, zonk };
+import elaborate::state { BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, intText, isSize, joinWith, kindOf, namedTy, noBoundedParts, notModelled, nth, oneScope, rawInstanceName, render, resolve, simpleTy, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
 // The functions of a trait, an impl's checks against it, the functions with bounds and the calls that resolve to an impl's function
 
-fn traitFnOf(st: &St, id: Int) -> AstTraitFn [{ }] [{ }] {
+fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
     if node is AstNode::TraitFn { return clone((node as AstNode::TraitFn).value); };
     return AstTraitFn { n: 0 - 1, ps: 0 - 1, sig: 0 - 1, ins: 0 - 1, outs: 0 - 1 };
 };
 
-fn traitFnName(st: &St, id: Int) -> String [{ }] [{ }] { return nameText(&st.nodes, traitFnOf(st, id).n); };
+fn traitFnName(st: &St, id: Int) -> String ~ { return nameText(&st.nodes, traitFnOf(st, id).n); };
 
 // The first function of the list that has the name (-1 for none)
-fn traitFnNamed(st: &St, fns: &List<Int>, name: &String) -> Int [{ }] [{ }] {
+fn traitFnNamed(st: &St, fns: &List<Int>, name: &String) -> Int ~ {
     for f in fns {
         if traitFnName(st, f) = clone(name) { return f; };
     };
@@ -29,7 +29,7 @@ fn traitFnNamed(st: &St, fns: &List<Int>, name: &String) -> Int [{ }] [{ }] {
 };
 
 // Strings by their bytes, as Haskell orders the keys of a map
-fn textBefore(a: &String, b: &String) -> Bool [{ }] [{ }] {
+fn textBefore(a: &String, b: &String) -> Bool ~ {
     i = 0;
     while i < size(a.bytes) && i < size(b.bytes) [{ affirm i >= 0; }] shrinks size(a.bytes) - i {
         x = toInt(get(a.bytes, i));
@@ -56,13 +56,13 @@ fn sortTexts(xs: List<String>) -> List<String> ~ {
 };
 
 // <Type>::f and <Type as Trait>::f (Syntax.implFunctionName); trait is "" for an impl of the type itself
-fn implFunctionName(owner: &String, tname: &String, function: &String) -> String [{ }] [{ }] {
+fn implFunctionName(owner: &String, tname: &String, function: &String) -> String ~ {
     if size(tname.bytes) = 0 { return catStrings(catStrings(catStrings("<", owner), ">::"), function); };
     return catStrings(catStrings(catStrings(catStrings(catStrings("<", owner), " as "), tname), ">::"), function);
 };
 
 // The f of such a name (implFunctionPart)
-fn implFunctionPart(name: &String) -> String [{ }] [{ }] {
+fn implFunctionPart(name: &String) -> String ~ {
     at = 0 - 1;
     i = 0;
     while i < size(name.bytes) && at < 0 [{ affirm i >= 0; }] shrinks size(name.bytes) - i {
@@ -73,11 +73,11 @@ fn implFunctionPart(name: &String) -> String [{ }] [{ }] {
     return name.slice(at + 3, size(name.bytes));
 };
 
-fn assocKey(owner: &String, function: &String) -> String [{ }] [{ }] { return catStrings(catStrings(owner, " "), function); };
+fn assocKey(owner: &String, function: &String) -> String ~ { return catStrings(catStrings(owner, " "), function); };
 
-fn pairKey(a: &String, b: &String) -> String [{ }] [{ }] { return catStrings(catStrings(a, " "), b); };
+fn pairKey(a: &String, b: &String) -> String ~ { return catStrings(catStrings(a, " "), b); };
 
-fn addAssoc(st: St, owner: &String, function: &String, origin: &String) -> St [{ }] [{ }] {
+fn addAssoc(st: St, owner: &String, function: &String, origin: &String) -> St ~ {
     key = assocKey(owner, function);
     origins = st.assoc.lookup(&key, []);
     return St { assoc: st.assoc.insert(key, push(origins, clone(origin))), ..st };
@@ -240,10 +240,10 @@ fn argListOf(st: St, id: Int) -> St ~ {
     return St { te: TE { node: 0 - 1, types: out }, ..st };
 };
 
-fn boundsText(params: &List<String>) -> String [{ }] [{ }] { return joinWith(params, ", "); };
+fn boundsText(params: &List<String>) -> String ~ { return joinWith(params, ", "); };
 
 // A bound names a trait with as many types as it has (the bounds of a template and of an impl)
-fn checkBoundTrait(st: St, b: &BoundInfo, noTypesWhere: String, whereText: String, unknownWhere: String) -> St [{ }] [{ }] {
+fn checkBoundTrait(st: St, b: &BoundInfo, noTypesWhere: String, whereText: String, unknownWhere: String) -> St ~ {
     if !st.traitParams.contains(&b.n) {
         if st.traits.contains(&b.n) {
             if size(b.ts) > 0 { return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("trait ", clone(b.n)), " has no types, but the bound on "), clone(b.p)), noTypesWhere), " gives it some")); };
@@ -272,21 +272,20 @@ fn declareTemplate(st: St, name: String, bounds: List<BoundInfo>, tm: Template) 
 // A template of a function value record, with its signature as types (rewritten by the caller when an impl's Self is in it)
 // (the functions it sees are those of where it is declared, kept for its interface; sigNode -1 for the record's own)
 fn templateOf(st: &St, v: Int, bounds: &List<BoundInfo>, boundsNode: Int, fs: &FnSig, sigNode: Int) -> Template ~ {
-    value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
-    native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
+    value = nativeFn(&st.nodes, v);
     fnNames = [];
     fnTypes = [];
     for e in st.fns.entries() { fnNames = push(fnNames, clone(e.key)); fnTypes = push(fnTypes, e.value); };
     sig = sigNode;
-    if sig < 0 { sig = native.sig; };
-    return Template { bounds: clone(bounds), fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: value.ins, outs: value.outs, term: native.term, body: native.stmts, boundsNode: boundsNode, paramsNode: value.ps, sigNode: sig, retNode: 0 - 1 };
+    if sig < 0 { sig = value.sig; };
+    return Template { bounds: clone(bounds), fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: value.ins, outs: value.outs, term: value.term, body: value.stmts, boundsNode: boundsNode, paramsNode: value.ps, sigNode: sig, retNode: 0 - 1 };
 };
 
 // How big a type is, so that a function with bounds can call itself for a part of the type it is made for (typeBigness)
 fn typeBigness(st: &St, t: Int) -> Int ~ {
     x = tyAt(st, resolve(st, t));
     k = x.kind;
-    if k = 6 || k = 7 || k = 8 || k = 9 || k = 10 || k = 11 { return 1 + typeBigness(st, get(x.args, 0)); };
+    if k = 6 || k = 7 || k = 8 || k = 9 || k = 10 || k = 11 { return 1 + typeBigness(st, nth(&x.args, 0)); };
     if k = 4 || k = 14 {
         total = 1;
         for a in x.args {
@@ -307,7 +306,7 @@ fn unknownIn(st: &St, t: Int) -> Bool ~ {
         };
         return false;
     };
-    if x.kind = 6 { return unknownIn(st, get(x.args, 0)); };
+    if x.kind = 6 { return unknownIn(st, nth(&x.args, 0)); };
     return false;
 };
 
@@ -321,17 +320,45 @@ fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~
     sizeVars = [];
     typeVars = [];
     i = 0;
-    while i < size(vars) [{ affirm i >= 0; }] ~ {
+    while i < size(vars) [{ affirm i >= 0; }] shrinks size(vars) - i {
         if i < size(tm.sizes) { sizeVars = push(sizeVars, get(vars, i)); } else { typeVars = push(typeVars, get(vars, i)); };
         i = i + 1;
     };
     x = tyAt(st, instantiated);
     if x.kind != 14 { return typeError(st, catStrings(clone(name), " is not a function")); };
     pts = argsOfFn(&x);
-    result = last(x.args);
+    result = nth(&x.args, size(x.args) - 1);
     if size(pts) - size(tm.sizes) != size(inferred) {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " takes "), intText(size(pts) - size(tm.sizes))), " arguments, got "), intText(size(inferred))));
     };
+    st = templateArguments(st, &name, &pts, inferred);
+    if st.status != 0 { return st; };
+    args = clone(st.tes);
+    st = templateBounds(st, &name, &tm, &typeVars);
+    if st.status != 0 { return st; };
+    concrete = [];
+    for v in &typeVars { st = zonk(st, v); concrete = push(concrete, st.ty); };
+    st = templateConcrete(st, &name, &tm, &concrete);
+    if st.status != 0 { return st; };
+    st = templateInstance(st, &name, &tm, &concrete);
+    if st.status != 0 { return st; };
+    instance = firstText(&st.names);
+    st = templateSizeArguments(st, &name, &tm, &sizeVars);
+    if st.status != 0 { return st; };
+    sizeArgs = clone(st.tes);
+    st = zonk(st, result);
+    resultTy = st.ty;
+    all = clone(args);
+    for a in &sizeArgs { all = push(all, clone(a)); };
+    st = emitVar(st, clone(instance));
+    functNode = st.nid;
+    argNodes = nodesOf(&all);
+    st = emitCall(st, functNode, &argNodes);
+    return typed(st, st.nid, resultTy, &all);
+};
+
+// The arguments of a call of a function with bounds coerced to its parameters (st.tes)
+fn templateArguments(st: St, name: &String, pts: &List<Int>, inferred: &List<TE>) -> St ~ {
     args = [];
     i = 0;
     while i < size(pts) && i < size(inferred) [{ affirm i >= 0; }] ~ {
@@ -354,7 +381,11 @@ fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~
         args = push(args, arg);
         i = i + 1;
     };
-    // (a bound on a type that another bound decides waits until that one has: the passes end when all are met, or none can be)
+    return St { tes: args, ..st };
+};
+
+// A bound on a type that another bound decides waits until that one has: the passes end when all are met, or none can be
+fn templateBounds(st: St, name: &String, tm: &Template, typeVars: &List<Int>) -> St ~ {
     pending = clone(tm.bounds);
     while size(pending) > 0 [{ }] ~ {
         left = [];
@@ -369,7 +400,7 @@ fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~
                 t = st.ty;
             };
             if kindOf(st, t) = 15 { left = push(left, clone(b)); } else {
-                st = checkBound(st, &name, &tm.types, &typeVars, b, t);
+                st = checkBound(st, name, &tm.types, typeVars, b, t);
                 if st.status != 0 { return st; };
             };
         };
@@ -378,8 +409,10 @@ fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~
         };
         pending = left;
     };
-    concrete = [];
-    for v in &typeVars { st = zonk(st, v); concrete = push(concrete, st.ty); };
+    return st;
+};
+
+fn templateConcrete(st: St, name: &String, tm: &Template, concrete: &List<Int>) -> St ~ {
     i = 0;
     while i < size(tm.types) && i < size(concrete) [{ affirm i >= 0; }] ~ {
         t = get(concrete, i);
@@ -389,10 +422,16 @@ fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~
         };
         i = i + 1;
     };
+    return st;
+};
+
+// The instance of a function with bounds for the types of a call, made with its companions when it is not yet
+// (st.names its name)
+fn templateInstance(st: St, name: &String, tm: &Template, concrete: &List<Int>) -> St ~ {
     names = [];
     rendered = [];
     bigness = 0;
-    for t in &concrete {
+    for t in concrete {
         names = push(names, typeNameText(st, t, true));
         rendered = push(rendered, render(st, t));
         bigness = bigness + typeBigness(st, t);
@@ -402,42 +441,39 @@ fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~
     if !st.instances.contains(&instance) {
         i = 0;
         while i < size(st.activeNames) && i < size(st.activeSizes) [{ affirm i >= 0; }] ~ {
-            if get(st.activeNames, i) = name && bigness >= get(st.activeSizes, i) {
+            if get(st.activeNames, i) = clone(name) && bigness >= get(st.activeSizes, i) {
                 return typeError(st, catStrings(catStrings(catStrings(clone(name), " calls itself with the types "), joinWith(&rendered, ", ")), ", which are not those it is made for: a function with bounds is made for each type, and one that is made for a bigger type at each call would never end"));
             };
             i = i + 1;
         };
-        st = makeTemplateInstance(st, &name, &tm, &instance, bigness, &concrete);
+        st = makeTemplateInstance(st, name, tm, &instance, bigness, concrete);
         if st.status != 0 { return st; };
-        for companion in st.companions.lookup(&name, []) {
+        for companion in st.companions.lookup(name, []) {
             companionName = catStrings(clone(companion), clone(suffix));
             if st.templates.contains(&companion) && !st.instances.contains(&companionName) {
                 ctm = st.templates.lookup(&companion, emptyTemplate());
-                st = makeTemplateInstance(st, &companion, &ctm, &companionName, bigness, &concrete);
+                st = makeTemplateInstance(st, &companion, &ctm, &companionName, bigness, concrete);
                 if st.status != 0 { return st; };
             };
         };
     };
+    return St { names: push([], instance), ..st };
+};
+
+// The size arguments of a call of a function with bounds (st.tes)
+fn templateSizeArguments(st: St, name: &String, tm: &Template, sizeVars: &List<Int>) -> St ~ {
     sizeArgs = [];
     i = 0;
     while i < size(tm.sizes) && i < size(sizeVars) [{ affirm i >= 0; }] ~ {
         sz = resolve(st, get(sizeVars, i));
         sizeName = clone(get(tm.sizes, i));
-        st = sizeArgument(st, &name, &sizeName, sz);
+        st = sizeArgument(st, name, &sizeName, sz);
         if st.status != 0 { return st; };
         st = simpleTy(st, 0);
         sizeArgs = push(sizeArgs, TE { node: st.nid, types: push([], st.ty) });
         i = i + 1;
     };
-    st = zonk(st, result);
-    resultTy = st.ty;
-    all = clone(args);
-    for a in &sizeArgs { all = push(all, clone(a)); };
-    st = emitVar(st, clone(instance));
-    functNode = st.nid;
-    argNodes = nodesOf(&all);
-    st = emitCall(st, functNode, &argNodes);
-    return typed(st, st.nid, resultTy, &all);
+    return St { tes: sizeArgs, ..st };
 };
 
 // The type meets the bound: it implements the trait, with the types that the bound writes (checkBound)
@@ -518,11 +554,11 @@ fn makeTemplateInstance(st: St, name: &String, tm: &Template, instance: &String,
     wsNode = st.nid;
     st = emitNames(st, &from);
     st = emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: ssNode, ps: psNode, ws: wsNode, fs: st.nid } });
-    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: st.nid, term: get(parts, 2), stmts: get(parts, 3) } });
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: st.nid, term: nth(&parts, 2), stmts: nth(&parts, 3) } });
     bodyNode = st.nid;
     noProofs = [];
     st = emitProofs(st, &noProofs);
-    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: paramsNode, ins: get(parts, 0), outs: get(parts, 1), body: bodyNode, exports: st.nid } });
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: paramsNode, ins: nth(&parts, 0), outs: nth(&parts, 1), body: bodyNode, exports: st.nid } });
     st = emitVal(st, st.nid);
     st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: nameNode, e: st.nid } });
     emittedTypes = clone(st.emittedTypes);
@@ -554,7 +590,7 @@ fn callResolved(st: St, name: String, inferred: &List<TE>) -> St ~ {
     st = zonk(st, ft);
     x = tyAt(st, st.ty);
     if x.kind = 13 {
-        st = genericCall(st, clone(name), &x.sizes, &x.types, get(x.args, 0), inferred);
+        st = genericCall(st, clone(name), &x.sizes, &x.types, nth(&x.args, 0), inferred);
         if st.status != 0 { return st; };
         resultTy = st.ty;
         args = clone(st.tes);
@@ -578,7 +614,7 @@ fn callResolved(st: St, name: String, inferred: &List<TE>) -> St ~ {
     return typed(st, st.nid, resultTy, &args);
 };
 
-fn emptyTemplate() -> Template [{ }] [{ }] {
+fn emptyTemplate() -> Template ~ {
     return Template { bounds: [], fnNames: [], fnTypes: [], params: [], ptys: [], rty: 0, sizes: [], types: [], from: [], ins: 0 - 1, outs: 0 - 1, term: 0 - 1, body: 0 - 1, boundsNode: 0 - 1, paramsNode: 0 - 1, sigNode: 0 - 1, retNode: 0 - 1 };
 };
 
@@ -647,7 +683,7 @@ fn ownerThroughTrait(st: St, tname: &String, fns: &List<Int>, function: &String,
     };
     st = traitOwner(st, &path, get(ats, at));
     if st.status != 0 { return st; };
-    owner = clone(get(st.names, 0));
+    owner = firstText(&st.names);
     if !st.impls.contains(pairKey(tname, &owner)) { return typeError(st, catStrings(catStrings(owner, " does not implement "), clone(tname))); };
     return St { names: push([], owner), ..st };
 };
@@ -685,7 +721,7 @@ fn primitiveTraitCall(st: St, tname: &String, fns: &List<Int>, function: &String
 fn bareRelValue(st: St, key: String) -> St ~ {
     index = st.builtinNames.lookup(&key, 0 - 1);
     if index < 0 || index >= size(st.builtinValues) { return notModelled(st, catStrings("the builtin ", key)); };
-    value = nodeIn(&st.nodes, get(st.builtinValues, index));
+    value = nodeIn(&st.nodes, builtinValueAt(st, index));
     if !(value is AstNode::Value) || !((value as AstNode::Value).value is AstValue::VFunct) { return notModelled(st, catStrings("the builtin ", key)); };
     body = nodeIn(&st.nodes, ((value as AstNode::Value).value as AstValue::VFunct).body);
     if !(body is AstNode::Body) || !((body as AstNode::Body).value is AstBody::BuiltinFunct) { return notModelled(st, catStrings("the builtin ", key)); };
@@ -714,18 +750,18 @@ fn traitArguments(st: St, tname: String, t: Int) -> St ~ {
     return traitArgumentsOf(st, tname, t);
 };
 
-fn gives(st: St, ok: Bool, ts: List<Int>) -> St [{ }] [{ }] { return St { ok: ok, te: TE { node: 0 - 1, types: ts }, ..st }; };
+fn gives(st: St, ok: Bool, ts: List<Int>) -> St ~ { return St { ok: ok, te: TE { node: 0 - 1, types: ts }, ..st }; };
 
 fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     x = tyAt(st, t);
     if (tname = "Eq" || tname = "Clone") && primitiveEqRaw(&x) { return gives(st, true, []); };
     if tname = "Clone" && (x.kind = 3 || x.kind = 14 || x.kind = 7 || x.kind = 12 || x.kind = 15) { return gives(st, true, []); };
     if tname = "Clone" && (isListTy(st, t) || x.kind = 6 || isBoxTy(st, t)) {
-        st = traitArguments(st, "Clone", get(x.args, 0));
+        st = traitArguments(st, "Clone", nth(&x.args, 0));
         return gives(st, st.ok, []);
     };
-    if tname = "Eq" && isBoxTy(st, t) && kindOf(st, get(x.args, 0)) = 6 {
-        st = traitArguments(st, "Eq", get(tyAt(st, get(x.args, 0)).args, 0));
+    if tname = "Eq" && isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 {
+        st = traitArguments(st, "Eq", argAt(st, nth(&x.args, 0), 0));
         return gives(st, st.ok, []);
     };
     arity = size(st.traitParams.lookup(&tname, []));
@@ -733,10 +769,10 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     args = [];
     fallback = 0 - 1;
     fallbackTraits = [];
-    if isListTy(st, t) { base = "List"; args = push([], get(x.args, 0)); fallback = get(x.args, 0); fallbackTraits = push(push([], "Sequence"), "Growable"); } else {
-        if x.kind = 6 { base = "Array"; args = clone(x.args); fallback = get(x.args, 0); fallbackTraits = push([], "Sequence"); } else {
-            if isBoxTy(st, t) && kindOf(st, get(x.args, 0)) = 6 {
-                elem = get(tyAt(st, get(x.args, 0)).args, 0);
+    if isListTy(st, t) { base = "List"; args = push([], nth(&x.args, 0)); fallback = nth(&x.args, 0); fallbackTraits = push(push([], "Sequence"), "Growable"); } else {
+        if x.kind = 6 { base = "Array"; args = clone(x.args); fallback = nth(&x.args, 0); fallbackTraits = push([], "Sequence"); } else {
+            if isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 {
+                elem = argAt(st, nth(&x.args, 0), 0);
                 st = simpleTy(st, 21);
                 st = arrayTy(st, elem, st.ty);
                 base = "Box";
@@ -778,7 +814,7 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     return gives(st, true, found);
 };
 
-fn primitiveEqRaw(x: &Ty) -> Bool [{ }] [{ }] { return x.kind = 0 || x.kind = 1 || x.kind = 2 || x.kind = 3 || x.kind = 7; };
+fn primitiveEqRaw(x: &Ty) -> Bool ~ { return x.kind = 0 || x.kind = 1 || x.kind = 2 || x.kind = 3 || x.kind = 7; };
 
 // What an impl of the trait for the base type gives it, the type's arguments matched against the impl's (own):
 // st.ok, st.te.types the types it gives, st.names and st.tes the type parameters the match bound
@@ -836,14 +872,14 @@ fn matchTypes(st: &St, p: Int, t: Int) -> Matched ~ {
     px = tyAt(st, p);
     tx = tyAt(st, t);
     if px.kind = 12 {
-        if tx.kind = 6 && kindOf(st, get(tx.args, 1)) = 21 { return Matched { ok: false, names: [], types: [] }; };
+        if tx.kind = 6 && kindOf(st, nth(&tx.args, 1)) = 21 { return Matched { ok: false, names: [], types: [] }; };
         return Matched { ok: true, names: push([], clone(px.name)), types: push([], t) };
     };
-    if (isListTy(st, p) && isListTy(st, t)) || (isBoxTy(st, p) && isBoxTy(st, t)) { return matchTypes(st, get(px.args, 0), get(tx.args, 0)); };
+    if (isListTy(st, p) && isListTy(st, t)) || (isBoxTy(st, p) && isBoxTy(st, t)) { return matchTypes(st, nth(&px.args, 0), nth(&tx.args, 0)); };
     if px.kind = 6 && tx.kind = 6 {
-        sa = get(px.args, 1);
+        sa = nth(&px.args, 1);
         sk = kindOf(st, sa);
-        if rawSame(st, sa, get(tx.args, 1)) || sk = 21 || sk = 22 { return matchTypes(st, get(px.args, 0), get(tx.args, 0)); };
+        if rawSame(st, sa, nth(&tx.args, 1)) || sk = 21 || sk = 22 { return matchTypes(st, nth(&px.args, 0), nth(&tx.args, 0)); };
         return Matched { ok: false, names: [], types: [] };
     };
     return Matched { ok: rawSame(st, p, t), names: [], types: [] };
@@ -904,12 +940,12 @@ fn parameterOk(st: St, tname: &String, t: Int) -> St ~ {
     st = zonk(st, t);
     x = tyAt(st, st.ty);
     if x.kind = 12 { return St { ok: true, ..st }; };
-    if tname = "Clone" && (isListTy(st, st.ty) || isBoxTy(st, st.ty)) { return parameterOk(st, tname, get(x.args, 0)); };
-    if x.kind = 6 { return parameterOk(st, tname, get(x.args, 0)); };
+    if tname = "Clone" && (isListTy(st, st.ty) || isBoxTy(st, st.ty)) { return parameterOk(st, tname, nth(&x.args, 0)); };
+    if x.kind = 6 { return parameterOk(st, tname, nth(&x.args, 0)); };
     return implementsMarker(st, clone(tname), st.ty, 0);
 };
 
-fn optName(st: &St, id: Int) -> String [{ }] [{ }] {
+fn optName(st: &St, id: Int) -> String ~ {
     node = nodeIn(&st.nodes, id);
     if node is AstNode::OptName && (node as AstNode::OptName).value is AstOptName::SomeName {
         return nameText(&st.nodes, ((node as AstNode::OptName).value as AstOptName::SomeName).n);
@@ -922,8 +958,8 @@ fn selfOf(st: St, typeName: &String, selfInput: Int) -> St ~ {
     x = tyAt(st, selfInput);
     selfName = render(st, selfInput);
     if x.kind = 4 { selfName = rawInstanceName(st, selfInput); };
-    if typeName = "Array" && x.kind = 4 && size(x.args) = 2 && !isSize(st, get(x.args, 0)) && isSize(st, get(x.args, 1)) {
-        st = arrayTy(st, get(x.args, 0), get(x.args, 1));
+    if typeName = "Array" && x.kind = 4 && size(x.args) = 2 && !isSize(st, nth(&x.args, 0)) && isSize(st, nth(&x.args, 1)) {
+        st = arrayTy(st, nth(&x.args, 0), nth(&x.args, 1));
     } else {
         if typeName = "Int" { st = simpleTy(st, 0); } else {
             if typeName = "Byte" { st = simpleTy(st, 1); } else {
@@ -937,9 +973,8 @@ fn selfOf(st: St, typeName: &String, selfInput: Int) -> St ~ {
 // A function of an impl: its value record and its signature with Self the type the impl is for; st.ok says whether
 // anything was replaced
 fn implFnSig(st: St, v: Int, selfName: &String, selfType: Int) -> St ~ {
-    value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
-    native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
-    st = fnSigOf(st, value.ps, native.sig);
+    value = nativeFn(&st.nodes, v);
+    st = fnSigOf(st, value.ps, value.sig);
     fs = clone(st.fnSig);
     changed = false;
     ptys = [];
@@ -953,7 +988,7 @@ fn implFnSig(st: St, v: Int, selfName: &String, selfType: Int) -> St ~ {
     return St { fnSig: FnSig { ptys: ptys, rty: st.ty, ..fs }, ok: changed, ..st };
 };
 
-fn isMayDiverge(st: &St, term: Int) -> Bool [{ }] [{ }] {
+fn isMayDiverge(st: &St, term: Int) -> Bool ~ {
     node = nodeIn(&st.nodes, term);
     if !(node is AstNode::OptTermination) || !((node as AstNode::OptTermination).value is AstOptTermination::SomeTermination) { return false; };
     t = nodeIn(&st.nodes, ((node as AstNode::OptTermination).value as AstOptTermination::SomeTermination).t);
@@ -1016,13 +1051,10 @@ fn checkImplDef(st: St, top: Bool, traitNode: Int, argsNode: Int, nameNode: Int,
     return checkImpl(st, tname, traitArgs, typeName, nameNode, selfInput, functions, tyNode, argsNode);
 };
 
-fn wrongTraitArity(st: St, tname: &String, params: &List<String>, typeName: &String, count: Int) -> St [{ }] [{ }] {
+fn wrongTraitArity(st: St, tname: &String, params: &List<String>, typeName: &String, count: Int) -> St ~ {
     return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("trait ", clone(tname)), " has parameters <"), joinWith(params, ", ")), ">, which impl "), clone(tname)), " for "), clone(typeName)), catStrings(" gives ", intText(count))));
 };
 
-// A function of an impl, as the checks against its trait read it
-struct Defined { name: String, params: List<String>, ptys: List<Int>, rty: Int, sizes: Int, term: Int, sigNode: Int };
-impl Clone for Defined { };
 
 // The functions an impl defines are what its trait declares, with the types the trait gives them; st.n is -1 for none
 // missing, and st.names the wrappers' parameter lists are made from
@@ -1055,7 +1087,7 @@ fn checkAgainstTrait(st: St, tname: &String, typeName: &String, traitArgs: &List
         d = get(defined, at);
         actual = [];
         i = 0;
-        while i < size(d.ptys) - d.sizes [{ affirm i >= 0; }] ~ {
+        while i < size(d.ptys) - d.sizes && i < size(d.ptys) [{ affirm i >= 0; }] ~ {
             actual = push(actual, get(d.ptys, i));
             i = i + 1;
         };
@@ -1077,7 +1109,7 @@ fn checkAgainstTrait(st: St, tname: &String, typeName: &String, traitArgs: &List
 
 // The parameters of the function that checks an impl's function against its trait: the trait's, then the sizes the
 // impl's function is given beside them
-fn wrapperParams(st: &St, tf: &AstTraitFn, d: &Defined) -> List<String> [{ }] [{ }] {
+fn wrapperParams(st: &St, tf: &AstTraitFn, d: &Defined) -> List<String> ~ {
     out = namesText(&st.nodes, tf.ps);
     i = size(d.params) - d.sizes;
     if i < 0 { i = 0; };
@@ -1090,7 +1122,7 @@ fn wrapperParams(st: &St, tf: &AstTraitFn, d: &Defined) -> List<String> [{ }] [{
 
 fn checkImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, nameNode: Int, selfInput: Int, functions: List<Int>, tyNode: Int, argsNode: Int) -> St ~ {
     st = selfOf(st, &typeName, selfInput);
-    selfName = clone(get(st.names, 0));
+    selfName = firstText(&st.names);
     selfType = st.ty;
     if !(typeName = "List" || typeName = "Box" || typeName = "Array" || typeName = "Int" || typeName = "Byte" || typeName = "Bool" || st.generics.contains(&typeName)) {
         st = typeCtors(st, &typeName);
@@ -1099,90 +1131,23 @@ fn checkImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, name
     required = [];
     traitParams = [];
     if size(tname.bytes) > 0 {
-        if !st.traitFns.contains(&tname) { return typeError(st, catStrings("unknown trait ", clone(tname))); };
-        found = st.traitFns.lookup(&tname, []);
-        params = st.traitParams.lookup(&tname, []);
-        if size(params) != size(traitArgs) { return wrongTraitArity(st, &tname, &params, &typeName, size(traitArgs)); };
-        if st.impls.contains(pairKey(&tname, &typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
-        if tname = "Eq" && (typeName = "Int" || typeName = "Byte" || typeName = "Bool") { return typeError(st, catStrings(clone(typeName), " implements Eq by the language: its values are compared as words")); };
-        st = St { impls: st.impls.insert(pairKey(&tname, &typeName)), implArgs: st.implArgs.insert(pairKey(&tname, &typeName), ImplArgs { ty: selfInput, args: clone(traitArgs), tyNode: tyNode, argsNode: argsNode }), ..st };
-        if (tname = "Clone" || tname = "Copy") && size(found) = 0 && size(params) = 0 {
-            st = checkMarkerImpl(st, &tname, &typeName);
-            if st.status != 0 { return st; };
-        };
-        if tname = "Drop" {
-            here = catStrings(catStrings(catStrings("impl Drop for ", clone(typeName)), ": "), clone(typeName));
-            if st.linearTypes.contains(&typeName) { return typeError(st, catStrings(here, " is linear, so it is used by the program and not dropped")); };
-            if st.impls.contains(pairKey("Copy", &typeName)) { return typeError(st, catStrings(here, " is Copy, and a copy of a value with a drop would be dropped twice")); };
-            holding = false;
-            if st.generics.contains(&typeName) {
-                g = st.generics.lookup(&typeName, Generic { params: [], names: [], types: [] });
-                for t in &g.types {
-                    st = holdsGhost(st, t);
-                    if st.status != 0 { return st; };
-                    if st.ok { holding = true; };
-                };
-            } else {
-                st = namedTy(st, clone(typeName), []);
-                st = holdsGhost(st, st.ty);
-                if st.status != 0 { return st; };
-                holding = st.ok;
-            };
-            if !holding { return typeError(st, catStrings(here, " holds no permission (Block<T>), and a drop is how a value frees the memory it holds; a value that has to be closed is a linear type, closed by a call")); };
-            st = St { drops: st.drops.insert(clone(typeName)), ..st };
-        };
-        required = found;
-        traitParams = params;
-    };
-    // (the functions of the impl can be called as Type::f from the next one on, itself included)
-    checked = [];
-    types = [];
-    defined = [];
-    for s in &functions {
-        stmt = stmtOf(st, s);
-        v = 0 - 1;
-        if stmt is AstStatement::Assign {
-            a = stmt as AstStatement::Assign;
-            name = nameText(&st.nodes, a.n);
-            part = implFunctionPart(&name);
-            st = addAssoc(st, &typeName, &part, &tname);
-            v = functionValue(st, a.e);
-            if v >= 0 {
-                st = implFnSig(st, v, &selfName, selfType);
-                fs = clone(st.fnSig);
-                rewritten = st.ok;
-                value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
-                native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
-                st = checkFunctionWith(st, true, clone(name), a.n, v, clone(fs), rewritten);
-                if st.status != 0 { return st; };
-                defined = push(defined, Defined { name: part, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: size(fs.sizes), term: native.term, sigNode: st.sigNode });
-            };
-        };
-        if v < 0 { st = checkStatement(st, true, s); };
+        st = registerImpl(st, &tname, &traitArgs, &typeName, selfInput, tyNode, argsNode);
         if st.status != 0 { return st; };
-        checked = push(checked, st.nid);
-        for t in &st.te.types { types = push(types, t); };
+        required = st.traitFns.lookup(&tname, []);
+        traitParams = st.traitParams.lookup(&tname, []);
     };
-    if size(tname.bytes) = 0 { return St { outs: checked, te: TE { node: 0 - 1, types: types }, ..st }; };
+    st = checkImplFunctions(st, &tname, &typeName, &selfName, selfType, &functions);
+    if st.status != 0 { return st; };
+    checked = clone(st.outs);
+    types = clone(st.te.types);
+    defined = clone(st.implDefined);
+    if size(tname.bytes) = 0 { return St { outs: checked, te: TE { node: 0 - 1, types: types }, implDefined: [], ..st }; };
     st = checkAgainstTrait(st, &tname, &typeName, &traitArgs, &traitParams, &required, &defined, &selfName, selfType);
     if st.status != 0 { return st; };
-    // (the functions that check the impl against its trait cannot be called as Type::f)
-    checks = [];
-    for f in &required {
-        tf = traitFnOf(st, f);
-        fname = nameText(&st.nodes, tf.n);
-        names = [];
-        for d in &defined { names = push(names, clone(d.name)); };
-        d = get(defined, indexIn(&names, &fname));
-        params = wrapperParams(st, &tf, &d);
-        st = traitCheckWrapper(st, &tname, &typeName, &tf, &params, d.sigNode, isMayDiverge(st, d.term));
-        valueNode = st.nid;
-        wrapperName = nameText(&st.nodes, st.n);
-        st = checkFunctionDef(st, true, wrapperName, st.n, valueNode);
-        if st.status != 0 { return st; };
-        checks = push(checks, st.nid);
-        for t in &st.te.types { types = push(types, t); };
-    };
+    st = implCheckFunctions(st, &tname, &typeName, &required, &defined);
+    if st.status != 0 { return st; };
+    checks = clone(st.outs);
+    for t in &st.te.types { types = push(types, t); };
     out = [];
     if tname = "Copy" && size(required) = 0 {
         st = emit(st, AstNode::Statement { value: AstStatement::CopyDef { n: nameNode } });
@@ -1194,36 +1159,151 @@ fn checkImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, name
     };
     for c in &checked { out = push(out, c); };
     for w in &checks { out = push(out, w); };
-    return St { outs: out, te: TE { node: 0 - 1, types: types }, ..st };
+    return St { outs: out, te: TE { node: 0 - 1, types: types }, implDefined: [], ..st };
+};
+
+fn registerImpl(st: St, tname: &String, traitArgs: &List<Int>, typeName: &String, selfInput: Int, tyNode: Int, argsNode: Int) -> St ~ {
+    if !st.traitFns.contains(tname) { return typeError(st, catStrings("unknown trait ", clone(tname))); };
+    found = st.traitFns.lookup(tname, []);
+    params = st.traitParams.lookup(tname, []);
+    if size(params) != size(traitArgs) { return wrongTraitArity(st, tname, &params, typeName, size(traitArgs)); };
+    if st.impls.contains(pairKey(tname, typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
+    if wordEq(tname, typeName) { return typeError(st, catStrings(clone(typeName), " implements Eq by the language: its values are compared as words")); };
+    key = pairKey(tname, typeName);
+    args = ImplArgs { ty: selfInput, args: clone(traitArgs), tyNode: tyNode, argsNode: argsNode };
+    st = St { impls: st.impls.insert(clone(key)), implArgs: st.implArgs.insert(clone(key), args), ..st };
+    return implMarks(st, tname, typeName, size(found) = 0 && size(params) = 0);
+};
+
+fn wordEq(tname: &String, typeName: &String) -> Bool ~ {
+    return tname = "Eq" && (typeName = "Int" || typeName = "Byte" || typeName = "Bool");
+};
+
+fn implMarks(st: St, tname: &String, typeName: &String, marker: Bool) -> St ~ {
+    if (tname = "Clone" || tname = "Copy") && marker {
+        st = checkMarkerImpl(st, tname, typeName);
+        if st.status != 0 { return st; };
+    };
+    if tname = "Drop" { return checkDropImpl(st, typeName); };
+    return st;
+};
+
+fn checkDropImpl(st: St, typeName: &String) -> St ~ {
+    here = catStrings(catStrings(catStrings("impl Drop for ", clone(typeName)), ": "), clone(typeName));
+    if st.linearTypes.contains(typeName) { return typeError(st, catStrings(here, " is linear, so it is used by the program and not dropped")); };
+    if st.impls.contains(pairKey("Copy", typeName)) { return typeError(st, catStrings(here, " is Copy, and a copy of a value with a drop would be dropped twice")); };
+    holding = false;
+    if st.generics.contains(typeName) {
+        g = st.generics.lookup(typeName, Generic { params: [], names: [], types: [] });
+        for t in &g.types {
+            st = holdsGhost(st, t);
+            if st.status != 0 { return st; };
+            if st.ok { holding = true; };
+        };
+    } else {
+        st = namedTy(st, clone(typeName), []);
+        st = holdsGhost(st, st.ty);
+        if st.status != 0 { return st; };
+        holding = st.ok;
+    };
+    if !holding { return typeError(st, catStrings(here, " holds no permission (Block<T>), and a drop is how a value frees the memory it holds; a value that has to be closed is a linear type, closed by a call")); };
+    return typesChanged(St { drops: st.drops.insert(clone(typeName)), ..st });
+};
+
+// The functions of an impl checked in order: st.outs their statements, st.te.types their types, st.implDefined the
+// functions as the checks against the trait read them (the functions can be called as Type::f from the next one on,
+// itself included)
+fn checkImplFunctions(st: St, tname: &String, typeName: &String, selfName: &String, selfType: Int, functions: &List<Int>) -> St ~ {
+    checked = [];
+    types = [];
+    defined = [];
+    for s in functions {
+        stmt = stmtOf(st, s);
+        v = 0 - 1;
+        if stmt is AstStatement::Assign {
+            a = stmt as AstStatement::Assign;
+            name = nameText(&st.nodes, a.n);
+            part = implFunctionPart(&name);
+            st = addAssoc(st, typeName, &part, tname);
+            v = functionValue(st, a.e);
+            if v >= 0 {
+                st = implFnSig(st, v, selfName, selfType);
+                fs = clone(st.fnSig);
+                rewritten = st.ok;
+                native = nativeFn(&st.nodes, v);
+                st = checkFunctionWith(st, true, clone(name), a.n, v, clone(fs), rewritten);
+                if st.status != 0 { return st; };
+                defined = push(defined, Defined { name: part, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: size(fs.sizes), term: native.term, sigNode: st.sigNode });
+            };
+        };
+        if v < 0 { st = checkStatement(st, true, s); };
+        if st.status != 0 { return st; };
+        checked = push(checked, st.nid);
+        for t in &st.te.types { types = push(types, t); };
+    };
+    return St { outs: checked, te: TE { node: 0 - 1, types: types }, implDefined: defined, ..st };
+};
+
+// The functions that check an impl against its trait (they cannot be called as Type::f): st.outs their statements and
+// st.te.types their types
+fn implCheckFunctions(st: St, tname: &String, typeName: &String, required: &List<Int>, defined: &List<Defined>) -> St ~ {
+    checks = [];
+    types = [];
+    for f in required {
+        tf = traitFnOf(st, f);
+        fname = nameText(&st.nodes, tf.n);
+        names = [];
+        for d in defined { names = push(names, clone(d.name)); };
+        at = indexIn(&names, &fname);
+        if at < 0 || at >= size(defined) { return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("impl ", clone(tname)), " for "), clone(typeName)), " lacks the function "), fname)); };
+        d = get(defined, at);
+        params = wrapperParams(st, &tf, &d);
+        st = traitCheckWrapper(st, tname, typeName, &tf, &params, d.sigNode, isMayDiverge(st, d.term));
+        valueNode = st.nid;
+        wrapperName = nameText(&st.nodes, st.n);
+        st = checkFunctionDef(st, true, wrapperName, st.n, valueNode);
+        if st.status != 0 { return st; };
+        checks = push(checks, st.nid);
+        for t in &st.te.types { types = push(types, t); };
+    };
+    return St { outs: checks, te: TE { node: 0 - 1, types: types }, ..st };
 };
 
 // An impl with bounds implements its trait for the types that meet them: its functions, and the checks of them against
 // the trait, are templates (checkImpl with bounds)
 fn checkBoundedImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, selfInput: Int, bounds: List<BoundInfo>, functions: List<Int>, tyNode: Int, argsNode: Int, boundsNode: Int) -> St ~ {
     st = selfOf(st, &typeName, selfInput);
-    selfName = clone(get(st.names, 0));
+    selfName = firstText(&st.names);
     selfType = st.ty;
     implWhere = catStrings(" of the impl for ", clone(typeName));
     for b in &bounds {
         st = checkBoundTrait(st, b, clone(implWhere), clone(implWhere), clone(implWhere));
         if st.status != 0 { return st; };
     };
-    fnNames = [];
-    fnValues = [];
-    fnSigs = [];
-    defined = [];
-    for s in &functions {
+    st = boundedImplSignatures(st, &selfName, selfType, &functions);
+    if size(tname.bytes) > 0 {
+        st = registerBoundedImpl(st, &tname, &traitArgs, &typeName, selfInput, &bounds, tyNode, argsNode, boundsNode, &selfName, selfType);
+        if st.status != 0 { return st; };
+    };
+    st = boundedImplTemplates(st, &tname, &typeName, &bounds, boundsNode, &functions);
+    if st.status != 0 { return st; };
+    st = boundedWrapperTemplates(st, &bounds, boundsNode);
+    return St { outs: [], te: TE { node: 0 - 1, types: [] }, boundedParts: noBoundedParts(), ..st };
+};
+
+// The signatures of an impl's functions with Self the type it is for (st.boundedParts)
+fn boundedImplSignatures(st: St, selfName: &String, selfType: Int, functions: &List<Int>) -> St ~ {
+    parts = noBoundedParts();
+    for s in functions {
         stmt = stmtOf(st, s);
-        v = 0 - 1;
         if stmt is AstStatement::Assign {
             a = stmt as AstStatement::Assign;
             v = functionValue(st, a.e);
             if v >= 0 {
                 name = nameText(&st.nodes, a.n);
-                st = implFnSig(st, v, &selfName, selfType);
+                st = implFnSig(st, v, selfName, selfType);
                 fs = clone(st.fnSig);
-                value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
-                native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
+                native = nativeFn(&st.nodes, v);
                 // (the wrapper is given the impl function's signature, rewritten)
                 st = emitTypes(st, &fs.ptys);
                 tsNode = st.nid;
@@ -1231,75 +1311,85 @@ fn checkBoundedImpl(st: St, tname: String, traitArgs: List<Int>, typeName: Strin
                 retNode = st.nid;
                 sig = signatureOf(&st.nodes, native.sig);
                 st = emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: sig.ss, ps: sig.ps, ws: sig.ws, fs: sig.fs } });
-                fnNames = push(fnNames, clone(name));
-                fnValues = push(fnValues, v);
-                fnSigs = push(fnSigs, clone(fs));
-                defined = push(defined, Defined { name: implFunctionPart(&name), params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: size(fs.sizes), term: native.term, sigNode: st.nid });
+                defined = Defined { name: implFunctionPart(&name), params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: size(fs.sizes), term: native.term, sigNode: st.nid };
+                parts = BoundedParts { names: push(parts.names, name), values: push(parts.values, v), sigs: push(parts.sigs, fs), defined: push(parts.defined, defined), ..parts };
             };
         };
     };
-    wrapperOf = [];
-    wrapperValues = [];
-    wrapperNames = [];
-    if size(tname.bytes) > 0 {
-        if !st.traitFns.contains(&tname) { return typeError(st, catStrings("unknown trait ", clone(tname))); };
-        required = st.traitFns.lookup(&tname, []);
-        traitParams = st.traitParams.lookup(&tname, []);
-        here = catStrings(catStrings(catStrings("impl ", clone(tname)), " for "), clone(typeName));
-        if size(traitParams) != size(traitArgs) { return wrongTraitArity(st, &tname, &traitParams, &typeName, size(traitArgs)); };
-        if st.impls.contains(pairKey(&tname, &typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
-        if size(required) = 0 { return typeError(st, catStrings(catStrings(catStrings(here, " has bounds, and "), clone(tname)), " has no functions: the bounds of a marker impl are not supported")); };
-        st = St { impls: st.impls.insert(pairKey(&tname, &typeName)), implArgs: st.implArgs.insert(pairKey(&tname, &typeName), ImplArgs { ty: selfInput, args: clone(traitArgs), tyNode: tyNode, argsNode: argsNode }), implBounds: st.implBounds.insert(pairKey(&tname, &typeName), clone(bounds)), implBoundsNodes: st.implBoundsNodes.insert(pairKey(&tname, &typeName), boundsNode), ..st };
-        st = checkAgainstTrait(st, &tname, &typeName, &traitArgs, &traitParams, &required, &defined, &selfName, selfType);
-        if st.status != 0 { return st; };
-        for f in &required {
-            tf = traitFnOf(st, f);
-            fname = nameText(&st.nodes, tf.n);
-            names = [];
-            for d in &defined { names = push(names, clone(d.name)); };
-            d = get(defined, indexIn(&names, &fname));
-            params = wrapperParams(st, &tf, &d);
-            st = traitCheckWrapper(st, &tname, &typeName, &tf, &params, d.sigNode, isMayDiverge(st, d.term));
-            wrapperOf = push(wrapperOf, implFunctionName(&typeName, &tname, &fname));
-            wrapperValues = push(wrapperValues, st.nid);
-            wrapperNames = push(wrapperNames, nameText(&st.nodes, st.n));
-        };
+    return St { boundedParts: parts, ..st };
+};
+
+// An impl with bounds of a trait recorded and checked against the trait, with the functions that make those checks
+fn registerBoundedImpl(st: St, tname: &String, traitArgs: &List<Int>, typeName: &String, selfInput: Int, bounds: &List<BoundInfo>, tyNode: Int, argsNode: Int, boundsNode: Int, selfName: &String, selfType: Int) -> St ~ {
+    if !st.traitFns.contains(tname) { return typeError(st, catStrings("unknown trait ", clone(tname))); };
+    required = st.traitFns.lookup(tname, []);
+    traitParams = st.traitParams.lookup(tname, []);
+    here = catStrings(catStrings(catStrings("impl ", clone(tname)), " for "), clone(typeName));
+    if size(traitParams) != size(traitArgs) { return wrongTraitArity(st, tname, &traitParams, typeName, size(traitArgs)); };
+    if st.impls.contains(pairKey(tname, typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
+    if size(required) = 0 { return typeError(st, catStrings(catStrings(catStrings(here, " has bounds, and "), clone(tname)), " has no functions: the bounds of a marker impl are not supported")); };
+    key = pairKey(tname, typeName);
+    st = St { impls: st.impls.insert(clone(key)), implArgs: st.implArgs.insert(clone(key), ImplArgs { ty: selfInput, args: clone(traitArgs), tyNode: tyNode, argsNode: argsNode }), implBounds: st.implBounds.insert(clone(key), clone(bounds)), implBoundsNodes: st.implBoundsNodes.insert(clone(key), boundsNode), ..st };
+    parts = clone(st.boundedParts);
+    st = checkAgainstTrait(st, tname, typeName, traitArgs, &traitParams, &required, &parts.defined, selfName, selfType);
+    if st.status != 0 { return st; };
+    names = [];
+    for d in &parts.defined { names = push(names, clone(d.name)); };
+    for f in &required {
+        tf = traitFnOf(st, f);
+        fname = nameText(&st.nodes, tf.n);
+        at = indexIn(&names, &fname);
+        if at < 0 || at >= size(parts.defined) { return typeError(st, catStrings(catStrings(clone(here), " lacks the function "), fname)); };
+        d = get(parts.defined, at);
+        params = wrapperParams(st, &tf, &d);
+        st = traitCheckWrapper(st, tname, typeName, &tf, &params, d.sigNode, isMayDiverge(st, d.term));
+        parts = BoundedParts { wrapperOf: push(parts.wrapperOf, implFunctionName(typeName, tname, &fname)), wrapperValues: push(parts.wrapperValues, st.nid), wrapperNames: push(parts.wrapperNames, nameText(&st.nodes, st.n)), ..parts };
     };
-    // (anything else in an impl with bounds is refused where it stands among the functions)
+    return St { boundedParts: parts, ..st };
+};
+
+// Each function of an impl with bounds made a template (anything else in the impl is refused where it stands among
+// the functions)
+fn boundedImplTemplates(st: St, tname: &String, typeName: &String, bounds: &List<BoundInfo>, boundsNode: Int, functions: &List<Int>) -> St ~ {
+    parts = clone(st.boundedParts);
     i = 0;
-    for s in &functions {
+    for s in functions {
         stmt = stmtOf(st, s);
         isFunction = false;
         if stmt is AstStatement::Assign { isFunction = functionValue(st, (stmt as AstStatement::Assign).e) >= 0; };
         if !isFunction { return fail(st, "Type error: an impl with bounds can only hold functions"); };
-        if i >= size(fnNames) || i >= size(fnValues) || i >= size(fnSigs) || i >= size(defined) { return st; };
-        name = clone(get(fnNames, i));
-        fs = clone(get(fnSigs, i));
-        for b in &bounds {
+        if i >= size(parts.names) || i >= size(parts.values) || i >= size(parts.sigs) || i >= size(parts.defined) { return st; };
+        name = clone(get(parts.names, i));
+        fs = clone(get(parts.sigs, i));
+        for b in bounds {
             if indexIn(&fs.types, &b.p) < 0 {
                 return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(b.p), " is bounded by "), clone(b.n)), " in the impl for "), clone(typeName)), " but is not a type of "), clone(name)));
             };
         };
         if st.templates.contains(&name) || st.fns.contains(&name) { return typeError(st, catStrings(clone(name), " is already defined")); };
-        tm = templateOf(st, get(fnValues, i), &bounds, boundsNode, &fs, get(defined, i).sigNode);
+        tm = templateOf(st, get(parts.values, i), bounds, boundsNode, &fs, get(parts.defined, i).sigNode);
         part = implFunctionPart(&name);
-        st = addAssoc(st, &typeName, &part, &tname);
+        st = addAssoc(st, typeName, &part, tname);
         st = St { templates: st.templates.insert(name, tm), ..st };
         i = i + 1;
     };
-    // (the check of each function against the trait is a template too, made with the function)
+    return st;
+};
+
+// The check of each function against the trait made a template too, with the function
+fn boundedWrapperTemplates(st: St, bounds: &List<BoundInfo>, boundsNode: Int) -> St ~ {
+    parts = clone(st.boundedParts);
     i = 0;
-    while i < size(wrapperOf) && i < size(wrapperValues) && i < size(wrapperNames) [{ affirm i >= 0; }] ~ {
-        v = get(wrapperValues, i);
-        value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
-        native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
-        st = fnSigOf(st, value.ps, native.sig);
+    while i < size(parts.wrapperOf) && i < size(parts.wrapperValues) && i < size(parts.wrapperNames) [{ affirm i >= 0; }] shrinks size(parts.wrapperOf) - i {
+        v = get(parts.wrapperValues, i);
+        value = nativeFn(&st.nodes, v);
+        st = fnSigOf(st, value.ps, value.sig);
         fs = clone(st.fnSig);
-        tm = templateOf(st, v, &bounds, boundsNode, &fs, 0 - 1);
-        wname = clone(get(wrapperNames, i));
-        function = clone(get(wrapperOf, i));
+        tm = templateOf(st, v, bounds, boundsNode, &fs, 0 - 1);
+        wname = clone(get(parts.wrapperNames, i));
+        function = clone(get(parts.wrapperOf, i));
         st = St { templates: st.templates.insert(clone(wname), tm), companions: st.companions.insert(clone(function), concatFront(push([], wname), st.companions.lookup(&function, []))), ..st };
         i = i + 1;
     };
-    return St { outs: [], te: TE { node: 0 - 1, types: [] }, ..st };
+    return st;
 };

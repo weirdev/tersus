@@ -7,6 +7,9 @@
 --   frontend-diff compare EXE --sources DIR
 --                                          also the programs the tests wrote to DIR (run the suite with
 --                                          TERSUS_DIFFERENTIAL_SOURCES=DIR: each program a test helper checks)
+--   frontend-diff pipeline EXE [FILE... | --package ENTRY...]
+--                                          the time the compiler takes to elaborate and lower each unit with EXE as
+--                                          its elaborator and with the Haskell one (best of three each)
 --   frontend-diff builtins OUT             write the builtin table (lib/data/builtins.ast) from BuiltinRegistry
 --   frontend-diff build OUT                build the elaborator of lib/elaborate (and lib/data) as it is on disk, unvalidated
 --
@@ -15,6 +18,9 @@
 module Main (main) where
 
 import Control.Exception (evaluate)
+import GHC.Clock (getMonotonicTime)
+import Text.Printf (printf)
+import ElaborateRequest (respond)
 import Control.Monad (forM_, when)
 import Data.List (isSuffixOf, sort)
 import System.Directory (listDirectory)
@@ -53,7 +59,12 @@ main = do
             let (agree, wording, disagree, unmodelled, failed) = tally [o | (_, _, o) <- results]
             putStrLn (show (length units) ++ " units, " ++ show (length results) ++ " requests: " ++ show agree ++ " agree, " ++ show wording ++ " wording, " ++ show disagree ++ " disagree, " ++ show unmodelled ++ " not modelled, " ++ show failed ++ " failed")
             when (disagree + failed > 0) exitFailure
-        _ -> failWith "usage: frontend-diff compare (EXE | --haskell) [FILE...] | frontend-diff builtins OUT | frontend-diff build OUT"
+        "pipeline" : exe : rest -> do
+            units <- if null rest then corpusUnits else pure (unitsOf rest)
+            totals <- mapM (pipelineUnit exe) units
+            let (h, c) = foldr (\(a, b) (x, y) -> (a + x, b + y)) (0, 0) totals
+            printf "total: haskell %.3fs, candidate %.3fs, ratio %.2f\n" h c (c / max 1e-9 h)
+        _ -> failWith "usage: frontend-diff compare (EXE | --haskell) [FILE...] | frontend-diff pipeline EXE [FILE...] | frontend-diff builtins OUT | frontend-diff build OUT"
   where
     unitsOf args = case args of
         "--package" : entry : more -> FilePackage entry : unitsOf more
@@ -65,6 +76,21 @@ main = do
         EmbeddedPackage entry -> entry
         FilePackage entry -> entry
         Libraries -> "lib"
+
+pipelineUnit :: FilePath -> Unit -> IO (Double, Double)
+pipelineUnit exe unit = do
+    h <- best (unitThrough True respond unit >>= force)
+    c <- best (unitThrough True (executableElaborator exe) unit >>= force)
+    printf "%s: haskell %.3fs, candidate %.3fs\n" (show unit) h c
+    pure (h, c)
+  where
+    force r = evaluate (length (show r)) >> pure ()
+    best act = minimum <$> mapM (const (timed act)) [1 :: Int .. 3]
+    timed act = do
+        t0 <- getMonotonicTime
+        _ <- act
+        t1 <- getMonotonicTime
+        pure (t1 - t0)
 
 packageFromDisk :: [FilePath] -> IO [(FilePath, String)]
 packageFromDisk dirs = concat <$> mapM files dirs

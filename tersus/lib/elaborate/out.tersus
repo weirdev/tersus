@@ -1,15 +1,15 @@
 import data::ast::ast { AstExpression, AstExpressions, AstName, AstNames, AstNode, AstProofs, AstStatements, AstTypes, AstValidations };
 import data::codec::codec { catStrings, tokenize, typeAt };
 import elaborate::builtins { builtinValueOf };
-import elaborate::state { St, intText, isSize, notModelled, resolve, tyAt, zonk };
+import elaborate::state { St, intText, isSize, notModelled, nth, resolve, tyAt, zonk };
 
 // A new record of the arena; st.nid is its number
-fn emit(st: St, node: AstNode) -> St [{ }] [{ }] {
+fn emit(st: St, node: AstNode) -> St ~ {
     id = size(st.nodes);
     return St { nodes: push(st.nodes, node), nid: id, ..st };
 };
 
-fn emitName(st: St, text: String) -> St [{ }] [{ }] {
+fn emitName(st: St, text: String) -> St ~ {
     st = emit(st, AstNode::Name { value: AstName::End });
     if size(text.bytes) = 0 { return st; };
     return emit(st, AstNode::Name { value: AstName::Part { text: text, tail: st.nid } });
@@ -32,11 +32,11 @@ fn emitNames(st: St, names: &List<String>) -> St ~ {
     return St { nid: tail, ..st };
 };
 
-fn emitVal(st: St, value: Int) -> St [{ }] [{ }] {
+fn emitVal(st: St, value: Int) -> St ~ {
     return emit(st, AstNode::Expression { value: AstExpression::Val { v: value } });
 };
 
-fn emitVar(st: St, name: String) -> St [{ }] [{ }] {
+fn emitVar(st: St, name: String) -> St ~ {
     st = emitName(st, name);
     return emit(st, AstNode::Expression { value: AstExpression::Var { n: st.nid } });
 };
@@ -126,19 +126,19 @@ fn typeTokenText(st: &St, t: Int) -> String ~ {
         return out;
     };
     if k = 5 { return catStrings(" variant ", quotedName(&x.name)); };
-    if k = 6 { return catStrings(catStrings(" array", typeTokenText(st, get(x.args, 0))), sizeTokenText(st, get(x.args, 1))); };
-    if k = 7 { return catStrings(" addr", typeTokenText(st, get(x.args, 0))); };
-    if k = 8 { return catStrings(" block", typeTokenText(st, get(x.args, 0))); };
-    if k = 9 { return catStrings(" uninit", typeTokenText(st, get(x.args, 0))); };
-    if k = 10 { return catStrings(" ref", typeTokenText(st, get(x.args, 0))); };
-    if k = 11 { return catStrings(" mutref", typeTokenText(st, get(x.args, 0))); };
+    if k = 6 { return catStrings(catStrings(" array", typeTokenText(st, nth(&x.args, 0))), sizeTokenText(st, nth(&x.args, 1))); };
+    if k = 7 { return catStrings(" addr", typeTokenText(st, nth(&x.args, 0))); };
+    if k = 8 { return catStrings(" block", typeTokenText(st, nth(&x.args, 0))); };
+    if k = 9 { return catStrings(" uninit", typeTokenText(st, nth(&x.args, 0))); };
+    if k = 10 { return catStrings(" ref", typeTokenText(st, nth(&x.args, 0))); };
+    if k = 11 { return catStrings(" mutref", typeTokenText(st, nth(&x.args, 0))); };
     if k = 12 { return catStrings(" param ", quotedName(&x.name)); };
     if k = 13 {
         out = catStrings(" forall ", intText(size(x.sizes)));
         for s in &x.sizes { out = catStrings(catStrings(out, " "), quotedName(s)); };
         out = catStrings(catStrings(out, " "), intText(size(x.types)));
         for s in &x.types { out = catStrings(catStrings(out, " "), quotedName(s)); };
-        return catStrings(out, typeTokenText(st, get(x.args, 0)));
+        return catStrings(out, typeTokenText(st, nth(&x.args, 0)));
     };
     if k = 14 {
         out = catStrings(" fn ", intText(size(x.args) - 1));
@@ -158,7 +158,7 @@ fn sizeTokenText(st: &St, t: Int) -> String ~ {
 };
 
 // A name as the data quotes it: printable ASCII as it is, apart from " and \, and every other byte as \xHH
-fn quotedName(name: &String) -> String [{ }] [{ }] {
+fn quotedName(name: &String) -> String ~ {
     out = push([], toByte(34));
     for b in &name.bytes {
         c = toInt(b);
@@ -172,7 +172,7 @@ fn quotedName(name: &String) -> String [{ }] [{ }] {
     return String { bytes: push(out, toByte(34)) };
 };
 
-fn hexByte(d: Int) -> Byte [{ }] [{ }] {
+fn hexByte(d: Int) -> Byte ~ {
     if d >= 0 && d < 10 { return toByte(48 + d); };
     if d >= 10 && d < 16 { return toByte(55 + d); };
     return toByte(48);

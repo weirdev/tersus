@@ -102,7 +102,7 @@ main = do
 
 -- Groups that run only when they are named: too slow for every run of the suite
 optInGroups :: [String]
-optInGroups = ["testHostValidation"]
+optInGroups = ["testHostValidation", "testElaborateMutant"]
 
 allGroups :: [Test]
 allGroups = concatMap registered originalGroups
@@ -114,7 +114,7 @@ allGroups = concatMap registered originalGroups
             Nothing -> [original]
 
 batchedGroups :: [(Test, [Test])]
-batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader, testDifferential, testElaborate]]
+batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader]]
 
 originalGroups :: [Test]
 originalGroups =
@@ -131,6 +131,7 @@ originalGroups =
     , testCrashRegression
     , testExamples
     , testHostValidation
+    , testElaborateMutant
     , testCli
     , testMir
     , testMirSelfHosted
