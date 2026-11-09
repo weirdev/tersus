@@ -22,8 +22,8 @@ fn lookupVar(st: St, name: &String) -> St ~ {
     if st.status != 0 { return st; };
     t = scopeLookup(st, name);
     if t >= 0 { return withTy(st, t); };
-    if st.fns.contains(name) { return withTy(st, st.fns.lookup(name, 0 - 1)); };
-    if st.stdNames.contains(name) { return builtinIndexType(st, st.stdNames.lookup(name, 0 - 1)); };
+    if HashMap::contains(&st.fns, name) { return withTy(st, HashMap::lookup(&st.fns, name, 0 - 1)); };
+    if HashMap::contains(&st.stdNames, name) { return builtinIndexType(st, HashMap::lookup(&st.stdNames, name, 0 - 1)); };
     return fail(st, catStrings("Undefined variable: ", clone(name)));
 };
 
@@ -32,8 +32,8 @@ fn lookupProofVar(st: St, name: &String) -> St ~ {
     if st.status != 0 { return st; };
     t = scopeLookup(st, name);
     if t >= 0 { return withTy(st, t); };
-    if st.fns.contains(name) { return withTy(st, st.fns.lookup(name, 0 - 1)); };
-    if st.stdNames.contains(name) { return builtinIndexType(st, st.stdNames.lookup(name, 0 - 1)); };
+    if HashMap::contains(&st.fns, name) { return withTy(st, HashMap::lookup(&st.fns, name, 0 - 1)); };
+    if HashMap::contains(&st.stdNames, name) { return builtinIndexType(st, HashMap::lookup(&st.stdNames, name, 0 - 1)); };
     return freshVar(st);
 };
 
@@ -232,9 +232,9 @@ fn builtinHead(st: &St, funct: Int) -> Int ~ {
     if e is AstExpression::Val { return builtinOfValue(st, (e as AstExpression::Val).v); };
     if e is AstExpression::Var {
         name = nameText(&st.nodes, (e as AstExpression::Var).n);
-        if inScope(st, &name) || st.fns.contains(&name) { return 0 - 1; };
-        if st.stdNames.contains(&name) {
-            i = st.stdNames.lookup(&name, 0 - 1);
+        if inScope(st, &name) || HashMap::contains(&st.fns, &name) { return 0 - 1; };
+        if HashMap::contains(&st.stdNames, &name) {
+            i = HashMap::lookup(&st.stdNames, &name, 0 - 1);
             if i >= 0 && i < size(st.builtinValues) { return builtinOfValue(st, get(st.builtinValues, i)); };
         };
     };

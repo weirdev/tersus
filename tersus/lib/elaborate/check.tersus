@@ -371,7 +371,7 @@ fn checkFunctionDef(st: St, top: Bool, name: String, n: Int, v: Int) -> St ~ {
 // A function definition with its signature as types (rewritten: they are not the ones its record writes, as an impl's Self
 // replaced), giving back the definition with its contracts, termination and body checked (checkStatement)
 fn checkFunctionWith(st: St, top: Bool, name: String, n: Int, v: Int, fs: FnSig, rewritten: Bool) -> St ~ {
-    if st.templates.contains(&name) { return typeError(st, catStrings(clone(name), " is already defined")); };
+    if HashMap::contains(&st.templates, &name) { return typeError(st, catStrings(clone(name), " is already defined")); };
     value = nativeFn(&st.nodes, v);
     sig = signatureOf(&st.nodes, value.sig);
     st = fnTypeOf(st, &fs);
@@ -711,8 +711,8 @@ fn checkRule(st: St, r: Int) -> St ~ {
 // A struct with sizes and types (declareGeneric)
 fn declareGeneric(st: St, name: &String, params: &List<String>, names: &List<String>, types: &List<Int>) -> St ~ {
     if st.status != 0 { return st; };
-    predeclared = st.predeclared.contains(name);
-    if !predeclared && (st.types.contains(name) || st.traits.contains(name) || st.generics.contains(name)) {
+    predeclared = HashSet::contains(&st.predeclared, name);
+    if !predeclared && (HashMap::contains(&st.types, name) || HashSet::contains(&st.traits, name) || HashMap::contains(&st.generics, name)) {
         return fail(st, catStrings("Type already defined: ", clone(name)));
     };
     distinct = true;

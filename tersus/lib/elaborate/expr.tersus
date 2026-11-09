@@ -146,18 +146,18 @@ fn inferCallRest(st: St, funct: Int, args: &List<Int>) -> St ~ {
     if headKey(st, funct) = "CloneOf" { return cloneCall(st, args); };
     if fex is AstExpression::Var {
         fname = nameText(&st.nodes, (fex as AstExpression::Var).n);
-        if fname = "clone" && !st.fns.contains("clone") && !inScope(st, "clone") { return cloneCall(st, args); };
+        if fname = "clone" && !HashMap::contains(&st.fns, "clone") && !inScope(st, "clone") { return cloneCall(st, args); };
         if fname = ".clone" && size(args) = 1 { return cloneMethod(st, args); };
         if size(fname.bytes) > 1 && get(fname.bytes, 0) = toByte(46) && size(args) > 0 {
             return methodCall(st, fname.slice(1, size(fname.bytes)), args);
         };
-        if st.ghostNames.contains(&fname) && !inScope(st, &fname) && !st.fns.contains(&fname) {
-            index = st.ghostNames.lookup(&fname, 0 - 1);
+        if HashMap::contains(&st.ghostNames, &fname) && !inScope(st, &fname) && !HashMap::contains(&st.fns, &fname) {
+            index = HashMap::lookup(&st.ghostNames, &fname, 0 - 1);
             key = builtinKindAt(st, index);
             if !isAddressKey(&key) { return ghostExpr(st, fname, index, key, funct, args); };
         };
-        if st.pointer.contains(&fname) && !inScope(st, &fname) && !st.fns.contains(&fname) {
-            return pointerCall(st, fname, st.pointer.lookup(&fname, 0 - 1), args);
+        if HashMap::contains(&st.pointer, &fname) && !inScope(st, &fname) && !HashMap::contains(&st.fns, &fname) {
+            return pointerCall(st, fname, HashMap::lookup(&st.pointer, &fname, 0 - 1), args);
         };
         if size(fname.bytes) > 0 && get(fname.bytes, 0) = toByte(60) {
             st = inferAll(st, args);
@@ -636,10 +636,16 @@ fn derefExpr(st: St, te: TE) -> St ~ {
 fn derefTarget(st: St, t0: Int) -> St ~ {
     st = zonk(st, t0);
     t = st.ty;
-    if isBoxTy(st, t) { return St { ok: true, ty: argAt(st, t, 0), ..st }; };
+    if isBoxTy(st, t) {
+        inner = argAt(st, t, 0);
+        return St { ok: true, ty: inner, ..st };
+    };
     st = traitArguments(st, "Deref", t);
     if st.status != 0 { return st; };
-    if st.ok && size(st.te.types) = 1 { return St { ok: true, ty: get(st.te.types, 0), ..st }; };
+    if st.ok && size(st.te.types) = 1 {
+        target = get(st.te.types, 0);
+        return St { ok: true, ty: target, ..st };
+    };
     return St { ok: false, ..st };
 };
 
@@ -652,7 +658,8 @@ fn derefOwner(st: St, t0: Int) -> St ~ {
     if x.kind = 5 {
         st = ctorInfo(st, &x.name);
         if st.status != 0 { return st; };
-        return St { names: push([], clone(st.ctor.owner)), ..st };
+        owner = clone(st.ctor.owner);
+        return St { names: push([], owner), ..st };
     };
     return typeError(st, catStrings(render(st, t), " has no Deref impl"));
 };
@@ -701,8 +708,8 @@ fn methodCall(st: St, method: String, args: &List<Int>) -> St ~ {
     inferred = clone(st.tes);
     st = zonk(st, teHeadAt(&inferred, 0));
     receiverTy = unrefOf(st, st.ty);
-    if st.methods.contains(&method) && sequenceType(st, receiverTy) {
-        index = st.methods.lookup(&method, 0 - 1);
+    if HashMap::contains(&st.methods, &method) && sequenceType(st, receiverTy) {
+        index = HashMap::lookup(&st.methods, &method, 0 - 1);
         value = builtinValueAt(st, index);
         st = emitVal(st, value);
         functNode = st.nid;
@@ -800,7 +807,7 @@ fn inferEquality(st: St, funct: Int, negated: Bool, args: &List<Int>) -> St ~ {
 
 // A comparison of values of a type that implements Eq: a call of its eq (equalityCall)
 fn equalityCall(st: St, t: Int, operands: &List<TE>) -> St ~ {
-    if !st.traits.contains("Eq") {
+    if !HashSet::contains(&st.traits, "Eq") {
         return typeError(st, catStrings(render(st, t), " is compared with =, which needs the trait Eq of lib/eq.tersus, which a program has unless it declares a trait Eq of its own"));
     };
     st = traitArguments(st, "Eq", t);
@@ -826,12 +833,15 @@ fn missingEq(st: St, t: Int) -> St ~ {
         e = nth(&x.args, 0);
         st = traitArguments(st, "Eq", e);
         if st.status != 0 { return st; };
-        if st.ok { return St { names: push([], catStrings(render(st, t), " does not")), ..st }; };
+        if st.ok {
+            shown = render(st, t);
+            return St { names: push([], catStrings(shown, " does not")), ..st };
+        };
         st = zonk(st, e);
         return missingEq(st, st.ty);
     };
     if x.kind = 4 {
-        if st.impls.contains(catStrings("Eq ", x.name)) {
+        if HashSet::contains(&st.impls, catStrings("Eq ", x.name)) {
             lacking = [];
             for a in x.args {
                 if !isSize(st, a) {
@@ -841,7 +851,8 @@ fn missingEq(st: St, t: Int) -> St ~ {
                 };
             };
             if size(lacking) > 0 { return missingEq(st, get(lacking, 0)); };
-            return St { names: push([], catStrings(render(st, t), " does not")), ..st };
+            shown = render(st, t);
+            return St { names: push([], catStrings(shown, " does not")), ..st };
         };
         return St { names: push([], catStrings(catStrings(catStrings(clone(x.name), " does not: write impl Eq for "), clone(x.name)), " { }; to compare its fields")), ..st };
     };
@@ -851,7 +862,8 @@ fn missingEq(st: St, t: Int) -> St ~ {
         enumName = clone(st.ctor.owner);
         return St { names: push([], catStrings(catStrings(catStrings(clone(enumName), " does not: write impl Eq for "), enumName), " { }; to compare its fields")), ..st };
     };
-    return St { names: push([], catStrings(render(st, t), " does not")), ..st };
+    shown = render(st, t);
+    return St { names: push([], catStrings(shown, " does not")), ..st };
 };
 
 // The function part of Trait::function
@@ -866,8 +878,8 @@ fn functionOf(name: &String) -> String ~ {
 
 // Trait::f(x) and Type::f(x) (traitCall)
 fn traitCall(st: St, funct: Int, path: String, function: String, args: &List<Int>) -> St ~ {
-    if st.traitFns.contains(&path) {
-        fns = st.traitFns.lookup(&path, []);
+    if HashMap::contains(&st.traitFns, &path) {
+        fns = HashMap::lookup(&st.traitFns, &path, []);
         st = inferAll(st, args);
         if st.status != 0 { return st; };
         inferred = clone(st.tes);
@@ -879,7 +891,7 @@ fn traitCall(st: St, funct: Int, path: String, function: String, args: &List<Int
         owner = firstText(&st.names);
         return callResolved(st, implFunctionName(&owner, &path, &function), &inferred);
     };
-    if st.types.contains(&path) || st.generics.contains(&path) {
+    if HashMap::contains(&st.types, &path) || HashMap::contains(&st.generics, &path) {
         st = inferAll(st, args);
         if st.status != 0 { return st; };
         inferred = clone(st.tes);
@@ -901,7 +913,7 @@ fn cloneMethod(st: St, args: &List<Int>) -> St ~ {
     receiver = clone(st.te);
     st = zonk(st, teHead(&receiver));
     x = tyAt(st, st.ty);
-    owned = x.kind = 4 && st.assoc.contains(catStrings(x.name, " clone"));
+    owned = x.kind = 4 && HashMap::contains(&st.assoc, catStrings(x.name, " clone"));
     if !owned { return cloneCall(st, args); };
     st = ownerOfValue(st, "clone", teHead(&receiver));
     if st.status != 0 { return st; };
@@ -910,8 +922,8 @@ fn cloneMethod(st: St, args: &List<Int>) -> St ~ {
     if st.status != 0 { return st; };
     name = firstText(&st.names);
     input = clone(receiver);
-    if st.traitFns.contains("Clone") && name = implFunctionName(&owner, "Clone", "clone") {
-        fns = st.traitFns.lookup("Clone", []);
+    if HashMap::contains(&st.traitFns, "Clone") && name = implFunctionName(&owner, "Clone", "clone") {
+        fns = HashMap::lookup(&st.traitFns, "Clone", []);
         st = cloneTraitInput(st, &fns, receiver);
         input = clone(st.te);
     };
@@ -941,12 +953,12 @@ fn cloneCall(st: St, args: &List<Int>) -> St ~ {
     if k = 12 || k = 15 || mentionsParameter(st, xtz) { return cloneWrap(st, x, xt); };
     xx = tyAt(st, xtz);
     if isBoxTy(st, xtz) && kindOf(st, nth(&xx.args, 0)) = 6 && kindOf(st, argAt(st, nth(&xx.args, 0), 1)) = 21 {
-        if st.templates.contains("cloneBoxedArray") || st.fns.contains("cloneBoxedArray") {
+        if HashMap::contains(&st.templates, "cloneBoxedArray") || HashMap::contains(&st.fns, "cloneBoxedArray") {
             params = [];
-            if st.templates.contains("cloneBoxedArray") {
-                params = st.templates.lookup("cloneBoxedArray", emptyTemplate()).ptys;
+            if HashMap::contains(&st.templates, "cloneBoxedArray") {
+                params = HashMap::lookup(&st.templates, "cloneBoxedArray", emptyTemplate()).ptys;
             } else {
-                ft = tyAt(st, st.fns.lookup("cloneBoxedArray", 0));
+                ft = tyAt(st, HashMap::lookup(&st.fns, "cloneBoxedArray", 0));
                 if ft.kind = 13 { ft = tyAt(st, nth(&ft.args, 0)); };
                 if ft.kind = 14 { params = argsOfFn(&ft); };
             };
@@ -998,11 +1010,11 @@ fn cloneWrap(st: St, x: TE, xt: Int) -> St ~ {
 
 // The impl's clone, given a borrow of the value when it takes one (cloneTrait)
 fn cloneTrait(st: St, x: TE) -> St ~ {
-    if !st.traitFns.contains("Clone") {
+    if !HashMap::contains(&st.traitFns, "Clone") {
         args = push([], x.node);
         return traitCall(st, 0 - 1, "Clone", "clone", &args);
     };
-    fns = st.traitFns.lookup("Clone", []);
+    fns = HashMap::lookup(&st.traitFns, "Clone", []);
     st = cloneTraitInput(st, &fns, clone(x));
     input = clone(st.te);
     ats = push([], teHead(&x));
@@ -1209,8 +1221,8 @@ fn general(st: St, funct: Int, args: &List<Int>) -> St ~ {
     fex = exprOf(st, funct);
     if fex is AstExpression::Var {
         name = nameText(&st.nodes, (fex as AstExpression::Var).n);
-        if st.templates.contains(&name) && !inScope(st, &name) {
-            tm = st.templates.lookup(&name, emptyTemplate());
+        if HashMap::contains(&st.templates, &name) && !inScope(st, &name) {
+            tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
             st = inferAll(st, args);
             if st.status != 0 { return st; };
             inferred = clone(st.tes);
@@ -1294,8 +1306,8 @@ fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
     if b >= 0 && size(inferred0) > 0 {
         key = builtinKey(st, b);
         i = builtinIndex(st, &key);
-        if st.methodOf.contains(i) {
-            fname = st.methodOf.lookup(i, "");
+        if HashMap::contains(&st.methodOf, i) {
+            fname = HashMap::lookup(&st.methodOf, i, "");
             st = zonk(st, teHeadAt(&inferred0, 0));
             x = tyAt(st, st.ty);
             if x.kind = 4 && x.name != "List" && x.name != "Box" {
@@ -1670,7 +1682,7 @@ fn implementsMarker(st: St, marker: String, t0: Int, depth: Int) -> St ~ {
 
 fn declaredMarker(st: St, marker: String, depth: Int, name: String) -> St ~ {
     base = baseNameOf(&name);
-    if !st.impls.contains(catStrings(catStrings(marker, " "), clone(base))) { return St { ok: false, ..st }; };
+    if !HashSet::contains(&st.impls, catStrings(catStrings(marker, " "), clone(base))) { return St { ok: false, ..st }; };
     // (a struct with types is Copy for the types that are, and a Clone one is checked where its impl is)
     if marker = "Copy" && base != name {
         st = typeCtors(st, &name);

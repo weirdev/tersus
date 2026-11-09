@@ -370,22 +370,40 @@ locally: a list is read through `nth`, `firstText` and the like, which answer
 -1 or nothing where the data has no such element; a record is cast only after
 its variant is checked; and a search loop carries `i <= size` for the slice
 that follows it. The validator's cost follows the size and branching of a
-function, so the dispatchers are split: `data::reader` reads a record through
-groups of at most five tags, `data::arena` renumbers through groups of node
+function, so the dispatchers are split: `data::reader` reads a record with
+the reader of a group of at most five tags (found by its tag's number in a
+table made once per block), `data::arena` renumbers through groups of node
 kinds, and the elaborator's large functions (`checkStatement`,
 `extractInterface`, `checkImpl`, `templateCall` and others) are made of
 smaller ones.
 
 Cost: the compiler elaborating and lowering a unit with the elaborator
-written in Tersus instead of the Haskell one (`frontend-diff pipeline`, one
-CPU, best of three) takes 1.6 times as long on the six compiler packages
-(203 s against 127 s on the host this was measured on) and 0.1 to 0.2 s more
-on a small program. Most of the elaborator's time is reading
-its request, which carries the interfaces of every module the module
-imports. `holdsGhost` and `holdsRef` keep what they found for a named type
-until a type, a linear type or a drop is declared, and a state built with
-`St { f: g(&st.nodes), ..st }` (which clones the arena to lend it) is built
-from locals instead.
+written in Tersus (`frontend-diff pipeline`, one CPU, best of three) takes
+1.15 times as long as it does on master with the Haskell elaborator, over the
+six compiler packages together (119.5 s against 103.7 s; 1.03 to 1.33 times
+for each), and 0.05 to 0.37 s longer for a small program, whose whole build
+(`tersus-exe build`, validation and native code included) takes 3.6 to 108 s. The elaborator's state is one struct, and what the compiler does
+with it decides most of the cost:
+- A state built as `St { f: e, ..st }`, where `e` reads `st`, copies every
+  other field of the state before `e` runs; such an `e` is computed into a
+  local first.
+- A method called on a field of the state, `st.ctors.lookup(k, noCtor())`,
+  copies the field (the whole map) when an argument needs a call to compute;
+  the elaborator calls `HashMap::lookup(&st.ctors, k, noCtor())` instead.
+- `zonk` of a type that is already resolved, and `withTy` of the type the
+  state already has, leave the state as it is.
+
+A request carries an interface for the module and again in the defining
+context of every module that depends on it; the host writes each interface
+once, and the elaborator parses a block whose records it has already read
+once (it keeps the blocks it has read by their text).
+
+`holdsGhost` and `holdsRef` keep what they found for a named type until a
+type, a linear type or a drop is declared. On the host's side, the request
+and the response are put together and read as lines rather than as one text
+split again, the writer reads back only the type and size records it wrote,
+and numbers are read digit by digit rather than with `reads` (which also took
+forms such as `0x1F` and `(5)` that no writer of the data writes).
 `stack run frontend-diff -- build EXE` builds it from the sources on disk.
 
 ### Deferred or coordinated work

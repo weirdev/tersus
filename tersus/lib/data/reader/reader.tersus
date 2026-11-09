@@ -158,154 +158,246 @@ fn primitiveWords() -> List<String> [{ }] [{ }] {
 
 fn noNode() -> AstNode [{ }] [{ }] { return AstNode::Name { value: AstName::End }; };
 
-// A record of the arena: the parser of its tag's group, each of which refuses a tag it does not have (no tag is in
-// two groups; the groups of the most common records are tried first)
-fn nodeAt(ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+
+
+
+
+
+
+
+
+// The tags of the records and the words of the primitives: each tag is the number of the reader of its records times
+// 8, plus its place among that reader's tags
+struct Tags { codes: HashMap<String, Int>, primitives: HashMap<String, Int> };
+
+fn recordTags() -> Tags [{ }] [{ }] {
+    codes = HashMap::new();
+    codes = codes.insert("NameEnd", 0);
+    codes = codes.insert("NamePart", 1);
+    codes = codes.insert("Type", 2);
+    codes = codes.insert("Size", 3);
+    codes = codes.insert("Primitive", 4);
+    codes = codes.insert("VInt", 8);
+    codes = codes.insert("VList", 9);
+    codes = codes.insert("VBool", 10);
+    codes = codes.insert("VData", 11);
+    codes = codes.insert("VFnRef", 12);
+    codes = codes.insert("VFunct", 16);
+    codes = codes.insert("NativeFunct", 17);
+    codes = codes.insert("BuiltinFunct", 18);
+    codes = codes.insert("Val", 19);
+    codes = codes.insert("Var", 20);
+    codes = codes.insert("F", 24);
+    codes = codes.insert("NamesEnd", 32);
+    codes = codes.insert("NamesCons", 33);
+    codes = codes.insert("ValuesEnd", 34);
+    codes = codes.insert("ValuesCons", 35);
+    codes = codes.insert("StatementsEnd", 36);
+    codes = codes.insert("StatementsCons", 40);
+    codes = codes.insert("ExpressionsEnd", 41);
+    codes = codes.insert("ExpressionsCons", 42);
+    codes = codes.insert("ValidationsEnd", 43);
+    codes = codes.insert("ValidationsCons", 44);
+    codes = codes.insert("ProofsEnd", 48);
+    codes = codes.insert("ProofsCons", 49);
+    codes = codes.insert("FieldsEnd", 50);
+    codes = codes.insert("FieldsCons", 51);
+    codes = codes.insert("VariantsEnd", 52);
+    codes = codes.insert("VariantsCons", 56);
+    codes = codes.insert("ValueFieldsEnd", 57);
+    codes = codes.insert("ValueFieldsCons", 58);
+    codes = codes.insert("TypesEnd", 59);
+    codes = codes.insert("TypesCons", 60);
+    codes = codes.insert("ArgsEnd", 64);
+    codes = codes.insert("ArgsCons", 65);
+    codes = codes.insert("TraitFnsEnd", 66);
+    codes = codes.insert("TraitFnsCons", 67);
+    codes = codes.insert("BoundsEnd", 68);
+    codes = codes.insert("BoundsCons", 72);
+    codes = codes.insert("Elaborated", 73);
+    codes = codes.insert("Signature", 80);
+    codes = codes.insert("TraitFn", 81);
+    codes = codes.insert("Bound", 82);
+    codes = codes.insert("Field", 83);
+    codes = codes.insert("Variant", 84);
+    codes = codes.insert("ValueField", 88);
+    codes = codes.insert("ArgSize", 89);
+    codes = codes.insert("ArgType", 90);
+    codes = codes.insert("NoName", 91);
+    codes = codes.insert("SomeName", 92);
+    codes = codes.insert("NoTermination", 96);
+    codes = codes.insert("SomeTermination", 97);
+    codes = codes.insert("Ctor", 98);
+    codes = codes.insert("FieldBuiltin", 99);
+    codes = codes.insert("Is", 100);
+    codes = codes.insert("Project", 104);
+    codes = codes.insert("Cast", 105);
+    codes = codes.insert("ToWord", 106);
+    codes = codes.insert("Rel", 107);
+    codes = codes.insert("Assign", 112);
+    codes = codes.insert("AssignDeref", 113);
+    codes = codes.insert("Let", 114);
+    codes = codes.insert("Return", 115);
+    codes = codes.insert("ValidationStatement", 116);
+    codes = codes.insert("StructDef", 120);
+    codes = codes.insert("EnumDef", 121);
+    codes = codes.insert("AxiomDef", 122);
+    codes = codes.insert("ProofDef", 123);
+    codes = codes.insert("Block", 124);
+    codes = codes.insert("If", 128);
+    codes = codes.insert("While", 129);
+    codes = codes.insert("TraitDef", 130);
+    codes = codes.insert("ImplDef", 131);
+    codes = codes.insert("BoundedDef", 132);
+    codes = codes.insert("Mark", 136);
+    codes = codes.insert("CopyDef", 137);
+    codes = codes.insert("LinearDef", 138);
+    codes = codes.insert("ExternDef", 139);
+    codes = codes.insert("DropDef", 140);
+    codes = codes.insert("Dissolve", 144);
+    codes = codes.insert("Shrinks", 152);
+    codes = codes.insert("Counting", 153);
+    codes = codes.insert("Parts", 154);
+    codes = codes.insert("MayDiverge", 155);
+    codes = codes.insert("Recursing", 156);
+    codes = codes.insert("Rewrite", 160);
+    codes = codes.insert("ProofAssert", 161);
+    codes = codes.insert("AssignProofVar", 162);
+    codes = codes.insert("Assume", 163);
+    codes = codes.insert("FApp", 168);
+    codes = codes.insert("ATerm", 169);
+    codes = codes.insert("CTerm", 170);
+    codes = codes.insert("Forall", 171);
+    codes = codes.insert("BVar", 172);
+    codes = codes.insert("Refl", 176);
+    codes = codes.insert("Eval", 177);
+    codes = codes.insert("EvalAll", 178);
+    codes = codes.insert("CheckGtZero", 179);
+    codes = codes.insert("CheckRel", 180);
+    codes = codes.insert("UserRewrite", 184);
+    codes = codes.insert("NamesEntry", 192);
+    codes = codes.insert("CtorEntry", 193);
+    codes = codes.insert("GenericEntry", 194);
+    codes = codes.insert("InvariantEntry", 195);
+    codes = codes.insert("TraitEntry", 196);
+    codes = codes.insert("FunctionEntry", 200);
+    codes = codes.insert("PairEntry", 201);
+    codes = codes.insert("AssocEntry", 202);
+    codes = codes.insert("ImplArgsEntry", 203);
+    codes = codes.insert("ImplBoundsEntry", 204);
+    codes = codes.insert("TemplateEntry", 208);
+    codes = codes.insert("TypeEntry", 209);
+    codes = codes.insert("SurfaceEntry", 210);
+    codes = codes.insert("BuiltinEntry", 211);
+    codes = codes.insert("SigFn", 212);
+    codes = codes.insert("SigDynamic", 216);
+    codes = codes.insert("SigValueError", 217);
+    codes = codes.insert("NoType", 218);
+    codes = codes.insert("SomeType", 219);
+    codes = codes.insert("EntriesEnd", 220);
+    codes = codes.insert("EntriesCons", 224);
+    codes = codes.insert("OptNamesEnd", 225);
+    codes = codes.insert("OptNamesCons", 226);
+    codes = codes.insert("Interface", 227);
+    primitives = HashMap::new();
+    for w in primitiveWords() { primitives = primitives.insert(clone(w), 1); };
+    return Tags { codes: codes, primitives: primitives };
+};
+
+// A record of the arena, read by the reader of its tag
+fn nodeAt(tags: &Tags, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
     if size(ts) < 1 { return bad; };
     tag = wordAt(ts, 0);
     if !tag.ok { return bad; };
-    rleafNodeAt = leafNodeAt(&tag.value, ts, nodes);
-    if rleafNodeAt.ok { return rleafNodeAt; };
-    rvalueNodeAt = valueNodeAt(&tag.value, ts, nodes);
-    if rvalueNodeAt.ok { return rvalueNodeAt; };
-    rlistNodeAt = listNodeAt(&tag.value, ts, nodes);
-    if rlistNodeAt.ok { return rlistNodeAt; };
-    rpartNodeAt = partNodeAt(&tag.value, ts, nodes);
-    if rpartNodeAt.ok { return rpartNodeAt; };
-    rstatementNodeAt = statementNodeAt(&tag.value, ts, nodes);
-    if rstatementNodeAt.ok { return rstatementNodeAt; };
-    rvalidationNodeAt = validationNodeAt(&tag.value, ts, nodes);
-    if rvalidationNodeAt.ok { return rvalidationNodeAt; };
-    rproofNodeAt = proofNodeAt(&tag.value, ts, nodes);
-    if rproofNodeAt.ok { return rproofNodeAt; };
-    rentryNodeAt = entryNodeAt(&tag.value, ts, nodes);
-    if rentryNodeAt.ok { return rentryNodeAt; };
+    code = tags.codes.lookup(&tag.value, 0 - 1);
+    if code < 0 { return bad; };
+    c = code / 8;
+    k = code % 8;
+    if c = 0 { return leafNodeAt(k, ts, nodes, &tags.primitives); };
+    if c = 1 { return valueNodeAt1(k, ts, nodes); };
+    if c = 2 { return valueNodeAt2(k, ts, nodes); };
+    if c = 3 { return valueNodeAt3(k, ts, nodes); };
+    if c = 4 { return listNodeAt1(k, ts, nodes); };
+    if c = 5 { return listNodeAt2(k, ts, nodes); };
+    if c = 6 { return listNodeAt3(k, ts, nodes); };
+    if c = 7 { return listNodeAt4(k, ts, nodes); };
+    if c = 8 { return listNodeAt5(k, ts, nodes); };
+    if c = 9 { return listNodeAt6(k, ts, nodes); };
+    if c = 10 { return partNodeAt1(k, ts, nodes); };
+    if c = 11 { return partNodeAt2(k, ts, nodes); };
+    if c = 12 { return partNodeAt3(k, ts, nodes); };
+    if c = 13 { return partNodeAt4(k, ts, nodes); };
+    if c = 14 { return statementNodeAt1(k, ts, nodes); };
+    if c = 15 { return statementNodeAt2(k, ts, nodes); };
+    if c = 16 { return statementNodeAt3(k, ts, nodes); };
+    if c = 17 { return statementNodeAt4(k, ts, nodes); };
+    if c = 18 { return statementNodeAt5(k, ts, nodes); };
+    if c = 19 { return validationNodeAt1(k, ts, nodes); };
+    if c = 20 { return validationNodeAt2(k, ts, nodes); };
+    if c = 21 { return proofNodeAt1(k, ts, nodes); };
+    if c = 22 { return proofNodeAt2(k, ts, nodes); };
+    if c = 23 { return proofNodeAt3(k, ts, nodes); };
+    if c = 24 { return entryNodeAt1(k, ts, nodes); };
+    if c = 25 { return entryNodeAt2(k, ts, nodes); };
+    if c = 26 { return entryNodeAt3(k, ts, nodes); };
+    if c = 27 { return entryNodeAt4(k, ts, nodes); };
+    if c = 28 { return entryNodeAt5(k, ts, nodes); };
     return bad;
 };
 
-fn valueNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
-    rvalueNodeAt1 = valueNodeAt1(tag, ts, nodes);
-    if rvalueNodeAt1.ok { return rvalueNodeAt1; };
-    rvalueNodeAt2 = valueNodeAt2(tag, ts, nodes);
-    if rvalueNodeAt2.ok { return rvalueNodeAt2; };
-    return valueNodeAt3(tag, ts, nodes);
-};
-
-fn validationNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
-    rvalidationNodeAt1 = validationNodeAt1(tag, ts, nodes);
-    if rvalidationNodeAt1.ok { return rvalidationNodeAt1; };
-    return validationNodeAt2(tag, ts, nodes);
-};
-
-fn proofNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
-    rproofNodeAt1 = proofNodeAt1(tag, ts, nodes);
-    if rproofNodeAt1.ok { return rproofNodeAt1; };
-    rproofNodeAt2 = proofNodeAt2(tag, ts, nodes);
-    if rproofNodeAt2.ok { return rproofNodeAt2; };
-    return proofNodeAt3(tag, ts, nodes);
-};
-
-fn statementNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
-    rstatementNodeAt1 = statementNodeAt1(tag, ts, nodes);
-    if rstatementNodeAt1.ok { return rstatementNodeAt1; };
-    rstatementNodeAt2 = statementNodeAt2(tag, ts, nodes);
-    if rstatementNodeAt2.ok { return rstatementNodeAt2; };
-    rstatementNodeAt3 = statementNodeAt3(tag, ts, nodes);
-    if rstatementNodeAt3.ok { return rstatementNodeAt3; };
-    rstatementNodeAt4 = statementNodeAt4(tag, ts, nodes);
-    if rstatementNodeAt4.ok { return rstatementNodeAt4; };
-    return statementNodeAt5(tag, ts, nodes);
-};
-
-fn partNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
-    rpartNodeAt1 = partNodeAt1(tag, ts, nodes);
-    if rpartNodeAt1.ok { return rpartNodeAt1; };
-    rpartNodeAt2 = partNodeAt2(tag, ts, nodes);
-    if rpartNodeAt2.ok { return rpartNodeAt2; };
-    rpartNodeAt3 = partNodeAt3(tag, ts, nodes);
-    if rpartNodeAt3.ok { return rpartNodeAt3; };
-    return partNodeAt4(tag, ts, nodes);
-};
-
-fn listNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
-    rlistNodeAt1 = listNodeAt1(tag, ts, nodes);
-    if rlistNodeAt1.ok { return rlistNodeAt1; };
-    rlistNodeAt2 = listNodeAt2(tag, ts, nodes);
-    if rlistNodeAt2.ok { return rlistNodeAt2; };
-    rlistNodeAt3 = listNodeAt3(tag, ts, nodes);
-    if rlistNodeAt3.ok { return rlistNodeAt3; };
-    rlistNodeAt4 = listNodeAt4(tag, ts, nodes);
-    if rlistNodeAt4.ok { return rlistNodeAt4; };
-    rlistNodeAt5 = listNodeAt5(tag, ts, nodes);
-    if rlistNodeAt5.ok { return rlistNodeAt5; };
-    return listNodeAt6(tag, ts, nodes);
-};
-
-fn entryNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
-    rentryNodeAt1 = entryNodeAt1(tag, ts, nodes);
-    if rentryNodeAt1.ok { return rentryNodeAt1; };
-    rentryNodeAt2 = entryNodeAt2(tag, ts, nodes);
-    if rentryNodeAt2.ok { return rentryNodeAt2; };
-    rentryNodeAt3 = entryNodeAt3(tag, ts, nodes);
-    if rentryNodeAt3.ok { return rentryNodeAt3; };
-    rentryNodeAt4 = entryNodeAt4(tag, ts, nodes);
-    if rentryNodeAt4.ok { return rentryNodeAt4; };
-    return entryNodeAt5(tag, ts, nodes);
-};
-
-fn leafNodeAt(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn leafNodeAt(k: Int, ts: &List<Token>, nodes: &List<AstNode>, primitives: &HashMap<String, Int>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "NameEnd" && size(ts) = 1 { return done(AstNode::Name { value: AstName::End }, size(ts)); };
-    if tag = "NamePart" && size(ts) = 3 {
+    if k = 0 && size(ts) = 1 { return done(AstNode::Name { value: AstName::End }, size(ts)); };
+    if k = 1 && size(ts) = 3 {
         text = nameAt(ts, 1);
         tail = refAt(ts, 2, nodes, 1);
         if !text.ok || !tail.ok { return bad; };
         return done(AstNode::Name { value: AstName::Part { text: text.value, tail: tail.value } }, size(ts));
     };
-    if tag = "Type" && size(ts) > 1 {
+    if k = 2 && size(ts) > 1 {
         t = typeAt(ts, 1);
         if !t.ok || t.pos != size(ts) { return bad; };
         return done(AstNode::Type { value: t.value }, size(ts));
     };
-    if tag = "Size" && size(ts) > 1 {
+    if k = 3 && size(ts) > 1 {
         s = sizeAt(ts, 1);
         if !s.ok || s.pos != size(ts) { return bad; };
         return done(AstNode::Size { value: s.value }, size(ts));
     };
-    if tag = "Primitive" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         n = nameAt(ts, 1);
-        if !n.ok || indexOf(primitiveWords(), n.value) < 0 { return bad; };
+        if !n.ok || !primitives.contains(&n.value) { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::Primitive { name: n.value } }, size(ts));
     };
     return bad;
 };
 
-fn valueNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn valueNodeAt1(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "VInt" && size(ts) = 2 {
+    if k = 0 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         if !validDecimal(nameValue(nodes, n.value)) { return bad; };
         return done(AstNode::Value { value: AstValue::VInt { n: n.value } }, size(ts));
     };
-    if tag = "VList" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         xs = refAt(ts, 1, nodes, 23);
         if !xs.ok { return bad; };
         return done(AstNode::Value { value: AstValue::VList { xs: xs.value } }, size(ts));
     };
-    if tag = "VBool" && size(ts) = 2 {
+    if k = 2 && size(ts) = 2 {
         b = boolAt(ts, 1);
         if !b.ok { return bad; };
         return done(AstNode::Value { value: AstValue::VBool { b: b.value } }, size(ts));
     };
-    if tag = "VData" && size(ts) = 3 {
+    if k = 3 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         xs = refAt(ts, 2, nodes, 30);
         if !n.ok || !xs.ok { return bad; };
         return done(AstNode::Value { value: AstValue::VData { n: n.value, xs: xs.value } }, size(ts));
     };
-    if tag = "VFnRef" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Value { value: AstValue::VFnRef { n: n.value } }, size(ts));
@@ -313,9 +405,9 @@ fn valueNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn valueNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn valueNodeAt2(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "VFunct" && size(ts) = 6 {
+    if k = 0 && size(ts) = 6 {
         ps = refAt(ts, 1, nodes, 22);
         ins = refAt(ts, 2, nodes, 26);
         outs = refAt(ts, 3, nodes, 26);
@@ -324,24 +416,24 @@ fn valueNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
         if !ps.ok || !ins.ok || !outs.ok || !body.ok || !exports.ok { return bad; };
         return done(AstNode::Value { value: AstValue::VFunct { ps: ps.value, ins: ins.value, outs: outs.value, body: body.value, exports: exports.value } }, size(ts));
     };
-    if tag = "NativeFunct" && size(ts) = 4 {
+    if k = 1 && size(ts) = 4 {
         sig = refAt(ts, 1, nodes, 12);
         term = refAt(ts, 2, nodes, 20);
         stmts = refAt(ts, 3, nodes, 24);
         if !sig.ok || !term.ok || !stmts.ok { return bad; };
         return done(AstNode::Body { value: AstBody::NativeFunct { sig: sig.value, term: term.value, stmts: stmts.value } }, size(ts));
     };
-    if tag = "BuiltinFunct" && size(ts) = 2 {
+    if k = 2 && size(ts) = 2 {
         b = refAt(ts, 1, nodes, 21);
         if !b.ok { return bad; };
         return done(AstNode::Body { value: AstBody::BuiltinFunct { b: b.value } }, size(ts));
     };
-    if tag = "Val" && size(ts) = 2 {
+    if k = 3 && size(ts) = 2 {
         v = refAt(ts, 1, nodes, 4);
         if !v.ok { return bad; };
         return done(AstNode::Expression { value: AstExpression::Val { v: v.value } }, size(ts));
     };
-    if tag = "Var" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Expression { value: AstExpression::Var { n: n.value } }, size(ts));
@@ -349,9 +441,9 @@ fn valueNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn valueNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn valueNodeAt3(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "F" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         f = refAt(ts, 1, nodes, 6);
         xs = refAt(ts, 2, nodes, 25);
         if !f.ok || !xs.ok { return bad; };
@@ -360,27 +452,27 @@ fn valueNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn validationNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn validationNodeAt1(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "Shrinks" && size(ts) = 2 {
+    if k = 0 && size(ts) = 2 {
         e = refAt(ts, 1, nodes, 6);
         if !e.ok { return bad; };
         return done(AstNode::Termination { value: AstTermination::Shrinks { e: e.value } }, size(ts));
     };
-    if tag = "Counting" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         e = refAt(ts, 1, nodes, 6);
         if !e.ok { return bad; };
         return done(AstNode::Termination { value: AstTermination::Counting { e: e.value } }, size(ts));
     };
-    if tag = "Parts" && size(ts) = 2 {
+    if k = 2 && size(ts) = 2 {
         e = refAt(ts, 1, nodes, 6);
         if !e.ok { return bad; };
         return done(AstNode::Termination { value: AstTermination::Parts { e: e.value } }, size(ts));
     };
-    if tag = "MayDiverge" && size(ts) = 1 {
+    if k = 3 && size(ts) = 1 {
         return done(AstNode::Termination { value: AstTermination::MayDiverge }, size(ts));
     };
-    if tag = "Recursing" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         t = refAt(ts, 1, nodes, 20);
         if !t.ok { return bad; };
         return done(AstNode::Termination { value: AstTermination::Recursing { t: t.value } }, size(ts));
@@ -388,25 +480,25 @@ fn validationNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> P
     return bad;
 };
 
-fn validationNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn validationNodeAt2(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "Rewrite" && size(ts) = 2 {
+    if k = 0 && size(ts) = 2 {
         r = refAt(ts, 1, nodes, 10);
         if !r.ok { return bad; };
         return done(AstNode::Validation { value: AstValidation::Rewrite { r: r.value } }, size(ts));
     };
-    if tag = "ProofAssert" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         p = refAt(ts, 1, nodes, 9);
         if !p.ok { return bad; };
         return done(AstNode::Validation { value: AstValidation::ProofAssert { p: p.value } }, size(ts));
     };
-    if tag = "AssignProofVar" && size(ts) = 3 {
+    if k = 2 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         e = refAt(ts, 2, nodes, 6);
         if !n.ok || !e.ok { return bad; };
         return done(AstNode::Validation { value: AstValidation::AssignProofVar { n: n.value, e: e.value } }, size(ts));
     };
-    if tag = "Assume" && size(ts) = 2 {
+    if k = 3 && size(ts) = 2 {
         p = refAt(ts, 1, nodes, 9);
         if !p.ok { return bad; };
         return done(AstNode::Validation { value: AstValidation::Assume { p: p.value } }, size(ts));
@@ -414,32 +506,32 @@ fn validationNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> P
     return bad;
 };
 
-fn proofNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn proofNodeAt1(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "FApp" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         f = refAt(ts, 1, nodes, 9);
         xs = refAt(ts, 2, nodes, 27);
         if !f.ok || !xs.ok { return bad; };
         return done(AstNode::Proof { value: AstProof::FApp { f: f.value, xs: xs.value } }, size(ts));
     };
-    if tag = "ATerm" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Proof { value: AstProof::ATerm { n: n.value } }, size(ts));
     };
-    if tag = "CTerm" && size(ts) = 2 {
+    if k = 2 && size(ts) = 2 {
         v = refAt(ts, 1, nodes, 4);
         if !v.ok { return bad; };
         return done(AstNode::Proof { value: AstProof::CTerm { v: v.value } }, size(ts));
     };
-    if tag = "Forall" && size(ts) = 4 {
+    if k = 3 && size(ts) = 4 {
         n = refAt(ts, 1, nodes, 1);
         gs = refAt(ts, 2, nodes, 27);
         b = refAt(ts, 3, nodes, 9);
         if !n.ok || !gs.ok || !b.ok { return bad; };
         return done(AstNode::Proof { value: AstProof::Forall { n: n.value, gs: gs.value, b: b.value } }, size(ts));
     };
-    if tag = "BVar" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Proof { value: AstProof::BVar { n: n.value } }, size(ts));
@@ -447,27 +539,27 @@ fn proofNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn proofNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn proofNodeAt2(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "Refl" && size(ts) = 2 {
+    if k = 0 && size(ts) = 2 {
         p = refAt(ts, 1, nodes, 9);
         if !p.ok { return bad; };
         return done(AstNode::Rule { value: AstRule::Refl { p: p.value } }, size(ts));
     };
-    if tag = "Eval" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Rule { value: AstRule::Eval { n: n.value } }, size(ts));
     };
-    if tag = "EvalAll" && size(ts) = 1 {
+    if k = 2 && size(ts) = 1 {
         return done(AstNode::Rule { value: AstRule::EvalAll }, size(ts));
     };
-    if tag = "CheckGtZero" && size(ts) = 2 {
+    if k = 3 && size(ts) = 2 {
         p = refAt(ts, 1, nodes, 9);
         if !p.ok { return bad; };
         return done(AstNode::Rule { value: AstRule::CheckGtZero { p: p.value } }, size(ts));
     };
-    if tag = "CheckRel" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         p = refAt(ts, 1, nodes, 9);
         if !p.ok { return bad; };
         return done(AstNode::Rule { value: AstRule::CheckRel { p: p.value } }, size(ts));
@@ -475,9 +567,9 @@ fn proofNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn proofNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn proofNodeAt3(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "UserRewrite" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         xs = refAt(ts, 2, nodes, 27);
         if !n.ok || !xs.ok { return bad; };
@@ -486,32 +578,32 @@ fn proofNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn statementNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn statementNodeAt1(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "Assign" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         e = refAt(ts, 2, nodes, 6);
         if !n.ok || !e.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::Assign { n: n.value, e: e.value } }, size(ts));
     };
-    if tag = "AssignDeref" && size(ts) = 3 {
+    if k = 1 && size(ts) = 3 {
         a = refAt(ts, 1, nodes, 6);
         b = refAt(ts, 2, nodes, 6);
         if !a.ok || !b.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::AssignDeref { a: a.value, b: b.value } }, size(ts));
     };
-    if tag = "Let" && size(ts) = 3 {
+    if k = 2 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         e = refAt(ts, 2, nodes, 6);
         if !n.ok || !e.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::Let { n: n.value, e: e.value } }, size(ts));
     };
-    if tag = "Return" && size(ts) = 2 {
+    if k = 3 && size(ts) = 2 {
         e = refAt(ts, 1, nodes, 6);
         if !e.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::Return { e: e.value } }, size(ts));
     };
-    if tag = "ValidationStatement" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         v = refAt(ts, 1, nodes, 8);
         if !v.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::ValidationStatement { v: v.value } }, size(ts));
@@ -519,9 +611,9 @@ fn statementNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
     return bad;
 };
 
-fn statementNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn statementNodeAt2(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "StructDef" && size(ts) = 5 {
+    if k = 0 && size(ts) = 5 {
         n = refAt(ts, 1, nodes, 1);
         ps = refAt(ts, 2, nodes, 22);
         fs = refAt(ts, 3, nodes, 28);
@@ -529,13 +621,13 @@ fn statementNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
         if !n.ok || !ps.ok || !fs.ok || !vs.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::StructDef { n: n.value, ps: ps.value, fs: fs.value, vs: vs.value } }, size(ts));
     };
-    if tag = "EnumDef" && size(ts) = 3 {
+    if k = 1 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         vs = refAt(ts, 2, nodes, 29);
         if !n.ok || !vs.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::EnumDef { n: n.value, vs: vs.value } }, size(ts));
     };
-    if tag = "AxiomDef" && size(ts) = 5 {
+    if k = 2 && size(ts) = 5 {
         n = refAt(ts, 1, nodes, 1);
         ps = refAt(ts, 2, nodes, 22);
         ins = refAt(ts, 3, nodes, 26);
@@ -543,7 +635,7 @@ fn statementNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
         if !n.ok || !ps.ok || !ins.ok || !outs.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::AxiomDef { n: n.value, ps: ps.value, ins: ins.value, outs: outs.value } }, size(ts));
     };
-    if tag = "ProofDef" && size(ts) = 6 {
+    if k = 3 && size(ts) = 6 {
         n = refAt(ts, 1, nodes, 1);
         ps = refAt(ts, 2, nodes, 22);
         ins = refAt(ts, 3, nodes, 26);
@@ -552,7 +644,7 @@ fn statementNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
         if !n.ok || !ps.ok || !ins.ok || !outs.ok || !body.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::ProofDef { n: n.value, ps: ps.value, ins: ins.value, outs: outs.value, body: body.value } }, size(ts));
     };
-    if tag = "Block" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         xs = refAt(ts, 1, nodes, 24);
         if !xs.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::Block { xs: xs.value } }, size(ts));
@@ -560,16 +652,16 @@ fn statementNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
     return bad;
 };
 
-fn statementNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn statementNodeAt3(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "If" && size(ts) = 4 {
+    if k = 0 && size(ts) = 4 {
         e = refAt(ts, 1, nodes, 6);
         a = refAt(ts, 2, nodes, 24);
         b = refAt(ts, 3, nodes, 24);
         if !e.ok || !a.ok || !b.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::If { e: e.value, a: a.value, b: b.value } }, size(ts));
     };
-    if tag = "While" && size(ts) = 5 {
+    if k = 1 && size(ts) = 5 {
         e = refAt(ts, 1, nodes, 6);
         vs = refAt(ts, 2, nodes, 26);
         t = refAt(ts, 3, nodes, 20);
@@ -577,14 +669,14 @@ fn statementNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
         if !e.ok || !vs.ok || !t.ok || !xs.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::While { e: e.value, vs: vs.value, t: t.value, xs: xs.value } }, size(ts));
     };
-    if tag = "TraitDef" && size(ts) = 4 {
+    if k = 2 && size(ts) = 4 {
         n = refAt(ts, 1, nodes, 1);
         ps = refAt(ts, 2, nodes, 22);
         fs = refAt(ts, 3, nodes, 33);
         if !n.ok || !ps.ok || !fs.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::TraitDef { n: n.value, ps: ps.value, fs: fs.value } }, size(ts));
     };
-    if tag = "ImplDef" && size(ts) = 7 {
+    if k = 3 && size(ts) = 7 {
         traitName = refAt(ts, 1, nodes, 19);
         args = refAt(ts, 2, nodes, 32);
         n = refAt(ts, 3, nodes, 1);
@@ -594,7 +686,7 @@ fn statementNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
         if !traitName.ok || !args.ok || !n.ok || !ty.ok || !bs.ok || !xs.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::ImplDef { traitName: traitName.value, args: args.value, n: n.value, ty: ty.value, bs: bs.value, xs: xs.value } }, size(ts));
     };
-    if tag = "BoundedDef" && size(ts) = 3 {
+    if k = 4 && size(ts) = 3 {
         bs = refAt(ts, 1, nodes, 34);
         s = refAt(ts, 2, nodes, 11);
         if !bs.ok || !s.ok { return bad; };
@@ -603,30 +695,30 @@ fn statementNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
     return bad;
 };
 
-fn statementNodeAt4(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn statementNodeAt4(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "Mark" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         line = intAt(ts, 1);
         col = intAt(ts, 2);
         if !line.ok || !col.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::Mark { line: line.value, col: col.value } }, size(ts));
     };
-    if tag = "CopyDef" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::CopyDef { n: n.value } }, size(ts));
     };
-    if tag = "LinearDef" && size(ts) = 2 {
+    if k = 2 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::LinearDef { n: n.value } }, size(ts));
     };
-    if tag = "ExternDef" && size(ts) = 2 {
+    if k = 3 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::ExternDef { n: n.value } }, size(ts));
     };
-    if tag = "DropDef" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::DropDef { n: n.value } }, size(ts));
@@ -634,9 +726,9 @@ fn statementNodeAt4(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
     return bad;
 };
 
-fn statementNodeAt5(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn statementNodeAt5(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "Dissolve" && size(ts) = 2 {
+    if k = 0 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::Dissolve { n: n.value } }, size(ts));
@@ -644,9 +736,9 @@ fn statementNodeAt5(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Pa
     return bad;
 };
 
-fn partNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn partNodeAt1(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "Signature" && size(ts) = 7 {
+    if k = 0 && size(ts) = 7 {
         params = refAt(ts, 1, nodes, 31);
         ret = refAt(ts, 2, nodes, 2);
         ss = refAt(ts, 3, nodes, 22);
@@ -656,7 +748,7 @@ fn partNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
         if !params.ok || !ret.ok || !ss.ok || !ps.ok || !ws.ok || !fs.ok { return bad; };
         return done(AstNode::Signature { value: AstSignature { ts: params.value, ret: ret.value, ss: ss.value, ps: ps.value, ws: ws.value, fs: fs.value } }, size(ts));
     };
-    if tag = "TraitFn" && size(ts) = 6 {
+    if k = 1 && size(ts) = 6 {
         n = refAt(ts, 1, nodes, 1);
         ps = refAt(ts, 2, nodes, 22);
         sig = refAt(ts, 3, nodes, 12);
@@ -665,20 +757,20 @@ fn partNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
         if !n.ok || !ps.ok || !sig.ok || !ins.ok || !outs.ok { return bad; };
         return done(AstNode::TraitFn { value: AstTraitFn { n: n.value, ps: ps.value, sig: sig.value, ins: ins.value, outs: outs.value } }, size(ts));
     };
-    if tag = "Bound" && size(ts) = 4 {
+    if k = 2 && size(ts) = 4 {
         p = refAt(ts, 1, nodes, 1);
         n = refAt(ts, 2, nodes, 1);
         params = refAt(ts, 3, nodes, 31);
         if !p.ok || !n.ok || !params.ok { return bad; };
         return done(AstNode::Bound { value: AstBound { p: p.value, n: n.value, ts: params.value } }, size(ts));
     };
-    if tag = "Field" && size(ts) = 3 {
+    if k = 3 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         ty = refAt(ts, 2, nodes, 2);
         if !n.ok || !ty.ok { return bad; };
         return done(AstNode::Field { value: AstField { n: n.value, ty: ty.value } }, size(ts));
     };
-    if tag = "Variant" && size(ts) = 3 {
+    if k = 4 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         fs = refAt(ts, 2, nodes, 28);
         if !n.ok || !fs.ok { return bad; };
@@ -687,28 +779,28 @@ fn partNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
     return bad;
 };
 
-fn partNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn partNodeAt2(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "ValueField" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         v = refAt(ts, 2, nodes, 4);
         if !n.ok || !v.ok { return bad; };
         return done(AstNode::ValueField { value: AstValueField { n: n.value, v: v.value } }, size(ts));
     };
-    if tag = "ArgSize" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         s = refAt(ts, 1, nodes, 3);
         if !s.ok { return bad; };
         return done(AstNode::Arg { value: AstArg::ArgSize { s: s.value } }, size(ts));
     };
-    if tag = "ArgType" && size(ts) = 2 {
+    if k = 2 && size(ts) = 2 {
         t = refAt(ts, 1, nodes, 2);
         if !t.ok { return bad; };
         return done(AstNode::Arg { value: AstArg::ArgType { t: t.value } }, size(ts));
     };
-    if tag = "NoName" && size(ts) = 1 {
+    if k = 3 && size(ts) = 1 {
         return done(AstNode::OptName { value: AstOptName::NoName }, size(ts));
     };
-    if tag = "SomeName" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::OptName { value: AstOptName::SomeName { n: n.value } }, size(ts));
@@ -716,30 +808,30 @@ fn partNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
     return bad;
 };
 
-fn partNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn partNodeAt3(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "NoTermination" && size(ts) = 1 {
+    if k = 0 && size(ts) = 1 {
         return done(AstNode::OptTermination { value: AstOptTermination::NoTermination }, size(ts));
     };
-    if tag = "SomeTermination" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         t = refAt(ts, 1, nodes, 7);
         if !t.ok { return bad; };
         return done(AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: t.value } }, size(ts));
     };
-    if tag = "Ctor" && size(ts) = 4 {
+    if k = 2 && size(ts) = 4 {
         n = refAt(ts, 1, nodes, 1);
         args = refAt(ts, 2, nodes, 32);
         fs = refAt(ts, 3, nodes, 22);
         if !n.ok || !args.ok || !fs.ok { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::Ctor { n: n.value, args: args.value, fs: fs.value } }, size(ts));
     };
-    if tag = "FieldBuiltin" && size(ts) = 3 {
+    if k = 3 && size(ts) = 3 {
         owner = refAt(ts, 1, nodes, 19);
         n = refAt(ts, 2, nodes, 1);
         if !owner.ok || !n.ok { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::FieldBuiltin { owner: owner.value, n: n.value } }, size(ts));
     };
-    if tag = "Is" && size(ts) = 2 {
+    if k = 4 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::Is { n: n.value } }, size(ts));
@@ -747,26 +839,26 @@ fn partNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
     return bad;
 };
 
-fn partNodeAt4(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn partNodeAt4(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "Project" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         f = refAt(ts, 2, nodes, 1);
         if !n.ok || !f.ok { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::Project { n: n.value, f: f.value } }, size(ts));
     };
-    if tag = "Cast" && size(ts) = 2 {
+    if k = 1 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::Cast { n: n.value } }, size(ts));
     };
-    if tag = "ToWord" && size(ts) = 3 {
+    if k = 2 && size(ts) = 3 {
         signed = boolAt(ts, 1);
         bits = intAt(ts, 2);
         if !signed.ok || !bits.ok { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::ToWord { signed: signed.value, bits: bits.value } }, size(ts));
     };
-    if tag = "Rel" && size(ts) = 2 {
+    if k = 3 && size(ts) = 2 {
         r = relAt(ts, 1);
         if !r.ok { return bad; };
         return done(AstNode::Builtin { value: AstBuiltin::Rel { r: r.value } }, size(ts));
@@ -774,43 +866,43 @@ fn partNodeAt4(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
     return bad;
 };
 
-fn listNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn listNodeAt1(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "NamesEnd" && size(ts) = 1 { return done(AstNode::Names { value: AstNames::End }, size(ts)); };
-    if tag = "NamesCons" && size(ts) = 3 {
+    if k = 0 && size(ts) = 1 { return done(AstNode::Names { value: AstNames::End }, size(ts)); };
+    if k = 1 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 1);
         t = refAt(ts, 2, nodes, 22);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Names { value: AstNames::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "ValuesEnd" && size(ts) = 1 { return done(AstNode::Values { value: AstValues::End }, size(ts)); };
-    if tag = "ValuesCons" && size(ts) = 3 {
+    if k = 2 && size(ts) = 1 { return done(AstNode::Values { value: AstValues::End }, size(ts)); };
+    if k = 3 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 4);
         t = refAt(ts, 2, nodes, 23);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Values { value: AstValues::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "StatementsEnd" && size(ts) = 1 { return done(AstNode::Statements { value: AstStatements::End }, size(ts)); };
+    if k = 4 && size(ts) = 1 { return done(AstNode::Statements { value: AstStatements::End }, size(ts)); };
     return bad;
 };
 
-fn listNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn listNodeAt2(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "StatementsCons" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 11);
         t = refAt(ts, 2, nodes, 24);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Statements { value: AstStatements::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "ExpressionsEnd" && size(ts) = 1 { return done(AstNode::Expressions { value: AstExpressions::End }, size(ts)); };
-    if tag = "ExpressionsCons" && size(ts) = 3 {
+    if k = 1 && size(ts) = 1 { return done(AstNode::Expressions { value: AstExpressions::End }, size(ts)); };
+    if k = 2 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 6);
         t = refAt(ts, 2, nodes, 25);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Expressions { value: AstExpressions::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "ValidationsEnd" && size(ts) = 1 { return done(AstNode::Validations { value: AstValidations::End }, size(ts)); };
-    if tag = "ValidationsCons" && size(ts) = 3 {
+    if k = 3 && size(ts) = 1 { return done(AstNode::Validations { value: AstValidations::End }, size(ts)); };
+    if k = 4 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 8);
         t = refAt(ts, 2, nodes, 26);
         if !h.ok || !t.ok { return bad; };
@@ -819,43 +911,43 @@ fn listNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
     return bad;
 };
 
-fn listNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn listNodeAt3(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "ProofsEnd" && size(ts) = 1 { return done(AstNode::Proofs { value: AstProofs::End }, size(ts)); };
-    if tag = "ProofsCons" && size(ts) = 3 {
+    if k = 0 && size(ts) = 1 { return done(AstNode::Proofs { value: AstProofs::End }, size(ts)); };
+    if k = 1 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 9);
         t = refAt(ts, 2, nodes, 27);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Proofs { value: AstProofs::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "FieldsEnd" && size(ts) = 1 { return done(AstNode::Fields { value: AstFields::End }, size(ts)); };
-    if tag = "FieldsCons" && size(ts) = 3 {
+    if k = 2 && size(ts) = 1 { return done(AstNode::Fields { value: AstFields::End }, size(ts)); };
+    if k = 3 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 15);
         t = refAt(ts, 2, nodes, 28);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Fields { value: AstFields::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "VariantsEnd" && size(ts) = 1 { return done(AstNode::Variants { value: AstVariants::End }, size(ts)); };
+    if k = 4 && size(ts) = 1 { return done(AstNode::Variants { value: AstVariants::End }, size(ts)); };
     return bad;
 };
 
-fn listNodeAt4(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn listNodeAt4(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "VariantsCons" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 16);
         t = refAt(ts, 2, nodes, 29);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Variants { value: AstVariants::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "ValueFieldsEnd" && size(ts) = 1 { return done(AstNode::ValueFields { value: AstValueFields::End }, size(ts)); };
-    if tag = "ValueFieldsCons" && size(ts) = 3 {
+    if k = 1 && size(ts) = 1 { return done(AstNode::ValueFields { value: AstValueFields::End }, size(ts)); };
+    if k = 2 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 17);
         t = refAt(ts, 2, nodes, 30);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::ValueFields { value: AstValueFields::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "TypesEnd" && size(ts) = 1 { return done(AstNode::Types { value: AstTypes::End }, size(ts)); };
-    if tag = "TypesCons" && size(ts) = 3 {
+    if k = 3 && size(ts) = 1 { return done(AstNode::Types { value: AstTypes::End }, size(ts)); };
+    if k = 4 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 2);
         t = refAt(ts, 2, nodes, 31);
         if !h.ok || !t.ok { return bad; };
@@ -864,35 +956,35 @@ fn listNodeAt4(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
     return bad;
 };
 
-fn listNodeAt5(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn listNodeAt5(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "ArgsEnd" && size(ts) = 1 { return done(AstNode::Args { value: AstArgs::End }, size(ts)); };
-    if tag = "ArgsCons" && size(ts) = 3 {
+    if k = 0 && size(ts) = 1 { return done(AstNode::Args { value: AstArgs::End }, size(ts)); };
+    if k = 1 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 18);
         t = refAt(ts, 2, nodes, 32);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Args { value: AstArgs::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "TraitFnsEnd" && size(ts) = 1 { return done(AstNode::TraitFns { value: AstTraitFns::End }, size(ts)); };
-    if tag = "TraitFnsCons" && size(ts) = 3 {
+    if k = 2 && size(ts) = 1 { return done(AstNode::TraitFns { value: AstTraitFns::End }, size(ts)); };
+    if k = 3 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 13);
         t = refAt(ts, 2, nodes, 33);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::TraitFns { value: AstTraitFns::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "BoundsEnd" && size(ts) = 1 { return done(AstNode::Bounds { value: AstBounds::End }, size(ts)); };
+    if k = 4 && size(ts) = 1 { return done(AstNode::Bounds { value: AstBounds::End }, size(ts)); };
     return bad;
 };
 
-fn listNodeAt6(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn listNodeAt6(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "BoundsCons" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 14);
         t = refAt(ts, 2, nodes, 34);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Bounds { value: AstBounds::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "Elaborated" && size(ts) = 3 {
+    if k = 1 && size(ts) = 3 {
         s = refAt(ts, 1, nodes, 24);
         t = refAt(ts, 2, nodes, 31);
         if !s.ok || !t.ok { return bad; };
@@ -902,35 +994,35 @@ fn listNodeAt6(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<
 };
 
 // The entries of an interface or of the builtin table, and the nodes only they hold
-fn entryNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn entryNodeAt1(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "NamesEntry" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         ns = refAt(ts, 2, nodes, 22);
         if !n.ok || !ns.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::NamesEntry { n: n.value, ns: ns.value } }, size(ts));
     };
-    if tag = "CtorEntry" && size(ts) = 4 {
+    if k = 1 && size(ts) = 4 {
         n = refAt(ts, 1, nodes, 1);
         o = refAt(ts, 2, nodes, 1);
         fs = refAt(ts, 3, nodes, 28);
         if !n.ok || !o.ok || !fs.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::CtorEntry { n: n.value, owner: o.value, fs: fs.value } }, size(ts));
     };
-    if tag = "GenericEntry" && size(ts) = 4 {
+    if k = 2 && size(ts) = 4 {
         n = refAt(ts, 1, nodes, 1);
         ps = refAt(ts, 2, nodes, 22);
         fs = refAt(ts, 3, nodes, 28);
         if !n.ok || !ps.ok || !fs.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::GenericEntry { n: n.value, ps: ps.value, fs: fs.value } }, size(ts));
     };
-    if tag = "InvariantEntry" && size(ts) = 3 {
+    if k = 3 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         vs = refAt(ts, 2, nodes, 26);
         if !n.ok || !vs.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::InvariantEntry { n: n.value, vs: vs.value } }, size(ts));
     };
-    if tag = "TraitEntry" && size(ts) = 3 {
+    if k = 4 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         fs = refAt(ts, 2, nodes, 33);
         if !n.ok || !fs.ok { return bad; };
@@ -939,9 +1031,9 @@ fn entryNodeAt1(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn entryNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn entryNodeAt2(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "FunctionEntry" && size(ts) = 8 {
+    if k = 0 && size(ts) = 8 {
         n = refAt(ts, 1, nodes, 1);
         ps = refAt(ts, 2, nodes, 22);
         sig = refAt(ts, 3, nodes, 12);
@@ -952,20 +1044,20 @@ fn entryNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
         if !n.ok || !ps.ok || !sig.ok || !ins.ok || !outs.ok || !term.ok || !exports.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::FunctionEntry { n: n.value, ps: ps.value, sig: sig.value, ins: ins.value, outs: outs.value, term: term.value, exports: exports.value } }, size(ts));
     };
-    if tag = "PairEntry" && size(ts) = 3 {
+    if k = 1 && size(ts) = 3 {
         a = refAt(ts, 1, nodes, 1);
         b = refAt(ts, 2, nodes, 1);
         if !a.ok || !b.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::PairEntry { a: a.value, b: b.value } }, size(ts));
     };
-    if tag = "AssocEntry" && size(ts) = 4 {
+    if k = 2 && size(ts) = 4 {
         a = refAt(ts, 1, nodes, 1);
         b = refAt(ts, 2, nodes, 1);
         os = refAt(ts, 3, nodes, 38);
         if !a.ok || !b.ok || !os.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::AssocEntry { a: a.value, b: b.value, origins: os.value } }, size(ts));
     };
-    if tag = "ImplArgsEntry" && size(ts) = 5 {
+    if k = 3 && size(ts) = 5 {
         a = refAt(ts, 1, nodes, 1);
         b = refAt(ts, 2, nodes, 1);
         ty = refAt(ts, 3, nodes, 2);
@@ -973,7 +1065,7 @@ fn entryNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
         if !a.ok || !b.ok || !ty.ok || !args.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::ImplArgsEntry { a: a.value, b: b.value, ty: ty.value, args: args.value } }, size(ts));
     };
-    if tag = "ImplBoundsEntry" && size(ts) = 4 {
+    if k = 4 && size(ts) = 4 {
         a = refAt(ts, 1, nodes, 1);
         b = refAt(ts, 2, nodes, 1);
         bs = refAt(ts, 3, nodes, 34);
@@ -983,9 +1075,9 @@ fn entryNodeAt2(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn entryNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn entryNodeAt3(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "TemplateEntry" && size(ts) = 11 {
+    if k = 0 && size(ts) = 11 {
         n = refAt(ts, 1, nodes, 1);
         bs = refAt(ts, 2, nodes, 34);
         fns = refAt(ts, 3, nodes, 37);
@@ -1000,19 +1092,19 @@ fn entryNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
         if !entriesAre(nodes, fns.value, 11) || !entriesAscending(nodes, fns.value) { return bad; };
         return done(AstNode::Entry { value: AstEntry::TemplateEntry { n: n.value, bs: bs.value, fns: fns.value, ret: ret.value, ps: ps.value, sig: sig.value, ins: ins.value, outs: outs.value, term: term.value, body: body.value } }, size(ts));
     };
-    if tag = "TypeEntry" && size(ts) = 3 {
+    if k = 1 && size(ts) = 3 {
         n = refAt(ts, 1, nodes, 1);
         ty = refAt(ts, 2, nodes, 2);
         if !n.ok || !ty.ok { return bad; };
         return done(AstNode::Entry { value: AstEntry::TypeEntry { n: n.value, ty: ty.value } }, size(ts));
     };
-    if tag = "SurfaceEntry" && size(ts) = 3 {
+    if k = 2 && size(ts) = 3 {
         space = wordAt(ts, 1);
         n = refAt(ts, 2, nodes, 1);
         if !space.ok || !n.ok || indexOf(spaceWords(), space.value) < 0 { return bad; };
         return done(AstNode::Entry { value: AstEntry::SurfaceEntry { space: space.value, n: n.value } }, size(ts));
     };
-    if tag = "BuiltinEntry" && size(ts) = 5 {
+    if k = 3 && size(ts) = 5 {
         b = refAt(ts, 1, nodes, 21);
         surface = refAt(ts, 2, nodes, 37);
         scheme = refAt(ts, 3, nodes, 41);
@@ -1021,7 +1113,7 @@ fn entryNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
         if !entriesAre(nodes, surface.value, 12) { return bad; };
         return done(AstNode::Entry { value: AstEntry::BuiltinEntry { b: b.value, surface: surface.value, scheme: scheme.value, value: value.value } }, size(ts));
     };
-    if tag = "SigFn" && size(ts) = 3 {
+    if k = 4 && size(ts) = 3 {
         params = refAt(ts, 1, nodes, 31);
         ret = refAt(ts, 2, nodes, 2);
         if !params.ok || !ret.ok { return bad; };
@@ -1030,40 +1122,40 @@ fn entryNodeAt3(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed
     return bad;
 };
 
-fn entryNodeAt4(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn entryNodeAt4(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "SigDynamic" && size(ts) = 1 { return done(AstNode::Scheme { value: AstScheme::SigDynamic }, size(ts)); };
-    if tag = "SigValueError" && size(ts) = 2 {
+    if k = 0 && size(ts) = 1 { return done(AstNode::Scheme { value: AstScheme::SigDynamic }, size(ts)); };
+    if k = 1 && size(ts) = 2 {
         n = refAt(ts, 1, nodes, 1);
         if !n.ok { return bad; };
         return done(AstNode::Scheme { value: AstScheme::SigValueError { n: n.value } }, size(ts));
     };
-    if tag = "NoType" && size(ts) = 1 { return done(AstNode::OptType { value: AstOptType::NoType }, size(ts)); };
-    if tag = "SomeType" && size(ts) = 2 {
+    if k = 2 && size(ts) = 1 { return done(AstNode::OptType { value: AstOptType::NoType }, size(ts)); };
+    if k = 3 && size(ts) = 2 {
         t = refAt(ts, 1, nodes, 2);
         if !t.ok { return bad; };
         return done(AstNode::OptType { value: AstOptType::SomeType { t: t.value } }, size(ts));
     };
-    if tag = "EntriesEnd" && size(ts) = 1 { return done(AstNode::Entries { value: AstEntries::End }, size(ts)); };
+    if k = 4 && size(ts) = 1 { return done(AstNode::Entries { value: AstEntries::End }, size(ts)); };
     return bad;
 };
 
-fn entryNodeAt5(tag: &String, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+fn entryNodeAt5(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
     bad = failed(noNode(), ts);
-    if tag = "EntriesCons" && size(ts) = 3 {
+    if k = 0 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 36);
         t = refAt(ts, 2, nodes, 37);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::Entries { value: AstEntries::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "OptNamesEnd" && size(ts) = 1 { return done(AstNode::OptNames { value: AstOptNames::End }, size(ts)); };
-    if tag = "OptNamesCons" && size(ts) = 3 {
+    if k = 1 && size(ts) = 1 { return done(AstNode::OptNames { value: AstOptNames::End }, size(ts)); };
+    if k = 2 && size(ts) = 3 {
         h = refAt(ts, 1, nodes, 19);
         t = refAt(ts, 2, nodes, 38);
         if !h.ok || !t.ok { return bad; };
         return done(AstNode::OptNames { value: AstOptNames::Cons { head: h.value, tail: t.value } }, size(ts));
     };
-    if tag = "Interface" && size(ts) = 22 { return interfaceNodeAt(ts, nodes); };
+    if k = 3 && size(ts) = 22 { return interfaceNodeAt(ts, nodes); };
     return bad;
 };
 
@@ -1514,41 +1606,60 @@ fn readAst() -> Parsed<AstProgram> ~ {
 // An AST block of exactly count records on standard input (a header, the nodes and the root), with more input
 // after it; with a negative count, the whole input
 fn readAstRecords(count: Int) -> Parsed<AstProgram> ~ {
-    header = readRecord();
-    if !header.ok || header.pos = 0 || size(header.value.bytes) < 14 || !header.value.startsWith("tersus-ast 1 ") { return badAst(); };
-    stage = header.value.slice(13, size(header.value.bytes));
+    lines = readRecords(count);
+    if !lines.ok { return badAst(); };
+    return parseAstLines(&lines.value);
+};
+
+// count records of standard input, or with a negative count every record to its end
+fn readRecords(count: Int) -> Parsed<List<String>> ~ {
+    lines = [];
+    while true [{ }] ~ {
+        if count >= 0 && size(lines) >= count { return done(lines, 0); };
+        line = readRecord();
+        if !line.ok { return Parsed<List<String>> { value: [], pos: 0, ok: false }; };
+        if line.pos = 0 {
+            if count < 0 { return done(lines, 0); };
+            return Parsed<List<String>> { value: [], pos: 0, ok: false };
+        };
+        lines = push(lines, line.value);
+    };
+    return Parsed<List<String>> { value: [], pos: 0, ok: false };
+};
+
+// An AST block as its records: a header, the nodes and the root, which is the last record
+fn parseAstLines(lines: &List<String>) -> Parsed<AstProgram> ~ {
+    if size(lines) < 2 { return badAst(); };
+    header = get(lines, 0);
+    if size(header.bytes) < 14 || !header.startsWith("tersus-ast 1 ") { return badAst(); };
+    stage = header.slice(13, size(header.bytes));
     rootKind = rootKindOf(stage);
     if rootKind < 0 { return badAst(); };
+    tags = recordTags();
     nodes = [];
     uses = noInts();
-    while true [{ }] ~ {
-        if count >= 0 && size(nodes) + 2 > count { return badAst(); };
-        line = readRecord();
-        if !line.ok || line.pos = 0 || size(line.value.bytes) = 0 { return badAst(); };
-        tokens = tokenizeStrict(line.value);
+    i = 1;
+    while i < size(lines) [{ affirm i >= 1; }] ~ {
+        line = get(lines, i);
+        if size(line.bytes) = 0 { return badAst(); };
+        tokens = tokenizeStrict(line);
         if !tokens.ok { return badAst(); };
         ts = tokens.value;
         if isWord(ts, 0, "root") {
-            if size(ts) != 2 { return badAst(); };
+            if size(ts) != 2 || i != size(lines) - 1 { return badAst(); };
             root = intAt(ts, 1);
             if !root.ok || root.value < 0 || root.value != size(nodes) - 1 { return badAst(); };
             if nodeKind(&get(nodes, root.value)) != rootKind { return badAst(); };
             if stage = "builtins" && !entriesAre(nodes, root.value, 13) { return badAst(); };
-            for i in 0..size(uses) {
+            for j in 0..size(uses) {
                 expected = 1;
-                if i = root.value { expected = 0; };
-                if get(uses, i) != expected { return badAst(); };
-            };
-            if count < 0 {
-                end = readRecord();
-                if !end.ok || end.pos != 0 { return badAst(); };
-            } else {
-                if size(nodes) + 2 != count { return badAst(); };
+                if j = root.value { expected = 0; };
+                if get(uses, j) != expected { return badAst(); };
             };
             total = size(nodes);
             return done(AstProgram { stage: stage, nodes: nodes, root: root.value }, total);
         };
-        node = nodeAt(ts, nodes);
+        node = nodeAt(&tags, ts, nodes);
         if !node.ok { return badAst(); };
         refs = nodeRefs(node.value);
         for r in refs {
@@ -1558,6 +1669,7 @@ fn readAstRecords(count: Int) -> Parsed<AstProgram> ~ {
         };
         nodes = push(nodes, node.value);
         uses = push(uses, 0);
+        i = i + 1;
     };
     return badAst();
 };

@@ -1,11 +1,12 @@
 -- Module interfaces as data, `tersus-ast 1 interface` (AST_DATA.md): what a checked module exposes to the
 -- modules that import it, written and read without loss.
-module InterfaceData (writeInterface, readInterface) where
+module InterfaceData (writeInterface, writeInterfaceLines, readInterface, readInterfaceLines, readInterfaceBytes) where
 
+import qualified Data.ByteString.Char8 as B
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import AstData (FunctionRecord (..), InterfaceRecord (..), TemplateRecord (..), readInterfaceRecord, writeInterfaceRecord)
+import AstData (FunctionRecord (..), InterfaceRecord (..), TemplateRecord (..), readInterfaceRecord, readInterfaceRecordBytes, readInterfaceRecordLines, writeInterfaceRecord, writeInterfaceRecordLines)
 import Interface (InterfaceFunction (..), ModuleInterface (..))
 import Modules (ModuleId (..))
 import TypeCheckCore (Ctx (..), Template (..))
@@ -14,10 +15,19 @@ import Utils
 writeInterface :: ModuleInterface -> Result String String
 writeInterface iface = writeInterfaceRecord (recordOf iface)
 
+writeInterfaceLines :: ModuleInterface -> Result [String] String
+writeInterfaceLines iface = writeInterfaceRecordLines (recordOf iface)
+
 -- A map's entries and a set's members have to be in ascending order, with no key twice, so that reading
 -- them back loses nothing
 readInterface :: String -> Result ModuleInterface String
 readInterface text = readInterfaceRecord text `bindResult` interfaceOf
+
+readInterfaceLines :: [String] -> Result ModuleInterface String
+readInterfaceLines ls = readInterfaceRecordLines ls `bindResult` interfaceOf
+
+readInterfaceBytes :: [B.ByteString] -> Result ModuleInterface String
+readInterfaceBytes ls = readInterfaceRecordBytes ls `bindResult` interfaceOf
 
 recordOf :: ModuleInterface -> InterfaceRecord
 recordOf iface =

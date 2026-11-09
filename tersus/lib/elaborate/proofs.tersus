@@ -182,10 +182,10 @@ fn inferProofHead(st: St, funct: Int, args: &List<Int>) -> St ~ {
     fp = proofOf(st, funct);
     if fp is AstProof::ATerm {
         name = nameText(&st.nodes, (fp as AstProof::ATerm).n);
-        if !shadowedByFunction(st, &name) && !st.fns.contains(&name) && st.ghostNames.contains(&name) {
-            return ghostProof(st, funct, name, st.ghostNames.lookup(&name, 0 - 1), args);
+        if !shadowedByFunction(st, &name) && !HashMap::contains(&st.fns, &name) && HashMap::contains(&st.ghostNames, &name) {
+            return ghostProof(st, funct, name, HashMap::lookup(&st.ghostNames, &name, 0 - 1), args);
         };
-        if !inScope(st, &name) && !st.fns.contains(&name) && name = "whole" {
+        if !inScope(st, &name) && !HashMap::contains(&st.fns, &name) && name = "whole" {
             return fail(st, "Type error: whole(b) is a statement of its own, affirm whole(b); (it is two facts: start(b) = 0 and cap(b) = extent(origin(b)))");
         };
         if !inScope(st, &name) { return proofOrdinaryCall(st, funct, name, args); };
@@ -218,8 +218,8 @@ fn inferProofOther(st: St, funct: Int, args: &List<Int>) -> St ~ {
             argNodes = set(argNodes, 0, n);
         };
         i = builtinIndex(st, &key);
-        if st.methodOf.contains(i) {
-            fname = st.methodOf.lookup(i, "");
+        if HashMap::contains(&st.methodOf, i) {
+            fname = HashMap::lookup(&st.methodOf, i, "");
             st = zonk(st, nth(&argTys, 0));
             x = tyAt(st, st.ty);
             if x.kind = 4 && x.name = "Self" {
@@ -376,8 +376,8 @@ fn proofOrdinaryCall(st: St, funct: Int, name: String, args: &List<Int>) -> St ~
     argTys = clone(st.te.types);
     argNodes = clone(st.outs);
     // (a function with bounds is the function made for the types of the arguments)
-    if st.templates.contains(&name) {
-        tm = st.templates.lookup(&name, emptyTemplate());
+    if HashMap::contains(&st.templates, &name) {
+        tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
         st = zeroArguments(st, &argTys);
         fakes = clone(st.tes);
         st = templateCall(st, clone(name), tm, &fakes);
@@ -396,21 +396,21 @@ fn proofOrdinaryCall(st: St, funct: Int, name: String, args: &List<Int>) -> St ~
     if traitPath(&name) {
         path = pathOf(&name);
         function = functionOf(&name);
-        if st.traitFns.contains(&path) {
-            fns = st.traitFns.lookup(&path, []);
+        if HashMap::contains(&st.traitFns, &path) {
+            fns = HashMap::lookup(&st.traitFns, &path, []);
             st = ownerThroughTrait(st, &path, &fns, &function, &argTys);
             if st.status != 0 { return st; };
             owner = firstText(&st.names);
             return ghostCall(st, funct, implFunctionName(&owner, &path, &function), &argTys, &argNodes);
         };
-        if st.types.contains(&path) || st.generics.contains(&path) {
+        if HashMap::contains(&st.types, &path) || HashMap::contains(&st.generics, &path) {
             st = resolveAssociated(st, &path, &function);
             if st.status != 0 { return st; };
             return ghostCall(st, funct, firstText(&st.names), &argTys, &argNodes);
         };
         return proofGeneral(st, funct, &argTys, &argNodes);
     };
-    if st.fns.contains(&name) { return ghostCall(st, funct, name, &argTys, &argNodes); };
+    if HashMap::contains(&st.fns, &name) { return ghostCall(st, funct, name, &argTys, &argNodes); };
     return proofGeneral(st, funct, &argTys, &argNodes);
 };
 

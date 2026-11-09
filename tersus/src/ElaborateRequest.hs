@@ -10,17 +10,20 @@ module ElaborateRequest
     , readRequest
     , writeResponse
     , readResponse
+    , readResponseLines
+    , readResponseBytes
     , respond
     , acceptedElaboration
     ) where
 
+import qualified Data.ByteString.Char8 as B
 import qualified Data.Map as Map
 
-import AstData (readElaborated, readParsed, writeElaborated, writeParsed)
-import BuiltinTable (builtinTableText)
+import AstData (readElaboratedBytes, readElaboratedLines, readParsedLines, writeElaboratedLines, writeParsedLines)
+import BuiltinTable (builtinTableLines)
 import DataCodec (Token (..), quote, strictTokenize)
 import Interface (ModuleInterface (..), extractInterface, extractLibInterface, mergeInterfacesImportEnv, predeclareOwnEnv)
-import InterfaceData (readInterface, writeInterface)
+import InterfaceData (readInterfaceBytes, readInterfaceLines, writeInterfaceLines)
 import Modules (ModuleId (..))
 import Syntax (Elaborated (..), Statement)
 import TypeCheck (ImportEnv (..), elaborateWith)
@@ -60,10 +63,10 @@ type Elaborator = Request -> Response
 
 writeRequest :: Request -> Result String String
 writeRequest rq =
-    builtinTableText `bindResult` \builtins ->
-    mapAll writeInterface (rqInterfaces rq) `bindResult` \ifaces ->
+    builtinTableLines `bindResult` \builtins ->
+    mapAll linesOf (rqInterfaces rq) `bindResult` \ifaces ->
         mapAll writeDefinition (rqDefinitions rq) `bindResult` \definitions ->
-        writeParsed (rqStatements rq) `bindResult` \ast ->
+        writeParsedLines (rqStatements rq) `bindResult` \ast ->
             Ok $
                 unlines
                     ( [ "tersus-elaborate 1"
@@ -78,14 +81,17 @@ writeRequest rq =
                         ++ concatMap block ifaces
                         ++ ["definitions " ++ show (length definitions)]
                         ++ concat definitions
+                        ++ block ast
                     )
-                    ++ block' ast
   where
     writeDefinition [] = Error "ElaborateRequest: empty defining context"
-    writeDefinition context = mapAll writeInterface context `bindResult` \texts -> Ok (("definition " ++ show (length texts)) : concatMap block texts)
+    writeDefinition context = mapAll linesOf context `bindResult` \texts -> Ok (("definition " ++ show (length texts)) : concatMap block texts)
+    -- (a defining context repeats the interfaces of the modules it depends on, so each is written once)
+    written = Map.fromList [(ifModule i, (i, writeInterfaceLines i)) | i <- rqInterfaces rq ++ concat (rqDefinitions rq)]
+    linesOf iface = case Map.lookup (ifModule iface) written of
+        Just (known, ls) | known == iface -> ls
+        _ -> writeInterfaceLines iface
     ModuleId pkg modu = rqModule rq
-    block text = lines (block' text)
-    block' text = unlines (("data " ++ show (length (lines text))) : lines text)
 
 readRequest :: String -> Result Request String
 readRequest text = case lines text of
@@ -98,20 +104,20 @@ readRequest text = case lines text of
         wordAfter "extract" extractLine `bindResult` \extract ->
         extractionOf extract `bindResult` \extraction ->
         blocks 1 afterBuiltins `bindResult` \(builtinTexts, afterTable) ->
-        builtinTableText `bindResult` \table ->
-        (if map lines builtinTexts == [lines table] then Ok () else Error "ElaborateRequest: the request's builtin table is not this compiler's") `bindResult` \() ->
+        builtinTableLines `bindResult` \table ->
+        (if builtinTexts == [table] then Ok () else Error "ElaborateRequest: the request's builtin table is not this compiler's") `bindResult` \() ->
         firstLine afterTable `bindResult` \(countLine, rest) ->
         wordAfter "interfaces" countLine `bindResult` \countText ->
         countOf countText `bindResult` \count ->
         blocks count rest `bindResult` \(ifaceTexts, rest') ->
-        mapAll readInterface ifaceTexts `bindResult` \ifaces ->
+        mapAll readInterfaceLines ifaceTexts `bindResult` \ifaces ->
         definitionBlocks rest' `bindResult` \(definitionTexts, syntax) ->
-        mapAll (mapAll readInterface) definitionTexts `bindResult` \definitions ->
+        mapAll (mapAll readInterfaceLines) definitionTexts `bindResult` \definitions ->
         blocks 1 syntax `bindResult` \(astTexts, rest'') ->
             if not (null rest'')
                 then Error "ElaborateRequest: records after the module's syntax"
                 else case astTexts of
-                    [ast] -> readParsed ast `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions stmts)
+                    [ast] -> readParsedLines ast `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions stmts)
                     _ -> Error "ElaborateRequest: no syntax"
     _ -> Error "ElaborateRequest: not an elaboration request"
   where
@@ -137,28 +143,35 @@ readRequest text = case lines text of
 writeResponse :: Response -> Result String String
 writeResponse response = case response of
     Accepted elaborated iface ->
-        writeElaborated elaborated `bindResult` \ast ->
-            maybe (Ok Nothing) (mapResult Just . writeInterface) iface `bindResult` \ifaceText ->
-                Ok (unlines (["tersus-elaborated 1", "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceText))
+        writeElaboratedLines elaborated `bindResult` \ast ->
+            maybe (Ok Nothing) (mapResult Just . writeInterfaceLines) iface `bindResult` \ifaceLines ->
+                Ok (unlines (["tersus-elaborated 1", "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines))
     Refused message -> Ok (unlines ["tersus-elaborated 1", "refused " ++ quote message])
     RefusedInterface message -> Ok (unlines ["tersus-elaborated 1", "interfaceRefused " ++ quote message])
     NotModelled what -> Ok (unlines ["tersus-elaborated 1", "unmodelled " ++ quote what])
-  where
-    block text = ("data " ++ show (length (lines text))) : lines text
 
 readResponse :: String -> Result Response String
-readResponse text = case lines text of
+readResponse = readResponseLines . lines
+
+readResponseLines :: [String] -> Result Response String
+readResponseLines = readResponseWith id readElaboratedLines readInterfaceLines
+
+readResponseBytes :: [B.ByteString] -> Result Response String
+readResponseBytes = readResponseWith B.unpack readElaboratedBytes readInterfaceBytes
+
+readResponseWith :: (l -> String) -> ([l] -> Result Elaborated String) -> ([l] -> Result ModuleInterface String) -> [l] -> Result Response String
+readResponseWith text elaborated interface ls = case map text (take 3 ls) of
     ["tersus-elaborated 1", line] -> strictTokenize line `bindResult` \ts -> case ts of
         [Word "refused", Str message] -> Ok (Refused message)
         [Word "interfaceRefused", Str message] -> Ok (RefusedInterface message)
         [Word "unmodelled", Str what] -> Ok (NotModelled what)
         _ -> Error "ElaborateRequest: malformed response"
-    "tersus-elaborated 1" : "accepted" : rest ->
-        blocks 1 rest `bindResult` \(astTexts, rest') -> case (astTexts, rest') of
-            ([ast], ["interface none"]) -> readElaborated ast `bindResult` \e -> Ok (Accepted e Nothing)
-            ([ast], "interface" : more) ->
-                blocks 1 more `bindResult` \(ifaceTexts, rest'') -> case (ifaceTexts, rest'') of
-                    ([ifaceText], []) -> readElaborated ast `bindResult` \e -> readInterface ifaceText `bindResult` \i -> Ok (Accepted e (Just i))
+    "tersus-elaborated 1" : "accepted" : _ ->
+        blocksWith text 1 (drop 2 ls) `bindResult` \(astTexts, rest') -> case (astTexts, map text (take 2 rest')) of
+            ([ast], ["interface none"]) -> elaborated ast `bindResult` \e -> Ok (Accepted e Nothing)
+            ([ast], "interface" : _) ->
+                blocksWith text 1 (drop 1 rest') `bindResult` \(ifaceTexts, rest'') -> case (ifaceTexts, rest'') of
+                    ([ifaceText], []) -> elaborated ast `bindResult` \e -> interface ifaceText `bindResult` \i -> Ok (Accepted e (Just i))
                     _ -> Error "ElaborateRequest: malformed interface"
             _ -> Error "ElaborateRequest: malformed response"
     _ -> Error "ElaborateRequest: not an elaboration response"
@@ -210,16 +223,22 @@ countOf text = case reads text of
     [(n, "")] | n >= 0 && show n == text -> Ok n
     _ -> Error "ElaborateRequest: malformed count"
 
+block :: [String] -> [String]
+block ls = ("data " ++ show (length ls)) : ls
+
 -- n blocks, each `data <line count>` and that many lines, and the lines after them
-blocks :: Int -> [String] -> Result ([String], [String]) String
-blocks 0 rest = Ok ([], rest)
-blocks n (header : rest) =
-    wordAfter "data" header `bindResult` countOf `bindResult` \count ->
-        let (block, after) = splitAt count rest
-         in if length block < count
+blocks :: Int -> [String] -> Result ([[String]], [String]) String
+blocks = blocksWith id
+
+blocksWith :: (l -> String) -> Int -> [l] -> Result ([[l]], [l]) String
+blocksWith _ 0 rest = Ok ([], rest)
+blocksWith text n (header : rest) =
+    wordAfter "data" (text header) `bindResult` countOf `bindResult` \count ->
+        let (taken, after) = splitAt count rest
+         in if length taken < count
                 then Error "ElaborateRequest: a block is cut short"
-                else blocks (n - 1) after `bindResult` \(more, rest') -> Ok (unlines block : more, rest')
-blocks _ [] = Error "ElaborateRequest: missing data block"
+                else blocksWith text (n - 1) after `bindResult` \(more, rest') -> Ok (taken : more, rest')
+blocksWith _ _ [] = Error "ElaborateRequest: missing data block"
 
 firstLine :: [String] -> Result (String, [String]) String
 firstLine ls = case ls of

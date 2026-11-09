@@ -112,6 +112,8 @@ ghc-options:
 
 library:
   source-dirs: src
+  dependencies:
+  - bytestring >= 0.10.12 && < 0.13
 
 executables:
   tersus-exe:
@@ -200,6 +202,7 @@ executables:
     - -rtsopts
     dependencies:
     - tersus
+    - bytestring >= 0.10.12 && < 0.13
 
 tests:
   tersus-test:

@@ -1,10 +1,12 @@
 module DataCodec
-    ( Token (..), P (..), quote, tokenize, strictTokenize, parseLine
+    ( Token (..), P (..), quote, tokenize, strictTokenize, strictTokenizeBytes, parseLine
     , word, name, expect, integer, int, failP, typeTokens, sizeTokens, argTokens
     , typeP, sizeP, argP, decimal
     ) where
 
 import Control.Monad (replicateM)
+import qualified Data.ByteString.Char8 as B
+import Data.List (foldl')
 import Types
 import Utils
 
@@ -71,10 +73,6 @@ tokenize text = case text of
         '\\' : _ -> Error "a bad escape in a name"
         c : more -> quoted more (c : acc)
         [] -> Error "a name that is not closed"
-    hexValue c
-        | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
-        | c >= 'A' && c <= 'F' = Just (fromEnum c - fromEnum 'A' + 10)
-        | otherwise = Nothing
 
 -- A parser of the tokens of a line
 newtype P a = P {runP :: [Token] -> Result (a, [Token]) String}
@@ -106,9 +104,9 @@ expect :: String -> P ()
 expect w = word >>= \found -> if found == w then pure () else failP ("expected " ++ w ++ ", found " ++ found)
 
 integer :: P Integer
-integer = word >>= \w -> case reads w of
-    [(n, "")] -> pure n
-    _ -> failP ("a number was expected, found " ++ w)
+integer = word >>= \w -> case decimal w of
+    Just n -> pure n
+    Nothing -> failP ("a number was expected, found " ++ w)
 
 int :: P Int
 int = fromInteger <$> integer
@@ -164,41 +162,84 @@ sizeP = word >>= \w -> case w of
 
 decimal :: String -> Maybe Integer
 decimal s = case s of
-    '-' : ds | digits ds -> Just (negate (read ds))
-    ds | digits ds -> Just (read ds)
+    '-' : ds | digits ds -> Just (negate (value ds))
+    ds | digits ds -> Just (value ds)
     _ -> Nothing
   where
     digits ds = not (null ds) && all (\c -> c >= '0' && c <= '9') ds
+    value = foldl' (\n c -> 10 * n + toInteger (fromEnum c - fromEnum '0')) 0
 
 strictTokenize :: String -> Result [Token] String
 strictTokenize line
     | any (\c -> c < ' ' || c > '~') line = Error "non-ASCII record"
-    | otherwise = scan line `bindResult` \() -> tokenize line `bindResult` \ts ->
-        if all valid ts then Ok ts else Error "invalid UTF-8 or numeric token"
+    | otherwise = scan line `bindResult` \(ts, allValid) ->
+        if allValid then Ok ts else Error "invalid UTF-8 or numeric token"
   where
-    valid (Str _) = True
-    valid (Word w) = case decimal w of
-        Just n -> n >= -9223372036854775808 && n <= 9223372036854775807
-        Nothing -> case w of
-            c : rest -> alpha c && all (\x -> alpha x || (x >= '0' && x <= '9')) rest
-            [] -> False
-    alpha c = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-    scan [] = Ok ()
+    -- (a malformed token anywhere in the line is reported before an invalid word, as a whole-line scan would)
+    scan [] = Ok ([], True)
     scan (' ' : xs) = scan xs
     scan ('"' : xs) = quotedStrict xs [] `bindResult` \(bytes, rest) ->
-        if encodeUtf8 (decodeUtf8 bytes) /= bytes then Error "invalid UTF-8" else separated rest
-    scan xs = let (w, rest) = break (== ' ') xs in
-        if '"' `elem` w || '\\' `elem` w then Error "malformed word" else scan rest
-    separated [] = Ok ()
-    separated xs@(' ' : _) = scan xs
-    separated _ = Error "missing token separator"
+        strictName bytes (case rest of { [] -> Nothing; c : _ -> Just c }) (scan rest)
+    scan xs =
+        let (w, rest) = break (== ' ') xs
+         in if '"' `elem` w || '\\' `elem` w
+                then Error "malformed word"
+                else mapResult (\(ts, ok) -> (Word w : ts, ok && validWord w)) (scan rest)
     quotedStrict [] _ = Error "unclosed name"
     quotedStrict ('"' : xs) acc = Ok (reverse acc, xs)
     quotedStrict ('\\' : 'x' : h : l : xs) acc
-        | Just a <- hex h, Just b <- hex l = quotedStrict xs (toEnum (16 * a + b) : acc)
+        | Just a <- hexValue h, Just b <- hexValue l = quotedStrict xs (toEnum (16 * a + b) : acc)
     quotedStrict ('\\' : _) _ = Error "malformed escape"
     quotedStrict (c : xs) acc = quotedStrict xs (c : acc)
-    hex c
-        | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
-        | c >= 'A' && c <= 'F' = Just (fromEnum c - fromEnum 'A' + 10)
-        | otherwise = Nothing
+
+strictTokenizeBytes :: B.ByteString -> Result [Token] String
+strictTokenizeBytes line
+    | B.any (\c -> c < ' ' || c > '~') line = Error "non-ASCII record"
+    | otherwise = scan line `bindResult` \(ts, allValid) ->
+        if allValid then Ok ts else Error "invalid UTF-8 or numeric token"
+  where
+    scan s = case B.uncons s of
+        Nothing -> Ok ([], True)
+        Just (' ', rest) -> scan rest
+        Just ('"', rest) -> quotedStrict rest [] `bindResult` \(bytes, after) ->
+            strictName bytes (fst <$> B.uncons after) (scan after)
+        Just _ ->
+            let (w, rest) = B.break (== ' ') s
+             in if B.elem '"' w || B.elem '\\' w
+                    then Error "malformed word"
+                    else let text = B.unpack w in mapResult (\(ts, ok) -> (Word text : ts, ok && validWord text)) (scan rest)
+    quotedStrict s acc = case B.uncons s of
+        Nothing -> Error "unclosed name"
+        Just ('"', xs) -> Ok (reverse acc, xs)
+        Just ('\\', xs) -> case B.unpack (B.take 3 xs) of
+            ['x', h, l] | Just a <- hexValue h, Just b <- hexValue l -> quotedStrict (B.drop 3 xs) (toEnum (16 * a + b) : acc)
+            _ -> Error "malformed escape"
+        Just (c, xs) -> quotedStrict xs (c : acc)
+
+-- A quoted name's bytes, which have to be UTF-8 and followed by a space or the end of the record, and the tokens
+-- after it
+strictName :: String -> Maybe Char -> Result ([Token], Bool) String -> Result ([Token], Bool) String
+strictName bytes next rest =
+    let text = decodeUtf8 bytes
+     in if encodeUtf8 text /= bytes
+            then Error "invalid UTF-8"
+            else case next of
+                Nothing -> Ok ([Str text], True)
+                Just ' ' -> mapResult (\(ts, ok) -> (Str text : ts, ok)) rest
+                Just _ -> Error "missing token separator"
+
+-- A word is a number that fits an Int or a letter followed by letters and digits
+validWord :: String -> Bool
+validWord w = case decimal w of
+    Just n -> n >= -9223372036854775808 && n <= 9223372036854775807
+    Nothing -> case w of
+        c : rest -> alpha c && all (\x -> alpha x || (x >= '0' && x <= '9')) rest
+        [] -> False
+  where
+    alpha c = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+
+hexValue :: Char -> Maybe Int
+hexValue c
+    | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
+    | c >= 'A' && c <= 'F' = Just (fromEnum c - fromEnum 'A' + 10)
+    | otherwise = Nothing

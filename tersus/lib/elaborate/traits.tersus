@@ -3,14 +3,13 @@ import data::codec::codec { catStrings };
 import elaborate::builtins { substitute };
 import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, head, instantiateGenerics, lookupVar, sizeArgument, teHead };
 import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, mentionsParameter, stmtOf };
-import elaborate::core { checkType, concatFront, concatInts, ctorInfo, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
+import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInfo, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
+import elaborate::exports { pairParts };
 import elaborate::expr { coerceArguments, genericCall, implementsMarker, nodesOf, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitCall, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, fromCodec, fromCodecs, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf };
 import elaborate::refs { putRefResult, traitResultFrom };
 import elaborate::state { BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, intText, isSize, joinWith, kindOf, namedTy, noBoundedParts, notModelled, nth, oneScope, rawInstanceName, render, resolve, simpleTy, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
-
-import elaborate::exports { pairParts };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -79,7 +78,7 @@ fn pairKey(a: &String, b: &String) -> String ~ { return catStrings(catStrings(a,
 
 fn addAssoc(st: St, owner: &String, function: &String, origin: &String) -> St ~ {
     key = assocKey(owner, function);
-    origins = st.assoc.lookup(&key, []);
+    origins = HashMap::lookup(&st.assoc, &key, []);
     return St { assoc: st.assoc.insert(key, push(origins, clone(origin))), ..st };
 };
 
@@ -155,14 +154,14 @@ fn rawSame(st: &St, a: Int, b: Int) -> Bool ~ {
 // trait Name<params> { functions }: the functions' types and contracts are checked with Self a type that has no
 // constructors, and with no function of the program in sight (checkTrait)
 fn checkTrait(st: St, name: String, params: List<String>, fns: List<Int>) -> St ~ {
-    wasPredeclared = st.predeclared.contains(&name);
+    wasPredeclared = HashSet::contains(&st.predeclared, &name);
     if wasPredeclared { st = St { predeclared: st.predeclared.remove(&name), ..st }; };
-    if st.types.contains(&name) || (st.traits.contains(&name) && !wasPredeclared) { return typeError(st, catStrings(clone(name), " is already defined")); };
+    if HashMap::contains(&st.types, &name) || (HashSet::contains(&st.traits, &name) && !wasPredeclared) { return typeError(st, catStrings(clone(name), " is already defined")); };
     selfFns = clone(fns);
     keys = [];
-    for e in st.traitFns.entries() { keys = push(keys, clone(e.key)); };
+    for e in HashMap::entries(&st.traitFns) { keys = push(keys, clone(e.key)); };
     for k in sortTexts(keys) {
-        for f in st.traitFns.lookup(&k, []) { selfFns = push(selfFns, f); };
+        for f in HashMap::lookup(&st.traitFns, &k, []) { selfFns = push(selfFns, f); };
     };
     outerFns = st.fns;
     outerRet = st.ret;
@@ -244,14 +243,14 @@ fn boundsText(params: &List<String>) -> String ~ { return joinWith(params, ", ")
 
 // A bound names a trait with as many types as it has (the bounds of a template and of an impl)
 fn checkBoundTrait(st: St, b: &BoundInfo, noTypesWhere: String, whereText: String, unknownWhere: String) -> St ~ {
-    if !st.traitParams.contains(&b.n) {
-        if st.traits.contains(&b.n) {
+    if !HashMap::contains(&st.traitParams, &b.n) {
+        if HashSet::contains(&st.traits, &b.n) {
             if size(b.ts) > 0 { return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("trait ", clone(b.n)), " has no types, but the bound on "), clone(b.p)), noTypesWhere), " gives it some")); };
             return st;
         };
         return typeError(st, catStrings(catStrings(catStrings(catStrings("unknown trait ", clone(b.n)), " in the bound on "), clone(b.p)), unknownWhere));
     };
-    ps = st.traitParams.lookup(&b.n, []);
+    ps = HashMap::lookup(&st.traitParams, &b.n, []);
     if size(ps) != size(b.ts) {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("trait ", clone(b.n)), " has parameters <"), boundsText(&ps)), ">, which the bound on "), clone(b.p)), whereText), " gives "), intText(size(b.ts))));
     };
@@ -260,7 +259,7 @@ fn checkBoundTrait(st: St, b: &BoundInfo, noTypesWhere: String, whereText: Strin
 
 // fn name<bounds>(...) at the top: kept, and checked for the types each call gives it (declareTemplate)
 fn declareTemplate(st: St, name: String, bounds: List<BoundInfo>, tm: Template) -> St ~ {
-    if st.fns.contains(&name) || st.templates.contains(&name) || st.stdNames.contains(&name) { return typeError(st, catStrings(clone(name), " is already defined")); };
+    if HashMap::contains(&st.fns, &name) || HashMap::contains(&st.templates, &name) || HashMap::contains(&st.stdNames, &name) { return typeError(st, catStrings(clone(name), " is already defined")); };
     for b in &bounds {
         if indexIn(&tm.types, &b.p) < 0 { return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(b.p), " is bounded by "), clone(b.n)), " but is not a type of "), clone(name))); };
         st = checkBoundTrait(st, b, "", catStrings(" of ", clone(name)), catStrings(" of ", clone(name)));
@@ -275,7 +274,7 @@ fn templateOf(st: &St, v: Int, bounds: &List<BoundInfo>, boundsNode: Int, fs: &F
     value = nativeFn(&st.nodes, v);
     fnNames = [];
     fnTypes = [];
-    for e in st.fns.entries() { fnNames = push(fnNames, clone(e.key)); fnTypes = push(fnTypes, e.value); };
+    for e in HashMap::entries(&st.fns) { fnNames = push(fnNames, clone(e.key)); fnTypes = push(fnTypes, e.value); };
     sig = sigNode;
     if sig < 0 { sig = value.sig; };
     return Template { bounds: clone(bounds), fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: value.ins, outs: value.outs, term: value.term, body: value.stmts, boundsNode: boundsNode, paramsNode: value.ps, sigNode: sig, retNode: 0 - 1, grouped: false, definingTraits: [], definingTypes: [], definingTemplates: [], privateContext: false };
@@ -320,47 +319,62 @@ fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~
             if mentionsParameter(st, t) { return notModelled(st, "an imported template with parameter-dependent trait arguments"); };
         };
     };
-    outerTraits = clone(st.traits);
-    outerTraitFns = clone(st.traitFns);
-    outerTraitParams = clone(st.traitParams);
-    outerAssoc = clone(st.assoc);
-    outerImpls = clone(st.impls);
-    outerImplArgs = clone(st.implArgs);
-    outerImplBounds = clone(st.implBounds);
-    outerTemplates = clone(st.templates);
-    outerFns = clone(st.fns);
+    // (the outer maps are moved out and put back, and read where they are: a call is made for each instance, and
+    // copying or listing the whole state each time was most of the cost of a package with many)
+    outerTraits = st.traits;
+    outerTraitFns = st.traitFns;
+    outerTraitParams = st.traitParams;
+    outerAssoc = st.assoc;
+    outerImpls = st.impls;
+    outerImplArgs = st.implArgs;
+    outerImplBounds = st.implBounds;
+    outerTemplates = st.templates;
+    outerFns = st.fns;
     known = HashSet::new();
     for trait in &tm.definingTraits { known = known.insert(clone(trait)); };
-    traitFns = st.traitFns;
-    for e in st.traitFns.entries() { if !known.contains(&e.key) { traitFns = traitFns.remove(&e.key); }; };
-    traitParams = st.traitParams;
-    for e in st.traitParams.entries() { if !known.contains(&e.key) { traitParams = traitParams.remove(&e.key); }; };
-    assoc = st.assoc;
+    traitFns = clone(outerTraitFns);
+    for bucket in &outerTraitFns.buckets { for e in bucket { if !known.contains(&e.key) { traitFns = traitFns.remove(&e.key); }; }; };
+    traitParams = clone(outerTraitParams);
+    for bucket in &outerTraitParams.buckets { for e in bucket { if !known.contains(&e.key) { traitParams = traitParams.remove(&e.key); }; }; };
+    assoc = clone(outerAssoc);
     allowed = HashSet::new();
-    for e in st.assoc.entries() {
-        origins = [];
-        pair = pairParts(&e.key);
-        for trait in &e.value {
-            if known.contains(trait) || (size(trait.bytes) = 0 && pair.ok && indexIn(&tm.definingTypes, baseNameOf(&pair.before)) >= 0) {
-                origins = push(origins, clone(trait));
-                if pair.ok { allowed = allowed.insert(implFunctionName(&pair.before, trait, &pair.after)); };
+    for bucket in &outerAssoc.buckets {
+        for e in bucket {
+            origins = [];
+            pair = pairParts(&e.key);
+            for trait in &e.value {
+                if known.contains(trait) || (size(trait.bytes) = 0 && pair.ok && indexIn(&tm.definingTypes, baseNameOf(&pair.before)) >= 0) {
+                    origins = push(origins, clone(trait));
+                    if pair.ok { allowed = allowed.insert(implFunctionName(&pair.before, trait, &pair.after)); };
+                };
             };
+            if size(origins) = 0 { assoc = assoc.remove(&e.key); } else { assoc = assoc.insert(clone(e.key), origins); };
         };
-        if size(origins) = 0 { assoc = assoc.remove(&e.key); } else { assoc = assoc.insert(clone(e.key), origins); };
     };
     for method in allowed.elements() {
-        for companion in st.companions.lookup(&method, []) { allowed = allowed.insert(clone(companion)); };
+        for companion in HashMap::lookup(&st.companions, &method, []) { allowed = allowed.insert(clone(companion)); };
     };
-    impls = st.impls;
-    for key in st.impls.elements() { pair = pairParts(&key); if !pair.ok || !known.contains(&pair.before) { impls = impls.remove(&key); }; };
-    implArgs = st.implArgs;
-    for e in st.implArgs.entries() { pair = pairParts(&e.key); if !pair.ok || !known.contains(&pair.before) { implArgs = implArgs.remove(&e.key); }; };
-    implBounds = st.implBounds;
-    for e in st.implBounds.entries() { pair = pairParts(&e.key); if !pair.ok || !known.contains(&pair.before) { implBounds = implBounds.remove(&e.key); }; };
-    templates = st.templates;
-    for e in st.templates.entries() { if indexIn(&tm.definingTemplates, &e.key) < 0 && !allowed.contains(&e.key) { templates = templates.remove(&e.key); }; };
-    fns = st.fns;
-    for e in st.fns.entries() { if indexIn(&tm.fnNames, &e.key) < 0 && !allowed.contains(&e.key) { fns = fns.remove(&e.key); }; };
+    impls = clone(outerImpls);
+    for bucket in &outerImpls.map.buckets { for e in bucket { pair = pairParts(&e.key); if !pair.ok || !known.contains(&pair.before) { impls = impls.remove(&e.key); }; }; };
+    implArgs = clone(outerImplArgs);
+    for bucket in &outerImplArgs.buckets { for e in bucket { pair = pairParts(&e.key); if !pair.ok || !known.contains(&pair.before) { implArgs = implArgs.remove(&e.key); }; }; };
+    implBounds = clone(outerImplBounds);
+    for bucket in &outerImplBounds.buckets { for e in bucket { pair = pairParts(&e.key); if !pair.ok || !known.contains(&pair.before) { implBounds = implBounds.remove(&e.key); }; }; };
+    // (the template and function maps are only looked up in, so they are made of the names kept)
+    templates = HashMap::new();
+    for k in &tm.definingTemplates {
+        if HashMap::contains(&outerTemplates, k) { templates = templates.insert(clone(k), HashMap::lookup(&outerTemplates, k, emptyTemplate())); };
+    };
+    for k in allowed.elements() {
+        if HashMap::contains(&outerTemplates, &k) && !HashMap::contains(&templates, &k) { templates = templates.insert(clone(k), HashMap::lookup(&outerTemplates, &k, emptyTemplate())); };
+    };
+    fns = HashMap::new();
+    for k in &tm.fnNames {
+        if HashMap::contains(&outerFns, k) { fns = fns.insert(clone(k), HashMap::lookup(&outerFns, k, 0)); };
+    };
+    for k in allowed.elements() {
+        if HashMap::contains(&outerFns, &k) && !HashMap::contains(&fns, &k) { fns = fns.insert(clone(k), HashMap::lookup(&outerFns, &k, 0)); };
+    };
     st = St { traits: known, traitFns: traitFns, traitParams: traitParams, assoc: assoc, impls: impls, implArgs: implArgs, implBounds: implBounds, templates: templates, fns: fns, ..st };
     st = templateInContext(st, name, tm, inferred);
     return St { traits: outerTraits, traitFns: outerTraitFns, traitParams: outerTraitParams, assoc: outerAssoc, impls: outerImpls, implArgs: outerImplArgs, implBounds: outerImplBounds, templates: outerTemplates, fns: outerFns, ..st };
@@ -492,7 +506,7 @@ fn templateInstance(st: St, name: &String, tm: &Template, concrete: &List<Int>) 
     };
     suffix = catStrings(catStrings("[", joinWith(&names, ", ")), "]");
     instance = catStrings(clone(name), clone(suffix));
-    if !st.instances.contains(&instance) {
+    if !HashMap::contains(&st.instances, &instance) {
         i = 0;
         while i < size(st.activeNames) && i < size(st.activeSizes) [{ affirm i >= 0; }] ~ {
             if get(st.activeNames, i) = clone(name) && bigness >= get(st.activeSizes, i) {
@@ -502,11 +516,11 @@ fn templateInstance(st: St, name: &String, tm: &Template, concrete: &List<Int>) 
         };
         st = makeTemplateInstance(st, name, tm, &instance, bigness, concrete);
         if st.status != 0 { return st; };
-        for companion in st.companions.lookup(name, []) {
+        for companion in HashMap::lookup(&st.companions, name, []) {
             companionName = catStrings(clone(companion), clone(suffix));
-            if !st.templates.contains(&companion) { return notModelled(st, "a required template companion outside its retained defining scope"); };
-            if !st.instances.contains(&companionName) {
-                ctm = st.templates.lookup(&companion, emptyTemplate());
+            if !HashMap::contains(&st.templates, &companion) { return notModelled(st, "a required template companion outside its retained defining scope"); };
+            if !HashMap::contains(&st.instances, &companionName) {
+                ctm = HashMap::lookup(&st.templates, &companion, emptyTemplate());
                 st = makeTemplateInstance(st, &companion, &ctm, &companionName, bigness, concrete);
                 if st.status != 0 { return st; };
             };
@@ -627,11 +641,11 @@ fn callResolved(st: St, name: String, inferred: &List<TE>) -> St ~ {
         dropCheck = size(st.current.bytes) >= 9 && st.current.slice(0, 9) = "Drop for ";
         if !dropCheck { return typeError(st, catStrings(clone(name), " is a drop, which is called where a value goes out of scope, and not by the program")); };
     };
-    if st.templates.contains(&name) {
-        tm = st.templates.lookup(&name, emptyTemplate());
+    if HashMap::contains(&st.templates, &name) {
+        tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
         return templateCall(st, name, tm, inferred);
     };
-    if !st.fns.contains(&name) {
+    if !HashMap::contains(&st.fns, &name) {
         return typeError(st, catStrings(clone(name), " is not defined before this call (there is no such function, or its impl comes later)"));
     };
     st = lookupVar(st, &name);
@@ -670,7 +684,7 @@ fn emptyTemplate() -> Template ~ {
 
 // The function that Type::f means: the one function of that name that the impls of Type define (resolveAssociated); st.names
 fn resolveAssociated(st: St, owner: &String, function: &String) -> St ~ {
-    origins = st.assoc.lookup(assocKey(owner, function), []);
+    origins = HashMap::lookup(&st.assoc, assocKey(owner, function), []);
     path = catStrings(catStrings(clone(owner), "::"), clone(function));
     if size(origins) = 0 { return typeError(st, catStrings(path, " is not defined before this call (there is no such function, or its impl comes later)")); };
     if size(origins) = 1 { return St { names: push([], implFunctionName(owner, &get(origins, 0), function)), ..st }; };
@@ -695,7 +709,8 @@ fn ownerOfValue(st: St, function: &String, ty: Int) -> St ~ {
     if x.kind = 5 {
         st = ctorInfo(st, &x.name);
         if st.status != 0 { return st; };
-        return St { names: push([], clone(st.ctor.owner)), ..st };
+        owner = clone(st.ctor.owner);
+        return St { names: push([], owner), ..st };
     };
     if x.kind = 15 { return typeError(st, catStrings(catStrings("the type of the value whose function ", clone(function)), " is called is not known yet; annotate it")); };
     return typeError(st, catStrings(catStrings(catStrings(clone(function), " is called on a "), render(st, t)), ", which has no functions"));
@@ -734,7 +749,7 @@ fn ownerThroughTrait(st: St, tname: &String, fns: &List<Int>, function: &String,
     st = traitOwner(st, &path, get(ats, at));
     if st.status != 0 { return st; };
     owner = firstText(&st.names);
-    if !st.impls.contains(pairKey(tname, &owner)) { return typeError(st, catStrings(catStrings(owner, " does not implement "), clone(tname))); };
+    if !HashSet::contains(&st.impls, pairKey(tname, &owner)) { return typeError(st, catStrings(catStrings(owner, " does not implement "), clone(tname))); };
     return St { names: push([], owner), ..st };
 };
 
@@ -769,7 +784,7 @@ fn primitiveTraitCall(st: St, tname: &String, fns: &List<Int>, function: &String
 
 // VFunct [] [] [] (BuiltinFunct b) []: the builtin with no parameters or contracts, as the checker writes Eq's
 fn bareRelValue(st: St, key: String) -> St ~ {
-    index = st.builtinNames.lookup(&key, 0 - 1);
+    index = HashMap::lookup(&st.builtinNames, &key, 0 - 1);
     if index < 0 || index >= size(st.builtinValues) { return notModelled(st, catStrings("the builtin ", key)); };
     value = nodeIn(&st.nodes, builtinValueAt(st, index));
     if !(value is AstNode::Value) || !((value as AstNode::Value).value is AstValue::VFunct) { return notModelled(st, catStrings("the builtin ", key)); };
@@ -793,7 +808,7 @@ fn bareRelValue(st: St, key: String) -> St ~ {
 
 // The types a type gives a trait that it implements (traitArguments): st.ok, and st.te.types
 fn traitArguments(st: St, tname: String, t: Int) -> St ~ {
-    if (tname = "Clone" || tname = "Copy") && st.traitFns.contains(&tname) && size(st.traitFns.lookup(&tname, [])) = 0 && size(st.traitParams.lookup(&tname, [])) = 0 {
+    if (tname = "Clone" || tname = "Copy") && HashMap::contains(&st.traitFns, &tname) && size(HashMap::lookup(&st.traitFns, &tname, [])) = 0 && size(HashMap::lookup(&st.traitParams, &tname, [])) = 0 {
         st = implementsMarker(st, clone(tname), t, 0);
         return St { te: TE { node: 0 - 1, types: [] }, ..st };
     };
@@ -814,7 +829,7 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
         st = traitArguments(st, "Eq", argAt(st, nth(&x.args, 0), 0));
         return gives(st, st.ok, []);
     };
-    arity = size(st.traitParams.lookup(&tname, []));
+    arity = size(HashMap::lookup(&st.traitParams, &tname, []));
     base = "";
     args = [];
     fallback = 0 - 1;
@@ -854,10 +869,10 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     boundNames = clone(st.names);
     boundTypes = clone(st.tes);
     // (an impl with bounds is for the types that meet them)
-    for b in st.implBounds.lookup(pairKey(&tname, &base), []) {
+    for b in HashMap::lookup(&st.implBounds, pairKey(&tname, &base), []) {
         at = indexIn(&boundNames, &b.p);
         if at < 0 || at >= size(boundTypes) { return gives(st, false, []); };
-        if !st.traits.contains(&b.n) { return notModelled(st, "a caller implementation with private bound prerequisites"); };
+        if !HashSet::contains(&st.traits, &b.n) { return notModelled(st, "a caller implementation with private bound prerequisites"); };
         st = traitArguments(st, clone(b.n), head(get(boundTypes, at).types));
         if st.status != 0 { return st; };
         if !st.ok { return gives(st, false, []); };
@@ -871,8 +886,8 @@ fn primitiveEqRaw(x: &Ty) -> Bool ~ { return x.kind = 0 || x.kind = 1 || x.kind 
 // st.ok, st.te.types the types it gives, st.names and st.tes the type parameters the match bound
 fn ownImpl(st: St, tname: &String, base: &String, args: &List<Int>) -> St ~ {
     key = pairKey(tname, base);
-    if !st.implArgs.contains(&key) { return St { ok: false, ..st }; };
-    ia = st.implArgs.lookup(&key, ImplArgs { ty: 0, args: [], tyNode: 0 - 1, argsNode: 0 - 1 });
+    if !HashMap::contains(&st.implArgs, &key) { return St { ok: false, ..st }; };
+    ia = HashMap::lookup(&st.implArgs, &key, ImplArgs { ty: 0, args: [], tyNode: 0 - 1, argsNode: 0 - 1 });
     sx = tyAt(st, ia.ty);
     givenTypes = [];
     for g in &ia.args {
@@ -939,20 +954,20 @@ fn matchTypes(st: &St, p: Int, t: Int) -> Matched ~ {
 // The check of `impl Clone for T { };` and `impl Copy for T { };` (checkMarkerImpl)
 fn checkMarkerImpl(st: St, tname: &String, typeName: &String) -> St ~ {
     here = catStrings(catStrings(catStrings(catStrings("impl ", clone(tname)), " for "), clone(typeName)), ": ");
-    if st.linearTypes.contains(typeName) {
+    if HashSet::contains(&st.linearTypes, typeName) {
         return typeError(st, catStrings(catStrings(here, clone(typeName)), " is linear, so a value of it is used exactly once and is never copied"));
     };
-    if st.drops.contains(typeName) {
+    if HashSet::contains(&st.drops, typeName) {
         return typeError(st, catStrings(catStrings(here, clone(typeName)), " has a drop, and a copy of a value with a drop would be dropped twice"));
     };
-    if tname = "Copy" && !st.impls.contains(pairKey("Clone", typeName)) {
+    if tname = "Copy" && !HashSet::contains(&st.impls, pairKey("Clone", typeName)) {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("impl Copy for ", clone(typeName)), ": "), clone(typeName)), " is Copy only if it is Clone, so write impl Clone for "), catStrings(clone(typeName), " { }; first")));
     };
     ctorNames = [];
     fieldNamesOf = [];
     fieldTypesOf = [];
-    if st.generics.contains(typeName) {
-        g = st.generics.lookup(typeName, Generic { params: [], names: [], types: [] });
+    if HashMap::contains(&st.generics, typeName) {
+        g = HashMap::lookup(&st.generics, typeName, Generic { params: [], names: [], types: [] });
         ctorNames = push(ctorNames, clone(typeName));
         fieldNamesOf = push(fieldNamesOf, clone(g.names));
         fieldTypesOf = push(fieldTypesOf, clone(g.types));
@@ -1087,8 +1102,8 @@ fn checkImplDef(st: St, top: Bool, traitNode: Int, argsNode: Int, nameNode: Int,
     typeName = nameText(&st.nodes, nameNode);
     // (a copy of a linear value would use it twice, and a copy of a value with a drop would be dropped twice)
     if tname = "Clone" {
-        if st.linearTypes.contains(&typeName) { return typeError(st, catStrings(catStrings(catStrings(catStrings("impl Clone for ", clone(typeName)), ": "), clone(typeName)), " is linear, so a value of it is used exactly once and is never copied")); };
-        if st.drops.contains(&typeName) { return typeError(st, catStrings(catStrings(catStrings(catStrings("impl Clone for ", clone(typeName)), ": "), clone(typeName)), " has a drop, and a copy of a value with a drop would be dropped twice")); };
+        if HashSet::contains(&st.linearTypes, &typeName) { return typeError(st, catStrings(catStrings(catStrings(catStrings("impl Clone for ", clone(typeName)), ": "), clone(typeName)), " is linear, so a value of it is used exactly once and is never copied")); };
+        if HashSet::contains(&st.drops, &typeName) { return typeError(st, catStrings(catStrings(catStrings(catStrings("impl Clone for ", clone(typeName)), ": "), clone(typeName)), " has a drop, and a copy of a value with a drop would be dropped twice")); };
     };
     tyc = codecTypeAt(&st.nodes, tyNode);
     st = fromCodec(st, &tyc);
@@ -1175,7 +1190,7 @@ fn checkImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, name
     st = selfOf(st, &typeName, selfInput);
     selfName = firstText(&st.names);
     selfType = st.ty;
-    if !(typeName = "List" || typeName = "Box" || typeName = "Array" || typeName = "Int" || typeName = "Byte" || typeName = "Bool" || st.generics.contains(&typeName)) {
+    if !(typeName = "List" || typeName = "Box" || typeName = "Array" || typeName = "Int" || typeName = "Byte" || typeName = "Bool" || HashMap::contains(&st.generics, &typeName)) {
         st = typeCtors(st, &typeName);
         if st.status != 0 { return st; };
     };
@@ -1184,8 +1199,8 @@ fn checkImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, name
     if size(tname.bytes) > 0 {
         st = registerImpl(st, &tname, &traitArgs, &typeName, selfInput, tyNode, argsNode);
         if st.status != 0 { return st; };
-        required = st.traitFns.lookup(&tname, []);
-        traitParams = st.traitParams.lookup(&tname, []);
+        required = HashMap::lookup(&st.traitFns, &tname, []);
+        traitParams = HashMap::lookup(&st.traitParams, &tname, []);
     };
     st = checkImplFunctions(st, &tname, &typeName, &selfName, selfType, &functions);
     if st.status != 0 { return st; };
@@ -1214,11 +1229,11 @@ fn checkImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, name
 };
 
 fn registerImpl(st: St, tname: &String, traitArgs: &List<Int>, typeName: &String, selfInput: Int, tyNode: Int, argsNode: Int) -> St ~ {
-    if !st.traitFns.contains(tname) { return typeError(st, catStrings("unknown trait ", clone(tname))); };
-    found = st.traitFns.lookup(tname, []);
-    params = st.traitParams.lookup(tname, []);
+    if !HashMap::contains(&st.traitFns, tname) { return typeError(st, catStrings("unknown trait ", clone(tname))); };
+    found = HashMap::lookup(&st.traitFns, tname, []);
+    params = HashMap::lookup(&st.traitParams, tname, []);
     if size(params) != size(traitArgs) { return wrongTraitArity(st, tname, &params, typeName, size(traitArgs)); };
-    if st.impls.contains(pairKey(tname, typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
+    if HashSet::contains(&st.impls, pairKey(tname, typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
     if wordEq(tname, typeName) { return typeError(st, catStrings(clone(typeName), " implements Eq by the language: its values are compared as words")); };
     key = pairKey(tname, typeName);
     args = ImplArgs { ty: selfInput, args: clone(traitArgs), tyNode: tyNode, argsNode: argsNode };
@@ -1241,11 +1256,11 @@ fn implMarks(st: St, tname: &String, typeName: &String, marker: Bool) -> St ~ {
 
 fn checkDropImpl(st: St, typeName: &String) -> St ~ {
     here = catStrings(catStrings(catStrings("impl Drop for ", clone(typeName)), ": "), clone(typeName));
-    if st.linearTypes.contains(typeName) { return typeError(st, catStrings(here, " is linear, so it is used by the program and not dropped")); };
-    if st.impls.contains(pairKey("Copy", typeName)) { return typeError(st, catStrings(here, " is Copy, and a copy of a value with a drop would be dropped twice")); };
+    if HashSet::contains(&st.linearTypes, typeName) { return typeError(st, catStrings(here, " is linear, so it is used by the program and not dropped")); };
+    if HashSet::contains(&st.impls, pairKey("Copy", typeName)) { return typeError(st, catStrings(here, " is Copy, and a copy of a value with a drop would be dropped twice")); };
     holding = false;
-    if st.generics.contains(typeName) {
-        g = st.generics.lookup(typeName, Generic { params: [], names: [], types: [] });
+    if HashMap::contains(&st.generics, typeName) {
+        g = HashMap::lookup(&st.generics, typeName, Generic { params: [], names: [], types: [] });
         for t in &g.types {
             st = holdsGhost(st, t);
             if st.status != 0 { return st; };
@@ -1372,12 +1387,12 @@ fn boundedImplSignatures(st: St, selfName: &String, selfType: Int, functions: &L
 
 // An impl with bounds of a trait recorded and checked against the trait, with the functions that make those checks
 fn registerBoundedImpl(st: St, tname: &String, traitArgs: &List<Int>, typeName: &String, selfInput: Int, bounds: &List<BoundInfo>, tyNode: Int, argsNode: Int, boundsNode: Int, selfName: &String, selfType: Int) -> St ~ {
-    if !st.traitFns.contains(tname) { return typeError(st, catStrings("unknown trait ", clone(tname))); };
-    required = st.traitFns.lookup(tname, []);
-    traitParams = st.traitParams.lookup(tname, []);
+    if !HashMap::contains(&st.traitFns, tname) { return typeError(st, catStrings("unknown trait ", clone(tname))); };
+    required = HashMap::lookup(&st.traitFns, tname, []);
+    traitParams = HashMap::lookup(&st.traitParams, tname, []);
     here = catStrings(catStrings(catStrings("impl ", clone(tname)), " for "), clone(typeName));
     if size(traitParams) != size(traitArgs) { return wrongTraitArity(st, tname, &traitParams, typeName, size(traitArgs)); };
-    if st.impls.contains(pairKey(tname, typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
+    if HashSet::contains(&st.impls, pairKey(tname, typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
     if size(required) = 0 { return typeError(st, catStrings(catStrings(catStrings(here, " has bounds, and "), clone(tname)), " has no functions: the bounds of a marker impl are not supported")); };
     key = pairKey(tname, typeName);
     st = St { impls: st.impls.insert(clone(key)), implArgs: st.implArgs.insert(clone(key), ImplArgs { ty: selfInput, args: clone(traitArgs), tyNode: tyNode, argsNode: argsNode }), implBounds: st.implBounds.insert(clone(key), clone(bounds)), implBoundsNodes: st.implBoundsNodes.insert(clone(key), boundsNode), ..st };
@@ -1417,7 +1432,7 @@ fn boundedImplTemplates(st: St, tname: &String, typeName: &String, bounds: &List
                 return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(b.p), " is bounded by "), clone(b.n)), " in the impl for "), clone(typeName)), " but is not a type of "), clone(name)));
             };
         };
-        if st.templates.contains(&name) || st.fns.contains(&name) { return typeError(st, catStrings(clone(name), " is already defined")); };
+        if HashMap::contains(&st.templates, &name) || HashMap::contains(&st.fns, &name) { return typeError(st, catStrings(clone(name), " is already defined")); };
         tm = templateOf(st, get(parts.values, i), bounds, boundsNode, &fs, get(parts.defined, i).sigNode);
         part = implFunctionPart(&name);
         st = addAssoc(st, typeName, &part, tname);
@@ -1439,7 +1454,8 @@ fn boundedWrapperTemplates(st: St, bounds: &List<BoundInfo>, boundsNode: Int) ->
         tm = templateOf(st, v, bounds, boundsNode, &fs, 0 - 1);
         wname = clone(get(parts.wrapperNames, i));
         function = clone(get(parts.wrapperOf, i));
-        st = St { templates: st.templates.insert(clone(wname), tm), companions: st.companions.insert(clone(function), concatFront(push([], wname), st.companions.lookup(&function, []))), ..st };
+        existing = HashMap::lookup(&st.companions, &function, []);
+        st = St { templates: st.templates.insert(clone(wname), tm), companions: st.companions.insert(clone(function), concatFront(push([], wname), existing)), ..st };
         i = i + 1;
     };
     return st;
