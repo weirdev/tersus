@@ -63,6 +63,7 @@ extra-source-files:
     AST_DATA.md
     bootstrap/emitter.sha256
     bootstrap/parser.sha256
+    bootstrap/frontend.sha256
     lib/parser/package.tersus
     lib/parser/parser.tersus
     lib/mir/mir_verify/mir_verify.tersus
@@ -103,6 +104,7 @@ library
       Compile
       DataCodec
       ElaborateRequest
+      ElaboratorTool
       FileParserProtocol
       Hash
       Interface
@@ -256,6 +258,26 @@ executable frontend-diff
     , unix
   default-language: Haskell2010
 
+executable frontend-seed
+  main-is: Main.hs
+  other-modules:
+      ElaboratorNative
+  hs-source-dirs:
+      dev/frontend-seed
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
+  build-depends:
+      base >=4.7 && <5
+    , containers
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+    , unix
+  default-language: Haskell2010
+
 executable frontend-spike
   main-is: Main.hs
   other-modules:
@@ -324,6 +346,7 @@ test-suite tersus-test
   main-is: TestTersus.hs
   other-modules:
       Differential
+      ElaboratorNative
       TestArrays
       TestAstData
       TestBasics
@@ -341,6 +364,7 @@ test-suite tersus-test
       TestDifferential
       TestElaborate
       TestEq
+      TestFrontendBootstrap
       TestGenerics
       TestHarness
       TestHashMap

@@ -19,6 +19,7 @@ module Pipeline
     , compileModules
     , compileModulesValidated
     , compileModulesBootstrap
+    , compileModulesBootstrapWith
     , compileModulesToProgram
     , compileModulesToOwned
     , erasedModuleProgram
@@ -39,7 +40,9 @@ import qualified Mir as M
 import Compile (SourceParts, lowerSourceParts, lowerStatements)
 import TersusParser (parseSource, parseWithEquality)
 import qualified TersusParser
-import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked)
+import ElaborateRequest (Elaborator)
+import LibPackage (compileLibPackageWith)
+import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked, compileModulesUsing, lowerCompiledPackage)
 import Link (pruneProgram)
 import qualified Modules as Mod
 import MirHousekeeping (eraseGhosts, insertOwnership, verifyProgram)
@@ -241,6 +244,11 @@ oneMarkerEach program =
 -- its ghosts erased, not validated (see MirHousekeeping.toolProgram)
 compileModulesBootstrap :: Mod.LoadedPackage -> Result M.Program String
 compileModulesBootstrap pkg = mapResult pruneProgram (compileModulesLinked pkg `bindResult` eraseGhosts)
+
+-- compileModulesBootstrap with the package's modules and the compiler libraries elaborated by the given elaborator
+compileModulesBootstrapWith :: Elaborator -> Mod.LoadedPackage -> Result M.Program String
+compileModulesBootstrapWith elaborator pkg =
+    mapResult pruneProgram (compileModulesUsing elaborator (compileLibPackageWith elaborator) pkg `bindResult` lowerCompiledPackage pkg `bindResult` eraseGhosts)
 
 compileModulesToProgram :: Mod.LoadedPackage -> Result M.Program String
 compileModulesToProgram pkg = compileModulesValidated pkg `bindResult` erasedModuleProgram

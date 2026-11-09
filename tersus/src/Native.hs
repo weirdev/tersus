@@ -20,6 +20,7 @@ module Native
     , runWithInput
     , runWithInputFull
     , runCommandWithInputFull
+    , raiseStack
     ) where
 
 import Control.Concurrent (forkIO, forkIOWithUnmask, killThread)
@@ -399,3 +400,8 @@ cachedProgramWithArtifacts artifacts kind hash what build = withCachedProgram ki
                         if ready then renameFile partial exe >> pure (Ok exe)
                             else pure (Error "cached program did not publish its required artifacts"))
                 `finally` removeIfExists partial
+
+-- Run $0 with the largest stack the system allows (macOS caps it at 64 MB): the validator and the elaborator
+-- written in Tersus recurse over the nesting of what they read
+raiseStack :: String
+raiseStack = "ulimit -s unlimited 2>/dev/null || ulimit -s 65532 2>/dev/null; exec \"$0\""

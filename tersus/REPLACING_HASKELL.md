@@ -270,9 +270,9 @@ validates it, and compares it with the Haskell elaborator. Measured on master
   one large dispatch function could cost hours, as `nodeAt` shows.
 - **Seed shape.** The spike's LLVM IR, emitted twice, is byte-identical
   (2.4 MB, SHA-256 `096baa55...`), and an executable built from that IR alone
-  gives the same results. The F0/F1 self-elaboration fixpoint has to wait
-  until the elaborator covers its own source (lists, strings, maps, imports),
-  which is after the core and trait work.
+  gives the same results. The F0/F1 self-elaboration fixpoint had to wait
+  until the elaborator covered its own source; it holds now ("The frontend
+  seed" below).
 
 So elaboration in Tersus is feasible on all four counts: identical data, less
 time than Haskell once a process is started, a proof without assumptions in
@@ -405,6 +405,42 @@ split again, the writer reads back only the type and size records it wrote,
 and numbers are read digit by digit rather than with `reads` (which also took
 forms such as `0x1F` and `(5)` that no writer of the data writes).
 `stack run frontend-diff -- build EXE` builds it from the sources on disk.
+
+#### The frontend seed
+
+Built: the elaborator written in Tersus bootstraps from a pinned seed, as the
+emitter and the parser do. F0 is the elaborator built with clang from seed IR
+(`bootstrap/frontend.sha256`, the `frontend.ll` asset of release
+`bootstrap-455af12e9342`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
+`bootstrap/frontend.ll` supplies local bytes, verified against the same pin).
+F1 is the elaborator as it is now, its modules and the compiler libraries
+elaborated by F0 and the rest of the build done by the host as for its other
+programs (`ElaboratorNative.frontendStage`); F2 is the same elaborated by F1.
+A stage is kept in the cache under the program its executable is made of, with
+the IR it was built from, so the fixpoint is F2 being F1. The List and Box
+helper units that native code links are still elaborated by the Haskell
+elaborator in every stage.
+
+`testFrontendBootstrap` checks that F1 (and F2, when it is another executable)
+answers every request of the elaborator's own build and of the compiler
+libraries as the Haskell elaborator does, that F2 is F1, that the host's
+programs (the emitter, the MIR checker and eraser, the parser, the AST reader
+and the validator) elaborated by F0 are the programs the Haskell elaborator
+gives, that a missing or corrupt seed is refused and an elaborator that fails
+refuses the module, and that the seed and the stages are kept. CI runs it on a
+runner of its own. `stack run frontend-seed -- emit` makes the same fixpoint
+check and writes F1's IR; the first seed came from `advance` (the elaborator
+elaborated by the Haskell elaborator), and `emit` from it gives the same bytes.
+
+With `TERSUS_TOOL_ELABORATOR=seed`, the host elaborates its own programs with
+F0 instead of the Haskell elaborator, and keeps what it prepares from them
+apart from what the Haskell elaborator's programs give. It is for the
+bootstrap's tests and measurements until the flip; a failure of the tool
+refuses the build rather than falling back. From an empty cache,
+`tersus-exe run examples/basics.tersus` with it takes 1.21 times as long as
+on master (283 s against 234 s, the mean of two alternating runs on eight
+pinned CPUs). F0 is built beside the parser and emitter seeds, since it needs
+neither; what remains is the six programs elaborated through F0.
 
 ### Deferred or coordinated work
 

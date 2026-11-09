@@ -23,6 +23,7 @@ module PreludeSource
     , validationPackageFiles
     , seedSha256
     , parserSeedSha256
+    , frontendSeedSha256
     ) where
 
 import Data.List (isSuffixOf, sort)
@@ -212,6 +213,14 @@ parserSeedSha256 =
     $( do
         addDependentFile "bootstrap/parser.sha256"
         contents <- runIO (readFile "bootstrap/parser.sha256")
+        lift (head (words contents))
+     )
+
+frontendSeedSha256 :: String
+frontendSeedSha256 =
+    $( do
+        addDependentFile "bootstrap/frontend.sha256"
+        contents <- runIO (readFile "bootstrap/frontend.sha256")
         lift (head (words contents))
      )
 

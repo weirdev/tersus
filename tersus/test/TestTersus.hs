@@ -53,6 +53,7 @@ import TestScheduling
 import TestAstData
 import TestDifferential
 import TestElaborate
+import TestFrontendBootstrap
 import TestDataCodec
 import TestModules
 import TestParity
@@ -132,6 +133,7 @@ originalGroups =
     , testExamples
     , testHostValidation
     , testElaborateMutant
+    , testFrontendBootstrap
     , testCli
     , testMir
     , testMirSelfHosted

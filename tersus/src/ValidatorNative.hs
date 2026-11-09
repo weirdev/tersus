@@ -33,7 +33,7 @@ import CacheLock (copyFileCloexec, openLockHandle, openTempFileCloexec)
 import Hash (fingerprint)
 import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, cachedUncheckedValidator, nativeStorage, prepareBootstrap, prepareValidator, cachedPreparedInput, cachedContentKey, emitterEntry)
-import Native (cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, availableProcessors, parallelBuilds, runCommandWithInputFull)
+import Native (cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, availableProcessors, parallelBuilds, runCommandWithInputFull, raiseStack)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
 import Syntax (parseImplCheckName)
 import Utils (Result (..), mapResult)
@@ -360,10 +360,6 @@ buildCheckedValidator = do
 -- driver, not yet validated
 uncheckedValidator :: IO (Result FilePath String)
 uncheckedValidator = cachedUncheckedValidator
-
--- Run $0 with the largest stack the system allows (macOS caps it at 64 MB)
-raiseStack :: String
-raiseStack = "ulimit -s unlimited 2>/dev/null || ulimit -s 65532 2>/dev/null; exec \"$0\""
 
 -- The verdicts are kept on disk too, so that each function is validated once
 -- for a build of the validator however many processes ask: a file per
