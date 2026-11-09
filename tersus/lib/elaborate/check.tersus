@@ -486,7 +486,9 @@ fn checkStatementReturn(st: St, s: Int, e: Int) -> St ~ {
             allFrom = size(st.names) > 0;
             for o in &st.names { root = declaredOrigin(st, o); if indexIn(&st.resultFrom, &root) < 0 { allFrom = false; }; };
             if !allFrom {
-                return typeError(st, catStrings(catStrings("the value returned is not a reference from ", joinWith(&st.resultFrom, ", ")), ", which the signature names: return a reference to a place of one of them"));
+                functionName = clone(st.current);
+                if size(functionName.bytes) = 0 { functionName = "function"; };
+                return typeError(st, catStrings(catStrings(catStrings("the value returned is not a reference from ", joinWith(&st.resultFrom, ", ")), ", which the signature names: return a reference to a place of one of them"), catStrings(catStrings(" (in ", functionName), ")")));
             };
         };
         st = emit(st, AstNode::Statement { value: AstStatement::Return { e: texpr.node } });
