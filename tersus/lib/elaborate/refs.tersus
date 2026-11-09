@@ -114,7 +114,7 @@ fn aliasesOf(st: &St, name: &String) -> List<Place> ~ {
 };
 
 fn uniquePlaces(places: &List<Place>) -> List<Place> ~ {
-    out = [];
+    let out: List<Place> = [];
     for place in places {
         found = false;
         for old in &out { if old.root = place.root && old.steps = place.steps && old.ok = place.ok { found = true; }; };
