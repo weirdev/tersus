@@ -275,6 +275,21 @@ struct MergePair { left: Int, right: Int, joined: Int };
 
 impl Clone for MergePair { };
 
+// The raw facts of both sides of a merge, numbered in the order the sides are
+// normalized: fact f's terms are terms[starts[f]] up to the next start, and a
+// definition (an application or a constant) has the term it defines first.
+struct RawFacts { terms: List<Int>, starts: List<Int>, definitions: HashSet<Int> };
+
+impl Clone for RawFacts { };
+
+// A side renamed for a merge. origins holds, for each renamed fact in the
+// order normalizedContext walks them (equalities, applications, constants,
+// orders, different, differences, variants), the raw fact it came from, or
+// -1 for an equality the merge adds (sameAsKept).
+struct NormalizedSide { context: ValidatorContext, origins: List<Int>, raw: RawFacts };
+
+impl Clone for NormalizedSide { };
+
 enum StateMergeLookup { Missing, Found { state: ExecutionState } };
 
 impl Clone for StateMergeLookup { };
