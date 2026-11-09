@@ -43,6 +43,36 @@ fn inferAll(st: St, args: &List<Int>) -> St ~ {
     return St { tes: tes, ..st };
 };
 
+// A list-typed parameter gives its type to an argument that writes out a list (inferArg)
+fn inferArgs(st: St, ft: Int, args: &List<Int>) -> St ~ {
+    f = tyAt(st, ft);
+    params = [];
+    if f.kind = 14 { params = argsOfFn(&f); };
+    if size(params) != size(args) { return inferAll(st, args); };
+    tes = [];
+    i = 0;
+    for a in args {
+        p = unrefOf(st, get(params, i));
+        if isListTy(st, p) && literalContext(st, a) { st = inferExpected(st, "expression result", p, a, false); } else { st = inferExpr(st, a); };
+        if st.status != 0 { return St { tes: tes, ..st }; };
+        tes = push(tes, clone(st.te));
+        i = i + 1;
+    };
+    return St { tes: tes, ..st };
+};
+
+fn literalContext(st: &St, e: Int) -> Bool ~ {
+    if listLiteral(st, e) { return true; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        return literalContext(st, a.a) || literalContext(st, a.b);
+    };
+    if ex is AstExpression::BlockExpr { return literalContext(st, (ex as AstExpression::BlockExpr).e); };
+    c = callOf(st, e);
+    return c.ok && size(c.args) = 2 && headKey(st, c.head) = "Push";
+};
+
 fn argsCountText(name: String, n: Int, args: Int) -> String ~ {
     word = " arguments, got ";
     if n = 1 { word = " argument, got "; };
@@ -1847,7 +1877,7 @@ fn headTExpr(st: &St, functT: &TE) -> List<TE> ~ {
 };
 
 fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
-    st = inferAll(st, args);
+    st = inferArgs(st, ft, args);
     if st.status != 0 { return st; };
     inferred0 = clone(st.tes);
     b = builtinHead(st, funct);
