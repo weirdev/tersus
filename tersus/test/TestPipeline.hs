@@ -695,6 +695,15 @@ selfHostedQueryFamilies program =
                 checkBoundCongruence = testAssertEq (runNamedFunction program "entailsGoal" [boundContext, goal "Equal" 10 11]) (Ok (Just (MBool True)))
                 emptyContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkUnknownGoal = testAssertEq (runNamedFunction program "entailsGoal" [emptyContext, MData "ValidatorGoal::Unknown" []]) (Ok (Just (MBool False)))
+                partContext constantTerms equalities orders = MData "ValidatorContext" [("equalities", MList (map fact equalities)), ("applications", MList (map app [(10, 100, [0, 5]), (11, 100, [1, 5])])), ("constants", MList (map constant constantTerms)), ("orders", MList (map mixedFact orders)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                checkPartConstants constantTerms equalities orders expected =
+                    let context = partContext constantTerms equalities orders
+                     in case runNamedFunction program "analyzeContext" [context] of
+                            Ok (Just (MData "ContextAnalysis" fields)) -> case lookup "classes" fields of
+                                Just classes -> testAssertEq (runNamedFunction program "entailsPartDisequality" [context, classes, MList [], MInt 0, MInt 1]) (Ok (Just (MBool expected)))
+                                _ -> Just "Context analysis has no equality classes"
+                            result -> Just ("Unexpected context analysis: " ++ show result)
+                checkInconsistentPartContext = testAssertEq (runNamedFunction program "entailsGoal" [partContext [(10, 0, 0), (11, 0, -1)] [(10, 11)] [], goal "Different" 0 0]) (Ok (Just (MBool True)))
                 localsValue bindings = MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt k), ("value", MInt v)] | (k, v) <- bindings]]), ("count", MInt (toInteger (length bindings)))]
                 initialExecution = MData "ExecutionState" [("context", emptyContext), ("locals", localsValue []), ("templates", MList [])]
                 termRef i = MData "ValueRef::Term" [("term", MInt i)]
@@ -943,6 +952,14 @@ selfHostedQueryFamilies program =
                       , checkContext "Different" 0 4 True, checkContext "Less" 4 0 False
                       , checkBoundCongruence
                       , checkUnknownGoal
+                      , checkPartConstants [(10, 0, 0), (11, 0, -1)] [] [] True
+                      , checkPartConstants [(10, 0, 0), (11, 0, 0)] [] [] False
+                      , checkPartConstants [(10, 0, 0)] [] [] False
+                      , checkPartConstants [] [] [] False
+                      , checkPartConstants [(-300, 0, 0), (-400, 0, -7)] [(10, -100), (-100, -300), (11, -200), (-200, -400)] [] True
+                      , checkPartConstants [(20, 0, 0), (21, 0, -1)] [] [(10, 20, False), (20, 10, False), (11, 21, False), (21, 11, False)] True
+                      , checkPartConstants [(10, 1, 1), (11, 1, 0)] [] [] False
+                      , checkInconsistentPartContext
                       ])
                 , ("execution",
                       [ checkExecution executionSteps 0 (-1), checkExecution [assignLocal 0 (localRef 99)] 2 0

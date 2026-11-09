@@ -692,8 +692,8 @@ fn entailsPartDisequalityWithin(context: &ValidatorContext, classes: &HashMap<In
                             if depth > 1 && a.id != left && a.id != right {
                                 if entailsPartDisequalityWithin(context, classes, orders, a.id, b.id, depth - 1) { return true; };
                             };
-                            av = integerValue(context, a.id);
-                            bv = integerValue(context, b.id);
+                            av = integerValueIn(classes, context.constants, a.id);
+                            bv = integerValueIn(classes, context.constants, b.id);
                             if av is IntegerLookup::Found {
                                 if bv is IntegerLookup::Found {
                                     if (av as IntegerLookup::Found).value != (bv as IntegerLookup::Found).value { return true; };
