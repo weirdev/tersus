@@ -142,7 +142,7 @@ fn resolvePlacesSeen(st: &St, root: String, steps: List<String>, seen: List<Stri
     for alias in &aliases {
         joined = clone(alias.steps);
         for step in &steps { joined = push(joined, clone(step)); };
-        for place in resolvePlacesSeen(st, clone(alias.root), joined, clone(seen)) { out = push(out, place); };
+        for place in resolvePlacesSeen(st, clone(alias.root), joined, clone(seen)) { out = push(out, clone(place)); };
     };
     return uniquePlaces(&out);
 };
@@ -151,7 +151,7 @@ fn putAliases(st: St, name: &String, places: &List<Place>) -> St ~ {
     st = dropAlias(st, name);
     names = st.aliasNames;
     aliases = st.aliasPlaces;
-    for place in uniquePlaces(places) { names = push(names, clone(name)); aliases = push(aliases, place); };
+    for place in uniquePlaces(places) { names = push(names, clone(name)); aliases = push(aliases, clone(place)); };
     return St { aliasNames: names, aliasPlaces: aliases, ..st };
 };
 
@@ -165,7 +165,7 @@ fn argumentPlaces(st: &St, e: Int) -> List<Place> ~ {
     if ex is AstExpression::IfExpr {
         a = ex as AstExpression::IfExpr;
         out = argumentPlaces(st, a.a);
-        for place in argumentPlaces(st, a.b) { out = push(out, place); };
+        for place in argumentPlaces(st, a.b) { out = push(out, clone(place)); };
         return uniquePlaces(&out);
     };
     place = placeSteps(st, e);
@@ -178,7 +178,7 @@ fn fromArgumentPlaces(st: &St, params: &List<String>, froms: &List<String>, args
     i = 0;
     while i < size(params) && i < size(args) [{ affirm i >= 0; }] ~ {
         if indexIn(froms, &get(params, i)) >= 0 {
-            for place in argumentPlaces(st, get(args, i)) { out = push(out, place); };
+            for place in argumentPlaces(st, get(args, i)) { out = push(out, clone(place)); };
         };
         i = i + 1;
     };
@@ -194,7 +194,7 @@ fn expressionPlaces(st: &St, e: Int) -> List<Place> ~ {
     if ex is AstExpression::IfExpr {
         a = ex as AstExpression::IfExpr;
         out = expressionPlaces(st, a.a);
-        for place in expressionPlaces(st, a.b) { out = push(out, place); };
+        for place in expressionPlaces(st, a.b) { out = push(out, clone(place)); };
         return uniquePlaces(&out);
     };
     if ex is AstExpression::BlockExpr { return expressionPlaces(st, (ex as AstExpression::BlockExpr).e); };
@@ -218,9 +218,9 @@ fn expressionPlaces(st: &St, e: Int) -> List<Place> ~ {
     if c.ok && size(c.callee.bytes) > 0 {
         known = fromsOf(st, &c.callee);
         if known.ok {
-            for place in fromArgumentPlaces(st, &known.params, &known.froms, &c.args) { out = push(out, place); };
+            for place in fromArgumentPlaces(st, &known.params, &known.froms, &c.args) { out = push(out, clone(place)); };
         } else {
-            if c.callee = st.current { for place in fromArgumentPlaces(st, &st.params, &st.resultFrom, &c.args) { out = push(out, place); }; };
+            if c.callee = st.current { for place in fromArgumentPlaces(st, &st.params, &st.resultFrom, &c.args) { out = push(out, clone(place)); }; };
         };
     };
     return uniquePlaces(&out);
@@ -290,7 +290,7 @@ fn joinBranchReferences(st: St, left: &St) -> St ~ {
     allNames = uniqueOrigins(&left.aliasNames);
     for name in allNames {
         places = aliasesOf(st, &name);
-        for place in aliasesOf(left, &name) { places = push(places, place); };
+        for place in aliasesOf(left, &name) { places = push(places, clone(place)); };
         st = putAliases(st, &name, &places);
     };
     i = 0;
@@ -328,7 +328,7 @@ fn namedReferences(st: &St, before: St) -> St ~ {
         if !isExpressionOrigin(name) { originNames = push(originNames, clone(name)); roots = push(roots, uniqueOrigins(&get(st.originRoots, i))); };
         i = i + 1;
     };
-    named = St { aliasNames: names, aliasPlaces: aliases, originNames: originNames, originRoots: roots, ..before };
+    named = St { aliasNames: names, aliasPlaces: aliases, originNames: originNames, originRoots: roots, ..clone(before) };
     return resetBranchReferences(before, &named);
 };
 
@@ -466,7 +466,7 @@ fn exprOriginCandidates(st: &St, e: Int) -> List<String> ~ {
     if ex is AstExpression::IfExpr {
         a = ex as AstExpression::IfExpr;
         out = exprOriginCandidates(st, a.a);
-        for root in exprOriginCandidates(st, a.b) { out = push(out, root); };
+        for root in exprOriginCandidates(st, a.b) { out = push(out, clone(root)); };
         return uniqueOrigins(&out);
     };
     if ex is AstExpression::BlockExpr { return exprOriginCandidates(st, (ex as AstExpression::BlockExpr).e); };
@@ -668,7 +668,7 @@ fn ownParameterSources(st: &St, value: &TE) -> List<String> ~ {
     for node in children {
         child = typedChild(st, value, node);
         if child.node >= 0 {
-            for root in ownParameterSources(st, &child) { out = push(out, root); };
+            for root in ownParameterSources(st, &child) { out = push(out, clone(root)); };
         };
     };
     return uniqueOrigins(&out);

@@ -455,9 +455,10 @@ fn typedChild(st: &St, parent: &TE, wanted: Int) -> TE ~ {
 // Coercion consumes recorded types; it never evaluates or infers an expression again.
 fn coerce(st: St, wanted: Int, arg: TE) -> St ~ {
     if st.status != 0 { return St { te: arg, ..st }; };
+    sourceNode = arg.node;
     st = coerceCore(st, wanted, arg);
     if st.status != 0 { return st; };
-    return copyExpressionOrigins(st, arg.node, st.te.node);
+    return copyExpressionOrigins(st, sourceNode, st.te.node);
 };
 
 fn coerceCore(st: St, wanted: Int, arg: TE) -> St ~ {
