@@ -199,6 +199,7 @@ originalGroups =
     , testHashSet
     , testModules
     , testPhase1Packages
+    , testPhase2Packages
     , testBuiltinRegistry
     , testSharedCache
     , testPhase1Cache

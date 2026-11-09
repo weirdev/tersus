@@ -267,8 +267,7 @@ fn implHere(sc: &Scope, tname: &String, ty: &String) -> Bool ~ {
 };
 
 fn implVisible(sc: &Scope, tname: &String, ty: &String) -> Bool ~ {
-    if sc.isLib { return implHere(sc, tname, ty); };
-    return inModule(sc, tname) || inModule(sc, ty);
+    return implHere(sc, tname, ty);
 };
 
 fn typeVisible(sc: &Scope, name: &String) -> Bool ~ {
@@ -322,11 +321,6 @@ fn pairParts(key: &String) -> Broken ~ { return breakOn(" ", key); };
 // the interface root, or status 3 with why it cannot be given
 fn extractInterface(st: St, isLib: Bool, pkg: String, modu: String, hasModule: Bool, original: &List<Int>, elaborated: &List<Int>) -> St ~ {
     sc = scopeOf(st, isLib, &pkg, &modu, hasModule, original);
-    if !isLib && size(sc.bounded) > 0 {
-        moduleName = clone(pkg);
-        if hasModule { moduleName = catStrings(catStrings(moduleName, "::"), clone(modu)); };
-        return St { status: 3, msg: catStrings(catStrings(catStrings(catStrings("in module ", moduleName), ": bounded function "), firstText(&sc.bounded)), " cannot be exported in a module interface: a function with bounds on its types (BoundedDef) is usable inside its home module only"), ..st };
-    };
     st = declarationSections(st, &pkg, &modu, hasModule, isLib, original, elaborated);
     first = clone(st.outs);
     st = implSections(st, &sc, elaborated);
@@ -683,7 +677,6 @@ fn copiesOf(st: &St, sc: &Scope, elaborated: &List<Int>) -> List<String> ~ {
 };
 
 fn assocKept(sc: &Scope, owner: &String, origins: &List<String>) -> Bool ~ {
-    if !sc.isLib { return inModule(sc, owner); };
     ownerBase = baseNameOf(owner);
     keep = indexIn(&sc.ownNames, &ownerBase) >= 0;
     for o in origins {
@@ -759,17 +752,18 @@ fn implBoundsSection(st: St, sc: &Scope) -> St ~ {
     return emitEntries(st, &implBounds);
 };
 
-// A template, or a companion of one, is in the interface of the module that declares it (in a library) or of a module
-// with functions with bounds
-fn templateKept(sc: &Scope, name: &String) -> Bool ~ {
-    if !sc.isLib { return indexIn(&sc.bounded, name) >= 0; };
-    return templateHere(sc, name);
+fn templateKept(st: &St, sc: &Scope, name: &String) -> Bool ~ {
+    if indexIn(&sc.declaredFns, name) >= 0 { return true; };
+    for function in &sc.declaredFns {
+        if indexIn(st.companions.lookup(function, []), name) >= 0 { return true; };
+    };
+    return false;
 };
 
 fn templatesSection(st: St, sc: &Scope) -> St ~ {
     templates = [];
     for e in st.templates.entries() {
-        if templateKept(sc, &e.key) {
+        if templateKept(st, sc, &e.key) {
             st = templateEntry(st, &e.key, &e.value);
             templates = push(templates, Keyed { a: clone(e.key), b: "", node: st.nid });
         };
@@ -780,7 +774,7 @@ fn templatesSection(st: St, sc: &Scope) -> St ~ {
 fn companionsSection(st: St, sc: &Scope) -> St ~ {
     companions = [];
     for e in st.companions.entries() {
-        if templateKept(sc, &e.key) {
+        if templateKept(st, sc, &e.key) {
             st = namesEntry(st, &e.key, &e.value);
             companions = push(companions, Keyed { a: clone(e.key), b: "", node: st.nid });
         };

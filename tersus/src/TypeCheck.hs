@@ -81,11 +81,12 @@ data ImportEnv = ImportEnv
     , ieTemplates :: Map Name Template
     , ieCompanions :: Map Name [Name]
     , iePredeclareOwn :: Bool
+    , ieDefinitions :: [(Map Name Template, ImportEnv)]
     }
     deriving (Show, Eq)
 
 emptyImportEnv :: ImportEnv
-emptyImportEnv = ImportEnv Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty False
+emptyImportEnv = ImportEnv Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty False []
 
 elaborateWith :: ImportEnv -> [Statement] -> Result (Elaborated, TcState) String
 elaborateWith env stmts =
@@ -115,6 +116,7 @@ seededTcState env =
         , tcRefResults = Map.union (ieRefResults env) (tcRefResults initialTcState)
         , tcTemplates = Map.union (ieTemplates env) (tcTemplates initialTcState)
         , tcCompanions = Map.unionWith (++) (ieCompanions env) (tcCompanions initialTcState)
+        , tcDefinitions = [(owned, seededTcState context) | (owned, context) <- ieDefinitions env]
         }
 
 checkProgram :: [Statement] -> TC ([Statement], [Type])
@@ -1283,7 +1285,9 @@ checkImpl ctx env trait traitArgs typeName selfTypeInput bounds functions
                 forM_ bounds $ \(param, traitName, _) -> unless (param `elem` sigTypes) $ failTc ("Type error: " ++ param ++ " is bounded by " ++ traitName ++ " in the impl for " ++ typeName ++ " but is not a type of " ++ name)
                 s <- getState
                 when (Map.member name (tcTemplates s) || Map.member name (ctxFns ctx)) $ failTc ("Type error: " ++ name ++ " is already defined")
-                putState s{tcTemplates = Map.insert name (Template bounds ctx params signature ins outs term body) (tcTemplates s), tcAssoc = Map.insertWith (\new old -> old ++ new) (typeName, implFunctionPart name) [trait] (tcAssoc s)}
+                checkTemplateSignature name params signature bounds
+                checked <- getState
+                putState checked{tcTemplates = Map.insert name (Template bounds ctx params signature ins outs term body) (tcTemplates checked), tcAssoc = Map.insertWith (\new old -> old ++ new) (typeName, implFunctionPart name) [trait] (tcAssoc checked)}
             _ -> failTc "Type error: an impl with bounds can only hold functions"
         forM_ wrappers $ \(function, stmt) -> case stmt of
             Assign name (Val (VFunct params ins outs (NativeFunct signature term body) _)) -> do
@@ -1673,12 +1677,20 @@ declareTemplate ctx name bounds params signature@(Signature _ _ _ types _writes 
             Nothing -> failTc ("Type error: unknown trait " ++ trait ++ " in the bound on " ++ param ++ " of " ++ name)
             Just params' -> when (length params' /= length args) $
                 failTc ("Type error: trait " ++ trait ++ " has parameters <" ++ intercalate ", " params' ++ ">, which the bound on " ++ param ++ " of " ++ name ++ " gives " ++ show (length args))
-    putState s{tcTemplates = Map.insert name (Template bounds ctx params signature ins outs term body) (tcTemplates s)}
+    checkTemplateSignature name params signature bounds
+    checked <- getState
+    putState checked{tcTemplates = Map.insert name (Template bounds ctx params signature ins outs term body) (tcTemplates checked)}
+
+checkTemplateSignature :: Name -> [Variable] -> Signature -> [Bound] -> TC ()
+checkTemplateSignature name params (Signature ptys rty sizes types _ from) bounds = withGenerics sizes types $ do
+    when (length params /= length ptys) $ failTc ("Type error: function " ++ name ++ " has " ++ show (length params) ++ " parameters but " ++ show (length ptys) ++ " types")
+    mapM_ checkType (rty : ptys ++ concat [args | (_, _, args) <- bounds])
+    void (refResultFrom name params ptys rty from)
 
 -- A call of a function with bounds: the types of the arguments give the types of the function, each of which has to implement what its bounds say,
 -- and the function is checked for those types, once (it is a function of the program named after them: total[Vec<Int>]). The call is a call of that.
 templateCall :: Ctx -> Name -> Template -> [TExpr] -> TC (Type, Name, [TExpr], [TExpr])
-templateCall ctx name template inferred = do
+templateCall ctx name template inferred = withDefinitions name template $ do
     let Signature ptys rty sizes types _writes _from = tmplSignature template
     (instantiated, sizeVars, typeVars) <- instantiateGenerics sizes types (TFn ptys rty)
     case instantiated of
@@ -1703,7 +1715,7 @@ templateCall ctx name template inferred = do
                             t <- maybe (return TInt) zonk (lookup param given)
                             case t of
                                 TVar _ -> return (Just bound)
-                                _ -> checkBound given bound t >> return Nothing
+                                _ -> checkBound (zip sizes sizeVars) given bound t >> return Nothing
                         let left = [bound | Just bound <- results]
                         if null left
                             then return ()
@@ -1717,7 +1729,12 @@ templateCall ctx name template inferred = do
                     when (unknown t) $ failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " cannot be worked out from its arguments")
                     when (mentionsParameter t) $
                         failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " would be " ++ renderType t ++ ", which is made of a type parameter of the function that calls: a function with bounds is made for types a call writes")
-                let suffix = "[" ++ intercalate ", " (map renderTypeForName concrete) ++ "]"
+                matchedSizes <- mapM (\(n, size) -> zonkSize size >>= \size' -> return (n, size')) (zip sizes sizeVars)
+                let boundedSizes = [(n, size) | (n, size) <- matchedSizes, any (\ty -> substitute [(n, SizeConst 0)] [] ty /= ty) (concat [parameters | (_, _, parameters) <- tmplBounds template])]
+                forM_ boundedSizes $ \(n, size) -> case size of
+                    SizeConst _ -> return ()
+                    _ -> failTc ("Type error: the size " ++ n ++ " in a bound of " ++ name ++ " cannot be worked out from its arguments")
+                let suffix = "[" ++ intercalate ", " (map renderTypeForName concrete ++ map (renderSizeForName . snd) boundedSizes) ++ "]"
                     instanceName' = name ++ suffix
                     bigness = sum (map typeBigness concrete)
                 instances <- tcInstances <$> getState
@@ -1727,21 +1744,21 @@ templateCall ctx name template inferred = do
                     -- types get smaller, as the impl for a list of lists compares lists of the elements)
                     when (any (\(n, b) -> n == name && bigness >= b) active) $
                         failTc ("Type error: " ++ name ++ " calls itself with the types " ++ intercalate ", " (map renderType concrete) ++ ", which are not those it is made for: a function with bounds is made for each type, and one that is made for a bigger type at each call would never end")
-                    makeTemplateInstance ctx name template instanceName' bigness (zip types concrete)
+                    makeTemplateInstance ctx name template instanceName' bigness boundedSizes (zip types concrete)
                     companions <- Map.findWithDefault [] name . tcCompanions <$> getState
                     forM_ companions $ \companion -> do
                         s <- getState
                         case Map.lookup companion (tcTemplates s) of
                             Just companionTemplate | not (Map.member (companion ++ suffix) (tcInstances s)) ->
-                                makeTemplateInstance ctx companion companionTemplate (companion ++ suffix) bigness (zip types concrete)
+                                makeTemplateInstance ctx companion companionTemplate (companion ++ suffix) bigness boundedSizes (zip types concrete)
                             _ -> return ()
-                sizeGiven <- mapM (\(n, size) -> zonkSize size >>= sizeArgument name n) (zip sizes sizeVars)
+                sizeGiven <- mapM (\(n, size) -> sizeArgument name n size) matchedSizes
                 resultTy <- zonk result
                 return (resultTy, instanceName', args, map (tLeaf TInt) sizeGiven)
         _ -> failTc ("Type error: " ++ name ++ " is not a function")
   where
     -- the type meets the bound: it implements the trait, with the types that the bound writes
-    checkBound given (param, trait, wanted) t = do
+    checkBound sizes given (param, trait, wanted) t = do
         gives <- traitArguments trait t
         case gives of
             Nothing -> failTc ("Type error: " ++ name ++ " needs " ++ param ++ " to implement " ++ trait ++ ", and " ++ renderType t ++ " does not")
@@ -1750,7 +1767,7 @@ templateCall ctx name template inferred = do
                     failTc ("Type error: " ++ renderType t ++ " gives " ++ trait ++ " " ++ show (length actual) ++ " types, but the bound on " ++ param ++ " of " ++ name ++ " has " ++ show (length wanted))
                 forM_ (zip actual wanted) $ \(have, want) -> do
                     have' <- zonk have
-                    want' <- zonk (substitute [] given want)
+                    want' <- zonk (substitute sizes given want)
                     ok <- unify have' want'
                     unless ok $ do
                         h <- zonk have'
@@ -1770,6 +1787,64 @@ templateCall ctx name template inferred = do
         TFn args r -> any unknown (r : args)
         _ -> False
 
+definingContext :: Name -> Template -> TcState -> Maybe TcState
+definingContext name template state = case [context | (owned, context) <- tcDefinitions state, Map.lookup name owned == Just template] of
+    context : _ -> Just context
+    [] -> Nothing
+
+withDefinitions :: Name -> Template -> TC a -> TC a
+withDefinitions name template action = do
+    outer <- getState
+    case definingContext name template outer of
+        Just defining -> do
+            let allowedTraits = Map.keysSet (tcTraits defining)
+                allowedPair (trait, _) = trait `Set.member` allowedTraits
+                callerAssoc = Map.mapMaybe (\origins -> case [Just trait | Just trait <- origins, trait `Set.member` allowedTraits] of [] -> Nothing; visible -> Just visible) (tcAssoc outer)
+                callerNames = Set.fromList [implFunctionName owner (Just trait) method | ((owner, method), origins) <- Map.toList callerAssoc, Just trait <- origins]
+                callerCompanions = Map.restrictKeys (tcCompanions outer) callerNames
+                callerTemplates = Set.union callerNames (Set.fromList (concat (Map.elems callerCompanions)))
+                scoped = outer
+                    { tcTypes = Map.union (tcTypes defining) (tcTypes outer)
+                    , tcCtors = Map.union (tcCtors defining) (tcCtors outer)
+                    , tcGenerics = Map.union (tcGenerics defining) (tcGenerics outer)
+                    , tcTraits = tcTraits defining
+                    , tcTraitParams = tcTraitParams defining
+                    , tcImpls = Set.union (tcImpls defining) (Set.filter allowedPair (tcImpls outer))
+                    , tcAssoc = Map.union (tcAssoc defining) callerAssoc
+                    , tcImplArgs = Map.union (tcImplArgs defining) (Map.filterWithKey (\pair _ -> allowedPair pair) (tcImplArgs outer))
+                    , tcImplBounds = Map.union (tcImplBounds defining) (Map.filterWithKey (\pair _ -> allowedPair pair) (tcImplBounds outer))
+                    , tcLinear = Set.union (tcLinear defining) (tcLinear outer)
+                    , tcDrops = Set.union (tcDrops defining) (tcDrops outer)
+                    , tcTemplates = Map.union (tcTemplates defining) (Map.restrictKeys (tcTemplates outer) callerTemplates)
+                    , tcCompanions = Map.union (tcCompanions defining) callerCompanions
+                    , tcRefResults = Map.union (tcRefResults defining) (Map.restrictKeys (tcRefResults outer) callerTemplates)
+                    , tcDefinitions = tcDefinitions outer ++ [(tcTemplates outer, outer{tcDefinitions = []})]
+                    }
+            putState scoped
+            result <- action
+            after <- getState
+            putState after
+                { tcTypes = Map.union (tcTypes outer) (Map.filterWithKey (\key _ -> canonical key || Map.notMember key (tcTypes scoped)) (tcTypes after))
+                , tcCtors = Map.union (tcCtors outer) (Map.filterWithKey (\key _ -> canonical key || Map.notMember key (tcCtors scoped)) (tcCtors after))
+                , tcGenerics = Map.union (tcGenerics outer) (Map.filterWithKey (\key _ -> canonical key) (tcGenerics after))
+                , tcTraits = tcTraits outer
+                , tcTraitParams = tcTraitParams outer
+                , tcImpls = tcImpls outer
+                , tcAssoc = tcAssoc outer
+                , tcImplArgs = tcImplArgs outer
+                , tcImplBounds = tcImplBounds outer
+                , tcLinear = tcLinear outer
+                , tcDrops = tcDrops outer
+                , tcTemplates = tcTemplates outer
+                , tcCompanions = tcCompanions outer
+                , tcRefResults = Map.union (tcRefResults outer) (Map.difference (tcRefResults after) (tcRefResults scoped))
+                , tcDefinitions = tcDefinitions outer
+                }
+            return result
+        _ -> action
+  where
+    canonical key = "$" `isInfixOf` key
+
 -- How big a type is, so that a function with bounds can call itself for a part of the type it is made for
 typeBigness :: Type -> Int
 typeBigness t = case t of
@@ -1785,18 +1860,96 @@ typeBigness t = case t of
     TFn args r -> 1 + sum (map typeBigness (r : args))
     _ -> 1
 
+specializeTemplate :: Bool -> [(Variable, Size)] -> [(Variable, Type)] -> Expression -> Expression
+specializeTemplate rootDefinition sizeBindings bindings = expression
+  where
+    ty = substitute sizeBindings bindings
+    expression expr = case expr of
+        Var name | Just (SizeConst size) <- lookup name sizeBindings -> Val (VInt size)
+        Val value -> Val (valueOf value)
+        F function args -> F (expression function) (map expression args)
+        _ -> expr
+    valueOf value = case value of
+        VFunct params ins outs (NativeFunct (Signature ptys rty sizes types writes from) term body) exported ->
+            let remaining = filter (\(param, _) -> param `notElem` types) bindings
+                remainingSizes = filter (\(param, _) -> param `notElem` (localNames body ++ if rootDefinition then [] else sizes ++ params)) sizeBindings
+                scoped = specializeTemplate False remainingSizes remaining
+                scopedType = substitute remainingSizes remaining
+                parts = specializeTemplateParts scoped
+             in VFunct params (map (validation scoped) ins) (map (validation scoped) outs)
+                    (NativeFunct (Signature (map scopedType ptys) (scopedType rty) sizes types writes from) (termination scoped term) (map parts body)) exported
+        VFunct params ins outs (BuiltinFunct (Ctor name args fields)) exported ->
+            let args' = map argument args
+                name' = if args' == args then name else instanceName (baseNameOf name) args'
+             in VFunct params ins outs (BuiltinFunct (Ctor name' args' fields)) exported
+        VList values -> VList (map valueOf values)
+        VData name fields -> VData name [(field, valueOf inner) | (field, inner) <- fields]
+        _ -> value
+    localNames = concatMap (\stmt -> case stmt of
+        Assign name _ -> [name]
+        Let name _ -> [name]
+        ValidationStatement (AssignProofVar name _) -> [name]
+        Block body -> localNames body
+        If _ yes no -> localNames yes ++ localNames no
+        While _ _ _ body -> localNames body
+        _ -> [])
+    argument (ArgType inner) = ArgType (ty inner)
+    argument (ArgSize size@(SizeParam name)) = ArgSize (fromMaybe size (lookup name sizeBindings))
+    argument other = other
+    proof scoped term = case term of
+        ATerm name -> exprToProof (scoped (Var name))
+        CTerm value -> case scoped (Val value) of Val value' -> CTerm value'; _ -> term
+        FApp function args -> FApp (proof scoped function) (map (proof scoped) args)
+        Forall index guards body -> Forall index (map (proof scoped) guards) (proof scoped body)
+        _ -> term
+    validation scoped item = case item of
+        ProofAssert term -> ProofAssert (proof scoped term)
+        Assume term -> Assume (proof scoped term)
+        AssignProofVar name expr -> AssignProofVar name (scoped expr)
+        Rewrite rule -> Rewrite (case rule of
+            Refl term -> Refl (proof scoped term)
+            CheckGtZero term -> CheckGtZero (proof scoped term)
+            CheckRel term -> CheckRel (proof scoped term)
+            UserRewrite name terms -> UserRewrite name (map (proof scoped) terms)
+            _ -> rule)
+    termination scoped = fmap (\term -> case term of
+        Shrinks expr -> Shrinks (scoped expr)
+        Counting expr -> Counting (scoped expr)
+        Parts expr -> Parts (scoped expr)
+        _ -> term)
+    specializeTemplateParts scoped stmt = case stmt of
+        Assign name expr -> Assign name (scoped expr)
+        Let name expr -> Let name (scoped expr)
+        AssignDeref lhs rhs -> AssignDeref (scoped lhs) (scoped rhs)
+        Return expr -> Return (scoped expr)
+        ValidationStatement item -> ValidationStatement (validation scoped item)
+        Block body -> Block (map (specializeTemplateParts scoped) body)
+        If cond yes no -> If (scoped cond) (map (specializeTemplateParts scoped) yes) (map (specializeTemplateParts scoped) no)
+        While cond invariant term body -> While (scoped cond) (map (validation scoped) invariant) (termination scoped term) (map (specializeTemplateParts scoped) body)
+        _ -> stmt
+
 -- A template with the types it was called with in place of its own, which is checked like any function
-makeTemplateInstance :: Ctx -> Name -> Template -> Name -> Int -> [(Variable, Type)] -> TC ()
-makeTemplateInstance ctx name template instanceName' bigness bindings = do
-    let Signature ptys rty sizes _ _writes _from = tmplSignature template
-        ptys' = map (substitute [] bindings) ptys
-        rty' = substitute [] bindings rty
-        fnTy = functionType sizes [] ptys' rty'
-        instanceCtx = (tmplCtx template){ctxFns = Map.insert instanceName' fnTy (Map.union (ctxFns ctx) (ctxFns (tmplCtx template)))}
+makeTemplateInstance :: Ctx -> Name -> Template -> Name -> Int -> [(Variable, Size)] -> [(Variable, Type)] -> TC ()
+makeTemplateInstance ctx name template instanceName' bigness sizeBindings bindings = do
     s <- getState
+    let callerFunctions = case definingContext name template s of
+            Just defining ->
+                let visibleTraits = Map.keysSet (tcTraits defining)
+                    names = Set.fromList [implFunctionName owner (Just trait) method | ((owner, method), origins) <- Map.toList (tcAssoc s), Just trait <- origins, trait `Set.member` visibleTraits]
+                 in Map.restrictKeys (ctxFns ctx) names
+            _ -> ctxFns ctx
+        Signature ptys rty sizes _ writes froms = tmplSignature template
+        bodySizes = filter (`notElem` map fst sizeBindings) sizes
+        specialized = specializeTemplate True sizeBindings bindings (Val (VFunct (tmplParams template) (tmplRequires template) (tmplEnsures template) (NativeFunct (Signature ptys rty bodySizes [] writes froms) (tmplTermination template) (tmplBody template)) []))
+        ptys' = map (substitute sizeBindings bindings) ptys
+        rty' = substitute sizeBindings bindings rty
+        fnTy = functionType sizes [] ptys' rty'
+        instanceCtx = (tmplCtx template){ctxFns = Map.insert instanceName' fnTy (Map.union (ctxFns (tmplCtx template)) callerFunctions)}
     putState s{tcInstances = Map.insert instanceName' fnTy (tcInstances s), tcActive = (name, bigness) : tcActive s}
-    (term', ins', outs', body', bodyTypes, from) <- checkFunction instanceCtx instanceName' (tmplParams template) ptys' rty' sizes [] (tmplRequires template) (tmplEnsures template) [] _from (tmplTermination template) (tmplBody template)
-    let function = Assign instanceName' (Val (VFunct (tmplParams template) ins' outs' (NativeFunct (Signature ptys' rty' sizes [] [] from) term' body') []))
+    (term', ins', outs', body', bodyTypes, from) <- case specialized of
+        Val (VFunct _ ins outs (NativeFunct _ term body) _) -> checkFunction instanceCtx instanceName' (tmplParams template) ptys' rty' sizes [] ins outs writes froms term body
+        _ -> failTc "Type error: a template is not a function"
+    let function = Assign instanceName' (Val (VFunct (tmplParams template) ins' outs' (NativeFunct (Signature ptys' rty' sizes [] writes from) term' body') []))
     s' <- getState
     putState s'{tcEmitted = tcEmitted s' ++ [(function, bodyTypes)], tcActive = tcActive s, tcRefResults = if null from then tcRefResults s' else Map.insert instanceName' (tmplParams template, from) (tcRefResults s')}
 

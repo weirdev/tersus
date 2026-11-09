@@ -15,10 +15,10 @@ import Data.Ord (comparing)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (librariesFor, reservedHelperName, reservedError, completeSpecEnvs)
+import Compile (librariesFor, reservedHelperName, reservedError)
 import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..), respond)
 import Interface (InterfaceFunction (..), ModuleInterface (..), mergeInterfacesImportEnv, nameInModule, withoutDeclaredNames)
-import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
+import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libDefinitionContexts, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
 import ModuleResolve (rewriteFileReferences)
 import qualified Modules as Mod
@@ -27,6 +27,7 @@ import MirLower (lowerModuleWith)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
 import TypeCheck (Elaborated (..))
+import TypeCheckCore (tmplSignature)
 import Types (Signature (..), Type (..), pattern TBox, pattern TList, baseNameOf)
 import Utils
 
@@ -37,6 +38,8 @@ data CompiledModule = CompiledModule
     , compiledInterface :: ModuleInterface
     , compiledLibInterfaces :: [ModuleInterface]
     , compiledLibUnits :: [(Mod.ModuleId, M.Program)]
+    , compiledImportInterfaces :: [ModuleInterface]
+    , compiledDefinitionContexts :: [[ModuleInterface]]
     }
     deriving (Show)
 
@@ -53,15 +56,16 @@ compileModulesWith :: Elaborator -> Mod.LoadedPackage -> Result CompiledPackage 
 compileModulesWith elaborator pkg = go (Mod.packageModules pkg) Map.empty []
   where
     go [] _ done = Ok (CompiledPackage (Mod.packageEntryModule pkg) (reverse done))
-    go (modu : rest) interfaces done =
-        case compileOne interfaces modu of
+    go (modu : rest) compiled done =
+        case compileOne compiled modu of
             Error err -> Error err
-            Ok compiled -> go rest (Map.insert (Mod.loadedModuleId modu) (compiledInterface compiled) interfaces) (compiled : done)
-    compileOne interfaces modu =
+            Ok unit -> go rest (Map.insert (Mod.loadedModuleId modu) unit compiled) (unit : done)
+    compileOne compiled modu =
         let moduId = Mod.loadedModuleId modu
-            extraction = if moduId == Mod.packageEntryModule pkg then LibInterfaceOf else ModuleInterfaceOf
-            depInterfaces = [interfaces Map.! dep | dep <- Mod.loadedDependencies modu, Map.member dep interfaces]
-            missing = [dep | dep <- Mod.loadedDependencies modu, not (Map.member dep interfaces)]
+            depModules = [compiled Map.! dep | dep <- Mod.loadedDependencies modu, Map.member dep compiled]
+            depInterfaces = map compiledInterface depModules
+            definingContexts = uniqueContexts (concatMap compiledDefinitionContexts depModules)
+            missing = [dep | dep <- Mod.loadedDependencies modu, not (Map.member dep compiled)]
          in if not (null missing)
                 then Error ("in module " ++ Mod.renderModuleId moduId ++ ": dependency " ++ Mod.renderModuleId (head missing) ++ " was not compiled before it (the loader gives modules dependencies first)")
                 else
@@ -72,15 +76,18 @@ compileModulesWith elaborator pkg = go (Mod.packageModules pkg) Map.empty []
                             Left err -> Error err
                             Right () -> case selectLibraries depInterfaces modu prepared of
                                     Left err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
-                                    Right (libIfaces, libUnits, checkOnlyIfaces) ->
-                                        case elaborator (Request moduId True False extraction (libIfaces ++ checkOnlyIfaces ++ depInterfaces) prepared) of
-                                            Accepted elaborated@(Elaborated elaboratedStmts _) (Just iface) -> Ok (CompiledModule moduId elaboratedStmts elaborated iface (libIfaces ++ checkOnlyIfaces) libUnits)
+                                    Right (libIfaces, libUnits, checkOnlyIfaces, libraryDefinitions) ->
+                                        let visible = libIfaces ++ checkOnlyIfaces ++ depInterfaces
+                                            definitions = uniqueContexts (libraryDefinitions ++ definingContexts)
+                                            lowering = uniqueInterfaces (visible ++ concat definitions)
+                                         in case elaborator (Request moduId True False ModuleInterfaceOf visible definitions prepared) of
+                                            Accepted elaborated@(Elaborated elaboratedStmts _) (Just iface) -> Ok (CompiledModule moduId elaboratedStmts elaborated iface (libIfaces ++ checkOnlyIfaces) libUnits lowering (uniqueContexts ((iface : lowering) : definitions)))
                                             Accepted _ Nothing -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": the elaborator gave no interface")
                                             Refused err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
                                             RefusedInterface err -> Error err
                                             NotModelled what -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": the elaborator does not handle this module yet: " ++ what)
     selectLibraries depInterfaces modu prepared
-        | Mod.loadedNoPrelude modu = Right ([], [], [])
+        | Mod.loadedNoPrelude modu = Right ([], [], [], [])
         | otherwise = case libPackage of
             Error err -> Left err
             Ok libPkg -> moduleLibSelection libPkg depInterfaces modu prepared
@@ -95,7 +102,7 @@ compileModulesWith elaborator pkg = go (Mod.packageModules pkg) Map.empty []
 -- is checked against the prelude's Drop trait alone, check-only: that is
 -- what the old Drop-trait extraction from the prelude text served, and
 -- no lib unit is linked for it.
-moduleLibSelection :: LibPackage -> [ModuleInterface] -> Mod.LoadedModule -> [Statement] -> Either String ([ModuleInterface], [(Mod.ModuleId, M.Program)], [ModuleInterface])
+moduleLibSelection :: LibPackage -> [ModuleInterface] -> Mod.LoadedModule -> [Statement] -> Either String ([ModuleInterface], [(Mod.ModuleId, M.Program)], [ModuleInterface], [[ModuleInterface]])
 moduleLibSelection libPkg depInterfaces modu prepared =
     let selected = [name | display <- map fst (librariesFor probed), Just name <- [libModuleOfDisplay display]]
         selection = libSelectionFor libPkg selected prepared
@@ -108,7 +115,7 @@ moduleLibSelection libPkg depInterfaces modu prepared =
         (selectedIfaces, libUnits) <- selection
         let libIfaces = map (withoutDeclaredNames (moduleDeclaredNames prepared)) selectedIfaces
             libUnits' = stripDeclaredFromUnits (moduleDeclaredNames prepared) libUnits
-        Right (libIfaces, libUnits', checkOnlyIfaces)
+        Right (libIfaces, libUnits', checkOnlyIfaces, libDefinitionContexts libPkg selected)
   where
     probed = concatMap (fileBody . Mod.loadedParsed) (Mod.loadedModuleFiles modu) ++ [Return (Var name) | name <- ["String", "HashMap", "HashSet"], name `elem` dependencyTypeNames]
     dependencyTypeNames = concatMap interfaceTypeNames depInterfaces
@@ -117,8 +124,9 @@ moduleLibSelection libPkg depInterfaces modu prepared =
             ++ Map.keys (ifGenerics iface)
             ++ concatMap (concatMap (typeNames . snd) . snd) (Map.elems (ifCtors iface))
             ++ concatMap (concatMap (typeNames . snd) . snd) (Map.elems (ifGenerics iface))
-            ++ concatMap signatureTypeNames (Map.elems (ifFunctions iface))
-    signatureTypeNames fn = let Signature params ret _ _ _ _ = fnSignature fn in concatMap typeNames (ret : params)
+            ++ concatMap (signatureTypeNames . fnSignature) (Map.elems (ifFunctions iface))
+            ++ concatMap (signatureTypeNames . tmplSignature) (Map.elems (ifTemplates iface))
+    signatureTypeNames (Signature params ret _ _ _ _) = concatMap typeNames (ret : params)
     typeNames ty = case ty of
         TNamed name _ -> [name]
         TVariant name -> [name]
@@ -239,16 +247,14 @@ compileModulesLinked pkg = compileModules pkg `bindResult` lowerCompiledPackage 
 -- Callers must validate the linked program before erasure or execution.
 lowerCompiledPackage :: Mod.LoadedPackage -> CompiledPackage -> Result M.Program String
 lowerCompiledPackage pkg compiled =
-    let ifaceMap = Map.fromList [(compiledModuleId modu, compiledInterface modu) | modu <- compiledModules compiled]
-        loadedMap = Map.fromList [(Mod.loadedModuleId modu, modu) | modu <- Mod.packageModules pkg]
+    let loadedMap = Map.fromList [(Mod.loadedModuleId modu, modu) | modu <- Mod.packageModules pkg]
         lowerOne modu = case Map.lookup (compiledModuleId modu) loadedMap of
             Nothing -> Error ("internal: compiled module " ++ Mod.renderModuleId (compiledModuleId modu) ++ " is not in the loaded package")
-            Just loaded ->
-                let depIfaces = [ifaceMap Map.! dep | dep <- Mod.loadedDependencies loaded, Map.member dep ifaceMap]
-                    allIfaces = compiledLibInterfaces modu ++ depIfaces
+            Just _ ->
+                let allIfaces = compiledImportInterfaces modu
                  in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv allIfaces) allIfaces (compiledElaborated modu)))
         libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
-     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> mapResult completeSpecEnvs (linkPrograms (libUnits ++ units))
+     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
 
 assumptionsOfPackage :: CompiledPackage -> [String]
 assumptionsOfPackage compiled = concatMap perModule (compiledModules compiled)
@@ -271,6 +277,12 @@ assumptionsOfPackage compiled = concatMap perModule (compiledModules compiled)
         ImplDef _ _ _ _ _ body -> concatMap assumesIn body
         BoundedDef _ inner -> assumesIn inner
         _ -> []
+
+uniqueContexts :: [[ModuleInterface]] -> [[ModuleInterface]]
+uniqueContexts = nubBy (\a b -> map ifModule (take 1 a) == map ifModule (take 1 b))
+
+uniqueInterfaces :: [ModuleInterface] -> [ModuleInterface]
+uniqueInterfaces = nubBy (\a b -> ifModule a == ifModule b)
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

@@ -3,6 +3,7 @@
 module Link
     ( linkPrograms
     , pruneProgram
+    , completeSpecEnvs
     ) where
 
 import Data.List (isPrefixOf)
@@ -32,13 +33,14 @@ linkPrograms units = deduplicateUnits [(modu, normalizeExterns program) | (modu,
 linkNormalized :: [(ModuleId, M.Program)] -> Result M.Program String
 linkNormalized normalized =
     mergeAll "type" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progTypes program)] `bindResult` \types ->
-        mergeFunctions normalized `bindResult` \functions ->
+        mergeFunctions functionEnv normalized `bindResult` \functions ->
             mergeAll "generic struct" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progGenerics program)] `bindResult` \generics ->
                 mergeAll "invariant" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInvariants program)] `bindResult` \invariants ->
                     Ok (M.completeInstances (M.Program types functions linkedMain generics invariants))
   where
+    functionEnv = Map.fromList [(name, M.Const (M.CFn name)) | (_, program) <- normalized, name <- Map.keys (M.progFunctions program)]
     rootMain = M.progMain (snd (last normalized))
-    linkedMain = prependGhosts (concatMap unitGhosts (init normalized)) rootMain
+    linkedMain = (completeFunctionEnvs functionEnv (prependGhosts (concatMap unitGhosts (init normalized)) rootMain)){M.fnSpec = M.fnSpec rootMain}
 
 deduplicateUnits :: [(ModuleId, M.Program)] -> Result [(ModuleId, M.Program)] String
 deduplicateUnits = go Map.empty []
@@ -69,8 +71,29 @@ mergeAll what entries = go Map.empty Map.empty entries
             | existing == value -> go values origins rest
             | otherwise -> Error ("link error: " ++ what ++ " " ++ name ++ " is defined by both module " ++ renderModuleId (origins Map.! name) ++ " and module " ++ renderModuleId modu ++ " with different definitions")
 
-mergeFunctions :: [(ModuleId, M.Program)] -> Result (Map.Map Name M.Function) String
-mergeFunctions units = go Map.empty Map.empty [(modu, fn) | (modu, program) <- units, fn <- Map.elems (M.progFunctions program)]
+-- Linked functions need the complete program's ghost environment, not only the unit's.
+completeSpecEnvs :: M.Program -> M.Program
+completeSpecEnvs program = program
+    { M.progFunctions = Map.map (completeFunctionEnvs functionEnv) (M.progFunctions program)
+    , M.progMain = (completeFunctionEnvs functionEnv (M.progMain program)){M.fnSpec = M.fnSpec (M.progMain program)}
+    }
+  where
+    functionEnv = Map.fromList [(name, M.Const (M.CFn name)) | name <- Map.keys (M.progFunctions program)]
+
+completeFunctionEnvs :: M.Env -> M.Function -> M.Function
+completeFunctionEnvs functionEnv fn = fn
+    { M.fnSpec = completeSpec (M.fnSpec fn)
+    , M.fnBlocks = Map.map completeBlock (M.fnBlocks fn)
+    }
+  where
+    completeBlock (M.BasicBlock statements term) = M.BasicBlock (map completeStatement statements) term
+    completeStatement (M.Ghost env ghost) = M.Ghost (completeEnv env) ghost
+    completeStatement other = other
+    completeSpec spec = spec{M.specEnv = completeEnv (M.specEnv spec), M.specLoops = Map.map (\loop -> loop{M.loopEnv = completeEnv (M.loopEnv loop)}) (M.specLoops spec)}
+    completeEnv env = Map.union env functionEnv
+
+mergeFunctions :: M.Env -> [(ModuleId, M.Program)] -> Result (Map.Map Name M.Function) String
+mergeFunctions functionEnv units = go Map.empty Map.empty [(modu, completeFunctionEnvs functionEnv fn) | (modu, program) <- units, fn <- Map.elems (M.progFunctions program)]
   where
     go functions _ [] = Ok functions
     go functions origins ((modu, fn) : rest) = case Map.lookup (M.fnName fn) functions of
@@ -83,8 +106,7 @@ mergeFunctions units = go Map.empty Map.empty [(modu, fn) | (modu, program) <- u
         Nothing -> name
     sameFunction a b
         | externLocal (M.fnName a) /= Nothing && externLocal (M.fnName b) /= Nothing = externSignature a == externSignature b
-        | otherwise = comparable a == comparable b
-    comparable fn = fn{M.fnSpec = (M.fnSpec fn){M.specEnv = Map.empty, M.specLoops = Map.map (\loop -> loop{M.loopEnv = Map.empty}) (M.specLoops (M.fnSpec fn))}}
+        | otherwise = a == b
     externSignature fn =
         ( [maybe "" (show . M.localType) (Map.lookup param (M.fnLocals fn)) | param <- M.fnParams fn]
         , M.fnReturns fn

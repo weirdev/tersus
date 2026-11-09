@@ -1,6 +1,7 @@
 module TestModules
     ( testModules
     , testPhase1Packages
+    , testPhase2Packages
     , validatorMetadataFingerprint
     ) where
 
@@ -15,6 +16,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Unsafe (unsafePerformIO)
 
+import qualified Bootstrap
 import qualified AstData
 import qualified PackageCompile
 import PreludeSource (parserPackageFiles, astReaderPackageFiles, toolPackageFiles, validationPackageFiles)
@@ -24,6 +26,8 @@ import FileParserProtocol
 import qualified FileParserProtocol as File
 import qualified Cli
 import Cli (Command (..), World (..), noWorld, runPackageFiles)
+import qualified ElaborateRequest as Elaboration
+import InterfaceData (readInterface, writeInterface)
 import Interface
 import qualified Mir as M
 import MirEval (renderMirValue, runProgram, runNamedFunction, MirValue (..))
@@ -586,7 +590,7 @@ testModuleCheckTraits =
                         then Nothing
                         else Just ("expected the cross-module axiom name in elaborated root statements, got: " ++ show (compiledStatements modu))
                 Nothing -> Just "expected a compiled root module"
-        , expectCompileErrorAll boundedFiles "app/main.tersus" ["bounded function", "cannot be exported"]
+        , expectCompileErrorAll boundedFiles "app/main.tersus" ["type S", "cannot be worked out"]
         , expectCompileError orphanFiles "app/main.tersus" "orphan impl"
         , case compilePkg externFiles "app/main.tersus" of
             Left err -> Just ("extern package should compile: " ++ err)
@@ -638,13 +642,12 @@ testModuleCheckWithin =
                         , testAssertTrue (not (null (ifAxioms iface)))
                         , testAssertTrue ("unused" `elem` foldr (:) [] (ifExterns iface))
                         ]
-        , expectCompileError
+        , expectCompiles
             [ ("app/package.tersus", "")
-            , ("app/main.tersus", "import app::geo; return geo::answer(7);")
+            , ("app/main.tersus", "import app::geo; return geo::core::answer(7);")
             , ("app/geo/core.tersus", "trait Mark { }; impl Mark for Int { }; fn home<T: Mark>(x: T) -> T { return x; }; fn answer(x: Int) -> Int { return home(x); };")
             ]
             "app/main.tersus"
-            "cannot be exported"
         , expectCompileError
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo; x = 1;")
@@ -916,13 +919,13 @@ testModuleLinkLibCollision :: Test
 testModuleLinkLibCollision =
     testCaseSeq
         "module-link-lib-collision"
-        [ expectProgramError
+        [ expectProgramErrorAll
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo; struct Entry<K, V> { k: K }; e = Entry<Int, Int> { k: 3 }; return e.k + geo::counts();")
             , ("app/geo/geo.tersus", "fn counts() -> Int [{ }] [{ }] { counts = HashMap::new(); counts = counts.insert(\"the\", 40); return counts.lookup(\"the\", 0); };")
             ]
             "app/main.tersus"
-            "link error: generic struct Entry is defined by both module tersuslib::map and module app"
+            ["link error:", "Entry", "tersuslib::map", "module app", "different definitions"]
         , expectProgramError
             [ ("app/package.tersus", "")
             , ("app/main.tersus", "import app::geo; fn findNth(x: Int) -> Int [{ }] [{ }] { return x + 1; }; return findNth(1) + geo::setSize();")
@@ -2156,6 +2159,327 @@ testPhase1Packages = TestList "testPhase1Packages"
         testAssertTrue (all ((== Nothing) . Cli.parseCompilerOptions)
             [["--package-root", "vendor=a", "--package-root", "vendor=b", "check", "file"], ["--package-root", "=a"], ["--package-root", "a="], ["--std-root"], ["--std-root", "a", "--std-root", "b"]])
     ]
+
+phase2Entry :: FilePath
+phase2Entry = "unrelated/app/main.tersus"
+
+phase2Files :: String -> String -> Files -> Files
+phase2Files source api extra =
+    [ ("unrelated/app/package.tersus", "noPrelude = true;")
+    , (phase2Entry, source)
+    , ("installed/vendor/package.tersus", "noPrelude = true;")
+    , ("installed/vendor/api/api.tersus", api)
+    ] ++ extra
+
+phase2Load :: Files -> Either String LoadedPackage
+phase2Load files = case Pipeline.loadFromEntry
+    (resolverFromFiles files){resolverOptions = defaultLoadOptions{packageRoots = Map.singleton "vendor" "installed/vendor"}} phase2Entry of
+        Right (PackageResult pkg) -> Right pkg
+        Right _ -> Left "expected an ordinary external package"
+        Left err -> Left err
+
+phase2Runs :: Files -> Int -> TestResult
+phase2Runs files expected = case phase2Load files of
+    Left err -> Just err
+    Right pkg -> case compileModulesToProgram pkg `bindResult` runProgram of
+        Error err -> Just err
+        Ok value -> testAssertEq value (Just (MInt (toInteger expected)))
+
+phase2Rejects :: Files -> [String] -> TestResult
+phase2Rejects files needles = case phase2Load files of
+    Left err -> check err
+    Right pkg -> case compileModulesToProgram pkg of
+        Error err -> check err
+        Ok _ -> Just ("accepted instead of refusing " ++ show needles)
+  where
+    check err = foldr (<>) Nothing [if needle `isInfixOf` err then Nothing else Just ("expected " ++ show needle ++ ", got: " ++ err) | needle <- needles]
+
+phase2Identity :: String
+phase2Identity = "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { return x; };"
+
+phase2Impl :: String -> String
+phase2Impl body = "trait Mark { }; impl Mark for Int { }; struct Wrap<T> { value: T }; trait Read<E> { fn read(self: &Self) -> E; }; impl<T: Mark> Read<T> for Wrap<T> { fn read(self: &Self) -> T { " ++ body ++ " }; };"
+
+phase2WriteFiles :: String -> Files
+phase2WriteFiles field = phase2Files
+    "import vendor::api { Pair, value }; p = Pair<Int> { x: 1, y: 2 }; value(&mut p, 42); return p.x;"
+    ("trait Mark { }; impl Mark for Int { }; struct Pair<T> { x: T, y: T }; fn value<T: Mark>(p: &mut Pair<T>, x: T) -> Int writes(p.x) [{ }] [{ }] { (*p)." ++ field ++ " = x; return 0; };") []
+
+phase2PrivateResultFiles :: Files
+phase2PrivateResultFiles = phase2Files
+    "import vendor::api { value }; p = value(1); return p.value;"
+    "import vendor::helpers as h; trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> h::Hidden { return h::make(42); };"
+    [("installed/vendor/helpers/helpers.tersus", "struct Hidden { value: Int } invariant [{ affirm value >= 0; }]; fn make(n: Int) -> Hidden [{ affirm n >= 0; }] [{ affirm return.value = n; }] { return Hidden { value: n }; };")]
+
+phase2ForeignImplFiles :: Files
+phase2ForeignImplFiles = phase2Files
+    "import vendor::model { Wrap }; import vendor::api { Read }; p = Wrap<Int> { value: 1 }; return Read::read(p);"
+    "import vendor::model { Wrap }; trait Mark { }; impl Mark for Int { }; trait Read { fn read(self: &Self) -> Int; }; impl<T: Mark> Read for Wrap<T> { fn read(self: &Self) -> Int [{ }] [{ affirm return = 42; }] { return 42; }; };"
+    [("installed/vendor/model/model.tersus", "struct Wrap<T> { value: T };")]
+
+phase2ConflictingFiles :: Files
+phase2ConflictingFiles = phase2Files
+    "import app::left { a }; import app::right { b }; return a() + b();"
+    "import vendor::model { Mark }; fn value<T: Mark>(x: &T) -> Int { return x.read(); };"
+    [ ("installed/vendor/model/model.tersus", "trait Mark { }; struct Item { }; impl Mark for Item { };")
+    , ("unrelated/app/left/left.tersus", consumer "a" "1")
+    , ("unrelated/app/right/right.tersus", consumer "b" "2")
+    ]
+  where
+    consumer name result = "import vendor::api { value }; import vendor::model { Item }; trait Read { fn read(self: &Self) -> Int; }; impl Read for Item { fn read(self: &Self) -> Int { return " ++ result ++ "; }; }; fn " ++ name ++ "() -> Int { return value(Item { }); };"
+
+phase2CallerOnlyTrait :: Files
+phase2CallerOnlyTrait = [(path, if path == phase2Entry then "import app::left { a }; return a();" else text) | (path, text) <- phase2ConflictingFiles]
+
+phase2CallerOnlyFunction :: Files
+phase2CallerOnlyFunction = phase2Files
+    "import vendor::api { value }; fn secret(x: Int) -> Int { return 42; }; return value(1);"
+    "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> Int { return secret(x); };" []
+
+phase2NoPreludeHashFiles :: Files
+phase2NoPreludeHashFiles = [(path, if path == "unrelated/app/package.tersus" then "" else text) | (path, text) <- phase2Files
+    "import vendor::api { Mark, value }; struct Local { n: Int }; impl Mark for Local { }; impl Hash for Local { fn hash(self: &Self) -> Int [{ }] [{ affirm return = 1; }] { return 1; }; }; p = Local { n: 1 }; return value(p);"
+    "trait Mark { }; fn value<T: Mark>(x: &T) -> Int { return Hash::hash(x); };" []]
+
+phase2CallerTypeFiles :: Bool -> Files
+phase2CallerTypeFiles implementation = phase2Files
+    ("import vendor::api { Mark, Wrap, value, Read }; struct Local { n: Int } invariant [{ affirm n >= 0; }]; impl Mark for Local { fn marked(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.n; }; }; p = Local { n: 42 }; " ++ (if implementation then "w = Wrap<Local> { value: p }; return Read::read(w);" else "return value(p);"))
+    "trait Mark { fn marked(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; fn value<T: Mark>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return Mark::marked(x); }; struct Wrap<T> { value: T }; trait Read { fn read(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl<T: Mark> Read for Wrap<T> { fn read(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return Mark::marked(self.value); }; };" []
+
+phase2ConflictingContracts :: Files
+phase2ConflictingContracts = phase2Files
+    "import app::left; import app::right; return 0;"
+    phase2Identity
+    [ ("unrelated/app/left/left.tersus", "extern fn shared(x: Int) -> Int [{ }] [{ affirm return = 1; }];")
+    , ("unrelated/app/right/right.tersus", "extern fn shared(x: Int) -> Int [{ }] [{ affirm return = 2; }];")
+    ]
+
+phase2Private :: Files
+phase2Private = phase2Files
+    "import vendor::api { value }; fn pass(x: Bool) -> Bool { return x; }; return value(42);"
+    "import vendor::helpers { pass }; trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { return pass(x); };"
+    [("installed/vendor/helpers/helpers.tersus", "trait Good { }; impl Good for Int { }; struct Hidden<T> { value: T }; fn pack<T: Good>(x: T) -> Hidden<T> { return Hidden { value: x }; }; fn pass<T: Good>(x: T) -> T { h = pack(x); return h.value; };")]
+
+testPhase2Packages :: Test
+testPhase2Packages = TestList "testPhase2Packages"
+    [ TestCase "external private templates run identically from disk in reference and native code" phase2Filesystem
+    , TestCase "caller-owned visible-trait implementations run in reference and native code" (phase2FilesystemWith (phase2CallerTypeFiles True))
+    , testCase "entry and external bounded helpers share checking rules" $
+        case Pipeline.compileSourceNoPrelude True (phase2Identity ++ " return value(42);") `bindResult` runProgram of
+            Error err -> Just err
+            Ok value -> testAssertEq value (Just (MInt 42))
+    , testCase "external bounded function uses ordinary checked exports" $
+        phase2Runs (phase2Files "import vendor::api { value }; return value(42);" phase2Identity []) 42
+    , testCase "bounded return signatures preserve current implicit library selection" $
+        phase2Runs [(path, if "package.tersus" `isSuffixOf` path then "" else text) | (path, text) <- phase2Files
+            "import vendor::api { value }; return size(value(1));"
+            "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> String { return \"hi\"; };" []] 2
+    , testCase "external bounded implementation and trait companion instantiate" $
+        phase2Runs (phase2Files "import vendor::api { Wrap }; v = Wrap<Int> { value: 42 }; return v.read();" (phase2Impl "return clone(self.value);") []) 42
+    , testCase "nested private generic constructors and helpers keep defining context" $ phase2Runs phase2Private 42
+    , testCase "explicit private generic constructor arguments specialize with their template" $
+        phase2Runs [(path, if "helpers.tersus" `isSuffixOf` path then "trait Good { }; impl Good for Int { }; struct Hidden<T> { value: T }; fn pack<T: Good>(x: T) -> Hidden<T> { return Hidden<T> { value: x }; }; fn pass<T: Good>(x: T) -> T { h = pack(x); return h.value; };" else text) | (path, text) <- phase2Private] 42
+    , testCase "private nominal result metadata remains usable without naming its provider" $ phase2Runs phase2PrivateResultFiles 42
+    , testCase "trait-owning modules export bounded implementations for imported types" $ phase2Runs phase2ForeignImplFiles 42
+    , testCase "caller-only traits cannot satisfy defining-site method visibility" $ phase2Rejects phase2CallerOnlyTrait ["Type error:", "read"]
+    , testCase "a no-prelude provider cannot inherit the caller's selected Hash trait" $ phase2Rejects phase2NoPreludeHashFiles ["Undefined variable: Hash::hash"]
+    , testCase "caller-owned types satisfy visible vendor bounds" $ phase2Runs (phase2CallerTypeFiles False) 42
+    , testCase "bounded vendor implementations use caller implementations of visible traits" $ phase2Runs (phase2CallerTypeFiles True) 42
+    , testCase "caller-only bare functions are not template defining dependencies" $ phase2Rejects phase2CallerOnlyFunction ["Undefined variable: secret"]
+    , testCase "different checked function bodies remain a link conflict" $ expectProgramErrorAll
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; fn findNth(x: Int) -> Int { return x + 1; }; return findNth(1) + geo::setSize();")
+        , ("app/geo/geo.tersus", "fn setSize() -> Int { s = HashSet::new().insert(1).insert(2); return s.size(); };")
+        ] "app/main.tersus" ["link error: function findNth", "tersuslib::map", "module app", "different definitions"]
+    , testCase "different linked contracts remain a link conflict" $ phase2Rejects phase2ConflictingContracts ["link error: function extern fn shared", "different definitions"]
+    , testCase "private template closure does not expose a bare helper" $
+        phase2Rejects [(path, if path == phase2Entry then "import vendor::api { value }; x = value(42); return pass(x);" else text) | (path, text) <- phase2Private] ["Undefined variable: pass"]
+    , testCase "private template closure does not expose a qualified helper" $
+        phase2Rejects [(path, if path == phase2Entry then "import vendor::api { value }; x = value(42); return vendor::helpers::pass(x);" else text) | (path, text) <- phase2Private] ["covering import"]
+    , testCase "bounded function refuses an unsatisfied ordinary trait" $
+        phase2Rejects (phase2Files "import vendor::api { value }; return value(true);" phase2Identity []) ["needs T to implement", "Mark", "Bool does not"]
+    , testCase "bounded implementation refuses an unsatisfied ordinary trait" $
+        phase2Rejects (phase2Files "import vendor::api { Wrap }; v = Wrap<Bool> { value: true }; return v.read();" (phase2Impl "return clone(self.value);") []) ["needs T to implement", "Mark", "Bool does not"]
+    , testCase "bounded calls retain their requires contract" $
+        phase2Rejects (phase2Files "import vendor::api { value }; return value(1, -1);"
+            "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T, n: Int) -> T [{ affirm n >= 0; }] [{ }] { return x; };" []) ["Could not prove:", "n >= 0"]
+    , testCase "bounded write footprints retain permitted field updates" $
+        phase2Runs (phase2WriteFiles "x") 42
+    , testCase "bounded write footprints reject an unlisted field update" $
+        phase2Rejects (phase2WriteFiles "y") ["writes clause of the function does not allow"]
+    , testCase "bounded implementation companion checks the trait contract" $
+        phase2Rejects (phase2Files "import vendor::api { Wrap }; return Wrap<Int> { value: 1 }.read();"
+            "trait Mark { }; impl Mark for Int { }; struct Wrap<T> { value: T }; trait Read { fn read(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl<T: Mark> Read for Wrap<T> { fn read(self: &Self) -> Int { return -1; }; };" []) ["does not meet what", "could not prove return >= 0"]
+    , testCase "private struct invariants survive template lowering" $
+        phase2Rejects (phase2Files "import vendor::api { value }; return value(1, -1);"
+            "trait Mark { }; impl Mark for Int { }; struct Positive { value: Int } invariant [{ affirm value >= 0; }]; fn value<T: Mark>(x: T, n: Int) -> Int { p = Positive { value: n }; return p.value; };" []) ["Could not prove:"]
+    , testCase "invalid bound declarations are refused normally" $
+        phase2Rejects (phase2Files "import vendor::api { value }; return value(1);"
+            "fn value<T: Missing>(x: T) -> T { return x; };" []) ["unknown trait", "Missing", "bound"]
+    , testCase "unused bounded signatures are checked before export" $
+        phase2Rejects (phase2Files "import vendor::api; return 0;"
+            "trait Mark { }; fn value<T: Mark>(x: T) -> Missing { return x; };" []) ["unknown type Missing"]
+    , testCase "ordinary import ambiguity is not hidden by templates" $
+        phase2Rejects (phase2Files "import vendor::api { value }; import vendor::other { value }; return value(1);" phase2Identity
+            [("installed/vendor/other/other.tersus", phase2Identity)]) ["ambiguous", "value"]
+    , testCase "external orphan implementations remain refused" $
+        phase2Rejects (phase2Files "import vendor::other; return 0;"
+            "trait Read { fn read(self: &Self) -> Int; }; struct Wrap<T> { value: T };"
+            [("installed/vendor/other/other.tersus", "import vendor::api { Read, Wrap }; trait Mark { }; impl Mark for Int { }; impl<T: Mark> Read for Wrap<T> { fn read(self: &Self) -> Int { return 1; }; };")]) ["orphan impl", "neither a trait nor a type"]
+    , testCase "inferred generic constructor identities survive template substitution" phase2InferredConstructor
+    , testCase "inferred generic constructors validate in an external bounded body" $ phase2Runs phase2InferredFiles 42
+    , testCase "implementation bounds match their trait argument types" $ phase2Runs (phase2ArgumentFiles "Int" "return 7;") 1
+    , testCase "implementation bounds refuse a different trait argument type" $
+        phase2Rejects (phase2ArgumentFiles "Bool" "return true;") ["needs U to implement", "Label", "does not"]
+    , testCase "caller implementation prerequisites use their defining scope" $ phase2Runs (phase2PrerequisiteFiles False False) 42
+    , TestCase "private caller prerequisites validate in reference and native code" $ phase2FilesystemWith (phase2PrerequisiteFiles False False)
+    , testCase "implementation-private traits do not enter provider method scope" $ phase2Rejects (phase2PrerequisiteFiles True False) ["good", "not defined"]
+    , testCase "private caller implementation companions retain provider contracts" $ phase2Rejects (phase2PrerequisiteFiles False True) ["does not meet what", "could not prove return >= 0"]
+    , testCase "implementation bounds substitute matched array sizes" $ phase2Runs (phase2SizeArgumentFiles "3" "#[1, 2, 3]") 42
+    , TestCase "matched size bounds run from disk in reference and native code" $ phase2FilesystemWith (phase2SizeArgumentFiles "3" "#[1, 2, 3]")
+    , testCase "implementation bounds refuse a different array size" $
+        phase2Rejects (phase2SizeArgumentFiles "4" "#[1, 2, 3, 4]") ["needs U to implement", "Label", "does not"]
+    , testCase "outer size binders specialize array constructor and return types" $ phase2Runs (phase2SizedReturnFiles "return array(n, 1);" "return size(make(p, a)) + 39;") 42
+    , TestCase "sized array returns validate and run in reference and native code" $ phase2FilesystemWith (phase2SizedReturnFiles "return array(n, 1);" "return size(make(p, a)) + 39;")
+    , testCase "inner function size parameters shadow outer size specialization" $ phase2CheckedShadow (phase2SizedReturnFiles "fn f<n>(a: &Array<Int, n>) -> Array<Int, n> { return array(n, 2); }; b = #[1, 2, 3, 4]; c = f(b); return array(n, size(c));" "return get(make(p, a), 0) + 38;")
+    , testCase "inner local values shadow outer size specialization" $ phase2CheckedShadow (phase2SizedReturnFiles "fn f(x: Int) -> Int { n = 5; return n; }; return array(n, f(0));" "return get(make(p, a), 0) + 37;")
+    , testCase "size-specialized array returns refuse a different concrete size" $ phase2Rejects (phase2SizedReturnFiles "return array(4, 1);" "return size(make(p, a));") ["returned value:", "expected Array<Int, 3>", "got Array<Int, 4>"]
+    , testCase "repeated aliases and cross-module uses link one canonical instance" phase2Dedup
+    , testCase "ghost-bearing cross-module templates deduplicate without losing proof context" $
+        phase2DedupWith "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { affirm 1 = 1; return x; };"
+    , testCase "checked defining closure survives request and interface round trips" phase2RoundTrip
+    ]
+
+phase2Filesystem :: IO TestResult
+phase2Filesystem = phase2FilesystemWith phase2Private
+
+phase2FilesystemWith :: Files -> IO TestResult
+phase2FilesystemWith files = withPhase1Directory $ \root -> do
+    let entry = root </> phase2Entry
+        options = defaultLoadOptions{packageRoots = Map.singleton "vendor" (root </> "installed/vendor")}
+    mapM_ (\(path, text) -> createDirectoryIfMissing True (takeDirectory (root </> path)) >> writeFile (root </> path) text) files
+    loaded <- Pipeline.loadFromFilesystemWithOptions options entry
+    case loaded of
+        Left err -> pure (Just err)
+        Right (PackageResult pkg) -> case compileModulesToProgram pkg of
+            Error err -> pure (Just err)
+            Ok reference -> case compileModulesToOwned pkg of
+                Error err -> pure (Just err)
+                Ok owned -> do
+                    emitted <- Bootstrap.llvmOfOwned owned
+                    case emitted of
+                        Error err -> pure (Just err)
+                        Ok llvm -> do
+                            let executable = root </> "external-generics"
+                            built <- Native.buildExecutable executable llvm
+                            case built of
+                                Error err -> pure (Just err)
+                                Ok () -> do
+                                    (code, out, err) <- Native.runWithInputFull executable ""
+                                    pure (testAssertEq (runProgram reference) (Ok (Just (MInt 42)))
+                                        <> testAssertEq (code, out, err) (ExitSuccess, "42\n", ""))
+        Right _ -> pure (Just "expected package")
+
+phase2InferredFiles :: Files
+phase2InferredFiles =
+    [(path, if path == "installed/vendor/package.tersus" then "" else text) | (path, text) <- phase2Files
+        "import vendor::api { value }; return value(1);"
+        "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> Int { m = HashMap::new().insert(1, 42); return m.lookup(1, 0); };" []]
+
+phase2InferredConstructor :: TestResult
+phase2InferredConstructor = case loadFromEntry
+    (resolverFromFiles phase2InferredFiles){resolverOptions = defaultLoadOptions{packageRoots = Map.singleton "vendor" "installed/vendor"}} phase2Entry of
+        Left err -> Just err
+        Right (PackageResult pkg) -> case PackageCompile.compileModulesLinked pkg of
+            Error err -> Just err
+            Ok raw -> testAssertTrue (Map.member "vendor$api$api$value[Int]" (M.progFunctions raw))
+        Right _ -> Just "expected package"
+
+phase2ArgumentFiles :: String -> String -> Files
+phase2ArgumentFiles argument body = phase2Files
+    "import vendor::api { Holder, Item, inspect }; h = Holder<Item> { value: Item { } }; return inspect(h);"
+    ("trait Feed<E> { fn feed(self: &Self) -> E; }; struct Item { }; impl Feed<" ++ argument ++ "> for Item { fn feed(self: &Self) -> " ++ argument ++ " { " ++ body ++ " }; }; trait Label { fn label(self: &Self) -> Int; }; struct Holder<T> { value: T }; impl<T: Feed<Int>> Label for Holder<T> { fn label(self: &Self) -> Int { return 1; }; }; fn inspect<U: Label>(x: &U) -> Int { return 1; };") []
+
+phase2PrerequisiteFiles :: Bool -> Bool -> Files
+phase2PrerequisiteFiles leak badContract = phase2Files
+    ("import vendor::api { Mark, value }; trait Good { fn good(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl Good for Int { fn good(self: &Self) -> Int [{ }] [{ affirm return = 42; }] { return 42; }; }; struct Wrap<T> { value: T }; impl<U: Good> Mark for Wrap<U> { fn marked(self: &Self) -> Int [{ }] [{ " ++ (if badContract then "" else "affirm return >= 0;") ++ " }] { return " ++ (if badContract then "-1" else "self.value.good()") ++ "; }; }; p = Wrap<Int> { value: 1 }; return value(p);")
+    ("trait Mark { fn marked(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; fn value<T: Mark>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return " ++ (if leak then "x.value.good()" else "Mark::marked(x)") ++ "; };") []
+
+phase2SizeArgumentFiles :: String -> String -> Files
+phase2SizeArgumentFiles size body = phase2Files
+    "import vendor::api { Holder, Item, inspect }; h = Holder<Item, 3> { value: Item { }, cells: #[1, 2, 3] }; return inspect(h);"
+    ("trait Feed<E> { fn feed(self: &Self) -> E; }; struct Item { }; impl Feed<Array<Int, " ++ size ++ ">> for Item { fn feed(self: &Self) -> Array<Int, " ++ size ++ "> { return " ++ body ++ "; }; }; trait Label { fn label(self: &Self) -> Int; }; struct Holder<T, n> { value: T, cells: Array<Int, n> }; impl<T: Feed<Array<Int, n>>, n> Label for Holder<T, n> { fn label(self: &Self) -> Int [{ }] [{ affirm return = n + 39; }] { return n + 39; }; }; fn inspect<U: Label>(x: &U) -> Int { return x.label(); };") []
+
+phase2CheckedShadow :: Files -> TestResult
+phase2CheckedShadow files =
+    (case phase2Load files of
+        Left err -> Just err
+        Right pkg -> case PackageCompile.compileModulesLinked pkg `bindResult` runProgram of
+            Error err -> Just err
+            Ok value -> testAssertEq value (Just (MInt 42)))
+    <> phase2Rejects files ["does not model yet: two functions with one name"]
+
+phase2SizedReturnFiles :: String -> String -> Files
+phase2SizedReturnFiles body consumer = phase2Files
+    ("import vendor::api { Item, make }; p = Item { }; a = #[1, 2, 3]; " ++ consumer)
+    ("trait Feed<E> { fn feed(self: &Self) -> E; }; struct Item { }; impl Feed<Array<Int, 3>> for Item { fn feed(self: &Self) -> Array<Int, 3> { return #[1, 2, 3]; }; }; fn make<T: Feed<Array<Int, n>>, n>(x: &T, a: &Array<Int, n>) -> Array<Int, n> { " ++ body ++ " };") []
+
+phase2Dedup :: TestResult
+phase2Dedup = phase2DedupWith phase2Identity
+
+phase2DedupWith :: String -> TestResult
+phase2DedupWith api = case phase2Load files of
+    Left err -> Just err
+    Right pkg -> case PackageCompile.compileModulesLinked pkg of
+        Error err -> Just err
+        Ok raw -> testAssertTrue (all (`elem` map (renderModuleId . loadedModuleId) (packageModules pkg)) ["app::left", "app::right"])
+            <> foldr (<>) Nothing [testAssertEq [name | name <- Map.keys (M.progFunctions raw), name == expected] [expected] | expected <- ["vendor$api$api$value[Int]", method, companion]]
+            <> (case Map.lookup companion (M.progFunctions raw) of
+                Nothing -> Just "missing required checked companion"
+                Just fn -> testAssertEq (length (M.specEnsures (M.fnSpec fn))) 1)
+            <> (if "affirm" `isInfixOf` api then case Map.lookup "vendor$api$api$value[Int]" (M.progFunctions raw) of
+                Nothing -> Just "missing canonical ghost-bearing instance"
+                Just fn -> testAssertTrue (any (proofContext raw) (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))))
+                else Nothing)
+            <> phase2Runs files 94
+  where
+    method = "<vendor$api$api$Wrap as vendor$api$api$Read>::read[Int]"
+    companion = "vendor$api$api$Read for vendor$api$api$Wrap::read[Int]"
+    proofContext raw (M.Ghost env (M.GhostValidation (ProofAssert _))) = all (`Map.member` env) (Map.keys (M.progFunctions raw))
+    proofContext _ _ = False
+    files = phase2Files
+        "import app::left { a }; import app::right { b }; import vendor::api as v; import vendor::api as again; return a() + b() + v::value(3) + again::value(4);"
+        (api ++ " struct Wrap<T> { value: T }; trait Read { fn read(self: &Self) -> Int [{ }] [{ affirm return = 42; }]; }; impl<T: Mark> Read for Wrap<T> { fn read(self: &Self) -> Int [{ }] [{ affirm return = 42; }] { return 42; }; };")
+        [ ("unrelated/app/left/left.tersus", "import vendor::api { value, Wrap }; fn a() -> Int { w = Wrap<Int> { value: 1 }; return w.read() + value(1); };")
+        , ("unrelated/app/right/right.tersus", "import vendor::api as v; fn b() -> Int { w = v::Wrap<Int> { value: 2 }; return w.read() + v::value(2); };")
+        ]
+
+phase2RoundTrip :: TestResult
+phase2RoundTrip = case phase2Load phase2Private of
+    Left err -> Just err
+    Right pkg -> case PackageCompile.compileModulesWith throughWire pkg of
+        Error err -> Just err
+        Ok compiled -> foldr (<>) Nothing (map roundTrip (compiledModules compiled))
+            <> case PackageCompile.lowerCompiledPackage pkg compiled `bindResult` runProgram of
+                Error err -> Just err
+                Ok value -> testAssertEq value (Just (MInt 42))
+  where
+    throughWire request = case Elaboration.writeRequest request `bindResult` checkedRequest request of
+        Error err -> Elaboration.Refused err
+        Ok decoded | decoded /= request -> Elaboration.Refused "defining context changed during request round trip"
+        Ok decoded -> case Elaboration.writeResponse (Elaboration.respond decoded) `bindResult` Elaboration.readResponse of
+            Error err -> Elaboration.Refused err
+            Ok response -> response
+    checkedRequest request encoded
+        | not (null (Elaboration.rqDefinitions request)) = case Elaboration.readRequest (unlines (filter (not . isPrefixOf "definition ") (lines encoded))) of
+            Ok _ -> Error "accepted a legacy flat defining context"
+            Error _ -> Elaboration.readRequest encoded
+        | otherwise = case Elaboration.readRequest (unlines (filter (/= "definitions 0") (lines encoded))) of
+            Ok _ -> Error "accepted a request without defining contexts"
+            Error _ -> Elaboration.readRequest encoded
+    roundTrip modu = case writeInterface (compiledInterface modu) `bindResult` readInterface of
+        Error err -> Just err
+        Ok decoded -> testAssertEq decoded (compiledInterface modu)
 
 testModules :: Test
 testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]

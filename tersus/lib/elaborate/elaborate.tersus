@@ -9,7 +9,7 @@ import elaborate::out { emit, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, intText, noBoundedParts, notModelled, oneScope };
-import elaborate::traits { argListOf, boundsOf };
+import elaborate::traits { argListOf, boundsOf, emptyTemplate };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
 // response on standard output (AST_DATA.md). It answers `unmodelled` for what it does not handle yet.
@@ -235,8 +235,78 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
                 };
                 st = fnSigOf(st, base + tme.ps, base + tme.sig);
                 fs = clone(st.fnSig);
-                tm = Template { bounds: bounds, fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: base + tme.ins, outs: base + tme.outs, term: base + tme.term, body: base + tme.body, boundsNode: base + tme.bs, paramsNode: base + tme.ps, sigNode: base + tme.sig, retNode: base + tme.ret };
+                tm = Template { bounds: bounds, fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: base + tme.ins, outs: base + tme.outs, term: base + tme.term, body: base + tme.body, boundsNode: base + tme.bs, paramsNode: base + tme.ps, sigNode: base + tme.sig, retNode: base + tme.ret, grouped: false, definingTraits: [], definingTypes: [], definingTemplates: [], privateContext: false };
                 st = St { templates: st.templates.insert(name, tm), ..st };
+            };
+        };
+    };
+    return st;
+};
+
+fn definingContext(st: St, context: &List<AstProgram>) -> St ~ {
+    if size(context) = 0 { return notModelled(st, "an empty template defining context"); };
+    traits = [];
+    types = [];
+    templates = [];
+    missing = false;
+    for iface in context {
+        root = nodeIn(&iface.nodes, iface.root);
+        if !(root is AstNode::Interface) { return notModelled(st, "a defining interface the data does not give"); };
+        v = (root as AstNode::Interface).value;
+        for e in listItems(&iface.nodes, v.traits) {
+            entry = entryOf(&iface.nodes, e);
+            if entry is AstEntry::TraitEntry {
+                name = nameText(&iface.nodes, (entry as AstEntry::TraitEntry).n);
+                traits = push(traits, clone(name));
+                if !st.traits.contains(&name) { missing = true; };
+            };
+        };
+        for e in listItems(&iface.nodes, v.types) {
+            entry = entryOf(&iface.nodes, e);
+            if entry is AstEntry::NamesEntry {
+                name = nameText(&iface.nodes, (entry as AstEntry::NamesEntry).n);
+                types = push(types, clone(name));
+                if !st.types.contains(&name) { missing = true; };
+            };
+        };
+        for e in listItems(&iface.nodes, v.ctors) {
+            entry = entryOf(&iface.nodes, e);
+            if entry is AstEntry::CtorEntry && !st.ctors.contains(nameText(&iface.nodes, (entry as AstEntry::CtorEntry).n)) { missing = true; };
+        };
+        for e in listItems(&iface.nodes, v.generics) {
+            entry = entryOf(&iface.nodes, e);
+            if entry is AstEntry::GenericEntry {
+                name = nameText(&iface.nodes, (entry as AstEntry::GenericEntry).n);
+                types = push(types, clone(name));
+                if !st.generics.contains(&name) { missing = true; };
+            };
+        };
+        for e in listItems(&iface.nodes, v.templates) {
+            entry = entryOf(&iface.nodes, e);
+            if entry is AstEntry::TemplateEntry {
+                name = nameText(&iface.nodes, (entry as AstEntry::TemplateEntry).n);
+                templates = push(templates, clone(name));
+                if !st.templates.contains(&name) { missing = true; };
+            };
+        };
+        for e in listItems(&iface.nodes, v.implArgs) {
+            entry = entryOf(&iface.nodes, e);
+            if entry is AstEntry::ImplArgsEntry {
+                p = entry as AstEntry::ImplArgsEntry;
+                key = catStrings(catStrings(nameText(&iface.nodes, p.a), " "), nameText(&iface.nodes, p.b));
+                if !st.implArgs.contains(&key) { missing = true; };
+            };
+        };
+    };
+    owner = get(context, 0);
+    v = (nodeIn(&owner.nodes, owner.root) as AstNode::Interface).value;
+    for e in listItems(&owner.nodes, v.templates) {
+        entry = entryOf(&owner.nodes, e);
+        if entry is AstEntry::TemplateEntry {
+            name = nameText(&owner.nodes, (entry as AstEntry::TemplateEntry).n);
+            if st.templates.contains(&name) {
+                tm = st.templates.lookup(&name, emptyTemplate());
+                st = St { templates: st.templates.insert(name, Template { grouped: true, definingTraits: clone(traits), definingTypes: clone(types), definingTemplates: clone(templates), privateContext: missing, ..tm }), ..st };
             };
         };
     };
@@ -319,6 +389,24 @@ for i in 0..count.value {
     if !b.ok || b.value.stage != "interface" { return malformed(); };
     ifaces = push(ifaces, b.value);
 };
+definitionsLine = readLine();
+if !wordIs(&definitionsLine, 0, "definitions") || size(definitionsLine.words) != 2 { return malformed(); };
+definitionCount = intAt(&definitionsLine.words, 1);
+if !definitionCount.ok || definitionCount.value < 0 { return malformed(); };
+definitions = [];
+for i in 0..definitionCount.value {
+    contextLine = readLine();
+    if !wordIs(&contextLine, 0, "definition") || size(contextLine.words) != 2 { return malformed(); };
+    contextCount = intAt(&contextLine.words, 1);
+    if !contextCount.ok || contextCount.value < 1 { return malformed(); };
+    context = [];
+    for j in 0..contextCount.value {
+        b = readBlock();
+        if !b.ok || b.value.stage != "interface" { return malformed(); };
+        context = push(context, b.value);
+    };
+    definitions = push(definitions, context);
+};
 programBlock = readBlock();
 if !programBlock.ok || programBlock.value.stage != "parsed" { return malformed(); };
 end = readRecord();
@@ -327,6 +415,7 @@ parsed = programBlock.value;
 st = St { nodes: clone(parsed.nodes), ..st };
 st = loadBuiltins(st, &table.value);
 for iface in &ifaces { st = loadInterface(st, iface); };
+for context in &definitions { st = definingContext(st, context); };
 predeclaring = wordIs(&predeclare, 1, "true");
 viewing = wordIs(&library, 1, "true");
 extracting = !wordIs(&extract, 1, "none");

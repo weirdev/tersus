@@ -207,10 +207,11 @@ An elaborator answers a request for one module (`ElaborateRequest`). The request
 is the module, whether it predeclares its own types (a package module does),
 whether it is a module of the compiler libraries (which see a generic struct's
 constructor as the struct it builds), which interface to give back (none for a
-single-file program, `module` for a package module, `lib` for a compiler-library
-module or a package's entry module), the interfaces it sees in merge order (the
-first wins a name; the compiler libraries a module selects are among them), and
-its statements as read:
+single-file program, `module` for every ordinary package module, `lib` for a
+compiler-library module's physical constructor view), the caller-visible interfaces
+in merge order (the first wins a name; selected compiler libraries are among them),
+the checked defining dependency interfaces used only during template instantiation,
+and its statements as read:
 
 ```
 tersus-elaborate 1
@@ -224,15 +225,23 @@ data LINES          (the builtin table, `tersus-ast 1 builtins`)
 interfaces N
 data LINES          (N times: a `tersus-ast 1 interface` block of LINES lines)
 ...
+definitions N
+definition INTERFACES (N times: one provider's checked context)
+data LINES          (INTERFACES ordinary interface blocks; provider interface first)
+...
 data LINES          (the module's `tersus-ast 1 parsed` syntax)
 ...
 ```
 
+The `definitions` blocks extend the experimental `tersus-elaborate 1` envelope; they are mandatory, and older envelopes without them are refused rather than accepted with missing context. They reuse ordinary interface records and do not change the AST/interface record schema.
+
+The native elaborator consumes and structurally checks each provider's grouped interfaces without importing them into caller-visible bindings. Its existing template captures supply defining function precedence, and imported instances use only caller implementations of the provider's known traits. An imported instance needing private type, trait, implementation or nested-template metadata absent from its visible environment is `unmodelled`; so are imported bounds with parameter-dependent trait arguments and caller implementations with private bound prerequisites. Ordinary module extraction and representable bounded instances use the existing native elaborator paths.
+
 The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
 the elaborated syntax and `interface none` or `interface` with a `data` block of
 the interface; or `refused "MESSAGE"` (the module does not check),
-`interfaceRefused "MESSAGE"` (it checks, but its interface cannot be given,
-as for an exported function with bounds) or `unmodelled "WHAT"` (the elaborator
+`interfaceRefused "MESSAGE"` (it checks, but the requested interface cannot be given)
+or `unmodelled "WHAT"` (the elaborator
 does not handle the program yet, which is no verdict on it).
 `ElaborateRequest.respond` is the Haskell elaborator answering a request. The
 compiler makes its requests through an `Elaborator` (`Compile.lowerSourcePartsWith`

@@ -75,7 +75,8 @@ seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
         EnumDef name variants -> name : map fst variants
         TraitDef name _ _ -> [name]
         _ -> []
-    stubList = [(name, mirNameOf iface name, fn) | iface <- ifaces, (name, fn) <- Map.toList (ifFunctions iface)]
+    ownFunctions = Set.fromList [name | Assign name (Val VFunct{}) <- elaborated]
+    stubList = [(name, mirNameOf iface name, fn) | iface <- ifaces, (name, fn) <- Map.toList (ifFunctions iface), name `Set.notMember` ownFunctions]
     mirNameOf iface name
         | name `Set.member` ifExterns iface = "extern " ++ name
         | otherwise = name
