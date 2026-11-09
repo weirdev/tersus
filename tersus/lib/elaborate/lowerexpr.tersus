@@ -865,8 +865,7 @@ fn anyEffects(ls: LowSt, src: &List<AstNode>, es: &List<Int>) -> LowSt ~ {
 
 // (a function whose type is not known, other than a builtin, may update anything)
 fn headMutates(ls: &LowSt, src: &List<AstNode>, f: Int) -> Bool ~ {
-    b = builtinOfExpr(src, f);
-    if b >= 0 { return isPrim(&biOf(src, b), "BorrowMutOf"); };
+    if builtinOfExpr(src, f) >= 0 { return false; };
     x = exprAt(src, f);
     if !(x is AstExpression::Var) { return true; };
     name = nameText(src, (x as AstExpression::Var).n);
@@ -875,10 +874,7 @@ fn headMutates(ls: &LowSt, src: &List<AstNode>, f: Int) -> Bool ~ {
     if found.found {
         t = found.b.ty;
     } else {
-        if !HashMap::contains(&ls.globalTys, &name) {
-            if !HashMap::contains(&ls.std, &name) { return true; };
-            return isPrim(&biOf(src, HashMap::lookup(&ls.std, &name, 0 - 1)), "BorrowMutOf");
-        };
+        if !HashMap::contains(&ls.globalTys, &name) { return !HashMap::contains(&ls.std, &name); };
         t = HashMap::lookup(&ls.globalTys, &name, 0 - 1);
     };
     params = lwParameters(ls, t);
