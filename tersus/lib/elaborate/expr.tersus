@@ -1,4 +1,4 @@
-import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstValue };
+import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstStatement, AstValue };
 import data::codec::codec { catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
 import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, popScope, pushScope, sizeArgument, teHead, valueType, withResultType, withType };
@@ -1622,18 +1622,42 @@ fn stableCloneIndex(st: &St, e: Int) -> Bool ~ {
     ex = exprOf(st, e);
     if ex is AstExpression::Val {
         v = nodeIn(&st.nodes, (ex as AstExpression::Val).v);
-        return v is AstNode::Value && (v as AstNode::Value).value is AstValue::VInt;
+        return v is AstNode::Value && ((v as AstNode::Value).value is AstValue::VInt || (v as AstNode::Value).value is AstValue::VBool);
     };
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        return stableCloneIndex(st, a.c) && stableCloneIndex(st, a.a) && stableCloneIndex(st, a.b);
+    };
+    if ex is AstExpression::BlockExpr {
+        a = ex as AstExpression::BlockExpr;
+        for s in listItems(&st.nodes, a.xs) {
+            if !stableCloneStatement(st, s) { return false; };
+        };
+        return stableCloneIndex(st, a.e);
+    };
+    if ex is AstExpression::Ascribed { return stableCloneIndex(st, (ex as AstExpression::Ascribed).e); };
     c = callOf(st, e);
     if !c.ok { return false; };
-    key = headKey(st, c.head);
-    if key = "Plus" || key = "Minus" || key = "Times" || key = "Div" || key = "Mod" || key = "FromByte" {
-        for a in &c.args {
-            if !stableCloneIndex(st, a) { return false; };
-        };
-        return true;
+    b = builtinHead(st, c.head);
+    if b < 0 || !stableCloneBuiltin(st, b) { return false; };
+    for arg in &c.args {
+        if !stableCloneIndex(st, arg) { return false; };
     };
-    return false;
+    return true;
+};
+
+fn stableCloneStatement(st: &St, s: Int) -> Bool ~ {
+    node = nodeIn(&st.nodes, s);
+    if !(node is AstNode::Statement) { return false; };
+    a = (node as AstNode::Statement).value;
+    if a is AstStatement::Let { return stableCloneIndex(st, (a as AstStatement::Let).e); };
+    return a is AstStatement::Mark || a is AstStatement::ValidationStatement;
+};
+
+fn stableCloneBuiltin(st: &St, b: Int) -> Bool ~ {
+    if builtinRecord(st, b) is AstBuiltin::Rel { return true; };
+    key = builtinKey(st, b);
+    return key = "Is" || key = "Field" || key = "Cast" || key = "Plus" || key = "Minus" || key = "Times" || key = "Div" || key = "Mod" || key = "FromByte" || key = "Get" || key = "First" || key = "Last" || key = "Size" || key = "Not" || key = "And" || key = "Or";
 };
 
 // A copy is made of a type that has the marker (requireMarker)
