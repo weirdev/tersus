@@ -875,8 +875,6 @@ selfHostedQueryFamilies program =
                 withinContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (11, 200, [10]), app (12, 201, [11])]), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt 200, MInt 201]), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkWithin a b expected = testAssertEq (runNamedFunction program "entailsGoal" [withinContext, withinGoal a b]) (Ok (Just (MBool expected)))
                 mergeContext constants equalities = MData "ValidatorContext" [("equalities", MList equalities), ("applications", MList []), ("constants", MList constants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                -- (the state where the paths parted, which knows nothing here)
-                mergeForkState = MData "ExecutionState" [("context", mergeContext [] []), ("locals", localsValue []), ("templates", MList [])]
                 mergeLeftState = MData "ExecutionState" [("context", mergeContext [constant (10, 0, 3)] [fact (10, 10)]), ("locals", localsValue [(1, 10)]), ("templates", MList [])]
                 mergeRightState = MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (11, 11)]), ("locals", localsValue [(1, 11)]), ("templates", MList [])]
                 checkCommonContext =
@@ -885,13 +883,62 @@ selfHostedQueryFamilies program =
                         expected = mergeContext [] [fact (0, 1)]
                      in testAssertEq (runNamedFunction program "commonContext" [left, right]) (Ok (Just expected))
                 -- (both sides hold 3 in local 1: the merged context says the merged local is 3)
-                checkMergeStates = case runNamedFunction program "mergeStates" [mergeForkState, mergeLeftState, mergeRightState] of
+                checkMergeStates = case runNamedFunction program "mergeStates" [mergeLeftState, mergeRightState] of
                     Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" [("context", context), ("locals", mergedLocals), ("templates", _)])])) ->
                         case runNamedFunction program "lookupLocal" [mergedLocals, MInt 1] of
                             Ok (Just (MData "ValueLookup::Found" [("term", MInt found)])) ->
                                 testAssertEq (runNamedFunction program "entailsGoal" [context, goal "Equal" found 10]) (Ok (Just (MBool True)))
                             other -> Just ("Merged state malformed: " ++ show other)
                     result -> Just ("Unexpected mergeStates result: " ++ show result)
+                -- Structural twins of the merge model's contest cases: a local both sides bind to one
+                -- minted id keeps it, and is bounded only when a dropped raw fact reaches it, as its own
+                -- definition (T1) or through unnamed intermediates (A1, A1b). Their source rows in
+                -- testIfJoin do not isolate this: each arm's Add steps state relations of their own.
+                contestState = contestStateWith []
+                contestStateWith equalities contestApps constantTerms orders bindings = MData "ExecutionState" [("context", MData "ValidatorContext" [("equalities", MList (map fact equalities)), ("applications", MList (map app contestApps)), ("constants", MList (map constant constantTerms)), ("orders", MList (map mixedFact orders)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]), ("locals", localsValue bindings), ("templates", MList [])]
+                checkMergedGoal name leftApps rightApps constantTerms orders bindings goalName a b =
+                    case runNamedFunction program "mergeStates" [contestState leftApps constantTerms orders bindings, contestState rightApps constantTerms orders bindings] of
+                        Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" (("context", context) : _))])) ->
+                            fmap ((name ++ ": ") ++) (testAssertEq (runNamedFunction program "entailsGoal" [context, goal goalName a b]) (Ok (Just (MBool True))))
+                        result -> Just (name ++ ": unexpected mergeStates result: " ++ show result)
+                -- x = old + 1 / old + 2, t = old + 3 kept, old held by no local: x < t
+                checkContestT1 = checkMergedGoal "T1" [(-31, -1, [-30, 10]), (-32, -1, [-30, 12])] [(-31, -1, [-30, 11]), (-32, -1, [-30, 12])] [(10, 0, 1), (11, 0, 2), (12, 0, 3)] [] [(1, 1), (2, -31), (3, -32)] "Less" (-31) (-32)
+                -- x = (y + a) + 1 / (y + b) + 1 with a, b >= 0: y < x
+                checkContestA1 = checkMergedGoal "A1" [(-30, -1, [1, 2]), (-31, -1, [-30, 10])] [(-30, -1, [1, 3]), (-31, -1, [-30, 10])] [(10, 0, 1), (13, 0, 0)] [(13, 2, False), (13, 3, False)] [(1, 1), (2, 2), (3, 3), (4, -31)] "Less" 1 (-31)
+                checkContestA1b = checkMergedGoal "A1b" [(-30, -1, [1, 2]), (-31, -1, [-30, 10]), (-32, -1, [-31, 10])] [(-30, -1, [1, 3]), (-31, -1, [-30, 10]), (-32, -1, [-31, 10])] [(10, 0, 1), (13, 0, 0)] [(13, 2, False), (13, 3, False)] [(1, 1), (2, 2), (3, 3), (4, -32)] "Less" 1 (-32)
+                -- The bound round skips a contested self-pair that is a boolean on either side, each side
+                -- by its own classes. -5 is true on the left through an alias and false on the right; -6
+                -- is a boolean on the left only; -7 holds the integers 1 and 0 beside boolean constants of
+                -- the same values, and is equal on the right to -13, a boolean on the left only (a
+                -- different term there); -9 is uncontested; -10/-11 is renamed, so asked as before.
+                mergePair (pairLeft, pairRight, pairJoined) = MData "MergePair" [("left", MInt pairLeft), ("right", MInt pairRight), ("joined", MInt pairJoined)]
+                termSet members = MData "HashSet" [("map", MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt member), ("value", MBool True)] | member <- members]]), ("count", MInt (toInteger (length members)))])]
+                pairConstants = [constant (8, 1, 1), constant (9, 1, 0), constant (20, 0, 1), constant (21, 0, 0)]
+                checkBoundPairs = testAssertEq
+                    (runNamedFunction program "boundPairs"
+                        [ MList (map mergePair [(-5, -5, -5), (-6, -6, -6), (-7, -7, -7), (-9, -9, -9), (-10, -11, -12)])
+                        , termSet [-5, -6, -7]
+                        , mergeContext pairConstants [fact (-5, -4), fact (-4, 8), fact (-6, 9), fact (-7, 20), fact (-13, 8), fact (-10, 8)]
+                        , mergeContext pairConstants [fact (-5, 9), fact (-7, 21), fact (-7, -13)] ])
+                    (Ok (Just (MList (map mergePair [(-7, -7, -7), (-10, -11, -12)]))))
+                -- T1 with its branch condition -5 kept by local 5: true on the left, false on the right
+                conditionConstants = [(8, 1, 1), (9, 1, 0)]
+                checkContestT1WithCondition =
+                    case runNamedFunction program "mergeStates"
+                            [ contestStateWith [(-5, 8)] [(-31, -1, [-30, 10]), (-32, -1, [-30, 12])] ([(10, 0, 1), (11, 0, 2), (12, 0, 3)] ++ conditionConstants) [] [(1, 1), (2, -31), (3, -32), (5, -5)]
+                            , contestStateWith [(-5, 9)] [(-31, -1, [-30, 11]), (-32, -1, [-30, 12])] ([(10, 0, 1), (11, 0, 2), (12, 0, 3)] ++ conditionConstants) [] [(1, 1), (2, -31), (3, -32), (5, -5)] ] of
+                        Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" (("context", context) : _))])) ->
+                            testAssertEq (runNamedFunction program "entailsGoal" [context, goal "Less" (-31) (-32)]) (Ok (Just (MBool True)))
+                        result -> Just ("T1 with condition: unexpected mergeStates result: " ++ show result)
+                -- x keeps one id, the integer 0 on the left and 1 on the right, beside the condition and
+                -- boolean constants of the same values: 0 <= x <= 1 and not x > 0
+                checkIntegerSelfPair goalName a b expected =
+                    case runNamedFunction program "mergeStates"
+                            [ contestStateWith [(-31, 20), (-5, 8)] [] ((20, 0, 0) : (21, 0, 1) : conditionConstants) [] [(1, -31), (5, -5)]
+                            , contestStateWith [(-31, 21), (-5, 9)] [] ((20, 0, 0) : (21, 0, 1) : conditionConstants) [] [(1, -31), (5, -5)] ] of
+                        Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" (("context", context) : _))])) ->
+                            fmap (("integer self-pair " ++ goalName ++ ": ") ++) (testAssertEq (runNamedFunction program "entailsGoal" [context, goal goalName a b]) (Ok (Just (MBool expected))))
+                        result -> Just ("integer self-pair: unexpected mergeStates result: " ++ show result)
                 -- A loop candidate is replayed in a state built from the loop's initial state, so
                 -- every term id it names has to be one of that state's: an id inference minted
                 -- while building the candidate denotes something else, or nothing, where the
@@ -1245,7 +1292,9 @@ selfHostedQueryFamilies program =
                       [ checkVariantGoal "Different" 0 1 True, checkVariantGoal "Equal" 0 1 False
                       , checkConstructorGoal "Equal" 11 1 True, checkConstructorGoal "Equal" 11 0 False
                       , checkWithin 12 10 True, checkWithin 10 12 False, checkWithin 10 10 False
-                      , checkCommonContext, checkMergeStates
+                      , checkCommonContext, checkMergeStates, checkContestT1, checkContestA1, checkContestA1b
+                      , checkBoundPairs, checkContestT1WithCondition
+                      , checkIntegerSelfPair "AtMost" 20 (-31) True, checkIntegerSelfPair "AtMost" (-31) 21 True, checkIntegerSelfPair "Less" 20 (-31) False
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
                       , testAssertErrorContains "expected 3 arguments" (runNamedFunction program "hasEquality" [])
                       ])
