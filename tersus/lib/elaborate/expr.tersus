@@ -1175,9 +1175,6 @@ fn derefOwner(st: St, t0: Int) -> St ~ {
 fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St ~ {
     name = nameText(&st.nodes, ctor.n);
     fields = namesText(&st.nodes, ctor.fs);
-    st = inferAll(st, args);
-    if st.status != 0 { return st; };
-    inferred0 = clone(st.tes);
     base = baseNameOf(&name);
     st = ctorArgTypes(st, ctor.args);
     ctorArgs = clone(st.te.types);
@@ -1186,20 +1183,33 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
     tuple = isTuple(&base);
     if !tuple { st = ensureInstance(st, ty0); };
     declared = [];
+    declaredNames = [];
     if !tuple {
         st = ctorInfo(st, &name);
         if st.status != 0 { return st; };
         declared = clone(st.ctor.types);
+        declaredNames = clone(st.ctor.names);
     };
-    inferred = clone(inferred0);
-    if size(declared) = size(inferred0) {
-        inferred = [];
+    inferred = [];
+    if size(declared) = size(args) {
         i = 0;
-        while i < size(declared) [{ affirm i >= 0; affirm size(declared) = size(inferred0); }] ~ {
-            st = coerce(st, get(declared, i), clone(get(inferred0, i)));
+        for a in args {
+            ty = get(declared, i);
+            if mentionsParameter(st, ty) {
+                st = inferExpr(st, a);
+                if st.status != 0 { return st; };
+                st = coerce(st, ty, clone(st.te));
+            } else {
+                st = inferExpected(st, catStrings(catStrings(catStrings("field ", clone(get(declaredNames, i))), " of "), clone(name)), ty, a, false);
+            };
+            if st.status != 0 { return st; };
             inferred = push(inferred, clone(st.te));
             i = i + 1;
         };
+    } else {
+        st = inferAll(st, args);
+        if st.status != 0 { return st; };
+        inferred = clone(st.tes);
     };
     argTypes = typesHeads(&inferred);
     st = checkConstruct(st, ty0, &fields, &argTypes);
