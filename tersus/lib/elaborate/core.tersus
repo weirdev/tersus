@@ -131,9 +131,16 @@ fn noCtor() -> CtorInfo ~ { return CtorInfo { owner: "", names: [], types: [] };
 
 fn ctorInfo(st: St, name: &String) -> St ~ {
     if st.status != 0 { return st; };
-    if !HashMap::contains(&st.ctors, name) { return typeError(st, catStrings("unknown struct or variant ", clone(name))); };
-    info = HashMap::lookup(&st.ctors, name, noCtor());
-    return St { ctor: info, ..st };
+    if HashMap::contains(&st.ctors, name) {
+        info = HashMap::lookup(&st.ctors, name, noCtor());
+        return St { ctor: info, ..st };
+    };
+    // (a generic struct of the program is its own constructor, with the fields its declaration gives)
+    if HashMap::contains(&st.generics, name) {
+        g = HashMap::lookup(&st.generics, name, Generic { params: [], names: [], types: [] });
+        return St { ctor: CtorInfo { owner: clone(name), names: g.names, types: g.types }, ..st };
+    };
+    return typeError(st, catStrings("unknown struct or variant ", clone(name)));
 };
 
 fn typeCtors(st: St, name: &String) -> St ~ {

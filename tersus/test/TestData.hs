@@ -33,6 +33,11 @@ typeCheckRows =
     , ( "type-ok-fn-apply-g-fn-int-int-n-int-int-return", TypeOkStage, "fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; r = apply(inc, 1);", "" )
     , ( "type-ok-fn-f-n-int-int-affirm-n-0-affirm-return", TypeOkStage, "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; x = f(2);", "" )
     , ( "type-ok-l-l-push-l-1-m-set-l-0-5", TypeOkStage, "l = []; l = push(l, 1); m = set(l, 0, 5); x = first(m) + last(m);", "" )
+      -- A generic struct of the program builds its values itself
+    , ( "type-ok-generic-struct-built-at-the-top-level", TypeOkStage, "struct W<T> { v: T }; w = W { v: 3 }; return w.v;", "" )
+    , ( "type-ok-generic-struct-of-bool-built-at-the-top-level", TypeOkStage, "struct W<T> { v: T }; w = W { v: true }; if w.v { return 1; }; return 0;", "" )
+    , ( "type-ok-generic-struct-with-a-size-built-at-the-top-level", TypeOkStage, "struct V<n> { a: Array<Int, n> }; v = V { a: #[1, 2, 3] }; return get(v.a, 0);", "" )
+    , ( "type-ok-generic-struct-inside-a-generic-struct", TypeOkStage, "struct W<T> { v: T }; struct N<T> { w: W<T> }; n = N { w: W { v: 1 } }; return n.w.v;", "" )
       -- Equality works on any type, ordering only on Int
     , ( "type-ok-affirm-1-1-affirm-true-true", TypeOkStage, "affirm [1] = [1]; affirm true = true;", "" )
     , ( "type-error-affirm-1-2-expected-int-got-list-int", TypeErrorStage, "affirm [1] < [2];", "expected Int, got List<Int>" )
