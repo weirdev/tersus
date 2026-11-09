@@ -414,7 +414,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                             noState = ExecutionState { context: noContext, ..clone(run.state) };
                             noResult = walkExecution(stopped, branch.no, noState, fuel - 1, clone(loops));
                             if noResult.status != 0 { return noResult; };
-                            merged = mergeStates(run.state, yesResult.state, noResult.state);
+                            merged = mergeStates(yesResult.state, noResult.state);
                             if merged is StateMergeLookup::Found {
                                 return walkExecution(blocks, branch.join, (merged as StateMergeLookup::Found).state, fuel - 1, loops);
                             };

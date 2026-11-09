@@ -1,11 +1,11 @@
 import validation::context { analyzeContext, contextDifferent, integerValue, knownNonnegativeWith, signFacts };
 import validation::differences { semanticFacts };
 import validation::linear { linearEntails };
-import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, IntegerLookup, MergePair, OrderFact, SignFacts, SplitResult, StateMergeLookup, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
+import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, IntegerLookup, MergePair, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
 import validation::relations { applicationAt, containsValue, emptyIntMap, emptyPositions, intAt, leastClasses, minInt, sameIn };
 import validation::saturation { withInstances };
 import validation::sequenceFacts { sizeTermOf };
-import validation::state { bindLocal, commonTemplates, emptyMergePairs, goalSides, lookupLocal, noTemplates, termInUse };
+import validation::state { bindLocal, commonTemplates, emptyMergePairs, goalSides, lookupLocal, noTemplates };
 import validation::validation { entailmentCache, entailsGoal, entailsGoalCached };
 
 
@@ -277,7 +277,7 @@ fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashSet<Int>, term: Int) ->
     return ValueLookup::Found { term: term };
 };
 
-fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> ValidatorContext {
+fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool, raw: &RawFacts) -> NormalizedSide {
     joined = emptyIntMap();
     ambiguous = HashSet::new();
     // (a term a local keeps as itself across the join keeps its facts: a local
@@ -322,18 +322,30 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
     constructorFunctions = clone(context.constructorFunctions);
     constructorFields = clone(context.constructorFields);
     differences = [];
+    origins = [];
+    terms = clone(raw.terms);
+    starts = clone(raw.starts);
+    definitions = clone(raw.definitions);
     for factPosition in 0..size(context.equalities) {
         fact = get(context.equalities, factPosition);
+        starts = push(starts, size(terms));
+        terms = push(push(terms, fact.left), fact.right);
         left = mergeTerm(joined, ambiguous, fact.left);
         right = mergeTerm(joined, ambiguous, fact.right);
         if left is ValueLookup::Found {
             if right is ValueLookup::Found {
                 equalities = push(equalities, EqualityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term });
+                origins = push(origins, size(starts) - 1);
             };
         };
     };
+    for fact in sameAsKept { equalities = push(equalities, fact); origins = push(origins, -1); };
     for factPosition in 0..size(context.applications) {
         fact = get(context.applications, factPosition);
+        definitions = definitions.insert(size(starts));
+        starts = push(starts, size(terms));
+        terms = push(terms, fact.id);
+        for argument in fact.arguments { terms = push(terms, argument); };
         id = mergeTerm(joined, ambiguous, fact.id);
         arguments = [];
         valid = true;
@@ -343,45 +355,74 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
             if mapped is ValueLookup::Found { arguments = push(arguments, (mapped as ValueLookup::Found).term); } else { valid = false; };
         };
         if id is ValueLookup::Found {
-            if valid { applications = push(applications, ApplicationTerm { id: (id as ValueLookup::Found).term, function: fact.function, arguments: arguments }); };
+            if valid {
+                applications = push(applications, ApplicationTerm { id: (id as ValueLookup::Found).term, function: fact.function, arguments: arguments });
+                origins = push(origins, size(starts) - 1);
+            };
         };
     };
     for factPosition in 0..size(context.constants) {
         fact = get(context.constants, factPosition);
+        definitions = definitions.insert(size(starts));
+        starts = push(starts, size(terms));
+        terms = push(terms, fact.id);
         id = mergeTerm(joined, ambiguous, fact.id);
-        if id is ValueLookup::Found { constants = push(constants, ConstantTerm { id: (id as ValueLookup::Found).term, kind: fact.kind, value: fact.value }); };
+        if id is ValueLookup::Found {
+            constants = push(constants, ConstantTerm { id: (id as ValueLookup::Found).term, kind: fact.kind, value: fact.value });
+            origins = push(origins, size(starts) - 1);
+        };
     };
     for factPosition in 0..size(context.orders) {
         fact = get(context.orders, factPosition);
+        starts = push(starts, size(terms));
+        terms = push(push(terms, fact.smaller), fact.greater);
         smaller = mergeTerm(joined, ambiguous, fact.smaller);
         greater = mergeTerm(joined, ambiguous, fact.greater);
         if smaller is ValueLookup::Found {
-            if greater is ValueLookup::Found { orders = push(orders, OrderFact { smaller: (smaller as ValueLookup::Found).term, greater: (greater as ValueLookup::Found).term, strict: fact.strict }); };
+            if greater is ValueLookup::Found {
+                orders = push(orders, OrderFact { smaller: (smaller as ValueLookup::Found).term, greater: (greater as ValueLookup::Found).term, strict: fact.strict });
+                origins = push(origins, size(starts) - 1);
+            };
         };
     };
     for factPosition in 0..size(context.different) {
         fact = get(context.different, factPosition);
+        starts = push(starts, size(terms));
+        terms = push(push(terms, fact.left), fact.right);
         left = mergeTerm(joined, ambiguous, fact.left);
         right = mergeTerm(joined, ambiguous, fact.right);
         if left is ValueLookup::Found {
-            if right is ValueLookup::Found { different = push(different, DisequalityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term }); };
+            if right is ValueLookup::Found {
+                different = push(different, DisequalityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term });
+                origins = push(origins, size(starts) - 1);
+            };
         };
     };
     for factPosition in 0..size(context.differences) {
         fact = get(context.differences, factPosition);
+        starts = push(starts, size(terms));
+        terms = push(push(terms, fact.left), fact.right);
         left = mergeTerm(joined, ambiguous, fact.left);
         right = mergeTerm(joined, ambiguous, fact.right);
         if left is ValueLookup::Found {
-            if right is ValueLookup::Found { differences = push(differences, DifferenceFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term, bound: fact.bound }); };
+            if right is ValueLookup::Found {
+                differences = push(differences, DifferenceFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term, bound: fact.bound });
+                origins = push(origins, size(starts) - 1);
+            };
         };
     };
     for factPosition in 0..size(context.variants) {
         fact = get(context.variants, factPosition);
+        starts = push(starts, size(terms));
+        terms = push(terms, fact.object);
         object = mergeTerm(joined, ambiguous, fact.object);
-        if object is ValueLookup::Found { variants = push(variants, VariantFact { object: (object as ValueLookup::Found).term, family: fact.family, constructor: fact.constructor, matches: fact.matches }); };
+        if object is ValueLookup::Found {
+            variants = push(variants, VariantFact { object: (object as ValueLookup::Found).term, family: fact.family, constructor: fact.constructor, matches: fact.matches });
+            origins = push(origins, size(starts) - 1);
+        };
     };
-    for fact in sameAsKept { equalities = push(equalities, fact); };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+    normalized = ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+    return NormalizedSide { context: normalized, origins: origins, raw: RawFacts { terms: terms, starts: starts, definitions: definitions } };
 };
 
 fn sameEquality(a: &EqualityFact, b: &EqualityFact) -> Bool {
@@ -447,27 +488,35 @@ impl JoinedFact for DifferenceFact {
     fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.left = other.left && self.right = other.right && self.bound = other.bound; };
 };
 
+fn factPositions<T: JoinedFact>(facts: &List<T>) -> HashMap<Int, List<Int>> {
+    byKey = emptyPositions();
+    for position in 0..size(facts) {
+        key = JoinedFact::joinKey(get(facts, position));
+        byKey = byKey.insert(key, push(byKey.lookup(key, []), position));
+    };
+    return byKey;
+};
+
+fn holdsFact<T: JoinedFact>(facts: &List<T>, byKey: &HashMap<Int, List<Int>>, fact: &T) -> Bool {
+    for candidate in byKey.lookup(JoinedFact::joinKey(fact), []) {
+        if candidate >= 0 && candidate < size(facts) {
+            if JoinedFact::sameFact(fact, get(facts, candidate)) { return true; };
+        };
+    };
+    return false;
+};
+
 // The facts of left that right holds too, each once. (A fact held twice on
 // each side was kept four times, and the copies multiplied with every join
 // after it.) The facts of right are found by their key, not by a walk over
 // all of them for each fact of left.
 fn commonFacts<T: JoinedFact + Clone>(left: &List<T>, right: &List<T>) -> List<T> {
     common = [];
-    byKey = emptyPositions();
-    for rPosition in 0..size(right) {
-        rKey = JoinedFact::joinKey(get(right, rPosition));
-        byKey = byKey.insert(rKey, push(byKey.lookup(rKey, []), rPosition));
-    };
+    byKey = factPositions(right);
     kept = emptyPositions();
     for lPosition in 0..size(left) {
         lKey = JoinedFact::joinKey(get(left, lPosition));
-        matched = false;
-        for candidate in byKey.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right) {
-                if JoinedFact::sameFact(get(left, lPosition), get(right, candidate)) { matched = true; };
-            };
-        };
-        if matched {
+        if holdsFact(right, byKey, get(left, lPosition)) {
             already = false;
             for earlier in kept.lookup(lKey, []) {
                 if already = false && earlier >= 0 && earlier < size(left) {
@@ -481,6 +530,98 @@ fn commonFacts<T: JoinedFact + Clone>(left: &List<T>, right: &List<T>) -> List<T
         };
     };
     return common;
+};
+
+// The raw facts of a side whose renamed form the merged context holds
+fn keptOrigins<T: JoinedFact>(renamed: &List<T>, merged: &List<T>, origins: &List<Int>, first: Int, kept: HashSet<Int>) -> HashSet<Int> {
+    byKey = factPositions(merged);
+    for position in 0..size(renamed) {
+        origin = intAt(origins, first + position, -1);
+        if origin >= 0 {
+            if holdsFact(merged, byKey, get(renamed, position)) { kept = kept.insert(origin); };
+        };
+    };
+    return kept;
+};
+
+fn keptRawFacts(side: &NormalizedSide, merged: &ValidatorContext, kept: HashSet<Int>) -> HashSet<Int> {
+    first = 0;
+    kept = keptOrigins(side.context.equalities, merged.equalities, side.origins, first, kept);
+    first = first + size(side.context.equalities);
+    kept = keptOrigins(side.context.applications, merged.applications, side.origins, first, kept);
+    first = first + size(side.context.applications);
+    kept = keptOrigins(side.context.constants, merged.constants, side.origins, first, kept);
+    first = first + size(side.context.constants);
+    kept = keptOrigins(side.context.orders, merged.orders, side.origins, first, kept);
+    first = first + size(side.context.orders);
+    kept = keptOrigins(side.context.different, merged.different, side.origins, first, kept);
+    first = first + size(side.context.different);
+    kept = keptOrigins(side.context.differences, merged.differences, side.origins, first, kept);
+    first = first + size(side.context.differences);
+    return keptOrigins(side.context.variants, merged.variants, side.origins, first, kept);
+};
+
+// The kept self-pairs a dropped raw fact reaches. A named term (a local's
+// value on either side or after the merge, or any non-negative id) of a
+// dropped fact is marked. A dropped definition seeds only the term it
+// defines, a dropped relation each of its unnamed terms, and the walk from
+// the seeds crosses unnamed terms only, marking every named term of each fact
+// it reaches. (Seeding an old value from x_new = x_old + k would make it a
+// hub reaching every local ever ordered against it, and x_new is marked
+// already.)
+fn contestedTerms(raw: &RawFacts, kept: &HashSet<Int>, named: &HashSet<Int>) -> HashSet<Int> {
+    marked = HashSet::new();
+    factsOf = emptyPositions();
+    queue = [];
+    reached = HashSet::new();
+    for f in 0..size(raw.starts) {
+        start = intAt(raw.starts, f, 0);
+        end = intAt(raw.starts, f + 1, size(raw.terms));
+        dropped = kept.contains(f) = false;
+        definition = raw.definitions.contains(f);
+        if start >= 0 && start <= end {
+            for k in start..end {
+                term = intAt(raw.terms, k, 0);
+                if term >= 0 || named.contains(term) {
+                    if dropped { marked = marked.insert(term); };
+                } else {
+                    factsOf = factsOf.insert(term, push(factsOf.lookup(term, []), f));
+                    if dropped && (definition = false || k = start) && reached.contains(term) = false {
+                        reached = reached.insert(term);
+                        queue = push(queue, term);
+                    };
+                };
+            };
+        };
+    };
+    visited = HashSet::new();
+    head = 0;
+    // (each unnamed term is queued once, so there are no more of them than term occurrences)
+    for step in 0..size(raw.terms) {
+        if head < size(queue) {
+            u = intAt(queue, head, 0);
+            head = head + 1;
+            for f in factsOf.lookup(u, []) {
+                if f >= 0 && f < size(raw.starts) && visited.contains(f) = false {
+                    visited = visited.insert(f);
+                    start = intAt(raw.starts, f, 0);
+                    end = intAt(raw.starts, f + 1, size(raw.terms));
+                    if start >= 0 && start <= end {
+                        for k in start..end {
+                            term = intAt(raw.terms, k, 0);
+                            if term >= 0 || named.contains(term) {
+                                marked = marked.insert(term);
+                            } else if reached.contains(term) = false {
+                                reached = reached.insert(term);
+                                queue = push(queue, term);
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return marked;
 };
 
 fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
@@ -833,21 +974,61 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
     return result;
 };
 
+fn booleanIn(classes: &HashMap<Int, Int>, constants: &List<ConstantTerm>, term: Int) -> Bool {
+    for constantPosition in 0..size(constants) {
+        constant = get(constants, constantPosition);
+        if constant.kind = 1 && sameIn(classes, constant.id, term) { return true; };
+    };
+    return false;
+};
+
+// The pairs the bound round asks about: every pair with a joined term, and
+// each contested self-pair whose term neither side's classes hold a boolean
+// constant for. (A branch condition is contested at every join, true on one
+// side and false on the other, and no integer bound is said of a boolean.)
+fn boundPairs(pairs: &List<MergePair>, contested: &HashSet<Int>, left: &ValidatorContext, right: &ValidatorContext) -> List<MergePair> {
+    selected = emptyMergePairs();
+    leftClasses = emptyIntMap();
+    rightClasses = emptyIntMap();
+    classesMade = false;
+    for pairPosition in 0..size(pairs) {
+        pair = get(pairs, pairPosition);
+        if pair.joined != pair.left || pair.joined != pair.right {
+            selected = push(selected, clone(pair));
+        } else if contested.contains(pair.joined) {
+            if classesMade = false {
+                leftClasses = leastClasses(semanticFacts(left.equalities, left.applications, left.constants));
+                rightClasses = leastClasses(semanticFacts(right.equalities, right.applications, right.constants));
+                classesMade = true;
+            };
+            if booleanIn(leftClasses, left.constants, pair.left) = false && booleanIn(rightClasses, right.constants, pair.right) = false {
+                selected = push(selected, clone(pair));
+            };
+        };
+    };
+    return selected;
+};
+
 // A merge keeps a fact only when both sides hold it, after each side renames
-// its own terms into the joined ones. That is sound whatever a term id means
-// on either side, because:
-//   1. each side's renaming is injective -- a local the sides bind to
-//      different terms gets one joined term of its own, fresh below every
-//      term either side mentions, and a term with two joined images on a side
-//      is dropped from that side rather than renamed;
-//   2. a term neither side renames keeps its id, and a fact about it is kept
-//      only when both sides state it, so it holds of whichever value the path
-//      that ran produced -- the two sides mint fresh ids independently, so the
-//      same id can be two values, and nothing here assumes otherwise. A local
-//      the two sides bind to one such id is still joined, because the bounds
-//      below are what the two values have in common.
-// Hence ids need not be globally unique (plan clarification 8).
-fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
+// its own terms into the joined ones. Reading each joined term as its source
+// on a side and every other id as itself, each side's values satisfy the
+// merged state, whatever a generated (negative) id means on either side,
+// provided that:
+//   1. every joined term is fresh below every term either side mentions;
+//   2. every joined term has one source on each side (pairs are keyed by
+//      both sources);
+//   3. a non-negative id has one value in both states: the constants either
+//      side states of one are kept, and a local both sides bind to one keeps
+//      it unpaired. The caller must not merge states in which a block that
+//      makes host-numbered terms ran more than once.
+// A template is kept by id: the host registers each with one id and content
+// that speaks only of captured locals and literals. A term with two joined
+// images on a side is dropped from that side, which costs precision only.
+// A local both sides bind to the same generated id keeps it; that self-pair
+// is asked for bounds only when a dropped raw fact reaches it
+// (contestedTerms), as x is after x = x + 1 against x = x + 2, and it is not
+// a boolean (boundPairs).
+fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
     poolContext = unionContexts(left.context, right.context);
     poolEqualities = clone(poolContext.equalities);
     for binding in left.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
@@ -862,14 +1043,10 @@ fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionSt
             rightTerm = (other as ValueLookup::Found).term;
             if binding.value >= 0 && binding.value = rightTerm {
                 locals = bindLocal(locals, binding.key, binding.value);
-            } else if binding.value = rightTerm && termInUse(fork, binding.value) {
-                // (a term the checker made before the branch, as size(digits)
-                // from a contract, is the same on both sides: it is kept as
-                // itself, and another local joined from it is said equal to it
+            } else if binding.value = rightTerm {
+                // (another local joined from the kept term is said equal to it
                 // rather than renamed into it, which would take from this local
-                // what is known of it. The same number made separately on each
-                // side after the branch is two values, so it is joined below,
-                // which is also what gets it the bounds both sides entail.)
+                // what is known of it)
                 locals = bindLocal(locals, binding.key, binding.value);
                 known = false;
                 for pair in pairs { if pair.left = binding.value && pair.right = binding.value { known = true; }; };
@@ -898,22 +1075,23 @@ fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionSt
             };
         };
     };
-    leftContext = normalizedContext(left.context, pairs, true);
-    rightContext = normalizedContext(right.context, pairs, false);
+    noRaw = RawFacts { terms: [], starts: [], definitions: HashSet::new() };
+    leftSide = normalizedContext(left.context, pairs, true, noRaw);
+    rightSide = normalizedContext(right.context, pairs, false, leftSide.raw);
     // (a forall both paths assumed holds after the join: its values are locals,
     // which the join gives the joined terms)
-    state = ExecutionState { context: commonContext(leftContext, rightContext), locals: locals, templates: commonTemplates(left.templates, right.templates) };
+    state = ExecutionState { context: commonContext(leftSide.context, rightSide.context), locals: locals, templates: commonTemplates(left.templates, right.templates) };
     mergedConstants = clone(state.context.constants);
-    for factPosition in 0..size(leftContext.constants) {
-        fact = get(leftContext.constants, factPosition);
+    for factPosition in 0..size(leftSide.context.constants) {
+        fact = get(leftSide.context.constants, factPosition);
         if fact.id >= 0 {
             known = false;
             for kept in mergedConstants { if kept.id = fact.id { known = true; }; };
             if known = false { mergedConstants = push(mergedConstants, clone(fact)); };
         };
     };
-    for factPosition in 0..size(rightContext.constants) {
-        fact = get(rightContext.constants, factPosition);
+    for factPosition in 0..size(rightSide.context.constants) {
+        fact = get(rightSide.context.constants, factPosition);
         if fact.id >= 0 {
             known = false;
             for kept in mergedConstants { if kept.id = fact.id { known = true; }; };
@@ -921,11 +1099,12 @@ fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionSt
         };
     };
     state = ExecutionState { context: ValidatorContext { constants: mergedConstants, ..state.context }, ..state };
-    joinPairs = emptyMergePairs();
-    for pairPosition in 0..size(pairs) {
-        pair = get(pairs, pairPosition);
-        if pair.joined != pair.left || pair.joined != pair.right { joinPairs = push(joinPairs, clone(pair)); };
-    };
+    keptFacts = keptRawFacts(rightSide, state.context, keptRawFacts(leftSide, state.context, HashSet::new()));
+    named = HashSet::new();
+    for binding in left.locals.entries() { named = named.insert(binding.value); };
+    for binding in right.locals.entries() { named = named.insert(binding.value); };
+    for binding in state.locals.entries() { named = named.insert(binding.value); };
+    joinPairs = boundPairs(pairs, contestedTerms(rightSide.raw, keptFacts, named), left.context, right.context);
     for pairPosition in 0..size(joinPairs) {
         pair = get(joinPairs, pairPosition);
         loLeft = rangeBound(left.context, pair.left, true);

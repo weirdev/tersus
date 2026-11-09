@@ -555,7 +555,7 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq selfHostedFamilyManifest
             [("products", 225), ("relations", 19), ("execution", 33), ("driver", 46),
              ("MIR contracts", 60), ("MIR arithmetic", 22), ("MIR sequences", 32), ("MIR data", 21),
-             ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 22), ("bridges", 11),
+             ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 22), ("bridges", 19),
              ("loop candidate provenance", 6)]
     , testCase "self-hosted cache-sharing batches belong to one shard for every count" $
         testAssertTrue (all (\count ->
