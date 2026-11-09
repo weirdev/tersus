@@ -1207,7 +1207,7 @@ fn checkAssignDeref(st: St, lhs: Int, value: Int) -> St ~ {
     for beforePlace in &places {
         path = clone(beforePlace.steps);
         for step in &suffix { path = push(path, clone(step)); };
-        place = Place { steps: path, ..beforePlace };
+        place = Place { steps: path, ..clone(beforePlace) };
         if size(st.writes) > 0 && indexIn(&st.mutParams, &place.root) >= 0 && !withinWrites(&st.writes, &place) {
             return typeError(st, catStrings(catStrings(catStrings("this assignment changes ", writesTarget(&place)), ", which the writes clause of the function does not allow "), writesText(st)));
         };

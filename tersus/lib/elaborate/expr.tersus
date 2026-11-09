@@ -1918,11 +1918,12 @@ fn coerceArguments(st: St, ft: Int, inferred: &List<TE>) -> St ~ {
                     };
                     st = checkCallWrites(st, arg.node);
                     child = clone(arg);
+                    sourceNode = child.node;
                     args = push([], child.node);
                     st = emitBuiltinCall(st, "BorrowMutOf", &args);
                     children = push([], child);
                     st = typed(st, st.nid, ptz, &children);
-                    st = copyExpressionOrigins(st, child.node, st.te.node);
+                    st = copyExpressionOrigins(st, sourceNode, st.te.node);
                     arg = clone(st.te);
                 } else {
                     st = coerce(st, unrefOf(st, ptz), arg);
