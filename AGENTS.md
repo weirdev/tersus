@@ -83,11 +83,12 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     `Interface`) that answers an elaboration request (`AST_DATA.md`) for a
     program or a module. Its declarative sibling files are one root module with
     `elaborate.tersus` as the entry. `PreludeSource.elaboratePackageFiles`
-    embeds it; only `testElaborate` and `frontend-diff` build and run it.
+    embeds it; only `testElaborate`, `testElaborateMutant`, `testHostValidation`
+    and `frontend-diff` build and run it.
   - `mir/`, `data/`, `parser/` and `ast_reader/`: the compiler's own programs,
     four packages beside `validation/` with their own `package.tersus`
-    markers. `testHostValidation` validates the AST reader and the MIR reader,
-    checker, eraser and emitter, and says what running them with no input does.
+    markers. `testHostValidation` validates the AST reader, the MIR reader,
+    checker, eraser and emitter, and the elaborator, and says what running them with no input does.
     `mir/emit/emit.tersus` is the LLVM emitter written in Tersus, and
     `mir/mir_reader/mir_reader.tersus` / `mir/mir_verify/mir_verify.tersus` /
     `mir/mir_erase/mir_erase.tersus` are the MIR reader, the MIR checker and
@@ -191,10 +192,8 @@ Work from `tersus/`.
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
   `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
   `testNative`, `testMirEmit`, `testMirVerify`, `testMirSelfHosted`,
-  `testAstData`, `testParser`, `testAstReader` and `testDifferential` each
-  register four batches named `<original>:1/4` through `<original>:4/4`, and
-  `testElaborate` three (`:1/3` through `:3/3`; the first two share one cached
-  build of the elaborator and the mutant's builds its own). The AST/parser corpora partition
+  `testAstData`, `testParser` and `testAstReader` each
+  register four batches named `<original>:1/4` through `<original>:4/4`. The AST/parser corpora partition
   samples without splitting package declaration contexts; all emitter
   helper files share one prepared-parser comparison.
   Selecting an original name selects all its batches; shard filters intersect
@@ -208,9 +207,14 @@ Work from `tersus/`.
   CI reserves one runner for each of these three bootstrap groups; the
   remaining groups use three runners, with four worker processes per runner.
   The required aggregate check still requires every shard to pass.
-  `testHostValidation`, which validates the compiler's own programs (the MIR
-  reader, checker and eraser, and the emitter), runs only when named, since it
-  takes far longer than the rest of the suite (`TestTersus.optInGroups`).
+  `testHostValidation`, which validates the compiler's own programs (the AST
+  reader, the MIR reader, checker and eraser, the emitter and the elaborator),
+  runs only when named, since it
+  takes far longer than the rest of the suite (`TestTersus.optInGroups`), as
+  does `testElaborateMutant` (an elaborator whose unification is broken, which
+  the differential has to catch; it builds an elaborator of its own).
+  `testElaborate` leaves the compiler's own packages to
+  `stack run frontend-diff -- compare EXE`, whose default corpus has them.
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in
   `tersus/README.md`.
 

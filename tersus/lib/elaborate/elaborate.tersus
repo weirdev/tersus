@@ -1,24 +1,24 @@
 import data::arena::arena { remapNode, reorderArena };
-import data::ast::ast { AstBody, AstElaborated, AstEntry, AstNode, AstOptName, AstProgram, AstStatement, AstValue, printAst };
+import data::ast::ast { AstElaborated, AstEntry, AstNode, AstOptName, AstProgram, AstStatement, printAst };
 import data::codec::codec { Parsed, Token, Type, catStrings, intAt, tokenize };
 import data::reader::reader { readAstRecords, readRecord };
 import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
 import elaborate::out { emit, emitTypes, quotedName };
-import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData, signatureOf };
+import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, intText, notModelled, oneScope };
+import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, intText, noBoundedParts, notModelled, oneScope };
 import elaborate::traits { argListOf, boundsOf };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
 // response on standard output (AST_DATA.md). It answers `unmodelled` for what it does not handle yet.
 
-fn newState() -> St [{ }] [{ }] {
+fn newState() -> St ~ {
     return St {
         nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0,
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
-        traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, big: [], undo: [], sizeUndo: [], templates: HashMap::new(), instances: HashMap::new(), emitted: [], emittedTypes: [], activeNames: [], activeSizes: [], companions: HashMap::new(), fns: HashMap::new(), scopes: oneScope(),
+        traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), instances: HashMap::new(), emitted: [], emittedTypes: [], activeNames: [], activeSizes: [], companions: HashMap::new(), fns: HashMap::new(), scopes: oneScope(),
         ret: 0 - 1, programReturn: 0 - 1, sizeScope: [], typeScope: [], readOnly: [], mutParams: [], writes: [], aliasNames: [], aliasPlaces: [], originNames: [], originRoots: [], refResultNames: [], refResultParams: [], refResultFroms: [], resultFrom: [], params: [], current: "", inGhost: false,
         predeclared: HashSet::new(), impls: HashSet::new(), builtinNames: HashMap::new(), builtinValues: [], builtinSchemes: [],
         builtinKinds: [], stdNames: HashMap::new(), pointer: HashMap::new(), ghostNames: HashMap::new(), methods: HashMap::new(),
@@ -32,7 +32,7 @@ fn newState() -> St [{ }] [{ }] {
 struct Line { words: List<Token>, ok: Bool };
 impl Clone for Line { };
 
-fn readLine() -> Line [{ }] [{ }] {
+fn readLine() -> Line ~ {
     r = readRecord();
     if !r.ok || r.pos = 0 { return Line { words: [], ok: false }; };
     t = tokenize(&r.value);
@@ -40,7 +40,7 @@ fn readLine() -> Line [{ }] [{ }] {
     return Line { words: t.value, ok: true };
 };
 
-fn wordIs(line: &Line, i: Int, w: &String) -> Bool [{ }] [{ }] {
+fn wordIs(line: &Line, i: Int, w: &String) -> Bool ~ {
     if !line.ok || i < 0 || i >= size(line.words) { return false; };
     tok = get(line.words, i);
     return !tok.quoted && tok.text = clone(w);
@@ -243,9 +243,9 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
     return st;
 };
 
-fn isRefCodec(t: &Type) -> Bool [{ }] [{ }] { return t is Type::TRef || t is Type::TMutRef; };
+fn isRefCodec(t: &Type) -> Bool ~ { return t is Type::TRef || t is Type::TMutRef; };
 
-fn entryOf(nodes: &List<AstNode>, e: Int) -> AstEntry [{ }] [{ }] {
+fn entryOf(nodes: &List<AstNode>, e: Int) -> AstEntry ~ {
     node = nodeIn(nodes, e);
     if node is AstNode::Entry { return clone((node as AstNode::Entry).value); };
     return AstEntry::PairEntry { a: 0 - 1, b: 0 - 1 };
@@ -261,9 +261,8 @@ fn gatherSignatures(st: St, stmts: &List<Int>) -> St ~ {
             v = functionValue(st, a.e);
             name = nameText(&st.nodes, a.n);
             if v >= 0 && !st.stdNames.contains(&name) && !st.ghostNames.contains(&name) {
-                value = ((nodeIn(&st.nodes, v) as AstNode::Value).value as AstValue::VFunct);
-                native = ((nodeIn(&st.nodes, value.body) as AstNode::Body).value as AstBody::NativeFunct);
-                sd = sigData(&st.nodes, native.sig); st = functionTypeFrom(st, &sd);
+                value = nativeFn(&st.nodes, v);
+                sd = sigData(&st.nodes, value.sig); st = functionTypeFrom(st, &sd);
                 gathered = gathered.insert(name, st.ty);
             };
         };
@@ -287,11 +286,11 @@ fn respond(st: &St, program: &AstProgram, iface: &AstProgram, hasInterface: Bool
     return n + "refused ".print() + printQuoted(&st.msg) + "\n".print();
 };
 
-fn printIntWord(n: Int) -> Int [{ }] [{ }] { return " ".print() + intText(n).print(); };
+fn printIntWord(n: Int) -> Int ~ { return " ".print() + intText(n).print(); };
 
-fn printQuoted(text: &String) -> Int [{ }] [{ }] { return quotedName(text).print(); };
+fn printQuoted(text: &String) -> Int ~ { return quotedName(text).print(); };
 
-fn malformed() -> Int [{ }] [{ }] {
+fn malformed() -> Int ~ {
     "not an elaboration request\n".printError();
     return 1;
 };

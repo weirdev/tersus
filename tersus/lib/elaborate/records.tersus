@@ -1,7 +1,7 @@
-import data::ast::ast { AstExpression, AstName, AstNode, AstSignature };
+import data::ast::ast { AstBody, AstExpression, AstName, AstNode, AstSignature, AstValue };
 import data::codec::codec { Size, Type, sizeAt, typeAt, wordAt };
 import data::reader::reader { nameValue, nodeKind, nodeRefs };
-import elaborate::state { St, TE, Ty, addTy, arrayTy, boxTy, fnTy, listTy, namedTy, notModelled, simpleTy, sizeConst, wordTy, wrapTy };
+import elaborate::state { St, TE, Ty, addTy, arrayTy, boxTy, fnTy, listTy, namedTy, notModelled, nth, simpleTy, sizeConst, wordTy, wrapTy };
 
 // The elements of a list record of an arena, in order
 fn listItems(nodes: &List<AstNode>, start: Int) -> List<Int> ~ {
@@ -13,18 +13,18 @@ fn listItems(nodes: &List<AstNode>, start: Int) -> List<Int> ~ {
         if !((k >= 22 && k <= 34) || k = 37 || k = 38) { return out; };
         refs = nodeRefs(node);
         if size(refs) != 2 { return out; };
-        out = push(out, get(refs, 0));
-        id = get(refs, 1);
+        out = push(out, nth(&refs, 0));
+        id = nth(&refs, 1);
     };
     return out;
 };
 
-fn nodeIn(nodes: &List<AstNode>, id: Int) -> AstNode [{ }] [{ }] {
+fn nodeIn(nodes: &List<AstNode>, id: Int) -> AstNode ~ {
     if id < 0 || id >= size(nodes) { return AstNode::Name { value: AstName::End }; };
     return clone(get(nodes, id));
 };
 
-fn nameText(nodes: &List<AstNode>, id: Int) -> String [{ }] [{ }] {
+fn nameText(nodes: &List<AstNode>, id: Int) -> String ~ {
     return nameValue(nodes, id);
 };
 
@@ -35,20 +35,20 @@ fn namesText(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
 };
 
 // The codec type of a Type record
-fn codecTypeAt(nodes: &List<AstNode>, id: Int) -> Type [{ }] [{ }] {
+fn codecTypeAt(nodes: &List<AstNode>, id: Int) -> Type ~ {
     node = nodeIn(nodes, id);
     if node is AstNode::Type { return clone((node as AstNode::Type).value); };
     return Type::TInt;
 };
 
 // The codec size of a Size record
-fn codecSizeAt(nodes: &List<AstNode>, id: Int) -> Size [{ }] [{ }] {
+fn codecSizeAt(nodes: &List<AstNode>, id: Int) -> Size ~ {
     node = nodeIn(nodes, id);
     if node is AstNode::Size { return clone((node as AstNode::Size).value); };
     return Size::SAny;
 };
 
-fn codecSize(st: St, s: &Size) -> St [{ }] [{ }] {
+fn codecSize(st: St, s: &Size) -> St ~ {
     return match s {
         Size::SConst { n: n } => sizeConst(st, n),
         Size::SAny => simpleTy(st, 21),
@@ -150,7 +150,7 @@ fn fieldNames(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
     return out;
 };
 
-fn signatureOf(nodes: &List<AstNode>, id: Int) -> AstSignature [{ }] [{ }] {
+fn signatureOf(nodes: &List<AstNode>, id: Int) -> AstSignature ~ {
     node = nodeIn(nodes, id);
     if node is AstNode::Signature { return clone((node as AstNode::Signature).value); };
     return AstSignature { ts: 0 - 1, ret: 0 - 1, ss: 0 - 1, ps: 0 - 1, ws: 0 - 1, fs: 0 - 1 };
@@ -175,19 +175,37 @@ fn functionTypeFrom(st: St, sig: &SigData) -> St ~ {
     return addTy(st, Ty { kind: 13, name: "", args: push([], st.ty), n: 0, flag: false, sizes: clone(sig.sizes), types: clone(sig.types) });
 };
 
-fn exprOf(st: &St, e: Int) -> AstExpression [{ }] [{ }] {
+fn exprOf(st: &St, e: Int) -> AstExpression ~ {
     node = nodeIn(&st.nodes, e);
     if node is AstNode::Expression { return clone((node as AstNode::Expression).value); };
     return AstExpression::Var { n: 0 - 1 };
 };
 
-fn varName(st: &St, e: Int) -> String [{ }] [{ }] {
+fn varName(st: &St, e: Int) -> String ~ {
     ex = exprOf(st, e);
     if ex is AstExpression::Var { return nameText(&st.nodes, (ex as AstExpression::Var).n); };
     return "";
 };
 
-fn isVar(st: &St, e: Int) -> Bool [{ }] [{ }] {
+fn isVar(st: &St, e: Int) -> Bool ~ {
     node = nodeIn(&st.nodes, e);
     return node is AstNode::Expression && (node as AstNode::Expression).value is AstExpression::Var;
+};
+
+// A function value record whose body is written in Tersus, its parts -1 when the record is not one
+struct NativeFn { ok: Bool, ps: Int, ins: Int, outs: Int, body: Int, exports: Int, sig: Int, term: Int, stmts: Int };
+
+fn nativeFn(nodes: &List<AstNode>, v: Int) -> NativeFn ~ {
+    none = NativeFn { ok: false, ps: 0 - 1, ins: 0 - 1, outs: 0 - 1, body: 0 - 1, exports: 0 - 1, sig: 0 - 1, term: 0 - 1, stmts: 0 - 1 };
+    node = nodeIn(nodes, v);
+    if !(node is AstNode::Value) { return none; };
+    value = (node as AstNode::Value).value;
+    if !(value is AstValue::VFunct) { return none; };
+    f = value as AstValue::VFunct;
+    bodyNode = nodeIn(nodes, f.body);
+    if !(bodyNode is AstNode::Body) { return none; };
+    b = (bodyNode as AstNode::Body).value;
+    if !(b is AstBody::NativeFunct) { return none; };
+    nf = b as AstBody::NativeFunct;
+    return NativeFn { ok: true, ps: f.ps, ins: f.ins, outs: f.outs, body: f.body, exports: f.exports, sig: nf.sig, term: nf.term, stmts: nf.stmts };
 };
