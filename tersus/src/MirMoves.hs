@@ -181,14 +181,14 @@ type Loan = (Place, Bool, Pos)
 -- the values a value holding references was made of, the arguments a result is from. A parent is suspended while the local is live
 -- (REFERENCES.md, Core rules).
 -- stThrough holds, for a view read through a reference (`*r`, or a part of such a view), the references it may have been read through.
-data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place], stFieldLoans :: Map (Local, Variable) [Place], stConst :: Map Local Integer, stFnAlias :: Map Local Name, stParents :: Map Local [Local], stThrough :: Map Local (Set Local), stReborrowedThrough :: Map Local [Local]}
+data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place], stFieldLoans :: Map (Local, Variable) [Place], stConst :: Map Local Integer, stFnAlias :: Map Local Name, stParents :: Map Local [Local], stThrough :: Map Local (Set Local), stReborrowedThrough :: Map Local [Local], stCarried :: Map Local [Place]}
     deriving (Eq)
 
 emptySt :: St
-emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
+emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
 joinSt :: St -> St -> St
-joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) extras (Map.unionWith unionPlaces (stFieldLoans a) (stFieldLoans b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stConst a) (stConst b))) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v]) (Map.unionWith unionPlaces (stParents a) (stParents b)) (Map.unionWith Set.union (stThrough a) (stThrough b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stReborrowedThrough a) (stReborrowedThrough b)))
+joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) extras (Map.unionWith unionPlaces (stFieldLoans a) (stFieldLoans b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stConst a) (stConst b))) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v]) (Map.unionWith unionPlaces (stParents a) (stParents b)) (Map.unionWith Set.union (stThrough a) (stThrough b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stReborrowedThrough a) (stReborrowedThrough b))) (Map.unionWith unionPlaces (stCarried a) (stCarried b))
   where
     -- (a reference the two branches leave to different places may be to either)
     alternatives = Map.fromListWith unionPlaces [(ref, [other]) | (ref, (place, _, _)) <- Map.toList (stLoans a), Just (other, _, _) <- [Map.lookup ref (stLoans b)], place /= other]
@@ -200,13 +200,14 @@ unionPlaces :: Eq a => [a] -> [a] -> [a]
 unionPlaces xs ys = xs ++ [y | y <- ys, y `notElem` xs]
 
 sameShape :: St -> St -> Bool
-sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.map (\(place, mutable, _) -> (place, mutable)) (stLoans a) == Map.map (\(place, mutable, _) -> (place, mutable)) (stLoans b) && Map.map (Set.fromList) (stExtraLoans a) == Map.map (Set.fromList) (stExtraLoans b) && Map.map (Set.fromList) (stFieldLoans a) == Map.map (Set.fromList) (stFieldLoans b) && stParents a == stParents b && stThrough a == stThrough b && stReborrowedThrough a == stReborrowedThrough b
+sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.map (\(place, mutable, _) -> (place, mutable)) (stLoans a) == Map.map (\(place, mutable, _) -> (place, mutable)) (stLoans b) && Map.map (Set.fromList) (stExtraLoans a) == Map.map (Set.fromList) (stExtraLoans b) && Map.map (Set.fromList) (stFieldLoans a) == Map.map (Set.fromList) (stFieldLoans b) && stParents a == stParents b && stThrough a == stThrough b && stReborrowedThrough a == stReborrowedThrough b && Map.map Set.fromList (stCarried a) == Map.map Set.fromList (stCarried b)
 
--- Every loan that freezes a place: a reference's own place, and the other places a result that may be from
--- more than one parameter freezes (a call result: which of them it is is the callee's choice). A value that
--- holds an update reference holds an update loan on its place.
+-- Every loan that freezes a place: a reference's own place, the other places a result that may be from
+-- more than one parameter freezes (a call result: which of them it is is the callee's choice), and what the holder a
+-- borrow is of carries (stCarried, which is not a place the borrow is to). A value that holds an update reference holds
+-- an update loan on its place.
 loanEntries :: St -> [(Local, Place, Bool)]
-loanEntries st = [(ref, place, mutable) | (ref, (place, mutable, _)) <- Map.toList (stLoans st)] ++ [(ref, place, maybe (place `elem` carried) (\(_, mutable, _) -> mutable) (Map.lookup ref (stLoans st))) | (ref, places) <- Map.toList (stExtraLoans st), let carried = carriedUpdates st ref, place <- places]
+loanEntries st = [(ref, place, mutable) | (ref, (place, mutable, _)) <- Map.toList (stLoans st)] ++ [(ref, place, maybe (place `elem` carried) (\(_, mutable, _) -> mutable) (Map.lookup ref (stLoans st))) | (ref, places) <- Map.toList (stExtraLoans st), let carried = carriedUpdates st ref, place <- places] ++ [(ref, place, maybe False (\(_, mutable, _) -> mutable) (Map.lookup ref (stLoans st))) | (ref, places) <- Map.toList (stCarried st), place <- places]
 
 -- The places a value that holds references holds an update reference to: those of the update references it was made of,
 -- directly or through the values that hold them
@@ -492,9 +493,16 @@ placesOf st l = case Map.lookup l (stViews st) of
     _ -> [(l, [])]
 
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
-assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias', stParents = parents'', stThrough = through'', stReborrowedThrough = reborrowed'}, errs ++ lost cx pos st1 d ++ loanErrs ++ readOutErrs ++ readThroughErrs ++ placeReadErrs)
+assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias', stParents = parents'', stThrough = through'', stReborrowedThrough = reborrowed', stCarried = carried'}, errs ++ lost cx pos st1 d ++ loanErrs ++ readOutErrs ++ readThroughErrs ++ placeReadErrs)
   where
     -- (the references a reborrow was taken through, which lending it to a call does not conflict with)
+    carried' = case rv of
+        -- (what the holder is to through an update reference only is its capability, not a place a view of it freezes: mutableHolderLoan)
+        Borrow{} | Just (place, _) <- borrowPlace, held@(_ : _) <- filter (not . mutableHolderLoan cx st1 (fst place)) (heldBy place) -> Map.insert d held (stCarried base)
+        Use (Move src) | Just held <- Map.lookup src (stCarried st1) -> Map.insert d held (Map.delete src (stCarried base))
+        Use (Copy src) | Just held <- Map.lookup src (stCarried st1) -> Map.insert d held (stCarried base)
+        CopyOf o | Just src <- operandLocal o, Just held <- Map.lookup src (stCarried st1) -> Map.insert d held (stCarried base)
+        _ -> stCarried base
     reborrowed' = case (borrowPlace, rv) of
         (Just _, _) | not (null borrowChain) -> Map.insert d borrowChain (stReborrowedThrough base)
         (Nothing, Use operand) | isReference ty, Just src <- operandLocal operand, Just chain <- Map.lookup src (stReborrowedThrough st1) -> Map.insert d chain (stReborrowedThrough base)
@@ -601,16 +609,11 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
         ListOp op args
             | op `elem` [Get, First, Last], referenceContents cx ty, srcOp : _ <- args, Just src <- operandLocal srcOp, places@(_ : _) <- Map.findWithDefault [] src (stExtraLoans st1) ->
                 (loans', Map.insert d places (stExtraLoans base), foldl' (\out field -> Map.insert (d, field) places out) clearedFields (refFieldNames cx ty))
-        Borrow root steps _
-            | isReference (typeOf cx root) || not (null held) ->
-                let primary = fmap (\(place, _, _) -> place) (Map.lookup d loans')
-                    copied = if isReference (typeOf cx root) then [resolvePlace cx st1 (owner, prefix ++ map (refStepConst (stConst st1)) steps) | (owner, prefix) <- Map.findWithDefault [] root (stExtraLoans st1)] else []
-                    extras = nub (filter (\place -> Just place /= primary) copied ++ held)
-                 in (loans', if null extras then Map.delete d (stExtraLoans base) else Map.insert d extras (stExtraLoans base), clearedFields)
-          where
-            held = case borrowPlace of
-                Just (place, _) -> heldBy place
-                Nothing -> []
+        Borrow root steps _ | isReference (typeOf cx root) ->
+            let primary = fmap (\(place, _, _) -> place) (Map.lookup d loans')
+                copied = [resolvePlace cx st1 (owner, prefix ++ map (refStepConst (stConst st1)) steps) | (owner, prefix) <- Map.findWithDefault [] root (stExtraLoans st1)]
+                alternatives = filter (\place -> Just place /= primary) (nub copied)
+             in (loans', if null alternatives then Map.delete d (stExtraLoans base) else Map.insert d alternatives (stExtraLoans base), clearedFields)
         Use (Move src) -> (loans', transferExtras src, transferFields src True)
         Use (Copy src) -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
         CopyOf o | Just src <- operandLocal o -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
@@ -1013,6 +1016,7 @@ define _ st d view0 =
         , stThrough = stThrough st
         -- (a reborrow taken through the old value of d is not taken through the new one)
         , stReborrowedThrough = Map.map (filter (/= d)) (Map.delete d (stReborrowedThrough st))
+        , stCarried = Map.delete d (stCarried st)
         }
 
 terminator :: Cx -> Pos -> St -> Terminator -> (St, [String])
