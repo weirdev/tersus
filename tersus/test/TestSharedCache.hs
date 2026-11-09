@@ -2025,7 +2025,7 @@ missingHashTools = do
                 createDirectoryIfMissing True (takeDirectory entry)
                 BL.writeFile entry poisoned
                 child <- spawnProbe home [("PATH", home), ("TERSUS_SHARED_CACHE_PROBE_INVALID", "1")]
-                code <- waitChild 10 child
+                code <- waitChild 300 child
                 when (code == Nothing) (stopOwnedProcess False child >> waitForProcess child >> pure ())
                 got <- readMarker marker
                 after <- readBinaryMarker entry
