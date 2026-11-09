@@ -19,11 +19,15 @@ stage = clone(p.value.stage);
 root = p.value.root;
 nodes = p.value.nodes;
 mode = "";
+// (decided where the argument is read: with no argument the validator cannot rule out "" = "mutate", and it refuses a
+// loop on a path whose facts contradict each other)
+mutate = false;
 if argCount() > 0 {
     mode = String::arg(0, 16);
     if argCount() != 1 || (mode != "mutate" && mode != "count") { "unknown AST reader mode\n".printError(); return 1; };
+    mutate = mode = "mutate";
 };
-if mode = "mutate" {
+if mutate {
     count = size(nodes);
     for i in 0..count [{ affirm size(nodes) = count; }] {
         if isPlus(get(nodes, i)) {
