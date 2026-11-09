@@ -466,7 +466,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
     -- (a borrow of a value that holds references, or of a field of it that does, keeps what they are to frozen)
     heldBy place@(root, steps) = case steps of
         _ | Just ty <- placeType cx place, not (holdsReference (cxProgram cx) ty) -> []
-        SField _ f : _ | any ((== root) . fst) (Map.keys (stFieldLoans st1)) -> Map.findWithDefault [] (root, f) (stFieldLoans st1)
+        SField _ f : _ -> fromMaybe (loansOf root) (Map.lookup (root, f) (stFieldLoans st1))
         _ -> loansOf root
     transferExtras src = case Map.lookup src (stExtraLoans st1) of
         Just places -> Map.insert d places (Map.delete src (stExtraLoans base))
