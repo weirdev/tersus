@@ -177,7 +177,7 @@ emptySt :: St
 emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
 joinSt :: St -> St -> St
-joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith (++) (stExtraLoans a) (stExtraLoans b)) (Map.unionWith (++) (stFieldLoans a) (stFieldLoans b)) (Map.intersection (stConst a) (stConst b)) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v])
+joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith (++) (stExtraLoans a) (stExtraLoans b)) (Map.unionWith (++) (stFieldLoans a) (stFieldLoans b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stConst a) (stConst b))) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v])
 
 sameShape :: St -> St -> Bool
 sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.keysSet (stLoans a) == Map.keysSet (stLoans b) && Map.keysSet (stExtraLoans a) == Map.keysSet (stExtraLoans b) && Map.keysSet (stFieldLoans a) == Map.keysSet (stFieldLoans b)
@@ -401,11 +401,15 @@ placesOf st l = case Map.lookup l (stViews st) of
     _ -> [(l, [])]
 
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
-assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts', stFnAlias = fnAlias'}, errs ++ lost cx pos st1 d ++ loanErrs)
+assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias'}, errs ++ lost cx pos st1 d ++ loanErrs)
   where
     fnAlias' = case rv of
         Use (Const (CFn name)) -> Map.insert d name (stFnAlias base)
         _ -> Map.delete d (stFnAlias base)
+    -- (what a local is borrowed for updating may be changed through the borrow, so its constant is not known after it)
+    consts'' = case borrowPlace of
+        Just ((root, _), True) -> Map.delete root consts'
+        _ -> consts'
     consts' = case rv of
         Use (Const (CInt n)) -> Map.insert d n (stConst base)
         Use (Copy src) -> maybe (Map.delete d (stConst base)) (\n -> Map.insert d n (stConst base)) (Map.lookup src (stConst base))
@@ -738,7 +742,7 @@ terminator cx pos st term = case term of
                 , overlaps h (argPlace m)
                 ]
             (st', errs) = foldl' (access cx pos) (st, []) ([(l, [], Read) | Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
-            defined = define cx st' dest []
+            defined = (define cx st' dest []){stConst = Map.delete dest (stConst st')}
             -- (a result that is a reference is a borrow of a place of one of the arguments it is from, made here)
             loaned = case resultFromPlaces cx st' callee args of
                 [] -> defined
