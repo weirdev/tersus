@@ -1,7 +1,7 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstStatement, AstValue };
 import data::codec::codec { catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
-import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, popScope, pushScope, sizeArgument, teHead, valueType, withResultType, withType };
+import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, popScope, pushScope, sizeArgument, teHead, typeSlice, valueType, withResultType, withType };
 import elaborate::check { checkStatements, fnSigOf, mentionsParameter };
 import elaborate::core { arrayOk, baseNameOf, checkConstruct, checkType, ctorInfo, ensureInstance, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
@@ -1631,6 +1631,21 @@ fn cloneInput(st: St, x: TE) -> St ~ {
         types = push([], st.ty);
         for t in &pointee.types { types = push(types, t); };
         return St { te: TE { node: borrowNode, types: types }, ..st };
+    };
+    // (an index that may change the collection is read from a copy of the collection made before it, TypeCheck.cloneInput)
+    if c.ok && size(c.args) = 2 && headKey(st, c.head) = "Get" && !stableCloneIndex(st, nth(&c.args, 1)) {
+        collectionTy = nth(&x.types, 1);
+        if kindOf(st, collectionTy) != 10 && kindOf(st, collectionTy) != 11 {
+            st = requireClone(st, collectionTy);
+            if st.status != 0 { return st; };
+            snapshotArgs = push([], nth(&c.args, 0));
+            st = emitBuiltinCall(st, "CloneOf", &snapshotArgs);
+            getArgs = push(push([], st.nid), nth(&c.args, 1));
+            st = emitCall(st, c.head, &getArgs);
+            types = push(push([], teHead(&x)), collectionTy);
+            for t in typeSlice(&x.types, 1, size(x.types) - 1) { types = push(types, t); };
+            return St { te: TE { node: st.nid, types: types }, ..st };
+        };
     };
     st = crossesBox(st, &x.types, 1);
     boxed = st.ok;
