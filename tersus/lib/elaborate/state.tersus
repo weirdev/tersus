@@ -188,6 +188,7 @@ struct St {
     status: Int,
     msg: String
 };
+impl Clone for St { };
 
 // A pack of types of a variadic function (`..T`) and its elements' types (`..T#0`, `..T@1`) keep the dots, which no other
 // type parameter has
