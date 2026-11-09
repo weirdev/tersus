@@ -299,7 +299,9 @@ fn definingContext(st: St, context: &List<AstProgram>) -> St ~ {
         };
     };
     owner = get(context, 0);
-    v = (nodeIn(&owner.nodes, owner.root) as AstNode::Interface).value;
+    root = nodeIn(&owner.nodes, owner.root);
+    if !(root is AstNode::Interface) { return notModelled(st, "a defining interface the data does not give"); };
+    v = (root as AstNode::Interface).value;
     for e in listItems(&owner.nodes, v.templates) {
         entry = entryOf(&owner.nodes, e);
         if entry is AstEntry::TemplateEntry {
