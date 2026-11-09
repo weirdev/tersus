@@ -943,11 +943,14 @@ fn captureOperand(ls: LowSt, reference: Int, o: Op, ty: Int) -> LowSt ~ {
     l = o.l;
     declared = false;
     declTy = 0 - 1;
+    named = false;
     if l >= 0 && l < size(ls.bLocals) {
         d = clone(get(ls.bLocals, l));
-        if d.present { declared = true; declTy = d.ty; };
+        if d.present { declared = true; declTy = d.ty; named = d.hasName; };
     };
-    if reference >= 0 && declared && !isRefTy(&ls, declTy) {
+    // (an update reference is not Copy: a named one given to a borrowed parameter is lent again, not moved)
+    namedUpdateReference = declared && named && lwKind(&ls, declTy) = 11;
+    if reference >= 0 && ((declared && !isRefTy(&ls, declTy)) || namedUpdateReference) {
         kind = 10;
         if reference = 1 { kind = 11; };
         inner = unrefTy(&ls, ty);
