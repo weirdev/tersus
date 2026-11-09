@@ -101,7 +101,7 @@ fn inferExpectedCore(st: St, context: String, wanted: Int, e: Int, returning: Bo
         return inferBlock(st, a.xs, a.e, wanted, returning, context);
     };
     c = callOf(st, e);
-    if isListTy(st, wanted) && c.ok && c.key = "Push" && size(c.args) = 2 {
+    if isListTy(st, wanted) && c.ok && headKey(st, c.head) = "Push" && size(c.args) = 2 {
         st = inferExpected(st, "argument 1 of push", wanted, get(c.args, 0), false);
         if st.status != 0 { return st; };
         list = clone(st.te);
