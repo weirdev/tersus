@@ -20,36 +20,36 @@ fn setIntAt(xs: List<Int>, id: Int, v: Int) -> List<Int> ~ {
     return set(xs, id, v);
 };
 
-struct Arena { old: List<AstNode>, nodes: List<AstNode>, map: List<Int> };
+struct Arena { nodes: List<AstNode>, map: List<Int> };
 impl Clone for Arena { };
 
-fn arenaEmit(a: Arena, id: Int) -> Arena ~ {
-    node = nodeAtList(&a.old, id);
-    if isListNode(node) { return arenaEmitList(a, id); };
+fn arenaEmit(old: &List<AstNode>, a: Arena, id: Int) -> Arena ~ {
+    node = nodeAtList(old, id);
+    if isListNode(node) { return arenaEmitList(old, a, id); };
     out = a;
-    for child in nodeChildren(node) { out = arenaEmit(out, child); };
-    newNode = remapNode(nodeAtList(&out.old, id), &out.map);
+    for child in nodeChildren(node) { out = arenaEmit(old, out, child); };
+    newNode = remapNode(node, &out.map);
     newId = size(out.nodes);
     out = Arena { nodes: push(out.nodes, newNode), ..out };
     out = Arena { map: setIntAt(out.map, id, newId), ..out };
     return out;
 };
 
-fn arenaEmitList(a: Arena, id: Int) -> Arena ~ {
-    chain = chainOf(&a.old, id);
+fn arenaEmitList(old: &List<AstNode>, a: Arena, id: Int) -> Arena ~ {
+    chain = chainOf(old, id);
     heads = getChainHeads(chain);
     consIds = getChainCons(chain);
     out = a;
     endId = getChainEnd(chain);
     newEnd = size(out.nodes);
-    endNode = nodeAtList(&out.old, endId);
+    endNode = nodeAtList(old, endId);
     out = Arena { nodes: push(out.nodes, endNode), ..out };
     out = Arena { map: setIntAt(out.map, endId, newEnd), ..out };
     i = size(heads) - 1;
     while i >= 0 ~ {
-        out = arenaEmit(out, intAtOr(heads, i, 0));
+        out = arenaEmit(old, out, intAtOr(heads, i, 0));
         consId = intAtOr(consIds, i, 0);
-        consNode = remapNode(nodeAtList(&out.old, consId), &out.map);
+        consNode = remapNode(nodeAtList(old, consId), &out.map);
         newId = size(out.nodes);
         out = Arena { nodes: push(out.nodes, consNode), ..out };
         out = Arena { map: setIntAt(out.map, consId, newId), ..out };
@@ -61,8 +61,8 @@ fn arenaEmitList(a: Arena, id: Int) -> Arena ~ {
 fn reorderArena(nodes: &List<AstNode>, root: Int, stage: String) -> AstProgram ~ {
     mapInit = [];
     for n in &nodes { mapInit = push(mapInit, 0 - 1); };
-    a = Arena { old: clone(nodes), nodes: [], map: mapInit };
-    a = arenaEmit(a, root);
+    a = Arena { nodes: [], map: mapInit };
+    a = arenaEmit(nodes, a, root);
     return AstProgram { stage: stage, nodes: a.nodes, root: intAtOr(&a.map, root, root) };
 };
 

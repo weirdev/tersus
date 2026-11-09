@@ -1,21 +1,32 @@
 module AstData
     ( writeParsed
+    , writeParsedLines
     , readParsed
+    , readParsedLines
     , writeElaborated
+    , writeElaboratedLines
     , readElaborated
+    , readElaboratedLines
+    , readElaboratedBytes
     , InterfaceRecord (..)
     , FunctionRecord (..)
     , TemplateRecord (..)
     , writeInterfaceRecord
+    , writeInterfaceRecordLines
     , readInterfaceRecord
+    , readInterfaceRecordLines
+    , readInterfaceRecordBytes
     , BuiltinRecord (..)
     , writeBuiltinTable
+    , writeBuiltinTableLines
     , readBuiltinTable
     ) where
 
 import Control.Monad (replicateM)
 import qualified Data.Map.Strict as Map
 import qualified Data.IntSet as IS
+import qualified Data.IntMap.Strict as IM
+import qualified Data.ByteString.Char8 as B
 import Data.List (foldl')
 import BuiltinRegistry (NameSpace (..), SigScheme (..), builtinRegistry, entryInstances)
 import DataCodec
@@ -90,34 +101,51 @@ data Entry
 emit :: String -> [String] -> Build -> (Int, Build)
 emit tag fields (n, records) = (n, (n + 1, unwords (tag : fields) : records))
 
+-- (each writer also gives its lines, so a request or a response that carries the data is put together without
+-- splitting it again)
 writeParsed :: [Statement] -> Result String String
-writeParsed ss = finish "parsed" (putStatements ss (0, []))
+writeParsed = mapResult unlines . writeParsedLines
+
+writeParsedLines :: [Statement] -> Result [String] String
+writeParsedLines ss = finish "parsed" (putStatements ss (0, []))
 
 writeElaborated :: Elaborated -> Result String String
-writeElaborated (Elaborated ss ts) =
+writeElaborated = mapResult unlines . writeElaboratedLines
+
+writeElaboratedLines :: Elaborated -> Result [String] String
+writeElaboratedLines (Elaborated ss ts) =
     let (s, b) = putStatements ss (0, [])
         (t, b') = putTypes ts b
      in finish "elaborated" (emit "Elaborated" [show s, show t] b')
 
 writeInterfaceRecord :: InterfaceRecord -> Result String String
-writeInterfaceRecord r = finish "interface" (putInterface r (0, []))
+writeInterfaceRecord = mapResult unlines . writeInterfaceRecordLines
+
+writeInterfaceRecordLines :: InterfaceRecord -> Result [String] String
+writeInterfaceRecordLines r = finish "interface" (putInterface r (0, []))
 
 writeBuiltinTable :: [BuiltinRecord] -> Result String String
-writeBuiltinTable rs = finish "builtins" (putEntries (map EBuiltin rs) (0, []))
+writeBuiltinTable = mapResult unlines . writeBuiltinTableLines
 
-finish :: String -> (Int, Build) -> Result String String
+writeBuiltinTableLines :: [BuiltinRecord] -> Result [String] String
+writeBuiltinTableLines rs = finish "builtins" (putEntries (map EBuiltin rs) (0, []))
+
+finish :: String -> (Int, Build) -> Result [String] String
 finish stage (root, (_, records)) =
     checkRecords records `bindResult` \() ->
-        Ok (unlines (("tersus-ast 1 " ++ stage) : reverse records ++ ["root " ++ show root]))
+        Ok (("tersus-ast 1 " ++ stage) : reverse records ++ ["root " ++ show root])
   where
+    -- (a record's words are made by the writer and its names are quoted, so only the size of a record and the types
+    -- and sizes, whose tokens are made by typeTokens and sizeTokens, are read back)
     checkRecords [] = Ok ()
     checkRecords (line : rest)
         | null line || length line > 1000000 = Error "AstData: empty or oversized record"
-        | otherwise = strictTokenize line `bindResult` \ts ->
+        | take 5 line == "Type " || take 5 line == "Size " = strictTokenize line `bindResult` \ts ->
             case ts of
                 Word "Type" : fields -> parseLine astTypeP fields `bindResult` \_ -> checkRecords rest
                 Word "Size" : fields -> parseLine sizeP fields `bindResult` \_ -> checkRecords rest
                 _ -> checkRecords rest
+        | otherwise = checkRecords rest
 
 putName :: String -> Build -> (Int, Build)
 putName s b = foldl' part (emit "NameEnd" [] b) (reverse (chunks s))
@@ -727,242 +755,329 @@ putOptType value b0 = case value of
          in emit "SomeType" [show r0] b1
 
 readInterfaceRecord :: String -> Result InterfaceRecord String
-readInterfaceRecord text = decode "interface" text `bindResult` \n -> case n of
+readInterfaceRecord = readInterfaceRecordLines . lines
+
+readInterfaceRecordLines :: [String] -> Result InterfaceRecord String
+readInterfaceRecordLines ls = decode "interface" ls `bindResult` interfaceRoot
+
+readInterfaceRecordBytes :: [B.ByteString] -> Result InterfaceRecord String
+readInterfaceRecordBytes ls = decodeBytes "interface" ls `bindResult` interfaceRoot
+
+interfaceRoot :: Node -> Result InterfaceRecord String
+interfaceRoot n = case n of
     NInterface r -> Ok r
     _ -> Error "AstData: wrong root kind"
 
 readBuiltinTable :: String -> Result [BuiltinRecord] String
-readBuiltinTable text = decode "builtins" text `bindResult` \n -> case n of
+readBuiltinTable text = decode "builtins" (lines text) `bindResult` \n -> case n of
     NEntries es -> case [r | EBuiltin r <- es] of
         rs | length rs == length es -> Ok rs
         _ -> Error "AstData: a builtin table holds builtin entries"
     _ -> Error "AstData: wrong root kind"
 
 readParsed :: String -> Result [Statement] String
-readParsed text = decode "parsed" text `bindResult` \n -> case n of
+readParsed = readParsedLines . lines
+
+readParsedLines :: [String] -> Result [Statement] String
+readParsedLines ls = decode "parsed" ls `bindResult` \n -> case n of
     NStatements ss -> Ok ss
     _ -> Error "AstData: wrong root kind"
 
 readElaborated :: String -> Result Elaborated String
-readElaborated text = decode "elaborated" text `bindResult` \n -> case n of
+readElaborated = readElaboratedLines . lines
+
+readElaboratedLines :: [String] -> Result Elaborated String
+readElaboratedLines ls = decode "elaborated" ls `bindResult` elaboratedRoot
+
+readElaboratedBytes :: [B.ByteString] -> Result Elaborated String
+readElaboratedBytes ls = decodeBytes "elaborated" ls `bindResult` elaboratedRoot
+
+elaboratedRoot :: Node -> Result Elaborated String
+elaboratedRoot n = case n of
     NElaborated e -> Ok e
     _ -> Error "AstData: wrong root kind"
 
-decode :: String -> String -> Result Node String
-decode stage text = case lines text of
-    header : rest | header == "tersus-ast 1 " ++ stage -> case reverse rest of
+decode :: String -> [String] -> Result Node String
+decode = decodeWith id stringTokens
+  where
+    stringTokens line
+        | null line || length line > 1000000 = Error "AstData: empty or oversized record"
+        | otherwise = strictTokenize line
+
+decodeBytes :: String -> [B.ByteString] -> Result Node String
+decodeBytes = decodeWith B.unpack byteTokens
+  where
+    byteTokens line
+        | B.null line || B.length line > 1000000 = Error "AstData: empty or oversized record"
+        | otherwise = strictTokenizeBytes line
+
+decodeWith :: (l -> String) -> (l -> Result [Token] String) -> String -> [l] -> Result Node String
+decodeWith text tokens stage ls = case ls of
+    header : rest | text header == "tersus-ast 1 " ++ stage -> case reverse rest of
         root : reversed -> doResult (reverse reversed) root
         _ -> Error "AstData: missing root"
     _ -> Error "AstData: unknown header"
   where
-    doResult records root = foldRecords (Map.empty, IS.empty) records `bindResult` \(nodes, uses) ->
-        strictLine (expect "root" >> int) root `bindResult` \r ->
-        case Map.lookup r nodes of
-            Just node | r == Map.size nodes - 1 && all (\i -> IS.member i uses == (i /= r)) [0 .. r] -> Ok node
+    -- (IM.size walks the map, so the count is kept beside it)
+    doResult records root = foldRecords (IM.empty, 0, IS.empty) records `bindResult` \(nodes, count, uses) ->
+        lineOf (expect "root" >> int) root `bindResult` \r ->
+        case IM.lookup r nodes of
+            Just node | r == count - 1 && all (\i -> IS.member i uses == (i /= r)) [0 .. r] -> Ok node
             _ -> Error "AstData: dangling root or extra records"
     foldRecords state [] = Ok state
     foldRecords state (line : rest) = add state line `bindResult` \next -> foldRecords next rest
-    add (nodes, uses) line = strictLine (nodeP nodes) line `bindResult` \(node, refs) ->
+    add (nodes, count, uses) line = lineOf (nodeP nodes) line `bindResult` \(node, refs) ->
         if any (`IS.member` uses) refs || length refs /= IS.size (IS.fromList refs)
             then Error "AstData: reused reference"
-            else Ok (Map.insert (Map.size nodes) node nodes, foldl' (flip IS.insert) uses refs)
+            else Ok (IM.insert count node nodes, count + 1, foldl' (flip IS.insert) uses refs)
+    lineOf p line = tokens line `bindResult` parseLine p
 
-strictLine :: P a -> String -> Result a String
-strictLine p line
-    | null line || length line > 1000000 = Error "AstData: empty or oversized record"
-    | otherwise = strictTokenize line `bindResult` parseLine p
-
-ref :: Map.Map Int Node -> (Node -> Maybe a) -> P (a, Int)
+ref :: IM.IntMap Node -> (Node -> Maybe a) -> P (a, Int)
 ref nodes project = do
     i <- int
-    case Map.lookup i nodes >>= project of
+    case IM.lookup i nodes >>= project of
         Just value -> pure (value, i)
         Nothing -> failP "AstData: dangling, cyclic, forward or wrong-kind reference"
 
-nodeP :: Map.Map Int Node -> P (Node, [Int])
-nodeP nodes = word >>= \tag -> case tag of
-    "NameEnd" -> pure (NName "", [])
-    "NamePart" -> do
+nodeP :: IM.IntMap Node -> P (Node, [Int])
+nodeP nodes = word >>= \tag -> case Map.lookup tag nodeParsers of
+    Just p -> p nodes
+    Nothing -> failP ("AstData: unknown tag " ++ tag)
+
+nodeParsers :: Map.Map String (IM.IntMap Node -> P (Node, [Int]))
+nodeParsers = Map.fromList
+    [ ("NameEnd", \_ -> pure (NName "", [])
+      )
+    , ("NamePart", \nodes -> do
         s <- name
         (tailName, r) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NName (s ++ tailName), [r])
-    "Type" -> astTypeP >>= \t -> pure (NType t, [])
-    "Size" -> sizeP >>= \s -> pure (NSize s, [])
-    "Primitive" -> do
+      )
+    , ("Type", \_ -> astTypeP >>= \t -> pure (NType t, [])
+      )
+    , ("Size", \_ -> sizeP >>= \s -> pure (NSize s, [])
+      )
+    , ("Primitive", \_ -> do
         n <- name
         case lookup n fixedBuiltins of
             Just b -> pure (NBuiltin b, [])
             _ -> failP "AstData: unknown primitive"
-    "Elaborated" -> do
+      )
+    , ("Elaborated", \nodes -> do
         (ss, s) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
         (ts, t) <- ref nodes (\node -> case node of NTypes payload -> Just payload; _ -> Nothing)
         pure (NElaborated (Elaborated ss ts), [s, t])
-    "VInt" -> do
+      )
+    , ("VInt", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         number <- decimalP n
         pure (NValue (VInt number), [r0])
-    "VList" -> do
+      )
+    , ("VList", \nodes -> do
         (xs, r0) <- ref nodes (\node -> case node of NValues payload -> Just payload; _ -> Nothing)
         pure (NValue (VList xs), [r0])
-    "VBool" -> do
+      )
+    , ("VBool", \_ -> do
         b <- boolP
         pure (NValue (VBool b), [])
-    "VData" -> do
+      )
+    , ("VData", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (xs, r1) <- ref nodes (\node -> case node of NValueFields payload -> Just payload; _ -> Nothing)
         pure (NValue (VData n xs), [r0, r1])
-    "VFnRef" -> do
+      )
+    , ("VFnRef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NValue (VFnRef n), [r0])
-    "VFunct" -> do
+      )
+    , ("VFunct", \nodes -> do
         (ps, r0) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (ins, r1) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         (outs, r2) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         (body, r3) <- ref nodes (\node -> case node of NBody payload -> Just payload; _ -> Nothing)
         (exports, r4) <- ref nodes (\node -> case node of NProofs payload -> Just payload; _ -> Nothing)
         pure (NValue (VFunct ps ins outs body exports), [r0, r1, r2, r3, r4])
-    "NativeFunct" -> do
+      )
+    , ("NativeFunct", \nodes -> do
         (sig, r0) <- ref nodes (\node -> case node of NSignature payload -> Just payload; _ -> Nothing)
         (term, r1) <- ref nodes (\node -> case node of NOptTermination payload -> Just payload; _ -> Nothing)
         (stmts, r2) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
         pure (NBody (NativeFunct sig term stmts), [r0, r1, r2])
-    "BuiltinFunct" -> do
+      )
+    , ("BuiltinFunct", \nodes -> do
         (b, r0) <- ref nodes (\node -> case node of NBuiltin payload -> Just payload; _ -> Nothing)
         pure (NBody (BuiltinFunct b), [r0])
-    "Val" -> do
+      )
+    , ("Val", \nodes -> do
         (v, r0) <- ref nodes (\node -> case node of NValue payload -> Just payload; _ -> Nothing)
         pure (NExpression (Val v), [r0])
-    "Var" -> do
+      )
+    , ("Var", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NExpression (Var n), [r0])
-    "F" -> do
+      )
+    , ("F", \nodes -> do
         (f, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         (xs, r1) <- ref nodes (\node -> case node of NExpressions payload -> Just payload; _ -> Nothing)
         pure (NExpression (F f xs), [r0, r1])
-    "Shrinks" -> do
+      )
+    , ("Shrinks", \nodes -> do
         (e, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         pure (NTermination (Shrinks e), [r0])
-    "Counting" -> do
+      )
+    , ("Counting", \nodes -> do
         (e, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         pure (NTermination (Counting e), [r0])
-    "Parts" -> do
+      )
+    , ("Parts", \nodes -> do
         (e, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         pure (NTermination (Parts e), [r0])
-    "MayDiverge" -> do
+      )
+    , ("MayDiverge", \_ -> do
         pure (NTermination (MayDiverge), [])
-    "Recursing" -> do
+      )
+    , ("Recursing", \nodes -> do
         (t, r0) <- ref nodes (\node -> case node of NOptTermination payload -> Just payload; _ -> Nothing)
         pure (NTermination (Recursing t), [r0])
-    "Rewrite" -> do
+      )
+    , ("Rewrite", \nodes -> do
         (r, r0) <- ref nodes (\node -> case node of NRule payload -> Just payload; _ -> Nothing)
         pure (NValidation (Rewrite r), [r0])
-    "ProofAssert" -> do
+      )
+    , ("ProofAssert", \nodes -> do
         (p, r0) <- ref nodes (\node -> case node of NProof payload -> Just payload; _ -> Nothing)
         pure (NValidation (ProofAssert p), [r0])
-    "AssignProofVar" -> do
+      )
+    , ("AssignProofVar", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (e, r1) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         pure (NValidation (AssignProofVar n e), [r0, r1])
-    "Assume" -> do
+      )
+    , ("Assume", \nodes -> do
         (p, r0) <- ref nodes (\node -> case node of NProof payload -> Just payload; _ -> Nothing)
         pure (NValidation (Assume p), [r0])
-    "FApp" -> do
+      )
+    , ("FApp", \nodes -> do
         (f, r0) <- ref nodes (\node -> case node of NProof payload -> Just payload; _ -> Nothing)
         (xs, r1) <- ref nodes (\node -> case node of NProofs payload -> Just payload; _ -> Nothing)
         pure (NProof (FApp f xs), [r0, r1])
-    "ATerm" -> do
+      )
+    , ("ATerm", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NProof (ATerm n), [r0])
-    "CTerm" -> do
+      )
+    , ("CTerm", \nodes -> do
         (v, r0) <- ref nodes (\node -> case node of NValue payload -> Just payload; _ -> Nothing)
         pure (NProof (CTerm v), [r0])
-    "Forall" -> do
+      )
+    , ("Forall", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (gs, r1) <- ref nodes (\node -> case node of NProofs payload -> Just payload; _ -> Nothing)
         (b, r2) <- ref nodes (\node -> case node of NProof payload -> Just payload; _ -> Nothing)
         pure (NProof (Forall n gs b), [r0, r1, r2])
-    "BVar" -> do
+      )
+    , ("BVar", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NProof (BVar n), [r0])
-    "Refl" -> do
+      )
+    , ("Refl", \nodes -> do
         (p, r0) <- ref nodes (\node -> case node of NProof payload -> Just payload; _ -> Nothing)
         pure (NRule (Refl p), [r0])
-    "Eval" -> do
+      )
+    , ("Eval", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NRule (Eval n), [r0])
-    "EvalAll" -> do
+      )
+    , ("EvalAll", \_ -> do
         pure (NRule (EvalAll), [])
-    "CheckGtZero" -> do
+      )
+    , ("CheckGtZero", \nodes -> do
         (p, r0) <- ref nodes (\node -> case node of NProof payload -> Just payload; _ -> Nothing)
         pure (NRule (CheckGtZero p), [r0])
-    "CheckRel" -> do
+      )
+    , ("CheckRel", \nodes -> do
         (p, r0) <- ref nodes (\node -> case node of NProof payload -> Just payload; _ -> Nothing)
         pure (NRule (CheckRel p), [r0])
-    "UserRewrite" -> do
+      )
+    , ("UserRewrite", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (xs, r1) <- ref nodes (\node -> case node of NProofs payload -> Just payload; _ -> Nothing)
         pure (NRule (UserRewrite n xs), [r0, r1])
-    "Assign" -> do
+      )
+    , ("Assign", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (e, r1) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         pure (NStatement (Assign n e), [r0, r1])
-    "AssignDeref" -> do
+      )
+    , ("AssignDeref", \nodes -> do
         (a, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         (b, r1) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         pure (NStatement (AssignDeref a b), [r0, r1])
-    "Let" -> do
+      )
+    , ("Let", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (e, r1) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         pure (NStatement (Let n e), [r0, r1])
-    "Return" -> do
+      )
+    , ("Return", \nodes -> do
         (e, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         pure (NStatement (Return e), [r0])
-    "ValidationStatement" -> do
+      )
+    , ("ValidationStatement", \nodes -> do
         (v, r0) <- ref nodes (\node -> case node of NValidation payload -> Just payload; _ -> Nothing)
         pure (NStatement (ValidationStatement v), [r0])
-    "StructDef" -> do
+      )
+    , ("StructDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (ps, r1) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (fs, r2) <- ref nodes (\node -> case node of NFields payload -> Just payload; _ -> Nothing)
         (vs, r3) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         pure (NStatement (StructDef n ps fs vs), [r0, r1, r2, r3])
-    "EnumDef" -> do
+      )
+    , ("EnumDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (vs, r1) <- ref nodes (\node -> case node of NVariants payload -> Just payload; _ -> Nothing)
         pure (NStatement (EnumDef n vs), [r0, r1])
-    "AxiomDef" -> do
+      )
+    , ("AxiomDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (ps, r1) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (ins, r2) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         (outs, r3) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         pure (NStatement (AxiomDef n ps ins outs), [r0, r1, r2, r3])
-    "ProofDef" -> do
+      )
+    , ("ProofDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (ps, r1) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (ins, r2) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         (outs, r3) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         (body, r4) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         pure (NStatement (ProofDef n ps ins outs body), [r0, r1, r2, r3, r4])
-    "Block" -> do
+      )
+    , ("Block", \nodes -> do
         (xs, r0) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
         pure (NStatement (Block xs), [r0])
-    "If" -> do
+      )
+    , ("If", \nodes -> do
         (e, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         (a, r1) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
         (b, r2) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
         pure (NStatement (If e a b), [r0, r1, r2])
-    "While" -> do
+      )
+    , ("While", \nodes -> do
         (e, r0) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         (vs, r1) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         (t, r2) <- ref nodes (\node -> case node of NOptTermination payload -> Just payload; _ -> Nothing)
         (xs, r3) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
         pure (NStatement (While e vs t xs), [r0, r1, r2, r3])
-    "TraitDef" -> do
+      )
+    , ("TraitDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (ps, r1) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (fs, r2) <- ref nodes (\node -> case node of NTraitFns payload -> Just payload; _ -> Nothing)
         pure (NStatement (TraitDef n ps fs), [r0, r1, r2])
-    "ImplDef" -> do
+      )
+    , ("ImplDef", \nodes -> do
         (trait, r0) <- ref nodes (\node -> case node of NOptName payload -> Just payload; _ -> Nothing)
         (args, r1) <- ref nodes (\node -> case node of NArgs payload -> Just payload; _ -> Nothing)
         (n, r2) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
@@ -970,30 +1085,38 @@ nodeP nodes = word >>= \tag -> case tag of
         (bs, r4) <- ref nodes (\node -> case node of NBounds payload -> Just payload; _ -> Nothing)
         (xs, r5) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
         pure (NStatement (ImplDef trait args n ty bs xs), [r0, r1, r2, r3, r4, r5])
-    "BoundedDef" -> do
+      )
+    , ("BoundedDef", \nodes -> do
         (bs, r0) <- ref nodes (\node -> case node of NBounds payload -> Just payload; _ -> Nothing)
         (s, r1) <- ref nodes (\node -> case node of NStatement payload -> Just payload; _ -> Nothing)
         pure (NStatement (BoundedDef bs s), [r0, r1])
-    "Mark" -> do
+      )
+    , ("Mark", \_ -> do
         line <- int
         col <- int
         pure (NStatement (Mark line col), [])
-    "CopyDef" -> do
+      )
+    , ("CopyDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NStatement (CopyDef n), [r0])
-    "LinearDef" -> do
+      )
+    , ("LinearDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NStatement (LinearDef n), [r0])
-    "ExternDef" -> do
+      )
+    , ("ExternDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NStatement (ExternDef n), [r0])
-    "DropDef" -> do
+      )
+    , ("DropDef", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NStatement (DropDef n), [r0])
-    "Dissolve" -> do
+      )
+    , ("Dissolve", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NStatement (Dissolve n), [r0])
-    "Signature" -> do
+      )
+    , ("Signature", \nodes -> do
         (ts, r0) <- ref nodes (\node -> case node of NTypes payload -> Just payload; _ -> Nothing)
         (ret, r1) <- ref nodes (\node -> case node of NType payload -> Just payload; _ -> Nothing)
         (ss, r2) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
@@ -1001,273 +1124,342 @@ nodeP nodes = word >>= \tag -> case tag of
         (ws, r4) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (fs, r5) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         pure (NSignature (Signature ts ret ss ps ws fs), [r0, r1, r2, r3, r4, r5])
-    "TraitFn" -> do
+      )
+    , ("TraitFn", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (ps, r1) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         (sig, r2) <- ref nodes (\node -> case node of NSignature payload -> Just payload; _ -> Nothing)
         (ins, r3) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         (outs, r4) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
         pure (NTraitFn (TraitFn n ps sig ins outs), [r0, r1, r2, r3, r4])
-    "Bound" -> do
+      )
+    , ("Bound", \nodes -> do
         (p, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (n, r1) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (ts, r2) <- ref nodes (\node -> case node of NTypes payload -> Just payload; _ -> Nothing)
         pure (NBound ((p, n, ts)), [r0, r1, r2])
-    "Field" -> do
+      )
+    , ("Field", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (ty, r1) <- ref nodes (\node -> case node of NType payload -> Just payload; _ -> Nothing)
         pure (NField ((n, ty)), [r0, r1])
-    "Variant" -> do
+      )
+    , ("Variant", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (fs, r1) <- ref nodes (\node -> case node of NFields payload -> Just payload; _ -> Nothing)
         pure (NVariant ((n, fs)), [r0, r1])
-    "ValueField" -> do
+      )
+    , ("ValueField", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (v, r1) <- ref nodes (\node -> case node of NValue payload -> Just payload; _ -> Nothing)
         pure (NValueField ((n, v)), [r0, r1])
-    "ArgSize" -> do
+      )
+    , ("ArgSize", \nodes -> do
         (s, r0) <- ref nodes (\node -> case node of NSize payload -> Just payload; _ -> Nothing)
         pure (NArg (ArgSize s), [r0])
-    "ArgType" -> do
+      )
+    , ("ArgType", \nodes -> do
         (t, r0) <- ref nodes (\node -> case node of NType payload -> Just payload; _ -> Nothing)
         pure (NArg (ArgType t), [r0])
-    "NoName" -> do
+      )
+    , ("NoName", \_ -> do
         pure (NOptName (Nothing), [])
-    "SomeName" -> do
+      )
+    , ("SomeName", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NOptName (Just n), [r0])
-    "NoTermination" -> do
+      )
+    , ("NoTermination", \_ -> do
         pure (NOptTermination (Nothing), [])
-    "SomeTermination" -> do
+      )
+    , ("SomeTermination", \nodes -> do
         (t, r0) <- ref nodes (\node -> case node of NTermination payload -> Just payload; _ -> Nothing)
         pure (NOptTermination (Just t), [r0])
-    "Ctor" -> do
+      )
+    , ("Ctor", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (args, r1) <- ref nodes (\node -> case node of NArgs payload -> Just payload; _ -> Nothing)
         (fs, r2) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
         pure (NBuiltin (Ctor n args fs), [r0, r1, r2])
-    "FieldBuiltin" -> do
+      )
+    , ("FieldBuiltin", \nodes -> do
         (owner, r0) <- ref nodes (\node -> case node of NOptName payload -> Just payload; _ -> Nothing)
         (n, r1) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NBuiltin (Field owner n), [r0, r1])
-    "Is" -> do
+      )
+    , ("Is", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NBuiltin (Is n), [r0])
-    "Project" -> do
+      )
+    , ("Project", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         (f, r1) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NBuiltin (Project n f), [r0, r1])
-    "Cast" -> do
+      )
+    , ("Cast", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
         pure (NBuiltin (Cast n), [r0])
-    "ToWord" -> do
+      )
+    , ("ToWord", \_ -> do
         signed <- boolP
         bits <- integer
         pure (NBuiltin (ToWord signed bits), [])
-    "Rel" -> do
+      )
+    , ("Rel", \_ -> do
         r <- relP
         pure (NBuiltin (Rel r), [])
-    "NamesEnd" -> pure (NNames [], [])
-    "NamesCons" -> do
+      )
+    , ("NamesEnd", \_ -> pure (NNames [], [])
+      )
+    , ("NamesCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NName v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NNames v -> Just v; _ -> Nothing)
         pure (NNames (x : xs), [a, b])
-    "ValuesEnd" -> pure (NValues [], [])
-    "ValuesCons" -> do
+      )
+    , ("ValuesEnd", \_ -> pure (NValues [], [])
+      )
+    , ("ValuesCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NValue v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NValues v -> Just v; _ -> Nothing)
         pure (NValues (x : xs), [a, b])
-    "StatementsEnd" -> pure (NStatements [], [])
-    "StatementsCons" -> do
+      )
+    , ("StatementsEnd", \_ -> pure (NStatements [], [])
+      )
+    , ("StatementsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NStatement v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NStatements v -> Just v; _ -> Nothing)
         pure (NStatements (x : xs), [a, b])
-    "ExpressionsEnd" -> pure (NExpressions [], [])
-    "ExpressionsCons" -> do
+      )
+    , ("ExpressionsEnd", \_ -> pure (NExpressions [], [])
+      )
+    , ("ExpressionsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NExpression v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NExpressions v -> Just v; _ -> Nothing)
         pure (NExpressions (x : xs), [a, b])
-    "ValidationsEnd" -> pure (NValidations [], [])
-    "ValidationsCons" -> do
+      )
+    , ("ValidationsEnd", \_ -> pure (NValidations [], [])
+      )
+    , ("ValidationsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NValidation v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NValidations v -> Just v; _ -> Nothing)
         pure (NValidations (x : xs), [a, b])
-    "ProofsEnd" -> pure (NProofs [], [])
-    "ProofsCons" -> do
+      )
+    , ("ProofsEnd", \_ -> pure (NProofs [], [])
+      )
+    , ("ProofsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NProof v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NProofs v -> Just v; _ -> Nothing)
         pure (NProofs (x : xs), [a, b])
-    "FieldsEnd" -> pure (NFields [], [])
-    "FieldsCons" -> do
+      )
+    , ("FieldsEnd", \_ -> pure (NFields [], [])
+      )
+    , ("FieldsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NField v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NFields v -> Just v; _ -> Nothing)
         pure (NFields (x : xs), [a, b])
-    "VariantsEnd" -> pure (NVariants [], [])
-    "VariantsCons" -> do
+      )
+    , ("VariantsEnd", \_ -> pure (NVariants [], [])
+      )
+    , ("VariantsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NVariant v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NVariants v -> Just v; _ -> Nothing)
         pure (NVariants (x : xs), [a, b])
-    "ValueFieldsEnd" -> pure (NValueFields [], [])
-    "ValueFieldsCons" -> do
+      )
+    , ("ValueFieldsEnd", \_ -> pure (NValueFields [], [])
+      )
+    , ("ValueFieldsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NValueField v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NValueFields v -> Just v; _ -> Nothing)
         pure (NValueFields (x : xs), [a, b])
-    "TypesEnd" -> pure (NTypes [], [])
-    "TypesCons" -> do
+      )
+    , ("TypesEnd", \_ -> pure (NTypes [], [])
+      )
+    , ("TypesCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NType v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NTypes v -> Just v; _ -> Nothing)
         pure (NTypes (x : xs), [a, b])
-    "ArgsEnd" -> pure (NArgs [], [])
-    "ArgsCons" -> do
+      )
+    , ("ArgsEnd", \_ -> pure (NArgs [], [])
+      )
+    , ("ArgsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NArg v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NArgs v -> Just v; _ -> Nothing)
         pure (NArgs (x : xs), [a, b])
-    "TraitFnsEnd" -> pure (NTraitFns [], [])
-    "TraitFnsCons" -> do
+      )
+    , ("TraitFnsEnd", \_ -> pure (NTraitFns [], [])
+      )
+    , ("TraitFnsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NTraitFn v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NTraitFns v -> Just v; _ -> Nothing)
         pure (NTraitFns (x : xs), [a, b])
-    "BoundsEnd" -> pure (NBounds [], [])
-    "BoundsCons" -> do
+      )
+    , ("BoundsEnd", \_ -> pure (NBounds [], [])
+      )
+    , ("BoundsCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NBound v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NBounds v -> Just v; _ -> Nothing)
         pure (NBounds (x : xs), [a, b])
-    "Interface" -> do
-        (pkg, r0) <- refName
+      )
+    , ("Interface", \nodes -> do
+        (pkg, r0) <- refName nodes
         (modu, r1) <- ref nodes (\node -> case node of NOptName payload -> Just payload; _ -> Nothing)
-        (types, r2) <- entries (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
-        (ctors, r3) <- entries (\e -> case e of ECtor k o fs -> Just (k, (o, fs)); _ -> Nothing)
-        (generics, r4) <- entries (\e -> case e of EGeneric k ps fs -> Just (k, (ps, fs)); _ -> Nothing)
-        (invariants, r5) <- entries (\e -> case e of EInvariant k vs -> Just (k, vs); _ -> Nothing)
-        (traits, r6) <- entries (\e -> case e of ETrait k fs -> Just (k, fs); _ -> Nothing)
-        (traitParams, r7) <- entries (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
-        (functions, r8) <- entries (\e -> case e of EFunction k f -> Just (k, f); _ -> Nothing)
-        (impls, r9) <- entries (\e -> case e of EPair a b -> Just (a, b); _ -> Nothing)
-        (assoc, r10) <- entries (\e -> case e of EAssoc a b os -> Just ((a, b), os); _ -> Nothing)
-        (implArgs, r11) <- entries (\e -> case e of EImplArgs a b t as -> Just ((a, b), (t, as)); _ -> Nothing)
-        (implBounds, r12) <- entries (\e -> case e of EImplBounds a b bs -> Just ((a, b), bs); _ -> Nothing)
-        (copies, r13) <- refNames
-        (linear, r14) <- refNames
-        (drops, r15) <- refNames
-        (axioms, r16) <- refStatements
-        (proofs, r17) <- refStatements
-        (externs, r18) <- refNames
-        (templates, r19) <- entries (\e -> case e of ETemplate k t -> Just (k, t); _ -> Nothing)
-        (companions, r20) <- entries (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
+        (types, r2) <- entries nodes (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
+        (ctors, r3) <- entries nodes (\e -> case e of ECtor k o fs -> Just (k, (o, fs)); _ -> Nothing)
+        (generics, r4) <- entries nodes (\e -> case e of EGeneric k ps fs -> Just (k, (ps, fs)); _ -> Nothing)
+        (invariants, r5) <- entries nodes (\e -> case e of EInvariant k vs -> Just (k, vs); _ -> Nothing)
+        (traits, r6) <- entries nodes (\e -> case e of ETrait k fs -> Just (k, fs); _ -> Nothing)
+        (traitParams, r7) <- entries nodes (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
+        (functions, r8) <- entries nodes (\e -> case e of EFunction k f -> Just (k, f); _ -> Nothing)
+        (impls, r9) <- entries nodes (\e -> case e of EPair a b -> Just (a, b); _ -> Nothing)
+        (assoc, r10) <- entries nodes (\e -> case e of EAssoc a b os -> Just ((a, b), os); _ -> Nothing)
+        (implArgs, r11) <- entries nodes (\e -> case e of EImplArgs a b t as -> Just ((a, b), (t, as)); _ -> Nothing)
+        (implBounds, r12) <- entries nodes (\e -> case e of EImplBounds a b bs -> Just ((a, b), bs); _ -> Nothing)
+        (copies, r13) <- refNames nodes
+        (linear, r14) <- refNames nodes
+        (drops, r15) <- refNames nodes
+        (axioms, r16) <- refStatements nodes
+        (proofs, r17) <- refStatements nodes
+        (externs, r18) <- refNames nodes
+        (templates, r19) <- entries nodes (\e -> case e of ETemplate k t -> Just (k, t); _ -> Nothing)
+        (companions, r20) <- entries nodes (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
         pure (NInterface (InterfaceRecord pkg modu types ctors generics invariants traits traitParams functions impls assoc implArgs implBounds copies linear drops axioms proofs externs templates companions), [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20])
-    "NamesEntry" -> do
-        (k, r0) <- refName
-        (v, r1) <- refNames
+      )
+    , ("NamesEntry", \nodes -> do
+        (k, r0) <- refName nodes
+        (v, r1) <- refNames nodes
         pure (NEntry (ENames k v), [r0, r1])
-    "CtorEntry" -> do
-        (k, r0) <- refName
-        (o, r1) <- refName
-        (fs, r2) <- refFields
+      )
+    , ("CtorEntry", \nodes -> do
+        (k, r0) <- refName nodes
+        (o, r1) <- refName nodes
+        (fs, r2) <- refFields nodes
         pure (NEntry (ECtor k o fs), [r0, r1, r2])
-    "GenericEntry" -> do
-        (k, r0) <- refName
-        (ps, r1) <- refNames
-        (fs, r2) <- refFields
+      )
+    , ("GenericEntry", \nodes -> do
+        (k, r0) <- refName nodes
+        (ps, r1) <- refNames nodes
+        (fs, r2) <- refFields nodes
         pure (NEntry (EGeneric k ps fs), [r0, r1, r2])
-    "InvariantEntry" -> do
-        (k, r0) <- refName
-        (vs, r1) <- refValidations
+      )
+    , ("InvariantEntry", \nodes -> do
+        (k, r0) <- refName nodes
+        (vs, r1) <- refValidations nodes
         pure (NEntry (EInvariant k vs), [r0, r1])
-    "TraitEntry" -> do
-        (k, r0) <- refName
+      )
+    , ("TraitEntry", \nodes -> do
+        (k, r0) <- refName nodes
         (fs, r1) <- ref nodes (\node -> case node of NTraitFns payload -> Just payload; _ -> Nothing)
         pure (NEntry (ETrait k fs), [r0, r1])
-    "FunctionEntry" -> do
-        (k, r0) <- refName
-        (ps, r1) <- refNames
-        (sig, r2) <- refSignature
-        (ins, r3) <- refValidations
-        (outs, r4) <- refValidations
-        (term, r5) <- refOptTermination
+      )
+    , ("FunctionEntry", \nodes -> do
+        (k, r0) <- refName nodes
+        (ps, r1) <- refNames nodes
+        (sig, r2) <- refSignature nodes
+        (ins, r3) <- refValidations nodes
+        (outs, r4) <- refValidations nodes
+        (term, r5) <- refOptTermination nodes
         (exports, r6) <- ref nodes (\node -> case node of NProofs payload -> Just payload; _ -> Nothing)
         pure (NEntry (EFunction k (FunctionRecord ps sig ins outs term exports)), [r0, r1, r2, r3, r4, r5, r6])
-    "PairEntry" -> do
-        (a, r0) <- refName
-        (b, r1) <- refName
+      )
+    , ("PairEntry", \nodes -> do
+        (a, r0) <- refName nodes
+        (b, r1) <- refName nodes
         pure (NEntry (EPair a b), [r0, r1])
-    "AssocEntry" -> do
-        (a, r0) <- refName
-        (b, r1) <- refName
+      )
+    , ("AssocEntry", \nodes -> do
+        (a, r0) <- refName nodes
+        (b, r1) <- refName nodes
         (os, r2) <- ref nodes (\node -> case node of NOptNames payload -> Just payload; _ -> Nothing)
         pure (NEntry (EAssoc a b os), [r0, r1, r2])
-    "ImplArgsEntry" -> do
-        (a, r0) <- refName
-        (b, r1) <- refName
-        (t, r2) <- refType
+      )
+    , ("ImplArgsEntry", \nodes -> do
+        (a, r0) <- refName nodes
+        (b, r1) <- refName nodes
+        (t, r2) <- refType nodes
         (as, r3) <- ref nodes (\node -> case node of NArgs payload -> Just payload; _ -> Nothing)
         pure (NEntry (EImplArgs a b t as), [r0, r1, r2, r3])
-    "ImplBoundsEntry" -> do
-        (a, r0) <- refName
-        (b, r1) <- refName
-        (bs, r2) <- refBounds
+      )
+    , ("ImplBoundsEntry", \nodes -> do
+        (a, r0) <- refName nodes
+        (b, r1) <- refName nodes
+        (bs, r2) <- refBounds nodes
         pure (NEntry (EImplBounds a b bs), [r0, r1, r2])
-    "TemplateEntry" -> do
-        (k, r0) <- refName
-        (bs, r1) <- refBounds
-        (fns, r2) <- entries (\e -> case e of EType n t -> Just (n, t); _ -> Nothing)
+      )
+    , ("TemplateEntry", \nodes -> do
+        (k, r0) <- refName nodes
+        (bs, r1) <- refBounds nodes
+        (fns, r2) <- entries nodes (\e -> case e of EType n t -> Just (n, t); _ -> Nothing)
         (ret, r3) <- ref nodes (\node -> case node of NOptType payload -> Just payload; _ -> Nothing)
-        (ps, r4) <- refNames
-        (sig, r5) <- refSignature
-        (ins, r6) <- refValidations
-        (outs, r7) <- refValidations
-        (term, r8) <- refOptTermination
-        (body, r9) <- refStatements
+        (ps, r4) <- refNames nodes
+        (sig, r5) <- refSignature nodes
+        (ins, r6) <- refValidations nodes
+        (outs, r7) <- refValidations nodes
+        (term, r8) <- refOptTermination nodes
+        (body, r9) <- refStatements nodes
         pure (NEntry (ETemplate k (TemplateRecord bs fns ret ps sig ins outs term body)), [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9])
-    "TypeEntry" -> do
-        (k, r0) <- refName
-        (t, r1) <- refType
+      )
+    , ("TypeEntry", \nodes -> do
+        (k, r0) <- refName nodes
+        (t, r1) <- refType nodes
         pure (NEntry (EType k t), [r0, r1])
-    "SurfaceEntry" -> do
+      )
+    , ("SurfaceEntry", \nodes -> do
         w <- word
-        (n, r0) <- refName
+        (n, r0) <- refName nodes
         case [space | (space, w') <- spaceWords, w' == w] of
             [space] -> pure (NEntry (ESurface space n), [r0])
             _ -> failP "AstData: unknown name space"
-    "BuiltinEntry" -> do
+      )
+    , ("BuiltinEntry", \nodes -> do
         (b, r0) <- ref nodes (\node -> case node of NBuiltin payload -> Just payload; _ -> Nothing)
-        (surface, r1) <- entries (\e -> case e of ESurface space n -> Just (space, n); _ -> Nothing)
+        (surface, r1) <- entries nodes (\e -> case e of ESurface space n -> Just (space, n); _ -> Nothing)
         (scheme, r2) <- ref nodes (\node -> case node of NScheme payload -> Just payload; _ -> Nothing)
         (value, r3) <- ref nodes (\node -> case node of NValue payload -> Just payload; _ -> Nothing)
         pure (NEntry (EBuiltin (BuiltinRecord b surface scheme value)), [r0, r1, r2, r3])
-    "SigFn" -> do
+      )
+    , ("SigFn", \nodes -> do
         (params, r0) <- ref nodes (\node -> case node of NTypes payload -> Just payload; _ -> Nothing)
-        (result, r1) <- refType
+        (result, r1) <- refType nodes
         pure (NScheme (SigFn params result), [r0, r1])
-    "SigDynamic" -> pure (NScheme SigDynamic, [])
-    "SigValueError" -> do
-        (message, r0) <- refName
+      )
+    , ("SigDynamic", \_ -> pure (NScheme SigDynamic, [])
+      )
+    , ("SigValueError", \nodes -> do
+        (message, r0) <- refName nodes
         pure (NScheme (SigValueError message), [r0])
-    "NoType" -> pure (NOptType Nothing, [])
-    "SomeType" -> do
-        (t, r0) <- refType
+      )
+    , ("NoType", \_ -> pure (NOptType Nothing, [])
+      )
+    , ("SomeType", \nodes -> do
+        (t, r0) <- refType nodes
         pure (NOptType (Just t), [r0])
-    "EntriesEnd" -> pure (NEntries [], [])
-    "EntriesCons" -> do
+      )
+    , ("EntriesEnd", \_ -> pure (NEntries [], [])
+      )
+    , ("EntriesCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NEntry v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NEntries v -> Just v; _ -> Nothing)
         pure (NEntries (x : xs), [a, b])
-    "OptNamesEnd" -> pure (NOptNames [], [])
-    "OptNamesCons" -> do
+      )
+    , ("OptNamesEnd", \_ -> pure (NOptNames [], [])
+      )
+    , ("OptNamesCons", \nodes -> do
         (x, a) <- ref nodes (\node -> case node of NOptName v -> Just v; _ -> Nothing)
         (xs, b) <- ref nodes (\node -> case node of NOptNames v -> Just v; _ -> Nothing)
         pure (NOptNames (x : xs), [a, b])
-    _ -> failP ("AstData: unknown tag " ++ tag)
+      )
+    ]
   where
-    refName = ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
-    refNames = ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
-    refType = ref nodes (\node -> case node of NType payload -> Just payload; _ -> Nothing)
-    refFields = ref nodes (\node -> case node of NFields payload -> Just payload; _ -> Nothing)
-    refValidations = ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
-    refStatements = ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
-    refBounds = ref nodes (\node -> case node of NBounds payload -> Just payload; _ -> Nothing)
-    refSignature = ref nodes (\node -> case node of NSignature payload -> Just payload; _ -> Nothing)
-    refOptTermination = ref nodes (\node -> case node of NOptTermination payload -> Just payload; _ -> Nothing)
-    entries project = ref nodes (\node -> case node of NEntries es -> mapM project es; _ -> Nothing)
+    refName nodes = ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
+    refNames nodes = ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
+    refType nodes = ref nodes (\node -> case node of NType payload -> Just payload; _ -> Nothing)
+    refFields nodes = ref nodes (\node -> case node of NFields payload -> Just payload; _ -> Nothing)
+    refValidations nodes = ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
+    refStatements nodes = ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
+    refBounds nodes = ref nodes (\node -> case node of NBounds payload -> Just payload; _ -> Nothing)
+    refSignature nodes = ref nodes (\node -> case node of NSignature payload -> Just payload; _ -> Nothing)
+    refOptTermination nodes = ref nodes (\node -> case node of NOptTermination payload -> Just payload; _ -> Nothing)
+    entries nodes project = ref nodes (\node -> case node of NEntries es -> mapM project es; _ -> Nothing)
 
 astTypeP :: P Type
 astTypeP = word >>= \w -> case w of

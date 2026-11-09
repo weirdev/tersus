@@ -22,7 +22,10 @@ fn isTuple(base: &String) -> Bool ~ { return tupleArity(base) > 0; };
 
 // The declaration of a struct with parameters, the program's or a tuple's, in st.gen (st.ok false when there is none)
 fn genericOf(st: St, base: &String) -> St ~ {
-    if st.generics.contains(base) { return St { gen: st.generics.lookup(base, Generic { params: [], names: [], types: [] }), ok: true, ..st }; };
+    if HashMap::contains(&st.generics, base) {
+        g = HashMap::lookup(&st.generics, base, Generic { params: [], names: [], types: [] });
+        return St { gen: g, ok: true, ..st };
+    };
     n = tupleArity(base);
     if n <= 0 { return St { ok: false, ..st }; };
     params = [];
@@ -78,7 +81,7 @@ fn ensureInstance(st: St, t: Int) -> St ~ {
     x = tyAt(st, t);
     if x.kind != 4 { return st; };
     name = rawInstanceName(st, t);
-    if st.ctors.contains(&name) || size(x.args) = 0 { return st; };
+    if HashMap::contains(&st.ctors, &name) || size(x.args) = 0 { return st; };
     tuple = isTuple(&x.name);
     st = genericOf(st, &x.name);
     if !st.ok { return st; };
@@ -128,15 +131,19 @@ fn noCtor() -> CtorInfo ~ { return CtorInfo { owner: "", names: [], types: [] };
 
 fn ctorInfo(st: St, name: &String) -> St ~ {
     if st.status != 0 { return st; };
-    if !st.ctors.contains(name) { return typeError(st, catStrings("unknown struct or variant ", clone(name))); };
-    return St { ctor: st.ctors.lookup(name, noCtor()), ..st };
+    if !HashMap::contains(&st.ctors, name) { return typeError(st, catStrings("unknown struct or variant ", clone(name))); };
+    info = HashMap::lookup(&st.ctors, name, noCtor());
+    return St { ctor: info, ..st };
 };
 
 fn typeCtors(st: St, name: &String) -> St ~ {
     if st.status != 0 { return st; };
-    if st.types.contains(name) { return St { names: st.types.lookup(name, []), ..st }; };
-    if st.generics.contains(name) {
-        g = st.generics.lookup(name, Generic { params: [], names: [], types: [] });
+    if HashMap::contains(&st.types, name) {
+        ctors = HashMap::lookup(&st.types, name, []);
+        return St { names: ctors, ..st };
+    };
+    if HashMap::contains(&st.generics, name) {
+        g = HashMap::lookup(&st.generics, name, Generic { params: [], names: [], types: [] });
         ps = genericParamsText(&g.params);
         return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " has parameters <"), ps), catStrings(">, which a type gives, as in ", clone(name))), catStrings(catStrings("<", ps), ">")));
     };
@@ -244,8 +251,8 @@ fn solveInstanceArgs(st: St, params: &List<String>, template: &List<Int>, actual
 fn ctorResultType(st: St, typeName: &String, declared: &List<Int>) -> St ~ {
     base = baseNameOf(typeName);
     if isTuple(&base) { return tupleType(st, declared); };
-    if st.generics.contains(&base) {
-        g = st.generics.lookup(&base, Generic { params: [], names: [], types: [] });
+    if HashMap::contains(&st.generics, &base) {
+        g = HashMap::lookup(&st.generics, &base, Generic { params: [], names: [], types: [] });
         st = solveInstanceArgs(st, &g.params, &g.types, declared);
         return namedTy(st, base, clone(st.te.types));
     };
@@ -258,8 +265,8 @@ fn tupleType(st: St, parts: &List<Int>) -> St ~ {
 
 // The instance type a constructor with these argument types builds (instanceTypeFor); st.ty -1 for none
 fn instanceTypeFor(st: St, base: &String, argTys: &List<Int>) -> St ~ {
-    if !st.generics.contains(base) { return withTy(st, 0 - 1); };
-    g = st.generics.lookup(base, Generic { params: [], names: [], types: [] });
+    if !HashMap::contains(&st.generics, base) { return withTy(st, 0 - 1); };
+    g = HashMap::lookup(&st.generics, base, Generic { params: [], names: [], types: [] });
     vars = [];
     sizeNames = [];
     sizes = [];
@@ -408,10 +415,10 @@ fn fieldType(st: St, field: &String, structTy: Int) -> St ~ {
 
 fn declareTypeWith(st: St, name: &String, ctors: List<String>) -> St ~ {
     if st.status != 0 { return st; };
-    if st.predeclared.contains(name) {
+    if HashSet::contains(&st.predeclared, name) {
         return typesChanged(St { types: st.types.insert(clone(name), ctors), predeclared: st.predeclared.remove(name), ..st });
     };
-    if st.types.contains(name) || st.traits.contains(name) { return fail(st, catStrings("Type already defined: ", clone(name))); };
+    if HashMap::contains(&st.types, name) || HashSet::contains(&st.traits, name) { return fail(st, catStrings("Type already defined: ", clone(name))); };
     return typesChanged(St { types: st.types.insert(clone(name), ctors), ..st });
 };
 
@@ -432,8 +439,8 @@ fn holdsRoot(st: &St, root: &String, t: Int) -> Bool ~ {
     x = tyAt(st, t);
     if x.kind = 4 { return x.name = clone(root); };
     if x.kind = 5 {
-        if !st.ctors.contains(&x.name) { return false; };
-        return st.ctors.lookup(&x.name, noCtor()).owner = clone(root);
+        if !HashMap::contains(&st.ctors, &x.name) { return false; };
+        return HashMap::lookup(&st.ctors, &x.name, noCtor()).owner = clone(root);
     };
     if x.kind = 6 { return holdsRoot(st, root, nth(&x.args, 0)); };
     return false;
@@ -582,7 +589,10 @@ fn ghostGo(st: St, t0: Int) -> St ~ {
         if indexIn(&st.seen, &n) >= 0 { return St { ok: false, ..st }; };
         // (the first named type of a search has nothing seen before it, so what it finds is the whole answer)
         root = size(st.seen) = 0;
-        if root && st.ghostCache.contains(&n) { return St { ok: st.ghostCache.lookup(&n, false), ..st }; };
+        if root && HashMap::contains(&st.ghostCache, &n) {
+            cached = HashMap::lookup(&st.ghostCache, &n, false);
+            return St { ok: cached, ..st };
+        };
         st = ghostNamed(st, t, &x, &n);
         if root && st.status = 0 { return St { ghostCache: st.ghostCache.insert(n, st.ok), ..st }; };
         return st;
@@ -590,8 +600,8 @@ fn ghostGo(st: St, t0: Int) -> St ~ {
     if x.kind = 5 {
         if indexIn(&st.seen, &x.name) >= 0 { return St { ok: false, ..st }; };
         st = St { seen: push(st.seen, clone(x.name)), ..st };
-        if st.ctors.contains(&x.name) {
-            for ft in st.ctors.lookup(&x.name, noCtor()).types {
+        if HashMap::contains(&st.ctors, &x.name) {
+            for ft in HashMap::lookup(&st.ctors, &x.name, noCtor()).types {
                 st = ghostGo(st, ft);
                 if st.ok { return st; };
             };
@@ -602,13 +612,13 @@ fn ghostGo(st: St, t0: Int) -> St ~ {
 };
 
 fn ghostNamed(st: St, t: Int, x: &Ty, n: &String) -> St ~ {
-    if st.drops.contains(&x.name) { return St { ok: false, ..st }; };
-    if st.linearTypes.contains(&x.name) { return St { ok: true, ..st }; };
-    if size(x.args) > 0 && !st.ctors.contains(n) { st = ensureInstance(st, t); };
+    if HashSet::contains(&st.drops, &x.name) { return St { ok: false, ..st }; };
+    if HashSet::contains(&st.linearTypes, &x.name) { return St { ok: true, ..st }; };
+    if size(x.args) > 0 && !HashMap::contains(&st.ctors, n) { st = ensureInstance(st, t); };
     st = St { seen: push(st.seen, clone(n)), ..st };
-    for c in st.types.lookup(n, []) {
-        if st.ctors.contains(&c) {
-            for ft in st.ctors.lookup(&c, noCtor()).types {
+    for c in HashMap::lookup(&st.types, n, []) {
+        if HashMap::contains(&st.ctors, &c) {
+            for ft in HashMap::lookup(&st.ctors, &c, noCtor()).types {
                 st = ghostGo(st, ft);
                 if st.ok { return st; };
             };
@@ -626,11 +636,11 @@ fn holdsRef(st: St, t: Int) -> St ~ {
 };
 
 fn refNamed(st: St, t: Int, x: &Ty, n: &String) -> St ~ {
-    if size(x.args) > 0 && !st.ctors.contains(n) { st = ensureInstance(st, t); };
+    if size(x.args) > 0 && !HashMap::contains(&st.ctors, n) { st = ensureInstance(st, t); };
     st = St { seen: push(st.seen, clone(n)), ..st };
-    for c in st.types.lookup(n, []) {
-        if st.ctors.contains(&c) {
-            for ft in st.ctors.lookup(&c, noCtor()).types {
+    for c in HashMap::lookup(&st.types, n, []) {
+        if HashMap::contains(&st.ctors, &c) {
+            for ft in HashMap::lookup(&st.ctors, &c, noCtor()).types {
                 st = refGo(st, ft);
                 if st.ok { return st; };
             };
@@ -651,7 +661,10 @@ fn refGo(st: St, t0: Int) -> St ~ {
         n = instanceName(st, t);
         if indexIn(&st.seen, &n) >= 0 { return St { ok: false, ..st }; };
         root = size(st.seen) = 0;
-        if root && st.refCache.contains(&n) { return St { ok: st.refCache.lookup(&n, false), ..st }; };
+        if root && HashMap::contains(&st.refCache, &n) {
+            cached = HashMap::lookup(&st.refCache, &n, false);
+            return St { ok: cached, ..st };
+        };
         st = refNamed(st, t, &x, &n);
         if root && st.status = 0 { return St { refCache: st.refCache.insert(n, st.ok), ..st }; };
         return st;
@@ -659,8 +672,8 @@ fn refGo(st: St, t0: Int) -> St ~ {
     if x.kind = 5 {
         if indexIn(&st.seen, &x.name) >= 0 { return St { ok: false, ..st }; };
         st = St { seen: push(st.seen, clone(x.name)), ..st };
-        if st.ctors.contains(&x.name) {
-            for ft in st.ctors.lookup(&x.name, noCtor()).types {
+        if HashMap::contains(&st.ctors, &x.name) {
+            for ft in HashMap::lookup(&st.ctors, &x.name, noCtor()).types {
                 st = refGo(st, ft);
                 if st.ok { return st; };
             };
@@ -685,12 +698,12 @@ fn ownsGo(st: St, t0: Int, seen: List<String>) -> St ~ {
     if x.kind = 4 {
         n = instanceName(st, t);
         if indexIn(&seen, &n) >= 0 || x.name = "Self" { return St { ok: false, ..st }; };
-        if size(x.args) > 0 && !st.ctors.contains(&n) { st = ensureInstance(st, t); };
+        if size(x.args) > 0 && !HashMap::contains(&st.ctors, &n) { st = ensureInstance(st, t); };
         inner = push(clone(seen), clone(n));
         owns = false;
-        for c in st.types.lookup(&n, []) {
-            if st.ctors.contains(&c) {
-                for ft in st.ctors.lookup(&c, noCtor()).types {
+        for c in HashMap::lookup(&st.types, &n, []) {
+            if HashMap::contains(&st.ctors, &c) {
+                for ft in HashMap::lookup(&st.ctors, &c, noCtor()).types {
                     st = ownsGo(st, ft, clone(inner));
                     if st.ok { owns = true; };
                 };
@@ -700,8 +713,8 @@ fn ownsGo(st: St, t0: Int, seen: List<String>) -> St ~ {
     };
     if x.kind = 5 {
         owns = false;
-        if st.ctors.contains(&x.name) {
-            for ft in st.ctors.lookup(&x.name, noCtor()).types {
+        if HashMap::contains(&st.ctors, &x.name) {
+            for ft in HashMap::lookup(&st.ctors, &x.name, noCtor()).types {
                 st = ownsGo(st, ft, clone(seen));
                 if st.ok { owns = true; };
             };
@@ -808,8 +821,8 @@ fn typeWords(st: St, t0: Int) -> St ~ {
         return wordsOfType(st, instanceName(st, t));
     };
     if x.kind = 5 {
-        if st.ctors.contains(&x.name) {
-            st = namedTy(st, clone(st.ctors.lookup(&x.name, noCtor()).owner), []);
+        if HashMap::contains(&st.ctors, &x.name) {
+            st = namedTy(st, clone(HashMap::lookup(&st.ctors, &x.name, noCtor()).owner), []);
             return typeWords(st, st.ty);
         };
         return St { big: bigOf(1), ..st };
@@ -818,11 +831,11 @@ fn typeWords(st: St, t0: Int) -> St ~ {
 };
 
 fn wordsOfType(st: St, name: String) -> St ~ {
-    if !st.types.contains(&name) { return St { big: bigOf(1), ..st }; };
-    ctors = st.types.lookup(&name, []);
-    if size(ctors) = 1 && get(ctors, 0) = name && st.ctors.contains(&name) {
+    if !HashMap::contains(&st.types, &name) { return St { big: bigOf(1), ..st }; };
+    ctors = HashMap::lookup(&st.types, &name, []);
+    if size(ctors) = 1 && get(ctors, 0) = name && HashMap::contains(&st.ctors, &name) {
         total = bigOf(0);
-        for ft in st.ctors.lookup(&name, noCtor()).types {
+        for ft in HashMap::lookup(&st.ctors, &name, noCtor()).types {
             st = typeWords(st, ft);
             total = bigAdd(&total, &st.big);
         };
@@ -831,8 +844,8 @@ fn wordsOfType(st: St, name: String) -> St ~ {
     widest = bigOf(0);
     for c in ctors {
         width = bigOf(0);
-        if st.ctors.contains(&c) {
-            for ft in st.ctors.lookup(&c, noCtor()).types {
+        if HashMap::contains(&st.ctors, &c) {
+            for ft in HashMap::lookup(&st.ctors, &c, noCtor()).types {
                 st = typeWords(st, ft);
                 width = bigAdd(&width, &st.big);
             };

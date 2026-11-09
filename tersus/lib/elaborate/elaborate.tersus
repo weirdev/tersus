@@ -1,7 +1,7 @@
 import data::arena::arena { remapNode, reorderArena };
 import data::ast::ast { AstElaborated, AstEntry, AstNode, AstOptName, AstProgram, AstStatement, printAst };
-import data::codec::codec { Parsed, Token, Type, catStrings, intAt, tokenize };
-import data::reader::reader { readAstRecords, readRecord };
+import data::codec::codec { Parsed, Token, Type, catStrings, done, intAt, tokenize };
+import data::reader::reader { parseAstLines, readAstRecords, readRecord, readRecords };
 import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
@@ -56,6 +56,34 @@ fn readBlock() -> Parsed<AstProgram> ~ {
     return readAstRecords(n.value);
 };
 
+// A block whose records are the same as an earlier one's is not read again: a request carries an interface once for
+// the module and once in the defining context of each module that depends on it
+struct Blocks { seen: HashMap<String, AstProgram>, block: Parsed<AstProgram> };
+
+fn readCachedBlock(seen: HashMap<String, AstProgram>) -> Blocks ~ {
+    bad = Parsed<AstProgram> { value: AstProgram { stage: "", nodes: [], root: 0 }, pos: 0, ok: false };
+    line = readLine();
+    if !wordIs(&line, 0, "data") || size(line.words) != 2 { return Blocks { seen: seen, block: bad }; };
+    n = intAt(&line.words, 1);
+    if !n.ok || n.value < 2 { return Blocks { seen: seen, block: bad }; };
+    lines = readRecords(n.value);
+    if !lines.ok { return Blocks { seen: seen, block: bad }; };
+    keyBytes = [];
+    for l in &lines.value {
+        for c in &l.bytes { keyBytes = push(keyBytes, c); };
+        keyBytes = push(keyBytes, toByte(10));
+    };
+    key = String { bytes: keyBytes };
+    if HashMap::contains(&seen, &key) {
+        known = HashMap::lookup(&seen, &key, AstProgram { stage: "", nodes: [], root: 0 });
+        return Blocks { seen: seen, block: done(known, 0) };
+    };
+    parsed = parseAstLines(&lines.value);
+    if !parsed.ok { return Blocks { seen: seen, block: parsed }; };
+    kept = clone(parsed.value);
+    return Blocks { seen: seen.insert(key, kept), block: parsed };
+};
+
 // What an interface gives the checker (Interface.interfaceImportEnv, merged so that the first interface wins a name)
 fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
     root = nodeIn(&iface.nodes, iface.root);
@@ -75,7 +103,7 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::NamesEntry {
             ne = entry as AstEntry::NamesEntry;
             name = nameText(nodes, ne.n);
-            if !st.types.contains(&name) { st = St { types: st.types.insert(name, namesText(nodes, ne.ns)), ..st }; };
+            if !HashMap::contains(&st.types, &name) { st = St { types: st.types.insert(name, namesText(nodes, ne.ns)), ..st }; };
         };
     };
     for e in listItems(nodes, v.ctors) {
@@ -85,9 +113,10 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
             name = nameText(nodes, ce.n);
             // (a generic constructor's owner is a compiler-only physical view, which a library module sees as a type)
             if name = nameText(nodes, ce.owner) { st = St { ownerViews: push(st.ownerViews, clone(name)), ..st }; };
-            if !st.ctors.contains(&name) {
+            if !HashMap::contains(&st.ctors, &name) {
                 tycs = fieldCodecTypes(nodes, ce.fs); st = fromCodecs(st, &tycs);
-                st = St { ctors: st.ctors.insert(name, CtorInfo { owner: nameText(nodes, ce.owner), names: fieldNames(nodes, ce.fs), types: clone(st.te.types) }), ..st };
+                fieldTypes = clone(st.te.types);
+                st = St { ctors: st.ctors.insert(name, CtorInfo { owner: nameText(nodes, ce.owner), names: fieldNames(nodes, ce.fs), types: fieldTypes }), ..st };
             };
         };
     };
@@ -96,9 +125,10 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::GenericEntry {
             ge = entry as AstEntry::GenericEntry;
             name = nameText(nodes, ge.n);
-            if !st.generics.contains(&name) {
+            if !HashMap::contains(&st.generics, &name) {
                 tycs = fieldCodecTypes(nodes, ge.fs); st = fromCodecs(st, &tycs);
-                st = St { generics: st.generics.insert(name, Generic { params: namesText(nodes, ge.ps), names: fieldNames(nodes, ge.fs), types: clone(st.te.types) }), ..st };
+                fieldTypes = clone(st.te.types);
+                st = St { generics: st.generics.insert(name, Generic { params: namesText(nodes, ge.ps), names: fieldNames(nodes, ge.fs), types: fieldTypes }), ..st };
             };
         };
     };
@@ -107,7 +137,7 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::TraitEntry {
             te = entry as AstEntry::TraitEntry;
             name = nameText(nodes, te.n);
-            if !st.traitFns.contains(&name) {
+            if !HashMap::contains(&st.traitFns, &name) {
                 fns = [];
                 for f in listItems(nodes, te.fs) { fns = push(fns, base + f); };
                 st = St { traits: st.traits.insert(clone(name)), traitFns: st.traitFns.insert(clone(name), fns), ..st };
@@ -136,7 +166,7 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::NamesEntry {
             ne = entry as AstEntry::NamesEntry;
             name = nameText(nodes, ne.n);
-            if !st.traitParams.contains(&name) { st = St { traitParams: st.traitParams.insert(name, namesText(nodes, ne.ns)), ..st }; };
+            if !HashMap::contains(&st.traitParams, &name) { st = St { traitParams: st.traitParams.insert(name, namesText(nodes, ne.ns)), ..st }; };
         };
     };
     for e in listItems(nodes, v.assoc) {
@@ -144,7 +174,7 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::AssocEntry {
             ae = entry as AstEntry::AssocEntry;
             key = catStrings(catStrings(nameText(nodes, ae.a), " "), nameText(nodes, ae.b));
-            origins = st.assoc.lookup(&key, []);
+            origins = HashMap::lookup(&st.assoc, &key, []);
             for o in listItems(nodes, ae.origins) {
                 onode = nodeIn(nodes, o);
                 origin = "";
@@ -161,12 +191,13 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::ImplArgsEntry {
             ia = entry as AstEntry::ImplArgsEntry;
             key = catStrings(catStrings(nameText(nodes, ia.a), " "), nameText(nodes, ia.b));
-            if !st.implArgs.contains(&key) {
+            if !HashMap::contains(&st.implArgs, &key) {
                 tyc = codecTypeAt(nodes, ia.ty);
                 st = fromCodec(st, &tyc);
                 selfTy = st.ty;
                 st = argListOf(st, base + ia.args);
-                st = St { implArgs: st.implArgs.insert(key, ImplArgs { ty: selfTy, args: clone(st.te.types), tyNode: base + ia.ty, argsNode: base + ia.args }), ..st };
+                argTypes = clone(st.te.types);
+                st = St { implArgs: st.implArgs.insert(key, ImplArgs { ty: selfTy, args: argTypes, tyNode: base + ia.ty, argsNode: base + ia.args }), ..st };
             };
         };
     };
@@ -175,9 +206,10 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::ImplBoundsEntry {
             ib = entry as AstEntry::ImplBoundsEntry;
             key = catStrings(catStrings(nameText(nodes, ib.a), " "), nameText(nodes, ib.b));
-            if !st.implBounds.contains(&key) {
+            if !HashMap::contains(&st.implBounds, &key) {
                 st = boundsOf(st, base + ib.bs);
-                st = St { implBounds: st.implBounds.insert(clone(key), clone(st.boundsOut)), implBoundsNodes: st.implBoundsNodes.insert(key, base + ib.bs), ..st };
+                bounds = clone(st.boundsOut);
+                st = St { implBounds: st.implBounds.insert(clone(key), bounds), implBoundsNodes: st.implBoundsNodes.insert(key, base + ib.bs), ..st };
             };
         };
     };
@@ -186,7 +218,7 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::NamesEntry {
             ne = entry as AstEntry::NamesEntry;
             name = nameText(nodes, ne.n);
-            existing = st.companions.lookup(&name, []);
+            existing = HashMap::lookup(&st.companions, &name, []);
             for c in namesText(nodes, ne.ns) { existing = push(existing, clone(c)); };
             st = St { companions: st.companions.insert(name, existing), ..st };
         };
@@ -196,7 +228,7 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::FunctionEntry {
             fe = entry as AstEntry::FunctionEntry;
             name = nameText(nodes, fe.n);
-            if !st.fns.contains(&name) {
+            if !HashMap::contains(&st.fns, &name) {
                 sd = sigData(nodes, fe.sig); st = functionTypeFrom(st, &sd);
                 st = St { fns: st.fns.insert(clone(name), st.ty), ..st };
             };
@@ -218,7 +250,7 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
         if entry is AstEntry::TemplateEntry {
             tme = entry as AstEntry::TemplateEntry;
             name = nameText(nodes, tme.n);
-            if !st.templates.contains(&name) {
+            if !HashMap::contains(&st.templates, &name) {
                 st = boundsOf(st, base + tme.bs);
                 bounds = clone(st.boundsOut);
                 fnNames = [];
@@ -258,7 +290,7 @@ fn definingContext(st: St, context: &List<AstProgram>) -> St ~ {
             if entry is AstEntry::TraitEntry {
                 name = nameText(&iface.nodes, (entry as AstEntry::TraitEntry).n);
                 traits = push(traits, clone(name));
-                if !st.traits.contains(&name) { missing = true; };
+                if !HashSet::contains(&st.traits, &name) { missing = true; };
             };
         };
         for e in listItems(&iface.nodes, v.types) {
@@ -266,19 +298,19 @@ fn definingContext(st: St, context: &List<AstProgram>) -> St ~ {
             if entry is AstEntry::NamesEntry {
                 name = nameText(&iface.nodes, (entry as AstEntry::NamesEntry).n);
                 types = push(types, clone(name));
-                if !st.types.contains(&name) { missing = true; };
+                if !HashMap::contains(&st.types, &name) { missing = true; };
             };
         };
         for e in listItems(&iface.nodes, v.ctors) {
             entry = entryOf(&iface.nodes, e);
-            if entry is AstEntry::CtorEntry && !st.ctors.contains(nameText(&iface.nodes, (entry as AstEntry::CtorEntry).n)) { missing = true; };
+            if entry is AstEntry::CtorEntry && !HashMap::contains(&st.ctors, nameText(&iface.nodes, (entry as AstEntry::CtorEntry).n)) { missing = true; };
         };
         for e in listItems(&iface.nodes, v.generics) {
             entry = entryOf(&iface.nodes, e);
             if entry is AstEntry::GenericEntry {
                 name = nameText(&iface.nodes, (entry as AstEntry::GenericEntry).n);
                 types = push(types, clone(name));
-                if !st.generics.contains(&name) { missing = true; };
+                if !HashMap::contains(&st.generics, &name) { missing = true; };
             };
         };
         for e in listItems(&iface.nodes, v.templates) {
@@ -286,7 +318,7 @@ fn definingContext(st: St, context: &List<AstProgram>) -> St ~ {
             if entry is AstEntry::TemplateEntry {
                 name = nameText(&iface.nodes, (entry as AstEntry::TemplateEntry).n);
                 templates = push(templates, clone(name));
-                if !st.templates.contains(&name) { missing = true; };
+                if !HashMap::contains(&st.templates, &name) { missing = true; };
             };
         };
         for e in listItems(&iface.nodes, v.implArgs) {
@@ -294,7 +326,7 @@ fn definingContext(st: St, context: &List<AstProgram>) -> St ~ {
             if entry is AstEntry::ImplArgsEntry {
                 p = entry as AstEntry::ImplArgsEntry;
                 key = catStrings(catStrings(nameText(&iface.nodes, p.a), " "), nameText(&iface.nodes, p.b));
-                if !st.implArgs.contains(&key) { missing = true; };
+                if !HashMap::contains(&st.implArgs, &key) { missing = true; };
             };
         };
     };
@@ -306,8 +338,8 @@ fn definingContext(st: St, context: &List<AstProgram>) -> St ~ {
         entry = entryOf(&owner.nodes, e);
         if entry is AstEntry::TemplateEntry {
             name = nameText(&owner.nodes, (entry as AstEntry::TemplateEntry).n);
-            if st.templates.contains(&name) {
-                tm = st.templates.lookup(&name, emptyTemplate());
+            if HashMap::contains(&st.templates, &name) {
+                tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
                 st = St { templates: st.templates.insert(name, Template { grouped: true, definingTraits: clone(traits), definingTypes: clone(types), definingTemplates: clone(templates), privateContext: missing, ..tm }), ..st };
             };
         };
@@ -332,7 +364,7 @@ fn gatherSignatures(st: St, stmts: &List<Int>) -> St ~ {
             a = stmt as AstStatement::Assign;
             v = functionValue(st, a.e);
             name = nameText(&st.nodes, a.n);
-            if v >= 0 && !st.stdNames.contains(&name) && !st.ghostNames.contains(&name) {
+            if v >= 0 && !HashMap::contains(&st.stdNames, &name) && !HashMap::contains(&st.ghostNames, &name) {
                 value = nativeFn(&st.nodes, v);
                 sd = sigData(&st.nodes, value.sig); st = functionTypeFrom(st, &sd);
                 gathered = gathered.insert(name, st.ty);
@@ -386,8 +418,11 @@ if !wordIs(&countLine, 0, "interfaces") || size(countLine.words) != 2 { return m
 count = intAt(&countLine.words, 1);
 if !count.ok || count.value < 0 { return malformed(); };
 ifaces = [];
+seenBlocks = HashMap::new();
 for i in 0..count.value {
-    b = readBlock();
+    read = readCachedBlock(seenBlocks);
+    seenBlocks = read.seen;
+    b = read.block;
     if !b.ok || b.value.stage != "interface" { return malformed(); };
     ifaces = push(ifaces, b.value);
 };
@@ -403,7 +438,9 @@ for i in 0..definitionCount.value {
     if !contextCount.ok || contextCount.value < 1 { return malformed(); };
     context = [];
     for j in 0..contextCount.value {
-        b = readBlock();
+        read = readCachedBlock(seenBlocks);
+        seenBlocks = read.seen;
+        b = read.block;
         if !b.ok || b.value.stage != "interface" { return malformed(); };
         context = push(context, b.value);
     };
@@ -413,8 +450,8 @@ programBlock = readBlock();
 if !programBlock.ok || programBlock.value.stage != "parsed" { return malformed(); };
 end = readRecord();
 if !end.ok || end.pos != 0 { return malformed(); };
-parsed = programBlock.value;
-st = St { nodes: clone(parsed.nodes), ..st };
+parsedRoot = programBlock.value.root;
+st = St { nodes: programBlock.value.nodes, ..st };
 st = loadBuiltins(st, &table.value);
 for iface in &ifaces { st = loadInterface(st, iface); };
 for context in &definitions { st = definingContext(st, context); };
@@ -427,10 +464,10 @@ modu = "";
 if hasModule { modu = clone(get(moduleLine.words, 2).text); };
 if viewing {
     for o in clone(st.ownerViews) {
-        if !st.types.contains(&o) { st = St { types: st.types.insert(clone(o), push([], clone(o))), ..st }; };
+        if !HashMap::contains(&st.types, &o) { st = St { types: st.types.insert(clone(o), push([], clone(o))), ..st }; };
     };
 };
-stmts = listItems(&st.nodes, parsed.root);
+stmts = listItems(&st.nodes, parsedRoot);
 if st.status = 0 {
     st = gatherSignatures(st, &stmts);
     if predeclaring {

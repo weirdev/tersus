@@ -18,13 +18,16 @@ module Differential
     , tally
     ) where
 
-import Control.Exception (SomeException, evaluate, try)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (IOException, SomeException, evaluate, finally, try)
+import qualified Data.ByteString.Char8 as B
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (isSuffixOf, sort)
 import System.Directory (listDirectory)
 import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
-import System.Process (readProcessWithExitCode)
+import System.IO (hClose, hSetBinaryMode)
+import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess, withCreateProcess)
 
 import AstData (writeElaborated)
 import Bootstrap (llvmOfOwned)
@@ -178,11 +181,23 @@ executableCandidate :: FilePath -> Candidate
 executableCandidate exe rq = case writeRequest rq of
     Error e -> pure (Error e)
     Ok text -> do
-        -- (the elaborator recurses over the nesting of expressions, deeper than a default stack allows for a deep one)
-        (code, out, err) <- readProcessWithExitCode "/bin/sh" ["-c", raiseStack, exe] text
+        -- (the elaborator recurses over the nesting of expressions, deeper than a default stack allows for a deep one;
+        -- the data is ASCII, so it is passed as bytes rather than through the locale's decoding of a String)
+        (code, out, err) <- withCreateProcess (proc "/bin/sh" ["-c", raiseStack, exe]){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe} $
+            \(Just hin) (Just hout) (Just herr) ph -> do
+                mapM_ (`hSetBinaryMode` True) [hin, hout, herr]
+                outVar <- newEmptyMVar
+                errVar <- newEmptyMVar
+                _ <- forkIO (B.hGetContents hout >>= putMVar outVar)
+                _ <- forkIO (B.hGetContents herr >>= putMVar errVar)
+                _ <- try (B.hPut hin (B.pack text) `finally` hClose hin) :: IO (Either IOException ())
+                out <- takeMVar outVar
+                err <- takeMVar errVar
+                code <- waitForProcess ph
+                pure (code, out, err)
         pure $ case code of
-            ExitSuccess -> readResponse out
-            ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 err)
+            ExitSuccess -> readResponseBytes (B.lines out)
+            ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 (B.unpack err))
 
 -- Each request of each unit, with the module it elaborates and how the candidate's response compares
 runDifferential :: Candidate -> [Unit] -> IO [(Unit, String, Outcome)]

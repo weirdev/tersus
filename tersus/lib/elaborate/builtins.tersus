@@ -62,11 +62,11 @@ fn loadBuiltins(st: St, table: &AstProgram) -> St ~ {
                             se = sv as AstEntry::SurfaceEntry;
                             name = nameText(&table.nodes, se.n);
                             if se.space = "std" { st = St { stdNames: st.stdNames.insert(clone(name), index), ..st }; };
-                            if se.space = "pointer" && !st.pointer.contains(&name) { st = St { pointer: st.pointer.insert(clone(name), index), ..st }; };
-                            if se.space = "ghost" && !st.ghostNames.contains(&name) { st = St { ghostNames: st.ghostNames.insert(clone(name), index), ..st }; };
+                            if se.space = "pointer" && !HashMap::contains(&st.pointer, &name) { st = St { pointer: st.pointer.insert(clone(name), index), ..st }; };
+                            if se.space = "ghost" && !HashMap::contains(&st.ghostNames, &name) { st = St { ghostNames: st.ghostNames.insert(clone(name), index), ..st }; };
                             if se.space = "method" {
-                                if !st.methods.contains(&name) { st = St { methods: st.methods.insert(clone(name), index), ..st }; };
-                                if !st.methodOf.contains(index) { st = St { methodOf: st.methodOf.insert(index, clone(name)), ..st }; };
+                                if !HashMap::contains(&st.methods, &name) { st = St { methods: st.methods.insert(clone(name), index), ..st }; };
+                                if !HashMap::contains(&st.methodOf, index) { st = St { methodOf: st.methodOf.insert(index, clone(name)), ..st }; };
                             };
                         };
                     };
@@ -98,7 +98,7 @@ fn schemeFn(st: St, nodes: &List<AstNode>, ts: Int, ret: Int) -> St ~ {
 };
 
 fn builtinIndex(st: &St, key: &String) -> Int ~ {
-    return st.builtinNames.lookup(key, 0 - 1);
+    return HashMap::lookup(&st.builtinNames, key, 0 - 1);
 };
 
 // The record of the value StdLib.builtinFunct gives for a builtin, in the arena (-1 when the table has none)

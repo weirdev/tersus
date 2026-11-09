@@ -240,15 +240,22 @@ fn exprRefOrigins(st: St, e: Int) -> St ~ {
     if isVar(st, e) {
         v = varName(st, e);
         i = indexIn(&st.originNames, &v);
-        if i >= 0 && i < size(st.originRoots) { return St { names: clone(get(st.originRoots, i)), ..st }; };
+        if i >= 0 && i < size(st.originRoots) {
+            roots = clone(get(st.originRoots, i));
+            return St { names: roots, ..st };
+        };
         if indexIn(&st.readOnly, &v) >= 0 || indexIn(&st.mutParams, &v) >= 0 {
-            return St { names: push([], clone(resolveRefPlace(st, clone(v), []).root)), ..st };
+            root = resolveRefPlace(st, clone(v), []).root;
+            return St { names: push([], root), ..st };
         };
         st = lookupVar(st, &v);
         if st.status != 0 { return St { names: [], ..st }; };
         st = zonk(st, st.ty);
         k = kindOf(st, st.ty);
-        if k = 10 || k = 11 { return St { names: exprOriginCandidates(st, e), ..st }; };
+        if k = 10 || k = 11 {
+            candidates = exprOriginCandidates(st, e);
+            return St { names: candidates, ..st };
+        };
         return St { names: [], ..st };
     };
     c = callOf(st, e);
@@ -261,7 +268,8 @@ fn exprRefOrigins(st: St, e: Int) -> St ~ {
         return St { names: out, ..st };
     };
     if c.ok && c.key = "Field" && size(c.args) = 1 { return exprRefOrigins(st, nth(&c.args, 0)); };
-    return St { names: exprOriginCandidates(st, e), ..st };
+    candidates = exprOriginCandidates(st, e);
+    return St { names: candidates, ..st };
 };
 
 fn putAlias(st: St, name: &String, place: Place) -> St ~ {

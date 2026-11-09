@@ -364,12 +364,12 @@ fn implSections(st: St, sc: &Scope, elaborated: &List<Int>) -> St ~ {
 // st.outs the nodes of the module's linear types, drops, axioms, proofs, externs, templates and their companions
 fn nameSections(st: St, sc: &Scope, elaborated: &List<Int>) -> St ~ {
     linearNames = [];
-    for n in st.linearTypes.elements() {
+    for n in HashSet::elements(&st.linearTypes) {
         if typeVisible(sc, &n) { linearNames = push(linearNames, clone(n)); };
     };
     st = emitSortedNames(st, &linearNames); out = push([], st.nid);
     drops = [];
-    for n in st.drops.elements() {
+    for n in HashSet::elements(&st.drops) {
         dropPair = catStrings("Drop ", baseNameOf(&n));
         if typeVisible(sc, &n) || (sc.isLib && indexIn(&sc.declaredImpls, &dropPair) >= 0) { drops = push(drops, clone(n)); };
     };
@@ -647,7 +647,7 @@ fn pairEntry(st: St, a: &String, b: &String) -> St ~ {
 
 fn implsSection(st: St, sc: &Scope) -> St ~ {
     impls = [];
-    for k in st.impls.elements() {
+    for k in HashSet::elements(&st.impls) {
         p = pairParts(&k);
         if p.ok && implVisible(sc, &p.before, &p.after) {
             st = pairEntry(st, &p.before, &p.after);
@@ -665,7 +665,7 @@ fn copiesOf(st: &St, sc: &Scope, elaborated: &List<Int>) -> List<String> ~ {
         stmt = stmtOf(st, s);
         if (stmt is AstStatement::CopyDef) { copies = push(copies, nameText(&st.nodes, (stmt as AstStatement::CopyDef).n)); };
     };
-    for k in st.impls.elements() {
+    for k in HashSet::elements(&st.impls) {
         p = pairParts(&k);
         if p.ok && p.before = "Copy" && indexIn(&copies, &p.after) < 0 {
             copyHere = inModule(sc, &p.after);
@@ -707,7 +707,7 @@ fn optNamesOf(st: St, names: &List<String>) -> St ~ {
 
 fn assocSection(st: St, sc: &Scope) -> St ~ {
     assoc = [];
-    for e in st.assoc.entries() {
+    for e in HashMap::entries(&st.assoc) {
         p = pairParts(&e.key);
         if p.ok && assocKept(sc, &p.before, &e.value) {
             st = optNamesOf(st, &e.value);
@@ -724,7 +724,7 @@ fn assocSection(st: St, sc: &Scope) -> St ~ {
 
 fn implArgsSection(st: St, sc: &Scope) -> St ~ {
     implArgs = [];
-    for e in st.implArgs.entries() {
+    for e in HashMap::entries(&st.implArgs) {
         p = pairParts(&e.key);
         if p.ok && implVisible(sc, &p.before, &p.after) {
             st = emitName(st, clone(p.before));
@@ -739,7 +739,7 @@ fn implArgsSection(st: St, sc: &Scope) -> St ~ {
 
 fn implBoundsSection(st: St, sc: &Scope) -> St ~ {
     implBounds = [];
-    for e in st.implBoundsNodes.entries() {
+    for e in HashMap::entries(&st.implBoundsNodes) {
         p = pairParts(&e.key);
         if p.ok && implVisible(sc, &p.before, &p.after) {
             st = emitName(st, clone(p.before));
@@ -755,14 +755,14 @@ fn implBoundsSection(st: St, sc: &Scope) -> St ~ {
 fn templateKept(st: &St, sc: &Scope, name: &String) -> Bool ~ {
     if indexIn(&sc.declaredFns, name) >= 0 { return true; };
     for function in &sc.declaredFns {
-        if indexIn(st.companions.lookup(function, []), name) >= 0 { return true; };
+        if indexIn(HashMap::lookup(&st.companions, function, []), name) >= 0 { return true; };
     };
     return false;
 };
 
 fn templatesSection(st: St, sc: &Scope) -> St ~ {
     templates = [];
-    for e in st.templates.entries() {
+    for e in HashMap::entries(&st.templates) {
         if templateKept(st, sc, &e.key) {
             st = templateEntry(st, &e.key, &e.value);
             templates = push(templates, Keyed { a: clone(e.key), b: "", node: st.nid });
@@ -773,7 +773,7 @@ fn templatesSection(st: St, sc: &Scope) -> St ~ {
 
 fn companionsSection(st: St, sc: &Scope) -> St ~ {
     companions = [];
-    for e in st.companions.entries() {
+    for e in HashMap::entries(&st.companions) {
         if templateKept(st, sc, &e.key) {
             st = namesEntry(st, &e.key, &e.value);
             companions = push(companions, Keyed { a: clone(e.key), b: "", node: st.nid });

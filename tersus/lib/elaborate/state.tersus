@@ -169,6 +169,7 @@ fn typeError(st: St, what: String) -> St ~ {
 };
 
 fn withTy(st: St, t: Int) -> St ~ {
+    if st.ty = t { return st; };
     return St { ty: t, ..st };
 };
 
@@ -300,11 +301,11 @@ fn resolve(st: &St, t: Int) -> Int ~ {
     going = true;
     while going [{ }] ~ {
         k = kindOf(st, r);
-        if k = 15 && st.subst.contains(numberOf(st, r)) {
-            r = st.subst.lookup(numberOf(st, r), r);
+        if k = 15 && HashMap::contains(&st.subst, numberOf(st, r)) {
+            r = HashMap::lookup(&st.subst, numberOf(st, r), r);
         } else {
-            if k = 23 && st.sizeSubst.contains(numberOf(st, r)) {
-                r = st.sizeSubst.lookup(numberOf(st, r), r);
+            if k = 23 && HashMap::contains(&st.sizeSubst, numberOf(st, r)) {
+                r = HashMap::lookup(&st.sizeSubst, numberOf(st, r), r);
             } else {
                 going = false;
             };
@@ -313,8 +314,22 @@ fn resolve(st: &St, t: Int) -> Int ~ {
     return r;
 };
 
+// Whether zonk would give another type than t (most types it is given are already resolved, and finding that out
+// needs no new state)
+fn zonkChanges(st: &St, t: Int) -> Bool ~ {
+    if resolve(st, t) != t { return true; };
+    if t < 0 || t >= size(st.tys) { return false; };
+    i = 0;
+    while i < size(get(st.tys, t).args) [{ affirm i >= 0; }] ~ {
+        if zonkChanges(st, get(get(st.tys, t).args, i)) { return true; };
+        i = i + 1;
+    };
+    return false;
+};
+
 // The type with everything known of its unknowns put in (TypeCheckCore.zonk), as a type of its own
 fn zonk(st: St, t: Int) -> St ~ {
+    if !zonkChanges(st, t) { return withTy(st, t); };
     r = resolve(st, t);
     x = tyAt(st, r);
     if size(x.args) = 0 { return withTy(st, r); };
@@ -365,14 +380,17 @@ fn unifySize(st: St, a: Int, b: Int) -> St ~ {
     ky = kindOf(st, y);
     if kx = 23 && ky = 23 && numberOf(st, x) = numberOf(st, y) { return St { ok: true, ..st }; };
     if kx = 23 {
-        if st.logging { st = St { sizeUndo: push(st.sizeUndo, numberOf(st, x)), ..st }; };
-        return St { sizeSubst: st.sizeSubst.insert(numberOf(st, x), y), ok: true, ..st };
+        nx = numberOf(st, x);
+        if st.logging { st = St { sizeUndo: push(st.sizeUndo, nx), ..st }; };
+        return St { sizeSubst: st.sizeSubst.insert(nx, y), ok: true, ..st };
     };
     if ky = 23 {
-        if st.logging { st = St { sizeUndo: push(st.sizeUndo, numberOf(st, y)), ..st }; };
-        return St { sizeSubst: st.sizeSubst.insert(numberOf(st, y), x), ok: true, ..st };
+        ny = numberOf(st, y);
+        if st.logging { st = St { sizeUndo: push(st.sizeUndo, ny), ..st }; };
+        return St { sizeSubst: st.sizeSubst.insert(ny, x), ok: true, ..st };
     };
-    return St { ok: sameTy(st, x, y), ..st };
+    same = sameTy(st, x, y);
+    return St { ok: same, ..st };
 };
 
 fn unifyArg(st: St, a: Int, b: Int) -> St ~ {
@@ -412,7 +430,7 @@ fn unify(st: St, a: Int, b: Int) -> St ~ {
     if kx = 4 && ky = 5 {
         variant = nameOf(st, y);
         whole = instanceName(st, x);
-        variants = st.types.lookup(&whole, []);
+        variants = HashMap::lookup(&st.types, &whole, []);
         return St { ok: indexIn(&variants, &variant) >= 0, ..st };
     };
     if kx != ky {
@@ -421,8 +439,14 @@ fn unify(st: St, a: Int, b: Int) -> St ~ {
         return St { ok: false, ..st };
     };
     if kx <= 2 { return St { ok: true, ..st }; };
-    if kx = 3 { return St { ok: numberOf(st, x) = numberOf(st, y) && tyAt(st, x).flag = tyAt(st, y).flag, ..st }; };
-    if kx = 5 || kx = 12 { return St { ok: nameOf(st, x) = nameOf(st, y), ..st }; };
+    if kx = 3 {
+        sameWord = numberOf(st, x) = numberOf(st, y) && tyAt(st, x).flag = tyAt(st, y).flag;
+        return St { ok: sameWord, ..st };
+    };
+    if kx = 5 || kx = 12 {
+        sameName = nameOf(st, x) = nameOf(st, y);
+        return St { ok: sameName, ..st };
+    };
     if kx = 6 {
         st = unifySize(st, argAt(st, x, 1), argAt(st, y, 1));
         if !st.ok { return st; };
