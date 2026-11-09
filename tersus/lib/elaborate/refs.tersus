@@ -661,8 +661,8 @@ fn ownParameterSources(st: &St, value: &TE) -> List<String> ~ {
     };
     if ex is AstExpression::F {
         a = ex as AstExpression::F;
-        head = exprOf(st, a.f);
-        if !(head is AstExpression::Var) && !(head is AstExpression::Val) { children = push(children, a.f); };
+        callHead = exprOf(st, a.f);
+        if !(callHead is AstExpression::Var) && !(callHead is AstExpression::Val) { children = push(children, a.f); };
         for arg in listItems(&st.nodes, a.xs) { children = push(children, arg); };
     };
     for node in children {
@@ -801,8 +801,8 @@ fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
             if st.status != 0 { return st; };
             signature = st.ty;
         } else {
-            head = typedChild(st, value, c.head);
-            if head.node >= 0 && size(head.types) > 0 { signature = get(head.types, 0); };
+            typedHead = typedChild(st, value, c.head);
+            if typedHead.node >= 0 && size(typedHead.types) > 0 { signature = get(typedHead.types, 0); };
         };
     };
     declared = [];
