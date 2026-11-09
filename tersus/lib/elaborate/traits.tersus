@@ -10,7 +10,7 @@ import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, f
 import elaborate::refs { putRefResult, traitResultFrom };
 import elaborate::state { BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, intText, isSize, joinWith, kindOf, namedTy, noBoundedParts, notModelled, nth, oneScope, rawInstanceName, render, resolve, simpleTy, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
-// The functions of a trait, an impl's checks against it, the functions with bounds and the calls that resolve to an impl's function
+import elaborate::exports { pairParts };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -278,7 +278,7 @@ fn templateOf(st: &St, v: Int, bounds: &List<BoundInfo>, boundsNode: Int, fs: &F
     for e in st.fns.entries() { fnNames = push(fnNames, clone(e.key)); fnTypes = push(fnTypes, e.value); };
     sig = sigNode;
     if sig < 0 { sig = value.sig; };
-    return Template { bounds: clone(bounds), fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: value.ins, outs: value.outs, term: value.term, body: value.stmts, boundsNode: boundsNode, paramsNode: value.ps, sigNode: sig, retNode: 0 - 1 };
+    return Template { bounds: clone(bounds), fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: value.ins, outs: value.outs, term: value.term, body: value.stmts, boundsNode: boundsNode, paramsNode: value.ps, sigNode: sig, retNode: 0 - 1, grouped: false, definingTraits: [], definingTypes: [], definingTemplates: [], privateContext: false };
 };
 
 // How big a type is, so that a function with bounds can call itself for a part of the type it is made for (typeBigness)
@@ -313,6 +313,60 @@ fn unknownIn(st: &St, t: Int) -> Bool ~ {
 // A call of a function with bounds: the types of the arguments give the function's types, each meets its bounds, and the
 // function is checked for them once, as a function of the program named after them (templateCall). st.te: the call.
 fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~ {
+    if !tm.grouped { return templateInContext(st, name, tm, inferred); };
+    if tm.privateContext { return notModelled(st, "an imported template with private defining dependency metadata"); };
+    for b in &tm.bounds {
+        for t in &b.ts {
+            if mentionsParameter(st, t) { return notModelled(st, "an imported template with parameter-dependent trait arguments"); };
+        };
+    };
+    outerTraits = clone(st.traits);
+    outerTraitFns = clone(st.traitFns);
+    outerTraitParams = clone(st.traitParams);
+    outerAssoc = clone(st.assoc);
+    outerImpls = clone(st.impls);
+    outerImplArgs = clone(st.implArgs);
+    outerImplBounds = clone(st.implBounds);
+    outerTemplates = clone(st.templates);
+    outerFns = clone(st.fns);
+    known = HashSet::new();
+    for trait in &tm.definingTraits { known = known.insert(clone(trait)); };
+    traitFns = st.traitFns;
+    for e in st.traitFns.entries() { if !known.contains(&e.key) { traitFns = traitFns.remove(&e.key); }; };
+    traitParams = st.traitParams;
+    for e in st.traitParams.entries() { if !known.contains(&e.key) { traitParams = traitParams.remove(&e.key); }; };
+    assoc = st.assoc;
+    allowed = HashSet::new();
+    for e in st.assoc.entries() {
+        origins = [];
+        pair = pairParts(&e.key);
+        for trait in &e.value {
+            if known.contains(trait) || (size(trait.bytes) = 0 && pair.ok && indexIn(&tm.definingTypes, baseNameOf(&pair.before)) >= 0) {
+                origins = push(origins, clone(trait));
+                if pair.ok { allowed = allowed.insert(implFunctionName(&pair.before, trait, &pair.after)); };
+            };
+        };
+        if size(origins) = 0 { assoc = assoc.remove(&e.key); } else { assoc = assoc.insert(clone(e.key), origins); };
+    };
+    for method in allowed.elements() {
+        for companion in st.companions.lookup(&method, []) { allowed = allowed.insert(clone(companion)); };
+    };
+    impls = st.impls;
+    for key in st.impls.elements() { pair = pairParts(&key); if !pair.ok || !known.contains(&pair.before) { impls = impls.remove(&key); }; };
+    implArgs = st.implArgs;
+    for e in st.implArgs.entries() { pair = pairParts(&e.key); if !pair.ok || !known.contains(&pair.before) { implArgs = implArgs.remove(&e.key); }; };
+    implBounds = st.implBounds;
+    for e in st.implBounds.entries() { pair = pairParts(&e.key); if !pair.ok || !known.contains(&pair.before) { implBounds = implBounds.remove(&e.key); }; };
+    templates = st.templates;
+    for e in st.templates.entries() { if indexIn(&tm.definingTemplates, &e.key) < 0 && !allowed.contains(&e.key) { templates = templates.remove(&e.key); }; };
+    fns = st.fns;
+    for e in st.fns.entries() { if indexIn(&tm.fnNames, &e.key) < 0 && !allowed.contains(&e.key) { fns = fns.remove(&e.key); }; };
+    st = St { traits: known, traitFns: traitFns, traitParams: traitParams, assoc: assoc, impls: impls, implArgs: implArgs, implBounds: implBounds, templates: templates, fns: fns, ..st };
+    st = templateInContext(st, name, tm, inferred);
+    return St { traits: outerTraits, traitFns: outerTraitFns, traitParams: outerTraitParams, assoc: outerAssoc, impls: outerImpls, implArgs: outerImplArgs, implBounds: outerImplBounds, templates: outerTemplates, fns: outerFns, ..st };
+};
+
+fn templateInContext(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~ {
     st = fnTy(st, clone(tm.ptys), tm.rty);
     st = instantiateGenerics(st, &tm.sizes, &tm.types, st.ty);
     instantiated = st.ty;
@@ -450,7 +504,8 @@ fn templateInstance(st: St, name: &String, tm: &Template, concrete: &List<Int>) 
         if st.status != 0 { return st; };
         for companion in st.companions.lookup(name, []) {
             companionName = catStrings(clone(companion), clone(suffix));
-            if st.templates.contains(&companion) && !st.instances.contains(&companionName) {
+            if !st.templates.contains(&companion) { return notModelled(st, "a required template companion outside its retained defining scope"); };
+            if !st.instances.contains(&companionName) {
                 ctm = st.templates.lookup(&companion, emptyTemplate());
                 st = makeTemplateInstance(st, &companion, &ctm, &companionName, bigness, concrete);
                 if st.status != 0 { return st; };
@@ -512,21 +567,16 @@ fn makeTemplateInstance(st: St, name: &String, tm: &Template, instance: &String,
     for p in &tm.ptys { st = substitute(st, p, &noSizeNames, &noSizes, &tm.types, concrete); ptys = push(ptys, st.ty); };
     st = substitute(st, tm.rty, &noSizeNames, &noSizes, &tm.types, concrete);
     rty = st.ty;
-    fs = FnSig { params: clone(tm.params), ptys: clone(ptys), rty: rty, sizes: clone(tm.sizes), types: [], writes: [], froms: clone(tm.from) };
+    writes = namesText(&st.nodes, signatureOf(&st.nodes, tm.sigNode).ws);
+    fs = FnSig { params: clone(tm.params), ptys: clone(ptys), rty: rty, sizes: clone(tm.sizes), types: [], writes: writes, froms: clone(tm.from) };
     st = fnTypeOf(st, &fs);
     fnT = st.ty;
-    // (the instance sees the caller's functions, those of where the template was declared, and itself)
-    added = [];
+    savedFns = clone(st.fns);
     i = 0;
     while i < size(tm.fnNames) && i < size(tm.fnTypes) [{ affirm i >= 0; }] ~ {
-        fnName = clone(get(tm.fnNames, i));
-        if !st.fns.contains(&fnName) {
-            added = push(added, clone(get(tm.fnNames, i)));
-            st = St { fns: st.fns.insert(clone(get(tm.fnNames, i)), get(tm.fnTypes, i)), ..st };
-        };
+        st = St { fns: st.fns.insert(clone(get(tm.fnNames, i)), get(tm.fnTypes, i)), ..st };
         i = i + 1;
     };
-    if !st.fns.contains(instance) { added = push(added, clone(instance)); };
     st = St { fns: st.fns.insert(clone(instance), fnT), instances: st.instances.insert(clone(instance), fnT), ..st };
     outerNames = clone(st.activeNames);
     outerSizes = clone(st.activeSizes);
@@ -536,7 +586,7 @@ fn makeTemplateInstance(st: St, name: &String, tm: &Template, instance: &String,
     parts = clone(st.outs);
     bodyTypes = clone(st.te.types);
     from = clone(st.names);
-    for a in &added { st = St { fns: st.fns.remove(a), ..st }; };
+    st = St { fns: savedFns, ..st };
     st = emitName(st, clone(instance));
     nameNode = st.nid;
     st = emitNames(st, &tm.params);
@@ -550,7 +600,7 @@ fn makeTemplateInstance(st: St, name: &String, tm: &Template, instance: &String,
     noNames = [];
     st = emitNames(st, &noNames);
     psNode = st.nid;
-    st = emitNames(st, &noNames);
+    st = emitNames(st, &fs.writes);
     wsNode = st.nid;
     st = emitNames(st, &from);
     st = emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: ssNode, ps: psNode, ws: wsNode, fs: st.nid } });
@@ -615,7 +665,7 @@ fn callResolved(st: St, name: String, inferred: &List<TE>) -> St ~ {
 };
 
 fn emptyTemplate() -> Template ~ {
-    return Template { bounds: [], fnNames: [], fnTypes: [], params: [], ptys: [], rty: 0, sizes: [], types: [], from: [], ins: 0 - 1, outs: 0 - 1, term: 0 - 1, body: 0 - 1, boundsNode: 0 - 1, paramsNode: 0 - 1, sigNode: 0 - 1, retNode: 0 - 1 };
+    return Template { bounds: [], fnNames: [], fnTypes: [], params: [], ptys: [], rty: 0, sizes: [], types: [], from: [], ins: 0 - 1, outs: 0 - 1, term: 0 - 1, body: 0 - 1, boundsNode: 0 - 1, paramsNode: 0 - 1, sigNode: 0 - 1, retNode: 0 - 1, grouped: false, definingTraits: [], definingTypes: [], definingTemplates: [], privateContext: false };
 };
 
 // The function that Type::f means: the one function of that name that the impls of Type define (resolveAssociated); st.names
@@ -807,6 +857,7 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     for b in st.implBounds.lookup(pairKey(&tname, &base), []) {
         at = indexIn(&boundNames, &b.p);
         if at < 0 || at >= size(boundTypes) { return gives(st, false, []); };
+        if !st.traits.contains(&b.n) { return notModelled(st, "a caller implementation with private bound prerequisites"); };
         st = traitArguments(st, clone(b.n), head(get(boundTypes, at).types));
         if st.status != 0 { return st; };
         if !st.ok { return gives(st, false, []); };

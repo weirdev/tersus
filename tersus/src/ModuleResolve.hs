@@ -60,11 +60,14 @@ implCanonical pkg file name = case stripPrefix "<" name of
         let (inside, after) = break (== '>') rest
             function = drop 3 after
          in case breakOn " as " inside of
-                Just (owner, trait) -> implFunctionName (canonicalOwner owner) (Just (canonicalForFile pkg file trait)) function
+                Just (owner, trait) -> implFunctionName (canonicalOwner owner) (Just (target KindTrait trait)) function
                 Nothing -> implFunctionName (canonicalOwner inside) Nothing function
     Nothing -> canonicalForFile pkg file name
   where
-    canonicalOwner owner = canonicalForFile pkg file (baseNameOf owner)
+    canonicalOwner owner = target KindType (baseNameOf owner)
+    target kind local = case nub [diCanonical decl | decl <- packageDecls pkg, diKind decl == kind, local `elem` spellingsFor pkg file decl] of
+        [canonical] -> canonical
+        _ -> local
     breakOn needle = go ""
       where
         go acc text
@@ -188,8 +191,8 @@ buildMaps pkg current = do
         KindTrait -> foldBuild (\mm fnName -> foldBuild (\mmm traitSpelling -> insertChecked "trait functions" (traitSpelling ++ "::" ++ fnName) (diCanonical decl ++ "::" ++ fnName) mmm) mm (spellingsFor pkg current decl)) m (diTraitFns decl)
         KindFunction
             | "<" `isPrefixOf` diLocal decl ->
-                let (ownerLocal, fnName) = implOwnerFn (diLocal decl)
-                 in case [owner | owner <- allDeclsOf pkg, diKind owner == KindType, diLocal owner == ownerLocal] of
+                let (_, fnName) = implOwnerFn (diLocal decl)
+                 in case [owner | owner <- allDeclsOf pkg, diKind owner == KindType, diCanonical owner == ownerCanonicalOf (diCanonical decl)] of
                         ownerDecl : _ -> foldBuild (\mm ownerSpelling -> insertChecked "associated functions" (ownerSpelling ++ "::" ++ fnName) (ownerCanonicalOf (diCanonical decl) ++ "::" ++ fnName) mm) m (spellingsFor pkg current ownerDecl)
                         [] -> Right m
             | otherwise -> Right m
@@ -498,8 +501,9 @@ rewriteStatement maps bound typeParams stmt = case stmt of
         body' <- rewriteValidations maps bound' typeParams body
         Right (ProofDef name args ins' outs' body', bound)
     Assign name (Val funct@(VFunct params ins outs body exported)) -> do
+        name' <- rewriteImplFull maps name
         (ins', outs', body') <- rewriteFunctParts maps bound typeParams params ins outs body
-        Right (Assign name (Val (VFunct params ins' outs' body' exported)), Set.insert name bound)
+        Right (Assign name' (Val (VFunct params ins' outs' body' exported)), Set.insert name' bound)
     Assign name expr -> do
         expr' <- rewriteExpr maps bound typeParams expr
         Right (Assign name expr', Set.insert name bound)

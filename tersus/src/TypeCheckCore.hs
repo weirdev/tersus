@@ -72,6 +72,7 @@ data TcState = TcState
     , tcImplBounds :: Map (Name, Name) [Bound] -- for a trait and a type whose impl of it has bounds (`impl<T: Eq> Eq for List<T>`), the bounds
     , tcCompanions :: Map Name [Name] -- for a function of an impl with bounds, the template of the check of it against its trait, made with it
     , tcPredeclared :: Set.Set Name -- the types a module predeclared from its own declarations, which their definitions may then redeclare
+    , tcDefinitions :: [(Map Name Template, TcState)]
     }
 
 -- A function whose type parameters have bounds (`fn total<S: Sequence<Int>>(s: &S) -> Int`): its definition, the bounds and the functions it can
@@ -91,7 +92,7 @@ data Template = Template
 newtype TC a = TC (TcState -> Either String (a, TcState))
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty Map.empty Map.empty Set.empty
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty Map.empty Map.empty Set.empty []
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -408,7 +409,9 @@ ctorInfo name = do
     s <- getState
     case Map.lookup name (tcCtors s) of
         Just info -> return info
-        Nothing -> failTc ("Type error: unknown struct or variant " ++ name)
+        Nothing -> case Map.lookup name (tcGenerics s) of
+            Just (_, fields) -> return (name, fields)
+            Nothing -> failTc ("Type error: unknown struct or variant " ++ name)
 
 -- The constructors of a type
 typeCtors :: Name -> TC [Name]
@@ -1568,7 +1571,7 @@ traitArgumentsOf "Eq" (TBox (TArrayOf e _)) = fmap (const []) <$> traitArguments
 traitArgumentsOf trait ty = do
     s <- getState
     let arity = length (Map.findWithDefault [] trait (tcTraitParams s))
-        builtin elementType traits = fmap (\ts -> (ts, ("", []))) (Just [elementType | trait `elem` traits, arity == 1])
+        builtin elementType traits = fmap (\ts -> (ts, ("", [], []))) (Just [elementType | trait `elem` traits, arity == 1])
         own name args = case Map.lookup (trait, name) (tcImplArgs s) of
             Nothing -> Nothing
             Just (selfType, given) -> case selfType of
@@ -1576,8 +1579,8 @@ traitArgumentsOf trait ty = do
                     | length selfArgs /= length args -> Nothing
                     | otherwise -> do
                         (sizesBound, typesBound) <- foldl collect (Just ([], [])) (zip selfArgs args)
-                        return ([substitute sizesBound typesBound t | ArgType t <- given], (name, typesBound))
-                _ -> Just ([t | ArgType t <- given], (name, []))
+                        return ([substitute sizesBound typesBound t | ArgType t <- given], (name, sizesBound, typesBound))
+                _ -> Just ([t | ArgType t <- given], (name, [], []))
           where
             collect Nothing _ = Nothing
             collect (Just (ss, ts)) (ArgSize (SizeParam p), ArgSize sz) = Just ((p, sz) : ss, ts)
@@ -1621,14 +1624,44 @@ traitArgumentsOf trait ty = do
     -- (an impl with bounds is for the types that meet them)
     case found of
         Nothing -> return Nothing
-        Just (args, (base, bindings)) -> do
+        Just (args, (base, sizes, bindings)) -> do
             let bounds = Map.findWithDefault [] (trait, base) (tcImplBounds s)
-            met <- allM [maybe (return False) (fmap isJust . traitArguments bound) (lookup param bindings) | (param, bound, _) <- bounds]
+            met <- inImplementationContext (trait, base) $ allM [case lookup param bindings of
+                Nothing -> return False
+                Just concrete -> do
+                    actual <- traitArguments bound concrete
+                    wanted <- mapM (zonk . substitute sizes bindings) parameters
+                    case actual of
+                        Nothing -> return False
+                        Just given -> (== wanted) <$> mapM zonk given
+                | (param, bound, parameters) <- bounds]
             return (if met then Just args else Nothing)
   where
     nonEmpty (xs, b) = if null xs then Nothing else Just (xs, b)
     allM [] = return True
     allM (m : ms) = m >>= \ok -> if ok then allM ms else return False
+
+inImplementationContext :: (Name, Name) -> TC a -> TC a
+inImplementationContext pair action = do
+    outer <- getState
+    let contexts = [context | (_, context) <- tcDefinitions outer
+            , pair `Set.member` tcImpls context
+            , Just arguments <- [Map.lookup pair (tcImplArgs outer)]
+            , Map.lookup pair (tcImplArgs context) == Just arguments
+            , Map.lookup pair (tcImplBounds context) == Map.lookup pair (tcImplBounds outer)]
+    case contexts of
+        context : _ -> do
+            putState outer{tcTraits = Map.union (tcTraits context) (tcTraits outer),
+                tcTraitParams = Map.union (tcTraitParams context) (tcTraitParams outer),
+                tcImpls = Set.union (tcImpls context) (tcImpls outer),
+                tcImplArgs = Map.union (tcImplArgs context) (tcImplArgs outer),
+                tcImplBounds = Map.union (tcImplBounds context) (tcImplBounds outer)}
+            result <- action
+            after <- getState
+            putState after{tcTraits = tcTraits outer, tcTraitParams = tcTraitParams outer,
+                tcImpls = tcImpls outer, tcImplArgs = tcImplArgs outer, tcImplBounds = tcImplBounds outer}
+            return result
+        [] -> action
 
 -- The result of applying a function type to argument types
 checkCall :: String -> Type -> [Type] -> TC Type

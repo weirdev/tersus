@@ -26,22 +26,21 @@ import Syntax (Elaborated (..), Statement)
 import TypeCheck (ImportEnv (..), elaborateWith)
 import Utils
 
--- Which interface of the module the elaborator also gives back: none (a single-file program), the
--- interface of a package module (Interface.extractInterface) or of a compiler-library module
--- (Interface.extractLibInterface)
+-- Which interface to return: ordinary modules share one template export policy;
+-- compiler-library extraction additionally retains physical constructor views.
 data Extraction = NoInterface | ModuleInterfaceOf | LibInterfaceOf
     deriving (Show, Eq)
 
 -- The module, whether it predeclares its own types (a package module does), whether it is a module of the
 -- compiler libraries (which see a generic struct's constructor as the struct it builds), the interface to
--- give back, the interfaces it sees in the order they are merged (the first wins a name), and its
--- statements as read
+-- give back, caller-visible interfaces, checked defining dependencies, and statements as read.
 data Request = Request
     { rqModule :: ModuleId
     , rqPredeclare :: Bool
     , rqLibrary :: Bool
     , rqExtraction :: Extraction
     , rqInterfaces :: [ModuleInterface]
+    , rqDefinitions :: [[ModuleInterface]]
     , rqStatements :: [Statement]
     }
     deriving (Show, Eq)
@@ -63,6 +62,7 @@ writeRequest :: Request -> Result String String
 writeRequest rq =
     builtinTableText `bindResult` \builtins ->
     mapAll writeInterface (rqInterfaces rq) `bindResult` \ifaces ->
+        mapAll writeDefinition (rqDefinitions rq) `bindResult` \definitions ->
         writeParsed (rqStatements rq) `bindResult` \ast ->
             Ok $
                 unlines
@@ -76,9 +76,13 @@ writeRequest rq =
                         ++ block builtins
                         ++ ["interfaces " ++ show (length ifaces)]
                         ++ concatMap block ifaces
+                        ++ ["definitions " ++ show (length definitions)]
+                        ++ concat definitions
                     )
                     ++ block' ast
   where
+    writeDefinition [] = Error "ElaborateRequest: empty defining context"
+    writeDefinition context = mapAll writeInterface context `bindResult` \texts -> Ok (("definition " ++ show (length texts)) : concatMap block texts)
     ModuleId pkg modu = rqModule rq
     block text = lines (block' text)
     block' text = unlines (("data " ++ show (length (lines text))) : lines text)
@@ -101,14 +105,23 @@ readRequest text = case lines text of
         countOf countText `bindResult` \count ->
         blocks count rest `bindResult` \(ifaceTexts, rest') ->
         mapAll readInterface ifaceTexts `bindResult` \ifaces ->
-        blocks 1 rest' `bindResult` \(astTexts, rest'') ->
+        definitionBlocks rest' `bindResult` \(definitionTexts, syntax) ->
+        mapAll (mapAll readInterface) definitionTexts `bindResult` \definitions ->
+        blocks 1 syntax `bindResult` \(astTexts, rest'') ->
             if not (null rest'')
                 then Error "ElaborateRequest: records after the module's syntax"
                 else case astTexts of
-                    [ast] -> readParsed ast `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces stmts)
+                    [ast] -> readParsed ast `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions stmts)
                     _ -> Error "ElaborateRequest: no syntax"
     _ -> Error "ElaborateRequest: not an elaboration request"
   where
+    definitionBlocks (line : rest) = wordAfter "definitions" line `bindResult` countOf `bindResult` \count -> contexts count rest
+    definitionBlocks [] = Error "ElaborateRequest: missing defining interfaces"
+    contexts 0 rest = Ok ([], rest)
+    contexts n (line : rest) = wordAfter "definition" line `bindResult` countOf `bindResult` \count ->
+        if count == 0 then Error "ElaborateRequest: empty defining context" else
+        blocks count rest `bindResult` \(context, remaining) -> contexts (n - 1) remaining `bindResult` \(more, syntax) -> Ok (context : more, syntax)
+    contexts _ [] = Error "ElaborateRequest: missing defining context"
     moduleOf line = strictTokenize line `bindResult` \ts -> case ts of
         [Word "module", Str pkg, Word "none"] -> Ok (ModuleId pkg Nothing)
         [Word "module", Str pkg, Str modu] -> Ok (ModuleId pkg (Just modu))
@@ -163,7 +176,8 @@ respond rq = case elaborateWith env (rqStatements rq) of
     -- (a generic constructor's owner is a compiler-only physical view, not something a program imports)
     owners = Map.fromList [(owner, [ctor]) | iface <- rqInterfaces rq, (ctor, (owner, _)) <- Map.toList (ifCtors iface), ctor == owner]
     viewed = if rqLibrary rq then merged{ieTypes = Map.union (ieTypes merged) owners} else merged
-    env = if rqPredeclare rq then predeclareOwnEnv viewed else viewed
+    env = (if rqPredeclare rq then predeclareOwnEnv viewed else viewed)
+        { ieDefinitions = [(ifTemplates owner, mergeInterfacesImportEnv context) | context@(owner : _) <- rqDefinitions rq] }
     extracted extract stmts state elaborated = case extract (rqModule rq) (rqStatements rq) stmts state of
         Error e -> RefusedInterface e
         Ok iface -> Accepted elaborated (Just iface)

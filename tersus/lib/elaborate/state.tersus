@@ -47,7 +47,8 @@ impl Clone for ImplArgs { };
 struct Template {
     bounds: List<BoundInfo>, fnNames: List<String>, fnTypes: List<Int>, params: List<String>, ptys: List<Int>, rty: Int,
     sizes: List<String>, types: List<String>, from: List<String>, ins: Int, outs: Int, term: Int, body: Int,
-    boundsNode: Int, paramsNode: Int, sigNode: Int, retNode: Int
+    boundsNode: Int, paramsNode: Int, sigNode: Int, retNode: Int,
+    grouped: Bool, definingTraits: List<String>, definingTypes: List<String>, definingTemplates: List<String>, privateContext: Bool
 };
 impl Clone for Template { };
 

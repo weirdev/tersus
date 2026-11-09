@@ -9,6 +9,7 @@ module LibPackage
     , libModuleOfDisplay
     , libSelection
     , libSelectionFor
+    , libDefinitionContexts
     , stripDeclaredFromUnits
     ) where
 
@@ -88,7 +89,7 @@ compileLibModule :: Elaborator -> Map.Map String ModuleInterface -> [String] -> 
 compileLibModule elaborator ifaces deps name statements =
     let moduId = libModuleId name
         depIfaces = [ifaces Map.! dep | dep <- deps]
-     in case elaborator (Request moduId True True LibInterfaceOf depIfaces statements) of
+     in case elaborator (Request moduId True True LibInterfaceOf depIfaces (definitionContexts ifaces (Map.keys ifaces) deps) statements) of
             Accepted elaborated (Just iface) -> case lowerModuleWith (mergeInterfacesImportEnv depIfaces) depIfaces elaborated of
                 Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
                 Ok program -> Ok (iface, program)
@@ -152,16 +153,28 @@ libSelectionFor pkg names statements =
                         then Left "Type error: a replacement Eq used with cached library implementations must have exactly the library Eq's parameters, method signatures and contracts"
                         else Right (visible, units)
 
-libSelection :: LibPackage -> [String] -> ([ModuleInterface], [(ModuleId, M.Program)])
-libSelection pkg names =
-    let wanted = [name | name <- closure names, name /= "types" || "types" `elem` names]
-        ordered = [name | name <- libOrder pkg, name `elem` wanted]
-     in ( [libInterfaces pkg Map.! name | name <- ordered]
-        , [(libModuleId name, libPrograms pkg Map.! name) | name <- ordered]
-        )
+libDefinitionContexts :: LibPackage -> [String] -> [[ModuleInterface]]
+libDefinitionContexts pkg = definitionContexts (libInterfaces pkg) (libOrder pkg)
+
+definitionContexts :: Map.Map String ModuleInterface -> [String] -> [String] -> [[ModuleInterface]]
+definitionContexts ifaces order names =
+    [ iface : [ifaces Map.! dependency | dependency <- order, dependency `elem` libDependencyClosure (libDependencies name)]
+    | name <- order, name `elem` libDependencyClosure names
+    , Just iface <- [Map.lookup name ifaces]
+    ]
+
+libDependencyClosure :: [String] -> [String]
+libDependencyClosure pending = go pending []
   where
-    closure pending = go pending []
     go [] done = done
     go (name : rest) done
         | name `elem` done = go rest done
         | otherwise = go (libDependencies name ++ rest) (done ++ [name])
+
+libSelection :: LibPackage -> [String] -> ([ModuleInterface], [(ModuleId, M.Program)])
+libSelection pkg names =
+    let wanted = [name | name <- libDependencyClosure names, name /= "types" || "types" `elem` names]
+        ordered = [name | name <- libOrder pkg, name `elem` wanted]
+     in ( [libInterfaces pkg Map.! name | name <- ordered]
+        , [(libModuleId name, libPrograms pkg Map.! name) | name <- ordered]
+        )
