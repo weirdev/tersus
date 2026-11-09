@@ -116,6 +116,24 @@ testIfJoin =
               -- An arm the path condition rules out contributes nothing to the join
             , ( "valid-infeasible-arm-contributes-nothing", "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ }] { x = 0; if n < 0 { x = 1; } else { x = 2; }; affirm x = 2; return 0; }; return 0;", ControlValid )
             , ( "fail-infeasible-arm-contributes-nothing", "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ }] { x = 0; if n < 0 { x = 1; } else { x = 2; }; affirm x = 1; return 0; }; return 0;", ControlFails "Could not prove: x = 1" )
+              -- The merge model's contest fixtures written as programs (their structural twins,
+              -- which reach a kept self-pair only through the contest, are in the bridges family)
+            , ( "join-bounds-x-through-unnamed-intermediate", "fn f(y: Int, a: Int, b: Int, c: Bool) -> Int [{ affirm a >= 0; affirm b >= 0; }] [{ }] { x = y; if c { x = y + a + 1; } else { x = y + b + 1; }; affirm x > y; return x; }; return 0;", ControlValid )
+            , ( "join-bounds-x-through-two-unnamed-intermediates", "fn f(y: Int, a: Int, b: Int, c: Bool) -> Int [{ affirm a >= 0; affirm b >= 0; }] [{ }] { x = y; if c { x = y + a + 1 + 1; } else { x = y + b + 1 + 1; }; affirm x > y; return x; }; return 0;", ControlValid )
+            , ( "join-bounds-call-result-through-unnamed-temporary", "fn g(p: Int) -> Int [{ }] [{ affirm return <= p; }] { return p; }; fn f(y: Int, c: Bool) -> Int [{ }] [{ }] { w = y + 3; x = 0; if c { x = g(y + 2); } else { x = g(y + 3); }; affirm x <= w; return x; }; return 0;", ControlValid )
+            , ( "join-keeps-zero-bound-over-two-diamonds", "fn f(c: Bool, d: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 1; } else { x = x + 2; }; if d { x = x + 1; } else { x = x + 2; }; affirm x > 0; return x; }; return 0;", ControlValid )
+              -- x is defined from an old value no local holds, and t = old + 3 is kept
+            , ( "join-bounds-named-lockstep-definition-from-old-value", "fn f(y: Int, k: Int, c: Bool) -> Int [{ }] [{ }] { u = y + k; t = u + 3; w = u; u = y; x = 0; if c { x = w + 1; w = y; } else { x = w + 2; w = y; }; affirm x < t; return x; }; return 0;", ControlValid )
+              -- An arm that resets the counter to the bound answers no to the strict question
+            , ( "fail-one-arm-resets-to-the-bound", "fn f(c: Int) -> Int [{ }] [{ }] { x = 5; if c > 0 { x = x + 1; } else { x = 0; }; affirm x > 0; return x; }; return 0;", ControlFails "Could not prove: x > 0" )
+              -- A literal is every fact's term, never renamed or aliased into a joined local
+            , ( "fail-literal-not-aliased-into-joined-local", "fn f(c: Int) -> Int [{ }] [{ }] { m = 1; if c > 0 { m = 1; } else { m = 2; }; affirm m >= 3; return m; }; return 0;", ControlFails "Could not prove: m >= 3" )
+            , ( "valid-parameter-and-literal-kept-unpaired", "fn f(c: Bool, p: Int) -> Int [{ affirm p > 3; }] [{ }] { x = p; m = 1; if c { x = p; m = 1; } else { m = 2; }; affirm x > 3; affirm m >= 1; affirm p > 1; return x; }; return 0;", ControlValid )
+            , ( "valid-size-of-joined-local-survives-join", "fn f(c: Bool, l: List<Int>) -> Int [{ }] [{ }] { m = l; n = size(m); if c { m = push(m, 1); n = size(m); } else { m = push(m, 2); n = size(m); }; affirm n = size(m); return 0; }; return 0;", ControlValid )
+              -- Arms of unequal length mint different ids for the same local, both ways round
+            , ( "valid-unequal-arm-lengths", "fn f(c: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 1; x = x + 1; } else { x = x + 3; }; affirm x > 1; return x; }; return 0;", ControlValid )
+            , ( "valid-unequal-arm-lengths-reversed", "fn f(c: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 3; } else { x = x + 1; x = x + 1; }; affirm x > 1; return x; }; return 0;", ControlValid )
+            , ( "fail-unequal-arms-same-id-two-values", "fn f(c: Bool, p: Int) -> Int [{ }] [{ }] { t = 0; x = 0; if c { t = p + 1; x = t + 1; } else { x = p + 5; }; affirm x = t + 1; return x; }; return 0;", ControlFails "Could not prove: x = t + 1" )
             ]
         runRow (name, source, verdict) =
             ( name
