@@ -83,8 +83,10 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     `Interface`) that answers an elaboration request (`AST_DATA.md`) for a
     program or a module. Its declarative sibling files are one root module with
     `elaborate.tersus` as the entry. `PreludeSource.elaboratePackageFiles`
-    embeds it; only `testElaborate`, `testElaborateMutant`, `testHostValidation`
-    and `frontend-diff` build and run it.
+    embeds it; only `testElaborate`, `testElaborateMutant`, `testHostValidation`,
+    `testFrontendBootstrap`, `frontend-diff` and `frontend-seed` build and run it
+    (`test/ElaboratorNative.hs`, shared with `frontend-seed`; the frontend
+    seed F0 is its pinned IR).
   - `mir/`, `data/`, `parser/` and `ast_reader/`: the compiler's own programs,
     four packages beside `validation/` with their own `package.tersus`
     markers. `testHostValidation` validates the AST reader, the MIR reader,
@@ -115,13 +117,17 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   (see Build, Test, and Development Commands).
 - `tersus/bootstrap/parser.sha256`: the SHA-256 pin of the native parser LLVM
   seed; `TERSUS_PARSER_SEED_FILE` supplies verified local bytes before release.
+- `tersus/bootstrap/frontend.sha256`: the SHA-256 pin of the elaborator's LLVM
+  seed (F0); `TERSUS_FRONTEND_SEED_FILE` supplies verified local bytes. Nothing
+  in production uses it yet: `testFrontendBootstrap` and
+  `TERSUS_TOOL_ELABORATOR=seed` (the host's programs elaborated by F0) do.
 - `tersus/test/`: regression tests. `TestTersus.hs` runs the test groups; the
   groups live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`,
   `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`,
   `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`,
   `TestCopies`, `TestEq`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
   `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
-  `TestMirEmit`, `TestBootstrap`, `TestParity`, `TestAstData`, `TestDifferential`
+  `TestMirEmit`, `TestBootstrap`, `TestFrontendBootstrap`, `TestParity`, `TestAstData`, `TestDifferential`
   (the differential harness of `test/Differential.hs`, also run on an elaborator
   executable by `stack run frontend-diff`) and `TestElaborate` (the differential
   on the elaborator of `lib/elaborate/`), with the shared harness in `TestHarness`.
@@ -180,6 +186,18 @@ Work from `tersus/`.
   put the digest in `bootstrap/emitter.sha256`, and let `TestBootstrap`
   check the stage 0 / stage 1 fixpoint. Do not write straight into a seed
   file the running compiler is using.
+- The elaborator seed (F0): `stack run frontend-seed -- emit /tmp/frontend.ll.new "$(git rev-parse HEAD)"`
+  builds F0 from the pin, F1 (the elaborator elaborated by F0) and F2
+  (elaborated by F1), requires F2 to be F1 (F1 elaborates the elaborator as F0
+  does), and writes F1's IR. `testFrontendBootstrap` checks the same fixpoint.
+  A new seed is needed only when F0 can no longer elaborate the elaborator (a
+  change to the request or response it reads or writes): run
+  `stack run frontend-seed -- advance /tmp/frontend.ll.new "$(git rev-parse HEAD)"`
+  (the elaborator elaborated by the Haskell elaborator), pin its digest in
+  `bootstrap/frontend.sha256` and rebuild, then `emit` with
+  `TERSUS_FRONTEND_SEED_FILE` set to it and the same commit must give the same
+  bytes. Publish it as the `frontend.ll` asset of a release tagged
+  `bootstrap-<first 12 digits of its digest>`, as for the other seeds.
 - Production parsing uses native P1. Bootstrap readers (`StdLibDefs`,
   `LibParsed`, `Compile`, default `Modules`) use the pinned native P0 leaf;
   there is no Haskell grammar or fallback. Building Haskell needs no clang
@@ -204,7 +222,9 @@ Work from `tersus/`.
   `testParserBootstrap:2/2` for repair and fixpoint checks from independent
   private copies of the runner's ordinary tool cache. Ordinary preparation
   is counted in the latter group and never credited to the cold pair.
-  CI reserves one runner for each of these three bootstrap groups; the
+  `testFrontendBootstrap` builds the elaborator seed F0 and the stages F1 and
+  F2 and checks their fixpoint (`REPLACING_HASKELL.md`, "The frontend seed").
+  CI reserves one runner for each of these four bootstrap groups; the
   remaining groups use three runners, with four worker processes per runner.
   The required aggregate check still requires every shard to pass.
   `testHostValidation`, which validates the compiler's own programs (the AST

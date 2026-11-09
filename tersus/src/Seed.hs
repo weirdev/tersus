@@ -9,6 +9,10 @@ module Seed
     , parserSeedSha256
     , parserSeedUrl
     , cachedParserSeed
+    , frontendSeedHash
+    , frontendSeedSha256
+    , frontendSeedUrl
+    , cachedFrontendSeed
     ) where
 
 import Control.Exception (IOException, evaluate, try)
@@ -25,7 +29,7 @@ import CacheLock (openTempFileCloexec)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Native (buildExecutable, cachedProgram, cacheDirectory, readProcessOutput)
-import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, seedSha256, parserSeedSha256, stdlibSource)
+import PreludeSource (compilerSourceHash, frontendSeedSha256, libPackageFiles, mirPackageFiles, seedSha256, parserSeedSha256, stdlibSource)
 import Utils
 
 seedUrl :: String
@@ -33,6 +37,9 @@ seedUrl = assetUrl "emitter" seedSha256
 
 parserSeedUrl :: String
 parserSeedUrl = assetUrl "parser" parserSeedSha256
+
+frontendSeedUrl :: String
+frontendSeedUrl = assetUrl "frontend" frontendSeedSha256
 
 assetUrl :: String -> String -> String
 assetUrl name digest = "https://github.com/weirdev/tersus/releases/download/bootstrap-" ++ take 12 digest ++ "/" ++ name ++ ".ll"
@@ -42,6 +49,11 @@ seedHash = fingerprint [seedSha256, runtimeSource]
 
 parserSeedHash :: String
 parserSeedHash = fingerprint [parserSeedSha256, runtimeSource]
+
+-- (the elaborator seed is not part of compilerSnapshotHash: nothing but the frontend's own stages and their tests
+-- are built with it yet)
+frontendSeedHash :: String
+frontendSeedHash = fingerprint [frontendSeedSha256, runtimeSource]
 
 compilerSnapshotHash :: String
 compilerSnapshotHash = fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
@@ -76,7 +88,7 @@ seedText name digest hash variable = do
         case cache of
             Error e -> pure (Error e)
             Ok dir -> do
-                let path = dir </> ((if name == "emitter" then "seed-" else "parser-seed-") ++ hash ++ ".ll")
+                let path = dir </> ((if name == "emitter" then "seed-" else name ++ "-seed-") ++ hash ++ ".ll")
                 present <- doesFileExist path
                 if present
                     then verifiedText name digest path
@@ -146,3 +158,7 @@ cachedSeed = cachedProgram "seed" seedHash "the seed of the emitter written in T
 
 cachedParserSeed :: IO (Result FilePath String)
 cachedParserSeed = cachedProgram "parser-seed" parserSeedHash "the pinned native parser seed" (buildSeed "parser" parserSeedSha256 parserSeedHash "TERSUS_PARSER_SEED_FILE")
+
+-- F0: the elaborator written in Tersus, built from the pinned seed IR (bootstrap/frontend.sha256)
+cachedFrontendSeed :: IO (Result FilePath String)
+cachedFrontendSeed = cachedProgram "frontend-seed" frontendSeedHash "the pinned elaborator seed" (buildSeed "frontend" frontendSeedSha256 frontendSeedHash "TERSUS_FRONTEND_SEED_FILE")

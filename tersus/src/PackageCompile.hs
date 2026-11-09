@@ -5,6 +5,7 @@ module PackageCompile
     , CompiledPackage (..)
     , compileModules
     , compileModulesWith
+    , compileModulesUsing
     , lowerCompiledPackage
     , compileModulesLinked
     , assumptionsOfPackage
@@ -53,7 +54,12 @@ compileModules :: Mod.LoadedPackage -> Result CompiledPackage String
 compileModules = compileModulesWith respond
 
 compileModulesWith :: Elaborator -> Mod.LoadedPackage -> Result CompiledPackage String
-compileModulesWith elaborator pkg = go (Mod.packageModules pkg) Map.empty []
+compileModulesWith elaborator = compileModulesUsing elaborator libPackage
+
+-- The package's modules elaborated by the elaborator, checked against the given compiler libraries (the frontend
+-- seed's stages give libraries elaborated by the same elaborator)
+compileModulesUsing :: Elaborator -> Result LibPackage String -> Mod.LoadedPackage -> Result CompiledPackage String
+compileModulesUsing elaborator libraries pkg = go (Mod.packageModules pkg) Map.empty []
   where
     go [] _ done = Ok (CompiledPackage (Mod.packageEntryModule pkg) (reverse done))
     go (modu : rest) compiled done =
@@ -88,7 +94,7 @@ compileModulesWith elaborator pkg = go (Mod.packageModules pkg) Map.empty []
                                             NotModelled what -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": the elaborator does not handle this module yet: " ++ what)
     selectLibraries depInterfaces modu prepared
         | Mod.loadedNoPrelude modu = Right ([], [], [], [])
-        | otherwise = case libPackage of
+        | otherwise = case libraries of
             Error err -> Left err
             Ok libPkg -> moduleLibSelection libPkg depInterfaces modu prepared
 

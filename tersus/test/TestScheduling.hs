@@ -99,14 +99,14 @@ assignShards :: Int -> [String] -> [(String, Int)]
 assignShards count names
     | count <= 0 = []
     -- Run 41883710449: sibling compiler tests contended with the private cold bootstrap.
-    | count == 6 && not (null isolated) =
+    | count == 7 && not (null isolated) =
         [(name, normalShards !! (index - 1))
             | (name, index) <- assignShards (length normalShards) (filter (\name -> name `notElem` map fst isolated) names)]
         ++ isolated
     | otherwise = [(name, index) | (_, index, assigned) <- balance bins, unit <- reverse assigned, name <- unit]
   where
-    isolated = [(name, index) | (name, index) <- [("testParserBootstrap:1/2", 4), ("testParserBootstrap:2/2", 5), ("testBootstrap", 6)], name `elem` names]
-    normalShards = [index | index <- [1 .. 6], index `notElem` map snd isolated]
+    isolated = [(name, index) | (name, index) <- [("testParserBootstrap:1/2", 4), ("testParserBootstrap:2/2", 5), ("testBootstrap", 6), ("testFrontendBootstrap", 7)], name `elem` names]
+    normalShards = [index | index <- [1 .. 7], index `notElem` map snd isolated]
     selfHosted = filter isSelfHosted names
     units = [selfHosted | not (null selfHosted)] ++ [[name] | name <- names, not (isSelfHosted name)]
     bins = foldl' assign [(0, index, []) | index <- [1 .. min count (length names)]]
@@ -235,6 +235,7 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testMirEmit:4/4", 109)
         , ("testMirEmitPrograms", 126)
         , ("testBootstrap", 248)
+        , ("testFrontendBootstrap", 640)
         , ("testEq", 2)
         , ("testHashMap", 2)
         , ("testHashSet", 2)
@@ -389,36 +390,40 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq (length names) (length (unique names))
     , testCase "every group belongs to exactly one shard for every tested count" $
         testAssertTrue (all complete [1 .. length names + 1])
-    , testCase "six CI shards reserve the sixth for cold bootstrap only" $
-        let assigned = assignShards 6 names
-         in testAssertTrue ([name | (name, shard) <- assigned, shard == 6] == ["testBootstrap"]
+    , testCase "seven CI shards reserve the last four for the bootstrap groups, one each" $
+        let assigned = assignShards 7 names
+         in testAssertTrue ([name | (name, shard) <- assigned, shard == 7] == ["testFrontendBootstrap"]
+            && [name | (name, shard) <- assigned, shard == 6] == ["testBootstrap"]
             && [name | (name, shard) <- assigned, shard == 5] == ["testParserBootstrap:2/2"]
             && [name | (name, shard) <- assigned, shard == 4] == ["testParserBootstrap:1/2"]
-            && [(name, shard) | (name, shard) <- assigned, name `notElem` ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]]
-                == assignShards 3 (filter (\name -> name `notElem` ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]) names))
-    , testCase "six-shard isolation retains aliases and filtered bootstrap selection" $
+            && [(name, shard) | (name, shard) <- assigned, name `notElem` bootstrapGroups]
+                == assignShards 3 (filter (`notElem` bootstrapGroups) names))
+    , testCase "seven-shard isolation retains aliases and filtered bootstrap selection" $
         testAssertTrue (all (\index ->
-            selectGroupNames (Arguments Nothing ["testBootstrap"] False (Just (index, 6))) names
+            selectGroupNames (Arguments Nothing ["testBootstrap"] False (Just (index, 7))) names
                 == Right ["testBootstrap" | index == 6]
-            && selectGroupNames (Arguments Nothing ["testParserBootstrap"] False (Just (index, 6))) names
+            && selectGroupNames (Arguments Nothing ["testParserBootstrap"] False (Just (index, 7))) names
                 == Right (["testParserBootstrap:1/2" | index == 4] ++ ["testParserBootstrap:2/2" | index == 5])
-            && selectGroupNames (Arguments Nothing ["testNative"] False (Just (index, 6))) names
+            && selectGroupNames (Arguments Nothing ["testFrontendBootstrap"] False (Just (index, 7))) names
+                == Right ["testFrontendBootstrap" | index == 7]
+            && selectGroupNames (Arguments Nothing ["testNative"] False (Just (index, 7))) names
                 == Right [name | name <- names, "testNative:" `isPrefixOf` name,
-                    lookup name (assignShards 6 names) == Just index]) [1 .. 6])
-    , testCase "bootstrap isolation is limited to six shards and handles sparse inputs" $
+                    lookup name (assignShards 7 names) == Just index]) [1 .. 7])
+    , testCase "bootstrap isolation is limited to seven shards and handles sparse inputs" $
         testAssertTrue
-            ( assignShards 6 ["testBootstrap"] == [("testBootstrap", 6)]
-              && assignShards 6 ["testParserBootstrap:2/2"] == [("testParserBootstrap:2/2", 5)]
-              && assignShards 6 ["testParserBootstrap:1/2"] == [("testParserBootstrap:1/2", 4)]
-              && assignShards 6 ["testParserBootstrap:2/2", "newA", "newB", "newC", "newD", "newE"]
+            ( assignShards 7 ["testBootstrap"] == [("testBootstrap", 6)]
+              && assignShards 7 ["testParserBootstrap:2/2"] == [("testParserBootstrap:2/2", 5)]
+              && assignShards 7 ["testParserBootstrap:1/2"] == [("testParserBootstrap:1/2", 4)]
+              && assignShards 7 ["testFrontendBootstrap"] == [("testFrontendBootstrap", 7)]
+              && assignShards 7 ["testParserBootstrap:2/2", "newA", "newB", "newC", "newD", "newE"]
                   == [("newA", 1), ("newB", 2), ("newC", 3), ("newD", 4), ("newE", 6), ("testParserBootstrap:2/2", 5)]
-              && assignShards 6 ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]
+              && assignShards 7 ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]
                   == [("testParserBootstrap:1/2", 4), ("testParserBootstrap:2/2", 5), ("testBootstrap", 6)]
-              && assignShards 6 ["newA", "newB"] == [("newA", 1), ("newB", 2)]
+              && assignShards 7 ["newA", "newB"] == [("newA", 1), ("newB", 2)]
               && assignShards 1 ["testBootstrap", "newA"] == [("testBootstrap", 1), ("newA", 1)]
               && sort (map snd (assignShards 2 ["testBootstrap", "newA"])) == [1, 2]
               && null (assignShards 0 ["testBootstrap"])
-              && null (assignShards 6 []))
+              && null (assignShards 7 []))
     , testCase "examples and strings remain unbatched to avoid duplicate cold startup" $
         testAssertTrue (all (`elem` names) ["testExamples", "testStrings"]
             && not (any (\name -> "testExamples:" `isPrefixOf` name || "testStrings:" `isPrefixOf` name) names))
@@ -433,7 +438,7 @@ testScheduling names batches = TestList "testScheduling"
         testAssertTrue (maximum loads - minimum loads <= 11)
     , testCase "CLI and cold bootstrap are covered exactly once" $
         testAssertTrue (all (\name -> length (filter ((== name) . fst) assignments) == 1)
-            ["testCli", "testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"])
+            ("testCli" : bootstrapGroups))
     , testCase "explicit filters intersect the full-suite shard assignment" $
         testAssertTrue (all filtered [1 .. 3])
     , testCase "unknown explicit groups fail even on an empty shard" $
@@ -600,3 +605,6 @@ testScheduling names batches = TestList "testScheduling"
     invalidShards = ["", "1", "0/3", "1/0", "4/3", "-1/3", "1/-3", "1/3/2", "1//3", "/3", "1/", "one/3", "1/three", "1.0/3", " 1/3", "1/3 ", "1/+3", show (toInteger (maxBound :: Int) + 1) ++ "/3", "1/" ++ show (toInteger (maxBound :: Int) + 1)]
     isLeft (Left _) = True
     isLeft (Right _) = False
+
+bootstrapGroups :: [String]
+bootstrapGroups = ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2", "testFrontendBootstrap"]
