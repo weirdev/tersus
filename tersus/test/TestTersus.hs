@@ -4,8 +4,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (modifyMVar, modifyMVar_, newMVar)
 import Control.Exception (SomeException, displayException, mask, try)
 import Control.Monad (forM, forM_, unless, when)
-import Data.List (foldl', isPrefixOf, sortBy)
-import Data.Ord (comparing)
+import Data.List (foldl', isPrefixOf)
 import GHC.Clock (getMonotonicTime)
 import Native (availableProcessors, readProcessOutput)
 import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv)
@@ -233,8 +232,8 @@ runInProcess overlap selected = do
 -- Each group runs in a process of its own, so that a group's temporary files, locale and environment are its own, and
 -- several groups make progress at once. A child is given one group, so it runs in its process and prints no summary;
 -- its [PASS]/[FAIL]/[CRASH] lines are the counts here, and its exit status says whether it failed.
--- The groups that take the longest, longest first: a group is a process and the run is over when the last of them
--- ends, so the ones that take minutes are started first and the seconds-long ones fill in around them, instead of
+-- The groups with the most memory-weighted work start first: a group is a process and the run is over when the last
+-- of them ends, so the ones that take minutes are started first and the seconds-long ones fill in around them, instead of
 -- the longest only starting once everything before it in the list has had a process. The results are still taken
 -- in the order of the list of groups, so the output is unchanged.
 runInParallel :: Int -> [String] -> IO (TestSummary, Bool)
@@ -251,17 +250,12 @@ runInParallel jobs names = do
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
         pure (name, done)
-    -- (a self-hosted group holds the compiled validator as Haskell data, about 2 GB, and peaks at 5 to 7 GB, and a
-    -- parser batch peaks near 6 GB: at most two of them run at once, so that a runner of 16 GB is not exhausted; the
-    -- next group that may run is taken instead)
-    queue <- newMVar (sortBy (comparing (negate . groupWeight . fst)) slots, 0 :: Int)
-    let heavyGroup name = isSelfHosted name || "testParser:" `isPrefixOf` name
-        allowed heavy (name, _) = not (heavyGroup name) || heavy < 2
-        release name = when (heavyGroup name) $ modifyMVar_ queue (\(remaining, heavy) -> pure (remaining, heavy - 1))
+    queue <- newMVar (launchOrder fst slots, 0 :: Int)
+    let release name = modifyMVar_ queue (\(remaining, used) -> pure (remaining, used - estimatedPeakMiB name))
         worker = mask $ \restore -> do
-            next <- modifyMVar queue $ \(remaining, heavy) -> case break (allowed heavy) remaining of
-                (_, []) -> pure ((remaining, heavy), if null remaining then Nothing else Just Nothing)
-                (before, slot@(name, _) : after) -> pure ((before ++ after, heavy + fromEnum (heavyGroup name)), Just (Just slot))
+            next <- modifyMVar queue $ \(remaining, used) -> case admitGroup memoryBudgetMiB (estimatedPeakMiB . fst) used remaining of
+                Nothing -> pure ((remaining, used), if null remaining then Nothing else Just Nothing)
+                Just (slot@(name, _), rest) -> pure ((rest, used + estimatedPeakMiB name), Just (Just slot))
             case next of
                 Nothing -> pure ()
                 Just Nothing -> threadDelay 200000 >> restore worker
