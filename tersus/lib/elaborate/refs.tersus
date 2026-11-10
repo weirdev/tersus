@@ -867,15 +867,32 @@ fn mutableReferenceStores(st: St, t: Int, seen: List<String>) -> St ~ {
         name = clone(ty.name);
         if ty.kind = 4 { name = instanceName(st, resolvedType); };
         if indexIn(&seen, &name) >= 0 { return St { ok: false, ..st }; };
-        seen = push(seen, clone(name));
-        ctors = push([], clone(name));
-        if ty.kind = 4 { st = holdsRef(st, resolvedType); ctors = HashMap::lookup(&st.types, &name, []); };
-        for ctor in &ctors {
-            info = HashMap::lookup(&st.ctors, ctor, CtorInfo { owner: "", names: [], types: [] });
-            for field in &info.types {
-                st = mutableReferenceStores(st, field, clone(seen));
-                if st.status != 0 || st.ok { return st; };
-            };
+        // (a named instance's answer at the root does not depend on a path, as with refGo's refCache; storeCache is
+        // emptied wherever a layout or a binding is added and wherever a definition context changes)
+        if ty.kind = 4 && size(seen) = 0 {
+            key = catStrings("4:", clone(name));
+            if HashMap::contains(&st.storeCache, &key) { return St { ok: HashMap::lookup(&st.storeCache, &key, false), ..st }; };
+            st = storesNamed(st, resolvedType, &ty, &name, seen);
+            if st.status = 0 { return St { storeCache: st.storeCache.insert(key, st.ok), ..st }; };
+            return st;
+        };
+        return storesNamed(st, resolvedType, &ty, &name, seen);
+    };
+    return St { ok: false, ..st };
+};
+
+fn storesNamed(st: St, resolvedType: Int, ty: &Ty, name: &String, seen: List<String>) -> St ~ {
+    seen = push(seen, clone(name));
+    ctors = push([], clone(name));
+    if ty.kind = 4 {
+        st = holdsRef(st, resolvedType);
+        ctors = HashMap::lookup(&st.types, name, []);
+    };
+    for ctor in &ctors {
+        info = HashMap::lookup(&st.ctors, ctor, CtorInfo { owner: "", names: [], types: [] });
+        for field in &info.types {
+            st = mutableReferenceStores(st, field, clone(seen));
+            if st.status != 0 || st.ok { return st; };
         };
     };
     return St { ok: false, ..st };
