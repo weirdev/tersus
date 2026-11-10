@@ -47,7 +47,8 @@ import Pipeline (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage
 import Syntax
 import Types
 import TestHarness
-import TypeCheck (elaborate)
+import Compile (elaborateStatements)
+import ElaboratorTool (noVerdict, sourceElaborator)
 import Utils (Result (..), bindResult)
 
 parsed :: String -> Either String [Statement]
@@ -133,7 +134,7 @@ testCanonical =
                     ["pkg$geo$shapes$Shape", "pkg$geo$shapes$Shape::Circle", "pkg$geo$shapes$Point"]
         , case parsed "struct Point { x: Int }; struct Point { y: Int };" of
             Left err -> Just ("Parse failed: " ++ err)
-            Right a -> case elaborate (canonicalizeDeclarations (fileModuleIdentity "pkg" "geo" "shapes.tersus") a) of
+            Right a -> case elaborateStatements (canonicalizeDeclarations (fileModuleIdentity "pkg" "geo" "shapes.tersus") a) of
                 Error err ->
                     if "already defined" `isInfixOf` err
                         then Nothing
@@ -1659,6 +1660,7 @@ testCrossPackageConstructors = testCaseSeq "cross-package-constructor-seeds"
             Error err -> Just err
             Ok result -> testAssertEq (fmap renderMirValue result) (Just (show expected))
     refuses source = case checked source of
+        Error e | noVerdict e -> Just e
         Error _ -> Nothing
         Ok _ -> Just "unimported qualified constructor/type became visible"
 
@@ -2467,7 +2469,7 @@ phase2RoundTrip = case phase2Load phase2Private of
     throughWire request = case Elaboration.writeRequest request `bindResult` checkedRequest request of
         Error err -> Elaboration.Refused err
         Ok decoded | decoded /= request -> Elaboration.Refused "defining context changed during request round trip"
-        Ok decoded -> case Elaboration.writeResponse (Elaboration.respond decoded) `bindResult` Elaboration.readResponse of
+        Ok decoded -> case Elaboration.writeResponse (sourceElaborator decoded) `bindResult` Elaboration.readResponse of
             Error err -> Elaboration.Refused err
             Ok response -> response
     checkedRequest request encoded

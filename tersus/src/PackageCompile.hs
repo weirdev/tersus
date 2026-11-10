@@ -17,8 +17,9 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import Compile (librariesFor, reservedHelperName, reservedError)
-import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..), respond)
-import Interface (InterfaceFunction (..), ModuleInterface (..), mergeInterfacesImportEnv, nameInModule, withoutDeclaredNames)
+import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..))
+import ElaboratorTool (sourceElaborator)
+import Interface (InterfaceFunction (..), ModuleInterface (..), nameInModule, withoutDeclaredNames)
 import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libDefinitionContexts, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
 import ModuleResolve (rewriteFileReferences)
@@ -26,9 +27,8 @@ import qualified Modules as Mod
 import ParsedFile (ParsedFile (..))
 import MirLower (lowerModuleWith)
 import Pretty (renderVarProof)
-import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
-import TypeCheck (Elaborated (..))
-import TypeCheckCore (tmplSignature)
+import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
+import Elaboration (tmplSignature)
 import Types (Signature (..), Type (..), pattern TBox, pattern TList, baseNameOf)
 import Utils
 
@@ -51,7 +51,7 @@ data CompiledPackage = CompiledPackage
     deriving (Show)
 
 compileModules :: Mod.LoadedPackage -> Result CompiledPackage String
-compileModules = compileModulesWith respond
+compileModules = compileModulesWith sourceElaborator
 
 compileModulesWith :: Elaborator -> Mod.LoadedPackage -> Result CompiledPackage String
 compileModulesWith elaborator = compileModulesUsing elaborator libPackage
@@ -258,7 +258,7 @@ lowerCompiledPackage pkg compiled =
             Nothing -> Error ("internal: compiled module " ++ Mod.renderModuleId (compiledModuleId modu) ++ " is not in the loaded package")
             Just _ ->
                 let allIfaces = compiledImportInterfaces modu
-                 in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv allIfaces) allIfaces (compiledElaborated modu)))
+                 in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith allIfaces (compiledElaborated modu)))
         libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
      in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
 

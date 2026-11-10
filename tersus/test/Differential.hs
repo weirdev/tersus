@@ -1,6 +1,5 @@
--- The differential harness (REPLACING_HASKELL.md): an elaborator other than the Haskell one, answering the
--- requests the compiler makes over the corpus, compared request by request with `respond`. TestDifferential
--- runs it on in-process candidates; `stack run frontend-diff` runs it on an executable.
+-- The differential harness (REPLACING_HASKELL.md): another elaborator answering the requests the compiler makes over
+-- the corpus, compared request by request with the compiler's elaborator (ElaboratorTool.sourceElaborator).
 module Differential
     ( Unit (..)
     , Outcome (..)
@@ -28,7 +27,7 @@ import AstData (writeElaborated)
 import Bootstrap (llvmOfOwned)
 import Compile (lowerSourcePartsWith, lowerStatementsWith, parseWithEquality)
 import ElaborateRequest
-import ElaboratorTool (runElaborator)
+import ElaboratorTool (noVerdict, runElaborator, sourceElaborator)
 import InterfaceData (writeInterface)
 import LibPackage (compileLibPackageWith, nativeStorageUnitsWith)
 import MirHousekeeping (validationEntry)
@@ -71,18 +70,20 @@ suiteUnits = do
 toolPackages :: [FilePath]
 toolPackages = ["lib/parser/parser.tersus", "lib/ast_reader/ast_reader.tersus", "lib/mir/emit/emit.tersus", "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", validationEntry]
 
--- The requests the compiler makes compiling a unit, in the order it makes them, with `respond`'s answers. A unit
--- that does not parse makes none.
-unitRequests :: Unit -> IO (Result [(Request, Response)] String)
-unitRequests unit = do
+-- The requests the compiler makes compiling a unit, in the order it makes them, with the given elaborator's answers, none of
+-- which may be a failure of the elaborator as a tool or a program it does not handle. A unit that does not parse makes none.
+unitRequests :: Elaborator -> Unit -> IO (Result [(Request, Response)] String)
+unitRequests elaborator unit = do
     ref <- newIORef []
-    outcome <- unitThrough False (recording ref) unit
+    outcome <- unitThrough False (recording elaborator ref) unit
     forced <- try (evaluate (either id (const "") (resultEither outcome)) >>= evaluate . length)
     requests <- reverse <$> readIORef ref
     pure $ case (forced :: Either SomeException Int, outcome) of
         (Left e, _) -> Error (show e)
         (_, Error e) | null requests -> Error e
-        _ -> Ok requests
+        _ -> case [r | (_, r) <- requests, noAnswer r] of
+            r : _ -> Error ("the reference elaborator gave no answer: " ++ show r)
+            [] -> Ok requests
   where
     resultEither r = case r of
         Ok a -> Right a
@@ -111,12 +112,12 @@ unitThrough deep elaborator given = pure given >>= \unit -> case unit of
         Right _ -> Error (entry ++ " is not a package")
     measured r = mapResult (\lowered -> if deep then length (show lowered) else 0) r
 
--- `respond`, with each request and its answer kept (in reverse order). The compiler takes each response apart as
+-- The elaborator, with each request and its answer kept (in reverse order). The compiler takes each response apart as
 -- soon as it has it, so a request is kept when it is made.
 {-# NOINLINE recording #-}
-recording :: IORef [(Request, Response)] -> Elaborator
-recording ref rq = unsafePerformIO $ do
-    let response = respond rq
+recording :: Elaborator -> IORef [(Request, Response)] -> Elaborator
+recording elaborator ref rq = unsafePerformIO $ do
+    let response = elaborator rq
     modifyIORef' ref ((rq, response) :)
     pure response
 
@@ -142,14 +143,15 @@ compareResponses reference candidate = case (reference, candidate) of
         [] -> ""
     firstDifference _ _ = ""
 
--- The Haskell elaborator behind the text protocol: what a request and a response lose shows up as a disagreement
+-- The compiler's elaborator behind a second trip through the text protocol: what a request and a response lose shows up
+-- as a disagreement
 throughText :: Candidate
 throughText rq = pure $
     writeRequest rq `bindResult` \text ->
         readRequest text `bindResult` \rq' ->
             if rq' /= rq
                 then Error "the request does not read back as written"
-                else writeResponse (respond rq') `bindResult` readResponse
+                else writeResponse (sourceElaborator rq') `bindResult` readResponse
 
 -- The elaborator of lib/elaborate in the given package files, built unvalidated as the host builds its own tools
 buildElaborator :: [(FilePath, String)] -> FilePath -> IO (Result () String)
@@ -180,7 +182,7 @@ runDifferential :: Candidate -> [Unit] -> IO [(Unit, String, Outcome)]
 runDifferential candidate units = concat <$> mapM one units
   where
     one unit = do
-        requests <- unitRequests unit
+        requests <- unitRequests sourceElaborator unit
         case requests of
             Error e -> pure [(unit, "", CandidateFailed ("the compiler made no requests: " ++ e)) | not (notParsed e)]
             Ok answered -> mapM (compareOne unit) answered
@@ -202,3 +204,10 @@ tally outcomes = (count isAgree, count isWording, count isDisagree, count isNotM
     isDisagree o = case o of Disagree _ -> True; _ -> False
     isNotModelled o = case o of NotModelledBy _ -> True; _ -> False
     isFailed o = case o of CandidateFailed _ -> True; _ -> False
+
+noAnswer :: Response -> Bool
+noAnswer response = case response of
+    Refused message -> noVerdict message
+    RefusedInterface message -> noVerdict message
+    NotModelled _ -> True
+    Accepted _ _ -> False

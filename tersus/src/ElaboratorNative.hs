@@ -1,8 +1,6 @@
 -- REPLACING_HASKELL.md, "The frontend seed"
 module ElaboratorNative
-    ( elaboratorProgramWith
-    , elaboratorIrWith
-    , frontendStage
+    ( frontendStage
     , frontendStageIr
     ) where
 
@@ -23,7 +21,7 @@ import Hash (fingerprint)
 import qualified Mir as M
 import MirData (writeProgram)
 import qualified Modules as Mod
-import Native (buildExecutable, cachedProgramWithArtifacts)
+import Native (buildExecutable, cacheDirectory, cachedProgramWithArtifacts)
 import Pipeline (compileModulesBootstrapWith, ownedModuleProgram)
 import PreludeSource (elaboratePackageFiles)
 import Seed (cachedFrontendSeed, compilerSnapshotHash, frontendSeedHash)
@@ -50,21 +48,25 @@ irOf program = case program `bindResult` ownedModuleProgram of
 -- fixpoint, and then stage 2 is stage 1's executable. Each keeps the IR it was built from beside it.
 frontendStage :: Int -> IO (Result (FilePath, String) String)
 frontendStage n = do
-    slot <- modifyMVar stages $ \made -> case Map.lookup n made of
+    directory <- cacheDirectory
+    let key = (either' directory, n)
+    slot <- modifyMVar stages $ \made -> case Map.lookup key made of
         Just slot -> pure (made, slot)
         Nothing -> do
             slot <- newMVar Nothing
-            pure (Map.insert n slot made, slot)
+            pure (Map.insert key slot made, slot)
     modifyMVar slot $ \done -> case done of
         Just ready -> pure (done, ready)
         Nothing -> do
             ready <- makeStage n
-            pure (case ready of
-                Ok _ -> Just ready
-                Error _ -> Nothing, ready)
+            pure (Just ready, ready)
+
+either' :: Result String String -> String
+either' (Ok path) = path
+either' (Error e) = e
 
 {-# NOINLINE stages #-}
-stages :: MVar (Map.Map Int (MVar (Maybe (Result (FilePath, String) String))))
+stages :: MVar (Map.Map (String, Int) (MVar (Maybe (Result (FilePath, String) String))))
 stages = unsafePerformIO (newMVar Map.empty)
 
 makeStage :: Int -> IO (Result (FilePath, String) String)

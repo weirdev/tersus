@@ -2953,7 +2953,7 @@ encodeMono physical program
         -- A function with type parameters is a template: it is checked
         -- only where a call decides its types, as its instances in the
         -- program (the reference does the same). The one exception is a
-        -- function that checks an impl against its trait (TypeCheck
+        -- function that checks an impl against its trait (the elaborator
         -- writes it beside the impl, and nothing calls it): it is
         -- checked as written, or a weaker impl would pass.
         -- (a builtin used as a value, builtin::first, is a function whose body is

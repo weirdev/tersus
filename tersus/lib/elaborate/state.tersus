@@ -47,10 +47,23 @@ impl Clone for ImplArgs { };
 struct Template {
     bounds: List<BoundInfo>, fnNames: List<String>, fnTypes: List<Int>, params: List<String>, ptys: List<Int>, rty: Int,
     sizes: List<String>, types: List<String>, from: List<String>, ins: Int, outs: Int, term: Int, body: Int,
-    boundsNode: Int, paramsNode: Int, sigNode: Int, retNode: Int,
-    grouped: Bool, definingTraits: List<String>, definingTypes: List<String>, definingTemplates: List<String>, privateContext: Bool
+    boundsNode: Int, paramsNode: Int, sigNode: Int, retNode: Int
 };
 impl Clone for Template { };
+
+// What the module that defines a function with bounds sees, which a call of it is checked in (TcState of tcDefinitions):
+// the templates it owns, and its types, traits, impls and templates
+struct Defining {
+    owned: HashMap<String, Template>,
+    types: HashMap<String, List<String>>, ctors: HashMap<String, CtorInfo>, generics: HashMap<String, Generic>,
+    linearTypes: HashSet<String>, drops: HashSet<String>,
+    traits: HashSet<String>, traitFns: HashMap<String, List<Int>>, traitParams: HashMap<String, List<String>>,
+    assoc: HashMap<String, List<String>>, impls: HashSet<String>, implArgs: HashMap<String, ImplArgs>,
+    implBounds: HashMap<String, List<BoundInfo>>, implBoundsNodes: HashMap<String, Int>,
+    templates: HashMap<String, Template>, companions: HashMap<String, List<String>>,
+    refResultNames: List<String>, refResultParams: List<List<String>>, refResultFroms: List<List<String>>
+};
+impl Clone for Defining { };
 
 // A function's parameters and signature, its types as types of the arena (Signature)
 struct FnSig { params: List<String>, ptys: List<Int>, rty: Int, sizes: List<String>, types: List<String>, writes: List<String>, froms: List<String> };
@@ -105,6 +118,7 @@ struct St {
     activeNames: List<String>,
     activeSizes: List<Int>,
     companions: HashMap<String, List<String>>,
+    definitions: List<Defining>,
     fns: HashMap<String, Int>,
     scopes: Scopes,
     ret: Int,

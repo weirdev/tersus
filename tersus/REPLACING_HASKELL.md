@@ -283,7 +283,7 @@ a list literal holds only constants, so a list of strings is built with
 package's declarations ("a string literal needs the library String"), which
 can hide the real error.
 
-Reproduce from `tersus/`, with the seeds available:
+Reproduced from `tersus/` at the spike's commit (the flip removed `dev/frontend-spike`):
 
 ```sh
 stack run frontend-spike -- build /tmp/elaborate
@@ -301,13 +301,12 @@ is data (`AST_DATA.md`). A module interface is `tersus-ast 1 interface`
 knows are the table `lib/data/builtins.ast` (`BuiltinTable`, made from
 `BuiltinRegistry` and checked against it), and an elaboration is a
 `tersus-elaborate 1` request answered by a `tersus-elaborated 1` response
-(`ElaborateRequest`). The compiler already elaborates every program and module
-through that request, in process (`respond`), and `test/Differential.hs` records
-the requests
-it makes over the corpus and compares another elaborator's responses with
-`respond`'s: agreement, a refusal in other words, disagreement, not modelled
-(`testDifferential`; `stack run frontend-diff -- compare EXE` for an
-executable). A test holds the lowering to taking exactly the expression types the
+(`ElaborateRequest`). Until the flip the compiler elaborated every program and
+module through that request in process, with the Haskell `respond`, and
+`test/Differential.hs` recorded the requests it made over the corpus and
+compared another elaborator's responses with `respond`'s: agreement, a refusal
+in other words, disagreement, not modelled (`testDifferential`; the
+`frontend-diff` tool for an executable). A test holds the lowering to taking exactly the expression types the
 elaboration gives (one more or one fewer is refused), and a test that expects a refusal in the checker's words
 no longer passes when the validator refuses instead (`TestHarness`).
 
@@ -338,22 +337,22 @@ footprints, `from` origins and aliases), `clone` and the Copy and Clone
 markers, traits and impls (method resolution, `Type::f`, `Trait::f(x)`, `Eq`
 behind `=`, Deref look-through and the functions that check an impl against
 its trait), functions with bounds (made for each list of types a call gives
-them, placed before the statement that called them), and the modules of
+them, placed before the statement that called them; one another package's
+module defines is checked in what that module sees, its defining context, and
+the sizes its bounds name are in the instance's name and body), and the modules of
 packages and of the compiler libraries: a module predeclares its own types,
 a library module sees a generic constructor's owner as a type, and the
 elaborator gives back the interface the module exposes
-(`Interface.extractInterface` and `extractLibInterface`). It answers
+(as the Haskell `Interface.extractInterface` and `extractLibInterface` did). It answers
 `unmodelled` only for data it cannot read and for a builtin whose type only
-the program's declarations give, which no request carries. `testElaborate` builds the
+the program's declarations give, which no request carries. Until the flip, `testElaborate` built the
 elaborator from the embedded sources (`PreludeSource.elaboratePackageFiles`)
-and runs the differential over every single-file corpus program and every
+and ran the differential over every single-file corpus program and every
 `testTypeCheck` source (with the clone, equality and list libraries in front
 of it), the example package, the compiler libraries and four small packages
-that try the edges of predeclaration and interfaces: every request agrees,
-interfaces included. The compiler's own packages are left to
-`stack run frontend-diff -- compare EXE`, whose default corpus has them (their
-Haskell elaboration alone would take most of the suite's time): run it after
-a change to `lib/elaborate`. `testElaborateMutant`, run only when named, checks that a mutant whose
+that try the edges of predeclaration and interfaces: every request agreed,
+interfaces included, and `frontend-diff compare` covered the compiler's own
+packages. `testElaborateMutant`, run only when named, checks that a mutant whose
 unification lets Int and Bool stand for each other is caught. The
 differential runs the elaborator with the largest stack the system allows,
 as the validator is run: it recurses over the nesting of expressions.
@@ -378,7 +377,7 @@ kinds, and the elaborator's large functions (`checkStatement`,
 smaller ones.
 
 Cost: the compiler elaborating and lowering a unit with the elaborator
-written in Tersus (`frontend-diff pipeline`, one CPU, best of three) takes
+written in Tersus (`frontend-diff pipeline`, one CPU, best of three) took
 1.15 times as long as it does on master with the Haskell elaborator, over the
 six compiler packages together (119.5 s against 103.7 s; 1.03 to 1.33 times
 for each), and 0.05 to 0.37 s longer for a small program, whose whole build
@@ -396,7 +395,9 @@ with it decides most of the cost:
 A request carries an interface for the module and again in the defining
 context of every module that depends on it; the host writes each interface
 once, and the elaborator parses a block whose records it has already read
-once (it keeps the blocks it has read by their text).
+once (it keeps the blocks it has read by their text) and reads a defining
+context's interface where the module's own copy of it already is, so that a
+template the module imported is the one its defining context owns.
 
 `holdsGhost` and `holdsRef` keep what they found for a named type until a
 type, a linear type or a drop is declared. On the host's side, the request
@@ -404,43 +405,60 @@ and the response are put together and read as lines rather than as one text
 split again, the writer reads back only the type and size records it wrote,
 and numbers are read digit by digit rather than with `reads` (which also took
 forms such as `0x1F` and `(5)` that no writer of the data writes).
-`stack run frontend-diff -- build EXE` builds it from the sources on disk.
 
 #### The frontend seed
 
 Built: the elaborator written in Tersus bootstraps from a pinned seed, as the
 emitter and the parser do. F0 is the elaborator built with clang from seed IR
 (`bootstrap/frontend.sha256`, the `frontend.ll` asset of release
-`bootstrap-455af12e9342`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
+`bootstrap-25421a0b113f`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
 `bootstrap/frontend.ll` supplies local bytes, verified against the same pin).
 F1 is the elaborator as it is now, its modules and the compiler libraries
 elaborated by F0 and the rest of the build done by the host as for its other
 programs (`ElaboratorNative.frontendStage`); F2 is the same elaborated by F1.
 A stage is kept in the cache under the program its executable is made of, with
-the IR it was built from, so the fixpoint is F2 being F1. The List and Box
-helper units that native code links are still elaborated by the Haskell
-elaborator in every stage.
+the IR it was built from, so the fixpoint is F2 being F1.
 
-`testFrontendBootstrap` checks that F1 (and F2, when it is another executable)
-answers every request of the elaborator's own build and of the compiler
-libraries as the Haskell elaborator does, that F2 is F1, that the host's
-programs (the emitter, the MIR checker and eraser, the parser, the AST reader
-and the validator) elaborated by F0 are the programs the Haskell elaborator
+`testFrontendBootstrap` checks that the pin records the elaborator's sources as
+they are, that F1 (and F2, when it is another executable) answers every request
+of the elaborator's own build and of the compiler libraries as F0 does, that F2
+is F1, that the host's programs (the emitter, the MIR checker and eraser, the
+parser, the AST reader and the validator) elaborated by F1 are the ones F0
 gives, that a missing or corrupt seed is refused and an elaborator that fails
 refuses the module, and that the seed and the stages are kept. CI runs it on a
 runner of its own. `stack run frontend-seed -- emit` makes the same fixpoint
-check and writes F1's IR; the first seed came from `advance` (the elaborator
-elaborated by the Haskell elaborator), and `emit` from it gives the same bytes.
+check and writes F1's IR.
 
-With `TERSUS_TOOL_ELABORATOR=seed`, the host elaborates its own programs with
-F0 instead of the Haskell elaborator, and keeps what it prepares from them
-apart from what the Haskell elaborator's programs give. It is for the
-bootstrap's tests and measurements until the flip; a failure of the tool
-refuses the build rather than falling back. From an empty cache,
-`tersus-exe run examples/basics.tersus` with it takes 1.21 times as long as
-on master (283 s against 234 s, the mean of two alternating runs on eight
-pinned CPUs). F0 is built beside the parser and emitter seeds, since it needs
-neither; what remains is the six programs elaborated through F0.
+#### The flip
+
+Built: the compiler type-checks with the elaborator written in Tersus, and
+`TypeCheck`, `TypeCheckCore` and the checker half of `Interface` are gone. The
+data the rest of the compiler reads (templates, import environments) is in
+`Elaboration`. Building F1 takes several minutes (owning its MIR is most of
+it), longer than master's whole cold bootstrap, so the compiler runs F0 while
+the pin's second word, a fingerprint of what the seed was made from (the
+`lib/elaborate` and `lib/data` files, the builtin table and the protocol
+headers), matches the sources (`ElaboratorTool.sourceElaborator`), and builds
+F1 only when it does not; `testFrontendBootstrap` fails on a mismatch, so a
+change to the elaborator comes with a new seed. The compiler's own code (its
+tools, the compiler libraries, the List and Box helper units and the stages)
+is always elaborated by F0 (`bootstrapElaborator`), as P0 reads the compiler's
+own sources. A failure of the elaborator executable refuses the module. Before
+the switch, the elaborator was brought up to the Haskell checker on imported
+templates: one is checked in a state seeded from its provider's interfaces, the
+sizes its bounds name are part of the instance, and a caller's impl meets its
+bounds in the context that defines it. The differential agreed on every
+request of the corpus, the examples and the probes, and the `testPhase2Packages`
+packages (168, 180 and 90 requests) on its last run.
+
+Cost, against master on the same host: the full suite takes 1.15 times as long
+(1,053 s against 917 s of wall time on seven shards; 1.11 times the summed group
+time), most of it in the package tests, whose compiles now start an elaborator
+process for each module. From an empty cache, `tersus-exe run
+examples/basics.tersus` takes 1.10 times as long (257 s against 235 s, the mean
+of three alternating pairs on eight pinned CPUs, 1.06 to 1.12 times each): F0's
+build is the largest of the three seeds, so the first parse builds it beside the
+parser and emitter seeds, before the parse runs.
 
 ### Deferred or coordinated work
 

@@ -1,6 +1,5 @@
 -- The elaborator's request and response (AST_DATA.md, "Elaboration requests"): what a host gives an
--- elaborator to elaborate one module, and what it gets back. `respond` is the Haskell elaborator answering
--- a request, the reference any other elaborator is compared with.
+-- elaborator to elaborate one module, and what it gets back (ElaboratorTool runs the elaborator written in Tersus).
 module ElaborateRequest
     ( Elaborator
     , Extraction (..)
@@ -12,8 +11,9 @@ module ElaborateRequest
     , readResponse
     , readResponseLines
     , readResponseBytes
-    , respond
     , acceptedElaboration
+    , requestHeader
+    , responseHeader
     ) where
 
 import qualified Data.ByteString.Char8 as B
@@ -22,11 +22,10 @@ import qualified Data.Map as Map
 import AstData (readElaboratedBytes, readElaboratedLines, readParsedLines, writeElaboratedLines, writeParsedLines)
 import BuiltinTable (builtinTableLines)
 import DataCodec (Token (..), quote, strictTokenize)
-import Interface (ModuleInterface (..), extractInterface, extractLibInterface, mergeInterfacesImportEnv, predeclareOwnEnv)
+import Interface (ModuleInterface (..))
 import InterfaceData (readInterfaceBytes, readInterfaceLines, writeInterfaceLines)
 import Modules (ModuleId (..))
 import Syntax (Elaborated (..), Statement)
-import TypeCheck (ImportEnv (..), elaborateWith)
 import Utils
 
 -- Which interface to return: ordinary modules share one template export policy;
@@ -58,7 +57,6 @@ data Response
       NotModelled String
     deriving (Show)
 
--- How a module is elaborated: `respond` in process, or another elaborator answering the same request
 type Elaborator = Request -> Response
 
 writeRequest :: Request -> Result String String
@@ -69,7 +67,7 @@ writeRequest rq =
         writeParsedLines (rqStatements rq) `bindResult` \ast ->
             Ok $
                 unlines
-                    ( [ "tersus-elaborate 1"
+                    ( [ requestHeader
                       , unwords ["module", quote pkg, maybe "none" quote modu]
                       , "predeclare " ++ boolWord (rqPredeclare rq)
                       , "library " ++ boolWord (rqLibrary rq)
@@ -145,10 +143,10 @@ writeResponse response = case response of
     Accepted elaborated iface ->
         writeElaboratedLines elaborated `bindResult` \ast ->
             maybe (Ok Nothing) (mapResult Just . writeInterfaceLines) iface `bindResult` \ifaceLines ->
-                Ok (unlines (["tersus-elaborated 1", "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines))
-    Refused message -> Ok (unlines ["tersus-elaborated 1", "refused " ++ quote message])
-    RefusedInterface message -> Ok (unlines ["tersus-elaborated 1", "interfaceRefused " ++ quote message])
-    NotModelled what -> Ok (unlines ["tersus-elaborated 1", "unmodelled " ++ quote what])
+                Ok (unlines ([responseHeader, "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines))
+    Refused message -> Ok (unlines [responseHeader, "refused " ++ quote message])
+    RefusedInterface message -> Ok (unlines [responseHeader, "interfaceRefused " ++ quote message])
+    NotModelled what -> Ok (unlines [responseHeader, "unmodelled " ++ quote what])
 
 readResponse :: String -> Result Response String
 readResponse = readResponseLines . lines
@@ -175,25 +173,6 @@ readResponseWith text elaborated interface ls = case map text (take 3 ls) of
                     _ -> Error "ElaborateRequest: malformed interface"
             _ -> Error "ElaborateRequest: malformed response"
     _ -> Error "ElaborateRequest: not an elaboration response"
-
--- The Haskell elaborator answering a request, as PackageCompile, LibPackage and Compile elaborate a module
-respond :: Request -> Response
-respond rq = case elaborateWith env (rqStatements rq) of
-    Error e -> Refused e
-    Ok (elaborated@(Elaborated stmts _), state) -> case rqExtraction rq of
-        NoInterface -> Accepted elaborated Nothing
-        ModuleInterfaceOf -> extracted extractInterface stmts state elaborated
-        LibInterfaceOf -> extracted extractLibInterface stmts state elaborated
-  where
-    merged = mergeInterfacesImportEnv (rqInterfaces rq)
-    -- (a generic constructor's owner is a compiler-only physical view, not something a program imports)
-    owners = Map.fromList [(owner, [ctor]) | iface <- rqInterfaces rq, (ctor, (owner, _)) <- Map.toList (ifCtors iface), ctor == owner]
-    viewed = if rqLibrary rq then merged{ieTypes = Map.union (ieTypes merged) owners} else merged
-    env = (if rqPredeclare rq then predeclareOwnEnv viewed else viewed)
-        { ieDefinitions = [(ifTemplates owner, mergeInterfacesImportEnv context) | context@(owner : _) <- rqDefinitions rq] }
-    extracted extract stmts state elaborated = case extract (rqModule rq) (rqStatements rq) stmts state of
-        Error e -> RefusedInterface e
-        Ok iface -> Accepted elaborated (Just iface)
 
 -- What a single-file program needs of a response: the elaboration, or why there is none
 acceptedElaboration :: Response -> Result Elaborated String
@@ -247,3 +226,9 @@ firstLine ls = case ls of
 
 mapAll :: (a -> Result b String) -> [a] -> Result [b] String
 mapAll f = foldr (\x rest -> f x `bindResult` \y -> rest `bindResult` \ys -> Ok (y : ys)) (Ok [])
+
+requestHeader :: String
+requestHeader = "tersus-elaborate 1"
+
+responseHeader :: String
+responseHeader = "tersus-elaborated 1"

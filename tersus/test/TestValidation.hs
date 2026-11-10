@@ -12,6 +12,7 @@ module TestValidation
     ) where
 
 import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, killThread, newEmptyMVar, putMVar, takeMVar)
+import ElaboratorTool (noVerdict)
 import Control.Exception (MaskingState (..), SomeException, bracket, displayException, evaluate, getMaskingState, try)
 import System.Timeout (timeout)
 import Compile (lowerSource, lowerStatements, parseSource)
@@ -49,6 +50,7 @@ validationFailHelper :: [Statement] -> TestResult
 validationFailHelper stmts =
     case validateStatements stmts of
         Ok _ -> Just "Validation passed when it should have failed"
+        Error e | noVerdict e -> Just e
         Error _ -> Nothing
 
 testValidateWithExpectedMatch :: Test

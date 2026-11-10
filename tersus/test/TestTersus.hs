@@ -215,7 +215,6 @@ originalGroups =
     , testParserUnicode
     , testAstReader
     , testDifferential
-    , testElaborate
     , testParity
     , testLibModules
     , testNativeStorageModules

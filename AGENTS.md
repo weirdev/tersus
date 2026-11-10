@@ -11,12 +11,12 @@ resulting behavior and migration when a change is user-visible.
 ## Project Structure & Module Organization
 The active implementation lives in `tersus/`, a Stack-based Haskell package.
 
-- `tersus/src/`: core language, parser, type checker, MIR, proof, and utility
-  modules (the shared definitions are split by concern: `Types` is the core
-  type language, `Syntax` is the AST and proof terms, and `Solver` is the
-  proof solver state; `TypeCheckCore` holds the checking monad, unification
-  and builtin typing, and `TypeCheck` holds declaration, expression and
-  proof inference). The CLI entry point is `tersus/app/Main.hs` (logic in
+- `tersus/src/`: core language, MIR, proof, and utility modules (the shared
+  definitions are split by concern: `Types` is the core type language,
+  `Syntax` is the AST and proof terms, `Elaboration` the templates and import
+  environments that interfaces carry, and `Solver` is the proof solver state).
+  Type checking is the elaborator written in Tersus (`lib/elaborate/`); there
+  is no Haskell checker. The CLI entry point is `tersus/app/Main.hs` (logic in
   `src/Cli.hs`).
   Packages and modules are in `src/Modules.hs` (package discovery, the module
   graph and the loader, canonical names), `src/Interface.hs` (what a checked
@@ -27,7 +27,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   (merging the lowered modules into one program and pruning what the entry
   program does not reach); `src/ElaborateRequest.hs` is the elaborator's request and response
   for one module (the compiler elaborates every program and module through it,
-  with the Haskell `respond`; `AST_DATA.md`); `src/Pipeline.hs` compiles each module with the
+  `AST_DATA.md`), and `src/ElaboratorTool.hs` the executables that answer it
+  (`bootstrapElaborator`, the seed F0, for the compiler's own code;
+  `sourceElaborator` for the programs it is given); `src/Pipeline.hs` compiles each module with the
   implicit libraries its own text calls for (`Compile.librariesFor`, consumed
   via synthesised implicit imports on both the single-file and package paths,
   the package path in `src/PackageCompile.hs`) and links the package.
@@ -79,14 +81,12 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     embeds all files and the package marker. `ValidatorNative` requires the
     full validator source and physical List/Box proofs before use.
   - `elaborate/`: the elaborator written in Tersus (`REPLACING_HASKELL.md`),
-    a port of `TypeCheck`/`TypeCheckCore` (and the interface extraction of
-    `Interface`) that answers an elaboration request (`AST_DATA.md`) for a
-    program or a module. Its declarative sibling files are one root module with
-    `elaborate.tersus` as the entry. `PreludeSource.elaboratePackageFiles`
-    embeds it; only `testElaborate`, `testElaborateMutant`, `testHostValidation`,
-    `testFrontendBootstrap`, `frontend-diff` and `frontend-seed` build and run it
-    (`test/ElaboratorNative.hs`, shared with `frontend-seed`; the frontend
-    seed F0 is its pinned IR).
+    the compiler's type checker: it answers an elaboration request
+    (`AST_DATA.md`) for a program or a module, with the module's interface.
+    Its declarative sibling files are one root module with `elaborate.tersus`
+    as the entry. `PreludeSource.elaboratePackageFiles` embeds it. The compiler
+    runs the pinned seed F0 built from it (`ElaboratorTool`), or stage 1 built
+    from the sources when they are not the seed's (`ElaboratorNative`).
   - `mir/`, `data/`, `parser/` and `ast_reader/`: the compiler's own programs,
     four packages beside `validation/` with their own `package.tersus`
     markers. `testHostValidation` validates the AST reader, the MIR reader,
@@ -118,9 +118,10 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
 - `tersus/bootstrap/parser.sha256`: the SHA-256 pin of the native parser LLVM
   seed; `TERSUS_PARSER_SEED_FILE` supplies verified local bytes before release.
 - `tersus/bootstrap/frontend.sha256`: the SHA-256 pin of the elaborator's LLVM
-  seed (F0); `TERSUS_FRONTEND_SEED_FILE` supplies verified local bytes. Nothing
-  in production uses it yet: `testFrontendBootstrap` and
-  `TERSUS_TOOL_ELABORATOR=seed` (the host's programs elaborated by F0) do.
+  seed (F0), then the fingerprint of the sources it was made from;
+  `TERSUS_FRONTEND_SEED_FILE` supplies verified local bytes. The compiler
+  type-checks with F0 (see the elaborator seed under Build, Test, and
+  Development Commands).
 - `tersus/test/`: regression tests. `TestTersus.hs` runs the test groups; the
   groups live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`,
   `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`,
@@ -128,9 +129,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `TestCopies`, `TestEq`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
   `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
   `TestMirEmit`, `TestBootstrap`, `TestFrontendBootstrap`, `TestParity`, `TestAstData`, `TestDifferential`
-  (the differential harness of `test/Differential.hs`, also run on an elaborator
-  executable by `stack run frontend-diff`) and `TestElaborate` (the differential
-  on the elaborator of `lib/elaborate/`), with the shared harness in `TestHarness`.
+  (the request recorder of `test/Differential.hs`, which also compares another
+  elaborator with the compiler's) and `TestElaborate` (the opt-in mutation
+  control), with the shared harness in `TestHarness`.
 
 ## Build, Test, and Development Commands
 Work from `tersus/`.
@@ -186,18 +187,27 @@ Work from `tersus/`.
   put the digest in `bootstrap/emitter.sha256`, and let `TestBootstrap`
   check the stage 0 / stage 1 fixpoint. Do not write straight into a seed
   file the running compiler is using.
-- The elaborator seed (F0): `stack run frontend-seed -- emit /tmp/frontend.ll.new "$(git rev-parse HEAD)"`
-  builds F0 from the pin, F1 (the elaborator elaborated by F0) and F2
-  (elaborated by F1), requires F2 to be F1 (F1 elaborates the elaborator as F0
-  does), and writes F1's IR. `testFrontendBootstrap` checks the same fixpoint.
-  A new seed is needed only when F0 can no longer elaborate the elaborator (a
-  change to the request or response it reads or writes): run
-  `stack run frontend-seed -- advance /tmp/frontend.ll.new "$(git rev-parse HEAD)"`
-  (the elaborator elaborated by the Haskell elaborator), pin its digest in
-  `bootstrap/frontend.sha256` and rebuild, then `emit` with
-  `TERSUS_FRONTEND_SEED_FILE` set to it and the same commit must give the same
-  bytes. Publish it as the `frontend.ll` asset of a release tagged
-  `bootstrap-<first 12 digits of its digest>`, as for the other seeds.
+- The elaborator seed (F0): `bootstrap/frontend.sha256` holds the seed's
+  SHA-256 and then the fingerprint of what it was made from (the
+  `lib/elaborate` and `lib/data` files, the builtin table and the protocol
+  headers; `stack run frontend-seed -- sources` prints it). The compiler uses
+  F0 while the fingerprint matches and builds stage 1 from the sources when it
+  does not, and `testFrontendBootstrap` fails on a mismatch: a change to any
+  of those comes with a new seed in the same PR, as for the emitter. Run
+  `stack run frontend-seed -- emit /tmp/frontend.ll.new "$(git rev-parse HEAD)"`
+  (it builds F1, the elaborator elaborated by F0, and F2, elaborated by F1,
+  requires F2 to be F1, and writes F1's IR); when the change makes the
+  elaborator elaborate its own source differently, so that F2 is not F1, use
+  `advance` instead (F2's IR) and `emit` again from it. A change to the
+  request or response that the pinned seed cannot read has no bootstrap path
+  of its own: make it in two PRs, the first teaching the elaborator to read
+  both forms (with a new seed), the second dropping the old one. Then
+  `sha256sum /tmp/frontend.ll.new`, publish it as the `frontend.ll` asset of a
+  release tagged `bootstrap-<first 12 digits of its digest>`, put the digest
+  and the fingerprint in `bootstrap/frontend.sha256`, and let
+  `testFrontendBootstrap` check it: `emit` with `TERSUS_FRONTEND_SEED_FILE` set
+  to the new seed and the same commit gives the same bytes. Never write into a
+  seed file the running compiler is using.
 - Production parsing uses native P1. Bootstrap readers (`StdLibDefs`,
   `LibParsed`, `Compile`, default `Modules`) use the pinned native P0 leaf;
   there is no Haskell grammar or fallback. Building Haskell needs no clang
@@ -232,9 +242,8 @@ Work from `tersus/`.
   runs only when named, since it
   takes far longer than the rest of the suite (`TestTersus.optInGroups`), as
   does `testElaborateMutant` (an elaborator whose unification is broken, which
-  the differential has to catch; it builds an elaborator of its own).
-  `testElaborate` leaves the compiler's own packages to
-  `stack run frontend-diff -- compare EXE`, whose default corpus has them.
+  the differential against the compiler's elaborator has to catch; it builds
+  an elaborator of its own).
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in
   `tersus/README.md`.
 

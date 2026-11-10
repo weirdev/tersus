@@ -178,9 +178,9 @@ for a primitive contract, its contract). It lists every instance of
 tests and casts are made from a program's declarations. The functions of the
 standard library and the contracts of its `builtin fn` declarations are not in
 the table: they are `lib/stdlib.tersus`'s (`StdLibDefs`), which an elaborator
-reads as the Haskell one does. `lib/data/builtins.ast`
+reads. `lib/data/builtins.ast`
 is the table; `testAstData` checks that it is still `BuiltinTable`'s, and
-`stack run frontend-diff -- builtins lib/data/builtins.ast` writes it again.
+`stack run frontend-seed -- builtins lib/data/builtins.ast` writes it again.
 
 `Type TYPE` and `Size SIZE` use the exact MIR recursive codecs and Tersus
 `Type`/`Size` enums, including the MIR `TNamed`'s preserved argument tokens.
@@ -235,7 +235,12 @@ data LINES          (the module's `tersus-ast 1 parsed` syntax)
 
 The `definitions` blocks extend the experimental `tersus-elaborate 1` envelope; they are mandatory, and older envelopes without them are refused rather than accepted with missing context. They reuse ordinary interface records and do not change the AST/interface record schema.
 
-The native elaborator consumes and structurally checks each provider's grouped interfaces without importing them into caller-visible bindings. Its existing template captures supply defining function precedence, and imported instances use only caller implementations of the provider's known traits. An imported instance needing private type, trait, implementation or nested-template metadata absent from its visible environment is `unmodelled`; so are imported bounds with parameter-dependent trait arguments and caller implementations with private bound prerequisites. Ordinary module extraction and representable bounded instances use the existing native elaborator paths.
+The elaborator seeds a checker state of its own from each provider's
+interfaces and keeps it with the templates the provider's interface owns. A
+call of one of those templates is checked in that state: the provider's types
+beside the caller's, the provider's traits, and the caller's impls of those
+traits only. The bounds of a caller's impl are met with the traits and impls of
+the defining context that has the impl as the caller does.
 
 The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
 the elaborated syntax and `interface none` or `interface` with a `data` block of
@@ -243,14 +248,15 @@ the interface; or `refused "MESSAGE"` (the module does not check),
 `interfaceRefused "MESSAGE"` (it checks, but the requested interface cannot be given)
 or `unmodelled "WHAT"` (the elaborator
 does not handle the program yet, which is no verdict on it).
-`ElaborateRequest.respond` is the Haskell elaborator answering a request. The
-compiler makes its requests through an `Elaborator` (`Compile.lowerSourcePartsWith`
+The compiler makes its requests through an `Elaborator` (`Compile.lowerSourcePartsWith`
 and `lowerStatementsWith`, `PackageCompile.compileModulesWith`,
-`LibPackage.compileLibPackageWith` and `nativeStorageUnitsWith`), which is
-`respond` in production; only test conveniences (`MirLower.lowerProgram`,
-`TypeCheck.typeCheck`) call the checker themselves, with the request
-`lowerStatementsWith` makes. The differential harness (`test/Differential.hs`)
-records the requests and puts them to another elaborator too.
+`LibPackage.compileLibPackageWith` and `nativeStorageUnitsWith`). In production
+that is an executable of the elaborator written in Tersus (`ElaboratorTool`):
+the seed F0 for the compiler's own code (its tools, the compiler libraries and
+the List and Box helper units) and the source elaborator for the programs and
+modules it is given. A failure of the executable refuses the module; nothing
+answers in its place. The differential harness (`test/Differential.hs`) records
+the requests and puts them to another elaborator too.
 
 ## The packages
 
@@ -434,13 +440,11 @@ refuses interfaces with entries out of order or of the wrong kind;
 the malformed interfaces. `testDifferential` records every request the compiler
 makes over the corpus (single files, the tool packages, `examples/modules` and
 the compiler libraries, and the programs of `testTypeCheck`) and requires the
-Haskell elaborator behind the text protocol to agree with itself on each, so a request or a response that loses
-something fails; it also checks that a candidate with a wrong type, other words
-or nothing modelled is not counted as agreeing, and that the lowering takes
-exactly the elaborated expression types, in their order. With
-`TERSUS_DIFFERENTIAL_SOURCES=DIR`, the test helpers write each program they check
-to `DIR`, and `stack run frontend-diff -- compare EXE --sources DIR` puts those
-to an elaborator too.
+compiler's elaborator behind a second trip through the text protocol to agree
+with itself on each, so a request or a response that loses something fails; it
+also checks that a candidate with a wrong type, other words or nothing modelled
+is not counted as agreeing, and that the lowering takes exactly the elaborated
+expression types, in their order.
 
 `testParser` compares P0 and P1 over the same corpus and generated snippets.
 The language tests keep their independent literal ASTs, verdicts and rejected

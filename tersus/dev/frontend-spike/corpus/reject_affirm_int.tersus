@@ -1,3 +1,0 @@
-x = 3;
-affirm x;
-return x;

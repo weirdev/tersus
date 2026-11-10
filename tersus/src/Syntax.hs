@@ -108,7 +108,7 @@ data Statement
       -- checks them against the trait and hands them back as ordinary function definitions, so the lowering never sees it.
       ImplDef (Maybe Name) [Arg] Name Type [Bound] [Statement]
     | -- fn f<S: Sequence<Int>, T>(...) ...: a function whose type parameters have bounds (`BoundedDef [(S, Sequence, [Int])] (the function)`),
-      -- which the type checker keeps as a template and makes a function of for each type it is called with (see TypeCheck.templateCall).
+      -- which the type checker keeps as a template and makes a function of for each type it is called with (see templateCall in lib/elaborate/traits.tersus).
       -- It does not reach the lowering.
       BoundedDef [Bound] Statement
     | -- The line and column of the statement that follows it in its block, in a program that was parsed to keep them (`Pipeline`
@@ -158,7 +158,7 @@ implFunctionName owner (Just trait) function = "<" ++ owner ++ " as " ++ trait +
 implFunctionPart :: Name -> Name
 implFunctionPart = drop 3 . dropWhile (/= '>')
 
--- The function that stands for the check that an impl meets its trait (see TypeCheck.checkImpl) is named after the trait, the
+-- The function that stands for the check that an impl meets its trait (see checkImpl in lib/elaborate/traits.tersus) is named after the trait, the
 -- type and the function, in a way no program can write: "Trait for Type::function"
 implCheckName :: Name -> Name -> Name -> Name
 implCheckName trait owner function = trait ++ " for " ++ owner ++ "::" ++ function

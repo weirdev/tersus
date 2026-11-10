@@ -12,12 +12,12 @@ import System.IO (hClose, hPutStr)
 
 import CacheLock (openTempFileCloexec)
 import Differential (Outcome (..), Unit (..), compareResponses, unitRequests)
-import ElaborateRequest (Response (..), respond)
+import ElaborateRequest (Response (..))
 import ElaboratorNative (frontendStage)
-import ElaboratorTool (frontendToolFailure, nativeElaborator, runElaborator)
-import MirHousekeeping (emitterEntry, toolProgramWith, validationEntry)
+import ElaboratorTool (bootstrapElaborator, frontendSources, frontendToolFailure, nativeElaborator, runElaborator)
+import MirHousekeeping (emitterEntry, toolProgram, toolProgramWith, validationEntry)
 import Native (cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts)
-import PreludeSource (frontendSeedSha256)
+import PreludeSource (frontendSeedSha256, frontendSeedSources)
 import Seed (cachedFrontendSeed, frontendSeedHash)
 import TestHarness
 import Utils
@@ -26,10 +26,12 @@ testFrontendBootstrap :: Test
 testFrontendBootstrap =
     TestList "testFrontendBootstrap"
         [ testCase "the seed pin is a SHA-256 digest" (testAssertTrue (length frontendSeedSha256 == 64 && all isHexDigit frontendSeedSha256))
+        , testCase "the pin records the elaborator's sources as they are (a change to them comes with a new seed)" $
+            testAssertEq frontendSources (Ok frontendSeedSources)
         , TestCase "a missing or corrupt seed is refused, and an elaborator that fails refuses the module" refusals
-        , TestCase "stages 1 and 2 answer the requests of the elaborator and the compiler libraries as the Haskell elaborator does" stagesAgree
+        , TestCase "stages 1 and 2 answer the requests of the elaborator and the compiler libraries as the seed does" stagesAgree
         , TestCase "stage 2 is stage 1: stage 1 elaborates the elaborator as the seed does" stagesFixpoint
-        , TestCase "the host's programs elaborated by the seed are the ones the Haskell elaborator gives" toolsAgree
+        , TestCase "the host's programs elaborated by stage 1 are the ones the seed gives" toolsAgree
         , TestCase "the seed and the stages are kept in the cache" kept
         ]
 
@@ -41,7 +43,7 @@ refusals = withScratch $ \home -> do
     hClose handle
     corrupted <- withEnv [("XDG_CACHE_HOME", Just home), ("TERSUS_FRONTEND_SEED_FILE", Just corrupt)] cachedFrontendSeed
     missing <- withEnv [("XDG_CACHE_HOME", Just home), ("TERSUS_FRONTEND_SEED_FILE", Just (home </> "absent.ll"))] cachedFrontendSeed
-    requests <- unitRequests (SourceText "refusal" "return 1;")
+    requests <- unitRequests bootstrapElaborator (SourceText "refusal" "return 1;")
     pure $ firstFailure
         [ refused "a corrupt seed" "does not match bootstrap/frontend.sha256" corrupted
         , refused "a missing seed" "frontend bootstrap seed" missing
@@ -64,8 +66,8 @@ stagesAgree :: IO TestResult
 stagesAgree = do
     one <- frontendStage 1
     two <- frontendStage 2
-    own <- unitRequests (FilePackage "lib/elaborate/elaborate.tersus")
-    libraries <- unitRequests Libraries
+    own <- unitRequests bootstrapElaborator (FilePackage "lib/elaborate/elaborate.tersus")
+    libraries <- unitRequests bootstrapElaborator Libraries
     let requests = own `bindResult` \a -> mapResult (a ++) libraries
     case (one, two, requests) of
         (Error e, _, _) -> pure (Just ("stage 1: " ++ e))
@@ -95,16 +97,16 @@ stagesFixpoint = do
 
 toolsAgree :: IO TestResult
 toolsAgree = do
-    seed <- cachedFrontendSeed
-    case seed of
-        Error e -> pure (Just ("the seed: " ++ e))
-        Ok exe -> pure (firstFailure (map (same exe) entries))
+    one <- frontendStage 1
+    case one of
+        Error e -> pure (Just ("stage 1: " ++ e))
+        Ok (exe, _) -> pure (firstFailure (map (same exe) entries))
   where
     entries = [emitterEntry, "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", "lib/parser/parser.tersus", "lib/ast_reader/ast_reader.tersus", validationEntry]
-    same exe entry = case (toolProgramWith (nativeElaborator exe) entry, toolProgramWith respond entry) of
+    same exe entry = case (toolProgramWith (nativeElaborator exe) entry, toolProgram entry) of
         (Ok a, Ok b) | a == b -> Nothing
-        (Ok _, Ok _) -> Just (entry ++ ": elaborated by the seed, it is another program")
-        (Error e, _) -> Just (entry ++ " elaborated by the seed: " ++ e)
+        (Ok _, Ok _) -> Just (entry ++ ": elaborated by stage 1, it is another program")
+        (Error e, _) -> Just (entry ++ " elaborated by stage 1: " ++ e)
         (_, Error e) -> Just (entry ++ ": " ++ e)
 
 kept :: IO TestResult

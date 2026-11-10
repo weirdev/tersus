@@ -39,7 +39,7 @@ import qualified ParserSeed
 import qualified Pipeline
 import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, toolPackageFiles, mirPackageFiles)
 import Hash (fingerprint)
-import Seed (cachedParserSeed, parserSeedHash, seedHash, compilerSnapshotHash)
+import Seed (cachedParserSeed, frontendSeedHash, parserSeedHash, seedHash, compilerSnapshotHash)
 import qualified SourceParse
 import qualified TersusParser
 import TestHarness
@@ -239,7 +239,7 @@ copyBootstrapTools source target = do
             modified <- getModificationTime (source </> name)
             setModificationTime (target </> name) modified)
         [name | name <- names, any (`isPrefixOf` name)
-            ["parser-seed-", "tersus-parser-", "seed-", "emitter-", "mir-verify-", "mir-erase-", "validator-", "tersus_rt_", "prepared-", "content-key-"]]
+            ["parser-seed-", "tersus-parser-", "seed-", "frontend-", "emitter-", "mir-verify-", "mir-erase-", "validator-", "tersus_rt_", "prepared-", "content-key-"]]
 
 wrongSeed :: String -> FilePath -> IO [(String, String)]
 wrongSeed variable home = do
@@ -352,6 +352,7 @@ retryStagesRecipe = inPrimedWorker "repair" ["parser-seed-", "tersus-parser-", "
             sourceFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.toolParseSource "return 41;")
             nativeFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.parseFileNative emptyDecls "return 42;")
             clangFailed <- withSetting "PATH" (Just bin) (TersusParser.parseFileNative emptyDecls "return 42;")
+            evictEmitterSeed
             emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) (TersusParser.parseFileNative emptyDecls "return 42;")
             nativeReady <- TersusParser.parseFileNative emptyDecls "return 42;"
             sourceReady <- TersusParser.toolParseSource "return 43;"
@@ -372,6 +373,18 @@ retryStagesRecipe = inPrimedWorker "repair" ["parser-seed-", "tersus-parser-", "
                             interpretedReady <- TersusParser.parseFileInterpreted emptyDecls "return 42;"
                             pure (firstFailure [parsed rebuilt, testAssertTrue present, refused "interpreted P0" interpretedFailed, parsed interpretedReady])
 
+-- (the first parse builds the emitter seed beside the parser seed, so a step that needs the emitter seed rebuilt from a
+-- bad override removes the one an earlier step built)
+evictEmitterSeed :: IO ()
+evictEmitterSeed = do
+    directory <- cacheDirectory
+    case directory of
+        Ok dir -> do
+            let path = dir </> ("seed-" ++ seedHash)
+            present <- doesFileExist path
+            when present (removeFile path)
+        Error _ -> pure ()
+
 emitterRetryStages :: IO TestResult
 emitterRetryStages = inPrimedWorker "emitter-repair" ["parser-seed-", "seed-"] $ withDirectory $ \home -> do
     let bin = home </> "bin"
@@ -386,6 +399,7 @@ emitterRetryStages = inPrimedWorker "emitter-repair" ["parser-seed-", "seed-"] $
             Just path -> createFileLink path (bin </> name)) ["sha256sum", "shasum"]
     parserFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just (home </> "missing-parser.ll")) Bootstrap.cachedEmitter
     clangFailed <- withSetting "PATH" (Just bin) Bootstrap.cachedEmitter
+    evictEmitterSeed
     emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) Bootstrap.cachedEmitter
     ready <- Bootstrap.cachedEmitter
     case firstFailure [refused "P0" parserFailed, refused "clang" clangFailed, refused "E0" emitterFailed] of
@@ -405,7 +419,7 @@ emitterRetryStages = inPrimedWorker "emitter-repair" ["parser-seed-", "seed-"] $
 
 bootstrapLibraryHash :: IO TestResult
 bootstrapLibraryHash = pure $ testAssertEq compilerSnapshotHash
-    (fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, text) -> [path, text]) (mirPackageFiles ++ libPackageFiles)
+    (fingerprint ([seedHash, parserSeedHash, frontendSeedHash] ++ concatMap (\(path, text) -> [path, text]) (mirPackageFiles ++ libPackageFiles)
         ++ [stdlibSource, compilerSourceHash]))
 
 timed :: String -> IO a -> IO a

@@ -13,7 +13,7 @@ import qualified Mir as M
 import TestParserFragments
 import Types
 import Syntax
-import TypeCheck
+import Compile (elaborateStatements)
 import Utils
 import TestHarness
 import ValidatorNative (validateCompiled)
@@ -301,17 +301,17 @@ testTermination =
             , -- The type of what shrinks decides what it means: an Int counts down, an enum or struct loses a field
               case parseStatementBlock "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" of
                 Left err -> Just ("Parse error: " ++ show err)
-                Right stmts -> case elaborate stmts of
+                Right stmts -> case elaborateStatements stmts of
                     Ok (Elaborated [_, While _ _ (Just (Counting _)) _] _) -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , case parseStatementBlock (tree ++ "t = Box::new(Tree::Leaf); while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; };") of
                 Left err -> Just ("Parse error: " ++ show err)
-                Right stmts -> case elaborate stmts of
+                Right stmts -> case elaborateStatements stmts of
                     Ok (Elaborated [_, _, While _ _ (Just (Parts _)) _] _) -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , case parseStatementBlock "fn f(n: Int) -> Int shrinks n { return 0; };" of
                 Left err -> Just ("Parse error: " ++ show err)
-                Right stmts -> case elaborate stmts of
+                Right stmts -> case elaborateStatements stmts of
                     Ok (Elaborated [Assign _ (Val (VFunct _ _ _ (NativeFunct _ (Just (Counting _)) _) _))] _) -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , parseValidateFailProgramHelper "x = [1]; while x = x shrinks x { x = x; };" "Loop variant does not shrink: x"

@@ -38,7 +38,8 @@ import StdLibDefs (stdlibBuiltin)
 import Syntax
 import TestHarness
 import TestNative (clangAvailable, runExecutableBytes)
-import TypeCheck (Elaborated (..), elaborate)
+import Compile (elaborateStatements)
+import ElaboratorTool (noVerdict)
 import Types
 import Utils
 
@@ -140,7 +141,8 @@ corpusHaskell batch = do
     pure $ firstFailure
         [ prefix name $ case tree of
             Error e -> if knownParserRejection name e then Nothing else Just e
-            Ok ss -> firstFailure [roundTrip ss, case elaborate ss of
+            Ok ss -> firstFailure [roundTrip ss, case elaborateStatements ss of
+                Error e | noVerdict e -> Just e
                 Error _ -> Nothing
                 Ok e -> elaboratedRoundTrip e]
         | (_, _, name, tree) <- samples
@@ -209,7 +211,7 @@ builtinTableCurrent = do
     pure $ case builtinTableText of
         Error e -> Just e
         Ok text
-            | text /= checkedIn -> Just "lib/data/builtins.ast is not BuiltinTable.builtinTableText: regenerate it with `stack run frontend-diff -- builtins lib/data/builtins.ast`"
+            | text /= checkedIn -> Just "lib/data/builtins.ast is not BuiltinTable.builtinTableText: regenerate it with `stack run frontend-seed -- builtins lib/data/builtins.ast`"
             | otherwise -> case A.readBuiltinTable text `bindResult` A.writeBuiltinTable of
                 Error e -> Just e
                 Ok back -> testAssertTrue (back == text)
@@ -560,7 +562,8 @@ nativeCorpus batch = withAstReader $ \exe -> do
         Error e -> pure (if knownParserRejection name e then Nothing else Just (name ++ ": " ++ e), 0 :: Int, 0 :: Int)
         Ok ss -> do
             p <- nativeText exe (dataParsed ss)
-            (e, count) <- case elaborate ss of
+            (e, count) <- case elaborateStatements ss of
+                Error refusal | noVerdict refusal -> pure (Just (name ++ ": " ++ refusal), 0)
                 Error _ -> pure (Nothing, 0)
                 Ok tree -> do
                     result <- nativeText exe (dataElaborated tree)
