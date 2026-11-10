@@ -763,8 +763,12 @@ selfHostedQueryFamilies program =
                 drivenRefused = "2 -1 -1 0\n"
                 drivenContext constantTerms = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 drivenState constantTerms = MData "ExecutionState" [("context", drivenContext constantTerms), ("locals", localsValue []), ("templates", MList [])]
-                dBooleanBranch value = dData "ExecutionEnd::BooleanBranch" [dInt 1, dInt 2, dInt (-1), value, dTerm 20, dTerm 21]
-                checkDrivenBoolean value = checkDrivenIn (drivenState boolConstants) (dList [dBlock (dList []) (dBooleanBranch value), dBlockAt 1 (dList []) dDone, dBlockAt 2 (dList []) dDone])
+                dBooleanBranchTo yes no value = dData "ExecutionEnd::BooleanBranch" [dInt yes, dInt no, value, dTerm 20, dTerm 21]
+                checkDrivenEnd constantTerms end = checkDrivenIn (drivenState constantTerms) (dList [dBlock (dList []) end, dBlockAt 1 (dList []) dDone, dBlockAt 2 (dList []) dDone])
+                checkDrivenBoolean value = checkDrivenEnd boolConstants (dBooleanBranchTo 1 2 value)
+                -- (term 10 is 0 < 1, so these make it true and false)
+                drivenTrue = boolConstants ++ [constant (0,0,1), constant (1,0,2)]
+                drivenFalse = boolConstants ++ [constant (0,0,2), constant (1,0,1)]
                 checkDrivenConstant zero = checkDrivenIn (drivenState [constant (2, 0, 0), zero]) (dList [dBlock (dList [dCheck (dTerm 1) (dTerm 2)]) dDone])
                 dTemplate fields = dStep "AssumeForall" [dData "ForallTemplate" fields]
                 dRelation = dData "TemplateRelation" [dInt 0, dInt 0, dInt 0]
@@ -900,7 +904,7 @@ selfHostedQueryFamilies program =
                 checkBooleanBranch constantTerms destinations blocks expected =
                     let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                         initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
-                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("join", MInt (-1)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
+                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                      in case runNamedFunction program "validateExecution" [MList (execBlock 0 [] end : blocks), MInt 0, initial] of
                             Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
                             result -> Just ("Unexpected boolean branch result: " ++ show result)
@@ -908,7 +912,7 @@ selfHostedQueryFamilies program =
                     let joinConstants = boolConstants ++ [constant (30, 0, 3), constant (31, 0, rightValue), constant (32, 0, 3)]
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                         initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
-                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("join", MInt 3), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
+                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                         blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
                      in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
                             Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
@@ -917,7 +921,7 @@ selfHostedQueryFamilies program =
                     let joinConstants = boolConstants ++ [constant (0, 0, 1), constant (1, 0, 2), constant (30, 0, 3), constant (31, 0, 4), constant (32, 0, 3)]
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                         initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
-                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("join", MInt 3), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
+                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                         blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
                      in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
                             Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
@@ -1217,6 +1221,14 @@ selfHostedQueryFamilies program =
                       , checkDrivenSteps [dStep "ApplyFresh" [dInt 0, dInt 7, dList [dTerm 1, dTerm 2]]] 0
                       , checkDrivenSteps [dStep "ApplyFresh" [dInt 0, dInt 7, dList [dTerm 1, dInt 2]]] 2
                       , checkDrivenBoolean (dTerm 10) 0, checkDrivenBoolean (dData "ValueRef::Term" [dInt 10, dInt 11]) 2
+                      , checkDrivenEnd drivenTrue (dBooleanBranchTo 1 99 (dTerm 10)) 0
+                      , checkDrivenEnd drivenFalse (dBooleanBranchTo 99 1 (dTerm 10)) 0
+                      , checkDrivenEnd drivenTrue (dBooleanBranchTo 99 1 (dTerm 10)) 3
+                      , checkDrivenEnd boolConstants (dBooleanBranchTo 1 99 (dTerm 10)) 3
+                      , checkDrivenEnd boolConstants (dData "ExecutionEnd::BooleanBranch" [dInt 1, dInt 2, dInt (-1), dTerm 10, dTerm 20, dTerm 21]) 2
+                      , checkDrivenEnd boolConstants (dData "ExecutionEnd::BooleanBranch" [dInt 1, dInt 2, dTerm 10, dTerm 20, dTerm 21, dInt (-1)]) 2
+                      , checkDrivenEnd boolConstants (dData "ExecutionEnd::BooleanBranch" [dInt 1, dInt 2, dTerm 10, dTerm 20]) 2
+                      , checkDrivenEnd boolConstants (dData "ExecutionEnd::Condition" [dInt 1, dInt 2, dInt 2, dTerm 0, dTerm 1]) 2
                       , checkDrivenConstant (constant (1, 0, 0)) 0
                       , checkDrivenConstant (MData "ConstantTerm" [("id", MInt 1), ("kind", MInt 0)]) 2
                       , checkDrivenConstant (MData "ConstantTerm" [("id", MInt 1), ("kind", MInt 0), ("value", MBool False)]) 2

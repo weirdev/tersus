@@ -553,7 +553,7 @@ testScheduling names batches = TestList "testScheduling"
     , -- (the queries that compared the Haskell engine with the Tersus one went with the engine)
       testCase "every self-hosted query assertion remains in its family" $
         testAssertEq selfHostedFamilyManifest
-            [("products", 225), ("relations", 19), ("entailment cache", 2), ("execution", 55), ("driver", 46),
+            [("products", 225), ("relations", 19), ("entailment cache", 2), ("execution", 55), ("driver", 54),
              ("MIR contracts", 60), ("MIR arithmetic", 22), ("MIR sequences", 32), ("MIR data", 21),
              ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 22), ("bridges", 18),
              ("join hull", 35), ("loop candidate provenance", 6)]
