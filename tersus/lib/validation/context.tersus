@@ -473,7 +473,8 @@ fn contextWithinUnder(context: &ValidatorContext, classes: &HashMap<Int, Int>, i
                 step = false;
                 if app.function = -14 && size(app.arguments) = 2 { step = true; };
                 if size(app.arguments) = 1 && fieldSet.contains(app.function) { step = true; };
-                if step {
+                // (restated: the size the two arms above imply does not survive their join)
+                if step && size(app.arguments) >= 1 {
                     if reached.contains(ufFind(classes, get(app.arguments, 0))) {
                         c = ufFind(classes, app.id);
                         if reached.contains(c) = false { reached = reached.insert(c); changed = true; };

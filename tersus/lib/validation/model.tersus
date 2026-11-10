@@ -423,15 +423,21 @@ struct CheckedStep { result: ExecutionResult, shared: SharedEntailment };
 
 impl Clone for CheckedStep { };
 
-// A loop being walked: its header, the blocks that can get back to it, what
-// has to hold at each back edge, and the value of the variant when the
-// iteration started. A stack of frames keeps an exit from a nested loop inside
-// the loop that encloses it.
+// The loop a region is being swept for: its header, what the user's invariant
+// asks at each back edge, the inferred candidates (checks of candidate i are
+// candChecks from candEnds(i - 1) to candEnds(i)), and the value of the
+// variant when the iteration started.
 
 struct LoopFrame {
     header: Int,
+    exit: Int,
+    // The header of every sweep running, this one last: a header is never
+    // swept again under itself, so the nesting depth is bounded by the blocks.
+    active: List<Int>,
     region: List<Int>,
     checks: List<ExecutionStep>,
+    candChecks: List<ExecutionStep>,
+    candEnds: List<Int>,
     variant: ValueRef,
     variantMode: Int,
     variantOther: ValueRef,
@@ -440,6 +446,45 @@ struct LoopFrame {
 };
 
 impl Clone for LoopFrame { };
+
+struct SweepArrival { block: Int, state: ExecutionState };
+
+impl Clone for SweepArrival { };
+
+// The blocks of a region in an order where every block follows the blocks
+// that can deliver to it, or status 3 and no order.
+struct SweepOrder { status: Int, order: List<Int> };
+
+impl Clone for SweepOrder { };
+
+// The states a block's end hands on, one per edge it takes.
+struct SweepDelivery { status: Int, step: Int, states: List<SweepArrival> };
+
+impl Clone for SweepDelivery { };
+
+// The terms an iteration's entry state gives the loop's variant and its test,
+// with the zero the variant is measured against confirmed to be 0.
+struct LoopEntryTerms { found: Bool, left: Int, right: Int, prior: Int, priorOther: Int, zero: Int };
+
+impl Clone for LoopEntryTerms { };
+
+impl Copy for LoopEntryTerms { };
+
+// The two ways out of a loop's test: the state an iteration runs in (the
+// tests joined where there are several), and the context its exit edge has.
+struct LoopSplit { status: Int, yes: ExecutionState, no: ValidatorContext };
+
+impl Clone for LoopSplit { };
+
+struct CandidateSteps { assumes: List<ExecutionStep>, checks: List<ExecutionStep>, ends: List<Int> };
+
+impl Clone for CandidateSteps { };
+
+// An iteration ready to sweep: the header state, the state the body starts
+// in, the exit edge's context, and the variant's value at the start.
+struct LoopIteration { status: Int, step: Int, header: ExecutionState, yes: ExecutionState, no: ValidatorContext, prior: Int, priorOther: Int };
+
+impl Clone for LoopIteration { };
 
 // An execution graph carries local bindings separately along every path. Its
 // edge steps are host-supplied consequences of the branch condition. An
@@ -468,6 +513,19 @@ impl Clone for ExecutionBlock { };
 struct ExecutionFlowResult { status: Int, block: Int, step: Int, state: ExecutionState };
 
 impl Clone for ExecutionFlowResult { };
+
+// How a region sweep ended, the candidates that failed at one of its back
+// edges (a round that dropped any proves nothing), the states delivered to
+// the loop's own exit, and how many states were delivered and merged.
+struct SweepResult { result: ExecutionFlowResult, dropped: List<Int>, exits: List<ExecutionState>, arrivals: Int, merges: Int };
+
+impl Clone for SweepResult { };
+
+// A loop round: the region's sweep, and the states it leaves the loop with
+// (none when the round failed).
+struct LoopRound { swept: SweepResult, exits: List<ExecutionState> };
+
+impl Clone for LoopRound { };
 
 struct InferSubject { local: Int, isSize: Bool, temp: Int, term: Int };
 

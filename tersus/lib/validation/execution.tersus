@@ -18,12 +18,6 @@ fn quietStep(given: &ExecutionStep) -> ExecutionStep {
     return clone(given);
 };
 
-fn quietSteps(steps: &List<ExecutionStep>) -> List<ExecutionStep> {
-    result = [];
-    for s in steps { result = push(result, quietStep(s)); };
-    return result;
-};
-
 // relation: 0 is equality, 1 disequality, 2 strict less, 3 non-strict less.
 // Any other relation code is rejected rather than guessed.
 fn localGoal(relation: Int, left: Int, right: Int) -> ValidatorGoal {
@@ -83,8 +77,8 @@ fn assumeComparison(context: &ValidatorContext, term: Int, truth: Bool) -> Valid
 
 fn assumeBooleanFact(context: ValidatorContext, left: Int, right: Int) -> ValidatorContext {
     // (the comparisons a literal on either side decides, found before the context changes)
-    terms = push([], 0);
-    truths = push([], false);
+    terms = [];
+    truths = [];
     for cPosition in 0..size(context.constants) {
         if get(context.constants, cPosition).kind = 1 {
             if get(context.constants, cPosition).id = left { terms = push(terms, right); truths = push(truths, get(context.constants, cPosition).value = 1); };
@@ -92,7 +86,7 @@ fn assumeBooleanFact(context: ValidatorContext, left: Int, right: Int) -> Valida
         };
     };
     state = context;
-    for k in 1..size(terms) { state = assumeComparison(state, get(terms, k), boolAt(truths, k, false)); };
+    for k in 0..size(terms) { state = assumeComparison(state, get(terms, k), boolAt(truths, k, false)); };
     return state;
 };
 

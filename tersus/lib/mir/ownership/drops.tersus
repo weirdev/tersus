@@ -58,7 +58,7 @@ fn ownPartPut(parts: List<OwnPart>, key: Key, state: OwnState) -> List<OwnPart> 
     i = 0;
     while i < size(parts) && keyLess(get(parts, i).key, key) ~ { i = i + 1; };
     present = i < size(parts) && get(parts, i).key = key;
-    if present && keep { return set(parts, i, OwnPart { key: key, state: state }); };
+    if present && keep && i < size(parts) { return set(parts, i, OwnPart { key: key, state: state }); };
     if !present && !keep { return parts; };
     out = []; added = false;
     for part in parts {

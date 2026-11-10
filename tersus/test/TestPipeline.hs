@@ -796,6 +796,104 @@ selfHostedQueryFamilies program =
                 execBlock i steps end = MData "ExecutionBlock" [("id", MInt i), ("steps", MList steps), ("end", end)]
                 joinCheck = MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", localRef 0)]
                 execBlocks branchValue = [execBlock 0 [assignLocal 0 (termRef 1)] execBranch, execBlock 1 [assignLocal 1 (termRef 1)] (execJump 3), execBlock 2 [assignLocal 1 (termRef branchValue)] (execJump 3), execBlock 3 [joinCheck] execEndDone]
+                execBranchTo yes no = MData "ExecutionEnd::Branch" [("yes", MInt yes), ("no", MInt no), ("yesSteps", MList []), ("noSteps", MList [])]
+                -- (variant mode 2 asks nothing at the back edge, and term 5 is the zero)
+                execLoopEnd exitBlock bodyBlock regionBlocks = MData "ExecutionEnd::Loop"
+                    [ ("exit", MInt exitBlock), ("body", MInt bodyBlock), ("region", MList (map MInt regionBlocks))
+                    , ("checks", MList []), ("assumptions", MList []), ("havoc", MList [])
+                    , ("relation", MInt 2), ("left", termRef 1), ("right", termRef 2)
+                    , ("variant", termRef 1), ("variantMode", MInt 2), ("variantOther", termRef 1)
+                    , ("zero", termRef 5), ("variantObject", termRef 1), ("variantFamily", MInt (-1))
+                    , ("variantConstructor", MInt (-1)), ("orTests", MList [])
+                    ]
+                -- A graph the sweep cannot order is refused, never swept in part: a cycle no
+                -- loop accounts for, an edge into a loop region past its header, an edge to a
+                -- block that is not there, and nested regions the bridge could not have made
+                -- (one without its header, one naming a missing block). Containment in the
+                -- enclosing region is not checked: a region is the blocks that reach its header.
+                unorderedCycleBlocks = [execBlock 0 [] (execJump 1), execBlock 1 [] (execJump 2), execBlock 2 [] (execJump 1)]
+                regionEntryBlocks = [execBlock 0 [] execBranch, execBlock 1 [] (execLoopEnd 4 3 [1, 3]), execBlock 2 [] (execJump 3), execBlock 3 [] (execJump 1), execBlock 4 [] execEndDone]
+                missingTargetBlocks = [execBlock 0 [] (execJump 9)]
+                headerlessRegionBlocks = [execBlock 0 [] (execLoopEnd 2 1 [1]), execBlock 1 [] (execJump 0), execBlock 2 [] execEndDone]
+                strayRegionBlocks = [execBlock 0 [] (execLoopEnd 2 1 [0, 1, 9]), execBlock 1 [] (execJump 0), execBlock 2 [] execEndDone]
+                -- A loop body of n sequential diamonds (each arm assigns, each join is the
+                -- next diamond's branch), then a latch. N = 3n blocks run once, so at most
+                -- 2N + 1 arrivals in the round; a walk per path would reach the latch 2^n times.
+                diamondLoopBlocks n =
+                    execBlock 0 [] (execLoopEnd 90 1 [0 .. 3 * n + 1])
+                        : concat [ [ execBlock (3 * k + 1) [] (execBranchTo (3 * k + 2) (3 * k + 3))
+                                   , execBlock (3 * k + 2) [assignLocal 1 (termRef 1)] (execJump (3 * k + 4))
+                                   , execBlock (3 * k + 3) [assignLocal 1 (termRef 2)] (execJump (3 * k + 4)) ]
+                                 | k <- [0 .. n - 1] ]
+                        ++ [execBlock (3 * n + 1) [assignLocal 2 (termRef 1)] (execJump 0), execBlock 90 [] execEndDone]
+                -- Nested ifs whose joins (6, 7) and one arm (5) are empty jumps: they forward each
+                -- arrival to the latch as it is, so nothing in the round is merged.
+                forwardedLoopBlocks =
+                    [ execBlock 0 [] (execLoopEnd 90 1 [0 .. 8]), execBlock 1 [] (execBranchTo 2 3)
+                    , execBlock 2 [assignLocal 1 (termRef 1)] (execBranchTo 4 5), execBlock 3 [assignLocal 1 (termRef 2)] (execJump 7)
+                    , execBlock 4 [assignLocal 1 (termRef 2)] (execJump 6), execBlock 5 [] (execJump 6), execBlock 6 [] (execJump 7)
+                    , execBlock 7 [] (execJump 8), execBlock 8 [assignLocal 2 (termRef 1)] (execJump 0), execBlock 90 [] execEndDone ]
+                loopInitial = MData "ExecutionState" [("context", mergeContext [constant (5, 0, 0)] []), ("locals", localsValue []), ("templates", MList [])]
+                -- (the test is term 5 < term 6, which always holds, so a loop is left only
+                -- through a later conjunct's edge to its exit)
+                execGuardedLoopEnd exitBlock bodyBlock regionBlocks checks assumptions havoc = MData "ExecutionEnd::Loop"
+                    [ ("exit", MInt exitBlock), ("body", MInt bodyBlock), ("region", MList (map MInt regionBlocks))
+                    , ("checks", MList checks), ("assumptions", MList assumptions), ("havoc", MList (map MInt havoc))
+                    , ("relation", MInt 2), ("left", termRef 5), ("right", termRef 6)
+                    , ("variant", termRef 1), ("variantMode", MInt 2), ("variantOther", termRef 1)
+                    , ("zero", termRef 5), ("variantObject", termRef 1), ("variantFamily", MInt (-1))
+                    , ("variantConstructor", MInt (-1)), ("orTests", MList [])
+                    ]
+                xIsZeroCheck = MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 5)]
+                xIsZeroAssume = MData "ExecutionStep::Assume" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 5)]
+                xIsZeroLoop exitBlock bodyBlock regionBlocks = execGuardedLoopEnd exitBlock bodyBlock regionBlocks [xIsZeroCheck] [xIsZeroAssume] [1]
+                -- A body that sets x to 7 and leaves through its own exit, where x = 0 is checked:
+                -- after the loop, or at the outer loop's back edge when the exit is its latch.
+                -- The control leaves with x = 0.
+                bodyExitBlocks exitValue = [execBlock 1 [assignLocal 1 (termRef exitValue)] (execBranchTo 2 3), execBlock 2 [assignLocal 1 (termRef 5)] (execJump 0)]
+                bodyExitTopBlocks = execBlock 9 [assignLocal 1 (termRef 5)] (execJump 0) : execBlock 0 [] (xIsZeroLoop 3 1 [0, 1, 2]) : bodyExitBlocks 1 ++ [execBlock 3 [xIsZeroCheck] execEndDone]
+                bodyExitLatchBlocks exitValue =
+                    [ execBlock 9 [assignLocal 1 (termRef 5)] (execJump 10), execBlock 10 [] (xIsZeroLoop 11 0 [10, 0, 1, 2, 3])
+                    , execBlock 0 [] (xIsZeroLoop 3 1 [0, 1, 2]) ] ++ bodyExitBlocks exitValue ++ [execBlock 3 [] (execJump 10), execBlock 11 [] execEndDone]
+                -- Edges out of a loop that are not its own exit are still refused: to another block
+                -- of the outer region, to a missing exit, with the exit the header, or inside the region.
+                plainExitLoop exitBlock bodyBlock regionBlocks = execGuardedLoopEnd exitBlock bodyBlock regionBlocks [] [] []
+                strayExitBlocks =
+                    [ [ execBlock 9 [] (execJump 10), execBlock 10 [] (plainExitLoop 11 0 [10, 0, 1, 2, 3, 4]), execBlock 0 [] (plainExitLoop 3 1 [0, 1, 2])
+                      , execBlock 1 [] (execBranchTo 2 4), execBlock 2 [] (execJump 0), execBlock 3 [] (execJump 10)
+                      , execBlock 4 [assignLocal 1 (termRef 1)] (execJump 10), execBlock 11 [] execEndDone ]
+                    , [execBlock 9 [] (execJump 0), execBlock 0 [] (plainExitLoop 77 1 [0, 1, 2]), execBlock 1 [] (execBranchTo 2 77), execBlock 2 [] (execJump 0)]
+                    , [execBlock 9 [] (execJump 0), execBlock 0 [] (plainExitLoop 0 1 [0, 1, 2]), execBlock 1 [] (execBranchTo 2 3), execBlock 2 [] (execJump 0), execBlock 3 [] execEndDone]
+                    , [execBlock 9 [] (execJump 0), execBlock 0 [] (plainExitLoop 2 1 [0, 1, 2]), execBlock 1 [] (execBranchTo 2 4), execBlock 2 [] (execJump 0), execBlock 4 [] execEndDone]
+                    ]
+                exitInitial = MData "ExecutionState" [("context", mergeContext [constant (1, 0, 7), constant (2, 0, 8), constant (5, 0, 0), constant (6, 0, 1)] []), ("locals", localsValue []), ("templates", MList [])]
+                checkFlowFrom entry blocks state status = case runNamedFunction program "validateExecution" [MList blocks, MInt entry, state] of
+                    Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt status))
+                    result -> Just ("Unexpected execution flow result: " ++ show result)
+                -- Loops left by later conjuncts: three extra conjuncts at the top level, the same
+                -- loop as the last statement of an outer loop, k such loops in sequence, and three
+                -- nested loops each left straight to the enclosing latch.
+                conjunctLoopBlocks = [execBlock 0 [] (execLoopEnd 90 1 [0, 1, 2, 3, 4]), execBlock 1 [] (execBranchTo 2 90), execBlock 2 [] (execBranchTo 3 90), execBlock 3 [] (execBranchTo 4 90), execBlock 4 [assignLocal 2 (termRef 1)] (execJump 0), execBlock 90 [] execEndDone]
+                conjunctInOuterBlocks =
+                    [ execBlock 10 [] (execLoopEnd 96 0 [10, 0, 1, 2, 3, 4, 95]), execBlock 0 [] (execLoopEnd 95 1 [0, 1, 2, 3, 4]), execBlock 1 [] (execBranchTo 2 95), execBlock 2 [] (execBranchTo 3 95)
+                    , execBlock 3 [] (execBranchTo 4 95), execBlock 4 [assignLocal 2 (termRef 1)] (execJump 0), execBlock 95 [assignLocal 3 (termRef 1)] (execJump 10), execBlock 96 [] execEndDone ]
+                sequentialConjunctLoops n =
+                    concat [ [ execBlock (10 * k) [] (execLoopEnd (10 * k + 9) (10 * k + 1) [10 * k, 10 * k + 1, 10 * k + 2])
+                             , execBlock (10 * k + 1) [] (execBranchTo (10 * k + 2) (10 * k + 9))
+                             , execBlock (10 * k + 2) [assignLocal 2 (termRef 1)] (execJump (10 * k))
+                             , execBlock (10 * k + 9) [assignLocal 3 (termRef 1)] (execJump (if k == n - 1 then 999 else 10 * k + 10)) ]
+                           | k <- [0 .. n - 1] ] ++ [execBlock 999 [] execEndDone]
+                nestedConjunctLoops =
+                    [ execBlock 10 [] (execLoopEnd 99 20 [10, 20, 21, 22, 30, 31, 32, 15, 25]), execBlock 20 [] (execLoopEnd 15 21 [20, 21, 22, 30, 31, 32, 25])
+                    , execBlock 21 [] (execBranchTo 22 15), execBlock 22 [] (execJump 30), execBlock 30 [] (execLoopEnd 25 31 [30, 31, 32])
+                    , execBlock 31 [] (execBranchTo 32 25), execBlock 32 [assignLocal 2 (termRef 1)] (execJump 30)
+                    , execBlock 25 [] (execJump 20), execBlock 15 [] (execJump 10), execBlock 99 [] execEndDone ]
+                checkSweepCounts = checkSweepCountsFrom 0
+                checkSweepCountsFrom entry blocks expected = case runNamedFunction program "sweepExecution" [MList blocks, MInt entry, loopInitial] of
+                    Ok (Just (MData "SweepResult" fields)) -> case lookup "result" fields of
+                        Just (MData "ExecutionFlowResult" result) -> testAssertEq (lookup "status" result, lookup "block" result, lookup "arrivals" fields, lookup "merges" fields) expected
+                        other -> Just ("Sweep result without a flow result: " ++ show other)
+                    result -> Just ("Unexpected sweep result: " ++ show result)
                 checkExecutionFlow blocks status blockId = case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initialExecution] of
                     Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields, lookup "block" fields) (Just (MInt status), Just (MInt blockId))
                     result -> Just ("Unexpected execution flow result: " ++ show result)
@@ -1070,6 +1168,22 @@ selfHostedQueryFamilies program =
                       , checkExecutionFlow (execBlocks 1) 0 3, checkExecutionFlow (execBlocks 2) 1 3
                       , checkBooleanBranch (boolConstants ++ [constant (0,0,1), constant (1,0,2)]) (1,99) [execBlock 1 [] execEndDone] 0
                       , checkBooleanBranch (boolConstants ++ [constant (0,0,2), constant (1,0,1)]) (99,1) [execBlock 1 [] execEndDone] 0
+                      , checkBooleanBranch (boolConstants ++ [constant (0,0,1), constant (1,0,2)]) (99,1) [execBlock 1 [] execEndDone] 3
+                      , checkBooleanBranch boolConstants (1,99) [execBlock 1 [] execEndDone] 3
+                      , checkExecutionFlow unorderedCycleBlocks 3 0, checkExecutionFlow regionEntryBlocks 3 0
+                      , checkExecutionFlow missingTargetBlocks 3 0, checkExecutionFlow headerlessRegionBlocks 3 0
+                      , checkExecutionFlow strayRegionBlocks 3 0
+                      , checkSweepCounts (diamondLoopBlocks 8) (Just (MInt 0), Just (MInt 90), Just (MInt 35), Just (MInt 7))
+                      , checkSweepCounts (diamondLoopBlocks 16) (Just (MInt 0), Just (MInt 90), Just (MInt 67), Just (MInt 15))
+                      , checkSweepCounts forwardedLoopBlocks (Just (MInt 0), Just (MInt 90), Just (MInt 9), Just (MInt 0))
+                      , checkFlowFrom 9 bodyExitTopBlocks exitInitial 1, checkFlowFrom 9 (bodyExitLatchBlocks 1) exitInitial 1
+                      , checkFlowFrom 9 (bodyExitLatchBlocks 5) exitInitial 0
+                      ] ++ [checkFlowFrom 9 blocks exitInitial 3 | blocks <- strayExitBlocks] ++
+                      [ checkSweepCounts conjunctLoopBlocks (Just (MInt 0), Just (MInt 90), Just (MInt 9), Just (MInt 0))
+                      , checkSweepCountsFrom 10 conjunctInOuterBlocks (Just (MInt 0), Just (MInt 96), Just (MInt 10), Just (MInt 0))
+                      , checkSweepCounts (sequentialConjunctLoops 4) (Just (MInt 0), Just (MInt 999), Just (MInt 21), Just (MInt 4))
+                      , checkSweepCounts (sequentialConjunctLoops 8) (Just (MInt 0), Just (MInt 999), Just (MInt 41), Just (MInt 8))
+                      , checkSweepCountsFrom 10 nestedConjunctLoops (Just (MInt 0), Just (MInt 99), Just (MInt 9), Just (MInt 0))
                       , checkBooleanBranch boolConstants (1,2) [execBlock 1 [] execEndDone, execBlock 2 [joinCheck] execEndDone] 2
                       , checkBooleanJoin 3 0, checkBooleanJoin 4 1, checkBooleanJoinKnown 0
                       , checkExecution [scoped [assumeTerms 1 2, checkTerms 0 1 2]] 0 (-1)
