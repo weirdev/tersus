@@ -251,15 +251,17 @@ runInParallel jobs names = do
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
         pure (name, done)
-    -- (a self-hosted group holds the compiled validator as Haskell data, about 2 GB, and peaks at 5 to 7 GB: at most
-    -- two run at once, so that a runner of 16 GB is not exhausted; the next group that may run is taken instead)
+    -- (a self-hosted group holds the compiled validator as Haskell data, about 2 GB, and peaks at 5 to 7 GB, and a
+    -- parser batch peaks near 6 GB: at most two of them run at once, so that a runner of 16 GB is not exhausted; the
+    -- next group that may run is taken instead)
     queue <- newMVar (sortBy (comparing (negate . groupWeight . fst)) slots, 0 :: Int)
-    let allowed heavy (name, _) = not (isSelfHosted name) || heavy < 2
-        release name = when (isSelfHosted name) $ modifyMVar_ queue (\(remaining, heavy) -> pure (remaining, heavy - 1))
+    let heavyGroup name = isSelfHosted name || "testParser:" `isPrefixOf` name
+        allowed heavy (name, _) = not (heavyGroup name) || heavy < 2
+        release name = when (heavyGroup name) $ modifyMVar_ queue (\(remaining, heavy) -> pure (remaining, heavy - 1))
         worker = mask $ \restore -> do
             next <- modifyMVar queue $ \(remaining, heavy) -> case break (allowed heavy) remaining of
                 (_, []) -> pure ((remaining, heavy), if null remaining then Nothing else Just Nothing)
-                (before, slot@(name, _) : after) -> pure ((before ++ after, heavy + fromEnum (isSelfHosted name)), Just (Just slot))
+                (before, slot@(name, _) : after) -> pure ((before ++ after, heavy + fromEnum (heavyGroup name)), Just (Just slot))
             case next of
                 Nothing -> pure ()
                 Just Nothing -> threadDelay 200000 >> restore worker
