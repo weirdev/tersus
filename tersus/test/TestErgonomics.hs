@@ -60,7 +60,7 @@ positive =
     , ("lazy branch effects", "fn next(n: &mut Int) -> Int { *n = n + 1; return n; }; n = 0; x = if true { next(&mut n) } else { next(&mut n) + next(&mut n) }; return n * 10 + x;", VInt 11)
     , ("bounded template typed let of an if expression", "fn choose<T: Eq>(x: T, c: Bool) -> T { let y: T = if c { x } else { x }; return y; }; return choose(1, true);", VInt 1)
     , ("bounded template block expression with a typed let", "fn keep<T: Eq>(x: T) -> T { return { let y: T = x; y }; }; return keep(4);", VInt 4)
-    , ("bounded template size in an if expression", "fn count<T: Eq, n>(a: &Array<T, n>) -> Int { return if n > 0 { n } else { 0 }; }; return count(#[1, 2, 3]);", VInt 3)
+    , ("bounded template size parameter in an if expression", "fn count<T: Eq, n>(a: &Array<T, n>) -> Int { return if n > 0 { n } else { 0 }; }; return count(#[1, 2, 3]);", VInt 3)
     , ("update reference lent past an effectful block argument", "fn put(p: &mut Int, n: Int) -> Int writes(p) { *p = n; return 0; }; x = 0; r = &mut x; put(r, { y = 1; y }); return *r;", VInt 1)
     , ("update reference lent past a mutating call argument", "fn bump(q: &mut Int) -> Int writes(q) { *q = *q + 1; return *q; }; fn put(p: &mut Int, n: Int) -> Int writes(p) { *p = n; return 0; }; x = 0; z = 5; r = &mut x; put(r, bump(&mut z)); return *r;", VInt 6)
     , ("if let subject once", enum ++ "fn make(n: &mut Int) -> E { *n = n + 1; return E::A { x: n }; }; n = 0; x = if let E::A { x: x } = make(&mut n) { x } else { 0 }; return n * 10 + x;", VInt 11)
