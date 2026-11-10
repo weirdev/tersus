@@ -65,11 +65,11 @@ fn escaped(name: &String) -> String [{ }] [{ }] {
 };
 
 fn renderSize(s: &Size) -> String [{ }] [{ }] {
-    return match s {
-        Size::SConst { n: n } => showInt(n),
-        Size::SAny => "?",
-        Size::SParam { name: name } => clone(name),
-        Size::SVar { n: n } => catStrings("_", showInt(n)),
+    match s {
+        Size::SConst { n: n } => { return showInt(n); },
+        Size::SAny => { return "?"; },
+        Size::SParam { name: name } => { return clone(name); },
+        Size::SVar { n: n } => { return catStrings("_", showInt(n)); },
     };
 };
 

@@ -103,6 +103,11 @@ fn isExpressionOrigin(name: &String) -> Bool [{ }] [{ }] {
     return name.startsWith("$expression ");
 };
 
+// (an empty list of places, typed for the accumulators that start from it)
+fn noPlaces() -> List<Place> [{ }] [{ }] {
+    return [];
+};
+
 fn aliasesOf(st: &St, name: &String) -> List<Place> ~ {
     out = [];
     i = 0;
@@ -114,7 +119,7 @@ fn aliasesOf(st: &St, name: &String) -> List<Place> ~ {
 };
 
 fn uniquePlaces(places: &List<Place>) -> List<Place> ~ {
-    let out: List<Place> = [];
+    out = noPlaces();
     for place in places {
         found = false;
         for old in &out { if old.root = place.root && old.steps = place.steps && old.ok = place.ok { found = true; }; };

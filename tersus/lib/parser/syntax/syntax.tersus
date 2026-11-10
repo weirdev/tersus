@@ -939,11 +939,11 @@ fn wordTok(w: &String) -> Token ~ { return Token { quoted: false, text: clone(w)
 fn nameTok(w: &String) -> Token ~ { return Token { quoted: true, text: clone(w) }; };
 
 fn sizeTokensOf(s: Size) -> List<Token> ~ {
-    return match s {
-        Size::SConst { n: n } => push(push([], wordTok("c")), wordTok(String::fromInt(n))),
-        Size::SAny => push([], wordTok("any")),
-        Size::SParam { name: name } => push(push([], wordTok("p")), nameTok(name)),
-        Size::SVar { n: n } => push(push([], wordTok("v")), wordTok(String::fromInt(n))),
+    match s {
+        Size::SConst { n: n } => { return push(push([], wordTok("c")), wordTok(String::fromInt(n))); },
+        Size::SAny => { return push([], wordTok("any")); },
+        Size::SParam { name: name } => { return push(push([], wordTok("p")), nameTok(name)); },
+        Size::SVar { n: n } => { return push(push([], wordTok("v")), wordTok(String::fromInt(n))); },
     };
 };
 
@@ -1000,11 +1000,11 @@ fn typeTokensOf(t: Type) -> List<Token> ~ {
 };
 
 fn renderSizeName(s: Size) -> String ~ {
-    return match s {
-        Size::SConst { n: n } => String::fromInt(n),
-        Size::SAny => "?",
-        Size::SParam { name: name } => clone(name),
-        Size::SVar { n: n } => catStrings("_", String::fromInt(n)),
+    match s {
+        Size::SConst { n: n } => { return String::fromInt(n); },
+        Size::SAny => { return "?"; },
+        Size::SParam { name: name } => { return clone(name); },
+        Size::SVar { n: n } => { return catStrings("_", String::fromInt(n)); },
     };
 };
 
@@ -2727,9 +2727,9 @@ fn nameText(st: &St, id: Int) -> String ~ {
     n = nodeAt( st, id);
     if n is AstNode::Name {
         v = (n as AstNode::Name).value;
-        return match v {
-            AstName::End => "",
-            AstName::Part { text: t, tail: tail } => catStrings(t, nameText( st, tail)),
+        match v {
+            AstName::End => { return ""; },
+            AstName::Part { text: t, tail: tail } => { return catStrings(t, nameText( st, tail)); },
         };
     };
     return "";
@@ -2740,13 +2740,13 @@ fn exprParts(st: &St, id: Int) -> List<Int> ~ {
     n = nodeAt( st, id);
     if n is AstNode::Expression {
         v = (n as AstNode::Expression).value;
-        return match v {
-            AstExpression::F { f: f, xs: xs } => push(push([], f), xs),
-            AstExpression::Val { v: vv } => [],
-            AstExpression::Var { n: nn } => [],
-            AstExpression::IfExpr { c: c, a: a, b: b } => [],
-            AstExpression::BlockExpr { xs: xs, e: e } => [],
-            AstExpression::Ascribed { e: e, ty: ty } => [],
+        match v {
+            AstExpression::F { f: f, xs: xs } => { return push(push([], f), xs); },
+            AstExpression::Val { v: vv } => { return []; },
+            AstExpression::Var { n: nn } => { return []; },
+            AstExpression::IfExpr { c: c, a: a, b: b } => { return []; },
+            AstExpression::BlockExpr { xs: xs, e: e } => { return []; },
+            AstExpression::Ascribed { e: e, ty: ty } => { return []; },
         };
     };
     return [];
@@ -2756,13 +2756,13 @@ fn exprVarName(st: &St, id: Int) -> String ~ {
     n = nodeAt( st, id);
     if n is AstNode::Expression {
         v = (n as AstNode::Expression).value;
-        return match v {
-            AstExpression::Var { n: nn } => nameText( st, nn),
-            AstExpression::Val { v: vv } => "",
-            AstExpression::F { f: f, xs: xs } => "",
-            AstExpression::IfExpr { c: c, a: a, b: b } => "",
-            AstExpression::BlockExpr { xs: xs, e: e } => "",
-            AstExpression::Ascribed { e: e, ty: ty } => "",
+        match v {
+            AstExpression::Var { n: nn } => { return nameText( st, nn); },
+            AstExpression::Val { v: vv } => { return ""; },
+            AstExpression::F { f: f, xs: xs } => { return ""; },
+            AstExpression::IfExpr { c: c, a: a, b: b } => { return ""; },
+            AstExpression::BlockExpr { xs: xs, e: e } => { return ""; },
+            AstExpression::Ascribed { e: e, ty: ty } => { return ""; },
         };
     };
     return "";
@@ -3740,12 +3740,12 @@ fn copyProof(st: St, id: Int) -> Res<Int> ~ {
     n = nodeAt( st, id);
     if n is AstNode::Proof {
         v = (n as AstNode::Proof).value;
-        return match v {
-            AstProof::ATerm { n: a } => copyATerm( st, a),
-            AstProof::BVar { n: a } => copyBVar( st, a),
-            AstProof::CTerm { v: a } => copyCTerm( st, a),
-            AstProof::FApp { f: f, xs: xs } => copyFApp( st, f, xs),
-            AstProof::Forall { n: a, gs: b, b: c } => copyForall( st, a, b, c),
+        match v {
+            AstProof::ATerm { n: a } => { return copyATerm( st, a); },
+            AstProof::BVar { n: a } => { return copyBVar( st, a); },
+            AstProof::CTerm { v: a } => { return copyCTerm( st, a); },
+            AstProof::FApp { f: f, xs: xs } => { return copyFApp( st, f, xs); },
+            AstProof::Forall { n: a, gs: b, b: c } => { return copyForall( st, a, b, c); },
         };
     };
     return fail( st, 0, "internal: not a proof");
@@ -3814,13 +3814,13 @@ fn copyValue(st: St, id: Int) -> Res<Int> ~ {
     n = nodeAt( st, id);
     if n is AstNode::Value {
         v = (n as AstNode::Value).value;
-        return match v {
-            AstValue::VInt { n: a } => copyVInt( st, a),
-            AstValue::VBool { b: b } => emit( st, AstNode::Value { value: AstValue::VBool { b: b } }),
-            AstValue::VList { xs: xs } => copyVList( st, xs),
-            AstValue::VData { n: a, xs: b } => copyVData( st, a, b),
-            AstValue::VFnRef { n: a } => copyVFnRef( st, a),
-            AstValue::VFunct { ps: a, ins: b, outs: c, body: d, exports: e } => copyVFunct( st, a, b, c, d, e),
+        match v {
+            AstValue::VInt { n: a } => { return copyVInt( st, a); },
+            AstValue::VBool { b: b } => { return emit( st, AstNode::Value { value: AstValue::VBool { b: b } }); },
+            AstValue::VList { xs: xs } => { return copyVList( st, xs); },
+            AstValue::VData { n: a, xs: b } => { return copyVData( st, a, b); },
+            AstValue::VFnRef { n: a } => { return copyVFnRef( st, a); },
+            AstValue::VFunct { ps: a, ins: b, outs: c, body: d, exports: e } => { return copyVFunct( st, a, b, c, d, e); },
         };
     };
     return fail( st, 0, "internal: not a value");
@@ -3939,9 +3939,9 @@ fn copyVFunctGeneric(st: St, ps: Int, ins: Int, outs: Int, body: Int, exports: I
     bn = nodeAt( st, body);
     if bn is AstNode::Body {
         bv = (bn as AstNode::Body).value;
-        return match bv {
-            AstBody::BuiltinFunct { b: b } => copyBuiltinSymbolValue( st, b, ps),
-            AstBody::NativeFunct { sig: a, term: b, stmts: c } => fail( st, 0, "internal: cannot copy function value"),
+        match bv {
+            AstBody::BuiltinFunct { b: b } => { return copyBuiltinSymbolValue( st, b, ps); },
+            AstBody::NativeFunct { sig: a, term: b, stmts: c } => { return fail( st, 0, "internal: cannot copy function value"); },
         };
     };
     return fail( st, 0, "internal: cannot copy function value");
@@ -3950,15 +3950,15 @@ fn copyBuiltinSymbolValue(st: St, builtinId: Int, ps: Int) -> Res<Int> ~ {
     n = nodeAt( st, builtinId);
     if n is AstNode::Builtin {
         v = (n as AstNode::Builtin).value;
-        return match v {
-            AstBuiltin::Primitive { name: nm } => primValue( st, nm),
-            AstBuiltin::Rel { r: r } => relValue( st, r),
-            AstBuiltin::ToWord { signed: a, bits: b } => builtinValue( st, AstBuiltin::ToWord { signed: a, bits: b }, push([], "x")),
-            AstBuiltin::Ctor { n: a, args: b, fs: c } => copyCtorSymbol( st, a, b, c),
-            AstBuiltin::FieldBuiltin { owner: a, n: b } => copyFieldSymbol( st, a, b),
-            AstBuiltin::Is { n: a } => copyIsSymbol( st, a),
-            AstBuiltin::Project { n: a, f: b } => copyProjectSymbol( st, a, b),
-            AstBuiltin::Cast { n: a } => copyCastSymbol( st, a),
+        match v {
+            AstBuiltin::Primitive { name: nm } => { return primValue( st, nm); },
+            AstBuiltin::Rel { r: r } => { return relValue( st, r); },
+            AstBuiltin::ToWord { signed: a, bits: b } => { return builtinValue( st, AstBuiltin::ToWord { signed: a, bits: b }, push([], "x")); },
+            AstBuiltin::Ctor { n: a, args: b, fs: c } => { return copyCtorSymbol( st, a, b, c); },
+            AstBuiltin::FieldBuiltin { owner: a, n: b } => { return copyFieldSymbol( st, a, b); },
+            AstBuiltin::Is { n: a } => { return copyIsSymbol( st, a); },
+            AstBuiltin::Project { n: a, f: b } => { return copyProjectSymbol( st, a, b); },
+            AstBuiltin::Cast { n: a } => { return copyCastSymbol( st, a); },
         };
     };
     return fail( st, 0, "internal: cannot copy builtin");
@@ -7742,11 +7742,11 @@ fn fileCatStrings(a: &String, b: &String) -> String [{ }] [{ }] ~ {
 };
 
 fn fileRenderSizeForName(s: &Size) -> String [{ }] [{ }] ~ {
-    return match s {
-        Size::SConst { n: n } => String::fromInt(n),
-        Size::SAny => "?",
-        Size::SParam { name: name } => clone(name),
-        Size::SVar { n: n } => fileCatStrings("_", String::fromInt(n)),
+    match s {
+        Size::SConst { n: n } => { return String::fromInt(n); },
+        Size::SAny => { return "?"; },
+        Size::SParam { name: name } => { return clone(name); },
+        Size::SVar { n: n } => { return fileCatStrings("_", String::fromInt(n)); },
     };
 };
 

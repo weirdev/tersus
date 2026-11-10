@@ -445,23 +445,23 @@ fn printNode(node: &AstNode) -> Int ~ {
 };
 
 fn printEntry(e: &AstEntry) -> Int [{ }] [{ }] {
-    return match e {
-        AstEntry::NamesEntry { n: n, ns: ns } => "NamesEntry".print() + printInt(n) + printInt(ns),
-        AstEntry::CtorEntry { n: n, owner: o, fs: fs } => "CtorEntry".print() + printInt(n) + printInt(o) + printInt(fs),
-        AstEntry::GenericEntry { n: n, ps: ps, fs: fs } => "GenericEntry".print() + printInt(n) + printInt(ps) + printInt(fs),
-        AstEntry::InvariantEntry { n: n, vs: vs } => "InvariantEntry".print() + printInt(n) + printInt(vs),
-        AstEntry::TraitEntry { n: n, fs: fs } => "TraitEntry".print() + printInt(n) + printInt(fs),
+    match e {
+        AstEntry::NamesEntry { n: n, ns: ns } => { return "NamesEntry".print() + printInt(n) + printInt(ns); },
+        AstEntry::CtorEntry { n: n, owner: o, fs: fs } => { return "CtorEntry".print() + printInt(n) + printInt(o) + printInt(fs); },
+        AstEntry::GenericEntry { n: n, ps: ps, fs: fs } => { return "GenericEntry".print() + printInt(n) + printInt(ps) + printInt(fs); },
+        AstEntry::InvariantEntry { n: n, vs: vs } => { return "InvariantEntry".print() + printInt(n) + printInt(vs); },
+        AstEntry::TraitEntry { n: n, fs: fs } => { return "TraitEntry".print() + printInt(n) + printInt(fs); },
         AstEntry::FunctionEntry { n: n, ps: ps, sig: sig, ins: ins, outs: outs, term: term, exports: exports } =>
-            "FunctionEntry".print() + printInt(n) + printInt(ps) + printInt(sig) + printInt(ins) + printInt(outs) + printInt(term) + printInt(exports),
-        AstEntry::PairEntry { a: a, b: b } => "PairEntry".print() + printInt(a) + printInt(b),
-        AstEntry::AssocEntry { a: a, b: b, origins: os } => "AssocEntry".print() + printInt(a) + printInt(b) + printInt(os),
-        AstEntry::ImplArgsEntry { a: a, b: b, ty: ty, args: args } => "ImplArgsEntry".print() + printInt(a) + printInt(b) + printInt(ty) + printInt(args),
-        AstEntry::ImplBoundsEntry { a: a, b: b, bs: bs } => "ImplBoundsEntry".print() + printInt(a) + printInt(b) + printInt(bs),
+            { return "FunctionEntry".print() + printInt(n) + printInt(ps) + printInt(sig) + printInt(ins) + printInt(outs) + printInt(term) + printInt(exports); },
+        AstEntry::PairEntry { a: a, b: b } => { return "PairEntry".print() + printInt(a) + printInt(b); },
+        AstEntry::AssocEntry { a: a, b: b, origins: os } => { return "AssocEntry".print() + printInt(a) + printInt(b) + printInt(os); },
+        AstEntry::ImplArgsEntry { a: a, b: b, ty: ty, args: args } => { return "ImplArgsEntry".print() + printInt(a) + printInt(b) + printInt(ty) + printInt(args); },
+        AstEntry::ImplBoundsEntry { a: a, b: b, bs: bs } => { return "ImplBoundsEntry".print() + printInt(a) + printInt(b) + printInt(bs); },
         AstEntry::TemplateEntry { n: n, bs: bs, fns: fns, ret: ret, ps: ps, sig: sig, ins: ins, outs: outs, term: term, body: body } =>
-            "TemplateEntry".print() + printInt(n) + printInt(bs) + printInt(fns) + printInt(ret) + printInt(ps) + printInt(sig) + printInt(ins) + printInt(outs) + printInt(term) + printInt(body),
-        AstEntry::TypeEntry { n: n, ty: ty } => "TypeEntry".print() + printInt(n) + printInt(ty),
-        AstEntry::SurfaceEntry { space: space, n: n } => "SurfaceEntry".print() + printWord(space) + printInt(n),
-        AstEntry::BuiltinEntry { b: b, surface: surface, scheme: scheme, value: value } => "BuiltinEntry".print() + printInt(b) + printInt(surface) + printInt(scheme) + printInt(value),
+            { return "TemplateEntry".print() + printInt(n) + printInt(bs) + printInt(fns) + printInt(ret) + printInt(ps) + printInt(sig) + printInt(ins) + printInt(outs) + printInt(term) + printInt(body); },
+        AstEntry::TypeEntry { n: n, ty: ty } => { return "TypeEntry".print() + printInt(n) + printInt(ty); },
+        AstEntry::SurfaceEntry { space: space, n: n } => { return "SurfaceEntry".print() + printWord(space) + printInt(n); },
+        AstEntry::BuiltinEntry { b: b, surface: surface, scheme: scheme, value: value } => { return "BuiltinEntry".print() + printInt(b) + printInt(surface) + printInt(scheme) + printInt(value); },
     };
 };
 

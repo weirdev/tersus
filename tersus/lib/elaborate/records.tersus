@@ -49,11 +49,11 @@ fn codecSizeAt(nodes: &List<AstNode>, id: Int) -> Size ~ {
 };
 
 fn codecSize(st: St, s: &Size) -> St ~ {
-    return match s {
-        Size::SConst { n: n } => sizeConst(st, n),
-        Size::SAny => simpleTy(st, 21),
-        Size::SParam { name: name } => addTy(st, Ty { kind: 22, name: clone(name), args: [], n: 0, flag: false, sizes: [], types: [] }),
-        Size::SVar { n: n } => addTy(st, Ty { kind: 23, name: "", args: [], n: n, flag: false, sizes: [], types: [] }),
+    match s {
+        Size::SConst { n: n } => { return sizeConst(st, n); },
+        Size::SAny => { return simpleTy(st, 21); },
+        Size::SParam { name: name } => { return addTy(st, Ty { kind: 22, name: clone(name), args: [], n: 0, flag: false, sizes: [], types: [] }); },
+        Size::SVar { n: n } => { return addTy(st, Ty { kind: 23, name: "", args: [], n: n, flag: false, sizes: [], types: [] }); },
     };
 };
 
