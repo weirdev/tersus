@@ -171,7 +171,8 @@ fn inferExpectedCore(st: St, context: String, wanted: Int, e: Int, returning: Bo
     arg = clone(st.te);
     st = expect(st, context, wanted, teHead(&arg));
     if st.status != 0 { return st; };
-    return St { te: withResultType(st, &arg, wanted), ..st };
+    result = withResultType(&st, &arg, wanted);
+    return St { te: result, ..st };
 };
 
 fn inferIf(st: St, c: Int, a: Int, b: Int, wanted: Int, returning: Bool, context: String) -> St ~ {
