@@ -2,7 +2,7 @@ import validation::context { analyzeContext, contextDifferent, contextEqual, con
 import validation::differences { isSizeTerm, semanticFacts };
 import validation::linear { linearEntailsIn };
 import validation::model { AnalysisLookup, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, GetFact, IntegerLookup, OrderFact, RelationFact, ValidatorContext, ValidatorGoal };
-import validation::relations { closedDisequality, containsValue, hasDifferenceIn, intAt, leastClasses, sameIn };
+import validation::relations { closedDisequality, containsValue, emptyIntMap, hasDifferenceIn, intAt, leastClasses, sameIn };
 import validation::sequenceFacts { finiteGetEqual, forallConstant, forallEqual, forallShift, getFactsTranslated, modDifferent, modIsSelf, setGetEqual };
 
 
@@ -473,7 +473,7 @@ fn deriveRefinedOrders(context: &ValidatorContext) -> ValidatorContext {
 };
 
 fn entailmentCache(context: &ValidatorContext) -> EntailmentCache {
-    return EntailmentCache { plain: clone(context), plainAnalysis: AnalysisLookup::Missing, derivedMade: false, derived: clone(context), derivedAnalysis: AnalysisLookup::Missing };
+    return EntailmentCache { plain: clone(context), plainClassesMade: false, plainClasses: emptyIntMap(), plainAnalysis: AnalysisLookup::Missing, derivedMade: false, derived: clone(context), derivedAnalysis: AnalysisLookup::Missing };
 };
 
 // Whether any of the goals holds: each is tried on the context, then each on
@@ -485,11 +485,13 @@ fn entailsAnyCached(cache: EntailmentCache, goals: &List<ValidatorGoal>) -> Cach
         if recognizedGoal(get(goals, gPosition)) { recognized = true; };
     };
     if recognized = false { return CachedAnswer { holds: false, cache: c }; };
-    plainDirect = leastClasses(semanticFacts(c.plain.equalities, c.plain.applications, c.plain.constants));
+    if c.plainClassesMade = false {
+        c = EntailmentCache { plainClasses: leastClasses(semanticFacts(c.plain.equalities, c.plain.applications, c.plain.constants)), plainClassesMade: true, ..c };
+    };
     for gPosition in 0..size(goals) {
         g = get(goals, gPosition);
         if recognizedGoal(g) {
-            if entailsGoalDirectlyIn(c.plain, plainDirect, g) { return CachedAnswer { holds: true, cache: c }; };
+            if entailsGoalDirectlyIn(c.plain, c.plainClasses, g) { return CachedAnswer { holds: true, cache: c }; };
         };
     };
     if recognized {
@@ -513,7 +515,7 @@ fn entailsAnyCached(cache: EntailmentCache, goals: &List<ValidatorGoal>) -> Cach
         for gPosition in 0..size(goals) {
             g = get(goals, gPosition);
             if recognizedGoal(g) {
-                if entailsGoalDirectlyIn(c.derived, plainDirect, g) { return CachedAnswer { holds: true, cache: c }; };
+                if entailsGoalDirectlyIn(c.derived, c.plainClasses, g) { return CachedAnswer { holds: true, cache: c }; };
             };
         };
         if c.derivedAnalysis is AnalysisLookup::Missing {

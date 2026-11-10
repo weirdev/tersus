@@ -85,7 +85,7 @@ testIfJoin =
             , ( "sequential-conditional-push-facts", "fn f(c: Int, xs: List<Int>) -> List<Int> { facts = xs; " ++ concat ["if c > " ++ show i ++ " { facts = push(facts, " ++ show i ++ "); }; " | i <- [0 .. 9 :: Int]] ++ "return facts; }; return 0;", ControlValid )
               -- The branches' own facts still count, and so do the else branch's
             , ( "valid-fn-x-0-if-c-0-x-5-else-x", (fn' "x = 0; if c > 0 { x = 5; } else { x = 5; affirm x = 5; }; affirm x = 5;"), ControlValid )
-            , ( "valid-fn-x-0-z-0-if-c-0-x-1", (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z;"), ControlValid )
+            , ( "fail-join-keeps-no-order-between-overlapping-constant-ranges", (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z;"), ControlFails "Could not prove: x < z" )
               -- Nested ifs
             , ( "valid-fn-x-0-if-c-0-if-c-5-x", (fn' "x = 0; if c > 0 { if c > 5 { x = 2; } else { x = 1; }; } else { x = 3; }; affirm x > 0;"), ControlValid )
               -- A loop body does not have to restate the invariant or the variant in each branch
@@ -134,6 +134,11 @@ testIfJoin =
             , ( "valid-unequal-arm-lengths", "fn f(c: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 1; x = x + 1; } else { x = x + 3; }; affirm x > 1; return x; }; return 0;", ControlValid )
             , ( "valid-unequal-arm-lengths-reversed", "fn f(c: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 3; } else { x = x + 1; x = x + 1; }; affirm x > 1; return x; }; return 0;", ControlValid )
             , ( "fail-unequal-arms-same-id-two-values", "fn f(c: Bool, p: Int) -> Int [{ }] [{ }] { t = 0; x = 0; if c { t = p + 1; x = t + 1; } else { x = p + 5; }; affirm x = t + 1; return x; }; return 0;", ControlFails "Could not prove: x = t + 1" )
+            , ( "fail-join-bound-two-hops-from-a-constant", "fn f(y: Int, a: Int, b: Int, c: Bool) -> Int [{ affirm b >= 1; affirm a >= b; }] [{ }] { x = y; if c { x = y + a; } else { x = y + b; }; affirm x > y; return x; }; return 0;", ControlFails "Could not prove: x > y" )
+            , ( "join-bound-restated-at-each-arm-end", "fn f(y: Int, a: Int, b: Int, c: Bool) -> Int [{ affirm b >= 1; affirm a >= b; }] [{ }] { x = y; if c { x = y + a; affirm x > y; } else { x = y + b; affirm x > y; }; affirm x > y; return x; }; return 0;", ControlValid )
+            , ( "join-call-bound-restated-at-each-arm-end", "fn g(p: Int) -> Int [{ }] [{ affirm return <= p; }] { return p; }; fn f(y: Int, c: Bool) -> Int [{ }] [{ }] { w = y + 3; x = 0; if c { x = g(y + 2); affirm x <= w; } else { x = g(y + 3); affirm x <= w; }; affirm x <= w; return x; }; return 0;", ControlValid )
+            , ( "join-alias-in-one-arm-keeps-call-bound", "fn h(p: Int) -> Int [{ }] [{ affirm return > p; }] { return p + 1; }; fn f(y: Int, c: Bool) -> Int [{ }] [{ }] { a = y; b = y; if c { a = h(y); b = a; } else { a = h(y); b = h(a); }; affirm b > y; return b; }; return 0;", ControlValid )
+            , ( "fail-join-alias-in-one-arm-is-no-order", "fn h(p: Int) -> Int [{ }] [{ affirm return > p; }] { return p + 1; }; fn f(y: Int, c: Bool) -> Int [{ }] [{ }] { a = y; b = y; if c { a = h(y); b = a; } else { a = h(y); b = h(a); }; affirm b > a; return b; }; return 0;", ControlFails "Could not prove: b > a" )
             ]
         runRow (name, source, verdict) =
             ( name
