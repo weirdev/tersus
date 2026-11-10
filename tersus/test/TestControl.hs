@@ -214,11 +214,11 @@ testForLoops =
               parseValidateFailProgramHelper "fn f(n: Int) -> Int { for i in 0..n { x = i; }; return 0; };" "the range has to be known to end at or after its start"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { for i in 0..n { x = i; }; affirm i = n; return 0; };"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 3; }] [{ }] { for i in 3..n { x = i; }; affirm i = n; return 0; };"
-            , -- A loop under a mode read from the arguments, as the AST reader runs one: decided where the argument is read,
-              -- it validates. Under a comparison of the default "" with "mutate", which the validator does not rule out, the
-              -- path with no argument reaches the loop with facts that contradict each other, and the loop is refused there.
+            , -- A loop under a mode read from the arguments, as the AST reader runs one: the sweep merges the arrival with the ""
+              -- default and the one with the argument before the comparison, so the loop is checked on facts that agree
               pipelineValid "mutate = false; if argCount() > 0 { mode = String::arg(0, 16); mutate = mode = \"mutate\"; }; l = [1, 2]; if mutate { n = size(l); for i in 0..n [{ affirm size(l) = n; }] { l = set(l, i, 0); }; }; return size(l);"
-            , pipelineRejected "mode = \"\"; if argCount() > 0 { mode = String::arg(0, 16); }; l = [1, 2]; if mode = \"mutate\" { n = size(l); for i in 0..n [{ affirm size(l) = n; }] { l = set(l, i, 0); }; }; return size(l);" "does not model yet: an operation in main"
+            , pipelineValid "mode = \"\"; if argCount() > 0 { mode = String::arg(0, 16); }; l = [1, 2]; if mode = \"mutate\" { n = size(l); for i in 0..n [{ affirm size(l) = n; }] { l = set(l, i, 0); }; }; return size(l);"
+            , pipelineRejected "mode = \"\"; if argCount() > 0 { mode = String::arg(0, 16); }; l = [1, 2]; if mode = \"mutate\" { n = size(l); for i in 0..n [{ affirm size(l) = n; }] { l = set(l, i, 0); }; affirm size(l) = 1; }; return size(l);" "Could not prove: size(l) = 1"
             ]
 
 -- Loops get the invariants a counter and the lists built beside it satisfy, without the program writing them
