@@ -9,7 +9,7 @@ import elaborate::expr { coerceArguments, genericCall, implementsMarker, nodesOf
 import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf };
 import elaborate::refs { putRefResult, traitResultFrom };
-import elaborate::state { BoundInfo, BoundedParts, Defined, Defining, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, rawInstanceName, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
+import elaborate::state { BoundInfo, BoundedParts, Defined, Defining, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, defFinding, freshVar, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, rawInstanceName, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -268,6 +268,7 @@ fn declareTemplate(st: St, name: String, bounds: List<BoundInfo>, tm: Template) 
     fs = FnSig { params: clone(tm.params), ptys: clone(tm.ptys), rty: tm.rty, sizes: clone(tm.sizes), types: clone(tm.types), writes: [], froms: clone(tm.from) };
     st = checkTemplateSignature(st, &name, &fs, &bounds);
     if st.status != 0 { return st; };
+    if st.boundsReport { st = St { defQueue: push(st.defQueue, clone(name)), defKinds: push(st.defKinds, "fn"), ..st }; };
     return St { templates: st.templates.insert(name, tm), ..st };
 };
 
@@ -519,9 +520,17 @@ fn templateInContext(st: St, name: String, tm: Template, inferred: &List<TE>) ->
     if st.status != 0 { return st; };
     bounded = clone(st.names);
     boundedValues = clone(st.te.types);
-    st = templateInstance(st, &name, &tm, &concrete, &bounded, &boundedValues);
-    if st.status != 0 { return st; };
-    instance = firstText(&st.names);
+    instance = clone(name);
+    if st.defChecking {
+        calledSig = FnSig { params: clone(tm.params), ptys: clone(tm.ptys), rty: tm.rty, sizes: clone(tm.sizes), types: clone(tm.types), writes: [], froms: clone(tm.from) };
+        st = fnTypeOf(st, &calledSig);
+        calledTy = st.ty;
+        st = St { defCalled: push(st.defCalled, clone(name)), defCalledTys: push(st.defCalledTys, calledTy), ..st };
+    } else {
+        st = templateInstance(st, &name, &tm, &concrete, &bounded, &boundedValues);
+        if st.status != 0 { return st; };
+        instance = firstText(&st.names);
+    };
     st = templateSizeArguments(st, &name, &tm, &sizeVars);
     if st.status != 0 { return st; };
     sizeArgs = clone(st.tes);
@@ -596,7 +605,7 @@ fn templateConcrete(st: St, name: &String, tm: &Template, concrete: &List<Int>) 
     while i < size(tm.types) && i < size(concrete) [{ affirm i >= 0; }] ~ {
         t = get(concrete, i);
         if unknownIn(st, t) { return typeError(st, catStrings(catStrings(catStrings(catStrings("the type ", clone(get(tm.types, i))), " of "), clone(name)), " cannot be worked out from its arguments")); };
-        if mentionsParameter(st, t) {
+        if mentionsParameter(st, t) && !st.defChecking {
             return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("the type ", clone(get(tm.types, i))), " of "), clone(name)), " would be "), render(st, t)), ", which is made of a type parameter of the function that calls: a function with bounds is made for types a call writes"));
         };
         i = i + 1;
@@ -747,6 +756,7 @@ fn makeTemplateInstance(st: St, name: &String, tm: &Template, instance: &String,
     parts = clone(st.outs);
     bodyTypes = clone(st.te.types);
     from = clone(st.names);
+    if st.boundsReport { st = St { instanceCount: st.instanceCount + 1, instanceTypes: st.instanceTypes + size(bodyTypes), ..st }; };
     st = St { fns: savedFns, ..st };
     st = emitName(st, clone(instance));
     nameNode = st.nid;
@@ -1362,6 +1372,9 @@ fn callResolved(st: St, name: String, inferred: &List<TE>) -> St ~ {
         tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
         return templateCall(st, name, tm, inferred);
     };
+    if st.defChecking && HashMap::contains(&st.fns, &name) && boundCallOwner(&st, &name) {
+        st = St { defCalled: push(st.defCalled, clone(name)), defCalledTys: push(st.defCalledTys, HashMap::lookup(&st.fns, &name, 0)), ..st };
+    };
     if !HashMap::contains(&st.fns, &name) {
         return typeError(st, catStrings(clone(name), " is not defined before this call (there is no such function, or its impl comes later)"));
     };
@@ -1429,6 +1442,7 @@ fn ownerOfValue(st: St, function: &String, ty: Int) -> St ~ {
         owner = clone(st.ctor.owner);
         return St { names: push([], owner), ..st };
     };
+    if st.defChecking && x.kind = 12 { return paramOwner(st, function, t); };
     if x.kind = 15 { return typeError(st, catStrings(catStrings("the type of the value whose function ", clone(function)), " is called is not known yet; annotate it")); };
     return typeError(st, catStrings(catStrings(catStrings(clone(function), " is called on a "), render(st, t)), ", which has no functions"));
 };
@@ -1466,6 +1480,16 @@ fn ownerThroughTrait(st: St, tname: &String, fns: &List<Int>, function: &String,
     st = traitOwner(st, &path, get(ats, at));
     if st.status != 0 { return st; };
     owner = firstText(&st.names);
+    if st.defChecking && !HashSet::contains(&st.impls, pairKey(tname, &owner)) {
+        st = zonk(st, get(ats, at));
+        if kindOf(st, st.ty) = 12 {
+            pty = st.ty;
+            st = defFinding(st, "unwritten bound", catStrings(catStrings(catStrings(catStrings(catStrings("calls ", clone(path)), " on "), clone(owner)), ", which needs "), catStrings(catStrings(clone(owner), ": "), clone(tname))));
+            st = freshTraitArgs(st, tname);
+            args = clone(st.te.types);
+            st = registerParamImpl(st, &owner, pty, tname, &args);
+        };
+    };
     if !HashSet::contains(&st.impls, pairKey(tname, &owner)) { return typeError(st, catStrings(catStrings(owner, " does not implement "), clone(tname))); };
     return St { names: push([], owner), ..st };
 };
@@ -1540,6 +1564,9 @@ fn gives(st: St, ok: Bool, ts: List<Int>) -> St ~ { return St { ok: ok, te: TE {
 fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     x = tyAt(st, t);
     if (tname = "Eq" || tname = "Clone") && primitiveEqRaw(&x) { return gives(st, true, []); };
+    if tname = "Clone" && st.defChecking && x.kind = 12 && !HashSet::contains(&st.impls, pairKey(&tname, &x.name)) {
+        st = defFinding(st, "unbounded clone", catStrings(clone(x.name), " is used as Clone, which a type parameter allows today, and its bounds do not give Clone"));
+    };
     if tname = "Clone" && (x.kind = 3 || x.kind = 14 || x.kind = 7 || x.kind = 12 || x.kind = 15) { return gives(st, true, []); };
     if tname = "Clone" && (isListTy(st, t) || x.kind = 6 || isBoxTy(st, t)) {
         st = traitArguments(st, "Clone", nth(&x.args, 0));
@@ -1549,6 +1576,7 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
         st = traitArguments(st, "Eq", argAt(st, nth(&x.args, 0), 0));
         return gives(st, st.ok, []);
     };
+    if st.defChecking && x.kind = 12 { return paramTraitArguments(st, tname, t); };
     arity = size(HashMap::lookup(&st.traitParams, &tname, []));
     base = "";
     args = [];
@@ -2277,6 +2305,11 @@ fn boundedImplTemplates(st: St, tname: &String, typeName: &String, bounds: &List
         tm = templateOf(st, get(parts.values, i), bounds, boundsNode, &fs, get(parts.defined, i).sigNode);
         part = implFunctionPart(&name);
         st = addAssoc(st, typeName, &part, tname);
+        if st.boundsReport {
+            kind = "trait impl fn";
+            if size(tname.bytes) = 0 { kind = "inherent impl fn"; };
+            st = St { defQueue: push(st.defQueue, clone(name)), defKinds: push(st.defKinds, kind), ..st };
+        };
         st = St { templates: st.templates.insert(name, tm), ..st };
         i = i + 1;
     };
@@ -2296,8 +2329,269 @@ fn boundedWrapperTemplates(st: St, bounds: &List<BoundInfo>, boundsNode: Int) ->
         wname = clone(get(parts.wrapperNames, i));
         function = clone(get(parts.wrapperOf, i));
         existing = HashMap::lookup(&st.companions, &function, []);
+        if st.boundsReport { st = St { defQueue: push(st.defQueue, clone(wname)), defKinds: push(st.defKinds, "trait check fn"), ..st }; };
         st = St { templates: st.templates.insert(clone(wname), tm), companions: st.companions.insert(clone(function), concatFront(push([], wname), existing)), ..st };
         i = i + 1;
     };
     return st;
+};
+
+// Phase 0 spike (bounds-only report, TERSUS_BOUNDS_ONLY_REPORT): each template the module defines checked once against
+// its written bounds, its type parameters left as parameters. A bound T: Tr<args> is an impl of Tr for T whose functions
+// are <T as Tr>::f; a use the bounds do not give is recorded and then given, so that one body can show several.
+
+fn freshTraitArgs(st: St, tname: &String) -> St ~ {
+    out = [];
+    for q in HashMap::lookup(&st.traitParams, tname, []) { st = freshVar(st); out = push(out, st.ty); };
+    return St { te: TE { node: 0 - 1, types: out }, ..st };
+};
+
+fn registerParamImpl(st: St, p: &String, pty: Int, tname: &String, args: &List<Int>) -> St ~ {
+    key = pairKey(tname, p);
+    st = St { impls: st.impls.insert(clone(key)), implArgs: st.implArgs.insert(clone(key), ImplArgs { ty: pty, args: clone(args), tyNode: 0 - 1, argsNode: 0 - 1 }), ..st };
+    params = HashMap::lookup(&st.traitParams, tname, []);
+    for f in HashMap::lookup(&st.traitFns, tname, []) {
+        tf = traitFnOf(&st, f);
+        fname = nameText(&st.nodes, tf.n);
+        st = fnSigOf(st, tf.ps, tf.sig);
+        fs = clone(st.fnSig);
+        ptys = [];
+        for q in &fs.ptys { st = substSelfAs(st, "Self", pty, q); st = substTraitArgs(st, &params, args, st.ty); ptys = push(ptys, st.ty); };
+        st = substSelfAs(st, "Self", pty, fs.rty);
+        st = substTraitArgs(st, &params, args, st.ty);
+        rty = st.ty;
+        boundSig = FnSig { params: clone(fs.params), ptys: ptys, rty: rty, sizes: clone(fs.sizes), types: clone(fs.types), writes: clone(fs.writes), froms: clone(fs.froms) };
+        st = fnTypeOf(st, &boundSig);
+        fty = st.ty;
+        bname = implFunctionName(p, tname, &fname);
+        st = addAssoc(st, p, &fname, tname);
+        st = St { fns: st.fns.insert(clone(bname), fty), ..st };
+        if size(fs.froms) > 0 { st = putRefResult(st, bname, clone(fs.params), clone(fs.froms)); };
+    };
+    return st;
+};
+
+fn paramTraitArguments(st: St, tname: String, t: Int) -> St ~ {
+    p = tyAt(&st, t).name;
+    key = pairKey(&tname, &p);
+    if !HashMap::contains(&st.implArgs, &key) {
+        st = defFinding(st, "unwritten bound", catStrings(catStrings(catStrings(clone(p), " is used as "), clone(tname)), ", which its bounds do not give"));
+        st = freshTraitArgs(st, &tname);
+        args = clone(st.te.types);
+        st = registerParamImpl(st, &p, t, &tname, &args);
+    };
+    ia = HashMap::lookup(&st.implArgs, &key, ImplArgs { ty: 0, args: [], tyNode: 0 - 1, argsNode: 0 - 1 });
+    out = [];
+    for g in &ia.args { if !isSize(&st, g) { out = push(out, g); }; };
+    return gives(st, true, out);
+};
+
+// The value of a type parameter owns the functions of its bounds
+fn paramOwner(st: St, function: &String, t: Int) -> St ~ {
+    p = tyAt(&st, t).name;
+    if HashMap::contains(&st.assoc, assocKey(&p, function)) { return St { names: push([], p), ..st }; };
+    candidates = [];
+    for e in HashMap::entries(&st.traitFns) {
+        if traitFnNamed(&st, &e.value, function) >= 0 { candidates = push(candidates, clone(e.key)); };
+    };
+    candidates = sortTexts(candidates);
+    if size(candidates) > 0 {
+        tname = clone(get(candidates, 0));
+        st = defFinding(st, "unwritten bound", catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("calls ", clone(function)), " on "), clone(p)), ", which needs "), catStrings(catStrings(clone(p), ": "), clone(tname))), catStrings(" (traits with it: ", catStrings(joinWith(&candidates, ", "), ")"))));
+        st = freshTraitArgs(st, &tname);
+        args = clone(st.te.types);
+        st = registerParamImpl(st, &p, t, &tname, &args);
+    };
+    return St { names: push([], p), ..st };
+};
+
+// <T as Tr>::f for a type parameter T of the function being checked
+fn boundCallOwner(st: &St, name: &String) -> Bool ~ {
+    if size(name.bytes) < 2 || get(name.bytes, 0) != toByte(60) { return false; };
+    end = 1;
+    while end < size(name.bytes) && get(name.bytes, end) != toByte(32) [{ affirm end >= 1; }] shrinks size(name.bytes) - end { end = end + 1; };
+    owner = name.slice(1, end);
+    return indexIn(&st.typeScope, &owner) >= 0;
+};
+
+fn defCheckAll(st: St) -> St ~ {
+    i = 0;
+    while i < size(st.defQueue) && i < size(st.defKinds) [{ affirm i >= 0; }] shrinks size(st.defQueue) - i {
+        name = clone(get(st.defQueue, i));
+        kind = clone(get(st.defKinds, i));
+        st = defCheckOne(st, name, kind);
+        i = i + 1;
+    };
+    return st;
+};
+
+fn defCheckOne(st: St, name: String, kind: String) -> St ~ {
+    tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
+    // (what the check may leave changed when it fails part way is put back; the arena and the unifier only grow)
+    nodes = st.nodes;
+    tys = st.tys;
+    subst = st.subst;
+    sizeSubst = st.sizeSubst;
+    next = st.next;
+    definitions = st.definitions;
+    builtinValues = st.builtinValues;
+    builtinSchemes = st.builtinSchemes;
+    findings = st.defFindings;
+    genericOut = st.genericOut;
+    genericTypes = st.genericTypes;
+    st = St { nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), definitions: [], builtinValues: [], builtinSchemes: [], defFindings: [], genericOut: [], genericTypes: [], ..st };
+    saved = clone(st);
+    depth = size(definitions);
+    st = St { nodes: nodes, tys: tys, subst: subst, sizeSubst: sizeSubst, next: next, definitions: definitions, builtinValues: builtinValues, builtinSchemes: builtinSchemes, defFindings: findings, genericOut: genericOut, genericTypes: genericTypes, ..st };
+    st = St { defChecking: true, defCurrent: catStrings(catStrings(clone(kind), " "), clone(name)), defCalled: [], defCalledTys: [], ..st };
+    copyParams = [];
+    for b in &tm.bounds {
+        st = addTy(st, Ty { kind: 12, name: clone(b.p), args: [], n: 0, flag: false, sizes: [], types: [] });
+        pty = st.ty;
+        st = registerParamImpl(st, &b.p, pty, &b.n, &b.ts);
+        if b.n = "Copy" { copyParams = push(copyParams, clone(b.p)); };
+    };
+    i = 0;
+    while i < size(tm.fnNames) && i < size(tm.fnTypes) [{ affirm i >= 0; }] ~ {
+        st = St { fns: st.fns.insert(clone(get(tm.fnNames, i)), get(tm.fnTypes, i)), ..st };
+        i = i + 1;
+    };
+    writes = namesText(&st.nodes, signatureOf(&st.nodes, tm.sigNode).ws);
+    fs = FnSig { params: clone(tm.params), ptys: clone(tm.ptys), rty: tm.rty, sizes: clone(tm.sizes), types: clone(tm.types), writes: writes, froms: clone(tm.from) };
+    st = checkFunction(st, &name, clone(fs), tm.ins, tm.outs, tm.term, tm.body);
+    if st.status != 0 {
+        msg = clone(st.msg);
+        st = St { status: 0, msg: "", ..st };
+        st = defFinding(st, "refused", msg);
+    } else {
+        st = defFinding(st, "checked", intText(size(st.te.types)));
+        st = emitGeneric(st, &name, &tm, &fs, &copyParams);
+    };
+    nodes = st.nodes;
+    tys = st.tys;
+    subst = st.subst;
+    sizeSubst = st.sizeSubst;
+    next = st.next;
+    definitions = st.definitions;
+    while size(definitions) > depth [{ }] ~ { definitions = pop(definitions); };
+    builtinValues = st.builtinValues;
+    builtinSchemes = st.builtinSchemes;
+    findings = st.defFindings;
+    genericOut = st.genericOut;
+    genericTypes = st.genericTypes;
+    return St { nodes: nodes, tys: tys, subst: subst, sizeSubst: sizeSubst, next: next, definitions: definitions, builtinValues: builtinValues, builtinSchemes: builtinSchemes, defFindings: findings, genericOut: genericOut, genericTypes: genericTypes, ..saved };
+};
+
+// The checked generic body as a function with type parameters, after stubs of the bound calls and template calls it
+// makes and a marker the host reads: `$generic <types> <name> <Copy-bounded parameters>`
+fn emitGeneric(st: St, name: &String, tm: &Template, fs: &FnSig, copyParams: &List<String>) -> St ~ {
+    parts = clone(st.outs);
+    bodyTypes = clone(st.te.types);
+    from = clone(st.names);
+    out = [];
+    stubbed = [];
+    i = 0;
+    while i < size(st.defCalled) && i < size(st.defCalledTys) [{ affirm i >= 0; }] ~ {
+        callee = clone(get(st.defCalled, i));
+        if indexIn(&stubbed, &callee) < 0 && callee != clone(name) {
+            stubbed = push(stubbed, clone(callee));
+            st = emitName(st, "$stub");
+            st = emit(st, AstNode::Statement { value: AstStatement::ExternDef { n: st.nid } });
+            out = push(out, st.nid);
+            st = emitStub(st, &callee, get(st.defCalledTys, i));
+            if st.nid >= 0 { out = push(out, st.nid); };
+        };
+        i = i + 1;
+    };
+    marker = catStrings(catStrings(catStrings(catStrings("$generic ", intText(size(bodyTypes))), " "), clone(name)), catStrings(" ", joinWith(copyParams, " ")));
+    st = emitName(st, marker);
+    st = emit(st, AstNode::Statement { value: AstStatement::ExternDef { n: st.nid } });
+    out = push(out, st.nid);
+    st = emitName(st, clone(name));
+    nameNode = st.nid;
+    st = emitNames(st, &tm.params);
+    paramsNode = st.nid;
+    st = emitTypes(st, &fs.ptys);
+    tsNode = st.nid;
+    st = emitType(st, fs.rty);
+    retNode = st.nid;
+    st = emitNames(st, &tm.sizes);
+    ssNode = st.nid;
+    st = emitNames(st, &tm.types);
+    psNode = st.nid;
+    st = emitNames(st, &fs.writes);
+    wsNode = st.nid;
+    st = emitNames(st, &from);
+    st = emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: ssNode, ps: psNode, ws: wsNode, fs: st.nid } });
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: st.nid, term: nth(&parts, 2), stmts: nth(&parts, 3) } });
+    bodyNode = st.nid;
+    noProofs = [];
+    st = emitProofs(st, &noProofs);
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: paramsNode, ins: nth(&parts, 0), outs: nth(&parts, 1), body: bodyNode, exports: st.nid } });
+    st = emitVal(st, st.nid);
+    st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: nameNode, e: st.nid } });
+    out = push(out, st.nid);
+    genericOut = clone(st.genericOut);
+    for o in &out { genericOut = push(genericOut, o); };
+    genericTypes = clone(st.genericTypes);
+    for t in &bodyTypes { genericTypes = push(genericTypes, t); };
+    return St { genericOut: genericOut, genericTypes: genericTypes, ..st };
+};
+
+// A function with the signature of a function type and no body (st.nid its statement, -1 for a type that is not one)
+fn emitStub(st: St, name: &String, ft: Int) -> St ~ {
+    st = zonk(st, ft);
+    x = tyAt(&st, st.ty);
+    sizes = [];
+    types = [];
+    if x.kind = 13 {
+        sizes = clone(x.sizes);
+        types = clone(x.types);
+        st = zonk(st, nth(&x.args, 0));
+        x = tyAt(&st, st.ty);
+    };
+    if x.kind != 14 || size(x.args) = 0 { return St { nid: 0 - 1, ..st }; };
+    ptys = [];
+    params = [];
+    i = 0;
+    while i + 1 < size(x.args) [{ affirm i >= 0; }] shrinks size(x.args) - i {
+        ptys = push(ptys, get(x.args, i));
+        params = push(params, catStrings("p", intText(i)));
+        i = i + 1;
+    };
+    rty = nth(&x.args, size(x.args) - 1);
+    st = emitName(st, clone(name));
+    nameNode = st.nid;
+    st = emitNames(st, &params);
+    paramsNode = st.nid;
+    st = emitTypes(st, &ptys);
+    tsNode = st.nid;
+    st = emitType(st, rty);
+    retNode = st.nid;
+    st = emitNames(st, &sizes);
+    ssNode = st.nid;
+    st = emitNames(st, &types);
+    psNode = st.nid;
+    noNames = [];
+    st = emitNames(st, &noNames);
+    wsNode = st.nid;
+    st = emitNames(st, &noNames);
+    st = emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: ssNode, ps: psNode, ws: wsNode, fs: st.nid } });
+    sigNode = st.nid;
+    st = emit(st, AstNode::OptTermination { value: AstOptTermination::NoTermination });
+    termNode = st.nid;
+    noStmts = [];
+    st = emitStatements(st, &noStmts);
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: termNode, stmts: st.nid } });
+    bodyNode = st.nid;
+    noValidations = [];
+    st = emitValidations(st, &noValidations);
+    insNode = st.nid;
+    st = emitValidations(st, &noValidations);
+    outsNode = st.nid;
+    noProofs = [];
+    st = emitProofs(st, &noProofs);
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: paramsNode, ins: insNode, outs: outsNode, body: bodyNode, exports: st.nid } });
+    st = emitVal(st, st.nid);
+    return emit(st, AstNode::Statement { value: AstStatement::Assign { n: nameNode, e: st.nid } });
 };

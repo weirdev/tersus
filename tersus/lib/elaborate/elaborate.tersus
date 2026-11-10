@@ -5,11 +5,11 @@ import data::reader::reader { parseAstLines, readAstRecords, readRecord, readRec
 import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
-import elaborate::out { emit, emitTypes, quotedName };
+import elaborate::out { emit, emitStatements, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, Defining, FnSig, Generic, ImplArgs, St, TE, Template, intText, noBoundedParts, notModelled, oneScope };
-import elaborate::traits { argListOf, boundsOf, emptyTemplate };
+import elaborate::traits { argListOf, boundsOf, defCheckAll, emptyTemplate };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
 // response on standard output (AST_DATA.md). It answers `unmodelled` for what it does not handle yet.
@@ -25,7 +25,8 @@ fn newState() -> St ~ {
         methodOf: HashMap::new(), ty: 0, ok: true, te: TE { node: 0 - 1, types: [] }, tes: [], outs: [], nid: 0 - 1, n: 0,
         gen: Generic { params: [], names: [], types: [] }, ctor: CtorInfo { owner: "", names: [], types: [] }, names: [],
         fnSig: FnSig { params: [], ptys: [], rty: 0, sizes: [], types: [], writes: [], froms: [] }, sigNode: 0 - 1, boundsOut: [],
-        seen: [], status: 0, msg: ""
+        seen: [], status: 0, msg: "",
+        boundsReport: false, defChecking: false, defCurrent: "", defQueue: [], defKinds: [], defFindings: [], defCalled: [], defCalledTys: [], genericOut: [], genericTypes: [], instanceCount: 0, instanceTypes: 0
     };
 };
 
@@ -479,6 +480,7 @@ if viewing {
     };
 };
 stmts = listItems(&st.nodes, parsedRoot);
+st = St { boundsReport: wordIs(&builtinsLine, 1, "boundsReport"), ..st };
 if st.status = 0 {
     st = gatherSignatures(st, &stmts);
     if predeclaring {
@@ -489,12 +491,25 @@ if st.status = 0 {
 };
 out = AstProgram { stage: "elaborated", nodes: [], root: 0 };
 iface = AstProgram { stage: "interface", nodes: [], root: 0 };
+programTypeCount = 0;
 if st.status = 0 {
     statementsNode = st.te.node;
     types = clone(st.te.types);
+    programTypeCount = size(types);
+    programStatements = statementsNode;
+    if st.boundsReport {
+        st = defCheckAll(st);
+        if size(st.genericOut) > 0 {
+            all = listItems(&st.nodes, statementsNode);
+            for g in &st.genericOut { all = push(all, g); };
+            for t in &st.genericTypes { types = push(types, t); };
+            st = emitStatements(st, &all);
+            programStatements = st.nid;
+        };
+    };
     st = emitTypes(st, &types);
     if st.status = 0 {
-        st = emit(st, AstNode::Elaborated { value: AstElaborated { statements: statementsNode, types: st.nid } });
+        st = emit(st, AstNode::Elaborated { value: AstElaborated { statements: programStatements, types: st.nid } });
         out = reorderArena(&st.nodes, st.nid, "elaborated");
         if extracting {
             elaborated = listItems(&st.nodes, statementsNode);
@@ -502,5 +517,9 @@ if st.status = 0 {
             if st.status = 0 { iface = reorderArena(&st.nodes, st.nid, "interface"); };
         };
     };
+};
+for f in &st.defFindings { catStrings(clone(f), "\n").printError(); };
+if st.boundsReport {
+    catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("boundsReport | stats | instances ", intText(st.instanceCount)), " | instanceTypes "), intText(st.instanceTypes)), " | programTypes "), intText(programTypeCount)), catStrings(catStrings(" | genericTypes ", intText(size(st.genericTypes))), "\n")).printError();
 };
 respond(&st, &out, &iface, extracting);

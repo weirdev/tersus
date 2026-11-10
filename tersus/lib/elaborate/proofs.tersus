@@ -9,7 +9,7 @@ import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
 import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { callOf };
 import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk };
-import elaborate::traits { emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
+import elaborate::traits { emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof ~ {
     node = nodeIn(&st.nodes, p);
@@ -240,6 +240,15 @@ fn inferProofOther(st: St, funct: Int, args: &List<Int>) -> St ~ {
             };
             if x.kind = 4 && x.name != "List" && x.name != "Box" {
                 owner = clone(x.name);
+                st = resolveAssociated(st, &owner, &fname);
+                if st.status != 0 { return st; };
+                return ghostCall(st, 0 - 1, firstText(&st.names), &argTys, &argNodes);
+            };
+            if st.defChecking && x.kind = 12 {
+                receiverTy = st.ty;
+                st = ownerOfValue(st, &fname, receiverTy);
+                if st.status != 0 { return st; };
+                owner = firstText(&st.names);
                 st = resolveAssociated(st, &owner, &fname);
                 if st.status != 0 { return st; };
                 return ghostCall(st, 0 - 1, firstText(&st.names), &argTys, &argNodes);

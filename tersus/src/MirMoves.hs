@@ -101,6 +101,7 @@ isCopyType copies program = go (0 :: Int)
             TRef t -> go (depth + 1) t
             TNamed base args -> declared depth (instanceName base args)
             TVariant v -> maybe False (declared depth) (ownerOf program v)
+            TParam p -> ("$param " ++ p) `Set.member` copies
             _ -> False
     declared depth n =
         let base = baseNameOf n

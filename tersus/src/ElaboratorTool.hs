@@ -11,11 +11,15 @@ module ElaboratorTool
     ) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (IOException, finally, try)
+import Control.Exception (IOException, evaluate, finally, try)
 import qualified Data.ByteString.Char8 as B
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
+import GHC.Clock (getMonotonicTime)
+import System.Directory (createDirectoryIfMissing)
+import System.Environment (lookupEnv)
+import System.Posix.Process (ProcessTimes (..), getProcessTimes)
 import System.Exit (ExitCode (..))
-import System.IO (hClose, hSetBinaryMode)
+import System.IO (hClose, hPutStr, hSetBinaryMode, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess, withCreateProcess)
 
@@ -23,34 +27,107 @@ import BuiltinTable (builtinTableText)
 import ElaborateRequest
 import {-# SOURCE #-} ElaboratorNative (frontendStage)
 import Hash (fingerprint)
+import MirLower (probeGenerics)
+import Modules (ModuleId (..))
+import Syntax (Elaborated (..), Statement (..))
 import Native (raiseStack)
 import PreludeSource (elaboratePackageFiles, frontendSeedSources)
 import Seed (cachedFrontendSeed)
 import Utils
 
 runElaborator :: FilePath -> Request -> IO (Result Response String)
-runElaborator exe rq = case writeRequest rq of
-    Error e -> pure (Error e)
-    Ok text -> do
-        -- (the elaborator recurses over the nesting of expressions, deeper than a default stack allows for a deep one;
-        -- the data is ASCII, so it is passed as bytes rather than through the locale's decoding of a String)
-        (code, out, err) <- withCreateProcess (proc "/bin/sh" ["-c", raiseStack, exe]){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe} $
-            \hin' hout' herr' ph -> case (hin', hout', herr') of
-                (Just hin, Just hout, Just herr) -> do
-                    mapM_ (`hSetBinaryMode` True) [hin, hout, herr]
-                    outVar <- newEmptyMVar
-                    errVar <- newEmptyMVar
-                    _ <- forkIO (B.hGetContents hout >>= putMVar outVar)
-                    _ <- forkIO (B.hGetContents herr >>= putMVar errVar)
-                    _ <- try (B.hPut hin (B.pack text) `finally` hClose hin) :: IO (Either IOException ())
-                    out <- takeMVar outVar
-                    err <- takeMVar errVar
-                    code <- waitForProcess ph
-                    pure (code, out, err)
-                _ -> pure (ExitFailure 1, B.empty, B.pack "no pipes to the elaborator")
-        pure $ case code of
-            ExitSuccess -> readResponseBytes (B.lines out)
-            ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 (B.unpack err))
+runElaborator exe rq = do
+    reportDir <- lookupEnv "TERSUS_BOUNDS_ONLY_REPORT"
+    case writeRequest rq of
+        Error e -> pure (Error e)
+        Ok text0 -> do
+            let text = maybe text0 (const (markBoundsReport text0)) reportDir
+            -- (the elaborator recurses over the nesting of expressions, deeper than a default stack allows for a deep one;
+            -- the data is ASCII, so it is passed as bytes rather than through the locale's decoding of a String)
+            start <- getMonotonicTime
+            cpuStart <- childCpuSeconds
+            (code, out, err) <- withCreateProcess (proc "/bin/sh" ["-c", raiseStack, exe]){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe} $
+                \hin' hout' herr' ph -> case (hin', hout', herr') of
+                    (Just hin, Just hout, Just herr) -> do
+                        mapM_ (`hSetBinaryMode` True) [hin, hout, herr]
+                        outVar <- newEmptyMVar
+                        errVar <- newEmptyMVar
+                        _ <- forkIO (B.hGetContents hout >>= putMVar outVar)
+                        _ <- forkIO (B.hGetContents herr >>= putMVar errVar)
+                        _ <- try (B.hPut hin (B.pack text) `finally` hClose hin) :: IO (Either IOException ())
+                        out <- takeMVar outVar
+                        err <- takeMVar errVar
+                        code <- waitForProcess ph
+                        pure (code, out, err)
+                    _ -> pure (ExitFailure 1, B.empty, B.pack "no pipes to the elaborator")
+            let response = case code of
+                    ExitSuccess -> readResponseBytes (B.lines out)
+                    ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 (B.unpack err))
+            elapsed <- subtract start <$> getMonotonicTime
+            cpu <- subtract cpuStart <$> childCpuSeconds
+            case reportDir of
+                Nothing -> do
+                    timingDir <- lookupEnv "TERSUS_ELABORATE_TIMING"
+                    mapM_ (\dir -> writeReport dir [moduleLine rq response, "elaborateSeconds " ++ show elapsed, "elaborateCpuSeconds " ++ show cpu]) timingDir
+                    pure response
+                Just dir -> boundsReport dir rq elapsed cpu err response
+
+-- Phase 0 spike (TERSUS_BOUNDS_ONLY_REPORT=<directory>): the elaborator checks each template the module defines against
+-- its bounds and appends the generic bodies; their lowering is probed here, and both reports are written to the directory.
+-- The response given back is the program without the appended bodies.
+markBoundsReport :: String -> String
+markBoundsReport = unlines . go . lines
+  where
+    go ("builtins" : rest) = "builtins boundsReport" : rest
+    go (l : rest) = l : go rest
+    go [] = []
+
+boundsReport :: FilePath -> Request -> Double -> Double -> B.ByteString -> Result Response String -> IO (Result Response String)
+boundsReport dir rq elapsed cpu err response = do
+    let findings = [B.unpack l | l <- B.lines err, B.pack "boundsReport | " `B.isPrefixOf` l]
+        isMarker stmt = case stmt of
+            ExternDef m -> m == "$stub" || "$generic " `isPrefixOf` m
+            _ -> False
+    (result, probed, probeSeconds) <- case response of
+        Ok (Accepted (Elaborated stmts types) iface) | any isMarker stmts -> do
+            let (mainStmts, tailStmts) = break isMarker stmts
+                genericCount = sum [n | ExternDef m <- tailStmts, "$generic " `isPrefixOf` m, (w : _) <- [words (drop 9 m)], [(n, "")] <- [reads w]]
+                (mainTypes, genericTypes) = splitAt (length types - genericCount) types
+                lines' = probeGenerics (rqInterfaces rq) mainStmts tailStmts genericTypes
+            probeStart <- getMonotonicTime
+            _ <- evaluate (length (concat lines'))
+            probeEnd <- getMonotonicTime
+            pure (Ok (Accepted (Elaborated mainStmts mainTypes) iface), lines', probeEnd - probeStart)
+        _ -> pure (response, [], 0)
+    writeReport dir ([moduleLine rq response, "elaborateSeconds " ++ show elapsed, "elaborateCpuSeconds " ++ show cpu, "probeSeconds " ++ show probeSeconds] ++ findings ++ probed)
+    pure result
+
+-- (user and system time of the children this process has waited for: the elaborator, as requests are made one at a time)
+childCpuSeconds :: IO Double
+childCpuSeconds = do
+    times <- getProcessTimes
+    pure (fromIntegral (fromEnum (childUserTime times) + fromEnum (childSystemTime times)) / 100)
+
+moduleLine :: Request -> Result Response String -> String
+moduleLine rq response = "module " ++ pkg ++ maybe "" ("::" ++) modu ++ " | " ++ map (\c -> if c == '\n' then ' ' else c) verdict
+  where
+    ModuleId pkg modu = rqModule rq
+    verdict = case response of
+        Ok (Accepted _ _) -> "accepted"
+        Ok (Refused e) -> "refused " ++ take 200 e
+        Ok (RefusedInterface e) -> "interfaceRefused " ++ take 200 e
+        Ok (NotModelled e) -> "unmodelled " ++ take 200 e
+        Error e -> "error " ++ take 200 e
+
+writeReport :: FilePath -> [String] -> IO ()
+writeReport dir ls = do
+    _ <- try (do
+        createDirectoryIfMissing True dir
+        (path, handle) <- openTempFile dir "report.txt"
+        hPutStr handle (unlines ls)
+        hClose handle
+        pure path) :: IO (Either IOException FilePath)
+    pure ()
 
 -- The executable as the compiler's elaborator. An answer it cannot give refuses the module, with a reason that says
 -- the tool failed, rather than being taken for the program's fault or answered by another elaborator.
