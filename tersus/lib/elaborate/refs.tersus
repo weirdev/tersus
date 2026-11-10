@@ -211,7 +211,7 @@ fn expressionPlaces(st: &St, e: Int) -> List<Place> ~ {
         if place.ok { return resolveRefPlaces(st, clone(place.root), clone(place.steps)); };
         return expressionPlaces(st, get(c.args, 0));
     };
-    if c.ok && c.key = "Field" && size(c.args) = 1 {
+    if c.ok && (c.key = "Field" || c.key = "Project" || c.key = "Cast") && size(c.args) = 1 {
         working = exprRefOrigins(clone(st), get(c.args, 0));
         roots = clone(working.names);
         out = [];
