@@ -111,7 +111,7 @@ fn ensureInstance(st: St, t: Int) -> St ~ {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " gives a size where "), catStrings(x.name, " wants a type, or a type where it wants a size (")), joinWith(&parts, ", ")), ")"));
     };
     fields = clone(st.te.types);
-    return St { types: st.types.insert(clone(name), push([], clone(name))), ctors: st.ctors.insert(clone(name), CtorInfo { owner: clone(name), names: clone(g.names), types: fields }), ..st };
+    return St { types: st.types.insert(clone(name), push([], clone(name))), ctors: st.ctors.insert(clone(name), CtorInfo { owner: clone(name), names: clone(g.names), types: fields }), storeCache: HashMap::new(), ..st };
 };
 
 fn argKnown(st: St, p: &String, a: Int, name: &String) -> St ~ {

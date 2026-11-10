@@ -115,6 +115,7 @@ struct St {
     implDefined: List<Defined>,
     ghostCache: HashMap<String, Bool>,
     refCache: HashMap<String, Bool>,
+    storeCache: HashMap<String, Bool>,
     boundedParts: BoundedParts,
     big: List<Int>,
     undo: List<Int>,
@@ -296,7 +297,7 @@ fn teHeadAt(xs: &List<TE>, i: Int) -> Int ~ {
 };
 
 // What holdsGhost and holdsRef found no longer holds once a type, its constructors, a linear type or a drop is declared
-fn typesChanged(st: St) -> St ~ { return St { ghostCache: HashMap::new(), refCache: HashMap::new(), ..st }; };
+fn typesChanged(st: St) -> St ~ { return St { ghostCache: HashMap::new(), refCache: HashMap::new(), storeCache: HashMap::new(), ..st }; };
 
 fn firstText(xs: &List<String>) -> String ~ {
     if size(xs) = 0 { return ""; };
@@ -468,7 +469,7 @@ fn occurs(st: &St, v: Int, t: Int) -> Bool ~ {
 
 fn bindVar(st: St, n: Int, t: Int) -> St ~ {
     if st.logging { st = St { undo: push(st.undo, n), ..st }; };
-    return St { subst: st.subst.insert(n, t), ok: true, ..st };
+    return St { subst: st.subst.insert(n, t), storeCache: HashMap::new(), ok: true, ..st };
 };
 
 fn unifySize(st: St, a: Int, b: Int) -> St ~ {
@@ -480,12 +481,12 @@ fn unifySize(st: St, a: Int, b: Int) -> St ~ {
     if kx = 23 {
         nx = numberOf(st, x);
         if st.logging { st = St { sizeUndo: push(st.sizeUndo, nx), ..st }; };
-        return St { sizeSubst: st.sizeSubst.insert(nx, y), ok: true, ..st };
+        return St { sizeSubst: st.sizeSubst.insert(nx, y), storeCache: HashMap::new(), ok: true, ..st };
     };
     if ky = 23 {
         ny = numberOf(st, y);
         if st.logging { st = St { sizeUndo: push(st.sizeUndo, ny), ..st }; };
-        return St { sizeSubst: st.sizeSubst.insert(ny, x), ok: true, ..st };
+        return St { sizeSubst: st.sizeSubst.insert(ny, x), storeCache: HashMap::new(), ok: true, ..st };
     };
     same = sameTy(st, x, y);
     return St { ok: same, ..st };
@@ -802,7 +803,7 @@ fn undoTry(st: St, next: Int) -> St ~ {
     for n in &st.undo { subst = subst.remove(n); };
     sizes = st.sizeSubst;
     for n in &st.sizeUndo { sizes = sizes.remove(n); };
-    return St { subst: subst, sizeSubst: sizes, next: next, status: 0, msg: "", logging: false, undo: [], sizeUndo: [], ..st };
+    return St { subst: subst, sizeSubst: sizes, next: next, status: 0, msg: "", logging: false, undo: [], sizeUndo: [], storeCache: HashMap::new(), ..st };
 };
 
 fn endTry(st: St) -> St ~ { return St { logging: false, undo: [], sizeUndo: [], ..st }; };

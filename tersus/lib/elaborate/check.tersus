@@ -1139,11 +1139,11 @@ fn declareGeneric(st: St, name: &String, params: &List<String>, names: &List<Str
         i = i + 1;
     };
     if predeclared {
-        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), predeclared: st.predeclared.remove(name), ..st };
+        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), storeCache: HashMap::new(), predeclared: st.predeclared.remove(name), ..st };
         if !distinct { return typeError(st, catStrings(clone(name), " names a parameter twice")); };
     } else {
         if !distinct { return typeError(st, catStrings(clone(name), " names a parameter twice")); };
-        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), ..st };
+        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), storeCache: HashMap::new(), ..st };
     };
     for t in types {
         if selfExpands(st, name, t) {
