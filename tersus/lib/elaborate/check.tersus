@@ -445,8 +445,8 @@ fn refResultFrom(st: St, name: &String, params: &List<String>, ptys: &List<Int>,
         if size(froms) > 0 {
             for p in froms {
                 at = indexIn(params, p);
-                ok = at >= 0 && at < size(ptys);
-                if ok { pk = kindOf(st, get(ptys, at)); ok = pk = 10 || pk = 11; };
+                ok = false;
+                if at >= 0 && at < size(ptys) { pk = kindOf(st, get(ptys, at)); ok = pk = 10 || pk = 11; };
                 if !ok { return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), clone(p)), ", which is not a reference parameter of it")); };
             };
             from = clone(froms);

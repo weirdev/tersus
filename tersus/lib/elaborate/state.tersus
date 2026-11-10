@@ -515,7 +515,7 @@ fn productFits(a: Int, c: Int) -> Bool ~ {
     ua = a;
     if a < 0 { ua = 0 - a; };
     uc = c;
-    if c < 0 { uc = 0 - c; };
+    if c < 0 { uc = 0 - c; } else { affirm c > 0; };
     if (a < 0) = (c < 0) { return ua <= maxInt() / uc; };
     // (a negative product may be the least Int, 2^63 below zero)
     return ua <= maxInt() / uc || (maxInt() % uc = uc - 1 && ua = maxInt() / uc + 1);
