@@ -1,6 +1,9 @@
 module TestErgonomics (testErgonomics, ergonomicsPrograms, ergonomicsFunctionPrograms) where
 
 import Data.List (isInfixOf)
+import qualified Data.Map.Strict as Map
+import qualified FieldPaths
+import qualified Types as T
 import AstData (readParsed, writeParsed)
 import MirData (readLowered, writeLowered)
 import Compile (elaborateStatements, lowerSource)
@@ -114,6 +117,12 @@ positive =
     , ("for nested function does not capture counter", "count = 0; for i in 0..3 { fn local(i: Int) -> Int { i = 2; return i; }; count = count + 1; }; return count;", VInt 3)
     , ("whole borrowed holder keeps storage origin", "struct W { r: &Int }; fn f(p: &mut W, b: &Int) -> &mut W from p { (*p).r = &b; return p; }; a = 1; b = 2; w = W { r: &a }; p = f(&mut w, b); r = (*p).r; return *r;", VInt 2)
     , ("replaced field releases old owned pointee", "struct W { r: &List<Int> }; a = [1]; b = [2, 3]; w = W { r: &a }; p = &mut w; (*p).r = &b; saved = w.r; a = [4]; return size(*saved) + size(a);", VInt 3)
+    , ("a write through a result under from to a field of the argument", "struct Inner { r: &Int }; struct Outer { child: Inner, k: Int }; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; x = 1; y = 2; outer = Outer { child: Inner { r: &x }, k: 0 }; q = focus(&mut outer); (*q).r = &y; return *outer.child.r;", VInt 2)
+    , ("a copy of a result under from writes the same place", "struct Inner { r: &Int }; struct Outer { child: Inner, k: Int }; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; x = 1; y = 2; outer = Outer { child: Inner { r: &x }, k: 0 }; q = focus(&mut outer); q2 = q; (*q2).r = &y; return *outer.child.r;", VInt 2)
+    , ("a result under from used after the write through it", "struct Inner { r: &Int }; struct Outer { child: Inner, k: Int }; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; x = 1; y = 2; outer = Outer { child: Inner { r: &x }, k: 0 }; q = focus(&mut outer); (*q).r = &y; return *(*q).r;", VInt 2)
+    , ("a write through a result under from keeps its owner's invariant", "struct Inner { n: Int }; struct Outer { child: Inner } invariant [{ affirm child.n >= 0; }]; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; outer = Outer { child: Inner { n: 1 } }; q = focus(&mut outer); (*q).n = 2; return outer.child.n;", VInt 2)
+    , ("a write through a result under from inside a function keeps the invariant", "struct Inner { n: Int }; struct Outer { child: Inner } invariant [{ affirm child.n >= 0; }]; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; fn g(o: &mut Outer) -> Int writes(o) { q = focus(&mut *o); (*q).n = 2; return 0; }; outer = Outer { child: Inner { n: 1 } }; r = g(&mut outer); return outer.child.n;", VInt 2)
+    , ("a result under from that is an enum field", "enum E { A { n: Int }, B }; struct H { e: E, k: Int }; fn focus(h: &mut H) -> &mut E from h { return &mut (*h).e; }; h = H { e: E::B, k: 0 }; q = focus(&mut h); *q = E::A { n: 4 }; return h.k;", VInt 0)
     , ("owning match result", ownedEnum ++ "e = E::A { x: [1, 2] }; xs = match e { E::A { x: x } => x, E::B => [] }; return size(xs);", VInt 2)
     ]
 
@@ -132,6 +141,11 @@ ergonomicsFunctionPrograms =
     ]
   where
     functions = "fn f(x: Int) -> Int { return x + 1; }; fn g(x: Int) -> Int { return x + 2; }; "
+
+expect :: Maybe [[(String, String)]] -> Maybe [[(String, String)]] -> TestResult
+expect wanted got
+    | wanted == got = Nothing
+    | otherwise = Just ("Expected " ++ show wanted ++ ", got " ++ show got)
 
 ergonomicsRejected :: String -> String -> TestResult
 ergonomicsRejected source expected = case parseSource source of
@@ -157,7 +171,11 @@ referenceChain = "enum E { End, Link { next: &E } }; fn step(e: &E) -> &E from e
 
 testErgonomics :: Test
 testErgonomics = TestList "testErgonomics"
-    [ testCaseNamedSeq "source reference bounds (without native proof credit)"
+    [ testCaseNamedSeq "field path authority"
+        [ ("function types may unify through reference qualifiers", expect (Just [[]]) (FieldPaths.fieldPaths False Map.empty (T.TFn [T.TRef T.TInt] T.TInt) (T.TFn [T.TMutRef T.TInt] T.TInt)))
+        , ("a reference to a function that may be the target is not complete", expect Nothing (FieldPaths.fieldPaths True Map.empty (T.TFn [T.TRef T.TInt] T.TInt) (T.TRef (T.TFn [T.TMutRef T.TInt] T.TInt))))
+        ]
+    , testCaseNamedSeq "source reference bounds (without native proof credit)"
         [(name, sourceAccepted source) | (name, source) <-
             [ ("readonly carrier stores a borrowed source", indirectHolder ++ "fn store(o: &Outer, b: &Int) -> Int { (*o.slot).r = &b; return 0; }; a = 1; b = 2; inner = Inner { r: &a }; o = Outer { slot: &mut inner }; store(o, b); saved = (*o.slot).r; return *saved;")
             , ("by-value carrier stores a borrowed source", indirectHolder ++ "fn store(o: Outer, b: &Int) -> Int { (*o.slot).r = &b; return 0; }; a = 1; b = 2; inner = Inner { r: &a }; o = Outer { slot: &mut inner }; store(o, b); saved = inner.r; return *saved;")
@@ -201,6 +219,9 @@ testErgonomics = TestList "testErgonomics"
             , ("a write through a result under from freezes what it stores", "struct Inner { r: &Int }; struct Outer { child: Inner, k: Int }; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; x = 1; y = 2; outer = Outer { child: Inner { r: &x }, k: 0 }; q = focus(&mut outer); (*q).r = &y; saved = outer.child.r; y = 5; return *saved;", "borrowed")
             , ("a write through a result under from keeps the old target frozen", "struct Inner { r: &Int }; struct Outer { child: Inner, k: Int }; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; x = 1; y = 2; outer = Outer { child: Inner { r: &x }, k: 0 }; saved = outer.child.r; q = focus(&mut outer); (*q).r = &y; x = 5; return *saved;", "borrowed")
             , ("a read route reached beside a capability route of the same place still conflicts, in the other field order", "struct W { r: &mut Int }; struct R { r: &Int }; struct X { b: &R, a: &W }; n = 1; w = W { r: &mut n }; r = R { r: &*w.r }; x = X { b: &r, a: &w }; view = &x; target = w.r; *target = 4; return *(*(*view).b).r;", "borrowed")
+            , ("a copy of a result under from freezes what is stored through it", "struct Inner { r: &Int }; struct Outer { child: Inner, k: Int }; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; x = 1; y = 2; outer = Outer { child: Inner { r: &x }, k: 0 }; q = focus(&mut outer); q2 = q; (*q2).r = &y; saved = outer.child.r; y = 5; return *saved;", "borrowed")
+            , ("a write through a result under from cannot break its owner's invariant", "struct Inner { n: Int }; struct Outer { child: Inner } invariant [{ affirm child.n >= 0; }]; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; outer = Outer { child: Inner { n: 1 } }; q = focus(&mut outer); (*q).n = -1; return outer.child.n;", "Could not prove")
+            , ("a write through a result under from inside a function cannot break the invariant", "struct Inner { n: Int }; struct Outer { child: Inner } invariant [{ affirm child.n >= 0; }]; fn focus(o: &mut Outer) -> &mut Inner from o { return &mut (*o).child; }; fn g(o: &mut Outer) -> Int writes(o) { q = focus(&mut *o); (*q).n = -1; return 0; }; outer = Outer { child: Inner { n: 1 } }; r = g(&mut outer); return outer.child.n;", "Could not prove")
             , ("a reborrow's parent reassigned to its child still conflicts", "fn put(p: &mut Int, n: Int) -> Int writes(p) { *p = n; return 0; }; x = 0; r = &mut x; s = &mut *r; r = &mut *s; put(s, 1); return *r;", "borrowed")
             , ("a live sibling reborrow still conflicts with a lent reference", "fn put(p: &mut Int, n: Int) -> Int writes(p) { *p = n; return 0; }; x = 0; r = &mut x; s = &mut *r; put(r, { y = 1; y }); return *s;", "borrowed")
             , ("bounded template annotation mismatch", "fn bad<T: Eq>(x: T) -> T { let y: Bool = if true { x } else { x }; return x; }; return bad(1);", "Type error")
