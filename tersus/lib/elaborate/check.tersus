@@ -636,13 +636,33 @@ fn checkStatementWhile(st: St, e: Int, vs: Int, t: Int, xs: Int) -> St ~ {
     return St { te: TE { node: st.nid, types: types }, ..st };
 };
 
+// The first n elements of a list, the ones after them dropped (n is at most its size)
+fn firstNodes(xs: List<AstNode>, n: Int) -> List<AstNode> ~ {
+    while size(xs) > n && size(xs) > 0 [{ }] ~ { xs = pop(xs); };
+    return xs;
+};
+
+fn firstTys(xs: List<Ty>, n: Int) -> List<Ty> ~ {
+    while size(xs) > n && size(xs) > 0 [{ }] ~ { xs = pop(xs); };
+    return xs;
+};
+
 fn prepareLoopReferences(st: St, cond: Int, xs: Int) -> St ~ {
     entry = refsOf(&st);
     known = refsOf(&st);
     body = listItems(&st.nodes, xs);
+    // (a round only appends to the node arena and the type table, so after it they are cut back to their sizes before
+    // it, and every other field is restored from a copy taken without them)
+    nodeCount = size(st.nodes);
+    tyCount = size(st.tys);
+    nodes = st.nodes;
+    tys = st.tys;
+    rest = St { nodes: [], tys: [], ..st };
+    saved = clone(rest);
+    st = St { nodes: nodes, tys: tys, ..rest };
     count = 0;
     while count <= 100 [{ affirm count >= 0; }] ~ {
-        working = withRefs(clone(st), clone(known));
+        working = withRefs(st, clone(known));
         working = inferExpr(working, cond);
         if working.status != 0 { return working; };
         working = pushScope(working);
@@ -650,6 +670,13 @@ fn prepareLoopReferences(st: St, cond: Int, xs: Int) -> St ~ {
         if working.status != 0 { return working; };
         working = joinBranchReferences(working, &known);
         next = namedReferences(&working, &entry);
+        if size(working.nodes) < nodeCount || size(working.tys) < tyCount { return typeError(working, "a loop's checking removed nodes or types it did not add"); };
+        roundNodes = working.nodes;
+        roundTys = working.tys;
+        cutNodes = firstNodes(roundNodes, nodeCount);
+        cutTys = firstTys(roundTys, tyCount);
+        restored = clone(saved);
+        st = St { nodes: cutNodes, tys: cutTys, ..restored };
         if sameReferences(&known, &next) { return withRefs(st, next); };
         known = next;
         count = count + 1;
