@@ -5,13 +5,7 @@ import elaborate::calls { argsOfFn, builtinRecord, lookupVar, scopeLookup, typed
 import elaborate::core { holdsRef, isBoxTy, isListTy, unrefOf };
 import elaborate::out { emit };
 import elaborate::records { exprOf, isVar, listItems, nameText, varName };
-import elaborate::state { CtorInfo, Place, St, TE, indexIn, instanceName, intText, joinWith, kindOf, nth, tyAt, typeError, wrapTy, zonk };
-
-// The reference facts a branch, a loop body or a call starts from: where each reference may point and the roots each
-// value may borrow from. They are saved and restored apart from the rest of the state, whose node arena is as large as
-// the whole input.
-struct Refs { aliasNames: List<String>, aliasPlaces: List<Place>, originNames: List<String>, originRoots: List<List<String>> };
-impl Clone for Refs { };
+import elaborate::state { CtorInfo, Place, Refs, St, TE, indexIn, instanceName, intText, joinWith, kindOf, nth, tyAt, typeError, wrapTy, zonk };
 
 fn refsOf(st: &St) -> Refs ~ {
     return Refs { aliasNames: clone(st.aliasNames), aliasPlaces: clone(st.aliasPlaces), originNames: clone(st.originNames), originRoots: clone(st.originRoots) };
