@@ -73,7 +73,7 @@ fn derefSteps(st: &St, e: Int) -> List<String> ~ {
     if c.ok && c.key = "Field" && size(c.args) = 1 {
         return push(derefSteps(st, get(c.args, 0)), clone(c.field));
     };
-    if c.ok && isGetCall(&c) { return push(derefSteps(st, get(c.args, 0)), ""); };
+    if c.ok && isGetCall(&c) { return push(derefSteps(st, nth(&c.args, 0)), ""); };
     return [];
 };
 
@@ -95,7 +95,7 @@ fn placeRoot(st: &St, e: Int) -> String ~ {
     return "";
 };
 
-fn expressionOriginName(e: Int) -> String [{ }] [{ }] {
+fn expressionOriginName(e: Int) -> String ~ {
     return catStrings("$expression ", intText(e));
 };
 
@@ -706,6 +706,7 @@ fn strongStore(st: St, targets: &List<Place>, place: &Place) -> St ~ {
 };
 
 fn recordPlaceReferences(st: St, targets: &List<Place>, value: &TE) -> St ~ {
+    if size(value.types) = 0 { return typeError(st, "a reference store has no recorded expression type"); };
     st = zonk(st, get(value.types, 0));
     st = holdsRef(st, st.ty);
     if st.status != 0 { return st; };
@@ -761,6 +762,7 @@ fn mutableReferenceStores(st: St, t: Int, seen: List<String>) -> St ~ {
     st = zonk(st, t);
     resolvedType = st.ty;
     ty = tyAt(st, resolvedType);
+    if (ty.kind = 11 || ty.kind = 10 || ty.kind = 6 || ty.kind = 9 || isListTy(st, resolvedType) || isBoxTy(st, resolvedType)) && size(ty.args) < 1 { return typeError(st, "a reference, array, List or Box type has no element type"); };
     if ty.kind = 11 { return holdsRef(st, get(ty.args, 0)); };
     if ty.kind = 10 || ty.kind = 6 || ty.kind = 9 || isListTy(st, resolvedType) || isBoxTy(st, resolvedType) {
         return mutableReferenceStores(st, get(ty.args, 0), seen);
@@ -809,13 +811,17 @@ fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
     if signature >= 0 {
         st = zonk(st, signature);
         ty = tyAt(st, st.ty);
-        if ty.kind = 13 { st = zonk(st, get(ty.args, 0)); ty = tyAt(st, st.ty); };
+        if ty.kind = 13 {
+            if size(ty.args) < 1 { return typeError(st, "a function type with size parameters has no signature"); };
+            st = zonk(st, get(ty.args, 0));
+            ty = tyAt(st, st.ty);
+        };
         if ty.kind = 14 { declared = argsOfFn(&ty); };
     };
     inputs = [];
     types = [];
     i = 0;
-    while i < size(c.args) [{ affirm i >= 0; }] ~ {
+    while i < size(c.args) [{ affirm i >= 0; affirm size(inputs) = i; affirm size(types) = i; }] ~ {
         input = typedChild(st, value, get(c.args, i));
         if input.node < 0 || size(input.types) = 0 { return typeError(st, "a call argument has no recorded expression type"); };
         actual = get(input.types, 0);
@@ -834,13 +840,14 @@ fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
     };
     bounds = [];
     i = 0;
-    while i < size(inputs) [{ affirm i >= 0; }] ~ {
+    while i < size(inputs) [{ affirm i >= 0; affirm size(types) = size(inputs); }] ~ {
         input = get(inputs, i);
         st = zonk(st, get(types, i));
         mode = kindOf(st, st.ty);
         if mode = 10 || mode = 11 {
             for place in argumentPlaces(st, input.node) { bounds = push(bounds, clone(place.root)); };
         } else {
+            if size(input.types) = 0 { return typeError(st, "a call argument has no recorded expression type"); };
             st = holdsRef(st, get(input.types, 0));
             if st.status != 0 { return st; };
             if st.ok { st = exprRefOrigins(st, input.node); for root in &st.names { bounds = push(bounds, clone(root)); }; };
@@ -850,7 +857,7 @@ fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
     bounds = reachableOrigins(st, &bounds);
     before = clone(st);
     i = 0;
-    while i < size(inputs) [{ affirm i >= 0; }] ~ {
+    while i < size(inputs) [{ affirm i >= 0; affirm size(types) = size(inputs); }] ~ {
         input = get(inputs, i);
         st = mutableReferenceStores(st, get(types, i), []);
         if st.status != 0 { return st; };

@@ -51,7 +51,8 @@ fn inferArgs(st: St, ft: Int, args: &List<Int>) -> St ~ {
     if size(params) != size(args) { return inferAll(st, args); };
     tes = [];
     i = 0;
-    for a in args {
+    while i < size(args) [{ affirm i >= 0; affirm size(params) = size(args); }] ~ {
+        a = get(args, i);
         p = unrefOf(st, get(params, i));
         if isListTy(st, p) && literalContext(st, a) { st = inferExpected(st, "expression result", p, a, false); } else { st = inferExpr(st, a); };
         if st.status != 0 { return St { tes: tes, ..st }; };
@@ -1200,14 +1201,17 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
     inferred = [];
     if size(declared) = size(args) {
         i = 0;
-        for a in args {
+        while i < size(args) [{ affirm i >= 0; affirm size(declared) = size(args); }] ~ {
+            a = get(args, i);
             ty = get(declared, i);
             if mentionsParameter(st, ty) {
                 st = inferExpr(st, a);
                 if st.status != 0 { return st; };
                 st = coerce(st, ty, clone(st.te));
             } else {
-                st = inferExpected(st, catStrings(catStrings(catStrings("field ", clone(get(declaredNames, i))), " of "), clone(name)), ty, a, false);
+                fieldName = "";
+                if i < size(declaredNames) { fieldName = clone(get(declaredNames, i)); };
+                st = inferExpected(st, catStrings(catStrings(catStrings("field ", fieldName), " of "), clone(name)), ty, a, false);
             };
             if st.status != 0 { return st; };
             inferred = push(inferred, clone(st.te));
