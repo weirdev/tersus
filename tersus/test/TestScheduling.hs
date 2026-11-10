@@ -6,6 +6,10 @@ module TestScheduling
     , assignShards
     , groupWeight
     , isSelfHosted
+    , estimatedPeakMiB
+    , memoryBudgetMiB
+    , admitGroup
+    , launchOrder
     , splitTestGroups
     , groupName
     , leafPaths
@@ -267,6 +271,32 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testNativeStorageModules", 201)
         , ("testMirSupport", 61)
         ]
+
+-- Peak GHC "total memory in use" per group on the 16 GB CI runner (shard 3 of run 42855380501), rounded up.
+-- The budget leaves the OS and runner about 3.6 GiB. Counting only self-hosted and parser groups let a warm
+-- cache line up SelfHosted:3, Parser:3, Parity and Native:2 at 15.6 GiB, and the runner was shut down
+-- (run 42861235242, twice). These are estimates for admission, not a limit the processes are held to.
+estimatedPeakMiB :: String -> Int
+estimatedPeakMiB name
+    | isSelfHosted name = 7680
+    | name `elem` ["testParser:2/4", "testParser:3/4"] = 6144
+    | name `elem` ["testParity", "testAstData:2/4", "testAstReader:2/4"] = 2560
+    | otherwise = 1024
+
+memoryBudgetMiB :: Int
+memoryBudgetMiB = 12288
+
+-- The first queued group whose estimate fits beside the running ones; with none running, the first group,
+-- however large, so that a group estimated over the budget runs alone instead of never.
+admitGroup :: Int -> (a -> Int) -> Int -> [a] -> Maybe (a, [a])
+admitGroup budget estimate used queue = case break fits queue of
+    (before, item : after) -> Just (item, before ++ after)
+    (_, []) -> Nothing
+  where
+    fits item = used == 0 || used + estimate item <= budget
+
+launchOrder :: (a -> String) -> [a] -> [a]
+launchOrder name = sortBy (comparing (\item -> negate (estimatedPeakMiB (name item) * groupWeight (name item))))
 
 groupName :: Test -> String
 groupName (TestCase name _) = name
@@ -572,8 +602,41 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "small and empty trees never create empty batches" $
         testAssertTrue (null (splitTestGroups 4 (TestList "empty" []))
             && map groupName (splitTestGroups 4 (testCase "single" Nothing)) == ["single:1/1"])
+    , testCase "every CI shard's groups launch once, with estimated memory within the budget whenever two run" $
+        testAssertTrue (all (\index -> case selectGroupNames (Arguments Nothing [] False (Just (index, 7))) names of
+            Right shard -> let trace = admissionTrace shard
+                 in sort [name | (_, _, name) <- trace] == sort shard
+                    && all (\(running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace
+            Left _ -> False) [1 .. 7])
+    , testCase "the groups running at the shard 3 shutdown are not admitted together; small groups fill in instead" $
+        testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity", "testNative:2/4", "testCli"])
+            ["testMirSelfHosted:3/4", "testParity", "testNative:2/4", "testCli"]
+    , testCase "a group estimated over the budget runs alone, and launch order is memory-weighted work with stable ties" $
+        testAssertEq
+            ( admitGroup 1000 snd 0 [("big", 4000 :: Int), ("small", 10)]
+            , admitGroup 1000 snd 4000 [("small", 10 :: Int)]
+            , launchOrder id ["testCli", "testMirSelfHosted:3/4", "newA", "testParser:3/4"] )
+            ( Just (("big", 4000), [("small", 10)])
+            , Nothing
+            , ["testParser:3/4", "testMirSelfHosted:3/4", "testCli", "newA"] )
     ]
   where
+    -- Four workers; a group ends groupWeight time units after it starts.
+    admissionTrace = go 0 [] . launchOrder id
+      where
+        go now running queue = case (if length running < 4 then admitGroup memoryBudgetMiB estimatedPeakMiB (charged running) queue else Nothing) of
+            Just (name, rest) ->
+                let started = (now + groupWeight name, name) : running
+                 in (length started, charged started, name) : go now started rest
+            Nothing -> case sort running of
+                (finish, _) : others -> go finish others queue
+                [] -> []
+        charged running = sum [estimatedPeakMiB name | (_, name) <- running]
+    admitWhileRoom = go 0
+      where
+        go used queue = case admitGroup memoryBudgetMiB estimatedPeakMiB used queue of
+            Just (name, rest) -> name : go (used + estimatedPeakMiB name) rest
+            Nothing -> []
     assignments = assignShards 3 names
     loads = [shardWeight [name | (name, assigned) <- assignments, assigned == index] | index <- [1 .. 3]]
     complete count =
