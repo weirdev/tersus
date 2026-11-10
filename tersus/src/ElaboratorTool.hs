@@ -17,6 +17,7 @@ import Data.List (isInfixOf, isPrefixOf)
 import GHC.Clock (getMonotonicTime)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv)
+import System.Posix.Process (ProcessTimes (..), getProcessTimes)
 import System.Exit (ExitCode (..))
 import System.IO (hClose, hPutStr, hSetBinaryMode, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
@@ -44,6 +45,7 @@ runElaborator exe rq = do
             -- (the elaborator recurses over the nesting of expressions, deeper than a default stack allows for a deep one;
             -- the data is ASCII, so it is passed as bytes rather than through the locale's decoding of a String)
             start <- getMonotonicTime
+            cpuStart <- childCpuSeconds
             (code, out, err) <- withCreateProcess (proc "/bin/sh" ["-c", raiseStack, exe]){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe} $
                 \hin' hout' herr' ph -> case (hin', hout', herr') of
                     (Just hin, Just hout, Just herr) -> do
@@ -61,11 +63,14 @@ runElaborator exe rq = do
             let response = case code of
                     ExitSuccess -> readResponseBytes (B.lines out)
                     ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 (B.unpack err))
+            elapsed <- subtract start <$> getMonotonicTime
+            cpu <- subtract cpuStart <$> childCpuSeconds
             case reportDir of
-                Nothing -> pure response
-                Just dir -> do
-                    elapsed <- subtract start <$> getMonotonicTime
-                    boundsReport dir rq elapsed err response
+                Nothing -> do
+                    timingDir <- lookupEnv "TERSUS_ELABORATE_TIMING"
+                    mapM_ (\dir -> writeReport dir [moduleLine rq response, "elaborateSeconds " ++ show elapsed, "elaborateCpuSeconds " ++ show cpu]) timingDir
+                    pure response
+                Just dir -> boundsReport dir rq elapsed cpu err response
 
 -- Phase 0 spike (TERSUS_BOUNDS_ONLY_REPORT=<directory>): the elaborator checks each template the module defines against
 -- its bounds and appends the generic bodies; their lowering is probed here, and both reports are written to the directory.
@@ -77,8 +82,8 @@ markBoundsReport = unlines . go . lines
     go (l : rest) = l : go rest
     go [] = []
 
-boundsReport :: FilePath -> Request -> Double -> B.ByteString -> Result Response String -> IO (Result Response String)
-boundsReport dir rq elapsed err response = do
+boundsReport :: FilePath -> Request -> Double -> Double -> B.ByteString -> Result Response String -> IO (Result Response String)
+boundsReport dir rq elapsed cpu err response = do
     let findings = [B.unpack l | l <- B.lines err, B.pack "boundsReport | " `B.isPrefixOf` l]
         isMarker stmt = case stmt of
             ExternDef m -> m == "$stub" || "$generic " `isPrefixOf` m
@@ -94,25 +99,35 @@ boundsReport dir rq elapsed err response = do
             probeEnd <- getMonotonicTime
             pure (Ok (Accepted (Elaborated mainStmts mainTypes) iface), lines', probeEnd - probeStart)
         _ -> pure (response, [], 0)
-    let ModuleId pkg modu = rqModule rq
-        verdict = case response of
-            Ok (Accepted _ _) -> "accepted"
-            Ok (Refused e) -> "refused " ++ take 200 e
-            Ok (RefusedInterface e) -> "interfaceRefused " ++ take 200 e
-            Ok (NotModelled e) -> "unmodelled " ++ take 200 e
-            Error e -> "error " ++ take 200 e
-        header =
-            [ "module " ++ pkg ++ maybe "" ("::" ++) modu ++ " | " ++ map (\c -> if c == '\n' then ' ' else c) verdict
-            , "elaborateSeconds " ++ show elapsed
-            , "probeSeconds " ++ show probeSeconds
-            ]
+    writeReport dir ([moduleLine rq response, "elaborateSeconds " ++ show elapsed, "elaborateCpuSeconds " ++ show cpu, "probeSeconds " ++ show probeSeconds] ++ findings ++ probed)
+    pure result
+
+-- (user and system time of the children this process has waited for: the elaborator, as requests are made one at a time)
+childCpuSeconds :: IO Double
+childCpuSeconds = do
+    times <- getProcessTimes
+    pure (fromIntegral (fromEnum (childUserTime times) + fromEnum (childSystemTime times)) / 100)
+
+moduleLine :: Request -> Result Response String -> String
+moduleLine rq response = "module " ++ pkg ++ maybe "" ("::" ++) modu ++ " | " ++ map (\c -> if c == '\n' then ' ' else c) verdict
+  where
+    ModuleId pkg modu = rqModule rq
+    verdict = case response of
+        Ok (Accepted _ _) -> "accepted"
+        Ok (Refused e) -> "refused " ++ take 200 e
+        Ok (RefusedInterface e) -> "interfaceRefused " ++ take 200 e
+        Ok (NotModelled e) -> "unmodelled " ++ take 200 e
+        Error e -> "error " ++ take 200 e
+
+writeReport :: FilePath -> [String] -> IO ()
+writeReport dir ls = do
     _ <- try (do
         createDirectoryIfMissing True dir
         (path, handle) <- openTempFile dir "report.txt"
-        hPutStr handle (unlines (header ++ findings ++ probed))
+        hPutStr handle (unlines ls)
         hClose handle
         pure path) :: IO (Either IOException FilePath)
-    pure result
+    pure ()
 
 -- The executable as the compiler's elaborator. An answer it cannot give refuses the module, with a reason that says
 -- the tool failed, rather than being taken for the program's fault or answered by another elaborator.

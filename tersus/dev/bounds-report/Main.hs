@@ -2,7 +2,7 @@
 -- elaborator as it is now (stage 1 when the sources are not the seed's), the compiler libraries included, without
 -- validation, and prints the time each took. With TERSUS_BOUNDS_ONLY_REPORT set, each elaboration also writes its
 -- bounds-only report there. BOUNDS_REPORT_ALTERNATE=<directory> times each entry twice in this process, with the report
--- off and on (into that directory), alternating which goes first; BOUNDS_REPORT_SEED=1 elaborates with the seed instead.
+-- off and on (into that directory; the off runs' elaboration times into <directory>-off), alternating which goes first; BOUNDS_REPORT_SEED=1 elaborates with the seed instead.
 module Main (main) where
 
 import Control.Exception (evaluate)
@@ -33,8 +33,8 @@ main = do
             putStrLn (path ++ " | " ++ outcome ++ " | " ++ show seconds)
             hFlush stdout
         Just dir -> forM_ (zip [0 :: Int ..] paths) $ \(i, path) -> do
-            let off = unsetEnv "TERSUS_BOUNDS_ONLY_REPORT" >> timed elaborator path
-                on = setEnv "TERSUS_BOUNDS_ONLY_REPORT" dir >> timed elaborator path
+            let off = unsetEnv "TERSUS_BOUNDS_ONLY_REPORT" >> setEnv "TERSUS_ELABORATE_TIMING" (dir ++ "-off") >> timed elaborator path
+                on = unsetEnv "TERSUS_ELABORATE_TIMING" >> setEnv "TERSUS_BOUNDS_ONLY_REPORT" dir >> timed elaborator path
             ((offOutcome, offSeconds), (onOutcome, onSeconds)) <-
                 if even i then (,) <$> off <*> on else (\b a -> (a, b)) <$> on <*> off
             putStrLn (path ++ " | off " ++ offOutcome ++ " " ++ show offSeconds ++ " | on " ++ onOutcome ++ " " ++ show onSeconds)
