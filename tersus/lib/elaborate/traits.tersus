@@ -2429,6 +2429,7 @@ fn defCheckOne(st: St, name: String, kind: String) -> St ~ {
     tys = st.tys;
     subst = st.subst;
     sizeSubst = st.sizeSubst;
+    next = st.next;
     definitions = st.definitions;
     builtinValues = st.builtinValues;
     builtinSchemes = st.builtinSchemes;
@@ -2438,7 +2439,7 @@ fn defCheckOne(st: St, name: String, kind: String) -> St ~ {
     st = St { nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), definitions: [], builtinValues: [], builtinSchemes: [], defFindings: [], genericOut: [], genericTypes: [], ..st };
     saved = clone(st);
     depth = size(definitions);
-    st = St { nodes: nodes, tys: tys, subst: subst, sizeSubst: sizeSubst, definitions: definitions, builtinValues: builtinValues, builtinSchemes: builtinSchemes, defFindings: findings, genericOut: genericOut, genericTypes: genericTypes, ..st };
+    st = St { nodes: nodes, tys: tys, subst: subst, sizeSubst: sizeSubst, next: next, definitions: definitions, builtinValues: builtinValues, builtinSchemes: builtinSchemes, defFindings: findings, genericOut: genericOut, genericTypes: genericTypes, ..st };
     st = St { defChecking: true, defCurrent: catStrings(catStrings(clone(kind), " "), clone(name)), defCalled: [], defCalledTys: [], ..st };
     copyParams = [];
     for b in &tm.bounds {
@@ -2467,6 +2468,7 @@ fn defCheckOne(st: St, name: String, kind: String) -> St ~ {
     tys = st.tys;
     subst = st.subst;
     sizeSubst = st.sizeSubst;
+    next = st.next;
     definitions = st.definitions;
     while size(definitions) > depth [{ }] ~ { definitions = pop(definitions); };
     builtinValues = st.builtinValues;
@@ -2474,7 +2476,7 @@ fn defCheckOne(st: St, name: String, kind: String) -> St ~ {
     findings = st.defFindings;
     genericOut = st.genericOut;
     genericTypes = st.genericTypes;
-    return St { nodes: nodes, tys: tys, subst: subst, sizeSubst: sizeSubst, definitions: definitions, builtinValues: builtinValues, builtinSchemes: builtinSchemes, defFindings: findings, genericOut: genericOut, genericTypes: genericTypes, ..saved };
+    return St { nodes: nodes, tys: tys, subst: subst, sizeSubst: sizeSubst, next: next, definitions: definitions, builtinValues: builtinValues, builtinSchemes: builtinSchemes, defFindings: findings, genericOut: genericOut, genericTypes: genericTypes, ..saved };
 };
 
 // The checked generic body as a function with type parameters, after stubs of the bound calls and template calls it
