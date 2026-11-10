@@ -5,7 +5,7 @@ import elaborate::calls { argsOfFn, builtinRecord, lookupVar, scopeLookup, typed
 import elaborate::core { holdsRef, isBoxTy, isListTy, unrefOf };
 import elaborate::out { emit };
 import elaborate::records { exprOf, isVar, listItems, nameText, varName };
-import elaborate::state { CtorInfo, Place, Refs, St, TE, indexIn, instanceName, intText, joinWith, kindOf, nth, tyAt, typeError, wrapTy, zonk };
+import elaborate::state { CtorInfo, Place, Refs, St, TE, indexIn, instanceName, intText, joinWith, kindOf, nth, resolve, tyAt, typeError, wrapTy, zonk };
 
 fn refsOf(st: &St) -> Refs ~ {
     return Refs { aliasNames: clone(st.aliasNames), aliasPlaces: clone(st.aliasPlaces), originNames: clone(st.originNames), originRoots: clone(st.originRoots) };
@@ -231,8 +231,8 @@ fn expressionPlaces(st: &St, e: Int) -> List<Place> ~ {
         return expressionPlaces(st, get(c.args, 0));
     };
     if c.ok && (c.key = "Field" || c.key = "Project" || c.key = "Cast") && size(c.args) = 1 {
-        working = exprRefOrigins(clone(st), get(c.args, 0));
-        roots = clone(working.names);
+        operand = refOriginsOf(st, get(c.args, 0));
+        roots = operand.names;
         out = [];
         for root in &roots { out = push(out, Place { ok: true, root: clone(root), steps: push([], "") }); };
         return out;
@@ -594,6 +594,63 @@ fn exprRefOrigins(st: St, e: Int) -> St ~ {
     return St { names: candidates, ..st };
 };
 
+// What exprRefOrigins gives, without changing the state: the same cases in the same order. A lookup that would have
+// refused (status != 0 on a copy of the state) is failed, and as on that copy nothing is looked up after it.
+struct Origins { names: List<String>, failed: Bool };
+
+fn refOriginsOf(st: &St, e: Int) -> Origins ~ {
+    if st.status != 0 { return Origins { names: [], failed: true }; };
+    captured = expressionOriginName(e);
+    at = indexIn(&st.originNames, &captured);
+    if at >= 0 && at < size(st.originRoots) { return Origins { names: clone(get(st.originRoots, at)), failed: false }; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        yes = refOriginsOf(st, a.a);
+        if yes.failed { return Origins { names: uniqueOrigins(&yes.names), failed: true }; };
+        no = refOriginsOf(st, a.b);
+        out = clone(yes.names);
+        for root in &no.names { out = push(out, clone(root)); };
+        return Origins { names: uniqueOrigins(&out), failed: no.failed };
+    };
+    if ex is AstExpression::BlockExpr { return refOriginsOf(st, (ex as AstExpression::BlockExpr).e); };
+    if ex is AstExpression::Ascribed { return refOriginsOf(st, (ex as AstExpression::Ascribed).e); };
+    if isVar(st, e) {
+        v = varName(st, e);
+        i = indexIn(&st.originNames, &v);
+        if i >= 0 && i < size(st.originRoots) { return Origins { names: clone(get(st.originRoots, i)), failed: false }; };
+        if indexIn(&st.readOnly, &v) >= 0 || indexIn(&st.mutParams, &v) >= 0 { return Origins { names: exprOriginCandidates(st, e), failed: false }; };
+        t = scopeLookup(st, &v);
+        found = t >= 0;
+        if !found && HashMap::contains(&st.fns, &v) { t = HashMap::lookup(&st.fns, &v, 0 - 1); found = true; };
+        if !found {
+            // (a builtin's type is its scheme instantiated, whose root keeps the scheme's kind, 14; any other refuses)
+            if !HashMap::contains(&st.stdNames, &v) { return Origins { names: [], failed: true }; };
+            index = HashMap::lookup(&st.stdNames, &v, 0 - 1);
+            if index < 0 || index >= size(st.builtinSchemes) { return Origins { names: [], failed: true }; };
+            return Origins { names: [], failed: kindOf(st, get(st.builtinSchemes, index)) != 14 };
+        };
+        k = kindOf(st, resolve(st, t));
+        if k = 10 || k = 11 { return Origins { names: exprOriginCandidates(st, e), failed: false }; };
+        return Origins { names: [], failed: false };
+    };
+    c = callOf(st, e);
+    if c.ok && c.key = "Ctor" {
+        out = [];
+        failed = false;
+        for a in &c.args {
+            if !failed {
+                part = refOriginsOf(st, a);
+                for r in &part.names { out = push(out, clone(r)); };
+                failed = part.failed;
+            };
+        };
+        return Origins { names: out, failed: failed };
+    };
+    if c.ok && (readsThrough(&c.key) && size(c.args) = 1) { return refOriginsOf(st, nth(&c.args, 0)); };
+    return Origins { names: exprOriginCandidates(st, e), failed: false };
+};
+
 fn putAlias(st: St, name: &String, place: Place) -> St ~ {
     i = indexIn(&st.aliasNames, name);
     if i >= 0 && i < size(st.aliasPlaces) { return St { aliasPlaces: set(st.aliasPlaces, i, place), ..st }; };
@@ -680,8 +737,7 @@ fn declaredOrigin(st: &St, name: &String) -> String ~ {
 fn ownParameterSources(st: &St, value: &TE) -> List<String> ~ {
     out = [];
     if size(value.types) = 0 { return out; };
-    working = zonk(clone(st), get(value.types, 0));
-    kind = kindOf(&working, working.ty);
+    kind = kindOf(st, resolve(st, get(value.types, 0)));
     if kind = 10 || kind = 11 {
         for place in expressionPlaces(st, value.node) {
             if indexIn(&st.params, &place.root) >= 0 && indexIn(&st.readOnly, &place.root) < 0 && indexIn(&st.mutParams, &place.root) < 0 { out = push(out, clone(place.root)); };
