@@ -1765,7 +1765,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
                             , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
-                            , testAssertEq (validatorMetadataFingerprint raw) "eb4193aea60bcefa"
+                            , testAssertEq (validatorMetadataFingerprint raw) "f55e5e7c7653b2cf"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of

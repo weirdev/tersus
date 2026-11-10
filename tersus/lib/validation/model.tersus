@@ -486,18 +486,16 @@ struct LoopIteration { status: Int, step: Int, header: ExecutionState, yes: Exec
 
 impl Clone for LoopIteration { };
 
-// An execution graph carries local bindings separately along every path. Its
-// edge steps are host-supplied consequences of the branch condition. An
+// Edge steps are host-supplied consequences of the branch condition. An
 // unsupported MIR operation must be represented by ExecutionEnd::Unsupported.
 enum ExecutionEnd {
     Done,
     Jump { target: Int },
     Branch { yes: Int, no: Int, yesSteps: List<ExecutionStep>, noSteps: List<ExecutionStep> },
-    BooleanBranch { yes: Int, no: Int, join: Int, value: ValueRef, trueValue: ValueRef, falseValue: ValueRef },
-    Condition { yes: Int, no: Int, relation: Int, left: ValueRef, right: ValueRef },
+    BooleanBranch { yes: Int, no: Int, value: ValueRef, trueValue: ValueRef, falseValue: ValueRef },
     // body is the block an iteration starts on, and region is the header and
-    // every block that can get back to it; a block outside the region leaves
-    // the loop and is walked after it.
+    // every block that can get back to it. A block outside the region that the
+    // body reaches is either exit or on a path to a return.
     Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef, variantObject: ValueRef, variantFamily: Int, variantConstructor: Int, orTests: List<LoopTest> },
     Unsupported,
 };

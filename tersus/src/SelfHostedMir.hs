@@ -2185,7 +2185,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
             let M.BlockId yesId = yes
                 M.BlockId noId = no
                 ending = record "ExecutionEnd::BooleanBranch"
-                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("join", MInt (joinFor yes no)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
+                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
             Just ([required], ending, b3)
         (Nothing, M.Call (M.Copy local) args dest target)
             | allowCalls
@@ -2615,25 +2615,6 @@ block types invariants functions rules termInfo allowCalls fn predecessors (bloc
             (more, placeRef, b') <- placeRefOf False (localRef (localNumber root)) placeSteps b
             pure (steps ++ more ++ [step "Assign" [("local", MInt (localNumber ref)), ("value", placeRef)]], b')
     jump (M.BlockId target) = record "ExecutionEnd::Jump" [("target", MInt (toInteger target))]
-    -- The join of a branch is the first block both successors reach by straight
-    -- jumps alone, when neither the branch nor the join is inside a loop region:
-    -- merging there is what the Tersus checker does at that block, and inside a
-    -- loop the per-path walk is kept instead, since a merged state can drop the
-    -- facts a loop invariant is checked against.
-    joinFor yes no
-        | any (Set.member blockId) regions = -1
-        | otherwise = case [n | c@(M.BlockId n) <- path yes, c `elem` path no, c /= blockId, not (Map.member c (M.specLoops (M.fnSpec fn))), not (any (Set.member c) regions)] of
-            n : _ -> toInteger n
-            [] -> -1
-      where
-        regions = Map.elems (loopRegions fn)
-        path start = go Set.empty start
-          where
-            go seen b
-                | Set.member b seen = []
-                | otherwise = b : case Map.lookup b (M.fnBlocks fn) of
-                    Just (M.BasicBlock _ (M.Goto target)) -> go (Set.insert b seen) target
-                    _ -> []
     -- The test a branch on a Boolean local is, when its own block made it:
     -- the block's last assignment of the local is `is` of a local that no
     -- statement of the block assigns or writes through (a test made before,

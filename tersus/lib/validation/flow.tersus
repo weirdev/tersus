@@ -6,7 +6,7 @@ import validation::loopInference { inferLoopCandidateGoals, loopMentions };
 import validation::model { CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StateMergeLookup, SweepArrival, SweepDelivery, SweepOrder, SweepResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
 import validation::relations { containsValue, contradictoryDisequalities, intAt, leastClasses };
 import validation::state { booleanKnownCached, negateRelation, resolveValue };
-import validation::validation { entailmentCache, entailsGoal, entailsGoalCached };
+import validation::validation { entailmentCache, entailsGoal };
 
 
 // One region round in progress. Every state delivered is pushed once onto
@@ -166,10 +166,6 @@ fn sweepSuccessors(blocks: &HashMap<Int, ExecutionBlock>, id: Int) -> List<Int> 
         if end is ExecutionEnd::BooleanBranch {
             branch = end as ExecutionEnd::BooleanBranch;
             raw = testTargets(blocks, branch.yes, branch.no);
-        };
-        if end is ExecutionEnd::Condition {
-            condition = end as ExecutionEnd::Condition;
-            raw = testTargets(blocks, condition.yes, condition.no);
         };
         if end is ExecutionEnd::Loop { raw = push(raw, (end as ExecutionEnd::Loop).exit); };
     };
@@ -449,34 +445,6 @@ fn sweepDeliveries(end: ExecutionEnd, state: ExecutionState) -> SweepDelivery {
                     noState = ExecutionState { context: noContext, ..state };
                     return SweepDelivery { status: 0, step: -1, states: push(push([], SweepArrival { block: branch.yes, state: yesState }), SweepArrival { block: branch.no, state: noState }) };
                 };
-            };
-        };
-        return SweepDelivery { status: 2, step: -1, states: [] };
-    };
-    if end is ExecutionEnd::Condition {
-        condition = end as ExecutionEnd::Condition;
-        if condition.relation < 0 { return SweepDelivery { status: 2, step: -1, states: [] }; };
-        if condition.relation > 3 { return SweepDelivery { status: 2, step: -1, states: [] }; };
-        left = resolveValue(state, condition.left);
-        right = resolveValue(state, condition.right);
-        if left is ValueLookup::Found {
-            if right is ValueLookup::Found {
-                a = (left as ValueLookup::Found).term;
-                b = (right as ValueLookup::Found).term;
-                inverse = negateRelation(condition.relation, a, b);
-                yesContext = assumeRelation(clone(state.context), condition.relation, a, b);
-                noContext = assumeRelation(clone(state.context), inverse.relation, inverse.left, inverse.right);
-                yesAnswer = entailsGoalCached(entailmentCache(state.context), localGoal(condition.relation, a, b));
-                noKnown = entailsGoalCached(yesAnswer.cache, localGoal(inverse.relation, inverse.left, inverse.right)).holds;
-                if noKnown {
-                    return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: condition.no, state: ExecutionState { context: noContext, ..state } }) };
-                };
-                if yesAnswer.holds {
-                    return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: condition.yes, state: ExecutionState { context: yesContext, ..state } }) };
-                };
-                yesState = ExecutionState { context: yesContext, ..clone(state) };
-                noState = ExecutionState { context: noContext, ..state };
-                return SweepDelivery { status: 0, step: -1, states: push(push([], SweepArrival { block: condition.yes, state: yesState }), SweepArrival { block: condition.no, state: noState }) };
             };
         };
         return SweepDelivery { status: 2, step: -1, states: [] };
