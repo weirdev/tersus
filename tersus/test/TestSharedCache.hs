@@ -175,7 +175,7 @@ filesystemWarmParserReuse = withNativeHome $ \home -> withCurrentDirectory home 
             [ testAssertTrue (before > 0)
             , testAssertEq after before
             , testAssertEq a b
-            , testAssertEq (Map.size (progFunctions a)) 760
+            , testAssertEq (Map.size (progFunctions a)) 860
             , testAssertTrue (all (`Map.member` progFunctions a) ["safeProduct", "containsValue", "commonContext", "driverReadAll"])
             ]
         other -> Just (show other)

@@ -476,6 +476,24 @@ fn entailmentCache(context: &ValidatorContext) -> EntailmentCache {
     return EntailmentCache { plain: clone(context), plainClassesMade: false, plainClasses: emptyIntMap(), plainAnalysis: AnalysisLookup::Missing, derivedMade: false, derived: clone(context), derivedAnalysis: AnalysisLookup::Missing };
 };
 
+// The cache with its analysis made, and the contract that says so. Making it
+// inline leaves the cast on the far side of the join of that test, where one
+// arm states Found and the other states not-Missing: two different facts, and
+// a merge keeps only what both arms state. A return path states it once.
+fn withPlainAnalysis(cache: EntailmentCache) -> EntailmentCache [{ }] [{ affirm return.plainAnalysis is AnalysisLookup::Found; }] {
+    if cache.plainAnalysis is AnalysisLookup::Missing {
+        return EntailmentCache { plainAnalysis: AnalysisLookup::Found { analysis: analyzeContext(cache.plain) }, ..cache };
+    };
+    return cache;
+};
+
+fn withDerivedAnalysis(cache: EntailmentCache) -> EntailmentCache [{ }] [{ affirm return.derivedAnalysis is AnalysisLookup::Found; }] {
+    if cache.derivedAnalysis is AnalysisLookup::Missing {
+        return EntailmentCache { derivedAnalysis: AnalysisLookup::Found { analysis: analyzeContext(cache.derived) }, ..cache };
+    };
+    return cache;
+};
+
 // Whether any of the goals holds: each is tried on the context, then each on
 // the derived context, which is made only when none held on the first.
 fn entailsAnyCached(cache: EntailmentCache, goals: &List<ValidatorGoal>) -> CachedAnswer {
@@ -495,9 +513,7 @@ fn entailsAnyCached(cache: EntailmentCache, goals: &List<ValidatorGoal>) -> Cach
         };
     };
     if recognized {
-        if c.plainAnalysis is AnalysisLookup::Missing {
-            c = EntailmentCache { plainAnalysis: AnalysisLookup::Found { analysis: analyzeContext(c.plain) }, ..c };
-        };
+        c = withPlainAnalysis(c);
         plainAnalysis = (clone(c.plainAnalysis) as AnalysisLookup::Found).analysis;
         for gPosition in 0..size(goals) {
             g = get(goals, gPosition);
@@ -518,9 +534,7 @@ fn entailsAnyCached(cache: EntailmentCache, goals: &List<ValidatorGoal>) -> Cach
                 if entailsGoalDirectlyIn(c.derived, c.plainClasses, g) { return CachedAnswer { holds: true, cache: c }; };
             };
         };
-        if c.derivedAnalysis is AnalysisLookup::Missing {
-            c = EntailmentCache { derivedAnalysis: AnalysisLookup::Found { analysis: analyzeContext(c.derived) }, ..c };
-        };
+        c = withDerivedAnalysis(c);
         derivedAnalysis = (clone(c.derivedAnalysis) as AnalysisLookup::Found).analysis;
         for gPosition in 0..size(goals) {
             g = get(goals, gPosition);
