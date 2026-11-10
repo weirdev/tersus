@@ -187,6 +187,18 @@ fn defFinding(st: St, what: String, detail: String) -> St ~ {
     return St { defFindings: push(st.defFindings, line), ..st };
 };
 
+// The type parameters in a type that no impl of the trait is registered for (the definition check's bounds)
+fn paramsWithout(st: &St, t: Int, trait: &String) -> List<String> ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 12 {
+        if HashSet::contains(&st.impls, catStrings(catStrings(clone(trait), " "), clone(x.name))) { return []; };
+        return push([], clone(x.name));
+    };
+    out = [];
+    for a in &x.args { for p in paramsWithout(st, a, trait) { if indexIn(&out, &p) < 0 { out = push(out, clone(p)); }; }; };
+    return out;
+};
+
 fn fail(st: St, msg: String) -> St ~ {
     if st.status != 0 { return st; };
     return St { status: 1, msg: msg, ..st };

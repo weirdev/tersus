@@ -1564,6 +1564,9 @@ fn gives(st: St, ok: Bool, ts: List<Int>) -> St ~ { return St { ok: ok, te: TE {
 fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     x = tyAt(st, t);
     if (tname = "Eq" || tname = "Clone") && primitiveEqRaw(&x) { return gives(st, true, []); };
+    if tname = "Clone" && st.defChecking && x.kind = 12 && !HashSet::contains(&st.impls, pairKey(&tname, &x.name)) {
+        st = defFinding(st, "unbounded clone", catStrings(clone(x.name), " is used as Clone, which a type parameter allows today, and its bounds do not give Clone"));
+    };
     if tname = "Clone" && (x.kind = 3 || x.kind = 14 || x.kind = 7 || x.kind = 12 || x.kind = 15) { return gives(st, true, []); };
     if tname = "Clone" && (isListTy(st, t) || x.kind = 6 || isBoxTy(st, t)) {
         st = traitArguments(st, "Clone", nth(&x.args, 0));

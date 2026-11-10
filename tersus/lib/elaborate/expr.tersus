@@ -7,7 +7,7 @@ import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureIn
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
-import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, defFinding, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, productFits, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
+import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, defFinding, endTry, paramsWithout, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, productFits, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
 import elaborate::traits { callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
@@ -950,6 +950,10 @@ fn cloneCall(st: St, args: &List<Int>) -> St ~ {
     };
     // (a word, an address, a function and a reference are their own copy)
     if k = 0 || k = 1 || k = 2 || k = 3 || k = 7 || k = 14 || k = 10 || k = 11 { return St { te: x, ..st }; };
+    if st.defChecking && (k = 12 || mentionsParameter(st, xtz)) {
+        unbounded = paramsWithout(&st, xtz, "Clone");
+        if size(unbounded) > 0 { st = defFinding(st, "unbounded clone", catStrings(catStrings(catStrings(render(st, xtz), " is cloned, which today needs nothing of "), joinWith(&unbounded, ", ")), ", and their bounds do not give Clone")); };
+    };
     if k = 12 || k = 15 || mentionsParameter(st, xtz) { return cloneWrap(st, x, xt); };
     xx = tyAt(st, xtz);
     if isBoxTy(st, xtz) && kindOf(st, nth(&xx.args, 0)) = 6 && kindOf(st, argAt(st, nth(&xx.args, 0), 1)) = 21 {
@@ -1664,6 +1668,7 @@ fn implementsMarker(st: St, marker: String, t0: Int, depth: Int) -> St ~ {
             st = St { impls: st.impls.insert(catStrings(catStrings(clone(marker), " "), clone(x.name))), ..st };
         };
         if st.defChecking && HashSet::contains(&st.impls, catStrings(catStrings(clone(marker), " "), clone(x.name))) { return St { ok: true, ..st }; };
+        if st.defChecking && marker = "Clone" { st = defFinding(st, "unbounded clone", catStrings(clone(x.name), " is cloned, which a type parameter allows today, and its bounds do not give Clone")); };
         return St { ok: marker = "Clone", ..st };
     };
     if x.kind = 6 { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
