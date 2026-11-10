@@ -605,7 +605,6 @@ fn stepMentions(step: &ExecutionStep, into: HashSet<Int>, depth: Int) -> HashSet
 fn endMentions(end: &ExecutionEnd, into: HashSet<Int>) -> HashSet<Int> {
     if end is ExecutionEnd::Branch { return stepsMentions((end as ExecutionEnd::Branch).noSteps, stepsMentions((end as ExecutionEnd::Branch).yesSteps, into)); };
     if end is ExecutionEnd::BooleanBranch { return refMention((end as ExecutionEnd::BooleanBranch).value, into); };
-    if end is ExecutionEnd::Condition { return refMention((end as ExecutionEnd::Condition).right, refMention((end as ExecutionEnd::Condition).left, into)); };
     if end is ExecutionEnd::Loop {
         mentioned = refMention((end as ExecutionEnd::Loop).right, refMention((end as ExecutionEnd::Loop).left, into));
         mentioned = stepsMentions((end as ExecutionEnd::Loop).checks, mentioned);
