@@ -6,7 +6,7 @@ import elaborate::expr { derefExpr, freshElementType, inferExpected, inferExpr, 
 import elaborate::out { emit, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations };
 import elaborate::proofs { inferProof, rewriteOldStatements };
 import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName, mentionsVariable };
-import elaborate::refs { declaredOrigin, derefRoot, derefSteps, exprRefOrigins, expressionPlaces, joinBranchReferences, namedReferences, ownParameterSources, parameterContents, placeSteps, putOrigins, putRefResult, recordAlias, recordOrigins, recordPlaceReferences, resetBranchReferences, resolveRefPlace, resolveRefPlaces, sameReferences, withinWrites, writesTarget, writesText };
+import elaborate::refs { declaredOrigin, refsOf, withRefs, derefRoot, derefSteps, exprRefOrigins, expressionPlaces, joinBranchReferences, namedReferences, ownParameterSources, parameterContents, placeSteps, putOrigins, putRefResult, recordAlias, recordOrigins, recordPlaceReferences, resetBranchReferences, resolveRefPlace, resolveRefPlaces, sameReferences, withinWrites, writesTarget, writesText };
 import elaborate::state { FnSig, Generic, Place, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
 import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, templateOf };
 
@@ -582,14 +582,14 @@ fn checkStatementIf(st: St, e: Int, a: Int, b: Int) -> St ~ {
     cond = clone(st.te);
     st = simpleTy(st, 2);
     st = expect(st, "condition of if", st.ty, head(&cond.types));
-    beforeBranches = clone(st);
+    beforeBranches = refsOf(&st);
     st = pushScope(st);
     thenStmts = listItems(&st.nodes, a);
     st = checkStatements(st, false, &thenStmts);
     st = popScope(st);
     if st.status != 0 { return st; };
     thenPart = clone(st.te);
-    leftReferences = clone(st);
+    leftReferences = refsOf(&st);
     st = resetBranchReferences(st, &beforeBranches);
     st = pushScope(st);
     elseStmts = listItems(&st.nodes, b);
@@ -622,7 +622,7 @@ fn checkStatementWhile(st: St, e: Int, vs: Int, t: Int, xs: Int) -> St ~ {
     st = resolveTermination(st, t);
     if st.status != 0 { return st; };
     term = st.nid;
-    beforeLoopBody = clone(st);
+    beforeLoopBody = refsOf(&st);
     st = pushScope(st);
     loopStmts = listItems(&st.nodes, xs);
     st = checkStatements(st, false, &loopStmts);
@@ -637,20 +637,20 @@ fn checkStatementWhile(st: St, e: Int, vs: Int, t: Int, xs: Int) -> St ~ {
 };
 
 fn prepareLoopReferences(st: St, cond: Int, xs: Int) -> St ~ {
-    before = clone(st);
-    known = clone(st);
+    entry = refsOf(&st);
+    known = refsOf(&st);
     body = listItems(&st.nodes, xs);
     count = 0;
     while count <= 100 [{ affirm count >= 0; }] ~ {
-        working = clone(known);
+        working = withRefs(clone(st), clone(known));
         working = inferExpr(working, cond);
         if working.status != 0 { return working; };
         working = pushScope(working);
         working = checkStatements(working, false, &body);
         if working.status != 0 { return working; };
         working = joinBranchReferences(working, &known);
-        next = namedReferences(&working, clone(before));
-        if sameReferences(&known, &next) { return next; };
+        next = namedReferences(&working, &entry);
+        if sameReferences(&known, &next) { return withRefs(st, next); };
         known = next;
         count = count + 1;
     };
@@ -1179,11 +1179,11 @@ fn indexOfByte(text: &String, b: Int) -> Int ~ {
 // *r = value; and (*r).field = value;: the place must be through an update reference, and the value is
 // evaluated before the replacement, so its types come first (checkStatement, AssignDeref)
 fn checkAssignDeref(st: St, lhs: Int, value: Int) -> St ~ {
-    beforePlace = clone(st);
+    beforeRefs = refsOf(&st);
     st = inferExpr(st, lhs);
     if st.status != 0 { return st; };
     targetTy = teHead(&st.te);
-    st = St { aliasNames: clone(beforePlace.aliasNames), aliasPlaces: clone(beforePlace.aliasPlaces), originNames: clone(beforePlace.originNames), originRoots: clone(beforePlace.originRoots), ..st };
+    st = withRefs(st, beforeRefs);
     st = inferExpected(st, "expression result", targetTy, value, false);
     if st.status != 0 { return st; };
     exprT = clone(st.te);

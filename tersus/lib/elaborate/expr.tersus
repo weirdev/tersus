@@ -6,8 +6,8 @@ import elaborate::check { checkStatements, fnSigOf, mentionsParameter };
 import elaborate::core { arrayOk, baseNameOf, checkConstruct, checkType, ctorInfo, ensureInstance, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { codecTypeAt, exprOf, fromCodec, isVar, listItems, nameText, namesText, nodeIn, varName };
-import elaborate::refs { Call, callOf, captureExpression, checkCallWrites, copyExpressionOrigins, joinBranchReferences, placeForm, placeRoot, recordCallFieldOrigins, refResultIndex, resetBranchReferences };
-import elaborate::state { forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, maxInt, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, render, resolve, sameTy, simpleTy, sizeConst, teHeadAt, tyAt, typeError, unclonedParameter, undoTry, unify, withTy, wrapTy, zonk, stubTraitParameter };
+import elaborate::refs { Call, callOf, captureExpression, checkCallWrites, copyExpressionOrigins, joinBranchReferences, placeForm, placeRoot, recordCallFieldOrigins, refResultIndex, resetBranchReferences, refsOf };
+import elaborate::state { forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, maxInt, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, render, resolve, sameTy, simpleTy, sizeConst, teHeadAt, tyAt, typeError, unclonedParameter, undoTry, unify, withTy, wrapTy, zonk, protocolName, protocolIs, stubTraitParameter };
 import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, fnBoundCall, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
@@ -182,11 +182,11 @@ fn inferIf(st: St, c: Int, a: Int, b: Int, wanted: Int, returning: Bool, context
     st = simpleTy(st, 2);
     st = expect(st, "condition of if", st.ty, teHead(&cond));
     if st.status != 0 { return st; };
-    before = clone(st);
+    before = refsOf(&st);
     if wanted >= 0 { st = inferExpected(st, clone(context), wanted, a, returning); } else { st = inferExpr(st, a); };
     if st.status != 0 { return st; };
     yes = clone(st.te);
-    left = clone(st);
+    left = refsOf(&st);
     st = resetBranchReferences(st, &before);
     if wanted >= 0 { st = inferExpected(st, context, wanted, b, returning); } else { st = inferExpr(st, b); };
     if st.status != 0 { return st; };
