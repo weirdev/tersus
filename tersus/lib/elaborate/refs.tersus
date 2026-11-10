@@ -462,6 +462,12 @@ fn firstOrigin(st: &St, params: &List<String>, froms: &List<String>, args: &List
     return noPlace();
 };
 
+// A read of a part of its one argument (a field, a dereference, a variant's field or a cast): a reference it gives
+// is one that argument holds
+fn readsThrough(key: &String) -> Bool [{ }] [{ }] {
+    return key = "Field" || key = "DerefOf" || key = "Project" || key = "Cast";
+};
+
 // Every root a returned value's places may be from (exprOriginCandidates)
 fn exprOriginCandidates(st: &St, e: Int) -> List<String> ~ {
     name = expressionOriginName(e);
@@ -488,7 +494,7 @@ fn exprOriginCandidates(st: &St, e: Int) -> List<String> ~ {
         if p.ok { for place in resolveRefPlaces(st, clone(p.root), clone(p.steps)) { out = push(out, clone(place.root)); }; };
         return uniqueOrigins(&out);
     };
-    if c.ok && ((c.key = "Field" || c.key = "DerefOf") && size(c.args) = 1) { return exprOriginCandidates(st, get(c.args, 0)); };
+    if c.ok && (readsThrough(&c.key) && size(c.args) = 1) { return exprOriginCandidates(st, get(c.args, 0)); };
     if c.ok && size(c.callee.bytes) > 0 {
         known = fromsOf(st, &c.callee);
         if known.ok { return argCandidates(st, &known.params, &known.froms, &c.args); };
@@ -558,7 +564,7 @@ fn exprRefOrigins(st: St, e: Int) -> St ~ {
         };
         return St { names: out, ..st };
     };
-    if c.ok && ((c.key = "Field" || c.key = "DerefOf") && size(c.args) = 1) { return exprRefOrigins(st, nth(&c.args, 0)); };
+    if c.ok && (readsThrough(&c.key) && size(c.args) = 1) { return exprRefOrigins(st, nth(&c.args, 0)); };
     candidates = exprOriginCandidates(st, e);
     return St { names: candidates, ..st };
 };
