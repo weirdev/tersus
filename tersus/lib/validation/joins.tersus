@@ -1,12 +1,11 @@
-import validation::context { analyzeContext, contextDifferent, integerValue, knownNonnegativeWith, signFacts };
-import validation::differences { semanticFacts };
+import validation::context { analyzeContext, contextDifferent, knownNonnegativeWith, signFacts };
 import validation::linear { linearEntails };
-import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, IntegerLookup, MergePair, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
-import validation::relations { applicationAt, containsValue, emptyIntMap, emptyPositions, intAt, leastClasses, minInt, sameIn };
+import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, MergePair, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, UnionFind, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
+import validation::relations { applicationAt, emptyIntMap, emptyPositions, intAt, minInt, sameIn, ufFind, ufUnion };
 import validation::saturation { withInstances };
 import validation::sequenceFacts { sizeTermOf };
 import validation::state { bindLocal, commonTemplates, emptyMergePairs, goalSides, lookupLocal, noTemplates };
-import validation::validation { entailmentCache, entailsGoal, entailsGoalCached };
+import validation::validation { entailsGoal };
 
 
 
@@ -561,69 +560,6 @@ fn keptRawFacts(side: &NormalizedSide, merged: &ValidatorContext, kept: HashSet<
     return keptOrigins(side.context.variants, merged.variants, side.origins, first, kept);
 };
 
-// The kept self-pairs a dropped raw fact reaches. A named term (a local's
-// value on either side or after the merge, or any non-negative id) of a
-// dropped fact is marked. A dropped definition seeds only the term it
-// defines, a dropped relation each of its unnamed terms, and the walk from
-// the seeds crosses unnamed terms only, marking every named term of each fact
-// it reaches. (Seeding an old value from x_new = x_old + k would make it a
-// hub reaching every local ever ordered against it, and x_new is marked
-// already.)
-fn contestedTerms(raw: &RawFacts, kept: &HashSet<Int>, named: &HashSet<Int>) -> HashSet<Int> {
-    marked = HashSet::new();
-    factsOf = emptyPositions();
-    queue = [];
-    reached = HashSet::new();
-    for f in 0..size(raw.starts) {
-        start = intAt(raw.starts, f, 0);
-        end = intAt(raw.starts, f + 1, size(raw.terms));
-        dropped = kept.contains(f) = false;
-        definition = raw.definitions.contains(f);
-        if start >= 0 && start <= end {
-            for k in start..end {
-                term = intAt(raw.terms, k, 0);
-                if term >= 0 || named.contains(term) {
-                    if dropped { marked = marked.insert(term); };
-                } else {
-                    factsOf = factsOf.insert(term, push(factsOf.lookup(term, []), f));
-                    if dropped && (definition = false || k = start) && reached.contains(term) = false {
-                        reached = reached.insert(term);
-                        queue = push(queue, term);
-                    };
-                };
-            };
-        };
-    };
-    visited = HashSet::new();
-    head = 0;
-    // (each unnamed term is queued once, so there are no more of them than term occurrences)
-    for step in 0..size(raw.terms) {
-        if head < size(queue) {
-            u = intAt(queue, head, 0);
-            head = head + 1;
-            for f in factsOf.lookup(u, []) {
-                if f >= 0 && f < size(raw.starts) && visited.contains(f) = false {
-                    visited = visited.insert(f);
-                    start = intAt(raw.starts, f, 0);
-                    end = intAt(raw.starts, f + 1, size(raw.terms));
-                    if start >= 0 && start <= end {
-                        for k in start..end {
-                            term = intAt(raw.terms, k, 0);
-                            if term >= 0 || named.contains(term) {
-                                marked = marked.insert(term);
-                            } else if reached.contains(term) = false {
-                                reached = reached.insert(term);
-                                queue = push(queue, term);
-                            };
-                        };
-                    };
-                };
-            };
-        };
-    };
-    return marked;
-};
-
 fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
     fieldFunctions = [];
     rightFields = HashSet::new();
@@ -636,106 +572,6 @@ fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> Validator
     return ValidatorContext { equalities: commonFacts(left.equalities, right.equalities), applications: commonFacts(left.applications, right.applications), constants: commonFacts(left.constants, right.constants), orders: commonFacts(left.orders, right.orders), different: commonFacts(left.different, right.different), variants: commonFacts(left.variants, right.variants), fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: commonFacts(left.constructorFields, right.constructorFields), differences: commonFacts(left.differences, right.differences) };
 };
 
-// One end of the integer range a term is known to lie in: its constant
-// value, or the tightest order fact against a constant-valued term.
-fn rangeBound(context: &ValidatorContext, term: Int, low: Bool) -> IntegerLookup {
-    value = integerValue(context, term);
-    if value is IntegerLookup::Found { return value; };
-    equalities = semanticFacts(context.equalities, context.applications, context.constants);
-    equalitiesClasses = leastClasses(equalities);
-    best = 0;
-    found = false;
-    for orderPosition in 0..size(context.orders) {
-        order = get(context.orders, orderPosition);
-        if low {
-            if sameIn(equalitiesClasses, order.greater, term) {
-                v = integerValue(context, order.smaller);
-                if v is IntegerLookup::Found {
-                    cand = (v as IntegerLookup::Found).value;
-                    usable = true;
-                    if order.strict {
-                        if cand < 9223372036854775807 { cand = cand + 1; } else { usable = false; };
-                    };
-                    if usable {
-                        if found = false || cand > best { best = cand; found = true; };
-                    };
-                };
-            };
-        } else {
-            if sameIn(equalitiesClasses, order.smaller, term) {
-                v = integerValue(context, order.greater);
-                if v is IntegerLookup::Found {
-                    cand = (v as IntegerLookup::Found).value;
-                    usable = true;
-                    if order.strict {
-                        if cand > -9223372036854775808 { cand = cand - 1; } else { usable = false; };
-                    };
-                    if usable {
-                        if found = false || cand < best { best = cand; found = true; };
-                    };
-                };
-            };
-        };
-    };
-    if found { return IntegerLookup::Found { value: best }; };
-    return IntegerLookup::Missing;
-};
-
-fn addRangeBound(state: &ExecutionState, term: Int, value: Int, low: Bool) -> ExecutionState {
-    boundTerm = 0;
-    found = false;
-    for constantPosition in 0..size(state.context.constants) {
-        constant = get(state.context.constants, constantPosition);
-        if constant.kind = 0 {
-            if constant.value = value { boundTerm = constant.id; found = true; };
-        };
-    };
-    owned = clone(state);
-    context = clone(owned.context);
-    if found = false {
-        fresh = freshValue(state);
-        if fresh is ValueLookup::Found {
-            boundTerm = (fresh as ValueLookup::Found).term;
-            context = ValidatorContext { constants: push(clone(context.constants), ConstantTerm { id: boundTerm, kind: 0, value: value }), ..context };
-        } else { return clone(state); };
-    };
-    if low {
-        context = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: boundTerm, greater: term, strict: false }), ..context };
-    } else {
-        context = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: term, greater: boundTerm, strict: false }), ..context };
-    };
-    return ExecutionState { context: context, ..owned };
-};
-
-fn addOrderToState(state: &ExecutionState, smaller: Int, greater: Int) -> ExecutionState {
-    for orderPosition in 0..size(state.context.orders) {
-        order = get(state.context.orders, orderPosition);
-        if order.smaller = smaller {
-            if order.greater = greater { return clone(state); };
-        };
-    };
-    context = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: smaller, greater: greater, strict: false }), ..clone(state.context) };
-    return ExecutionState { context: context, ..clone(state) };
-};
-
-fn addStrictOrderToState(state: &ExecutionState, smaller: Int, greater: Int) -> ExecutionState {
-    for orderPosition in 0..size(state.context.orders) {
-        order = get(state.context.orders, orderPosition);
-        if order.smaller = smaller {
-            if order.greater = greater {
-                if order.strict { return clone(state); };
-            };
-        };
-    };
-    context = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: smaller, greater: greater, strict: true }), ..clone(state.context) };
-    return ExecutionState { context: context, ..clone(state) };
-};
-
-// A bound that both branches give the joined term, though neither branch
-// states it of that term: on one side it may follow from the value the term
-// was before the join (0 <= 0 - n from n < 0), so each side is asked with the
-// solver, not matched as a fact. The bounds tried are the constants the join
-// keeps and the terms both sides compare against.
 fn constantTermWithValue(context: &ValidatorContext, value: Int) -> ValueLookup {
     for constantPosition in 0..size(context.constants) {
         constant = get(context.constants, constantPosition);
@@ -744,269 +580,6 @@ fn constantTermWithValue(context: &ValidatorContext, value: Int) -> ValueLookup 
         };
     };
     return ValueLookup::Missing;
-};
-
-// Two locals the paths set to different numbers with the same sum (x = 1,
-// y = 0 on one, x = 0, y = 1 on the other) keep that sum after the join
-fn addJoinedSums(state: &ExecutionState, pairs: &List<MergePair>, left: &ExecutionState, right: &ExecutionState) -> ExecutionState {
-    result = clone(state);
-    added = 0;
-    for i in 0..size(pairs) {
-        for j in 0..size(pairs) {
-            if i < j && added < 8 {
-                p = get(pairs, i);
-                q = get(pairs, j);
-                lp = integerValue(left.context, p.left);
-                lq = integerValue(left.context, q.left);
-                rp = integerValue(right.context, p.right);
-                rq = integerValue(right.context, q.right);
-                if lp is IntegerLookup::Found && lq is IntegerLookup::Found && rp is IntegerLookup::Found && rq is IntegerLookup::Found {
-                    a = (lp as IntegerLookup::Found).value;
-                    b = (lq as IntegerLookup::Found).value;
-                    c = (rp as IntegerLookup::Found).value;
-                    d = (rq as IntegerLookup::Found).value;
-                    if a + b = c + d && a != c {
-                        total = constantTermWithValue(result.context, a + b);
-                        fresh = freshValue(result);
-                        if total is ValueLookup::Found && fresh is ValueLookup::Found {
-                            sumTerm = (fresh as ValueLookup::Found).term;
-                            apps = push(clone(result.context.applications), ApplicationTerm { id: sumTerm, function: -1, arguments: push(push([], p.joined), q.joined) });
-                            facts = push(clone(result.context.equalities), EqualityFact { left: sumTerm, right: (total as ValueLookup::Found).term });
-                            result = ExecutionState { context: ValidatorContext { applications: apps, equalities: facts, ..clone(result.context) }, ..clone(result) };
-                            added = added + 1;
-                        };
-                    };
-                };
-            };
-        };
-    };
-    return result;
-};
-
-fn neighboursOf(context: &ValidatorContext, term: Int) -> HashSet<Int> {
-    near = HashSet::new();
-    for factPosition in 0..size(context.equalities) {
-        fact = get(context.equalities, factPosition);
-        if fact.left = term { near = near.insert(fact.right); };
-        if fact.right = term { near = near.insert(fact.left); };
-    };
-    for factPosition in 0..size(context.orders) {
-        fact = get(context.orders, factPosition);
-        if fact.smaller = term { near = near.insert(fact.greater); };
-        if fact.greater = term { near = near.insert(fact.smaller); };
-    };
-    for factPosition in 0..size(context.different) {
-        fact = get(context.different, factPosition);
-        if fact.left = term { near = near.insert(fact.right); };
-        if fact.right = term { near = near.insert(fact.left); };
-    };
-    for factPosition in 0..size(context.differences) {
-        fact = get(context.differences, factPosition);
-        if fact.left = term { near = near.insert(fact.right); };
-        if fact.right = term { near = near.insert(fact.left); };
-    };
-    for appPosition in 0..size(context.applications) {
-        app = get(context.applications, appPosition);
-        mentioned = app.id = term;
-        for argumentPosition in 0..size(app.arguments) {
-            if get(app.arguments, argumentPosition) = term { mentioned = true; };
-        };
-        if mentioned {
-            near = near.insert(app.id);
-            for argumentPosition in 0..size(app.arguments) { near = near.insert(get(app.arguments, argumentPosition)); };
-        };
-    };
-    return near;
-};
-
-fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &ExecutionState, right: &ExecutionState) -> ExecutionState {
-    result = clone(state);
-    leftCache = entailmentCache(left.context);
-    rightCache = entailmentCache(right.context);
-    for pairPosition in 0..size(pairs) {
-        pair = get(pairs, pairPosition);
-        // (a constant the branch never put in a fact with either of the pair's
-        // own terms is asked nothing: it is the constants that grow with the
-        // program, and a bound on the joined term is proved from the facts its
-        // side's term takes part in. The locals in scope are bounded by the
-        // function and stay candidates: capping them too loses the strict
-        // bound of r = n + 1 against r = n + 2.)
-        leftNear = neighboursOf(left.context, pair.left);
-        rightNear = neighboursOf(right.context, pair.right);
-        mergedCandidates = [];
-        leftCandidates = [];
-        rightCandidates = [];
-        candidateValues = [];
-        for constantPosition in 0..size(result.context.constants) {
-            constant = get(result.context.constants, constantPosition);
-            if constant.kind = 0 {
-                lc = constantTermWithValue(left.context, constant.value);
-                rc = constantTermWithValue(right.context, constant.value);
-                if lc is ValueLookup::Found {
-                    if rc is ValueLookup::Found {
-                        lcTerm = (lc as ValueLookup::Found).term;
-                        rcTerm = (rc as ValueLookup::Found).term;
-                        if leftNear.contains(lcTerm) || rightNear.contains(rcTerm) {
-                            if containsValue(mergedCandidates, constant.id) = false {
-                                mergedCandidates = push(mergedCandidates, constant.id);
-                                candidateValues = push(candidateValues, constant.value);
-                                leftCandidates = push(leftCandidates, lcTerm);
-                                rightCandidates = push(rightCandidates, rcTerm);
-                            };
-                        };
-                    };
-                };
-            };
-        };
-        firstLocal = size(mergedCandidates);
-        for binding in result.locals.entries() {
-            if binding.value != pair.joined {
-                lc = lookupLocal(left.locals, binding.key);
-                rc = lookupLocal(right.locals, binding.key);
-                if lc is ValueLookup::Found {
-                    if rc is ValueLookup::Found {
-                        if containsValue(mergedCandidates, binding.value) = false {
-                            mergedCandidates = push(mergedCandidates, binding.value);
-                            leftCandidates = push(leftCandidates, (lc as ValueLookup::Found).term);
-                            rightCandidates = push(rightCandidates, (rc as ValueLookup::Found).term);
-                        };
-                    };
-                };
-            };
-        };
-        haveLower = false;
-        lowerValue = 0;
-        lowerTerm = 0;
-        haveUpper = false;
-        upperValue = 0;
-        upperTerm = 0;
-        for i in 0..size(mergedCandidates) {
-            candidate = get(mergedCandidates, i);
-            lc = intAt(leftCandidates, i, 0);
-            rc = intAt(rightCandidates, i, 0);
-            // (a bound both sides keep strictly against a local is kept strictly:
-            // r > n after r = n + 1 on one side and r = n + 2 on the other; a
-            // constant's own value says as much without the cost)
-            leftAnswer = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: lc, right: pair.left });
-            leftCache = leftAnswer.cache;
-            if leftAnswer.holds {
-                rightAnswer = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: rc, right: pair.right });
-                rightCache = rightAnswer.cache;
-                if rightAnswer.holds {
-                    strict = false;
-                    if i >= firstLocal {
-                        leftAnswer = entailsGoalCached(leftCache, ValidatorGoal::Less { left: lc, right: pair.left });
-                        leftCache = leftAnswer.cache;
-                        if leftAnswer.holds {
-                            rightAnswer = entailsGoalCached(rightCache, ValidatorGoal::Less { left: rc, right: pair.right });
-                            rightCache = rightAnswer.cache;
-                            strict = rightAnswer.holds;
-                        };
-                    };
-                    if i < firstLocal {
-                        // (of the constants below both sides only the greatest is kept:
-                        // the others follow from it, and each would be a fact to carry)
-                        v = intAt(candidateValues, i, 0);
-                        if haveLower = false || v > lowerValue { haveLower = true; lowerValue = v; lowerTerm = candidate; };
-                    } else {
-                        if strict { result = addStrictOrderToState(result, candidate, pair.joined); } else { result = addOrderToState(result, candidate, pair.joined); };
-                    };
-                };
-            };
-            leftAnswer = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: pair.left, right: lc });
-            leftCache = leftAnswer.cache;
-            if leftAnswer.holds {
-                rightAnswer = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: pair.right, right: rc });
-                rightCache = rightAnswer.cache;
-                if rightAnswer.holds {
-                    strict = false;
-                    if i >= firstLocal {
-                        leftAnswer = entailsGoalCached(leftCache, ValidatorGoal::Less { left: pair.left, right: lc });
-                        leftCache = leftAnswer.cache;
-                        if leftAnswer.holds {
-                            rightAnswer = entailsGoalCached(rightCache, ValidatorGoal::Less { left: pair.right, right: rc });
-                            rightCache = rightAnswer.cache;
-                            strict = rightAnswer.holds;
-                        };
-                    };
-                    if i < firstLocal {
-                        v = intAt(candidateValues, i, 0);
-                        if haveUpper = false || v < upperValue { haveUpper = true; upperValue = v; upperTerm = candidate; };
-                    } else {
-                        if strict { result = addStrictOrderToState(result, pair.joined, candidate); } else { result = addOrderToState(result, pair.joined, candidate); };
-                    };
-                };
-            };
-        };
-        if haveLower { result = addOrderToState(result, lowerTerm, pair.joined); };
-        if haveUpper { result = addOrderToState(result, pair.joined, upperTerm); };
-    };
-    for pPosition in 0..size(pairs) {
-        p = get(pairs, pPosition);
-        for qPosition in 0..size(pairs) {
-            q = get(pairs, qPosition);
-            if p.joined != q.joined {
-                a = integerValue(left.context, p.left);
-                b = integerValue(left.context, q.left);
-                c = integerValue(right.context, p.right);
-                d = integerValue(right.context, q.right);
-                if a is IntegerLookup::Found {
-                    if b is IntegerLookup::Found {
-                        if c is IntegerLookup::Found {
-                            if d is IntegerLookup::Found {
-                                av = (a as IntegerLookup::Found).value;
-                                bv = (b as IntegerLookup::Found).value;
-                                cv = (c as IntegerLookup::Found).value;
-                                dv = (d as IntegerLookup::Found).value;
-                                if av <= bv {
-                                    if cv <= dv { result = addOrderToState(result, p.joined, q.joined); };
-                                };
-                                if av < bv {
-                                    if cv < dv { result = addStrictOrderToState(result, p.joined, q.joined); };
-                                };
-                            };
-                        };
-                    };
-                };
-            };
-        };
-    };
-    return result;
-};
-
-fn booleanIn(classes: &HashMap<Int, Int>, constants: &List<ConstantTerm>, term: Int) -> Bool {
-    for constantPosition in 0..size(constants) {
-        constant = get(constants, constantPosition);
-        if constant.kind = 1 && sameIn(classes, constant.id, term) { return true; };
-    };
-    return false;
-};
-
-// The pairs the bound round asks about: every pair with a joined term, and
-// each contested self-pair whose term neither side's classes hold a boolean
-// constant for. (A branch condition is contested at every join, true on one
-// side and false on the other, and no integer bound is said of a boolean.)
-fn boundPairs(pairs: &List<MergePair>, contested: &HashSet<Int>, left: &ValidatorContext, right: &ValidatorContext) -> List<MergePair> {
-    selected = emptyMergePairs();
-    leftClasses = emptyIntMap();
-    rightClasses = emptyIntMap();
-    classesMade = false;
-    for pairPosition in 0..size(pairs) {
-        pair = get(pairs, pairPosition);
-        if pair.joined != pair.left || pair.joined != pair.right {
-            selected = push(selected, clone(pair));
-        } else if contested.contains(pair.joined) {
-            if classesMade = false {
-                leftClasses = leastClasses(semanticFacts(left.equalities, left.applications, left.constants));
-                rightClasses = leastClasses(semanticFacts(right.equalities, right.applications, right.constants));
-                classesMade = true;
-            };
-            if booleanIn(leftClasses, left.constants, pair.left) = false && booleanIn(rightClasses, right.constants, pair.right) = false {
-                selected = push(selected, clone(pair));
-            };
-        };
-    };
-    return selected;
 };
 
 // A merge keeps a fact only when both sides hold it, after each side renames
@@ -1024,10 +597,8 @@ fn boundPairs(pairs: &List<MergePair>, contested: &HashSet<Int>, left: &Validato
 // A template is kept by id: the host registers each with one id and content
 // that speaks only of captured locals and literals. A term with two joined
 // images on a side is dropped from that side, which costs precision only.
-// A local both sides bind to the same generated id keeps it; that self-pair
-// is asked for bounds only when a dropped raw fact reaches it
-// (contestedTerms), as x is after x = x + 1 against x = x + 2, and it is not
-// a boolean (boundPairs).
+// A local both sides bind to the same generated id keeps it. Bounds of the
+// joined terms come from addDifferenceHull, which asks no solver.
 fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
     poolContext = unionContexts(left.context, right.context);
     poolEqualities = clone(poolContext.equalities);
@@ -1104,29 +675,527 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
     for binding in left.locals.entries() { named = named.insert(binding.value); };
     for binding in right.locals.entries() { named = named.insert(binding.value); };
     for binding in state.locals.entries() { named = named.insert(binding.value); };
-    joinPairs = boundPairs(pairs, contestedTerms(rightSide.raw, keptFacts, named), left.context, right.context);
-    for pairPosition in 0..size(joinPairs) {
-        pair = get(joinPairs, pairPosition);
-        loLeft = rangeBound(left.context, pair.left, true);
-        loRight = rangeBound(right.context, pair.right, true);
-        if loLeft is IntegerLookup::Found {
-            if loRight is IntegerLookup::Found {
-                lo = (loLeft as IntegerLookup::Found).value;
-                if (loRight as IntegerLookup::Found).value < lo { lo = (loRight as IntegerLookup::Found).value; };
-                state = addRangeBound(state, pair.joined, lo, true);
-            };
-        };
-        hiLeft = rangeBound(left.context, pair.left, false);
-        hiRight = rangeBound(right.context, pair.right, false);
-        if hiLeft is IntegerLookup::Found {
-            if hiRight is IntegerLookup::Found {
-                hi = (hiLeft as IntegerLookup::Found).value;
-                if (hiRight as IntegerLookup::Found).value > hi { hi = (hiRight as IntegerLookup::Found).value; };
-                state = addRangeBound(state, pair.joined, hi, false);
-            };
+    state = addDifferenceHull(state, droppedDefinitions(rightSide.raw, keptFacts), pairs, left, right, named, leastTermInUse(pool));
+    return StateMergeLookup::Found { state: state };
+};
+
+// What one side of a merge knows, indexed once. Classes are union-find roots
+// over equalities and equal kind-0 constants; a class id names a class, and
+// values holds the kind-0 value of a class that has one.
+struct HullIndex { parent: HashMap<Int, Int>, values: HashMap<Int, Int>, defs: HashMap<Int, Int>, lows: HashMap<Int, Int>, highs: HashMap<Int, Int>, edges: HashMap<Int, Int>, names: HashMap<Int, Int>, anyNames: HashMap<Int, Int> };
+
+// The items appended under each key, in order: first and last positions per
+// key and a next position per item, so an append never copies a list.
+struct HullLinks { first: HashMap<Int, Int>, last: HashMap<Int, Int>, next: List<Int>, items: List<Int> };
+
+struct HullForm { coeffs: HashMap<Int, Int>, leaves: List<Int>, leafTerms: List<Int>, constant: Int, valid: Bool, lo: Int, hi: Int, unknownLo: Int, unknownHi: Int, partLo: HashMap<Int, Int>, partHi: HashMap<Int, Int>, single: Int, singleCount: Int, root: Int, seen: HashSet<Int> };
+
+struct HullBound { hasLo: Bool, lo: Int, hasHi: Bool, hi: Int };
+
+fn hullSmall(v: Int) -> Bool {
+    return v < 1099511627776 && v > -1099511627776;
+};
+
+fn idSmall(v: Int) -> Bool {
+    return v < 2147483647 && v > -2147483647;
+};
+
+// (only called with both class ids strictly within 2^31, where the key is
+// exact and far from overflow)
+fn hullEdgeKey(a: Int, b: Int) -> Int { return a * 4294967296 + b; };
+
+fn noLinks() -> HullLinks {
+    return HullLinks { first: emptyIntMap(), last: emptyIntMap(), next: [], items: [] };
+};
+
+fn linkAppend(links: HullLinks, key: Int, item: Int) -> HullLinks {
+    HullLinks { first: first, last: last, next: next, items: items } = links;
+    position = size(items);
+    tail = last.lookup(key, -1);
+    if tail >= 0 && tail < size(next) { next = set(next, tail, position); } else { first = first.insert(key, position); };
+    return HullLinks { first: first, last: last.insert(key, position), next: push(next, -1), items: push(items, item) };
+};
+
+fn hullIndex(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> HullIndex {
+    parent = emptyIntMap();
+    weight = emptyIntMap();
+    for position in 0..size(context.equalities) {
+        e = get(context.equalities, position);
+        UnionFind { parent: parent, weight: weight } = ufUnion(parent, weight, e.left, e.right);
+    };
+    firstOfValue = emptyIntMap();
+    for position in 0..size(context.constants) {
+        c = get(context.constants, position);
+        if c.kind = 0 && hullSmall(c.value) {
+            if firstOfValue.contains(c.value) {
+                UnionFind { parent: parent, weight: weight } = ufUnion(parent, weight, firstOfValue.lookup(c.value, 0), c.id);
+            } else { firstOfValue = firstOfValue.insert(c.value, c.id); };
         };
     };
-    state = addJoinedBounds(state, joinPairs, left, right);
-    state = addJoinedSums(state, joinPairs, left, right);
-    return StateMergeLookup::Found { state: state };
+    values = emptyIntMap();
+    for position in 0..size(context.constants) {
+        c = get(context.constants, position);
+        if c.kind = 0 && hullSmall(c.value) {
+            k = ufFind(parent, c.id);
+            if values.contains(k) = false { values = values.insert(k, c.value); };
+        };
+    };
+    defs = emptyIntMap();
+    for position in 0..size(context.applications) {
+        a = get(context.applications, position);
+        if size(a.arguments) = 2 && (a.function = -1 || a.function = -2) {
+            k = ufFind(parent, a.id);
+            if defs.contains(k) = false { defs = defs.insert(k, position); };
+        };
+    };
+    lows = emptyIntMap();
+    highs = emptyIntMap();
+    edges = emptyIntMap();
+    for position in 0..size(context.orders) {
+        o = get(context.orders, position);
+        s = ufFind(parent, o.smaller);
+        g = ufFind(parent, o.greater);
+        step = 0;
+        if o.strict { step = 1; };
+        if values.contains(s) {
+            v = values.lookup(s, 0) + step;
+            if lows.contains(g) = false || v > lows.lookup(g, 0) { lows = lows.insert(g, v); };
+        };
+        if values.contains(g) {
+            v = values.lookup(g, 0) - step;
+            if highs.contains(s) = false || v < highs.lookup(s, 0) { highs = highs.insert(s, v); };
+        };
+        if idSmall(s) && idSmall(g) {
+            key = hullEdgeKey(s, g);
+            if edges.contains(key) = false || 0 - step < edges.lookup(key, 0) { edges = edges.insert(key, 0 - step); };
+        };
+    };
+    for position in 0..size(context.differences) {
+        d = get(context.differences, position);
+        l = ufFind(parent, d.left);
+        r = ufFind(parent, d.right);
+        if idSmall(l) && idSmall(r) && hullSmall(d.bound) {
+            key = hullEdgeKey(l, r);
+            if edges.contains(key) = false || d.bound < edges.lookup(key, 0) { edges = edges.insert(key, d.bound); };
+        };
+    };
+    // (a class holding a negative pair source is named by the first such
+    // pair's joined term, as normalization renames it; a non-negative source
+    // keeps its own id)
+    names = emptyIntMap();
+    anyNames = emptyIntMap();
+    for position in 0..size(pairs) {
+        p = get(pairs, position);
+        source = p.right;
+        if leftSide { source = p.left; };
+        k = ufFind(parent, source);
+        if source < 0 && names.contains(k) = false { names = names.insert(k, p.joined); };
+        if anyNames.contains(k) = false { anyNames = anyNames.insert(k, p.joined); };
+    };
+    return HullIndex { parent: parent, values: values, defs: defs, lows: lows, highs: highs, edges: edges, names: names, anyNames: anyNames };
+};
+
+fn hullRoots(index: &HullIndex, selected: &List<MergePair>, leftSide: Bool) -> HashMap<Int, Int> {
+    roots = emptyIntMap();
+    for i in 0..size(selected) {
+        p = get(selected, i);
+        source = p.right;
+        if leftSide { source = p.left; };
+        k = ufFind(index.parent, source);
+        if roots.contains(k) = false { roots = roots.insert(k, i); };
+    };
+    return roots;
+};
+
+// The classes whose add/sub definition reaches a dropped definition: a
+// breadth-first walk up from the dropped ones, each class queued once.
+fn hullReach(index: &HullIndex, context: &ValidatorContext, dropped: &List<Int>) -> HashSet<Int> {
+    users = noLinks();
+    for position in 0..size(context.applications) {
+        a = get(context.applications, position);
+        if size(a.arguments) = 2 && (a.function = -1 || a.function = -2) {
+            k = ufFind(index.parent, a.id);
+            users = linkAppend(users, ufFind(index.parent, intAt(a.arguments, 0, 0)), k);
+            users = linkAppend(users, ufFind(index.parent, intAt(a.arguments, 1, 0)), k);
+        };
+    };
+    reached = HashSet::new();
+    queue = [];
+    for position in 0..size(dropped) {
+        k = ufFind(index.parent, get(dropped, position));
+        if reached.contains(k) = false { reached = reached.insert(k); queue = push(queue, k); };
+    };
+    head = 0;
+    bound = size(queue) + size(users.items) + 1;
+    linkCount = size(users.items);
+    while head < size(queue) && head < bound [{ affirm head >= 0; affirm head <= bound; }] shrinks bound - head {
+        k = get(queue, head);
+        head = head + 1;
+        at = users.first.lookup(k, -1);
+        walked = 0;
+        while at >= 0 && at < size(users.items) && walked < linkCount [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
+            owner = get(users.items, at);
+            if reached.contains(owner) = false { reached = reached.insert(owner); queue = push(queue, owner); };
+            at = intAt(users.next, at, -1);
+            walked = walked + 1;
+        };
+    };
+    return reached;
+};
+
+fn hullName(index: &HullIndex, term: Int) -> Int {
+    return index.names.lookup(ufFind(index.parent, term), term);
+};
+
+// One root-edge candidate per end of a fact touching a selected root class,
+// owned by the class's first selected pair
+fn hullRootEdge(links: HullLinks, index: &HullIndex, roots: &HashMap<Int, Int>, root: Int, other: Int, otherClass: Int) -> HullLinks {
+    if roots.contains(root) = false { return links; };
+    owner = roots.lookup(root, 0);
+    result = links;
+    if index.anyNames.contains(otherClass) { result = linkAppend(result, owner, index.anyNames.lookup(otherClass, 0)); };
+    // (a stable id names itself on both sides, even inside a renamed class)
+    if other >= 0 { return linkAppend(result, owner, other); };
+    return linkAppend(result, owner, hullName(index, other));
+};
+
+fn hullEdgeEnds(links: HullLinks, index: &HullIndex, roots: &HashMap<Int, Int>, a: Int, b: Int) -> HullLinks {
+    ka = ufFind(index.parent, a);
+    kb = ufFind(index.parent, b);
+    return hullRootEdge(hullRootEdge(links, index, roots, ka, b, kb), index, roots, kb, a, ka);
+};
+
+fn hullEdgeLinks(links: HullLinks, index: &HullIndex, roots: &HashMap<Int, Int>, context: &ValidatorContext) -> HullLinks {
+    result = links;
+    for position in 0..size(context.orders) {
+        o = get(context.orders, position);
+        result = hullEdgeEnds(result, index, roots, o.smaller, o.greater);
+    };
+    for position in 0..size(context.differences) {
+        d = get(context.differences, position);
+        result = hullEdgeEnds(result, index, roots, d.left, d.right);
+    };
+    for position in 0..size(context.equalities) {
+        e = get(context.equalities, position);
+        result = hullEdgeEnds(result, index, roots, e.left, e.right);
+    };
+    return result;
+};
+
+// The affine form of a pair source on one side. The root's own add/sub
+// definition is always expanded; below it only an unnamed, negative,
+// non-source class not yet expanded on this side in this merge, so each
+// class is expanded at most once per side however many pairs reach it.
+fn hullForm(index: &HullIndex, context: &ValidatorContext, root: Int, named: &HashSet<Int>, sources: &HashSet<Int>, visited: HashSet<Int>) -> HullForm {
+    coeffs = emptyIntMap();
+    leaves = [];
+    leafTerms = [];
+    constant = 0;
+    valid = true;
+    terms = push([], root);
+    signs = push([], 1);
+    head = 0;
+    bound = 2 * size(context.applications) + 2;
+    seen = visited;
+    while head < size(terms) && head < bound [{ affirm head >= 0; affirm head <= bound; }] shrinks bound - head {
+        t = intAt(terms, head, 0);
+        c = intAt(signs, head, 1);
+        k = ufFind(index.parent, t);
+        expandable = head = 0;
+        if expandable = false {
+            expandable = t < 0 && named.contains(t) = false && sources.contains(t) = false && seen.contains(k) = false;
+        };
+        head = head + 1;
+        position = index.defs.lookup(k, -1);
+        if index.values.contains(k) {
+            constant = constant + c * index.values.lookup(k, 0);
+            if hullSmall(constant) = false { valid = false; constant = 0; };
+        } else if expandable && position >= 0 && position < size(context.applications) {
+            seen = seen.insert(k);
+            a = get(context.applications, position);
+            terms = push(push(terms, intAt(a.arguments, 0, 0)), intAt(a.arguments, 1, 0));
+            if a.function = -1 { signs = push(push(signs, c), c); } else { signs = push(push(signs, c), 0 - c); };
+        } else {
+            if coeffs.contains(k) = false { leaves = push(leaves, k); leafTerms = push(leafTerms, t); };
+            n = coeffs.lookup(k, 0) + c;
+            if n >= 1048576 || n <= -1048576 { valid = false; n = 0; };
+            coeffs = coeffs.insert(k, n);
+        };
+    };
+    if head < size(terms) { valid = false; };
+    // (each leaf's share of the form's range, summed once: |c| < 2^20 and a
+    // range end within 2^40 keep every product and running sum far from 2^63)
+    lo = constant;
+    hi = constant;
+    unknownLo = 0;
+    unknownHi = 0;
+    partLo = emptyIntMap();
+    partHi = emptyIntMap();
+    single = 0;
+    singleCount = 0;
+    for leafPosition in 0..size(leaves) {
+        k = get(leaves, leafPosition);
+        c = coeffs.lookup(k, 0);
+        if c != 0 {
+            singleCount = singleCount + 1;
+            single = k;
+            haveLow = index.lows.contains(k) && hullSmall(index.lows.lookup(k, 0));
+            haveHigh = index.highs.contains(k) && hullSmall(index.highs.lookup(k, 0));
+            low = index.lows.lookup(k, 0);
+            high = index.highs.lookup(k, 0);
+            if c < 0 {
+                swapHave = haveLow;
+                haveLow = haveHigh;
+                haveHigh = swapHave;
+                swap = low;
+                low = high;
+                high = swap;
+            };
+            // (an overflowed sum counts as many unknowns, so dropping one leaf never clears it)
+            if haveLow { partLo = partLo.insert(k, c * low); lo = lo + c * low; if hullSmall(lo) = false { unknownLo = unknownLo + 1000000; lo = 0; }; } else { unknownLo = unknownLo + 1; };
+            if haveHigh { partHi = partHi.insert(k, c * high); hi = hi + c * high; if hullSmall(hi) = false { unknownHi = unknownHi + 1000000; hi = 0; }; } else { unknownHi = unknownHi + 1; };
+        };
+    };
+    return HullForm { coeffs: coeffs, leaves: leaves, leafTerms: leafTerms, constant: constant, valid: valid, lo: lo, hi: hi, unknownLo: unknownLo, unknownHi: unknownHi, partLo: partLo, partHi: partHi, single: single, singleCount: singleCount, root: ufFind(index.parent, root), seen: seen };
+};
+
+fn hullTighter(a: &HullBound, b: &HullBound) -> HullBound {
+    lo = a.lo;
+    if b.hasLo && (a.hasLo = false || b.lo > a.lo) { lo = b.lo; };
+    hi = a.hi;
+    if b.hasHi && (a.hasHi = false || b.hi < a.hi) { hi = b.hi; };
+    return HullBound { hasLo: a.hasLo || b.hasLo, lo: lo, hasHi: a.hasHi || b.hasHi, hi: hi };
+};
+
+// Bounds of root - m on one side, m read as `reading` there: the root's own
+// direct edge to m, and the form's residual, each proved alone; the tighter
+// end of the two is kept.
+fn hullResidual(index: &HullIndex, form: &HullForm, reading: Int) -> HullBound {
+    m = ufFind(index.parent, reading);
+    if m = form.root { return HullBound { hasLo: true, lo: 0, hasHi: true, hi: 0 }; };
+    direct = HullBound { hasLo: false, lo: 0, hasHi: false, hi: 0 };
+    if idSmall(m) && idSmall(form.root) {
+        up = hullEdgeKey(form.root, m);
+        down = hullEdgeKey(m, form.root);
+        direct = HullBound { hasLo: index.edges.contains(down), lo: 0 - index.edges.lookup(down, 0), hasHi: index.edges.contains(up), hi: index.edges.lookup(up, 0) };
+    };
+    if form.valid = false { return direct; };
+    k = form.constant;
+    residual = HullBound { hasLo: false, lo: 0, hasHi: false, hi: 0 };
+    if form.coeffs.lookup(m, 0) = 1 {
+        // (identity: drop m's own share)
+        uLo = form.unknownLo;
+        lo = form.lo;
+        if form.partLo.contains(m) { lo = lo - form.partLo.lookup(m, 0); } else { uLo = uLo - 1; };
+        uHi = form.unknownHi;
+        hi = form.hi;
+        if form.partHi.contains(m) { hi = hi - form.partHi.lookup(m, 0); } else { uHi = uHi - 1; };
+        residual = HullBound { hasLo: uLo = 0 && hullSmall(lo), lo: lo, hasHi: uHi = 0 && hullSmall(hi), hi: hi };
+    } else if form.singleCount = 1 && form.coeffs.lookup(form.single, 0) = 1 && idSmall(m) && idSmall(form.single) {
+        up = hullEdgeKey(form.single, m);
+        down = hullEdgeKey(m, form.single);
+        residual = HullBound { hasLo: index.edges.contains(down), lo: k - index.edges.lookup(down, 0), hasHi: index.edges.contains(up), hi: k + index.edges.lookup(up, 0) };
+    } else if index.values.contains(m) {
+        v = index.values.lookup(m, 0);
+        residual = HullBound { hasLo: form.unknownLo = 0, lo: form.lo - v, hasHi: form.unknownHi = 0, hi: form.hi - v };
+    } else {
+        haveHigh = index.highs.contains(m) && hullSmall(index.highs.lookup(m, 0));
+        haveLow = index.lows.contains(m) && hullSmall(index.lows.lookup(m, 0));
+        residual = HullBound { hasLo: form.unknownLo = 0 && haveHigh, lo: form.lo - index.highs.lookup(m, 0), hasHi: form.unknownHi = 0 && haveLow, hi: form.hi - index.lows.lookup(m, 0) };
+    };
+    return hullTighter(direct, residual);
+};
+
+// The range of the root alone: its form's range, tightened by its own facts
+fn hullRange(index: &HullIndex, form: &HullForm) -> HullBound {
+    own = HullBound { hasLo: index.lows.contains(form.root), lo: index.lows.lookup(form.root, 0), hasHi: index.highs.contains(form.root), hi: index.highs.lookup(form.root, 0) };
+    if index.values.contains(form.root) { v = index.values.lookup(form.root, 0); own = HullBound { hasLo: true, lo: v, hasHi: true, hi: v }; };
+    if form.valid = false { return own; };
+    return hullTighter(own, HullBound { hasLo: form.unknownLo = 0, lo: form.lo, hasHi: form.unknownHi = 0, hi: form.hi });
+};
+
+fn sideReading(pairs: &List<MergePair>, byJoined: &HashMap<Int, Int>, leftSide: Bool, name: Int) -> Int {
+    position = byJoined.lookup(name, -1);
+    if position >= 0 && position < size(pairs) {
+        p = get(pairs, position);
+        if leftSide { return p.left; };
+        return p.right;
+    };
+    return name;
+};
+
+// The terms whose definition (an application or constant) the merge dropped
+fn droppedDefinitions(raw: &RawFacts, kept: &HashSet<Int>) -> List<Int> {
+    dropped = [];
+    for f in 0..size(raw.starts) {
+        if raw.definitions.contains(f) && kept.contains(f) = false { dropped = push(dropped, intAt(raw.terms, intAt(raw.starts, f, 0), 0)); };
+    };
+    return dropped;
+};
+
+// The facts a merge adds, built up pair by pair. Every id it mints is next,
+// counting down; canMint is false near the bottom of Int.
+struct HullFacts { orders: List<OrderFact>, differences: List<DifferenceFact>, constants: List<ConstantTerm>, applications: List<ApplicationTerm>, equalities: List<EqualityFact>, constantOf: HashMap<Int, Int>, next: Int, canMint: Bool };
+
+// value <= joined (or joined <= value) against the merged constant of that
+// value, minted when there is none and minting is allowed, else omitted
+fn hullRangeFact(facts: HullFacts, value: Int, joined: Int, low: Bool) -> HullFacts {
+    HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: constantOf, next: next, canMint: canMint } = facts;
+    if constantOf.contains(value) = false && canMint {
+        constantOf = constantOf.insert(value, next);
+        constants = push(constants, ConstantTerm { id: next, kind: 0, value: value });
+        next = next - 1;
+    };
+    if constantOf.contains(value) {
+        bound = constantOf.lookup(value, 0);
+        if low { orders = push(orders, OrderFact { smaller: bound, greater: joined, strict: false }); } else { orders = push(orders, OrderFact { smaller: joined, greater: bound, strict: false }); };
+    };
+    return HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: constantOf, next: next, canMint: canMint };
+};
+
+// The looser of the two sides' bounds of joined - m, where both sides have it
+fn hullDifferenceFacts(facts: HullFacts, lb: &HullBound, rb: &HullBound, m: Int, joined: Int) -> HullFacts {
+    HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: constantOf, next: next, canMint: canMint } = facts;
+    if lb.hasLo && rb.hasLo {
+        lo = minInt(lb.lo, rb.lo);
+        if lo >= 1 { orders = push(orders, OrderFact { smaller: m, greater: joined, strict: true }); } else if lo >= 0 { orders = push(orders, OrderFact { smaller: m, greater: joined, strict: false }); } else { differences = push(differences, DifferenceFact { left: m, right: joined, bound: 0 - lo }); };
+    };
+    if lb.hasHi && rb.hasHi {
+        hi = lb.hi;
+        if rb.hi > hi { hi = rb.hi; };
+        if hi <= -1 { orders = push(orders, OrderFact { smaller: joined, greater: m, strict: true }); } else if hi <= 0 { orders = push(orders, OrderFact { smaller: joined, greater: m, strict: false }); } else { differences = push(differences, DifferenceFact { left: joined, right: m, bound: hi }); };
+    };
+    return HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: constantOf, next: next, canMint: canMint };
+};
+
+// The coefficient-1 leaves of both forms, then the root-edge candidates the
+// pair owns
+fn hullCandidates(li: &HullIndex, lf: &HullForm, ri: &HullIndex, rf: &HullForm, links: &HullLinks, owner: Int) -> List<Int> {
+    candidates = [];
+    for j in 0..size(lf.leaves) { if lf.coeffs.lookup(get(lf.leaves, j), 0) = 1 { candidates = push(candidates, hullName(li, intAt(lf.leafTerms, j, 0))); }; };
+    for j in 0..size(rf.leaves) { if rf.coeffs.lookup(get(rf.leaves, j), 0) = 1 { candidates = push(candidates, hullName(ri, intAt(rf.leafTerms, j, 0))); }; };
+    at = links.first.lookup(owner, -1);
+    walked = 0;
+    linkCount = size(links.items);
+    while at >= 0 && at < size(links.items) && walked < linkCount [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
+        candidates = push(candidates, get(links.items, at));
+        at = intAt(links.next, at, -1);
+        walked = walked + 1;
+    };
+    return candidates;
+};
+
+// The range of one joined term and its difference against each candidate,
+// each candidate once; a candidate constant on the left is covered by the range
+fn hullPairFacts(facts: HullFacts, li: &HullIndex, lf: &HullForm, ri: &HullIndex, rf: &HullForm, joined: Int, pairs: &List<MergePair>, byJoined: &HashMap<Int, Int>, candidates: &List<Int>) -> HullFacts {
+    result = facts;
+    lr = hullRange(li, lf);
+    rr = hullRange(ri, rf);
+    if lr.hasLo && rr.hasLo { result = hullRangeFact(result, minInt(lr.lo, rr.lo), joined, true); };
+    if lr.hasHi && rr.hasHi {
+        hi = lr.hi;
+        if rr.hi > hi { hi = rr.hi; };
+        result = hullRangeFact(result, hi, joined, false);
+    };
+    done = HashSet::new();
+    done = done.insert(joined);
+    for position in 0..size(candidates) {
+        m = get(candidates, position);
+        leftReading = sideReading(pairs, byJoined, true, m);
+        if done.contains(m) = false && li.values.contains(ufFind(li.parent, leftReading)) = false {
+            done = done.insert(m);
+            result = hullDifferenceFacts(result, hullResidual(li, lf, leftReading), hullResidual(ri, rf, sideReading(pairs, byJoined, false, m)), m, joined);
+        };
+    };
+    return result;
+};
+
+// Two pairs whose constant values trade places keep their sum, found by the
+// opposite difference in one pass; the total must already be a merged
+// constant
+fn hullSums(facts: HullFacts, li: &HullIndex, ri: &HullIndex, selected: &List<MergePair>) -> HullFacts {
+    HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: constantOf, next: next, canMint: canMint } = facts;
+    byDelta = emptyIntMap();
+    sums = 0;
+    for i in 0..size(selected) {
+        p = get(selected, i);
+        a = ufFind(li.parent, p.left);
+        c = ufFind(ri.parent, p.right);
+        if li.values.contains(a) && ri.values.contains(c) && sums < 8 {
+            av = li.values.lookup(a, 0);
+            delta = av - ri.values.lookup(c, 0);
+            if delta != 0 && byDelta.contains(0 - delta) {
+                position = byDelta.lookup(0 - delta, 0);
+                if position >= 0 && position < size(selected) {
+                    q = get(selected, position);
+                    total = av + li.values.lookup(ufFind(li.parent, q.left), 0);
+                    if constantOf.contains(total) && canMint {
+                        applications = push(applications, ApplicationTerm { id: next, function: -1, arguments: push(push([], q.joined), p.joined) });
+                        equalities = push(equalities, EqualityFact { left: next, right: constantOf.lookup(total, 0) });
+                        next = next - 1;
+                        sums = sums + 1;
+                    };
+                };
+            };
+            if delta != 0 && byDelta.contains(delta) = false { byDelta = byDelta.insert(delta, i); };
+        };
+    };
+    return HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: constantOf, next: next, canMint: canMint };
+};
+
+// Every renamed pair, and each self-pair whose root class reaches a dropped
+// definition on either side
+fn hullSelected(pairs: &List<MergePair>, li: &HullIndex, ri: &HullIndex, lreach: &HashSet<Int>, rreach: &HashSet<Int>) -> List<MergePair> {
+    selected = emptyMergePairs();
+    for position in 0..size(pairs) {
+        p = get(pairs, position);
+        if p.joined != p.left || p.joined != p.right || lreach.contains(ufFind(li.parent, p.left)) || rreach.contains(ufFind(ri.parent, p.right)) { selected = push(selected, clone(p)); };
+    };
+    return selected;
+};
+
+// Bounds both sides give each joined term, read off each side's facts with no
+// solver: its range, and its difference against each candidate (the
+// coefficient-1 leaves of its forms and the other ends of facts on its root
+// class), keeping the looser end of the two sides and omitting an end either
+// side lacks. Every id it mints is below least, which is at or below every id
+// either side or the merged state mentions; near the bottom of Int it mints
+// nothing and drops the facts that would need a new term.
+fn addDifferenceHull(state: ExecutionState, dropped: &List<Int>, pairs: &List<MergePair>, left: &ExecutionState, right: &ExecutionState, named: &HashSet<Int>, least: Int) -> ExecutionState {
+    if size(pairs) = 0 { return state; };
+    li = hullIndex(left.context, pairs, true);
+    ri = hullIndex(right.context, pairs, false);
+    selected = hullSelected(pairs, li, ri, hullReach(li, left.context, dropped), hullReach(ri, right.context, dropped));
+    if size(selected) = 0 { return state; };
+    leftSources = HashSet::new();
+    rightSources = HashSet::new();
+    byJoined = emptyIntMap();
+    for position in 0..size(pairs) {
+        p = get(pairs, position);
+        leftSources = leftSources.insert(p.left);
+        rightSources = rightSources.insert(p.right);
+        if byJoined.contains(p.joined) = false { byJoined = byJoined.insert(p.joined, position); };
+    };
+    edgeLinks = hullEdgeLinks(hullEdgeLinks(noLinks(), li, hullRoots(li, selected, true), left.context), ri, hullRoots(ri, selected, false), right.context);
+    constantOf = emptyIntMap();
+    for position in 0..size(state.context.constants) {
+        c = get(state.context.constants, position);
+        if c.kind = 0 && constantOf.contains(c.value) = false { constantOf = constantOf.insert(c.value, c.id); };
+    };
+    canMint = least > -4611686018427387904;
+    next = 0;
+    if canMint { next = least - 1; };
+    facts = HullFacts { orders: clone(state.context.orders), differences: clone(state.context.differences), constants: clone(state.context.constants), applications: clone(state.context.applications), equalities: clone(state.context.equalities), constantOf: constantOf, next: next, canMint: canMint };
+    lv = HashSet::new();
+    rv = HashSet::new();
+    for i in 0..size(selected) {
+        p = get(selected, i);
+        lf = hullForm(li, left.context, p.left, named, leftSources, lv);
+        rf = hullForm(ri, right.context, p.right, named, rightSources, rv);
+        facts = hullPairFacts(facts, li, lf, ri, rf, p.joined, pairs, byJoined, hullCandidates(li, lf, ri, rf, edgeLinks, i));
+        lv = lf.seen;
+        rv = rf.seen;
+    };
+    HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: finalConstantOf, next: finalNext, canMint: finalCanMint } = hullSums(facts, li, ri, selected);
+    return ExecutionState { context: ValidatorContext { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, ..state.context }, ..state };
 };

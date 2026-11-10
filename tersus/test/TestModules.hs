@@ -1765,7 +1765,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
                             , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
-                            , testAssertEq (validatorMetadataFingerprint raw) "a74d21315096f953"
+                            , testAssertEq (validatorMetadataFingerprint raw) "3a4c4c2a2c97446e"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
@@ -1773,7 +1773,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Just fn -> let env = M.specEnv (M.fnSpec fn) in
                                     all (`Map.member` env) (Map.keys (M.progFunctions raw)) && not (Map.member "countParsed" env))
                                 ["containsValue", "commonContext", "driverReadAll"])
-                            , testAssertEq (Map.size (M.progFunctions raw)) 792
+                            , testAssertEq (Map.size (M.progFunctions raw)) 807
                             , testAssertEq (Map.keys (M.progFunctions checker)) (Map.keys (M.progFunctions raw))
                             , testAssertTrue (all (`Map.member` M.progFunctions raw) declared)
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) declared)
@@ -1786,7 +1786,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                             , testAssertEq [loadedFileStem file | file <- files, "JoinedFact" `elem` loadedDeclNames file] ["joins"]
                             , testAssertEq [loadedFileStem file | file <- files, "commonFacts" `elem` loadedDeclNames file] ["joins"]
                             , testAssertEq [loadedFileStem file | file <- files, "commonContext" `elem` loadedDeclNames file] ["joins"]
-                            , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 407
+                            , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 422
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) ["validateExecution", "noTemplates", "commonContext", "driverReadAll"])
                             , testAssertTrue (all (not . isInfixOf "validation$") (Map.keys (M.progFunctions checker)))
                             , testAssertEq (runNamedFunction trapped "noTemplates" []) (Ok (Just (MList [])))
