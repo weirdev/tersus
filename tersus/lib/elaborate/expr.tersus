@@ -251,6 +251,7 @@ fn branchType(st: St, a: Int, b: Int) -> St ~ {
     };
     if xt.kind = 5 && yt.kind = 4 { return branchType(st, y, x); };
     if (xt.kind = 10 && yt.kind = 11) || (xt.kind = 11 && yt.kind = 10) {
+        if size(xt.args) < 1 || size(yt.args) < 1 { return typeError(st, "a reference type has no referent"); };
         st = branchType(st, get(xt.args, 0), get(yt.args, 0));
         if st.status != 0 { return st; };
         return wrapTy(st, 10, st.ty);
@@ -260,23 +261,29 @@ fn branchType(st: St, a: Int, b: Int) -> St ~ {
     if xt.kind = 3 && yt.kind = 0 { return withTy(st, x); };
     if xt.kind = 0 && yt.kind = 3 { return withTy(st, y); };
     if isBoxTy(st, x) && isBoxTy(st, y) {
+        if size(xt.args) < 1 || size(yt.args) < 1 { return typeError(st, "a Box type has no element type"); };
         xi = tyAt(st, get(xt.args, 0));
         yi = tyAt(st, get(yt.args, 0));
-        if xi.kind = 6 && yi.kind = 6 && !sameTy(st, get(xi.args, 1), get(yi.args, 1)) {
-            st = branchType(st, get(xi.args, 0), get(yi.args, 0));
-            if st.status != 0 { return st; };
-            element = st.ty;
-            st = simpleTy(st, 21);
-            st = arrayTy(st, element, st.ty);
-            return boxTy(st, st.ty);
+        if xi.kind = 6 && yi.kind = 6 {
+            if size(xi.args) < 2 || size(yi.args) < 2 { return typeError(st, "an array type has no element type or size"); };
+            if !sameTy(st, get(xi.args, 1), get(yi.args, 1)) {
+                st = branchType(st, get(xi.args, 0), get(yi.args, 0));
+                if st.status != 0 { return st; };
+                element = st.ty;
+                st = simpleTy(st, 21);
+                st = arrayTy(st, element, st.ty);
+                return boxTy(st, st.ty);
+            };
         };
     };
     if isListTy(st, x) && isListTy(st, y) {
+        if size(xt.args) < 1 || size(yt.args) < 1 { return typeError(st, "a List type has no element type"); };
         st = branchType(st, get(xt.args, 0), get(yt.args, 0));
         if st.status != 0 { return st; };
         return listTy(st, st.ty);
     };
     if isBoxTy(st, x) && isBoxTy(st, y) {
+        if size(xt.args) < 1 || size(yt.args) < 1 { return typeError(st, "a Box type has no element type"); };
         st = branchType(st, get(xt.args, 0), get(yt.args, 0));
         if st.status != 0 { return st; };
         return boxTy(st, st.ty);
