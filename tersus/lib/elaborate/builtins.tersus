@@ -9,15 +9,15 @@ fn builtinKey(st: &St, b: Int) -> String ~ {
     node = nodeIn(&st.nodes, b);
     if !(node is AstNode::Builtin) { return ""; };
     scrutinee = (node as AstNode::Builtin).value;
-    return match scrutinee {
-        AstBuiltin::Primitive { name: n } => clone(n),
-        AstBuiltin::ToWord { signed: s, bits: bits } => catStrings(catStrings(wordName(s, bits), " "), "ToWord"),
-        AstBuiltin::Rel { r: r } => catStrings("Rel ", intText(r)),
-        AstBuiltin::Ctor { n: n, args: args, fs: fs } => "Ctor",
-        AstBuiltin::FieldBuiltin { owner: o, n: n } => "Field",
-        AstBuiltin::Is { n: n } => "Is",
-        AstBuiltin::Project { n: n, f: f } => "Project",
-        AstBuiltin::Cast { n: n } => "Cast",
+    match scrutinee {
+        AstBuiltin::Primitive { name: n } => { return clone(n); },
+        AstBuiltin::ToWord { signed: s, bits: bits } => { return catStrings(catStrings(wordName(s, bits), " "), "ToWord"); },
+        AstBuiltin::Rel { r: r } => { return catStrings("Rel ", intText(r)); },
+        AstBuiltin::Ctor { n: n, args: args, fs: fs } => { return "Ctor"; },
+        AstBuiltin::FieldBuiltin { owner: o, n: n } => { return "Field"; },
+        AstBuiltin::Is { n: n } => { return "Is"; },
+        AstBuiltin::Project { n: n, f: f } => { return "Project"; },
+        AstBuiltin::Cast { n: n } => { return "Cast"; },
     };
 };
 
