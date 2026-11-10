@@ -18,8 +18,9 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.IO.Unsafe (unsafePerformIO)
 
-import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..), respond)
-import Interface (ModuleInterface (..), mergeInterfacesImportEnv)
+import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..))
+import ElaboratorTool (bootstrapElaborator)
+import Interface (ModuleInterface (..))
 import Syntax (Statement (..))
 import LibParsed (LibParsed (..), libModules, libParsed)
 import qualified LibParsed
@@ -73,7 +74,7 @@ data LibPackage = LibPackage
     deriving (Show)
 
 compileLibPackage :: Result LibPackage String
-compileLibPackage = compileLibPackageWith respond
+compileLibPackage = compileLibPackageWith bootstrapElaborator
 
 compileLibPackageWith :: Elaborator -> Result LibPackage String
 compileLibPackageWith elaborator = case libParsed of
@@ -90,7 +91,7 @@ compileLibModule elaborator ifaces deps name statements =
     let moduId = libModuleId name
         depIfaces = [ifaces Map.! dep | dep <- deps]
      in case elaborator (Request moduId True True LibInterfaceOf depIfaces (definitionContexts ifaces (Map.keys ifaces) deps) statements) of
-            Accepted elaborated (Just iface) -> case lowerModuleWith (mergeInterfacesImportEnv depIfaces) depIfaces elaborated of
+            Accepted elaborated (Just iface) -> case lowerModuleWith depIfaces elaborated of
                 Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
                 Ok program -> Ok (iface, program)
             Accepted _ Nothing -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator gave no interface")
@@ -99,7 +100,7 @@ compileLibModule elaborator ifaces deps name statements =
             NotModelled what -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator does not handle this module yet: " ++ what)
 
 nativeStorageUnits :: Result [(ModuleId, ModuleInterface, M.Program)] String
-nativeStorageUnits = nativeStorageUnitsWith respond
+nativeStorageUnits = nativeStorageUnitsWith bootstrapElaborator
 
 nativeStorageUnitsWith :: Elaborator -> Result [(ModuleId, ModuleInterface, M.Program)] String
 nativeStorageUnitsWith elaborator = libPackage `bindResult` \pkg -> case LibParsed.nativeLibParsed of

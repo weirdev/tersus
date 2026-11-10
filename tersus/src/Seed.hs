@@ -15,7 +15,7 @@ module Seed
     , cachedFrontendSeed
     ) where
 
-import Control.Exception (IOException, evaluate, try)
+import Control.Exception (IOException, SomeException, evaluate, try)
 import Data.Char (isHexDigit)
 import GHC.IO.Encoding (char8)
 import System.Directory (doesFileExist, removeFile, renameFile)
@@ -28,7 +28,7 @@ import System.Process (proc)
 import CacheLock (openTempFileCloexec)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import Native (buildExecutable, cachedProgram, cacheDirectory, readProcessOutput)
+import Native (buildExecutable, cachedProgram, cachedProgramIfPresent, cacheDirectory, parallelBuilds, readProcessOutput)
 import PreludeSource (compilerSourceHash, frontendSeedSha256, libPackageFiles, mirPackageFiles, seedSha256, parserSeedSha256, stdlibSource)
 import Utils
 
@@ -50,13 +50,11 @@ seedHash = fingerprint [seedSha256, runtimeSource]
 parserSeedHash :: String
 parserSeedHash = fingerprint [parserSeedSha256, runtimeSource]
 
--- (the elaborator seed is not part of compilerSnapshotHash: nothing but the frontend's own stages and their tests
--- are built with it yet)
 frontendSeedHash :: String
 frontendSeedHash = fingerprint [frontendSeedSha256, runtimeSource]
 
 compilerSnapshotHash :: String
-compilerSnapshotHash = fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
+compilerSnapshotHash = fingerprint ([seedHash, parserSeedHash, frontendSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
 
 stageZero :: FilePath -> IO (Result () String)
 stageZero = buildSeed "emitter" seedSha256 seedHash "TERSUS_SEED_FILE"
@@ -156,8 +154,20 @@ removeQuietly path = do
 cachedSeed :: IO (Result FilePath String)
 cachedSeed = cachedProgram "seed" seedHash "the seed of the emitter written in Tersus" stageZero
 
+-- (the emitter and elaborator seeds need nothing else and are needed soon after the first parse, so they are built beside
+-- the parser seed, before the parse runs rather than while it runs)
 cachedParserSeed :: IO (Result FilePath String)
-cachedParserSeed = cachedProgram "parser-seed" parserSeedHash "the pinned native parser seed" (buildSeed "parser" parserSeedSha256 parserSeedHash "TERSUS_PARSER_SEED_FILE")
+cachedParserSeed = do
+    present <- cachedProgramIfPresent "parser-seed" parserSeedHash
+    case present of
+        Ok (Just exe) -> pure (Ok exe)
+        _ -> do
+            built <- parallelBuilds [buildParserSeed, besides cachedSeed, besides cachedFrontendSeed]
+            pure (head built)
+  where
+    buildParserSeed = cachedProgram "parser-seed" parserSeedHash "the pinned native parser seed" (buildSeed "parser" parserSeedSha256 parserSeedHash "TERSUS_PARSER_SEED_FILE")
+    -- (what goes wrong with them is reported when they are asked for themselves)
+    besides build = (try build :: IO (Either SomeException (Result FilePath String))) >> pure (Error "unused")
 
 -- F0: the elaborator written in Tersus, built from the pinned seed IR (bootstrap/frontend.sha256)
 cachedFrontendSeed :: IO (Result FilePath String)

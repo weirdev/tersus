@@ -1,4 +1,4 @@
-module MirLower (lowerProgram, lowerElaborated, lowerLibrary, lowerModuleWith) where
+module MirLower (lowerElaborated, lowerLibrary, lowerModuleWith) where
 
 import Control.Monad (forM, unless, when)
 import Data.List (intercalate)
@@ -14,22 +14,18 @@ import StdLib (builtinFunct)
 import StdLibDefs (stdLibCtx)
 import Types
 import Syntax
-import TypeCheck (Elaborated (..), ImportEnv, elaborate)
-import TypeCheckCore (arrayElement, functionType)
+import Elaboration (arrayElement, functionType)
 import Utils
 
 -- Lowers a program that has passed validation to the MIR: control flow becomes blocks that jump, nested expressions
 -- become temporaries, nested functions are lifted to the top, and the scopes that decide which variable an assignment
 -- means are resolved to numbered locals.
 --
--- Every local and temporary has a type, which the AST does not carry: `elaborate` hands them over with the
--- program (see TypeCheck.Elaborated), one for each expression in the order the lowering visits them, fully
+-- Every local and temporary has a type, which the AST does not carry: the elaborator hands them over with the
+-- program (see Syntax.Elaborated), one for each expression in the order the lowering visits them, fully
 -- resolved: that is how `x = []` gets the element type that a later `push(x, 1)` decides. The lowering takes
 -- the next one as it reaches each expression (`claim`), and infers nothing itself.
-lowerProgram :: [Statement] -> Result M.Program String
-lowerProgram stmts = elaborate stmts `bindResult` lowerElaborated
-
--- For a program that `elaborate` has checked and handed back (the pipeline checks a program once)
+-- For a program the elaborator has checked and handed back (the pipeline checks a program once)
 lowerElaborated :: Elaborated -> Result M.Program String
 lowerElaborated = lowerWith True
 
@@ -44,8 +40,8 @@ lowerWith checking elaborated@(Elaborated stmts _) =
         Left e -> Error e
         Right (p, _) -> Ok p
 
-lowerModuleWith :: ImportEnv -> [ModuleInterface] -> Elaborated -> Result M.Program String
-lowerModuleWith _env ifaces elaborated@(Elaborated stmts _) =
+lowerModuleWith :: [ModuleInterface] -> Elaborated -> Result M.Program String
+lowerModuleWith ifaces elaborated@(Elaborated stmts _) =
     case runL (program stmts) (seededModuleState ifaces elaborated) of
         Left e -> Error e
         Right (p, finalState) -> Ok p{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs finalState) (M.progFunctions p)}
@@ -140,7 +136,7 @@ getS = L (\s -> Right (s, s))
 modifyS :: (LS -> LS) -> L ()
 modifyS f = L (\s -> Right ((), f s))
 
--- The type `elaborate` gave the expression the lowering has just reached. A missing one means the
+-- The type the elaborator gave the expression the lowering has just reached. A missing one means the
 -- elaboration and the lowering disagree about the program, which is a fault in the compiler.
 claim :: L Type
 claim = do
@@ -174,7 +170,7 @@ data Builder = Builder
     }
 
 data LS = LS
-    { lsElabTypes :: [Type] -- the types `elaborate` gave the expressions not reached yet, in visit order
+    { lsElabTypes :: [Type] -- the types the elaborator gave the expressions not reached yet, in visit order
     , lsTypes :: Map Name M.TypeDecl
     , lsFunctions :: Map Name M.Function
     , lsNames :: Set.Set Name
@@ -475,7 +471,7 @@ lowerStatements (stmt : rest) = do
     if open then lowerStatements rest else skipStatements rest
 
 -- Takes the expression types of statements that are not lowered (after a return), in the order
--- `elaborate` gave them
+-- the elaborator gave them
 skipStatements :: [Statement] -> L ()
 skipStatements = mapM_ skipStatement
 
@@ -829,7 +825,7 @@ resolveHead (Var name) = do
 resolveHead other = Callable . fst <$> lowerOperand other
 
 -- A place as the root local it starts from, the steps from there, and its type (REFERENCES.md). Each
--- expression of the place takes the type `elaborate` gave it (`claim`), in the order it gave them: the
+-- expression of the place takes the type the elaborator gave it (`claim`), in the order it gave them: the
 -- checker has already decided what a field read and an index give, so the lowering infers nothing here.
 lowerPlace :: Expression -> L (M.Local, [M.RefStep], Type)
 lowerPlace expr = case expr of
@@ -948,7 +944,7 @@ localTypeOf l = do
 
 -- The place an assignment through a reference is to: through an update parameter (the parameter local itself), or
 -- through a reference local made by &mut place in this function (the place it was made to). Like `lowerPlace`,
--- each expression of the place takes the type `elaborate` gave it.
+-- each expression of the place takes the type the elaborator gave it.
 lowerDerefPlace :: Expression -> L (M.Local, [M.RefStep], Type)
 lowerDerefPlace expr = case expr of
     F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
@@ -986,7 +982,7 @@ lowerDerefPlace expr = case expr of
         (indexOperand, _) <- lowerOperand index
         return (root, steps ++ [M.RefIndex indexOperand], elementTy)
 
--- The result type is the one `elaborate` gave the application; the checker has already folded the
+-- The result type is the one the elaborator gave the application; the checker has already folded the
 -- size of an array into it, and decided what a field read, a constructor and each builtin gives
 lowerBuiltin :: BuiltinFunct -> [Expression] -> Type -> L (Pending, Type)
 lowerBuiltin BorrowOf args result = case args of

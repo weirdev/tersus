@@ -28,7 +28,7 @@ import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Mir as M
 import MirEval (renderMirValue, runProgram)
-import MirLower (lowerProgram)
+import Compile (lowerStatements)
 import MirHousekeeping (insertOwnership, verifyProgram)
 import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared)
 import TestParserFragments (parseStatementBlock)
@@ -1187,7 +1187,7 @@ emitUnvalidated program = case nativeProgram program `bindResult` insertOwnershi
 lowerSource :: String -> Either String M.Program
 lowerSource source = case parseStatementBlock source of
     Left err -> Left ("Parse failed: " ++ show err)
-    Right stmts -> case lowerProgram stmts of
+    Right stmts -> case lowerStatements stmts of
         Error e -> Left e
         Ok program -> Right program
 

@@ -13,9 +13,10 @@ import qualified ParsedFile as Parse
 import PreludeSource (typesSource, eqSource, cloneSource, preludeSource, stringSource, mapSource, setSource, listsSource, boxSource)
 import qualified Mir as M
 import ValidatorNative (validateCompiled, validateLibrary)
-import Interface (ModuleInterface (..), extractLibInterface, interfaceImportEnv, mergeInterfacesImportEnv, predeclareOwnEnv)
+import Interface (ModuleInterface (..))
 import MirLower (lowerModuleWith)
-import TypeCheck (ImportEnv (..), Elaborated (..), elaborateWith)
+import ElaborateRequest (Extraction (..), Request (..), Response (..))
+import ElaboratorTool (sourceElaborator)
 import LibPackage (LibPackage (..), libPackage, libModuleId, libSelection, nativeStorageUnits)
 import LibParsed (LibParsed (..), libParsed, nativeLibParsed, libPackageFiles)
 import Link (linkPrograms)
@@ -192,8 +193,8 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         (_, Error e) -> Just e
     , testCase "physical generic constructor owners are not user import types" $ case libPackage of
         Error e -> Just e
-        Ok pkg -> let env = interfaceImportEnv (libInterfaces pkg Map.! "types")
-                   in testAssertTrue (all (`Map.notMember` ieTypes env) ["List<'T>", "Box<'T>"])
+        Ok pkg -> let iface = libInterfaces pkg Map.! "types"
+                   in testAssertTrue (all (`Map.notMember` ifTypes iface) ["List<'T>", "Box<'T>"])
     , testCase "implicit types expose no native Drop implementations" $ inspectPackage $ \pkg ->
         let iface = libInterfaces pkg Map.! "types"
          in testAssertTrue (Set.null (ifDrops iface) && Map.null (ifFunctions iface))
@@ -298,10 +299,12 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         Right parsed -> case Parse.parseFileWith (lpDecls parsed) source of
             Left e -> Error (show e)
             Right (Parse.ParsedFile _ stmts, _) ->
-                let env = mergeInterfacesImportEnv ifaces
-                 in elaborateWith (predeclareOwnEnv env) stmts `bindResult` \(elaborated@(Elaborated body _), state) ->
-                    extractLibInterface (Modules.ModuleId "fixture" Nothing) stmts body state `bindResult` \iface ->
-                        lowerModuleWith env ifaces elaborated `bindResult` \p -> Ok (iface, p)
+                case sourceElaborator (Request (Modules.ModuleId "fixture" Nothing) True False LibInterfaceOf ifaces [] stmts) of
+                    Accepted elaborated (Just iface) -> lowerModuleWith ifaces elaborated `bindResult` \p -> Ok (iface, p)
+                    Accepted _ Nothing -> Error "the elaborator gave no interface"
+                    Refused e -> Error e
+                    RefusedInterface e -> Error e
+                    NotModelled what -> Error ("not modelled: " ++ what)
     importedLoan source shouldFail = case fixtureModule "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); };" of
         Error e -> Just e
         Ok (iface, _) -> libCheck iface

@@ -12,7 +12,7 @@ import TestParserFragments
 import StdLib
 import Types
 import Syntax
-import TypeCheck
+import Compile (elaborateStatements)
 import Utils
 import TestHarness
 
@@ -94,11 +94,11 @@ testTypeCheck =
     let typeError source expected =
             case parseStatementBlock source of
                 Left err -> Just ("Parse failed: " ++ show err)
-                Right stmts -> testAssertErrorContains expected (typeCheck stmts)
+                Right stmts -> testAssertErrorContains expected (mapResult (const ()) (elaborateStatements stmts))
         typeOk source =
             case parseStatementBlock source of
                 Left err -> Just ("Parse failed: " ++ show err)
-                Right stmts -> case typeCheck stmts of
+                Right stmts -> case mapResult (const ()) (elaborateStatements stmts) of
                     Ok () -> Nothing
                     Error e -> Just ("Type check failed: " ++ e)
         runRow (name, stage, source, expected) =

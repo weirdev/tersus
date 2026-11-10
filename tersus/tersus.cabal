@@ -104,6 +104,8 @@ library
       Compile
       DataCodec
       ElaborateRequest
+      Elaboration
+      ElaboratorNative
       ElaboratorTool
       FileParserProtocol
       Hash
@@ -140,8 +142,6 @@ library
       StdLibDefs
       Syntax
       TersusParser
-      TypeCheck
-      TypeCheckCore
       Types
       Utils
       ValidatorNative
@@ -237,55 +237,14 @@ executable emitter-seed
     , unix
   default-language: Haskell2010
 
-executable frontend-diff
-  main-is: Main.hs
-  other-modules:
-      Differential
-  hs-source-dirs:
-      dev/frontend-diff
-      test
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
-  build-depends:
-      base >=4.7 && <5
-    , bytestring >=0.10.12 && <0.13
-    , containers
-    , directory
-    , filepath
-    , parsec
-    , process
-    , template-haskell
-    , tersus
-    , unix
-  default-language: Haskell2010
-
 executable frontend-seed
-  main-is: Main.hs
-  other-modules:
-      ElaboratorNative
-  hs-source-dirs:
-      dev/frontend-seed
-      test
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
-  build-depends:
-      base >=4.7 && <5
-    , containers
-    , directory
-    , filepath
-    , parsec
-    , process
-    , template-haskell
-    , tersus
-    , unix
-  default-language: Haskell2010
-
-executable frontend-spike
   main-is: Main.hs
   other-modules:
       Paths_tersus
   autogen-modules:
       Paths_tersus
   hs-source-dirs:
-      dev/frontend-spike
+      dev/frontend-seed
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts
   build-depends:
       base >=4.7 && <5
@@ -346,7 +305,6 @@ test-suite tersus-test
   main-is: TestTersus.hs
   other-modules:
       Differential
-      ElaboratorNative
       TestArrays
       TestAstData
       TestBasics

@@ -424,6 +424,52 @@ fn fnSigOf(st: St, ps: Int, sigNode: Int) -> St ~ {
     return St { fnSig: fs, ..st };
 };
 
+// The parameters a reference result is from (refResultFrom): st.names
+fn refResultFrom(st: St, name: &String, params: &List<String>, ptys: &List<Int>, rty: Int, froms: &List<String>) -> St ~ {
+    rk = kindOf(st, rty);
+    isRefResult = false;
+    if rk = 10 || rk = 11 {
+        st = checkType(st, argAt(st, rty, 0));
+        isRefResult = true;
+    } else {
+        st = holdsRef(st, rty);
+        isRefResult = st.ok;
+    };
+    if st.status != 0 { return st; };
+    from = [];
+    if !isRefResult {
+        if size(froms) > 0 {
+            return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), joinWith(froms, ", ")), ", but its result is not a reference"));
+        };
+    } else {
+        if size(froms) > 0 {
+            for p in froms {
+                at = indexIn(params, p);
+                ok = at >= 0 && at < size(ptys);
+                if ok { pk = kindOf(st, get(ptys, at)); ok = pk = 10 || pk = 11; };
+                if !ok { return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), clone(p)), ", which is not a reference parameter of it")); };
+            };
+            from = clone(froms);
+        } else {
+            refParams = [];
+            i = 0;
+            while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
+                pk = kindOf(st, get(ptys, i));
+                if pk = 10 || pk = 11 { refParams = push(refParams, clone(get(params, i))); };
+                i = i + 1;
+            };
+            if size(refParams) = 0 {
+                return typeError(st, catStrings(clone(name), " returns a reference, but no parameter of it is a reference for the result to be from: write the result as -> &T from <parameter>"));
+            };
+            if size(refParams) > 1 {
+                return typeError(st, catStrings(clone(name), " returns a reference and has more than one reference parameter: say which the result is from, as in -> &T from (a, b)"));
+            };
+            from = refParams;
+        };
+    };
+    return St { names: from, ..st };
+};
+
 // The body sees its parameters and the functions known at the top, itself among them (checkFunction)
 fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: Int, body: Int) -> St ~ {
     params = clone(fs.params);
@@ -453,47 +499,10 @@ fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: In
         i = i + 1;
     };
     if !distinct { return typeError(st, catStrings(catStrings("function ", clone(name)), " names a size twice, or the same as a parameter")); };
-    rk = kindOf(st, rty);
-    isRefResult = false;
-    if rk = 10 || rk = 11 {
-        st = checkType(st, argAt(st, rty, 0));
-        isRefResult = true;
-    } else {
-        st = holdsRef(st, rty);
-        isRefResult = st.ok;
-    };
+    st = refResultFrom(st, name, &params, &ptys, rty, &froms);
     if st.status != 0 { return st; };
-    from = [];
-    if !isRefResult {
-        if size(froms) > 0 {
-            return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), joinWith(&froms, ", ")), ", but its result is not a reference"));
-        };
-    } else {
-        if size(froms) > 0 {
-            for p in &froms {
-                at = indexIn(&params, p);
-                ok = at >= 0 && at < size(ptys);
-                if ok { pk = kindOf(st, get(ptys, at)); ok = pk = 10 || pk = 11; };
-                if !ok { return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), clone(p)), ", which is not a reference parameter of it")); };
-            };
-            from = clone(froms);
-        } else {
-            refParams = [];
-            i = 0;
-            while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
-                pk = kindOf(st, get(ptys, i));
-                if pk = 10 || pk = 11 { refParams = push(refParams, clone(get(params, i))); };
-                i = i + 1;
-            };
-            if size(refParams) = 0 {
-                return typeError(st, catStrings(clone(name), " returns a reference, but no parameter of it is a reference for the result to be from: write the result as -> &T from <parameter>"));
-            };
-            if size(refParams) > 1 {
-                return typeError(st, catStrings(clone(name), " returns a reference and has more than one reference parameter: say which the result is from, as in -> &T from (a, b)"));
-            };
-            from = refParams;
-        };
-    };
+    from = clone(st.names);
+    rk = kindOf(st, rty);
     for p in &ptys { st = checkType(st, p); };
     if rk = 10 { st = checkType(st, argAt(st, rty, 0)); } else { st = checkType(st, rty); };
     if st.status != 0 { return st; };

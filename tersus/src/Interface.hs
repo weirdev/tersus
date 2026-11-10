@@ -1,11 +1,6 @@
 module Interface
     ( InterfaceFunction (..)
     , ModuleInterface (..)
-    , extractInterface
-    , extractLibInterface
-    , interfaceImportEnv
-    , mergeInterfacesImportEnv
-    , predeclareOwnEnv
     , withoutDeclaredNames
     , modulePrefixOf
     , nameInModule
@@ -15,13 +10,10 @@ import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import LibParsed (nativeStorageModules)
 import Modules (ModuleId (..))
 import Syntax
 import Types
-import TypeCheck (ImportEnv (..), emptyImportEnv)
-import TypeCheckCore (TcState (..), Template, functionType, isRefType)
-import Utils (Result (..))
+import Elaboration (Template)
 
 data InterfaceFunction = InterfaceFunction
     { fnParams :: [Variable]
@@ -64,114 +56,6 @@ modulePrefixOf (ModuleId pkg (Just modu)) = pkg ++ "$" ++ modu ++ "$"
 nameInModule :: ModuleId -> Name -> Bool
 nameInModule modu name = modulePrefixOf modu `isPrefixOf` name || modulePrefixOf modu `isPrefixOf` dropWhile (/= '$') (drop 1 name)
 
-extractInterface :: ModuleId -> [Statement] -> [Statement] -> TcState -> Result ModuleInterface String
-extractInterface modu = extractInterfaceWith False modu
-
--- Native storage lowering still needs a generic constructor's physical view.
-extractLibInterface :: ModuleId -> [Statement] -> [Statement] -> TcState -> Result ModuleInterface String
-extractLibInterface modu = extractInterfaceWith True modu
-
-extractInterfaceWith :: Bool -> ModuleId -> [Statement] -> [Statement] -> TcState -> Result ModuleInterface String
-extractInterfaceWith physical modu original elaborated state =
-        Ok
-            ModuleInterface
-                { ifModule = modu
-                , ifTypes = Map.union (Map.fromList [(name, [name]) | StructDef name _ _ _ <- elaborated]) (Map.fromList [(name, map fst variants) | EnumDef name variants <- elaborated])
-                , ifCtors =
-                    Map.union
-                        (Map.fromList ([(name, (name, fields)) | StructDef name params fields _ <- elaborated, null params] ++ [(variant, (name, fields)) | EnumDef name variants <- elaborated, (variant, fields) <- variants]))
-                        ( if physical
-                            then Map.fromList [(inst, (inst, fields)) | (name, (params, fields)) <- Map.toList genericStructs, let inst = instanceName name [if isTypeName param then ArgType (TParam param) else ArgSize (SizeParam param) | param <- params]]
-                            else Map.empty
-                        )
-                , ifGenerics = genericStructs
-                , ifInvariants = Map.fromList [(name, invariant) | StructDef name _ _ invariant <- elaborated, not (null invariant)]
-                , ifTraits = Map.fromList [(name, functions) | TraitDef name _ functions <- original]
-                , ifTraitParams = Map.fromList [(name, params) | TraitDef name params _ <- original]
-                , ifFunctions = Map.fromList [(name, interfaceFunction params ins outs signature termination exported) | Assign name (Val (VFunct params ins outs (NativeFunct signature termination _) exported)) <- elaborated, name `Set.member` declaredFunctions]
-                , ifImpls = Set.filter implHere (tcImpls state)
-                , ifAssoc = Map.filterWithKey (\(owner, _) origins -> typeVisible owner || any (\trait -> implHere (trait, baseNameOf owner)) [trait | Just trait <- origins]) (tcAssoc state)
-                , ifImplArgs = Map.filterWithKey (\(trait, ty) _ -> implHere (trait, ty)) (tcImplArgs state)
-                , ifImplBounds = Map.filterWithKey (\(trait, ty) _ -> implHere (trait, ty)) (tcImplBounds state)
-                , ifCopies = Set.union (Set.fromList [name | CopyDef name <- elaborated]) (Set.fromList [ty | ("Copy", ty) <- Set.toList (tcImpls state), implHere ("Copy", ty)])
-                , ifLinear = Set.filter typeVisible (tcLinear state)
-                , ifDrops = Set.filter (\name -> typeVisible name || ("Drop", baseNameOf name) `Set.member` declaredImpls) (tcDrops state)
-                , ifAxioms = [stmt | stmt@(AxiomDef{}) <- elaborated]
-                , ifProofs = [stmt | stmt@(ProofDef{}) <- elaborated]
-                , ifExterns = Set.fromList [name | ExternDef name <- elaborated]
-                , ifTemplates = Map.restrictKeys (tcTemplates state) templateNames
-                , ifCompanions = companions
-                }
-  where
-    companions = Map.restrictKeys (tcCompanions state) declaredFunctions
-    templateNames = Set.union declaredFunctions (Set.fromList (concat (Map.elems companions)))
-    genericStructs = Map.fromList [(name, (params, fields)) | StructDef name params fields _ <- elaborated, not (null params)]
-    ownNames = Set.fromList (concatMap declaredTypeOrTrait original)
-    declaredTypeOrTrait stmt = case stmt of
-        StructDef name _ _ _ -> [name]
-        EnumDef name _ -> [name]
-        TraitDef name _ _ -> [name]
-        _ -> []
-    implHere pair@(trait, ty) = pair `Set.member` declaredImpls || trait `Set.member` ownNames || baseNameOf ty `Set.member` ownNames
-    declaredImpls
-        | modu `elem` [ModuleId "tersuslib" (Just name) | name <- nativeStorageModules] = Set.fromList [(trait, ty) | ImplDef (Just trait) _ ty _ _ _ <- original]
-        | otherwise = Set.empty
-    typeVisible name = baseNameOf name `Set.member` ownNames
-    declaredFunctions =
-        Set.fromList $
-            concatMap
-                declared
-                original
-    declared stmt = case stmt of
-        Assign name (Val VFunct{}) -> [name]
-        ImplDef _ _ _ _ _ functions -> concatMap declared functions
-        BoundedDef _ inner -> declared inner
-        _ -> []
-    interfaceFunction params ins outs signature termination exported = InterfaceFunction params signature ins outs termination exported
-
-interfaceImportEnv :: ModuleInterface -> ImportEnv
-interfaceImportEnv iface =
-    emptyImportEnv
-        { ieTypes = ifTypes iface
-        , ieCtors = ifCtors iface
-        , ieGenerics = ifGenerics iface
-        , ieTraits = ifTraits iface
-        , ieTraitParams = ifTraitParams iface
-        , ieFunctions = Map.map functionOf (ifFunctions iface)
-        , ieImpls = ifImpls iface
-        , ieAssoc = ifAssoc iface
-        , ieImplArgs = ifImplArgs iface
-        , ieImplBounds = ifImplBounds iface
-        , ieLinear = ifLinear iface
-        , ieDrops = ifDrops iface
-        , ieTemplates = ifTemplates iface
-        , ieCompanions = ifCompanions iface
-        , ieRefResults =
-            Map.union
-                ( Map.fromList
-                    [ (trait ++ "::" ++ traitFnName fn, (traitFnParams fn, froms))
-                    | (trait, functions) <- Map.toList (ifTraits iface)
-                    , fn <- functions
-                    , let Signature params result _ _ _ fromNames = traitFnSignature fn
-                    , let froms = if not (null fromNames) then fromNames else case [param | (param, ty) <- zip (traitFnParams fn) params, isRefType ty] of [only] -> [only]; _ -> []
-                    , not (null froms)
-                    , isRefType result
-                    ]
-                )
-                ( Map.fromList
-                    [ (name, (fnParams fn, froms))
-                    | (name, fn) <- Map.toList (ifFunctions iface)
-                    , let Signature _ _ _ _ _ froms = fnSignature fn
-                    , not (null froms)
-                    ]
-                )
-        }
-  where
-    functionOf fn = let Signature ptys rty sizes types _ _ = fnSignature fn in functionType sizes types ptys rty
-
-predeclareOwnEnv :: ImportEnv -> ImportEnv
-predeclareOwnEnv env = env{iePredeclareOwn = True}
-
 -- An interface as a module that itself declares some of the same names
 -- sees it: the module's own declarations win, so nothing the interface
 -- declares under one of those names is imported. This is what keeps the
@@ -205,28 +89,3 @@ withoutDeclaredNames declared iface =
   where
     declaredSet = Set.fromList declared
     declaredName name = name `Set.member` declaredSet || any (\own -> (" as " ++ own ++ ">") `isInfixOf` name || (own ++ "::") `isPrefixOf` name) declared
-
-mergeInterfacesImportEnv :: [ModuleInterface] -> ImportEnv
-mergeInterfacesImportEnv ifaces = foldr merge emptyImportEnv ifaces
-  where
-    merge iface env =
-        let addition = interfaceImportEnv iface
-         in ImportEnv
-                { ieTypes = Map.union (ieTypes addition) (ieTypes env)
-                , ieCtors = Map.union (ieCtors addition) (ieCtors env)
-                , ieGenerics = Map.union (ieGenerics addition) (ieGenerics env)
-                , ieTraits = Map.union (ieTraits addition) (ieTraits env)
-                , ieTraitParams = Map.union (ieTraitParams addition) (ieTraitParams env)
-                , ieFunctions = Map.union (ieFunctions addition) (ieFunctions env)
-                , ieImpls = Set.union (ieImpls addition) (ieImpls env)
-                , ieAssoc = Map.unionWith (++) (ieAssoc addition) (ieAssoc env)
-                , ieImplArgs = Map.union (ieImplArgs addition) (ieImplArgs env)
-                , ieImplBounds = Map.union (ieImplBounds addition) (ieImplBounds env)
-                , ieLinear = Set.union (ieLinear addition) (ieLinear env)
-                , ieDrops = Set.union (ieDrops addition) (ieDrops env)
-                , ieRefResults = Map.union (ieRefResults addition) (ieRefResults env)
-                , ieTemplates = Map.union (ieTemplates addition) (ieTemplates env)
-                , ieCompanions = Map.unionWith (++) (ieCompanions addition) (ieCompanions env)
-                , iePredeclareOwn = iePredeclareOwn env
-                , ieDefinitions = []
-                }

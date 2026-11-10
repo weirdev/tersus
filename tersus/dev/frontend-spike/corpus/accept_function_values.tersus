@@ -1,4 +1,0 @@
-fn twice(x: Int) -> Int [{ }] [{ }] { return x * 2; };
-f = twice;
-g = f;
-return g(f(3)) + twice(1);

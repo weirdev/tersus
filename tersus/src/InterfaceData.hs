@@ -9,7 +9,7 @@ import qualified Data.Set as Set
 import AstData (FunctionRecord (..), InterfaceRecord (..), TemplateRecord (..), readInterfaceRecord, readInterfaceRecordBytes, readInterfaceRecordLines, writeInterfaceRecord, writeInterfaceRecordLines)
 import Interface (InterfaceFunction (..), ModuleInterface (..))
 import Modules (ModuleId (..))
-import TypeCheckCore (Ctx (..), Template (..))
+import Elaboration (Ctx (..), Template (..))
 import Utils
 
 writeInterface :: ModuleInterface -> Result String String

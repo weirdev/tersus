@@ -1,2 +1,0 @@
-fn f(a: Int) -> Int [{ }] [{ }] { return a; };
-return f(1, 2);

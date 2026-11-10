@@ -1,5 +1,0 @@
-fn f() -> Int [{ }] [{ }] { return 0; };
-fn g() -> Int [{ }] [{ }] { return 1; };
-h = f;
-k = g;
-return h = k;

@@ -14,7 +14,7 @@ import Mir
 import MirEval (MirValue (..), runProgram)
 import MirMoves (Role (..), operandLocal, roles)
 import MirHousekeeping (expandRefWrites, insertOwnership, verifyProgram)
-import MirLower (lowerProgram)
+import Compile (lowerStatements)
 import Modules (LoadResult (..))
 import TestParserFragments (parseStatementBlock)
 import Pipeline
@@ -892,7 +892,7 @@ onLowered :: String -> String -> TestResult
 onLowered name source =
     case parseStatementBlock source of
         Left e -> Just (name ++ " does not parse: " ++ show e)
-        Right stmts -> case lowerProgram stmts of
+        Right stmts -> case lowerStatements stmts of
             Error e -> Just (name ++ " does not lower: " ++ e)
             Ok program -> sameOnModel name program
 

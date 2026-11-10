@@ -52,9 +52,8 @@ import System.Exit (ExitCode (..))
 
 import Hash (fingerprint)
 import ElaborateRequest (Elaborator)
-import ElaboratorTool (nativeElaborator)
-import LibPackage (LibPackage, compileLibPackageWith, nativeStorageUnits)
-import System.Environment (lookupEnv)
+import ElaboratorTool (bootstrapElaborator)
+import LibPackage (LibPackage, compileLibPackageWith, libPackage, nativeStorageUnits)
 import Link (linkPrograms)
 import LlvmRuntime (runtimeSource)
 import Mir
@@ -67,7 +66,7 @@ import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, 
 import Seed (cachedFrontendSeed, cachedSeed, cachedParserSeed, frontendSeedHash, seedHash, parserSeedHash)
 import Compile (lowerSource)
 import Modules (LoadedPackage, ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
-import PackageCompile (compileModulesLinked, compileModulesUsing, lowerCompiledPackage)
+import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, boxSource, listsSource, mirPackageFiles, parserPackageFiles, toolPackageFiles, validationPackageFiles)
 import Types (Type (..))
 import Utils
@@ -276,14 +275,12 @@ storageBox :: MVar (Maybe [(ModuleId, Program)])
 storageBox = unsafePerformIO (newMVar Nothing)
 
 prepareBootstrap :: IO (Result () String)
-prepareBootstrap = case toolElaboratorChoice of
+prepareBootstrap = do
     -- (the elaborator seed, the largest of the three, needs neither of the others)
-    Just "seed" -> do
-        built <- parallelBuilds [seeds, mapResult (const ()) <$> cachedFrontendSeed]
-        pure (case [e | Error e <- built] of
-            e : _ -> Error e
-            [] -> Ok ())
-    _ -> seeds
+    built <- parallelBuilds [seeds, mapResult (const ()) <$> cachedFrontendSeed]
+    pure (case [e | Error e <- built] of
+        e : _ -> Error e
+        [] -> Ok ())
   where
     seeds = do
         parser <- cachedParserSeed
@@ -417,7 +414,7 @@ cachedUncheckedValidatorExe = do
 {-# NOINLINE preparationSnapshot #-}
 preparationSnapshot :: String
 preparationSnapshot = fingerprint [show (compilerSourceHash, seedHash, parserSeedHash,
-    toolPackageFiles, libPackageFiles, stdlibSource, validationPackageFiles, runtimeSource, fmap (const frontendSeedHash) toolElaboratorChoice)]
+    toolPackageFiles, libPackageFiles, stdlibSource, validationPackageFiles, runtimeSource, frontendSeedHash)]
 
 preparedInputPath :: FilePath -> FilePath -> [String] -> FilePath
 preparedInputPath dir entry flags = dir </> ("prepared-" ++ fingerprint [show (preparationSnapshot, entry, flags)])
@@ -697,10 +694,7 @@ toolProgram entry = unsafePerformIO $ do
             Ok program -> pure (Just program, Ok program)
 
 compileToolProgram :: FilePath -> Result Program String
-compileToolProgram entry = case toolElaborator of
-    Error e -> Error e
-    Ok (Just (elaborator, libraries)) -> withToolPackage entry (compileToolWith elaborator libraries)
-    Ok Nothing -> withToolPackage entry compileModulesLinked
+compileToolProgram entry = withToolPackage entry (compileToolWith bootstrapElaborator libPackage)
 
 -- A program the host compiles itself, its modules and the compiler libraries elaborated by the given elaborator
 toolProgramWith :: Elaborator -> FilePath -> Result Program String
@@ -716,22 +710,6 @@ withToolPackage entry compile = case loadFromEntry (resolverFromFiles files) ent
     Right (StandaloneResult _ _) -> Error ("internal: " ++ entry ++ " is not in an embedded tool package")
   where
     files = if entry == validationEntry then validationPackageFiles else toolPackageFiles
-
--- The elaborator of the host's own programs: the Haskell one, or, with TERSUS_TOOL_ELABORATOR=seed, the frontend seed
--- (F0), for the frontend bootstrap's tests and measurements until it replaces the Haskell elaborator. The List and Box
--- helper units of native code are elaborated by the Haskell elaborator either way.
-{-# NOINLINE toolElaboratorChoice #-}
-toolElaboratorChoice :: Maybe String
-toolElaboratorChoice = unsafePerformIO $ do
-    choice <- lookupEnv "TERSUS_TOOL_ELABORATOR"
-    pure (if choice == Just "" then Nothing else choice)
-
-{-# NOINLINE toolElaborator #-}
-toolElaborator :: Result (Maybe (Elaborator, Result LibPackage String)) String
-toolElaborator = unsafePerformIO $ case toolElaboratorChoice of
-    Nothing -> pure (Ok Nothing)
-    Just "seed" -> mapResult (\exe -> let elaborator = nativeElaborator exe in Just (elaborator, compileLibPackageWith elaborator)) <$> cachedFrontendSeed
-    Just other -> pure (Error ("TERSUS_TOOL_ELABORATOR=" ++ other ++ " names no elaborator (seed is the one there is)"))
 
 -- A program of the mir package the host compiles itself (the emitter, the checker, the eraser), with the lists of
 -- the library, owned by the production ownership tool (stage 1); the bootstrap owns these with stage 0 instead

@@ -24,6 +24,7 @@ module PreludeSource
     , seedSha256
     , parserSeedSha256
     , frontendSeedSha256
+    , frontendSeedSources
     ) where
 
 import Data.List (isSuffixOf, sort)
@@ -216,6 +217,15 @@ parserSeedSha256 =
         lift (head (words contents))
      )
 
+-- (the second word of bootstrap/frontend.sha256 is the fingerprint of what the seed elaborates as: ElaboratorTool)
+frontendSeedSources :: String
+frontendSeedSources =
+    $( do
+        addDependentFile "bootstrap/frontend.sha256"
+        contents <- runIO (readFile "bootstrap/frontend.sha256")
+        lift (concat (take 1 (drop 1 (words contents))))
+     )
+
 frontendSeedSha256 :: String
 frontendSeedSha256 =
     $( do
@@ -248,7 +258,7 @@ astReaderPackageFiles = dataPackageFiles ++
         lift files
      )
 
--- The elaborator written in Tersus (REPLACING_HASKELL.md), which only the tests and frontend-diff build and run
+-- The elaborator written in Tersus (REPLACING_HASKELL.md), the compiler's type checker
 elaboratePackageFiles :: [(FilePath, String)]
 elaboratePackageFiles = dataPackageFiles ++
     $( do

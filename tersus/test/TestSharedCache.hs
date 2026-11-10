@@ -2331,7 +2331,7 @@ copyCompiledTools from to = do
 
 compiledToolName :: String -> Bool
 compiledToolName name = any (`isPrefixOf` name)
-    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "parser-seed-", "tersus-parser-", "tersus_rt_", "prepared-", "content-key-"]
+    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "parser-seed-", "frontend-", "tersus-parser-", "tersus_rt_", "prepared-", "content-key-"]
     && not (".lock" `isInfixOf` name)
 
 withCacheHome :: (FilePath -> IO a) -> IO a
@@ -2434,8 +2434,8 @@ primeBootstrapTools home = do
                         let output = target </> name
                         exists <- doesFileExist output
                         when (not exists) (copyCacheFile (source </> name) output))
-                        [name | name <- names, '.' `notElem` name,
-                            any (`isPrefixOf` name) ["seed-", "parser-seed-", "emitter-", "mir-verify-", "mir-erase-", "tersus-parser-", "validator-", "prepared-", "content-key-"]]
+                        [name | name <- names, '.' `notElem` name || ("frontend-" `isPrefixOf` name && ".ll" `isSuffixOf` name),
+                            any (`isPrefixOf` name) ["seed-", "parser-seed-", "frontend-", "emitter-", "mir-verify-", "mir-erase-", "tersus-parser-", "validator-", "prepared-", "content-key-"]]
 
 packageProcesses :: IO TestResult
 packageProcesses = do

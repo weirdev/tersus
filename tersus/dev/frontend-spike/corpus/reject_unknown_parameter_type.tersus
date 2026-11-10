@@ -1,2 +1,0 @@
-fn f(q: Q) -> Int [{ }] [{ }] { return 0; };
-return 0;

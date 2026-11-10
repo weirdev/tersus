@@ -155,7 +155,7 @@ ghostBuiltin :: BuiltinFunct -> Bool
 ghostBuiltin b = b `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast, BlockBase, BlockCap, BlockFilled, BlockContents, BlockOrigin, BlockStart, BlockExtent, BlockCount]
 
 
--- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
+-- The types the checker (lib/elaborate) knows. They are erased after checking: validation and evaluation never
 -- look at them. TVar is the checker's own unknown and is never written by a program.
 -- TArrayOf element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
 -- or an element of a bigger array), with no pointer to it. The size is part of the type.

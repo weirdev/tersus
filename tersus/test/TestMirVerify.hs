@@ -11,7 +11,7 @@ import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (insertOwnership, verifyProgram, toolProgram)
-import MirLower (lowerProgram)
+import Compile (lowerStatements)
 import TestParserFragments (parseStatementBlock)
 import Pipeline (compileSource, nativeProgram)
 import MirHousekeeping (storageProgram)
@@ -383,7 +383,7 @@ functionCases =
         Nothing -> Error ("no function program named " ++ name)
         Just source -> case parseStatementBlock source of
             Left e -> Error (show e)
-            Right stmts -> mapResult writeProgram (lowerProgram stmts `bindResult` nativeProgram `bindResult` insertOwnership)
+            Right stmts -> mapResult writeProgram (lowerStatements stmts `bindResult` nativeProgram `bindResult` insertOwnership)
     ordinary = ("fn(Int) -> Int", "fn 1 int int")
     borrowedArg = ("fn(&List<Int>) -> Int", "fn 1 ref list int int")
     namedArg = ("fn(Integer) -> Int", "fn 1 named \"Integer\" 0 int")

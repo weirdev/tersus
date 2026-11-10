@@ -1,3 +1,0 @@
-b = true;
-while b [{ }] shrinks b { b = false; };
-return 0;

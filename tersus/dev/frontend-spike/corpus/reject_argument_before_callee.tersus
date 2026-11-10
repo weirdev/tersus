@@ -1,2 +1,0 @@
-fn g(f: Int) -> Int [{ }] [{ }] { return f(1 + true); };
-return 0;

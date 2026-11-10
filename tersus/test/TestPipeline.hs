@@ -37,7 +37,7 @@ import ValidatorNative (prepareTexts)
 import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
-import TypeCheck (Elaborated (..), elaborate)
+import Compile (elaborateStatements, lowerStatements)
 import Types
 import Syntax
 import Utils
@@ -341,7 +341,7 @@ testCliConfiguredSources = TestCase "real CLI isolates standalone/stdin roots an
             write (cwdRoot </> "provider.tersus") "fn answer() -> Int { return 42; };"
             results <- mapM (\(args, input, expectedCode, expectedOutput, expectedError) -> do
                 (code, output, errors) <- run args input
-                pure (testAssertEq code expectedCode <> testAssertEq (trim output) expectedOutput
+                pure (fmap (++ ("\nCLI diagnostic: " ++ errors)) (testAssertEq code expectedCode <> testAssertEq (trim output) expectedOutput)
                     <> if expectedError `isInfixOf` errors then Nothing else Just ("wrong CLI diagnostic: " ++ errors))) cases
             (irCode, ir, irErrors) <- run ["--no-prelude", "llvm", "-"] "return 42;"
             pure (testAssertEq initial (ExitSuccess, "42\n", "")
@@ -402,7 +402,7 @@ testCliCases =
 lowerSource :: String -> Either String M.Program
 lowerSource source = case parseStatementBlock source of
     Left err -> Left ("Parse failed: " ++ show err)
-    Right stmts -> case lowerProgram stmts of
+    Right stmts -> case lowerStatements stmts of
         Error e -> Left e
         Ok program -> Right program
 
@@ -497,7 +497,7 @@ testMirStructure =
                 ([g | (_, M.BasicBlock stmts _) <- blocksOf (mainFunction p), M.Ghost _ g@M.GhostFunction{} <- stmts], fmap (M.specEnv . M.fnSpec) (Map.lookup "f" (M.progFunctions p)))
                 ([M.GhostFunction "f" "f" True], Just (Map.fromList [("f", M.Const (M.CFn "f")), ("n", M.Copy (M.Local 1))]))
         , -- A builtin used as a value is a function of the program
-          case lowerProgram [Assign "f" (Val (builtinFunct Plus)), Assign "r" (F (Var "f") [Val (VInt 1), Val (VInt 2)]), Return (Var "r")] of
+          case lowerStatements [Assign "f" (Val (builtinFunct Plus)), Assign "r" (F (Var "f") [Val (VInt 1), Val (VInt 2)]), Return (Var "r")] of
             Error e -> Just e
             Ok p -> testAssertEq (Map.keys (M.progFunctions p), mapResult (fmap renderMirValue) (runProgram p)) (["builtin::add"], Ok (Just "3"))
         , -- A call ends the block it is in
@@ -741,7 +741,7 @@ selfHostedQueryFamilies program =
                     MData name fields -> MData name [(key, onLoop change field) | (key, field) <- fields]
                     MList items -> MList (map (onLoop change) items)
                     other -> other
-                checkDrivenLoop source change expected = case parseSource source `bindResult` elaborate `bindResult` lowerElaborated of
+                checkDrivenLoop source change expected = case parseSource source `bindResult` elaborateStatements `bindResult` lowerElaborated of
                     Error e -> Just ("Could not lower test program: " ++ e)
                     Ok mir -> case fmap (lookup "f") (encode mir) of
                         Right (Just (blocks, initial, entry)) -> either Just (`testAssertEq` Just (MInt expected)) (driven (toDriver (onLoop change blocks)) entry initial)
@@ -753,7 +753,7 @@ selfHostedQueryFamilies program =
                     Ok (Just (MData "DriverParsed" fields)) -> lookup "value" fields
                     _ -> Nothing
                 malformed = Just (MData "DriverValue::DriverMalformed" [])
-                drivenTexts = parseSource "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` elaborate `bindResult` lowerElaborated `bindResult` prepareTexts False
+                drivenTexts = parseSource "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` elaborateStatements `bindResult` lowerElaborated `bindResult` prepareTexts False
                 checkDrivenInput edit expected = case drivenTexts of
                     Error e -> Just ("Could not prepare test program: " ++ e)
                     Ok texts -> case runProgramWith (edit (show (length texts) ++ "\n") (concatMap snd texts)) program of
@@ -826,7 +826,7 @@ selfHostedQueryFamilies program =
                             result -> Just ("Unexpected known boolean join result: " ++ show result)
                 boolConstants = [constant (20, 1, 1), constant (21, 1, 0)]
                 checkMirSubset input expected =
-                    let lowered = parseSource input `bindResult` elaborate `bindResult` lowerElaborated
+                    let lowered = parseSource input `bindResult` elaborateStatements `bindResult` lowerElaborated
                      in case lowered of
                             Error e -> Just ("Could not lower test program: " ++ e)
                             Ok mir ->
@@ -836,7 +836,7 @@ selfHostedQueryFamilies program =
                                         Nothing -> Nothing
                 checkMalformedArrayLength =
                     let input = "fn f<n>(a: Array<Int, n>, m: Int) -> Int { b = array(n, 0); return size(b); }; return 0;"
-                        lowered = parseSource input `bindResult` elaborate `bindResult` lowerElaborated
+                        lowered = parseSource input `bindResult` elaborateStatements `bindResult` lowerElaborated
                      in case lowered of
                             Error e -> Just ("Could not lower malformed-MIR fixture: " ++ e)
                             Ok mir -> case Map.lookup "f" (M.progFunctions mir) of
@@ -1312,7 +1312,7 @@ testPipeline =
         , validationFailureFor "compileSource"
         , testAssertErrorContains "Validation failed: Type error" (compileSource "x = 1; y = x(2);")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
-          case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborate of
+          case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborateStatements of
             Ok (Elaborated stmts _) -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))
             Error e -> Just e
         , case compileSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" of

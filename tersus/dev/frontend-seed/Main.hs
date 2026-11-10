@@ -5,22 +5,25 @@ import System.Directory (canonicalizePath, doesFileExist)
 import System.Environment (getArgs, lookupEnv)
 import System.IO (IOMode (..), hPutStr, hSetEncoding, withFile)
 
-import ElaborateRequest (respond)
-import ElaboratorNative (elaboratorIrWith, frontendStage, frontendStageIr)
+import ElaboratorNative (frontendStage, frontendStageIr)
+import BuiltinTable (builtinTableText)
+import ElaboratorTool (frontendSources)
 import Hash (fingerprint)
 import PreludeSource (elaboratePackageFiles, seedSha256)
 import Utils
 
--- `advance <output.ll> <commit>` writes the IR of the elaborator elaborated by the Haskell elaborator: the first seed, or
--- the one after a change to the request or the response that the pinned seed cannot read.
+-- `advance <output.ll> <commit>` writes stage 2's IR, for a change to the elaborator that elaborates its own source
+-- differently, where stage 2 is not stage 1.
 -- `emit <output.ll> <commit>` builds stage 0 from $TERSUS_FRONTEND_SEED_FILE (or the pinned seed), stage 1 from it and
 -- stage 2 from stage 1, checks that stage 2 is stage 1 (stage 1 elaborates the elaborator as stage 0 does), and writes
 -- stage 1's IR. Either output is the seed only when `emit` from it, with the same commit, gives the same bytes.
+-- `sources` prints the fingerprint the pin records after the digest (ElaboratorTool.frontendSources).
+-- `builtins <output>` writes the builtin table every request carries (lib/data/builtins.ast) from BuiltinRegistry.
 main :: IO ()
 main = do
     args <- getArgs
     case args of
-        ["advance", output, commit] -> elaboratorIrWith respond >>= written output commit
+        ["advance", output, commit] -> frontendStageIr 2 >>= written output commit
         ["emit", output, commit] -> do
             one <- frontendStage 1
             two <- frontendStage 2
@@ -30,8 +33,12 @@ main = do
                 (Ok (_, a), Ok (_, b))
                     | a /= b -> fail "stage 1 elaborates the elaborator differently from stage 0"
                     | otherwise -> frontendStageIr 1 >>= written output commit
-        _ -> fail "usage: frontend-seed advance <output.ll> <commit> | frontend-seed emit <output.ll> <commit>"
+        ["sources"] -> either' frontendSources >>= putStrLn
+        ["builtins", output] -> either' builtinTableText >>= writeFile output
+        _ -> fail "usage: frontend-seed advance <output.ll> <commit> | frontend-seed emit <output.ll> <commit> | frontend-seed sources | frontend-seed builtins <output>"
   where
+    either' (Ok a) = pure a
+    either' (Error e) = fail e
     -- (the output is written only once everything succeeded, and never over the seed the run was built from)
     written _ _ (Error e) = fail e
     written output commit (Ok text) = do

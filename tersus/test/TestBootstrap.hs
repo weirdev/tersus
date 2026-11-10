@@ -14,7 +14,7 @@ import System.FilePath (takeFileName, (</>))
 import System.Posix.Process (getProcessID)
 
 import qualified TersusParser
-import Seed (parserSeedHash, parserSeedSha256, parserSeedUrl)
+import Seed (frontendSeedHash, parserSeedHash, parserSeedSha256, parserSeedUrl)
 import Bootstrap
 import Cli (Command (..), makesIr)
 import MirData (writeProgram)
@@ -49,7 +49,7 @@ hashShape :: IO TestResult
 hashShape =
     pure $
         if all (\h -> length h == 16 && all isHexDigit h) [seedHash, compilerSnapshotHash] && seedHash /= compilerSnapshotHash
-            && compilerSnapshotHash == fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
+            && compilerSnapshotHash == fingerprint ([seedHash, parserSeedHash, frontendSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
             then Nothing
             else Just ("the hashes are " ++ show (seedHash, compilerSnapshotHash))
 

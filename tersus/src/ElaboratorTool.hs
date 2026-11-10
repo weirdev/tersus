@@ -1,9 +1,13 @@
--- An elaborator executable (the elaborator written in Tersus, lib/elaborate) as the compiler's elaborator: the
--- request (ElaborateRequest) on its standard input, the response on its standard output.
+-- The compiler's elaborators: executables of the elaborator written in Tersus (lib/elaborate), each answering one
+-- request (ElaborateRequest) on its standard input with the response on its standard output.
 module ElaboratorTool
     ( runElaborator
     , nativeElaborator
     , frontendToolFailure
+    , bootstrapElaborator
+    , sourceElaborator
+    , frontendSources
+    , noVerdict
     ) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
@@ -15,8 +19,13 @@ import System.IO (hClose, hSetBinaryMode)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess, withCreateProcess)
 
+import BuiltinTable (builtinTableText)
 import ElaborateRequest
+import {-# SOURCE #-} ElaboratorNative (frontendStage)
+import Hash (fingerprint)
 import Native (raiseStack)
+import PreludeSource (elaboratePackageFiles, frontendSeedSources)
+import Seed (cachedFrontendSeed)
 import Utils
 
 runElaborator :: FilePath -> Request -> IO (Result Response String)
@@ -47,14 +56,46 @@ runElaborator exe rq = case writeRequest rq of
 -- the tool failed, rather than being taken for the program's fault or answered by another elaborator.
 {-# NOINLINE nativeElaborator #-}
 nativeElaborator :: FilePath -> Elaborator
-nativeElaborator exe rq = unsafePerformIO $ do
-    answer <- runElaborator exe rq
-    pure $ case answer of
-        Ok response -> response
-        Error e -> Refused (toolFailurePrefix ++ e)
+nativeElaborator exe rq = unsafePerformIO (answered <$> runElaborator exe rq)
+
+answered :: Result Response String -> Response
+answered (Ok response) = response
+answered (Error e) = Refused (toolFailurePrefix ++ e)
 
 toolFailurePrefix :: String
 toolFailurePrefix = "Elaborator tool failure: "
 
 frontendToolFailure :: String -> Bool
 frontendToolFailure = isInfixOf toolFailurePrefix
+
+-- A refusal that says nothing about the program: the elaborator failed as a tool, or does not handle the program
+noVerdict :: String -> Bool
+noVerdict message = frontendToolFailure message || "does not handle this" `isInfixOf` message
+
+-- The seed (F0) elaborates the compiler's own code: the host's programs, the compiler libraries and the List and Box
+-- helper units, and the elaborator's later stages.
+bootstrapElaborator :: Elaborator
+bootstrapElaborator = withStage 0
+
+-- The elaborator of the programs and modules the compiler is given: the seed while it was made from the elaborator's
+-- sources as they are (testFrontendBootstrap requires that on master), otherwise the elaborator as it is now,
+-- elaborated by the seed (stage 1, built once).
+sourceElaborator :: Elaborator
+sourceElaborator = withStage sourceStage
+
+sourceStage :: Int
+sourceStage = if frontendSources == Ok frontendSeedSources then 0 else 1
+
+-- What the seed's behavior depends on besides its own IR: the elaborator's sources, the protocol, and the builtin
+-- table every request carries
+frontendSources :: Result String String
+frontendSources = mapResult (\table -> fingerprint ([requestHeader, responseHeader, table] ++ concatMap (\(path, contents) -> [path, contents]) elaboratePackageFiles)) builtinTableText
+
+-- (the stage is looked up in the cache for each request, as the cache directory can change within a process)
+{-# NOINLINE withStage #-}
+withStage :: Int -> Elaborator
+withStage n rq = unsafePerformIO $ do
+    exe <- if n <= 0 then cachedFrontendSeed else mapResult fst <$> frontendStage n
+    case exe of
+        Ok path -> runElaborator path rq >>= pure . answered
+        Error e -> pure (Refused (toolFailurePrefix ++ e))

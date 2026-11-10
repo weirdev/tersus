@@ -8,7 +8,7 @@ import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
 import elaborate::out { emit, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, intText, noBoundedParts, notModelled, oneScope };
+import elaborate::state { CtorInfo, Defining, FnSig, Generic, ImplArgs, St, TE, Template, intText, noBoundedParts, notModelled, oneScope };
 import elaborate::traits { argListOf, boundsOf, emptyTemplate };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
@@ -18,7 +18,7 @@ fn newState() -> St ~ {
     return St {
         nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0,
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
-        traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), instances: HashMap::new(), emitted: [], emittedTypes: [], activeNames: [], activeSizes: [], companions: HashMap::new(), fns: HashMap::new(), scopes: oneScope(),
+        traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), instances: HashMap::new(), emitted: [], emittedTypes: [], activeNames: [], activeSizes: [], companions: HashMap::new(), definitions: [], fns: HashMap::new(), scopes: oneScope(),
         ret: 0 - 1, programReturn: 0 - 1, sizeScope: [], typeScope: [], readOnly: [], mutParams: [], writes: [], aliasNames: [], aliasPlaces: [], originNames: [], originRoots: [], refResultNames: [], refResultParams: [], refResultFroms: [], resultFrom: [], params: [], current: "", inGhost: false,
         predeclared: HashSet::new(), impls: HashSet::new(), builtinNames: HashMap::new(), builtinValues: [], builtinSchemes: [],
         builtinKinds: [], stdNames: HashMap::new(), pointer: HashMap::new(), ghostNames: HashMap::new(), methods: HashMap::new(),
@@ -58,16 +58,16 @@ fn readBlock() -> Parsed<AstProgram> ~ {
 
 // A block whose records are the same as an earlier one's is not read again: a request carries an interface once for
 // the module and once in the defining context of each module that depends on it
-struct Blocks { seen: HashMap<String, AstProgram>, block: Parsed<AstProgram> };
+struct Blocks { seen: HashMap<String, AstProgram>, block: Parsed<AstProgram>, key: String };
 
 fn readCachedBlock(seen: HashMap<String, AstProgram>) -> Blocks ~ {
     bad = Parsed<AstProgram> { value: AstProgram { stage: "", nodes: [], root: 0 }, pos: 0, ok: false };
     line = readLine();
-    if !wordIs(&line, 0, "data") || size(line.words) != 2 { return Blocks { seen: seen, block: bad }; };
+    if !wordIs(&line, 0, "data") || size(line.words) != 2 { return Blocks { seen: seen, block: bad, key: "" }; };
     n = intAt(&line.words, 1);
-    if !n.ok || n.value < 2 { return Blocks { seen: seen, block: bad }; };
+    if !n.ok || n.value < 2 { return Blocks { seen: seen, block: bad, key: "" }; };
     lines = readRecords(n.value);
-    if !lines.ok { return Blocks { seen: seen, block: bad }; };
+    if !lines.ok { return Blocks { seen: seen, block: bad, key: "" }; };
     keyBytes = [];
     for l in &lines.value {
         for c in &l.bytes { keyBytes = push(keyBytes, c); };
@@ -76,28 +76,32 @@ fn readCachedBlock(seen: HashMap<String, AstProgram>) -> Blocks ~ {
     key = String { bytes: keyBytes };
     if HashMap::contains(&seen, &key) {
         known = HashMap::lookup(&seen, &key, AstProgram { stage: "", nodes: [], root: 0 });
-        return Blocks { seen: seen, block: done(known, 0) };
+        return Blocks { seen: seen, block: done(known, 0), key: key };
     };
     parsed = parseAstLines(&lines.value);
-    if !parsed.ok { return Blocks { seen: seen, block: parsed }; };
+    if !parsed.ok { return Blocks { seen: seen, block: parsed, key: "" }; };
     kept = clone(parsed.value);
-    return Blocks { seen: seen.insert(key, kept), block: parsed };
+    return Blocks { seen: seen.insert(clone(key), kept), block: parsed, key: key };
 };
 
-// What an interface gives the checker (Interface.interfaceImportEnv, merged so that the first interface wins a name)
-fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
-    root = nodeIn(&iface.nodes, iface.root);
-    if !(root is AstNode::Interface) { return notModelled(st, "an interface the data does not give"); };
-    v = (root as AstNode::Interface).value;
-    nodes = &iface.nodes;
-    // (the interface's records join the program's, so that what refers to them, a trait's functions or a template's body,
-    // is in the one arena; base is where they start)
+// The interface's records joined to the program's, so that what refers to them, a trait's functions or a template's body,
+// is in the one arena: st.n is where they start
+fn appendInterface(st: St, iface: &AstProgram) -> St ~ {
     base = size(st.nodes);
     shift = [];
     for i in 0..size(iface.nodes) { shift = push(shift, base + i); };
     all = st.nodes;
     for node in &iface.nodes { all = push(all, remapNode(clone(node), &shift)); };
-    st = St { nodes: all, ..st };
+    return St { nodes: all, n: base, ..st };
+};
+
+// What an interface whose records start at base gives the checker (Interface.interfaceImportEnv, merged so that the first
+// interface wins a name)
+fn loadInterface(st: St, iface: &AstProgram, base: Int) -> St ~ {
+    root = nodeIn(&iface.nodes, iface.root);
+    if !(root is AstNode::Interface) { return notModelled(st, "an interface the data does not give"); };
+    v = (root as AstNode::Interface).value;
+    nodes = &iface.nodes;
     for e in listItems(nodes, v.types) {
         entry = entryOf(nodes, e);
         if entry is AstEntry::NamesEntry {
@@ -267,7 +271,7 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
                 };
                 st = fnSigOf(st, base + tme.ps, base + tme.sig);
                 fs = clone(st.fnSig);
-                tm = Template { bounds: bounds, fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: base + tme.ins, outs: base + tme.outs, term: base + tme.term, body: base + tme.body, boundsNode: base + tme.bs, paramsNode: base + tme.ps, sigNode: base + tme.sig, retNode: base + tme.ret, grouped: false, definingTraits: [], definingTypes: [], definingTemplates: [], privateContext: false };
+                tm = Template { bounds: bounds, fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: base + tme.ins, outs: base + tme.outs, term: base + tme.term, body: base + tme.body, boundsNode: base + tme.bs, paramsNode: base + tme.ps, sigNode: base + tme.sig, retNode: base + tme.ret };
                 st = St { templates: st.templates.insert(name, tm), ..st };
             };
         };
@@ -275,76 +279,51 @@ fn loadInterface(st: St, iface: &AstProgram) -> St ~ {
     return st;
 };
 
-fn definingContext(st: St, context: &List<AstProgram>) -> St ~ {
-    if size(context) = 0 { return notModelled(st, "an empty template defining context"); };
-    traits = [];
-    types = [];
-    templates = [];
-    missing = false;
-    for iface in context {
-        root = nodeIn(&iface.nodes, iface.root);
-        if !(root is AstNode::Interface) { return notModelled(st, "a defining interface the data does not give"); };
-        v = (root as AstNode::Interface).value;
-        for e in listItems(&iface.nodes, v.traits) {
-            entry = entryOf(&iface.nodes, e);
-            if entry is AstEntry::TraitEntry {
-                name = nameText(&iface.nodes, (entry as AstEntry::TraitEntry).n);
-                traits = push(traits, clone(name));
-                if !HashSet::contains(&st.traits, &name) { missing = true; };
-            };
-        };
-        for e in listItems(&iface.nodes, v.types) {
-            entry = entryOf(&iface.nodes, e);
-            if entry is AstEntry::NamesEntry {
-                name = nameText(&iface.nodes, (entry as AstEntry::NamesEntry).n);
-                types = push(types, clone(name));
-                if !HashMap::contains(&st.types, &name) { missing = true; };
-            };
-        };
-        for e in listItems(&iface.nodes, v.ctors) {
-            entry = entryOf(&iface.nodes, e);
-            if entry is AstEntry::CtorEntry && !HashMap::contains(&st.ctors, nameText(&iface.nodes, (entry as AstEntry::CtorEntry).n)) { missing = true; };
-        };
-        for e in listItems(&iface.nodes, v.generics) {
-            entry = entryOf(&iface.nodes, e);
-            if entry is AstEntry::GenericEntry {
-                name = nameText(&iface.nodes, (entry as AstEntry::GenericEntry).n);
-                types = push(types, clone(name));
-                if !HashMap::contains(&st.generics, &name) { missing = true; };
-            };
-        };
-        for e in listItems(&iface.nodes, v.templates) {
-            entry = entryOf(&iface.nodes, e);
-            if entry is AstEntry::TemplateEntry {
-                name = nameText(&iface.nodes, (entry as AstEntry::TemplateEntry).n);
-                templates = push(templates, clone(name));
-                if !HashMap::contains(&st.templates, &name) { missing = true; };
-            };
-        };
-        for e in listItems(&iface.nodes, v.implArgs) {
-            entry = entryOf(&iface.nodes, e);
-            if entry is AstEntry::ImplArgsEntry {
-                p = entry as AstEntry::ImplArgsEntry;
-                key = catStrings(catStrings(nameText(&iface.nodes, p.a), " "), nameText(&iface.nodes, p.b));
-                if !HashMap::contains(&st.implArgs, &key) { missing = true; };
-            };
-        };
+// A defining context (ElaborateRequest.rqDefinitions): its interfaces seeded into a checker of their own, kept with the
+// templates its first interface owns (seededTcState); bases says where each interface's records start
+fn definingContext(st: St, context: &List<AstProgram>, bases: &List<Int>) -> St ~ {
+    if size(context) = 0 || size(context) != size(bases) { return notModelled(st, "an empty template defining context"); };
+    types = st.types;
+    ctors = st.ctors;
+    generics = st.generics;
+    linearTypes = st.linearTypes;
+    drops = st.drops;
+    traits = st.traits;
+    traitFns = st.traitFns;
+    traitParams = st.traitParams;
+    assoc = st.assoc;
+    impls = st.impls;
+    implArgs = st.implArgs;
+    implBounds = st.implBounds;
+    implBoundsNodes = st.implBoundsNodes;
+    templates = st.templates;
+    companions = st.companions;
+    fns = st.fns;
+    refResultNames = st.refResultNames;
+    refResultParams = st.refResultParams;
+    refResultFroms = st.refResultFroms;
+    ownerViews = st.ownerViews;
+    st = St { types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(), traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), assoc: HashMap::new(), impls: HashSet::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), templates: HashMap::new(), companions: HashMap::new(), fns: HashMap::new(), refResultNames: [], refResultParams: [], refResultFroms: [], ownerViews: [], ..st };
+    i = 0;
+    while i < size(context) && i < size(bases) [{ affirm i >= 0; }] shrinks size(context) - i {
+        st = loadInterface(st, &get(context, i), get(bases, i));
+        i = i + 1;
     };
     owner = get(context, 0);
+    owned = HashMap::new();
     root = nodeIn(&owner.nodes, owner.root);
-    if !(root is AstNode::Interface) { return notModelled(st, "a defining interface the data does not give"); };
-    v = (root as AstNode::Interface).value;
-    for e in listItems(&owner.nodes, v.templates) {
-        entry = entryOf(&owner.nodes, e);
-        if entry is AstEntry::TemplateEntry {
-            name = nameText(&owner.nodes, (entry as AstEntry::TemplateEntry).n);
-            if HashMap::contains(&st.templates, &name) {
-                tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
-                st = St { templates: st.templates.insert(name, Template { grouped: true, definingTraits: clone(traits), definingTypes: clone(types), definingTemplates: clone(templates), privateContext: missing, ..tm }), ..st };
+    if root is AstNode::Interface {
+        for e in listItems(&owner.nodes, (root as AstNode::Interface).value.templates) {
+            entry = entryOf(&owner.nodes, e);
+            if entry is AstEntry::TemplateEntry {
+                name = nameText(&owner.nodes, (entry as AstEntry::TemplateEntry).n);
+                if HashMap::contains(&st.templates, &name) { owned = owned.insert(clone(name), HashMap::lookup(&st.templates, &name, emptyTemplate())); };
             };
         };
     };
-    return st;
+    d = Defining { owned: owned, types: clone(st.types), ctors: clone(st.ctors), generics: clone(st.generics), linearTypes: clone(st.linearTypes), drops: clone(st.drops), traits: clone(st.traits), traitFns: clone(st.traitFns), traitParams: clone(st.traitParams), assoc: clone(st.assoc), impls: clone(st.impls), implArgs: clone(st.implArgs), implBounds: clone(st.implBounds), implBoundsNodes: clone(st.implBoundsNodes), templates: clone(st.templates), companions: clone(st.companions), refResultNames: clone(st.refResultNames), refResultParams: clone(st.refResultParams), refResultFroms: clone(st.refResultFroms) };
+    definitions = push(clone(st.definitions), d);
+    return St { types: types, ctors: ctors, generics: generics, linearTypes: linearTypes, drops: drops, traits: traits, traitFns: traitFns, traitParams: traitParams, assoc: assoc, impls: impls, implArgs: implArgs, implBounds: implBounds, implBoundsNodes: implBoundsNodes, templates: templates, companions: companions, fns: fns, refResultNames: refResultNames, refResultParams: refResultParams, refResultFroms: refResultFroms, ownerViews: ownerViews, definitions: definitions, ..st };
 };
 
 fn isRefCodec(t: &Type) -> Bool ~ { return t is Type::TRef || t is Type::TMutRef; };
@@ -418,6 +397,7 @@ if !wordIs(&countLine, 0, "interfaces") || size(countLine.words) != 2 { return m
 count = intAt(&countLine.words, 1);
 if !count.ok || count.value < 0 { return malformed(); };
 ifaces = [];
+ifaceKeys = [];
 seenBlocks = HashMap::new();
 for i in 0..count.value {
     read = readCachedBlock(seenBlocks);
@@ -425,26 +405,31 @@ for i in 0..count.value {
     b = read.block;
     if !b.ok || b.value.stage != "interface" { return malformed(); };
     ifaces = push(ifaces, b.value);
+    ifaceKeys = push(ifaceKeys, read.key);
 };
 definitionsLine = readLine();
 if !wordIs(&definitionsLine, 0, "definitions") || size(definitionsLine.words) != 2 { return malformed(); };
 definitionCount = intAt(&definitionsLine.words, 1);
 if !definitionCount.ok || definitionCount.value < 0 { return malformed(); };
 definitions = [];
+definitionKeys = [];
 for i in 0..definitionCount.value {
     contextLine = readLine();
     if !wordIs(&contextLine, 0, "definition") || size(contextLine.words) != 2 { return malformed(); };
     contextCount = intAt(&contextLine.words, 1);
     if !contextCount.ok || contextCount.value < 1 { return malformed(); };
     context = [];
+    keys = [];
     for j in 0..contextCount.value {
         read = readCachedBlock(seenBlocks);
         seenBlocks = read.seen;
         b = read.block;
         if !b.ok || b.value.stage != "interface" { return malformed(); };
         context = push(context, b.value);
+        keys = push(keys, read.key);
     };
     definitions = push(definitions, context);
+    definitionKeys = push(definitionKeys, keys);
 };
 programBlock = readBlock();
 if !programBlock.ok || programBlock.value.stage != "parsed" { return malformed(); };
@@ -453,8 +438,34 @@ if !end.ok || end.pos != 0 { return malformed(); };
 parsedRoot = programBlock.value.root;
 st = St { nodes: programBlock.value.nodes, ..st };
 st = loadBuiltins(st, &table.value);
-for iface in &ifaces { st = loadInterface(st, iface); };
-for context in &definitions { st = definingContext(st, context); };
+// (an interface a defining context carries again is read where its records already are, so that its templates are
+// those the module imported)
+bases = HashMap::new();
+k = 0;
+while k < size(ifaces) && k < size(ifaceKeys) [{ affirm k >= 0; }] shrinks size(ifaces) - k {
+    st = appendInterface(st, &get(ifaces, k));
+    bases = bases.insert(clone(get(ifaceKeys, k)), st.n);
+    st = loadInterface(st, &get(ifaces, k), st.n);
+    k = k + 1;
+};
+k = 0;
+while k < size(definitions) && k < size(definitionKeys) [{ affirm k >= 0; }] shrinks size(definitions) - k {
+    context = clone(get(definitions, k));
+    keys = clone(get(definitionKeys, k));
+    contextBases = [];
+    j = 0;
+    while j < size(context) && j < size(keys) [{ affirm j >= 0; }] shrinks size(context) - j {
+        key = clone(get(keys, j));
+        if !HashMap::contains(&bases, &key) {
+            st = appendInterface(st, &get(context, j));
+            bases = bases.insert(clone(key), st.n);
+        };
+        contextBases = push(contextBases, HashMap::lookup(&bases, &key, 0));
+        j = j + 1;
+    };
+    st = definingContext(st, &context, &contextBases);
+    k = k + 1;
+};
 predeclaring = wordIs(&predeclare, 1, "true");
 viewing = wordIs(&library, 1, "true");
 extracting = !wordIs(&extract, 1, "none");

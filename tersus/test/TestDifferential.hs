@@ -9,11 +9,12 @@ import MirLower (lowerElaborated)
 import Syntax (Elaborated (..))
 import TestData (typeCheckSources)
 import TestHarness
-import TypeCheck (elaborate)
+import Compile (elaborateStatements)
+import ElaboratorTool (sourceElaborator)
 import Types (Type (..))
 import Utils
 
--- The Haskell elaborator behind the text protocol agrees with itself on the requests of a package, of the compiler
+-- The compiler's elaborator behind the text protocol agrees with itself on the requests of a package, of the compiler
 -- libraries, of the smallest compiler package (whose interfaces have every kind of entry), of a refused program and of
 -- the programs of testTypeCheck
 protocolAgreement :: IO TestResult
@@ -43,7 +44,7 @@ mutationControls = do
         , expect "not modelled" unmodelled (\o -> case o of NotModelledBy _ -> True; _ -> False)
         ]
   where
-    perturbed change rq = pure (Ok (change (respond rq)))
+    perturbed change rq = pure (Ok (change (sourceElaborator rq)))
     retype response = case response of
         Accepted (Elaborated stmts (t : ts)) i -> Accepted (Elaborated stmts ((if t == TBool then TInt else TBool) : ts)) i
         other -> other
@@ -61,7 +62,7 @@ mutationControls = do
 visitOrder :: TestResult
 visitOrder = case parseWithEquality "x = [true]; n = 3; return n;" of
     Left e -> Just e
-    Right program -> case elaborate program of
+    Right program -> case elaborateStatements program of
         Error e -> Just e
         Ok (Elaborated stmts types) -> firstFailure
             [ case lowerElaborated (Elaborated stmts types) of
@@ -81,13 +82,13 @@ visitOrder = case parseWithEquality "x = [true]; n = 3; return n;" of
 -- A request and a response read back as written, and malformed ones are refused
 protocolRoundTrip :: IO TestResult
 protocolRoundTrip = do
-    requests <- unitRequests (FilePackage "examples/modules/app/main.tersus")
+    requests <- unitRequests sourceElaborator (FilePackage "examples/modules/app/main.tersus")
     pure $ case requests of
         Error e -> Just e
         Ok [] -> Just "no requests"
         Ok answered -> firstFailure (map (one . fst) answered ++ [malformed (fst (last answered))] ++ map verdict [Refused "a \"refusal\"", RefusedInterface "in module p::m: no interface", NotModelled "what"])
   where
-    malformed rq = case (writeRequest rq, writeResponse (respond rq)) of
+    malformed rq = case (writeRequest rq, writeResponse (sourceElaborator rq)) of
         (Ok request, Ok response) ->
             let refused name r = case r of
                     Error _ -> Nothing
@@ -128,7 +129,7 @@ protocolRoundTrip = do
     one rq = case writeRequest rq `bindResult` readRequest of
         Error e -> Just e
         Ok rq' | rq' /= rq -> Just "request changed"
-        Ok _ -> case writeResponse (respond rq) of
+        Ok _ -> case writeResponse (sourceElaborator rq) of
             Error e -> Just e
             Ok text -> case readResponse text `bindResult` writeResponse of
                 Error e -> Just e

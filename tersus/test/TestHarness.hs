@@ -96,7 +96,7 @@ import CacheLock (openBinaryTempFileCloexec, openLockFd)
 import Mir (Program)
 import Compile (lowerSource)
 import MirHousekeeping (eraseGhosts, toolProgram, validationEntry)
-import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationPackageFiles)
+import PreludeSource (compilerSourceHash, libPackageFiles, mirPackageFiles, parserSeedSha256, seedSha256, stdlibSource, toolPackageFiles, validationPackageFiles, elaboratePackageFiles, frontendSeedSha256)
 import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
@@ -369,8 +369,8 @@ pipelineRejected source expected = case parseSource source of
 withProgram :: String -> TestResult -> TestResult
 withProgram source result = recordSource source `seq` fmap (\message -> message ++ "\nProgram: " ++ take 500 source) result
 
--- With TERSUS_DIFFERENTIAL_SOURCES set to a directory, each program a helper checks is written there, for the
--- differential harness (`stack run frontend-diff -- compare EXE --sources DIR`). Groups run at once, so a file
+-- With TERSUS_DIFFERENTIAL_SOURCES set to a directory, each program a helper checks is written there, to put to
+-- another elaborator. Groups run at once, so a file
 -- appears whole or not at all, and a failure to write one fails no test.
 {-# NOINLINE recordSource #-}
 recordSource :: String -> ()
@@ -720,7 +720,7 @@ cacheBuildScope = do
     backend <- lookupEnv "TERSUS_PARSER"
     path <- lookupEnv "PATH"
     overrides <- mapM seedIdentity
-        [("TERSUS_PARSER_SEED_FILE", parserSeedSha256), ("TERSUS_SEED_FILE", seedSha256)]
+        [("TERSUS_PARSER_SEED_FILE", parserSeedSha256), ("TERSUS_SEED_FILE", seedSha256), ("TERSUS_FRONTEND_SEED_FILE", frontendSeedSha256)]
     pure $ (\b seeds -> show (b, backend, path, seeds)) <$> build <*> sequence overrides
   where
     seedIdentity (variable, expected) = do
@@ -785,6 +785,8 @@ compilerIdentity :: String
 compilerIdentity =
     fingerprint $
         [ compilerSourceHash
+        , frontendSeedSha256
+        , fingerprint (concatMap (\(path, text) -> [path, text]) elaboratePackageFiles)
         , harnessSourceHash
         , concreteBuildIdentity
         , ProgramBinary.codecVersion

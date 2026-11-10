@@ -384,7 +384,7 @@ lowerSupportUnit loaded compiled =
     case ([m | m <- Mod.packageModules loaded, Mod.loadedModuleId m == supportId], [m | m <- Package.compiledModules compiled, Package.compiledModuleId m == supportId]) of
         ([source], [modu]) ->
             let ifaces = Package.compiledLibInterfaces modu ++ map (`interfaceOf` compiled) (Mod.loadedDependencies source)
-             in mapResult ((,) supportId) (lowerModuleWith (I.mergeInterfacesImportEnv ifaces) ifaces (Package.compiledElaborated modu))
+             in mapResult ((,) supportId) (lowerModuleWith ifaces (Package.compiledElaborated modu))
         _ -> Error "expected one loaded and compiled support unit"
 
 call :: Result (Mod.LoadedPackage, Package.CompiledPackage, M.Program) String -> String -> [MirValue] -> MirValue -> TestResult
