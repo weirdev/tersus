@@ -1,6 +1,7 @@
 module TestErgonomics (testErgonomics, ergonomicsPrograms, ergonomicsFunctionPrograms) where
 
 import Data.List (isInfixOf)
+import ElaboratorTool (noVerdict)
 import qualified Data.Map.Strict as Map
 import qualified FieldPaths
 import qualified Types as T
@@ -64,6 +65,9 @@ positive =
     , ("bounded template typed let of an if expression", "fn choose<T: Eq>(x: T, c: Bool) -> T { let y: T = if c { x } else { x }; return y; }; return choose(1, true);", VInt 1)
     , ("bounded template block expression with a typed let", "fn keep<T: Eq>(x: T) -> T { return { let y: T = x; y }; }; return keep(4);", VInt 4)
     , ("bounded template size parameter in an if expression", "fn count<T: Eq, n>(a: &Array<T, n>) -> Int { return if n > 0 { n } else { 0 }; }; return count(#[1, 2, 3]);", VInt 3)
+    , ("bounded template constructor of its type parameter", "struct W<K> { v: K }; fn pack<T: Eq>(x: T) -> W<T> { return W<T> { v: x }; }; return pack(1).v;", VInt 1)
+    , ("bounded template constructor in an if expression", "struct W<K> { v: K }; fn pack<T: Eq>(x: T) -> W<T> { return if true { W<T> { v: x } } else { W<T> { v: x } }; }; return pack(1).v;", VInt 1)
+    , ("nested function type parameter hides the template's", "fn outer<T: Eq>(x: T) -> T { fn inner<T>(y: T) -> T { let z: T = y; return z; }; let w: T = x; return w; }; return outer(2);", VInt 2)
     , ("update reference lent past an effectful block argument", "fn put(p: &mut Int, n: Int) -> Int writes(p) { *p = n; return 0; }; x = 0; r = &mut x; put(r, { y = 1; y }); return *r;", VInt 1)
     , ("update reference lent past a mutating call argument", "fn bump(q: &mut Int) -> Int writes(q) { *q = *q + 1; return *q; }; fn put(p: &mut Int, n: Int) -> Int writes(p) { *p = n; return 0; }; x = 0; z = 5; r = &mut x; put(r, bump(&mut z)); return *r;", VInt 6)
     , ("if let subject once", enum ++ "fn make(n: &mut Int) -> E { *n = n + 1; return E::A { x: n }; }; n = 0; x = if let E::A { x: x } = make(&mut n) { x } else { 0 }; return n * 10 + x;", VInt 11)
@@ -155,6 +159,7 @@ ergonomicsRejected source expected = case parseSource source of
         Error err -> check err
   where
     check err
+        | noVerdict err = Just ("the elaborator gave no verdict: " ++ err)
         | expected `isInfixOf` err && not ("does not model yet" `isInfixOf` err) = Nothing
         | otherwise = Just ("Expected modeled rejection containing: " ++ expected ++ "\nGot: " ++ err)
 
