@@ -124,6 +124,7 @@ library
       Elaboration
       ElaboratorNative
       ElaboratorTool
+      FieldPaths
       FileParserProtocol
       Hash
       Interface
