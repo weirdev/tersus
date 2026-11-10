@@ -3,6 +3,7 @@
 module TestMirVerify (testMirVerify, testMirVerifyPrograms) where
 
 import Data.List (isInfixOf)
+import ElaboratorTool (noVerdict)
 import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
@@ -76,6 +77,7 @@ testMirVerify =
                      in testAssertTrue (any (\(dest, root) -> root `elem` fnMutBorrowed fn && passed dest) borrows))
         , TestList "overlapping call arguments are refused"
             [ testCase name (case compileSource source of
+                Error e | noVerdict e -> Just ("the elaborator gave no verdict: " ++ e)
                 Error e | all (`isInfixOf` e) reason && not ("does not model yet" `isInfixOf` e) -> Nothing
                 Error e -> Just ("refused for another reason: " ++ e)
                 Ok _ -> Just "accepted overlapping call arguments that include an update borrow")

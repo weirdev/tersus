@@ -2218,7 +2218,9 @@ phase2Rejects files needles = case phase2Load files of
         Error err -> check err
         Ok _ -> Just ("accepted instead of refusing " ++ show needles)
   where
-    check err = foldr (<>) Nothing [if needle `isInfixOf` err then Nothing else Just ("expected " ++ show needle ++ ", got: " ++ err) | needle <- needles]
+    check err
+        | noVerdict err = Just ("the elaborator gave no verdict: " ++ err)
+        | otherwise = foldr (<>) Nothing [if needle `isInfixOf` err then Nothing else Just ("expected " ++ show needle ++ ", got: " ++ err) | needle <- needles]
 
 phase2Identity :: String
 phase2Identity = "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { return x; };"
