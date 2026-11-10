@@ -7,6 +7,31 @@ import elaborate::out { emit };
 import elaborate::records { exprOf, isVar, listItems, nameText, varName };
 import elaborate::state { CtorInfo, Place, St, TE, indexIn, instanceName, intText, joinWith, kindOf, nth, tyAt, typeError, wrapTy, zonk };
 
+// The reference facts a branch, a loop body or a call starts from: where each reference may point and the roots each
+// value may borrow from. They are saved and restored apart from the rest of the state, whose node arena is as large as
+// the whole input.
+struct Refs { aliasNames: List<String>, aliasPlaces: List<Place>, originNames: List<String>, originRoots: List<List<String>> };
+impl Clone for Refs { };
+
+fn refsOf(st: &St) -> Refs ~ {
+    return Refs { aliasNames: clone(st.aliasNames), aliasPlaces: clone(st.aliasPlaces), originNames: clone(st.originNames), originRoots: clone(st.originRoots) };
+};
+
+fn withRefs(st: St, refs: Refs) -> St ~ {
+    Refs { aliasNames: names, aliasPlaces: places, originNames: origins, originRoots: roots } = refs;
+    return St { aliasNames: names, aliasPlaces: places, originNames: origins, originRoots: roots, ..st };
+};
+
+fn refAliases(refs: &Refs, name: &String) -> List<Place> ~ {
+    out = [];
+    i = 0;
+    while i < size(refs.aliasNames) && i < size(refs.aliasPlaces) [{ affirm i >= 0; }] ~ {
+        if get(refs.aliasNames, i) = clone(name) { out = push(out, clone(get(refs.aliasPlaces, i))); };
+        i = i + 1;
+    };
+    return out;
+};
+
 // A call of an expression record: its head, its arguments, the key of the builtin its head is when that is a
 // value (key), the name its head is when that is a variable (callee), and the field a field builtin reads
 struct Call { ok: Bool, head: Int, args: List<Int>, key: String, callee: String, field: String };
@@ -271,31 +296,37 @@ fn copyExpressionOrigins(st: St, source: Int, dest: Int) -> St ~ {
     return putAliases(st, &after, &places);
 };
 
-fn resetBranchReferences(st: St, before: &St) -> St ~ {
+fn resetBranchReferences(st: St, before: &Refs) -> St ~ {
+    current = refsOf(&st);
+    return withRefs(st, resetRefs(&current, before));
+};
+
+// The facts of before, and those current has captured for expressions since
+fn resetRefs(current: &Refs, before: &Refs) -> Refs ~ {
     names = clone(before.aliasNames);
     aliases = clone(before.aliasPlaces);
     i = 0;
-    while i < size(st.aliasNames) && i < size(st.aliasPlaces) [{ affirm i >= 0; }] ~ {
-        name = get(st.aliasNames, i);
-        if isExpressionOrigin(name) && indexIn(&before.aliasNames, name) < 0 { names = push(names, clone(name)); aliases = push(aliases, clone(get(st.aliasPlaces, i))); };
+    while i < size(current.aliasNames) && i < size(current.aliasPlaces) [{ affirm i >= 0; }] ~ {
+        name = get(current.aliasNames, i);
+        if isExpressionOrigin(name) && indexIn(&before.aliasNames, name) < 0 { names = push(names, clone(name)); aliases = push(aliases, clone(get(current.aliasPlaces, i))); };
         i = i + 1;
     };
     origins = clone(before.originNames);
     roots = clone(before.originRoots);
     i = 0;
-    while i < size(st.originNames) && i < size(st.originRoots) [{ affirm i >= 0; }] ~ {
-        name = get(st.originNames, i);
-        if isExpressionOrigin(name) && indexIn(&before.originNames, name) < 0 { origins = push(origins, clone(name)); roots = push(roots, clone(get(st.originRoots, i))); };
+    while i < size(current.originNames) && i < size(current.originRoots) [{ affirm i >= 0; }] ~ {
+        name = get(current.originNames, i);
+        if isExpressionOrigin(name) && indexIn(&before.originNames, name) < 0 { origins = push(origins, clone(name)); roots = push(roots, clone(get(current.originRoots, i))); };
         i = i + 1;
     };
-    return St { aliasNames: names, aliasPlaces: aliases, originNames: origins, originRoots: roots, ..st };
+    return Refs { aliasNames: names, aliasPlaces: aliases, originNames: origins, originRoots: roots };
 };
 
-fn joinBranchReferences(st: St, left: &St) -> St ~ {
+fn joinBranchReferences(st: St, left: &Refs) -> St ~ {
     allNames = uniqueOrigins(&left.aliasNames);
     for name in allNames {
         places = aliasesOf(st, &name);
-        for place in aliasesOf(left, &name) { places = push(places, clone(place)); };
+        for place in refAliases(left, &name) { places = push(places, clone(place)); };
         st = putAliases(st, &name, &places);
     };
     i = 0;
@@ -310,7 +341,7 @@ fn joinBranchReferences(st: St, left: &St) -> St ~ {
     return st;
 };
 
-fn namedReferences(st: &St, before: St) -> St ~ {
+fn namedReferences(st: &St, entry: &Refs) -> Refs ~ {
     names = [];
     aliases = [];
     i = 0;
@@ -333,17 +364,17 @@ fn namedReferences(st: &St, before: St) -> St ~ {
         if !isExpressionOrigin(name) { originNames = push(originNames, clone(name)); roots = push(roots, uniqueOrigins(&get(st.originRoots, i))); };
         i = i + 1;
     };
-    named = St { aliasNames: names, aliasPlaces: aliases, originNames: originNames, originRoots: roots, ..clone(before) };
-    return resetBranchReferences(before, &named);
+    named = Refs { aliasNames: names, aliasPlaces: aliases, originNames: originNames, originRoots: roots };
+    return resetRefs(entry, &named);
 };
 
-fn sameReferences(left: &St, right: &St) -> Bool ~ {
+fn sameReferences(left: &Refs, right: &Refs) -> Bool ~ {
     names = uniqueOrigins(&left.aliasNames);
     others = uniqueOrigins(&right.aliasNames);
     if size(names) != size(others) { return false; };
     for name in names {
-        leftPlaces = aliasesOf(left, &name);
-        rightPlaces = aliasesOf(right, &name);
+        leftPlaces = refAliases(left, &name);
+        rightPlaces = refAliases(right, &name);
         a = uniquePlaces(&leftPlaces);
         b = uniquePlaces(&rightPlaces);
         if size(a) != size(b) { return false; };
@@ -756,13 +787,17 @@ fn recordPlaceReferences(st: St, targets: &List<Place>, value: &TE) -> St ~ {
 };
 
 fn reachableOrigins(st: &St, initial: &List<String>) -> List<String> ~ {
+    return reachableIn(&st.originNames, &st.originRoots, initial);
+};
+
+fn reachableIn(originNames: &List<String>, originRoots: &List<List<String>>, initial: &List<String>) -> List<String> ~ {
     roots = uniqueOrigins(initial);
     i = 0;
     while i < size(roots) [{ affirm i >= 0; }] ~ {
         root = get(roots, i);
-        at = indexIn(&st.originNames, &root);
-        if at >= 0 && at < size(st.originRoots) {
-            for next in &get(st.originRoots, at) { if indexIn(&roots, next) < 0 { roots = push(roots, clone(next)); }; };
+        at = indexIn(originNames, &root);
+        if at >= 0 && at < size(originRoots) {
+            for next in &get(originRoots, at) { if indexIn(&roots, next) < 0 { roots = push(roots, clone(next)); }; };
         };
         i = i + 1;
     };
@@ -866,7 +901,7 @@ fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
         i = i + 1;
     };
     bounds = reachableOrigins(st, &bounds);
-    before = clone(st);
+    before = refsOf(&st);
     i = 0;
     while i < size(inputs) [{ affirm i >= 0; affirm size(types) = size(inputs); }] ~ {
         input = get(inputs, i);
@@ -877,7 +912,7 @@ fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
             targets = clone(st.names);
             st = zonk(st, get(types, i));
             if kindOf(st, st.ty) = 11 { for place in expressionPlaces(st, input.node) { targets = push(targets, clone(place.root)); }; };
-            targets = reachableOrigins(&before, &targets);
+            targets = reachableIn(&before.originNames, &before.originRoots, &targets);
             if size(targets) = 0 { return typeError(st, "a call that can replace reference fields needs resolved target origin bounds"); };
             for target in &targets {
                 at = indexIn(&st.originNames, target);
