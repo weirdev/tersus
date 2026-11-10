@@ -264,7 +264,7 @@ fn textTypeAt(s: &String, pos: Int) -> TextParse ~ {
             if toInt(get(s.bytes, inner.pos)) = 44 {
                 start = inner.pos + 1;
                 stop = end;
-                if stop > start { stop = stop - 1; };
+                if stop > start { stop = stop - 1; affirm stop >= 0; };
                 while start < stop && toInt(get(s.bytes, start)) = 32 [{ affirm start >= 0; affirm start <= size(s.bytes); }] ~ { start = start + 1; };
                 while stop > start && toInt(get(s.bytes, stop - 1)) = 32 [{ affirm stop >= 0; affirm stop <= size(s.bytes); }] ~ { stop = stop - 1; };
                 arrSize = textSize(safeSlice(s, start, stop));

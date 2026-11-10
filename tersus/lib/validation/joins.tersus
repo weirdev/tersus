@@ -1041,12 +1041,14 @@ struct HullFacts { orders: List<OrderFact>, differences: List<DifferenceFact>, c
 // value, minted when there is none and minting is allowed, else omitted
 fn hullRangeFact(facts: HullFacts, value: Int, joined: Int, low: Bool) -> HullFacts {
     HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: constantOf, next: next, canMint: canMint } = facts;
-    if constantOf.contains(value) = false && canMint {
+    present = constantOf.contains(value);
+    if present = false && canMint {
         constantOf = constantOf.insert(value, next);
         constants = push(constants, ConstantTerm { id: next, kind: 0, value: value });
         next = next - 1;
+        present = true;
     };
-    if constantOf.contains(value) {
+    if present {
         bound = constantOf.lookup(value, 0);
         if low { orders = push(orders, OrderFact { smaller: bound, greater: joined, strict: false }); } else { orders = push(orders, OrderFact { smaller: joined, greater: bound, strict: false }); };
     };
