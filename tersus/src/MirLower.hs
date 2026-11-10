@@ -1,7 +1,7 @@
-module MirLower (lowerElaborated, lowerLibrary, lowerModuleWith) where
+module MirLower (lowerElaborated, lowerLibrary, lowerModuleWith, probeGenerics) where
 
 import Control.Monad (forM, unless, when)
-import Data.List (intercalate)
+import Data.List (intercalate, isPrefixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -98,6 +98,79 @@ stubFunction mirName fn =
             }
   where
     Signature _ _ _ _ _ froms = fnSignature fn
+
+-- Phase 0 spike (TERSUS_BOUNDS_ONLY_REPORT): the definition-checked generic bodies the elaborator appended (each after
+-- stubs of the bound calls and template calls it makes, and a `$generic <types> <name> <Copy params>` marker), each
+-- lowered once in the module's context and checked for moves, a type parameter Copy only when bounded by Copy.
+probeGenerics :: [ModuleInterface] -> [Statement] -> [Statement] -> [Type] -> [String]
+probeGenerics ifaces mainStmts tailStmts = go base tailStmts
+  where
+    seeded = (seededModuleState ifaces (Elaborated mainStmts [])){lsChecking = False}
+    base = withStubs [(var, probeStub var params sig) | Assign var (Val (VFunct params _ _ (NativeFunct sig _ _) _)) <- mainStmts] $
+        case runL (mapM_ declare mainStmts) seeded of
+            Right ((), s) -> s
+            Left _ -> seeded
+    declare stmt = case stmt of
+        StructDef{} -> lowerStatement stmt
+        EnumDef{} -> lowerStatement stmt
+        CopyDef{} -> lowerStatement stmt
+        LinearDef{} -> lowerStatement stmt
+        DropDef{} -> lowerStatement stmt
+        _ -> return ()
+    withStubs stubs s =
+        s
+            { lsFunctions = Map.union (Map.fromList [(v, f) | (v, (f, _)) <- stubs]) (lsFunctions s)
+            , lsGlobals = Map.union (Map.fromList [(v, (v, t)) | (v, (_, t)) <- stubs]) (lsGlobals s)
+            , lsNames = Set.union (Set.fromList (map fst stubs)) (lsNames s)
+            , lsStubs = Set.union (Set.fromList (map fst stubs)) (lsStubs s)
+            }
+    go s stmts types = case stmts of
+        ExternDef "$stub" : Assign var (Val (VFunct params _ _ (NativeFunct sig _ _) _)) : rest -> go (withStubs [(var, probeStub var params sig)] s) rest types
+        ExternDef marker : fnStmt@(Assign var (Val VFunct{})) : rest
+            | "$generic " `isPrefixOf` marker
+            , countText : _ : copyParams <- words (drop (length "$generic ") marker)
+            , [(count, "")] <- reads countText ->
+                let (mine, others) = splitAt count types
+                 in probeOne s var copyParams fnStmt mine : go s rest others
+        _ : rest -> go s rest types
+        [] -> []
+    probeOne s var copyParams fnStmt mine =
+        case runL (lowerStatement fnStmt >> getS) s{lsElabTypes = mine, lsBuilder = newBuilder "main" True Nothing} of
+            Left e -> "boundsLower | " ++ var ++ " | lowering failed | " ++ oneLine e
+            Right (s', _) -> case Map.lookup var (lsGlobals s') of
+                Nothing -> "boundsLower | " ++ var ++ " | lowering failed | no function"
+                Just (name, _) ->
+                    let leftover = length (lsElabTypes s')
+                        program = M.completeInstances (M.Program (lsTypes s') (lsFunctions s') (buildFunction [] [] Nothing Map.empty (newBuilder "main" True Nothing)) (lsGenerics s') (lsInvariants s'))
+                        copies = Set.union (lsCopies s') (Set.fromList ["$param " ++ p | p <- copyParams])
+                        excluded = Set.delete name (Map.keysSet (lsFunctions s'))
+                        errors = checkMovesExcluding copies (lsLinear s') (lsDrops s') excluded program
+                     in if leftover /= 0
+                            then "boundsLower | " ++ var ++ " | lowering failed | " ++ show leftover ++ " expression types left over"
+                            else
+                                if null errors
+                                    then "boundsLower | " ++ var ++ " | lowered and move-checked"
+                                    else "boundsLower | " ++ var ++ " | move errors | " ++ oneLine (intercalate " ;; " errors)
+    oneLine = map (\c -> if c == '\n' then ' ' else c)
+
+probeStub :: Name -> [Variable] -> Signature -> (M.Function, Type)
+probeStub name params (Signature ptys rty sizes types _ froms) =
+    let locals' = [M.Local (i + 1) | i <- [0 .. length ptys - 1]]
+     in ( M.Function
+            { M.fnName = name
+            , M.fnParams = locals'
+            , M.fnReturns = Just rty
+            , M.fnLocals = Map.fromList ((M.Local 0, M.LocalDecl rty Nothing) : [(l, M.LocalDecl ty (Just v)) | (l, ty, v) <- zip3 locals' ptys params])
+            , M.fnSizeParams = sizes
+            , M.fnTypeParams = types
+            , M.fnBorrowed = [l | (l, ty) <- zip locals' ptys, isRefType ty]
+            , M.fnMutBorrowed = [l | (l, ty) <- zip locals' ptys, isMutRefType ty]
+            , M.fnFrom = [l | (l, v) <- zip locals' params, v `elem` froms]
+            , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)
+            , M.fnSpec = M.emptySpec{M.specFrom = froms}
+            }
+        , functionType sizes types ptys rty
+        )
 
 interfaceTypeDecls :: ModuleInterface -> Map Name M.TypeDecl
 interfaceTypeDecls iface =

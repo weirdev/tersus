@@ -165,7 +165,26 @@ struct St {
     sigNode: Int,
     seen: List<String>,
     status: Int,
-    msg: String
+    msg: String,
+    boundsReport: Bool,
+    defChecking: Bool,
+    defCurrent: String,
+    defQueue: List<String>,
+    defKinds: List<String>,
+    defFindings: List<String>,
+    defCalled: List<String>,
+    defCalledTys: List<Int>,
+    genericOut: List<Int>,
+    genericTypes: List<Int>,
+    instanceCount: Int,
+    instanceTypes: Int
+};
+impl Clone for St { };
+
+// Phase 0 spike (bounds-only report): a finding about the template being checked at its definition
+fn defFinding(st: St, what: String, detail: String) -> St ~ {
+    line = catStrings(catStrings(catStrings(catStrings(catStrings("boundsReport | ", clone(st.defCurrent)), " | "), what), " | "), detail);
+    return St { defFindings: push(st.defFindings, line), ..st };
 };
 
 fn fail(st: St, msg: String) -> St ~ {

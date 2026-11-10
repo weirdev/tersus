@@ -7,7 +7,7 @@ import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureIn
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
-import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, productFits, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
+import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, defFinding, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, productFits, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
 import elaborate::traits { callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
@@ -1316,6 +1316,15 @@ fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
                 if st.status != 0 { return st; };
                 return callResolved(st, firstText(&st.names), &inferred0);
             };
+            if st.defChecking && x.kind = 12 {
+                receiverTy = st.ty;
+                st = ownerOfValue(st, &fname, receiverTy);
+                if st.status != 0 { return st; };
+                owner = firstText(&st.names);
+                st = resolveAssociated(st, &owner, &fname);
+                if st.status != 0 { return st; };
+                return callResolved(st, firstText(&st.names), &inferred0);
+            };
         };
     };
     return ordinaryBuiltin(st, funct, functT, ft, &inferred0);
@@ -1649,7 +1658,14 @@ fn implementsMarker(st: St, marker: String, t0: Int, depth: Int) -> St ~ {
     x = tyAt(st, t);
     if x.kind <= 3 || x.kind = 14 || x.kind = 15 || x.kind = 7 { return St { ok: true, ..st }; };
     if x.kind = 10 { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
-    if x.kind = 12 { return St { ok: marker = "Clone", ..st }; };
+    if x.kind = 12 {
+        if st.defChecking && marker != "Clone" && !HashSet::contains(&st.impls, catStrings(catStrings(clone(marker), " "), clone(x.name))) {
+            st = defFinding(st, "unwritten bound", catStrings(catStrings(catStrings(clone(x.name), " is used as "), clone(marker)), ", which its bounds do not give"));
+            st = St { impls: st.impls.insert(catStrings(catStrings(clone(marker), " "), clone(x.name))), ..st };
+        };
+        if st.defChecking && HashSet::contains(&st.impls, catStrings(catStrings(clone(marker), " "), clone(x.name))) { return St { ok: true, ..st }; };
+        return St { ok: marker = "Clone", ..st };
+    };
     if x.kind = 6 { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
     if isListTy(st, t) || isBoxTy(st, t) {
         if marker = "Clone" { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };

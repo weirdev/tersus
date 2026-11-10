@@ -192,6 +192,17 @@ executables:
     dependencies:
     - tersus
 
+  bounds-report:
+    main:                Main.hs
+    source-dirs:
+    - dev/bounds-report
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - tersus
+
 tests:
   tersus-test:
     main:                TestTersus.hs
