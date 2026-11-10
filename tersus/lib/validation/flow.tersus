@@ -1,14 +1,18 @@
 import validation::context { closeContext, contradictoryConstructors, contradictoryVariants, integerValue };
 import validation::differences { comparisonDifferences, constantDifferences, constantOrders, contradictoryConstants, contradictoryDifferences, refinedOrders };
-import validation::execution { assumeBooleanFact, assumeRelation, executeSteps, localGoal, quietStep, quietSteps };
-import validation::joins { commonContext, mergeStates };
-import validation::loopInference { appendSteps, inferLoopCandidateGoals, loopMentions };
-import validation::model { EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionState, ExecutionStep, IntegerLookup, LoopFrame, LoopTest, StateMergeLookup, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact };
-import validation::relations { contradictoryDisequalities, leastClasses };
+import validation::execution { assumeBooleanFact, assumeRelation, executeSteps, localGoal, quietStep };
+import validation::joins { HullLinks, commonContext, linkAppend, mergeStates, noLinks };
+import validation::loopInference { inferLoopCandidateGoals, loopMentions };
+import validation::model { CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StateMergeLookup, SweepArrival, SweepDelivery, SweepOrder, SweepResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
+import validation::relations { containsValue, contradictoryDisequalities, intAt, leastClasses };
 import validation::state { booleanKnownCached, negateRelation, resolveValue };
 import validation::validation { entailmentCache, entailsGoal, entailsGoalCached };
 
 
+// One region round in progress. Every state delivered is pushed once onto
+// states, and pending chains, per block, the positions of the states waiting
+// there in the order they were delivered.
+struct SweepWork { states: List<ExecutionState>, pending: HullLinks, exits: List<ExecutionState>, dropped: List<Int>, result: ExecutionFlowResult, settled: Bool, arrivals: Int, merges: Int };
 
 fn executionTable(blocks: &List<ExecutionBlock>) -> HashMap<Int, ExecutionBlock> {
     table = HashMap::new();
@@ -19,10 +23,12 @@ fn executionTable(blocks: &List<ExecutionBlock>) -> HashMap<Int, ExecutionBlock>
     return table;
 };
 
+// (an id below -1 is refused because the outermost sweep's header is -2)
 fn uniqueExecutionBlocks(blocks: &List<ExecutionBlock>) -> Bool {
     seen = HashSet::new();
     for blockPosition in 0..size(blocks) {
         block = get(blocks, blockPosition);
+        if block.id < -1 { return false; };
         if seen.contains(block.id) { return false; };
         seen = seen.insert(block.id);
     };
@@ -36,56 +42,14 @@ fn containsBlock(blocks: &List<Int>, id: Int) -> Bool {
     return false;
 };
 
-// An edge out of a loop leaves the frames whose region does not contain its
-// target, so a nested loop's exit is walked inside the loop that encloses it.
-fn popLoopFrames(loops: List<LoopFrame>, target: Int) -> List<LoopFrame> [{ }] [{ }] shrinks size(loops) {
-    if size(loops) = 0 { return loops; };
-    frame = last(loops);
-    if containsBlock(frame.region, target) { return loops; };
-    return popLoopFrames(pop(loops), target);
-};
-
-// What an edge back to a loop's header has to show: the invariant holds again,
-// and the variant is smaller than it was when the iteration started.
-fn checkLoopBackEdge(initial: &ExecutionState, frame: &LoopFrame, id: Int) -> ExecutionFlowResult {
-    preserved = executeSteps(clone(initial), frame.checks);
-    if preserved.status != 0 { return ExecutionFlowResult { status: preserved.status, block: id, step: preserved.failedAt, state: preserved.state }; };
-    next = resolveValue(preserved.state, frame.variant);
-    if next is ValueLookup::Found {
-        nextTerm = (next as ValueLookup::Found).term;
-        if frame.variantMode = 0 {
-            if entailsGoal(preserved.state.context, ValidatorGoal::Less { left: nextTerm, right: frame.prior }) = false {
-                return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
-            };
-        } else {
-            if frame.variantMode = 1 {
-                otherAfter = resolveValue(preserved.state, frame.variantOther);
-                if otherAfter is ValueLookup::Found {
-                    if entailsGoal(preserved.state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
-                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
-                    };
-                } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state }; };
-                if entailsGoal(preserved.state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
-                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
-                };
-            };
-            if frame.variantMode = 3 {
-                if entailsGoal(preserved.state.context, ValidatorGoal::Within { inner: nextTerm, outer: frame.prior }) = false {
-                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
-                };
-                if entailsGoal(preserved.state.context, ValidatorGoal::Different { left: nextTerm, right: frame.prior }) = false {
-                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
-                };
-            };
+fn stepRange(steps: &List<ExecutionStep>, from: Int, to: Int) -> List<ExecutionStep> {
+    out = [];
+    for position in 0..size(steps) {
+        if position >= from {
+            if position < to { out = push(out, clone(get(steps, position))); };
         };
-        return ExecutionFlowResult { status: 0, block: id, step: -1, state: preserved.state };
     };
-    return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state };
-};
-
-fn stopTableAtJoin(blocks: &HashMap<Int, ExecutionBlock>, join: Int) -> HashMap<Int, ExecutionBlock> {
-    table = clone(blocks);
-    return table.insert(join, ExecutionBlock { id: join, steps: [], end: ExecutionEnd::Done });
+    return out;
 };
 
 fn contextContradictory(context: &ValidatorContext) -> Bool {
@@ -101,368 +65,789 @@ fn contextContradictory(context: &ValidatorContext) -> Bool {
     return false;
 };
 
-fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
-    if fuel = 0 { return ExecutionFlowResult { status: 4, block: id, step: -1, state: clone(initial) }; };
-    if size(loops) > 0 {
-        frame = last(loops);
-        if id = frame.header { return checkLoopBackEdge(initial, frame, id); };
-        if containsBlock(frame.region, id) = false {
-            return walkExecution(blocks, id, initial, fuel - 1, popLoopFrames(loops, id));
-        };
+fn addVariantFact(context: ValidatorContext, state: &ExecutionState, object: ValueRef, family: Int, constructor: Int, matches: Bool) -> ValidatorContext {
+    if family < 0 { return context; };
+    found = resolveValue(state, object);
+    if found is ValueLookup::Found {
+        return ValidatorContext { variants: push(clone(context.variants), VariantFact { object: (found as ValueLookup::Found).term, family: family, constructor: constructor, matches: matches }), ..context };
     };
+    return context;
+};
+
+// What the variant has to show at an edge back to the header: it is smaller
+// than it was when the iteration started, in whichever of the four senses the
+// loop was written with.
+fn checkLoopVariant(state: ExecutionState, frame: &LoopFrame, id: Int) -> ExecutionFlowResult {
+    next = resolveValue(state, frame.variant);
+    if next is ValueLookup::Found {
+        nextTerm = (next as ValueLookup::Found).term;
+        if frame.variantMode = 0 {
+            if entailsGoal(state.context, ValidatorGoal::Less { left: nextTerm, right: frame.prior }) = false {
+                return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
+            };
+        } else {
+            if frame.variantMode = 1 {
+                otherAfter = resolveValue(state, frame.variantOther);
+                if otherAfter is ValueLookup::Found {
+                    if entailsGoal(state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
+                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
+                    };
+                } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: state }; };
+                if entailsGoal(state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
+                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
+                };
+            };
+            if frame.variantMode = 3 {
+                if entailsGoal(state.context, ValidatorGoal::Within { inner: nextTerm, outer: frame.prior }) = false {
+                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
+                };
+                if entailsGoal(state.context, ValidatorGoal::Different { left: nextTerm, right: frame.prior }) = false {
+                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
+                };
+            };
+        };
+        return ExecutionFlowResult { status: 0, block: id, step: -1, state: state };
+    };
+    return ExecutionFlowResult { status: 2, block: id, step: -1, state: state };
+};
+
+fn sweepFailure(status: Int, id: Int, step: Int, state: ExecutionState) -> SweepResult {
+    return SweepResult { result: ExecutionFlowResult { status: status, block: id, step: step, state: state }, dropped: [], exits: [], arrivals: 0, merges: 0 };
+};
+
+// An edge back to the header. The user's invariant and the variant are the
+// function's to prove; an inferred candidate is only a guess, so each is tried
+// on its own and quietly, and every one that fails is reported. The caller
+// sweeps the region again without them and believes nothing this round
+// produced, because the round's other proofs may have used a candidate that
+// turned out not to hold here.
+fn sweepBackEdge(initial: &ExecutionState, frame: &LoopFrame) -> SweepResult {
+    id = frame.header;
+    preserved = executeSteps(clone(initial), frame.checks);
+    if preserved.status != 0 { return sweepFailure(preserved.status, id, preserved.failedAt, preserved.state); };
+    state = clone(preserved.state);
+    dropped = [];
+    from = 0;
+    for candidate in 0..size(frame.candEnds) {
+        to = get(frame.candEnds, candidate);
+        tried = executeSteps(clone(state), stepRange(frame.candChecks, from, to));
+        if tried.status != 0 { dropped = push(dropped, candidate); } else { state = tried.state; };
+        from = to;
+    };
+    if size(dropped) > 0 {
+        return SweepResult { result: ExecutionFlowResult { status: 1, block: id, step: -1, state: state }, dropped: dropped, exits: [], arrivals: 0, merges: 0 };
+    };
+    return SweepResult { result: checkLoopVariant(state, frame, id), dropped: [], exits: [], arrivals: 0, merges: 0 };
+};
+
+// A test the state decides takes one arm only, so an arm naming a block the
+// function does not have is left out here and refused if a state is ever
+// delivered to it. Every other end's targets must exist.
+fn testTargets(blocks: &HashMap<Int, ExecutionBlock>, yes: Int, no: Int) -> List<Int> {
+    out = [];
+    if blocks.contains(yes) { out = push(out, yes); };
+    if blocks.contains(no) { out = push(out, no); };
+    return out;
+};
+
+// Every block an end can deliver to, once each. A nested loop gives its exit
+// alone: the blocks of its own region, and the blocks outside it that only
+// lead to returns, belong to the sweep of that region.
+fn sweepSuccessors(blocks: &HashMap<Int, ExecutionBlock>, id: Int) -> List<Int> {
+    raw = [];
     if blocks.contains(id) {
         block = blocks.lookupRef(id);
-        if (*block).end is ExecutionEnd::Loop {
-            loop = (*block).end as ExecutionEnd::Loop;
-            entry = executeSteps(clone(initial), loop.checks);
-            if entry.status != 0 { return ExecutionFlowResult { status: entry.status, block: id, step: entry.failedAt, state: entry.state }; };
-        };
-        run = executeSteps(clone(initial), (*block).steps);
-        if run.status != 0 { return ExecutionFlowResult { status: run.status, block: id, step: run.failedAt, state: run.state }; };
         end = (*block).end;
-        if end is ExecutionEnd::Done { return ExecutionFlowResult { status: 0, block: id, step: -1, state: run.state }; };
-        if end is ExecutionEnd::Jump {
-            jump = end as ExecutionEnd::Jump;
-            return walkExecution(blocks, jump.target, run.state, fuel - 1, loops);
-        };
-        if end is ExecutionEnd::Loop {
-            loop = end as ExecutionEnd::Loop;
-            if loop.relation < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
-            if loop.relation > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
-            if loop.variantMode < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
-            if loop.variantMode > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
-            inferredGoals = inferLoopCandidateGoals(initial, loop.havoc, loopMentions(blocks, loop.region));
-            survivors = clone(inferredGoals);
-            finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) };
-            done = false;
-            for attempt in 0..size(inferredGoals) + 2 {
-                if done = false {
-                    candAssumes = [];
-                    candChecks = [];
-                    candCheckPos = [];
-                    pos = size(loop.checks);
-                    for gi in 0..size(survivors) {
-                        g = get(survivors, gi);
-                        for si in 0..size(g.assumes) { candAssumes = push(candAssumes, clone(get(g.assumes, si))); };
-                        for si in 0..size(g.checks) { candChecks = push(candChecks, quietStep(get(g.checks, si))); };
-                        candCheckPos = push(candCheckPos, pos + size(g.checks) - 1);
-                        pos = pos + size(g.checks);
-                    };
-                    arbitrary = clone(initial);
-                    for localPosition in 0..size(loop.havoc) {
-                        local = get(loop.havoc, localPosition);
-                        if done = false {
-                            changed = executeSteps(clone(arbitrary), push([], ExecutionStep::Havoc { local: local }));
-                            if changed.status != 0 { finalResult = ExecutionFlowResult { status: changed.status, block: id, step: -1, state: clone(changed.state) }; done = true; };
-                            if done = false { arbitrary = changed.state; };
-                        };
-                    };
-                    if done = false {
-                        assumed = executeSteps(arbitrary, loop.assumptions);
-                        if assumed.status != 0 { finalResult = ExecutionFlowResult { status: assumed.status, block: id, step: assumed.failedAt, state: clone(assumed.state) }; done = true; };
-                        if done = false {
-                            assumed = executeSteps(assumed.state, candAssumes);
-                            if assumed.status != 0 { finalResult = ExecutionFlowResult { status: assumed.status, block: id, step: assumed.failedAt, state: clone(assumed.state) }; done = true; };
-                            if done = false {
-                                header = executeSteps(assumed.state, (*block).steps);
-                                if header.status != 0 { finalResult = ExecutionFlowResult { status: header.status, block: id, step: header.failedAt, state: clone(header.state) }; done = true; };
-                                if done = false {
-                                    headerState = clone(header.state);
-                                    left = resolveValue(headerState, loop.left);
-                                    right = resolveValue(headerState, loop.right);
-                                    old = resolveValue(headerState, loop.variant);
-                                    zero = resolveValue(headerState, loop.zero);
-                                    other = resolveValue(headerState, loop.variantOther);
-                                    if left is ValueLookup::Found {
-                                        if right is ValueLookup::Found {
-                                            if old is ValueLookup::Found {
-                                                if zero is ValueLookup::Found {
-                                                    if other is ValueLookup::Found {
-                                                        a = (left as ValueLookup::Found).term;
-                                                        b = (right as ValueLookup::Found).term;
-                                                        prior = (old as ValueLookup::Found).term;
-                                                        priorOther = (other as ValueLookup::Found).term;
-                                                        z = (zero as ValueLookup::Found).term;
-                                                        zeroValue = integerValue(headerState.context, z);
-                                                        if zeroValue is IntegerLookup::Found {
-                                                            if (zeroValue as IntegerLookup::Found).value != 0 { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
-                                                        } else { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
-                                                        if done = false {
-                                                            tests = push([], LoopTest { relation: loop.relation, left: loop.left, right: loop.right });
-                                                            for extra in loop.orTests { tests = push(tests, clone(extra)); };
-                                                            negContext = clone(headerState.context);
-                                                            joinedYes = clone(headerState);
-                                                            haveYes = false;
-                                                            pathContexts = [];
-                                                            testRelations = [];
-                                                            testLefts = [];
-                                                            testRights = [];
-                                                            for testPosition in 0..size(tests) {
-                                                                test = get(tests, testPosition);
-                                                                if done = false {
-                                                                    ta = a;
-                                                                    tb = b;
-                                                                    lv = resolveValue(headerState, test.left);
-                                                                    rv = resolveValue(headerState, test.right);
-                                                                    resolved = false;
-                                                                    if lv is ValueLookup::Found { if rv is ValueLookup::Found { ta = (lv as ValueLookup::Found).term; tb = (rv as ValueLookup::Found).term; resolved = true; }; };
-                                                                    if resolved = false { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
-                                                                    if done = false {
-                                                                        pathContext = assumeRelation(clone(negContext), test.relation, ta, tb);
-                                                                        pathFacts = push(pathContext.equalities, EqualityFact { left: prior, right: prior });
-                                                                        pathFacts = push(pathFacts, EqualityFact { left: priorOther, right: priorOther });
-                                                                        pathState = ExecutionState { context: ValidatorContext { equalities: pathFacts, ..pathContext }, ..clone(headerState) };
-                                                                        if contextContradictory(pathState.context) = false { pathContexts = push(pathContexts, clone(pathState.context)); };
-                                                                        testRelations = push(testRelations, test.relation);
-                                                                        testLefts = push(testLefts, ta);
-                                                                        testRights = push(testRights, tb);
-                                                                        if haveYes = false {
-                                                                            joinedYes = pathState;
-                                                                            haveYes = true;
-                                                                        } else {
-                                                                            if contextContradictory(pathState.context) = false {
-                                                                                if contextContradictory(joinedYes.context) {
-                                                                                    joinedYes = pathState;
-                                                                                } else {
-                                                                                    joinedYes = ExecutionState { context: commonContext(joinedYes.context, pathState.context), ..clone(joinedYes) };
-                                                                                };
-                                                                            };
-                                                                        };
-                                                                        inverse = negateRelation(test.relation, ta, tb);
-                                                                        negContext = assumeRelation(negContext, inverse.relation, inverse.left, inverse.right);
-                                                                    };
-                                                                };
-                                                            };
-                                                            if done = false {
-                                                                if size(tests) > 1 {
-                                                                    for ti in 0..size(testRelations) {
-                                                                        rel = get(testRelations, ti);
-                                                                        tl = get(testLefts, ti);
-                                                                        tr = get(testRights, ti);
-                                                                        everyPath = size(pathContexts) > 0;
-                                                                        for pcPosition in 0..size(pathContexts) {
-                                                                            pc = get(pathContexts, pcPosition);
-                                                                            if everyPath {
-                                                                                if entailsGoal(pc, localGoal(rel, tl, tr)) = false { everyPath = false; };
-                                                                            };
-                                                                        };
-                                                                        if everyPath {
-                                                                            joinedYes = ExecutionState { context: assumeRelation(joinedYes.context, rel, tl, tr), ..clone(joinedYes) };
-                                                                        };
-                                                                    };
-                                                                };
-                                                                yesContext = clone(joinedYes.context);
-                                                                if loop.variantFamily >= 0 {
-                                                                    variantObject = resolveValue(joinedYes, loop.variantObject);
-                                                                    if variantObject is ValueLookup::Found {
-                                                                        yesContext = ValidatorContext { variants: push(clone(yesContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: true }), ..yesContext };
-                                                                    };
-                                                                };
-                                                                if loop.variantMode = 0 {
-                                                                    if entailsGoal(yesContext, ValidatorGoal::AtMost { left: z, right: prior }) = false {
-                                                                        finalResult = ExecutionFlowResult { status: 1, block: id, step: -1, state: clone(headerState) }; done = true;
-                                                                    };
-                                                                } else {
-                                                                    if loop.variantMode = 1 {
-                                                                        if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
-                                                                            finalResult = ExecutionFlowResult { status: 1, block: id, step: -1, state: clone(headerState) }; done = true;
-                                                                        };
-                                                                    };
-                                                                };
-                                                                if done = false {
-                                                                    protectedFacts = push(yesContext.equalities, EqualityFact { left: prior, right: prior });
-                                                                    protectedFacts = push(protectedFacts, EqualityFact { left: priorOther, right: priorOther });
-                                                                    protected = ValidatorContext { equalities: protectedFacts, ..yesContext };
-                                                                    yesState = ExecutionState { context: protected, ..clone(joinedYes) };
-                                                                    frame = LoopFrame { header: id, region: clone(loop.region), checks: appendSteps(loop.checks, candChecks), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: prior, priorOther: priorOther };
-                                                                    bodyResult = walkExecution(blocks, loop.body, yesState, fuel - 1, push(clone(loops), frame));
-                                                                    if bodyResult.status != 0 { finalResult = bodyResult; done = true; };
-                                                                };
-                                                            };
-                                                            if done = false {
-                                                                noContext = negContext;
-                                                                if loop.variantFamily >= 0 {
-                                                                    variantObject = resolveValue(headerState, loop.variantObject);
-                                                                    if variantObject is ValueLookup::Found {
-                                                                        noContext = ValidatorContext { variants: push(clone(noContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: false }), ..noContext };
-                                                                    };
-                                                                };
-                                                                if contextContradictory(noContext) {
-                                                                    finalResult = ExecutionFlowResult { status: 0, block: id, step: -1, state: ExecutionState { context: clone(noContext), ..clone(headerState) } }; done = true;
-                                                                };
-                                                                if done = false {
-                                                                    noState = ExecutionState { context: noContext, ..clone(headerState) };
-                                                                    finalResult = walkExecution(blocks, loop.exit, noState, fuel - 1, clone(loops)); done = true;
-                                                                };
-                                                            };
-                                                        };
-                                                    };
-                                                };
-                                            };
-                                        };
-                                    };
-                                    if done = false { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; done = true; };
-                                };
-                            };
-                        };
-                    };
-                    if done {
-                        if finalResult.status != 0 {
-                            if size(survivors) > 0 {
-                                dropIndex = -1;
-                                if finalResult.block = id {
-                                    for ci in 0..size(candCheckPos) {
-                                        if get(candCheckPos, ci) = finalResult.step { dropIndex = ci; };
-                                    };
-                                };
-                                if dropIndex >= 0 {
-                                    // Every candidate after the one that failed is tried at the same
-                                    // edge, and each that fails there too goes with it: dropping more
-                                    // is always sound, and the loop is walked again once, not once
-                                    // for each candidate the body breaks.
-                                    // (each check after it is tried with what the ones before it
-                                    // proved, as the walk itself would have)
-                                    nextSurvivors = [];
-                                    edgeState = clone(finalResult.state);
-                                    for ci in 0..size(survivors) {
-                                        keep = ci != dropIndex;
-                                        if keep {
-                                            if ci > dropIndex {
-                                                tried = executeSteps(clone(edgeState), quietSteps(get(survivors, ci).checks));
-                                                if tried.status != 0 { keep = false; } else { edgeState = tried.state; };
-                                            };
-                                        };
-                                        if keep { nextSurvivors = push(nextSurvivors, clone(get(survivors, ci))); };
-                                    };
-                                    survivors = nextSurvivors;
-                                    done = false;
-                                } else {
-                                    survivors = [];
-                                    done = false;
-                                };
-                            };
-                        };
-                    };
-                };
-            };
-            return finalResult;
-            return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) };
-        };
-        if end is ExecutionEnd::Condition {
-            condition = end as ExecutionEnd::Condition;
-            if condition.relation < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state }; };
-            if condition.relation > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state }; };
-            left = resolveValue(run.state, condition.left);
-            right = resolveValue(run.state, condition.right);
-            if left is ValueLookup::Found {
-                if right is ValueLookup::Found {
-                    a = (left as ValueLookup::Found).term;
-                    b = (right as ValueLookup::Found).term;
-                    inverse = negateRelation(condition.relation, a, b);
-                    yesAnswer = entailsGoalCached(entailmentCache(run.state.context), localGoal(condition.relation, a, b));
-                    yesKnown = yesAnswer.holds;
-                    noKnown = entailsGoalCached(yesAnswer.cache, localGoal(inverse.relation, inverse.left, inverse.right)).holds;
-                    if noKnown = false {
-                        yesContext = assumeRelation(clone(run.state.context), condition.relation, a, b);
-                        yesState = ExecutionState { context: yesContext, ..clone(run.state) };
-                        yesResult = walkExecution(blocks, condition.yes, yesState, fuel - 1, clone(loops));
-                        if yesResult.status != 0 { return yesResult; };
-                        if yesKnown { return yesResult; };
-                    };
-                    noContext = assumeRelation(clone(run.state.context), inverse.relation, inverse.left, inverse.right);
-                    noState = ExecutionState { context: noContext, ..run.state };
-                    return walkExecution(blocks, condition.no, noState, fuel - 1, loops);
-                };
-            };
-            return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
+        if end is ExecutionEnd::Jump { raw = push(raw, (end as ExecutionEnd::Jump).target); };
+        if end is ExecutionEnd::Branch {
+            branch = end as ExecutionEnd::Branch;
+            raw = push(push(raw, branch.yes), branch.no);
         };
         if end is ExecutionEnd::BooleanBranch {
             branch = end as ExecutionEnd::BooleanBranch;
-            value = resolveValue(run.state, branch.value);
-            trueValue = resolveValue(run.state, branch.trueValue);
-            falseValue = resolveValue(run.state, branch.falseValue);
-            if value is ValueLookup::Found {
-                if trueValue is ValueLookup::Found {
-                    if falseValue is ValueLookup::Found {
-                        term = (value as ValueLookup::Found).term;
-                        yesLiteral = (trueValue as ValueLookup::Found).term;
-                        noLiteral = (falseValue as ValueLookup::Found).term;
-                        if branch.join >= 0 {
-                            joinYesAnswer = booleanKnownCached(entailmentCache(run.state.context), term, yesLiteral, true);
-                            joinYesKnown = joinYesAnswer.holds;
-                            if joinYesKnown {
-                                yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
-                                yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
-                                yesState = ExecutionState { context: yesContext, ..clone(run.state) };
-                                return walkExecution(blocks, branch.yes, yesState, fuel - 1, clone(loops));
-                            };
-                            joinNoKnown = booleanKnownCached(joinYesAnswer.cache, term, noLiteral, false).holds;
-                            if joinNoKnown {
-                                noContext = assumeRelation(run.state.context, 0, term, noLiteral);
-                                noContext = assumeBooleanFact(noContext, term, noLiteral);
-                                noState = ExecutionState { context: noContext, ..clone(run.state) };
-                                return walkExecution(blocks, branch.no, noState, fuel - 1, clone(loops));
-                            };
-                            yesContext = assumeRelation(clone(run.state.context), 0, term, yesLiteral);
-                            yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
-                            yesState = ExecutionState { context: yesContext, ..clone(run.state) };
-                            stopped = stopTableAtJoin(blocks, branch.join);
-                            yesResult = walkExecution(stopped, branch.yes, yesState, fuel - 1, clone(loops));
-                            if yesResult.status != 0 { return yesResult; };
-                            noContext = assumeRelation(clone(run.state.context), 0, term, noLiteral);
-                            noContext = assumeBooleanFact(noContext, term, noLiteral);
-                            noState = ExecutionState { context: noContext, ..clone(run.state) };
-                            noResult = walkExecution(stopped, branch.no, noState, fuel - 1, clone(loops));
-                            if noResult.status != 0 { return noResult; };
-                            merged = mergeStates(yesResult.state, noResult.state);
-                            if merged is StateMergeLookup::Found {
-                                return walkExecution(blocks, branch.join, (merged as StateMergeLookup::Found).state, fuel - 1, loops);
-                            };
-                            return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
-                        };
-                        yesAnswer = booleanKnownCached(entailmentCache(run.state.context), term, yesLiteral, true);
-                        yesKnown = yesAnswer.holds;
-                        if yesKnown {
-                            yesContext = assumeRelation(clone(run.state.context), 0, term, yesLiteral);
-                            yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
-                            yesState = ExecutionState { context: yesContext, ..run.state };
-                            return walkExecution(blocks, branch.yes, yesState, fuel - 1, loops);
-                        };
-                        noKnown = booleanKnownCached(yesAnswer.cache, term, noLiteral, false).holds;
-                        if noKnown = false {
-                            yesContext = assumeRelation(clone(run.state.context), 0, term, yesLiteral);
-                            yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
-                            yesState = ExecutionState { context: yesContext, ..clone(run.state) };
-                            yesResult = walkExecution(blocks, branch.yes, yesState, fuel - 1, clone(loops));
-                            if yesResult.status != 0 { return yesResult; };
-                        };
-                        noContext = assumeRelation(clone(run.state.context), 0, term, noLiteral);
-                        noContext = assumeBooleanFact(noContext, term, noLiteral);
-                        noState = ExecutionState { context: noContext, ..run.state };
-                        return walkExecution(blocks, branch.no, noState, fuel - 1, loops);
+            raw = testTargets(blocks, branch.yes, branch.no);
+        };
+        if end is ExecutionEnd::Condition {
+            condition = end as ExecutionEnd::Condition;
+            raw = testTargets(blocks, condition.yes, condition.no);
+        };
+        if end is ExecutionEnd::Loop { raw = push(raw, (end as ExecutionEnd::Loop).exit); };
+    };
+    out = [];
+    for position in 0..size(raw) {
+        target = get(raw, position);
+        if containsValue(out, target) = false { out = push(out, target); };
+    };
+    return out;
+};
+
+// The blocks this sweep is responsible for: what the start reaches without
+// taking a back edge to the header or the loop's own exit.
+fn sweepReached(blocks: &HashMap<Int, ExecutionBlock>, start: Int, header: Int, exit: Int, limit: Int) -> List<Int> [{ affirm limit >= 0; }] [{ }] {
+    reached = push([], start);
+    seen = HashSet::new();
+    seen = seen.insert(start);
+    at = 0;
+    for round in 0..limit {
+        if at < size(reached) {
+            id = get(reached, at);
+            at = at + 1;
+            successors = sweepSuccessors(blocks, id);
+            for position in 0..size(successors) {
+                target = get(successors, position);
+                if target != header && target != exit {
+                    if seen.contains(target) = false {
+                        seen = seen.insert(target);
+                        reached = push(reached, target);
                     };
                 };
             };
-            return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
         };
-        if end is ExecutionEnd::Branch {
-            branch = end as ExecutionEnd::Branch;
-            yes = executeSteps(clone(run.state), branch.yesSteps);
-            if yes.status != 0 { return ExecutionFlowResult { status: yes.status, block: id, step: yes.failedAt, state: yes.state }; };
-            yesResult = walkExecution(blocks, branch.yes, yes.state, fuel - 1, clone(loops));
-            if yesResult.status != 0 { return yesResult; };
-            no = executeSteps(run.state, branch.noSteps);
-            if no.status != 0 { return ExecutionFlowResult { status: no.status, block: id, step: no.failedAt, state: no.state }; };
-            return walkExecution(blocks, branch.no, no.state, fuel - 1, loops);
-        };
-        return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
     };
-    return ExecutionFlowResult { status: 3, block: id, step: -1, state: clone(initial) };
+    if at < size(reached) { return []; };
+    return reached;
+};
+
+// A graph this sweep can be trusted with. Everything it reaches is a block it
+// has; a nested loop is entered at its header alone; neither that header nor
+// any block of its region is a header already being swept, so the recursion
+// cannot re-enter a header and its depth is bounded by the block count; and a
+// block outside this region, which the language can only reach on the way to
+// a return, never leads back into it.
+//
+// A region is the blocks that reach its header, so a nested loop whose body
+// always returns adds nothing to the enclosing region and its own region is
+// legitimately no part of it. Membership is checked against the block table
+// and against what this sweep reached, never against the enclosing region.
+fn sweepGraphFault(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, reached: &List<Int>) -> Int {
+    if size(reached) = 0 { return 9; };
+    for position in 0..size(reached) {
+        id = get(reached, position);
+        if blocks.contains(id) {
+            block = blocks.lookupRef(id);
+            end = (*block).end;
+            if end is ExecutionEnd::Loop {
+                inner = (end as ExecutionEnd::Loop).region;
+                if containsBlock(frame.active, id) { return 2; };
+                if containsBlock(inner, id) = false { return 4; };
+                for innerPosition in 0..size(inner) {
+                    member = get(inner, innerPosition);
+                    if blocks.contains(member) = false { return 5; };
+                    if containsBlock(frame.active, member) { return 3; };
+                    if member != id {
+                        if containsBlock(reached, member) { return 6; };
+                    };
+                };
+            };
+        } else { return 1; };
+    };
+    if frame.header < 0 { return 0; };
+    for position in 0..size(reached) {
+        id = get(reached, position);
+        if containsBlock(frame.region, id) = false {
+            successors = sweepSuccessors(blocks, id);
+            for successorPosition in 0..size(successors) {
+                target = get(successors, successorPosition);
+                if target = frame.header { return 7; };
+                if containsBlock(frame.region, target) { return 8; };
+            };
+        };
+    };
+    return 0;
+};
+
+// The reached blocks in an order where a block follows every block that can
+// deliver to it, so its arrivals are all known when it is reached. A block
+// left over is in a cycle the region's back edges do not account for.
+fn sweepTopologicalOrder(blocks: &HashMap<Int, ExecutionBlock>, header: Int, reached: &List<Int>) -> SweepOrder {
+    arriving = HashMap::new();
+    for position in 0..size(reached) { arriving = arriving.insert(get(reached, position), 0); };
+    for position in 0..size(reached) {
+        successors = sweepSuccessors(blocks, get(reached, position));
+        for successorPosition in 0..size(successors) {
+            target = get(successors, successorPosition);
+            if target != header {
+                if arriving.contains(target) { arriving = arriving.insert(target, arriving.lookup(target, 0) + 1); };
+            };
+        };
+    };
+    ready = [];
+    for position in 0..size(reached) {
+        id = get(reached, position);
+        if arriving.lookup(id, 0) = 0 { ready = push(ready, id); };
+    };
+    order = [];
+    at = 0;
+    for round in 0..size(reached) {
+        if at < size(ready) {
+            id = get(ready, at);
+            at = at + 1;
+            order = push(order, id);
+            successors = sweepSuccessors(blocks, id);
+            for successorPosition in 0..size(successors) {
+                target = get(successors, successorPosition);
+                if target != header {
+                    if arriving.contains(target) {
+                        left = arriving.lookup(target, 0) - 1;
+                        arriving = arriving.insert(target, left);
+                        if left = 0 { ready = push(ready, target); };
+                    };
+                };
+            };
+        };
+    };
+    if size(order) != size(reached) { return SweepOrder { status: 3, order: [] }; };
+    return SweepOrder { status: 0, order: order };
+};
+
+// The state an iteration starts in: the locals the region assigns made
+// arbitrary, then what the loop assumes, the candidates that are still
+// standing, and the header's own steps.
+fn loopEntryState(initial: &ExecutionState, havoc: &List<Int>, assumptions: &List<ExecutionStep>, candAssumes: &List<ExecutionStep>, steps: &List<ExecutionStep>) -> ExecutionResult {
+    arbitrary = clone(initial);
+    for position in 0..size(havoc) {
+        changed = executeSteps(clone(arbitrary), push([], ExecutionStep::Havoc { local: get(havoc, position) }));
+        if changed.status != 0 { return ExecutionResult { status: changed.status, failedAt: -1, state: changed.state }; };
+        arbitrary = changed.state;
+    };
+    assumed = executeSteps(arbitrary, assumptions);
+    if assumed.status != 0 { return assumed; };
+    assumed = executeSteps(assumed.state, candAssumes);
+    if assumed.status != 0 { return assumed; };
+    return executeSteps(assumed.state, steps);
+};
+
+fn loopEntryTerms(state: &ExecutionState, left: ValueRef, right: ValueRef, variant: ValueRef, variantOther: ValueRef, zero: ValueRef) -> LoopEntryTerms {
+    missing = LoopEntryTerms { found: false, left: 0, right: 0, prior: 0, priorOther: 0, zero: 0 };
+    leftValue = resolveValue(state, left);
+    rightValue = resolveValue(state, right);
+    old = resolveValue(state, variant);
+    other = resolveValue(state, variantOther);
+    zeroValue = resolveValue(state, zero);
+    if leftValue is ValueLookup::Found {
+        if rightValue is ValueLookup::Found {
+            if old is ValueLookup::Found {
+                if other is ValueLookup::Found {
+                    if zeroValue is ValueLookup::Found {
+                        zeroTerm = (zeroValue as ValueLookup::Found).term;
+                        known = integerValue(state.context, zeroTerm);
+                        if known is IntegerLookup::Found {
+                            if (known as IntegerLookup::Found).value != 0 { return missing; };
+                            return LoopEntryTerms { found: true, left: (leftValue as ValueLookup::Found).term, right: (rightValue as ValueLookup::Found).term, prior: (old as ValueLookup::Found).term, priorOther: (other as ValueLookup::Found).term, zero: zeroTerm };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return missing;
+};
+
+// The two ways out of the loop's test. An iteration runs with the test true:
+// where the loop has several tests any one of them may be the reason, so the
+// state is what they have in common, plus the relations every one of them
+// entails. The exit edge has all of them false.
+fn loopSplit(headerState: &ExecutionState, tests: &List<LoopTest>, prior: Int, priorOther: Int) -> LoopSplit {
+    negContext = clone(headerState.context);
+    joinedYes = clone(headerState);
+    haveYes = false;
+    pathContexts = [];
+    testRelations = [];
+    testLefts = [];
+    testRights = [];
+    // (the three lists are pushed together, which is what lets the second loop
+    // index them by the first one's size)
+    for testPosition in 0..size(tests) [{ affirm size(testLefts) = size(testRelations); affirm size(testRights) = size(testRelations); }] {
+        test = get(tests, testPosition);
+        leftValue = resolveValue(headerState, test.left);
+        rightValue = resolveValue(headerState, test.right);
+        if leftValue is ValueLookup::Found {
+            if rightValue is ValueLookup::Found {
+                ta = (leftValue as ValueLookup::Found).term;
+                tb = (rightValue as ValueLookup::Found).term;
+                pathContext = assumeRelation(clone(negContext), test.relation, ta, tb);
+                pathFacts = push(pathContext.equalities, EqualityFact { left: prior, right: prior });
+                pathFacts = push(pathFacts, EqualityFact { left: priorOther, right: priorOther });
+                pathState = ExecutionState { context: ValidatorContext { equalities: pathFacts, ..pathContext }, ..clone(headerState) };
+                if contextContradictory(pathState.context) = false { pathContexts = push(pathContexts, clone(pathState.context)); };
+                testRelations = push(testRelations, test.relation);
+                testLefts = push(testLefts, ta);
+                testRights = push(testRights, tb);
+                if haveYes = false {
+                    joinedYes = pathState;
+                    haveYes = true;
+                } else {
+                    if contextContradictory(pathState.context) = false {
+                        if contextContradictory(joinedYes.context) {
+                            joinedYes = pathState;
+                        } else {
+                            joinedYes = ExecutionState { context: commonContext(joinedYes.context, pathState.context), ..clone(joinedYes) };
+                        };
+                    };
+                };
+                inverse = negateRelation(test.relation, ta, tb);
+                negContext = assumeRelation(negContext, inverse.relation, inverse.left, inverse.right);
+            } else { return LoopSplit { status: 2, yes: clone(headerState), no: clone(headerState.context) }; };
+        } else { return LoopSplit { status: 2, yes: clone(headerState), no: clone(headerState.context) }; };
+    };
+    if haveYes = false { return LoopSplit { status: 2, yes: clone(headerState), no: clone(headerState.context) }; };
+    if size(tests) > 1 {
+        for testPosition in 0..size(testRelations) {
+            relation = get(testRelations, testPosition);
+            ta = get(testLefts, testPosition);
+            tb = get(testRights, testPosition);
+            everyPath = size(pathContexts) > 0;
+            for pathPosition in 0..size(pathContexts) {
+                if everyPath {
+                    if entailsGoal(get(pathContexts, pathPosition), localGoal(relation, ta, tb)) = false { everyPath = false; };
+                };
+            };
+            if everyPath {
+                joinedYes = ExecutionState { context: assumeRelation(joinedYes.context, relation, ta, tb), ..clone(joinedYes) };
+            };
+        };
+    };
+    return LoopSplit { status: 0, yes: joinedYes, no: negContext };
+};
+
+// Where a block's end sends the state it ran. A test the facts already answer
+// takes one edge only, which is what keeps an arm the program cannot reach
+// from being checked.
+fn sweepDeliveries(end: ExecutionEnd, state: ExecutionState) -> SweepDelivery {
+    if end is ExecutionEnd::Jump {
+        return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: (end as ExecutionEnd::Jump).target, state: state }) };
+    };
+    if end is ExecutionEnd::Branch {
+        branch = end as ExecutionEnd::Branch;
+        yes = executeSteps(clone(state), branch.yesSteps);
+        if yes.status != 0 { return SweepDelivery { status: yes.status, step: yes.failedAt, states: [] }; };
+        no = executeSteps(state, branch.noSteps);
+        if no.status != 0 { return SweepDelivery { status: no.status, step: no.failedAt, states: [] }; };
+        return SweepDelivery { status: 0, step: -1, states: push(push([], SweepArrival { block: branch.yes, state: yes.state }), SweepArrival { block: branch.no, state: no.state }) };
+    };
+    if end is ExecutionEnd::BooleanBranch {
+        branch = end as ExecutionEnd::BooleanBranch;
+        value = resolveValue(state, branch.value);
+        trueValue = resolveValue(state, branch.trueValue);
+        falseValue = resolveValue(state, branch.falseValue);
+        if value is ValueLookup::Found {
+            if trueValue is ValueLookup::Found {
+                if falseValue is ValueLookup::Found {
+                    term = (value as ValueLookup::Found).term;
+                    yesLiteral = (trueValue as ValueLookup::Found).term;
+                    noLiteral = (falseValue as ValueLookup::Found).term;
+                    yesContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, yesLiteral), term, yesLiteral);
+                    noContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, noLiteral), term, noLiteral);
+                    yesAnswer = booleanKnownCached(entailmentCache(state.context), term, yesLiteral, true);
+                    if yesAnswer.holds {
+                        return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: branch.yes, state: ExecutionState { context: yesContext, ..state } }) };
+                    };
+                    if booleanKnownCached(yesAnswer.cache, term, noLiteral, false).holds {
+                        return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: branch.no, state: ExecutionState { context: noContext, ..state } }) };
+                    };
+                    yesState = ExecutionState { context: yesContext, ..clone(state) };
+                    noState = ExecutionState { context: noContext, ..state };
+                    return SweepDelivery { status: 0, step: -1, states: push(push([], SweepArrival { block: branch.yes, state: yesState }), SweepArrival { block: branch.no, state: noState }) };
+                };
+            };
+        };
+        return SweepDelivery { status: 2, step: -1, states: [] };
+    };
+    if end is ExecutionEnd::Condition {
+        condition = end as ExecutionEnd::Condition;
+        if condition.relation < 0 { return SweepDelivery { status: 2, step: -1, states: [] }; };
+        if condition.relation > 3 { return SweepDelivery { status: 2, step: -1, states: [] }; };
+        left = resolveValue(state, condition.left);
+        right = resolveValue(state, condition.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found {
+                a = (left as ValueLookup::Found).term;
+                b = (right as ValueLookup::Found).term;
+                inverse = negateRelation(condition.relation, a, b);
+                yesContext = assumeRelation(clone(state.context), condition.relation, a, b);
+                noContext = assumeRelation(clone(state.context), inverse.relation, inverse.left, inverse.right);
+                yesAnswer = entailsGoalCached(entailmentCache(state.context), localGoal(condition.relation, a, b));
+                noKnown = entailsGoalCached(yesAnswer.cache, localGoal(inverse.relation, inverse.left, inverse.right)).holds;
+                if noKnown {
+                    return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: condition.no, state: ExecutionState { context: noContext, ..state } }) };
+                };
+                if yesAnswer.holds {
+                    return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: condition.yes, state: ExecutionState { context: yesContext, ..state } }) };
+                };
+                yesState = ExecutionState { context: yesContext, ..clone(state) };
+                noState = ExecutionState { context: noContext, ..state };
+                return SweepDelivery { status: 0, step: -1, states: push(push([], SweepArrival { block: condition.yes, state: yesState }), SweepArrival { block: condition.no, state: noState }) };
+            };
+        };
+        return SweepDelivery { status: 2, step: -1, states: [] };
+    };
+    return SweepDelivery { status: 2, step: -1, states: [] };
+};
+
+fn sweepWorkStart(start: Int, state: &ExecutionState) -> SweepWork {
+    return SweepWork { states: push([], clone(state)), pending: linkAppend(noLinks(), start, 0), exits: [], dropped: [], result: ExecutionFlowResult { status: 0, block: start, step: -1, state: clone(state) }, settled: false, arrivals: 1, merges: 0 };
+};
+
+fn settleWith(work: SweepWork, result: ExecutionFlowResult) -> SweepWork {
+    return SweepWork { result: result, settled: true, ..work };
+};
+
+fn settleAt(work: SweepWork, status: Int, block: Int, step: Int) -> SweepWork {
+    state = clone(work.result.state);
+    return SweepWork { result: ExecutionFlowResult { status: status, block: block, step: step, state: state }, settled: true, ..work };
+};
+
+fn deliverState(work: SweepWork, block: Int, state: ExecutionState) -> SweepWork {
+    position = size(work.states);
+    return SweepWork { pending: linkAppend(work.pending, block, position), states: push(work.states, state), arrivals: work.arrivals + 1, ..work };
+};
+
+fn waitingAt(pending: &HullLinks, block: Int) -> List<Int> {
+    taken = [];
+    at = pending.first.lookup(block, -1);
+    walked = 0;
+    linkCount = size(pending.items);
+    while at >= 0 && at < size(pending.items) && walked < linkCount [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
+        taken = push(taken, get(pending.items, at));
+        at = intAt(pending.next, at, -1);
+        walked = walked + 1;
+    };
+    return taken;
+};
+
+fn withoutWaiting(pending: HullLinks, block: Int) -> HullLinks {
+    HullLinks { first: first, last: last, next: next, items: items } = pending;
+    return HullLinks { first: first.remove(block), last: last.remove(block), next: next, items: items };
+};
+
+fn arrivalState(states: &List<ExecutionState>, index: Int) -> StateMergeLookup {
+    if index < 0 { return StateMergeLookup::Missing; };
+    if index >= size(states) { return StateMergeLookup::Missing; };
+    return StateMergeLookup::Found { state: clone(get(states, index)) };
+};
+
+// The states waiting at a block, merged in the order they were delivered.
+// Only soundness, not precision, is independent of that order.
+fn foldArrivals(states: &List<ExecutionState>, taken: &List<Int>) -> StateMergeLookup {
+    if size(taken) = 0 { return StateMergeLookup::Missing; };
+    folded = arrivalState(states, get(taken, 0));
+    for position in 1..size(taken) {
+        if folded is StateMergeLookup::Found {
+            next = arrivalState(states, get(taken, position));
+            if next is StateMergeLookup::Found {
+                folded = mergeStates((folded as StateMergeLookup::Found).state, (next as StateMergeLookup::Found).state);
+            } else { folded = StateMergeLookup::Missing; };
+        };
+    };
+    return folded;
+};
+
+fn activeHeader(header: Int, target: Int) -> Bool {
+    if header < 0 { return false; };
+    return target = header;
+};
+
+fn backEdge(frame: &LoopFrame, state: &ExecutionState, work: SweepWork) -> SweepWork {
+    back = sweepBackEdge(state, frame);
+    dropped = clone(work.dropped);
+    for position in 0..size(back.dropped) {
+        candidate = get(back.dropped, position);
+        if containsValue(dropped, candidate) = false { dropped = push(dropped, candidate); };
+    };
+    if size(back.dropped) = 0 {
+        if back.result.status != 0 { return settleWith(SweepWork { dropped: dropped, ..work }, back.result); };
+    };
+    return SweepWork { dropped: dropped, ..work };
+};
+
+fn routeArrival(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, target: Int, state: ExecutionState, work: SweepWork) -> SweepWork {
+    if activeHeader(frame.header, target) { return backEdge(frame, state, work); };
+    if frame.header >= 0 && target = frame.exit { return SweepWork { exits: push(work.exits, state), ..work }; };
+    if blocks.contains(target) = false { return settleAt(work, 3, target, -1); };
+    return deliverState(work, target, state);
+};
+
+fn routeAll(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, arrivals: &List<SweepArrival>, work: SweepWork) -> SweepWork {
+    routed = work;
+    for position in 0..size(arrivals) {
+        if routed.settled = false {
+            arrival = get(arrivals, position);
+            routed = routeArrival(blocks, frame, arrival.block, clone(arrival.state), routed);
+        };
+    };
+    return routed;
+};
+
+// A return block, or a latch (a jump to the header being swept), runs once
+// per arrival. Neither delivers into the region: a return delivers nothing
+// and a latch goes only to the back edge, so a host-numbered id one of their
+// runs makes never meets another run's at a merge.
+fn runEachArrival(frame: &LoopFrame, block: &ExecutionBlock, taken: &List<Int>, work: SweepWork, latch: Bool) -> SweepWork {
+    id = (*block).id;
+    ran = work;
+    for position in 0..size(taken) {
+        if ran.settled = false {
+            arriving = arrivalState(ran.states, get(taken, position));
+            if arriving is StateMergeLookup::Found {
+                run = executeSteps((arriving as StateMergeLookup::Found).state, (*block).steps);
+                if run.status != 0 {
+                    ran = settleWith(ran, ExecutionFlowResult { status: run.status, block: id, step: run.failedAt, state: run.state });
+                } else {
+                    if latch {
+                        ran = backEdge(frame, run.state, ran);
+                    } else {
+                        ran = SweepWork { result: ExecutionFlowResult { status: 0, block: id, step: -1, state: run.state }, ..ran };
+                    };
+                };
+            } else { ran = settleAt(ran, 3, id, -1); };
+        };
+    };
+    return ran;
+};
+
+// A block with no steps that only jumps on (the join an if leaves) hands each
+// arrival to its target as it is: it runs nothing and merges nothing.
+fn forwardArrivals(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, target: Int, taken: &List<Int>, work: SweepWork) -> SweepWork {
+    if frame.header >= 0 && target = frame.exit {
+        leaving = work;
+        for position in 0..size(taken) {
+            arriving = arrivalState(leaving.states, get(taken, position));
+            if arriving is StateMergeLookup::Found { leaving = SweepWork { exits: push(leaving.exits, (arriving as StateMergeLookup::Found).state), ..leaving }; };
+        };
+        return leaving;
+    };
+    if blocks.contains(target) = false { return settleAt(work, 3, target, -1); };
+    moved = work;
+    for position in 0..size(taken) { moved = SweepWork { pending: linkAppend(moved.pending, target, get(taken, position)), ..moved }; };
+    return moved;
+};
+
+// Every other block, a branch with an edge to the header included, runs once
+// on the merge of everything that arrived.
+fn runOnce(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &ExecutionBlock, taken: &List<Int>, work: SweepWork) -> SweepWork {
+    id = (*block).id;
+    folded = foldArrivals(work.states, taken);
+    counted = SweepWork { merges: work.merges + size(taken) - 1, ..work };
+    if folded is StateMergeLookup::Found {
+        run = executeSteps((folded as StateMergeLookup::Found).state, (*block).steps);
+        if run.status != 0 { return settleWith(counted, ExecutionFlowResult { status: run.status, block: id, step: run.failedAt, state: run.state }); };
+        delivered = sweepDeliveries(clone((*block).end), clone(run.state));
+        if delivered.status != 0 { return settleWith(counted, ExecutionFlowResult { status: delivered.status, block: id, step: delivered.step, state: run.state }); };
+        return routeAll(blocks, frame, delivered.states, counted);
+    };
+    return settleAt(counted, 2, id, -1);
+};
+
+fn sweepPlain(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &ExecutionBlock, taken: &List<Int>, work: SweepWork) -> SweepWork {
+    if (*block).end is ExecutionEnd::Done { return runEachArrival(frame, block, taken, work, false); };
+    if (*block).end is ExecutionEnd::Jump {
+        target = ((*block).end as ExecutionEnd::Jump).target;
+        if activeHeader(frame.header, target) { return runEachArrival(frame, block, taken, work, true); };
+        if size((*block).steps) = 0 { return forwardArrivals(blocks, frame, target, taken, work); };
+    };
+    return runOnce(blocks, frame, block, taken, work);
+};
+
+fn loopFieldsValid(relation: Int, variantMode: Int) -> Bool {
+    if relation < 0 { return false; };
+    if relation > 3 { return false; };
+    if variantMode < 0 { return false; };
+    return variantMode <= 3;
+};
+
+fn loopTests(relation: Int, left: ValueRef, right: ValueRef, orTests: &List<LoopTest>) -> List<LoopTest> {
+    tests = push([], LoopTest { relation: relation, left: left, right: right });
+    for extra in orTests { tests = push(tests, clone(extra)); };
+    return tests;
+};
+
+// Where an iteration starts the variant must be at least the zero (a count)
+// or below its other end (a gap closing from below).
+fn variantStartHolds(context: &ValidatorContext, mode: Int, terms: LoopEntryTerms) -> Bool {
+    if mode = 0 { return entailsGoal(context, ValidatorGoal::AtMost { left: terms.zero, right: terms.prior }); };
+    if mode = 1 { return entailsGoal(context, ValidatorGoal::AtMost { left: terms.prior, right: terms.priorOther }); };
+    return true;
+};
+
+fn candidateSteps(survivors: &List<InferGoal>) -> CandidateSteps {
+    assumes = [];
+    checks = [];
+    ends = [];
+    for goalPosition in 0..size(survivors) {
+        goal = get(survivors, goalPosition);
+        for stepPosition in 0..size(goal.assumes) { assumes = push(assumes, clone(get(goal.assumes, stepPosition))); };
+        for stepPosition in 0..size(goal.checks) { checks = push(checks, quietStep(get(goal.checks, stepPosition))); };
+        ends = push(ends, size(checks));
+    };
+    return CandidateSteps { assumes: assumes, checks: checks, ends: ends };
+};
+
+fn withoutCandidates(survivors: &List<InferGoal>, dropped: &List<Int>) -> List<InferGoal> {
+    kept = [];
+    for position in 0..size(survivors) {
+        if containsValue(dropped, position) = false { kept = push(kept, clone(get(survivors, position))); };
+    };
+    return kept;
+};
+
+fn iterationFailure(status: Int, step: Int, state: &ExecutionState) -> LoopIteration {
+    return LoopIteration { status: status, step: step, header: clone(state), yes: clone(state), no: clone(state.context), prior: 0, priorOther: 0 };
+};
+
+// An iteration: the header state with the region's locals arbitrary, the
+// state the body starts in (the test true, the variant's start value pinned),
+// and the exit edge's context.
+fn loopIteration(block: &ExecutionBlock, entryState: &ExecutionState, cands: &CandidateSteps) -> LoopIteration {
+    if (*block).end is ExecutionEnd::Loop {
+        loop = (*block).end as ExecutionEnd::Loop;
+        headerResult = loopEntryState(entryState, loop.havoc, loop.assumptions, cands.assumes, (*block).steps);
+        if headerResult.status != 0 { return iterationFailure(headerResult.status, headerResult.failedAt, headerResult.state); };
+        headerState = headerResult.state;
+        terms = loopEntryTerms(headerState, loop.left, loop.right, loop.variant, loop.variantOther, loop.zero);
+        if terms.found = false { return iterationFailure(2, -1, headerState); };
+        split = loopSplit(headerState, loopTests(loop.relation, loop.left, loop.right, loop.orTests), terms.prior, terms.priorOther);
+        if split.status != 0 { return iterationFailure(split.status, -1, headerState); };
+        yesContext = addVariantFact(clone(split.yes.context), split.yes, loop.variantObject, loop.variantFamily, loop.variantConstructor, true);
+        if variantStartHolds(yesContext, loop.variantMode, terms) = false { return iterationFailure(1, -1, headerState); };
+        protectedFacts = push(clone(yesContext.equalities), EqualityFact { left: terms.prior, right: terms.prior });
+        protectedFacts = push(protectedFacts, EqualityFact { left: terms.priorOther, right: terms.priorOther });
+        yesState = ExecutionState { context: ValidatorContext { equalities: protectedFacts, ..yesContext }, ..clone(split.yes) };
+        noContext = addVariantFact(clone(split.no), headerState, loop.variantObject, loop.variantFamily, loop.variantConstructor, false);
+        return LoopIteration { status: 0, step: -1, header: clone(headerState), yes: yesState, no: noContext, prior: terms.prior, priorOther: terms.priorOther };
+    };
+    return iterationFailure(2, -1, entryState);
+};
+
+// One round of a loop: sweep the region from the body under the candidates
+// still standing. It leaves the loop with the header state under the failed
+// test, and with each state the body delivered to the loop's own exit (the
+// false edge of a later conjunct of the test), as it was delivered.
+fn loopRound(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &ExecutionBlock, entryState: &ExecutionState, cands: &CandidateSteps, total: Int, measure: Int) -> LoopRound [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
+    id = (*block).id;
+    iteration = loopIteration(block, entryState, cands);
+    if iteration.status != 0 { return LoopRound { swept: sweepFailure(iteration.status, id, iteration.step, clone(iteration.header)), exits: [] }; };
+    if measure <= 0 { return LoopRound { swept: sweepFailure(3, id, -1, clone(iteration.header)), exits: [] }; };
+    if (*block).end is ExecutionEnd::Loop {
+        loop = (*block).end as ExecutionEnd::Loop;
+        inner = LoopFrame { header: id, exit: loop.exit, active: push(clone(frame.active), id), region: clone(loop.region), checks: clone(loop.checks), candChecks: clone(cands.checks), candEnds: clone(cands.ends), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: iteration.prior, priorOther: iteration.priorOther };
+        swept = sweep(blocks, inner, loop.body, iteration.yes, total, measure - 1);
+        exits = [];
+        if swept.result.status = 0 {
+            if size(swept.dropped) = 0 {
+                if contextContradictory(iteration.no) = false { exits = push(exits, ExecutionState { context: clone(iteration.no), ..clone(iteration.header) }); };
+                for leaving in swept.exits { exits = push(exits, clone(leaving)); };
+            };
+        };
+        return LoopRound { swept: swept, exits: exits };
+    };
+    return LoopRound { swept: sweepFailure(2, id, -1, clone(iteration.header)), exits: [] };
+};
+
+// A nested loop's header: its arrivals merged, its entry checks, then rounds
+// until one drops no candidate. A round that failed for another reason is
+// tried once more with no candidates; running out of rounds refuses.
+fn sweepLoop(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &ExecutionBlock, taken: &List<Int>, work: SweepWork, total: Int, measure: Int) -> SweepWork [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
+    id = (*block).id;
+    folded = foldArrivals(work.states, taken);
+    looping = SweepWork { merges: work.merges + size(taken) - 1, ..work };
+    if folded is StateMergeLookup::Missing { return settleAt(looping, 2, id, -1); };
+    entryState = (folded as StateMergeLookup::Found).state;
+    if (*block).end is ExecutionEnd::Loop {
+        loop = (*block).end as ExecutionEnd::Loop;
+        if loopFieldsValid(loop.relation, loop.variantMode) = false { return settleWith(looping, ExecutionFlowResult { status: 2, block: id, step: -1, state: entryState }); };
+        entry = executeSteps(clone(entryState), loop.checks);
+        if entry.status != 0 { return settleWith(looping, ExecutionFlowResult { status: entry.status, block: id, step: entry.failedAt, state: entry.state }); };
+        before = executeSteps(clone(entryState), (*block).steps);
+        if before.status != 0 { return settleWith(looping, ExecutionFlowResult { status: before.status, block: id, step: before.failedAt, state: before.state }); };
+        if measure <= 0 { return settleAt(looping, 3, id, -1); };
+        inferred = inferLoopCandidateGoals(entryState, loop.havoc, loopMentions(blocks, loop.region));
+        survivors = clone(inferred);
+        finished = false;
+        for attempt in 0..size(inferred) + 2 {
+            if finished = false {
+                round = loopRound(blocks, frame, block, entryState, candidateSteps(survivors), total, measure - 1);
+                looping = SweepWork { arrivals: looping.arrivals + round.swept.arrivals, merges: looping.merges + round.swept.merges, ..looping };
+                if size(round.swept.dropped) > 0 {
+                    survivors = withoutCandidates(survivors, round.swept.dropped);
+                } else {
+                    if round.swept.result.status = 0 {
+                        for exitPosition in 0..size(round.exits) {
+                            if looping.settled = false { looping = routeArrival(blocks, frame, loop.exit, clone(get(round.exits, exitPosition)), looping); };
+                        };
+                        finished = true;
+                    } else {
+                        if size(survivors) = 0 { return settleWith(looping, clone(round.swept.result)); };
+                        survivors = [];
+                    };
+                };
+            };
+        };
+        if finished { return looping; };
+        return settleWith(looping, ExecutionFlowResult { status: 2, block: id, step: -1, state: entryState });
+    };
+    return settleAt(looping, 2, id, -1);
+};
+
+fn leftoverArrivals(work: SweepWork) -> SweepWork {
+    entries = work.pending.first.entries();
+    if size(entries) > 0 { return settleAt(work, 3, get(entries, 0).key, -1); };
+    return work;
+};
+
+// One visit per block. The blocks of the region are put in an order where a
+// block follows everything that delivers to it, and the states that arrive at
+// a block are merged into one before it runs, so a branch costs its two arms
+// and not the paths through them. Facts only one arm has are lost at the
+// merge.
+//
+// With N blocks run once in a region round, and B states the nested loops it
+// runs delivered to their own exits, at most 2N + 1 + B states arrive anywhere
+// but a forwarder and at most 2N + B merges are made. A nested loop delivers at
+// most twice the blocks it runs once, so one round's count is linear in the
+// blocks of the nest, while rounds still multiply with the nesting depth;
+// forwarding moves each arrival along a chain of forwarders at most as long as
+// the nesting.
+//
+// `measure` falls by one on each call around sweep, sweepLoop and loopRound.
+// A nested loop is entered under a header no enclosing sweep holds, so the
+// depth is bounded by the blocks; a sweep that would run out refuses.
+fn sweep(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, start: Int, startState: &ExecutionState, total: Int, measure: Int) -> SweepResult [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
+    if activeHeader(frame.header, start) {
+        back = sweepBackEdge(startState, frame);
+        return SweepResult { result: back.result, dropped: back.dropped, exits: [], arrivals: 1, merges: 0 };
+    };
+    reached = sweepReached(blocks, start, frame.header, frame.exit, total + 1);
+    if sweepGraphFault(blocks, frame, reached) != 0 { return sweepFailure(3, start, -1, clone(startState)); };
+    ordering = sweepTopologicalOrder(blocks, frame.header, reached);
+    if ordering.status != 0 { return sweepFailure(ordering.status, start, -1, clone(startState)); };
+    work = sweepWorkStart(start, startState);
+    for position in 0..size(ordering.order) {
+        if work.settled = false {
+            id = get(ordering.order, position);
+            taken = waitingAt(work.pending, id);
+            if size(taken) > 0 {
+                work = SweepWork { pending: withoutWaiting(work.pending, id), ..work };
+                if blocks.contains(id) {
+                    block = blocks.lookupRef(id);
+                    if (*block).end is ExecutionEnd::Loop {
+                        if measure <= 0 { work = settleAt(work, 3, id, -1); } else { work = sweepLoop(blocks, frame, block, taken, work, total, measure - 1); };
+                    } else { work = sweepPlain(blocks, frame, block, taken, work); };
+                } else { work = settleAt(work, 3, id, -1); };
+            };
+        };
+    };
+    if work.settled = false { work = leftoverArrivals(work); };
+    return SweepResult { result: work.result, dropped: work.dropped, exits: work.exits, arrivals: work.arrivals, merges: work.merges };
+};
+
+fn sweepExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &ExecutionState) -> SweepResult {
+    if uniqueExecutionBlocks(blocks) = false { return sweepFailure(3, entry, -1, clone(initial)); };
+    whole = [];
+    for blockPosition in 0..size(blocks) { whole = push(whole, get(blocks, blockPosition).id); };
+    outer = LoopFrame { header: -2, exit: -2, active: [], region: whole, checks: [], candChecks: [], candEnds: [], variant: ValueRef::Term { term: 0 }, variantMode: 0, variantOther: ValueRef::Term { term: 0 }, prior: 0, priorOther: 0 };
+    return sweep(executionTable(blocks), outer, entry, initial, size(blocks), 3 * size(blocks) + 3);
 };
 
 fn validateExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &ExecutionState) -> ExecutionFlowResult {
-    if uniqueExecutionBlocks(blocks) = false {
-        return ExecutionFlowResult { status: 3, block: entry, step: -1, state: clone(initial) };
-    };
-    return walkExecution(executionTable(blocks), entry, initial, 2 * size(blocks) + 2, []);
+    return sweepExecution(blocks, entry, initial).result;
 };

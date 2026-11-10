@@ -85,7 +85,9 @@ testIfJoin =
             , ( "sequential-conditional-push-facts", "fn f(c: Int, xs: List<Int>) -> List<Int> { facts = xs; " ++ concat ["if c > " ++ show i ++ " { facts = push(facts, " ++ show i ++ "); }; " | i <- [0 .. 9 :: Int]] ++ "return facts; }; return 0;", ControlValid )
               -- The branches' own facts still count, and so do the else branch's
             , ( "valid-fn-x-0-if-c-0-x-5-else-x", (fn' "x = 0; if c > 0 { x = 5; } else { x = 5; affirm x = 5; }; affirm x = 5;"), ControlValid )
-            , ( "fail-join-keeps-no-order-between-overlapping-constant-ranges", (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z;"), ControlFails "Could not prove: x < z" )
+            , ( "join-overlapping-constant-ranges-checked-per-path-in-a-return-block", (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z;"), ControlValid )
+            , ( "fail-join-keeps-no-order-between-overlapping-constant-ranges", (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z; if y > 5 { return 1; };"), ControlFails "Could not prove: x < z" )
+            , ( "fail-join-overlapping-constant-ranges-not-restored-at-arm-ends", (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; affirm x < z; } else { x = 3; z = 4; affirm x < z; }; affirm x < z; if y > 5 { return 1; };"), ControlFails "Could not prove: x < z" )
               -- Nested ifs
             , ( "valid-fn-x-0-if-c-0-if-c-5-x", (fn' "x = 0; if c > 0 { if c > 5 { x = 2; } else { x = 1; }; } else { x = 3; }; affirm x > 0;"), ControlValid )
               -- A loop body does not have to restate the invariant or the variant in each branch
@@ -134,8 +136,9 @@ testIfJoin =
             , ( "valid-unequal-arm-lengths", "fn f(c: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 1; x = x + 1; } else { x = x + 3; }; affirm x > 1; return x; }; return 0;", ControlValid )
             , ( "valid-unequal-arm-lengths-reversed", "fn f(c: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 3; } else { x = x + 1; x = x + 1; }; affirm x > 1; return x; }; return 0;", ControlValid )
             , ( "fail-unequal-arms-same-id-two-values", "fn f(c: Bool, p: Int) -> Int [{ }] [{ }] { t = 0; x = 0; if c { t = p + 1; x = t + 1; } else { x = p + 5; }; affirm x = t + 1; return x; }; return 0;", ControlFails "Could not prove: x = t + 1" )
-            , ( "fail-join-bound-two-hops-from-a-constant", "fn f(y: Int, a: Int, b: Int, c: Bool) -> Int [{ affirm b >= 1; affirm a >= b; }] [{ }] { x = y; if c { x = y + a; } else { x = y + b; }; affirm x > y; return x; }; return 0;", ControlFails "Could not prove: x > y" )
-            , ( "join-bound-restated-at-each-arm-end", "fn f(y: Int, a: Int, b: Int, c: Bool) -> Int [{ affirm b >= 1; affirm a >= b; }] [{ }] { x = y; if c { x = y + a; affirm x > y; } else { x = y + b; affirm x > y; }; affirm x > y; return x; }; return 0;", ControlValid )
+            , ( "join-bound-two-hops-from-a-constant-checked-per-path-in-a-return-block", "fn f(y: Int, a: Int, b: Int, c: Bool) -> Int [{ affirm b >= 1; affirm a >= b; }] [{ }] { x = y; if c { x = y + a; } else { x = y + b; }; affirm x > y; return x; }; return 0;", ControlValid )
+            , ( "fail-join-bound-two-hops-from-a-constant", "fn f(y: Int, a: Int, b: Int, c: Bool, d: Int) -> Int [{ affirm b >= 1; affirm a >= b; }] [{ }] { x = y; if c { x = y + a; } else { x = y + b; }; affirm x > y; if d > 0 { return x; }; return 0; }; return 0;", ControlFails "Could not prove: x > y" )
+            , ( "join-bound-restated-at-each-arm-end", "fn f(y: Int, a: Int, b: Int, c: Bool, d: Int) -> Int [{ affirm b >= 1; affirm a >= b; }] [{ }] { x = y; if c { x = y + a; affirm x > y; } else { x = y + b; affirm x > y; }; affirm x > y; if d > 0 { return x; }; return 0; }; return 0;", ControlValid )
             , ( "join-call-bound-restated-at-each-arm-end", "fn g(p: Int) -> Int [{ }] [{ affirm return <= p; }] { return p; }; fn f(y: Int, c: Bool) -> Int [{ }] [{ }] { w = y + 3; x = 0; if c { x = g(y + 2); affirm x <= w; } else { x = g(y + 3); affirm x <= w; }; affirm x <= w; return x; }; return 0;", ControlValid )
             , ( "join-alias-in-one-arm-keeps-call-bound", "fn h(p: Int) -> Int [{ }] [{ affirm return > p; }] { return p + 1; }; fn f(y: Int, c: Bool) -> Int [{ }] [{ }] { a = y; b = y; if c { a = h(y); b = a; } else { a = h(y); b = h(a); }; affirm b > y; return b; }; return 0;", ControlValid )
             , ( "fail-join-alias-in-one-arm-is-no-order", "fn h(p: Int) -> Int [{ }] [{ affirm return > p; }] { return p + 1; }; fn f(y: Int, c: Bool) -> Int [{ }] [{ }] { a = y; b = y; if c { a = h(y); b = a; } else { a = h(y); b = h(a); }; affirm b > a; return b; }; return 0;", ControlFails "Could not prove: b > a" )
@@ -249,14 +252,14 @@ testInferredInvariants =
             , -- Element properties are explicit invariants, with their read bounds
               parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 1) = size(p); }] { out = push(push([], v), size(p)); for x in p [{ affirm size(out) >= 2; affirm get(out, 1) = size(p); }] { out = push(out, x); }; return out; };"
             , parseValidProgramHelper "fn f(p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 0) = 5; affirm get(return, 1) = 6; }] { out = [5, 6]; for x in p [{ affirm size(out) >= 2; affirm get(out, 0) = 5; affirm get(out, 1) = 6; }] { out = push(out, x); }; return out; };"
-            , parseValidateFailProgramHelper "fn f(p: List<Int>) -> List<Int> [{ affirm size(p) > 0; }] [{ affirm get(return, 1) = 6; }] { out = [5, 6]; for i in 0..size(p) { out = set(out, 1, get(p, i)); }; return out; };" "Could not prove: index < size(list) (in f)"
+            , parseValidateFailProgramHelper "fn f(p: List<Int>) -> List<Int> [{ affirm size(p) > 0; }] [{ affirm get(return, 1) = 6; }] { out = [5, 6]; for i in 0..size(p) { out = set(out, 1, get(p, i)); }; return out; };" "Could not prove: get(return, 1) = 6 (in f)"
             , -- Scalar inference still works beside changing lists
               parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm i = n; return 0; }; x = f(3);"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n [{ affirm size(a) = 3; affirm get(a, 1) = 2; }] shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm get(a, 1) = 2; return 0; }; x = f(3);"
             , -- A loop that returns infers its invariants too, one candidate at a time
               parseValidProgramHelper "fn f(a: List<Int>) -> Int { out = []; for i in 0..size(a) { if get(a, i) > 2 { return i; }; out = push(out, 0); }; return -1; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = size(a); return -1; };"
-            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = 0; return -1; };" "Could not prove: index >= 0 (in f)"
+            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = 0; return -1; };" "Could not prove: i = 0 (in f)"
             , -- Starting from something that is not a number: a copy of an argument, or a counter bounded by a parameter
               parseValidProgramHelper "fn f(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); }] { out = clone(a); for i in 0..size(a) { out = set(out, i, 0); }; return out; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { c = clone(a); i = 0; while i < size(a) shrinks size(a) - i { c = set(c, i, 1); i = i + 1; }; affirm size(c) = size(a); return 0; };"
@@ -420,7 +423,76 @@ testCfgValidation =
         , ("reassigned-true-bool-local-returns-inside", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 5; }] { flag = false; flag = true; n = 0; while flag [{ affirm flag = true; }] shrinks n { return 5; }; return 0; }; return f();" (Just (VInt 5)))
         , ("false-bool-local-skips-body", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 0; }] { flag = false; n = 0; while flag [{ affirm flag = false; affirm n >= 0; }] shrinks n { return 5; }; affirm n = 0; return n; }; return f();" (Just (VInt 0)))
         , ("while-false-skips-body", parseValidateEvalProgramHelper "fn f() -> Int [{ }] [{ affirm return = 0; }] { n = 0; while false [{ affirm n >= 0; }] shrinks n { return 5; }; affirm n = 0; return n; }; return f();" (Just (VInt 0)))
-        ] ++ loopCandidateRegressions)
+        ] ++ sweepRegressions ++ loopCandidateRegressions)
+
+-- One run per block: a branch costs its arms, an empty join forwards, a latch
+-- and a return run once per arrival, and what only one arm knows is lost at
+-- the merge (sequential ifs in a loop body are not correlated).
+sweepRegressions :: [(String, TestResult)]
+sweepRegressions =
+    [ ( "sweep-nested-empty-joins-three-deep-in-a-loop"
+      , parseValidProgramHelper "fn f(n: Int, a: Int, b: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { s = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; affirm s <= i; }] shrinks n - i { if a > 0 { if b > 0 { if c > 0 { s = s + 1; }; }; }; i = i + 1; }; return s; }; return f(3, 1, 1, 1);" )
+    , ( "sweep-eight-sequential-diamonds-in-a-loop"
+      , parseValidProgramHelper
+            ( "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { x = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; affirm x >= 0; }] shrinks n - i { "
+                ++ concat (replicate 8 "if c > 0 { x = x + 1; } else { x = x + 2; }; ")
+                ++ "i = i + 1; }; return x; }; return f(2, 1);" ) )
+    , ( "sweep-fourteen-ifs-in-a-loop-body"
+      , parseValidProgramHelper
+            ( "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { x = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { "
+                ++ concat (replicate 14 "if c > 0 { x = x + 1; } else { x = x + 2; }; ")
+                ++ "i = i + 1; }; return x; }; return f(2, 1);" ) )
+    , ( "sweep-fourteen-independent-ifs"
+      , parseValidProgramHelper
+            ( "fn f(c: Int) -> Int [{ }] [{ }] { x = 0; "
+                ++ concat (replicate 14 "if c > 0 { x = x + 1; } else { x = x + 2; }; ")
+                ++ "affirm x > 0; return x; }; return f(1);" ) )
+    , ( "sweep-unequal-arms-with-a-nested-diamond"
+      , parseValidProgramHelper "fn f(c: Bool, d: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 1; if d { x = x + 0; } else { x = x + 0; }; } else { x = x + 2; }; affirm x > 0; return x; }; return 0;" )
+    , ( "sweep-unequal-arms-with-a-nested-diamond-reversed"
+      , parseValidProgramHelper "fn f(c: Bool, d: Bool) -> Int [{ }] [{ }] { x = 0; if c { x = x + 2; } else { x = x + 1; if d { x = x + 0; } else { x = x + 0; }; }; affirm x > 0; return x; }; return 0;" )
+    , ( "sweep-three-way-else-if"
+      , parseValidProgramHelper "fn f(a: Int) -> Int [{ }] [{ }] { x = 0; if a > 5 { x = x + 1; } else { if a > 2 { x = x + 2; } else { x = x + 3; }; }; affirm x > 0; return x; }; return 0;" )
+    , ( "sweep-nested-diamonds-in-both-arms"
+      , parseValidProgramHelper "fn f(a: Int, b: Int) -> Int [{ }] [{ }] { x = 0; if a > 0 { if b > 0 { x = x + 1; } else { x = x + 2; }; } else { if b > 0 { x = x + 3; } else { x = x + 4; }; }; affirm x > 0; affirm x < 5; return x; }; return f(1, 1);" )
+    , ( "sweep-sequential-matches"
+      , parseValidProgramHelper "enum E { A, B, C }; fn f(e: E) -> Int [{ }] [{ }] { x = 0; if e is E::A { x = 1; } else { if e is E::B { x = 2; } else { x = 3; }; }; y = 0; if e is E::C { y = 1; } else { y = 2; }; affirm x > 0; affirm y > 0; return x + y; }; return f(E::A);" )
+    , ( "sweep-guards-with-early-returns"
+      , parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ affirm return != 0; }] { if n > 3 { return 1; }; if n < 0 { return -1; }; if n = 2 { return 7; }; affirm n >= 0; affirm n <= 3; return n + 10; }; return f(1);" )
+    , ( "sweep-return-postcondition-per-path"
+      , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ affirm return > 0; }] { if n > 3 { return 1; }; if n < 0 { return -1; }; return 7; }; return f(1);" "Could not prove: return > 0" )
+    , ( "sweep-variant-changes-before-a-branch"
+      , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; c = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; if i > 2 { c = c + 1; } else { c = c + 2; }; }; return c; }; return f(3);" )
+    , ( "sweep-nested-loop-with-an-early-return"
+      , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] { s = 0; for i in 0..n { for j in 0..n { if i + j > 3 { return i + j; }; s = s + 1; }; }; affirm s >= 0; return s; }; return f(3);" )
+      -- The inner loop always returns, so its region does not reach the outer header
+      -- and lies outside the outer loop's region
+    , ( "sweep-always-returning-inner-loop-outside-the-outer-region"
+      , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] { i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { j = 0; while j < n [{ affirm j >= 0; }] shrinks n - j { return j; }; i = i + 1; }; return 0; }; return f(2);" )
+    , ( "sweep-fail-false-equality-after-a-loop-body-merge"
+      , parseValidateFailProgramHelper "fn f(n: Int, y: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { x = y; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { if c > 0 { x = y; } else { x = y + 1; }; affirm x = y; i = i + 1; }; return x; }; return 0;" "Could not prove: x = y" )
+    , ( "sweep-fail-one-arm-resets-to-the-bound-in-a-loop"
+      , parseValidateFailProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { x = 5; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { if c > 0 { x = x + 1; } else { x = 0; }; affirm x > 0; i = i + 1; }; return x; }; return 0;" "Could not prove: x > 0" )
+    , ( "sweep-fail-literal-not-aliased-in-a-loop"
+      , parseValidateFailProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { m = 1; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { if c > 0 { m = 1; } else { m = 2; }; affirm m >= 3; i = i + 1; }; return m; }; return 0;" "Could not prove: m >= 3" )
+      -- The accepted limit: the second if's branch block runs once on the merge, so
+      -- what the first if chose is gone; doing the work in the first if restates it
+    , ( "sweep-fail-sequential-ifs-in-a-loop-are-not-correlated"
+      , parseValidateFailProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { s = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { y = 0; if c > 0 { y = 1; }; if c > 0 { s = s + 10 / y; }; i = i + 1; }; return s; }; return 0;" "Could not prove" )
+    , ( "sweep-fail-and-loop-left-by-a-later-conjunct"
+      , parseValidateFailProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; while i < n && c > 0 [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; }; affirm i >= n; return i; }; return f(3, 1);" "Could not prove: i >= n" )
+    , ( "sweep-and-loop-left-by-a-later-conjunct-keeps-the-invariant"
+      , parseValidProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; while i < n && c > 0 [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; }; affirm i <= n; return i; }; return f(3, 1);" )
+      -- The inner loop's later conjunct leaves it straight to the outer loop's latch
+    , ( "sweep-nested-and-loop-left-to-the-outer-latch"
+      , parseValidProgramHelper "fn f(n: Int, m: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; j = 0; while j < m && c > 0 [{ affirm j >= 0; }] shrinks m - j { j = j + 1; }; }; return i; }; return f(2, 2, 1);" )
+    , ( "sweep-fail-nested-and-loop-exit-checks-the-outer-variant"
+      , parseValidateFailProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { while i < n && c > 0 [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; }; }; return i; }; return f(2, 1);" "Loop variant does not shrink" )
+    , ( "sweep-fail-and-loop-returning-inside-an-outer-loop"
+      , parseValidateFailProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 1; }] { i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { j = 0; while j < n && c > 0 [{ affirm j >= 0; }] shrinks n - j { return j; }; i = i + 1; }; return 5; }; return f(2, 1);" "Could not prove: return >= 1" )
+    , ( "sweep-sequential-ifs-in-a-loop-restated-as-one"
+      , parseValidProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ }] { s = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { y = 0; if c > 0 { y = 1; s = s + 10 / y; }; i = i + 1; }; return s; }; return f(2, 1);" )
+    ]
 
 loopCandidateRegressions :: [(String, TestResult)]
 loopCandidateRegressions =

@@ -877,9 +877,11 @@ fn f(c: Int) -> Int {
 };
 ```
 
+The validator visits each block once and merges what arrives there, so a later `if` does not know which way an earlier one went, in a loop body as anywhere else: `y = 0; if c > 0 { y = 1; }; if c > 0 { s = s + 10 / y; };` is refused (the second test runs on the merge, where `y` is 0 or 1), and `if c > 0 { y = 1; s = s + 10 / y; };` validates. A return and the end of a loop body are checked once for each way into them.
+
 In a loop, an `if` in the body does not have to restate the invariant or the variant in each branch (`examples/linear.tersus` searches by halving a range with an `if` that moves one end, and writes neither). A fact is only tried if the program asks for it as above, and it is checked with congruence and arithmetic only, with no `forall` instantiated and no case split, so a fact that needs those still has to be stated in each branch.
 
-This is sound but incomplete. A fact about values that existed before the `if` that nothing later asks for, and that the branches do not both state, is dropped, so state it in both branches or after the `if` when you need it. The output contract of the function is asked for too, about the value of the `return` that follows the `if` in the same block or in the blocks around it, so `r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r;` meets `affirm return > 0;` when `n > 0`.
+This is sound but incomplete. A fact about values that existed before the `if` that nothing later asks for, and that the branches do not both state, is dropped, so state it in both branches or after the `if` when you need it. A relation between two variables that each branch sets to constants is not kept: after `if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; };` the join knows `1 <= x <= 3` and `2 <= z <= 4`, so `affirm x < z; if y > 5 { return 1; };` is refused even when each branch ends with `affirm x < z;` (directly before a `return`, the affirm is checked once for each branch and holds). An `affirm` at the end of each branch brings a fact back only where the join keeps that fact's form or compares one of its ends; it is not a general remedy. The output contract of the function is asked for too, about the value of the `return` that follows the `if` in the same block or in the blocks around it, so `r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r;` meets `affirm return > 0;` when `n > 0`.
 
 #### Early return
 
