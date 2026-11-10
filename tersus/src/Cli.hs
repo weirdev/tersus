@@ -28,6 +28,7 @@ import Data.Char (isAlphaNum, isLetter)
 import qualified Data.Map.Strict as Map
 import qualified Modules
 import Control.Exception (IOException, try)
+import GHC.IO.Handle (hDuplicate)
 import System.IO
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -207,7 +208,7 @@ renderValue VFnRef{} = "<function>"
 
 -- Source text is UTF-8 whatever the locale is (the parser accepts any letter in a name), and so is what is printed
 readSourceFile :: FilePath -> IO String
-readSourceFile "-" = hSetEncoding stdin utf8 >> getContents
+readSourceFile "-" = readStandardInput utf8
 readSourceFile file = do
     handle <- openFile file ReadMode
     hSetEncoding handle utf8
@@ -234,7 +235,16 @@ writeWorldFiles files = concat <$> mapM write files
 
 -- The standard input as bytes (characters from 0 to 255), read as the program asks for them
 readInputBytes :: IO String
-readInputBytes = hSetEncoding stdin char8 >> getContents
+readInputBytes = readStandardInput char8
+
+-- Reading to the end closes the handle, and closing stdin would free descriptor 0 for the next file opened.
+-- createProcess moves a child's streams into place one at a time, so a child given that file as its output would
+-- write to its own input instead.
+readStandardInput :: TextEncoding -> IO String
+readStandardInput encoding = do
+    handle <- hDuplicate stdin
+    hSetEncoding handle encoding
+    hGetContents handle
 
 useUtf8 :: IO ()
 useUtf8 = mapM_ (`hSetEncoding` utf8) [stdout, stderr]

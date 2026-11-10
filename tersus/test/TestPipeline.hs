@@ -11,7 +11,7 @@ module TestPipeline
     , exampleExpectations
     ) where
 
-import Control.Exception (bracket, evaluate, finally)
+import Control.Exception (IOException, bracket, evaluate, finally, try)
 import Data.List (isInfixOf, nub, sort, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, findExecutable, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
@@ -22,6 +22,7 @@ import System.Process (CreateProcess (..), proc)
 import Native (readProcessOutput)
 import CacheLock (openTempFileCloexec)
 import System.IO
+import System.Posix.IO (FdOption (CloseOnExec), closeFd, dup, dupTo, handleToFd, queryFdOption, stdInput)
 import qualified Data.Map as Map
 import Cli
 import Modules (LoadResult (..))
@@ -290,6 +291,20 @@ testCliReadsUtf8 = TestCase "utf8 source" $ do
         return (if runSource Interpret source == Ok "42" then Nothing else Just ("got " ++ show (runSource Interpret source))))
         `finally` (setLocaleEncoding saved >> removeFile path)
 
+testCliStdinStaysOpen :: Test
+testCliStdinStaysOpen = TestCase "reading the source from stdin leaves descriptor 0 open" $ do
+    tmp <- getTemporaryDirectory
+    (path, handle) <- openTempFileCloexec tmp "tersus_stdin.tersus"
+    hPutStr handle "return 42;"
+    hClose handle
+    saved <- dup stdInput
+    (do _ <- bracket (openFile path ReadMode >>= handleToFd) closeFd (`dupTo` stdInput)
+        source <- readSourceFile "-"
+        _ <- evaluate (length source)
+        open <- try (queryFdOption stdInput CloseOnExec) :: IO (Either IOException Bool)
+        pure (testAssertEq source "return 42;" <> either (\e -> Just ("reading stdin closed descriptor 0: " ++ show e)) (const Nothing) open))
+        `finally` (dupTo saved stdInput >> closeFd saved >> removeFile path)
+
 cliExecutable :: IO (Maybe FilePath)
 cliExecutable = do
     supplied <- lookupEnv "TERSUS_TEST_CLI"
@@ -359,7 +374,7 @@ testCliConfiguredSources = TestCase "real CLI isolates standalone/stdin roots an
         pure path
 
 testCli :: Test
-testCli = TestList "testCli" [testCliReadsUtf8, testCliConfiguredSources, testCliCases]
+testCli = TestList "testCli" [testCliReadsUtf8, testCliStdinStaysOpen, testCliConfiguredSources, testCliCases]
 
 -- Every entry point must refuse a program that does not validate, before it
 -- is evaluated or lowered: (mode, runner for that mode, source, expected error).

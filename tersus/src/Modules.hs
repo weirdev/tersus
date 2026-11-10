@@ -1460,7 +1460,8 @@ filesystemSnapshot options rawEntry source = do
                     text <- readSource (fePath file)
                     walkImports root (Just pkg) text
         walkImports root pkg text = case ParserSeed.parseImportPrefix text of
-            Left _ -> pure ()
+            Left err | ParserSeed.toolFailure err -> ioError (userError err)
+                     | otherwise -> pure ()
             Right imports -> forM_ imports $ \imp -> do
                 let targetPkg = head (importPath imp)
                     rest = tail (importPath imp)

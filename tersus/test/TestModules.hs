@@ -5,7 +5,7 @@ module TestModules
     , validatorMetadataFingerprint
     ) where
 
-import Control.Exception (bracket, evaluate, try, SomeException)
+import Control.Exception (bracket, evaluate, finally, try, SomeException)
 import Control.Monad (when)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
@@ -493,6 +493,28 @@ testLoaderFilesystem = TestCase "loader-filesystem" $ do
         value <- action
         removeDirectoryRecursive dir
         return value
+
+testSnapshotToolFailure :: Test
+testSnapshotToolFailure = TestCase "snapshot capture refuses a parser tool failure" $ do
+    tmp <- getTemporaryDirectory
+    (home, handle) <- openTempFile tmp "tersus-snapshot-tool"
+    hClose handle
+    removeFile home
+    let seeds = ["TERSUS_PARSER_SEED_FILE", "TERSUS_SEED_FILE", "TERSUS_FRONTEND_SEED_FILE"]
+        variables = "XDG_CACHE_HOME" : seeds
+        badSeed = home </> "bad.ll"
+    saved <- mapM lookupEnv variables
+    entry <- writeGeoPackageFs (home </> "app") "import app::geo; x = 1;" "struct Point { x: Int };"
+    writeFile badSeed "not a seed"
+    captured <- (do
+        setEnv "XDG_CACHE_HOME" (home </> "cache")
+        mapM_ (`setEnv` badSeed) seeds
+        captureFilesystemInput defaultLoadOptions entry Nothing)
+        `finally` (sequence_ (zipWith (\name value -> maybe (unsetEnv name) (setEnv name) value) variables saved) >> removeDirectoryRecursive home)
+    pure $ case captured of
+        Left err | "Parser tool failure" `isInfixOf` err -> Nothing
+                 | otherwise -> Just ("snapshot refused without the tool failure: " ++ err)
+        Right _ -> Just "snapshot skipped the imports of a file the parser tool did not read"
 
 -- Phase 3: per-module checking against interfaces.
 
@@ -2484,4 +2506,4 @@ phase2RoundTrip = case phase2Load phase2Private of
         Ok decoded -> testAssertEq decoded (compiledInterface modu)
 
 testModules :: Test
-testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
+testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testSnapshotToolFailure, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
