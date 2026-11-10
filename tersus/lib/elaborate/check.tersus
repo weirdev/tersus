@@ -27,7 +27,7 @@ fn localScopes(st: St, stmts: &List<Int>) -> St ~ {
     return emitStatements(st, &out);
 };
 
-fn scopeName(st: St, n: Int) -> St [{ }] [{ }] {
+fn scopeName(st: St, n: Int) -> St ~ {
     name = nameText(&st.nodes, n);
     if st.localNames.contains(&name) {
         identity = HashMap::lookup(&st.localNames, &name, n);
