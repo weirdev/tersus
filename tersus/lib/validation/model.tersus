@@ -222,12 +222,12 @@ impl Copy for RelationFact { };
 
 // A goal holds of a context when it holds of the context's facts, or of them
 // with the sum and refined orders derived. Several goals asked of one context
-// share its analysis and its derived context through the cache.
+// share its classes, its analysis and its derived context through the cache.
 enum AnalysisLookup { Missing, Found { analysis: ContextAnalysis } };
 
 impl Clone for AnalysisLookup { };
 
-struct EntailmentCache { plain: ValidatorContext, plainAnalysis: AnalysisLookup, derivedMade: Bool, derived: ValidatorContext, derivedAnalysis: AnalysisLookup };
+struct EntailmentCache { plain: ValidatorContext, plainClassesMade: Bool, plainClasses: HashMap<Int, Int>, plainAnalysis: AnalysisLookup, derivedMade: Bool, derived: ValidatorContext, derivedAnalysis: AnalysisLookup };
 
 impl Clone for EntailmentCache { };
 

@@ -891,9 +891,9 @@ selfHostedQueryFamilies program =
                             other -> Just ("Merged state malformed: " ++ show other)
                     result -> Just ("Unexpected mergeStates result: " ++ show result)
                 -- Structural twins of the merge model's contest cases: a local both sides bind to one
-                -- minted id keeps it, and is bounded only when a dropped raw fact reaches it, as its own
-                -- definition (T1) or through unnamed intermediates (A1, A1b). Their source rows in
-                -- testIfJoin do not isolate this: each arm's Add steps state relations of their own.
+                -- minted id keeps it, and is bounded only when its definition reaches a dropped one, its
+                -- own (T1) or through unnamed intermediates (A1, A1b). Their source rows in testIfJoin
+                -- do not isolate this: each arm's Add steps state relations of their own.
                 contestState = contestStateWith []
                 contestStateWith equalities contestApps constantTerms orders bindings = MData "ExecutionState" [("context", MData "ValidatorContext" [("equalities", MList (map fact equalities)), ("applications", MList (map app contestApps)), ("constants", MList (map constant constantTerms)), ("orders", MList (map mixedFact orders)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]), ("locals", localsValue bindings), ("templates", MList [])]
                 checkMergedGoal name leftApps rightApps constantTerms orders bindings goalName a b =
@@ -906,21 +906,6 @@ selfHostedQueryFamilies program =
                 -- x = (y + a) + 1 / (y + b) + 1 with a, b >= 0: y < x
                 checkContestA1 = checkMergedGoal "A1" [(-30, -1, [1, 2]), (-31, -1, [-30, 10])] [(-30, -1, [1, 3]), (-31, -1, [-30, 10])] [(10, 0, 1), (13, 0, 0)] [(13, 2, False), (13, 3, False)] [(1, 1), (2, 2), (3, 3), (4, -31)] "Less" 1 (-31)
                 checkContestA1b = checkMergedGoal "A1b" [(-30, -1, [1, 2]), (-31, -1, [-30, 10]), (-32, -1, [-31, 10])] [(-30, -1, [1, 3]), (-31, -1, [-30, 10]), (-32, -1, [-31, 10])] [(10, 0, 1), (13, 0, 0)] [(13, 2, False), (13, 3, False)] [(1, 1), (2, 2), (3, 3), (4, -32)] "Less" 1 (-32)
-                -- The bound round skips a contested self-pair that is a boolean on either side, each side
-                -- by its own classes. -5 is true on the left through an alias and false on the right; -6
-                -- is a boolean on the left only; -7 holds the integers 1 and 0 beside boolean constants of
-                -- the same values, and is equal on the right to -13, a boolean on the left only (a
-                -- different term there); -9 is uncontested; -10/-11 is renamed, so asked as before.
-                mergePair (pairLeft, pairRight, pairJoined) = MData "MergePair" [("left", MInt pairLeft), ("right", MInt pairRight), ("joined", MInt pairJoined)]
-                termSet members = MData "HashSet" [("map", MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt member), ("value", MBool True)] | member <- members]]), ("count", MInt (toInteger (length members)))])]
-                pairConstants = [constant (8, 1, 1), constant (9, 1, 0), constant (20, 0, 1), constant (21, 0, 0)]
-                checkBoundPairs = testAssertEq
-                    (runNamedFunction program "boundPairs"
-                        [ MList (map mergePair [(-5, -5, -5), (-6, -6, -6), (-7, -7, -7), (-9, -9, -9), (-10, -11, -12)])
-                        , termSet [-5, -6, -7]
-                        , mergeContext pairConstants [fact (-5, -4), fact (-4, 8), fact (-6, 9), fact (-7, 20), fact (-13, 8), fact (-10, 8)]
-                        , mergeContext pairConstants [fact (-5, 9), fact (-7, 21), fact (-7, -13)] ])
-                    (Ok (Just (MList (map mergePair [(-7, -7, -7), (-10, -11, -12)]))))
                 -- T1 with its branch condition -5 kept by local 5: true on the left, false on the right
                 conditionConstants = [(8, 1, 1), (9, 1, 0)]
                 checkContestT1WithCondition =
@@ -931,7 +916,8 @@ selfHostedQueryFamilies program =
                             testAssertEq (runNamedFunction program "entailsGoal" [context, goal "Less" (-31) (-32)]) (Ok (Just (MBool True)))
                         result -> Just ("T1 with condition: unexpected mergeStates result: " ++ show result)
                 -- x keeps one id, the integer 0 on the left and 1 on the right, beside the condition and
-                -- boolean constants of the same values: 0 <= x <= 1 and not x > 0
+                -- boolean constants of the same values. Only a dropped definition selects a self-pair, and
+                -- x's only dropped fact is an equality, so the merge bounds it neither way
                 checkIntegerSelfPair goalName a b expected =
                     case runNamedFunction program "mergeStates"
                             [ contestStateWith [(-31, 20), (-5, 8)] [] ((20, 0, 0) : (21, 0, 1) : conditionConstants) [] [(1, -31), (5, -5)]
@@ -939,6 +925,49 @@ selfHostedQueryFamilies program =
                         Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" (("context", context) : _))])) ->
                             fmap (("integer self-pair " ++ goalName ++ ": ") ++) (testAssertEq (runNamedFunction program "entailsGoal" [context, goal goalName a b]) (Ok (Just (MBool expected))))
                         result -> Just ("integer self-pair: unexpected mergeStates result: " ++ show result)
+                -- Merges read off each side's facts with no solver (addDifferenceHull). Ids follow the
+                -- encoder: parameters and literal constants are non-negative, minted terms negative,
+                -- and the two arms mint from one state, so one negative id can mean two values. Each
+                -- goal names the joined local's term on one side and a merged local or a term on the
+                -- other; NEG goals are false on some path of the two sides and must stay unproved.
+                hullSide = contestStateWith
+                hullMerged (leftSide, rightSide) = case runNamedFunction program "mergeStates" [leftSide, rightSide] of
+                    Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" fields)])) -> Right fields
+                    other -> Left ("unexpected mergeStates result: " ++ show other)
+                hullLocal fields key = case lookup "locals" fields of
+                    Just merged -> case runNamedFunction program "lookupLocal" [merged, MInt key] of
+                        Ok (Just (MData "ValueLookup::Found" [("term", MInt bound)])) -> Just bound
+                        _ -> Nothing
+                    Nothing -> Nothing
+                checkHull name sides pairKey goals = case hullMerged sides of
+                    Left e -> Just (name ++ ": " ++ e)
+                    Right fields -> case (lookup "context" fields, hullLocal fields pairKey) of
+                        (Just context, Just joined) ->
+                            let ask (shape, joinedLeft, other, expected) = case either (hullLocal fields) Just other of
+                                    Nothing -> Just (name ++ ": no merged local " ++ show other)
+                                    Just otherTerm -> fmap ((name ++ " " ++ shape ++ " " ++ show (joinedLeft, other) ++ ": ") ++)
+                                        (testAssertEq (runNamedFunction program "entailsGoal" [context, if joinedLeft then goal shape joined otherTerm else goal shape otherTerm joined]) (Ok (Just (MBool expected))))
+                             in foldr (orElse . ask) Nothing goals
+                        _ -> Just (name ++ ": the merged state has no context or no joined local")
+                hullFacts sides = case hullMerged sides of
+                    Right fields | Just (MData _ context) <- lookup "context" fields ->
+                        let count listName = case lookup listName context of
+                                Just (MList items) -> length items
+                                _ -> -1
+                         in Just (count "orders", count "differences", count "constants")
+                    _ -> Nothing
+                quadSides k = ( hullSide [] [] [(-50 - i, 0, i) | i <- [1 .. k]] [] [(i, -50 - i) | i <- [1 .. k]]
+                              , hullSide [] [] [(-1000 - i, 0, 1000 + i) | i <- [1 .. k]] [] [(i, -1000 - i) | i <- [1 .. k]] )
+                hubSides k = ( hullSide [] [(-50, -1, [1, 31])] [(31, 0, 1), (32, 0, 2)] [(-50, 100 + i, True) | i <- [0 .. k - 1]] ([(1, 1), (4, -50)] ++ [(100 + i, 100 + i) | i <- [0 .. k - 1]])
+                             , hullSide [] [(-60, -1, [1, 32])] [(31, 0, 1), (32, 0, 2)] [(-60, 100 + i, True) | i <- [0 .. k - 1]] ([(1, 1), (4, -60)] ++ [(100 + i, 100 + i) | i <- [0 .. k - 1]]) )
+                freeLocals = [(71, 71), (72, 72), (73, 73)]
+                -- Both arms mint -1000 and -1001 from one state; -1001 is w on the left and v on the
+                -- right, and drops out of the merged state. A bound term minted at -1001 would read the
+                -- root edge x <= -1001 as x <= 7 or 9.
+                freshCollide renamed = ( hullSide [] [(-1000, -1, [1, 31]), (-1001, -1, [-1000, 33])] [(31, 0, 1), (32, 0, 2), (33, 0, 3), (35, 0, 5), (37, 0, 7), (39, 0, 9)] [(35, 1, False), (-1000, -1001, True)] [(1, 1), (4, -1000), (7, -1001)]
+                                       , hullSide [] [(right, -1, [1, 32]), (-1001, -1, [right, 39])] [(31, 0, 1), (32, 0, 2), (33, 0, 3), (35, 0, 5), (37, 0, 7), (39, 0, 9)] [(35, 1, False), (right, -1001, False)] [(1, 1), (4, right), (8, -1001)] )
+                    where right = if renamed then -1002 else -1000
+                freshGoals = [("AtMost", True, Right 37, False), ("AtMost", True, Right 39, False), ("Less", False, Left 1, True)]
                 -- A loop candidate is replayed in a state built from the loop's initial state, so
                 -- every term id it names has to be one of that state's: an id inference minted
                 -- while building the candidate denotes something else, or nothing, where the
@@ -987,6 +1016,40 @@ selfHostedQueryFamilies program =
                          in (if null goals then Just "Inference kept no loop candidate" else Nothing)
                                 `orElse` (if null outside then Nothing else Just ("Candidates replay terms the entry state does not name: " ++ show outside ++ ", named: " ++ show inferredEntryTerms))
                     other -> Just ("Unexpected candidate result: " ++ show other)
+                -- A cache threaded through the goals answers each as a fresh cache does, and
+                -- the classes it keeps are its own context's, made on the first ask.
+                cacheContext equalities = MData "ValidatorContext" [("equalities", MList (map fact equalities)), ("applications", MList (map app [(10,20,[0]),(11,20,[1])])), ("constants", MList (map constant [(30,0,3),(31,0,3),(32,0,5)])), ("orders", MList (map mixedFact [(1,5,True),(2,3,False),(6,4,False)])), ("different", MList [differentFact (3,4)]), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                aliasedGoals =
+                    [ (goal "Equal" 0 1, True), (goal "Equal" 10 11, True), (goal "Less" 7 32, True), (goal "AtMost" 7 31, True)
+                    , (goal "Less" 32 7, False), (goal "Less" 0 5, True), (goal "Less" 5 0, False), (goal "Less" 3 4, True)
+                    , (goal "Equal" 0 2, False), (goal "Equal" 30 31, True), (goal "Equal" 0 1, True), (goal "Less" 7 32, True) ]
+                unaliasedGoals =
+                    [ (goal "Equal" 0 1, False), (goal "Equal" 10 11, False), (goal "Less" 7 32, False), (goal "Less" 30 32, True)
+                    , (goal "Equal" 30 31, True), (goal "Less" 32 30, False), (goal "Equal" 0 1, False) ]
+                cacheField name (MData _ fields) = lookup name fields
+                cacheField _ _ = Nothing
+                ownClasses context = case (cacheField "equalities" context, cacheField "applications" context, cacheField "constants" context) of
+                    (Just equalities, Just applications, Just known) -> case runNamedFunction program "semanticFacts" [equalities, applications, known] of
+                        Ok (Just facts) -> case runNamedFunction program "leastClasses" [facts] of
+                            Ok (Just classes) -> Just classes
+                            _ -> Nothing
+                        _ -> Nothing
+                    _ -> Nothing
+                threadCache cache [] = Right (cache, [])
+                threadCache cache ((asked, _) : rest) = case runNamedFunction program "entailsGoalCached" [cache, asked] of
+                    Ok (Just answer@(MData "CachedAnswer" _)) -> case (cacheField "holds" answer, cacheField "cache" answer) of
+                        (Just (MBool holds), Just next) -> fmap (\(final, answers) -> (final, holds : answers)) (threadCache next rest)
+                        other -> Left ("Unexpected cached answer: " ++ show other)
+                    other -> Left ("Unexpected cached answer: " ++ show other)
+                checkCacheThreaded context expected = case runNamedFunction program "entailmentCache" [context] of
+                    Ok (Just start) -> case threadCache start expected of
+                        Left e -> Just e
+                        Right (final, threaded) ->
+                            testAssertEq threaded (map snd expected)
+                                `orElse` testAssertEq [runNamedFunction program "entailsGoal" [context, asked] | (asked, _) <- expected] [Ok (Just (MBool holds)) | (_, holds) <- expected]
+                                `orElse` testAssertEq (cacheField "plainClassesMade" start, cacheField "plainClassesMade" final) (Just (MBool False), Just (MBool True))
+                                `orElse` testAssertEq (fmap Just (cacheField "plainClasses" final)) (Just (ownClasses context))
+                    other -> Just ("Unexpected entailment cache: " ++ show other)
              in [ ("products", [checkProduct a b (productResult a b) | a <- productValues, b <- productValues])
                 , ("relations",
                       [ checkDifferenceOverflow
@@ -1005,6 +1068,10 @@ selfHostedQueryFamilies program =
                       , checkContext "Different" 0 4 True, checkContext "Less" 4 0 False
                       , checkBoundCongruence
                       , checkUnknownGoal
+                      ])
+                , ("entailment cache",
+                      [ checkCacheThreaded (cacheContext [(0,1),(3,6),(7,30)]) aliasedGoals
+                      , checkCacheThreaded (cacheContext []) unaliasedGoals
                       ])
                 , ("execution",
                       [ checkExecution executionSteps 0 (-1), checkExecution [assignLocal 0 (localRef 99)] 2 0
@@ -1293,10 +1360,127 @@ selfHostedQueryFamilies program =
                       , checkConstructorGoal "Equal" 11 1 True, checkConstructorGoal "Equal" 11 0 False
                       , checkWithin 12 10 True, checkWithin 10 12 False, checkWithin 10 10 False
                       , checkCommonContext, checkMergeStates, checkContestT1, checkContestA1, checkContestA1b
-                      , checkBoundPairs, checkContestT1WithCondition
-                      , checkIntegerSelfPair "AtMost" 20 (-31) True, checkIntegerSelfPair "AtMost" (-31) 21 True, checkIntegerSelfPair "Less" 20 (-31) False
+                      , checkContestT1WithCondition
+                      , checkIntegerSelfPair "AtMost" 20 (-31) False, checkIntegerSelfPair "AtMost" (-31) 21 False, checkIntegerSelfPair "Less" 20 (-31) False
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
                       , testAssertErrorContains "expected 3 arguments" (runNamedFunction program "hasEquality" [])
+                      ])
+                , ("join hull",
+                      [ checkHull "FreshCollide" (freshCollide False) 4 freshGoals
+                      , checkHull "FreshControl" (freshCollide True) 4 freshGoals
+                        -- (no root edge: the order w <= x reaches x's class on each side only through the opaque call)
+                      , checkHull "A3Affirm"
+                            ( hullSide [] [(-30, -1, [1, 32]), (-31, 7, [-30]), (20, -1, [1, 33])] [(32, 0, 2), (33, 0, 3)] [(-31, -30, False), (-31, 20, False)] [(1, 1), (2, 20), (4, -31)]
+                            , hullSide [] [(-60, -1, [1, 33]), (-61, 7, [-60]), (20, -1, [1, 33])] [(32, 0, 2), (33, 0, 3)] [(-61, -60, False), (-61, 20, False)] [(1, 1), (2, 20), (4, -61)] )
+                            4 [("AtMost", True, Left 2, True), ("Less", False, Left 2, False)]
+                        -- y changes on the left only; x > y holds on each side only as a root edge
+                      , checkHull "AffirmOneSided"
+                            ( hullSide [] [(-50, -1, [1, 31]), (-51, -1, [1, 32])] [(31, 0, 1), (32, 0, 2), (33, 0, 3)] [(-50, -51, True)] [(1, -50), (4, -51)]
+                            , hullSide [] [(-60, -1, [1, 33])] [(31, 0, 1), (32, 0, 2), (33, 0, 3)] [(1, -60, True)] [(1, 1), (4, -60)] )
+                            4 [("Less", False, Left 1, True), ("AtMost", True, Left 1, False)]
+                      , checkHull "GuideAffirm"
+                            ( hullSide [] [(-50, -1, [1, 2])] [(31, 0, 1)] [(3, 2, False), (31, 3, False), (1, -50, True)] [(1, 1), (2, 2), (3, 3), (4, -50)]
+                            , hullSide [] [(-60, -1, [1, 3])] [(31, 0, 1)] [(3, 2, False), (31, 3, False), (1, -60, True)] [(1, 1), (2, 2), (3, 3), (4, -60)] )
+                            4 [("Less", False, Left 1, True)]
+                      , checkHull "Range"
+                            (hullSide [] [] [(33, 0, 3), (39, 0, 9), (38, 0, 8), (-50, 0, 3)] [] [(4, -50)], hullSide [] [] [(33, 0, 3), (39, 0, 9), (38, 0, 8), (-60, 0, 9)] [] [(4, -60)])
+                            4 [("AtMost", False, Right 33, True), ("AtMost", True, Right 39, True), ("AtMost", True, Right 38, False)]
+                      , checkHull "StrictEdge"
+                            (hullSide [] [(-50, -1, [1, 30])] [(30, 0, 0), (31, 0, 1)] [] [(1, 1), (4, -50)], hullSide [] [(-60, -1, [1, 31])] [(30, 0, 0), (31, 0, 1)] [] [(1, 1), (4, -60)])
+                            4 [("AtMost", False, Left 1, True), ("Less", False, Left 1, False)]
+                      , checkHull "FalseClaim"
+                            (hullSide [] [(-50, -1, [1, 31])] [(31, 0, 1)] [] [(1, 1), (4, -50)], hullSide [] [(-60, -2, [1, 31])] [(31, 0, 1)] [] [(1, 1), (4, -60)])
+                            4 [("Less", False, Left 1, False), ("Less", True, Left 1, False)]
+                        -- raw -40 is p2 + 1 on the left and the constant 100 on the right
+                      , checkHull "RawMeaning"
+                            (hullSide [] [(-40, -1, [2, 31]), (-41, -1, [-40, 31])] [(31, 0, 1)] [] [(1, -41), (9, -40)], hullSide [] [] [(31, 0, 1), (-40, 0, 100), (-60, 0, 0)] [] [(1, -60)])
+                            1 [("Less", False, Right (-40), False), ("Less", True, Right (-40), False), ("AtMost", True, Right (-40), False)]
+                      , checkHull "SubSign"
+                            ( hullSide [] [(-50, -2, [1, 33]), (20, -2, [1, 32])] [(31, 0, 1), (32, 0, 2), (33, 0, 3)] [] [(1, 1), (3, 20), (4, -50)]
+                            , hullSide [] [(-60, -2, [1, 31]), (20, -2, [1, 32])] [(31, 0, 1), (32, 0, 2), (33, 0, 3)] [] [(1, 1), (3, 20), (4, -60)] )
+                            4 [("Less", True, Left 1, True), ("AtMost", True, Left 3, False), ("AtMost", False, Left 1, False)]
+                        -- the classes -49 and -4294967295 pack to the key of (-50, 1) unless the ids are kept within 2^31
+                      , checkHull "BigIdCollide"
+                            (hullSide [] [] [(31, 0, 1)] [(-49, -4294967295, False)] [(1, 1), (4, -50)], hullSide [] [] [(31, 0, 1)] [(-60, 1, False)] [(1, 1), (4, -60)])
+                            4 [("AtMost", True, Left 1, False)]
+                      , checkHull "BigValue"
+                            (hullSide [] [] [(30, 0, 0), (-50, 0, 1125899906842624)] [] [(4, -50)], hullSide [] [] [(30, 0, 0), (-60, 0, 1125899906842625)] [] [(4, -60)])
+                            4 [("AtMost", True, Right 30, False)]
+                      , checkHull "FiniteBigValue"
+                            (hullSide [] [] [(30, 0, 0), (-50, 0, 1099511627777)] [] [(4, -50)], hullSide [] [] [(30, 0, 0), (-60, 0, 5)] [] [(4, -60)])
+                            4 [("AtMost", True, Right 30, False)]
+                        -- with the least id below -2^62 nothing is minted, so no range fact needs a new term
+                      , let sides = (hullSide [] [] [(31, 0, 1), (-50, 0, 3)] [(-4611686018427387905, 1, False)] [(1, 1), (4, -50)], hullSide [] [] [(31, 0, 1), (-60, 0, 4)] [] [(1, 1), (4, -60)])
+                         in checkHull "MinBoundary" sides 4 [("AtMost", True, Left 1, False), ("Less", True, Left 1, False)]
+                                `orElse` testAssertEq (hullFacts sides) (Just (0, 0, 1))
+                      , checkHull "Bool"
+                            (hullSide [] [] [(30, 0, 0), (31, 0, 1), (-50, 1, 1)] [] [(4, -50)], hullSide [] [] [(30, 0, 0), (31, 0, 1), (-60, 1, 0)] [] [(4, -60)])
+                            4 [("AtMost", True, Right 30, False), ("AtMost", False, Right 31, False)]
+                      , checkHull "CycleContra"
+                            (hullSide [] [(-50, -1, [-50, 31])] [(31, 0, 1)] [] [(1, 1), (4, -50)], hullSide [] [(-60, -1, [1, 31])] [(31, 0, 1)] [] [(1, 1), (4, -60)])
+                            4 [("Less", True, Left 1, False), ("AtMost", True, Left 1, False)]
+                      , checkHull "CycleOk"
+                            ( hullSide [] [(-50, -1, [-51, 31]), (-51, -2, [-50, 31])] [(31, 0, 1), (32, 0, 2), (35, 0, 5), (37, 0, 7)] [(32, -51, False)] [(4, -50)]
+                            , hullSide [] [] [(31, 0, 1), (32, 0, 2), (35, 0, 5), (37, 0, 7), (-60, 0, 5)] [] [(4, -60)] )
+                            4 [("AtMost", True, Right 32, False), ("Less", False, Right 35, False)]
+                      , checkHull "Ambiguous" (hullSide [] [] [(-50, 0, 5)] [] [(1, -50), (2, -50)], hullSide [] [] [(-60, 0, 1), (-61, 0, 9)] [] [(1, -60), (2, -61)])
+                            1 [("Less", True, Left 2, False), ("Less", False, Left 2, False)]
+                      , checkHull "ManyLeaf"
+                            ( hullSide [] [(-41, -1, [1, 2]), (-42, -1, [-41, 3]), (-43, -1, [-42, 4]), (-44, -1, [-43, 5]), (-45, -1, [-44, 6]), (-50, -1, [-45, 31])] [(30, 0, 0), (31, 0, 1), (32, 0, 2)] [(30, i, False) | i <- [1 .. 6]] ([(i, i) | i <- [1 .. 6]] ++ [(9, -50)])
+                            , hullSide [] [(-41, -1, [1, 2]), (-42, -1, [-41, 3]), (-43, -1, [-42, 4]), (-44, -1, [-43, 5]), (-45, -1, [-44, 6]), (-60, -1, [-45, 32])] [(30, 0, 0), (31, 0, 1), (32, 0, 2)] [(30, i, False) | i <- [1 .. 6]] ([(i, i) | i <- [1 .. 6]] ++ [(9, -60)]) )
+                            9 [("Less", False, Left 3, True), ("AtMost", True, Left 3, False), ("Less", False, Right 30, True)]
+                        -- b shares a root class with the earlier pair a on the left; its root edge is a's there
+                      , checkHull "AliasOpaque"
+                            (hullSide [] [(-50, 7, [1])] [] [(1, -50, True)] [(1, 1), (2, -50), (3, -50)], hullSide [] [(-61, 7, [1]), (-62, 8, [1])] [] [(1, -62, True)] [(1, 1), (2, -61), (3, -62)])
+                            3 [("Less", False, Left 1, True), ("AtMost", True, Left 1, False)]
+                      , checkHull "AliasedRootFirstOwner"
+                            (hullSide [] [] [] [(1, -50, True), (-50, 9, True)] [(1, 1), (2, -50), (3, -50), (9, 9)], hullSide [] [] [] [(1, -61, True), (-61, 9, True), (1, -62, True)] [(1, 1), (2, -61), (3, -62), (9, 9)])
+                            3 [("AtMost", True, Left 1, False), ("AtMost", False, Left 9, False)]
+                        -- output is two facts a pair however many pairs, plus one per hub edge
+                      , testAssertEq [hullFacts (quadSides k) | k <- [4, 8, 16, 32]] [Just (2 * k, 0, 2 * k) | k <- [4, 8, 16, 32]]
+                      , testAssertEq (map (fmap (\(orders, differences, _) -> (orders, differences)) . hullFacts . hubSides) [16, 64]) [Just (33, 1), Just (129, 1)]
+                        -- the F fixtures with their minted terms negative; parameters and literals keep their ids
+                      , checkHull "F01neg" (hullSide [] [] [(30, 0, 5), (-50, 0, 7)] [] [(1, 30), (2, -50)], hullSide [] [] [(30, 0, 5), (-60, 0, 6)] [] [(1, 30), (2, -60)])
+                            2 [("AtMost", False, Left 1, True), ("Less", False, Left 1, True), ("Less", True, Left 1, False)]
+                      , checkHull "F02neg"
+                            ( hullSide [] [(-40, -13, [41])] [(33, 0, 0), (-50, 0, 0)] [(33, 3, False)] ([(1, -40), (2, 41), (3, 3), (4, -50)] ++ freeLocals)
+                            , hullSide [] [(-40, -13, [41]), (-60, -2, [33, 3])] [(33, 0, 0)] [(33, 3, False)] ([(1, -40), (2, 41), (3, 3), (4, -60)] ++ freeLocals) )
+                            4 [("AtMost", True, Left 3, True), ("Less", True, Left 1, False), ("Less", False, Left 3, False)]
+                      , checkHull "F03alias" (hullSide [(1, 2), (-50, 1)] [] [] [] [(1, 1), (2, 2), (3, -50)], hullSide [(1, 2), (-60, 2)] [] [] [] [(1, 1), (2, 2), (3, -60)])
+                            3 [("AtMost", True, Left 1, True), ("AtMost", False, Left 1, True)]
+                      , checkHull "F03neg" (hullSide [(1, 2)] [] [] [] [(1, 1), (2, 2), (3, -50)], hullSide [(1, 2)] [] [] [] [(1, 1), (2, 2), (3, -60)])
+                            3 [("AtMost", True, Left 1, False)]
+                      , checkHull "F04neg"
+                            ( hullSide [] [] [(33, 0, 0), (31, 0, 1), (-50, 0, 1)] [(33, 3, False), (3, 33, True)] ([(1, 3), (2, 4), (5, -50)] ++ freeLocals)
+                            , hullSide [] [(-60, -1, [4, 31])] [(33, 0, 0), (31, 0, 1)] [(33, 3, False)] ([(1, 3), (2, 4), (5, -60)] ++ freeLocals) )
+                            5 [("Less", True, Left 2, False)]
+                      , checkHull "F05neg"
+                            ( hullSide [] [(-50, -1, [1, 2])] [(31, 0, 1)] [(31, 1, False), (31, 2, False), (-50, 31, False)] ([(1, 1), (2, 2), (3, 4), (5, -50)] ++ freeLocals)
+                            , hullSide [] [(-60, -1, [4, 31])] [(31, 0, 1)] [(31, 1, False), (31, 2, False)] ([(1, 1), (2, 2), (3, 4), (5, -60)] ++ freeLocals) )
+                            5 [("Less", True, Left 3, False)]
+                      , checkHull "F06neg"
+                            ( hullSide [] [(-20, -1, [1, 2]), (-21, 20, [3, 2]), (-22, 20, [3, -20])] [(33, 0, 0)] [(33, 1, False), (-20, 2, False)] ([(1, 1), (2, 2), (3, 3), (4, -21), (5, -22)] ++ freeLocals)
+                            , hullSide [] [(-20, -1, [1, 2]), (-21, 20, [3, 2]), (-22, 20, [3, -20])] [(33, 0, 0)] [(33, 1, False), (-20, 2, False)] ([(1, 1), (2, 2), (3, 3), (4, -21), (5, -21)] ++ freeLocals) )
+                            5 [("Less", True, Left 4, False), ("Less", False, Left 4, False)]
+                      , checkHull "F07neg"
+                            ( hullSide [] [(-52, -1, [1, 2]), (-50, -1, [-52, 31])] [(33, 0, 0), (31, 0, 1), (32, 0, 2)] [(33, 1, False), (33, 2, False)] [(1, 1), (2, 2), (5, -50)]
+                            , hullSide [] [(-62, -1, [1, 2]), (-60, -1, [-62, 32])] [(33, 0, 0), (31, 0, 1), (32, 0, 2)] [(33, 1, False), (33, 2, False)] [(1, 1), (2, 2), (5, -60)] )
+                            5 [("Less", False, Left 1, True), ("Less", False, Left 2, True), ("Less", True, Left 1, False)]
+                      , checkHull "F08neg"
+                            (hullSide [] [] [(-50, 0, 1)] [] [(5, -50), (71, 71), (72, 72), (73, 73), (74, 74), (75, 75)], hullSide [] [] [(-60, 0, 2)] [] [(5, -60), (71, 71), (72, 72), (73, 73), (74, 74), (75, 75)])
+                            5 [("AtMost", False, Left 71, False), ("AtMost", True, Left 71, False)]
+                        -- a Boolean constant is no number: true is not 1
+                      , checkHull "F09neg"
+                            ( hullSide [] [] [(33, 0, 0), (31, 0, 1), (34, 1, 1), (-50, 0, 1)] [] ([(1, 33), (2, 31), (3, 34), (5, -50)] ++ freeLocals)
+                            , hullSide [] [] [(33, 0, 0), (31, 0, 1), (34, 1, 1), (-60, 0, 2)] [] ([(1, 33), (2, 31), (3, 34), (5, -60)] ++ freeLocals) )
+                            5 [("Less", False, Left 1, True), ("AtMost", False, Left 2, True), ("Less", False, Left 2, False), ("AtMost", False, Left 3, False), ("AtMost", True, Left 3, False)]
+                      , checkHull "F11neg"
+                            ( hullSide [] [(-21, 20, [3, 1]), (-22, 20, [3, 2])] [] [(1, 2, False), (2, 1, False), (-22, -50, True)] ([(1, 1), (2, 2), (3, 3), (4, -21), (5, -50), (6, -22)] ++ freeLocals)
+                            , hullSide [] [(-21, 20, [3, 1]), (-22, 20, [3, 2])] [] [(1, 2, False), (2, 1, False), (-22, -60, True)] ([(1, 1), (2, 2), (3, 3), (4, -21), (5, -60), (6, -22)] ++ freeLocals) )
+                            5 [("Less", False, Left 6, True), ("AtMost", True, Left 6, False)]
+                      , checkHull "F12neg"
+                            (hullSide [(-24, -28)] [] [] [(-28, -50, True)] ([(1, -24), (2, -28), (5, -50)] ++ freeLocals), hullSide [(-24, -28)] [] [] [(-28, -60, True)] ([(1, -24), (2, -28), (5, -60)] ++ freeLocals))
+                            5 [("Less", False, Left 1, True), ("Less", False, Left 2, True), ("AtMost", True, Left 2, False)]
                       ])
                 , ("loop candidate provenance",
                       [ checkPairProvenance "inferPairGoal" [(900, 0, 7), (901, 0, 4)] [(10, 0, 7), (11, 0, 4)] (1, [10, 11])
