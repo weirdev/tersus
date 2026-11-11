@@ -20,9 +20,12 @@ fn stmtOf(st: &St, s: Int) -> AstStatement ~ {
 fn checkStatements(st: St, top: Bool, stmts: &List<Int>) -> St ~ {
     out = [];
     types = [];
+    index = 0;
     for s in stmts {
         st = checkItem(st, top, s);
         if st.status != 0 { return st; };
+        index = index + 1;
+        if top && index = st.checkedItems { st = St { defQueue: [], ..st }; };
         // (the functions that templates were made into while it was checked come before it)
         if top {
             for m in &st.emitted { out = push(out, m); };
@@ -379,8 +382,12 @@ fn checkFunctionWith(st: St, top: Bool, name: String, n: Int, v: Int, fs: FnSig,
     if top { st = St { fns: st.fns.insert(clone(name), fnT), ..st }; };
     st = assignVar(st, &name, fnT);
     if st.status != 0 { return st; };
+    // (a function nested in a body checked against its bounds is checked as any function is: those bounds are not its)
+    outerDefChecking = st.defChecking;
+    st = St { defChecking: false, ..st };
     st = checkFunction(st, &name, clone(fs), value.ins, value.outs, value.term, value.stmts);
     if st.status != 0 { return st; };
+    st = St { defChecking: outerDefChecking, ..st };
     // (st.outs: the requires, the ensures, the termination and the body)
     parts = clone(st.outs);
     bodyTypes = clone(st.te.types);

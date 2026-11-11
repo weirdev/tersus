@@ -3,6 +3,9 @@ module TestDifferential (testDifferential) where
 import AstData (writeBuiltinTable)
 import BuiltinTable (builtinTable)
 import Compile (parseWithEquality)
+import Data.List (isInfixOf)
+import LibParsed (inlinedLibraryLength)
+import Modules (ModuleId (..))
 import Differential
 import ElaborateRequest
 import MirLower (lowerElaborated)
@@ -185,6 +188,40 @@ malformedSections (rq : _) = case writeRequest rq of
     renameIn _ _ [] = []
     lastBlock ls = head ([i | i <- reverse [0 .. length ls - 1], ls !! i == "data " ++ show (length ls - i - 1)] ++ [length ls])
 
+-- A request says how many of its first statements are libraries checked where they were defined, and the elaborator
+-- does not check their functions with bounds again: a count that covers the trait and the function below accepts a body
+-- that its bounds do not allow, and one statement fewer, the libraries alone or one statement less than them refuses it
+checkedStatements :: TestResult
+checkedStatements = case parseWithEquality "trait Show { fn show(self: &Self) -> Int; }; fn same<T: Show>(a: T, b: T) -> Bool { return a = b; }; return 0;" of
+    Left e -> Just e
+    Right stmts ->
+        let inlined = inlinedLibraryLength stmts
+            request n = Request (ModuleId "main" Nothing) False False NoInterface [] [] [] Nothing [stmts] n
+            refusedAt n = case sourceElaborator (request n) of
+                Refused m | "T is compared with =" `isInfixOf` m -> Nothing
+                other -> Just ("checked " ++ show n ++ " was not refused at the definition: " ++ show other)
+            acceptedAt n = case sourceElaborator (request n) of
+                Accepted {} -> Nothing
+                other -> Just ("checked " ++ show n ++ " checked a definition again: " ++ show other)
+         in firstFailure
+                [ if inlined > 0 && inlined + 3 == length stmts then Nothing else Just ("the inlined libraries are " ++ show inlined ++ " of " ++ show (length stmts) ++ " statements")
+                , refusedAt (inlined - 1)
+                , refusedAt inlined
+                , refusedAt (inlined + 1)
+                , acceptedAt (inlined + 2)
+                , acceptedAt (inlined + 3)
+                , case writeRequest (request (inlined + 2)) of
+                    Error e -> Just e
+                    Ok text -> firstFailure
+                        [ case readRequest text of
+                            Ok rq | rq == request (inlined + 2) -> Nothing
+                            _ -> Just "the checked count did not read back"
+                        , case readRequest (unlines [if take 8 l == "builtins" then "builtins checked 0" else l | l <- lines text]) of
+                            Error _ -> Nothing
+                            Ok _ -> Just "accepted a checked count of 0"
+                        ]
+                ]
+
 firstFailure :: [TestResult] -> TestResult
 firstFailure = foldr (\r rest -> maybe rest Just r) Nothing
 
@@ -194,4 +231,5 @@ testDifferential = TestList "testDifferential"
     , TestCase "a candidate's mistakes are not agreements" mutationControls
     , testCase "the lowering takes exactly the elaborated expression types" visitOrder
     , TestCase "the text protocol loses nothing" protocolAgreement
+    , testCase "functions with bounds of statements already checked are not checked again" checkedStatements
     ]

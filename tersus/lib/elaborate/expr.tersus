@@ -7,8 +7,8 @@ import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureIn
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
-import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, productFits, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
-import elaborate::traits { callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
+import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
+import elaborate::traits { boundCallWritten, builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, sequenceFunction, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
     return St { te: TE { node: node, types: push([], t) }, ..st };
@@ -149,7 +149,7 @@ fn inferCallRest(st: St, funct: Int, args: &List<Int>) -> St ~ {
         if fname = "clone" && !HashMap::contains(&st.fns, "clone") && !inScope(st, "clone") { return cloneCall(st, args); };
         if fname = ".clone" && size(args) = 1 { return cloneMethod(st, args); };
         if size(fname.bytes) > 1 && get(fname.bytes, 0) = toByte(46) && size(args) > 0 {
-            return methodCall(st, fname.slice(1, size(fname.bytes)), args);
+            return methodCall(st, funct, fname.slice(1, size(fname.bytes)), args);
         };
         if HashMap::contains(&st.ghostNames, &fname) && !inScope(st, &fname) && !HashMap::contains(&st.fns, &fname) {
             index = HashMap::lookup(&st.ghostNames, &fname, 0 - 1);
@@ -702,7 +702,7 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
     return typed(st, st.nid, t, &inferred);
 };
 
-fn methodCall(st: St, method: String, args: &List<Int>) -> St ~ {
+fn methodCall(st: St, funct: Int, method: String, args: &List<Int>) -> St ~ {
     st = inferAll(st, args);
     if st.status != 0 { return st; };
     inferred = clone(st.tes);
@@ -721,9 +721,11 @@ fn methodCall(st: St, method: String, args: &List<Int>) -> St ~ {
     st = ownerOfValue(st, &method, teHeadAt(&inferred, 0));
     if st.status != 0 { return st; };
     owner = firstText(&st.names);
-    st = resolveAssociated(st, &owner, &method);
+    st = sequenceFunction(st, &owner, &method);
     if st.status != 0 { return st; };
-    return callResolved(st, firstText(&st.names), &inferred);
+    resolved = firstText(&st.names);
+    if size(ownedParameter(&owner).bytes) > 0 { st = boundCallWritten(st, funct, &owner, &method, false); };
+    return callResolved(st, resolved, &inferred);
 };
 
 fn sequenceType(st: &St, t: Int) -> Bool ~ {
@@ -885,6 +887,11 @@ fn traitCall(st: St, funct: Int, path: String, function: String, args: &List<Int
         inferred = clone(st.tes);
         st = primitiveTraitCall(st, &path, &fns, &function, &inferred);
         if st.status != 0 || st.ok { return st; };
+        // (the builtin of that name, called as the program would call it by its name)
+        if size(inferred) > 0 && builtinSequenceCall(&st, &path, &function, teHeadAt(&inferred, 0)) {
+            st = emitVar(st, clone(function));
+            return inferCallRest(st, st.nid, args);
+        };
         ats = typesHeads(&inferred);
         st = ownerThroughTrait(st, &path, &fns, &function, &ats);
         if st.status != 0 { return st; };
@@ -913,7 +920,7 @@ fn cloneMethod(st: St, args: &List<Int>) -> St ~ {
     receiver = clone(st.te);
     st = zonk(st, teHead(&receiver));
     x = tyAt(st, st.ty);
-    owned = x.kind = 4 && HashMap::contains(&st.assoc, catStrings(x.name, " clone"));
+    owned = x.kind = 4 && !isBoxTy(st, st.ty) && HashMap::contains(&st.assoc, catStrings(x.name, " clone"));
     if !owned { return cloneCall(st, args); };
     st = ownerOfValue(st, "clone", teHead(&receiver));
     if st.status != 0 { return st; };
@@ -950,7 +957,13 @@ fn cloneCall(st: St, args: &List<Int>) -> St ~ {
     };
     // (a word, an address, a function and a reference are their own copy)
     if k = 0 || k = 1 || k = 2 || k = 3 || k = 7 || k = 14 || k = 10 || k = 11 { return St { te: x, ..st }; };
-    if k = 12 || k = 15 || mentionsParameter(st, xtz) { return cloneWrap(st, x, xt); };
+    if k = 12 || k = 15 || mentionsParameter(st, xtz) {
+        uncloned = unclonedParameter(&st, xtz);
+        if size(uncloned.bytes) > 0 {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(st.current), " clones a "), render(st, xtz)), ", and its bounds do not say "), uncloned), ": Clone"));
+        };
+        return cloneWrap(st, x, xt);
+    };
     xx = tyAt(st, xtz);
     if isBoxTy(st, xtz) && kindOf(st, nth(&xx.args, 0)) = 6 && kindOf(st, argAt(st, nth(&xx.args, 0), 1)) = 21 {
         if HashMap::contains(&st.templates, "cloneBoxedArray") || HashMap::contains(&st.fns, "cloneBoxedArray") {
@@ -1129,13 +1142,15 @@ fn requireMarker(st: St, marker: String, t: Int) -> St ~ {
     if k = 8 { return typeError(st, catStrings(render(st, lt), " is a permission, which is never copied: there is only ever one for a piece of memory")); };
     if k = 9 { return typeError(st, catStrings(render(st, lt), " holds a value that owns something, or nothing, and native code cannot tell which: it is not copied (take the value out with Uninit::take, and copy that)")); };
     tail = "";
-    if marker = "Clone" {
+    if kindOf(st, lt) = 12 {
+        tail = catStrings(catStrings(catStrings(catStrings(": bound it, as in <", render(st, lt)), ": "), clone(marker)), ">");
+    } else { if marker = "Clone" {
         x = tyAt(st, lt);
         owner = render(st, lt);
         if x.kind = 4 { owner = clone(x.name); };
         if x.kind = 5 { owner = clone(x.name); };
         tail = catStrings(catStrings(", so a copy of it is not made: write impl Clone for ", owner), " { }; (its fields have to be Clone) if it should be");
-    };
+    }; };
     return typeError(st, catStrings(catStrings(catStrings(render(st, lt), " does not implement "), clone(marker)), tail));
 };
 
@@ -1312,9 +1327,17 @@ fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
             x = tyAt(st, st.ty);
             if x.kind = 4 && x.name != "List" && x.name != "Box" {
                 owner = clone(x.name);
-                st = resolveAssociated(st, &owner, &fname);
+                st = sequenceFunction(st, &owner, &fname);
                 if st.status != 0 { return st; };
                 return callResolved(st, firstText(&st.names), &inferred0);
+            };
+            if x.kind = 12 && st.defChecking {
+                powner = parameterOwner(&x.name);
+                st = resolveAssociated(st, &powner, &fname);
+                if st.status != 0 { return st; };
+                resolved = firstText(&st.names);
+                st = boundCallWritten(st, funct, &powner, &fname, false);
+                return callResolved(st, resolved, &inferred0);
             };
         };
     };
@@ -1649,7 +1672,8 @@ fn implementsMarker(st: St, marker: String, t0: Int, depth: Int) -> St ~ {
     x = tyAt(st, t);
     if x.kind <= 3 || x.kind = 14 || x.kind = 15 || x.kind = 7 { return St { ok: true, ..st }; };
     if x.kind = 10 { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
-    if x.kind = 12 { return St { ok: marker = "Clone", ..st }; };
+    if x.kind = 12 && marker = "Clone" { return St { ok: parametersClone(&st, t), ..st }; };
+    if x.kind = 12 { return St { ok: st.defChecking && HashSet::contains(&st.impls, catStrings(catStrings(clone(marker), " "), parameterOwner(&x.name))), ..st }; };
     if x.kind = 6 { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
     if isListTy(st, t) || isBoxTy(st, t) {
         if marker = "Clone" { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };

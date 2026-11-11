@@ -341,8 +341,9 @@ addresses and permissions, references (places, borrows, `writes(...)`
 footprints, `from` origins and aliases), `clone` and the Copy and Clone
 markers, traits and impls (method resolution, `Type::f`, `Trait::f(x)`, `Eq`
 behind `=`, Deref look-through and the functions that check an impl against
-its trait), functions with bounds (made for each list of types a call gives
-them, placed before the statement that called them; one another package's
+its trait), functions with bounds (each checked once against its bounds alone where it is
+defined, then made for each list of types a call gives them, placed before the
+statement that called them; one another package's
 module defines is checked in what that module sees, its defining context, and
 the sizes its bounds name are in the instance's name and body), and the modules of
 packages and of the compiler libraries: a module predeclares its own types,

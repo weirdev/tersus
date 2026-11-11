@@ -211,7 +211,13 @@ single-file program, `module` for every ordinary package module, `lib` for a
 compiler-library module's physical constructor view), the interfaces of the modules
 it imports in merge order (the first wins a name), the checked defining dependency
 interfaces used only during template instantiation, the compiler libraries it may
-be given, the package its names are resolved in, and its statements as read:
+be given, the package its names are resolved in, its statements as read, and how
+many of the first statements are compiler libraries put in front of a single-file
+program (`Compile.elaborateWith`, counted by `LibParsed.inlinedLibraryLength`):
+their functions with bounds were checked against their bounds where the libraries
+were compiled as modules, so the elaborator does not check them again. The count
+is written as `builtins checked N` only when it is not 0, so a request without one
+is the plain `builtins` line an older elaborator reads:
 
 ```
 tersus-elaborate 1
@@ -219,7 +225,7 @@ module "PACKAGE" none|"MODULE"
 predeclare true|false
 library true|false
 extract none|module|lib
-builtins
+builtins [checked N]
 data LINES          (the builtin table, `tersus-ast 1 builtins`)
 ...
 interfaces N
@@ -264,7 +270,14 @@ interfaces and keeps it with the templates the provider's interface owns. A
 call of one of those templates is checked in that state: the provider's types
 beside the caller's, the provider's traits, and the caller's impls of those
 traits only. The bounds of a caller's impl are met with the traits and impls of
-the defining context that has the impl as the caller does.
+the defining context that has the impl as the caller does. Each function with
+bounds the module itself defines (a bounded function, a function of a bounded
+impl, and the check of a bounded trait impl's function against the trait) is
+checked once against its bounds alone, after the module's statements are or
+before its first copy is made, and a method call on a value of a type parameter
+is written into the template as the call of its bound's trait function, which an
+interface then carries; a copy of one that does not check is refused as an
+internal compiler error (LANGUAGE.md, Bounded types).
 
 The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
 the elaborated syntax, `interface none` or `interface` with a `data` block of

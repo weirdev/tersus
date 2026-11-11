@@ -40,27 +40,11 @@ impl<K: Hash + Eq> HashSet<K> {
         return self.map.contains(k);
     };
 
-    fn insert(self: Self, k: K) -> Self [{ }] [{
-        affirm size(return) >= size(self);
-        affirm size(return) <= size(self) + 1;
-    }] {
-        return makeSet(self.map.insert(k, true));
-    };
-
     fn remove(self: Self, k: &K) -> Self [{ }] [{
         affirm size(return) <= size(self);
         affirm size(return) >= size(self) - 1;
     }] {
         return makeSet(self.map.remove(k));
-    };
-
-    // Every key of the set, in bucket order (which order that is says nothing about the keys)
-    fn elements(self: &Self) -> List<K> [{ }] [{ }] {
-        result = [];
-        for e in self.map.entries() {
-            result = push(result, clone(e.key));
-        };
-        return result;
     };
 
     // A reference to the nth key in the order of elements(), which the caller says is there: the key is read where
@@ -70,5 +54,23 @@ impl<K: Hash + Eq> HashSet<K> {
         bucket = &get(self.map.buckets, loc.0);
         e = &get(bucket, loc.1);
         return &(*e).key;
+    };
+};
+
+impl<K: Hash + Eq + Clone> HashSet<K> {
+    fn insert(self: Self, k: K) -> Self [{ }] [{
+        affirm size(return) >= size(self);
+        affirm size(return) <= size(self) + 1;
+    }] {
+        return makeSet(self.map.insert(k, true));
+    };
+
+    // Every key of the set, in bucket order (which order that is says nothing about the keys)
+    fn elements(self: &Self) -> List<K> [{ }] [{ }] {
+        result = [];
+        for e in self.map.entries() {
+            result = push(result, clone(e.key));
+        };
+        return result;
     };
 };

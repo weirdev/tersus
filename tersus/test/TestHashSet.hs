@@ -38,6 +38,7 @@ testHashSet =
                 "elements by reference"
                 [ testCase "every key by reference, in some order" (pipelineRuns "s = HashSet::new().insert(1).insert(2).insert(1); t = 0; n = 0; total = s.size(); while n < total [{ affirm n >= 0; affirm n <= total; }] shrinks total - n { k = s.elementRef(n); t = t + *k * 10; n = n + 1; }; return t + total * 100 + s.size();" (VInt 232))
                 , testCase "elementRef where the key is a precondition" (pipelineValid "fn useIt(s: &HashSet<Int>) -> Int [{ affirm size(s.map.buckets) >= 1; affirm findNth(s.map.buckets, 1).1 >= 0; }] [{ }] { k = s.elementRef(1); return *k; }; return 0;")
+                , testCase "a key type without Clone is refused" (pipelineRejected "struct Key { n: Int }; impl Eq for Key { }; impl Hash for Key { fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] { return 1; }; }; s = HashSet::new().insert(Key { n: 1 }); return size(s.elements());" "<HashSet>::insert needs K to implement Clone, and Key does not")
                 , testCase "the set cannot be moved while an elementRef is live" (pipelineRejected "fn bad(s: HashSet<Int>) -> Int [{ affirm size(s.map.buckets) >= 1; affirm findNth(s.map.buckets, 0).1 >= 0; }] [{ }] { k = s.elementRef(0); s = s.insert(9); return *k; }; return 0;" "cannot be moved while that borrow is live")
                 ]
             ]

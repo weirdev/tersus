@@ -6,6 +6,7 @@ module Compile
 
 import qualified Mir as M
 import MirLower (lowerElaborated, lowerModuleWith)
+import LibParsed (inlinedLibraryLength)
 import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
 import Link (linkPrograms, completeSpecEnvs)
 import Modules (ModuleId (..))
@@ -38,7 +39,7 @@ lowerSourceParts = lowerSourcePartsWith sourceElaborator
 lowerSourcePartsWith :: Elaborator -> Bool -> SourceParts -> Result M.Program String
 lowerSourcePartsWith elaborator _reserving (names, _library, stmts) =
     catalog `bindResult` \libraries ->
-        case elaborator (Request mainModule False False NoInterface [] [] libraries Nothing [stmts]) of
+        case elaborator (Request mainModule False False NoInterface [] [] libraries Nothing [stmts] 0) of
             Unresolved err -> Error err
             response ->
                 stage "Validation failed: " (acceptedElaboration response) `bindResult` \elaborated ->
@@ -72,7 +73,7 @@ elaborateStatements :: [Statement] -> Result Elaborated String
 elaborateStatements = elaborateWith sourceElaborator
 
 elaborateWith :: Elaborator -> [Statement] -> Result Elaborated String
-elaborateWith elaborator stmts = acceptedElaboration (elaborator (Request mainModule False False NoInterface [] [] [] Nothing [stmts]))
+elaborateWith elaborator stmts = acceptedElaboration (elaborator (Request mainModule False False NoInterface [] [] [] Nothing [stmts] (inlinedLibraryLength stmts)))
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

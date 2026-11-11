@@ -70,7 +70,7 @@ compileModulesUsing elaborator libraries pkg = go (Mod.packageModules pkg) Map.e
                 (dep : _, _) -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": dependency " ++ Mod.renderModuleId dep ++ " was not compiled before it (the loader gives modules dependencies first)")
                 (_, Error err) -> Error (inModule err)
                 (_, Ok libPkg) ->
-                    let request = Request moduId True False ModuleInterfaceOf depInterfaces definingContexts (maybe [] libCatalog libPkg) (Just package) [fileBody (Mod.loadedParsed file) | file <- Mod.loadedModuleFiles modu]
+                    let request = Request moduId True False ModuleInterfaceOf depInterfaces definingContexts (maybe [] libCatalog libPkg) (Just package) [fileBody (Mod.loadedParsed file) | file <- Mod.loadedModuleFiles modu] 0
                      in case elaborator request of
                             Accepted elaborated@(Elaborated elaboratedStmts _) (Just iface) selected ->
                                 let (selectedIfaces, libUnits) = maybe ([], []) (`libSelection` selected) libPkg
