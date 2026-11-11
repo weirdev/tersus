@@ -407,7 +407,7 @@ fn checkFunctionWith(st: St, top: Bool, name: String, n: Int, v: Int, fs: FnSig,
     return St { te: TE { node: st.nid, types: bodyTypes }, sigNode: sigNode, ..st };
 };
 
-// The type of a function of a signature (TypeCheckCore.functionType)
+// The type of a function of a signature
 fn fnTypeOf(st: St, fs: &FnSig) -> St ~ {
     st = fnTy(st, clone(fs.ptys), fs.rty);
     if size(fs.sizes) = 0 && size(fs.types) = 0 { return st; };

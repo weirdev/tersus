@@ -341,7 +341,7 @@ fn zonkChanges(st: &St, t: Int) -> Bool ~ {
     return false;
 };
 
-// The type with everything known of its unknowns put in (TypeCheckCore.zonk), as a type of its own
+// The type with everything known of its unknowns put in, as a type of its own
 fn zonk(st: St, t: Int) -> St ~ {
     if !zonkChanges(st, t) { return withTy(st, t); };
     r = resolve(st, t);
@@ -426,7 +426,7 @@ fn unifyAll(st: St, xs: &List<Int>, ys: &List<Int>, args: Bool) -> St ~ {
     return St { ok: true, ..st };
 };
 
-// Makes the two types equal if they can be (TypeCheckCore.unify); st.ok says whether they could
+// Makes the two types equal if they can be; st.ok says whether they could
 fn unify(st: St, a: Int, b: Int) -> St ~ {
     x = resolve(st, a);
     y = resolve(st, b);
@@ -682,7 +682,7 @@ fn render(st: &St, t: Int) -> String ~ {
     return "?";
 };
 
-// Fails with the context if the types cannot be made equal (TypeCheckCore.expect)
+// Fails with the context if the types cannot be made equal
 fn expect(st: St, context: String, expected: Int, actual: Int) -> St ~ {
     if st.status != 0 { return st; };
     st = unify(st, expected, actual);

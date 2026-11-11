@@ -110,40 +110,40 @@ testMatchOverReference =
         decls
             ++ "enum Other { Index { o: Int } }; fn pick(step: &RefStep) -> Int [{ }] [{ }] { n = 0; match step { RefStep::Field { ctor: c, field: f } => { n = c + f; }, Other::Index { o: o } => { n = o; }, }; return n; };"
 
+-- Canonical names come from the elaborator, which resolves each package module it is sent
 testCanonical :: Test
 testCanonical =
     testCaseSeq
         "canonical"
-        [ case (parsed programA, parsed programB) of
-            (Right a, Right b) ->
-                let a' = canonicalizeDeclarations (fileModuleIdentity "pkg" "geo" "shapes.tersus") a
-                    b' = canonicalizeDeclarations (fileModuleIdentity "pkg" "other" "shapes.tersus") b
-                 in if declarationNames a' /= declarationNames b' && all ("pkg$geo$shapes$" `isInfixOf`) (declarationNames a')
-                        then Nothing
-                        else Just ("Expected distinct canonical names, got: " ++ show (declarationNames a', declarationNames b'))
-            (Left err, _) -> Just ("Parse failed: " ++ err)
-            (_, Left err) -> Just ("Parse failed: " ++ err)
-        , case parsed programA of
-            Left err -> Just ("Parse failed: " ++ err)
-            Right a -> testAssertEq (canonicalizeDeclarations (rootModuleIdentity "pkg" "main.tersus") a) a
-        , case parsed "enum Shape { Circle { r: Int } }; struct Point { x: Int };" of
-            Left err -> Just ("Parse failed: " ++ err)
-            Right a ->
-                testAssertEq
-                    (declarationNames (canonicalizeDeclarations (fileModuleIdentity "pkg" "geo" "shapes.tersus") a))
-                    ["pkg$geo$shapes$Shape", "pkg$geo$shapes$Shape::Circle", "pkg$geo$shapes$Point"]
-        , case parsed "struct Point { x: Int }; struct Point { y: Int };" of
-            Left err -> Just ("Parse failed: " ++ err)
-            Right a -> case elaborateStatements (canonicalizeDeclarations (fileModuleIdentity "pkg" "geo" "shapes.tersus") a) of
-                Error err ->
-                    if "already defined" `isInfixOf` err
-                        then Nothing
-                        else Just ("Expected duplicate error, got: " ++ err)
-                Ok _ -> Just "Expected duplicate declaration in one file to fail"
+        [ inspectModules [("pkg/geo/shapes.tersus", programA), ("pkg/other/shapes.tersus", programA)] $ \modules ->
+            let geo = namesIn (ModuleId "pkg" (Just "geo")) modules
+                other = namesIn (ModuleId "pkg" (Just "other")) modules
+             in if geo /= other && not (null geo) && all ("pkg$geo$shapes$" `isInfixOf`) geo
+                    then Nothing
+                    else Just ("Expected distinct canonical names, got: " ++ show (geo, other))
+        , inspectModules [] $ \modules -> testAssertEq (filter (`elem` ["Point", "area"]) (namesIn (ModuleId "pkg" Nothing) modules)) ["Point", "area"]
+        , inspectModules [("pkg/geo/shapes.tersus", "enum Shape { Circle { r: Int } }; struct Point { x: Int };")] $ \modules ->
+            testAssertEq (namesIn (ModuleId "pkg" (Just "geo")) modules) ["pkg$geo$shapes$Shape", "pkg$geo$shapes$Shape::Circle", "pkg$geo$shapes$Point"]
+        , case compiledWith [("pkg/geo/shapes.tersus", "struct Point { x: Int }; struct Point { y: Int };")] of
+            Error err ->
+                if "already defined" `isInfixOf` err
+                    then Nothing
+                    else Just ("Expected duplicate error, got: " ++ err)
+            Ok _ -> Just "Expected duplicate declaration in one file to fail"
         ]
   where
     programA = "struct Point { x: Int }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };"
-    programB = programA
+    -- (the entry module imports each module, and declares programA's names itself)
+    compiledWith files =
+        let imports = concat ["import pkg::" ++ takeWhile (/= '/') (drop 4 path) ++ "; " | (path, _) <- files]
+         in case loadFromEntry (resolverFromFiles ([("pkg/package.tersus", ""), ("pkg/main.tersus", imports ++ programA ++ " return 0;")] ++ files)) "pkg/main.tersus" of
+                Left err -> Error err
+                Right (PackageResult pkg) -> compileModules pkg
+                Right _ -> Error "fixture did not load as a package"
+    inspectModules files check = case compiledWith files of
+        Error err -> Just err
+        Ok compiled -> check (compiledModules compiled)
+    namesIn modu modules = concat [declarationNames (compiledStatements m) | m <- modules, compiledModuleId m == modu]
 
 testImports :: Test
 testImports =
@@ -802,6 +802,7 @@ testModuleLinkDrop =
         , case ownedPkg dropSuppressedPreludeFiles "app/main.tersus" of
             Left err -> Just ("drop with a suppressed prelude should compile to owned MIR: " ++ err)
             Right program -> testAssertTrue ("<app$geo$geo$Token as Drop>::drop" `isInfixOf` M.renderProgram program)
+        , testAssertErrorContains "Type error: unknown trait Drop" (compileSource (suppressedPreludeDrop ++ " t = Token::new(2); return t.n;"))
         ]
   where
     dropFiles =
@@ -810,12 +811,14 @@ testModuleLinkDrop =
         , ("app/geo/geo.tersus", "struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };")
         ]
     -- (the geo module declares a prelude trait of its own, so the prelude
-    -- is not selected for it, but its impl Drop still sees the Drop trait)
+    -- is not selected for it, but its impl Drop still sees the Drop trait;
+    -- a single file that does the same does not)
     dropSuppressedPreludeFiles =
         [ ("app/package.tersus", "")
         , ("app/main.tersus", "import app::geo; t = geo::Token::new(2); return t.n;")
-        , ("app/geo/geo.tersus", "trait Sequence<E> { fn size(self: &Self) -> Int; }; struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };")
+        , ("app/geo/geo.tersus", suppressedPreludeDrop)
         ]
+    suppressedPreludeDrop = "trait Sequence<E> { fn size(self: &Self) -> Int; }; struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };"
 
 testModuleLinkMutual :: Test
 testModuleLinkMutual =

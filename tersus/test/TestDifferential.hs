@@ -10,7 +10,7 @@ import Syntax (Elaborated (..))
 import TestData (typeCheckSources)
 import TestHarness
 import Compile (elaborateStatements)
-import ElaboratorTool (sourceElaborator)
+import ElaboratorTool (runElaboratorText, sourceElaborator, sourceElaboratorExecutable)
 import Types (Type (..))
 import Utils
 
@@ -46,7 +46,7 @@ mutationControls = do
   where
     perturbed change rq = pure (Ok (change (sourceElaborator rq)))
     retype response = case response of
-        Accepted (Elaborated stmts (t : ts)) i -> Accepted (Elaborated stmts ((if t == TBool then TInt else TBool) : ts)) i
+        Accepted (Elaborated stmts (t : ts)) i ls -> Accepted (Elaborated stmts ((if t == TBool then TInt else TBool) : ts)) i ls
         other -> other
     reword response = case response of
         Refused m -> Refused (m ++ "!")
@@ -83,11 +83,14 @@ visitOrder = case parseWithEquality "x = [true]; n = 3; return n;" of
 protocolRoundTrip :: IO TestResult
 protocolRoundTrip = do
     requests <- unitRequests sourceElaborator (FilePackage "examples/modules/app/main.tersus")
-    pure $ case requests of
-        Error e -> Just e
-        Ok [] -> Just "no requests"
-        Ok answered -> firstFailure (map (one . fst) answered ++ [malformed (fst (last answered))] ++ map verdict [Refused "a \"refusal\"", RefusedInterface "in module p::m: no interface", NotModelled "what"])
+    case requests of
+        Error e -> pure (Just e)
+        Ok [] -> pure (Just "no requests")
+        Ok answered -> do
+            sections <- malformedSections [rq | (rq, _) <- answered, length (rqStatements rq) > 1]
+            pure $ firstFailure (map (one . fst) answered ++ [malformed (fst (last answered)), sections] ++ map verdict ([Refused "a \"refusal\"", RefusedInterface "in module p::m: no interface", Unresolved "in module p::m: unknown name q", NotModelled "what"] ++ withLibraries (map snd answered)))
   where
+    withLibraries responses = take 1 [Accepted e i ["types", "clone"] | Accepted e i _ <- responses]
     malformed rq = case (writeRequest rq, writeResponse (sourceElaborator rq)) of
         (Ok request, Ok response) ->
             let refused name r = case r of
@@ -118,6 +121,11 @@ protocolRoundTrip = do
                         (Error e, _) -> Just e
                         (_, Error e) -> Just e
                     , refused "a response with no interface line" (readResponse (unlines (takeWhile (/= "interface") (lines response))))
+                    , case [(e, i) | Accepted e i _ <- [sourceElaborator rq]] of
+                        [] -> Just "the request was not accepted"
+                        (e, i) : _ -> case writeResponse (Accepted e i ["types", "clone"]) of
+                            Error err -> Just err
+                            Ok text -> refused "a libraries line with a wrong count" (readResponse (swapLine "libraries 2 \"types\" \"clone\"" "libraries 3 \"types\" \"clone\"" text))
                     , refused "a response with another header" (readResponse (swapLine "tersus-elaborated 1" "tersus-elaborated 2" response))
                     ]
         (Error e, _) -> Just e
@@ -134,6 +142,48 @@ protocolRoundTrip = do
             Ok text -> case readResponse text `bindResult` writeResponse of
                 Error e -> Just e
                 Ok text' -> testAssertEq text' text
+
+-- A package module's request with its new sections malformed is refused by the compiler's reader and by the
+-- elaborator's, and one whose syntax is not a block per file of the module is not written
+malformedSections :: [Request] -> IO TestResult
+malformedSections [] = pure (Just "no request for a module of several files")
+malformedSections (rq : _) = case writeRequest rq of
+    Error e -> pure (Just e)
+    Ok request -> do
+        exe <- sourceElaboratorExecutable
+        case exe of
+            Error e -> pure (Just e)
+            Ok path -> do
+                asWritten <- runElaboratorText path request
+                let cases =
+                        [ ("an empty library catalog", renameWord "libraries " "0" request)
+                        , ("an unknown declaration kind", renameWord "decl " "constant" request)
+                        , ("an unknown import level", renameWord "import " "package" request)
+                        , ("a file of the module without its syntax", unlines (take (lastBlock (lines request)) (lines request)))
+                        , ("syntax for a file the module does not have", unlines (lines request ++ drop (lastBlock (lines request)) (lines request)))
+                        ]
+                answers <- mapM (runElaboratorText path . snd) cases
+                pure $ firstFailure $
+                    [ case asWritten of
+                        Error e -> Just ("the elaborator refused the request as written: " ++ e)
+                        Ok _ -> Nothing
+                    ]
+                        ++ [if text == request then Just (name ++ " changed nothing") else Nothing | (name, text) <- cases]
+                        ++ [refusedBy ("the compiler's reader accepted " ++ name) (readRequest text) | (name, text) <- cases]
+                        ++ [refusedBy ("the elaborator accepted " ++ name) answer | ((name, _), answer) <- zip cases answers]
+                        ++ [ refusedBy "a module's syntax with a file missing was written" (writeRequest rq{rqStatements = init (rqStatements rq)})
+                           , refusedBy "a program's syntax of several blocks was written" (writeRequest rq{rqPackage = Nothing})
+                           ]
+  where
+    refusedBy what r = case r of
+        Error _ -> Nothing
+        Ok _ -> Just what
+    renameWord prefix new text = unlines (renameIn prefix new (lines text))
+    renameIn prefix new (l : ls)
+        | take (length prefix) l == prefix = (prefix ++ new ++ dropWhile (/= ' ') (drop (length prefix) l)) : ls
+        | otherwise = l : renameIn prefix new ls
+    renameIn _ _ [] = []
+    lastBlock ls = head ([i | i <- reverse [0 .. length ls - 1], ls !! i == "data " ++ show (length ls - i - 1)] ++ [length ls])
 
 firstFailure :: [TestResult] -> TestResult
 firstFailure = foldr (\r rest -> maybe rest Just r) Nothing

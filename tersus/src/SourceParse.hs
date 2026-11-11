@@ -2,7 +2,7 @@
 module SourceParse
     ( SourceParts, parseSourcePartsWith, parseWithEqualityWith
     , parsedLibraries, probeDecls
-    , librariesFor, reservedName, reservedHelperName, reservedError, declaredNames, definedFunctionNames
+    , librariesFor, reservedName, reservedError, declaredNames, definedFunctionNames
     ) where
 
 import Data.Char (isAlphaNum)
@@ -20,12 +20,15 @@ import Utils
 type SourceParts = ([String], [Statement], [Statement])
 type FileParser = Decls -> String -> Either String (ParsedFile, Decls)
 
-parsedLibraries :: [String] -> Either String ([Statement], Decls)
-parsedLibraries displays = do
-    parsed <- libParsed
+libraryNames :: [String] -> Either String [String]
+libraryNames displays =
     let names = [name | display <- displays, (name, shown, _) <- libModules, display == shown]
-    if length names /= length displays then Left ("Unknown implicit library selection: " ++ show displays)
-        else Right (statementsForLibModules parsed names, declsForLibModules parsed names)
+     in if length names /= length displays then Left ("Unknown implicit library selection: " ++ show displays) else Right names
+
+parsedLibraries :: [String] -> Either String ([Statement], Decls)
+parsedLibraries names = do
+    parsed <- libParsed
+    Right (statementsForLibModules parsed names, declsForLibModules parsed names)
 
 probeDecls :: Either String Decls
 probeDecls = do
@@ -59,16 +62,16 @@ parseSourcePartsWith parser reserving noPrelude source = unsafePerformIO $ do
                 | otherwise -> Ok ([], [], body)
         | otherwise = case probeDecls >>= (\declared -> probeFile parser (locating declared) source) of
             Left e -> Error (ParserSeed.stageParseError e)
-            Right (probedFile, _) ->
-                let names = map fst (librariesFor (fileBody probedFile))
-                 in case parsedLibraries names of
-                        Left e -> Error e
-                        Right (library, declared) -> case parser (locating declared) source of
-                            Left e -> Error (ParserSeed.stageParseError e)
-                            Right (ParsedFile imports body, _)
-                                | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
-                                | reserving, Just name <- reservedName body -> Error (reservedError name)
-                                | otherwise -> Ok (names, library, body)
+            Right (probedFile, _) -> case libraryNames (map fst (librariesFor (fileBody probedFile))) of
+                Left e -> Error e
+                Right names -> case parsedLibraries names of
+                    Left e -> Error e
+                    Right (library, declared) -> case parser (locating declared) source of
+                        Left e -> Error (ParserSeed.stageParseError e)
+                        Right (ParsedFile imports body, _)
+                            | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
+                            | reserving, Just name <- reservedName body -> Error (reservedError name)
+                            | otherwise -> Ok (names, library, body)
 
 {-# NOINLINE parseWithEqualityWith #-}
 parseWithEqualityWith :: FileParser -> String -> Either String [Statement]
@@ -81,7 +84,8 @@ parseWithEqualityWith parser source = unsafePerformIO $ do
     readSource = do
         declared <- probeDecls
         (probed, _) <- probeFile parser declared source
-        (library, seed) <- parsedLibraries [name | (name, _) <- librariesFor (fileBody probed), name `elem` ["the list and Box types", "the clone library", "the equality library"]]
+        names <- libraryNames (map fst (librariesFor (fileBody probed)))
+        (library, seed) <- parsedLibraries [name | name <- names, name `elem` ["types", "clone", "eq"]]
         (parsed, _) <- parser seed source
         if null (fileImports parsed) then Right (library ++ fileBody parsed) else Left "import statements must come before any declaration in a file"
 
@@ -91,9 +95,6 @@ reservedError name = "Type error: " ++ name ++ " is reserved: native code makes 
 -- A name the program declares that native code uses for lists (see MirLists)
 reservedName :: [Statement] -> Maybe String
 reservedName = reservedAmong (["List", "Box"] ++ nativeHelperNames)
-
-reservedHelperName :: [Statement] -> Maybe String
-reservedHelperName = reservedAmong nativeHelperNames
 
 nativeHelperNames :: [String]
 nativeHelperNames = ["listNew", "listLen", "listGet", "listFirst", "listLast", "listPop", "listSet", "listPush", "listFilled", "boxNew", "boxUnbox"]

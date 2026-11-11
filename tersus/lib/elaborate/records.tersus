@@ -165,7 +165,7 @@ fn sigData(nodes: &List<AstNode>, id: Int) -> SigData ~ {
     return SigData { ts: codecTypesAt(nodes, sig.ts), ret: codecTypeAt(nodes, sig.ret), sizes: namesText(nodes, sig.ss), types: namesText(nodes, sig.ps) };
 };
 
-// The type of a function of a signature (TypeCheckCore.functionType)
+// The type of a function of a signature
 fn functionTypeFrom(st: St, sig: &SigData) -> St ~ {
     st = fromCodecs(st, &sig.ts);
     params = clone(st.te.types);

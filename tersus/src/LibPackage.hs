@@ -6,11 +6,11 @@ module LibPackage
     , nativeStorageUnitsWith
     , libModuleNames
     , libModuleId
-    , libModuleOfDisplay
     , libSelection
-    , libSelectionFor
+    , libCatalog
     , libDefinitionContexts
     , stripDeclaredFromUnits
+    , withoutReplacedEq
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
@@ -18,11 +18,11 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.IO.Unsafe (unsafePerformIO)
 
-import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..))
+import ElaborateRequest (Elaborator, Extraction (..), Library (..), Request (..), Response (..))
 import ElaboratorTool (bootstrapElaborator)
 import Interface (ModuleInterface (..))
 import Syntax (Statement (..))
-import LibParsed (LibParsed (..), libModules, libParsed)
+import LibParsed (LibParsed (..), libParsed)
 import qualified LibParsed
 import qualified Mir as M
 import MirLower (lowerModuleWith)
@@ -35,10 +35,6 @@ import Utils (Result (..), bindResult, flatResultMap)
 libModuleNames :: [String]
 libModuleNames = LibParsed.libModuleNames
 
--- The display names Compile.librariesFor selects by.
-libModuleOfDisplay :: String -> Maybe String
-libModuleOfDisplay display = lookup display [(shown, name) | (name, shown, _) <- libModules, name `elem` libModuleNames]
-
 libDependencies :: String -> [String]
 libDependencies name = case libParsed of
     Right parsed -> Map.findWithDefault [] name (lpDependencies parsed)
@@ -48,8 +44,8 @@ libDependencies name = case libParsed of
 -- carries those types' declarations and invariants seeded from their
 -- interfaces; where the program being linked declares such a name itself
 -- (which kept the declaring library out of its selection), the program's
--- own declaration is the one the link must see, as with the interfaces
--- (see Interface.withoutDeclaredNames).
+-- own declaration is the one the link must see, as it is the one the
+-- elaborator gave the program (lib/elaborate/libraries.tersus).
 stripDeclaredFromUnits :: [String] -> [(ModuleId, M.Program)] -> [(ModuleId, M.Program)]
 stripDeclaredFromUnits declared units = map strip units
   where
@@ -90,13 +86,14 @@ compileLibModule :: Elaborator -> Map.Map String ModuleInterface -> [String] -> 
 compileLibModule elaborator ifaces deps name statements =
     let moduId = libModuleId name
         depIfaces = [ifaces Map.! dep | dep <- deps]
-     in case elaborator (Request moduId True True LibInterfaceOf depIfaces (definitionContexts ifaces (Map.keys ifaces) deps) statements) of
-            Accepted elaborated (Just iface) -> case lowerModuleWith depIfaces elaborated of
+     in case elaborator (Request moduId True True LibInterfaceOf depIfaces (definitionContexts ifaces (Map.keys ifaces) deps) [] Nothing [statements]) of
+            Accepted elaborated (Just iface) _ -> case lowerModuleWith depIfaces elaborated of
                 Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
                 Ok program -> Ok (iface, program)
-            Accepted _ Nothing -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator gave no interface")
+            Accepted _ Nothing _ -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator gave no interface")
             Refused err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
             RefusedInterface err -> Error err
+            Unresolved err -> Error err
             NotModelled what -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator does not handle this module yet: " ++ what)
 
 nativeStorageUnits :: Result [(ModuleId, ModuleInterface, M.Program)] String
@@ -126,33 +123,17 @@ libPackage = unsafePerformIO $ modifyMVar libPackageCache $ \cached -> case cach
                 Error _ -> result
          in pure (Just forced, forced)
 
--- The interfaces and lowered units of the named library modules, closed
--- over their dependencies. The units are in the order librariesFor puts
--- the libraries in front of a program, as the linked program's ghost
--- statements follow that order.
--- Suppression governs the user-facing imports, not the units needed by
--- library-internal calls. A replacement Eq does not receive the eq module's
--- helpers or implementation registry through String's dependency closure.
--- A retained cached implementation (String's Eq today) was checked against
--- the library trait: require exact trait AST identity before exposing it.
--- This intentionally rejects even logically equivalent differently written
--- contracts; programs with no retained cached Eq impl remain unrestricted.
-libSelectionFor :: LibPackage -> [String] -> [Statement] -> Either String ([ModuleInterface], [(ModuleId, M.Program)])
-libSelectionFor pkg names statements =
-    let (ifaces, units) = libSelection pkg names
-     in case [(params, functions) | TraitDef "Eq" params functions <- statements] of
-            [] -> Right (ifaces, units)
-            replacement : _ ->
-                let visible = filter ((/= libModuleId "eq") . ifModule) ifaces
-                    retainsEq = any (any ((== "Eq") . fst) . Set.toList . ifImpls) visible
-                    original = do
-                        iface <- Map.lookup "eq" (libInterfaces pkg)
-                        params <- Map.lookup "Eq" (ifTraitParams iface)
-                        functions <- Map.lookup "Eq" (ifTraits iface)
-                        pure (params, functions)
-                 in if retainsEq && Just replacement /= original
-                        then Left "Type error: a replacement Eq used with cached library implementations must have exactly the library Eq's parameters, method signatures and contracts"
-                        else Right (visible, units)
+libCatalog :: LibPackage -> [Library]
+libCatalog pkg = [Library name (libDependencies name) iface | name <- libOrder pkg, Just iface <- [Map.lookup name (libInterfaces pkg)]]
+
+withoutReplacedEq :: [Statement] -> [ModuleInterface] -> [ModuleInterface]
+withoutReplacedEq statements ifaces
+    | any declaresEq statements = filter ((/= libModuleId "eq") . ifModule) ifaces
+    | otherwise = ifaces
+  where
+    declaresEq stmt = case stmt of
+        TraitDef "Eq" _ _ -> True
+        _ -> False
 
 libDefinitionContexts :: LibPackage -> [String] -> [[ModuleInterface]]
 libDefinitionContexts pkg = definitionContexts (libInterfaces pkg) (libOrder pkg)
@@ -172,6 +153,8 @@ libDependencyClosure pending = go pending []
         | name `elem` done = go rest done
         | otherwise = go (libDependencies name ++ rest) (done ++ [name])
 
+-- The interfaces and lowered units of the libraries selected for a module, closed over what they import (the list and
+-- Box types only when selected), in the libraries' order, which the linked program's ghost statements follow
 libSelection :: LibPackage -> [String] -> ([ModuleInterface], [(ModuleId, M.Program)])
 libSelection pkg names =
     let wanted = [name | name <- libDependencyClosure names, name /= "types" || "types" `elem` names]
