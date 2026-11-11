@@ -57,7 +57,11 @@ They are separate from the source count. Reproduce current counts from
   performance optimization and final verification are still in progress.
 - **AST data:** `AstData` and `lib/ast_reader/` exchange parsed syntax
   and complete elaborated occurrence types, contracts and builtin metadata.
-  Parsed data is a production boundary; elaboration itself remains Haskell.
+  Parsed data is a production boundary.
+- **Elaboration and package resolution:** `lib/elaborate/` type-checks every
+  program and module, resolves a package module's names and selects the
+  compiler libraries it is given. `TypeCheck`, `TypeCheckCore` and
+  `ModuleResolve` are deleted; production runs the pinned seed F0.
 
 The validator keeps changing independently. PR #169 is on the survey base;
 its loop-state anchors and closure reuse reduce work unrelated to a loop's
@@ -197,10 +201,11 @@ this is not a second parser rewrite. Keep occurrence typing and declaration
 ordering explicit (`AST_DATA.md`).
 
 Package loading and linking are also compiler work, not incidental CLI glue:
-`Modules`, `ModuleResolve`, `Interface`, `LibPackage`, `PackageCompile` and `Link`
-resolve canonical names, compile interfaces and library units, reject collisions,
-and retain reachable implementations. Include them in the eventual frontend
-replacement instead of leaving them out of the roadmap.
+`Modules`, `Interface`, `LibPackage`, `PackageCompile` and `Link` load the
+module graph, compile interfaces and library units, reject collisions, and
+retain reachable implementations; canonical names and library selection are
+the elaborator's ("Package resolution" below). Include the rest in the eventual
+frontend replacement instead of leaving it out of the roadmap.
 
 #### Feasibility spike: findings
 
@@ -411,7 +416,7 @@ forms such as `0x1F` and `(5)` that no writer of the data writes).
 Built: the elaborator written in Tersus bootstraps from a pinned seed, as the
 emitter and the parser do. F0 is the elaborator built with clang from seed IR
 (`bootstrap/frontend.sha256`, the `frontend.ll` asset of release
-`bootstrap-25421a0b113f`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
+`bootstrap-87034934f977`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
 `bootstrap/frontend.ll` supplies local bytes, verified against the same pin).
 F1 is the elaborator as it is now, its modules and the compiler libraries
 elaborated by F0 and the rest of the build done by the host as for its other
@@ -459,6 +464,53 @@ examples/basics.tersus` takes 1.10 times as long (257 s against 235 s, the mean
 of three alternating pairs on eight pinned CPUs, 1.06 to 1.12 times each): F0's
 build is the largest of the three seeds, so the first parse builds it beside the
 parser and emitter seeds, before the parse runs.
+
+#### Package resolution
+
+Built: the elaborator resolves a package module's names and selects the compiler
+libraries a program or module is given, and `ModuleResolve`,
+`Modules.canonicalizeDeclarations`, `PackageCompile.prepareModule`,
+`orphanCheck` and `moduleLibSelection`, `LibPackage.libSelectionFor` and
+`Interface.withoutDeclaredNames` are gone. The compiler sends each module as it
+was read, with every file of its package (each file's identity, what it
+declares and its resolved imports, `Modules.fileDeclarations`) and every
+compiler library with what it imports (`AST_DATA.md`, "Elaboration requests").
+The elaborator names each file's declarations canonically, rewrites its
+references through the spellings its imports give (`lib/elaborate/resolve.tersus`,
+`rewrite.tersus`), orders the statements, refuses reserved helper names and
+orphan impls, selects libraries by the rule `SourceParse.librariesFor` applies
+to a parse (`libraries.tersus`), and gives the module their interfaces without
+what it declares itself; it answers `unresolved` with the whole message where
+Haskell refused. The response names the libraries it selected, and the compiler
+links their units (`LibPackage.libSelection`, without the module's own type
+names) and lowers with their interfaces, `MirLower` leaving out what the module
+declares itself. A single file's parse still selects the declarations it is
+parsed with in Haskell (`SourceParse`), until parsing moves in process; the
+compiler refuses, as an internal error, a response that selects other libraries.
+A module that impls Drop without the prelude still sees the prelude's Drop trait,
+but the defining contexts its dependents get no longer carry that view.
+
+Before the switch, a differential compared the two for every module of the
+corpus (the examples, the example package, the compiler's packages and the
+elaborator's own) and, with a hook in the compiler, every package and program
+the full suite compiles. All 164 requests of the corpus (129 programs and the 35
+modules of 8 packages) agreed, and so did the suite's 1,764 programs and 498
+package compiles; the hook's only other record was the elaborator's own package
+sent to the old seed, which cannot read the new sections. All 1,392 functions of `lib/elaborate` validate.
+
+The pinned seed cannot read the new sections, and the compiler sends them to it
+for its own packages, so the seed that comes with this change was made in two
+steps: `frontend-seed emit` by the compiler before the switch (Haskell
+resolution, the elaborator able to read the new sections) gave an intermediate
+seed, and `emit` from that seed with these sources gave the pinned one, which
+`emit` reproduces byte for byte.
+
+Cost, against master on the same host, with a seed made from these sources:
+the full suite takes 1.13 times as long (1,110 s against 985 s of wall time on
+seven shards; 1.07 times the summed group time, 12,255 s against 11,491 s).
+From an empty cache, `tersus-exe run examples/basics.tersus` takes as long
+(271 s against 269 s, the mean of three alternating pairs on eight pinned CPUs,
+0.94 to 1.06 times each).
 
 ### Deferred or coordinated work
 

@@ -1,0 +1,522 @@
+import data::codec::codec { Token, catStrings, intAt, tokenize };
+import data::reader::reader { readRecord };
+import elaborate::check { indexOfByte };
+import elaborate::core { baseNameOf };
+import elaborate::state { indexIn, joinWith };
+import elaborate::traits { implFunctionName, implFunctionPart };
+
+struct Line { words: List<Token>, ok: Bool };
+impl Clone for Line { };
+
+fn readLine() -> Line ~ {
+    r = readRecord();
+    if !r.ok || r.pos = 0 { return Line { words: [], ok: false }; };
+    t = tokenize(&r.value);
+    if !t.ok { return Line { words: [], ok: false }; };
+    return Line { words: t.value, ok: true };
+};
+
+fn wordIs(line: &Line, i: Int, w: &String) -> Bool ~ {
+    if !line.ok || i < 0 || i >= size(line.words) { return false; };
+    tok = get(line.words, i);
+    return !tok.quoted && tok.text = clone(w);
+};
+
+fn quotedAt(line: &Line, i: Int) -> Bool ~ {
+    if !line.ok || i < 0 || i >= size(line.words) { return false; };
+    return get(line.words, i).quoted;
+};
+
+fn textAt(line: &Line, i: Int) -> String ~ {
+    if i < 0 || i >= size(line.words) { return ""; };
+    return clone(get(line.words, i).text);
+};
+
+fn countAt(line: &Line, i: Int) -> Int ~ {
+    if i < 0 || i >= size(line.words) || quotedAt(line, i) { return 0 - 1; };
+    n = intAt(&line.words, i);
+    if !n.ok || n.value < 0 { return 0 - 1; };
+    return n.value;
+};
+
+fn moduleKey(pkg: &String, modu: &String, hasModu: Bool) -> String ~ {
+    if hasModu { return catStrings(catStrings(pkg, "::"), modu); };
+    return clone(pkg);
+};
+
+struct Imp { level: Int, target: String, pkg: String, modu: String, hasModu: Bool, file: String, hasFile: Bool, symbol: String, hasSymbol: Bool, alias: String, hasAlias: Bool, names: List<String>, hasNames: Bool };
+impl Clone for Imp { };
+
+// kind: 0 a type, 1 a variant, 2 a trait, 3 a function, 4 an axiom, 5 a proof. owner: for an impl's function, the type
+// declaration its impl is of, or -1
+struct Decl { kind: Int, local: String, fns: List<String>, file: Int, canonical: String, key: String, pkg: String, modu: String, hasModu: Bool, stem: String, collapsed: Bool, owner: Int };
+impl Clone for Decl { };
+
+// entry: the file is of the package's entry module, whose names are its own; collapsed: its module is this one file,
+// named after the module
+struct PFile { key: String, pkg: String, modu: String, hasModu: Bool, stem: String, name: String, imports: List<Imp>, entry: Bool, collapsed: Bool, prefix: String };
+impl Clone for PFile { };
+
+struct Pkg { ok: Bool, present: Bool, entry: String, files: List<PFile>, decls: List<Decl>, potentialTypes: HashMap<String, String>, potentialFns: HashMap<String, String> };
+impl Clone for Pkg { };
+
+fn noPackage() -> Pkg ~ {
+    return Pkg { ok: true, present: false, entry: "", files: [], decls: [], potentialTypes: HashMap::new(), potentialFns: HashMap::new() };
+};
+
+fn badPackage() -> Pkg ~ { return Pkg { ok: false, ..noPackage() }; };
+
+fn kindOfWord(w: &String) -> Int ~ {
+    if w = "type" { return 0; };
+    if w = "variant" { return 1; };
+    if w = "trait" { return 2; };
+    if w = "function" { return 3; };
+    if w = "axiom" { return 4; };
+    if w = "proof" { return 5; };
+    return 0 - 1;
+};
+
+fn levelOfWord(w: &String) -> Int ~ {
+    if w = "module" { return 0; };
+    if w = "file" { return 1; };
+    if w = "symbol" { return 2; };
+    return 0 - 1;
+};
+
+fn readDecl(file: Int) -> Decl ~ {
+    line = readLine();
+    bad = Decl { kind: 0 - 1, local: "", fns: [], file: file, canonical: "", key: "", pkg: "", modu: "", hasModu: false, stem: "", collapsed: false, owner: 0 - 1 };
+    if !wordIs(&line, 0, "decl") || !quotedAt(&line, 2) { return bad; };
+    kindWord = textAt(&line, 1);
+    kind = kindOfWord(&kindWord);
+    n = countAt(&line, 3);
+    if kind < 0 || n < 0 || size(line.words) != 4 + n { return bad; };
+    fns = [];
+    for i in 0..n {
+        if !quotedAt(&line, 4 + i) { return bad; };
+        fns = push(fns, textAt(&line, 4 + i));
+    };
+    return Decl { kind: kind, local: textAt(&line, 2), fns: fns, ..bad };
+};
+
+fn readImport() -> Imp ~ {
+    line = readLine();
+    bad = Imp { level: 0 - 1, target: "", pkg: "", modu: "", hasModu: false, file: "", hasFile: false, symbol: "", hasSymbol: false, alias: "", hasAlias: false, names: [], hasNames: false };
+    if !wordIs(&line, 0, "import") || size(line.words) < 8 || !quotedAt(&line, 2) { return bad; };
+    levelWord = textAt(&line, 1);
+    level = levelOfWord(&levelWord);
+    if level < 0 { return bad; };
+    for i in 3..7 { if !quotedAt(&line, i) && !wordIs(&line, i, "none") { return bad; }; };
+    pkg = textAt(&line, 2);
+    modu = textAt(&line, 3);
+    hasModu = quotedAt(&line, 3);
+    names = [];
+    hasNames = !wordIs(&line, 7, "none");
+    if hasNames {
+        n = countAt(&line, 7);
+        if n < 0 || size(line.words) != 8 + n { return bad; };
+        for i in 0..n {
+            if !quotedAt(&line, 8 + i) { return bad; };
+            names = push(names, textAt(&line, 8 + i));
+        };
+    } else { if size(line.words) != 8 { return bad; }; };
+    return Imp { level: level, target: moduleKey(&pkg, &modu, hasModu), pkg: pkg, modu: modu, hasModu: hasModu, file: textAt(&line, 4), hasFile: quotedAt(&line, 4), symbol: textAt(&line, 5), hasSymbol: quotedAt(&line, 5), alias: textAt(&line, 6), hasAlias: quotedAt(&line, 6), names: names, hasNames: hasNames };
+};
+
+fn readPackage(header: &Line) -> Pkg ~ {
+    n = countAt(header, 3);
+    if !quotedAt(header, 1) || (!quotedAt(header, 2) && !wordIs(header, 2, "none")) || n < 0 || size(header.words) != 4 { return badPackage(); };
+    files = [];
+    decls = [];
+    for f in 0..n {
+        line = readLine();
+        if !wordIs(&line, 0, "file") || size(line.words) != 7 || !quotedAt(&line, 1) || !quotedAt(&line, 3) || !quotedAt(&line, 4) { return badPackage(); };
+        if !quotedAt(&line, 2) && !wordIs(&line, 2, "none") { return badPackage(); };
+        d = countAt(&line, 5);
+        k = countAt(&line, 6);
+        if d < 0 || k < 0 { return badPackage(); };
+        pkg = textAt(&line, 1);
+        modu = textAt(&line, 2);
+        hasModu = quotedAt(&line, 2);
+        stem = textAt(&line, 3);
+        for i in 0..d {
+            decl = readDecl(f);
+            if decl.kind < 0 { return badPackage(); };
+            decls = push(decls, Decl { key: moduleKey(&pkg, &modu, hasModu), pkg: clone(pkg), modu: clone(modu), hasModu: hasModu, stem: clone(stem), ..decl });
+        };
+        imports = [];
+        for i in 0..k {
+            imp = readImport();
+            if imp.level < 0 { return badPackage(); };
+            imports = push(imports, imp);
+        };
+        files = push(files, PFile { key: moduleKey(&pkg, &modu, hasModu), pkg: pkg, modu: modu, hasModu: hasModu, stem: stem, name: textAt(&line, 4), imports: imports, entry: false, collapsed: false, prefix: "" });
+    };
+    entryModu = textAt(header, 2);
+    entryPkg = textAt(header, 1);
+    entry = moduleKey(&entryPkg, &entryModu, quotedAt(header, 2));
+    return finishPackage(Pkg { ok: true, present: true, entry: entry, files: files, decls: decls, potentialTypes: HashMap::new(), potentialFns: HashMap::new() });
+};
+
+// (an impl's functions are named after the canonical names of their type and trait as the file that declares them
+// spells them)
+fn finishPackage(p: Pkg) -> Pkg ~ {
+    files = [];
+    for f in &p.files {
+        alone = 0;
+        for g in &p.files { if g.key = f.key { alone = alone + 1; }; };
+        segment = clone(f.pkg);
+        if f.hasModu { segment = clone(f.modu); };
+        entry = f.key = p.entry;
+        files = push(files, PFile { entry: entry, collapsed: alone = 1 && f.stem = segment, prefix: filePrefix(f), ..clone(f) });
+    };
+    decls = [];
+    for d in &p.decls {
+        collapsed = false;
+        canonical = clone(d.local);
+        if d.file >= 0 && d.file < size(files) {
+            file = get(files, d.file);
+            collapsed = file.collapsed;
+            if d.kind = 1 { canonical = variantCanonical(&file, &d.local); } else { canonical = canonicalFor(&file, &d.local); };
+        };
+        decls = push(decls, Decl { canonical: canonical, collapsed: collapsed, ..clone(d) });
+    };
+    q = Pkg { files: files, decls: decls, ..p };
+    i = 0;
+    while i < size(q.decls) [{ affirm i >= 0; }] ~ {
+        d = clone(get(q.decls, i));
+        if d.kind = 3 && startsWithByte(&d.local, 60) && d.file >= 0 && d.file < size(q.files) {
+            canonical = implCanonical(&q, &get(q.files, d.file), &d.local);
+            q = Pkg { decls: set(q.decls, i, Decl { canonical: canonical, ..d }), ..q };
+        };
+        i = i + 1;
+    };
+    return withPotentials(withOwners(q));
+};
+
+fn startsWithByte(s: &String, c: Int) -> Bool ~ {
+    return size(s.bytes) > 0 && toInt(get(s.bytes, 0)) = c;
+};
+
+fn pathSegments(path: &String) -> List<String> ~ {
+    out = [];
+    start = 0;
+    n = size(path.bytes);
+    i = 0;
+    while i <= n [{ affirm i >= 0; affirm start >= 0; affirm start <= i; affirm n = size(path.bytes); }] ~ {
+        if i = n || toInt(get(path.bytes, i)) = 47 || toInt(get(path.bytes, i)) = 92 {
+            segment = path.slice(start, i);
+            if size(segment.bytes) > 0 && segment != "." { out = push(out, segment); };
+            start = i + 1;
+        };
+        i = i + 1;
+    };
+    return out;
+};
+
+fn filePrefix(f: &PFile) -> String ~ {
+    parts = pathSegments(&f.pkg);
+    if f.hasModu { for s in pathSegments(&f.modu) { parts = push(parts, clone(s)); }; };
+    fileName = catStrings(&f.stem, ".tersus");
+    named = pathSegments(&fileName);
+    last = "";
+    if size(named) > 0 { last = clone(get(named, size(named) - 1)); };
+    parts = push(parts, beforeByte(&last, 46));
+    return joinWith(&parts, "$");
+};
+
+fn beforeByte(s: &String, c: Int) -> String ~ {
+    i = 0;
+    for b in &s.bytes {
+        if toInt(b) = c { return s.slice(0, i); };
+        i = i + 1;
+    };
+    return clone(s);
+};
+
+fn canonicalFor(f: &PFile, local: &String) -> String ~ {
+    if f.entry { return clone(local); };
+    return catStrings(catStrings(&f.prefix, "$"), local);
+};
+
+fn colonsAt(s: &String) -> Int ~ {
+    n = size(s.bytes);
+    i = 0;
+    while i + 1 < n [{ affirm i >= 0; affirm n = size(s.bytes); }] ~ {
+        if toInt(get(s.bytes, i)) = 58 && toInt(get(s.bytes, i + 1)) = 58 { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn variantCanonical(f: &PFile, variant: &String) -> String ~ {
+    at = colonsAt(variant);
+    if at < 0 || at + 2 > size(variant.bytes) { return canonicalFor(f, variant); };
+    owner = variant.slice(0, at);
+    rest = variant.slice(at + 2, size(variant.bytes));
+    return catStrings(catStrings(canonicalFor(f, &owner), "::"), &rest);
+};
+
+fn textAtIndex(s: &String, needle: &String) -> Int ~ {
+    n = size(s.bytes);
+    m = size(needle.bytes);
+    i = 0;
+    while i + m <= n [{ affirm i >= 0; affirm n = size(s.bytes); affirm m = size(needle.bytes); }] ~ {
+        j = 0;
+        matching = true;
+        while j < m && matching [{ affirm j >= 0; affirm i >= 0; affirm i + m <= n; affirm n = size(s.bytes); affirm m = size(needle.bytes); }] ~ {
+            if get(s.bytes, i + j) != get(needle.bytes, j) { matching = false; };
+            j = j + 1;
+        };
+        if matching { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+struct ImplParts { owner: String, traitName: String, hasTrait: Bool, function: String };
+impl Clone for ImplParts { };
+
+fn implParts(name: &String) -> ImplParts ~ {
+    close = indexOfByte(name, 62);
+    inside = "";
+    function = "";
+    if close >= 1 && close <= size(name.bytes) { inside = name.slice(1, close); } else { if size(name.bytes) > 0 { inside = name.slice(1, size(name.bytes)); }; };
+    if close >= 0 && close + 3 <= size(name.bytes) { function = name.slice(close + 3, size(name.bytes)); };
+    at = textAtIndex(&inside, " as ");
+    if at < 0 || at + 4 > size(inside.bytes) { return ImplParts { owner: inside, traitName: "", hasTrait: false, function: function }; };
+    return ImplParts { owner: inside.slice(0, at), traitName: inside.slice(at + 4, size(inside.bytes)), hasTrait: true, function: function };
+};
+
+fn implCanonical(p: &Pkg, f: &PFile, name: &String) -> String ~ {
+    parts = implParts(name);
+    base = baseNameOf(&parts.owner);
+    owner = targetOf(p, f, 0, &base);
+    if parts.hasTrait {
+        traitName = targetOf(p, f, 2, &parts.traitName);
+        return implFunctionName(&owner, &traitName, &parts.function);
+    };
+    return implFunctionName(&owner, "", &parts.function);
+};
+
+fn targetOf(p: &Pkg, f: &PFile, kind: Int, local: &String) -> String ~ {
+    found = [];
+    for d in &p.decls {
+        if d.kind = kind && indexIn(&found, &d.canonical) < 0 {
+            spellings = spellingsFor(f, d);
+            if indexIn(&spellings, local) >= 0 { found = push(found, clone(d.canonical)); };
+        };
+    };
+    if size(found) = 1 { return clone(get(found, 0)); };
+    return clone(local);
+};
+
+fn ownerCanonicalOf(canonical: &String) -> String ~ {
+    return implParts(canonical).owner;
+};
+
+fn withOwners(p: Pkg) -> Pkg ~ {
+    decls = [];
+    for d in &p.decls {
+        owner = 0 - 1;
+        if d.kind = 3 && startsWithByte(&d.local, 60) {
+            ownerName = ownerCanonicalOf(&d.canonical);
+            j = 0;
+            for e in &p.decls {
+                if owner < 0 && e.kind = 0 && e.canonical = ownerName { owner = j; };
+                j = j + 1;
+            };
+        };
+        decls = push(decls, Decl { owner: owner, ..clone(d) });
+    };
+    return Pkg { decls: decls, ..p };
+};
+
+fn spelled(prefix: &String, local: &String) -> String ~ {
+    if size(prefix.bytes) = 0 { return clone(local); };
+    return catStrings(catStrings(prefix, "::"), local);
+};
+
+fn pushNew(xs: List<String>, x: String) -> List<String> ~ {
+    if indexIn(&xs, &x) >= 0 { return xs; };
+    return push(xs, x);
+};
+
+fn importPrefixes(d: &Decl, ri: &Imp) -> List<String> ~ {
+    out = [];
+    leading = beforeByte(&d.local, 58);
+    listed = ri.hasNames && (indexIn(&ri.names, &d.local) >= 0 || indexIn(&ri.names, &leading) >= 0);
+    if listed || ri.level = 2 { out = push(out, ""); };
+    if ri.level = 2 { return push(out, ""); };
+    if ri.level = 1 {
+        out = push(out, clone(d.stem));
+        if ri.hasAlias { out = push(out, clone(ri.alias)); };
+        return out;
+    };
+    moduleSeg = clone(ri.pkg);
+    whole = clone(ri.pkg);
+    if ri.hasModu { moduleSeg = clone(ri.modu); whole = catStrings(catStrings(&ri.pkg, "::"), &ri.modu); };
+    out = push(out, spelled(&moduleSeg, &d.stem));
+    out = push(out, spelled(&whole, &d.stem));
+    if d.collapsed { out = push(out, clone(moduleSeg)); out = push(out, clone(whole)); };
+    if ri.hasAlias {
+        out = push(out, spelled(&ri.alias, &d.stem));
+        if d.collapsed { out = push(out, clone(ri.alias)); };
+    };
+    return out;
+};
+
+fn covers(ri: &Imp, d: &Decl) -> Bool ~ {
+    if ri.level = 1 { return ri.hasFile && ri.file = d.stem; };
+    if ri.level = 2 {
+        leading = beforeByte(&d.local, 58);
+        return ri.hasSymbol && (ri.symbol = d.local || ri.symbol = leading);
+    };
+    return true;
+};
+
+fn prefixesFor(f: &PFile, d: &Decl) -> List<String> ~ {
+    if d.key = f.key && d.stem = f.stem { return push([], ""); };
+    out = [];
+    for ri in &f.imports {
+        if ri.target = d.key && covers(ri, d) {
+            for x in importPrefixes(d, ri) { out = pushNew(out, clone(x)); };
+        };
+    };
+    return out;
+};
+
+fn spellingsFor(f: &PFile, d: &Decl) -> List<String> ~ {
+    out = [];
+    for prefix in prefixesFor(f, d) { out = push(out, spelled(&prefix, &d.local)); };
+    return out;
+};
+
+// (a file that cannot use a declaration is told the declaration's spelling it wrote)
+fn potentialSpellings(d: &Decl) -> List<String> ~ {
+    segment = clone(d.pkg);
+    whole = clone(d.pkg);
+    if d.hasModu { segment = clone(d.modu); whole = catStrings(catStrings(&d.pkg, "::"), &d.modu); };
+    prefixes = push([], "");
+    prefixes = pushNew(prefixes, clone(d.stem));
+    prefixes = pushNew(prefixes, spelled(&segment, &d.stem));
+    prefixes = pushNew(prefixes, spelled(&whole, &d.stem));
+    if d.collapsed { prefixes = pushNew(prefixes, clone(segment)); prefixes = pushNew(prefixes, whole); };
+    out = [];
+    for prefix in &prefixes { out = push(out, spelled(prefix, &d.local)); };
+    return out;
+};
+
+fn emptyNames() -> HashMap<String, String> ~ { return HashMap::new(); };
+
+fn withPotentials(p: Pkg) -> Pkg ~ {
+    types = emptyNames();
+    fns = emptyNames();
+    for d in &p.decls {
+        if d.kind <= 1 {
+            for s in potentialSpellings(d) { if !HashMap::contains(&types, &s) { types = types.insert(clone(s), clone(d.canonical)); }; };
+        };
+        if d.kind >= 3 {
+            for s in potentialSpellings(d) { if !HashMap::contains(&fns, &s) { fns = fns.insert(clone(s), clone(d.canonical)); }; };
+        };
+    };
+    return Pkg { potentialTypes: types, potentialFns: fns, ..p };
+};
+
+struct TypeTarget { name: String, variant: Bool };
+impl Clone for TypeTarget { };
+
+struct Maps { types: HashMap<String, TypeTarget>, traits: HashMap<String, String>, fns: HashMap<String, String>, proofs: HashMap<String, String>, potentialTypes: HashMap<String, String>, potentialFns: HashMap<String, String>, msg: String };
+impl Clone for Maps { };
+
+fn noMaps() -> Maps ~ {
+    return Maps { types: HashMap::new(), traits: HashMap::new(), fns: HashMap::new(), proofs: HashMap::new(), potentialTypes: HashMap::new(), potentialFns: HashMap::new(), msg: "" };
+};
+
+struct Ins { map: HashMap<String, String>, msg: String };
+impl Clone for Ins { };
+
+fn ambiguous(spelling: &String, other: &String, canonical: &String, what: &String) -> String ~ {
+    return catStrings(catStrings(catStrings(catStrings(catStrings("name ", spelling), " is ambiguous in this file: it names both "), other), catStrings(" and ", canonical)), catStrings(catStrings(" (", what), "); rename one or import only one of them"));
+};
+
+fn insertChecked(m: Ins, spelling: String, canonical: String, what: &String) -> Ins ~ {
+    if size(m.msg.bytes) > 0 { return m; };
+    if HashMap::contains(&m.map, &spelling) {
+        other = HashMap::lookup(&m.map, &spelling, "");
+        if other = canonical { return m; };
+        return Ins { msg: ambiguous(&spelling, &other, &canonical, what), ..m };
+    };
+    return Ins { map: m.map.insert(spelling, canonical), ..m };
+};
+
+struct TypeIns { map: HashMap<String, TypeTarget>, msg: String };
+impl Clone for TypeIns { };
+
+fn insertType(m: TypeIns, spelling: String, target: TypeTarget) -> TypeIns ~ {
+    if size(m.msg.bytes) > 0 { return m; };
+    if HashMap::contains(&m.map, &spelling) {
+        other = HashMap::lookup(&m.map, &spelling, TypeTarget { name: "", variant: false });
+        if other.name = target.name && other.variant = target.variant { return m; };
+        return TypeIns { msg: ambiguous(&spelling, &other.name, &target.name, "types"), ..m };
+    };
+    return TypeIns { map: m.map.insert(spelling, target), ..m };
+};
+
+fn spellingsAt(spells: &List<List<String>>, i: Int) -> List<String> ~ {
+    if i < 0 || i >= size(spells) { return []; };
+    return clone(get(spells, i));
+};
+
+fn mapsFor(p: &Pkg, f: &PFile) -> Maps ~ {
+    spells = [];
+    for d in &p.decls { spells = push(spells, spellingsFor(f, d)); };
+    types = TypeIns { map: HashMap::new(), msg: "" };
+    i = 0;
+    for d in &p.decls {
+        if d.kind <= 1 { for s in spellingsAt(&spells, i) { types = insertType(types, clone(s), TypeTarget { name: clone(d.canonical), variant: d.kind = 1 }); }; };
+        i = i + 1;
+    };
+    if size(types.msg.bytes) > 0 { return Maps { msg: types.msg, ..noMaps() }; };
+    traits = namesOfKind(p, &spells, 2, 2, "traits");
+    if size(traits.msg.bytes) > 0 { return Maps { msg: traits.msg, ..noMaps() }; };
+    fns = Ins { map: HashMap::new(), msg: "" };
+    i = 0;
+    for d in &p.decls {
+        if d.kind = 3 && !startsWithByte(&d.local, 60) { for s in spellingsAt(&spells, i) { fns = insertChecked(fns, clone(s), clone(d.canonical), "functions"); }; };
+        i = i + 1;
+    };
+    fns = associated(p, &spells, fns);
+    if size(fns.msg.bytes) > 0 { return Maps { msg: fns.msg, ..noMaps() }; };
+    proofs = associated(p, &spells, namesOfKind(p, &spells, 3, 5, "proof names"));
+    if size(proofs.msg.bytes) > 0 { return Maps { msg: proofs.msg, ..noMaps() }; };
+    return Maps { types: types.map, traits: traits.map, fns: fns.map, proofs: proofs.map, potentialTypes: clone(p.potentialTypes), potentialFns: clone(p.potentialFns), msg: "" };
+};
+
+fn namesOfKind(p: &Pkg, spells: &List<List<String>>, low: Int, high: Int, what: &String) -> Ins ~ {
+    m = Ins { map: HashMap::new(), msg: "" };
+    i = 0;
+    for d in &p.decls {
+        if d.kind >= low && d.kind <= high { for s in spellingsAt(spells, i) { m = insertChecked(m, clone(s), clone(d.canonical), what); }; };
+        i = i + 1;
+    };
+    return m;
+};
+
+fn associated(p: &Pkg, spells: &List<List<String>>, m: Ins) -> Ins ~ {
+    i = 0;
+    for d in &p.decls {
+        if d.kind = 2 {
+            for fname in &d.fns {
+                for s in spellingsAt(spells, i) { m = insertChecked(m, catStrings(catStrings(&s, "::"), fname), catStrings(catStrings(&d.canonical, "::"), fname), "trait functions"); };
+            };
+        };
+        if d.kind = 3 && d.owner >= 0 && size(spellingsAt(spells, i)) > 0 {
+            fname = implFunctionPart(&d.local);
+            owner = ownerCanonicalOf(&d.canonical);
+            for s in spellingsAt(spells, d.owner) { m = insertChecked(m, catStrings(catStrings(&s, "::"), &fname), catStrings(catStrings(&owner, "::"), &fname), "associated functions"); };
+        };
+        i = i + 1;
+    };
+    return m;
+};

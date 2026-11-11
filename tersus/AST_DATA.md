@@ -208,10 +208,10 @@ is the module, whether it predeclares its own types (a package module does),
 whether it is a module of the compiler libraries (which see a generic struct's
 constructor as the struct it builds), which interface to give back (none for a
 single-file program, `module` for every ordinary package module, `lib` for a
-compiler-library module's physical constructor view), the caller-visible interfaces
-in merge order (the first wins a name; selected compiler libraries are among them),
-the checked defining dependency interfaces used only during template instantiation,
-and its statements as read:
+compiler-library module's physical constructor view), the interfaces of the modules
+it imports in merge order (the first wins a name), the checked defining dependency
+interfaces used only during template instantiation, the compiler libraries it may
+be given, the package its names are resolved in, and its statements as read:
 
 ```
 tersus-elaborate 1
@@ -229,11 +229,35 @@ definitions N
 definition INTERFACES (N times: one provider's checked context)
 data LINES          (INTERFACES ordinary interface blocks; provider interface first)
 ...
-data LINES          (the module's `tersus-ast 1 parsed` syntax)
+libraries N         (when the module may be given compiler libraries)
+library "NAME" K "IMPORT"... (N times, in the libraries' order: what the library imports)
+data LINES          (its interface)
 ...
+package "PKG" none|"MODULE" N (for a package module: every file of its package)
+file "PKG" none|"MODULE" "STEM" "NAME" D I (N times, in the loader's module order)
+decl type|variant|trait|function|axiom|proof "LOCAL" K "FUNCTION"... (D times: what the file declares)
+import module|file|symbol "PKG" none|"MODULE" FILE SYMBOL ALIAS NAMES (I times: its resolved imports)
+data LINES          (the module's `tersus-ast 1 parsed` syntax, as read: one block for each of
+...                  its files in the package's order, one for a program)
 ```
 
-The `definitions` blocks extend the experimental `tersus-elaborate 1` envelope; they are mandatory, and older envelopes without them are refused rather than accepted with missing context. They reuse ordinary interface records and do not change the AST/interface record schema.
+`FILE`, `SYMBOL` and `ALIAS` are each `none` or a quoted name, and `NAMES` is `none` or a count and the names an
+import lists.
+
+The `definitions` blocks extend the experimental `tersus-elaborate 1` envelope; they are mandatory, and older envelopes without them are refused rather than accepted with missing context. They reuse ordinary interface records and do not change the AST/interface record schema. The `libraries` and `package` sections are optional, and a request without them is the envelope as it was.
+
+With a package, the elaborator resolves the module's names before it checks them: it names each file's
+declarations canonically (`package$module$file$Local`; the entry module's keep their names), rewrites each file's
+references through the spellings its imports give, puts the files' statements in the package's order of the module's
+files with types and traits first, then impls, then the rest, and refuses a module that declares one of the List and Box helper functions native
+code calls (`listNew`, `listLen`, `listGet`, `listFirst`, `listLast`, `listPop`, `listSet`, `listPush`, `listFilled`,
+`boxNew`, `boxUnbox`) or impls a trait for a type when neither is the module's. With libraries, it selects those the
+module's statements as read call for (the rule `Compile.librariesFor` applies to a program's parse; for a module, the
+`String`, `HashMap` and `HashSet` the interfaces it imports name count as mentions) and sees their interfaces, closed
+over what they import (the list and Box types only when selected) and without what the module declares itself, in
+front of the module's `interfaces`; a module that impls Drop without the prelude sees the prelude's Drop trait alone,
+and the selected libraries' defining contexts come first among the `definitions`. A replacement `Eq` beside library
+impls checked against the library's `Eq` has to be that `Eq` exactly.
 
 The elaborator seeds a checker state of its own from each provider's
 interfaces and keeps it with the templates the provider's interface owns. A
@@ -243,8 +267,11 @@ traits only. The bounds of a caller's impl are met with the traits and impls of
 the defining context that has the impl as the caller does.
 
 The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
-the elaborated syntax and `interface none` or `interface` with a `data` block of
-the interface; or `refused "MESSAGE"` (the module does not check),
+the elaborated syntax, `interface none` or `interface` with a `data` block of
+the interface and, when the elaborator selected compiler libraries,
+`libraries N "NAME"...`, which the compiler links; or `refused "MESSAGE"` (the module does not check),
+`unresolved "MESSAGE"` (its names do not resolve, or the libraries it calls for
+cannot be given it; the message is whole),
 `interfaceRefused "MESSAGE"` (it checks, but the requested interface cannot be given)
 or `unmodelled "WHAT"` (the elaborator
 does not handle the program yet, which is no verdict on it).

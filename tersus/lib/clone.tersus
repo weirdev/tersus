@@ -7,7 +7,7 @@ import tersuslib::types;
 // A struct or an enum implements it with `impl Clone for T { };` (which clones the fields, of the same variant for an enum, each
 // with its own Clone) or with an impl that has a body, whose clone has the value of the value it clones, as the trait says. A word
 // (Int, Byte, Bool, a fixed-width integer, an address) and a function are their own copy, which clone itself says
-// (TypeCheck.cloneCall), so they have no impl.
+// (the elaborator's cloneCall), so they have no impl.
 trait Clone {
     fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }];
 };

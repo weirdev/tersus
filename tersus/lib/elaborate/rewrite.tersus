@@ -1,0 +1,958 @@
+import data::ast::ast { AstArg, AstBody, AstBuiltin, AstExpression, AstName, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstStatement, AstTermination, AstValidation, AstValue };
+import data::codec::codec { Size, Token, Type, catStrings, renderSizeForName, renderTypeForName, sizeAt, tokenize, typeAt, wordAt };
+import elaborate::core { baseNameOf };
+import elaborate::out { quotedName };
+import elaborate::records { listItems, nameText, nodeIn };
+import elaborate::check { indexOfByte };
+import elaborate::resolve { Maps, PFile, Pkg, TypeTarget, colonsAt, implParts, mapsFor, noMaps, startsWithByte };
+import elaborate::state { indexIn, intText, joinWith };
+import elaborate::traits { implFunctionName };
+
+// bound: the variables in scope; params: the type parameters in scope
+
+struct Canon { on: Bool, locals: HashSet<String>, prefix: String };
+impl Clone for Canon { };
+
+struct Rw { nodes: List<AstNode>, m: Maps, cn: Canon, bound: HashSet<String>, params: HashSet<String>, ok: Bool, msg: String };
+
+fn rwFail(rw: Rw, msg: String) -> Rw ~ {
+    if !rw.ok { return rw; };
+    return Rw { ok: false, msg: msg, ..rw };
+};
+
+struct Txt { ok: Bool, changed: Bool, text: String };
+impl Clone for Txt { };
+
+fn txt(text: String, changed: Bool) -> Txt ~ { return Txt { ok: true, changed: changed, text: text }; };
+
+fn txtFail(msg: String) -> Txt ~ { return Txt { ok: false, changed: false, text: msg }; };
+
+fn nameEnd(nodes: &List<AstNode>, id: Int) -> Int ~ {
+    at = id;
+    fuel = size(nodes);
+    while fuel > 0 [{ }] ~ {
+        node = nodeIn(nodes, at);
+        if !(node is AstNode::Name) { return 0 - 1; };
+        v = (node as AstNode::Name).value;
+        if v is AstName::End { return at; };
+        at = (v as AstName::Part).tail;
+        fuel = fuel - 1;
+    };
+    return 0 - 1;
+};
+
+fn setNameAt(rw: Rw, id: Int, text: String) -> Rw ~ {
+    if id < 0 || id >= size(rw.nodes) || nameText(&rw.nodes, id) = text { return rw; };
+    end = nameEnd(&rw.nodes, id);
+    if end < 0 || end = id { return rw; };
+    return Rw { nodes: set(rw.nodes, id, AstNode::Name { value: AstName::Part { text: text, tail: end } }), ..rw };
+};
+
+fn setTxtAt(rw: Rw, id: Int, t: Txt) -> Rw ~ {
+    if !t.ok { return rwFail(rw, t.text); };
+    if !t.changed { return rw; };
+    return setNameAt(rw, id, t.text);
+};
+
+fn bind(rw: Rw, name: String) -> Rw ~ {
+    if HashSet::contains(&rw.bound, &name) { return rw; };
+    return Rw { bound: rw.bound.insert(name), ..rw };
+};
+
+fn bindNames(rw: Rw, names: Int) -> Rw ~ {
+    for n in listItems(&rw.nodes, names) { rw = bind(rw, nameText(&rw.nodes, n)); };
+    return rw;
+};
+
+fn withParams(rw: Rw, names: &List<String>) -> Rw ~ {
+    params = rw.params;
+    for n in names { if !HashSet::contains(&params, n) { params = params.insert(clone(n)); }; };
+    return Rw { params: params, ..rw };
+};
+
+fn namesAt(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    out = [];
+    for n in listItems(nodes, id) { out = push(out, nameText(nodes, n)); };
+    return out;
+};
+
+fn uncovered(kind: &String, name: &String, potentials: &HashMap<String, String>) -> String ~ {
+    if HashMap::contains(potentials, name) {
+        canonical = HashMap::lookup(potentials, name, "");
+        return catStrings(catStrings(catStrings(catStrings("name ", name), " is "), canonical), ", which is declared in another file or module: use it here only through a covering import (a file import as file::Name, a module import as module::file::Name or fully qualified, or a symbol import as the bare name)");
+    };
+    return catStrings(catStrings(catStrings("unknown ", kind), " "), name);
+};
+
+struct TT { ok: Bool, name: String, variant: Bool, msg: String };
+impl Clone for TT { };
+
+fn lookupTypeTarget(m: &Maps, params: &HashSet<String>, name: &String) -> TT ~ {
+    unchanged = TT { ok: true, name: clone(name), variant: false, msg: "" };
+    base = baseNameOf(name);
+    if name = "Self" || HashSet::contains(params, &base) { return unchanged; };
+    if HashMap::contains(&m.types, name) {
+        t = HashMap::lookup(&m.types, name, TypeTarget { name: "", variant: false });
+        return TT { name: t.name, variant: t.variant, ..unchanged };
+    };
+    if HashMap::contains(&m.types, &base) && size(base.bytes) <= size(name.bytes) {
+        t = HashMap::lookup(&m.types, &base, TypeTarget { name: "", variant: false });
+        rest = name.slice(size(base.bytes), size(name.bytes));
+        return TT { name: catStrings(&t.name, &rest), variant: t.variant, ..unchanged };
+    };
+    if colonsAt(name) >= 0 || HashMap::contains(&m.potentialTypes, name) { return TT { ok: false, msg: uncovered("type", name, &m.potentialTypes), ..unchanged }; };
+    return unchanged;
+};
+
+fn canonName(cn: &Canon, name: &String) -> String ~ {
+    if HashSet::contains(&cn.locals, name) { return catStrings(catStrings(&cn.prefix, "$"), name); };
+    return clone(name);
+};
+
+fn renameNamed(cn: &Canon, name: &String) -> String ~ {
+    at = indexOfByte(name, 60);
+    if at < 0 || at > size(name.bytes) { return canonName(cn, name); };
+    base = name.slice(0, at);
+    rest = name.slice(at, size(name.bytes));
+    return catStrings(canonName(cn, &base), &rest);
+};
+
+fn renameVariant(cn: &Canon, name: &String) -> String ~ {
+    at = colonsAt(name);
+    if at < 0 || at + 2 > size(name.bytes) { return clone(name); };
+    owner = name.slice(0, at);
+    if !HashSet::contains(&cn.locals, &owner) { return clone(name); };
+    rest = name.slice(at + 2, size(name.bytes));
+    return catStrings(catStrings(canonName(cn, &owner), "::"), &rest);
+};
+
+fn namedTarget(m: &Maps, cn: &Canon, params: &HashSet<String>, base: &String) -> TT ~ {
+    if cn.on { return TT { ok: true, name: canonName(cn, base), variant: false, msg: "" }; };
+    return lookupTypeTarget(m, params, base);
+};
+
+fn variantTarget(m: &Maps, cn: &Canon, params: &HashSet<String>, name: &String) -> TT ~ {
+    if cn.on { return TT { ok: true, name: renameVariant(cn, name), variant: true, msg: "" }; };
+    return lookupTypeTarget(m, params, name);
+};
+
+fn sizeTokens(s: &Size) -> String ~ {
+    return match s {
+        Size::SConst { n: n } => catStrings(" c ", intText(n)),
+        Size::SAny => " any",
+        Size::SParam { name: name } => catStrings(" p ", quotedName(name)),
+        Size::SVar { n: n } => catStrings(" v ", intText(n)),
+    };
+};
+
+fn wrapText(word: &String, inner: Txt) -> Txt ~ {
+    if !inner.ok { return inner; };
+    return Txt { text: catStrings(word, &inner.text), ..inner };
+};
+
+fn typeText(m: &Maps, cn: &Canon, params: &HashSet<String>, t: &Type) -> Txt ~ {
+    match t {
+        Type::TInt => { return txt(" int", false); },
+        Type::TByte => { return txt(" byte", false); },
+        Type::TBool => { return txt(" bool", false); },
+        Type::TWord { signed: signed, bits: bits } => {
+            if signed { return txt(catStrings(" i", intText(bits)), false); };
+            return txt(catStrings(" u", intText(bits)), false);
+        },
+        Type::TList { elem: e } => { inner = Box::unbox(clone(e)); return wrapText(" list", typeText(m, cn, params, &inner)); },
+        Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); return wrapText(" box", typeText(m, cn, params, &inner)); },
+        Type::TRef { inner: e } => { inner = Box::unbox(clone(e)); return wrapText(" ref", typeText(m, cn, params, &inner)); },
+        Type::TMutRef { inner: e } => { inner = Box::unbox(clone(e)); return wrapText(" mutref", typeText(m, cn, params, &inner)); },
+        Type::TAddr { inner: e } => { inner = Box::unbox(clone(e)); return wrapText(" addr", typeText(m, cn, params, &inner)); },
+        Type::TBlock { inner: e } => { inner = Box::unbox(clone(e)); return wrapText(" block", typeText(m, cn, params, &inner)); },
+        Type::TUninit { inner: e } => { inner = Box::unbox(clone(e)); return wrapText(" uninit", typeText(m, cn, params, &inner)); },
+        Type::TArray { elem: e, size: s } => {
+            inner = Box::unbox(clone(e));
+            x = wrapText(" array", typeText(m, cn, params, &inner));
+            if !x.ok { return x; };
+            sz = sizeTokens(s);
+            return Txt { text: catStrings(&x.text, &sz), ..x };
+        },
+        Type::TFn { args: args, ret: r } => { inner = Box::unbox(clone(r)); return fnText(m, cn, params, args, &inner); },
+        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { return namedText(m, cn, params, base, argc, argTokens); },
+        Type::TVariant { name: name } => {
+            target = variantTarget(m, cn, params, name);
+            if !target.ok { return txtFail(target.msg); };
+            if target.variant { return txt(catStrings(" variant ", quotedName(&target.name)), target.name != clone(name)); };
+            return txt(catStrings(catStrings(" named ", quotedName(&target.name)), " 0"), true);
+        },
+        Type::TVar { n: n } => { return txt(catStrings(" var ", intText(n)), false); },
+        Type::TForall { sizes: sizes, types: types, body: body } => { inner = Box::unbox(clone(body)); return forallText(m, cn, params, sizes, types, &inner); },
+        Type::TParam { name: name } => { return txt(catStrings(" param ", quotedName(name)), false); },
+    };
+    return txt(" int", false);
+};
+
+fn fnText(m: &Maps, cn: &Canon, params: &HashSet<String>, args: &List<Type>, ret: &Type) -> Txt ~ {
+    out = catStrings(" fn ", intText(size(args)));
+    changed = false;
+    for a in args {
+        x = typeText(m, cn, params, a);
+        if !x.ok { return x; };
+        changed = changed || x.changed;
+        out = catStrings(out, &x.text);
+    };
+    x = typeText(m, cn, params, ret);
+    if !x.ok { return x; };
+    return txt(catStrings(out, &x.text), changed || x.changed);
+};
+
+fn forallText(m: &Maps, cn: &Canon, params: &HashSet<String>, sizes: &List<String>, types: &List<String>, body: &Type) -> Txt ~ {
+    inner = clone(params);
+    for t in types { if !HashSet::contains(&inner, t) { inner = inner.insert(clone(t)); }; };
+    out = catStrings(" forall ", intText(size(sizes)));
+    for s in sizes { out = catStrings(catStrings(out, " "), quotedName(s)); };
+    out = catStrings(catStrings(out, " "), intText(size(types)));
+    for s in types { out = catStrings(catStrings(out, " "), quotedName(s)); };
+    x = typeText(m, cn, &inner, body);
+    if !x.ok { return x; };
+    return Txt { text: catStrings(out, &x.text), ..x };
+};
+
+fn namedText(m: &Maps, cn: &Canon, params: &HashSet<String>, base: &String, argc: Int, argTokens: &List<Token>) -> Txt ~ {
+    target = namedTarget(m, cn, params, base);
+    if !target.ok { return txtFail(target.msg); };
+    out = "";
+    changed = target.variant || target.name != clone(base);
+    p = 0;
+    while p < size(argTokens) [{ affirm p >= 0; }] ~ {
+        w = wordAt(argTokens, p);
+        if !w.ok || w.pos >= size(argTokens) { return txtFail("a named type the data does not give whole"); };
+        if w.value = "size" {
+            s = sizeAt(argTokens, w.pos);
+            if !s.ok { return txtFail("a size the data does not give whole"); };
+            sz = sizeTokens(&s.value);
+            out = catStrings(catStrings(out, " size"), &sz);
+            p = s.pos;
+        } else {
+            a = typeAt(argTokens, w.pos);
+            if !a.ok { return txtFail("a type the data does not give whole"); };
+            x = typeText(m, cn, params, &a.value);
+            if !x.ok { return x; };
+            changed = changed || x.changed;
+            out = catStrings(catStrings(out, " type"), &x.text);
+            p = a.pos;
+        };
+    };
+    if target.variant { return txt(catStrings(" variant ", quotedName(&target.name)), changed); };
+    return txt(catStrings(catStrings(catStrings(catStrings(" named ", quotedName(&target.name)), " "), intText(argc)), out), changed);
+};
+
+fn rwTypeAt(rw: Rw, id: Int) -> Rw ~ {
+    if !rw.ok || id < 0 || id >= size(rw.nodes) { return rw; };
+    node = nodeIn(&rw.nodes, id);
+    if !(node is AstNode::Type) { return rw; };
+    t = (node as AstNode::Type).value;
+    x = typeText(&rw.m, &rw.cn, &rw.params, &t);
+    if !x.ok { return rwFail(rw, x.text); };
+    if !x.changed { return rw; };
+    tokens = tokenize(&x.text);
+    if !tokens.ok || size(tokens.value) = 0 { return rwFail(rw, "a type the data cannot write"); };
+    parsed = typeAt(&tokens.value, 0);
+    if !parsed.ok { return rwFail(rw, "a type the data cannot write"); };
+    return Rw { nodes: set(rw.nodes, id, AstNode::Type { value: parsed.value }), ..rw };
+};
+
+fn rwTypesAt(rw: Rw, list: Int) -> Rw ~ {
+    for t in listItems(&rw.nodes, list) { rw = rwTypeAt(rw, t); };
+    return rw;
+};
+
+fn rwArgsAt(rw: Rw, list: Int) -> Rw ~ {
+    for a in listItems(&rw.nodes, list) {
+        node = nodeIn(&rw.nodes, a);
+        if node is AstNode::Arg && (node as AstNode::Arg).value is AstArg::ArgType {
+            rw = rwTypeAt(rw, ((node as AstNode::Arg).value as AstArg::ArgType).t);
+        };
+    };
+    return rw;
+};
+
+fn rwFieldTypes(rw: Rw, list: Int) -> Rw ~ {
+    for f in listItems(&rw.nodes, list) {
+        node = nodeIn(&rw.nodes, f);
+        if node is AstNode::Field { rw = rwTypeAt(rw, (node as AstNode::Field).value.ty); };
+    };
+    return rw;
+};
+
+fn rwSignatureAt(rw: Rw, sig: Int) -> Rw ~ {
+    node = nodeIn(&rw.nodes, sig);
+    if !(node is AstNode::Signature) { return rw; };
+    s = (node as AstNode::Signature).value;
+    rw = rwTypesAt(rw, s.ts);
+    return rwTypeAt(rw, s.ret);
+};
+
+fn rwBoundsAt(rw: Rw, list: Int) -> Rw ~ {
+    for b in listItems(&rw.nodes, list) {
+        node = nodeIn(&rw.nodes, b);
+        if node is AstNode::Bound {
+            v = (node as AstNode::Bound).value;
+            traitName = nameText(&rw.nodes, v.n);
+            if rw.cn.on { rw = setNameAt(rw, v.n, canonName(&rw.cn, &traitName)); } else { rw = setNameAt(rw, v.n, traitTarget(&rw.m, &traitName)); };
+            rw = rwTypesAt(rw, v.ts);
+        };
+    };
+    return rw;
+};
+
+fn traitTarget(m: &Maps, name: &String) -> String ~ {
+    if HashMap::contains(&m.traits, name) { return HashMap::lookup(&m.traits, name, ""); };
+    return clone(name);
+};
+
+fn statementOf(nodes: &List<AstNode>, s: Int) -> AstStatement ~ {
+    node = nodeIn(nodes, s);
+    if node is AstNode::Statement { return (node as AstNode::Statement).value; };
+    return AstStatement::Mark { line: 0, col: 0 };
+};
+
+fn functValue(nodes: &List<AstNode>, e: Int) -> Int ~ {
+    node = nodeIn(nodes, e);
+    if !(node is AstNode::Expression) || !((node as AstNode::Expression).value is AstExpression::Val) { return 0 - 1; };
+    v = ((node as AstNode::Expression).value as AstExpression::Val).v;
+    value = nodeIn(nodes, v);
+    if value is AstNode::Value && (value as AstNode::Value).value is AstValue::VFunct { return v; };
+    return 0 - 1;
+};
+
+fn canonStatement(rw: Rw, s: Int) -> Rw ~ {
+    stmt = statementOf(&rw.nodes, s);
+    if stmt is AstStatement::StructDef { a = stmt as AstStatement::StructDef; rw = canonAt(rw, a.n); return rwFieldTypes(rw, a.fs); };
+    if stmt is AstStatement::EnumDef { a = stmt as AstStatement::EnumDef; rw = canonAt(rw, a.n); return canonVariants(rw, a.vs); };
+    if stmt is AstStatement::TraitDef {
+        a = stmt as AstStatement::TraitDef;
+        rw = canonAt(rw, a.n);
+        for f in listItems(&rw.nodes, a.fs) {
+            node = nodeIn(&rw.nodes, f);
+            if node is AstNode::TraitFn { rw = rwSignatureAt(rw, (node as AstNode::TraitFn).value.sig); };
+        };
+        return rw;
+    };
+    if stmt is AstStatement::Assign { return canonFunction(rw, s); };
+    if stmt is AstStatement::BoundedDef { a = stmt as AstStatement::BoundedDef; rw = rwBoundsAt(rw, a.bs); return canonFunction(rw, a.s); };
+    if stmt is AstStatement::AxiomDef { return canonAt(rw, (stmt as AstStatement::AxiomDef).n); };
+    if stmt is AstStatement::ProofDef { return canonAt(rw, (stmt as AstStatement::ProofDef).n); };
+    if stmt is AstStatement::ImplDef { return canonImpl(rw, s); };
+    if stmt is AstStatement::ExternDef { return canonAt(rw, (stmt as AstStatement::ExternDef).n); };
+    if stmt is AstStatement::LinearDef { return canonAt(rw, (stmt as AstStatement::LinearDef).n); };
+    if stmt is AstStatement::CopyDef { return canonAt(rw, (stmt as AstStatement::CopyDef).n); };
+    if stmt is AstStatement::DropDef { return canonAt(rw, (stmt as AstStatement::DropDef).n); };
+    return rw;
+};
+
+fn canonAt(rw: Rw, n: Int) -> Rw ~ {
+    name = nameText(&rw.nodes, n);
+    return setNameAt(rw, n, canonName(&rw.cn, &name));
+};
+
+fn canonVariants(rw: Rw, list: Int) -> Rw ~ {
+    for v in listItems(&rw.nodes, list) {
+        node = nodeIn(&rw.nodes, v);
+        if node is AstNode::Variant {
+            x = (node as AstNode::Variant).value;
+            name = nameText(&rw.nodes, x.n);
+            rw = setNameAt(rw, x.n, renameVariant(&rw.cn, &name));
+            rw = rwFieldTypes(rw, x.fs);
+        };
+    };
+    return rw;
+};
+
+fn canonFunction(rw: Rw, s: Int) -> Rw ~ {
+    stmt = statementOf(&rw.nodes, s);
+    if !(stmt is AstStatement::Assign) { return rw; };
+    a = stmt as AstStatement::Assign;
+    v = functValue(&rw.nodes, a.e);
+    if v < 0 { return rw; };
+    name = nameText(&rw.nodes, a.n);
+    renamed = clone(name);
+    if HashSet::contains(&rw.cn.locals, &name) { renamed = canonName(&rw.cn, &name); } else {
+        if indexOfByte(&name, 60) >= 0 {
+            parts = implParts(&name);
+            traitName = "";
+            if parts.hasTrait { traitName = canonName(&rw.cn, &parts.traitName); };
+            owner = renameNamed(&rw.cn, &parts.owner);
+            renamed = implFunctionName(&owner, &traitName, &parts.function);
+        };
+    };
+    rw = setNameAt(rw, a.n, renamed);
+    body = functBody(&rw.nodes, v);
+    node = nodeIn(&rw.nodes, body);
+    if node is AstNode::Body && (node as AstNode::Body).value is AstBody::NativeFunct {
+        rw = rwSignatureAt(rw, ((node as AstNode::Body).value as AstBody::NativeFunct).sig);
+    };
+    return rw;
+};
+
+fn functBody(nodes: &List<AstNode>, v: Int) -> Int ~ {
+    node = nodeIn(nodes, v);
+    if node is AstNode::Value && (node as AstNode::Value).value is AstValue::VFunct { return ((node as AstNode::Value).value as AstValue::VFunct).body; };
+    return 0 - 1;
+};
+
+fn canonImpl(rw: Rw, s: Int) -> Rw ~ {
+    stmt = statementOf(&rw.nodes, s);
+    if !(stmt is AstStatement::ImplDef) { return rw; };
+    a = stmt as AstStatement::ImplDef;
+    t = nodeIn(&rw.nodes, a.traitName);
+    if t is AstNode::OptName && (t as AstNode::OptName).value is AstOptName::SomeName { rw = canonAt(rw, ((t as AstNode::OptName).value as AstOptName::SomeName).n); };
+    rw = rwArgsAt(rw, a.args);
+    owner = nameText(&rw.nodes, a.n);
+    rw = setNameAt(rw, a.n, renameNamed(&rw.cn, &owner));
+    rw = rwTypeAt(rw, a.ty);
+    rw = rwBoundsAt(rw, a.bs);
+    for f in listItems(&rw.nodes, a.xs) { rw = canonFunction(rw, f); };
+    return rw;
+};
+
+fn rwStatements(rw: Rw, list: Int) -> Rw ~ {
+    for s in listItems(&rw.nodes, list) { rw = rwStatement(rw, s); };
+    return rw;
+};
+
+fn rwScoped(rw: Rw, list: Int) -> Rw ~ {
+    bound = clone(rw.bound);
+    rw = rwStatements(rw, list);
+    return Rw { bound: bound, ..rw };
+};
+
+fn rwStatement(rw: Rw, s: Int) -> Rw ~ {
+    if !rw.ok { return rw; };
+    stmt = statementOf(&rw.nodes, s);
+    if stmt is AstStatement::StructDef || stmt is AstStatement::EnumDef || stmt is AstStatement::TraitDef || stmt is AstStatement::ImplDef { return rwDeclaration(rw, &stmt); };
+    if stmt is AstStatement::BoundedDef || stmt is AstStatement::AxiomDef || stmt is AstStatement::ProofDef || stmt is AstStatement::Assign { return rwDefinition(rw, &stmt); };
+    if stmt is AstStatement::Block || stmt is AstStatement::If || stmt is AstStatement::While { return rwControl(rw, &stmt); };
+    if stmt is AstStatement::AssignDeref { a = stmt as AstStatement::AssignDeref; rw = rwExpr(rw, a.a); return rwExpr(rw, a.b); };
+    if stmt is AstStatement::Let { a = stmt as AstStatement::Let; rw = rwExpr(rw, a.e); return bind(rw, nameText(&rw.nodes, a.n)); };
+    if stmt is AstStatement::Return { return rwExpr(rw, (stmt as AstStatement::Return).e); };
+    if stmt is AstStatement::ValidationStatement { return rwValidation(rw, (stmt as AstStatement::ValidationStatement).v); };
+    if stmt is AstStatement::LinearDef { return rwNamedAt(rw, (stmt as AstStatement::LinearDef).n); };
+    if stmt is AstStatement::CopyDef { return rwNamedAt(rw, (stmt as AstStatement::CopyDef).n); };
+    if stmt is AstStatement::DropDef { return rwNamedAt(rw, (stmt as AstStatement::DropDef).n); };
+    return rw;
+};
+
+fn rwNamedAt(rw: Rw, n: Int) -> Rw ~ {
+    name = nameText(&rw.nodes, n);
+    return setTxtAt(rw, n, namedString(&rw.m, &rw.params, &name));
+};
+
+fn namedString(m: &Maps, params: &HashSet<String>, name: &String) -> Txt ~ {
+    at = indexOfByte(name, 60);
+    if at > size(name.bytes) { at = 0 - 1; };
+    base = clone(name);
+    if at >= 0 { base = name.slice(0, at); };
+    t = lookupTypeTarget(m, params, &base);
+    if !t.ok { return txtFail(t.msg); };
+    if at < 0 { return txt(t.name, t.name != clone(name)); };
+    rest = name.slice(at, size(name.bytes));
+    return txt(catStrings(&t.name, &rest), t.name != base);
+};
+
+fn rwDeclaration(rw: Rw, stmt: &AstStatement) -> Rw ~ {
+    params = clone(rw.params);
+    bound = clone(rw.bound);
+    if stmt is AstStatement::StructDef {
+        a = stmt as AstStatement::StructDef;
+        names = namesAt(&rw.nodes, a.ps);
+        rw = withParams(rw, &names);
+        rw = rwFieldTypes(rw, a.fs);
+        for f in listItems(&rw.nodes, a.fs) {
+            node = nodeIn(&rw.nodes, f);
+            if node is AstNode::Field { rw = bind(rw, nameText(&rw.nodes, (node as AstNode::Field).value.n)); };
+        };
+        rw = rwValidations(rw, a.vs);
+    };
+    if stmt is AstStatement::EnumDef {
+        for v in listItems(&rw.nodes, (stmt as AstStatement::EnumDef).vs) {
+            node = nodeIn(&rw.nodes, v);
+            if node is AstNode::Variant { rw = rwFieldTypes(rw, (node as AstNode::Variant).value.fs); };
+        };
+    };
+    if stmt is AstStatement::TraitDef {
+        a = stmt as AstStatement::TraitDef;
+        names = namesAt(&rw.nodes, a.ps);
+        rw = withParams(rw, &names);
+        for f in listItems(&rw.nodes, a.fs) { rw = rwTraitFn(rw, f); };
+    };
+    if stmt is AstStatement::ImplDef { rw = rwImpl(rw, stmt); };
+    return Rw { params: params, bound: bound, ..rw };
+};
+
+// (a trait function's contract sees only the function's parameters)
+fn rwTraitFn(rw: Rw, f: Int) -> Rw ~ {
+    node = nodeIn(&rw.nodes, f);
+    if !(node is AstNode::TraitFn) { return rw; };
+    v = (node as AstNode::TraitFn).value;
+    rw = rwSignatureAt(rw, v.sig);
+    rw = Rw { bound: HashSet::new(), ..rw };
+    rw = bindNames(rw, v.ps);
+    fnBound = clone(rw.bound);
+    rw = rwValidations(rw, v.ins);
+    rw = Rw { bound: fnBound, ..rw };
+    return rwValidations(rw, v.outs);
+};
+
+fn rwImpl(rw: Rw, stmt: &AstStatement) -> Rw ~ {
+    if !(stmt is AstStatement::ImplDef) { return rw; };
+    a = stmt as AstStatement::ImplDef;
+    t = nodeIn(&rw.nodes, a.traitName);
+    if t is AstNode::OptName && (t as AstNode::OptName).value is AstOptName::SomeName {
+        n = ((t as AstNode::OptName).value as AstOptName::SomeName).n;
+        traitName = nameText(&rw.nodes, n);
+        rw = setNameAt(rw, n, traitTarget(&rw.m, &traitName));
+    };
+    rw = rwArgsAt(rw, a.args);
+    rw = rwNamedAt(rw, a.n);
+    rw = rwTypeAt(rw, a.ty);
+    rw = rwBoundsAt(rw, a.bs);
+    return rwStatements(rw, a.xs);
+};
+
+fn rwDefinition(rw: Rw, stmt: &AstStatement) -> Rw ~ {
+    if stmt is AstStatement::BoundedDef {
+        a = stmt as AstStatement::BoundedDef;
+        rw = rwBoundsAt(rw, a.bs);
+        return rwStatement(rw, a.s);
+    };
+    if stmt is AstStatement::Assign {
+        a = stmt as AstStatement::Assign;
+        v = functValue(&rw.nodes, a.e);
+        name = nameText(&rw.nodes, a.n);
+        if v < 0 { rw = rwExpr(rw, a.e); return bind(rw, name); };
+        x = implFull(&rw.m, &name);
+        rw = setTxtAt(rw, a.n, x);
+        rw = rwFunct(rw, v);
+        return bind(rw, nameText(&rw.nodes, a.n));
+    };
+    bound = clone(rw.bound);
+    if stmt is AstStatement::AxiomDef {
+        a = stmt as AstStatement::AxiomDef;
+        rw = bindNames(rw, a.ps);
+        inner = clone(rw.bound);
+        rw = rwValidations(rw, a.ins);
+        rw = Rw { bound: inner, ..rw };
+        rw = rwValidations(rw, a.outs);
+    };
+    if stmt is AstStatement::ProofDef {
+        a = stmt as AstStatement::ProofDef;
+        rw = bindNames(rw, a.ps);
+        inner = clone(rw.bound);
+        rw = rwValidations(rw, a.ins);
+        rw = Rw { bound: clone(inner), ..rw };
+        rw = rwValidations(rw, a.outs);
+        rw = Rw { bound: inner, ..rw };
+        rw = rwValidations(rw, a.body);
+    };
+    return Rw { bound: bound, ..rw };
+};
+
+fn rwControl(rw: Rw, stmt: &AstStatement) -> Rw ~ {
+    if stmt is AstStatement::Block { return rwScoped(rw, (stmt as AstStatement::Block).xs); };
+    if stmt is AstStatement::If {
+        a = stmt as AstStatement::If;
+        rw = rwExpr(rw, a.e);
+        rw = rwScoped(rw, a.a);
+        return rwScoped(rw, a.b);
+    };
+    if stmt is AstStatement::While {
+        a = stmt as AstStatement::While;
+        rw = rwExpr(rw, a.e);
+        bound = clone(rw.bound);
+        rw = rwValidations(rw, a.vs);
+        rw = Rw { bound: bound, ..rw };
+        rw = rwTermination(rw, a.t);
+        return rwScoped(rw, a.xs);
+    };
+    return rw;
+};
+
+// (the type parameters of a function's signature are not in scope in its termination measure)
+fn rwFunct(rw: Rw, v: Int) -> Rw ~ {
+    node = nodeIn(&rw.nodes, v);
+    if !(node is AstNode::Value) || !((node as AstNode::Value).value is AstValue::VFunct) { return rw; };
+    f = (node as AstNode::Value).value as AstValue::VFunct;
+    bound = clone(rw.bound);
+    params = clone(rw.params);
+    rw = bindNames(rw, f.ps);
+    inner = clone(rw.bound);
+    rw = rwValidations(rw, f.ins);
+    rw = Rw { bound: clone(inner), ..rw };
+    rw = rwValidations(rw, f.outs);
+    rw = Rw { bound: inner, ..rw };
+    body = nodeIn(&rw.nodes, f.body);
+    if body is AstNode::Body && (body as AstNode::Body).value is AstBody::NativeFunct {
+        b = (body as AstNode::Body).value as AstBody::NativeFunct;
+        rw = rwTermination(rw, b.term);
+        sig = nodeIn(&rw.nodes, b.sig);
+        if sig is AstNode::Signature {
+            s = (sig as AstNode::Signature).value;
+            types = namesAt(&rw.nodes, s.ps);
+            sizes = namesAt(&rw.nodes, s.ss);
+            rw = withParams(rw, &types);
+            rw = withParams(rw, &sizes);
+        };
+        rw = rwSignatureAt(rw, b.sig);
+        rw = rwStatements(rw, b.stmts);
+    };
+    if body is AstNode::Body && (body as AstNode::Body).value is AstBody::BuiltinFunct { rw = rwBuiltin(rw, ((body as AstNode::Body).value as AstBody::BuiltinFunct).b); };
+    return Rw { bound: bound, params: params, ..rw };
+};
+
+fn rwBuiltin(rw: Rw, b: Int) -> Rw ~ {
+    node = nodeIn(&rw.nodes, b);
+    if !(node is AstNode::Builtin) { return rw; };
+    v = (node as AstNode::Builtin).value;
+    if v is AstBuiltin::Ctor { return rwCtorBuiltin(rw, b); };
+    if v is AstBuiltin::FieldBuiltin {
+        owner = nodeIn(&rw.nodes, (v as AstBuiltin::FieldBuiltin).owner);
+        if owner is AstNode::OptName && (owner as AstNode::OptName).value is AstOptName::SomeName { return rwNamedAt(rw, ((owner as AstNode::OptName).value as AstOptName::SomeName).n); };
+        return rw;
+    };
+    if v is AstBuiltin::Is { return rwCtorAt(rw, (v as AstBuiltin::Is).n); };
+    if v is AstBuiltin::Cast { return rwCtorAt(rw, (v as AstBuiltin::Cast).n); };
+    if v is AstBuiltin::Project { return rwCtorAt(rw, (v as AstBuiltin::Project).n); };
+    return rw;
+};
+
+fn rwCtorAt(rw: Rw, n: Int) -> Rw ~ {
+    name = nameText(&rw.nodes, n);
+    return setTxtAt(rw, n, ctorTarget(&rw.m, &name));
+};
+
+fn ctorTarget(m: &Maps, name: &String) -> Txt ~ {
+    if HashMap::contains(&m.types, name) { return txt(HashMap::lookup(&m.types, name, TypeTarget { name: "", variant: false }).name, true); };
+    if colonsAt(name) >= 0 || HashMap::contains(&m.potentialTypes, name) { return txtFail(uncovered("struct or variant", name, &m.potentialTypes)); };
+    return txt(clone(name), false);
+};
+
+fn rwCtorBuiltin(rw: Rw, b: Int) -> Rw ~ {
+    node = nodeIn(&rw.nodes, b);
+    if !(node is AstNode::Builtin) || !((node as AstNode::Builtin).value is AstBuiltin::Ctor) { return rw; };
+    c = (node as AstNode::Builtin).value as AstBuiltin::Ctor;
+    name = nameText(&rw.nodes, c.n);
+    base = baseNameOf(&name);
+    x = ctorTarget(&rw.m, &base);
+    if !x.ok { return rwFail(rw, x.text); };
+    rw = rwArgsAt(rw, c.args);
+    if !rw.ok { return rw; };
+    parts = [];
+    for a in listItems(&rw.nodes, c.args) {
+        arg = nodeIn(&rw.nodes, a);
+        if arg is AstNode::Arg && (arg as AstNode::Arg).value is AstArg::ArgType {
+            t = nodeIn(&rw.nodes, ((arg as AstNode::Arg).value as AstArg::ArgType).t);
+            if t is AstNode::Type { ty = (t as AstNode::Type).value; parts = push(parts, renderTypeForName(&ty, size(rw.nodes))); };
+        };
+        if arg is AstNode::Arg && (arg as AstNode::Arg).value is AstArg::ArgSize {
+            s = nodeIn(&rw.nodes, ((arg as AstNode::Arg).value as AstArg::ArgSize).s);
+            if s is AstNode::Size { sz = (s as AstNode::Size).value; parts = push(parts, renderSizeForName(&sz)); };
+        };
+    };
+    full = clone(x.text);
+    if size(parts) > 0 { full = catStrings(catStrings(catStrings(full, "<"), joinWith(&parts, ", ")), ">"); };
+    return setNameAt(rw, c.n, full);
+};
+
+fn rwValidations(rw: Rw, list: Int) -> Rw ~ {
+    for v in listItems(&rw.nodes, list) { rw = rwValidation(rw, v); };
+    return rw;
+};
+
+fn rwValidation(rw: Rw, v: Int) -> Rw ~ {
+    if !rw.ok { return rw; };
+    node = nodeIn(&rw.nodes, v);
+    if !(node is AstNode::Validation) { return rw; };
+    x = (node as AstNode::Validation).value;
+    if x is AstValidation::ProofAssert { return rwProof(rw, (x as AstValidation::ProofAssert).p); };
+    if x is AstValidation::Assume { return rwProof(rw, (x as AstValidation::Assume).p); };
+    if x is AstValidation::AssignProofVar {
+        a = x as AstValidation::AssignProofVar;
+        rw = rwExpr(rw, a.e);
+        return bind(rw, nameText(&rw.nodes, a.n));
+    };
+    if x is AstValidation::Rewrite { return rwRule(rw, (x as AstValidation::Rewrite).r); };
+    return rw;
+};
+
+fn rwRule(rw: Rw, r: Int) -> Rw ~ {
+    node = nodeIn(&rw.nodes, r);
+    if !(node is AstNode::Rule) { return rw; };
+    x = (node as AstNode::Rule).value;
+    if x is AstRule::Refl { return rwProof(rw, (x as AstRule::Refl).p); };
+    if x is AstRule::CheckGtZero { return rwProof(rw, (x as AstRule::CheckGtZero).p); };
+    if x is AstRule::CheckRel { return rwProof(rw, (x as AstRule::CheckRel).p); };
+    if x is AstRule::UserRewrite {
+        a = x as AstRule::UserRewrite;
+        name = nameText(&rw.nodes, a.n);
+        if HashMap::contains(&rw.m.proofs, &name) { rw = setNameAt(rw, a.n, HashMap::lookup(&rw.m.proofs, &name, "")); };
+        for p in listItems(&rw.nodes, a.xs) { rw = rwProof(rw, p); };
+    };
+    return rw;
+};
+
+fn rwProof(rw: Rw, p: Int) -> Rw ~ {
+    if !rw.ok { return rw; };
+    node = nodeIn(&rw.nodes, p);
+    if !(node is AstNode::Proof) { return rw; };
+    x = (node as AstNode::Proof).value;
+    if x is AstProof::ATerm { return rwProofName(rw, (x as AstProof::ATerm).n); };
+    if x is AstProof::CTerm { return rwValue(rw, (x as AstProof::CTerm).v); };
+    if x is AstProof::FApp {
+        a = x as AstProof::FApp;
+        rw = rwProof(rw, a.f);
+        for q in listItems(&rw.nodes, a.xs) { rw = rwProof(rw, q); };
+        return rw;
+    };
+    if x is AstProof::Forall {
+        a = x as AstProof::Forall;
+        bound = clone(rw.bound);
+        rw = bind(rw, nameText(&rw.nodes, a.n));
+        for g in listItems(&rw.nodes, a.gs) { rw = rwProof(rw, g); };
+        rw = rwProof(rw, a.b);
+        return Rw { bound: bound, ..rw };
+    };
+    return rw;
+};
+
+fn rwProofName(rw: Rw, n: Int) -> Rw ~ {
+    name = nameText(&rw.nodes, n);
+    if HashSet::contains(&rw.bound, &name) { return rw; };
+    if HashMap::contains(&rw.m.proofs, &name) { return setNameAt(rw, n, HashMap::lookup(&rw.m.proofs, &name, "")); };
+    if colonsAt(&name) >= 0 && HashMap::contains(&rw.m.potentialFns, &name) { return rwFail(rw, uncovered("function in a proof", &name, &rw.m.potentialFns)); };
+    return rw;
+};
+
+fn rwExpr(rw: Rw, e: Int) -> Rw ~ {
+    if !rw.ok { return rw; };
+    node = nodeIn(&rw.nodes, e);
+    if !(node is AstNode::Expression) { return rw; };
+    x = (node as AstNode::Expression).value;
+    if x is AstExpression::Val { return rwValue(rw, (x as AstExpression::Val).v); };
+    if x is AstExpression::Var {
+        n = (x as AstExpression::Var).n;
+        name = nameText(&rw.nodes, n);
+        return setTxtAt(rw, n, functionTarget(&rw.m, &rw.bound, &name));
+    };
+    if x is AstExpression::F {
+        a = x as AstExpression::F;
+        rw = rwExpr(rw, a.f);
+        for y in listItems(&rw.nodes, a.xs) { rw = rwExpr(rw, y); };
+    };
+    return rw;
+};
+
+fn functionTarget(m: &Maps, bound: &HashSet<String>, name: &String) -> Txt ~ {
+    if startsWithByte(name, 46) { return txt(clone(name), false); };
+    if startsWithByte(name, 60) { return implFull(m, name); };
+    colons = colonsAt(name) >= 0;
+    if HashMap::contains(&m.fns, name) {
+        if !colons && HashSet::contains(bound, name) { return txt(clone(name), false); };
+        return txt(HashMap::lookup(&m.fns, name, ""), true);
+    };
+    if colons && HashMap::contains(&m.potentialFns, name) { return txtFail(uncovered("function", name, &m.potentialFns)); };
+    return txt(clone(name), false);
+};
+
+fn implFull(m: &Maps, name: &String) -> Txt ~ {
+    if !startsWithByte(name, 60) { return txt(clone(name), false); };
+    parts = implParts(name);
+    none = HashSet::new();
+    owner = namedString(m, &none, &parts.owner);
+    if !owner.ok { return owner; };
+    traitName = "";
+    if parts.hasTrait { traitName = traitTarget(m, &parts.traitName); };
+    full = implFunctionName(&owner.text, &traitName, &parts.function);
+    return txt(clone(full), full != clone(name));
+};
+
+fn rwValue(rw: Rw, v: Int) -> Rw ~ {
+    if !rw.ok { return rw; };
+    node = nodeIn(&rw.nodes, v);
+    if !(node is AstNode::Value) { return rw; };
+    x = (node as AstNode::Value).value;
+    if x is AstValue::VData {
+        a = x as AstValue::VData;
+        name = nameText(&rw.nodes, a.n);
+        base = baseNameOf(&name);
+        c = ctorTarget(&rw.m, &base);
+        if !c.ok { return rwFail(rw, c.text); };
+        if c.changed && size(base.bytes) <= size(name.bytes) { rest = name.slice(size(base.bytes), size(name.bytes)); rw = setNameAt(rw, a.n, catStrings(&c.text, &rest)); };
+        for f in listItems(&rw.nodes, a.xs) {
+            field = nodeIn(&rw.nodes, f);
+            if field is AstNode::ValueField { rw = rwValue(rw, (field as AstNode::ValueField).value.v); };
+        };
+        return rw;
+    };
+    if x is AstValue::VList {
+        for y in listItems(&rw.nodes, (x as AstValue::VList).xs) { rw = rwValue(rw, y); };
+        return rw;
+    };
+    if x is AstValue::VFnRef {
+        n = (x as AstValue::VFnRef).n;
+        name = nameText(&rw.nodes, n);
+        return setTxtAt(rw, n, functionTarget(&rw.m, &rw.bound, &name));
+    };
+    if x is AstValue::VFunct { return rwFunct(rw, v); };
+    return rw;
+};
+
+fn rwTermination(rw: Rw, t: Int) -> Rw ~ {
+    node = nodeIn(&rw.nodes, t);
+    if !(node is AstNode::OptTermination) || !((node as AstNode::OptTermination).value is AstOptTermination::SomeTermination) { return rw; };
+    term = nodeIn(&rw.nodes, ((node as AstNode::OptTermination).value as AstOptTermination::SomeTermination).t);
+    if !(term is AstNode::Termination) { return rw; };
+    x = (term as AstNode::Termination).value;
+    if x is AstTermination::Shrinks { return rwExpr(rw, (x as AstTermination::Shrinks).e); };
+    if x is AstTermination::Counting { return rwExpr(rw, (x as AstTermination::Counting).e); };
+    if x is AstTermination::Parts { return rwExpr(rw, (x as AstTermination::Parts).e); };
+    return rw;
+};
+
+struct Prepared { nodes: List<AstNode>, stmts: List<Int>, ok: Bool, msg: String };
+
+fn prepareModule(nodes: List<AstNode>, p: &Pkg, key: &String, roots: &List<Int>) -> Prepared ~ {
+    rw = Rw { nodes: nodes, m: noMaps(), cn: Canon { on: false, locals: HashSet::new(), prefix: "" }, bound: HashSet::new(), params: HashSet::new(), ok: true, msg: "" };
+    all = [];
+    k = 0;
+    i = 0;
+    for f in &p.files {
+        if f.key = clone(key) {
+            if k >= size(roots) { return Prepared { nodes: rw.nodes, stmts: [], ok: false, msg: "a module file the request gives no statements for" }; };
+            ids = listItems(&rw.nodes, get(roots, k));
+            rw = prepareFile(rw, p, f, i, &ids);
+            if !rw.ok { return Prepared { nodes: rw.nodes, stmts: [], ok: false, msg: catStrings(catStrings(catStrings(catStrings("in module ", key), " file "), &f.name), catStrings(": ", &rw.msg)) }; };
+            for s in &ids { all = push(all, s); };
+            k = k + 1;
+        };
+        i = i + 1;
+    };
+    ordered = byCategory(&rw.nodes, &all);
+    reserved = reservedHelper(&rw.nodes, &ordered);
+    if size(reserved.bytes) > 0 { return Prepared { nodes: rw.nodes, stmts: [], ok: false, msg: reservedError(&reserved) }; };
+    orphan = orphanImpl(&rw.nodes, &ordered, key);
+    return Prepared { nodes: rw.nodes, stmts: ordered, ok: size(orphan.bytes) = 0, msg: orphan };
+};
+
+fn prepareFile(rw: Rw, p: &Pkg, f: &PFile, index: Int, ids: &List<Int>) -> Rw ~ {
+    if !f.entry {
+        locals = HashSet::new();
+        for d in &p.decls { if d.file = index && indexOfByte(&d.local, 60) < 0 { locals = locals.insert(clone(d.local)); }; };
+        rw = Rw { cn: Canon { on: true, locals: locals, prefix: clone(f.prefix) }, ..rw };
+        for s in ids { rw = canonStatement(rw, s); };
+    };
+    m = mapsFor(p, f);
+    if size(m.msg.bytes) > 0 { return rwFail(rw, m.msg); };
+    rw = Rw { m: m, cn: Canon { on: false, locals: HashSet::new(), prefix: "" }, bound: HashSet::new(), params: HashSet::new(), ..rw };
+    for s in ids { rw = rwStatement(rw, s); };
+    return rw;
+};
+
+fn category(nodes: &List<AstNode>, s: Int) -> Int ~ {
+    stmt = statementOf(nodes, s);
+    if stmt is AstStatement::StructDef || stmt is AstStatement::EnumDef || stmt is AstStatement::TraitDef { return 0; };
+    if stmt is AstStatement::ImplDef { return 1; };
+    return 2;
+};
+
+fn byCategory(nodes: &List<AstNode>, ids: &List<Int>) -> List<Int> ~ {
+    out = [];
+    for c in 0..3 {
+        for s in ids { if category(nodes, s) = c { out = push(out, s); }; };
+    };
+    return out;
+};
+
+fn nativeHelperNames() -> List<String> ~ {
+    out = push([], "listNew");
+    out = push(out, "listLen");
+    out = push(out, "listGet");
+    out = push(out, "listFirst");
+    out = push(out, "listLast");
+    out = push(out, "listPop");
+    out = push(out, "listSet");
+    out = push(out, "listPush");
+    out = push(out, "listFilled");
+    out = push(out, "boxNew");
+    return push(out, "boxUnbox");
+};
+
+fn reservedHelper(nodes: &List<AstNode>, ids: &List<Int>) -> String ~ {
+    helpers = nativeHelperNames();
+    for s in ids {
+        stmt = statementOf(nodes, s);
+        name = "";
+        if stmt is AstStatement::Assign && functValue(nodes, (stmt as AstStatement::Assign).e) >= 0 { name = nameText(nodes, (stmt as AstStatement::Assign).n); };
+        if stmt is AstStatement::StructDef { name = nameText(nodes, (stmt as AstStatement::StructDef).n); };
+        if stmt is AstStatement::EnumDef { name = nameText(nodes, (stmt as AstStatement::EnumDef).n); };
+        if stmt is AstStatement::TraitDef { name = nameText(nodes, (stmt as AstStatement::TraitDef).n); };
+        if stmt is AstStatement::BoundedDef {
+            inner = statementOf(nodes, (stmt as AstStatement::BoundedDef).s);
+            if inner is AstStatement::Assign { name = nameText(nodes, (inner as AstStatement::Assign).n); };
+        };
+        for h in &helpers { if name = clone(h) { return name; }; };
+    };
+    return "";
+};
+
+fn reservedError(name: &String) -> String ~ {
+    return catStrings(catStrings("Type error: ", name), " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them");
+};
+
+fn declaredTypeNames(nodes: &List<AstNode>, ids: &List<Int>) -> List<String> ~ {
+    out = [];
+    for s in ids {
+        stmt = statementOf(nodes, s);
+        if stmt is AstStatement::StructDef { out = push(out, nameText(nodes, (stmt as AstStatement::StructDef).n)); };
+        if stmt is AstStatement::EnumDef { out = push(out, nameText(nodes, (stmt as AstStatement::EnumDef).n)); };
+        if stmt is AstStatement::TraitDef { out = push(out, nameText(nodes, (stmt as AstStatement::TraitDef).n)); };
+    };
+    return out;
+};
+
+fn nameInModule(prefix: &String, name: &String) -> Bool ~ {
+    if name.startsWith(prefix) { return true; };
+    rest = "";
+    if size(name.bytes) > 0 {
+        tail = name.slice(1, size(name.bytes));
+        at = indexOfByte(&tail, 36);
+        if at >= 0 && at <= size(tail.bytes) { rest = tail.slice(at, size(tail.bytes)); };
+    };
+    return rest.startsWith(prefix);
+};
+
+fn modulePrefix(key: &String) -> String ~ {
+    at = colonsAt(key);
+    if at < 0 || at + 2 > size(key.bytes) { return catStrings(key, "$"); };
+    pkg = key.slice(0, at);
+    modu = key.slice(at + 2, size(key.bytes));
+    return catStrings(catStrings(catStrings(&pkg, "$"), &modu), "$");
+};
+
+fn orphanImpl(nodes: &List<AstNode>, ids: &List<Int>, key: &String) -> String ~ {
+    declared = declaredTypeNames(nodes, ids);
+    prefix = modulePrefix(key);
+    for s in ids {
+        stmt = statementOf(nodes, s);
+        if stmt is AstStatement::ImplDef {
+            a = stmt as AstStatement::ImplDef;
+            t = nodeIn(nodes, a.traitName);
+            if t is AstNode::OptName && (t as AstNode::OptName).value is AstOptName::SomeName {
+                traitName = nameText(nodes, ((t as AstNode::OptName).value as AstOptName::SomeName).n);
+                typeName = nameText(nodes, a.n);
+                base = baseNameOf(&typeName);
+                ours = indexIn(&declared, &traitName) >= 0 || indexIn(&declared, &base) >= 0 || nameInModule(&prefix, &traitName) || nameInModule(&prefix, &base);
+                if !ours {
+                    return catStrings(catStrings(catStrings(catStrings(catStrings("in module ", key), ": orphan impl: impl "), &traitName), catStrings(" for ", &typeName)), " defines neither a trait nor a type of this module; an impl must live in the module of its trait or of its type");
+                };
+            };
+        };
+    };
+    return "";
+};

@@ -124,18 +124,21 @@ recording elaborator ref rq = unsafePerformIO $ do
 compareResponses :: Response -> Response -> Outcome
 compareResponses reference candidate = case (reference, candidate) of
     (_, NotModelled what) -> NotModelledBy what
-    (Accepted e i, Accepted e' i')
+    (Accepted e i ls, Accepted e' i' ls')
         | e /= e' -> Disagree ("elaborations differ" ++ firstDifference (writeElaborated e) (writeElaborated e'))
         | i /= i' -> Disagree ("interfaces differ" ++ firstDifference (maybeText i) (maybeText i'))
+        | ls /= ls' -> Disagree ("selected libraries differ: " ++ unwords ls ++ " / " ++ unwords ls')
         | otherwise -> Agree
     (Refused m, Refused m') -> if m == m' then Agree else Wording m m'
     (RefusedInterface m, RefusedInterface m') -> if m == m' then Agree else Wording m m'
+    (Unresolved m, Unresolved m') -> if m == m' then Agree else Wording m m'
     _ -> Disagree ("verdicts differ: " ++ verdict reference ++ " / " ++ verdict candidate)
   where
     maybeText = maybe (Ok "none") writeInterface
     verdict r = case r of
-        Accepted _ _ -> "accepted"
+        Accepted _ _ _ -> "accepted"
         Refused m -> "refused: " ++ m
+        Unresolved m -> "unresolved: " ++ m
         RefusedInterface m -> "interface refused: " ++ m
         NotModelled m -> "not modelled: " ++ m
     firstDifference (Ok a) (Ok b) = case [(n, x, y) | (n, x, y) <- zip3 [1 :: Int ..] (lines a ++ repeat "") (lines b ++ repeat ""), x /= y] of
@@ -210,4 +213,5 @@ noAnswer response = case response of
     Refused message -> noVerdict message
     RefusedInterface message -> noVerdict message
     NotModelled _ -> True
-    Accepted _ _ -> False
+    Unresolved _ -> False
+    Accepted _ _ _ -> False
