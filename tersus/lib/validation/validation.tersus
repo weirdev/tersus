@@ -1,8 +1,9 @@
 import validation::context { analyzeContext, contextDifferent, contextEqual, contextWithin, contextWithinUnder, deriveSumOrders, entailsConstructorDisequality, entailsPartDisequality, entailsVariantDisequality, hasOrderFact, integerValue, integerValueIn };
 import validation::differences { isSizeTerm, semanticFacts };
+import validation::execution { lastRung };
 import validation::linear { linearEntailsIn };
 import validation::joins { linkAppend, linkedItems, noLinks };
-import validation::model { AnalysisLookup, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, FactIndex, GetFact, HullLinks, IntegerLookup, OrderFact, RelationFact, ValidatorContext, ValidatorGoal };
+import validation::model { AnalysisLookup, ApplicationTerm, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, FactIndex, GetFact, HullLinks, IntegerLookup, OrderFact, RelationFact, ValidatorContext, ValidatorGoal };
 import validation::relations { closedDisequality, containsValue, emptyIntMap, hasDifferenceIn, intAt, leastClasses, sameIn };
 import validation::sequenceFacts { finiteGetEqual, forallConstant, forallEqual, forallShift, getFactsTranslated, modDifferent, modIsSelf, setGetEqual };
 
@@ -769,7 +770,8 @@ fn expandTerm(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, te
 };
 
 // Two constants are never expanded, so a fact between them is admitted only
-// here, from the lighter one's links, when both are the seeds.
+// here, from the lighter one's links, when both are the seeds (or a fact of
+// one with itself, when it is both: c != c from a loop's exit edge).
 fn linkConstants(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, light: Int, other: Int) -> GoalSlice {
     w = walk;
     positions = linkedItems(index.equalities, light);
@@ -778,7 +780,7 @@ fn linkConstants(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex,
         w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
         if p >= 0 && p < size(context.equalities) && w.equalities.contains(p) = false {
             f = get(context.equalities, p);
-            if f.left = other || f.right = other {
+            if (f.left = light && f.right = other) || (f.left = other && f.right = light) {
                 slice = w.slice;
                 w = GoalSlice { equalities: w.equalities.insert(p), slice: ValidatorContext { equalities: push(slice.equalities, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
             };
@@ -790,7 +792,7 @@ fn linkConstants(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex,
         w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
         if p >= 0 && p < size(context.orders) && w.orders.contains(p) = false {
             f = get(context.orders, p);
-            if f.smaller = other || f.greater = other {
+            if (f.smaller = light && f.greater = other) || (f.smaller = other && f.greater = light) {
                 slice = w.slice;
                 w = GoalSlice { orders: w.orders.insert(p), slice: ValidatorContext { orders: push(slice.orders, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
             };
@@ -802,7 +804,7 @@ fn linkConstants(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex,
         w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
         if p >= 0 && p < size(context.different) && w.different.contains(p) = false {
             f = get(context.different, p);
-            if f.left = other || f.right = other {
+            if (f.left = light && f.right = other) || (f.left = other && f.right = light) {
                 slice = w.slice;
                 w = GoalSlice { different: w.different.insert(p), slice: ValidatorContext { different: push(slice.different, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
             };
@@ -814,11 +816,173 @@ fn linkConstants(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex,
         w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
         if p >= 0 && p < size(context.differences) && w.differences.contains(p) = false {
             f = get(context.differences, p);
-            if f.left = other || f.right = other {
+            if (f.left = light && f.right = other) || (f.left = other && f.right = light) {
                 slice = w.slice;
                 w = GoalSlice { differences: w.differences.insert(p), slice: ValidatorContext { differences: push(slice.differences, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
             };
         };
+    };
+    return w;
+};
+
+struct ChainSeeds { walk: GoalSlice, fs: List<Int>, bs: List<Int> };
+
+// The facts along the chain of blocks a goal's accessor reads through. For
+// each f(b) the goal is made of (or reads a list of), the walk goes back from
+// b to the terms it was made from (the arguments of b's application) and to
+// the terms it equals, and at each takes f of that term with the facts on it.
+// The blocks are hubs: they are searched for those links, never expanded.
+// Every link it looks at is charged, and it stops at budget units.
+fn chainSlice(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>, budget: Int, walk: GoalSlice) -> ValidatorContext {
+    limit = walk.admitted + budget;
+    chain = ChainSeeds { walk: walk, fs: [], bs: [] };
+    for s in 0..size(seeds) { chain = chainPairs(chain, context, index, get(seeds, s), limit, 1); };
+    ChainSeeds { walk: w, fs: fs, bs: bs } = chain;
+    for c in 0..size(fs) {
+        w = followChain(w, context, index, intAt(fs, c, 0), intAt(bs, c, 0), limit);
+    };
+    return inContextOrder(context, w);
+};
+
+// The (f, b) of each f(b) that makes the term, and (one level down) that makes
+// an argument of what makes it: the list a read reads, the origin an extent is of
+fn chainPairs(given: ChainSeeds, context: &ValidatorContext, index: &FactIndex, term: Int, limit: Int, depth: Int) -> ChainSeeds [{ affirm depth >= 0; }] [{ }] shrinks depth {
+    ChainSeeds { walk: w, fs: fs, bs: bs } = given;
+    made = [];
+    at = index.applications.first.lookup(term, -1);
+    walked = 0;
+    linkCount = size(index.applications.items);
+    room = w.admitted < limit;
+    while at >= 0 && at < size(index.applications.items) && walked < linkCount && room [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
+        w = GoalSlice { admitted: w.admitted + 1, operations: w.operations + 1, ..w };
+        p = get(index.applications.items, at);
+        if p >= 0 && p < size(context.applications) {
+            if get(context.applications, p).id = term { made = push(made, clone(get(context.applications, p))); };
+        };
+        at = intAt(index.applications.next, at, -1);
+        walked = walked + 1;
+        room = w.admitted < limit;
+    };
+    chain = ChainSeeds { walk: w, fs: fs, bs: bs };
+    for m in 0..size(made) {
+        a = get(made, m);
+        if size(a.arguments) = 1 { chain = withPair(chain, a.function, get(a.arguments, 0)); };
+        if depth > 0 {
+            for x in a.arguments { chain = chainPairs(chain, context, index, x, limit, depth - 1); };
+        };
+    };
+    return chain;
+};
+
+fn withPair(given: ChainSeeds, f: Int, b: Int) -> ChainSeeds {
+    for k in 0..size(given.fs) {
+        if intAt(given.fs, k, 0) = f && intAt(given.bs, k, 0) = b { return given; };
+    };
+    ChainSeeds { walk: w, fs: fs, bs: bs } = given;
+    return ChainSeeds { walk: w, fs: push(fs, f), bs: push(bs, b) };
+};
+
+fn smaller(a: Int, b: Int, lo: Int) -> Int [{ affirm a > lo; affirm b > lo; }] [{ affirm return > lo; affirm return <= a; affirm return <= b; }] {
+    if a < b { return a; };
+    return b;
+};
+
+fn mergeRuns(xs: &List<Int>, width: Int) -> List<Int> [{ affirm width >= 1; }] [{ }] {
+    n = size(xs);
+    out = [];
+    i = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+        mid = smaller(i + width, n, i);
+        hi = smaller(mid + width, n, mid - 1);
+        a = i;
+        b = mid;
+        while a < mid && b < hi [{ affirm a >= i; affirm a <= mid; affirm b >= mid; affirm b <= hi; }] shrinks mid - a + hi - b {
+            if get(xs, a) <= get(xs, b) { out = push(out, get(xs, a)); a = a + 1; } else { out = push(out, get(xs, b)); b = b + 1; };
+        };
+        while a < mid [{ affirm a >= i; }] shrinks mid - a { out = push(out, get(xs, a)); a = a + 1; };
+        while b < hi [{ affirm b >= mid; }] shrinks hi - b { out = push(out, get(xs, b)); b = b + 1; };
+        i = hi;
+    };
+    return out;
+};
+
+// The integers in increasing order: merge passes over runs of width 1, 2, 4, ...
+fn sortedPositions(given: List<Int>) -> List<Int> {
+    sorted = given;
+    n = size(sorted);
+    width = 1;
+    while width < n [{ affirm width >= 1; }] shrinks n - width {
+        sorted = mergeRuns(sorted, width);
+        width = width * 2;
+    };
+    return sorted;
+};
+
+// The slice's facts in the order the context has them: the read-over-write
+// split tries the newest reads first, and the order a walk admits facts in
+// would put the goal's own read among the oldest. Only the slice's positions
+// are sorted, so the cost is that of the slice, not of the context.
+fn inContextOrder(context: &ValidatorContext, w: &GoalSlice) -> ValidatorContext {
+    out = ValidatorContext { equalities: [], applications: [], constants: clone(w.slice.constants), orders: [], different: [], variants: [], fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: [] };
+    for p in sortedPositions(w.equalities.elements()) { if p >= 0 && p < size(context.equalities) { out = ValidatorContext { equalities: push(out.equalities, clone(get(context.equalities, p))), ..out }; }; };
+    for p in sortedPositions(w.applications.elements()) { if p >= 0 && p < size(context.applications) { out = ValidatorContext { applications: push(out.applications, clone(get(context.applications, p))), ..out }; }; };
+    for p in sortedPositions(w.orders.elements()) { if p >= 0 && p < size(context.orders) { out = ValidatorContext { orders: push(out.orders, clone(get(context.orders, p))), ..out }; }; };
+    for p in sortedPositions(w.different.elements()) { if p >= 0 && p < size(context.different) { out = ValidatorContext { different: push(out.different, clone(get(context.different, p))), ..out }; }; };
+    for p in sortedPositions(w.variants.elements()) { if p >= 0 && p < size(context.variants) { out = ValidatorContext { variants: push(out.variants, clone(get(context.variants, p))), ..out }; }; };
+    for p in sortedPositions(w.differences.elements()) { if p >= 0 && p < size(context.differences) { out = ValidatorContext { differences: push(out.differences, clone(get(context.differences, p))), ..out }; }; };
+    return out;
+};
+
+fn followChain(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, f: Int, start: Int, limit: Int) -> GoalSlice {
+    w = walk;
+    queue = push([], start);
+    seen = HashSet::new();
+    seen = seen.insert(start);
+    head = 0;
+    bound = lastRung();
+    room = w.admitted < limit;
+    while head < size(queue) && head < bound && room [{ affirm head >= 0; affirm head <= bound; }] shrinks bound - head {
+        b = intAt(queue, head, start);
+        at = index.applications.first.lookup(b, -1);
+        walked = 0;
+        linkCount = size(index.applications.items);
+        while at >= 0 && at < size(index.applications.items) && walked < linkCount && room [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
+            w = GoalSlice { admitted: w.admitted + 1, operations: w.operations + 1, ..w };
+            p = get(index.applications.items, at);
+            if p >= 0 && p < size(context.applications) {
+                a = get(context.applications, p);
+                if a.function = f && size(a.arguments) = 1 && a.id != b {
+                    if w.admitted + index.weights.lookup(a.id, 0) <= limit { w = expandTerm(w, context, index, a.id); };
+                };
+                if a.id = b {
+                    for x in a.arguments {
+                        if seen.contains(x) = false && index.constantAt.contains(x) = false { seen = seen.insert(x); queue = push(queue, x); };
+                    };
+                };
+            };
+            at = intAt(index.applications.next, at, -1);
+            walked = walked + 1;
+            room = w.admitted < limit;
+        };
+        at = index.equalities.first.lookup(b, -1);
+        walked = 0;
+        linkCount = size(index.equalities.items);
+        while at >= 0 && at < size(index.equalities.items) && walked < linkCount && room [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
+            w = GoalSlice { admitted: w.admitted + 1, operations: w.operations + 1, ..w };
+            p = get(index.equalities.items, at);
+            if p >= 0 && p < size(context.equalities) && w.admitted + 2 * termCost() <= limit && w.equalities.contains(p) = false {
+                e = get(context.equalities, p);
+                slice = w.slice;
+                w = GoalSlice { equalities: w.equalities.insert(p), slice: ValidatorContext { equalities: push(slice.equalities, clone(e)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+                other = e.left;
+                if other = b { other = e.right; };
+                if seen.contains(other) = false { seen = seen.insert(other); queue = push(queue, other); };
+            };
+            at = intAt(index.equalities.next, at, -1);
+            walked = walked + 1;
+            room = w.admitted < limit;
+        };
+        head = head + 1;
     };
     return w;
 };
@@ -835,7 +999,7 @@ fn goalSlice(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>, b
     if size(seeds) = 2 {
         a = get(seeds, 0);
         b = get(seeds, 1);
-        if a != b && index.constantAt.contains(a) && index.constantAt.contains(b) {
+        if index.constantAt.contains(a) && index.constantAt.contains(b) {
             light = a;
             other = b;
             if index.weights.lookup(b, 0) < index.weights.lookup(a, 0) { light = b; other = a; };
