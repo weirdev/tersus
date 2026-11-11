@@ -299,7 +299,7 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         Right parsed -> case Parse.parseFileWith (lpDecls parsed) source of
             Left e -> Error (show e)
             Right (Parse.ParsedFile _ stmts, _) ->
-                case sourceElaborator (Request (Modules.ModuleId "fixture" Nothing) True False LibInterfaceOf ifaces [] [] Nothing [stmts]) of
+                case sourceElaborator (Request (Modules.ModuleId "fixture" Nothing) True False LibInterfaceOf ifaces [] [] Nothing [stmts] 0) of
                     Accepted elaborated (Just iface) _ -> lowerModuleWith ifaces elaborated `bindResult` \p -> Ok (iface, p)
                     Accepted _ Nothing _ -> Error "the elaborator gave no interface"
                     Refused e -> Error e

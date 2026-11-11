@@ -1768,7 +1768,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
                             , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
-                            , testAssertEq (validatorMetadataFingerprint raw) "f55e5e7c7653b2cf"
+                            , testAssertEq (validatorMetadataFingerprint raw) "7d1bad137ad13ae1"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
@@ -2225,7 +2225,11 @@ phase2Identity :: String
 phase2Identity = "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { return x; };"
 
 phase2Impl :: String -> String
-phase2Impl body = "trait Mark { }; impl Mark for Int { }; struct Wrap<T> { value: T }; trait Read<E> { fn read(self: &Self) -> E; }; impl<T: Mark> Read<T> for Wrap<T> { fn read(self: &Self) -> T { " ++ body ++ " }; };"
+phase2Impl body = "trait Mark { }; impl Mark for Int { }; struct Wrap<T> { value: T }; trait Read<E> { fn read(self: &Self) -> E; }; impl<T: Mark + Clone> Read<T> for Wrap<T> { fn read(self: &Self) -> T { " ++ body ++ " }; };"
+
+-- (the provider has the prelude for the Clone bound its clone of a T needs)
+phase2ImplFiles :: String -> Files
+phase2ImplFiles source = [(path, if path == "installed/vendor/package.tersus" then "" else text) | (path, text) <- phase2Files source (phase2Impl "return clone(self.value);") []]
 
 phase2WriteFiles :: String -> Files
 phase2WriteFiles field = phase2Files
@@ -2284,7 +2288,7 @@ phase2ConflictingContracts = phase2Files
 phase2Private :: Files
 phase2Private = phase2Files
     "import vendor::api { value }; fn pass(x: Bool) -> Bool { return x; }; return value(42);"
-    "import vendor::helpers { pass }; trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { return pass(x); };"
+    "import vendor::helpers { Good, pass }; trait Mark { }; impl Mark for Int { }; fn value<T: Mark + Good>(x: T) -> T { return pass(x); };"
     [("installed/vendor/helpers/helpers.tersus", "trait Good { }; impl Good for Int { }; struct Hidden<T> { value: T }; fn pack<T: Good>(x: T) -> Hidden<T> { return Hidden { value: x }; }; fn pass<T: Good>(x: T) -> T { h = pack(x); return h.value; };")]
 
 testPhase2Packages :: Test
@@ -2302,17 +2306,17 @@ testPhase2Packages = TestList "testPhase2Packages"
             "import vendor::api { value }; return size(value(1));"
             "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> String { return \"hi\"; };" []] 2
     , testCase "external bounded implementation and trait companion instantiate" $
-        phase2Runs (phase2Files "import vendor::api { Wrap }; v = Wrap<Int> { value: 42 }; return v.read();" (phase2Impl "return clone(self.value);") []) 42
+        phase2Runs (phase2ImplFiles "import vendor::api { Wrap }; v = Wrap<Int> { value: 42 }; return v.read();") 42
     , testCase "nested private generic constructors and helpers keep defining context" $ phase2Runs phase2Private 42
     , testCase "explicit private generic constructor arguments specialize with their template" $
         phase2Runs [(path, if "helpers.tersus" `isSuffixOf` path then "trait Good { }; impl Good for Int { }; struct Hidden<T> { value: T }; fn pack<T: Good>(x: T) -> Hidden<T> { return Hidden<T> { value: x }; }; fn pass<T: Good>(x: T) -> T { h = pack(x); return h.value; };" else text) | (path, text) <- phase2Private] 42
     , testCase "private nominal result metadata remains usable without naming its provider" $ phase2Runs phase2PrivateResultFiles 42
     , testCase "trait-owning modules export bounded implementations for imported types" $ phase2Runs phase2ForeignImplFiles 42
-    , testCase "caller-only traits cannot satisfy defining-site method visibility" $ phase2Rejects phase2CallerOnlyTrait ["Type error:", "read"]
-    , testCase "a no-prelude provider cannot inherit the caller's selected Hash trait" $ phase2Rejects phase2NoPreludeHashFiles ["Undefined variable: Hash::hash"]
+    , testCase "caller-only traits cannot satisfy defining-site method visibility" $ phase2Rejects phase2CallerOnlyTrait ["in module vendor::api", "value calls read on a T, and no bound of it has a function read"]
+    , testCase "a no-prelude provider cannot inherit the caller's selected Hash trait" $ phase2Rejects phase2NoPreludeHashFiles ["in module vendor::api", "Undefined variable: Hash::hash"]
     , testCase "caller-owned types satisfy visible vendor bounds" $ phase2Runs (phase2CallerTypeFiles False) 42
     , testCase "bounded vendor implementations use caller implementations of visible traits" $ phase2Runs (phase2CallerTypeFiles True) 42
-    , testCase "caller-only bare functions are not template defining dependencies" $ phase2Rejects phase2CallerOnlyFunction ["Undefined variable: secret"]
+    , testCase "caller-only bare functions are not template defining dependencies" $ phase2Rejects phase2CallerOnlyFunction ["in module vendor::api", "Undefined variable: secret"]
     , testCase "different checked function bodies remain a link conflict" $ expectProgramErrorAll
         [ ("app/package.tersus", "")
         , ("app/main.tersus", "import app::geo; fn findNth(x: Int) -> Int { return x + 1; }; return findNth(1) + geo::setSize();")
@@ -2326,14 +2330,14 @@ testPhase2Packages = TestList "testPhase2Packages"
     , testCase "bounded function refuses an unsatisfied ordinary trait" $
         phase2Rejects (phase2Files "import vendor::api { value }; return value(true);" phase2Identity []) ["needs T to implement", "Mark", "Bool does not"]
     , testCase "bounded implementation refuses an unsatisfied ordinary trait" $
-        phase2Rejects (phase2Files "import vendor::api { Wrap }; v = Wrap<Bool> { value: true }; return v.read();" (phase2Impl "return clone(self.value);") []) ["needs T to implement", "Mark", "Bool does not"]
+        phase2Rejects (phase2ImplFiles "import vendor::api { Wrap }; v = Wrap<Bool> { value: true }; return v.read();") ["needs T to implement", "Mark", "Bool does not"]
     , testCase "bounded calls retain their requires contract" $
         phase2Rejects (phase2Files "import vendor::api { value }; return value(1, -1);"
             "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T, n: Int) -> T [{ affirm n >= 0; }] [{ }] { return x; };" []) ["Could not prove:", "n >= 0"]
     , testCase "bounded write footprints retain permitted field updates" $
         phase2Runs (phase2WriteFiles "x") 42
     , testCase "bounded write footprints reject an unlisted field update" $
-        phase2Rejects (phase2WriteFiles "y") ["writes clause of the function does not allow"]
+        phase2Rejects (phase2WriteFiles "y") ["in module vendor::api", "writes clause of the function does not allow"]
     , testCase "bounded implementation companion checks the trait contract" $
         phase2Rejects (phase2Files "import vendor::api { Wrap }; return Wrap<Int> { value: 1 }.read();"
             "trait Mark { }; impl Mark for Int { }; struct Wrap<T> { value: T }; trait Read { fn read(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl<T: Mark> Read for Wrap<T> { fn read(self: &Self) -> Int { return -1; }; };" []) ["does not meet what", "could not prove return >= 0"]
@@ -2360,7 +2364,7 @@ testPhase2Packages = TestList "testPhase2Packages"
         phase2Rejects (phase2ArgumentFiles "Bool" "return true;") ["needs U to implement", "Label", "does not"]
     , testCase "caller implementation prerequisites use their defining scope" $ phase2Runs (phase2PrerequisiteFiles False False) 42
     , TestCase "private caller prerequisites validate in reference and native code" $ phase2FilesystemWith (phase2PrerequisiteFiles False False)
-    , testCase "implementation-private traits do not enter provider method scope" $ phase2Rejects (phase2PrerequisiteFiles True False) ["good", "not defined"]
+    , testCase "implementation-private traits do not enter provider method scope" $ phase2Rejects (phase2PrerequisiteFiles True False) ["in module vendor::api", "value calls good on a T, and no bound of it has a function good"]
     , testCase "private caller implementation companions retain provider contracts" $ phase2Rejects (phase2PrerequisiteFiles False True) ["does not meet what", "could not prove return >= 0"]
     , testCase "implementation bounds substitute matched array sizes" $ phase2Runs (phase2SizeArgumentFiles "3" "#[1, 2, 3]") 42
     , TestCase "matched size bounds run from disk in reference and native code" $ phase2FilesystemWith (phase2SizeArgumentFiles "3" "#[1, 2, 3]")
@@ -2370,7 +2374,7 @@ testPhase2Packages = TestList "testPhase2Packages"
     , TestCase "sized array returns validate and run in reference and native code" $ phase2FilesystemWith (phase2SizedReturnFiles "return array(n, 1);" "return size(make(p, a)) + 39;")
     , testCase "inner function size parameters shadow outer size specialization" $ phase2CheckedShadow (phase2SizedReturnFiles "fn f<n>(a: &Array<Int, n>) -> Array<Int, n> { return array(n, 2); }; b = #[1, 2, 3, 4]; c = f(b); return array(n, size(c));" "return get(make(p, a), 0) + 38;")
     , testCase "inner local values shadow outer size specialization" $ phase2CheckedShadow (phase2SizedReturnFiles "fn f(x: Int) -> Int { n = 5; return n; }; return array(n, f(0));" "return get(make(p, a), 0) + 37;")
-    , testCase "size-specialized array returns refuse a different concrete size" $ phase2Rejects (phase2SizedReturnFiles "return array(4, 1);" "return size(make(p, a));") ["returned value:", "expected Array<Int, 3>", "got Array<Int, 4>"]
+    , testCase "size-specialized array returns refuse a different concrete size" $ phase2Rejects (phase2SizedReturnFiles "return array(4, 1);" "return size(make(p, a));") ["in module vendor::api", "returned value:", "expected Array<Int, n>", "got Array<Int, 4>"]
     , testCase "repeated aliases and cross-module uses link one canonical instance" phase2Dedup
     , testCase "ghost-bearing cross-module templates deduplicate without losing proof context" $
         phase2DedupWith "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { affirm 1 = 1; return x; };"
@@ -2430,7 +2434,7 @@ phase2ArgumentFiles argument body = phase2Files
 phase2PrerequisiteFiles :: Bool -> Bool -> Files
 phase2PrerequisiteFiles leak badContract = phase2Files
     ("import vendor::api { Mark, value }; trait Good { fn good(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl Good for Int { fn good(self: &Self) -> Int [{ }] [{ affirm return = 42; }] { return 42; }; }; struct Wrap<T> { value: T }; impl<U: Good> Mark for Wrap<U> { fn marked(self: &Self) -> Int [{ }] [{ " ++ (if badContract then "" else "affirm return >= 0;") ++ " }] { return " ++ (if badContract then "-1" else "self.value.good()") ++ "; }; }; p = Wrap<Int> { value: 1 }; return value(p);")
-    ("trait Mark { fn marked(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; fn value<T: Mark>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return " ++ (if leak then "x.value.good()" else "Mark::marked(x)") ++ "; };") []
+    ("trait Mark { fn marked(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; fn value<T: Mark>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return " ++ (if leak then "x.good()" else "Mark::marked(x)") ++ "; };") []
 
 phase2SizeArgumentFiles :: String -> String -> Files
 phase2SizeArgumentFiles size body = phase2Files

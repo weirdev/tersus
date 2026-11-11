@@ -8,8 +8,10 @@ module LibParsed
     , nativeStorageModules
     , statementsForLibModules
     , declsForLibModules
+    , inlinedLibraryLength
     ) where
 
+import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 
 import ParsedFile (Decls, Import (..), ParsedFile (..), declsFromStatements, emptyDecls)
@@ -69,3 +71,15 @@ statementsForLibModules parsed names = concat [Map.findWithDefault [] name (lpSt
 
 declsForLibModules :: LibParsed -> [String] -> Decls
 declsForLibModules parsed names = declsFromStatements emptyDecls (statementsForLibModules parsed names)
+
+-- How many of a program's first statements are compiler libraries put in front of it as they are (as
+-- SourceParse.parseWithEqualityWith does), each library in the order the libraries are parsed in
+inlinedLibraryLength :: [Statement] -> Int
+inlinedLibraryLength stmts = case libParsed of
+    Left _ -> 0
+    Right parsed -> strip stmts [Map.findWithDefault [] name (lpStatements parsed) | name <- lpOrder parsed]
+  where
+    strip rest (library : more)
+        | not (null library) && library `isPrefixOf` rest = length library + strip (drop (length library) rest) more
+        | otherwise = strip rest more
+    strip _ [] = 0

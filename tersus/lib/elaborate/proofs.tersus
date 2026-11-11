@@ -8,8 +8,8 @@ import elaborate::expr { Folded, argsCountText, arrayCall, constantArithmetic, d
 import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
 import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { callOf };
-import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk };
-import elaborate::traits { emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
+import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt };
+import elaborate::traits { boundCallWritten, builtinSequenceCall, emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, sequenceFunction, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof ~ {
     node = nodeIn(&st.nodes, p);
@@ -240,9 +240,17 @@ fn inferProofOther(st: St, funct: Int, args: &List<Int>) -> St ~ {
             };
             if x.kind = 4 && x.name != "List" && x.name != "Box" {
                 owner = clone(x.name);
-                st = resolveAssociated(st, &owner, &fname);
+                st = sequenceFunction(st, &owner, &fname);
                 if st.status != 0 { return st; };
                 return ghostCall(st, 0 - 1, firstText(&st.names), &argTys, &argNodes);
+            };
+            if x.kind = 12 && st.defChecking {
+                powner = parameterOwner(&x.name);
+                st = resolveAssociated(st, &powner, &fname);
+                if st.status != 0 { return st; };
+                resolved = firstText(&st.names);
+                st = boundCallWritten(st, funct, &powner, &fname, true);
+                return ghostCall(st, 0 - 1, resolved, &argTys, &argNodes);
             };
         };
     };
@@ -375,28 +383,18 @@ fn proofOrdinaryCall(st: St, funct: Int, name: String, args: &List<Int>) -> St ~
     if st.status != 0 { return st; };
     argTys = clone(st.te.types);
     argNodes = clone(st.outs);
-    // (a function with bounds is the function made for the types of the arguments)
-    if HashMap::contains(&st.templates, &name) {
-        tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
-        st = zeroArguments(st, &argTys);
-        fakes = clone(st.tes);
-        st = templateCall(st, clone(name), tm, &fakes);
-        if st.status != 0 { return st; };
-        t = teHead(&st.te);
-        call = callOf(st, st.te.node);
-        instance = varName(st, call.head);
-        st = sizeProofs(st, &call.args, size(argTys));
-        all = clone(argNodes);
-        for n in &st.outs { all = push(all, n); };
-        st = emitATerm(st, instance);
-        st = emitFApp(st, st.nid, &all);
-        return St { ty: t, ..st };
-    };
+    if HashMap::contains(&st.templates, &name) { return templateProofCall(st, name, &argTys, &argNodes); };
     if size(name.bytes) > 0 && get(name.bytes, 0) = toByte(60) { return ghostCall(st, funct, name, &argTys, &argNodes); };
     if traitPath(&name) {
         path = pathOf(&name);
         function = functionOf(&name);
         if HashMap::contains(&st.traitFns, &path) {
+            // (the builtin of that name, as a proof writes it)
+            if size(argTys) > 0 && builtinSequenceCall(&st, &path, &function, nth(&argTys, 0)) {
+                value = builtinValueAt(st, HashMap::lookup(&st.methods, &function, 0 - 1));
+                st = emit(st, AstNode::Proof { value: AstProof::CTerm { v: value } });
+                return inferProofOther(st, st.nid, args);
+            };
             fns = HashMap::lookup(&st.traitFns, &path, []);
             st = ownerThroughTrait(st, &path, &fns, &function, &argTys);
             if st.status != 0 { return st; };
@@ -464,7 +462,27 @@ fn derefStepProof(st: St, t0: Int, node: Int) -> St ~ {
     return St { ok: true, ..st };
 };
 
+// A call of a function with bounds in a proof: the function made for the types of the arguments
+fn templateProofCall(st: St, name: String, argTys: &List<Int>, argNodes: &List<Int>) -> St ~ {
+    tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
+    st = zeroArguments(st, argTys);
+    fakes = clone(st.tes);
+    st = templateCall(st, clone(name), tm, &fakes);
+    if st.status != 0 { return st; };
+    t = teHead(&st.te);
+    call = callOf(st, st.te.node);
+    instance = varName(st, call.head);
+    st = sizeProofs(st, &call.args, size(argTys));
+    all = clone(argNodes);
+    for n in &st.outs { all = push(all, n); };
+    st = emitATerm(st, instance);
+    st = emitFApp(st, st.nid, &all);
+    return St { ty: t, ..st };
+};
+
 fn ghostCall(st: St, funct: Int, name: String, argTys: &List<Int>, argNodes: &List<Int>) -> St ~ {
+    // (a function of an impl with bounds, as a trait's function or a method resolves to, is a function with bounds)
+    if HashMap::contains(&st.templates, &name) { return templateProofCall(st, name, argTys, argNodes); };
     st = lookupVar(st, &name);
     if st.status != 0 { return st; };
     ft = st.ty;

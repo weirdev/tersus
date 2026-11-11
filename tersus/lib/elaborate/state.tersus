@@ -80,7 +80,12 @@ impl Clone for BoundedParts { };
 
 fn noBoundedParts() -> BoundedParts ~ { return BoundedParts { names: [], values: [], sigs: [], defined: [], wrapperOf: [], wrapperValues: [], wrapperNames: [] }; };
 
-// The checker's state. status: 0 checking, 1 refused, 2 not modelled; msg says why.
+// The checker's state. status: 0 checking, 1 refused, 2 not modelled, 3 interface refused, 4 unresolved, 5 refused with a
+// message that a copy of a function with bounds passes on as it is (finalRefusal), answered as a refusal; msg says why. defQueue holds the functions with bounds the module defines, which are checked against their bounds alone once
+// it is checked, and defChecking is set while one is; checkedItems counts the statements in front of the program whose
+// functions with bounds were checked where they were defined (the libraries a single-file program has in front of it);
+// sequenceTraits holds the library's Sequence and Growable when the module has them, which lists, arrays and Boxes of
+// arrays implement with the builtins.
 // ty is the result of the last function that makes a type, ok of the last unify, te of the last inference.
 struct St {
     nodes: List<AstNode>,
@@ -164,6 +169,10 @@ struct St {
     boundsOut: List<BoundInfo>,
     sigNode: Int,
     seen: List<String>,
+    defQueue: List<String>,
+    defChecking: Bool,
+    checkedItems: Int,
+    sequenceTraits: HashSet<String>,
     status: Int,
     msg: String
 };
@@ -180,6 +189,40 @@ fn notModelled(st: St, what: String) -> St ~ {
 
 fn typeError(st: St, what: String) -> St ~ {
     return fail(st, "Type error: ".concat(what));
+};
+
+// A refusal that a copy of a function with bounds passes on as it is, not as an internal error of the copy
+fn finalRefusal(st: St, msg: String) -> St ~ {
+    if st.status != 0 { return st; };
+    return St { status: 5, msg: msg, ..st };
+};
+
+// The first type parameter of a type that keeps a value of it from being cloned, or "": in a body checked against its bounds
+// a type parameter is cloned only when a bound makes it Clone (or Copy, which is Clone too), and elsewhere any type parameter is
+fn unclonedParameter(st: &St, t: Int) -> String ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 12 {
+        if !st.defChecking || HashSet::contains(&st.impls, catStrings("Clone ", parameterOwner(&x.name))) || HashSet::contains(&st.impls, catStrings("Copy ", parameterOwner(&x.name))) { return ""; };
+        return clone(x.name);
+    };
+    for a in &x.args {
+        p = unclonedParameter(st, a);
+        if size(p.bytes) > 0 { return p; };
+    };
+    return "";
+};
+
+fn parametersClone(st: &St, t: Int) -> Bool ~ { return size(unclonedParameter(st, t).bytes) = 0; };
+
+// What a bound of the type parameter p is an impl for while a body is checked against its bounds: a name no program
+// writes, so that no type or function of the program is taken for one of the bound's
+fn parameterOwner(p: &String) -> String ~ { return catStrings("$param ", clone(p)); };
+
+// The type parameter that parameterOwner made the owner for, or ""
+fn ownedParameter(owner: &String) -> String ~ {
+    prefix = "$param ";
+    if size(owner.bytes) <= size(prefix.bytes) || owner.slice(0, size(prefix.bytes)) != prefix { return ""; };
+    return owner.slice(size(prefix.bytes), size(owner.bytes));
 };
 
 fn withTy(st: St, t: Int) -> St ~ {

@@ -86,7 +86,7 @@ compileLibModule :: Elaborator -> Map.Map String ModuleInterface -> [String] -> 
 compileLibModule elaborator ifaces deps name statements =
     let moduId = libModuleId name
         depIfaces = [ifaces Map.! dep | dep <- deps]
-     in case elaborator (Request moduId True True LibInterfaceOf depIfaces (definitionContexts ifaces (Map.keys ifaces) deps) [] Nothing [statements]) of
+     in case elaborator (Request moduId True True LibInterfaceOf depIfaces (definitionContexts ifaces (Map.keys ifaces) deps) [] Nothing [statements] 0) of
             Accepted elaborated (Just iface) _ -> case lowerModuleWith depIfaces elaborated of
                 Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
                 Ok program -> Ok (iface, program)

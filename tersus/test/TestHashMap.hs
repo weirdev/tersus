@@ -57,6 +57,8 @@ testHashMap =
             , TestList
                 "contracts"
                 [ testCase "fetch where the key is a precondition" (pipelineValid "fn getIt(m: &HashMap<Int, Int>, k: &Int) -> Int [{ affirm findIn(get(m.buckets, Hash::hash(k) % size(m.buckets)), k) >= 0; }] [{ }] { return m.fetch(k); }; return 0;")
+                , testCase "contains asks no Clone of a function with bounds that calls it" (pipelineRuns "fn has<K: Hash + Eq>(m: &HashMap<K, Int>, k: &K) -> Bool { return m.contains(k); }; m = HashMap::new(); m = m.insert(3, 4); if has(m, 3) { return 1; }; return 0;" (VInt 1))
+                , testCase "a value type without Clone is refused" (pipelineRejected "struct Plain { n: Int }; m = HashMap::new(); x = m.lookup(1, Plain { n: 0 }); return x.n;" "<HashMap>::lookup needs V to implement Clone, and Plain does not")
                 , testCase "a key type without Hash is refused" (pipelineRejected "struct Plain { x: Int }; impl Clone for Plain { }; m = HashMap::new().insert(Plain { x: 1 }, 2); return m.size();" "needs K to implement Hash")
                 , testCase "the count after insert is bounded" (pipelineValid "fn addOne(m: HashMap<Int, Int>, k: Int, v: Int) -> Int [{ }] [{ affirm return >= size(m); affirm return <= size(m) + 1; }] { return m.insert(k, v).size(); }; return 0;")
                 ]

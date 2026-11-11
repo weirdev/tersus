@@ -12,7 +12,7 @@ import elaborate::out { emit, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, Defining, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope };
-import elaborate::traits { argListOf, boundsOf, emptyTemplate };
+import elaborate::traits { argListOf, boundsOf, checkDefinitions, emptyTemplate };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
 // response on standard output (AST_DATA.md). It answers `unmodelled` for what it does not handle yet.
@@ -28,7 +28,7 @@ fn newState() -> St ~ {
         methodOf: HashMap::new(), ty: 0, ok: true, te: TE { node: 0 - 1, types: [] }, tes: [], outs: [], nid: 0 - 1, n: 0,
         gen: Generic { params: [], names: [], types: [] }, ctor: CtorInfo { owner: "", names: [], types: [] }, names: [],
         fnSig: FnSig { params: [], ptys: [], rty: 0, sizes: [], types: [], writes: [], froms: [] }, sigNode: 0 - 1, boundsOut: [],
-        seen: [], status: 0, msg: ""
+        seen: [], defQueue: [], defChecking: false, checkedItems: 0, sequenceTraits: HashSet::new(), status: 0, msg: ""
     };
 };
 
@@ -92,6 +92,12 @@ fn loadInterface(st: St, iface: &AstProgram, base: Int) -> St ~ {
     if !(root is AstNode::Interface) { return notModelled(st, "an interface the data does not give"); };
     v = (root as AstNode::Interface).value;
     nodes = &iface.nodes;
+    // (the library's Sequence and Growable, by the module that declares them, not by their names)
+    moduNode = nodeIn(nodes, v.modu);
+    preludeModule = false;
+    if nameText(nodes, v.pkg) = "tersuslib" && moduNode is AstNode::OptName && (moduNode as AstNode::OptName).value is AstOptName::SomeName {
+        preludeModule = nameText(nodes, ((moduNode as AstNode::OptName).value as AstOptName::SomeName).n) = "prelude";
+    };
     for e in listItems(nodes, v.types) {
         entry = entryOf(nodes, e);
         if entry is AstEntry::NamesEntry {
@@ -135,6 +141,7 @@ fn loadInterface(st: St, iface: &AstProgram, base: Int) -> St ~ {
                 fns = [];
                 for f in listItems(nodes, te.fs) { fns = push(fns, base + f); };
                 st = St { traits: st.traits.insert(clone(name)), traitFns: st.traitFns.insert(clone(name), fns), ..st };
+                if preludeModule && (name = "Sequence" || name = "Growable") { st = St { sequenceTraits: st.sequenceTraits.insert(clone(name)), ..st }; };
             };
             // (each interface's own trait gives its reference results, the first of a name winning)
             for f in listItems(nodes, te.fs) {
@@ -571,6 +578,15 @@ hasModule = get(moduleLine.words, 2).quoted;
 if !hasModule && !wordIs(&moduleLine, 2, "none") { return malformed(); };
 builtinsLine = readLine();
 if !wordIs(&builtinsLine, 0, "builtins") { return malformed(); };
+// (`builtins checked N`: the first N statements of the program are libraries whose functions with bounds were checked
+// where the libraries were defined)
+checkedItems = 0;
+if size(builtinsLine.words) != 1 {
+    if size(builtinsLine.words) != 3 || !wordIs(&builtinsLine, 1, "checked") { return malformed(); };
+    checkedCount = intAt(&builtinsLine.words, 2);
+    if !checkedCount.ok || checkedCount.value < 1 { return malformed(); };
+    checkedItems = checkedCount.value;
+};
 table = readBlock();
 if !table.ok { return malformed(); };
 countLine = readLine();
@@ -627,7 +643,8 @@ probe = Probe { declared: [], mentioned: HashSet::new(), literal: false };
 if hasCatalog { probe = probeModule(&program.nodes, &raw, &ifaces); };
 prepared = preparedProgram(program, raw, &pkg, &modKey);
 stmts = prepared.stmts;
-st = St { nodes: prepared.nodes, ..st };
+st = St { nodes: prepared.nodes, checkedItems: checkedItems, ..st };
+if hasModule && pkgName = "tersuslib" && modu = "prelude" { st = St { sequenceTraits: st.sequenceTraits.insert("Sequence").insert("Growable"), ..st }; };
 if !prepared.ok { st = unresolvedState(st, prepared.msg); };
 st = loadBuiltins(st, &table.value);
 selected = [];
@@ -689,6 +706,7 @@ iface = AstProgram { stage: "interface", nodes: [], root: 0 };
 if st.status = 0 {
     statementsNode = st.te.node;
     types = clone(st.te.types);
+    st = checkDefinitions(st);
     st = emitTypes(st, &types);
     if st.status = 0 {
         st = emit(st, AstNode::Elaborated { value: AstElaborated { statements: statementsNode, types: st.nid } });

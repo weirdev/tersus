@@ -19,7 +19,7 @@ impl<T: Clone> Clone for List<T> {
         out = [];
         i = 0;
         while i < size(self) [{ affirm i >= 0; affirm i <= size(self); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(self, j); }] shrinks size(self) - i {
-            out = push(out, clone(get(self, i)));
+            out = push(out, get(self, i).clone());
             i = i + 1;
         };
         return out;
@@ -31,7 +31,7 @@ impl<T: Clone, n> Clone for Array<T, n> {
         out = [];
         i = 0;
         while i < size(self) [{ affirm i >= 0; affirm i <= size(self); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(self, j); }] shrinks size(self) - i {
-            out = push(out, clone(get(self, i)));
+            out = push(out, get(self, i).clone());
             i = i + 1;
         };
         return Array::fromList(out);
@@ -40,7 +40,7 @@ impl<T: Clone, n> Clone for Array<T, n> {
 
 impl<T: Clone> Clone for Box<T> {
     fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] {
-        return Box::new(clone(Box::unbox(self)));
+        return Box::new(Box::unbox(self).clone());
     };
 };
 
@@ -50,7 +50,7 @@ fn cloneBoxedArray<T: Clone>(b: &Box<Array<T>>) -> Box<Array<T>> [{ }] [{ affirm
     out = [];
     i = 0;
     while i < size(b) [{ affirm i >= 0; affirm i <= size(b); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(b, j); }] shrinks size(b) - i {
-        out = push(out, clone(get(b, i)));
+        out = push(out, get(b, i).clone());
         i = i + 1;
     };
     return Box::new(Array::fromList(out));

@@ -40,8 +40,11 @@ data Extraction = NoInterface | ModuleInterfaceOf | LibInterfaceOf
 -- The module, whether it predeclares its own types (a package module does), whether it is a module of the
 -- compiler libraries (which see a generic struct's constructor as the struct it builds), the interface to
 -- give back, the interfaces of the modules it imports, checked defining dependencies, the compiler libraries it
--- may be given (the elaborator selects among them), the package its names are resolved in, and the statements
--- as read: one list for each of the module's files in the package's order, or one for a program.
+-- may be given (the elaborator selects among them), the package its names are resolved in, the statements
+-- as read: one list for each of the module's files in the package's order, or one for a program, and how many of
+-- the program's first statements are compiler libraries put in front of it, whose functions with bounds were checked
+-- against their bounds where the libraries were (written `builtins checked N`, only when N is not 0, so a request
+-- that has none reads as before).
 data Request = Request
     { rqModule :: ModuleId
     , rqPredeclare :: Bool
@@ -52,6 +55,7 @@ data Request = Request
     , rqLibraries :: [Library]
     , rqPackage :: Maybe Package
     , rqStatements :: [[Statement]]
+    , rqCheckedStatements :: Int
     }
     deriving (Show, Eq)
 
@@ -118,7 +122,7 @@ writeRequest rq =
                       , "predeclare " ++ boolWord (rqPredeclare rq)
                       , "library " ++ boolWord (rqLibrary rq)
                       , "extract " ++ extractionWord (rqExtraction rq)
-                      , "builtins"
+                      , "builtins" ++ (if rqCheckedStatements rq > 0 then " checked " ++ show (rqCheckedStatements rq) else "")
                       ]
                         ++ block builtins
                         ++ ["interfaces " ++ show (length ifaces)]
@@ -177,7 +181,8 @@ levelWord level = case level of
 
 readRequest :: String -> Result Request String
 readRequest text = case lines text of
-    "tersus-elaborate 1" : moduleLine : predeclareLine : libraryLine : extractLine : "builtins" : afterBuiltins ->
+    "tersus-elaborate 1" : moduleLine : predeclareLine : libraryLine : extractLine : builtinsLine : afterBuiltins ->
+        checkedOf builtinsLine `bindResult` \checked ->
         moduleOf moduleLine `bindResult` \modu ->
         wordAfter "predeclare" predeclareLine `bindResult` \predeclare ->
         boolOf predeclare `bindResult` \flag ->
@@ -201,7 +206,7 @@ readRequest text = case lines text of
             if not (null rest'')
                 then Error "ElaborateRequest: records after the module's syntax"
                 else if null astTexts then Error "ElaborateRequest: no syntax"
-                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions libraries package stmts)
+                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions libraries package stmts checked)
     _ -> Error "ElaborateRequest: not an elaboration request"
   where
     definitionBlocks (line : rest) = wordAfter "definitions" line `bindResult` countOf `bindResult` \count -> contexts count rest
@@ -211,6 +216,11 @@ readRequest text = case lines text of
         if count == 0 then Error "ElaborateRequest: empty defining context" else
         blocks count rest `bindResult` \(context, remaining) -> contexts (n - 1) remaining `bindResult` \(more, syntax) -> Ok (context : more, syntax)
     contexts _ [] = Error "ElaborateRequest: missing defining context"
+    checkedOf line = case words line of
+        ["builtins"] | line == "builtins" -> Ok 0
+        ["builtins", "checked", count] | line == unwords ["builtins", "checked", count] -> countOf count `bindResult` \n ->
+            if n > 0 then Ok n else Error "ElaborateRequest: a checked count of 0 is not written"
+        _ -> Error "ElaborateRequest: expected builtins"
     moduleOf line = strictTokenize line `bindResult` \ts -> case ts of
         [Word "module", Str pkg, Word "none"] -> Ok (ModuleId pkg Nothing)
         [Word "module", Str pkg, Str modu] -> Ok (ModuleId pkg (Just modu))
