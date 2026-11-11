@@ -1154,8 +1154,9 @@ selfHostedQueryFamilies program =
                                 `orElse` testAssertEq (fmap Just (cacheField "plainClasses" final)) (Just (ownClasses context))
                     other -> Just ("Unexpected entailment cache: " ++ show other)
                 -- Goal slices: an index of a block's facts by term, and the ladder of
-                -- budgeted slices a check is proved on. Work rows hold the charged
-                -- work under each rung and the work done under the charge.
+                -- budgeted slices a check is proved on. A ladder's answer is (proved,
+                -- the rung that proved it or -1, the work charged over every rung
+                -- walked, the work done).
                 sliceContext eqs apps consts ords = MData "ValidatorContext" [("equalities", MList (map fact eqs)), ("applications", MList (map app apps)), ("constants", MList (map constant consts)), ("orders", MList (map mixedFact ords)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 indexed index context = case runNamedFunction program "indexFacts" [index, context] of
                     Ok (Just value) -> Right value
@@ -1228,6 +1229,17 @@ selfHostedQueryFamilies program =
                 checkGoalTerms name = testAssertEq (runNamedFunction program "goalTerms" [goal name 7 8]) (Ok (Just (MList [MInt 7, MInt 8])))
                 -- a check, then a fact appended in the same block, then a check that needs it
                 sliceExtensionSteps = [assumeTerms 1 1, checkTerms 0 1 1, MData "ExecutionStep::Assume" [("relation", MInt 2), ("left", termRef 1), ("right", termRef 2)], checkTerms 2 1 2]
+                -- Saturation on a slice: term 20 is get(5, 7) and a forall says f(get(5, j)) =
+                -- get(5, j). Term -1000 is a hub of 210 orders, too heavy for any rung, so it
+                -- is a goal term the slice holds no fact of. The term saturation makes for
+                -- f(20) must be new to the whole state: one new only to the slice would be
+                -- -1000, and prove the false -1000 = 20.
+                templateNode kind function value arguments = MData "TemplateNode" [("kind", MInt kind), ("function", MInt function), ("value", termRef value), ("arguments", MList (map MInt arguments))]
+                forallF = MData "ExecutionStep::AssumeForall" [("template", MData "ForallTemplate" [("id", MInt 900), ("nodes", MList [templateNode 0 0 0 [], templateNode 1 0 5 [], templateNode 2 (-14) 0 [1, 0], templateNode 2 50 0 [2]]), ("guards", MList []), ("body", MData "TemplateRelation" [("relation", MInt 0), ("left", MInt 3), ("right", MInt 2)])])]
+                applyTo local result function arguments = MData "ExecutionStep::Apply" [("local", MInt local), ("result", MInt result), ("function", MInt function), ("arguments", MList arguments)]
+                hubAssumes = [MData "ExecutionStep::Assume" [("relation", MInt 2), ("left", termRef (-1000)), ("right", termRef (100 + k))] | k <- [0 .. 209]]
+                floorSteps = [applyTo 1 20 (-14) [termRef 5, termRef 7], forallF] ++ hubAssumes
+                checkLocal left local = MData "ExecutionStep::Check" [("relation", MInt 0), ("left", left), ("right", localRef local)]
              in [ ("products", [checkProduct a b (productResult a b) | a <- productValues, b <- productValues])
                 , ("relations",
                       [ checkDifferenceOverflow
@@ -1699,6 +1711,8 @@ selfHostedQueryFamilies program =
                       , checkSliceStale, checkSliceEarlyStop, checkIndexWork, checkSliceConstantSeeds, checkSliceConstantSeedsCapped
                       , checkGoalTerms "Equal", checkGoalTerms "Different", checkGoalTerms "Less", checkGoalTerms "AtMost"
                       , checkExecution sliceExtensionSteps 0 (-1), checkExecution (init sliceExtensionSteps ++ [checkTerms 2 1 9]) 1 3
+                      , checkExecution (floorSteps ++ [checkLocal (termRef (-1000)) 1]) 1 (toInteger (length floorSteps))
+                      , checkExecution (floorSteps ++ [applyTo 2 21 50 [localRef 1], checkLocal (localRef 2) 1]) 0 (-1)
                       ])
                 ]
 

@@ -35,6 +35,9 @@ testPointers =
             , testCase "the null address" (runs "p = Addr::null(); q = Addr::fromInt(0); return Addr::toInt(p) + Addr::toInt(q);" "0")
             , testCase "memory is resized" (runs resized "11")
             , testCase "values that own something" (runs owning "5")
+            -- (a read reached back through three writes: the value written there, never another)
+            , testCase "a read after a chain of writes gives what was written there" (valid (chain "10"))
+            , testCase "a read after a chain of writes is not what a later write put elsewhere" (rejected (chain "20") "Could not prove: x = 20")
             , testCase "a block is split and joined" (runs splitJoin "7")
             , testCase "a permission in a struct" (runs buffer "0")
             , testCase "a function takes a block and gives it back" (runs giveBack "9")
@@ -186,6 +189,7 @@ testPointers =
             , "affirm count(b) = 0;"
             , "b = Addr::write(p, 0, 5, b);"
             , "(q, b) = Addr::resize(p, 2, b);"
+            , "affirm filled(b, 0) = true; affirm at(b, 0) = 5; affirm cap(b) = extent(origin(b));"
             , "b = Addr::write(q, 1, 6, b);"
             , "x = Addr::get(q, 0, b);"
             , "affirm x = 5;"
@@ -193,9 +197,11 @@ testPointers =
             , "b = Addr::dropRange(q, 0, 2, b);"
             , "return x + y + Addr::free(q, b);"
             ]
+    chain value = "(p, b) = Addr::alloc(3); affirm cap(b) = extent(origin(b)); b = Addr::write(p, 0, 10, b); b = Addr::write(p, 1, 20, b); b = Addr::write(p, 2, 30, b); x = Addr::get(p, 0, b); affirm x = " ++ value ++ "; b = Addr::dropRange(p, 0, 3, b); return x + Addr::free(p, b);"
     owning =
         unlines
             [ "(p, b) = Addr::alloc(2);"
+            , "affirm cap(b) = extent(origin(b));"
             , "b = Addr::write(p, 0, push(push([], 1), 2), b);"
             , "b = Addr::write(p, 1, push([], 3), b);"
             , "(l, b) = Addr::take(p, 0, b);"

@@ -1,9 +1,11 @@
 import validation::context { integerValue, knownNonnegativeWith, signFacts, unionOf };
 import validation::differences { comparisonDifferences, constantDifferences, constantOrders, isSizeTerm, refinedOrders, safeBoundDifference, safeProduct, semanticFacts };
 import validation::joins { freshValue };
+import validation::execution { sliceBudgets };
 import validation::linear { linearEntails };
 import validation::model { ApplicationTerm, ConstantTerm, DifferenceFact, EqualityFact, ExecutionState, IntegerLookup, OrderFact, SumResult, ValidatorContext, ValueLookup };
 import validation::relations { hasDifferenceIn, hasOrderIn, intAt, leastClasses, sameIn, ufFind };
+import validation::validation { goalSlice, indexFacts, noFactIndex };
 
 
 
@@ -115,7 +117,7 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
                                                 orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
                                                 differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
                                                 below = hasDifferenceIn(equalitiesClasses, differences, index, lengthApp.id, -1);
-                                                if below = false { below = linearEntails(context, index, lengthApp.id, -1); };
+                                                if below = false { below = linearNear(context, index, lengthApp.id, -1); };
                                                 // Below the old length is only half of being in the old list.
                                                 // The read traced here can be a get written in a proof, which
                                                 // carries no bounds of its own, so without a lower bound this
@@ -625,4 +627,17 @@ fn builtinFacts(context: ValidatorContext, function: Int, result: Int, args: &Li
         return addRemainderOrders(context, result, b);
     };
     return context;
+};
+
+// Linear arithmetic on the slices of the ladder from the two terms, for a read
+// traced while a step is evaluated (no block index there: one pass indexes the context)
+fn linearNear(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
+    index = indexFacts(noFactIndex(), context);
+    budgets = sliceBudgets();
+    for r in 0..size(budgets) {
+        walk = goalSlice(context, index, push(push([], left), right), get(budgets, r));
+        if linearEntails(walk.slice, left, right, bound) { return true; };
+        if walk.capped = false { return false; };
+    };
+    return false;
 };

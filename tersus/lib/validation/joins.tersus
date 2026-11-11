@@ -1,6 +1,6 @@
 import validation::context { analyzeContext, contextDifferent, knownNonnegativeWith, signFacts };
 import validation::linear { linearEntails };
-import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, HullLinks, MergePair, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, UnionFind, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
+import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, HullLinks, MergePair, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, UnionFind, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact, WriteOf };
 import validation::relations { applicationAt, emptyIntMap, emptyPositions, intAt, minInt, sameIn, ufFind, ufUnion };
 import validation::saturation { withInstances };
 import validation::sequenceFacts { sizeTermOf };
@@ -51,7 +51,7 @@ fn equalToAny(classes: &HashMap<Int, Int>, term: Int, terms: &List<Int>) -> Bool
     return false;
 };
 
-fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, budget: Int) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
+fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, budget: Int, floor: Int) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
     if depth <= 0 || budget <= 0 { return SplitResult { holds: false, used: 0 }; };
     used = 0;
     analysis = analyzeContext(state.context);
@@ -73,7 +73,7 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
                     if w.written {
                         if sameIn(analysis.classes, get(state.context.applications, setAppPosition).id, get(app.arguments, 0)) {
                             tried = tried + 1;
-                            r = splitAtWrite(state, analysis, goal, depth, budget - used, app.id, k, w);
+                            r = splitAtWrite(state, analysis, goal, depth, budget - used, app.id, k, w, floor);
                             used = used + r.used;
                             if r.holds { return SplitResult { holds: true, used: used }; };
                         };
@@ -100,7 +100,7 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
                                 if rangeTried < 2 && used < budget {
                                     if linearEntails(state.context, bound, k, 0) = false && linearEntails(state.context, k, bound, -1) = false {
                                         rangeTried = rangeTried + 1;
-                                        r = splitAtBound(state, goal, depth, budget - used, k, bound);
+                                        r = splitAtBound(state, goal, depth, budget - used, k, bound, floor);
                                         used = used + r.used;
                                         if r.holds { return SplitResult { holds: true, used: used }; };
                                     };
@@ -118,7 +118,7 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
 // The goal at a read of a write: at the write's index the read is the value written; elsewhere it is a read of the
 // list written to, at an index other than the write's (below it, for a push, where writeOf has also required the
 // index to be in the list pushed to)
-fn splitAtWrite(state: &ExecutionState, analysis: &ContextAnalysis, goal: &ValidatorGoal, depth: Int, budget: Int, readId: Int, k: Int, w: &WriteOf) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
+fn splitAtWrite(state: &ExecutionState, analysis: &ContextAnalysis, goal: &ValidatorGoal, depth: Int, budget: Int, readId: Int, k: Int, w: &WriteOf, floor: Int) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
     used = 0;
     context = clone(state.context);
     sameIndex = sameIn(analysis.classes, k, w.idx);
@@ -129,16 +129,14 @@ fn splitAtWrite(state: &ExecutionState, analysis: &ContextAnalysis, goal: &Valid
         if atOk = false { used = used + 1; atOk = entailsGoal(atIdx, clone(goal)); };
         // (the value may itself be read from a write: a node set from the node there)
         if atOk = false && used < budget {
-            deeper = splitReadOverWrite(ExecutionState { context: clone(atIdx), ..clone(state) }, clone(goal), depth - 1, budget - used);
+            deeper = splitReadOverWrite(ExecutionState { context: clone(atIdx), ..clone(state) }, clone(goal), depth - 1, budget - used, floor);
             used = used + deeper.used;
             atOk = deeper.holds;
         };
     };
     if atOk = false { return SplitResult { holds: false, used: used }; };
     if sameIndex { return SplitResult { holds: true, used: used }; };
-    fresh = freshValue(state);
-    if fresh is ValueLookup::Missing { return SplitResult { holds: false, used: used }; };
-    newRead = (fresh as ValueLookup::Found).term;
+    newRead = freshBelow(state, floor);
     apps = push(clone(context.applications), ApplicationTerm { id: newRead, function: -14, arguments: push(push([], w.inner), k) });
     elsewhere = ValidatorContext { applications: apps, equalities: push(clone(context.equalities), EqualityFact { left: readId, right: newRead }), different: push(clone(context.different), DisequalityFact { left: k, right: w.idx }), ..clone(context) };
     if w.pushed {
@@ -147,7 +145,7 @@ fn splitAtWrite(state: &ExecutionState, analysis: &ContextAnalysis, goal: &Valid
     elseOk = analyzeContext(elsewhere).contradictory;
     if elseOk = false { used = used + 1; elseOk = entailsGoal(elsewhere, clone(goal)); };
     if elseOk = false {
-        deeper = splitReadOverWrite(ExecutionState { context: clone(elsewhere), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        deeper = splitReadOverWrite(ExecutionState { context: clone(elsewhere), ..clone(state) }, clone(goal), depth - 1, budget - used, floor);
         used = used + deeper.used;
         elseOk = deeper.holds;
     };
@@ -155,24 +153,24 @@ fn splitAtWrite(state: &ExecutionState, analysis: &ContextAnalysis, goal: &Valid
 };
 
 // The goal at a read on no known side of a forall fact's bound: below the bound, and at or above it
-fn splitAtBound(state: &ExecutionState, goal: &ValidatorGoal, depth: Int, budget: Int, k: Int, bound: Int) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
+fn splitAtBound(state: &ExecutionState, goal: &ValidatorGoal, depth: Int, budget: Int, k: Int, bound: Int, floor: Int) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
     used = 0;
     below = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: k, greater: bound, strict: true }), ..clone(state.context) };
-    below = withInstances(state, below);
+    below = withInstances(state, below, floor);
     belowOk = analyzeContext(below).contradictory;
     if belowOk = false { used = used + 1; belowOk = entailsGoal(below, clone(goal)); };
     if belowOk = false {
-        deeper = splitReadOverWrite(ExecutionState { context: clone(below), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        deeper = splitReadOverWrite(ExecutionState { context: clone(below), ..clone(state) }, clone(goal), depth - 1, budget - used, floor);
         used = used + deeper.used;
         belowOk = deeper.holds;
     };
     if belowOk = false { return SplitResult { holds: false, used: used }; };
     above = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: bound, greater: k, strict: false }), ..clone(state.context) };
-    above = withInstances(state, above);
+    above = withInstances(state, above, floor);
     aboveOk = analyzeContext(above).contradictory;
     if aboveOk = false { used = used + 1; aboveOk = entailsGoal(above, clone(goal)); };
     if aboveOk = false {
-        deeper = splitReadOverWrite(ExecutionState { context: clone(above), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        deeper = splitReadOverWrite(ExecutionState { context: clone(above), ..clone(state) }, clone(goal), depth - 1, budget - used, floor);
         used = used + deeper.used;
         aboveOk = deeper.holds;
     };
@@ -182,6 +180,12 @@ fn splitAtBound(state: &ExecutionState, goal: &ValidatorGoal, depth: Int, budget
 // (below every term the state mentions, found in one pass over it)
 fn freshValue(state: &ExecutionState) -> ValueLookup {
     return ValueLookup::Found { term: leastTermInUse(state) - 1 };
+};
+
+// A term new to a state that is part of another: below both what it mentions
+// and the floor of the whole it was taken from, whose other terms it may meet
+fn freshBelow(state: &ExecutionState, floor: Int) -> Int {
+    return minInt(leastTermInUse(state), floor) - 1;
 };
 
 fn leastTermInUse(state: &ExecutionState) -> Int {
@@ -225,6 +229,16 @@ fn leastTermInUse(state: &ExecutionState) -> Int {
         for k in 0..count {
             a = intAt(get(state.context.applications, appPosition).arguments, k, 0);
             if a < least { least = a; };
+        };
+    };
+    // (a template's literal and function ids are the data's and need not occur in the facts)
+    for template in state.templates {
+        for node in template.nodes {
+            if node.function < least { least = node.function; };
+            if node.value is ValueRef::Term {
+                term = (node.value as ValueRef::Term).term;
+                if term < least { least = term; };
+            };
         };
     };
     return least;

@@ -1,12 +1,11 @@
-import validation::context { closeContext, contradictoryConstructors, contradictoryVariants, integerValue };
-import validation::differences { comparisonDifferences, constantDifferences, constantOrders, contradictoryConstants, contradictoryDifferences, refinedOrders };
-import validation::execution { assumeBooleanFact, assumeRelation, executeSteps, localGoal, quietStep };
+import validation::context { integerValue };
+import validation::execution { assumeBooleanFact, assumeRelation, checkNear, contradictoryNear, entailsNear, executeSteps, localGoal, quietStep };
 import validation::joins { commonContext, linkAppend, linkedItems, mergeStates, noLinks };
 import validation::loopInference { inferLoopCandidateGoals, loopMentions };
 import validation::model { CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, HullLinks, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StateMergeLookup, SweepArrival, SweepDelivery, SweepOrder, SweepResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
-import validation::relations { containsValue, contradictoryDisequalities, leastClasses };
-import validation::state { booleanKnownCached, negateRelation, resolveValue };
-import validation::validation { entailmentCache, entailsGoal };
+import validation::relations { containsValue };
+import validation::state { negateRelation, resolveValue };
+import validation::validation { indexFacts, noFactIndex };
 
 
 // One region round in progress. Every state delivered is pushed once onto
@@ -52,19 +51,6 @@ fn stepRange(steps: &List<ExecutionStep>, from: Int, to: Int) -> List<ExecutionS
     return out;
 };
 
-fn contextContradictory(context: &ValidatorContext) -> Bool {
-    equalities = closeContext(context);
-    equalitiesClasses = leastClasses(equalities);
-    if contradictoryVariants(equalitiesClasses, context.variants) { return true; };
-    if contradictoryConstructors(equalitiesClasses, context.applications, context.constructorFunctions) { return true; };
-    if contradictoryConstants(equalitiesClasses, context.constants) { return true; };
-    if contradictoryDisequalities(equalitiesClasses, context.different) { return true; };
-    orders = refinedOrders(equalitiesClasses, constantOrders(context.orders, context.constants), context.different);
-    differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
-    if contradictoryDifferences(equalitiesClasses, differences) { return true; };
-    return false;
-};
-
 fn addVariantFact(context: ValidatorContext, state: &ExecutionState, object: ValueRef, family: Int, constructor: Int, matches: Bool) -> ValidatorContext {
     if family < 0 { return context; };
     found = resolveValue(state, object);
@@ -82,26 +68,26 @@ fn checkLoopVariant(state: ExecutionState, frame: &LoopFrame, id: Int) -> Execut
     if next is ValueLookup::Found {
         nextTerm = (next as ValueLookup::Found).term;
         if frame.variantMode = 0 {
-            if entailsGoal(state.context, ValidatorGoal::Less { left: nextTerm, right: frame.prior }) = false {
+            if entailsNear(state.context, ValidatorGoal::Less { left: nextTerm, right: frame.prior }) = false {
                 return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
             };
         } else {
             if frame.variantMode = 1 {
                 otherAfter = resolveValue(state, frame.variantOther);
                 if otherAfter is ValueLookup::Found {
-                    if entailsGoal(state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
+                    if entailsNear(state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
                         return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
                     };
                 } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: state }; };
-                if entailsGoal(state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
+                if entailsNear(state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
                     return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
                 };
             };
             if frame.variantMode = 3 {
-                if entailsGoal(state.context, ValidatorGoal::Within { inner: nextTerm, outer: frame.prior }) = false {
+                if entailsNear(state.context, ValidatorGoal::Within { inner: nextTerm, outer: frame.prior }) = false {
                     return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
                 };
-                if entailsGoal(state.context, ValidatorGoal::Different { left: nextTerm, right: frame.prior }) = false {
+                if entailsNear(state.context, ValidatorGoal::Different { left: nextTerm, right: frame.prior }) = false {
                     return ExecutionFlowResult { status: 1, block: id, step: -1, state: state };
                 };
             };
@@ -347,6 +333,7 @@ fn loopSplit(headerState: &ExecutionState, tests: &List<LoopTest>, prior: Int, p
     negContext = clone(headerState.context);
     joinedYes = clone(headerState);
     haveYes = false;
+    yesFeasible = false;
     pathContexts = [];
     testRelations = [];
     testLefts = [];
@@ -365,17 +352,20 @@ fn loopSplit(headerState: &ExecutionState, tests: &List<LoopTest>, prior: Int, p
                 pathFacts = push(pathContext.equalities, EqualityFact { left: prior, right: prior });
                 pathFacts = push(pathFacts, EqualityFact { left: priorOther, right: priorOther });
                 pathState = ExecutionState { context: ValidatorContext { equalities: pathFacts, ..pathContext }, ..clone(headerState) };
-                if contextContradictory(pathState.context) = false { pathContexts = push(pathContexts, clone(pathState.context)); };
+                feasible = contradictoryNear(pathState.context, push(push([], ta), tb)) = false;
+                if feasible { pathContexts = push(pathContexts, clone(pathState.context)); };
                 testRelations = push(testRelations, test.relation);
                 testLefts = push(testLefts, ta);
                 testRights = push(testRights, tb);
                 if haveYes = false {
                     joinedYes = pathState;
                     haveYes = true;
+                    yesFeasible = feasible;
                 } else {
-                    if contextContradictory(pathState.context) = false {
-                        if contextContradictory(joinedYes.context) {
+                    if feasible {
+                        if yesFeasible = false {
                             joinedYes = pathState;
+                            yesFeasible = true;
                         } else {
                             joinedYes = ExecutionState { context: commonContext(joinedYes.context, pathState.context), ..clone(joinedYes) };
                         };
@@ -395,7 +385,7 @@ fn loopSplit(headerState: &ExecutionState, tests: &List<LoopTest>, prior: Int, p
             everyPath = size(pathContexts) > 0;
             for pathPosition in 0..size(pathContexts) {
                 if everyPath {
-                    if entailsGoal(get(pathContexts, pathPosition), localGoal(relation, ta, tb)) = false { everyPath = false; };
+                    if entailsNear(get(pathContexts, pathPosition), localGoal(relation, ta, tb)) = false { everyPath = false; };
                 };
             };
             if everyPath {
@@ -435,12 +425,12 @@ fn sweepDeliveries(end: ExecutionEnd, state: ExecutionState) -> SweepDelivery {
                     term = (value as ValueLookup::Found).term;
                     yesLiteral = (trueValue as ValueLookup::Found).term;
                     noLiteral = (falseValue as ValueLookup::Found).term;
-                    yesAnswer = booleanKnownCached(entailmentCache(state.context), term, yesLiteral, true);
-                    if yesAnswer.holds {
+                    facts = indexFacts(noFactIndex(), state.context);
+                    if checkNear(state.context, facts, 0, term, yesLiteral) {
                         yesContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, yesLiteral), term, yesLiteral);
                         return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: branch.yes, state: ExecutionState { context: yesContext, ..state } }) };
                     };
-                    if booleanKnownCached(yesAnswer.cache, term, noLiteral, false).holds {
+                    if checkNear(state.context, facts, 0, term, noLiteral) {
                         noContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, noLiteral), term, noLiteral);
                         return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: branch.no, state: ExecutionState { context: noContext, ..state } }) };
                     };
@@ -628,8 +618,8 @@ fn loopTests(relation: Int, left: ValueRef, right: ValueRef, orTests: &List<Loop
 // Where an iteration starts the variant must be at least the zero (a count)
 // or below its other end (a gap closing from below).
 fn variantStartHolds(context: &ValidatorContext, mode: Int, terms: LoopEntryTerms) -> Bool {
-    if mode = 0 { return entailsGoal(context, ValidatorGoal::AtMost { left: terms.zero, right: terms.prior }); };
-    if mode = 1 { return entailsGoal(context, ValidatorGoal::AtMost { left: terms.prior, right: terms.priorOther }); };
+    if mode = 0 { return entailsNear(context, ValidatorGoal::AtMost { left: terms.zero, right: terms.prior }); };
+    if mode = 1 { return entailsNear(context, ValidatorGoal::AtMost { left: terms.prior, right: terms.priorOther }); };
     return true;
 };
 
@@ -682,6 +672,17 @@ fn loopIteration(block: &ExecutionBlock, entryState: &ExecutionState, cands: &Ca
     return iterationFailure(2, -1, entryState);
 };
 
+fn testTerms(state: &ExecutionState, tests: &List<LoopTest>) -> List<Int> {
+    terms = [];
+    for test in tests {
+        left = resolveValue(state, test.left);
+        if left is ValueLookup::Found { terms = push(terms, (left as ValueLookup::Found).term); };
+        right = resolveValue(state, test.right);
+        if right is ValueLookup::Found { terms = push(terms, (right as ValueLookup::Found).term); };
+    };
+    return terms;
+};
+
 fn loopBodyUnreachable(header: &ExecutionState, tests: &List<LoopTest>) -> Bool {
     for test in tests {
         run = executeSteps(clone(header), push([], ExecutionStep::Assume { relation: test.relation, left: test.left, right: test.right }));
@@ -702,21 +703,29 @@ fn loopRound(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &E
     if (*block).end is ExecutionEnd::Loop {
         loop = (*block).end as ExecutionEnd::Loop;
         inner = LoopFrame { header: id, exit: loop.exit, active: push(clone(frame.active), id), region: clone(loop.region), checks: clone(loop.checks), candChecks: clone(cands.checks), candEnds: clone(cands.ends), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: iteration.prior, priorOther: iteration.priorOther };
-        // (an empty successful sweep: a body no test lets execution into delivers nothing)
-        swept = SweepResult { result: ExecutionFlowResult { status: 0, block: id, step: -1, state: clone(iteration.header) }, dropped: [], exits: [], arrivals: 0, merges: 0 };
-        if loopBodyUnreachable(iteration.header, loopTests(loop.relation, loop.left, loop.right, loop.orTests)) = false {
-            swept = sweep(blocks, inner, loop.body, iteration.yes, total, measure - 1);
+        tests = loopTests(loop.relation, loop.left, loop.right, loop.orTests);
+        if loopBodyUnreachable(iteration.header, tests) {
+            // (an empty successful sweep: a body no test lets execution into delivers nothing)
+            empty = SweepResult { result: ExecutionFlowResult { status: 0, block: id, step: -1, state: clone(iteration.header) }, dropped: [], exits: [], arrivals: 0, merges: 0 };
+            emptyExits = roundExits(empty, iteration, tests);
+            return LoopRound { swept: empty, exits: emptyExits };
         };
-        exits = [];
-        if swept.result.status = 0 {
-            if size(swept.dropped) = 0 {
-                if contextContradictory(iteration.no) = false { exits = push(exits, ExecutionState { context: clone(iteration.no), ..clone(iteration.header) }); };
-                for leaving in swept.exits { exits = push(exits, clone(leaving)); };
-            };
-        };
+        swept = sweep(blocks, inner, loop.body, iteration.yes, total, measure - 1);
+        exits = roundExits(swept, iteration, tests);
         return LoopRound { swept: swept, exits: exits };
     };
     return LoopRound { swept: sweepFailure(2, id, -1, clone(iteration.header)), exits: [] };
+};
+
+fn roundExits(swept: &SweepResult, iteration: &LoopIteration, tests: &List<LoopTest>) -> List<ExecutionState> {
+    exits = [];
+    if swept.result.status = 0 {
+        if size(swept.dropped) = 0 {
+            if contradictoryNear(iteration.no, testTerms(iteration.header, tests)) = false { exits = push(exits, ExecutionState { context: clone(iteration.no), ..clone(iteration.header) }); };
+            for leaving in swept.exits { exits = push(exits, clone(leaving)); };
+        };
+    };
+    return exits;
 };
 
 // A nested loop's header: its arrivals merged, its entry checks, then rounds

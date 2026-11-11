@@ -2,7 +2,7 @@ import validation::context { analyzeContext, integerValue };
 import validation::differences { canonicalDifferences, canonicalHasDifference };
 import validation::evaluation { addSumOrders, builtinFacts };
 import validation::execution { assumeBooleanFact, assumeRelation, existingApplication, localGoal };
-import validation::joins { constantTermWithValue, leastTermInUse };
+import validation::joins { constantTermWithValue, freshBelow };
 import validation::model { ApplicationTerm, BlockedGuard, ClosedFacts, DisequalityFact, DoneKey, ExecutionState, ForallTemplate, IntegerLookup, NodeTerms, RoundResult, SatInstance, SatWork, Saturation, SplitResult, StateTerm, TermRelation, ValidatorContext, ValueLookup };
 import validation::relations { boolAt, containsValue, emptyIntMap, equalityRepresentatives, intAt, representativeOf };
 import validation::state { booleanCheck, resolveValue };
@@ -103,7 +103,7 @@ fn templateTerms(state: &ExecutionState, template: &ForallTemplate, index: Int, 
     return NodeTerms { state: current, terms: terms, found: found, next: counter, births: born };
 };
 
-fn saturationRound(given: &Saturation) -> RoundResult {
+fn saturationRound(given: &Saturation, floor: Int) -> RoundResult {
     state = clone(given.state);
     births = clone(given.births);
     done = clone(given.done);
@@ -120,7 +120,7 @@ fn saturationRound(given: &Saturation) -> RoundResult {
     };
     pending = noDoneKeys();
     instances = [];
-    nextTerm = leastTermInUse(state) - 1;
+    nextTerm = freshBelow(state, floor);
     sat = SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
     sat = saturateTemplates(sat, start, gets, writes, done);
     sat = saturateRangeFacts(sat, start, gets, writes, done);
@@ -361,18 +361,18 @@ fn closedHolds(closed: &ClosedFacts, relation: Int, left: Int, right: Int) -> Bo
 };
 
 // A case's context with the instances of the path's foralls that hold in it
-fn withInstances(state: &ExecutionState, context: ValidatorContext) -> ValidatorContext {
+fn withInstances(state: &ExecutionState, context: ValidatorContext, floor: Int) -> ValidatorContext {
     if size(state.templates) = 0 { return context; };
-    saturated = saturate(Saturation { state: ExecutionState { context: context, ..clone(state) }, births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() });
+    saturated = saturate(Saturation { state: ExecutionState { context: context, ..clone(state) }, births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() }, floor);
     return saturated.state.context;
 };
 
-fn saturate(given: &Saturation) -> Saturation {
+fn saturate(given: &Saturation, floor: Int) -> Saturation {
     current = clone(given);
     going = true;
     for round in 0..12 {
         if going {
-            outcome = saturationRound(current);
+            outcome = saturationRound(current, floor);
             current = outcome.saturation;
             if outcome.accepted = 0 { going = false; };
         };
@@ -410,9 +410,9 @@ fn goalReadIndexes(context: &ValidatorContext, closed: &ClosedFacts, left: Int, 
 // relation(left, right) holds of the saturation, or of each case of a guard
 // that blocked an instance (one guard a level, those at the indexes the goal
 // reads first), within a depth and a budget of saturations
-fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, depth: Int, budget: Int, splits: &List<BlockedGuard>) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks depth {
+fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, depth: Int, budget: Int, splits: &List<BlockedGuard>, floor: Int) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks depth {
     if budget <= 0 { return SplitResult { holds: false, used: 0 }; };
-    saturated = saturate(given);
+    saturated = saturate(given, floor);
     used = 1;
     closed = knownClosure(saturated);
     if closed.contradictory { return SplitResult { holds: true, used: used }; };
@@ -465,7 +465,7 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
             caseContext = assumeRelation(clone(saturated.state.context), c.relation, c.left, c.right);
             if c.relation = 0 { caseContext = assumeBooleanFact(caseContext, c.left, c.right); };
             caseSat = Saturation { state: ExecutionState { context: caseContext, ..clone(saturated.state) }, births: clone(saturated.births), done: clone(saturated.done), blocked: noBlocked(), closed: noClosed() };
-            r = proveBySaturation(caseSat, relation, left, right, depth - 1, budget - used, deeperSplits);
+            r = proveBySaturation(caseSat, relation, left, right, depth - 1, budget - used, deeperSplits, floor);
             used = used + r.used;
             if r.holds = false { allHold = false; };
         };

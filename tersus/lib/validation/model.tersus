@@ -342,6 +342,9 @@ enum ExecutionStep {
 impl Clone for ExecutionStep { };
 
 // status 0 is success; 1 is an unproved check; 2 is malformed or unsupported.
+// Status 0 with failedAt -2: the steps stopped at an assumption its nearby facts
+// contradict, so what follows is unreachable; a caller that goes on with the
+// state anyway loses precision, not soundness.
 struct ExecutionResult { status: Int, failedAt: Int, state: ExecutionState };
 
 impl Clone for ExecutionResult { };

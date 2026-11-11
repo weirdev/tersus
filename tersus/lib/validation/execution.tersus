@@ -1,12 +1,12 @@
 import validation::context { closeContext, integerValue, knownVariant };
 import validation::differences { safeBoundDifference, safeBoundSum, semanticFacts };
 import validation::evaluation { addOffsetFacts, builtinFacts, contextWithApplication, readThroughSequence, recordEvaluatedSize, recordEvaluatedValue };
-import validation::joins { freshValue, splitReadOverWrite };
+import validation::joins { freshValue, leastTermInUse, splitReadOverWrite };
 import validation::model { ApplicationTerm, ArgumentsLookup, CheckedStep, ConstantTerm, DisequalityFact, EqualityFact, ExecutionResult, ExecutionState, ExecutionStep, FactIndex, IntegerLookup, OrderFact, Saturation, SharedIndex, SumResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
 import validation::relations { boolAt, containsValue, emptyIntMap, equalArguments, hasEquality, intAt, leastClasses, sameIn };
 import validation::saturation { noBlocked, noClosed, noDoneKeys, proveBySaturation };
 import validation::state { bindLocal, booleanCheck, noTemplates, resolveArguments, resolveValue, termInUse };
-import validation::validation { entailmentCache, entailsGoal, entailsGoalCached, goalSlice, goalTerms, indexFacts, noFactIndex };
+import validation::validation { GoalSlice, chainSlice, entailsGoal, goalSlice, goalTerms, indexFacts, noFactIndex };
 
 
 
@@ -120,7 +120,7 @@ fn sequenceLength(state: &ExecutionState, list: Int) -> ValueLookup {
 // under a bound on the length alone; it was left as it is, with no failing
 // program found for it. popSequence keeps a read only at an index it knows
 // is in the shortened list.
-fn pushSequence(initial: &ExecutionState, local: Int, list: Int, value: Int, zero: Int) -> ExecutionResult {
+fn pushSequence(initial: &ExecutionState, facts: &FactIndex, local: Int, list: Int, value: Int, zero: Int) -> ExecutionResult {
     z = integerValue(initial.context, zero);
     if z is IntegerLookup::Found {
         if (z as IntegerLookup::Found).value != 0 { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
@@ -161,20 +161,15 @@ fn pushSequence(initial: &ExecutionState, local: Int, list: Int, value: Int, zer
     // its read, which can only lose proofs.
     equalities = semanticFacts(state.context.equalities, state.context.applications, state.context.constants);
     equalitiesClasses = leastClasses(equalities);
-    cache = entailmentCache(state.context);
     for previousPosition in 0..size(state.context.applications) {
         previous = get(state.context.applications, previousPosition);
         if previous.function = -14 {
             if size(previous.arguments) = 2 {
                 if sameIn(equalitiesClasses, get(previous.arguments, 0), list) {
-                    index = get(previous.arguments, 1);
-                    nonnegativeIndex = entailsGoalCached(cache, ValidatorGoal::AtMost { left: zero, right: index });
-                    cache = nonnegativeIndex.cache;
-                    if nonnegativeIndex.holds {
-                        below = entailsGoalCached(cache, ValidatorGoal::Less { left: index, right: oldLength });
-                        cache = below.cache;
-                        if below.holds {
-                            kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), index) };
+                    at = get(previous.arguments, 1);
+                    if entailsIn(state.context, facts, ValidatorGoal::AtMost { left: zero, right: at }) {
+                        if entailsIn(state.context, facts, ValidatorGoal::Less { left: at, right: oldLength }) {
+                            kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), at) };
                             apps = push(apps, kept);
                         };
                     };
@@ -197,7 +192,7 @@ fn pushSequence(initial: &ExecutionState, local: Int, list: Int, value: Int, zer
 
 // Last is translated when the length is known. A nonempty check is still
 // required; unknown lengths remain unsupported by this particular encoding.
-fn lastSequence(initial: &ExecutionState, local: Int, list: Int, zero: Int) -> ExecutionResult {
+fn lastSequence(initial: &ExecutionState, facts: &FactIndex, local: Int, list: Int, zero: Int) -> ExecutionResult {
     z = integerValue(initial.context, zero);
     if z is IntegerLookup::Found {
         if (z as IntegerLookup::Found).value != 0 { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
@@ -205,7 +200,7 @@ fn lastSequence(initial: &ExecutionState, local: Int, list: Int, zero: Int) -> E
     length = sequenceLength(initial, list);
     if length is ValueLookup::Found {
         lengthTerm = (length as ValueLookup::Found).term;
-        if entailsGoal(initial.context, ValidatorGoal::Less { left: zero, right: lengthTerm }) = false {
+        if entailsIn(initial.context, facts, ValidatorGoal::Less { left: zero, right: lengthTerm }) = false {
             return ExecutionResult { status: 1, failedAt: -1, state: clone(initial) };
         };
         value = integerValue(initial.context, lengthTerm);
@@ -457,6 +452,14 @@ fn executeStepsWithin(initial: ExecutionState, steps: &List<ExecutionStep>, dept
             if result.status != 0 { return result; };
             state = result.state;
             shared = after;
+        } else if readsFacts(get(steps, i)) {
+            before = contextSizes(state.context);
+            index = extendedIndex(shared, state.context);
+            result = stepReadingFacts(state, get(steps, i), i, index);
+            shared = SharedIndex::Found { index: index };
+            if result.status != 0 { return result; };
+            state = result.state;
+            if shrank(before, contextSizes(state.context)) { shared = SharedIndex::Missing; };
         } else {
             before = contextSizes(state.context);
             result = executeStep(state, get(steps, i), i, depth);
@@ -469,12 +472,24 @@ fn executeStepsWithin(initial: ExecutionState, steps: &List<ExecutionStep>, dept
                 index = extendedIndex(shared, state.context);
                 gone = unreachableAt(state.context, index, seeds);
                 shared = SharedIndex::Found { index: index };
-                // (no execution gets past an assumption its own neighbourhood contradicts)
                 if gone { return ExecutionResult { status: 0, failedAt: -2, state: state }; };
             };
         };
     };
     return ExecutionResult { status: 0, failedAt: -1, state: state };
+};
+
+// The steps that ask the block's facts a question other than a check's
+fn readsFacts(step: &ExecutionStep) -> Bool {
+    return step is ExecutionStep::Push || step is ExecutionStep::Last || step is ExecutionStep::CheckWithin || step is ExecutionStep::RequireVariant;
+};
+
+fn stepReadingFacts(state: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
+    if step is ExecutionStep::Push { return stepPush(state, step, i, facts); };
+    if step is ExecutionStep::Last { return stepLast(state, step, i, facts); };
+    if step is ExecutionStep::CheckWithin { return stepCheckWithin(state, step, i, facts); };
+    if step is ExecutionStep::RequireVariant { return stepRequireVariant(state, step, i, facts); };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
 fn contextSizes(c: &ValidatorContext) -> List<Int> {
@@ -500,19 +515,14 @@ fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int, depth: Int) 
     if step is ExecutionStep::Apply { return stepApply(state, step, i); };
     if step is ExecutionStep::Literal { return stepLiteral(state, step, i); };
     if step is ExecutionStep::ApplyFresh { return stepApplyFresh(state, step, i); };
-    if step is ExecutionStep::Push { return stepPush(state, step, i); };
-    if step is ExecutionStep::Last { return stepLast(state, step, i); };
     if step is ExecutionStep::Set { return stepSet(state, step, i); };
     if step is ExecutionStep::Pop { return stepPop(state, step, i); };
     if step is ExecutionStep::NewArray { return stepNewArray(state, step, i); };
     if step is ExecutionStep::Havoc { return stepHavoc(state, step, i); };
     if step is ExecutionStep::RequireDefined { return stepRequireDefined(state, step, i); };
-    if step is ExecutionStep::Check { return stepCheck(state, step, i); };
     if step is ExecutionStep::AssumeForall { return stepAssumeForall(state, step, i); };
     if step is ExecutionStep::Assume { return stepAssume(state, step, i); };
-    if step is ExecutionStep::CheckWithin { return stepCheckWithin(state, step, i); };
     if step is ExecutionStep::AssumeVariant { return stepAssumeVariant(state, step, i); };
-    if step is ExecutionStep::RequireVariant { return stepRequireVariant(state, step, i); };
     if step is ExecutionStep::Scoped && depth > 0 {
         inner = executeStepsWithin(clone(state), (step as ExecutionStep::Scoped).steps, depth - 1);
         if inner.status != 0 { return ExecutionResult { status: inner.status, failedAt: i, state: state }; };
@@ -613,7 +623,7 @@ fn stepApplyFresh(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Exec
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
-fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
     state = initial;
     if step is ExecutionStep::Push {
         pushStep = step as ExecutionStep::Push;
@@ -623,7 +633,7 @@ fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionR
         if list is ValueLookup::Found {
             if value is ValueLookup::Found {
                 if zero is ValueLookup::Found {
-                    pushed = pushSequence(state, pushStep.local, (list as ValueLookup::Found).term, (value as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
+                    pushed = pushSequence(state, facts, pushStep.local, (list as ValueLookup::Found).term, (value as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
                     if pushed.status != 0 { return ExecutionResult { status: pushed.status, failedAt: i, state: pushed.state }; };
                     state = pushed.state;
                     madeTerm = resolveValue(state, ValueRef::Local { local: pushStep.local });
@@ -636,7 +646,7 @@ fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionR
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
-fn stepLast(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepLast(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
     state = initial;
     if step is ExecutionStep::Last {
         last = step as ExecutionStep::Last;
@@ -644,7 +654,7 @@ fn stepLast(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionR
         zero = resolveValue(state, last.zero);
         if list is ValueLookup::Found {
             if zero is ValueLookup::Found {
-                result = lastSequence(state, last.local, (list as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
+                result = lastSequence(state, facts, last.local, (list as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
                 if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
                 state = result.state;
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
@@ -748,15 +758,14 @@ fn stepRequireDefined(initial: ExecutionState, step: &ExecutionStep, i: Int) -> 
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
-fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
-    CheckedStep { result: result, shared: after } = stepCheckShared(initial, step, i, SharedIndex::Missing);
-    return result;
-};
-
 // The ladder of budgets a check's slices are taken at: each a fresh walk
 // from the goal terms, so a hub too heavy for a cheap rung is expanded only
 // after the cheaper rungs have failed.
-fn sliceBudgets() -> List<Int> { return push(push(push(push(push([], 64), 128), 256), 512), 1024); };
+fn sliceBudgets() -> List<Int> { return push(push(push(push(push([], firstRung()), 128), 256), 512), lastRung()); };
+
+fn firstRung() -> Int { return 64; };
+
+fn lastRung() -> Int [{ }] [{ affirm return >= 0; }] { return 1024; };
 
 fn assumedTerms(state: &ExecutionState, step: &ExecutionStep) -> List<Int> {
     if step is ExecutionStep::Assume {
@@ -780,28 +789,70 @@ fn assumedTerms(state: &ExecutionState, step: &ExecutionStep) -> List<Int> {
 fn unreachableAt(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>) -> Bool {
     if size(seeds) = 0 { return false; };
     probe = get(seeds, 0);
-    return entailsGoal(goalSlice(context, index, seeds, 64).slice, ValidatorGoal::Less { left: probe, right: probe });
+    return entailsGoal(goalSlice(context, index, seeds, firstRung()).slice, ValidatorGoal::Less { left: probe, right: probe });
 };
 
-struct SliceAnswer { holds: Bool, budget: Int, admitted: Int, operations: Int };
+// A refused answer carries the last walk: the heavier engines are given its facts.
+struct SliceAnswer { holds: Bool, budget: Int, admitted: Int, operations: Int, walk: GoalSlice };
 
 fn checkInSlices(context: &ValidatorContext, index: &FactIndex, relation: Int, a: Int, b: Int) -> SliceAnswer {
     g = localGoal(relation, a, b);
-    seeds = goalTerms(g);
+    return goalInSlices(context, index, goalTerms(g), g, relation);
+};
+
+// The goal on each rung's slice from the seeds; a relation of 0 or 1 also asks
+// the Boolean check of the goal's two terms.
+fn goalInSlices(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>, goal: ValidatorGoal, relation: Int) -> SliceAnswer {
+    terms = goalTerms(goal);
+    a = intAt(terms, 0, 0);
+    b = intAt(terms, 1, 0);
     budgets = sliceBudgets();
-    admitted = 0;
-    operations = 0;
+    answer = rungAnswer(goalSlice(context, index, seeds, firstRung()), clone(goal), relation, a, b, firstRung(), 0, 0);
     for r in 0..size(budgets) {
-        budget = get(budgets, r);
-        walk = goalSlice(context, index, seeds, budget);
-        admitted = admitted + walk.admitted;
-        operations = operations + walk.operations;
-        if entailsGoal(walk.slice, clone(g)) || booleanCheck(walk.slice, relation, a, b) {
-            return SliceAnswer { holds: true, budget: budget, admitted: admitted, operations: operations };
+        if r > 0 && answer.holds = false && answer.walk.capped {
+            budget = intAt(budgets, r, lastRung());
+            answer = rungAnswer(goalSlice(context, index, seeds, budget), clone(goal), relation, a, b, budget, answer.admitted, answer.operations);
         };
-        if walk.capped = false { return SliceAnswer { holds: false, budget: -1, admitted: admitted, operations: operations }; };
     };
-    return SliceAnswer { holds: false, budget: -1, admitted: admitted, operations: operations };
+    return answer;
+};
+
+fn rungAnswer(walk: GoalSlice, goal: ValidatorGoal, relation: Int, a: Int, b: Int, budget: Int, admitted: Int, operations: Int) -> SliceAnswer {
+    proved = entailsGoal(walk.slice, goal) || booleanCheck(walk.slice, relation, a, b);
+    rung = -1;
+    if proved { rung = budget; };
+    return SliceAnswer { holds: proved, budget: rung, admitted: admitted + walk.admitted, operations: operations + walk.operations, walk: walk };
+};
+
+fn entailsIn(context: &ValidatorContext, index: &FactIndex, goal: ValidatorGoal) -> Bool {
+    return goalInSlices(context, index, goalTerms(goal), goal, -1).holds;
+};
+
+// For a question asked outside a block's steps, which has no index of its own:
+// one pass over the context indexes it, and the walk reads only the slice.
+fn entailsNear(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
+    return entailsIn(context, indexFacts(noFactIndex(), context), goal);
+};
+
+fn checkNear(context: &ValidatorContext, index: &FactIndex, relation: Int, a: Int, b: Int) -> Bool {
+    return checkInSlices(context, index, relation, a, b).holds;
+};
+
+// Whether the facts near the seeds contradict each other (only a contradiction entails x < x)
+fn contradictoryNear(context: &ValidatorContext, seeds: &List<Int>) -> Bool {
+    if size(seeds) = 0 { return false; };
+    probe = get(seeds, 0);
+    return goalInSlices(context, indexFacts(noFactIndex(), context), seeds, ValidatorGoal::Less { left: probe, right: probe }, -1).holds;
+};
+
+fn variantInSlices(context: &ValidatorContext, index: &FactIndex, term: Int, family: Int, constructor: Int) -> Bool {
+    budgets = sliceBudgets();
+    for r in 0..size(budgets) {
+        walk = goalSlice(context, index, push([], term), get(budgets, r));
+        if knownVariant(leastClasses(closeContext(walk.slice)), walk.slice.variants, term, family, constructor) = 1 { return true; };
+        if walk.capped = false { return false; };
+    };
+    return false;
 };
 
 fn extendedIndex(shared: SharedIndex, context: &ValidatorContext) -> FactIndex {
@@ -828,21 +879,30 @@ fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given:
                 a = (left as ValueLookup::Found).term;
                 b = (right as ValueLookup::Found).term;
                 index = extendedIndex(shared, state.context);
-                ok = checkInSlices(state.context, index, relation, a, b).holds;
-                shared = SharedIndex::Found { index: index };
-                if ok = false && quiet = false && size(state.templates) > 0 {
-                    // (each saturation of a large context is costly: a check it cannot
-                    // prove is given up after fewer of them)
-                    saturations = 40;
-                    if size(state.context.applications) > 150 { saturations = 12; };
-                    ok = proveBySaturation(Saturation { state: clone(state), births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() }, relation, a, b, 8, saturations, noBlocked()).holds;
-                };
+                sliced = checkInSlices(state.context, index, relation, a, b);
+                SliceAnswer { holds: ok, budget: rung, admitted: admitted, operations: operations, walk: walk } = sliced;
                 if ok = false && quiet = false {
-                    // (a small context affords more cases: each costs about its size)
-                    budget = 8;
-                    if size(state.context.applications) < 200 { budget = 24; };
-                    ok = splitReadOverWrite(state, localGoal(relation, a, b), 3, budget).holds;
+                    // (a term the engines make must be new to the whole state, not
+                    // only to the slice: the goal's own terms can be ones the slice
+                    // holds no fact of)
+                    floor = leastTermInUse(state);
+                    near = ExecutionState { context: chainSlice(state.context, index, push(push([], a), b), lastRung(), walk), locals: clone(state.locals), templates: clone(state.templates) };
+                    ok = entailsGoal(near.context, localGoal(relation, a, b)) || booleanCheck(near.context, relation, a, b);
+                    if ok = false && size(near.templates) > 0 {
+                        // (each saturation of a large slice is costly: a check it cannot
+                        // prove is given up after fewer of them)
+                        saturations = 40;
+                        if size(near.context.applications) > 150 { saturations = 12; };
+                        ok = proveBySaturation(Saturation { state: clone(near), births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() }, relation, a, b, 8, saturations, noBlocked(), floor).holds;
+                    };
+                    if ok = false {
+                        // (a small slice affords more cases: each costs about its size)
+                        budget = 8;
+                        if size(near.context.applications) < 200 { budget = 24; };
+                        ok = splitReadOverWrite(near, localGoal(relation, a, b), 3, budget, floor).holds;
+                    };
                 };
+                shared = SharedIndex::Found { index: index };
                 if ok = false {
                     return CheckedStep { result: ExecutionResult { status: 1, failedAt: i, state: state }, shared: shared };
                 };
@@ -896,7 +956,7 @@ fn stepAssume(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Executio
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
-fn stepCheckWithin(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepCheckWithin(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
     state = initial;
     if step is ExecutionStep::CheckWithin {
         cw = step as ExecutionStep::CheckWithin;
@@ -904,7 +964,7 @@ fn stepCheckWithin(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Exe
         outer = resolveValue(state, cw.outer);
         if inner is ValueLookup::Found {
             if outer is ValueLookup::Found {
-                if entailsGoal(state.context, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
+                if entailsIn(state.context, facts, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
                     return ExecutionResult { status: 1, failedAt: i, state: state };
                 };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
@@ -929,14 +989,14 @@ fn stepAssumeVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> E
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
-fn stepRequireVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepRequireVariant(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
     state = initial;
     if step is ExecutionStep::RequireVariant {
         rv = step as ExecutionStep::RequireVariant;
         object = resolveValue(state, rv.object);
         if object is ValueLookup::Found {
             term = (object as ValueLookup::Found).term;
-            if knownVariant(leastClasses(closeContext(state.context)), state.context.variants, term, rv.family, rv.constructor) = 1 {
+            if variantInSlices(state.context, facts, term, rv.family, rv.constructor) {
                 variants = push(clone(state.context.variants), VariantFact { object: term, family: rv.family, constructor: rv.constructor, matches: true });
                 context = ValidatorContext { variants: variants, ..state.context };
                 state = ExecutionState { context: context, ..state };
