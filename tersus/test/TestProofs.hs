@@ -1,6 +1,7 @@
 module TestProofs
     ( testForallInstantiation
     , testForallProof
+    , testGoalSlices
     , testRefinedArithmetic
     , testModulo
     , testLinearArithmetic
@@ -13,7 +14,7 @@ module TestProofs
     , testForallSyntax
     ) where
 
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import TestParserFragments
 import Pipeline (validateStatements)
 import StdLib
@@ -70,6 +71,79 @@ testForallInstantiation =
               parseValidProgramHelper
                 "fn g(l: List<Int>, i: Int) -> Int [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { x = get(l, i); y = get(l, i); affirm x = y; return x; };"
             ]
+
+-- A check sees the facts near its goal within a work budget: a hub too heavy for a cheap
+-- rung is left out, a fact appended after the block's first check is seen, and a long
+-- derivation needs its intermediate steps affirmed within reach.
+testGoalSlices :: Test
+testGoalSlices =
+    let offsets n = concat ["b" ++ show k ++ " = x + " ++ show k ++ "; " | k <- [0 .. n - 1]]
+        guided spacing n = "fn f(a: List<Int>, x: Int) -> Int [{ affirm x >= 0; affirm x < 1000; }] [{ }] { salt = 0; z0 = x + 1; "
+            ++ concat ["z" ++ show k ++ " = z" ++ show (k - 1) ++ " + 1; " ++ stone k | k <- [1 .. n]]
+            ++ "affirm z" ++ show n ++ " > x; n0 = z" ++ show n ++ "; return n0; }; return f([1, 2, 3], 5);"
+          where stone k = if k < n && (k + 1) `mod` spacing == 0 then "affirm z" ++ show k ++ " = x + " ++ show (k + 1) ++ "; " else ""
+        hub goal = "fn h(x: Int, g: Int) -> Int [{ affirm g > x; }] [{ }] { " ++ offsets 48 ++ "affirm " ++ goal ++ "; return g; }; return h(1, 2);"
+        branchHub goal = "fn h(x: Int, g: Int, c: Int) -> Int [{ affirm g > x; }] [{ }] { y = 0; if c > 0 { " ++ offsets 48 ++ "y = 1; } else { y = 2; }; affirm " ++ goal ++ "; return g; }; return h(1, 2, 3);"
+        loopHub goal = "fn h(x: Int, g: Int, n: Int) -> Int [{ affirm g > x; affirm n >= 0; }] [{ }] { i = 0; while i < n [{ affirm i >= 0; affirm g > x; }] shrinks n - i { " ++ offsets 24 ++ "i = i + 1; }; affirm " ++ goal ++ "; return g; }; return h(1, 2, 3);"
+        steps n = concat ["z" ++ show k ++ " = z" ++ show (k - 1) ++ " + 1; " ++ (if k `mod` 4 == 3 then "affirm z" ++ show k ++ " = x + " ++ show (k + 1) ++ "; " else "") | k <- [1 .. n]]
+        branchStones goal = "fn s(x: Int, c: Int) -> Int [{ affirm x >= 0; affirm x < 1000; }] [{ }] { r = x; if c > 0 { z0 = x + 1; " ++ steps 16 ++ "affirm " ++ goal ++ "; r = z16; }; return r; }; return s(5, 1);"
+        hubArm pre test = "fn f(x: Int) -> Int [{ affirm " ++ pre ++ "; affirm x < 1000; }] [{ affirm return = 1; }] { " ++ offsets 12 ++ "if " ++ test ++ " { return 2; }; return 1; }; return f(5);"
+        wideParams = concat [", a" ++ show k ++ ": Int" | k <- [1 .. 40 :: Int]]
+        wideArgs = concat [", a" ++ show k | k <- [1 .. 40 :: Int]]
+        wide goal = "fn big(x: Int" ++ wideParams ++ ") -> Int { return x; }; fn w(x: Int, g: Int" ++ wideParams ++ ") -> Int [{ affirm g > x; }] [{ }] { y = big(x" ++ wideArgs ++ "); affirm " ++ goal ++ "; return g; }; return w(1, 2" ++ concat (replicate 40 ", 0") ++ ");"
+        loopStones goal = "fn s(x: Int, n: Int) -> Int [{ affirm x >= 0; affirm x < 1000; affirm n >= 0; }] [{ }] { i = 0; while i < n [{ affirm i >= 0; }] shrinks n - i { z0 = x + 1; " ++ steps 16 ++ "affirm " ++ goal ++ "; i = i + 1; }; return i; }; return s(5, 2);"
+     in testCaseSeq
+            "testGoalSlices"
+            [ -- a fact appended after the block's first check
+              parseValidProgramHelper "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ }] { affirm x > 0; y = x + 1; affirm y > 1; return y; }; return f(1);"
+            , parseValidateFailProgramHelper "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ }] { affirm x > 0; y = x + 1; affirm y > 2; return y; }; return f(1);" "Could not prove: y > 2"
+            , -- reads checked against the bounds after an earlier check in the block
+              parseValidProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ }] { affirm i >= 0; x = get(l, i); y = get(l, i); affirm x = y; return x; }; return g([4], 0);"
+            , parseValidateFailProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] { affirm i >= 0; x = get(l, i); return x; }; return g([4], 0);" "Could not prove"
+            , -- a scoped forall after a check, and its negative
+              parseValidProgramHelper "fn f(l: List<Int>, n: Int) -> Int [{ affirm n >= 0; affirm n <= size(l); affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { affirm n >= 0; affirm forall j in 0..n: get(l, j) = 0; return n; }; return f([0], 1);"
+            , parseValidateFailProgramHelper "fn f(l: List<Int>, n: Int) -> Int [{ affirm n >= 0; affirm n <= size(l); affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { affirm n >= 0; affirm forall j in 0..n: get(l, j) = 1; return n; }; return f([0], 1);" "Could not prove"
+            , -- a hub the goal mentions, straight-line, after a branch and after a loop
+              parseValidProgramHelper (hub "g > x")
+            , parseValidateFailProgramHelper (hub "g > x + 1") "Could not prove"
+            , parseValidProgramHelper (branchHub "g > x")
+            , parseValidateFailProgramHelper (branchHub "g > x + 1") "Could not prove"
+            , parseValidProgramHelper (loopHub "g > x")
+            , parseValidateFailProgramHelper (loopHub "g > x + 1") "Could not prove"
+            , -- a constant many facts mention, and a wide call next to the goal
+              parseValidProgramHelper ("fn k(x: Int, a: Int) -> Int [{ affirm x >= 1; }] [{ }] { b0 = a + 1; " ++ concat ["b" ++ show k ++ " = b" ++ show (k - 1) ++ " + 1; " | k <- [1 .. 40 :: Int]] ++ "affirm x >= 1; return x; }; return k(1, 2);")
+            , parseValidProgramHelper (wide "g > x")
+            , parseValidateFailProgramHelper (wide "g > x + 1") "Could not prove"
+            , -- stepping stones, each within reach of the one before
+              parseValidProgramHelper (guided 4 32)
+            , parseValidProgramHelper (guided 2 32)
+            , parseValidateFailProgramHelper (replaceEnd (guided 4 32)) "Could not prove"
+            , parseValidProgramHelper (branchStones "z16 > x")
+            , parseValidateFailProgramHelper (branchStones "z16 > x + 17") "Could not prove"
+            , parseValidProgramHelper (loopStones "z16 > x")
+            , parseValidateFailProgramHelper (loopStones "z16 > x + 17") "Could not prove"
+            , -- code after an assumption its nearby facts contradict is unreachable
+              parseValidProgramHelper "affirm forall j in 3..3: 1 = 2;"
+            , parseValidateFailProgramHelper "affirm forall j in 3..3: 1 = 2; affirm 1 = 2;" "Could not prove: 1 = 2"
+            , parseValidProgramHelper "fn f(i: Int, j: Int, n: Int) -> Int [{ affirm i != n; affirm i <= n; affirm n <= i; }] [{ }] { affirm j = j + 1; return 0; };"
+            , parseValidateFailProgramHelper "fn f(i: Int, j: Int) -> Int [{ affirm i < j; affirm j <= i + 1; }] [{ }] { affirm i = 7; return 0; };" "Could not prove: i = 7"
+            , parseValidProgramHelper "enum Opt { None, Some { value: Int } };fn f(o: Opt) -> Int [{ affirm o is Opt::Some; }] [{ affirm return = 7; }] { return match o { Opt::None => 1, Opt::Some { value: v } => 7 }; };"
+            , parseValidateFailProgramHelper "enum Opt { None, Some { value: Int } };fn f(o: Opt) -> Int [{ affirm o is Opt::Some; }] [{ affirm return = 7; }] { return match o { Opt::None => 1, Opt::Some { value: v } => 8 }; };" "Could not prove"
+            , parseValidProgramHelper "fn f() -> Int [{ }] [{ affirm return = 0; }] { n = 0; while false [{ affirm n >= 0; }] shrinks n { return 5; }; affirm n = 0; return n; }; return f();"
+            , parseValidateFailProgramHelper "fn f() -> Int [{ }] [{ affirm return = 5; }] { n = 0; while false [{ affirm n >= 0; }] shrinks n { return 5; }; affirm n = 0; return n; }; return f();" "Could not prove"
+            , parseValidateFailProgramHelper "fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return = 0; }] { flag = false; n = x; while flag || n > 0 [{ affirm flag = false; affirm n >= 0; }] shrinks n { return 5; }; return 0; }; return f(0);" "Could not prove"
+            , -- an arm whose condition touches a hub too heavy for the first rung is still checked
+              parseValidProgramHelper (hubArm "x >= 5" "x < 3")
+            , parseValidateFailProgramHelper (hubArm "x >= 0" "x > 3") "Could not prove"
+            , -- a goal between two literals sees the fact that links them
+              parseValidProgramHelper "axiom five(x) [{ }] [{ affirm x = 5; }]; x = 0; rewrite five x; affirm x = 5;"
+            ]
+  where
+    replaceEnd source = case breakOn source of (before, after) -> before ++ "affirm z32 > x + 33;" ++ drop (length goalText) after
+    goalText = "affirm z32 > x;"
+    breakOn haystack
+        | null haystack || goalText `isPrefixOf` haystack = ([], haystack)
+        | otherwise = let (b, a) = breakOn (tail haystack) in (head haystack : b, a)
 
 -- forall goals are proved for an arbitrary index that meets the guards
 testForallProof :: Test

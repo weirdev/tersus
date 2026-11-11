@@ -1,6 +1,6 @@
 import validation::context { analyzeContext, contextDifferent, knownNonnegativeWith, signFacts };
 import validation::linear { linearEntails };
-import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, MergePair, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, UnionFind, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
+import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, HullLinks, MergePair, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, UnionFind, ValidatorContext, ValidatorGoal, ValueLookup, VariantFact, WriteOf };
 import validation::relations { applicationAt, emptyIntMap, emptyPositions, intAt, minInt, sameIn, ufFind, ufUnion };
 import validation::saturation { withInstances };
 import validation::sequenceFacts { sizeTermOf };
@@ -684,10 +684,6 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
 // values holds the kind-0 value of a class that has one.
 struct HullIndex { parent: HashMap<Int, Int>, values: HashMap<Int, Int>, defs: HashMap<Int, Int>, lows: HashMap<Int, Int>, highs: HashMap<Int, Int>, edges: HashMap<Int, Int>, names: HashMap<Int, Int>, anyNames: HashMap<Int, Int> };
 
-// The items appended under each key, in order: first and last positions per
-// key and a next position per item, so an append never copies a list.
-struct HullLinks { first: HashMap<Int, Int>, last: HashMap<Int, Int>, next: List<Int>, items: List<Int> };
-
 struct HullForm { coeffs: HashMap<Int, Int>, leaves: List<Int>, leafTerms: List<Int>, constant: Int, valid: Bool, lo: Int, hi: Int, unknownLo: Int, unknownHi: Int, partLo: HashMap<Int, Int>, partHi: HashMap<Int, Int>, single: Int, singleCount: Int, root: Int, seen: HashSet<Int> };
 
 struct HullBound { hasLo: Bool, lo: Int, hasHi: Bool, hi: Int };
@@ -714,6 +710,19 @@ fn linkAppend(links: HullLinks, key: Int, item: Int) -> HullLinks {
     tail = last.lookup(key, -1);
     if tail >= 0 && tail < size(next) { next = set(next, tail, position); } else { first = first.insert(key, position); };
     return HullLinks { first: first, last: last.insert(key, position), next: push(next, -1), items: push(items, item) };
+};
+
+fn linkedItems(links: &HullLinks, key: Int) -> List<Int> {
+    taken = [];
+    at = links.first.lookup(key, -1);
+    walked = 0;
+    linkCount = size(links.items);
+    while at >= 0 && at < size(links.items) && walked < linkCount [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
+        taken = push(taken, get(links.items, at));
+        at = intAt(links.next, at, -1);
+        walked = walked + 1;
+    };
+    return taken;
 };
 
 fn hullIndex(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> HullIndex {

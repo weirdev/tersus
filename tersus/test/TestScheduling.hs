@@ -181,6 +181,7 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testForallSyntax", 1)
         , ("testForallInstantiation", 1)
         , ("testForallProof", 1)
+        , ("testGoalSlices", 1)
         , ("testForallLoops", 2)
         , ("testPrettyProofs", 1)
         , ("testMulDivNegative", 1)
@@ -586,7 +587,7 @@ testScheduling names batches = TestList "testScheduling"
             [("products", 225), ("relations", 19), ("entailment cache", 2), ("execution", 55), ("driver", 54),
              ("MIR contracts", 60), ("MIR arithmetic", 22), ("MIR sequences", 32), ("MIR data", 21),
              ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 22), ("bridges", 18),
-             ("join hull", 35), ("loop candidate provenance", 6)]
+             ("join hull", 35), ("loop candidate provenance", 6), ("goal slices", 15)]
     , testCase "self-hosted cache-sharing batches belong to one shard for every count" $
         testAssertTrue (all (\count ->
             length (unique [index | (name, index) <- assignShards count names, isSelfHosted name]) == 1)

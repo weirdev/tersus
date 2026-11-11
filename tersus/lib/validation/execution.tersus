@@ -2,11 +2,11 @@ import validation::context { closeContext, integerValue, knownVariant };
 import validation::differences { safeBoundDifference, safeBoundSum, semanticFacts };
 import validation::evaluation { addOffsetFacts, builtinFacts, contextWithApplication, readThroughSequence, recordEvaluatedSize, recordEvaluatedValue };
 import validation::joins { freshValue, splitReadOverWrite };
-import validation::model { ApplicationTerm, ArgumentsLookup, CheckedStep, ConstantTerm, DisequalityFact, EqualityFact, ExecutionResult, ExecutionState, ExecutionStep, IntegerLookup, OrderFact, Saturation, SharedEntailment, SumResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
+import validation::model { ApplicationTerm, ArgumentsLookup, CheckedStep, ConstantTerm, DisequalityFact, EqualityFact, ExecutionResult, ExecutionState, ExecutionStep, FactIndex, IntegerLookup, OrderFact, Saturation, SharedIndex, SumResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
 import validation::relations { boolAt, containsValue, emptyIntMap, equalArguments, hasEquality, intAt, leastClasses, sameIn };
 import validation::saturation { noBlocked, noClosed, noDoneKeys, proveBySaturation };
 import validation::state { bindLocal, booleanCheck, noTemplates, resolveArguments, resolveValue, termInUse };
-import validation::validation { entailmentCache, entailsGoal, entailsGoalCached, entailsPlainCached };
+import validation::validation { entailmentCache, entailsGoal, entailsGoalCached, goalSlice, goalTerms, indexFacts, noFactIndex };
 
 
 
@@ -449,7 +449,7 @@ fn maxScopeDepth() -> Int [{ }] [{ affirm return >= 0; }] {
 
 fn executeStepsWithin(initial: ExecutionState, steps: &List<ExecutionStep>, depth: Int) -> ExecutionResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
     state = initial;
-    shared = SharedEntailment::Missing;
+    shared = SharedIndex::Missing;
     for i in 0..size(steps) {
         if get(steps, i) is ExecutionStep::Check {
             checked = stepCheckShared(state, get(steps, i), i, shared);
@@ -463,7 +463,15 @@ fn executeStepsWithin(initial: ExecutionState, steps: &List<ExecutionStep>, dept
             if result.status != 0 { return result; };
             state = result.state;
             // (and, should a step ever drop a fact, a list that got shorter drops it too)
-            if addsFactsOnly(get(steps, i)) = false || shrank(before, contextSizes(state.context)) { shared = SharedEntailment::Missing; };
+            if addsFactsOnly(get(steps, i)) = false || shrank(before, contextSizes(state.context)) { shared = SharedIndex::Missing; };
+            seeds = assumedTerms(state, get(steps, i));
+            if size(seeds) > 0 {
+                index = extendedIndex(shared, state.context);
+                gone = unreachableAt(state.context, index, seeds);
+                shared = SharedIndex::Found { index: index };
+                // (no execution gets past an assumption its own neighbourhood contradicts)
+                if gone { return ExecutionResult { status: 0, failedAt: -2, state: state }; };
+            };
         };
     };
     return ExecutionResult { status: 0, failedAt: -1, state: state };
@@ -741,11 +749,67 @@ fn stepRequireDefined(initial: ExecutionState, step: &ExecutionStep, i: Int) -> 
 };
 
 fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
-    CheckedStep { result: result, shared: after } = stepCheckShared(initial, step, i, SharedEntailment::Missing);
+    CheckedStep { result: result, shared: after } = stepCheckShared(initial, step, i, SharedIndex::Missing);
     return result;
 };
 
-fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given: SharedEntailment) -> CheckedStep {
+// The ladder of budgets a check's slices are taken at: each a fresh walk
+// from the goal terms, so a hub too heavy for a cheap rung is expanded only
+// after the cheaper rungs have failed.
+fn sliceBudgets() -> List<Int> { return push(push(push(push(push([], 64), 128), 256), 512), 1024); };
+
+fn assumedTerms(state: &ExecutionState, step: &ExecutionStep) -> List<Int> {
+    if step is ExecutionStep::Assume {
+        assumed = step as ExecutionStep::Assume;
+        left = resolveValue(state, assumed.left);
+        right = resolveValue(state, assumed.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found { return push(push([], (left as ValueLookup::Found).term), (right as ValueLookup::Found).term); };
+        };
+    };
+    if step is ExecutionStep::AssumeVariant {
+        object = resolveValue(state, (step as ExecutionStep::AssumeVariant).object);
+        if object is ValueLookup::Found { return push([], (object as ValueLookup::Found).term); };
+    };
+    return [];
+};
+
+// Whether the facts within the first rung's reach of the seeds contradict each
+// other (only a contradiction entails x < x; a walk the budget cut short proves
+// nothing about the facts it left out)
+fn unreachableAt(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>) -> Bool {
+    if size(seeds) = 0 { return false; };
+    probe = get(seeds, 0);
+    return entailsGoal(goalSlice(context, index, seeds, 64).slice, ValidatorGoal::Less { left: probe, right: probe });
+};
+
+struct SliceAnswer { holds: Bool, budget: Int, admitted: Int, operations: Int };
+
+fn checkInSlices(context: &ValidatorContext, index: &FactIndex, relation: Int, a: Int, b: Int) -> SliceAnswer {
+    g = localGoal(relation, a, b);
+    seeds = goalTerms(g);
+    budgets = sliceBudgets();
+    admitted = 0;
+    operations = 0;
+    for r in 0..size(budgets) {
+        budget = get(budgets, r);
+        walk = goalSlice(context, index, seeds, budget);
+        admitted = admitted + walk.admitted;
+        operations = operations + walk.operations;
+        if entailsGoal(walk.slice, clone(g)) || booleanCheck(walk.slice, relation, a, b) {
+            return SliceAnswer { holds: true, budget: budget, admitted: admitted, operations: operations };
+        };
+        if walk.capped = false { return SliceAnswer { holds: false, budget: -1, admitted: admitted, operations: operations }; };
+    };
+    return SliceAnswer { holds: false, budget: -1, admitted: admitted, operations: operations };
+};
+
+fn extendedIndex(shared: SharedIndex, context: &ValidatorContext) -> FactIndex {
+    if shared is SharedIndex::Found { return indexFacts((shared as SharedIndex::Found).index, context); };
+    return indexFacts(noFactIndex(), context);
+};
+
+fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given: SharedIndex) -> CheckedStep {
     shared = given;
     state = initial;
     if step is ExecutionStep::Check {
@@ -763,20 +827,9 @@ fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given:
             if right is ValueLookup::Found {
                 a = (left as ValueLookup::Found).term;
                 b = (right as ValueLookup::Found).term;
-                g = localGoal(relation, a, b);
-                ok = false;
-                if shared is SharedEntailment::Found {
-                    ok = entailsPlainCached((shared as SharedEntailment::Found).cache, g);
-                };
-                if ok = false {
-                    fresh = entailsGoalCached(entailmentCache(state.context), clone(g));
-                    ok = fresh.holds;
-                    shared = SharedEntailment::Found { cache: fresh.cache };
-                };
-                if ok = false {
-                    if relation = 0 { ok = booleanCheck(state.context, 0, a, b); };
-                    if relation = 1 { ok = booleanCheck(state.context, 1, a, b); };
-                };
+                index = extendedIndex(shared, state.context);
+                ok = checkInSlices(state.context, index, relation, a, b).holds;
+                shared = SharedIndex::Found { index: index };
                 if ok = false && quiet = false && size(state.templates) > 0 {
                     // (each saturation of a large context is costly: a check it cannot
                     // prove is given up after fewer of them)

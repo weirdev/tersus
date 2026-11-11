@@ -84,7 +84,7 @@ layoutPrograms =
     , ("in an array", "a = array(3, U16::from(65535)); a = set(a, 1, U16::from(7)); return a;")
     , ("Bools in a list and an array", "l = push(push([], true), false); a = #[true, false, true]; if get(a, 2) && !get(l, 1) { return size(l) + size(a); }; return 0;")
     , ("an enum with narrow fields", "enum E { A { x: Byte }, B { y: I16, z: Int } }; e = E::B { y: -300, z: 9 }; return e;")
-    , ("in memory", "(p, b) = Addr::alloc(3); b = Addr::write(p, 0, I32::from(-1), b); b = Addr::write(p, 2, I32::from(5), b); x = Addr::get(p, 0, b); b = Addr::dropValue(p, 0, b); y = Addr::get(p, 2, b); b = Addr::dropValue(p, 2, b); return toInt(x) * 10 + toInt(y) + Addr::free(p, b);")
+    , ("in memory", "(p, b) = Addr::alloc(3); affirm start(b) = 0; affirm count(b) = 0; b = Addr::write(p, 0, I32::from(-1), b); affirm cap(b) = extent(origin(b)); b = Addr::write(p, 2, I32::from(5), b); x = Addr::get(p, 0, b); b = Addr::dropValue(p, 0, b); y = Addr::get(p, 2, b); b = Addr::dropValue(p, 2, b); return toInt(x) * 10 + toInt(y) + Addr::free(p, b);")
     , ("a Box of a narrow value", "b = Box::new(I8::from(-3)); return toInt(Box::unbox(b));")
     ]
 

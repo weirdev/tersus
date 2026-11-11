@@ -1,7 +1,8 @@
 import validation::context { analyzeContext, contextDifferent, contextEqual, contextWithin, contextWithinUnder, deriveSumOrders, entailsConstructorDisequality, entailsPartDisequality, entailsVariantDisequality, hasOrderFact, integerValue, integerValueIn };
 import validation::differences { isSizeTerm, semanticFacts };
 import validation::linear { linearEntailsIn };
-import validation::model { AnalysisLookup, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, GetFact, IntegerLookup, OrderFact, RelationFact, ValidatorContext, ValidatorGoal };
+import validation::joins { linkAppend, linkedItems, noLinks };
+import validation::model { AnalysisLookup, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, FactIndex, GetFact, HullLinks, IntegerLookup, OrderFact, RelationFact, ValidatorContext, ValidatorGoal };
 import validation::relations { closedDisequality, containsValue, emptyIntMap, hasDifferenceIn, intAt, leastClasses, sameIn };
 import validation::sequenceFacts { finiteGetEqual, forallConstant, forallEqual, forallShift, getFactsTranslated, modDifferent, modIsSelf, setGetEqual };
 
@@ -546,21 +547,318 @@ fn entailsAnyCached(cache: EntailmentCache, goals: &List<ValidatorGoal>) -> Cach
     return CachedAnswer { holds: false, cache: c };
 };
 
-// Whether the plain closure a cache already holds proves the goal (the
-// derived facts, and a closure not made yet, are left to a fresh ask)
-fn entailsPlainCached(cache: &EntailmentCache, goal: &ValidatorGoal) -> Bool {
-    if recognizedGoal(clone(goal)) = false { return false; };
-    if entailsGoalDirectly(cache.plain, clone(goal)) { return true; };
-    if cache.plainAnalysis is AnalysisLookup::Found {
-        return entailsGoalAnalyzed(cache.plain, (clone(cache.plainAnalysis) as AnalysisLookup::Found).analysis, clone(goal));
-    };
-    return false;
-};
-
 fn entailsGoalCached(cache: EntailmentCache, goal: ValidatorGoal) -> CachedAnswer {
     return entailsAnyCached(cache, push([], goal));
 };
 
 fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     return entailsGoalCached(entailmentCache(context), goal).holds;
+};
+
+fn noFactIndex() -> FactIndex {
+    return FactIndex { equalities: noLinks(), applications: noLinks(), orders: noLinks(), different: noLinks(), variants: noLinks(), differences: noLinks(), weights: emptyIntMap(), constantAt: emptyIntMap(), counts: push(push(push(push(push(push(push([], 0), 0), 0), 0), 0), 0), 0), work: 0 };
+};
+
+// A fact costs 1, plus 2 per term it mentions: reaching the term and copying
+// the one constant fact a reached term brings with it. A term's weight sums
+// that over its links, so it bounds what expanding the term is charged.
+fn termCost() -> Int { return 2; };
+
+fn addWeight(weights: HashMap<Int, Int>, term: Int, cost: Int) -> HashMap<Int, Int> {
+    w = weights.lookup(term, 0);
+    return weights.insert(term, w + cost);
+};
+
+// (a count past the list's size, which a step that drops facts leaves, starts
+// at the end: those positions are not indexed)
+fn indexedFrom(counts: &List<Int>, k: Int, limit: Int) -> Int [{ affirm limit >= 0; }] [{ affirm return >= 0; affirm return <= limit; }] {
+    start = intAt(counts, k, 0);
+    if start < 0 { return 0; };
+    if start > limit { return limit; };
+    return start;
+};
+
+// The index extended with the facts appended since it was last extended
+fn indexFacts(index: FactIndex, context: &ValidatorContext) -> FactIndex {
+    FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, counts: counts, work: work } = index;
+    binary = 1 + 2 * termCost();
+    for p in indexedFrom(counts, 0, size(context.equalities))..size(context.equalities) {
+        f = get(context.equalities, p);
+        equalities = linkAppend(linkAppend(equalities, f.left, p), f.right, p);
+        weights = addWeight(addWeight(weights, f.left, binary), f.right, binary);
+        work = work + 3;
+    };
+    for p in indexedFrom(counts, 1, size(context.applications))..size(context.applications) {
+        a = get(context.applications, p);
+        cost = 1 + (1 + size(a.arguments)) * termCost();
+        applications = linkAppend(applications, a.id, p);
+        weights = addWeight(weights, a.id, cost);
+        for k in 0..size(a.arguments) {
+            applications = linkAppend(applications, get(a.arguments, k), p);
+            weights = addWeight(weights, get(a.arguments, k), cost);
+        };
+        work = work + 2 + size(a.arguments);
+    };
+    for p in indexedFrom(counts, 2, size(context.constants))..size(context.constants) {
+        c = get(context.constants, p);
+        if constantAt.contains(c.id) = false { constantAt = constantAt.insert(c.id, p); };
+        work = work + 1;
+    };
+    for p in indexedFrom(counts, 3, size(context.orders))..size(context.orders) {
+        f = get(context.orders, p);
+        orders = linkAppend(linkAppend(orders, f.smaller, p), f.greater, p);
+        weights = addWeight(addWeight(weights, f.smaller, binary), f.greater, binary);
+        work = work + 3;
+    };
+    for p in indexedFrom(counts, 4, size(context.different))..size(context.different) {
+        f = get(context.different, p);
+        different = linkAppend(linkAppend(different, f.left, p), f.right, p);
+        weights = addWeight(addWeight(weights, f.left, binary), f.right, binary);
+        work = work + 3;
+    };
+    for p in indexedFrom(counts, 5, size(context.variants))..size(context.variants) {
+        f = get(context.variants, p);
+        variants = linkAppend(variants, f.object, p);
+        weights = addWeight(weights, f.object, 1 + termCost());
+        work = work + 2;
+    };
+    for p in indexedFrom(counts, 6, size(context.differences))..size(context.differences) {
+        f = get(context.differences, p);
+        differences = linkAppend(linkAppend(differences, f.left, p), f.right, p);
+        weights = addWeight(addWeight(weights, f.left, binary), f.right, binary);
+        work = work + 3;
+    };
+    sizes = push(push(push(push(push(push(push([], size(context.equalities)), size(context.applications)), size(context.constants)), size(context.orders)), size(context.different)), size(context.variants)), size(context.differences));
+    return FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, counts: sizes, work: work };
+};
+
+fn goalTerms(goal: &ValidatorGoal) -> List<Int> {
+    if goal is ValidatorGoal::Equal { g = goal as ValidatorGoal::Equal; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::Different { g = goal as ValidatorGoal::Different; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::Less { g = goal as ValidatorGoal::Less; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::AtMost { g = goal as ValidatorGoal::AtMost; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::Difference { g = goal as ValidatorGoal::Difference; return push(push([], g.left), g.right); };
+    if goal is ValidatorGoal::Within { g = goal as ValidatorGoal::Within; return push(push([], g.inner), g.outer); };
+    return [];
+};
+
+// The facts a budgeted walk from the goal terms admits; admitted is the work
+// charged, operations the work done, and capped whether a term was left
+// unexpanded for the budget (with none, a larger budget walks the same slice).
+struct GoalSlice { slice: ValidatorContext, reached: HashSet<Int>, next: List<Int>, equalities: HashSet<Int>, applications: HashSet<Int>, orders: HashSet<Int>, different: HashSet<Int>, variants: HashSet<Int>, differences: HashSet<Int>, admitted: Int, operations: Int, capped: Bool };
+
+// A constant is copied in with what reached it but links nothing further.
+fn sliceReach(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, term: Int) -> GoalSlice {
+    if walk.reached.contains(term) { return walk; };
+    GoalSlice { slice: slice, reached: reached, next: next, equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, admitted: admitted, operations: operations, capped: capped } = walk;
+    reached = reached.insert(term);
+    operations = operations + 1;
+    at = index.constantAt.lookup(term, -1);
+    if at >= 0 {
+        if at < size(context.constants) {
+            slice = ValidatorContext { constants: push(slice.constants, clone(get(context.constants, at))), ..slice };
+            operations = operations + 1;
+        };
+    } else {
+        next = push(next, term);
+    };
+    return GoalSlice { slice: slice, reached: reached, next: next, equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, admitted: admitted, operations: operations, capped: capped };
+};
+
+fn expandEqualities(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, term: Int) -> GoalSlice {
+    w = walk;
+    positions = linkedItems(index.equalities, term);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.equalities) && w.equalities.contains(p) = false {
+            f = get(context.equalities, p);
+            slice = w.slice;
+            w = GoalSlice { equalities: w.equalities.insert(p), slice: ValidatorContext { equalities: push(slice.equalities, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+            w = sliceReach(sliceReach(w, context, index, f.left), context, index, f.right);
+        };
+    };
+    return w;
+};
+
+fn expandApplications(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, term: Int) -> GoalSlice {
+    w = walk;
+    positions = linkedItems(index.applications, term);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.applications) && w.applications.contains(p) = false {
+            a = get(context.applications, p);
+            slice = w.slice;
+            w = GoalSlice { applications: w.applications.insert(p), slice: ValidatorContext { applications: push(slice.applications, clone(a)), ..slice }, admitted: w.admitted + (1 + size(a.arguments)) * termCost(), ..w };
+            w = sliceReach(w, context, index, a.id);
+            for j in 0..size(a.arguments) { w = sliceReach(w, context, index, get(a.arguments, j)); };
+        };
+    };
+    return w;
+};
+
+fn expandOrders(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, term: Int) -> GoalSlice {
+    w = walk;
+    positions = linkedItems(index.orders, term);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.orders) && w.orders.contains(p) = false {
+            f = get(context.orders, p);
+            slice = w.slice;
+            w = GoalSlice { orders: w.orders.insert(p), slice: ValidatorContext { orders: push(slice.orders, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+            w = sliceReach(sliceReach(w, context, index, f.smaller), context, index, f.greater);
+        };
+    };
+    return w;
+};
+
+fn expandDifferent(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, term: Int) -> GoalSlice {
+    w = walk;
+    positions = linkedItems(index.different, term);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.different) && w.different.contains(p) = false {
+            f = get(context.different, p);
+            slice = w.slice;
+            w = GoalSlice { different: w.different.insert(p), slice: ValidatorContext { different: push(slice.different, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+            w = sliceReach(sliceReach(w, context, index, f.left), context, index, f.right);
+        };
+    };
+    return w;
+};
+
+fn expandVariants(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, term: Int) -> GoalSlice {
+    w = walk;
+    positions = linkedItems(index.variants, term);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.variants) && w.variants.contains(p) = false {
+            f = get(context.variants, p);
+            slice = w.slice;
+            w = GoalSlice { variants: w.variants.insert(p), slice: ValidatorContext { variants: push(slice.variants, clone(f)), ..slice }, admitted: w.admitted + termCost(), ..w };
+            w = sliceReach(w, context, index, f.object);
+        };
+    };
+    return w;
+};
+
+fn expandDifferences(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, term: Int) -> GoalSlice {
+    w = walk;
+    positions = linkedItems(index.differences, term);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.differences) && w.differences.contains(p) = false {
+            f = get(context.differences, p);
+            slice = w.slice;
+            w = GoalSlice { differences: w.differences.insert(p), slice: ValidatorContext { differences: push(slice.differences, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+            w = sliceReach(sliceReach(w, context, index, f.left), context, index, f.right);
+        };
+    };
+    return w;
+};
+
+fn expandTerm(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, term: Int) -> GoalSlice {
+    w = expandApplications(expandEqualities(walk, context, index, term), context, index, term);
+    w = expandDifferent(expandOrders(w, context, index, term), context, index, term);
+    return expandDifferences(expandVariants(w, context, index, term), context, index, term);
+};
+
+// Two constants are never expanded, so a fact between them is admitted only
+// here, from the lighter one's links, when both are the seeds.
+fn linkConstants(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, light: Int, other: Int) -> GoalSlice {
+    w = walk;
+    positions = linkedItems(index.equalities, light);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.equalities) && w.equalities.contains(p) = false {
+            f = get(context.equalities, p);
+            if f.left = other || f.right = other {
+                slice = w.slice;
+                w = GoalSlice { equalities: w.equalities.insert(p), slice: ValidatorContext { equalities: push(slice.equalities, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+            };
+        };
+    };
+    positions = linkedItems(index.orders, light);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.orders) && w.orders.contains(p) = false {
+            f = get(context.orders, p);
+            if f.smaller = other || f.greater = other {
+                slice = w.slice;
+                w = GoalSlice { orders: w.orders.insert(p), slice: ValidatorContext { orders: push(slice.orders, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+            };
+        };
+    };
+    positions = linkedItems(index.different, light);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.different) && w.different.contains(p) = false {
+            f = get(context.different, p);
+            if f.left = other || f.right = other {
+                slice = w.slice;
+                w = GoalSlice { different: w.different.insert(p), slice: ValidatorContext { different: push(slice.different, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+            };
+        };
+    };
+    positions = linkedItems(index.differences, light);
+    for k in 0..size(positions) {
+        p = get(positions, k);
+        w = GoalSlice { operations: w.operations + 1, admitted: w.admitted + 1, ..w };
+        if p >= 0 && p < size(context.differences) && w.differences.contains(p) = false {
+            f = get(context.differences, p);
+            if f.left = other || f.right = other {
+                slice = w.slice;
+                w = GoalSlice { differences: w.differences.insert(p), slice: ValidatorContext { differences: push(slice.differences, clone(f)), ..slice }, admitted: w.admitted + 2 * termCost(), ..w };
+            };
+        };
+    };
+    return w;
+};
+
+// The facts within the radius of the goal terms whose terms' weights fit the
+// budget, each tested before it is expanded. Every fact is one of the
+// context's, so whatever the slice entails the context entails.
+fn goalSlice(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>, budget: Int) -> GoalSlice {
+    metadata = ValidatorContext { equalities: [], applications: [], constants: [], orders: [], different: [], variants: [], fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: [] };
+    w = GoalSlice { slice: metadata, reached: HashSet::new(), next: [], equalities: HashSet::new(), applications: HashSet::new(), orders: HashSet::new(), different: HashSet::new(), variants: HashSet::new(), differences: HashSet::new(), admitted: 0, operations: 0, capped: false };
+    for s in 0..size(seeds) {
+        w = sliceReach(GoalSlice { admitted: w.admitted + termCost(), ..w }, context, index, get(seeds, s));
+    };
+    if size(seeds) = 2 {
+        a = get(seeds, 0);
+        b = get(seeds, 1);
+        if a != b && index.constantAt.contains(a) && index.constantAt.contains(b) {
+            light = a;
+            other = b;
+            if index.weights.lookup(b, 0) < index.weights.lookup(a, 0) { light = b; other = a; };
+            if w.admitted + index.weights.lookup(light, 0) <= budget {
+                w = linkConstants(w, context, index, light, other);
+            } else {
+                w = GoalSlice { capped: true, ..w };
+            };
+        };
+    };
+    radius = 8;
+    for hop in 0..radius {
+        frontier = w.next;
+        w = GoalSlice { next: [], ..w };
+        for t in 0..size(frontier) {
+            term = get(frontier, t);
+            weight = index.weights.lookup(term, 0);
+            if w.admitted + weight <= budget {
+                w = expandTerm(w, context, index, term);
+            } else {
+                w = GoalSlice { capped: true, ..w };
+            };
+        };
+    };
+    return w;
 };

@@ -169,11 +169,13 @@ testPointers =
     memory =
         unlines
             [ "(p, b) = Addr::alloc(2);"
+            , "affirm start(b) = 0; affirm cap(b) = extent(origin(b)); affirm count(b) = 0;"
             , "b = Addr::write(p, 0, 10, b);"
             , "b = Addr::write(p, 1, 20, b);"
             , "x = Addr::get(p, 1, b);"
             , "affirm x = 20;"
             , "(y, b) = Addr::take(p, 0, b);"
+            , "affirm cap(b) = extent(origin(b)); affirm count(b) = 1;"
             , "affirm y = 10;"
             , "b = Addr::dropValue(p, 1, b);"
             , "return x + y + Addr::free(p, b);"
@@ -181,6 +183,7 @@ testPointers =
     resized =
         unlines
             [ "(p, b) = Addr::alloc(1);"
+            , "affirm count(b) = 0;"
             , "b = Addr::write(p, 0, 5, b);"
             , "(q, b) = Addr::resize(p, 2, b);"
             , "b = Addr::write(q, 1, 6, b);"
@@ -205,7 +208,9 @@ testPointers =
         unlines
             [ "(p, b) = Addr::alloc(4);"
             , "(lo, hi) = Block::split(b, 2);"
+            , "affirm count(lo) = 0; affirm count(hi) = 0; affirm start(lo) = 0; affirm cap(hi) = 2; affirm extent(origin(lo)) = 4;"
             , "hi = Addr::write(Addr::offset(p, 2), 0, 7, hi);"
+            , "affirm start(hi) = start(lo) + cap(lo); affirm origin(hi) = origin(lo);"
             , "x = Addr::get(Addr::offset(p, 2), 0, hi);"
             , "hi = Addr::dropValue(Addr::offset(p, 2), 0, hi);"
             , "b = Block::join(lo, hi);"

@@ -564,7 +564,7 @@ fn lineAt(ts: &List<Token>, pos: Int, ghosts: Bool) -> Parsed<Line> [{ affirm po
         dest = intAt(ts, args.pos);
         if !dest.ok || dest.pos >= size(ts) { return bad; };
         after = intAt(ts, dest.pos);
-        if !after.ok { return bad; };
+        if !after.ok { return bad; }; affirm after.pos > pos;
         return done(Line::LTerminator { t: Terminator::Call { callee: callee.value, args: args.value, dest: dest.value, next: after.value } }, after.pos);
     };
     return bad;
