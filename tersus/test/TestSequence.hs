@@ -24,7 +24,7 @@ testSequence =
         double = "fn double(x: Int) -> Int [{ }] [{ affirm return = x * 2; }] { return x * 2; }; "
         counted = "struct V<T> { x: T, len: Int }; "
         trait2 = "trait Seq<E> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }]; fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }]; }; "
-        two = "struct Two<T> { a: T, b: T, n: Int } invariant [{ affirm n >= 0; }]; impl<T> Seq<T> for Two<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ }] { if i = 0 { return clone(self.a); }; return clone(self.b); }; fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] { return Self { a: self.a, b: x, n: self.n + 1 }; }; }; "
+        two = "struct Two<T> { a: T, b: T, n: Int } invariant [{ affirm n >= 0; }]; impl<T: Clone> Seq<T> for Two<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ }] { if i = 0 { return clone(self.a); }; return clone(self.b); }; fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] { return Self { a: self.a, b: x, n: self.n + 1 }; }; }; "
      in TestList
             "testSequence"
             [ TestList
@@ -60,9 +60,9 @@ testSequence =
                 [ testCase "a struct with types implements it" (runs (trait2 ++ two ++ "t = Two<Int> { a: 4, b: 5, n: 2 }; return get(t, 1) + size(t) * 10 + t.size() * 100;") (VInt 225))
                 , testCase "and push is its impl's" (runs (trait2 ++ two ++ "t = push(Two<Int> { a: 4, b: 5, n: 2 }, 9); return t.b + t.n;") (VInt 12))
                 , testCase "through the trait" (runs (trait2 ++ two ++ "t = Two<Int> { a: 4, b: 5, n: 2 }; return Seq::size(t) + Seq::get(t, 0);") (VInt 6))
-                , testCase "a contract that calls a function of the type" (valid (trait2 ++ two ++ "fn lastOf<T>(t: &Two<T>) -> T [{ affirm size(t) > 0; }] [{ }] { return get(t, size(t) - 1); }; return 0;"))
-                , testCase "an index past the size is refused" (rejected (trait2 ++ two ++ "t = Two<Int> { a: 4, b: 5, n: 2 }; return get(t, 2);") "Could not prove: i < <Two as Seq>::size(self)")
-                , testCase "an impl that promises less than the trait is refused" (rejected (trait2 ++ "struct Two<T> { a: T, n: Int }; impl<T> Seq<T> for Two<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ }] { return clone(self.a); }; fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] { return Self { a: x, n: self.n + 1 }; }; }; return 0;") "size does not meet what Seq declares")
+                , testCase "a contract that calls a function of the type" (valid (trait2 ++ two ++ "fn lastOf<T: Clone>(t: &Two<T>) -> T [{ affirm size(t) > 0; }] [{ }] { return get(t, size(t) - 1); }; return 0;"))
+                , testCase "an index past the size is refused" (rejected (trait2 ++ two ++ "t = Two<Int> { a: 4, b: 5, n: 2 }; return get(t, 2);") "Could not prove: i < <Two as Seq>::size[Int](self)")
+                , testCase "an impl that promises less than the trait is refused" (rejected (trait2 ++ "struct Two { a: Int, n: Int }; impl Seq<Int> for Two { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ }] { return self.a; }; fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] { return Self { a: x, n: self.n + 1 }; }; }; return 0;") "size does not meet what Seq declares")
                 , testCase "the types are given" (parseFails (trait2 ++ "struct Two<T> { a: T, n: Int }; impl<T> Seq for Two<T> { }; return 0;"))
                 , testCase "as many as the trait has" (parseFails "trait Seq<E> { fn size(self: &Self) -> Int; }; struct Two<T> { a: T, n: Int }; impl<T> Seq<T, T> for Two<T> { }; return 0;")
                 , testCase "a trait without any is not given some" (parseFails "trait Plain { fn size(self: &Self) -> Int; }; struct Two<T> { a: T, n: Int }; impl<T> Plain<T> for Two<T> { }; return 0;")
@@ -80,10 +80,10 @@ testSequence =
                 , testCase "a copy is a Vec of its own" (runs (vecLibrary ++ "a = Vec::new(0).push(1); b = a.clone().set(0, 7); return a.get(0) * 10 + b.get(0);") (VInt 17))
                 , testCase "of lists" (runs (vecLibrary ++ "rows = Vec::new(push([], 0)).push(push(push([], 4), 5)); return size(rows.get(0));") (VInt 2))
                 , testCase "of Vecs" (runs (vecLibrary ++ "g = Vec::new(Vec::new(0)).push(Vec::new(0).push(8).push(9)); return size(g.get(0));") (VInt 2))
-                , testCase "of structs that own a list" (runs (vecLibrary ++ "struct P { n: Int, xs: List<Int> }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);") (VInt 4))
+                , testCase "of structs that own a list" (runs (vecLibrary ++ "struct P { n: Int, xs: List<Int> }; impl Clone for P { }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);") (VInt 4))
                 , testCase "an index past the end is refused" (rejected (vecLibrary ++ "v = Vec::new(0).push(1); return v.get(1);") "Could not prove: i < self.len")
                 , testCase "so is a pop of an empty one" (rejected (vecLibrary ++ "v = Vec::new(0).pop(); return size(v);") "Could not prove: self.len >= 1")
-                , testCase "a function over any sequence of a Vec" (runs (vecLibrary ++ "fn firstOf<T>(v: &Vec<T>) -> T [{ affirm size(v) > 0; }] [{ }] { return v.get(0); }; return firstOf(Vec::new(3).push(8));") (VInt 8))
+                , testCase "a function over any sequence of a Vec" (runs (vecLibrary ++ "fn firstOf<T: Clone>(v: &Vec<T>) -> T [{ affirm size(v) > 0; }] [{ }] { return v.get(0); }; return firstOf(Vec::new(3).push(8));") (VInt 8))
                 ]
             , TestList
                 "bounded types"
@@ -111,10 +111,10 @@ testSequence =
                 , testCase "the types of the trait are as many as it has" (errorHas "fn f<S: Sequence>(s: &S) -> Int [{ }] [{ }] { return 0; }; return 0;" "has parameters <E>")
                 , testCase "a size has no bound" (parseFails "fn f<n: Sequence<Int>>(s: &List<Int>) -> Int { return 0; }; return 0;")
                 , testCase "a type that a call cannot work out" (errorHas "fn head<S: Sequence<E>, E>(s: &S) -> E [{ }] [{ }] { return get(s, 0); }; return head([]);" "cannot be worked out")
-                , testCase "a caller with a type of its own" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; fn h<T>(l: &List<T>) -> Int [{ }] [{ }] { return total(l); }; return 0;" "needs S to implement Sequence<Int>, and List<T> implements Sequence<T>")
+                , testCase "a caller with a type of its own" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; fn h<T>(l: &List<T>) -> Int [{ }] [{ }] { return total(l); }; return 0;" "total needs S to implement Sequence, and List<T> does not")
                 , testCase "a bound on a type that a later bound decides" (runsAs "fn f<E: Sequence<Int>, S: Sequence<E>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return f(push([], push([], 1)));" "1")
                 , testCase "which is still checked" (errorHas "fn f<E: Sequence<Int>, S: Sequence<E>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return f(push([], push([], true)));" "f needs E to implement Sequence<Int>, and List<Bool> implements Sequence<Bool>")
-                , testCase "a call of itself with a bigger type is refused" (errorHas "fn f<S: Sequence<E>, E>(s: &S) -> Int ~ { return f(push([], s)); }; return f(push([], 1));" "f calls itself with the types List<List<Int>>, List<Int>")
+                , testCase "a call of itself with a bigger type is refused" (errorHas "fn f<S: Sequence<E> + Clone, E>(s: &S) -> Int ~ { return f(push([], s)); }; return f(push([], 1));" "f calls itself with the types List<List<Int>>, List<Int>")
                 , testCase "and with its own types is not" (runsAs "fn count<S: Sequence<Int>>(s: &S, k: Int) -> Int [{ affirm k >= 0; }] [{ }] shrinks k { if k = 0 { return size(s); }; return count(s, k - 1); }; return count(push([], 4), 3);" "1")
                 , testCase "a size of the impl in the types of the bound" (runsAs "struct Packet<n> { cells: Array<Int, n> }; trait Holds<E> { }; impl<n> Holds<Array<Int, n>> for Packet<n> { }; fn g<S: Holds<Array<Int, 3>>>(s: &S) -> Int [{ }] [{ }] { return 2; }; return g(Packet<3> { cells: array(3, 0) });" "2")
                 , testCase "it has a name of its own" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; fn total(x: Int) -> Int { return x; }; return 0;" "is already defined")
@@ -131,6 +131,7 @@ testSequence =
                 , testCase "an element that is not Copy is read without a clone" (runsAs "rows = [[1, 2], [3]]; r = Sequence::getRef(rows, 0); return size(*r);" "2")
                 , testCase "an array element is read where it is" (runsAs "a = #[10, 20, 30]; r = Sequence::getRef(a, 2); return *r;" "30")
                 , testCase "a Box of an array element is read where it is" (runsAs "b = Array::boxed(3, 7); r = Sequence::getRef(b, 1); return *r;" "7")
+                , testCase "an impl of a trait of the program's own for a Box of an array returns a reference to an element" (runsAs "trait MySeq<E> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; fn getRef(self: &Self, i: Int) -> &E from self [{ affirm i >= 0; affirm i < size(self); }] [{ }]; }; impl MySeq<Int> for Box<Array<Int>> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); }; fn getRef(self: &Self, i: Int) -> &Int from self [{ affirm i >= 0; affirm i < size(self); }] [{ }] { return &get(self, i); }; }; b = Array::boxed(3, 7); r = MySeq::getRef(b, 1); return *r;" "7")
                 , testCase "a string byte is read where it is" (runsAs "s = \"ab\"; r = s.getRef(1); return toInt(*r);" "98")
                 , testCase "the source is frozen while the reference is live" (errorHas "xs = [10, 20, 30]; r = Sequence::getRef(xs, 0); xs = [40, 50]; return *r;" "cannot be assigned while it is borrowed")
                 , testCase "an array's source is frozen while the reference is live" (errorHas "a = #[10, 20, 30]; r = Sequence::getRef(a, 0); a = #[40, 50, 60]; return *r;" "cannot be assigned while it is borrowed")

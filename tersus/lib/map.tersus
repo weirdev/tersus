@@ -9,8 +9,8 @@ import tersuslib::clone;
 // A HashMap<K, V> is the entries with one key in buckets chosen by the hash of the key: `hash(k) % size(buckets)` is the bucket,
 // and the entries of a bucket are scanned with `=` on their keys, so a key type needs an impl of Hash (lib/prelude.tersus) and
 // one of Eq (lib/eq.tersus). A map is a value like a list: insert and remove give a new map, lookup and fetch clone the value
-// out, and the map owns its entries, which insert clones when it spreads them, so inserting and the reads that clone need
-// Clone key and value types; contains, lookupRef, entryRef and remove do not. lookupRef and entryRef instead read a value or an entry where it is, as a reference from
+// out, and the map owns its entries, which insert clones when it spreads them and remove when it rebuilds a bucket, so
+// inserting, removing and the reads that clone need Clone key and value types; contains, lookupRef and entryRef do not. lookupRef and entryRef instead read a value or an entry where it is, as a reference from
 // the map, and entries() clones every entry out where entryRef(n) gives the nth one by reference. When the count reaches four
 // times the number of buckets the entries are spread over twice as many, so a map built by inserting is built in time in
 // proportion to its count.
@@ -74,7 +74,7 @@ fn findNth<K, V>(buckets: &List<List<Entry<K, V>>>, n: Int) -> (Int, Int) [{ aff
 
 // The buckets with the entry for (k, v) in the bucket idx: in the place `at` of the entry the key already has (which findIn gives), or at
 // its end when `at` is -1
-fn bucketPut<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int, k: K, v: V) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); affirm at >= -1; affirm at < size(get(buckets, idx)); }] [{
+fn bucketPut<K: Clone, V: Clone>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int, k: K, v: V) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); affirm at >= -1; affirm at < size(get(buckets, idx)); }] [{
     affirm size(return) = size(buckets);
 }] {
     entries = clone(get(buckets, idx));
@@ -86,7 +86,7 @@ fn bucketPut<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int, k: K, v:
 };
 
 // The buckets with the entry at `at` taken out of the bucket idx (the bucket rebuilt without it; the others are the lists they were)
-fn bucketRemove<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); affirm at >= 0; affirm at < size(get(buckets, idx)); }] [{ affirm size(return) = size(buckets); }] {
+fn bucketRemove<K: Clone, V: Clone>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); affirm at >= 0; affirm at < size(get(buckets, idx)); }] [{ affirm size(return) = size(buckets); }] {
     entries = &get(buckets, idx);
     kept = [];
     i = 0;
@@ -144,7 +144,7 @@ fn indexFor<K: Hash>(buckets: Int, k: &K) -> Int [{ affirm buckets >= 1; }] [{ a
     return Hash::hash(k) % buckets;
 };
 
-// (reading a key or an entry where it is, and taking a key out, clone nothing)
+// (reading a key or an entry where it is clones nothing)
 impl<K: Hash + Eq, V> HashMap<K, V> {
     fn contains(self: &Self, k: &K) -> Bool [{ }] [{
         affirm return = (findIn(get(self.buckets, Hash::hash(k) % size(self.buckets)), k) >= 0);
@@ -167,7 +167,10 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         bucket = &get(self.buckets, loc.0);
         return &get(bucket, loc.1);
     };
+};
 
+impl<K: Hash + Eq + Clone, V: Clone> HashMap<K, V> {
+    // (the bucket is rebuilt without the entry, from clones of the others)
     fn remove(self: Self, k: &K) -> Self [{ }] [{
         affirm return.count <= self.count;
         affirm return.count >= self.count - 1;
@@ -179,9 +182,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         };
         return makeMap(bucketRemove(self.buckets, idx, at), self.count - 1);
     };
-};
 
-impl<K: Hash + Eq + Clone, V: Clone> HashMap<K, V> {
     // The value at k, or the fallback when there is none
     fn lookup(self: &Self, k: &K, fallback: V) -> V [{ }] [{ }] {
         entries = &get(self.buckets, indexFor(size(self.buckets), k));

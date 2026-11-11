@@ -40,13 +40,6 @@ impl<K: Hash + Eq> HashSet<K> {
         return self.map.contains(k);
     };
 
-    fn remove(self: Self, k: &K) -> Self [{ }] [{
-        affirm size(return) <= size(self);
-        affirm size(return) >= size(self) - 1;
-    }] {
-        return makeSet(self.map.remove(k));
-    };
-
     // A reference to the nth key in the order of elements(), which the caller says is there: the key is read where
     // it is, not cloned out, where elements() clones every key
     fn elementRef(self: &Self, n: Int) -> &K from self [{ affirm n >= 0; affirm size(self.map.buckets) >= 1; affirm findNth(self.map.buckets, n).1 >= 0; }] [{ }] {
@@ -58,6 +51,13 @@ impl<K: Hash + Eq> HashSet<K> {
 };
 
 impl<K: Hash + Eq + Clone> HashSet<K> {
+    fn remove(self: Self, k: &K) -> Self [{ }] [{
+        affirm size(return) <= size(self);
+        affirm size(return) >= size(self) - 1;
+    }] {
+        return makeSet(self.map.remove(k));
+    };
+
     fn insert(self: Self, k: K) -> Self [{ }] [{
         affirm size(return) >= size(self);
         affirm size(return) <= size(self) + 1;

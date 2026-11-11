@@ -1,14 +1,15 @@
 // A struct can have types as well as sizes: `struct Pair<T>` is a struct for each type, written Pair<Int>, and `struct Vec<T, n>` one for
 // each type and size. A parameter that starts with a capital letter is a type and any other is a size, as for a function. A literal
-// and a type write them (`Pair<Int> { a: 1, b: 2 }`), a function with type parameters takes any of them (`fn swap<U>(p: &Pair<U>)`),
+// and a type write them (`Pair<Int> { a: 1, b: 2 }`), a function with type parameters takes any of them (`fn swap<U>(p: Pair<U>)`),
 // and native code is made for each (Pair<Int> and Pair<List<Int>> are structs of their own, so a Pair<List<Int>> owns its lists).
 struct Pair<T> {
     a: T,
     b: T,
 };
 
-fn swap<U>(p: &Pair<U>) -> Pair<U> {
-    return Pair<U> { a: clone(p.b), b: clone(p.a) };
+fn swap<U>(p: Pair<U>) -> Pair<U> {
+    Pair { a: x, b: y } = p;
+    return Pair<U> { a: y, b: x };
 };
 
 // A field can be a Box of an array of the type: the start of a list that is a library type
@@ -17,7 +18,8 @@ struct Holder<T> {
     len: Int,
 };
 
-fn holder<T>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; affirm s > 0; }] [{ affirm size(return.items) = n; }] {
+// (Array::boxed(n, x) makes n copies of x, so T is bounded by Clone)
+fn holder<T: Clone>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; affirm s > 0; }] [{ affirm size(return.items) = n; }] {
     return Holder<T> { items: Array::boxed(n, x), len: n };
 };
 

@@ -338,7 +338,8 @@ It covers the whole checker: types and their instances, finiteness,
 unification and coercion, statements, functions and gathered signatures,
 generic calls, termination, contracts and proof terms, the builtins of
 addresses and permissions, references (places, borrows, `writes(...)`
-footprints, `from` origins and aliases), `clone` and the Copy and Clone
+footprints, `from` origins and aliases), `clone` (of a value of a type
+parameter only under a `Clone` or `Copy` bound) and the Copy and Clone
 markers, traits and impls (method resolution, `Type::f`, `Trait::f(x)`, `Eq`
 behind `=`, Deref look-through and the functions that check an impl against
 its trait), functions with bounds (each checked once against its bounds alone where it is

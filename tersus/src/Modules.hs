@@ -776,6 +776,7 @@ ensureLayout resolver sourceLayout pkgName = do
         missing = [root | root <- requested, not (marker root)]
         aliases root = [layName layout | layout <- Map.elems (lsLayouts state), layIsPackage layout, layRoot layout == root, layName layout /= pkgName]
     case (missing, candidates) of
+        _ | pkgName == reservedPackage -> pureM (Left (reservedPackageWhy ++ ", which a program does not import by name"))
         (root : _, _) -> pureM (Left ("package " ++ show pkgName ++ " not found: no package.tersus in requested root " ++ root))
         ([], []) -> pureM (Left (if layIsPackage sourceLayout
             then "package " ++ show pkgName ++ " not found: no package.tersus in " ++ sibling
@@ -1183,6 +1184,14 @@ loadFromEntryWith fileParser resolver rawEntry = case discoverEntry resolver ent
     entryPath = normalizePath rawEntry
     options = resolverOptions resolver
 
+-- The package the compiler libraries are compiled as (LibPackage). The elaborator treats some of its modules as the
+-- libraries they are, so no package a program loads may have its name.
+reservedPackage :: String
+reservedPackage = "tersuslib"
+
+reservedPackageWhy :: String
+reservedPackageWhy = "the package name " ++ reservedPackage ++ " is reserved for the compiler libraries"
+
 loadLayout :: FileParser -> Resolver -> FilePath -> Layout -> Either String LoadResult
 loadLayout fileParser resolver entryPath layout = do
     let root = layRoot layout
@@ -1190,7 +1199,11 @@ loadLayout fileParser resolver entryPath layout = do
         entryDir = dirNameOf entryPath
         entryName = if entryDir == root then Nothing else Just (baseNameOf entryDir)
         entryId = layoutModuleId layout entryName
-    if entryDir /= root && dirNameOf entryDir /= root
+    if Map.member reservedPackage (packageRoots (resolverOptions resolver))
+        then Left ("--package-root " ++ reservedPackage ++ "=" ++ packageRoots (resolverOptions resolver) Map.! reservedPackage ++ ": " ++ reservedPackageWhy)
+    else if layIsPackage layout && pkgName == reservedPackage
+        then Left ("package " ++ root ++ ": " ++ reservedPackageWhy ++ ", so a package directory cannot be named " ++ reservedPackage)
+    else if entryDir /= root && dirNameOf entryDir /= root
         then Left ("entry file " ++ entryPath ++ " is in a directory nested below module level under package " ++ pkgName ++ "; deeper nesting is not a module")
         else do
             let initial = LState fileParser (Map.singleton pkgName layout) Map.empty [] Map.empty [] Set.empty Map.empty

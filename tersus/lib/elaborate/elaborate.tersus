@@ -28,7 +28,7 @@ fn newState() -> St ~ {
         methodOf: HashMap::new(), ty: 0, ok: true, te: TE { node: 0 - 1, types: [] }, tes: [], outs: [], nid: 0 - 1, n: 0,
         gen: Generic { params: [], names: [], types: [] }, ctor: CtorInfo { owner: "", names: [], types: [] }, names: [],
         fnSig: FnSig { params: [], ptys: [], rty: 0, sizes: [], types: [], writes: [], froms: [] }, sigNode: 0 - 1, boundsOut: [],
-        seen: [], defQueue: [], defChecking: false, checkedItems: 0, sequenceTraits: HashSet::new(), status: 0, msg: ""
+        seen: [], defQueue: [], defChecking: false, checkedItems: 0, sequenceTraits: HashSet::new(), storageCopies: false, status: 0, msg: ""
     };
 };
 
@@ -643,7 +643,7 @@ probe = Probe { declared: [], mentioned: HashSet::new(), literal: false };
 if hasCatalog { probe = probeModule(&program.nodes, &raw, &ifaces); };
 prepared = preparedProgram(program, raw, &pkg, &modKey);
 stmts = prepared.stmts;
-st = St { nodes: prepared.nodes, checkedItems: checkedItems, ..st };
+st = St { nodes: prepared.nodes, checkedItems: checkedItems, storageCopies: pkgName = "tersuslib" && hasModule && (modu = "lists" || modu = "box"), ..st };
 if hasModule && pkgName = "tersuslib" && modu = "prelude" { st = St { sequenceTraits: st.sequenceTraits.insert("Sequence").insert("Growable"), ..st }; };
 if !prepared.ok { st = unresolvedState(st, prepared.msg); };
 st = loadBuiltins(st, &table.value);

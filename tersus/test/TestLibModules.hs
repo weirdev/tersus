@@ -242,7 +242,8 @@ testNativeStorageModules = TestList "testNativeStorageModules"
             Error e -> Just e
             Ok units -> case linkPrograms (units ++ [(Modules.ModuleId "native" Nothing, p)]) of
                 Ok _ -> Just "fixture no longer reproduces mixed ghost/native declarations"
-                Error e | not ("type Box<Array<'T, ?>>" `isInfixOf` e) -> Just e
+                -- (the raw program's generic Box still has its ghost permission, which the helpers' erased one does not)
+                Error e | not ("generic struct Box is defined by both" `isInfixOf` e && ghostBox p) -> Just e
                 Error _ -> case lowerLists (Ok units) p of
                     Error e -> Just e
                     Ok native -> testAssertEq (Map.lookup "Box<Array<'T, ?>>" (M.progTypes native)) (Just (M.StructDecl [("addr", TAddr (TArrayOf (TParam "T") SizeAny))]))
@@ -257,6 +258,9 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     , testCase "imported from results still freeze their source" $ importedLoan "xs = [1]; r = headOf(xs); xs = [2]; return *r;" True
     ]
   where
+    ghostBox p = case Map.lookup "Box" (M.progGenerics p) of
+        Just (_, fields) -> any (\(_, t) -> case t of TBlock _ -> True; _ -> False) fields
+        Nothing -> False
     inspectPackage check = case nativeStorageUnits of
         Error e -> Just e
         Ok native -> case libPackage of
