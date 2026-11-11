@@ -145,6 +145,7 @@ ergonomicsFunctionPrograms =
     , ("statement assignment to existing function", functions ++ "if true { f = g; } else {}; return f(3);" )
     , ("callable head precedes argument mutation", functions ++ "return f(if true { f = g; 3 } else { 0 });")
     , ("mutating computed head captures parameter read", "fn f(p: &mut Int) -> Int { *p = 4; return 0; }; fn g(p: &mut Int) -> Int { *p = 5; return 0; }; fn outer(p: &mut Int) -> Int { return p + (if true { f } else { g })(p); }; n = 1; return outer(&mut n);")
+    , ("function called before its definition beside a local of its name", "fn twice(x: Int) -> Int { return dn(x) + dn(x); }; fn other() -> Int { dn = 2; return dn; }; fn dn(x: Int) -> Int { return x; }; return twice(1) + other();")
     , ("match callable head", functions ++ "enum Which { F, G }; w = Which::F; return (match w { Which::F => f, Which::G => g })(3);")
     ]
   where
