@@ -1,10 +1,10 @@
 import validation::context { closeContext, contradictoryConstructors, contradictoryVariants, integerValue };
 import validation::differences { comparisonDifferences, constantDifferences, constantOrders, contradictoryConstants, contradictoryDifferences, refinedOrders };
 import validation::execution { assumeBooleanFact, assumeRelation, executeSteps, localGoal, quietStep };
-import validation::joins { HullLinks, commonContext, linkAppend, mergeStates, noLinks };
+import validation::joins { commonContext, linkAppend, linkedItems, mergeStates, noLinks };
 import validation::loopInference { inferLoopCandidateGoals, loopMentions };
-import validation::model { CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StateMergeLookup, SweepArrival, SweepDelivery, SweepOrder, SweepResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
-import validation::relations { containsValue, contradictoryDisequalities, intAt, leastClasses };
+import validation::model { CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, HullLinks, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StateMergeLookup, SweepArrival, SweepDelivery, SweepOrder, SweepResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
+import validation::relations { containsValue, contradictoryDisequalities, leastClasses };
 import validation::state { booleanKnownCached, negateRelation, resolveValue };
 import validation::validation { entailmentCache, entailsGoal };
 
@@ -419,7 +419,10 @@ fn sweepDeliveries(end: ExecutionEnd, state: ExecutionState) -> SweepDelivery {
         if yes.status != 0 { return SweepDelivery { status: yes.status, step: yes.failedAt, states: [] }; };
         no = executeSteps(state, branch.noSteps);
         if no.status != 0 { return SweepDelivery { status: no.status, step: no.failedAt, states: [] }; };
-        return SweepDelivery { status: 0, step: -1, states: push(push([], SweepArrival { block: branch.yes, state: yes.state }), SweepArrival { block: branch.no, state: no.state }) };
+        arrivals = [];
+        if yes.failedAt != -2 { arrivals = push(arrivals, SweepArrival { block: branch.yes, state: yes.state }); };
+        if no.failedAt != -2 { arrivals = push(arrivals, SweepArrival { block: branch.no, state: no.state }); };
+        return SweepDelivery { status: 0, step: -1, states: arrivals };
     };
     if end is ExecutionEnd::BooleanBranch {
         branch = end as ExecutionEnd::BooleanBranch;
@@ -432,18 +435,23 @@ fn sweepDeliveries(end: ExecutionEnd, state: ExecutionState) -> SweepDelivery {
                     term = (value as ValueLookup::Found).term;
                     yesLiteral = (trueValue as ValueLookup::Found).term;
                     noLiteral = (falseValue as ValueLookup::Found).term;
-                    yesContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, yesLiteral), term, yesLiteral);
-                    noContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, noLiteral), term, noLiteral);
                     yesAnswer = booleanKnownCached(entailmentCache(state.context), term, yesLiteral, true);
                     if yesAnswer.holds {
+                        yesContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, yesLiteral), term, yesLiteral);
                         return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: branch.yes, state: ExecutionState { context: yesContext, ..state } }) };
                     };
                     if booleanKnownCached(yesAnswer.cache, term, noLiteral, false).holds {
+                        noContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, noLiteral), term, noLiteral);
                         return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: branch.no, state: ExecutionState { context: noContext, ..state } }) };
                     };
-                    yesState = ExecutionState { context: yesContext, ..clone(state) };
-                    noState = ExecutionState { context: noContext, ..state };
-                    return SweepDelivery { status: 0, step: -1, states: push(push([], SweepArrival { block: branch.yes, state: yesState }), SweepArrival { block: branch.no, state: noState }) };
+                    yesRun = executeSteps(clone(state), push([], ExecutionStep::Assume { relation: 0, left: ValueRef::Term { term: term }, right: ValueRef::Term { term: yesLiteral } }));
+                    if yesRun.status != 0 { return SweepDelivery { status: yesRun.status, step: -1, states: [] }; };
+                    noRun = executeSteps(state, push([], ExecutionStep::Assume { relation: 0, left: ValueRef::Term { term: term }, right: ValueRef::Term { term: noLiteral } }));
+                    if noRun.status != 0 { return SweepDelivery { status: noRun.status, step: -1, states: [] }; };
+                    arrivals = [];
+                    if yesRun.failedAt != -2 { arrivals = push(arrivals, SweepArrival { block: branch.yes, state: yesRun.state }); };
+                    if noRun.failedAt != -2 { arrivals = push(arrivals, SweepArrival { block: branch.no, state: noRun.state }); };
+                    return SweepDelivery { status: 0, step: -1, states: arrivals };
                 };
             };
         };
@@ -468,19 +476,6 @@ fn settleAt(work: SweepWork, status: Int, block: Int, step: Int) -> SweepWork {
 fn deliverState(work: SweepWork, block: Int, state: ExecutionState) -> SweepWork {
     position = size(work.states);
     return SweepWork { pending: linkAppend(work.pending, block, position), states: push(work.states, state), arrivals: work.arrivals + 1, ..work };
-};
-
-fn waitingAt(pending: &HullLinks, block: Int) -> List<Int> {
-    taken = [];
-    at = pending.first.lookup(block, -1);
-    walked = 0;
-    linkCount = size(pending.items);
-    while at >= 0 && at < size(pending.items) && walked < linkCount [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
-        taken = push(taken, get(pending.items, at));
-        at = intAt(pending.next, at, -1);
-        walked = walked + 1;
-    };
-    return taken;
 };
 
 fn withoutWaiting(pending: HullLinks, block: Int) -> HullLinks {
@@ -560,7 +555,7 @@ fn runEachArrival(frame: &LoopFrame, block: &ExecutionBlock, taken: &List<Int>, 
                 run = executeSteps((arriving as StateMergeLookup::Found).state, (*block).steps);
                 if run.status != 0 {
                     ran = settleWith(ran, ExecutionFlowResult { status: run.status, block: id, step: run.failedAt, state: run.state });
-                } else {
+                } else if run.failedAt != -2 {
                     if latch {
                         ran = backEdge(frame, run.state, ran);
                     } else {
@@ -599,6 +594,7 @@ fn runOnce(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &Exe
     if folded is StateMergeLookup::Found {
         run = executeSteps((folded as StateMergeLookup::Found).state, (*block).steps);
         if run.status != 0 { return settleWith(counted, ExecutionFlowResult { status: run.status, block: id, step: run.failedAt, state: run.state }); };
+        if run.failedAt = -2 { return counted; };
         delivered = sweepDeliveries(clone((*block).end), clone(run.state));
         if delivered.status != 0 { return settleWith(counted, ExecutionFlowResult { status: delivered.status, block: id, step: delivered.step, state: run.state }); };
         return routeAll(blocks, frame, delivered.states, counted);
@@ -686,6 +682,14 @@ fn loopIteration(block: &ExecutionBlock, entryState: &ExecutionState, cands: &Ca
     return iterationFailure(2, -1, entryState);
 };
 
+fn loopBodyUnreachable(header: &ExecutionState, tests: &List<LoopTest>) -> Bool {
+    for test in tests {
+        run = executeSteps(clone(header), push([], ExecutionStep::Assume { relation: test.relation, left: test.left, right: test.right }));
+        if run.status != 0 || run.failedAt != -2 { return false; };
+    };
+    return size(tests) > 0;
+};
+
 // One round of a loop: sweep the region from the body under the candidates
 // still standing. It leaves the loop with the header state under the failed
 // test, and with each state the body delivered to the loop's own exit (the
@@ -698,7 +702,11 @@ fn loopRound(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &E
     if (*block).end is ExecutionEnd::Loop {
         loop = (*block).end as ExecutionEnd::Loop;
         inner = LoopFrame { header: id, exit: loop.exit, active: push(clone(frame.active), id), region: clone(loop.region), checks: clone(loop.checks), candChecks: clone(cands.checks), candEnds: clone(cands.ends), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: iteration.prior, priorOther: iteration.priorOther };
-        swept = sweep(blocks, inner, loop.body, iteration.yes, total, measure - 1);
+        // (an empty successful sweep: a body no test lets execution into delivers nothing)
+        swept = SweepResult { result: ExecutionFlowResult { status: 0, block: id, step: -1, state: clone(iteration.header) }, dropped: [], exits: [], arrivals: 0, merges: 0 };
+        if loopBodyUnreachable(iteration.header, loopTests(loop.relation, loop.left, loop.right, loop.orTests)) = false {
+            swept = sweep(blocks, inner, loop.body, iteration.yes, total, measure - 1);
+        };
         exits = [];
         if swept.result.status = 0 {
             if size(swept.dropped) = 0 {
@@ -792,7 +800,7 @@ fn sweep(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, start: Int, s
     for position in 0..size(ordering.order) {
         if work.settled = false {
             id = get(ordering.order, position);
-            taken = waitingAt(work.pending, id);
+            taken = linkedItems(work.pending, id);
             if size(taken) > 0 {
                 work = SweepWork { pending: withoutWaiting(work.pending, id), ..work };
                 if blocks.contains(id) {

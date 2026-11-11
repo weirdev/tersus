@@ -1789,7 +1789,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                             , testAssertEq [loadedFileStem file | file <- files, "JoinedFact" `elem` loadedDeclNames file] ["joins"]
                             , testAssertEq [loadedFileStem file | file <- files, "commonFacts" `elem` loadedDeclNames file] ["joins"]
                             , testAssertEq [loadedFileStem file | file <- files, "commonContext" `elem` loadedDeclNames file] ["joins"]
-                            , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 461
+                            , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 482
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) ["validateExecution", "noTemplates", "commonContext", "driverReadAll"])
                             , testAssertTrue (all (not . isInfixOf "validation$") (Map.keys (M.progFunctions checker)))
                             , testAssertEq (runNamedFunction trapped "noTemplates" []) (Ok (Just (MList [])))

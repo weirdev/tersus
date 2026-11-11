@@ -410,18 +410,21 @@ struct SatWork { state: ExecutionState, births: HashMap<Int, Int>, pending: List
 
 impl Clone for SatWork { };
 
-// A closure the checks of a block share. It is made from the facts of one
-// state, and a later state of the block has those facts and more as long as
-// every step between only adds facts and binds locals (addsFactsOnly), so a
-// goal it proves holds there too; a goal it cannot prove is asked again of
-// the facts there are now. Any other step drops it.
-enum SharedEntailment { Missing, Found { cache: EntailmentCache } };
+// The items appended under each key, in order: first and last positions per
+// key and a next position per item, so an append never copies a list.
+struct HullLinks { first: HashMap<Int, Int>, last: HashMap<Int, Int>, next: List<Int>, items: List<Int> };
 
-impl Clone for SharedEntailment { };
+// The facts of a block's context by the terms they mention, as positions in
+// each list (an application under its id and arguments, never its function),
+// with the work of admitting all of a term's facts, the position of each
+// term's first constant fact, and how far each list is indexed. A later state
+// of the block keeps every indexed position while every step between only
+// adds facts and binds locals (addsFactsOnly); any other step drops it.
+struct FactIndex { equalities: HullLinks, applications: HullLinks, orders: HullLinks, different: HullLinks, variants: HullLinks, differences: HullLinks, weights: HashMap<Int, Int>, constantAt: HashMap<Int, Int>, counts: List<Int>, work: Int };
 
-struct CheckedStep { result: ExecutionResult, shared: SharedEntailment };
+enum SharedIndex { Missing, Found { index: FactIndex } };
 
-impl Clone for CheckedStep { };
+struct CheckedStep { result: ExecutionResult, shared: SharedIndex };
 
 // The loop a region is being swept for: its header, what the user's invariant
 // asks at each back edge, the inferred candidates (checks of candidate i are

@@ -1153,6 +1153,81 @@ selfHostedQueryFamilies program =
                                 `orElse` testAssertEq (cacheField "plainClassesMade" start, cacheField "plainClassesMade" final) (Just (MBool False), Just (MBool True))
                                 `orElse` testAssertEq (fmap Just (cacheField "plainClasses" final)) (Just (ownClasses context))
                     other -> Just ("Unexpected entailment cache: " ++ show other)
+                -- Goal slices: an index of a block's facts by term, and the ladder of
+                -- budgeted slices a check is proved on. Work rows hold the charged
+                -- work under each rung and the work done under the charge.
+                sliceContext eqs apps consts ords = MData "ValidatorContext" [("equalities", MList (map fact eqs)), ("applications", MList (map app apps)), ("constants", MList (map constant consts)), ("orders", MList (map mixedFact ords)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                indexed index context = case runNamedFunction program "indexFacts" [index, context] of
+                    Ok (Just value) -> Right value
+                    other -> Left ("Unexpected index: " ++ show other)
+                freshIndex context = case runNamedFunction program "noFactIndex" [] of
+                    Ok (Just empty) -> indexed empty context
+                    other -> Left ("Unexpected empty index: " ++ show other)
+                sliceAnswer context index relation a b = case runNamedFunction program "checkInSlices" [context, index, MInt relation, MInt a, MInt b] of
+                    Ok (Just (MData "SliceAnswer" fields)) -> case (lookup "holds" fields, lookup "budget" fields, lookup "admitted" fields, lookup "operations" fields) of
+                        (Just (MBool holds), Just (MInt budget), Just (MInt admitted), Just (MInt operations)) -> Right (holds, budget, admitted, operations)
+                        other -> Left ("Unexpected slice answer: " ++ show other)
+                    other -> Left ("Unexpected slice answer: " ++ show other)
+                sliceOn context relation a b = freshIndex context >>= \index -> sliceAnswer context index relation a b
+                withinCharge (holds, budget, admitted, operations) = (holds, budget, operations <= admitted, admitted <= sum (takeWhile (<= max budget 1024) [64, 128, 256, 512, 1024]))
+                hubOrders hub n = [(hub, 100 + k, False) | k <- [0 .. n - 1]]
+                -- an order appended after the index was made is reached only once the index is extended
+                checkSliceExtension = either Just id $ do
+                    let before = sliceContext [] [] [] [(1, 2, False)]
+                        after = sliceContext [] [] [] [(1, 2, False), (2, 3, True)]
+                    index <- freshIndex before
+                    stale <- sliceAnswer after index 2 1 3
+                    extendedIndex <- indexed index after
+                    extended <- sliceAnswer after extendedIndex 2 1 3
+                    pure (testAssertEq (stale, extended) ((False, -1, 10, 5), (True, 64, 16, 7)))
+                -- a hub heavier than the first rung is not expanded there: the goal's other
+                -- term proves it within 64 units, where a single 512 search would take the hub
+                checkSliceHub = either Just id $ do
+                    answer <- sliceOn (sliceContext [] [] [] ((1, 2, True) : hubOrders 1 60)) 2 1 2
+                    pure (testAssertEq (withinCharge answer) (True, 64, True, True)
+                        <> testAssertTrue (let (_, _, admitted, _) = answer in admitted <= 64))
+                -- an application's arguments are charged: a wide one keeps its term out of the first rung
+                checkSliceArity = either Just id $ do
+                    let wide = (50, 20, 1 : [200 .. 259])
+                    answer <- sliceOn (sliceContext [] [wide] [] [(1, 2, True)]) 2 1 2
+                    pure (testAssertEq (withinCharge answer) (True, 64, True, True))
+                -- a constant is copied with what reaches it and never expanded, however many facts it has
+                checkSliceConstantHub = either Just id $ do
+                    let context = sliceContext [] [] [(30, 0, 3), (32, 0, 5)] ((1, 30, True) : [(100 + k, 30, False) | k <- [0 .. 99]])
+                    answer <- sliceOn context 3 1 32
+                    pure (testAssertEq (withinCharge answer) (True, 64, True, True))
+                -- a refused goal whose walk left no term out for the budget stops after the first rung
+                checkSliceEarlyStop = either Just id $ do
+                    answer <- sliceOn (sliceContext [] [] [] [(1, 2, False)]) 2 1 2
+                    pure (testAssertEq answer (False, -1, 10, 4))
+                -- a goal between two constants admits the fact linking them, which no expansion reaches
+                checkSliceConstantSeeds = either Just id $ do
+                    answer <- sliceOn (sliceContext [(30, 31)] [] [(30, 0, 5), (31, 0, 0)] []) 0 30 31
+                    pure (testAssertEq answer (True, 64, 9, 5))
+                -- and only once the lighter constant's weight fits the rung
+                checkSliceConstantSeedsCapped = either Just id $ do
+                    answer <- sliceOn (sliceContext [(30, 31)] [] [(30, 0, 5), (31, 0, 0)] ([(30, 100 + k, False) | k <- [0 .. 14]] ++ [(31, 200 + k, False) | k <- [0 .. 14]])) 0 30 31
+                    pure (testAssertEq answer (True, 128, 28, 24))
+                -- positions are read from the context the check has, never from the one indexed
+                checkSliceStale = either Just id $ do
+                    let bigger = sliceContext [] [] [] [(5, 6, False), (1, 2, True)]
+                        smaller = sliceContext [] [] [] [(5, 6, False)]
+                    index <- freshIndex bigger
+                    answer <- sliceAnswer smaller index 2 1 2
+                    pure (testAssertEq (let (holds, budget, _, _) = answer in (holds, budget)) (False, -1))
+                indexWork value = case value of
+                    MData "FactIndex" fields -> lookup "work" fields
+                    _ -> Nothing
+                -- extending an index costs the facts appended, not the facts indexed before
+                checkIndexWork = either Just id $ do
+                    let before = sliceContext [(1, 2)] [(10, 20, [0, 2])] [(30, 0, 3)] [(1, 2, False)]
+                        after = sliceContext [(1, 2), (3, 4)] [(10, 20, [0, 2])] [(30, 0, 3)] [(1, 2, False)]
+                    index <- freshIndex before
+                    extendedIndex <- indexed index after
+                    pure (testAssertEq (indexWork index, indexWork extendedIndex) (Just (MInt 11), Just (MInt 14)))
+                checkGoalTerms name = testAssertEq (runNamedFunction program "goalTerms" [goal name 7 8]) (Ok (Just (MList [MInt 7, MInt 8])))
+                -- a check, then a fact appended in the same block, then a check that needs it
+                sliceExtensionSteps = [assumeTerms 1 1, checkTerms 0 1 1, MData "ExecutionStep::Assume" [("relation", MInt 2), ("left", termRef 1), ("right", termRef 2)], checkTerms 2 1 2]
              in [ ("products", [checkProduct a b (productResult a b) | a <- productValues, b <- productValues])
                 , ("relations",
                       [ checkDifferenceOverflow
@@ -1618,6 +1693,12 @@ selfHostedQueryFamilies program =
                       -- state there is no candidate, rather than one naming the work state's)
                       , checkPairProvenance "inferPairGoal" [(900, 0, 7), (901, 0, 4)] [(11, 0, 4)] (0, [])
                       , checkInferenceProvenance
+                      ])
+                , ("goal slices",
+                      [ checkSliceExtension, checkSliceHub, checkSliceArity, checkSliceConstantHub
+                      , checkSliceStale, checkSliceEarlyStop, checkIndexWork, checkSliceConstantSeeds, checkSliceConstantSeedsCapped
+                      , checkGoalTerms "Equal", checkGoalTerms "Different", checkGoalTerms "Less", checkGoalTerms "AtMost"
+                      , checkExecution sliceExtensionSteps 0 (-1), checkExecution (init sliceExtensionSteps ++ [checkTerms 2 1 9]) 1 3
                       ])
                 ]
 

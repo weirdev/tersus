@@ -126,6 +126,8 @@ fn arena() -> Int [{ }] [{ }] {
     // 2 -> 0 -> 1, and -1 ends the list
     b = Addr::write(p, 0, Node { value: 20, next: 1 }, b);
     b = Addr::write(p, 1, Node { value: 30, next: 0 - 1 }, b);
+    // (a fact the free at the end needs, stated while the allocation is still within a check's reach)
+    affirm cap(b) = extent(origin(b));
     b = Addr::write(p, 2, Node { value: 10, next: 0 }, b);
     first = Addr::get(p, 2, b);
     second = Addr::get(p, first.next, b);

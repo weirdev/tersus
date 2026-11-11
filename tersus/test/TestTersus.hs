@@ -143,6 +143,7 @@ originalGroups =
     , testForallSyntax
     , testForallInstantiation
     , testForallProof
+    , testGoalSlices
     , testForallLoops
     , testPrettyProofs
     , testMulDivNegative
