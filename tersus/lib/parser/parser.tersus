@@ -216,20 +216,23 @@ fn decodeAt(sourceText: &Input, st: &St, i: Int) -> List<Int> [{ }] [{ affirm si
     if c < 128 { return push(push([], c), 1); };
     if c >= 194 && c <= 223 {
         b = byteAt(sourceText, st, i + 1);
+        affirm c - 192 >= 0;
         if b >= 128 && b <= 191 { return push(push([], (c - 192) * 64 + b - 128), 2); };
         return push(push([], c), 1);
     };
     if c >= 224 && c <= 239 {
         b = byteAt(sourceText, st, i + 1);
         d = byteAt(sourceText, st, i + 2);
-        if b >= 128 && b <= 191 && d >= 128 && d <= 191 { return push(push([], (c - 224) * 4096 + (b - 128) * 64 + d - 128), 3); };
+        affirm c - 224 >= 0;
+        if b >= 128 && b <= 191 && d >= 128 && d <= 191 { affirm b - 128 >= 0; return push(push([], (c - 224) * 4096 + (b - 128) * 64 + d - 128), 3); };
         return push(push([], c), 1);
     };
     if c >= 240 && c <= 244 {
         b = byteAt(sourceText, st, i + 1);
         d = byteAt(sourceText, st, i + 2);
         e = byteAt(sourceText, st, i + 3);
-        if b >= 128 && b <= 191 && d >= 128 && d <= 191 && e >= 128 && e <= 191 { return push(push([], (c - 240) * 262144 + (b - 128) * 4096 + (d - 128) * 64 + e - 128), 4); };
+        affirm c - 240 >= 0;
+        if b >= 128 && b <= 191 && d >= 128 && d <= 191 && e >= 128 && e <= 191 { affirm b - 128 >= 0; affirm d - 128 >= 0; return push(push([], (c - 240) * 262144 + (b - 128) * 4096 + (d - 128) * 64 + e - 128), 4); };
         return push(push([], c), 1);
     };
     return push(push([], c), 1);
@@ -1030,10 +1033,10 @@ fn baseNameOf(name: &String) -> String ~ {
 fn containsText(s: &String, needle: &String) -> Bool ~ {
     if size(needle.bytes) > size(s.bytes) { return false; };
     i = 0;
-    while i + size(needle.bytes) <= size(s.bytes) ~ {
+    while i + size(needle.bytes) <= size(s.bytes) [{ affirm i >= 0; }] ~ {
         same = true;
         j = 0;
-        while j < size(needle.bytes) ~ { if get(&s.bytes, i + j) != get(&needle.bytes, j) { same = false; }; j = j + 1; };
+        while j < size(needle.bytes) [{ affirm j >= 0; affirm i >= 0; affirm i + size(needle.bytes) <= size(s.bytes); }] ~ { if get(&s.bytes, i + j) != get(&needle.bytes, j) { same = false; }; j = j + 1; };
         if same { return true; };
         i = i + 1;
     };
@@ -5553,7 +5556,7 @@ fn tryStructAssign(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     same = size(fields) = size(declared);
     if same {
         i = 0;
-        for f in fields { if f != get(declared, i) { same = false; }; i = i + 1; };
+        for f in fields { if f != nameAtOr(&declared, i, "") { same = false; }; i = i + 1; };
     };
     if !same {
         joined = "";
@@ -5576,7 +5579,7 @@ fn tryStructAssign(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     out = push([], resultPartsfirstValue);
     i = 0;
     for field in fields {
-        var = get(vars, i);
+        var = nameAtOr(&vars, i, "");
         hv = varExprNode( s, held); Res { st: resultPartshvState, v: resultPartshvValue, ok: resultPartshvOk } = hv;
         if !resultPartshvOk { return Res<List<Int>> { st: resultPartshvState, v: [], ok: false }; };
         s = resultPartshvState;
@@ -5673,7 +5676,7 @@ fn structStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = setTypeInfo( s, clone(name), push([], clone(name)));
     finfos = [];
     i = 0;
-    for fn2 in fieldNames { finfos = push(finfos, FieldInfo { name: clone(fn2), ty: clone(get(fieldTypes, i)) }); i = i + 1; };
+    for fn2 in fieldNames { finfos = push(finfos, FieldInfo { name: clone(fn2), ty: typeAtOr(&fieldTypes, i) }); i = i + 1; };
     s = setFields( s, name, finfos);
     nn = putName( s, name); Res { st: resultPartsnnState, v: resultPartsnnValue, ok: resultPartsnnOk } = nn;
     if !resultPartsnnOk { return Res<Int> { st: resultPartsnnState, v: resultPartsnnValue, ok: resultPartsnnOk }; };
@@ -5796,7 +5799,7 @@ fn enumStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
             // store field types under the variant name
             finfos = [];
             i = 0;
-            for fn2 in fnames { finfos = push(finfos, FieldInfo { name: clone(fn2), ty: clone(get(ftys, i)) }); i = i + 1; };
+            for fn2 in fnames { finfos = push(finfos, FieldInfo { name: clone(fn2), ty: typeAtOr(&ftys, i) }); i = i + 1; };
             s = setFields( s, full, finfos);
             if byteAt(sourceText, s, s.pos) = 44 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); if byteAt(sourceText, s, s.pos) = 125 { loop = false; }; } else { loop = false; };
         };
@@ -7681,7 +7684,8 @@ fn metadataNamedHeader(sourceText: &Input, st: St) -> Res<List<String>> ~ {
 fn metadataDeclarationNames(sourceText: &Input, st: St) -> Res<List<String>> ~ {
     s = skipWs(sourceText, st);
     names = [];
-    while !atEnd(sourceText, s) ~ {
+    going = !atEnd(sourceText, s);
+    while going ~ {
         header = metadataEnumHeader(sourceText, clone(s));
         Res { st: headerState, v: headerNames, ok: headerOk } = header;
         if !headerOk {
@@ -7701,6 +7705,7 @@ fn metadataDeclarationNames(sourceText: &Input, st: St) -> Res<List<String>> ~ {
         s = tailState;
         if byteAt(sourceText, s, s.pos) = 59 { s = St { pos: s.pos + 1, ..s }; };
         s = skipWs(sourceText, s);
+        going = !atEnd(sourceText, s);
     };
     return ok(s, names);
 };
