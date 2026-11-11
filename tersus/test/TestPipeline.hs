@@ -95,7 +95,7 @@ testModulesPackageExample = TestCase "examples/modules/app/main.tersus" $ do
             Ok ((output, _), _) -> testAssertEq output "64"
         Right other -> Just ("modules example should be a package, got: " ++ show other)
 
--- The compiler's own programs (the AST reader, the MIR reader, checker and eraser and the
+-- The compiler's own programs (the parser, the AST reader, the MIR reader, checker and eraser and the
 -- emitter of the mir package, and the elaborator, under lib/) validated. They are large enough that validating them takes far longer than
 -- the rest of the suite, so this group runs only when it is named (TestTersus.optInGroups); the
 -- groups that run them build them unvalidated, as the host does.
@@ -103,7 +103,8 @@ testHostValidation :: Test
 testHostValidation =
     TestList
         "testHostValidation"
-        [ testExampleFile "lib/ast_reader/ast_reader.tersus" (ExpectReturn (VInt 1))
+        [ testExampleFile "lib/parser/parser.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "lib/ast_reader/ast_reader.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "lib/mir/mir_reader/mir_reader.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "lib/mir/mir_verify/mir_verify.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "lib/mir/mir_erase/mir_erase.tersus" (ExpectReturn (VInt 1))

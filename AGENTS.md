@@ -92,8 +92,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     from the sources when they are not the seed's (`ElaboratorNative`).
   - `mir/`, `data/`, `parser/` and `ast_reader/`: the compiler's own programs,
     four packages beside `validation/` with their own `package.tersus`
-    markers. `testHostValidation` validates the AST reader, the MIR reader,
-    checker, eraser and emitter, and the elaborator, and says what running them with no input does.
+    markers. `testHostValidation` validates the parser, the AST reader, the MIR
+    reader, checker, eraser and emitter, and the elaborator, and says what running them with no input does.
     `mir/emit/emit.tersus` is the LLVM emitter written in Tersus, and
     `mir/mir_reader/mir_reader.tersus` / `mir/mir_verify/mir_verify.tersus` /
     `mir/mir_erase/mir_erase.tersus` are the MIR reader, the MIR checker and
@@ -240,8 +240,8 @@ Work from `tersus/`.
   CI reserves one runner for each of these four bootstrap groups; the
   remaining groups use three runners, with four worker processes per runner.
   The required aggregate check still requires every shard to pass.
-  `testHostValidation`, which validates the compiler's own programs (the AST
-  reader, the MIR reader, checker and eraser, the emitter and the elaborator),
+  `testHostValidation`, which validates the compiler's own programs (the parser, the
+  AST reader, the MIR reader, checker and eraser, the emitter and the elaborator),
   runs only when named, since it
   takes far longer than the rest of the suite (`TestTersus.optInGroups`), as
   does `testElaborateMutant` (an elaborator whose unification is broken, which
