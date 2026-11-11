@@ -126,6 +126,35 @@ fn f(l: List<Int>) -> Int [{ affirm size(l) > 3; affirm forall j in 0..size(l): 
 
 A `forall` fact is only used at elements that appear in the context, so naming one with `define` or in an earlier `affirm` is how you ask for it. Facts you add with `axiom` are assumed, not checked, so they are the part of a program to review.
 
+### What a check sees
+
+A check does not search every fact of its path. It walks out from the terms of its goal over the facts that mention them, and proves the goal from the facts it reaches, its slice:
+
+- **The walk is charged for its work**: each fact it looks at and each term of a fact it keeps. It tries budgets of 64, 128, 256, 512 and 1024 units, each a fresh walk at most 8 steps out from the goal, and the first that proves the goal wins. A constant (`0`, `true`) is reached but never walked through, and a term with more facts than the budget allows (a hub, such as a parameter every later line mentions) is kept but not expanded.
+- **Everything else runs on the slice too**: `forall` instances, case splits, linear arithmetic, and the checks the loops and branches make. For a goal that reads a list or a memory block, the slice also follows back the chain of writes that made it, within a budget of its own. One check admits at most 3,008 units of work, however much other code the function has.
+- **Code after an assumption whose nearby facts contradict each other is not checked**: the body of `while false`, an empty `forall` range, a `match` arm that cannot run, the rest of a function whose input contract is contradictory. Only a contradiction one cheap walk (64 units) from the assumed condition counts.
+
+So a fact a goal needs has to be within its reach. An `affirm` close to the goal is the simplest help, and along a long chain of steps an `affirm` every few steps carries the fact forward, each proved from the one before:
+
+```tersus
+fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return > x; }] {
+    a = x + 1;
+    b = a + 1;
+    c = b + 1;
+    affirm c > x;        // a stepping stone, proved from the three steps above it
+    d = c + 1;
+    e = d + 1;
+    g = e + 1;
+    return g;            // return > x follows from g > c and the stone
+};
+```
+
+The same holds after operations on a memory block: each gives a new permission tied to the last, so what a later `free` needs (`start(b) = 0`, `cap(b) = extent(origin(b))`, `count(b) = n`) may have to be affirmed part way, close to the allocation (the `arena` of `examples/addresses.tersus`).
+
+More facts do not always help: every `affirm` adds a fact to each term it mentions, so many affirms about one term can make it a hub the walk no longer expands. Affirm what the next goal needs, about the terms it uses.
+
+The bound is per check. Validating a program still does work that grows with the facts of a function: indexing them once per block, running each step, merging the states where paths meet, and filtering the candidate invariants of a loop, which still asks about every fact. Validation time is therefore not linear in the length of the code.
+
 ## Values
 
 Tersus currently has four runtime value categories:
@@ -371,7 +400,7 @@ What this proves, for a program that uses no assumption: every access is in boun
 - **A permission is used exactly once**: by the operation that changes or frees its memory, by giving it to a call or returning it, or by putting it in a struct or a tuple that is. One that is still held at a `return`, or held by a local that is given another value, is an error (`b is a permission given at line 1:1 that is not used: ...`), and so is a use after it was used (`b was moved`). A struct or a tuple that holds one is used exactly once too. A permission is never copied (`clone(b)` is an error) or compared, and cannot be in a list, an array, a Box, a function value, or the type given to a type parameter.
 - **A permission is ghost.** It can be a local, a parameter (`ghost b: Block<T>`, or `ghost b: &Block<T>` to lend it to a function that only reads), a field (`ghost blk: Block<T>`) or a part of a tuple, and it is taken out of all of them after validation: a struct's layout is its other fields, a function that returns one returns `0`, and nothing of it runs. `ghost` is what the reader sees: the type `Block<T>` is what makes a value ghost, and `ghost` before any other type is an error.
 - **A library type holds the two together**, the equation as its invariant, so that a program that uses it never writes it (`struct Buffer<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm whole(blk); }]`). `examples/addresses.tersus` has such a buffer, a `Vec<T>` on an address (any element type, no filler value, `pop` gives the element back), a buffer split between two calls of a function that fills a block it is given, and a linked list in one block.
-- **A long run of operations on one block** may need what `free` needs (`start(b) = 0`, `cap(b) = extent(origin(b))`, `count(b) = n`) affirmed part way, where it is still close to the allocation: every operation gives a new permission tied to the last one, and a check only reaches facts within a bounded amount of work from its goal (the `arena` of `examples/addresses.tersus`).
+- **A long run of operations on one block** may need what `free` needs affirmed part way (see How Validation Works, What a check sees).
 - **A function given a block by value says what it keeps** of it in its contract (its base, size, origin and start, and which slots it changed), as a loop that changes one says in its invariant. What the validator knows of the block it was given can be named with `define` (`define o = origin(b);`). A function that only reads a block is lent it (`&Block<T>`) and keeps every fact without saying so.
 - **Natively** an address is a 64-bit number, a slot is a value as an element of an array is (8 bytes a word), `alloc`, `resize` and `free` call the runtime's allocator, and `dropValue` and `dropRange` free what the values own. `eval` keeps a heap of its own, and reports a read of an empty slot, a write over a filled one, a use of memory that was freed, and a free of memory that still holds a value: a proved program does none of them, so this checks what a program assumes.
 
@@ -1560,7 +1589,7 @@ A difference `x - y` of two unknown terms is a term of its own, which the graph 
 
 ### Linear arithmetic
 
-What the graph cannot say goes to a second step that solves the arithmetic of the facts as a system of linear equations and inequalities (`Linear`, Fourier-Motzkin elimination with rounding for whole numbers): sums of two variables, multiples of a variable next to other variables, and division by a constant. The step is only run for a goal the graph did not decide, and only when some fact has a `+`, `-`, `*` or `/` that the graph could not take (otherwise the graph is already complete). The goal is entailed when the facts together with its negation have no whole-number solution.
+What the graph cannot say goes to a second step that solves the arithmetic of the check's facts (its slice, see How Validation Works) as a system of linear equations and inequalities (`Linear`, Fourier-Motzkin elimination with rounding for whole numbers): sums of two variables, multiples of a variable next to other variables, and division by a constant. The step is only run for a goal the graph did not decide, and only when some fact has a `+`, `-`, `*` or `/` that the graph could not take (otherwise the graph is already complete). The goal is entailed when the facts together with its negation have no whole-number solution.
 
 ```tersus
 fn f(a: Int, b: Int) -> Int [{ affirm a >= 0; affirm b >= 0; affirm a + b <= 10; }] [{ affirm return <= 10; affirm return >= a; }] {
