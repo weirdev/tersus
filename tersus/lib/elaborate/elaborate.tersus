@@ -5,10 +5,13 @@ import data::reader::reader { parseAstLines, readAstRecords, readRecord, readRec
 import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
+import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, definedFunctions, entryOf, implsEq, libIndex, libraryContexts, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
+import elaborate::resolve { Line, Pkg, moduleKey, noPackage, readLine, readPackage, wordIs };
+import elaborate::rewrite { Prepared, prepareModule };
 import elaborate::out { emit, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { CtorInfo, Defining, FnSig, Generic, ImplArgs, St, TE, Template, intText, noBoundedParts, notModelled, oneScope };
+import elaborate::state { CtorInfo, Defining, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope };
 import elaborate::traits { argListOf, boundsOf, emptyTemplate };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
@@ -29,28 +32,15 @@ fn newState() -> St ~ {
     };
 };
 
-struct Line { words: List<Token>, ok: Bool };
-impl Clone for Line { };
-
-fn readLine() -> Line ~ {
-    r = readRecord();
-    if !r.ok || r.pos = 0 { return Line { words: [], ok: false }; };
-    t = tokenize(&r.value);
-    if !t.ok { return Line { words: [], ok: false }; };
-    return Line { words: t.value, ok: true };
-};
-
-fn wordIs(line: &Line, i: Int, w: &String) -> Bool ~ {
-    if !line.ok || i < 0 || i >= size(line.words) { return false; };
-    tok = get(line.words, i);
-    return !tok.quoted && tok.text = clone(w);
-};
-
 // `data N` and then an AST block of N records
 fn readBlock() -> Parsed<AstProgram> ~ {
-    bad = Parsed<AstProgram> { value: AstProgram { stage: "", nodes: [], root: 0 }, pos: 0, ok: false };
     line = readLine();
-    if !wordIs(&line, 0, "data") || size(line.words) != 2 { return bad; };
+    return readBlockAfter(&line);
+};
+
+fn readBlockAfter(line: &Line) -> Parsed<AstProgram> ~ {
+    bad = Parsed<AstProgram> { value: AstProgram { stage: "", nodes: [], root: 0 }, pos: 0, ok: false };
+    if !wordIs(line, 0, "data") || size(line.words) != 2 { return bad; };
     n = intAt(&line.words, 1);
     if !n.ok || n.value < 2 { return bad; };
     return readAstRecords(n.value);
@@ -282,7 +272,8 @@ fn loadInterface(st: St, iface: &AstProgram, base: Int) -> St ~ {
 // A defining context (ElaborateRequest.rqDefinitions): its interfaces seeded into a checker of their own, kept with the
 // templates its first interface owns (seededTcState); bases says where each interface's records start
 fn definingContext(st: St, context: &List<AstProgram>, bases: &List<Int>) -> St ~ {
-    if size(context) = 0 || size(context) != size(bases) { return notModelled(st, "an empty template defining context"); };
+    if size(context) = 0 { return notModelled(st, "an empty template defining context"); };
+    if size(context) != size(bases) { return notModelled(st, "a template defining context whose interfaces were not all read"); };
     types = st.types;
     ctors = st.ctors;
     generics = st.generics;
@@ -328,12 +319,6 @@ fn definingContext(st: St, context: &List<AstProgram>, bases: &List<Int>) -> St 
 
 fn isRefCodec(t: &Type) -> Bool ~ { return t is Type::TRef || t is Type::TMutRef; };
 
-fn entryOf(nodes: &List<AstNode>, e: Int) -> AstEntry ~ {
-    node = nodeIn(nodes, e);
-    if node is AstNode::Entry { return clone((node as AstNode::Entry).value); };
-    return AstEntry::PairEntry { a: 0 - 1, b: 0 - 1 };
-};
-
 // The signatures of the functions defined at the top, known before any body is checked (gatheredSignatures)
 fn gatherSignatures(st: St, stmts: &List<Int>) -> St ~ {
     gathered = HashMap::new();
@@ -355,18 +340,214 @@ fn gatherSignatures(st: St, stmts: &List<Int>) -> St ~ {
     return St { fns: fns, ..st };
 };
 
-fn respond(st: &St, program: &AstProgram, iface: &AstProgram, hasInterface: Bool) -> Int ~ {
+fn respond(st: &St, program: &AstProgram, iface: &AstProgram, hasInterface: Bool, libraries: &List<String>) -> Int ~ {
     n = "tersus-elaborated 1\n".print();
     if st.status = 0 {
         n = n + "accepted\ndata".print() + printIntWord(size(program.nodes) + 2) + "\n".print();
         n = n + printAst(program);
-        if !hasInterface { return n + "interface none\n".print(); };
-        n = n + "interface\ndata".print() + printIntWord(size(iface.nodes) + 2) + "\n".print();
-        return n + printAst(iface);
+        if !hasInterface { n = n + "interface none\n".print(); } else {
+            n = n + "interface\ndata".print() + printIntWord(size(iface.nodes) + 2) + "\n".print();
+            n = n + printAst(iface);
+        };
+        if size(libraries) = 0 { return n; };
+        n = n + "libraries".print() + printIntWord(size(libraries));
+        for l in libraries { n = n + " ".print() + printQuoted(l); };
+        return n + "\n".print();
     };
     if st.status = 2 { return n + "unmodelled ".print() + printQuoted(&st.msg) + "\n".print(); };
     if st.status = 3 { return n + "interfaceRefused ".print() + printQuoted(&st.msg) + "\n".print(); };
+    if st.status = 4 { return n + "unresolved ".print() + printQuoted(&st.msg) + "\n".print(); };
     return n + "refused ".print() + printQuoted(&st.msg) + "\n".print();
+};
+
+fn noBases() -> HashMap<String, Int> ~ { return HashMap::new(); };
+
+fn unresolvedState(st: St, msg: String) -> St ~ {
+    if st.status != 0 { return st; };
+    return St { status: 4, msg: msg, ..st };
+};
+
+fn libraryProgram(libs: &List<Lib>, name: &String, seen: &HashMap<String, AstProgram>) -> Parsed<AstProgram> ~ {
+    bad = Parsed<AstProgram> { value: AstProgram { stage: "", nodes: [], root: 0 }, pos: 0, ok: false };
+    i = libIndex(libs, name);
+    if i < 0 || i >= size(libs) { return bad; };
+    lib = get(libs, i);
+    if HashMap::contains(seen, &lib.key) { return done(HashMap::lookup(seen, &lib.key, AstProgram { stage: "", nodes: [], root: 0 }), 0); };
+    parsed = parseAstLines(&lib.lines);
+    if !parsed.ok || parsed.value.stage != "interface" { return bad; };
+    return parsed;
+};
+
+fn libraryKey(libs: &List<Lib>, name: &String) -> String ~ {
+    i = libIndex(libs, name);
+    if i < 0 || i >= size(libs) { return ""; };
+    return clone(get(libs, i).key);
+};
+
+struct Program { nodes: List<AstNode>, roots: List<Int> };
+
+fn preparedProgram(program: Program, raw: List<Int>, pkg: &Pkg, key: &String) -> Prepared ~ {
+    if !pkg.present { return Prepared { nodes: program.nodes, stmts: raw, ok: true, msg: "" }; };
+    return prepareModule(program.nodes, pkg, key, &program.roots);
+};
+
+fn joinBlock(p: Program, block: &AstProgram) -> Program ~ {
+    base = size(p.nodes);
+    shift = [];
+    for i in 0..size(block.nodes) { shift = push(shift, base + i); };
+    all = p.nodes;
+    for node in &block.nodes { all = push(all, remapNode(clone(node), &shift)); };
+    return Program { nodes: all, roots: push(p.roots, base + block.root) };
+};
+
+struct Sections { ok: Bool, given: Bool, catalog: Catalog, pkg: Pkg, program: Program };
+
+fn readSections(key: &String) -> Sections ~ {
+    bad = Sections { ok: false, given: false, catalog: Catalog { ok: false, libs: [] }, pkg: noPackage(), program: Program { nodes: [], roots: [] } };
+    next = readLine();
+    catalog = Catalog { ok: true, libs: [] };
+    given = wordIs(&next, 0, "libraries");
+    if given {
+        catalog = readCatalog(&next);
+        if !catalog.ok { return bad; };
+        next = readLine();
+    };
+    pkg = noPackage();
+    if wordIs(&next, 0, "package") {
+        pkg = readPackage(&next);
+        if !pkg.ok { return bad; };
+        next = readLine();
+    };
+    fileCount = 1;
+    if pkg.present {
+        fileCount = 0;
+        for f in &pkg.files { if f.key = clone(key) { fileCount = fileCount + 1; }; };
+    };
+    if fileCount = 0 { return bad; };
+    program = Program { nodes: [], roots: [] };
+    for i in 0..fileCount {
+        if i > 0 { next = readLine(); };
+        block = readBlockAfter(&next);
+        if !block.ok || block.value.stage != "parsed" { return bad; };
+        program = joinBlock(program, &block.value);
+    };
+    end = readRecord();
+    if !end.ok || end.pos != 0 { return bad; };
+    return Sections { ok: true, given: given, catalog: catalog, pkg: pkg, program: program };
+};
+
+fn givenState(g: Given) -> St ~ { return g.st; };
+
+fn statementsOf(program: &Program) -> List<Int> ~ {
+    out = [];
+    for r in &program.roots { for s in listItems(&program.nodes, r) { out = push(out, s); }; };
+    return out;
+};
+
+// status 1: the request does not give a library whole
+struct Given { st: St, bases: HashMap<String, Int>, status: Int };
+
+fn giveLibraries(st: St, catalog: &Catalog, selected: &List<String>, stmts: &List<Int>, seen: &HashMap<String, AstProgram>, inPackage: Bool, key: &String) -> Given ~ {
+    if st.status != 0 { return Given { st: st, bases: noBases(), status: 0 }; };
+    replaced = ownEq(&st.nodes, stmts) >= 0;
+    names = [];
+    for w in seenLibraries(&catalog.libs, selected) { if !replaced || w != "eq" { names = push(names, clone(w)); }; };
+    views = [];
+    for w in &names {
+        lib = libraryProgram(&catalog.libs, w, seen);
+        if !lib.ok { return Given { st: st, bases: noBases(), status: 1 }; };
+        views = push(views, lib.value);
+    };
+    if replaced && !eqKept(&st.nodes, stmts, &views, &catalog.libs, seen) {
+        message = "Type error: a replacement Eq used with cached library implementations must have exactly the library Eq's parameters, method signatures and contracts";
+        if inPackage { message = catStrings(catStrings(catStrings("in module ", key), ": "), message); };
+        return Given { st: unresolvedState(st, message), bases: noBases(), status: 0 };
+    };
+    hide = ownDeclarations(&st.nodes, stmts, inPackage);
+    loaded = loadViews(st, &views, &names, &catalog.libs, &hide);
+    if !inPackage || !needsDropTrait(&loaded.st.nodes, stmts) || indexIn(selected, "prelude") >= 0 || libIndex(&catalog.libs, "prelude") < 0 { return loaded; };
+    prelude = libraryProgram(&catalog.libs, "prelude", seen);
+    if !prelude.ok { return Given { status: 1, ..loaded }; };
+    dropHide = Hide { declared: HashSet::new(), own: [], dropOnly: true };
+    dropOnly = viewOf(&prelude.value, &dropHide);
+    st = appendInterface(loaded.st, &dropOnly.program);
+    base = st.n;
+    st = loadInterface(st, &dropOnly.program, base);
+    return Given { st: st, bases: loaded.bases, status: 0 };
+};
+
+fn eqKept(nodes: &List<AstNode>, stmts: &List<Int>, views: &List<AstProgram>, libs: &List<Lib>, seen: &HashMap<String, AstProgram>) -> Bool ~ {
+    retains = false;
+    for v in views { retains = retains || implsEq(v); };
+    if !retains { return true; };
+    eq = libraryProgram(libs, "eq", seen);
+    return eq.ok && sameEq(nodes, ownEq(nodes, stmts), &eq.value);
+};
+
+fn ownDeclarations(nodes: &List<AstNode>, stmts: &List<Int>, inPackage: Bool) -> Hide ~ {
+    own = [];
+    if inPackage { own = topTypeNames(nodes, stmts); } else { own = declaredNames(nodes, stmts); };
+    for d in definedFunctions(nodes, stmts) { own = push(own, clone(d)); };
+    ownSet = HashSet::new();
+    for o in &own { ownSet = ownSet.insert(clone(o)); };
+    return Hide { declared: ownSet, own: own, dropOnly: false };
+};
+
+// (a library interface the module sees whole is read where a defining context that carries it again reads it; one it
+// sees without some of its names is another interface)
+fn loadViews(st: St, views: &List<AstProgram>, names: &List<String>, libs: &List<Lib>, hide: &Hide) -> Given ~ {
+    bases = noBases();
+    k = 0;
+    while k < size(views) && k < size(names) [{ affirm k >= 0; }] shrinks size(views) - k {
+        lib = get(views, k);
+        view = viewOf(&lib, hide);
+        if view.changed {
+            st = appendInterface(st, &view.program);
+            base = st.n;
+            st = loadInterface(st, &view.program, base);
+        } else {
+            libKey = libraryKey(libs, &get(names, k));
+            if !HashMap::contains(&bases, &libKey) {
+                st = appendInterface(st, &lib);
+                bases = bases.insert(clone(libKey), st.n);
+            };
+            st = loadInterface(st, &lib, HashMap::lookup(&bases, &libKey, 0));
+        };
+        k = k + 1;
+    };
+    return Given { st: st, bases: bases, status: 0 };
+};
+
+struct Contexts { ok: Bool, contexts: List<List<AstProgram>>, keys: List<List<String>> };
+
+fn withLibraryContexts(libs: &List<Lib>, selected: &List<String>, seen: &HashMap<String, AstProgram>, definitions: &List<List<AstProgram>>, definitionKeys: &List<List<String>>) -> Contexts ~ {
+    contexts = [];
+    keysOut = [];
+    heads = [];
+    for names in libraryContexts(libs, selected) {
+        context = [];
+        keys = [];
+        for n in &names {
+            lib = libraryProgram(libs, n, seen);
+            if !lib.ok { return Contexts { ok: false, contexts: [], keys: [] }; };
+            context = push(context, lib.value);
+            keys = push(keys, libraryKey(libs, n));
+        };
+        if size(keys) > 0 { heads = push(heads, clone(get(keys, 0))); };
+        contexts = push(contexts, context);
+        keysOut = push(keysOut, keys);
+    };
+    k = 0;
+    while k < size(definitions) && k < size(definitionKeys) [{ affirm k >= 0; }] shrinks size(definitions) - k {
+        keys = clone(get(definitionKeys, k));
+        if size(keys) > 0 && indexIn(&heads, &get(keys, 0)) < 0 {
+            heads = push(heads, clone(get(keys, 0)));
+            contexts = push(contexts, clone(get(definitions, k)));
+            keysOut = push(keysOut, keys);
+        };
+        k = k + 1;
+    };
+    return Contexts { ok: true, contexts: contexts, keys: keysOut };
 };
 
 fn printIntWord(n: Int) -> Int ~ { return " ".print() + intText(n).print(); };
@@ -431,16 +612,36 @@ for i in 0..definitionCount.value {
     definitions = push(definitions, context);
     definitionKeys = push(definitionKeys, keys);
 };
-programBlock = readBlock();
-if !programBlock.ok || programBlock.value.stage != "parsed" { return malformed(); };
-end = readRecord();
-if !end.ok || end.pos != 0 { return malformed(); };
-parsedRoot = programBlock.value.root;
-st = St { nodes: programBlock.value.nodes, ..st };
+pkgName = clone(get(moduleLine.words, 1).text);
+modu = "";
+if hasModule { modu = clone(get(moduleLine.words, 2).text); };
+modKey = moduleKey(&pkgName, &modu, hasModule);
+sections = readSections(&modKey);
+if !sections.ok { return malformed(); };
+hasCatalog = sections.given;
+program = sections.program;
+catalog = sections.catalog;
+pkg = sections.pkg;
+raw = statementsOf(&program);
+probe = Probe { declared: [], mentioned: HashSet::new(), literal: false };
+if hasCatalog { probe = probeModule(&program.nodes, &raw, &ifaces); };
+prepared = preparedProgram(program, raw, &pkg, &modKey);
+stmts = prepared.stmts;
+st = St { nodes: prepared.nodes, ..st };
+if !prepared.ok { st = unresolvedState(st, prepared.msg); };
 st = loadBuiltins(st, &table.value);
+selected = [];
+if hasCatalog && st.status = 0 { selected = librariesFor(&probe); };
+given = giveLibraries(st, &catalog, &selected, &stmts, &seenBlocks, pkg.present, &modKey);
+if given.status = 1 { return malformed(); };
+bases = clone(given.bases);
+st = givenState(given);
+contexts = withLibraryContexts(&catalog.libs, &selected, &seenBlocks, &definitions, &definitionKeys);
+if !contexts.ok { return malformed(); };
+definitions = contexts.contexts;
+definitionKeys = contexts.keys;
 // (an interface a defining context carries again is read where its records already are, so that its templates are
 // those the module imported)
-bases = HashMap::new();
 k = 0;
 while k < size(ifaces) && k < size(ifaceKeys) [{ affirm k >= 0; }] shrinks size(ifaces) - k {
     st = appendInterface(st, &get(ifaces, k));
@@ -470,15 +671,11 @@ predeclaring = wordIs(&predeclare, 1, "true");
 viewing = wordIs(&library, 1, "true");
 extracting = !wordIs(&extract, 1, "none");
 if (!predeclaring && !wordIs(&predeclare, 1, "false")) || (!viewing && !wordIs(&library, 1, "false")) || (extracting && !wordIs(&extract, 1, "module") && !wordIs(&extract, 1, "lib")) { return malformed(); };
-pkg = clone(get(moduleLine.words, 1).text);
-modu = "";
-if hasModule { modu = clone(get(moduleLine.words, 2).text); };
 if viewing {
     for o in clone(st.ownerViews) {
         if !HashMap::contains(&st.types, &o) { st = St { types: st.types.insert(clone(o), push([], clone(o))), ..st }; };
     };
 };
-stmts = listItems(&st.nodes, parsedRoot);
 if st.status = 0 {
     st = gatherSignatures(st, &stmts);
     if predeclaring {
@@ -498,9 +695,9 @@ if st.status = 0 {
         out = reorderArena(&st.nodes, st.nid, "elaborated");
         if extracting {
             elaborated = listItems(&st.nodes, statementsNode);
-            st = extractInterface(st, wordIs(&extract, 1, "lib"), pkg, modu, hasModule, &stmts, &elaborated);
+            st = extractInterface(st, wordIs(&extract, 1, "lib"), pkgName, modu, hasModule, &stmts, &elaborated);
             if st.status = 0 { iface = reorderArena(&st.nodes, st.nid, "interface"); };
         };
     };
 };
-respond(&st, &out, &iface, extracting);
+respond(&st, &out, &iface, extracting, &selected);

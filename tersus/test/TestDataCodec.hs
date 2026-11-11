@@ -2,8 +2,6 @@ module TestDataCodec (testDataCodec) where
 
 import Data.List (sort)
 import qualified Modules as Mod
-import ParsedFile (fileBody)
-import ModuleResolve (canonicalForFile, rewriteFileReferences)
 import qualified PackageCompile
 import PreludeSource (toolPackageFiles, parserPackageFiles)
 import qualified TersusParser
@@ -34,11 +32,14 @@ sharing entry = case Mod.loadFromEntry (Mod.resolverFromFiles toolPackageFiles) 
     Right (Mod.PackageResult pkg) ->
         let codecs = [file | modu <- Mod.packageModules pkg, Mod.loadedModuleId modu == Mod.ModuleId "data" (Just "codec"), file <- Mod.loadedModuleFiles modu]
             imported = [ri | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu, ri <- Mod.loadedImports file, Mod.resolvedTargetModule ri == Mod.ModuleId "data" (Just "codec")]
-            canonical = [canonicalForFile pkg file name | file <- codecs, name <- Mod.loadedDeclNames file, name `elem` ["Token", "Parsed", "Size", "Type"]]
-         in if length codecs /= 1 || null imported || sort canonical /= sort ["data$codec$codec$" ++ name | name <- ["Token", "Parsed", "Size", "Type"]]
+            declared = [name | file <- codecs, name <- Mod.loadedDeclNames file, name `elem` shared]
+            through = "data$codec$codec" : ["data$codec$codec$" ++ name | name <- shared]
+         in if length codecs /= 1 || null imported || any ((`notElem` through) . Mod.resolvedCanonical) imported || sort declared /= sort shared
                 then Just "consumer does not use one canonical shared codec"
-                else firstFailure [either Just (const Nothing) (rewriteFileReferences pkg file (fileBody (Mod.loadedParsed file))) | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
+                else Nothing
     Right _ -> Just "codec consumer is standalone"
+  where
+    shared = ["Token", "Parsed", "Size", "Type"]
 
 codecRun :: String -> (Outcome -> TestResult) -> IO TestResult
 codecRun source check = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles (toolPackageFiles ++ [("lib/codec_test/package.tersus", ""), ("lib/codec_test/main.tersus", source)])) "lib/codec_test/main.tersus" of

@@ -299,11 +299,12 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         Right parsed -> case Parse.parseFileWith (lpDecls parsed) source of
             Left e -> Error (show e)
             Right (Parse.ParsedFile _ stmts, _) ->
-                case sourceElaborator (Request (Modules.ModuleId "fixture" Nothing) True False LibInterfaceOf ifaces [] stmts) of
-                    Accepted elaborated (Just iface) -> lowerModuleWith ifaces elaborated `bindResult` \p -> Ok (iface, p)
-                    Accepted _ Nothing -> Error "the elaborator gave no interface"
+                case sourceElaborator (Request (Modules.ModuleId "fixture" Nothing) True False LibInterfaceOf ifaces [] [] Nothing [stmts]) of
+                    Accepted elaborated (Just iface) _ -> lowerModuleWith ifaces elaborated `bindResult` \p -> Ok (iface, p)
+                    Accepted _ Nothing _ -> Error "the elaborator gave no interface"
                     Refused e -> Error e
                     RefusedInterface e -> Error e
+                    Unresolved e -> Error e
                     NotModelled what -> Error ("not modelled: " ++ what)
     importedLoan source shouldFail = case fixtureModule "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); };" of
         Error e -> Just e

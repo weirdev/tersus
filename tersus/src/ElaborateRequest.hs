@@ -4,6 +4,10 @@ module ElaborateRequest
     ( Elaborator
     , Extraction (..)
     , Request (..)
+    , Library (..)
+    , Package (..)
+    , PackageFile (..)
+    , FileImport (..)
     , Response (..)
     , writeRequest
     , readRequest
@@ -24,7 +28,7 @@ import BuiltinTable (builtinTableLines)
 import DataCodec (Token (..), quote, strictTokenize)
 import Interface (ModuleInterface (..))
 import InterfaceData (readInterfaceBytes, readInterfaceLines, writeInterfaceLines)
-import Modules (ModuleId (..))
+import Modules (Declaration (..), DeclarationKind (..), ImportLevel (..), ModuleId (..))
 import Syntax (Elaborated (..), Statement)
 import Utils
 
@@ -35,7 +39,9 @@ data Extraction = NoInterface | ModuleInterfaceOf | LibInterfaceOf
 
 -- The module, whether it predeclares its own types (a package module does), whether it is a module of the
 -- compiler libraries (which see a generic struct's constructor as the struct it builds), the interface to
--- give back, caller-visible interfaces, checked defining dependencies, and statements as read.
+-- give back, the interfaces of the modules it imports, checked defining dependencies, the compiler libraries it
+-- may be given (the elaborator selects among them), the package its names are resolved in, and the statements
+-- as read: one list for each of the module's files in the package's order, or one for a program.
 data Request = Request
     { rqModule :: ModuleId
     , rqPredeclare :: Bool
@@ -43,16 +49,54 @@ data Request = Request
     , rqExtraction :: Extraction
     , rqInterfaces :: [ModuleInterface]
     , rqDefinitions :: [[ModuleInterface]]
-    , rqStatements :: [Statement]
+    , rqLibraries :: [Library]
+    , rqPackage :: Maybe Package
+    , rqStatements :: [[Statement]]
+    }
+    deriving (Show, Eq)
+
+data Library = Library
+    { libraryName :: String
+    , libraryImports :: [String]
+    , libraryInterface :: ModuleInterface
+    }
+    deriving (Show, Eq)
+
+data Package = Package
+    { packageEntry :: ModuleId
+    , packageFiles :: [PackageFile]
+    }
+    deriving (Show, Eq)
+
+data PackageFile = PackageFile
+    { fileModule :: ModuleId
+    , fileStem :: String
+    , fileName :: String
+    , fileDeclarations :: [Declaration]
+    , fileImports :: [FileImport]
+    }
+    deriving (Show, Eq)
+
+-- A resolved import (Modules.ResolvedImport) as resolution reads it
+data FileImport = FileImport
+    { importLevel :: ImportLevel
+    , importTarget :: ModuleId
+    , importFile :: Maybe String
+    , importSymbol :: Maybe String
+    , importAs :: Maybe String
+    , importOnly :: Maybe [String]
     }
     deriving (Show, Eq)
 
 data Response
-    = Accepted Elaborated (Maybe ModuleInterface)
+    = -- with the compiler libraries the elaborator selected for the module
+      Accepted Elaborated (Maybe ModuleInterface) [String]
     | -- the module does not check
       Refused String
     | -- it checks, but its interface cannot be given (Interface.extractInterface)
       RefusedInterface String
+    | -- its names do not resolve, or the libraries it calls for cannot be given it; the message is whole
+      Unresolved String
     | -- the elaborator does not handle the program yet, which is not a verdict on it
       NotModelled String
     deriving (Show)
@@ -61,10 +105,12 @@ type Elaborator = Request -> Response
 
 writeRequest :: Request -> Result String String
 writeRequest rq =
+    syntax `bindResult` \() ->
     builtinTableLines `bindResult` \builtins ->
     mapAll linesOf (rqInterfaces rq) `bindResult` \ifaces ->
         mapAll writeDefinition (rqDefinitions rq) `bindResult` \definitions ->
-        writeParsedLines (rqStatements rq) `bindResult` \ast ->
+        mapAll writeLibrary (rqLibraries rq) `bindResult` \libraries ->
+        mapAll writeParsedLines (rqStatements rq) `bindResult` \asts ->
             Ok $
                 unlines
                     ( [ requestHeader
@@ -79,17 +125,55 @@ writeRequest rq =
                         ++ concatMap block ifaces
                         ++ ["definitions " ++ show (length definitions)]
                         ++ concat definitions
-                        ++ block ast
+                        ++ (if null libraries then [] else ("libraries " ++ show (length libraries)) : concat libraries)
+                        ++ maybe [] packageLines (rqPackage rq)
+                        ++ concatMap block asts
                     )
   where
+    syntax
+        | null (rqStatements rq) || length (rqStatements rq) /= syntaxBlocks (rqModule rq) (rqPackage rq) = Error "ElaborateRequest: the syntax is not one block per file of the module"
+        | otherwise = Ok ()
     writeDefinition [] = Error "ElaborateRequest: empty defining context"
     writeDefinition context = mapAll linesOf context `bindResult` \texts -> Ok (("definition " ++ show (length texts)) : concatMap block texts)
+    writeLibrary (Library name imports iface) = linesOf iface `bindResult` \text -> Ok (unwords (["library", quote name, show (length imports)] ++ map quote imports) : block text)
     -- (a defining context repeats the interfaces of the modules it depends on, so each is written once)
-    written = Map.fromList [(ifModule i, (i, writeInterfaceLines i)) | i <- rqInterfaces rq ++ concat (rqDefinitions rq)]
+    written = Map.fromList [(ifModule i, (i, writeInterfaceLines i)) | i <- rqInterfaces rq ++ concat (rqDefinitions rq) ++ map libraryInterface (rqLibraries rq)]
     linesOf iface = case Map.lookup (ifModule iface) written of
         Just (known, ls) | known == iface -> ls
         _ -> writeInterfaceLines iface
     ModuleId pkg modu = rqModule rq
+
+syntaxBlocks :: ModuleId -> Maybe Package -> Int
+syntaxBlocks modu = maybe 1 (\package -> length [f | f <- packageFiles package, fileModule f == modu])
+
+packageLines :: Package -> [String]
+packageLines (Package entry files) = unwords (["package"] ++ moduleWords entry ++ [show (length files)]) : concatMap fileLines files
+  where
+    fileLines (PackageFile modu stem name decls imports) =
+        unwords (["file"] ++ moduleWords modu ++ [quote stem, quote name, show (length decls), show (length imports)])
+            : map declLine decls ++ map importLine imports
+    declLine (Declaration kind name functions) = unwords (["decl", kindWord kind, quote name, show (length functions)] ++ map quote functions)
+    importLine (FileImport level target file symbol alias names) =
+        unwords (["import", levelWord level] ++ moduleWords target ++ map optional [file, symbol, alias] ++ maybe ["none"] (\ns -> show (length ns) : map quote ns) names)
+    optional = maybe "none" quote
+
+moduleWords :: ModuleId -> [String]
+moduleWords (ModuleId pkg modu) = [quote pkg, maybe "none" quote modu]
+
+kindWord :: DeclarationKind -> String
+kindWord kind = case kind of
+    DeclaresType -> "type"
+    DeclaresVariant -> "variant"
+    DeclaresTrait -> "trait"
+    DeclaresFunction -> "function"
+    DeclaresAxiom -> "axiom"
+    DeclaresProof -> "proof"
+
+levelWord :: ImportLevel -> String
+levelWord level = case level of
+    LevelModule -> "module"
+    LevelFile -> "file"
+    LevelSymbol -> "symbol"
 
 readRequest :: String -> Result Request String
 readRequest text = case lines text of
@@ -109,14 +193,15 @@ readRequest text = case lines text of
         countOf countText `bindResult` \count ->
         blocks count rest `bindResult` \(ifaceTexts, rest') ->
         mapAll readInterfaceLines ifaceTexts `bindResult` \ifaces ->
-        definitionBlocks rest' `bindResult` \(definitionTexts, syntax) ->
+        definitionBlocks rest' `bindResult` \(definitionTexts, afterDefinitions) ->
         mapAll (mapAll readInterfaceLines) definitionTexts `bindResult` \definitions ->
-        blocks 1 syntax `bindResult` \(astTexts, rest'') ->
+        libraryBlocks afterDefinitions `bindResult` \(libraries, afterLibraries) ->
+        packageOf afterLibraries `bindResult` \(package, syntax) ->
+        blocks (syntaxBlocks modu package) syntax `bindResult` \(astTexts, rest'') ->
             if not (null rest'')
                 then Error "ElaborateRequest: records after the module's syntax"
-                else case astTexts of
-                    [ast] -> readParsedLines ast `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions stmts)
-                    _ -> Error "ElaborateRequest: no syntax"
+                else if null astTexts then Error "ElaborateRequest: no syntax"
+                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions libraries package stmts)
     _ -> Error "ElaborateRequest: not an elaboration request"
   where
     definitionBlocks (line : rest) = wordAfter "definitions" line `bindResult` countOf `bindResult` \count -> contexts count rest
@@ -130,6 +215,53 @@ readRequest text = case lines text of
         [Word "module", Str pkg, Word "none"] -> Ok (ModuleId pkg Nothing)
         [Word "module", Str pkg, Str modu] -> Ok (ModuleId pkg (Just modu))
         _ -> Error "ElaborateRequest: malformed module"
+    libraryBlocks (line : rest) | take 10 line == "libraries " = wordAfter "libraries" line `bindResult` countOf `bindResult` \count ->
+        if count == 0 then Error "ElaborateRequest: an empty library catalog is written as none" else libraryEntries count rest
+    libraryBlocks ls = Ok ([], ls)
+    libraryEntries 0 rest = Ok ([], rest)
+    libraryEntries n (line : rest) = strictTokenize line `bindResult` \ts -> case ts of
+        Word "library" : Str name : Word count : imports
+            | Ok k <- countOf count, length imports == k, Just names <- mapM strOf imports ->
+                blocks 1 rest `bindResult` \(texts, remaining) -> case texts of
+                    [text] -> readInterfaceLines text `bindResult` \iface ->
+                        libraryEntries (n - 1) remaining `bindResult` \(more, after) -> Ok (Library name names iface : more, after)
+                    _ -> Error "ElaborateRequest: malformed library"
+        _ -> Error "ElaborateRequest: malformed library"
+    libraryEntries _ [] = Error "ElaborateRequest: missing library"
+    packageOf (line : rest) | take 8 line == "package " = strictTokenize line `bindResult` \ts -> case ts of
+        [Word "package", p, m, Word count] | Ok entry <- moduleIdOf p m, Ok n <- countOf count ->
+            packageFilesOf n rest `bindResult` \(files, after) -> Ok (Just (Package entry files), after)
+        _ -> Error "ElaborateRequest: malformed package"
+    packageOf ls = Ok (Nothing, ls)
+    packageFilesOf 0 rest = Ok ([], rest)
+    packageFilesOf n (line : rest) = strictTokenize line `bindResult` \ts -> case ts of
+        [Word "file", p, m, Str stem, Str name, Word declCount, Word importCount]
+            | Ok modu <- moduleIdOf p m, Ok d <- countOf declCount, Ok i <- countOf importCount, length rest >= d + i ->
+                mapAll declOf (take d rest) `bindResult` \decls ->
+                mapAll importOf (take i (drop d rest)) `bindResult` \imports ->
+                packageFilesOf (n - 1) (drop (d + i) rest) `bindResult` \(more, after) -> Ok (PackageFile modu stem name decls imports : more, after)
+        _ -> Error "ElaborateRequest: malformed package file"
+    packageFilesOf _ [] = Error "ElaborateRequest: missing package file"
+    declOf line = strictTokenize line `bindResult` \ts -> case ts of
+        Word "decl" : Word kind : Str name : Word count : functions
+            | Just k <- lookup kind [(kindWord d, d) | d <- [minBound ..]], Ok n <- countOf count, length functions == n, Just fs <- mapM strOf functions -> Ok (Declaration k name fs)
+        _ -> Error "ElaborateRequest: malformed declaration"
+    importOf line = strictTokenize line `bindResult` \ts -> case ts of
+        Word "import" : Word level : p : m : file : symbol : alias : names
+            | Just l <- lookup level [(levelWord v, v) | v <- [minBound ..]], Ok target <- moduleIdOf p m, Just f <- optionalOf file, Just s <- optionalOf symbol, Just a <- optionalOf alias, Just ns <- namesOf names ->
+                Ok (FileImport l target f s a ns)
+        _ -> Error "ElaborateRequest: malformed import"
+    moduleIdOf (Str pkg) (Word "none") = Ok (ModuleId pkg Nothing)
+    moduleIdOf (Str pkg) (Str modu) = Ok (ModuleId pkg (Just modu))
+    moduleIdOf _ _ = Error "ElaborateRequest: malformed module"
+    strOf (Str text) = Just text
+    strOf _ = Nothing
+    optionalOf (Word "none") = Just Nothing
+    optionalOf (Str text) = Just (Just text)
+    optionalOf _ = Nothing
+    namesOf [Word "none"] = Just Nothing
+    namesOf (Word count : names) | Ok n <- countOf count, length names == n = Just <$> mapM strOf names
+    namesOf _ = Nothing
     boolOf w = case w of
         "true" -> Ok True
         "false" -> Ok False
@@ -140,12 +272,13 @@ readRequest text = case lines text of
 
 writeResponse :: Response -> Result String String
 writeResponse response = case response of
-    Accepted elaborated iface ->
+    Accepted elaborated iface libraries ->
         writeElaboratedLines elaborated `bindResult` \ast ->
             maybe (Ok Nothing) (mapResult Just . writeInterfaceLines) iface `bindResult` \ifaceLines ->
-                Ok (unlines ([responseHeader, "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines))
+                Ok (unlines ([responseHeader, "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines ++ librariesLine libraries))
     Refused message -> Ok (unlines [responseHeader, "refused " ++ quote message])
     RefusedInterface message -> Ok (unlines [responseHeader, "interfaceRefused " ++ quote message])
+    Unresolved message -> Ok (unlines [responseHeader, "unresolved " ++ quote message])
     NotModelled what -> Ok (unlines [responseHeader, "unmodelled " ++ quote what])
 
 readResponse :: String -> Result Response String
@@ -162,24 +295,41 @@ readResponseWith text elaborated interface ls = case map text (take 3 ls) of
     ["tersus-elaborated 1", line] -> strictTokenize line `bindResult` \ts -> case ts of
         [Word "refused", Str message] -> Ok (Refused message)
         [Word "interfaceRefused", Str message] -> Ok (RefusedInterface message)
+        [Word "unresolved", Str message] -> Ok (Unresolved message)
         [Word "unmodelled", Str what] -> Ok (NotModelled what)
         _ -> Error "ElaborateRequest: malformed response"
     "tersus-elaborated 1" : "accepted" : _ ->
-        blocksWith text 1 (drop 2 ls) `bindResult` \(astTexts, rest') -> case (astTexts, map text (take 2 rest')) of
-            ([ast], ["interface none"]) -> elaborated ast `bindResult` \e -> Ok (Accepted e Nothing)
-            ([ast], "interface" : _) ->
-                blocksWith text 1 (drop 1 rest') `bindResult` \(ifaceTexts, rest'') -> case (ifaceTexts, rest'') of
-                    ([ifaceText], []) -> elaborated ast `bindResult` \e -> interface ifaceText `bindResult` \i -> Ok (Accepted e (Just i))
+        blocksWith text 1 (drop 2 ls) `bindResult` \(astTexts, rest') -> case (astTexts, map text (take 1 rest')) of
+            ([ast], ["interface none"]) -> librariesOf (map text (drop 1 rest')) `bindResult` \libraries -> elaborated ast `bindResult` \e -> Ok (Accepted e Nothing libraries)
+            ([ast], ["interface"]) ->
+                blocksWith text 1 (drop 1 rest') `bindResult` \(ifaceTexts, rest'') -> case ifaceTexts of
+                    [ifaceText] -> librariesOf (map text rest'') `bindResult` \libraries -> elaborated ast `bindResult` \e -> interface ifaceText `bindResult` \i -> Ok (Accepted e (Just i) libraries)
                     _ -> Error "ElaborateRequest: malformed interface"
             _ -> Error "ElaborateRequest: malformed response"
     _ -> Error "ElaborateRequest: not an elaboration response"
 
+-- `libraries N "NAME"...`, which ends an accepted response when the elaborator selected compiler libraries
+librariesLine :: [String] -> [String]
+librariesLine [] = []
+librariesLine names = [unwords (["libraries", show (length names)] ++ map quote names)]
+
+librariesOf :: [String] -> Result [String] String
+librariesOf [] = Ok []
+librariesOf [line] = strictTokenize line `bindResult` \ts -> case ts of
+    Word "libraries" : Word count : names | Ok n <- countOf count, n > 0, length names == n, Just ns <- mapM str names -> Ok ns
+    _ -> Error "ElaborateRequest: malformed libraries"
+  where
+    str (Str t) = Just t
+    str _ = Nothing
+librariesOf _ = Error "ElaborateRequest: malformed libraries"
+
 -- What a single-file program needs of a response: the elaboration, or why there is none
 acceptedElaboration :: Response -> Result Elaborated String
 acceptedElaboration response = case response of
-    Accepted e _ -> Ok e
+    Accepted e _ _ -> Ok e
     Refused message -> Error message
     RefusedInterface message -> Error message
+    Unresolved message -> Error message
     NotModelled what -> Error ("the elaborator does not handle this program yet: " ++ what)
 
 boolWord :: Bool -> String

@@ -19,9 +19,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   is no Haskell checker. The CLI entry point is `tersus/app/Main.hs` (logic in
   `src/Cli.hs`).
   Packages and modules are in `src/Modules.hs` (package discovery, the module
-  graph and the loader, canonical names), `src/Interface.hs` (what a checked
-  module exposes to its importers), `src/ModuleResolve.hs` (rewriting a file's
-  references to canonical names through its imports), `src/LibPackage.hs` (the
+  graph and the loader), `src/Interface.hs` (what a checked module exposes to
+  its importers), `src/LibPackage.hs` (the
   compiler libraries compiled once as a synthetic `tersuslib` package, one
   module per lib file, from the `PreludeSource` texts) and `src/Link.hs`
   (merging the lowered modules into one program and pruning what the entry
@@ -29,15 +28,16 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   for one module (the compiler elaborates every program and module through it,
   `AST_DATA.md`), and `src/ElaboratorTool.hs` the executables that answer it
   (`bootstrapElaborator`, the seed F0, for the compiler's own code;
-  `sourceElaborator` for the programs it is given); `src/Pipeline.hs` compiles each module with the
-  implicit libraries its own text calls for (`Compile.librariesFor`, consumed
-  via synthesised implicit imports on both the single-file and package paths,
-  the package path in `src/PackageCompile.hs`) and links the package.
+  `sourceElaborator` for the programs it is given); `src/Pipeline.hs` compiles each module, sent as it was read with its package's
+  files and the compiler libraries for the elaborator to resolve its names and
+  select its libraries (the package path in `src/PackageCompile.hs`), and links
+  the package with the libraries the elaborator selected.
 - `tersus/lib/` (Tersus sources the Haskell implementation depends on). The
   first seven are the compiler libraries: each is compiled as one module of the
   synthetic `tersuslib` package (`src/LibPackage.hs`) from its `PreludeSource`
-  text, selected per module by `Compile.librariesFor` and consumed via
-  synthesised implicit imports on both the single-file and package paths:
+  text, selected per module by the elaborator by the rule of
+  `Compile.librariesFor` (which also picks the declarations a single file is
+  parsed with) on both the single-file and package paths:
   - `types.tersus`: the structs `List` and `Box` that a list and a Box are
     values of, imported for every program that does not declare `List` or
     `Box`. Embedded by `PreludeSource`.
@@ -83,6 +83,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   - `elaborate/`: the elaborator written in Tersus (`REPLACING_HASKELL.md`),
     the compiler's type checker: it answers an elaboration request
     (`AST_DATA.md`) for a program or a module, with the module's interface.
+    It also resolves a package module's names to canonical names
+    (`resolve.tersus`, `rewrite.tersus`) and selects the compiler libraries a
+    program or module is given (`libraries.tersus`).
     Its declarative sibling files are one root module with `elaborate.tersus`
     as the entry. `PreludeSource.elaboratePackageFiles` embeds it. The compiler
     runs the pinned seed F0 built from it (`ElaboratorTool`), or stage 1 built

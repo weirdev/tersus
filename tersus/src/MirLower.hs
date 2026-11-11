@@ -55,9 +55,9 @@ seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
         , lsGlobals = Map.fromList [(name, (mirName, functionType sizes types ptys rty)) | (name, mirName, fn) <- stubList, let Signature ptys rty sizes types _ _ = fnSignature fn]
         , lsGenerics = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map ifGenerics ifaces))
         , lsInvariants = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map ifInvariants ifaces))
-        , lsCopies = Set.unions (map ifCopies ifaces)
-        , lsLinear = Set.unions (map ifLinear ifaces)
-        , lsDrops = Set.unions (map ifDrops ifaces)
+        , lsCopies = Set.filter imported (Set.unions (map ifCopies ifaces))
+        , lsLinear = Set.filter imported (Set.unions (map ifLinear ifaces))
+        , lsDrops = Set.filter imported (Set.unions (map ifDrops ifaces))
         , lsStubs = Set.fromList [mirName | (_, mirName, _) <- stubList]
         }
   where
@@ -71,7 +71,15 @@ seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
         EnumDef name variants -> name : map fst variants
         TraitDef name _ _ -> [name]
         _ -> []
-    ownFunctions = Set.fromList [name | Assign name (Val VFunct{}) <- elaborated]
+    -- (the module's own declarations win over an imported library's of the same name, which the elaborator did not
+    -- give it either)
+    imported name = baseNameOf name `Set.notMember` ownNames
+    ownFunctions = Set.fromList (concatMap defined elaborated)
+    defined stmt = case stmt of
+        Assign name (Val VFunct{}) -> [name]
+        ImplDef _ _ _ _ _ body -> concatMap defined body
+        BoundedDef _ inner -> defined inner
+        _ -> []
     stubList = [(name, mirNameOf iface name, fn) | iface <- ifaces, (name, fn) <- Map.toList (ifFunctions iface), name `Set.notMember` ownFunctions]
     mirNameOf iface name
         | name `Set.member` ifExterns iface = "extern " ++ name

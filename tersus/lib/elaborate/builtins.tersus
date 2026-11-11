@@ -175,7 +175,7 @@ fn substitute(st: St, t: Int, sizeNames: &List<String>, sizes: &List<Int>, names
     return addTy(st, Ty { args: args, ..x });
 };
 
-// The type of a builtin with a signature scheme, its type variables made new unknowns (TypeCheckCore.builtinType)
+// The type of a builtin with a signature scheme, its type variables made new unknowns
 fn schemeType(st: St, scheme: Int) -> St ~ {
     k = kindOf(st, scheme);
     if k = 0 - 2 { return fail(st, nameOf(st, scheme)); };
