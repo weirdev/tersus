@@ -655,8 +655,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         };
     };
     if !prepared.ok { st = unresolvedState(st, prepared.msg); };
-    rawStmts = stmts;
-    st = localScopes(st, &rawStmts);
+    st = localScopes(st, &stmts);
     scopedStmts = listItems(&st.nodes, st.nid);
     st = St { localNames: HashMap::new(), ..st };
     st = loadBuiltins(st, table);
@@ -698,14 +697,14 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     };
     if st.status = 0 {
         if st.wireVersion {
-            st = wireBindDeclarations(st, &rawStmts);
-            st = wireStorageDeclarations(st, &rawStmts);
+            st = wireBindDeclarations(st, &stmts);
+            st = wireStorageDeclarations(st, &stmts);
             st = wireValidateBindings(st);
         };
-        st = gatherSignatures(st, &rawStmts);
+        st = gatherSignatures(st, &stmts);
         if unit.predeclaring {
-            st = predeclareOwn(st, &rawStmts);
-            st = checkOwnFinite(st, &rawStmts);
+            st = predeclareOwn(st, &stmts);
+            st = checkOwnFinite(st, &stmts);
         };
         if st.status = 0 { st = checkStatements(st, true, &scopedStmts); };
     };
