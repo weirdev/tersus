@@ -860,6 +860,22 @@ testModuleLinkRoot =
         , ("app/main.tersus", rootSource)
         ]
 
+-- A function called before its definition is found at the top even when another function's body has a local of its name
+testModuleForwardCall :: Test
+testModuleForwardCall =
+    testCaseSeq
+        "module-forward-call"
+        [ expectRuns (files "dn") "app/main.tersus" "4"
+        , expectRuns (files "other") "app/main.tersus" "4"
+        ]
+  where
+    files local =
+        [ ("app/package.tersus", "")
+        , ("app/lib.tersus", "fn twice(x: Int) -> Int [{ }] [{ }] { return dn(x) + dn(x); }; fn dn(x: Int) -> Int [{ }] [{ }] { return x; };")
+        , ("app/other.tersus", "fn f() -> Int [{ }] [{ }] { " ++ local ++ " = 2; return " ++ local ++ "; };")
+        , ("app/main.tersus", "import app::lib { twice }; import app::other { f }; return twice(1) + f();")
+        ]
+
 testModuleLinkExtern :: Test
 testModuleLinkExtern =
     testCaseSeq
@@ -2535,7 +2551,7 @@ phase2RoundTrip = case phase2Load phase2Private of
         Ok decoded -> testAssertEq decoded (compiledInterface modu)
 
 testModules :: Test
-testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testSnapshotToolFailure, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
+testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testSnapshotToolFailure, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleForwardCall, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
 
 -- The names a file declares at its top: types, variants, traits, functions (in impls too), axioms and proofs
 declarationNames :: [Statement] -> [Name]

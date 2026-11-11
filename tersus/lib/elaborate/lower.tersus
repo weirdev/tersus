@@ -781,8 +781,13 @@ fn sortLoops(loops: List<LoopRec>) -> List<LoopRec> ~ {
 // The variables that statements assign (or bind with let), other than the names of the functions they define
 fn assignedNames(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
     assigned = ls.assigned;
-    for name in statementNamesAssigned(src, stmts, true, []) { assigned = assigned.insert(name); };
-    return LowSt { assigned: assigned, ..ls };
+    for name in statementNamesAssigned(src, stmts, true, []) { assigned = assigned.insert(clone(name)); };
+    ls = LowSt { assigned: assigned, ..ls };
+    // (a local of a function's body is not the top's variable: it does not stop a call before the definition finding the
+    // function at the top)
+    top = ls.topAssigned;
+    for name in statementNamesAssigned(src, stmts, false, []) { top = top.insert(clone(name)); };
+    return LowSt { topAssigned: top, ..ls };
 };
 
 // The variables statements assign or bind, also in their expressions' blocks, other than the names of the functions
@@ -880,7 +885,7 @@ fn registerOne(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
     var = nameText(src, (stmt as AstStatement::Assign).n);
     parts = fnParts(src, f);
     sizes = namesOf(src, signatureOf(src, parts.sig).ss);
-    assigned = HashSet::contains(&ls.assigned, &var) && size(sizes) = 0;
+    assigned = HashSet::contains(&ls.topAssigned, &var) && size(sizes) = 0;
     base = clone(var);
     if HashSet::contains(&ls.externs, &var) { base = lwCat("extern ", &var); };
     ls = uniqueName(ls, base);

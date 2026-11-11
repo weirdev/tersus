@@ -124,7 +124,7 @@ struct LowSt {
     elab: List<Int>, nextElab: Int,
     stmts: List<Stmt>,
     types: HashMap<String, TDecl>, functions: HashMap<String, LFn>, fnKeys: HashSet<String>, names: HashSet<String>,
-    globals: HashMap<String, String>, globalsVersion: Int, assigned: HashSet<String>,
+    globals: HashMap<String, String>, globalsVersion: Int, assigned: HashSet<String>, topAssigned: HashSet<String>,
     generics: HashMap<String, GenericRec>, invariants: HashMap<String, Int>,
     bounded: HashMap<String, BoundedRec>, instances: HashMap<String, String>, packLoops: HashMap<String, List<PackLoopRec>>,
     copies: HashSet<String>, linears: HashSet<String>, externs: HashSet<String>, drops: HashSet<String>,
@@ -189,7 +189,7 @@ fn newLowSt(pbase: Int) -> LowSt ~ {
     return LowSt {
         ok: true, msg: "", listName: "List", boxName: "Box", copyName: "Copy", tys: [], tyIndex: HashMap::new(), defaulted: HashMap::new(), elab: [], nextElab: 0,
         stmts: [], types: HashMap::new(), functions: HashMap::new(), fnKeys: HashSet::new(), names: HashSet::new().insert("main"),
-        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
+        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), topAssigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
         copies: HashSet::new(), linears: HashSet::new(), externs: HashSet::new(), drops: HashSet::new(),
         prereg: HashMap::new(), stubs: HashSet::new(), pn: [], pbase: pbase,
         envs: [], contents: [], contentKeys: HashMap::new(), contentTexts: HashMap::new(),
