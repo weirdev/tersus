@@ -1768,7 +1768,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
                             , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
-                            , testAssertEq (validatorMetadataFingerprint raw) "7d1bad137ad13ae1"
+                            , testAssertEq (validatorMetadataFingerprint raw) "be3fe38a94b305eb"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
@@ -1776,7 +1776,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Just fn -> let env = M.specEnv (M.fnSpec fn) in
                                     all (`Map.member` env) (Map.keys (M.progFunctions raw)) && not (Map.member "countParsed" env))
                                 ["containsValue", "commonContext", "driverReadAll"])
-                            , testAssertEq (Map.size (M.progFunctions raw)) 860
+                            , testAssertEq (Map.size (M.progFunctions raw)) 843
                             , testAssertEq (Map.keys (M.progFunctions checker)) (Map.keys (M.progFunctions raw))
                             , testAssertTrue (all (`Map.member` M.progFunctions raw) declared)
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) declared)
@@ -1845,7 +1845,10 @@ phase1Program :: String
 phase1Program = "import vendor::model { Choice, read }; c = Choice::Value { n: 42 }; return read(c);"
 
 phase1Load :: LoadOptions -> Files -> Either String LoadedPackage
-phase1Load options files = case Pipeline.loadFromEntry (resolverFromFiles files){resolverOptions = options} phase1Entry of
+phase1Load options files = loadAt options files phase1Entry
+
+loadAt :: LoadOptions -> Files -> FilePath -> Either String LoadedPackage
+loadAt options files entry = case Pipeline.loadFromEntry (resolverFromFiles files){resolverOptions = options} entry of
     Right (PackageResult pkg) -> Right pkg
     Left err -> Left err
     Right _ -> Left "expected package"
@@ -2147,6 +2150,24 @@ testPhase1Packages = TestList "testPhase1Packages"
     , testCase "no-prelude packages still validate their source bodies" $ case phase1Load phase1Options (phase1Files "affirm 1 = 2; return 42;") of
         Left err -> Just err
         Right pkg -> phase1ResultRefusal "Could not prove:" (compileModulesToProgram pkg)
+    , testCase "a package directory cannot be named tersuslib" $
+        phase1Refusal "a package directory cannot be named tersuslib" (loadAt defaultLoadOptions{noPrelude = True}
+            [("tersuslib/package.tersus", ""), ("tersuslib/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };"), ("tersuslib/main.tersus", "import tersuslib::lists { dup }; return 0;")]
+            "tersuslib/main.tersus")
+    , testCase "nor is a sibling package named tersuslib imported" $
+        phase1Refusal "the package name tersuslib is reserved for the compiler libraries, which a program does not import by name" (loadAt defaultLoadOptions
+            [("app/package.tersus", ""), ("app/main.tersus", "import tersuslib::lists { dup }; struct NC { v: List<Int> }; n = NC { v: [1, 2] }; m = dup(&n); return size(m.v);"), ("tersuslib/package.tersus", ""), ("tersuslib/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };")]
+            "app/main.tersus")
+    , testCase "nor is a root mapped to the name tersuslib" $
+        phase1Refusal "--package-root tersuslib=installed/spoof: the package name tersuslib is reserved" (loadAt defaultLoadOptions{packageRoots = Map.singleton "tersuslib" "installed/spoof"}
+            [("app/package.tersus", ""), ("app/main.tersus", "import tersuslib::lists { dup }; struct NC { v: List<Int> }; n = NC { v: [1, 2] }; m = dup(&n); return size(m.v);"), ("installed/spoof/package.tersus", ""), ("installed/spoof/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };")]
+            "app/main.tersus")
+    , testCase "a standard root in a directory named tersuslib is the package std, which clones under the usual rule" $
+        case loadAt defaultLoadOptions{installedStdRoot = Just "installed/tersuslib"}
+            [("app/package.tersus", ""), ("app/main.tersus", "import std::lists { dup }; struct NC { v: List<Int> }; n = NC { v: [1, 2] }; m = dup(&n); return size(m.v);"), ("installed/tersuslib/package.tersus", ""), ("installed/tersuslib/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };")]
+            "app/main.tersus" of
+            Left err -> Just err
+            Right pkg -> phase1ResultRefusal "dup clones a T, and its bounds do not say T: Clone" (compileModulesToProgram pkg)
     , testCase "a missing requested root fails even when a sibling exists" $
         phase1Refusal "requested root" (phase1Load phase1Options{packageRoots = Map.singleton "vendor" "absent/vendor"}
             (phase1Files phase1Program ++ [("unrelated/vendor/package.tersus", ""), ("unrelated/vendor/model/model.tersus", "struct Choice { n: Int };")]))

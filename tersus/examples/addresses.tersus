@@ -48,10 +48,6 @@ impl<T> Vec<T> {
         return Self { addr: self.addr, cap: self.cap, len: self.len + 1, blk: Addr::write(self.addr, self.len, x, self.blk) };
     };
 
-    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = at(self.blk, i); }] {
-        return clone(Addr::get(self.addr, i, self.blk));
-    };
-
     fn pop(self: Self) -> (Self, T) [{ affirm self.len >= 1; }] [{ affirm return.0.len = self.len - 1; }] {
         (x, b) = Addr::take(self.addr, self.len - 1, self.blk);
         return (Self { addr: self.addr, cap: self.cap, len: self.len - 1, blk: b }, x);
@@ -60,6 +56,14 @@ impl<T> Vec<T> {
     // (the values left are dropped where they are, and the memory is given back)
     fn free(self: Self) -> Int [{ }] [{ }] {
         return Addr::free(self.addr, Addr::dropRange(self.addr, 0, self.len, self.blk));
+    };
+};
+
+// Reading an element out clones it, so get is in an impl whose T is bounded by Clone (a function clones a value of a type parameter
+// only when a bound says it is Clone)
+impl<T: Clone> Vec<T> {
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = at(self.blk, i); }] {
+        return clone(Addr::get(self.addr, i, self.blk));
     };
 };
 

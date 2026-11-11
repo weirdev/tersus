@@ -31,7 +31,7 @@ struct Vec<T> {
 // lib/clone.tersus, which a program has unless it declares one of its own)
 impl<T> Clone for Vec<T> { };
 
-impl<T> Vec<T> {
+impl<T: Clone> Vec<T> {
     // An empty Vec. The array needs an element to fill it with, which is never read: nothing is in use until it is pushed.
     fn new(filler: T) -> Self [{ }] [{ affirm return.len = 0; }] {
         return Self { data: Array::boxed(4, filler), len: 0 };
@@ -43,7 +43,7 @@ impl<T> Vec<T> {
     };
 };
 
-impl<T> Sequence<T> for Vec<T> {
+impl<T: Clone> Sequence<T> for Vec<T> {
     fn size(self: &Self) -> Int [{ }] [{ affirm return = self.len; }] {
         return self.len;
     };
@@ -58,7 +58,7 @@ impl<T> Sequence<T> for Vec<T> {
 
 };
 
-impl<T> Growable<T> for Vec<T> {
+impl<T: Clone> Growable<T> for Vec<T> {
     fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; affirm get(return.data, self.len) = x; }] {
         if self.len < size(self.data) {
             return Self { data: set(self.data, self.len, x), len: self.len + 1 };

@@ -198,17 +198,27 @@ testCopies =
                 ]
             , TestList
                 "type parameters"
-                [ testCase "a type parameter is Clone" (runs "fn twice<T>(x: T) -> List<T> { return push(push([], clone(x)), x); }; return size(twice(3)) + size(twice([1]));" (VInt 4))
+                [ testCase "a function without bounds does not clone a type parameter" (rejected "fn twice<T>(x: T) -> List<T> { return push(push([], clone(x)), x); }; return size(twice(3));" "twice clones a T, and its bounds do not say T: Clone")
+                , testCase "nor by method" (rejected "fn twice<T>(x: T) -> List<T> { return push(push([], x.clone()), x); }; return size(twice(3));" "twice clones a T, and its bounds do not say T: Clone")
+                , testCase "nor through the trait" (rejected "fn dup<T>(x: &T) -> T { return Clone::clone(x); }; return dup(3);" "Clone::clone is called on a T, which has no functions")
+                , testCase "nor a list of one" (rejected "fn copy<T>(xs: &List<T>) -> List<T> { return clone(xs); }; return size(copy(push([], 3)));" "copy clones a List<T>, and its bounds do not say T: Clone")
+                , testCase "nor updates a struct from a clone of one" (rejected "struct Pair<T> { a: T, b: T }; fn f<T>(p: &Pair<T>, x: T) -> Pair<T> { return Pair<T> { a: x, ..clone(*p) }; }; return f(Pair<Int> { a: 1, b: 2 }, 5).b;" "f clones a T, and its bounds do not say T: Clone")
+                , testCase "nor makes copies of one with array(n, x)" (rejected "fn two<T>(x: T) -> Array<T, 2> { return array(2, x); }; return size(two(3));" "T does not implement Clone: bound it, as in <T: Clone>")
+                , testCase "nor does a function nested in a bounded one" (rejected "fn f<T: Clone>(x: T) -> Int { fn inner<U>(y: U) -> List<U> { return push(push([], clone(y)), y); }; return size(inner(x)); }; return f(3);" "inner clones a U, and its bounds do not say U: Clone")
+                , testCase "nor a function of an impl without bounds" (rejected "struct Two<T> { a: T, b: T }; impl<T> Two<T> { fn first(self: &Self) -> T { return clone(self.a); }; }; return Two<Int> { a: 1, b: 2 }.first();" "first clones a T, and its bounds do not say T: Clone")
+                , testCase "nor a function of a trait impl without bounds" (rejected "trait Pick<T> { fn pick(self: &Self) -> T; }; struct One<T> { a: T }; impl<T> Pick<T> for One<T> { fn pick(self: &Self) -> T { return clone(self.a); }; }; return One<Int> { a: 1 }.pick();" "pick clones a T, and its bounds do not say T: Clone")
+                , testCase "an impl with a Clone bound does" (runs "struct Two<T> { a: T, b: T }; impl<T: Clone> Two<T> { fn first(self: &Self) -> T { return clone(self.a); }; }; return Two<Int> { a: 1, b: 2 }.first() + size(Two<List<Int>> { a: [4, 5], b: [] }.first());" (VInt 3))
+                , testCase "the Clone a struct with a type parameter is given clones its fields" (runs "struct Two<T> { a: T, b: T }; impl<T> Clone for Two<T> { }; x = Two<List<Int>> { a: [1], b: [2, 3] }; y = clone(x); return size(y.b) + size(x.a);" (VInt 3))
                 , testCase "and moved" (moveError "fn twice<T>(x: T) -> List<T> { return push(push([], x), x); }; return size(twice(3));" "x was moved")
                 , testCase "a bound asks for Clone" (runs (markers ++ "fn twice<T: Clone>(x: T) -> List<T> { return push(push([], clone(x)), x); }; return size(twice(3));") (VInt 2))
                 , testCase "of the type it is given" (rejected (markers ++ "struct S { n: Int }; fn twice<T: Clone>(x: T) -> List<T> { return push(push([], clone(x)), x); }; return size(twice(S { n: 1 }));") "twice needs T to implement Clone, and S does not")
                 , testCase "or Copy" (runs (markers ++ "fn twice<T: Copy>(x: T) -> List<T> { return push(push([], x), x); }; return size(twice(3));") (VInt 2))
                 , testCase "a bounded body clones a type parameter only with a Clone bound" (rejected (markers ++ "trait Show { }; impl Show for Int { }; fn twice<T: Show>(x: T) -> List<T> { return push(push([], clone(x)), x); }; return size(twice(3));") "twice clones a T, and its bounds do not say T: Clone")
                 , testCase "or a list of one" (rejected (markers ++ "trait Show { }; impl Show for Int { }; fn copy<T: Show>(xs: &List<T>) -> List<T> { return clone(xs); }; return size(copy(push([], 3)));") "copy clones a List<T>, and its bounds do not say T: Clone")
-                , testCase "a bounded body has a type parameter cloned by a function written for any type" (runs (markers ++ "trait Show { }; impl Show for Int { }; fn dup<U>(x: &U) -> U { return clone(*x); }; fn f<T: Show>(x: &T) -> List<T> { return push(push([], dup(x)), dup(x)); }; return size(f(3));") (VInt 2))
+                , testCase "a bounded body cannot have a type parameter cloned by a function written for any type" (rejected (markers ++ "trait Show { }; impl Show for Int { }; fn dup<U>(x: &U) -> U { return clone(*x); }; fn f<T: Show>(x: &T) -> List<T> { return push(push([], dup(x)), dup(x)); }; return size(f(3));") "dup clones a U, and its bounds do not say U: Clone")
                 , testCase "a Copy bound clones" (runs (markers ++ "fn twice<T: Copy>(x: T) -> List<T> { return push(push([], clone(x)), x); }; return size(twice(3));") (VInt 2))
                 , testCase "a list is not" (rejected (markers ++ "fn twice<T: Copy>(x: T) -> List<T> { return push(push([], x), x); }; return size(twice([1]));") "twice needs T to implement Copy, and List<Int> does not")
-                , testCase "an element of a generic list is cloned to be returned" (runs "fn head<T>(items: &List<T>) -> T { return clone(get(items, 0)); }; return size(head(push([], [1, 2])));" (VInt 2))
+                , testCase "an element of a generic list is cloned to be returned" (runs "fn head<T: Clone>(items: &List<T>) -> T { return clone(get(items, 0)); }; return size(head(push([], [1, 2])));" (VInt 2))
                 , testCase "and moved out of it is an error" (moveError "fn head<T>(items: &List<T>) -> T { return get(items, 0); }; return head([1]);" "out of a list")
                 ]
             , TestList

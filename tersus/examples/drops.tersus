@@ -30,14 +30,18 @@ impl<T> Vec<T> {
         return Self { addr: p, cap: c, len: n + 1, blk: Addr::write(p, n, x, b) };
     };
 
-    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ }] {
-        return clone(Addr::get(self.addr, i, self.blk));
-    };
-
     fn pop(self: Self) -> (Self, T) [{ affirm self.len >= 1; }] [{ affirm return.0.len = self.len - 1; }] {
         Vec { addr: p, cap: c, len: n, blk: b } = self;
         (x, b2) = Addr::take(p, n - 1, b);
         return (Self { addr: p, cap: c, len: n - 1, blk: b2 }, x);
+    };
+};
+
+// Reading an element out clones it, so get is in an impl whose T is bounded by Clone (a function clones a value of a type parameter
+// only when a bound says it is Clone)
+impl<T: Clone> Vec<T> {
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ }] {
+        return clone(Addr::get(self.addr, i, self.blk));
     };
 };
 

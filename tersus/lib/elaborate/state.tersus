@@ -85,7 +85,9 @@ fn noBoundedParts() -> BoundedParts ~ { return BoundedParts { names: [], values:
 // it is checked, and defChecking is set while one is; checkedItems counts the statements in front of the program whose
 // functions with bounds were checked where they were defined (the libraries a single-file program has in front of it);
 // sequenceTraits holds the library's Sequence and Growable when the module has them, which lists, arrays and Boxes of
-// arrays implement with the builtins.
+// arrays implement with the builtins;
+// storageCopies is set for the native storage helpers (tersuslib's lists and box), whose clones are the copies native code
+// makes of a value of any type.
 // ty is the result of the last function that makes a type, ok of the last unify, te of the last inference.
 struct St {
     nodes: List<AstNode>,
@@ -173,6 +175,7 @@ struct St {
     defChecking: Bool,
     checkedItems: Int,
     sequenceTraits: HashSet<String>,
+    storageCopies: Bool,
     status: Int,
     msg: String
 };
@@ -197,12 +200,13 @@ fn finalRefusal(st: St, msg: String) -> St ~ {
     return St { status: 5, msg: msg, ..st };
 };
 
-// The first type parameter of a type that keeps a value of it from being cloned, or "": in a body checked against its bounds
-// a type parameter is cloned only when a bound makes it Clone (or Copy, which is Clone too), and elsewhere any type parameter is
+// The first type parameter of a type that keeps a value of it from being cloned, or "": a type parameter is cloned only in a
+// body checked against its bounds, when a bound makes it Clone (or Copy, which is Clone too), so a function without bounds
+// clones none, except in the native storage helpers (storageCopies).
 fn unclonedParameter(st: &St, t: Int) -> String ~ {
     x = tyAt(st, resolve(st, t));
     if x.kind = 12 {
-        if !st.defChecking || HashSet::contains(&st.impls, catStrings("Clone ", parameterOwner(&x.name))) || HashSet::contains(&st.impls, catStrings("Copy ", parameterOwner(&x.name))) { return ""; };
+        if st.storageCopies || (st.defChecking && (HashSet::contains(&st.impls, catStrings("Clone ", parameterOwner(&x.name))) || HashSet::contains(&st.impls, catStrings("Copy ", parameterOwner(&x.name))))) { return ""; };
         return clone(x.name);
     };
     for a in &x.args {

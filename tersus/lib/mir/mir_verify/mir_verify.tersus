@@ -789,11 +789,11 @@ fn one(s: String) -> List<String> [{ }] [{ affirm size(return) = 1; }] {
     return push([], s);
 };
 
-fn single<T>(x: &T) -> List<T> [{ }] [{ affirm size(return) = 1; }] {
+fn single<T: Clone>(x: &T) -> List<T> [{ }] [{ affirm size(return) = 1; }] {
     return push([], clone(x));
 };
 
-fn pairOf<T>(x: &T, y: &T) -> List<T> [{ }] [{ affirm size(return) = 2; }] {
+fn pairOf<T: Clone>(x: &T, y: &T) -> List<T> [{ }] [{ affirm size(return) = 2; }] {
     return push(push([], clone(x)), clone(y));
 };
 
@@ -1304,6 +1304,7 @@ fn placeWhy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, root: Int, st
             else if ty is Type::TArray { ty = Box::unbox((ty as Type::TArray).elem); }
             else if ty is Type::TNamed {
                 // Native containers declare the exact slot type in addr, including nested Boxes.
+                boxed = beforeAngle((ty as Type::TNamed).name) = "Box";
                 fields = ctorFields(p, (ty as Type::TNamed).name);
                 found = false;
                 for fd in fields {
@@ -1313,6 +1314,8 @@ fn placeWhy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, root: Int, st
                     };
                 };
                 if !found { return noTy(); };
+                // (a Box's one slot holds the whole array, so an index is of the array's element)
+                if boxed && ty is Type::TArray { ty = Box::unbox((ty as Type::TArray).elem); };
             } else { return noTy(); };
         };
         if ty is Type::TRef { ty = Box::unbox((ty as Type::TRef).inner); };
