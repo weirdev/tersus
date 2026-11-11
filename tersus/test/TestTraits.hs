@@ -2,6 +2,7 @@ module TestTraits (testTraits) where
 
 import MirEval (fromMirValue)
 import Compile (lowerSource)
+import ElaboratorTool (noVerdict)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Mir as M
@@ -98,6 +99,15 @@ testTraits =
             Right stmts -> case validateStatements stmts of
                 Error e | "internal compiler error" `isInfixOf` e -> Just ("an internal compiler error instead of a refusal: " ++ e)
                 _ -> parseValidateFailProgramHelper (showSize ++ body) expected
+        -- (the checker's own refusal: an elaborator that failed as a tool, or an internal error, is not it)
+        checkerRefuses source expected = case parseWithEquality source of
+            Left err -> Just ("Parse failed: " ++ err)
+            Right stmts -> case runStatements stmts of
+                Ok value -> Just ("accepted, giving " ++ show (fmap fromMirValue value))
+                Error e
+                    | noVerdict e || "internal compiler error" `isInfixOf` e -> Just ("no refusal by the checker: " ++ e)
+                    | expected `isInfixOf` e -> Nothing
+                    | otherwise -> Just ("expected " ++ show expected ++ ", got: " ++ e)
         compiledRejected source expected = case lowerSource True source of
             Ok _ -> Just ("accepted: " ++ source)
             Error e -> if take (length expected) e == expected then Nothing else Just ("expected an error starting " ++ show expected ++ ", got: " ++ e)
@@ -254,6 +264,9 @@ testTraits =
                 , testCase "whatever its function's type" (parseEvalProgramHelper "trait Sequence { fn get(self: &Self, i: Int) -> Bool; }; impl Sequence for List<Int> { fn get(self: &Self, i: Int) -> Bool { return true; }; }; fn f<S: Sequence>(s: &S) -> Bool { return get(s, 0); }; if f(push([], 1)) { return 1; }; return 0;" (Just (VInt 1)))
                 , testCase "and a program's own Growable" (parseEvalProgramHelper "trait Growable { fn push(self: Self, x: Int) -> Bool; }; impl Growable for List<Int> { fn push(self: Self, x: Int) -> Bool { return true; }; }; fn f<S: Growable>(s: S) -> Bool { return push(s, 3); }; if f(push([], 1)) { return 1; }; return 0;" (Just (VInt 1)))
                 , testCase "a reference returned onward by a bound's method" (parseEvalProgramHelper "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T) -> &Int from x { return x.first(); }; w = W { x: 3 }; r = pick(w); return *r;" (Just (VInt 3)))
+                , testCase "and by the trait's function called by its path" (parseEvalProgramHelper "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T) -> &Int from x { return R::first(x); }; w = W { x: 3 }; r = pick(w); return *r;" (Just (VInt 3)))
+                , testCase "and through a local" (parseEvalProgramHelper "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T) -> &Int from x { y = x.first(); return y; }; w = W { x: 3 }; r = pick(w); return *r;" (Just (VInt 3)))
+                , testCase "a reference a bound's method returns from another parameter is refused" (checkerRefuses "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T, y: &T) -> &Int from x { return y.first(); }; w = W { x: 3 }; v = W { x: 4 }; r = pick(w, v); return *r;" "the value returned is not a reference from x, which the signature names: return a reference to a place of one of them (in pick)")
                 , testCase "a function of a bounded impl calls another of it" (bounded "struct Pair<T> { a: T, b: T }; impl<T: Show> Pair<T> { fn both(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.a.show() + self.one(); }; fn one(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.b.show(); }; }; return Pair<Cell> { a: Cell { v: 0 }, b: Cell { v: 0 } }.both();" 2)
                 , testCase "and one that is not Copy is moved once, whatever the types a call gives" (parseValidateFailProgramHelper "fn twice<T: Clone>(x: T) -> Int { a = push([], x); b = push(a, x); return size(b); }; return 0;" "Move error: in twice")
                 , testCase "a function with bounds that nothing calls has no copy, only its generic body for the validator" (case lowerSource True "fn unused<T: Eq>(x: T) -> Bool { return x = x; }; return 0;" of

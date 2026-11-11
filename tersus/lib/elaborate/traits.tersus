@@ -8,8 +8,8 @@ import elaborate::exports { pairParts };
 import elaborate::expr { coerceArguments, genericCall, implementsMarker, inferAll, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { NativeFn, codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
-import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { stubTraitParameter, indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
+import elaborate::refs { fromsOf, putRefResult, refResultIndex, traitResultFrom };
+import elaborate::state { indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk, protocolName, protocolIs, stubTraitParameter };
 
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
@@ -2350,7 +2350,10 @@ fn boundAsImpl(st: St, p: &String, pty: Int, tname: &String, args: &List<Int>) -
         // array, which implement those with the builtins: the copy step reads the mark)
         if HashSet::contains(&st.sequenceTraits, tname) && HashMap::contains(&st.methods, &fname) { st = St { builtinStubs: st.builtinStubs.insert(clone(bname)), ..st }; };
         st = St { fns: st.fns.insert(clone(bname), fty), ..st };
-        if size(fs.froms) > 0 { st = putRefResult(st, bname, clone(fs.params), clone(fs.froms)); };
+        // (from what the trait's check recorded for its function: the signature read here does not carry its from)
+        traitKey = catStrings(catStrings(clone(tname), "::"), clone(fname));
+        traitFrom = fromsOf(&st, &traitKey);
+        if traitFrom.ok { st = putRefResult(st, bname, traitFrom.params, traitFrom.froms); };
     };
     return st;
 };
