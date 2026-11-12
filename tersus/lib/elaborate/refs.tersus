@@ -858,9 +858,12 @@ fn mutableReferenceStores(st: St, t: Int, seen: List<String>) -> St ~ {
     st = zonk(st, t);
     resolvedType = st.ty;
     ty = tyAt(st, resolvedType);
-    if (ty.kind = 11 || ty.kind = 10 || ty.kind = 6 || ty.kind = 9 || isListTy(st, resolvedType) || isBoxTy(st, resolvedType)) && size(ty.args) < 1 { return typeError(st, "a reference, array, List or Box type has no element type"); };
-    if ty.kind = 11 { return holdsRef(st, get(ty.args, 0)); };
+    if ty.kind = 11 {
+        if size(ty.args) < 1 { return typeError(st, "a reference, array, List or Box type has no element type"); };
+        return holdsRef(st, get(ty.args, 0));
+    };
     if ty.kind = 10 || ty.kind = 6 || ty.kind = 9 || isListTy(st, resolvedType) || isBoxTy(st, resolvedType) {
+        if size(ty.args) < 1 { return typeError(st, "a reference, array, List or Box type has no element type"); };
         return mutableReferenceStores(st, get(ty.args, 0), seen);
     };
     if ty.kind = 4 || ty.kind = 5 {
