@@ -96,20 +96,14 @@ main = do
                         ++ " failed"
             when (summaryFailed summary > 0 || not reported) exitFailure
   where
-    select arguments = (,) arguments . withoutOptIn arguments <$> selectGroupNames arguments (map groupName allGroups)
-    withoutOptIn arguments names
-        | null (argumentGroups arguments) = filter (`notElem` optInGroups) names
-        | otherwise = names
-
--- Groups that run only when they are named: too slow for every run of the suite
-optInGroups :: [String]
-optInGroups = ["testHostValidation", "testElaborateMutant"]
+    select arguments = (,) arguments <$> selectGroupNames arguments (map groupName allGroups)
 
 allGroups :: [Test]
 allGroups = concatMap registered originalGroups
   where
     registered original
         | groupName original == "testParserBootstrap" = parserBootstrapGroups
+        | groupName original == "testHostValidation" = hostValidationGroups
         | otherwise = case lookup (groupName original) [(groupName tree, split) | (tree, split) <- batchedGroups] of
             Just split -> split
             Nothing -> [original]

@@ -11,9 +11,9 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits, withVerdictLock, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, validateLibrary, validationCacheHits, withVerdictLock, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, takeMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
 import Data.List (sortOn)
 import Data.Char (isSpace)
 import Data.Ord (Down (..))
@@ -84,17 +84,42 @@ validateTexts exe physical caching program texts = do
         Error e -> Error e
         Ok results -> case [(index, verdict) | (index, Just verdict@(status, _, _)) <- zip [0 ..] results, status /= 0] of
             [] -> Ok ()
-            (index, (status, block, step)) : _ -> Error (message (fst (texts !! index)) status block step)
+            (index, verdict) : _ -> Error (refusalMessage physical program (fst (texts !! index)) verdict)
+
+refusalMessage :: Bool -> M.Program -> String -> (Int, Int, Int) -> String
+refusalMessage physical program name (status, block, step) = case status of
+    1 -> case (obligationNote physical program name block step, parseImplCheckName name) of
+        (Just note, Just (trait, owner, function)) -> "impl " ++ trait ++ " for " ++ owner ++ ": " ++ function ++ " does not meet what " ++ trait ++ " declares: could not prove " ++ note
+        (Just note, Nothing) -> "Could not prove: " ++ note ++ " (in " ++ name ++ ")"
+        _ -> "Could not prove: an obligation could not be proved by the Tersus validator (in " ++ name ++ ", block " ++ show block ++ ", step " ++ show step ++ ")"
+    2 -> unmodeledMessage ("an operation in " ++ name ++ ", block " ++ show block)
+    3 -> unmodeledMessage ("the control flow of " ++ name)
+    _ -> unmodeledMessage ("a loop of " ++ name ++ " at block " ++ show block)
   where
     unmodeledMessage what = "the program uses a feature the Tersus validator does not model yet: " ++ what
-    message name status block step = case status of
-        1 -> case (obligationNote physical program name block step, parseImplCheckName name) of
-            (Just note, Just (trait, owner, function)) -> "impl " ++ trait ++ " for " ++ owner ++ ": " ++ function ++ " does not meet what " ++ trait ++ " declares: could not prove " ++ note
-            (Just note, Nothing) -> "Could not prove: " ++ note ++ " (in " ++ name ++ ")"
-            _ -> "Could not prove: an obligation could not be proved by the Tersus validator (in " ++ name ++ ", block " ++ show block ++ ", step " ++ show step ++ ")"
-        2 -> unmodeledMessage ("an operation in " ++ name ++ ", block " ++ show block)
-        3 -> unmodeledMessage ("the control flow of " ++ name)
-        _ -> unmodeledMessage ("a loop of " ++ name ++ " at block " ++ show block)
+
+-- Every function of a program checked, not only those before the first refused (as validateCompiled checks them),
+-- with the verdicts validateCompiled keeps on disk: what each function refused, or that the validator could not
+-- check it, in the program's order
+validationRefusals :: M.Program -> IO (Result [String] String)
+validationRefusals program = case prepareTexts False program of
+    Error e -> pure (Error e)
+    Ok texts -> do
+        namespace <- validatorKey
+        built <- validatorExecutable
+        case (namespace, built) of
+            (Error e, _) -> pure (Error e)
+            (_, Error e) -> pure (Error e)
+            (Ok key, Ok exe) -> do
+                let distinct = Map.keys (Map.fromList [(text, ()) | (_, text) <- texts])
+                checked <- inParallel (storedOrChecked key (pure (Ok exe))) distinct
+                let byText = Map.fromList (zip distinct checked)
+                pure (Ok [message | (name, text) <- texts, Just outcome <- [Map.lookup text byText], Just message <- [failure name outcome]])
+  where
+    failure name (Error e) = Just ("the compiled validator could not check " ++ name ++ ": " ++ e)
+    failure name (Ok verdict@(status, _, _))
+        | status /= 0 = Just (refusalMessage False program name verdict)
+        | otherwise = Nothing
 
 -- The verdicts already known, by the text of a function's data, and how
 -- many times one has been used
@@ -115,8 +140,10 @@ validationCacheHits = readIORef cacheHitCount
 -- reached when the verdicts are read in order
 verdicts :: IO (Result FilePath String) -> Bool -> [String] -> IO (Result [Maybe (Int, Int, Int)] String)
 verdicts exe False texts = do
-    checked <- inParallel exe texts
-    pure $ mapResult (\found -> [Map.lookup i found | i <- [0 .. length texts - 1]]) checked
+    checked <- inParallel (checkOne exe) texts
+    pure $ case [e | Error e <- checked] of
+        e : _ -> Error e
+        [] -> Ok [Just verdict | Ok verdict <- checked]
 verdicts exe True texts = do
     namespace <- validatorKey
     case namespace of
@@ -153,23 +180,23 @@ cachedVerdicts namespace exe texts = do
 oneAtATime :: String -> IO (Result FilePath String) -> [String] -> Map.Map Int (Int, Int, Int) -> IO (Result (Map.Map Int (Int, Int, Int)) String)
 oneAtATime _ _ [] found = pure (Ok found)
 oneAtATime namespace exe (text : rest) found = do
-    verdict <- withVerdictLock namespace text $ do
-        stored <- diskVerdict namespace text
-        case stored of
-            Just v -> pure (Ok v)
-            Nothing -> do
-                checked <- runValidator exe [text]
-                case checked of
-                    Error e -> pure (Error e)
-                    Ok answers -> do
-                        let v = Map.findWithDefault (0, -1, -1) 0 answers
-                        storeVerdict namespace text v
-                        pure (Ok v)
+    verdict <- storedOrChecked namespace exe text
     case verdict of
         Error e -> pure (Error e)
         Ok v@(status, _, _) ->
             let found' = Map.insert (Map.size found) v found
              in if status /= 0 then pure (Ok found') else oneAtATime namespace exe rest found'
+
+storedOrChecked :: String -> IO (Result FilePath String) -> String -> IO (Result (Int, Int, Int) String)
+storedOrChecked namespace exe text = withVerdictLock namespace text $ do
+    stored <- diskVerdict namespace text
+    case stored of
+        Just v -> pure (Ok v)
+        Nothing -> do
+            checked <- checkOne exe text
+            case checked of
+                Error e -> pure (Error e)
+                Ok v -> storeVerdict namespace text v >> pure (Ok v)
 
 withVerdictLock :: String -> String -> IO a -> IO a
 withVerdictLock namespace text action = do
@@ -184,30 +211,30 @@ withVerdictLock namespace text action = do
             withMVar lock $ \_ ->
                 bracket (openLockHandle (path ++ ".lock")) hClose (\handle -> hLock handle ExclusiveLock >> action)
 
--- The compiled validator's verdicts over the functions given: each one up
--- to the first refused is proved, the refused one has its own
--- Every function checked, each by a process of its own, as many at once as
--- the machine has processors, the longest first
-inParallel :: IO (Result FilePath String) -> [String] -> IO (Result (Map.Map Int (Int, Int, Int)) String)
-inParallel exe texts = do
+-- Each text checked, as many at once as the machine has processors, the longest first
+inParallel :: (String -> IO (Result a String)) -> [String] -> IO [Result a String]
+inParallel check texts = do
     workers <- availableProcessors
     queue <- newMVar (sortOn (Down . length . snd) (zip [0 :: Int ..] texts))
-    found <- newMVar (Ok Map.empty)
+    found <- newMVar Map.empty
     let next = modifyMVar queue (\pending -> pure (drop 1 pending, take 1 pending))
         worker = do
             item <- next
             case item of
                 [] -> pure ()
                 (index, text) : _ -> do
-                    checked <- runValidator exe [text]
-                    modifyMVar found (\sofar -> pure (merge index checked sofar, ()))
+                    checked <- check text
+                    modifyMVar_ found (pure . Map.insert index checked)
                     worker
     _ <- parallelBuilds (replicate (max 1 workers) worker)
-    takeMVar found
-  where
-    merge _ _ (Error e) = Error e
-    merge _ (Error e) _ = Error e
-    merge index (Ok answer) (Ok sofar) = Ok (Map.insert index (Map.findWithDefault (0, -1, -1) 0 answer) sofar)
+    Map.elems <$> takeMVar found
+
+checkOne :: IO (Result FilePath String) -> String -> IO (Result (Int, Int, Int) String)
+checkOne exe text = do
+    checked <- runValidator exe [text]
+    pure $ case checked of
+        Error e -> Error e
+        Ok answers -> maybe (Error "the compiled validator gave no verdict") Ok (Map.lookup 0 answers)
 
 runValidator :: IO (Result FilePath String) -> [String] -> IO (Result (Map.Map Int (Int, Int, Int)) String)
 runValidator validator texts = do
@@ -220,7 +247,7 @@ runValidator validator texts = do
             (code, out, err) <- runCommandWithInputFull "/bin/sh" ["-c", raiseStack, path] (show (length texts) ++ "\n" ++ concat texts)
             pure $ case (code, map readInt (words (takeWhile (/= '\n') out))) of
                 (ExitSuccess, [Just 0, _, _, _]) -> Ok (Map.fromList [(i, (0, -1, -1)) | i <- [0 .. length texts - 1]])
-                (ExitSuccess, [Just status, Just block, Just step, Just index]) ->
+                (ExitSuccess, [Just status, Just block, Just step, Just index]) | index >= 0 && index < length texts ->
                     Ok (Map.fromList ([(i, (0, -1, -1)) | i <- [0 .. index - 1]] ++ [(index, (status, block, step))]))
                 _ -> Error ("the compiled validator did not answer (exit " ++ show code ++ ", output: " ++ take 200 out ++ ", error: " ++ take 200 err ++ ")")
   where

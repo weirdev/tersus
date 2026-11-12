@@ -18,6 +18,7 @@ module Pipeline
     , CompiledPackage (..)
     , compileModules
     , compileModulesValidated
+    , oneMarkerEach
     , compileModulesBootstrap
     , compileModulesBootstrapWith
     , compileModulesToProgram

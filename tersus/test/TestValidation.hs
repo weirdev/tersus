@@ -15,13 +15,14 @@ import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, killThread, newEmpt
 import ElaboratorTool (noVerdict)
 import Control.Exception (MaskingState (..), SomeException, bracket, displayException, evaluate, getMaskingState, try)
 import System.Timeout (timeout)
+import Data.List (isInfixOf)
 import Compile (lowerSource, lowerStatements, parseSource)
 import qualified Mir as M
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import TestParserFragments
 import Pipeline (compileSource, validateStatements)
-import ValidatorNative (validateCompiled, validateCompiledUncached, validationCacheHits)
+import ValidatorNative (validateCompiled, validateCompiledUncached, validationCacheHits, validationRefusals)
 import StdLib
 import Types
 import Syntax
@@ -594,6 +595,23 @@ frontendParity source = case parseSource source of
     Error e -> Just e
     Ok stmts -> testAssertEq (lowerSource True source) (lowerStatements stmts)
 
+allRefusals :: IO TestResult
+allRefusals = case (lowerSource True (twoRefused ++ identity ++ "return identity(3);"), lowerSource True (identity ++ "return identity(3);")) of
+    (Ok refused, Ok accepted) -> do
+        both <- validationRefusals refused
+        none <- validationRefusals accepted
+        pure $ case (both, none) of
+            (Ok [first, second], Ok []) ->
+                testAssertTrue ("(in a)" `isInfixOf` first && "(in b)" `isInfixOf` second)
+                    <> testAssertEq (show (validateCompiled refused)) (show (Error first :: Result () String))
+            _ -> Just ("expected the refusals of a and b and none, got " ++ show (both, none))
+    (Error e, _) -> pure (Just e)
+    (_, Error e) -> pure (Just e)
+  where
+    -- (b is longer, so it is taken from the queue first; the refusals still come in the program's order)
+    twoRefused = "fn a(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n + 1; }; "
+        ++ "fn b(n: Int) -> Int [{ }] [{ affirm return = n; }] { m = n * 2; k = m - n; return k + 2; }; "
+
 concurrentReuse :: IO (Maybe String)
 concurrentReuse = do
     -- (the first validation of a process may build the compiled validator, which is not what is timed)
@@ -656,6 +674,7 @@ testValidationCache = TestList "testValidationCache"
     , named "mutual recursion hits" (reuse mutual (mutual ++ "affirm 1 = 1;"))
     , named "mutual recursion changed member" (rejectChanged mutual brokenMutual)
     , named "changed function-input reader" (parity "fn value() -> Int { return 0; }; return 0;" "fn value() -> Int { return readByte(); }; return 0;")
+    , TestCase "every refused function is reported, the first as validateCompiled reports it" allRefusals
     , testCase "library prefix and whole-program elaboration agree" (frontendParity (cloneProgram "return size(z);"))
     , testCase "forward function signatures preserved" (frontendParity "fn first(n: Int) -> Int { return second(n); }; fn second(n: Int) -> Int { return n; }; return first(1);")
     , testCase "prepared prefix does not retain user declarations" (frontendParity "struct Item { value: Int }; x = Item { value: 1 }; return x.value;")
