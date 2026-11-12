@@ -2375,6 +2375,7 @@ fn boundCallWritten(st: St, head: Int, owner: &String, function: &String, proof:
     // function of its impl, sequenceFunction)
     if HashSet::contains(&st.sequenceTraits, &get(origins, 0)) && HashMap::contains(&st.methods, function) { return st; };
     st = emitName(st, catStrings(catStrings(clone(get(origins, 0)), "::"), clone(function)));
+    if head >= size(st.nodes) { return st; };
     node = AstNode::Expression { value: AstExpression::Var { n: st.nid } };
     if proof { node = AstNode::Proof { value: AstProof::ATerm { n: st.nid } }; };
     return St { nodes: set(st.nodes, head, node), ..st };
