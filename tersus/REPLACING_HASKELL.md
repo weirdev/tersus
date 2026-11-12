@@ -383,6 +383,11 @@ kinds, and the elaborator's large functions (`checkStatement`,
 `extractInterface`, `checkImpl`, `templateCall` and others) are made of
 smaller ones.
 
+Open: `emit` and `emitName` (`out.tersus`) have no contracts, so a caller
+knows nothing of `st.nodes` after either. `boundCallWritten` therefore checks
+`head` against the arena again after `emitName`; a postcondition such as
+`size(return.nodes) >= size(st.nodes)` would let that check go.
+
 Cost: the compiler elaborating and lowering a unit with the elaborator
 written in Tersus (`frontend-diff pipeline`, one CPU, best of three) took
 1.15 times as long as it does on master with the Haskell elaborator, over the
