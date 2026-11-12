@@ -1,6 +1,5 @@
 import validation::execution { localGoal };
-import validation::model { ArgumentsLookup, CachedAnswer, EntailmentCache, ExecutionState, ForallTemplate, IntegerLookup, MergePair, NegatedRelation, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef };
-import validation::relations { containsValue };
+import validation::model { ArgumentsLookup, CachedAnswer, EntailmentCache, ExecutionState, FactIndex, ForallTemplate, IntegerLookup, MergePair, NegatedRelation, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef };
 import validation::validation { entailmentCache, entailsAnyCached };
 
 
@@ -50,37 +49,12 @@ fn resolveArguments(state: &ExecutionState, values: &List<ValueRef>) -> Argument
     return ArgumentsLookup::Found { terms: terms };
 };
 
-// A fresh result must not alias any term already present on this path.
-fn termInUse(state: &ExecutionState, term: Int) -> Bool {
+// A fresh result must not alias any term already present on this path: a
+// local's value, or an id an indexed fact mentions (the index is the block's,
+// extended to the state's facts).
+fn termInUse(state: &ExecutionState, index: &FactIndex, term: Int) -> Bool {
     for binding in state.locals.entries() { if binding.value = term { return true; }; };
-    for factPosition in 0..size(state.context.equalities) {
-        fact = get(state.context.equalities, factPosition);
-        if fact.left = term { return true; }; if fact.right = term { return true; };
-    };
-    for factPosition in 0..size(state.context.different) {
-        fact = get(state.context.different, factPosition);
-        if fact.left = term { return true; }; if fact.right = term { return true; };
-    };
-    for factPosition in 0..size(state.context.orders) {
-        fact = get(state.context.orders, factPosition);
-        if fact.smaller = term { return true; }; if fact.greater = term { return true; };
-    };
-    for factPosition in 0..size(state.context.differences) {
-        fact = get(state.context.differences, factPosition);
-        if fact.left = term { return true; }; if fact.right = term { return true; };
-    };
-    for factPosition in 0..size(state.context.variants) {
-        fact = get(state.context.variants, factPosition);
-        if fact.object = term { return true; };
-    };
-    for constant in state.context.constants { if constant.id = term { return true; }; };
-    for appPosition in 0..size(state.context.applications) {
-        app = get(state.context.applications, appPosition);
-        if app.id = term { return true; };
-        if app.function = term { return true; };
-        if containsValue(app.arguments, term) { return true; };
-    };
-    return false;
+    return index.weights.contains(term) || index.constantAt.contains(term);
 };
 
 // The MIR bridge reserves -1 through -19 for builtin functions and uses

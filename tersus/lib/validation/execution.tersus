@@ -1,12 +1,12 @@
-import validation::context { closeContext, integerValue, knownVariant };
-import validation::differences { safeBoundDifference, safeBoundSum, semanticFacts };
-import validation::evaluation { addOffsetFacts, builtinFacts, contextWithApplication, readThroughSequence, recordEvaluatedSize, recordEvaluatedValue };
-import validation::joins { freshValue, leastTermInUse, splitReadOverWrite };
-import validation::model { ApplicationTerm, ArgumentsLookup, CheckedStep, ConstantTerm, DisequalityFact, EqualityFact, ExecutionResult, ExecutionState, ExecutionStep, FactIndex, IntegerLookup, OrderFact, Saturation, SharedIndex, SumResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
-import validation::relations { boolAt, containsValue, emptyIntMap, equalArguments, hasEquality, intAt, leastClasses, sameIn };
+import validation::context { closeContext, knownVariant };
+import validation::differences { safeBoundDifference, safeBoundSum };
+import validation::evaluation { addOffsetFacts, builtinFacts, contextWithApplication, readThroughSequence, recordEvaluatedSize, recordEvaluatedValue, stateWithApplication, stateWithConstant };
+import validation::joins { mint, splitReadOverWrite };
+import validation::model { ApplicationTerm, ArgumentsLookup, ConstantTerm, DisequalityFact, EqualityFact, ExecutionResult, ExecutionState, ExecutionStep, FactIndex, IntegerLookup, Minted, NearApplications, OrderFact, Saturation, SharedIndex, Stepped, SumResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
+import validation::relations { boolAt, containsValue, emptyIntMap, equalArguments, hasEquality, intAt, leastClasses };
 import validation::saturation { noBlocked, noClosed, noDoneKeys, proveBySaturation };
 import validation::state { bindLocal, booleanCheck, noTemplates, resolveArguments, resolveValue, termInUse };
-import validation::validation { GoalSlice, chainSlice, entailsGoal, goalSlice, goalTerms, indexFacts, noFactIndex };
+import validation::validation { GoalSlice, chainSlice, entailsGoal, goalSlice, goalTerms, indexFacts, linkedWithin, nearApplications, noFactIndex, termOfValue, valueNear };
 
 
 
@@ -41,13 +41,11 @@ fn assumeRelation(context: ValidatorContext, relation: Int, left: Int, right: In
 // A comparison result can be copied across blocks before it is branched on.
 // Its arguments name the values captured when it was evaluated, so derive the
 // relation from those terms rather than from the current local bindings.
-fn assumeComparison(context: &ValidatorContext, term: Int, truth: Bool) -> ValidatorContext {
-    state = clone(context);
-    equalities = semanticFacts(context.equalities, context.applications, context.constants);
-    equalitiesClasses = leastClasses(equalities);
-    for appPosition in 0..size(context.applications) {
-        app = get(context.applications, appPosition);
-        if sameIn(equalitiesClasses, app.id, term) {
+fn assumeComparison(context: ValidatorContext, index: &FactIndex, term: Int, truth: Bool) -> ValidatorContext {
+    state = context;
+    made = nearApplications(state, index, term);
+    for app in made.applications {
+        if made.terms.contains(app.id) {
             if size(app.arguments) = 2 {
                 a = get(app.arguments, 0);
                 b = get(app.arguments, 1);
@@ -75,35 +73,67 @@ fn assumeComparison(context: &ValidatorContext, term: Int, truth: Bool) -> Valid
     return state;
 };
 
-fn assumeBooleanFact(context: ValidatorContext, left: Int, right: Int) -> ValidatorContext {
+fn assumeBooleanFact(context: ValidatorContext, index: &FactIndex, left: Int, right: Int) -> ValidatorContext {
     // (the comparisons a literal on either side decides, found before the context changes)
     terms = [];
     truths = [];
-    for cPosition in 0..size(context.constants) {
-        if get(context.constants, cPosition).kind = 1 {
-            if get(context.constants, cPosition).id = left { terms = push(terms, right); truths = push(truths, get(context.constants, cPosition).value = 1); };
-            if get(context.constants, cPosition).id = right { terms = push(terms, left); truths = push(truths, get(context.constants, cPosition).value = 1); };
-        };
+    leftAt = index.constantAt.lookup(left, -1);
+    if leftAt >= 0 && leftAt < size(context.constants) {
+        if get(context.constants, leftAt).kind = 1 && get(context.constants, leftAt).id = left { terms = push(terms, right); truths = push(truths, get(context.constants, leftAt).value = 1); };
+    };
+    rightAt = index.constantAt.lookup(right, -1);
+    if rightAt >= 0 && rightAt < size(context.constants) {
+        if get(context.constants, rightAt).kind = 1 && get(context.constants, rightAt).id = right { terms = push(terms, left); truths = push(truths, get(context.constants, rightAt).value = 1); };
     };
     state = context;
-    for k in 0..size(terms) { state = assumeComparison(state, get(terms, k), boolAt(truths, k, false)); };
+    for k in 0..size(terms) { state = assumeComparison(state, index, get(terms, k), boolAt(truths, k, false)); };
     return state;
 };
 
-fn sequenceLength(state: &ExecutionState, list: Int) -> ValueLookup {
-    equalities = semanticFacts(state.context.equalities, state.context.applications, state.context.constants);
-    equalitiesClasses = leastClasses(equalities);
-    for appPosition in 0..size(state.context.applications) {
-        app = get(state.context.applications, appPosition);
+// (the state is borrowed whole: a field passed with other arguments that are
+// computed is passed as a copy of it)
+fn valueOf(state: &ExecutionState, index: &FactIndex, term: Int) -> IntegerLookup {
+    return valueNear(state.context, index, term);
+};
+
+fn madeOf(state: &ExecutionState, index: &FactIndex, term: Int) -> NearApplications {
+    return nearApplications(state.context, index, term);
+};
+
+fn holdsIn(state: &ExecutionState, index: &FactIndex, goal: ValidatorGoal) -> Bool {
+    return entailsIn(state.context, index, goal);
+};
+
+fn indexTo(index: FactIndex, state: &ExecutionState) -> FactIndex {
+    return indexFacts(index, state.context);
+};
+
+fn stateWithLocal(state: ExecutionState, local: Int, term: Int) -> ExecutionState {
+    ExecutionState { context: context, locals: locals, templates: templates, floor: floor } = state;
+    return ExecutionState { context: context, locals: bindLocal(locals, local, term), templates: templates, floor: floor };
+};
+
+fn readThrough(state: ExecutionState, index: &FactIndex, result: Int, list: Int, at: Int) -> ExecutionState {
+    ExecutionState { context: context, locals: locals, templates: templates, floor: floor } = state;
+    return ExecutionState { context: readThroughSequence(context, index, result, list, at), locals: locals, templates: templates, floor: floor };
+};
+
+fn sequenceLength(state: &ExecutionState, index: &FactIndex, list: Int) -> ValueLookup {
+    made = madeOf(state, index, list);
+    for app in made.applications {
         if app.function = -13 {
             if size(app.arguments) = 1 {
-                if sameIn(equalitiesClasses, get(app.arguments, 0), list) {
+                if made.terms.contains(get(app.arguments, 0)) {
                     return ValueLookup::Found { term: app.id };
                 };
             };
         };
     };
     return ValueLookup::Missing;
+};
+
+fn stepped(status: Int, failedAt: Int, state: ExecutionState, index: FactIndex) -> Stepped {
+    return Stepped { result: ExecutionResult { status: status, failedAt: failedAt, state: state }, index: index };
 };
 
 // Trusted list construction: the new length is the old length plus one,
@@ -120,302 +150,194 @@ fn sequenceLength(state: &ExecutionState, list: Int) -> ValueLookup {
 // under a bound on the length alone; it was left as it is, with no failing
 // program found for it. popSequence keeps a read only at an index it knows
 // is in the shortened list.
-fn pushSequence(initial: &ExecutionState, facts: &FactIndex, local: Int, list: Int, value: Int, zero: Int) -> ExecutionResult {
-    z = integerValue(initial.context, zero);
+fn pushSequence(initial: ExecutionState, facts: FactIndex, local: Int, list: Int, value: Int, zero: Int) -> Stepped {
+    z = valueOf(initial, facts, zero);
     if z is IntegerLookup::Found {
-        if (z as IntegerLookup::Found).value != 0 { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
-    } else { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
-    state = clone(initial);
-    length = sequenceLength(state, list);
+        if (z as IntegerLookup::Found).value != 0 { return stepped(2, -1, initial, facts); };
+    } else { return stepped(2, -1, initial, facts); };
+    length = sequenceLength(initial, facts, list);
+    state = initial;
     oldLength = zero;
     if length is ValueLookup::Found {
         oldLength = (length as ValueLookup::Found).term;
     } else {
-        new = freshValue(state);
-        if new is ValueLookup::Found { oldLength = (new as ValueLookup::Found).term; }
-        else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-        app = ApplicationTerm { id: oldLength, function: -13, arguments: push([], list) };
-        context = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
-        state = ExecutionState { context: context, ..state };
+        Minted { state: sized, term: made } = mint(state);
+        oldLength = made;
+        state = stateWithApplication(sized, ApplicationTerm { id: oldLength, function: -13, arguments: push([], list) });
     };
     nonnegative = assumeRelation(state.context, 3, zero, oldLength);
     state = ExecutionState { context: nonnegative, ..state };
-    made = freshValue(state);
-    result = zero;
-    if made is ValueLookup::Found { result = (made as ValueLookup::Found).term; }
-    else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-    app = ApplicationTerm { id: result, function: -16, arguments: push(push([], list), value) };
-    context = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
-    state = ExecutionState { context: context, locals: bindLocal(state.locals, local, result), templates: clone(initial.templates) };
-    new = freshValue(state);
-    newLength = zero;
-    if new is ValueLookup::Found { newLength = (new as ValueLookup::Found).term; }
-    else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-    lengthApp = ApplicationTerm { id: newLength, function: -13, arguments: push([], result) };
-    elementApp = ApplicationTerm { id: value, function: -14, arguments: push(push([], result), oldLength) };
-    apps = push(push(clone(state.context.applications), lengthApp), elementApp);
+    Minted { state: pushed, term: result } = mint(state);
+    state = stateWithApplication(pushed, ApplicationTerm { id: result, function: -16, arguments: push(push([], list), value) });
+    state = stateWithLocal(state, local, result);
+    Minted { state: lengthened, term: newLength } = mint(state);
+    state = stateWithApplication(stateWithApplication(lengthened, ApplicationTerm { id: newLength, function: -13, arguments: push([], result) }), ApplicationTerm { id: value, function: -14, arguments: push(push([], result), oldLength) });
     // A read of the old list holds of the new one at the same index, but
     // only where that index is in the old list: push defines the element at
     // the old length, so carrying a read at an index the old list did not
     // have would contradict it. An index that is not proved in range drops
     // its read, which can only lose proofs.
-    equalities = semanticFacts(state.context.equalities, state.context.applications, state.context.constants);
-    equalitiesClasses = leastClasses(equalities);
-    for previousPosition in 0..size(state.context.applications) {
-        previous = get(state.context.applications, previousPosition);
+    reads = madeOf(state, facts, list);
+    for previous in reads.applications {
         if previous.function = -14 {
             if size(previous.arguments) = 2 {
-                if sameIn(equalitiesClasses, get(previous.arguments, 0), list) {
+                if reads.terms.contains(get(previous.arguments, 0)) {
                     at = get(previous.arguments, 1);
-                    if entailsIn(state.context, facts, ValidatorGoal::AtMost { left: zero, right: at }) {
-                        if entailsIn(state.context, facts, ValidatorGoal::Less { left: at, right: oldLength }) {
-                            kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), at) };
-                            apps = push(apps, kept);
+                    if holdsIn(state, facts, ValidatorGoal::AtMost { left: zero, right: at }) {
+                        if holdsIn(state, facts, ValidatorGoal::Less { left: at, right: oldLength }) {
+                            state = stateWithApplication(state, ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), at) });
                         };
                     };
                 };
             };
         };
     };
-    context = ValidatorContext { applications: apps, ..state.context };
-    context = addOffsetFacts(context, newLength, oldLength, 1);
-    knownLength = integerValue(context, oldLength);
+    offset = addOffsetFacts(state.context, newLength, oldLength, 1);
+    state = ExecutionState { context: offset, ..state };
+    knownLength = valueOf(state, facts, oldLength);
     if knownLength is IntegerLookup::Found {
         increment = safeBoundSum((knownLength as IntegerLookup::Found).value, 1);
         if increment is SumResult::Sum {
-            known = ConstantTerm { id: newLength, kind: 0, value: (increment as SumResult::Sum).value };
-            context = ValidatorContext { constants: push(context.constants, known), ..context };
+            state = stateWithConstant(state, ConstantTerm { id: newLength, kind: 0, value: (increment as SumResult::Sum).value });
         };
     };
-    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, ..state } };
+    return stepped(0, -1, state, facts);
+};
+
+// The term the facts state to have the integer value, or a new one stated to have it
+fn constantNear(state: ExecutionState, index: &FactIndex, value: Int) -> Minted {
+    known = termOfValue(index, value);
+    if known is ValueLookup::Found { return Minted { state: state, term: (known as ValueLookup::Found).term }; };
+    Minted { state: minted, term: symbol } = mint(state);
+    return Minted { state: stateWithConstant(minted, ConstantTerm { id: symbol, kind: 0, value: value }), term: symbol };
 };
 
 // Last is translated when the length is known. A nonempty check is still
 // required; unknown lengths remain unsupported by this particular encoding.
-fn lastSequence(initial: &ExecutionState, facts: &FactIndex, local: Int, list: Int, zero: Int) -> ExecutionResult {
-    z = integerValue(initial.context, zero);
+fn lastSequence(initial: ExecutionState, facts: FactIndex, local: Int, list: Int, zero: Int) -> Stepped {
+    z = valueOf(initial, facts, zero);
     if z is IntegerLookup::Found {
-        if (z as IntegerLookup::Found).value != 0 { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
-    } else { return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) }; };
-    length = sequenceLength(initial, list);
+        if (z as IntegerLookup::Found).value != 0 { return stepped(2, -1, initial, facts); };
+    } else { return stepped(2, -1, initial, facts); };
+    length = sequenceLength(initial, facts, list);
     if length is ValueLookup::Found {
         lengthTerm = (length as ValueLookup::Found).term;
-        if entailsIn(initial.context, facts, ValidatorGoal::Less { left: zero, right: lengthTerm }) = false {
-            return ExecutionResult { status: 1, failedAt: -1, state: clone(initial) };
+        if holdsIn(initial, facts, ValidatorGoal::Less { left: zero, right: lengthTerm }) = false {
+            return stepped(1, -1, initial, facts);
         };
-        value = integerValue(initial.context, lengthTerm);
+        value = valueOf(initial, facts, lengthTerm);
         if value is IntegerLookup::Found {
-            index = safeBoundDifference((value as IntegerLookup::Found).value, 1);
-            if index is SumResult::Sum {
-                indexValue = (index as SumResult::Sum).value;
-                indexTerm = zero;
-                known = false;
-                for constantPosition in 0..size(initial.context.constants) {
-                    constant = get(initial.context.constants, constantPosition);
-                    if constant.kind = 0 {
-                        if constant.value = indexValue { indexTerm = constant.id; known = true; };
-                    };
-                };
-                state = clone(initial);
-                if known = false {
-                    symbol = freshValue(state);
-                    if symbol is ValueLookup::Found {
-                        indexTerm = (symbol as ValueLookup::Found).term;
-                        constant = ConstantTerm { id: indexTerm, kind: 0, value: indexValue };
-                        context = ValidatorContext { constants: push(clone(state.context.constants), constant), ..state.context };
-                        state = ExecutionState { context: context, ..state };
-                    } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-                };
-                fresh = freshValue(state);
-                if fresh is ValueLookup::Found {
-                    result = (fresh as ValueLookup::Found).term;
-                    app = ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) };
-                    withApp = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
-                    context = readThroughSequence(withApp, result, list, indexTerm);
-                    locals = bindLocal(state.locals, local, result);
-                    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals, templates: clone(initial.templates) } };
-                };
+            last = safeBoundDifference((value as IntegerLookup::Found).value, 1);
+            if last is SumResult::Sum {
+                Minted { state: indexed, term: indexTerm } = constantNear(initial, facts, (last as SumResult::Sum).value);
+                Minted { state: state, term: result } = mint(indexed);
+                state = stateWithApplication(state, ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) });
+                index = indexTo(facts, state);
+                return stepped(0, -1, readThrough(stateWithLocal(state, local, result), index, result, list, indexTerm), index);
             };
         };
-        state = clone(initial);
-        oneTerm = zero;
-        knownOne = false;
-        for constantPosition in 0..size(initial.context.constants) {
-            constant = get(initial.context.constants, constantPosition);
-            if constant.kind = 0 {
-                if constant.value = 1 { oneTerm = constant.id; knownOne = true; };
-            };
-        };
-        if knownOne = false {
-            symbol = freshValue(state);
-            if symbol is ValueLookup::Found {
-                oneTerm = (symbol as ValueLookup::Found).term;
-                context = ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: oneTerm, kind: 0, value: 1 }), ..state.context };
-                state = ExecutionState { context: context, ..state };
-            } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-        };
-        idxFresh = freshValue(state);
-        if idxFresh is ValueLookup::Found {
-            indexTerm = (idxFresh as ValueLookup::Found).term;
-            subApp = ApplicationTerm { id: indexTerm, function: -2, arguments: push(push([], lengthTerm), oneTerm) };
-            context = ValidatorContext { applications: push(clone(state.context.applications), subApp), ..state.context };
-            context = addOffsetFacts(context, indexTerm, lengthTerm, -1);
-            state = ExecutionState { context: context, ..state };
-            fresh = freshValue(state);
-            if fresh is ValueLookup::Found {
-                result = (fresh as ValueLookup::Found).term;
-                app = ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) };
-                withApp = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
-                context = readThroughSequence(withApp, result, list, indexTerm);
-                locals = bindLocal(state.locals, local, result);
-                return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals, templates: clone(initial.templates) } };
-            };
-        };
+        Minted { state: state, term: oneTerm } = constantNear(initial, facts, 1);
+        Minted { state: subtracted, term: indexTerm } = mint(state);
+        state = stateWithApplication(subtracted, ApplicationTerm { id: indexTerm, function: -2, arguments: push(push([], lengthTerm), oneTerm) });
+        offset = addOffsetFacts(state.context, indexTerm, lengthTerm, -1);
+        state = ExecutionState { context: offset, ..state };
+        Minted { state: read, term: result } = mint(state);
+        state = stateWithApplication(read, ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) });
+        index = indexTo(facts, state);
+        return stepped(0, -1, readThrough(stateWithLocal(state, local, result), index, result, list, indexTerm), index);
     };
-    return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) };
+    return stepped(2, -1, initial, facts);
 };
 
 // The bridge checks the index first. The update preserves the length and
 // known reads at indices that are concretely different from the updated one.
-fn setSequence(initial: &ExecutionState, local: Int, list: Int, index: Int, value: Int) -> ExecutionResult {
-    length = sequenceLength(initial, list);
-    if length is ValueLookup::Found {
-        made = freshValue(initial);
-        if made is ValueLookup::Found {
-            result = (made as ValueLookup::Found).term;
-            update = ApplicationTerm { id: result, function: -17, arguments: push(push(push([], list), index), value) };
-            sizeApp = ApplicationTerm { id: (length as ValueLookup::Found).term, function: -13, arguments: push([], result) };
-            changed = ApplicationTerm { id: value, function: -14, arguments: push(push([], result), index) };
-            apps = push(push(push(clone(initial.context.applications), update), sizeApp), changed);
-            equalities = semanticFacts(initial.context.equalities, initial.context.applications, initial.context.constants);
-            equalitiesClasses = leastClasses(equalities);
-            updatedIndex = integerValue(initial.context, index);
-            for previousPosition in 0..size(initial.context.applications) {
-                previous = get(initial.context.applications, previousPosition);
-                if previous.function = -14 {
-                    if size(previous.arguments) = 2 {
-                        if sameIn(equalitiesClasses, get(previous.arguments, 0), list) {
-                            other = integerValue(initial.context, get(previous.arguments, 1));
-                            if updatedIndex is IntegerLookup::Found {
-                                if other is IntegerLookup::Found {
-                                    if (updatedIndex as IntegerLookup::Found).value != (other as IntegerLookup::Found).value {
-                                        kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) };
-                                        apps = push(apps, kept);
-                                    };
-                                };
+fn setSequence(initial: ExecutionState, facts: FactIndex, local: Int, list: Int, index: Int, value: Int) -> Stepped {
+    length = sequenceLength(initial, facts, list);
+    if length is ValueLookup::Missing { return stepped(2, -1, initial, facts); };
+    updatedIndex = valueOf(initial, facts, index);
+    reads = madeOf(initial, facts, list);
+    Minted { state: state, term: result } = mint(initial);
+    state = stateWithApplication(state, ApplicationTerm { id: result, function: -17, arguments: push(push(push([], list), index), value) });
+    state = stateWithApplication(state, ApplicationTerm { id: (length as ValueLookup::Found).term, function: -13, arguments: push([], result) });
+    state = stateWithApplication(state, ApplicationTerm { id: value, function: -14, arguments: push(push([], result), index) });
+    for previous in reads.applications {
+        if previous.function = -14 {
+            if size(previous.arguments) = 2 {
+                if reads.terms.contains(get(previous.arguments, 0)) {
+                    at = get(previous.arguments, 1);
+                    other = valueOf(state, facts, at);
+                    if updatedIndex is IntegerLookup::Found {
+                        if other is IntegerLookup::Found {
+                            if (updatedIndex as IntegerLookup::Found).value != (other as IntegerLookup::Found).value {
+                                state = stateWithApplication(state, ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) });
                             };
                         };
                     };
                 };
             };
-            context = ValidatorContext { applications: apps, ..clone(initial.context) };
-            locals = bindLocal(clone(initial.locals), local, result);
-            return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals, templates: clone(initial.templates) } };
         };
     };
-    return ExecutionResult { status: 2, failedAt: -1, state: clone(initial) };
+    return stepped(0, -1, stateWithLocal(state, local, result), facts);
 };
 
 // The bridge checks nonemptiness first. For a known length, removing the
 // final element preserves every recorded read below the new length.
-fn popSequence(initial: &ExecutionState, local: Int, list: Int) -> ExecutionResult {
-    length = sequenceLength(initial, list);
+fn popSequence(initial: ExecutionState, facts: FactIndex, local: Int, list: Int) -> Stepped {
+    length = sequenceLength(initial, facts, list);
     if length is ValueLookup::Found {
         oldLength = (length as ValueLookup::Found).term;
-        value = integerValue(initial.context, oldLength);
+        value = valueOf(initial, facts, oldLength);
         if value is IntegerLookup::Found {
             shortened = safeBoundDifference((value as IntegerLookup::Found).value, 1);
             if shortened is SumResult::Sum {
                 newLengthValue = (shortened as SumResult::Sum).value;
-                made = freshValue(initial);
-                if made is ValueLookup::Found {
-                    result = (made as ValueLookup::Found).term;
-                    popApp = ApplicationTerm { id: result, function: -18, arguments: push([], list) };
-                    context = ValidatorContext { applications: push(clone(initial.context.applications), popApp), ..clone(initial.context) };
-                    state = ExecutionState { context: context, locals: bindLocal(clone(initial.locals), local, result), templates: clone(initial.templates) };
-                    lengthTerm = oldLength;
-                    known = false;
-                    for constantPosition in 0..size(state.context.constants) {
-                        constant = get(state.context.constants, constantPosition);
-                        if constant.kind = 0 {
-                            if constant.value = newLengthValue { lengthTerm = constant.id; known = true; };
-                        };
-                    };
-                    if known = false {
-                        symbol = freshValue(state);
-                        if symbol is ValueLookup::Found {
-                            lengthTerm = (symbol as ValueLookup::Found).term;
-                            constant = ConstantTerm { id: lengthTerm, kind: 0, value: newLengthValue };
-                            context = ValidatorContext { constants: push(clone(state.context.constants), constant), ..state.context };
-                            state = ExecutionState { context: context, ..state };
-                        } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-                    };
-                    sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
-                    apps = push(clone(state.context.applications), sizeApp);
-                    equalities = semanticFacts(initial.context.equalities, initial.context.applications, initial.context.constants);
-                    equalitiesClasses = leastClasses(equalities);
-                    for previousPosition in 0..size(initial.context.applications) {
-                        previous = get(initial.context.applications, previousPosition);
-                        if previous.function = -14 {
-                            if size(previous.arguments) = 2 {
-                                if sameIn(equalitiesClasses, get(previous.arguments, 0), list) {
-                                    index = integerValue(initial.context, get(previous.arguments, 1));
-                                    if index is IntegerLookup::Found {
-                                        i = (index as IntegerLookup::Found).value;
-                                        if i >= 0 {
-                                            if i < newLengthValue {
-                                                kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) };
-                                                apps = push(apps, kept);
-                                            };
+                reads = madeOf(initial, facts, list);
+                Minted { state: state, term: result } = mint(initial);
+                state = stateWithApplication(state, ApplicationTerm { id: result, function: -18, arguments: push([], list) });
+                state = stateWithLocal(state, local, result);
+                Minted { state: lengthened, term: lengthTerm } = constantNear(state, facts, newLengthValue);
+                state = stateWithApplication(lengthened, ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) });
+                for previous in reads.applications {
+                    if previous.function = -14 {
+                        if size(previous.arguments) = 2 {
+                            if reads.terms.contains(get(previous.arguments, 0)) {
+                                at = get(previous.arguments, 1);
+                                index = valueOf(state, facts, at);
+                                if index is IntegerLookup::Found {
+                                    i = (index as IntegerLookup::Found).value;
+                                    if i >= 0 {
+                                        if i < newLengthValue {
+                                            state = stateWithApplication(state, ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) });
                                         };
                                     };
                                 };
                             };
                         };
                     };
-                    context = ValidatorContext { applications: apps, ..state.context };
-                    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, ..state } };
                 };
+                return stepped(0, -1, state, facts);
             };
         };
     };
     // A length that is not a number: the result is one shorter, as a term
     // (its size is size(list) - 1; the walk has checked size(list) > 0)
-    state = clone(initial);
+    state = initial;
     oldLength = 0;
     if length is ValueLookup::Found {
         oldLength = (length as ValueLookup::Found).term;
     } else {
-        sized = freshValue(state);
-        if sized is ValueLookup::Found { oldLength = (sized as ValueLookup::Found).term; } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-        sizeOfList = ApplicationTerm { id: oldLength, function: -13, arguments: push([], list) };
-        state = ExecutionState { context: ValidatorContext { applications: push(clone(state.context.applications), sizeOfList), ..clone(state.context) }, ..state };
+        Minted { state: sized, term: made } = mint(state);
+        oldLength = made;
+        state = stateWithApplication(sized, ApplicationTerm { id: oldLength, function: -13, arguments: push([], list) });
     };
-    oneTerm = 0;
-    haveOne = false;
-    for constantPosition in 0..size(state.context.constants) {
-        constant = get(state.context.constants, constantPosition);
-        if constant.kind = 0 { if constant.value = 1 { oneTerm = constant.id; haveOne = true; }; };
-    };
-    if haveOne = false {
-        symbol = freshValue(state);
-        if symbol is ValueLookup::Found {
-            oneTerm = (symbol as ValueLookup::Found).term;
-            state = ExecutionState { context: ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: oneTerm, kind: 0, value: 1 }), ..clone(state.context) }, ..state };
-        } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-    };
-    made = freshValue(state);
-    if made is ValueLookup::Missing { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-    result = (made as ValueLookup::Found).term;
-    popApp = ApplicationTerm { id: result, function: -18, arguments: push([], list) };
-    state = ExecutionState { context: ValidatorContext { applications: push(clone(state.context.applications), popApp), ..clone(state.context) }, locals: bindLocal(clone(state.locals), local, result), templates: clone(state.templates) };
-    shorter = freshValue(state);
-    if shorter is ValueLookup::Missing { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
-    newLength = (shorter as ValueLookup::Found).term;
-    difference = ApplicationTerm { id: newLength, function: -2, arguments: push(push([], oldLength), oneTerm) };
-    sizeOfResult = ApplicationTerm { id: newLength, function: -13, arguments: push([], result) };
-    apps = push(push(clone(state.context.applications), difference), sizeOfResult);
-    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: ValidatorContext { applications: apps, ..clone(state.context) }, ..state } };
+    Minted { state: withOne, term: oneTerm } = constantNear(state, facts, 1);
+    Minted { state: popped, term: result } = mint(withOne);
+    state = stateWithApplication(popped, ApplicationTerm { id: result, function: -18, arguments: push([], list) });
+    state = stateWithLocal(state, local, result);
+    Minted { state: shorter, term: newLength } = mint(state);
+    state = stateWithApplication(shorter, ApplicationTerm { id: newLength, function: -2, arguments: push(push([], oldLength), oneTerm) });
+    state = stateWithApplication(state, ApplicationTerm { id: newLength, function: -13, arguments: push([], result) });
+    return stepped(0, -1, state, facts);
 };
 
 // Pure applications with the same function and exact arguments denote the
@@ -426,6 +348,26 @@ fn existingApplication(context: &ValidatorContext, function: Int, args: &List<In
         if app.function = function {
             if equalArguments(emptyIntMap(), app.arguments, args) {
                 return ValueLookup::Found { term: app.id };
+            };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+// The same for a step, found on the first links of its lightest argument; a
+// miss makes a new term, which congruence equates with the one missed
+// wherever both are in reach.
+fn knownApplication(state: &ExecutionState, index: &FactIndex, function: Int, args: &List<Int>) -> ValueLookup {
+    if size(args) = 0 { return ValueLookup::Missing; };
+    lightest = get(args, 0);
+    for a in args { if index.weights.lookup(a, 0) < index.weights.lookup(lightest, 0) { lightest = a; }; };
+    for p in linkedWithin(index.applications, lightest, firstRung()) {
+        if p >= 0 && p < size(state.context.applications) {
+            app = get(state.context.applications, p);
+            if app.function = function {
+                if equalArguments(emptyIntMap(), app.arguments, args) {
+                    return ValueLookup::Found { term: app.id };
+                };
             };
         };
     };
@@ -446,54 +388,63 @@ fn executeStepsWithin(initial: ExecutionState, steps: &List<ExecutionStep>, dept
     state = initial;
     shared = SharedIndex::Missing;
     for i in 0..size(steps) {
-        if get(steps, i) is ExecutionStep::Check {
-            checked = stepCheckShared(state, get(steps, i), i, shared);
-            CheckedStep { result: result, shared: after } = checked;
+        before = contextSizes(state);
+        if asksFacts(get(steps, i)) {
+            index = extendedIndex(shared, state);
+            Stepped { result: result, index: after } = stepAsking(state, get(steps, i), i, index);
             if result.status != 0 { return result; };
-            state = result.state;
-            shared = after;
-        } else if readsFacts(get(steps, i)) {
-            before = contextSizes(state.context);
-            index = extendedIndex(shared, state.context);
-            result = stepReadingFacts(state, get(steps, i), i, index);
-            shared = SharedIndex::Found { index: index };
-            if result.status != 0 { return result; };
-            state = result.state;
-            if shrank(before, contextSizes(state.context)) { shared = SharedIndex::Missing; };
+            state = stateOf(result);
+            shared = SharedIndex::Found { index: after };
         } else {
-            before = contextSizes(state.context);
             result = executeStep(state, get(steps, i), i, depth);
             if result.status != 0 { return result; };
-            state = result.state;
-            // (and, should a step ever drop a fact, a list that got shorter drops it too)
-            if addsFactsOnly(get(steps, i)) = false || shrank(before, contextSizes(state.context)) { shared = SharedIndex::Missing; };
-            seeds = assumedTerms(state, get(steps, i));
-            if size(seeds) > 0 {
-                index = extendedIndex(shared, state.context);
-                gone = unreachableAt(state.context, index, seeds);
-                shared = SharedIndex::Found { index: index };
-                if gone { return ExecutionResult { status: 0, failedAt: -2, state: state }; };
-            };
+            state = stateOf(result);
+            if addsFactsOnly(get(steps, i)) = false { shared = SharedIndex::Missing; };
+        };
+        // (and, should a step ever drop a fact, a list that got shorter drops it too)
+        if shrank(before, contextSizes(state)) { shared = SharedIndex::Missing; };
+        seeds = assumedTerms(state, get(steps, i));
+        if size(seeds) > 0 {
+            index = extendedIndex(shared, state);
+            gone = unreachableAt(state, index, seeds);
+            shared = SharedIndex::Found { index: index };
+            if gone { return ExecutionResult { status: 0, failedAt: -2, state: state }; };
         };
     };
     return ExecutionResult { status: 0, failedAt: -1, state: state };
 };
 
-// The steps that ask the block's facts a question other than a check's
-fn readsFacts(step: &ExecutionStep) -> Bool {
-    return step is ExecutionStep::Push || step is ExecutionStep::Last || step is ExecutionStep::CheckWithin || step is ExecutionStep::RequireVariant;
+// The steps that ask the facts a question: each is given the block's index,
+// extended to the state it starts from, and answers on slices of it
+fn asksFacts(step: &ExecutionStep) -> Bool {
+    if step is ExecutionStep::Check || step is ExecutionStep::Push || step is ExecutionStep::Last || step is ExecutionStep::CheckWithin || step is ExecutionStep::RequireVariant { return true; };
+    return step is ExecutionStep::Apply || step is ExecutionStep::ApplyFresh || step is ExecutionStep::Literal || step is ExecutionStep::Set || step is ExecutionStep::Pop || step is ExecutionStep::Assume;
 };
 
-fn stepReadingFacts(state: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
+fn stepAsking(state: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
+    if step is ExecutionStep::Check { return stepCheck(state, step, i, facts); };
     if step is ExecutionStep::Push { return stepPush(state, step, i, facts); };
     if step is ExecutionStep::Last { return stepLast(state, step, i, facts); };
     if step is ExecutionStep::CheckWithin { return stepCheckWithin(state, step, i, facts); };
     if step is ExecutionStep::RequireVariant { return stepRequireVariant(state, step, i, facts); };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    if step is ExecutionStep::Apply { return stepApply(state, step, i, facts); };
+    if step is ExecutionStep::ApplyFresh { return stepApplyFresh(state, step, i, facts); };
+    if step is ExecutionStep::Literal { return stepLiteral(state, step, i, facts); };
+    if step is ExecutionStep::Set { return stepSet(state, step, i, facts); };
+    if step is ExecutionStep::Pop { return stepPop(state, step, i, facts); };
+    if step is ExecutionStep::Assume { return stepAssume(state, step, i, facts); };
+    return stepped(2, i, state, facts);
 };
 
-fn contextSizes(c: &ValidatorContext) -> List<Int> {
-    return push(push(push(push(push(push(push([], size(c.equalities)), size(c.applications)), size(c.constants)), size(c.orders)), size(c.different)), size(c.variants)), size(c.differences));
+// (each of these takes the state whole: an argument that is a field of a value
+// the loop moves later is passed as a copy)
+fn stateOf(result: ExecutionResult) -> ExecutionState {
+    ExecutionResult { status: status, failedAt: failedAt, state: state } = result;
+    return state;
+};
+
+fn contextSizes(state: &ExecutionState) -> List<Int> {
+    return push(push(push(push(push(push(push([], size(state.context.equalities)), size(state.context.applications)), size(state.context.constants)), size(state.context.orders)), size(state.context.different)), size(state.context.variants)), size(state.context.differences));
 };
 
 fn shrank(before: &List<Int>, after: &List<Int>) -> Bool {
@@ -512,16 +463,10 @@ fn addsFactsOnly(step: &ExecutionStep) -> Bool {
 
 fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int, depth: Int) -> ExecutionResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth {
     if step is ExecutionStep::Assign { return stepAssign(state, step, i); };
-    if step is ExecutionStep::Apply { return stepApply(state, step, i); };
-    if step is ExecutionStep::Literal { return stepLiteral(state, step, i); };
-    if step is ExecutionStep::ApplyFresh { return stepApplyFresh(state, step, i); };
-    if step is ExecutionStep::Set { return stepSet(state, step, i); };
-    if step is ExecutionStep::Pop { return stepPop(state, step, i); };
     if step is ExecutionStep::NewArray { return stepNewArray(state, step, i); };
     if step is ExecutionStep::Havoc { return stepHavoc(state, step, i); };
     if step is ExecutionStep::RequireDefined { return stepRequireDefined(state, step, i); };
     if step is ExecutionStep::AssumeForall { return stepAssumeForall(state, step, i); };
-    if step is ExecutionStep::Assume { return stepAssume(state, step, i); };
     if step is ExecutionStep::AssumeVariant { return stepAssumeVariant(state, step, i); };
     if step is ExecutionStep::Scoped && depth > 0 {
         inner = executeStepsWithin(clone(state), (step as ExecutionStep::Scoped).steps, depth - 1);
@@ -547,30 +492,37 @@ fn stepAssign(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Executio
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
-fn stepApply(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+// The application as a fact, what the builtins know of it, and its value
+// where concrete evaluation knows it
+fn withApplied(state: ExecutionState, facts: FactIndex, function: Int, result: Int, terms: &List<Int>) -> Stepped {
+    ExecutionState { context: context, locals: locals, templates: templates, floor: floor } = state;
+    applied = contextWithApplication(context, ApplicationTerm { id: result, function: function, arguments: clone(terms) });
+    index = indexFacts(facts, applied);
+    built = builtinFacts(applied, index, function, result, terms);
+    index = indexFacts(index, built);
+    recorded = recordEvaluatedValue(ExecutionState { context: built, locals: locals, templates: templates, floor: floor }, index, result);
+    return stepped(0, -1, recorded, index);
+};
+
+fn stepApply(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::Apply {
         apply = step as ExecutionStep::Apply;
         args = resolveArguments(state, apply.arguments);
         if args is ArgumentsLookup::Found {
             terms = (args as ArgumentsLookup::Found).terms;
-            if termInUse(state, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            if apply.result = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            if containsValue(terms, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            ExecutionState { context: applyContext, locals: applyLocals, templates: applyTemplates } = state;
-            context = builtinFacts(contextWithApplication(applyContext, ApplicationTerm { id: apply.result, function: apply.function, arguments: clone(terms) }), apply.function, apply.result, terms);
-            state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(applyLocals, apply.local, apply.result), templates: applyTemplates }, apply.result);
-        } else {
-            return ExecutionResult { status: 2, failedAt: i, state: state };
+            if termInUse(state, facts, apply.result) { return stepped(2, i, state, facts); };
+            if apply.result = apply.function { return stepped(2, i, state, facts); };
+            if containsValue(terms, apply.result) { return stepped(2, i, state, facts); };
+            return withApplied(stateWithLocal(state, apply.local, apply.result), facts, apply.function, apply.result, terms);
         };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
 // (what a list or array literal is, the same term everywhere: known
 // again where a block names it, and nothing new where it is known)
-fn stepLiteral(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepLiteral(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::Literal {
         literal = step as ExecutionStep::Literal;
@@ -578,52 +530,72 @@ fn stepLiteral(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Executi
         if args is ArgumentsLookup::Found {
             terms = (args as ArgumentsLookup::Found).terms;
             known = false;
-            for aPosition in 0..size(state.context.applications) {
-                a = get(state.context.applications, aPosition);
+            made = madeOf(state, facts, literal.result);
+            for a in made.applications {
                 if a.id = literal.result && a.function = literal.function && a.arguments = terms { known = true; };
             };
-            if known = false {
-                ExecutionState { context: literalContext, locals: literalLocals, templates: literalTemplates } = state;
-                context = builtinFacts(contextWithApplication(literalContext, ApplicationTerm { id: literal.result, function: literal.function, arguments: clone(terms) }), literal.function, literal.result, terms);
-                state = recordEvaluatedValue(ExecutionState { context: context, locals: literalLocals, templates: literalTemplates }, literal.result);
-            };
-        } else {
-            return ExecutionResult { status: 2, failedAt: i, state: state };
+            if known { return stepped(0, -1, state, facts); };
+            return withApplied(state, facts, literal.function, literal.result, terms);
         };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
-fn stepApplyFresh(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepApplyFresh(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::ApplyFresh {
         apply = step as ExecutionStep::ApplyFresh;
         args = resolveArguments(state, apply.arguments);
         if args is ArgumentsLookup::Found {
             terms = (args as ArgumentsLookup::Found).terms;
-            existing = existingApplication(state.context, apply.function, terms);
+            existing = knownApplication(state, facts, apply.function, terms);
             if existing is ValueLookup::Found {
-                locals = bindLocal(state.locals, apply.local, (existing as ValueLookup::Found).term);
-                state = ExecutionState { locals: locals, ..state };
-            } else {
-              fresh = freshValue(state);
-              if fresh is ValueLookup::Found {
-                resultId = (fresh as ValueLookup::Found).term;
-                if resultId = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                if containsValue(terms, resultId) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                ExecutionState { context: freshContext, locals: freshLocals, templates: freshTemplates } = state;
-                context = builtinFacts(contextWithApplication(freshContext, ApplicationTerm { id: resultId, function: apply.function, arguments: clone(terms) }), apply.function, resultId, terms);
-                state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(freshLocals, apply.local, resultId), templates: freshTemplates }, resultId);
-              } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                return stepped(0, -1, stateWithLocal(state, apply.local, (existing as ValueLookup::Found).term), facts);
             };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+            Minted { state: minted, term: resultId } = mint(state);
+            if resultId = apply.function { return stepped(2, i, minted, facts); };
+            if containsValue(terms, resultId) { return stepped(2, i, minted, facts); };
+            return withApplied(stateWithLocal(minted, apply.local, resultId), facts, apply.function, resultId, terms);
+        };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
-fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
+// A helper's result as the step's, failing at the step
+fn atStep(made: Stepped, i: Int) -> Stepped {
+    Stepped { result: result, index: index } = made;
+    return resultAt(result, index, i);
+};
+
+fn resultAt(result: ExecutionResult, index: FactIndex, i: Int) -> Stepped {
+    ExecutionResult { status: status, failedAt: failedAt, state: state } = result;
+    if status != 0 { return stepped(status, i, state, index); };
+    return stepped(0, -1, state, index);
+};
+
+// The same, with the made list's size where concrete evaluation can count it
+fn sizedAfter(made: Stepped, i: Int, local: Int) -> Stepped {
+    Stepped { result: result, index: index } = made;
+    return sizedResult(result, index, i, local);
+};
+
+fn sizedResult(result: ExecutionResult, index: FactIndex, i: Int, local: Int) -> Stepped {
+    ExecutionResult { status: status, failedAt: failedAt, state: state } = result;
+    if status != 0 { return stepped(status, i, state, index); };
+    return withEvaluatedSize(state, index, local);
+};
+
+fn withEvaluatedSize(state: ExecutionState, facts: FactIndex, local: Int) -> Stepped {
+    index = indexTo(facts, state);
+    made = resolveValue(state, ValueRef::Local { local: local });
+    if made is ValueLookup::Found {
+        sized = recordEvaluatedSize(state, index, (made as ValueLookup::Found).term);
+        return stepped(0, -1, sized, index);
+    };
+    return stepped(0, -1, state, index);
+};
+
+fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::Push {
         pushStep = step as ExecutionStep::Push;
@@ -633,20 +605,15 @@ fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactI
         if list is ValueLookup::Found {
             if value is ValueLookup::Found {
                 if zero is ValueLookup::Found {
-                    pushed = pushSequence(state, facts, pushStep.local, (list as ValueLookup::Found).term, (value as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
-                    if pushed.status != 0 { return ExecutionResult { status: pushed.status, failedAt: i, state: pushed.state }; };
-                    state = pushed.state;
-                    madeTerm = resolveValue(state, ValueRef::Local { local: pushStep.local });
-                    if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+                    return sizedAfter(pushSequence(state, facts, pushStep.local, (list as ValueLookup::Found).term, (value as ValueLookup::Found).term, (zero as ValueLookup::Found).term), i, pushStep.local);
+                };
+            };
+        };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
-fn stepLast(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
+fn stepLast(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::Last {
         last = step as ExecutionStep::Last;
@@ -654,17 +621,14 @@ fn stepLast(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactI
         zero = resolveValue(state, last.zero);
         if list is ValueLookup::Found {
             if zero is ValueLookup::Found {
-                result = lastSequence(state, facts, last.local, (list as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
-                if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
-                state = result.state;
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+                return atStep(lastSequence(state, facts, last.local, (list as ValueLookup::Found).term, (zero as ValueLookup::Found).term), i);
+            };
+        };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
-fn stepSet(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepSet(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::Set {
         setStep = step as ExecutionStep::Set;
@@ -674,34 +638,24 @@ fn stepSet(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionRe
         if list is ValueLookup::Found {
             if index is ValueLookup::Found {
                 if value is ValueLookup::Found {
-                    result = setSequence(state, setStep.local, (list as ValueLookup::Found).term, (index as ValueLookup::Found).term, (value as ValueLookup::Found).term);
-                    if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
-                    state = result.state;
-                    madeTerm = resolveValue(state, ValueRef::Local { local: setStep.local });
-                    if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+                    return sizedAfter(setSequence(state, facts, setStep.local, (list as ValueLookup::Found).term, (index as ValueLookup::Found).term, (value as ValueLookup::Found).term), i, setStep.local);
+                };
+            };
+        };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
-fn stepPop(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepPop(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::Pop {
         popStep = step as ExecutionStep::Pop;
         list = resolveValue(state, popStep.list);
         if list is ValueLookup::Found {
-            result = popSequence(state, popStep.local, (list as ValueLookup::Found).term);
-            if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
-            state = result.state;
-            madeTerm = resolveValue(state, ValueRef::Local { local: popStep.local });
-            if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+            return sizedAfter(popSequence(state, facts, popStep.local, (list as ValueLookup::Found).term), i, popStep.local);
+        };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
 fn stepNewArray(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
@@ -712,21 +666,13 @@ fn stepNewArray(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Execut
         value = resolveValue(state, array.value);
         if length is ValueLookup::Found {
             if value is ValueLookup::Found {
-                fresh = freshValue(state);
-                if fresh is ValueLookup::Found {
-                    result = (fresh as ValueLookup::Found).term;
-                    lengthTerm = (length as ValueLookup::Found).term;
-                    valueTerm = (value as ValueLookup::Found).term;
-                    make = ApplicationTerm { id: result, function: -19, arguments: push(push([], lengthTerm), valueTerm) };
-                    sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
-                    apps = push(push(clone(state.context.applications), make), sizeApp);
-                    context = ValidatorContext { applications: apps, ..state.context };
-                    locals = bindLocal(state.locals, array.local, result);
-                    state = ExecutionState { context: context, locals: locals, ..state };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+                Minted { state: minted, term: result } = mint(state);
+                lengthTerm = (length as ValueLookup::Found).term;
+                valueTerm = (value as ValueLookup::Found).term;
+                made = stateWithApplication(stateWithApplication(minted, ApplicationTerm { id: result, function: -19, arguments: push(push([], lengthTerm), valueTerm) }), ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) });
+                return ExecutionResult { status: 0, failedAt: -1, state: stateWithLocal(made, array.local, result) };
+            };
+        };
     };
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
@@ -735,12 +681,8 @@ fn stepHavoc(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Execution
     state = initial;
     if step is ExecutionStep::Havoc {
         havoc = step as ExecutionStep::Havoc;
-        fresh = freshValue(state);
-        if fresh is ValueLookup::Found {
-            locals = bindLocal(state.locals, havoc.local, (fresh as ValueLookup::Found).term);
-            state = ExecutionState { locals: locals, ..state };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+        Minted { state: minted, term: fresh } = mint(state);
+        return ExecutionResult { status: 0, failedAt: -1, state: stateWithLocal(minted, havoc.local, fresh) };
     };
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
@@ -763,7 +705,7 @@ fn stepRequireDefined(initial: ExecutionState, step: &ExecutionStep, i: Int) -> 
 // after the cheaper rungs have failed.
 fn sliceBudgets() -> List<Int> { return push(push(push(push(push([], firstRung()), 128), 256), 512), lastRung()); };
 
-fn firstRung() -> Int { return 64; };
+fn firstRung() -> Int [{ }] [{ affirm return >= 0; }] { return 64; };
 
 fn lastRung() -> Int [{ }] [{ affirm return >= 0; }] { return 1024; };
 
@@ -786,10 +728,10 @@ fn assumedTerms(state: &ExecutionState, step: &ExecutionStep) -> List<Int> {
 // Whether the facts within the first rung's reach of the seeds contradict each
 // other (only a contradiction entails x < x; a walk the budget cut short proves
 // nothing about the facts it left out)
-fn unreachableAt(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>) -> Bool {
+fn unreachableAt(state: &ExecutionState, index: &FactIndex, seeds: &List<Int>) -> Bool {
     if size(seeds) = 0 { return false; };
     probe = get(seeds, 0);
-    return entailsGoal(goalSlice(context, index, seeds, firstRung()).slice, ValidatorGoal::Less { left: probe, right: probe });
+    return entailsGoal(goalSlice(state.context, index, seeds, firstRung()).slice, ValidatorGoal::Less { left: probe, right: probe });
 };
 
 // A refused answer carries the last walk: the heavier engines are given its facts.
@@ -855,13 +797,12 @@ fn variantInSlices(context: &ValidatorContext, index: &FactIndex, term: Int, fam
     return false;
 };
 
-fn extendedIndex(shared: SharedIndex, context: &ValidatorContext) -> FactIndex {
-    if shared is SharedIndex::Found { return indexFacts((shared as SharedIndex::Found).index, context); };
-    return indexFacts(noFactIndex(), context);
+fn extendedIndex(shared: SharedIndex, state: &ExecutionState) -> FactIndex {
+    if shared is SharedIndex::Found { return indexFacts((shared as SharedIndex::Found).index, state.context); };
+    return indexFacts(noFactIndex(), state.context);
 };
 
-fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given: SharedIndex) -> CheckedStep {
-    shared = given;
+fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int, index: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::Check {
         check0 = step as ExecutionStep::Check;
@@ -870,23 +811,22 @@ fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given:
         quiet = check0.relation >= 10;
         relation = check0.relation;
         if quiet { relation = relation - 10; };
-        if relation < 0 { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
-        if relation > 3 { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
+        if relation < 0 { return stepped(2, i, state, index); };
+        if relation > 3 { return stepped(2, i, state, index); };
         left = resolveValue(state, check0.left);
         right = resolveValue(state, check0.right);
         if left is ValueLookup::Found {
             if right is ValueLookup::Found {
                 a = (left as ValueLookup::Found).term;
                 b = (right as ValueLookup::Found).term;
-                index = extendedIndex(shared, state.context);
                 sliced = checkInSlices(state.context, index, relation, a, b);
                 SliceAnswer { holds: ok, budget: rung, admitted: admitted, operations: operations, walk: walk } = sliced;
                 if ok = false && quiet = false {
                     // (a term the engines make must be new to the whole state, not
                     // only to the slice: the goal's own terms can be ones the slice
                     // holds no fact of)
-                    floor = leastTermInUse(state);
-                    near = ExecutionState { context: chainSlice(state.context, index, push(push([], a), b), lastRung(), walk), locals: clone(state.locals), templates: clone(state.templates) };
+                    floor = state.floor;
+                    near = ExecutionState { context: chainSlice(state.context, index, push(push([], a), b), lastRung(), walk), locals: clone(state.locals), templates: clone(state.templates), floor: floor };
                     ok = entailsGoal(near.context, localGoal(relation, a, b)) || booleanCheck(near.context, relation, a, b);
                     if ok = false && size(near.templates) > 0 {
                         // (each saturation of a large slice is costly: a check it cannot
@@ -902,21 +842,31 @@ fn stepCheckShared(initial: ExecutionState, step: &ExecutionStep, i: Int, given:
                         ok = splitReadOverWrite(near, localGoal(relation, a, b), 3, budget, floor).holds;
                     };
                 };
-                shared = SharedIndex::Found { index: index };
-                if ok = false {
-                    return CheckedStep { result: ExecutionResult { status: 1, failedAt: i, state: state }, shared: shared };
-                };
-                ExecutionState { context: checkContext, locals: checkLocals, templates: checkTemplates } = state;
-                context = assumeRelation(checkContext, relation, a, b);
-                if relation = 0 {
-                    context = assumeBooleanFact(context, a, b);
-                };
-                state = ExecutionState { context: context, locals: checkLocals, templates: checkTemplates };
-            } else { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
-        } else { return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared }; };
-        return CheckedStep { result: ExecutionResult { status: 0, failedAt: -1, state: state }, shared: shared };
+                if ok = false { return stepped(1, i, state, index); };
+                checked = assumedState(state, index, relation, a, b);
+                return stepped(0, -1, checked, index);
+            };
+        };
     };
-    return CheckedStep { result: ExecutionResult { status: 2, failedAt: i, state: state }, shared: shared };
+    return stepped(2, i, state, index);
+};
+
+// A relation that holds now, and the comparisons a literal on either side of an equality decides
+fn assumedState(state: ExecutionState, index: &FactIndex, relation: Int, a: Int, b: Int) -> ExecutionState {
+    ExecutionState { context: context, locals: locals, templates: templates, floor: floor } = state;
+    assumed = assumeRelation(context, relation, a, b);
+    if relation = 0 { assumed = assumeBooleanFact(assumed, index, a, b); };
+    return ExecutionState { context: assumed, locals: locals, templates: templates, floor: floor };
+};
+
+fn stateWithVariant(state: ExecutionState, fact: VariantFact) -> ExecutionState {
+    ExecutionState { context: context, locals: locals, templates: templates, floor: floor } = state;
+    return ExecutionState { context: contextWithVariant(context, fact), locals: locals, templates: templates, floor: floor };
+};
+
+fn contextWithVariant(context: ValidatorContext, fact: VariantFact) -> ValidatorContext {
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: push(variants, fact), fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
 };
 
 fn stepAssumeForall(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
@@ -933,30 +883,25 @@ fn stepAssumeForall(initial: ExecutionState, step: &ExecutionStep, i: Int) -> Ex
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
-fn stepAssume(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+fn stepAssume(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::Assume {
         assumed = step as ExecutionStep::Assume;
-        if assumed.relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        if assumed.relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        if assumed.relation < 0 { return stepped(2, i, state, facts); };
+        if assumed.relation > 3 { return stepped(2, i, state, facts); };
         left = resolveValue(state, assumed.left);
         right = resolveValue(state, assumed.right);
         if left is ValueLookup::Found {
             if right is ValueLookup::Found {
-                ExecutionState { context: assumeContext, locals: assumeLocals, templates: assumeTemplates } = state;
-                context = assumeRelation(assumeContext, assumed.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
-                if assumed.relation = 0 {
-                    context = assumeBooleanFact(context, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
-                };
-                state = ExecutionState { context: context, locals: assumeLocals, templates: assumeTemplates };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+                assumedNow = assumedState(state, facts, assumed.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
+                return stepped(0, -1, assumedNow, facts);
+            };
+        };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
-fn stepCheckWithin(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
+fn stepCheckWithin(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::CheckWithin {
         cw = step as ExecutionStep::CheckWithin;
@@ -964,14 +909,14 @@ fn stepCheckWithin(initial: ExecutionState, step: &ExecutionStep, i: Int, facts:
         outer = resolveValue(state, cw.outer);
         if inner is ValueLookup::Found {
             if outer is ValueLookup::Found {
-                if entailsIn(state.context, facts, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
-                    return ExecutionResult { status: 1, failedAt: i, state: state };
+                if holdsIn(state, facts, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
+                    return stepped(1, i, state, facts);
                 };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+                return stepped(0, -1, state, facts);
+            };
+        };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };
 
 fn stepAssumeVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
@@ -980,16 +925,14 @@ fn stepAssumeVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> E
         av = step as ExecutionStep::AssumeVariant;
         object = resolveValue(state, av.object);
         if object is ValueLookup::Found {
-            variants = push(clone(state.context.variants), VariantFact { object: (object as ValueLookup::Found).term, family: av.family, constructor: av.constructor, matches: av.matches });
-            context = ValidatorContext { variants: variants, ..state.context };
-            state = ExecutionState { context: context, ..state };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+            return ExecutionResult { status: 0, failedAt: -1, state: stateWithVariant(state, VariantFact { object: (object as ValueLookup::Found).term, family: av.family, constructor: av.constructor, matches: av.matches }) };
+        };
+        return ExecutionResult { status: 2, failedAt: i, state: state };
     };
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
-fn stepRequireVariant(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: &FactIndex) -> ExecutionResult {
+fn stepRequireVariant(initial: ExecutionState, step: &ExecutionStep, i: Int, facts: FactIndex) -> Stepped {
     state = initial;
     if step is ExecutionStep::RequireVariant {
         rv = step as ExecutionStep::RequireVariant;
@@ -997,12 +940,11 @@ fn stepRequireVariant(initial: ExecutionState, step: &ExecutionStep, i: Int, fac
         if object is ValueLookup::Found {
             term = (object as ValueLookup::Found).term;
             if variantInSlices(state.context, facts, term, rv.family, rv.constructor) {
-                variants = push(clone(state.context.variants), VariantFact { object: term, family: rv.family, constructor: rv.constructor, matches: true });
-                context = ValidatorContext { variants: variants, ..state.context };
-                state = ExecutionState { context: context, ..state };
-            } else { return ExecutionResult { status: 1, failedAt: i, state: state }; };
-        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
+                required = stateWithVariant(state, VariantFact { object: term, family: rv.family, constructor: rv.constructor, matches: true });
+                return stepped(0, -1, required, facts);
+            };
+            return stepped(1, i, state, facts);
+        };
     };
-    return ExecutionResult { status: 2, failedAt: i, state: state };
+    return stepped(2, i, state, facts);
 };

@@ -1,10 +1,10 @@
 import validation::context { analyzeContext, contextDifferent, knownNonnegativeWith, signFacts };
 import validation::linear { linearEntails };
-import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, HullLinks, MergePair, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, UnionFind, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact, WriteOf };
+import validation::model { ApplicationTerm, ConstantTerm, ConstructorField, ContextAnalysis, DifferenceFact, DisequalityFact, EqualityFact, ExecutionState, HullLinks, MergePair, Minted, NormalizedSide, OrderFact, RawFacts, SignFacts, SplitResult, StateMergeLookup, UnionFind, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact, WriteOf };
 import validation::relations { applicationAt, emptyIntMap, emptyPositions, intAt, minInt, sameIn, ufFind, ufUnion };
 import validation::saturation { withInstances };
 import validation::sequenceFacts { sizeTermOf };
-import validation::state { bindLocal, commonTemplates, emptyMergePairs, goalSides, lookupLocal, noTemplates };
+import validation::state { bindLocal, commonTemplates, emptyMergePairs, goalSides, lookupLocal };
 import validation::validation { entailsGoal };
 
 
@@ -177,9 +177,10 @@ fn splitAtBound(state: &ExecutionState, goal: &ValidatorGoal, depth: Int, budget
     return SplitResult { holds: aboveOk, used: used };
 };
 
-// (below every term the state mentions, found in one pass over it)
-fn freshValue(state: &ExecutionState) -> ValueLookup {
-    return ValueLookup::Found { term: leastTermInUse(state) - 1 };
+// A term new to the state, and the state with its floor below it
+fn mint(state: ExecutionState) -> Minted {
+    term = state.floor - 1;
+    return Minted { state: ExecutionState { floor: term, ..state }, term: term };
 };
 
 // A term new to a state that is part of another: below both what it mentions
@@ -246,42 +247,6 @@ fn leastTermInUse(state: &ExecutionState) -> Int {
 
 fn sameConstructorField(a: &ConstructorField, b: &ConstructorField) -> Bool {
     return a.constructor = b.constructor && a.field = b.field && a.index = b.index;
-};
-
-fn containsConstructorField(fields: &List<ConstructorField>, field: &ConstructorField) -> Bool {
-    for candidatePosition in 0..size(fields) {
-        candidate = get(fields, candidatePosition);
-        if sameConstructorField(candidate, field) { return true; };
-    };
-    return false;
-};
-
-fn unionContexts(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
-    equalities = clone(left.equalities);
-    applications = clone(left.applications);
-    constants = clone(left.constants);
-    orders = clone(left.orders);
-    different = clone(left.different);
-    variants = clone(left.variants);
-    fieldFunctions = clone(left.fieldFunctions);
-    constructorFunctions = clone(left.constructorFunctions);
-    constructorFields = clone(left.constructorFields);
-    differences = clone(left.differences);
-    for fact in right.equalities { equalities = push(equalities, clone(fact)); };
-    for fact in right.applications { applications = push(applications, clone(fact)); };
-    for fact in right.constants { constants = push(constants, clone(fact)); };
-    for fact in right.orders { orders = push(orders, clone(fact)); };
-    for fact in right.different { different = push(different, clone(fact)); };
-    for fact in right.variants { variants = push(variants, clone(fact)); };
-    fieldSeen = HashSet::new();
-    for function in fieldFunctions { fieldSeen = fieldSeen.insert(function); };
-    for function in right.fieldFunctions { if fieldSeen.contains(function) = false { fieldSeen = fieldSeen.insert(function); fieldFunctions = push(fieldFunctions, function); }; };
-    constructorSeen = HashSet::new();
-    for function in constructorFunctions { constructorSeen = constructorSeen.insert(function); };
-    for function in right.constructorFunctions { if constructorSeen.contains(function) = false { constructorSeen = constructorSeen.insert(function); constructorFunctions = push(constructorFunctions, function); }; };
-    for field in right.constructorFields { if containsConstructorField(constructorFields, field) = false { constructorFields = push(constructorFields, clone(field)); }; };
-    for fact in right.differences { differences = push(differences, clone(fact)); };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
 };
 
 fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashSet<Int>, term: Int) -> ValueLookup {
@@ -614,12 +579,7 @@ fn constantTermWithValue(context: &ValidatorContext, value: Int) -> ValueLookup 
 // A local both sides bind to the same generated id keeps it. Bounds of the
 // joined terms come from addDifferenceHull, which asks no solver.
 fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
-    poolContext = unionContexts(left.context, right.context);
-    poolEqualities = clone(poolContext.equalities);
-    for binding in left.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
-    for binding in right.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
-    poolContext = ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) };
-    pool = ExecutionState { context: clone(poolContext), locals: HashMap::new(), templates: noTemplates() };
+    floor = minInt(left.floor, right.floor);
     pairs = emptyMergePairs();
     locals = emptyIntMap();
     for binding in left.locals.entries() {
@@ -647,14 +607,10 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
                     };
                 };
                 if found = false {
-                    fresh = freshValue(pool);
-                    if fresh is ValueLookup::Found {
-                        joined = (fresh as ValueLookup::Found).term;
-                        pairs = push(pairs, MergePair { left: binding.value, right: rightTerm, joined: joined });
-                        poolEqualities = push(clone(poolEqualities), EqualityFact { left: joined, right: joined });
-                        pool = ExecutionState { context: ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) }, locals: HashMap::new(), templates: noTemplates() };
-                        found = true;
-                    } else { return StateMergeLookup::Missing; };
+                    joined = floor - 1;
+                    floor = joined;
+                    pairs = push(pairs, MergePair { left: binding.value, right: rightTerm, joined: joined });
+                    found = true;
                 };
                 if found { locals = bindLocal(locals, binding.key, joined); };
             };
@@ -665,7 +621,7 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
     rightSide = normalizedContext(right.context, pairs, false, leftSide.raw);
     // (a forall both paths assumed holds after the join: its values are locals,
     // which the join gives the joined terms)
-    state = ExecutionState { context: commonContext(leftSide.context, rightSide.context), locals: locals, templates: commonTemplates(left.templates, right.templates) };
+    state = ExecutionState { context: commonContext(leftSide.context, rightSide.context), locals: locals, templates: commonTemplates(left.templates, right.templates), floor: floor };
     mergedConstants = clone(state.context.constants);
     for factPosition in 0..size(leftSide.context.constants) {
         fact = get(leftSide.context.constants, factPosition);
@@ -689,7 +645,7 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
     for binding in left.locals.entries() { named = named.insert(binding.value); };
     for binding in right.locals.entries() { named = named.insert(binding.value); };
     for binding in state.locals.entries() { named = named.insert(binding.value); };
-    state = addDifferenceHull(state, droppedDefinitions(rightSide.raw, keptFacts), pairs, left, right, named, leastTermInUse(pool));
+    state = addDifferenceHull(state, droppedDefinitions(rightSide.raw, keptFacts), pairs, left, right, named, floor);
     return StateMergeLookup::Found { state: state };
 };
 
@@ -1222,5 +1178,7 @@ fn addDifferenceHull(state: ExecutionState, dropped: &List<Int>, pairs: &List<Me
         rv = rf.seen;
     };
     HullFacts { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, constantOf: finalConstantOf, next: finalNext, canMint: finalCanMint } = hullSums(facts, li, ri, selected);
-    return ExecutionState { context: ValidatorContext { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, ..state.context }, ..state };
+    floor = least;
+    if finalCanMint && finalNext < least { floor = finalNext + 1; };
+    return ExecutionState { context: ValidatorContext { orders: orders, differences: differences, constants: constants, applications: applications, equalities: equalities, ..state.context }, floor: floor, ..state };
 };

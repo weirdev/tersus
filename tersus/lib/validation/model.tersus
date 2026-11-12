@@ -267,7 +267,9 @@ struct ForallTemplate { id: Int, nodes: List<TemplateNode>, guards: List<Templat
 
 impl Clone for ForallTemplate { };
 
-struct ExecutionState { context: ValidatorContext, locals: HashMap<Int, Int>, templates: List<ForallTemplate> };
+// floor is at or below every id the state mentions (leastTermInUse is the
+// scan that defines it): a term minted below it is new to the state.
+struct ExecutionState { context: ValidatorContext, locals: HashMap<Int, Int>, templates: List<ForallTemplate>, floor: Int };
 
 impl Clone for ExecutionState { };
 
@@ -423,11 +425,16 @@ struct HullLinks { first: HashMap<Int, Int>, last: HashMap<Int, Int>, next: List
 // term's first constant fact, and how far each list is indexed. A later state
 // of the block keeps every indexed position while every step between only
 // adds facts and binds locals (addsFactsOnly); any other step drops it.
-struct FactIndex { equalities: HullLinks, applications: HullLinks, orders: HullLinks, different: HullLinks, variants: HullLinks, differences: HullLinks, weights: HashMap<Int, Int>, constantAt: HashMap<Int, Int>, counts: List<Int>, work: Int };
+struct FactIndex { equalities: HullLinks, applications: HullLinks, orders: HullLinks, different: HullLinks, variants: HullLinks, differences: HullLinks, weights: HashMap<Int, Int>, constantAt: HashMap<Int, Int>, valueAt: HashMap<Int, Int>, counts: List<Int>, work: Int };
 
 enum SharedIndex { Missing, Found { index: FactIndex } };
 
-struct CheckedStep { result: ExecutionResult, shared: SharedIndex };
+// A step's result and the block index, extended to what the step asked of
+struct Stepped { result: ExecutionResult, index: FactIndex };
+
+struct Minted { state: ExecutionState, term: Int };
+
+struct NearApplications { terms: HashSet<Int>, applications: List<ApplicationTerm> };
 
 // The loop a region is being swept for: its header, what the user's invariant
 // asks at each back edge, the inferred candidates (checks of candidate i are

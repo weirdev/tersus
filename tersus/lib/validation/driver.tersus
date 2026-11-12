@@ -436,7 +436,7 @@ fn driverTemplate(value: &DriverValue) -> ForallTemplate {
 };
 
 fn driverState(value: &DriverValue) -> ExecutionState {
-    return ExecutionState { context: driverContext(driverField(value, 0)), locals: driverLocals(driverField(value, 1)), templates: noTemplates() };
+    return ExecutionState { context: driverContext(driverField(value, 0)), locals: driverLocals(driverField(value, 1)), templates: noTemplates(), floor: driverInt(driverField(value, 3)) };
 };
 
 fn driverContextOk(value: &DriverValue) -> Bool {
@@ -463,7 +463,7 @@ fn driverLocalsOk(value: &DriverValue) -> Bool {
 // The validator assumes the facts of the entry state, so a state with any
 // record the driver would misread is refused. Its templates are not read.
 fn driverStateOk(value: &DriverValue) -> Bool {
-    if driverFits(value, "ExecutionState", 3, [], [], [], [], []) = false { return false; };
+    if driverFits(value, "ExecutionState", 4, [3], [], [], [], []) = false { return false; };
     if driverContextOk(driverField(value, 0)) = false { return false; };
     if driverLocalsOk(driverField(value, 1)) = false { return false; };
     return driverIsList(driverField(value, 2));
