@@ -1,0 +1,362 @@
+import data::ast::ast { AstField, AstNode, AstStatement, AstTraitFn, AstVariant };
+import data::codec::codec { Type };
+import elaborate::records { codecTypeAt, listItems, nameText, namesText, nodeIn };
+import elaborate::rewrite { functValue, statementOf };
+import parser::syntax::syntax as ps;
+
+// The declarations a file is parsed with (ParsedFile.Decls): each map is a list in the order of its names, one entry a
+// name. An entry is a constructor's fields, a type's variants, a generic's parameters or a constructor's field types.
+struct Ent { name: String, names: List<String>, fields: List<ps::FieldInfo> };
+impl Clone for Ent { };
+
+struct Decls {
+    ctors: List<Ent>, types: List<Ent>, generics: List<Ent>, fieldTypes: List<Ent>,
+    selfName: String, hasSelf: Bool, selfTy: Type, hasSelfTy: Bool,
+    typeParams: List<String>, implParams: List<String>, ownClone: Bool, locate: Bool
+};
+impl Clone for Decls { };
+
+fn emptyDecls() -> Decls ~ {
+    return Decls { ctors: [], types: [], generics: [], fieldTypes: [], selfName: "", hasSelf: false, selfTy: Type::TInt, hasSelfTy: false,
+        typeParams: [], implParams: [], ownClone: false, locate: false };
+};
+
+fn locating(d: Decls) -> Decls ~ { return Decls { locate: true, ..d }; };
+
+fn textLess(a: &String, b: &String) -> Bool ~ {
+    n = size(a.bytes);
+    if size(b.bytes) < n { n = size(b.bytes); };
+    for i in 0..n {
+        x = toInt(get(&a.bytes, i));
+        y = toInt(get(&b.bytes, i));
+        if x != y { return x < y; };
+    };
+    return size(a.bytes) < size(b.bytes);
+};
+
+fn entIndex(ents: &List<Ent>, name: &String) -> Int ~ {
+    for i in 0..size(ents) { if get(ents, i).name = clone(name) { return i; }; };
+    return 0 - 1;
+};
+
+fn entAt(ents: &List<Ent>, name: &String) -> Ent ~ {
+    i = entIndex(ents, name);
+    if i < 0 || i >= size(ents) { return Ent { name: "", names: [], fields: [] }; };
+    return clone(get(ents, i));
+};
+
+fn hasEnt(ents: &List<Ent>, name: &String) -> Bool ~ { return entIndex(ents, name) >= 0; };
+
+fn insertEnt(ents: List<Ent>, e: Ent) -> List<Ent> ~ {
+    out = [];
+    placed = false;
+    for x in ents {
+        if !placed && x.name = clone(e.name) { out = push(out, clone(e)); placed = true; }
+        else {
+            if !placed && textLess(&e.name, &x.name) { out = push(out, clone(e)); placed = true; };
+            out = push(out, clone(x));
+        };
+    };
+    if !placed { out = push(out, e); };
+    return out;
+};
+
+fn deleteEnt(ents: List<Ent>, name: &String) -> List<Ent> ~ {
+    out = [];
+    for x in ents { if x.name != clone(name) { out = push(out, clone(x)); }; };
+    return out;
+};
+
+// Map.union: the first's entry wins a name
+fn unionEnts(a: &List<Ent>, b: &List<Ent>) -> List<Ent> ~ {
+    out = clone(b);
+    for e in a { out = insertEnt(out, clone(e)); };
+    return out;
+};
+
+fn sameFields(a: &List<ps::FieldInfo>, b: &List<ps::FieldInfo>) -> Bool ~ {
+    if size(a) != size(b) { return false; };
+    for i in 0..size(a) {
+        x = get(a, i);
+        y = get(b, i);
+        if x.name != y.name || x.ty != y.ty { return false; };
+    };
+    return true;
+};
+
+fn sameEnt(a: &Ent, b: &Ent) -> Bool ~ { return a.names = b.names && sameFields(&a.fields, &b.fields); };
+
+fn nameEnt(name: String, names: List<String>) -> Ent ~ { return Ent { name: name, names: names, fields: [] }; };
+
+// ---- to and from the parser's state ----
+
+fn toParser(d: &Decls) -> ps::St ~ {
+    ctors = [];
+    for e in &d.ctors { ctors = push(ctors, ps::CtorInfo { name: clone(e.name), fields: clone(e.names), active: true }); };
+    types = [];
+    for e in &d.types { types = push(types, ps::TypeInfo { name: clone(e.name), variants: clone(e.names), active: true }); };
+    generics = [];
+    for e in &d.generics { generics = push(generics, ps::GenInfo { name: clone(e.name), params: clone(e.names), active: true }); };
+    fieldsOf = [];
+    for e in &d.fieldTypes { fieldsOf = push(fieldsOf, ps::FieldsInfo { name: clone(e.name), fields: clone(e.fields) }); };
+    st = ps::newSt();
+    return ps::St { ctors: ctors, types: types, generics: generics, fieldsOf: fieldsOf, selfName: clone(d.selfName), hasSelf: d.hasSelf,
+        selfTy: clone(d.selfTy), hasSelfTy: d.hasSelfTy, typeParams: clone(d.typeParams), implParams: clone(d.implParams),
+        ownClone: d.ownClone, locate: d.locate, ..st };
+};
+
+// (each name's latest entry, when it is active, as the parser writes its final declarations)
+fn fromParser(st: &ps::St) -> Decls ~ {
+    keys = [];
+    active = [];
+    for e in &st.ctors { keys = push(keys, clone(e.name)); active = push(active, e.active); };
+    ctors = [];
+    for i in ps::fileSortedLatest(&keys, &active) {
+        if i >= 0 && i < size(st.ctors) { e = get(&st.ctors, i); ctors = push(ctors, nameEnt(clone(e.name), clone(e.fields))); };
+    };
+    keys = [];
+    active = [];
+    for e in &st.types { keys = push(keys, clone(e.name)); active = push(active, e.active); };
+    types = [];
+    for i in ps::fileSortedLatest(&keys, &active) {
+        if i >= 0 && i < size(st.types) { e = get(&st.types, i); types = push(types, nameEnt(clone(e.name), clone(e.variants))); };
+    };
+    keys = [];
+    active = [];
+    for e in &st.generics { keys = push(keys, clone(e.name)); active = push(active, e.active); };
+    generics = [];
+    for i in ps::fileSortedLatest(&keys, &active) {
+        if i >= 0 && i < size(st.generics) { e = get(&st.generics, i); generics = push(generics, nameEnt(clone(e.name), clone(e.params))); };
+    };
+    keys = [];
+    active = [];
+    for e in &st.fieldsOf { keys = push(keys, clone(e.name)); active = push(active, true); };
+    fieldTypes = [];
+    for i in ps::fileSortedLatest(&keys, &active) {
+        if i >= 0 && i < size(st.fieldsOf) { e = get(&st.fieldsOf, i); fieldTypes = push(fieldTypes, Ent { name: clone(e.name), names: [], fields: clone(e.fields) }); };
+    };
+    return Decls { ctors: ctors, types: types, generics: generics, fieldTypes: fieldTypes, selfName: clone(st.selfName), hasSelf: st.hasSelf,
+        selfTy: clone(st.selfTy), hasSelfTy: st.hasSelfTy, typeParams: clone(st.typeParams), implParams: clone(st.implParams),
+        ownClone: st.ownClone, locate: st.locate };
+};
+
+// ---- Modules.addImportedDecls and withoutImportedDecls ----
+
+fn addImported(base: Decls, imported: &Decls) -> Decls ~ {
+    ctors = unionEnts(&imported.ctors, &base.ctors);
+    types = unionEnts(&imported.types, &base.types);
+    generics = unionEnts(&imported.generics, &base.generics);
+    fieldTypes = unionEnts(&imported.fieldTypes, &base.fieldTypes);
+    return Decls { ctors: ctors, types: types, generics: generics, fieldTypes: fieldTypes, ..base };
+};
+
+// What a parse left, with the imported seeds taken back out: an entry the parse changed or the file declares stays, and
+// an entry of the seed the parse kept as it was gives way to what was there before the seed
+fn restoreEnts(before: &List<Ent>, incoming: &List<Ent>, after: &List<Ent>, declared: &List<Ent>) -> List<Ent> ~ {
+    kept = [];
+    for e in after {
+        i = entIndex(incoming, &e.name);
+        changed = i < 0 || i >= size(incoming) || !sameEnt(&get(incoming, i), e);
+        if changed || hasEnt(declared, &e.name) { kept = push(kept, clone(e)); };
+    };
+    restored = [];
+    for e in incoming {
+        j = entIndex(after, &e.name);
+        unchanged = j >= 0 && j < size(after) && sameEnt(&get(after, j), e) && !hasEnt(declared, &e.name);
+        k = entIndex(before, &e.name);
+        if unchanged && k >= 0 && k < size(before) { restored = push(restored, clone(get(before, k))); };
+    };
+    return unionEnts(&kept, &restored);
+};
+
+fn withoutImported(base: &Decls, imported: &Decls, parsed: Decls, own: &Decls) -> Decls ~ {
+    ctors = restoreEnts(&base.ctors, &imported.ctors, &parsed.ctors, &own.ctors);
+    types = restoreEnts(&base.types, &imported.types, &parsed.types, &own.types);
+    generics = restoreEnts(&base.generics, &imported.generics, &parsed.generics, &own.generics);
+    fieldTypes = restoreEnts(&base.fieldTypes, &imported.fieldTypes, &parsed.fieldTypes, &own.fieldTypes);
+    return Decls { ctors: ctors, types: types, generics: generics, fieldTypes: fieldTypes, ..parsed };
+};
+
+// ---- ParsedFile.declsFromStatements ----
+
+fn hasByte(text: &String, c: Int) -> Bool ~ {
+    for b in &text.bytes { if toInt(b) = c { return true; }; };
+    return false;
+};
+
+fn fromColon(text: &String) -> String ~ {
+    out = [];
+    seen = false;
+    for b in &text.bytes {
+        if toInt(b) = 58 { seen = true; };
+        if seen { out = push(out, b); };
+    };
+    return String { bytes: out };
+};
+
+fn shadowedCtors(d: &Decls, name: &String) -> List<Ent> ~ {
+    ctors = deleteEnt(clone(d.ctors), name);
+    for v in entAt(&d.types, name).names {
+        if hasByte(&v, 36) { ctors = deleteEnt(ctors, catText(name, fromColon(&v))); } else { ctors = deleteEnt(ctors, &v); };
+    };
+    return ctors;
+};
+
+fn catText(a: &String, b: &String) -> String ~ {
+    out = clone(a.bytes);
+    for c in &b.bytes { out = push(out, c); };
+    return String { bytes: out };
+};
+
+fn fieldNamesOf(fields: &List<ps::FieldInfo>) -> List<String> ~ {
+    out = [];
+    for f in fields { out = push(out, clone(f.name)); };
+    return out;
+};
+
+fn withGeneric(generics: List<Ent>, name: &String, params: List<String>) -> List<Ent> ~ {
+    if size(params) = 0 { return deleteEnt(generics, name); };
+    return insertEnt(generics, nameEnt(clone(name), params));
+};
+
+fn stepStruct(d: Decls, name: &String, params: List<String>, fields: List<ps::FieldInfo>) -> Decls ~ {
+    ctors = insertEnt(shadowedCtors(&d, name), nameEnt(clone(name), fieldNamesOf(&fields)));
+    types = insertEnt(clone(d.types), nameEnt(clone(name), push([], clone(name))));
+    fieldTypes = insertEnt(clone(d.fieldTypes), Ent { name: clone(name), names: [], fields: fields });
+    generics = withGeneric(clone(d.generics), name, params);
+    return Decls { ctors: ctors, types: types, fieldTypes: fieldTypes, generics: generics, ..d };
+};
+
+struct Variant { name: String, fields: List<ps::FieldInfo> };
+impl Clone for Variant { };
+
+fn stepEnum(d: Decls, name: &String, variants: &List<Variant>) -> Decls ~ {
+    ctors = shadowedCtors(&d, name);
+    fieldTypes = clone(d.fieldTypes);
+    names = [];
+    k = size(variants);
+    while k > 0 ~ {
+        k = k - 1;
+        if k < size(variants) {
+            v = get(variants, k);
+            ctors = insertEnt(ctors, nameEnt(clone(v.name), fieldNamesOf(&v.fields)));
+            fieldTypes = insertEnt(fieldTypes, Ent { name: clone(v.name), names: [], fields: clone(v.fields) });
+        };
+    };
+    for v in variants { names = push(names, clone(v.name)); };
+    types = insertEnt(clone(d.types), nameEnt(clone(name), names));
+    generics = deleteEnt(clone(d.generics), name);
+    return Decls { ctors: ctors, types: types, fieldTypes: fieldTypes, generics: generics, ..d };
+};
+
+fn stepTrait(d: Decls, name: &String, params: List<String>) -> Decls ~ {
+    ctors = shadowedCtors(&d, name);
+    types = deleteEnt(clone(d.types), name);
+    generics = withGeneric(clone(d.generics), name, params);
+    return Decls { ctors: ctors, types: types, generics: generics, ..d };
+};
+
+fn fieldsAt(nodes: &List<AstNode>, list: Int) -> List<ps::FieldInfo> ~ {
+    out = [];
+    for f in listItems(nodes, list) {
+        node = nodeIn(nodes, f);
+        if node is AstNode::Field {
+            field = (node as AstNode::Field).value;
+            out = push(out, ps::FieldInfo { name: nameText(nodes, field.n), ty: codecTypeAt(nodes, field.ty) });
+        };
+    };
+    return out;
+};
+
+fn variantsAt(nodes: &List<AstNode>, list: Int) -> List<Variant> ~ {
+    out = [];
+    for v in listItems(nodes, list) {
+        node = nodeIn(nodes, v);
+        if node is AstNode::Variant {
+            variant = (node as AstNode::Variant).value;
+            out = push(out, Variant { name: nameText(nodes, variant.n), fields: fieldsAt(nodes, variant.fs) });
+        };
+    };
+    return out;
+};
+
+fn stepStatement(d: Decls, nodes: &List<AstNode>, s: Int) -> Decls ~ {
+    stmt = statementOf(nodes, s);
+    if stmt is AstStatement::StructDef {
+        node = stmt as AstStatement::StructDef;
+        return stepStruct(d, nameText(nodes, node.n), namesText(nodes, node.ps), fieldsAt(nodes, node.fs));
+    };
+    if stmt is AstStatement::EnumDef {
+        node = stmt as AstStatement::EnumDef;
+        return stepEnum(d, nameText(nodes, node.n), variantsAt(nodes, node.vs));
+    };
+    if stmt is AstStatement::TraitDef {
+        node = stmt as AstStatement::TraitDef;
+        return stepTrait(d, nameText(nodes, node.n), namesText(nodes, node.ps));
+    };
+    if stmt is AstStatement::BoundedDef { return stepStatement(d, nodes, (stmt as AstStatement::BoundedDef).s); };
+    if stmt is AstStatement::Assign {
+        node = stmt as AstStatement::Assign;
+        if nameText(nodes, node.n) = "clone" && functValue(nodes, node.e) >= 0 { return Decls { ownClone: true, ..d }; };
+    };
+    return d;
+};
+
+fn declsFromStatements(d: Decls, nodes: &List<AstNode>, stmts: &List<Int>) -> Decls ~ {
+    for s in stmts { d = stepStatement(d, nodes, s); };
+    return d;
+};
+
+// ---- Modules.fileDeclarations ----
+
+// kind: 0 a type, 1 a variant, 2 a trait, 3 a function, 4 an axiom, 5 a proof
+struct FileDecl { kind: Int, name: String, fns: List<String> };
+impl Clone for FileDecl { };
+
+fn traitFnNames(nodes: &List<AstNode>, list: Int) -> List<String> ~ {
+    out = [];
+    for f in listItems(nodes, list) {
+        node = nodeIn(nodes, f);
+        if node is AstNode::TraitFn { out = push(out, nameText(nodes, (node as AstNode::TraitFn).value.n)); };
+    };
+    return out;
+};
+
+fn topDeclarations(out: List<FileDecl>, nodes: &List<AstNode>, s: Int) -> List<FileDecl> ~ {
+    stmt = statementOf(nodes, s);
+    if stmt is AstStatement::StructDef { return push(out, FileDecl { kind: 0, name: nameText(nodes, (stmt as AstStatement::StructDef).n), fns: [] }); };
+    if stmt is AstStatement::EnumDef {
+        node = stmt as AstStatement::EnumDef;
+        out = push(out, FileDecl { kind: 0, name: nameText(nodes, node.n), fns: [] });
+        for v in variantsAt(nodes, node.vs) { out = push(out, FileDecl { kind: 1, name: clone(v.name), fns: [] }); };
+        return out;
+    };
+    if stmt is AstStatement::TraitDef {
+        node = stmt as AstStatement::TraitDef;
+        return push(out, FileDecl { kind: 2, name: nameText(nodes, node.n), fns: traitFnNames(nodes, node.fs) });
+    };
+    if stmt is AstStatement::Assign {
+        node = stmt as AstStatement::Assign;
+        if functValue(nodes, node.e) >= 0 { return push(out, FileDecl { kind: 3, name: nameText(nodes, node.n), fns: [] }); };
+        return out;
+    };
+    if stmt is AstStatement::BoundedDef { return topDeclarations(out, nodes, (stmt as AstStatement::BoundedDef).s); };
+    if stmt is AstStatement::AxiomDef { return push(out, FileDecl { kind: 4, name: nameText(nodes, (stmt as AstStatement::AxiomDef).n), fns: [] }); };
+    if stmt is AstStatement::ProofDef { return push(out, FileDecl { kind: 5, name: nameText(nodes, (stmt as AstStatement::ProofDef).n), fns: [] }); };
+    if stmt is AstStatement::ImplDef {
+        for inner in listItems(nodes, (stmt as AstStatement::ImplDef).xs) { out = topDeclarations(out, nodes, inner); };
+    };
+    return out;
+};
+
+fn fileDeclarations(nodes: &List<AstNode>, stmts: &List<Int>) -> List<FileDecl> ~ {
+    out = [];
+    for s in stmts { out = topDeclarations(out, nodes, s); };
+    return out;
+};
+
+fn declarationNames(nodes: &List<AstNode>, stmts: &List<Int>) -> List<String> ~ {
+    out = [];
+    for d in fileDeclarations(nodes, stmts) { out = push(out, clone(d.name)); };
+    return out;
+};

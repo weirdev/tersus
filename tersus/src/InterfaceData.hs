@@ -8,7 +8,7 @@ import qualified Data.Set as Set
 
 import AstData (FunctionRecord (..), InterfaceRecord (..), TemplateRecord (..), readInterfaceRecord, readInterfaceRecordBytes, readInterfaceRecordLines, writeInterfaceRecord, writeInterfaceRecordLines)
 import Interface (InterfaceFunction (..), ModuleInterface (..))
-import Modules (ModuleId (..))
+import PackageData (ModuleId (..))
 import Elaboration (Ctx (..), Template (..))
 import Utils
 

@@ -1,0 +1,611 @@
+import data::ast::ast { AstNode, AstProgram, AstStatement, printAst };
+import data::codec::codec { catStrings, intAt };
+import data::reader::reader { parseAstLines, readRecord };
+import elaborate::decls { Decls, FileDecl, declsFromStatements, emptyDecls, fileDeclarations, locating, textLess };
+import elaborate::elaborate { Answer, Program, Unit, elaborateUnit, joinBlock, malformed, noProgram, printAnswerBody, printIntWord, printQuoted, readBlock };
+import elaborate::libraries { Catalog, Lib, closure, declaredNames, libIndex, libraryContexts, librariesFor, probeModule, readCatalog, seenLibraries };
+import elaborate::load { LFile, LS, Loaded, ModId, PMod, PR, RImp, dependenciesOf, emptyMod, layoutNames, soloLayout, stateOfLoad, idLess, loadEntry, modKey, newLS, parseWith, renderPath, resolvedKey, sameId, sortNames, statementsOfProgram };
+import elaborate::records { listItems, nameText, nodeIn };
+import elaborate::resolve { Decl, Imp, Line, PFile, Pkg, finishPackage, moduleKey, noPackage, readLine, textAt, wordIs };
+import elaborate::rewrite { functValue, reservedError, statementOf };
+import elaborate::snapshot { Snap, Source, hasFile, joinPath, readFile, readSnapshot, showText, showTexts };
+import elaborate::state { indexIn, intText, joinWith };
+import parser::syntax::syntax as ps;
+
+// A load request (AST_DATA.md, "Loading"): the snapshot is loaded, parsed in process and answered as a whole: the module
+// graph, every module of a package elaborated in order, a program, or the compiler libraries.
+
+fn answerLoad(line: &Line) -> Int ~ {
+    if size(line.words) != 2 { return malformed(); };
+    snap = readSnapshot(textAt(line, 1));
+    if !snap.ok { return malformed(); };
+    builtinsLine = readLine();
+    if !wordIs(&builtinsLine, 0, "builtins") { return malformed(); };
+    table = readBlock();
+    if !table.ok { return malformed(); };
+    catalog = Catalog { ok: true, libs: [] };
+    next = readLine();
+    if wordIs(&next, 0, "libraries") {
+        catalog = readCatalog(&next);
+        if !catalog.ok { return malformed(); };
+        next = readLine();
+    };
+    if next.ok || size(next.words) != 0 { return malformed(); };
+    if snap.kind != "graph" && snap.kind != "package" && snap.kind != "program" && snap.kind != "parse" && snap.kind != "equality" && snap.kind != "libraries" { return malformed(); };
+    libs = parseLibraries(&snap.sources);
+    "tersus-elaborated 1\n".print();
+    if snap.kind = "graph" { return answerGraph(&snap, &libs); };
+    if snap.kind = "package" { return answerPackage(&snap, &libs, &table.value, &catalog); };
+    if snap.kind = "program" || snap.kind = "parse" || snap.kind = "equality" { return answerProgram(&snap, &libs, &table.value, &catalog); };
+    if snap.kind = "libraries" { return answerLibraries(&libs, &table.value); };
+    return malformed();
+};
+
+// ---- the compiler libraries, parsed (LibParsed) ----
+
+struct LibParse { ok: Bool, msg: String, names: List<String>, deps: List<List<String>>, programs: List<AstProgram>, decls: Decls, regular: Int, nativeOk: Bool, nativeMsg: String };
+
+fn libDepsOf(libs: &LibParse, name: &String) -> List<String> ~ {
+    i = indexIn(&libs.names, name);
+    if i < 0 || i >= size(libs.deps) { return []; };
+    return clone(get(&libs.deps, i));
+};
+
+fn libProgramOf(libs: &LibParse, name: &String) -> AstProgram ~ {
+    i = indexIn(&libs.names, name);
+    if i < 0 || i >= size(libs.programs) { return noProgram("parsed"); };
+    return clone(get(&libs.programs, i));
+};
+
+// LibParsed.declsForLibModules: the declarations of the named libraries, in the libraries' order
+fn libDecls(libs: &LibParse, names: &List<String>, upTo: Int) -> Decls ~ {
+    d = emptyDecls();
+    if upTo <= 0 { return d; };
+    for i in 0..upTo {
+        if i < size(libs.names) && i < size(libs.programs) && indexIn(names, &get(libs.names, i)) >= 0 {
+            program = get(&libs.programs, i);
+            d = declsFromStatements(d, &program.nodes, statementsOfProgram(&program));
+        };
+    };
+    return d;
+};
+
+fn libClosure(libs: &LibParse, pending: List<String>) -> List<String> ~ {
+    done = [];
+    while size(pending) > 0 ~ {
+        name = clone(get(&pending, 0));
+        rest = [];
+        if indexIn(&done, &name) >= 0 {
+            for i in 1..size(pending) { rest = push(rest, clone(get(&pending, i))); };
+        } else {
+            for d in libDepsOf(libs, &name) { rest = push(rest, clone(d)); };
+            for i in 1..size(pending) { rest = push(rest, clone(get(&pending, i))); };
+            done = push(done, name);
+        };
+        pending = rest;
+    };
+    return done;
+};
+
+fn showImport(imp: &ps::FileImport) -> String ~ {
+    alias = "Nothing";
+    if imp.hasAlias { alias = catStrings("Just ", showText(&imp.alias)); };
+    names = "Nothing";
+    if imp.hasNames { names = catStrings("Just ", showTexts(&imp.names)); };
+    out = catStrings(catStrings(catStrings("Import {importPath = ", showTexts(&imp.path)), ", importAlias = "), alias);
+    out = catStrings(catStrings(catStrings(catStrings(out, ", importNames = "), names), ", importLine = "), intText(imp.line));
+    return catStrings(catStrings(catStrings(out, ", importColumn = "), intText(imp.column)), "}");
+};
+
+fn parseLibrary(libs: LibParse, source: &Source) -> LibParse ~ {
+    prefix = ps::importPrefixText(ps::newSt(), clone(source.text));
+    if !prefix.ok { return LibParse { ok: false, msg: prefix.message, ..libs }; };
+    deps = [];
+    for imp in &prefix.imports {
+        if size(imp.path) != 2 || get(&imp.path, 0) != "tersuslib" || imp.hasAlias || imp.hasNames {
+            return LibParse { ok: false, msg: catStrings("compiler library import must name a tersuslib module: ", showImport(imp)), ..libs };
+        };
+        deps = push(deps, clone(get(&imp.path, 1)));
+    };
+    for dep in &deps {
+        if indexIn(&libs.names, dep) < 0 {
+            return LibParse { ok: false, msg: catStrings(catStrings(catStrings(catStrings("lib module ", source.name), " imports "), dep), " before it is available"), ..libs };
+        };
+    };
+    declared = libDecls(&libs, libClosure(&libs, clone(deps)), size(libs.names));
+    parsed = parseWith(&declared, &source.text);
+    if !parsed.ok { return LibParse { ok: false, msg: catStrings(catStrings(catStrings("Parse error in the ", source.name), " library: "), parsed.msg), ..libs }; };
+    return LibParse { names: push(clone(libs.names), clone(source.name)), deps: push(clone(libs.deps), deps), programs: push(clone(libs.programs), parsed.program), ..libs };
+};
+
+// The implicit libraries in their order, then the native storage helpers after them (LibParsed.libParsed, nativeLibParsed)
+fn parseLibraries(sources: &List<Source>) -> LibParse ~ {
+    libs = LibParse { ok: true, msg: "", names: [], deps: [], programs: [], decls: emptyDecls(), regular: 0, nativeOk: true, nativeMsg: "" };
+    for s in sources {
+        if !s.native && libs.ok { libs = parseLibrary(libs, s); };
+    };
+    if !libs.ok { return LibParse { nativeOk: false, nativeMsg: clone(libs.msg), ..libs }; };
+    regularNames = clone(libs.names);
+    libs = LibParse { regular: size(libs.names), decls: libDecls(&libs, &regularNames, size(libs.names)), ..libs };
+    for s in sources {
+        if s.native && libs.nativeOk {
+            next = parseLibrary(libs, s);
+            if next.ok { libs = next; } else {
+                message = clone(next.msg);
+                libs = LibParse { ok: true, msg: "", nativeOk: false, nativeMsg: message, ..next };
+            };
+        };
+    };
+    return libs;
+};
+
+// ---- the graph (Modules.LoadResult) ----
+
+fn moduleOf(ls: &LS, id: &ModId) -> PMod ~ {
+    return HashMap::lookup(&ls.parsed, modKey(id), emptyMod(soloLayout("", false), id));
+};
+
+fn printWords(words: &List<String>) -> Int ~ {
+    n = 0;
+    for w in words { n = n + " ".print() + printQuoted(w); };
+    return n;
+};
+
+fn printModId(id: &ModId) -> Int ~ {
+    n = " ".print() + printQuoted(&id.pkg);
+    if id.has { return n + " ".print() + printQuoted(&id.modu); };
+    return n + " none".print();
+};
+
+fn printOptional(has: Bool, text: &String) -> Int ~ {
+    if has { return " ".print() + printQuoted(text); };
+    return " none".print();
+};
+
+fn printBlock(program: &AstProgram) -> Int ~ {
+    return "data".print() + printIntWord(size(program.nodes) + 2) + "\n".print() + printAst(program);
+};
+
+fn printImport(ri: &RImp) -> Int ~ {
+    n = "import".print() + printIntWord(ri.imp.line) + printIntWord(ri.imp.column) + printIntWord(size(ri.imp.path)) + printWords(&ri.imp.path);
+    n = n + printOptional(ri.imp.hasAlias, &ri.imp.alias);
+    if ri.imp.hasNames { n = n + printIntWord(size(ri.imp.names)) + printWords(&ri.imp.names); } else { n = n + " none".print(); };
+    level = "module";
+    if ri.level = 1 { level = "file"; };
+    if ri.level = 2 { level = "symbol"; };
+    n = n + " ".print() + level.print() + printModId(&ri.target) + printOptional(ri.hasFile, &ri.file) + printOptional(ri.hasSymbol, &ri.symbol);
+    return n + " ".print() + printQuoted(&ri.canonical) + "\n".print();
+};
+
+fn answerGraph(snap: &Snap, libs: &LibParse) -> Int ~ {
+    loaded = loadEntry(newLS(clone(libs.decls), libs.ok, clone(libs.msg)), snap);
+    if !loaded.ok {
+        message = clone(loaded.msg);
+        if !loaded.ls.ok { message = clone(loaded.ls.msg); };
+        "notLoaded ".print(); printQuoted(&message); "\n".print();
+        return 0;
+    };
+    if loaded.standalone {
+        "standalone ".print(); printQuoted(&loaded.entryPath); "\n".print();
+        printBlock(&loaded.standaloneProgram);
+        return 0;
+    };
+    root = clone(loaded.root);
+    pkgName = clone(loaded.name);
+    entryPath = clone(loaded.entryPath);
+    entryId = clone(loaded.entryId);
+    ls = stateOfLoad(loaded);
+    "package ".print(); printQuoted(&root); " ".print(); printQuoted(&pkgName); " ".print(); printQuoted(&entryPath);
+    printModId(&entryId); "\n".print();
+    "modules".print(); printIntWord(size(ls.order)); "\n".print();
+    for id in &ls.order {
+        pm = moduleOf(&ls, id);
+        deps = dependenciesOf(&ls, &pm);
+        "module".print(); printModId(id); " ".print();
+        if pm.layout.noPrelude { "true".print(); } else { "false".print(); };
+        printIntWord(size(pm.files)); printIntWord(size(deps));
+        for d in &deps { printModId(d); };
+        "\n".print();
+        for f in &pm.files {
+            resolved = HashMap::lookup(&ls.resolved, resolvedKey(id, &f.entry.name), []);
+            "file ".print(); printQuoted(&f.entry.name); " ".print(); printQuoted(&f.entry.stem); " ".print(); printQuoted(&f.entry.path);
+            printIntWord(size(f.names)); printWords(&f.names); printIntWord(size(resolved)); "\n".print();
+            for ri in &resolved { printImport(ri); };
+            printBlock(HashMap::lookup(&ls.programs, &f.entry.path, noProgram("parsed")));
+        };
+    };
+    sources = sortNames(clone(ls.probes));
+    for name in sortNames(layoutNames(&ls)) {
+        layout = HashMap::lookup(&ls.layouts, &name, soloLayout("", false));
+        marker = joinPath(&layout.root, "package.tersus");
+        if layout.isPackage && hasFile(snap, &marker) && indexIn(&sources, &marker) < 0 { sources = push(sources, marker); };
+    };
+    for id in &ls.order {
+        pm = moduleOf(&ls, id);
+        for f in &pm.files { if indexIn(&sources, &f.entry.path) < 0 { sources = push(sources, clone(f.entry.path)); }; };
+    };
+    sources = sortNames(sources);
+    "sources".print(); printIntWord(size(sources)); printWords(&sources); "\n".print();
+    names = sortNames(layoutNames(&ls));
+    "policies".print(); printIntWord(size(names)); "\n".print();
+    for name in &names {
+        layout = HashMap::lookup(&ls.layouts, name, soloLayout("", false));
+        "policy ".print(); printQuoted(&layout.name); " ".print(); printQuoted(&layout.root);
+        if layout.noPrelude { " true\n".print(); } else { " false\n".print(); };
+    };
+    return 0;
+};
+
+// ---- a package: every module elaborated in order (PackageCompile.compileModulesUsing) ----
+
+fn ownedPackage(ls: &LS, entry: &ModId) -> Pkg ~ {
+    files = [];
+    decls = [];
+    fi = 0;
+    for id in &ls.order {
+        pm = moduleOf(&ls, id);
+        key = modKey(id);
+        for f in &pm.files {
+            program = HashMap::lookup(&ls.programs, &f.entry.path, noProgram("parsed"));
+            for d in fileDeclarations(&program.nodes, statementsOfProgram(&program)) {
+                decls = push(decls, Decl { kind: d.kind, local: clone(d.name), fns: clone(d.fns), file: fi, canonical: "", key: clone(key), pkg: clone(id.pkg), modu: clone(id.modu), hasModu: id.has,
+                    stem: clone(f.entry.stem), collapsed: false, owner: 0 - 1 });
+            };
+            imports = [];
+            for ri in HashMap::lookup(&ls.resolved, resolvedKey(id, &f.entry.name), []) {
+                imports = push(imports, Imp { level: ri.level, target: modKey(&ri.target), pkg: clone(ri.target.pkg), modu: clone(ri.target.modu), hasModu: ri.target.has,
+                    file: clone(ri.file), hasFile: ri.hasFile, symbol: clone(ri.symbol), hasSymbol: ri.hasSymbol, alias: clone(ri.imp.alias), hasAlias: ri.imp.hasAlias,
+                    names: clone(ri.imp.names), hasNames: ri.imp.hasNames });
+            };
+            files = push(files, PFile { key: clone(key), pkg: clone(id.pkg), modu: clone(id.modu), hasModu: id.has, stem: clone(f.entry.stem), name: clone(f.entry.name),
+                imports: imports, entry: false, collapsed: false, prefix: "" });
+            fi = fi + 1;
+        };
+    };
+    return finishPackage(Pkg { ok: true, present: true, entry: modKey(entry), files: files, decls: decls, potentialTypes: HashMap::new(), potentialFns: HashMap::new() });
+};
+
+// The interfaces a request names, by key (a library's is its records, a module's its identity), with the module each is of
+struct Ifaces { programs: HashMap<String, AstProgram>, ids: HashMap<String, ModId> };
+
+fn idOfKey(t: &Ifaces, key: &String) -> String ~ {
+    return modKey(HashMap::lookup(&t.ids, key, ModId { pkg: "", modu: "", has: false }));
+};
+
+fn uniqueKeys(t: &Ifaces, keys: &List<String>) -> List<String> ~ {
+    out = [];
+    seen = [];
+    for k in keys {
+        id = idOfKey(t, k);
+        if indexIn(&seen, &id) < 0 { seen = push(seen, id); out = push(out, clone(k)); };
+    };
+    return out;
+};
+
+fn uniqueContexts(t: &Ifaces, contexts: &List<List<String>>) -> List<List<String>> ~ {
+    out = [];
+    seen = [];
+    for c in contexts {
+        leader = "";
+        if size(c) > 0 { leader = idOfKey(t, &get(c, 0)); };
+        if indexIn(&seen, &leader) < 0 { seen = push(seen, leader); out = push(out, clone(c)); };
+    };
+    return out;
+};
+
+fn programsOf(t: &Ifaces, keys: &List<String>) -> List<AstProgram> ~ {
+    out = [];
+    for k in keys { out = push(out, HashMap::lookup(&t.programs, k, noProgram("interface"))); };
+    return out;
+};
+
+fn noKeys() -> List<String> ~ { return []; };
+
+fn noPrograms() -> List<AstProgram> ~ { return []; };
+
+struct Comp { id: ModId, key: String, contexts: List<List<String>> };
+impl Clone for Comp { };
+
+fn compOf(compiled: &List<Comp>, id: &ModId) -> Int ~ {
+    for i in 0..size(compiled) { if sameId(&get(compiled, i).id, id) { return i; }; };
+    return 0 - 1;
+};
+
+fn joinedProgram(ls: &LS, files: &List<LFile>) -> Program ~ {
+    program = Program { nodes: [], roots: [] };
+    for f in files { program = joinBlock(program, HashMap::lookup(&ls.programs, &f.entry.path, noProgram("parsed"))); };
+    return program;
+};
+
+// Whether the elaborated module declares the trait Eq itself (LibPackage.withoutReplacedEq)
+fn declaresEq(out: &AstProgram) -> Bool ~ {
+    root = nodeIn(&out.nodes, out.root);
+    if !(root is AstNode::Elaborated) { return false; };
+    for s in listItems(&out.nodes, (root as AstNode::Elaborated).value.statements) {
+        stmt = statementOf(&out.nodes, s);
+        if stmt is AstStatement::TraitDef && nameText(&out.nodes, (stmt as AstStatement::TraitDef).n) = "Eq" { return true; };
+    };
+    return false;
+};
+
+fn libKeys(catalog: &Catalog, names: &List<String>) -> List<String> ~ {
+    out = [];
+    for n in names {
+        i = libIndex(&catalog.libs, n);
+        if i >= 0 && i < size(catalog.libs) { out = push(out, clone(get(&catalog.libs, i).key)); };
+    };
+    return out;
+};
+
+fn printAnswered(id: &ModId, lowering: &List<String>, t: &Ifaces, answer: &Answer) -> Int ~ {
+    n = "module".print() + printModId(id) + "\n".print();
+    n = n + "lowering".print() + printIntWord(size(lowering));
+    for k in lowering { n = n + printModId(HashMap::lookup(&t.ids, k, ModId { pkg: "", modu: "", has: false })); };
+    return n + "\n".print() + printAnswerBody(answer);
+};
+
+fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Catalog) -> Int ~ {
+    loaded = loadEntry(newLS(clone(libs.decls), libs.ok, clone(libs.msg)), snap);
+    if !loaded.ok {
+        message = clone(loaded.msg);
+        if !loaded.ls.ok { message = clone(loaded.ls.msg); };
+        "notLoaded ".print(); printQuoted(&message); "\n".print();
+        return 0;
+    };
+    if loaded.standalone {
+        "notLoaded ".print(); printQuoted(catStrings(&loaded.entryPath, " is not in a package")); "\n".print();
+        return 0;
+    };
+    entryId = clone(loaded.entryId);
+    ls = stateOfLoad(loaded);
+    pkg = ownedPackage(&ls, &entryId);
+    t = Ifaces { programs: HashMap::new(), ids: HashMap::new() };
+    seen = HashMap::new();
+    for lib in &catalog.libs {
+        parsed = parseAstLines(&lib.lines);
+        if !parsed.ok { return malformed(); };
+        seen = seen.insert(clone(lib.key), clone(parsed.value));
+        t = Ifaces { programs: t.programs.insert(clone(lib.key), parsed.value), ids: t.ids.insert(clone(lib.key), ModId { pkg: "tersuslib", modu: clone(lib.name), has: true }) };
+    };
+    compiled = [];
+    for id in &ls.order {
+        pm = moduleOf(&ls, id);
+        depKeys = [];
+        gathered = [];
+        for dep in dependenciesOf(&ls, &pm) {
+            i = compOf(&compiled, &dep);
+            if i >= 0 && i < size(compiled) {
+                c = get(&compiled, i);
+                depKeys = push(depKeys, clone(c.key));
+                for ctx in &c.contexts { gathered = push(gathered, clone(ctx)); };
+            };
+        };
+        defining = uniqueContexts(&t, &gathered);
+        given = !pm.layout.noPrelude && size(catalog.libs) > 0;
+        unitCatalog = Catalog { ok: true, libs: [] };
+        if given { unitCatalog = Catalog { ok: true, libs: clone(catalog.libs) }; };
+        definitionPrograms = [];
+        for ctx in &defining { definitionPrograms = push(definitionPrograms, programsOf(&t, ctx)); };
+        unit = Unit { pkgName: clone(id.pkg), modu: clone(id.modu), hasModule: id.has, predeclaring: true, viewing: false, extracting: true, libExtract: false,
+            ifaces: programsOf(&t, &depKeys), ifaceKeys: clone(depKeys), definitions: definitionPrograms, definitionKeys: clone(defining),
+            hasCatalog: given, catalog: unitCatalog, pkg: clone(pkg), program: joinedProgram(&ls, &pm.files), checked: 0 };
+        answer = elaborateUnit(table, unit, &seen);
+        if answer.status < 0 { return malformed(); };
+        if answer.status != 0 {
+            printAnswered(id, noKeys(), &t, &answer);
+            "end\n".print();
+            return 0;
+        };
+        names = [];
+        replaced = declaresEq(&answer.out);
+        for n in seenLibraries(&catalog.libs, &answer.selected) { if !replaced || n != "eq" { names = push(names, clone(n)); }; };
+        libContexts = [];
+        for ctx in libraryContexts(&catalog.libs, &answer.selected) { libContexts = push(libContexts, libKeys(catalog, &ctx)); };
+        for ctx in &defining { libContexts = push(libContexts, clone(ctx)); };
+        definitions = uniqueContexts(&t, &libContexts);
+        lowering = libKeys(catalog, &names);
+        for k in &depKeys { lowering = push(lowering, clone(k)); };
+        for ctx in &definitions { for k in ctx { lowering = push(lowering, clone(k)); }; };
+        lowering = uniqueKeys(&t, &lowering);
+        own = catStrings("module:", modKey(id));
+        t = Ifaces { programs: t.programs.insert(clone(own), clone(answer.iface)), ids: t.ids.insert(clone(own), clone(id)) };
+        withOwn = push([], clone(own));
+        for k in &lowering { withOwn = push(withOwn, clone(k)); };
+        contexts = push([], withOwn);
+        for ctx in &definitions { contexts = push(contexts, clone(ctx)); };
+        compiled = push(compiled, Comp { id: clone(id), key: clone(own), contexts: uniqueContexts(&t, &contexts) });
+        printAnswered(id, &lowering, &t, &answer);
+    };
+    "end\n".print();
+    return 0;
+};
+
+// ---- a program (SourceParse.parseSourcePartsWith, parseWithEqualityWith; Compile.lowerSourcePartsWith) ----
+
+fn reservedNames() -> List<String> ~ {
+    names = push(push(push(push(push(push(push([], "List"), "Box"), "listNew"), "listLen"), "listGet"), "listFirst"), "listLast");
+    return push(push(push(push(push(push(names, "listPop"), "listSet"), "listPush"), "listFilled"), "boxNew"), "boxUnbox");
+};
+
+fn reservedName(nodes: &List<AstNode>, stmts: &List<Int>) -> String ~ {
+    reserved = reservedNames();
+    for s in stmts {
+        stmt = statementOf(nodes, s);
+        name = "";
+        if stmt is AstStatement::Assign && functValue(nodes, (stmt as AstStatement::Assign).e) >= 0 { name = nameText(nodes, (stmt as AstStatement::Assign).n); };
+        if stmt is AstStatement::StructDef { name = nameText(nodes, (stmt as AstStatement::StructDef).n); };
+        if stmt is AstStatement::EnumDef { name = nameText(nodes, (stmt as AstStatement::EnumDef).n); };
+        if stmt is AstStatement::TraitDef { name = nameText(nodes, (stmt as AstStatement::TraitDef).n); };
+        if stmt is AstStatement::BoundedDef {
+            inner = statementOf(nodes, (stmt as AstStatement::BoundedDef).s);
+            if inner is AstStatement::Assign { name = nameText(nodes, (inner as AstStatement::Assign).n); };
+        };
+        if size(name.bytes) > 0 && indexIn(&reserved, &name) >= 0 { return name; };
+    };
+    return "";
+};
+
+
+struct SourceParse { ok: Bool, msg: String, names: List<String>, program: AstProgram };
+
+fn sourceFailed(msg: String) -> SourceParse ~ { return SourceParse { ok: false, msg: msg, names: [], program: noProgram("parsed") }; };
+
+fn regularNames(libs: &LibParse) -> List<String> ~ {
+    out = [];
+    if libs.regular <= 0 { return out; };
+    for i in 0..libs.regular { if i < size(libs.names) { out = push(out, clone(get(&libs.names, i))); }; };
+    return out;
+};
+
+// (a probe that fails with the libraries' declarations is tried with none, and gives the first error if that fails too)
+fn probeParse(declared: &Decls, text: &String) -> PR ~ {
+    first = parseWith(declared, text);
+    if first.ok { return first; };
+    none = emptyDecls();
+    bare = Decls { locate: declared.locate, ..none };
+    plain = parseWith(&bare, text);
+    if plain.ok { return plain; };
+    return first;
+};
+
+fn importsText(imports: &List<ps::FileImport>) -> String ~ {
+    paths = [];
+    for imp in imports { paths = push(paths, renderPath(&imp.path)); };
+    return joinWith(&paths, ", ");
+};
+
+fn parseSource(snap: &Snap, libs: &LibParse, text: &String) -> SourceParse ~ {
+    equality = snap.kind = "equality";
+    if snap.noPrelude && !equality {
+        plain = parseWith(locating(emptyDecls()), text);
+        if !plain.ok { return sourceFailed(catStrings("Parse error: ", plain.msg)); };
+        return checkedSource(snap, plain, []);
+    };
+    if !libs.ok {
+        if equality { return sourceFailed(clone(libs.msg)); };
+        return sourceFailed(catStrings("Parse error: ", libs.msg));
+    };
+    probeNames = push(push(push(push([], "prelude"), "string"), "map"), "set");
+    probeDecls = libDecls(libs, &probeNames, libs.regular);
+    if !equality { probeDecls = locating(probeDecls); };
+    probe = probeParse(&probeDecls, text);
+    if !probe.ok {
+        if equality { return sourceFailed(probe.msg); };
+        return sourceFailed(catStrings("Parse error: ", probe.msg));
+    };
+    chosen = librariesFor(probeModule(&probe.program.nodes, statementsOfProgram(&probe.program), noPrograms()));
+    if equality {
+        restricted = [];
+        for n in &chosen { if n = "types" || n = "clone" || n = "eq" { restricted = push(restricted, clone(n)); }; };
+        chosen = restricted;
+    };
+    declared = libDecls(libs, &chosen, libs.regular);
+    if !equality { declared = locating(declared); };
+    parsed = parseWith(&declared, text);
+    if !parsed.ok {
+        if equality { return sourceFailed(parsed.msg); };
+        return sourceFailed(catStrings("Parse error: ", parsed.msg));
+    };
+    if equality {
+        if size(parsed.imports) > 0 { return sourceFailed("import statements must come before any declaration in a file"); };
+        return SourceParse { ok: true, msg: "", names: chosen, program: parsed.program };
+    };
+    return checkedSource(snap, parsed, chosen);
+};
+
+fn checkedSource(snap: &Snap, parsed: PR, names: List<String>) -> SourceParse ~ {
+    if size(parsed.imports) > 0 { return sourceFailed(catStrings("imports are not linked yet: ", importsText(&parsed.imports))); };
+    if snap.reserving {
+        name = reservedName(&parsed.program.nodes, statementsOfProgram(&parsed.program));
+        if size(name.bytes) > 0 { return sourceFailed(reservedError(&name)); };
+    };
+    return SourceParse { ok: true, msg: "", names: names, program: parsed.program };
+};
+
+fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Catalog) -> Int ~ {
+    read = readFile(snap, &snap.entry);
+    if !snap.hasEntry || !read.ok { return malformed(); };
+    source = parseSource(snap, libs, &read.text);
+    if !source.ok { "unparsed ".print(); printQuoted(&source.msg); "\n".print(); return 0; };
+    if snap.kind != "program" {
+        "parsed\nlibraries".print(); printIntWord(size(source.names)); printWords(&source.names); "\n".print();
+        for name in &libs.names { if indexIn(&source.names, name) >= 0 { printBlock(libProgramOf(libs, name)); }; };
+        printBlock(&source.program);
+        return 0;
+    };
+    given = size(source.names) > 0;
+    unitCatalog = Catalog { ok: true, libs: [] };
+    if given { unitCatalog = Catalog { ok: true, libs: clone(catalog.libs) }; };
+    unit = Unit { pkgName: "main", modu: "", hasModule: false, predeclaring: false, viewing: false, extracting: false, libExtract: false,
+        ifaces: [], ifaceKeys: [], definitions: [], definitionKeys: [], hasCatalog: given, catalog: unitCatalog, pkg: noPackage(),
+        program: joinBlock(Program { nodes: [], roots: [] }, &source.program), checked: 0 };
+    seen = HashMap::new();
+    answer = elaborateUnit(table, unit, &seen);
+    if answer.status < 0 { return malformed(); };
+    if answer.status = 0 && answer.selected != source.names {
+        message = catStrings(catStrings(catStrings("internal: the elaborator selected the libraries ", showTexts(&answer.selected)), " for a program parsed with "), showTexts(&source.names));
+        "unresolved ".print(); printQuoted(&message); "\n".print();
+        return 0;
+    };
+    printAnswerBody(&answer);
+    return 0;
+};
+
+// ---- the compiler libraries, elaborated in order (LibPackage.compileLibPackageWith, nativeStorageUnitsWith) ----
+
+fn libKey(name: &String) -> String ~ { return catStrings("lib:", name); };
+
+fn libContextsFor(libs: &LibParse, ifaces: &List<String>, deps: &List<String>) -> List<List<String>> ~ {
+    order = sortNames(clone(ifaces));
+    wanted = libClosure(libs, clone(deps));
+    out = [];
+    for name in &order {
+        if indexIn(&wanted, name) >= 0 {
+            closureOf = libClosure(libs, libDepsOf(libs, name));
+            context = push([], libKey(name));
+            for d in &order { if indexIn(&closureOf, d) >= 0 { context = push(context, libKey(d)); }; };
+            out = push(out, context);
+        };
+    };
+    return out;
+};
+
+fn compileLibrary(libs: &LibParse, table: &AstProgram, t: &Ifaces, done: &List<String>, i: Int) -> Answer ~ {
+    name = "";
+    if i >= 0 && i < size(libs.names) { name = clone(get(&libs.names, i)); };
+    deps = libDepsOf(libs, &name);
+    depKeys = [];
+    for d in &deps { depKeys = push(depKeys, libKey(d)); };
+    contexts = libContextsFor(libs, done, &deps);
+    definitionPrograms = [];
+    for ctx in &contexts { definitionPrograms = push(definitionPrograms, programsOf(t, ctx)); };
+    unit = Unit { pkgName: "tersuslib", modu: clone(name), hasModule: true, predeclaring: true, viewing: true, extracting: true, libExtract: true,
+        ifaces: programsOf(t, &depKeys), ifaceKeys: depKeys, definitions: definitionPrograms, definitionKeys: contexts,
+        hasCatalog: false, catalog: Catalog { ok: true, libs: [] }, pkg: noPackage(), program: joinBlock(Program { nodes: [], roots: [] }, libProgramOf(libs, &name)), checked: 0 };
+    seen = HashMap::new();
+    return elaborateUnit(table, unit, &seen);
+};
+
+fn answerLibraries(libs: &LibParse, table: &AstProgram) -> Int ~ {
+    if !libs.ok { "librariesFailed ".print(); printQuoted(catStrings("the lib package does not parse: ", libs.msg)); "\n".print(); return 0; };
+    t = Ifaces { programs: HashMap::new(), ids: HashMap::new() };
+    done = [];
+    for i in 0..size(libs.names) {
+        if i = libs.regular && !libs.nativeOk { "nativesFailed ".print(); printQuoted(&libs.nativeMsg); "\n".print(); return 0; };
+        name = clone(get(&libs.names, i));
+        answer = compileLibrary(libs, table, &t, &done, i);
+        if answer.status < 0 { return malformed(); };
+        deps = libDepsOf(libs, &name);
+        "library ".print(); printQuoted(&name); printIntWord(size(deps)); printWords(&deps); "\n".print();
+        printBlock(libProgramOf(libs, &name));
+        printAnswerBody(&answer);
+        if answer.status != 0 { "end\n".print(); return 0; };
+        if i < libs.regular {
+            t = Ifaces { programs: t.programs.insert(libKey(&name), clone(answer.iface)), ids: t.ids.insert(libKey(&name), ModId { pkg: "tersuslib", modu: clone(name), has: true }) };
+            done = push(done, name);
+        };
+    };
+    if libs.regular = size(libs.names) && !libs.nativeOk { "nativesFailed ".print(); printQuoted(&libs.nativeMsg); "\n".print(); return 0; };
+    "end\n".print();
+    return 0;
+};

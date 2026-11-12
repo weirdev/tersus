@@ -11,10 +11,12 @@ import System.FilePath ((</>))
 import System.IO (hClose, hPutStr)
 
 import CacheLock (openTempFileCloexec)
-import Differential (Outcome (..), Unit (..), compareResponses, unitRequests)
-import ElaborateRequest (Response (..))
+import Differential (Asked (..), Outcome (..), Unit (..), bootstrapFrontend, compareAnswers, executableCandidate, unitRequests)
+import Compile (sourceRequest)
+import ElaborateRequest (LoadKind (..), LoadResponse (..), Response (..))
 import ElaboratorNative (frontendStage)
-import ElaboratorTool (bootstrapElaborator, frontendSources, frontendToolFailure, nativeElaborator, runElaborator)
+import ElaboratorTool (frontendSources, frontendToolFailure, nativeElaborator, nativeLoader)
+import LibPackage (compileLibPackageWith)
 import MirHousekeeping (emitterEntry, toolProgram, toolProgramWith, validationEntry)
 import Native (cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts)
 import PreludeSource (frontendSeedSha256, frontendSeedSources)
@@ -43,16 +45,20 @@ refusals = withScratch $ \home -> do
     hClose handle
     corrupted <- withEnv [("XDG_CACHE_HOME", Just home), ("TERSUS_FRONTEND_SEED_FILE", Just corrupt)] cachedFrontendSeed
     missing <- withEnv [("XDG_CACHE_HOME", Just home), ("TERSUS_FRONTEND_SEED_FILE", Just (home </> "absent.ll"))] cachedFrontendSeed
-    requests <- unitRequests bootstrapElaborator (SourceText "refusal" "return 1;")
+    requests <- unitRequests bootstrapFrontend (SourceText "refusal" "return 1;")
     pure $ firstFailure
         [ refused "a corrupt seed" "does not match bootstrap/frontend.sha256" corrupted
         , refused "a missing seed" "frontend bootstrap seed" missing
         , case requests of
-            Ok ((rq, _) : _) -> case nativeElaborator (home </> "absent-elaborator") rq of
-                Refused e | frontendToolFailure e -> Nothing
-                _ -> Just "an elaborator that cannot run did not refuse the module as a tool failure"
-            Ok [] -> Just "no request to send"
+            Ok answered -> case [rq | (AskedModule rq, _) <- answered] of
+                rq : _ -> case nativeElaborator (home </> "absent-elaborator") rq of
+                    Refused e | frontendToolFailure e -> Nothing
+                    _ -> Just "an elaborator that cannot run did not refuse the module as a tool failure"
+                [] -> Just "no module request to send"
             Error e -> Just e
+        , case nativeLoader (home </> "absent-elaborator") (sourceRequest LoadParse False False [] "return 1;") of
+            NotLoaded e | frontendToolFailure e -> Nothing
+            _ -> Just "an elaborator that cannot run did not refuse the load as a tool failure"
         ]
   where
     refused what expected built = case built of
@@ -66,8 +72,8 @@ stagesAgree :: IO TestResult
 stagesAgree = do
     one <- frontendStage 1
     two <- frontendStage 2
-    own <- unitRequests bootstrapElaborator (FilePackage "lib/elaborate/elaborate.tersus")
-    libraries <- unitRequests bootstrapElaborator Libraries
+    own <- unitRequests bootstrapFrontend (EmbeddedPackage "lib/elaborate/elaborate.tersus")
+    libraries <- unitRequests bootstrapFrontend Libraries
     let requests = own `bindResult` \a -> mapResult (a ++) libraries
     case (one, two, requests) of
         (Error e, _, _) -> pure (Just ("stage 1: " ++ e))
@@ -78,9 +84,9 @@ stagesAgree = do
             | otherwise -> firstFailure <$> sequence [agree exe rq reference | exe <- nub [stageOne, stageTwo], (rq, reference) <- answered]
   where
     agree exe rq reference = do
-        answer <- runElaborator exe rq
+        answer <- executableCandidate exe rq
         pure $ case answer of
-            Ok response -> case compareResponses reference response of
+            Ok response -> case compareAnswers reference response of
                 Agree -> Nothing
                 outcome -> Just (exe ++ " answered a request differently: " ++ show outcome)
             Error e -> Just (exe ++ " did not answer a request: " ++ e)
@@ -100,10 +106,11 @@ toolsAgree = do
     one <- frontendStage 1
     case one of
         Error e -> pure (Just ("stage 1: " ++ e))
-        Ok (exe, _) -> pure (firstFailure (map (same exe) entries))
+        -- (the compiler libraries stage 1 elaborates, once for every tool)
+        Ok (exe, _) -> let libraries = compileLibPackageWith (nativeLoader exe) in pure (firstFailure (map (same exe libraries) entries))
   where
     entries = [emitterEntry, "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", "lib/parser/parser.tersus", "lib/ast_reader/ast_reader.tersus", validationEntry]
-    same exe entry = case (toolProgramWith (nativeElaborator exe) entry, toolProgram entry) of
+    same exe libraries entry = case (toolProgramWith (nativeLoader exe) libraries entry, toolProgram entry) of
         (Ok a, Ok b) | a == b -> Nothing
         (Ok _, Ok _) -> Just (entry ++ ": elaborated by stage 1, it is another program")
         (Error e, _) -> Just (entry ++ " elaborated by stage 1: " ++ e)

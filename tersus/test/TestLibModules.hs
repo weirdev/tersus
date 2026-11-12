@@ -18,7 +18,9 @@ import MirLower (lowerModuleWith)
 import ElaborateRequest (Extraction (..), Request (..), Response (..))
 import ElaboratorTool (sourceElaborator)
 import LibPackage (LibPackage (..), libPackage, libModuleId, libSelection, nativeStorageUnits)
-import LibParsed (LibParsed (..), libParsed, nativeLibParsed, libPackageFiles)
+import PreludeSource (libPackageFiles)
+import ElaborateRequest (LibraryAnswer (..), LoadKind (..), LoadRequest (..), LoadResponse (..))
+import ElaboratorTool (bootstrapLoader, sourceLoader)
 import Link (linkPrograms)
 import MirLists (lowerLists)
 import Types (Arg (..), Type (..), Size (..))
@@ -57,12 +59,12 @@ testLibModules =
                     [Just source | (_, source) <- implicitSources]
             , testCase "implicit source imports preserve the dependency graph" $ case mapM (Parse.parseImportPrefix . snd) implicitSources of
                 Left e -> Just (show e)
-                Right imports -> case libParsed of
-                    Left e -> Just e
-                    Right parsed -> both
+                Right imports -> case libPackage of
+                    Error e -> Just e
+                    Ok pkg -> both
                         (testAssertEq (map (map (\imp -> (Parse.importPath imp, Parse.importAlias imp, Parse.importNames imp))) imports)
                             [[(["tersuslib", dep], Nothing, Nothing) | dep <- deps] | (_, deps) <- implicitDependencies])
-                        (testAssertEq (lpDependencies parsed) (Map.fromList implicitDependencies))
+                        (testAssertEq (libImports pkg) (Map.fromList implicitDependencies))
             , testCase "modules compile dependencies first" orderIsDependencyFirst
             , TestList "interface declarations" [ testCase name result | (name, result) <- interfaceCases ]
             ]
@@ -101,7 +103,7 @@ testLibModules =
              [ testCase "compatible Eq keeps String equality" (runs (checkedSource (ownEq ++ "if \"a\" = \"a\" { return 1; }; return 0;")) (VInt 1))
              , testCase "suppressed eq helper is not exposed" (rejected (checkedSource (ownEq ++ "s = \"hi\"; a = Array::boxed(1, 1); return eqBoxedArrays(a, a);")) "eqBoxedArrays")
              , testCase "a replacement without cached Eq impls is unrestricted" (runs (checkedSource "trait Eq { }; return 7;") (VInt 7))
-             , testCase "supplied single-file AST is lowered without reparsing" (runs (Compile.parseSourceParts True "return 9;" `bindResult` Compile.lowerSourceParts True) (VInt 9))
+             , testCase "supplied single-file AST is lowered without reparsing" (runs (Compile.lowerSourceUsing (\request -> sourceLoader request{lrResolver = (lrResolver request){Modules.resolverFiles = Map.fromList [("<source>", "return 9;")]}}) False True "@supplied-ast@") (VInt 9))
              , testCase "Drop source validates and retains its implementation" $ case checkedSource (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") of
                 Error err -> Just err
                 Ok program -> testAssertTrue (Map.member "<V as Drop>::drop" (M.progFunctions program))
@@ -125,7 +127,7 @@ testLibModules =
         validateCompiled program `bindResult` \_ -> Ok program
     checkedPackage source = case Modules.loadFromEntry (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" of
         Left err -> Error err
-        Right (Modules.PackageResult pkg) -> compileModulesValidated pkg
+        Right (Modules.PackageResult pkg) -> compileModulesValidated (Modules.packageSnapshot pkg)
         Right _ -> Error "fixture did not load as a package"
     runs result expected = case result `bindResult` runProgram of
         Error err -> Just err
@@ -137,9 +139,10 @@ testLibModules =
     takeThrough _ [] = []
     takeThrough p (x : xs) = x : if p x then [] else takeThrough p xs
     injectedPackage =
-        let parser decls source = either (Left . show) Right (Parse.parseFileWith decls (if source == "@supplied-ast@" then "return 11;" else source))
-         in case Modules.loadFromEntryWith parser (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "@supplied-ast@")]) "app/main.tersus" of
-                Right (Modules.PackageResult pkg) -> runs (compileModulesValidated pkg) (VInt 11)
+        let supplied = Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "return 11;")]
+            loader request = sourceLoader request{lrResolver = supplied}
+         in case Modules.loadFromEntryWith loader (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "@supplied-ast@")]) "app/main.tersus" of
+                Right (Modules.PackageResult pkg) -> runs (Package.compileModulesWith loader (Modules.packageSnapshot pkg) `bindResult` Package.lowerCompiledPackage) (VInt 11)
                 other -> Just ("injected fixture failed: " ++ show other)
     interfaceCases =
         [ ("eq declares Eq and its impls", (interface "eq" (\iface -> Map.member "Eq" (ifTraits iface) && implsIn iface [("Eq", "List"), ("Eq", "Array"), ("Eq", "Box")])))
@@ -184,13 +187,13 @@ testNativeStorageModules :: Test
 testNativeStorageModules = TestList "testNativeStorageModules"
     [ testCase "snapshot uses the embedded helper texts without concatenating bodies" $
         testAssertEq (map (\path -> lookup path libPackageFiles) ["tersuslib/lists/lists.tersus", "tersuslib/box/box.tersus"]) [Just listsSource, Just boxSource]
-    , testCase "native imports are the compiled dependency graph" $ case nativeLibParsed of
-        Left e -> Just e
-        Right parsed -> testAssertEq (map (\name -> Map.lookup name (lpDependencies parsed)) ["lists", "box"]) [Just ["types", "prelude"], Just ["types", "prelude"]]
-    , testCase "user-library parsing and compilation exclude native modules" $ case (libParsed, libPackage) of
-        (Right parsed, Ok pkg) -> testAssertTrue (all (\name -> Map.notMember name (lpStatements parsed) && Map.notMember name (libPrograms pkg)) ["lists", "box"])
-        (Left e, _) -> Just e
-        (_, Error e) -> Just e
+    , testCase "native imports are the compiled dependency graph" $
+        case bootstrapLoader (LoadRequest LoadLibraries False (Modules.resolverFromFiles []) Nothing Modules.librarySources []) of
+            LoadedLibraries answers Nothing -> testAssertEq [(name, imports) | LibraryAnswer name imports _ _ <- answers, name `elem` ["lists", "box"]] [("lists", ["types", "prelude"]), ("box", ["types", "prelude"])]
+            other -> Just ("the compiler libraries did not load: " ++ take 300 (show other))
+    , testCase "user-library compilation excludes native modules" $ case libPackage of
+        Ok pkg -> testAssertTrue (all (\name -> name `notElem` libOrder pkg && Map.notMember name (libPrograms pkg) && Map.notMember name (libImports pkg)) ["lists", "box"])
+        Error e -> Just e
     , testCase "physical generic constructor owners are not user import types" $ case libPackage of
         Error e -> Just e
         Ok pkg -> let iface = libInterfaces pkg Map.! "types"
@@ -284,7 +287,7 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         Ok p -> runtimeStorageLayout (M.completeErasedInstances p)
     bootstrapOwned entry = case Modules.loadFromEntry (Modules.resolverFromFiles toolPackageFiles) entry of
         Left e -> Just e
-        Right (Modules.PackageResult pkg) -> case Package.compileModules pkg `bindResult` Package.lowerCompiledPackage pkg of
+        Right (Modules.PackageResult pkg) -> case Package.compileModules (Modules.packageSnapshot pkg) `bindResult` Package.lowerCompiledPackage of
             Error e -> Just e
             Ok raw -> case (erasedHelpers `bindResult` \units -> expandRefWrites raw `bindResult` lowerLists (Ok units)) `bindResult` insertOwnership of
                 Error e -> Just e
@@ -298,12 +301,14 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     fixtureModule source = libPackage `bindResult` \pkg ->
         let ifaces = [libInterfaces pkg Map.! name | name <- ["types", "prelude", "clone"]]
          in checkedModule ifaces source
-    checkedModule ifaces source = case libParsed of
-        Left e -> Error e
-        Right parsed -> case Parse.parseFileWith (lpDecls parsed) source of
+    -- (the declarations of the libraries a fixture is read with, as the frontend reads them)
+    libDecls = foldl (\acc text -> acc >>= \decls -> fmap snd (Parse.parseFileWith decls text)) (Right Parse.emptyDecls) [typesSource, cloneSource, eqSource, preludeSource]
+    checkedModule ifaces source = case libDecls of
+        Left e -> Error (show e)
+        Right decls -> case Parse.parseFileWith decls source of
             Left e -> Error (show e)
             Right (Parse.ParsedFile _ stmts, _) ->
-                case sourceElaborator (Request (Modules.ModuleId "fixture" Nothing) True False LibInterfaceOf ifaces [] [] Nothing [stmts] 0) of
+                case sourceElaborator (Request (Modules.ModuleId "fixture" Nothing) True False LibInterfaceOf ifaces [] [] [stmts] 0) of
                     Accepted elaborated (Just iface) _ -> lowerModuleWith ifaces elaborated `bindResult` \p -> Ok (iface, p)
                     Accepted _ Nothing _ -> Error "the elaborator gave no interface"
                     Refused e -> Error e

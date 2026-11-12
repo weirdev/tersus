@@ -5,9 +5,6 @@ module ElaborateRequest
     , Extraction (..)
     , Request (..)
     , Library (..)
-    , Package (..)
-    , PackageFile (..)
-    , FileImport (..)
     , Response (..)
     , writeRequest
     , readRequest
@@ -18,6 +15,15 @@ module ElaborateRequest
     , acceptedElaboration
     , requestHeader
     , responseHeader
+    , LoadKind (..)
+    , LoadRequest (..)
+    , LoadResponse (..)
+    , LibraryAnswer (..)
+    , Graph (..)
+    , GraphModule (..)
+    , GraphFile (..)
+    , writeLoadRequest
+    , readLoadResponseBytes
     ) where
 
 import qualified Data.ByteString.Char8 as B
@@ -28,7 +34,8 @@ import BuiltinTable (builtinTableLines)
 import DataCodec (Token (..), quote, strictTokenize)
 import Interface (ModuleInterface (..))
 import InterfaceData (readInterfaceBytes, readInterfaceLines, writeInterfaceLines)
-import Modules (Declaration (..), DeclarationKind (..), ImportLevel (..), ModuleId (..))
+import PackageData (ImportLevel (..), LoadOptions (..), ModuleId (..), Resolver (..))
+import ParsedFile (Import (..))
 import Syntax (Elaborated (..), Statement)
 import Utils
 
@@ -40,11 +47,10 @@ data Extraction = NoInterface | ModuleInterfaceOf | LibInterfaceOf
 -- The module, whether it predeclares its own types (a package module does), whether it is a module of the
 -- compiler libraries (which see a generic struct's constructor as the struct it builds), the interface to
 -- give back, the interfaces of the modules it imports, checked defining dependencies, the compiler libraries it
--- may be given (the elaborator selects among them), the package its names are resolved in, the statements
--- as read: one list for each of the module's files in the package's order, or one for a program, and how many of
--- the program's first statements are compiler libraries put in front of it, whose functions with bounds were checked
--- against their bounds where the libraries were (written `builtins checked N`, only when N is not 0, so a request
--- that has none reads as before).
+-- may be given (the elaborator selects among them), the statements as read: one list for each of the module's files
+-- in the package's order, or one for a program, and how many of the program's first statements are compiler libraries
+-- put in front of it, whose functions with bounds were checked against their bounds where the libraries were (written
+-- `builtins checked N`, only when N is not 0, so a request that has none reads as before).
 data Request = Request
     { rqModule :: ModuleId
     , rqPredeclare :: Bool
@@ -53,7 +59,6 @@ data Request = Request
     , rqInterfaces :: [ModuleInterface]
     , rqDefinitions :: [[ModuleInterface]]
     , rqLibraries :: [Library]
-    , rqPackage :: Maybe Package
     , rqStatements :: [[Statement]]
     , rqCheckedStatements :: Int
     }
@@ -63,32 +68,6 @@ data Library = Library
     { libraryName :: String
     , libraryImports :: [String]
     , libraryInterface :: ModuleInterface
-    }
-    deriving (Show, Eq)
-
-data Package = Package
-    { packageEntry :: ModuleId
-    , packageFiles :: [PackageFile]
-    }
-    deriving (Show, Eq)
-
-data PackageFile = PackageFile
-    { fileModule :: ModuleId
-    , fileStem :: String
-    , fileName :: String
-    , fileDeclarations :: [Declaration]
-    , fileImports :: [FileImport]
-    }
-    deriving (Show, Eq)
-
--- A resolved import (Modules.ResolvedImport) as resolution reads it
-data FileImport = FileImport
-    { importLevel :: ImportLevel
-    , importTarget :: ModuleId
-    , importFile :: Maybe String
-    , importSymbol :: Maybe String
-    , importAs :: Maybe String
-    , importOnly :: Maybe [String]
     }
     deriving (Show, Eq)
 
@@ -130,12 +109,11 @@ writeRequest rq =
                         ++ ["definitions " ++ show (length definitions)]
                         ++ concat definitions
                         ++ (if null libraries then [] else ("libraries " ++ show (length libraries)) : concat libraries)
-                        ++ maybe [] packageLines (rqPackage rq)
                         ++ concatMap block asts
                     )
   where
     syntax
-        | null (rqStatements rq) || length (rqStatements rq) /= syntaxBlocks (rqModule rq) (rqPackage rq) = Error "ElaborateRequest: the syntax is not one block per file of the module"
+        | length (rqStatements rq) /= 1 = Error "ElaborateRequest: the syntax is not one block"
         | otherwise = Ok ()
     writeDefinition [] = Error "ElaborateRequest: empty defining context"
     writeDefinition context = mapAll linesOf context `bindResult` \texts -> Ok (("definition " ++ show (length texts)) : concatMap block texts)
@@ -146,32 +124,6 @@ writeRequest rq =
         Just (known, ls) | known == iface -> ls
         _ -> writeInterfaceLines iface
     ModuleId pkg modu = rqModule rq
-
-syntaxBlocks :: ModuleId -> Maybe Package -> Int
-syntaxBlocks modu = maybe 1 (\package -> length [f | f <- packageFiles package, fileModule f == modu])
-
-packageLines :: Package -> [String]
-packageLines (Package entry files) = unwords (["package"] ++ moduleWords entry ++ [show (length files)]) : concatMap fileLines files
-  where
-    fileLines (PackageFile modu stem name decls imports) =
-        unwords (["file"] ++ moduleWords modu ++ [quote stem, quote name, show (length decls), show (length imports)])
-            : map declLine decls ++ map importLine imports
-    declLine (Declaration kind name functions) = unwords (["decl", kindWord kind, quote name, show (length functions)] ++ map quote functions)
-    importLine (FileImport level target file symbol alias names) =
-        unwords (["import", levelWord level] ++ moduleWords target ++ map optional [file, symbol, alias] ++ maybe ["none"] (\ns -> show (length ns) : map quote ns) names)
-    optional = maybe "none" quote
-
-moduleWords :: ModuleId -> [String]
-moduleWords (ModuleId pkg modu) = [quote pkg, maybe "none" quote modu]
-
-kindWord :: DeclarationKind -> String
-kindWord kind = case kind of
-    DeclaresType -> "type"
-    DeclaresVariant -> "variant"
-    DeclaresTrait -> "trait"
-    DeclaresFunction -> "function"
-    DeclaresAxiom -> "axiom"
-    DeclaresProof -> "proof"
 
 levelWord :: ImportLevel -> String
 levelWord level = case level of
@@ -201,12 +153,11 @@ readRequest text = case lines text of
         definitionBlocks rest' `bindResult` \(definitionTexts, afterDefinitions) ->
         mapAll (mapAll readInterfaceLines) definitionTexts `bindResult` \definitions ->
         libraryBlocks afterDefinitions `bindResult` \(libraries, afterLibraries) ->
-        packageOf afterLibraries `bindResult` \(package, syntax) ->
-        blocks (syntaxBlocks modu package) syntax `bindResult` \(astTexts, rest'') ->
+        blocks 1 afterLibraries `bindResult` \(astTexts, rest'') ->
             if not (null rest'')
                 then Error "ElaborateRequest: records after the module's syntax"
                 else if null astTexts then Error "ElaborateRequest: no syntax"
-                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions libraries package stmts checked)
+                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions libraries stmts checked)
     _ -> Error "ElaborateRequest: not an elaboration request"
   where
     definitionBlocks (line : rest) = wordAfter "definitions" line `bindResult` countOf `bindResult` \count -> contexts count rest
@@ -238,40 +189,8 @@ readRequest text = case lines text of
                     _ -> Error "ElaborateRequest: malformed library"
         _ -> Error "ElaborateRequest: malformed library"
     libraryEntries _ [] = Error "ElaborateRequest: missing library"
-    packageOf (line : rest) | take 8 line == "package " = strictTokenize line `bindResult` \ts -> case ts of
-        [Word "package", p, m, Word count] | Ok entry <- moduleIdOf p m, Ok n <- countOf count ->
-            packageFilesOf n rest `bindResult` \(files, after) -> Ok (Just (Package entry files), after)
-        _ -> Error "ElaborateRequest: malformed package"
-    packageOf ls = Ok (Nothing, ls)
-    packageFilesOf 0 rest = Ok ([], rest)
-    packageFilesOf n (line : rest) = strictTokenize line `bindResult` \ts -> case ts of
-        [Word "file", p, m, Str stem, Str name, Word declCount, Word importCount]
-            | Ok modu <- moduleIdOf p m, Ok d <- countOf declCount, Ok i <- countOf importCount, length rest >= d + i ->
-                mapAll declOf (take d rest) `bindResult` \decls ->
-                mapAll importOf (take i (drop d rest)) `bindResult` \imports ->
-                packageFilesOf (n - 1) (drop (d + i) rest) `bindResult` \(more, after) -> Ok (PackageFile modu stem name decls imports : more, after)
-        _ -> Error "ElaborateRequest: malformed package file"
-    packageFilesOf _ [] = Error "ElaborateRequest: missing package file"
-    declOf line = strictTokenize line `bindResult` \ts -> case ts of
-        Word "decl" : Word kind : Str name : Word count : functions
-            | Just k <- lookup kind [(kindWord d, d) | d <- [minBound ..]], Ok n <- countOf count, length functions == n, Just fs <- mapM strOf functions -> Ok (Declaration k name fs)
-        _ -> Error "ElaborateRequest: malformed declaration"
-    importOf line = strictTokenize line `bindResult` \ts -> case ts of
-        Word "import" : Word level : p : m : file : symbol : alias : names
-            | Just l <- lookup level [(levelWord v, v) | v <- [minBound ..]], Ok target <- moduleIdOf p m, Just f <- optionalOf file, Just s <- optionalOf symbol, Just a <- optionalOf alias, Just ns <- namesOf names ->
-                Ok (FileImport l target f s a ns)
-        _ -> Error "ElaborateRequest: malformed import"
-    moduleIdOf (Str pkg) (Word "none") = Ok (ModuleId pkg Nothing)
-    moduleIdOf (Str pkg) (Str modu) = Ok (ModuleId pkg (Just modu))
-    moduleIdOf _ _ = Error "ElaborateRequest: malformed module"
     strOf (Str text) = Just text
     strOf _ = Nothing
-    optionalOf (Word "none") = Just Nothing
-    optionalOf (Str text) = Just (Just text)
-    optionalOf _ = Nothing
-    namesOf [Word "none"] = Just Nothing
-    namesOf (Word count : names) | Ok n <- countOf count, length names == n = Just <$> mapM strOf names
-    namesOf _ = Nothing
     boolOf w = case w of
         "true" -> Ok True
         "false" -> Ok False
@@ -392,3 +311,265 @@ requestHeader = "tersus-elaborate 1"
 
 responseHeader :: String
 responseHeader = "tersus-elaborated 1"
+
+-- ---------------------------------------------------------------------------
+-- Loading (AST_DATA.md, "Loading"): the snapshot the host read, answered as a whole by the loader written in Tersus
+
+-- graph: the module graph and each file as read (Modules.LoadResult); package: every module of the package elaborated in
+-- order; program and parse: a single file, elaborated or only read (SourceParse); equality: a file read with the type,
+-- clone and equality libraries in front of it (Compile.parseWithEquality); libraries: the compiler libraries elaborated
+data LoadKind = LoadGraph | LoadPackage | LoadProgram | LoadParse | LoadEquality | LoadLibraries
+    deriving (Show, Eq)
+
+-- The entry is a file of the snapshot, read from the filesystem or given as source (standard input, a program's text)
+data LoadRequest = LoadRequest
+    { lrKind :: LoadKind
+    , lrReserving :: Bool
+    , lrResolver :: Resolver
+    , lrEntry :: Maybe (FilePath, Bool)
+    , lrSources :: [(String, Bool, String)]
+    , lrLibraries :: [Library]
+    }
+    deriving (Show, Eq)
+
+data GraphFile = GraphFile
+    { gfName :: String
+    , gfStem :: String
+    , gfPath :: FilePath
+    , gfDeclNames :: [String]
+    , gfImports :: [(Import, ImportLevel, ModuleId, Maybe String, Maybe String, String)]
+    , gfBody :: [Statement]
+    }
+    deriving (Show, Eq)
+
+data GraphModule = GraphModule
+    { gmId :: ModuleId
+    , gmNoPrelude :: Bool
+    , gmDependencies :: [ModuleId]
+    , gmFiles :: [GraphFile]
+    }
+    deriving (Show, Eq)
+
+data Graph = Graph
+    { graphRoot :: FilePath
+    , graphName :: String
+    , graphEntry :: FilePath
+    , graphEntryModule :: ModuleId
+    , graphModules :: [GraphModule]
+    , graphSources :: [FilePath]
+    , graphPolicies :: [(String, FilePath, Bool)]
+    }
+    deriving (Show, Eq)
+
+data LibraryAnswer = LibraryAnswer
+    { laName :: String
+    , laImports :: [String]
+    , laStatements :: [Statement]
+    , laResponse :: Response
+    }
+    deriving (Show)
+
+data LoadResponse
+    = -- the load refuses, in the loader's words
+      NotLoaded String
+    | LoadedStandalone FilePath [Statement]
+    | LoadedGraph Graph
+    | -- each module in order with the modules of the interfaces its lowering takes; the last may be a refusal
+      LoadedModules [(ModuleId, [ModuleId], Response)]
+    | LoadedProgram Response
+    | -- the file does not read, in the reader's words, whole
+      Unparsed String
+    | -- the libraries the file was read with, their statements as read in their order, and its statements
+      ParsedSource [String] [Statement] [Statement]
+    | -- the libraries in order, then the native storage helpers; a failure to read them ends the list
+      LoadedLibraries [LibraryAnswer] (Maybe String)
+    deriving (Show)
+
+loadKindWord :: LoadKind -> String
+loadKindWord kind = case kind of
+    LoadGraph -> "graph"
+    LoadPackage -> "package"
+    LoadProgram -> "program"
+    LoadParse -> "parse"
+    LoadEquality -> "equality"
+    LoadLibraries -> "libraries"
+
+writeLoadRequest :: LoadRequest -> Result String String
+writeLoadRequest rq =
+    builtinTableLines `bindResult` \builtins ->
+    mapAll writeLibrary (lrLibraries rq) `bindResult` \libraries ->
+        Ok $ concat
+            ( map (++ "\n")
+                ( [ requestHeader
+                  , "load " ++ loadKindWord (lrKind rq)
+                  , "noPrelude " ++ boolWord (noPrelude options)
+                  , "reserving " ++ boolWord (lrReserving rq)
+                  , unwords (["roots", show (length roots)] ++ concat [[quote name, quote root] | (name, root) <- roots])
+                  , "std " ++ maybe "none" quote (installedStdRoot options)
+                  , "entry " ++ maybe "none" (\(path, source) -> quote path ++ (if source then " source" else " file")) (lrEntry rq)
+                  , unwords (["canonical", show (Map.size canonical)] ++ concat [[quote from, quote to] | (from, to) <- Map.toList canonical])
+                  , "dirs " ++ show (Map.size dirs)
+                  ]
+                    ++ [unwords (["dir", quote dir, show (length subdirs)] ++ map quote subdirs ++ [show (length files)] ++ map quote files) | (dir, (subdirs, files)) <- Map.toList dirs]
+                    ++ ["files " ++ show (Map.size (resolverFiles resolver))]
+                )
+                ++ [counted ("file " ++ quote path) text | (path, text) <- Map.toList (resolverFiles resolver)]
+                ++ map (++ "\n") ["sources " ++ show (length (lrSources rq))]
+                ++ [counted ("source " ++ quote name ++ (if native then " native" else " implicit")) text | (name, native, text) <- lrSources rq]
+                ++ map (++ "\n") (["builtins"] ++ block builtins ++ (if null libraries then [] else ("libraries " ++ show (length libraries)) : concat libraries))
+            )
+  where
+    resolver = lrResolver rq
+    options = resolverOptions resolver
+    roots = Map.toList (packageRoots options)
+    canonical = resolverCanonical resolver
+    dirs = resolverDirs resolver
+    counted header text = let bytes = encodeUtf8 text in header ++ " " ++ show (length bytes) ++ "\n" ++ bytes ++ "\n"
+    writeLibrary (Library name imports iface) = writeInterfaceLines iface `bindResult` \t -> Ok (unwords (["library", quote name, show (length imports)] ++ map quote imports) : block t)
+
+readLoadResponseBytes :: LoadKind -> [B.ByteString] -> Result LoadResponse String
+readLoadResponseBytes kind ls = case ls of
+    header : rest | B.unpack header == responseHeader -> case kind of
+        LoadGraph -> graphOf rest
+        LoadPackage -> packageAnswers rest
+        LoadProgram -> sourceOf rest `bindResult` \answer -> case answer of
+            Left response -> Ok response
+            Right (response, []) -> Ok (LoadedProgram response)
+            Right _ -> Error "ElaborateRequest: records after the program's answer"
+        LoadParse -> parsedOf rest
+        LoadEquality -> parsedOf rest
+        LoadLibraries -> librariesAnswer rest
+    _ -> Error "ElaborateRequest: not a load response"
+  where
+    text = B.unpack
+    tokens line = strictTokenize (text line)
+    notLoaded line = case tokens line of
+        Ok [Word "notLoaded", Str message] -> Just (NotLoaded message)
+        Ok [Word "unparsed", Str message] -> Just (Unparsed message)
+        _ -> Nothing
+    graphOf (line : rest) | Just r <- notLoaded line = if null rest then Ok r else Error "ElaborateRequest: records after a refusal"
+    graphOf (line : rest) = tokens line `bindResult` \ts -> case ts of
+        [Word "standalone", Str path] -> blocksWith text 1 rest `bindResult` \(asts, after) -> case (asts, after) of
+            ([ast], []) -> readParsedLines (map text ast) `bindResult` \body -> Ok (LoadedStandalone path body)
+            _ -> Error "ElaborateRequest: malformed standalone answer"
+        [Word "package", Str root, Str name, Str entry, p, m] -> moduleIdOf p m `bindResult` \entryId ->
+            case rest of
+                countLine : more -> wordAfter "modules" (text countLine) `bindResult` countOf `bindResult` \n ->
+                    readGraphModules n more `bindResult` \(modules, after) -> trailer after `bindResult` \(sources, policies) ->
+                        Ok (LoadedGraph (Graph root name entry entryId modules sources policies))
+                [] -> Error "ElaborateRequest: missing modules"
+        _ -> Error "ElaborateRequest: malformed graph"
+    graphOf [] = Error "ElaborateRequest: empty graph answer"
+    readGraphModules :: Int -> [B.ByteString] -> Result ([GraphModule], [B.ByteString]) String
+    readGraphModules 0 rest = Ok ([], rest)
+    readGraphModules n (line : rest) = tokens line `bindResult` \ts -> case ts of
+        Word "module" : p : m : Word prelude : Word fileCount : Word depCount : deps
+            | Ok f <- countOf fileCount, Ok d <- countOf depCount, length deps == 2 * d ->
+                moduleIdOf p m `bindResult` \modu -> boolOf prelude `bindResult` \flag -> pairs deps `bindResult` \depIds ->
+                    graphFiles f rest `bindResult` \(files, after) -> readGraphModules (n - 1) after `bindResult` \(more, after') ->
+                        Ok (GraphModule modu flag depIds files : more, after')
+        _ -> Error "ElaborateRequest: malformed graph module"
+    readGraphModules _ [] = Error "ElaborateRequest: missing graph module"
+    pairs (p : m : rest) = moduleIdOf p m `bindResult` \modu -> pairs rest `bindResult` \more -> Ok (modu : more)
+    pairs [] = Ok []
+    pairs _ = Error "ElaborateRequest: malformed module pair"
+    graphFiles :: Int -> [B.ByteString] -> Result ([GraphFile], [B.ByteString]) String
+    graphFiles 0 rest = Ok ([], rest)
+    graphFiles n (line : rest) = tokens line `bindResult` \ts -> case ts of
+        Word "file" : Str name : Str stem : Str path : Word declCount : more
+            | Ok d <- countOf declCount, length more == d + 1, Just decls <- mapM strOf (take d more), [Word importCount] <- drop d more, Ok k <- countOf importCount ->
+                mapAll importOf (take k rest) `bindResult` \imports ->
+                    blocksWith text 1 (drop k rest) `bindResult` \(asts, after) -> case asts of
+                        [ast] -> readParsedLines (map text ast) `bindResult` \body -> graphFiles (n - 1) after `bindResult` \(files, after') ->
+                            Ok (GraphFile name stem path decls imports body : files, after')
+                        _ -> Error "ElaborateRequest: malformed graph file"
+        _ -> Error "ElaborateRequest: malformed graph file"
+    graphFiles _ [] = Error "ElaborateRequest: missing graph file"
+    importOf line = tokens line `bindResult` \ts -> case ts of
+        Word "import" : Word l : Word c : Word segmentCount : more
+            | Ok lineNo <- countOf l, Ok col <- countOf c, Ok k <- countOf segmentCount, Just segments <- mapM strOf (take k more) -> importRest (Import segments) lineNo col (drop k more)
+        _ -> Error "ElaborateRequest: malformed graph import"
+    importRest mk lineNo col more = case more of
+        alias : rest -> optionalOf alias `bindResult` \a -> case rest of
+            Word "none" : rest' -> targetOf (mk a Nothing lineNo col) rest'
+            Word count : rest' | Ok k <- countOf count, Just names <- mapM strOf (take k rest') -> targetOf (mk a (Just names) lineNo col) (drop k rest')
+            _ -> Error "ElaborateRequest: malformed graph import names"
+        [] -> Error "ElaborateRequest: malformed graph import"
+    targetOf imp rest = case rest of
+        [Word level, p, m, file, symbol, Str canonical] | Just l <- lookup level [(levelWord v, v) | v <- [minBound ..]] ->
+            moduleIdOf p m `bindResult` \target -> optionalOf file `bindResult` \f -> optionalOf symbol `bindResult` \sym -> Ok (imp, l, target, f, sym, canonical)
+        _ -> Error "ElaborateRequest: malformed graph import target"
+    trailer (sourcesLine : policiesLine : rest) = tokens sourcesLine `bindResult` \ts -> case ts of
+        Word "sources" : Word count : paths | Ok n <- countOf count, length paths == n, Just ps <- mapM strOf paths ->
+            wordAfter "policies" (text policiesLine) `bindResult` countOf `bindResult` \k ->
+                if length rest /= k then Error "ElaborateRequest: malformed policies" else
+                mapAll policyOf rest `bindResult` \policies -> Ok (ps, policies)
+        _ -> Error "ElaborateRequest: malformed sources"
+    trailer _ = Error "ElaborateRequest: missing sources"
+    policyOf line = tokens line `bindResult` \ts -> case ts of
+        [Word "policy", Str name, Str root, Word flag] -> boolOf flag `bindResult` \b -> Ok (name, root, b)
+        _ -> Error "ElaborateRequest: malformed policy"
+    packageAnswers (line : rest) | Just r <- notLoaded line = if null rest then Ok r else Error "ElaborateRequest: records after a refusal"
+    packageAnswers ls' = modulesOf ls' `bindResult` \answers -> Ok (LoadedModules answers)
+    modulesOf (line : rest) | text line == "end" = if null rest then Ok [] else Error "ElaborateRequest: records after the end"
+    modulesOf (line : loweringLine : rest) = tokens line `bindResult` \ts -> case ts of
+        [Word "module", p, m] -> moduleIdOf p m `bindResult` \modu -> tokens loweringLine `bindResult` \lts -> case lts of
+            Word "lowering" : Word count : ids | Ok n <- countOf count, length ids == 2 * n -> pairs ids `bindResult` \lowering ->
+                answerOf rest `bindResult` \(response, after) -> modulesOf after `bindResult` \more -> Ok ((modu, lowering, response) : more)
+            _ -> Error "ElaborateRequest: malformed lowering"
+        _ -> Error "ElaborateRequest: malformed module answer"
+    modulesOf _ = Error "ElaborateRequest: the answers end early"
+    sourceOf (line : rest) | Just r <- notLoaded line = if null rest then Ok (Left r) else Error "ElaborateRequest: records after a refusal"
+    sourceOf ls' = mapResult Right (answerOf ls')
+    parsedOf (line : rest) | Just r <- notLoaded line = if null rest then Ok r else Error "ElaborateRequest: records after a refusal"
+    parsedOf (line : librariesLine' : rest) | text line == "parsed" = tokens librariesLine' `bindResult` \ts -> case ts of
+        Word "libraries" : Word count : names | Ok n <- countOf count, length names == n, Just ns <- mapM strOf names ->
+            blocksWith text (n + 1) rest `bindResult` \(asts, after) -> case (reverse asts, after) of
+                (ast : libraries, []) -> mapAll (readParsedLines . map text) (reverse libraries) `bindResult` \stmts ->
+                    readParsedLines (map text ast) `bindResult` \body -> Ok (ParsedSource ns (concat stmts) body)
+                _ -> Error "ElaborateRequest: malformed parse answer"
+        _ -> Error "ElaborateRequest: malformed parse answer"
+    parsedOf _ = Error "ElaborateRequest: malformed parse answer"
+    librariesAnswer (line : rest) = tokens line `bindResult` \ts -> case ts of
+        [Word "librariesFailed", Str message] | null rest -> Ok (LoadedLibraries [] (Just message))
+        [Word "nativesFailed", Str message] | null rest -> Ok (LoadedLibraries [] (Just message))
+        [Word "end"] | null rest -> Ok (LoadedLibraries [] Nothing)
+        Word "library" : Str name : Word count : imports | Ok n <- countOf count, length imports == n, Just is <- mapM strOf imports ->
+            blocksWith text 1 rest `bindResult` \(asts, after) -> case asts of
+                [ast] -> readParsedLines (map text ast) `bindResult` \stmts -> answerOf after `bindResult` \(response, after') ->
+                    librariesAnswer after' `bindResult` \more -> case more of
+                        LoadedLibraries answers failure -> Ok (LoadedLibraries (LibraryAnswer name is stmts response : answers) failure)
+                        _ -> Error "ElaborateRequest: malformed libraries answer"
+                _ -> Error "ElaborateRequest: malformed library"
+        _ -> Error "ElaborateRequest: malformed libraries answer"
+    librariesAnswer [] = Error "ElaborateRequest: the libraries answer ends early"
+    -- one module's answer, as a module response gives it after its header, and the records after it
+    answerOf :: [B.ByteString] -> Result (Response, [B.ByteString]) String
+    answerOf (line : rest) = case text line of
+        "accepted" -> blocksWith text 1 rest `bindResult` \(asts, after) -> case (asts, map text (take 1 after)) of
+            ([ast], ["interface none"]) -> withLibraries (drop 1 after) `bindResult` \(libs, after') -> readElaboratedBytes ast `bindResult` \e -> Ok (Accepted e Nothing libs, after')
+            ([ast], ["interface"]) -> blocksWith text 1 (drop 1 after) `bindResult` \(ifaces, after') -> case ifaces of
+                [ifaceText] -> withLibraries after' `bindResult` \(libs, after'') -> readElaboratedBytes ast `bindResult` \e -> readInterfaceBytes ifaceText `bindResult` \i -> Ok (Accepted e (Just i) libs, after'')
+                _ -> Error "ElaborateRequest: malformed interface"
+            _ -> Error "ElaborateRequest: malformed answer"
+        _ -> tokens line `bindResult` \ts -> case ts of
+            [Word "refused", Str message] -> Ok (Refused message, rest)
+            [Word "interfaceRefused", Str message] -> Ok (RefusedInterface message, rest)
+            [Word "unresolved", Str message] -> Ok (Unresolved message, rest)
+            [Word "unmodelled", Str what] -> Ok (NotModelled what, rest)
+            _ -> Error "ElaborateRequest: malformed answer"
+    answerOf [] = Error "ElaborateRequest: missing answer"
+    withLibraries (line : rest) | take 10 (text line) == "libraries " = librariesOf [text line] `bindResult` \libs -> Ok (libs, rest)
+    withLibraries rest = Ok ([], rest)
+    moduleIdOf (Str pkg) (Word "none") = Ok (ModuleId pkg Nothing)
+    moduleIdOf (Str pkg) (Str modu) = Ok (ModuleId pkg (Just modu))
+    moduleIdOf _ _ = Error "ElaborateRequest: malformed module"
+    strOf (Str t) = Just t
+    strOf _ = Nothing
+    optionalOf (Word "none") = Ok Nothing
+    optionalOf (Str t) = Ok (Just t)
+    optionalOf _ = Error "ElaborateRequest: malformed optional name"
+    boolOf w = case w of
+        "true" -> Ok True
+        "false" -> Ok False
+        _ -> Error "ElaborateRequest: malformed flag"

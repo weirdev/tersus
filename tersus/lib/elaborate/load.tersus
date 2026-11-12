@@ -1,0 +1,1151 @@
+import data::ast::ast { AstNode, AstProgram, AstStatement };
+import data::codec::codec { catStrings };
+import elaborate::decls { Decls, FileDecl, Variant, addImported, declarationNames, declsFromStatements, emptyDecls, fieldNamesOf, fileDeclarations, fieldsAt, fromParser, locating, nameEnt, stepEnum, stepStruct, stepTrait, textLess, toParser, variantsAt, withoutImported };
+import elaborate::records { listItems, nameText, namesText };
+import elaborate::rewrite { functValue, statementOf };
+import elaborate::snapshot { Snap, pathBaseName, canonicalRoot, dirNameOf, fileStem, hasFile, hasSuffix, joinPath, listDir, normalizePath, packageRootOf, readFile, rootsConfigured, showText, stemOf };
+import elaborate::state { indexIn, intText, joinWith };
+import parser::syntax::syntax as ps;
+
+struct FE { name: String, stem: String, path: String };
+impl Clone for FE { };
+struct ModId { pkg: String, modu: String, has: Bool };
+impl Clone for ModId { };
+struct Layout {
+    name: String, root: String, rootFiles: List<FE>, modNames: List<String>, modFiles: List<List<FE>>, modNested: List<List<String>>,
+    noPrelude: Bool, isPackage: Bool
+};
+impl Clone for Layout { };
+struct LFile { entry: FE, names: List<String>, imports: List<ps::FileImport> };
+impl Clone for LFile { };
+struct PMod { id: ModId, layout: Layout, files: List<LFile> };
+impl Clone for PMod { };
+struct RImp { imp: ps::FileImport, level: Int, target: ModId, hasFile: Bool, file: String, hasSymbol: Bool, symbol: String, canonical: String };
+impl Clone for RImp { };
+struct LS {
+    ok: Bool, msg: String,
+    layouts: HashMap<String, Layout>, parsed: HashMap<String, PMod>, parsing: List<String>,
+    resolved: HashMap<String, List<RImp>>, order: List<ModId>, done: HashSet<String>, probes: List<String>,
+    programs: HashMap<String, AstProgram>, libDecls: Decls, libOk: Bool, libMsg: String
+};
+struct Loaded {
+    ok: Bool, msg: String, standalone: Bool, standaloneProgram: AstProgram,
+    root: String, name: String, entryPath: String, entryId: ModId, ls: LS
+};
+struct Collapsed { ok: Bool, entry: FE };
+struct Config { ok: Bool, msg: String, noPrelude: Bool };
+struct LayoutR { ok: Bool, msg: String, layout: Layout };
+struct Found { ok: Bool, text: String };
+struct PR { ok: Bool, msg: String, imports: List<ps::FileImport>, program: AstProgram, decls: Decls };
+struct PMR { ls: LS, pm: PMod };
+struct SeedR { ls: LS, decls: Decls };
+struct FilesR { ls: LS, files: List<LFile> };
+struct EnsureR { ls: LS, ok: Bool, msg: String, layout: Layout };
+struct RR { ls: LS, ri: RImp, hasDep: Bool, dep: ModId };
+struct Reading { level: Int, target: ModId, hasFile: Bool, file: String, hasSymbol: Bool, symbol: String };
+impl Clone for Reading { };
+struct Cursor { text: String, pos: Int, line: Int, col: Int };
+
+// The package loader (Modules.hs), over the snapshot the host captured: package discovery, the module graph, each
+// module's files parsed in process with the declarations its imports and its package give it, and the imports resolved
+// to the modules, files and symbols they name. A refusal is the loader's message, whole.
+
+fn modKey(id: &ModId) -> String ~ {
+    if id.has { return catStrings(catStrings(id.pkg, "::"), id.modu); };
+    return clone(id.pkg);
+};
+
+fn sameId(a: &ModId, b: &ModId) -> Bool ~ { return a.pkg = b.pkg && a.has = b.has && (!a.has || a.modu = b.modu); };
+
+// Ord ModId: the package, then the root module before the others
+fn idLess(a: &ModId, b: &ModId) -> Bool ~ {
+    if a.pkg != b.pkg { return textLess(&a.pkg, &b.pkg); };
+    if a.has != b.has { return !a.has; };
+    return a.has && textLess(&a.modu, &b.modu);
+};
+
+// a file's declared names and imports (the syntax is kept by path, LS.programs)
+
+// level: 0 a module, 1 a file, 2 a symbol
+
+fn failed(ls: LS, msg: String) -> LS ~ {
+    if !ls.ok { return ls; };
+    return LS { ok: false, msg: msg, ..ls };
+};
+
+fn cat(a: &String, b: &String) -> String ~ { return catStrings(a, b); };
+
+fn renderPath(segments: &List<String>) -> String ~ { return joinWith(segments, "::"); };
+
+fn splitPath(name: &String) -> List<String> ~ {
+    out = [];
+    seg = [];
+    n = size(name.bytes);
+    i = 0;
+    while i < n ~ {
+        c = toInt(get(&name.bytes, i));
+        if c = 58 && i + 1 < n && toInt(get(&name.bytes, i + 1)) = 58 {
+            out = push(out, String { bytes: seg });
+            seg = [];
+            i = i + 2;
+        } else {
+            seg = push(seg, get(&name.bytes, i));
+            i = i + 1;
+        };
+    };
+    return push(out, String { bytes: seg });
+};
+
+fn beforeColon(name: &String) -> String ~ {
+    out = [];
+    for b in &name.bytes {
+        if toInt(b) = 58 { return String { bytes: out }; };
+        out = push(out, b);
+    };
+    return String { bytes: out };
+};
+
+fn nubTexts(xs: &List<String>) -> List<String> ~ {
+    out = [];
+    for x in xs { if indexIn(&out, x) < 0 { out = push(out, clone(x)); }; };
+    return out;
+};
+
+fn sortNames(xs: List<String>) -> List<String> ~ {
+    out = [];
+    for x in xs {
+        placed = [];
+        done = false;
+        for y in out {
+            if !done && textLess(&x, &y) { placed = push(placed, clone(x)); done = true; };
+            placed = push(placed, clone(y));
+        };
+        if !done { placed = push(placed, clone(x)); };
+        out = placed;
+    };
+    return out;
+};
+
+fn listDecls(names: &List<String>) -> String ~ {
+    unique = [];
+    for n in names {
+        hasAngle = false;
+        for b in &n.bytes { if toInt(b) = 60 { hasAngle = true; }; };
+        if !hasAngle && indexIn(&unique, n) < 0 { unique = push(unique, clone(n)); };
+    };
+    if size(unique) = 0 { return "(none)"; };
+    return joinWith(&unique, ", ");
+};
+
+fn feNames(entries: &List<FE>) -> List<String> ~ {
+    out = [];
+    for e in entries { out = push(out, clone(e.name)); };
+    return out;
+};
+
+fn canonicalOf(id: &ModId, hasFile: Bool, file: &String, hasSymbol: Bool, symbol: &String) -> String ~ {
+    parts = push([], clone(id.pkg));
+    if id.has { parts = push(parts, clone(id.modu)); };
+    if hasFile { parts = push(parts, clone(file)); };
+    if hasSymbol { parts = push(parts, clone(symbol)); };
+    return joinWith(&parts, "$");
+};
+
+// ---- layouts ----
+
+fn tersusFiles(dir: &String, names: &List<String>) -> List<FE> ~ {
+    out = [];
+    for name in sortNames(clone(names)) {
+        if hasSuffix(&name, ".tersus") { out = push(out, FE { name: clone(name), stem: stemOf(&name), path: joinPath(dir, &name) }); };
+    };
+    return out;
+};
+
+fn moduleIndex(layout: &Layout, name: &String) -> Int ~ { return indexIn(&layout.modNames, name); };
+
+fn isModule(layout: &Layout, name: &String) -> Bool ~ { return moduleIndex(layout, name) >= 0; };
+
+fn moduleFiles(layout: &Layout, has: Bool, name: &String) -> List<FE> ~ {
+    if !has { return clone(layout.rootFiles); };
+    i = moduleIndex(layout, name);
+    if i < 0 || i >= size(layout.modFiles) { return []; };
+    return clone(get(&layout.modFiles, i));
+};
+
+fn moduleNested(layout: &Layout, name: &String) -> List<String> ~ {
+    i = moduleIndex(layout, name);
+    if i < 0 || i >= size(layout.modNested) { return []; };
+    return clone(get(&layout.modNested, i));
+};
+
+fn layoutId(layout: &Layout, has: Bool, name: &String) -> ModId ~ { return ModId { pkg: clone(layout.name), modu: clone(name), has: has }; };
+
+fn collapsedFile(layout: &Layout, has: Bool, name: &String) -> Collapsed ~ {
+    entries = moduleFiles(layout, has, name);
+    label = clone(layout.name);
+    if has { label = clone(name); };
+    if size(entries) = 1 && get(&entries, 0).stem = label { return Collapsed { ok: true, entry: clone(get(&entries, 0)) }; };
+    return Collapsed { ok: false, entry: FE { name: "", stem: "", path: "" } };
+};
+
+fn stemsNamed(entries: &List<FE>, name: &String) -> List<FE> ~ {
+    out = [];
+    for e in entries { if e.stem = clone(name) { out = push(out, clone(e)); }; };
+    return out;
+};
+
+fn buildLayout(snap: &Snap, root: &String, noPrelude: Bool) -> LayoutR ~ {
+    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false };
+    listing = listDir(snap, root);
+    if !listing.ok { return LayoutR { ok: false, msg: cat(cat("package directory ", root), " not found"), layout: bad }; };
+    config = packageNoPrelude(snap, root);
+    if !config.ok { return LayoutR { ok: false, msg: config.msg, layout: bad }; };
+    names = [];
+    files = [];
+    nested = [];
+    for sub in &listing.subdirs {
+        dir = joinPath(root, sub);
+        inner = listDir(snap, &dir);
+        if inner.ok {
+            entries = tersusFiles(&dir, &inner.files);
+            if size(entries) > 0 && indexIn(&names, sub) < 0 {
+                names = push(names, clone(sub));
+                files = push(files, entries);
+                nested = push(nested, inner.subdirs);
+            };
+        };
+    };
+    sorted = sortNames(clone(names));
+    modFiles = [];
+    modNested = [];
+    for n in &sorted {
+        i = indexIn(&names, n);
+        if i >= 0 && i < size(files) && i < size(nested) { modFiles = push(modFiles, clone(get(&files, i))); modNested = push(modNested, clone(get(&nested, i))); };
+    };
+    rootFiles = [];
+    for e in tersusFiles(root, &listing.files) { if e.name != "package.tersus" { rootFiles = push(rootFiles, clone(e)); }; };
+    return LayoutR { ok: true, msg: "", layout: Layout { name: pathBaseName(root), root: clone(root), rootFiles: rootFiles, modNames: sorted, modFiles: modFiles,
+        modNested: modNested, noPrelude: config.noPrelude || noPrelude, isPackage: true } };
+};
+
+// The marker's configuration: blank, or `noPrelude = true;` / `noPrelude = false;`, with line comments
+fn packageNoPrelude(snap: &Snap, root: &String) -> Config ~ {
+    marker = joinPath(root, "package.tersus");
+    read = readFile(snap, &marker);
+    if !read.ok { return Config { ok: false, msg: cat("package marker not found: ", &marker), noPrelude: false }; };
+    return markerConfig(&marker, &read.text);
+};
+
+// ---- the loader's state and helpers ----
+
+fn newLS(libDecls: Decls, libOk: Bool, libMsg: String) -> LS ~ {
+    return LS { ok: true, msg: "", layouts: HashMap::new(), parsed: HashMap::new(), parsing: [], resolved: HashMap::new(), order: [],
+        done: HashSet::new(), probes: [], programs: HashMap::new(), libDecls: libDecls, libOk: libOk, libMsg: libMsg };
+};
+
+fn probed(ls: LS, path: &String) -> LS ~ {
+    if indexIn(&ls.probes, path) >= 0 { return ls; };
+    probes = push(clone(ls.probes), clone(path));
+    return LS { probes: probes, ..ls };
+};
+
+fn emptyMod(layout: &Layout, id: &ModId) -> PMod ~ { return PMod { id: clone(id), layout: clone(layout), files: [] }; };
+
+fn declsOfFile(pm: &PMod, stem: &String) -> List<String> ~ {
+    out = [];
+    for f in &pm.files { if f.entry.stem = clone(stem) { for n in &f.names { out = push(out, clone(n)); }; }; };
+    return out;
+};
+
+fn declsOfModule(pm: &PMod) -> List<String> ~ {
+    out = [];
+    for f in &pm.files { for n in &f.names { out = push(out, clone(n)); }; };
+    return out;
+};
+
+fn fileWithDecl(pm: &PMod, name: &String) -> Found ~ {
+    for f in &pm.files { if indexIn(&f.names, name) >= 0 { return Found { ok: true, text: clone(f.entry.stem) }; }; };
+    return Found { ok: false, text: "" };
+};
+
+fn statementsOfProgram(program: &AstProgram) -> List<Int> ~ { return listItems(&program.nodes, program.root); };
+
+// A file parsed in process (Modules.FileParser)
+
+fn parseWith(d: &Decls, text: &String) -> PR ~ {
+    r = ps::parseFileText(toParser(d), clone(text));
+    if !r.ok { return PR { ok: false, msg: r.message, imports: [], program: AstProgram { stage: "parsed", nodes: [], root: 0 }, decls: emptyDecls() }; };
+    return PR { ok: true, msg: "", imports: r.imports, program: r.program, decls: fromParser(&r.st) };
+};
+
+// ---- Modules.parseModule ----
+
+fn parseModule(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout, has: Bool, name: &String) -> PMR ~ {
+    id = layoutId(layout, has, name);
+    key = modKey(&id);
+    if HashMap::contains(&ls.parsed, &key) {
+        known = HashMap::lookup(&ls.parsed, &key, emptyMod(layout, &id));
+        return PMR { ls: ls, pm: known };
+    };
+    if indexIn(&ls.parsing, &key) >= 0 {
+        chain = [];
+        seen = false;
+        for k in &ls.parsing { if k = clone(key) { seen = true; }; if seen { chain = push(chain, clone(k)); }; };
+        chain = push(chain, clone(key));
+        return PMR { ls: failed(ls, cat("module import cycle: ", joinWith(&chain, " -> "))), pm: emptyMod(layout, &id) };
+    };
+    saved = clone(ls.parsing);
+    ls = LS { parsing: push(clone(ls.parsing), clone(key)), ..ls };
+    entries = moduleFiles(layout, has, name);
+    seeds = [];
+    for e in &entries {
+        seeded = importSeedFor(ls, snap, entryPath, layout, &id, e);
+        seedOfFile = clone(seeded.decls);
+        ls = stateOfSeed(seeded);
+        if !ls.ok { return PMR { ls: ls, pm: emptyMod(layout, &id) }; };
+        seeds = push(seeds, seedOfFile);
+    };
+    texts = [];
+    for e in &entries {
+        read = readFile(snap, &e.path);
+        if !read.ok { return PMR { ls: failed(ls, cat(cat(cat("in module ", &key), ": file not found: "), &e.path)), pm: emptyMod(layout, &id) }; };
+        ls = probed(ls, &e.path);
+        texts = push(texts, read.text);
+    };
+    files = parseModuleFiles(ls, snap, entryPath, layout, &id, &entries, &seeds, &texts);
+    fileList = clone(files.files);
+    ls = stateOfFiles(files);
+    if !ls.ok { return PMR { ls: ls, pm: emptyMod(layout, &id) }; };
+    pm = PMod { id: clone(id), layout: clone(layout), files: fileList };
+    ls = LS { parsed: ls.parsed.insert(clone(key), clone(pm)), parsing: saved, ..ls };
+    return PMR { ls: ls, pm: pm };
+};
+
+fn importSeedFor(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout, id: &ModId, entry: &FE) -> SeedR ~ {
+    read = readFile(snap, &entry.path);
+    if !read.ok { return SeedR { ls: failed(ls, cat("file not found: ", &entry.path)), decls: emptyDecls() }; };
+    prefix = ps::importPrefixText(ps::newSt(), read.text);
+    if !prefix.ok { return SeedR { ls: failed(ls, cat(cat(cat("parse error in file ", &entry.path), ": "), showText(&prefix.message))), decls: emptyDecls() }; };
+    d = emptyDecls();
+    for imp in &prefix.imports {
+        seeded = seedImport(ls, snap, entryPath, layout, id, entry, imp);
+        seedOfImport = clone(seeded.decls);
+        ls = stateOfSeed(seeded);
+        if !ls.ok { return SeedR { ls: ls, decls: emptyDecls() }; };
+        d = addImported(d, &seedOfImport);
+    };
+    return SeedR { ls: ls, decls: d };
+};
+
+fn firstSegment(imp: &ps::FileImport) -> String ~ {
+    if size(imp.path) = 0 { return ""; };
+    return clone(get(&imp.path, 0));
+};
+
+fn restSegments(imp: &ps::FileImport) -> List<String> ~ {
+    out = [];
+    if size(imp.path) <= 1 { return out; };
+    for i in 1..size(imp.path) { out = push(out, clone(get(&imp.path, i))); };
+    return out;
+};
+
+fn seedImport(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout, id: &ModId, entry: &FE, imp: &ps::FileImport) -> SeedR ~ {
+    target = ensureLayout(ls, snap, layout, firstSegment(imp));
+    targetOk = target.ok;
+    tl = clone(target.layout);
+    ls = stateOfEnsure(target);
+    if !ls.ok { return SeedR { ls: ls, decls: emptyDecls() }; };
+    source = emptyMod(layout, id);
+    if !targetOk {
+        r = resolveImport(ls, snap, true, entryPath, layout, &source, entry, imp);
+        return SeedR { ls: r.ls, decls: emptyDecls() };
+    };
+    rest = restSegments(imp);
+    has = false;
+    tname = "";
+    if size(rest) > 0 {
+        if isModule(&tl, &get(rest, 0)) { has = true; tname = clone(get(&rest, 0)); };
+    };
+    tid = layoutId(&tl, has, &tname);
+    if sameId(&tid, id) { return SeedR { ls: ls, decls: emptyDecls() }; };
+    tm = parseModule(ls, snap, entryPath, &tl, has, &tname);
+    tpm = clone(tm.pm);
+    ls = stateOfModule(tm);
+    if !ls.ok { return SeedR { ls: ls, decls: emptyDecls() }; };
+    r = resolveImport(ls, snap, true, entryPath, layout, &source, entry, imp);
+    ri = clone(r.ri);
+    ls = stateOfResolution(r);
+    if !ls.ok { return SeedR { ls: ls, decls: emptyDecls() }; };
+    collapsed = collapsedFile(&tl, has, &tname);
+    d = emptyDecls();
+    for f in &tpm.files {
+        if !ri.hasFile || ri.file = f.entry.stem {
+            program = HashMap::lookup(&ls.programs, &f.entry.path, AstProgram { stage: "parsed", nodes: [], root: 0 });
+            isCollapsed = collapsed.ok && collapsed.entry.stem = f.entry.stem;
+            for s in statementsOfProgram(&program) {
+                d = seedStatement(d, &program.nodes, s, &ri, &tpm.id, &f.entry.stem, isCollapsed);
+            };
+        };
+    };
+    return SeedR { ls: ls, decls: d };
+};
+
+// A type, enum or trait an import makes visible, under each spelling the import gives it
+fn seedStatement(d: Decls, nodes: &List<AstNode>, s: Int, ri: &RImp, target: &ModId, stem: &String, isCollapsed: Bool) -> Decls ~ {
+    stmt = statementOf(nodes, s);
+    if !(stmt is AstStatement::StructDef) && !(stmt is AstStatement::EnumDef) && !(stmt is AstStatement::TraitDef) { return d; };
+    names = declarationNames(nodes, push([], s));
+    if size(names) = 0 { return d; };
+    old = clone(get(&names, 0));
+    if ri.hasSymbol && old != ri.symbol && beforeColon(&old) != ri.symbol { return d; };
+    canonical = canonicalOf(target, true, stem, true, &old);
+    for prefix in seedPrefixes(stem, isCollapsed, &old, ri) {
+        parts = clone(prefix);
+        for p in splitPath(&old) { parts = push(parts, clone(p)); };
+        spelling = renderPath(&parts);
+        d = addImported(d, seedSpelling(nodes, &stmt, &old, &spelling, &canonical));
+    };
+    return d;
+};
+
+fn dropText(text: &String, n: Int) -> String ~ {
+    out = [];
+    for i in 0..size(text.bytes) { if i >= n { out = push(out, get(&text.bytes, i)); }; };
+    return String { bytes: out };
+};
+
+fn seedSpelling(nodes: &List<AstNode>, stmt: &AstStatement, old: &String, spelling: &String, canonical: &String) -> Decls ~ {
+    oldWidth = size(old.bytes);
+    if stmt is AstStatement::StructDef {
+        node = stmt as AstStatement::StructDef;
+        seed = stepStruct(emptyDecls(), spelling, namesText(nodes, node.ps), fieldsAt(nodes, node.fs));
+        return Decls { types: push([], nameEnt(clone(spelling), push([], clone(canonical)))), ..seed };
+    };
+    if stmt is AstStatement::EnumDef {
+        renamed = [];
+        canonicals = [];
+        for v in variantsAt(nodes, (stmt as AstStatement::EnumDef).vs) {
+            suffix = dropText(&v.name, oldWidth);
+            renamed = push(renamed, Variant { name: cat(spelling, &suffix), fields: clone(v.fields) });
+            canonicals = push(canonicals, cat(canonical, &suffix));
+        };
+        seed = stepEnum(emptyDecls(), spelling, &renamed);
+        return Decls { types: push([], nameEnt(clone(spelling), canonicals)), ..seed };
+    };
+    if stmt is AstStatement::TraitDef { return stepTrait(emptyDecls(), spelling, namesText(nodes, (stmt as AstStatement::TraitDef).ps)); };
+    return emptyDecls();
+};
+
+// Modules.importPrefixes: the prefixes under which an import makes a file's name visible
+fn seedPrefixes(fileSeg: &String, isCollapsed: Bool, local: &String, ri: &RImp) -> List<List<String>> ~ {
+    pkgName = clone(ri.target.pkg);
+    moduleSeg = clone(pkgName);
+    if ri.target.has { moduleSeg = clone(ri.target.modu); };
+    modSegs = [];
+    if ri.target.has { modSegs = push(modSegs, clone(ri.target.modu)); };
+    bareForListed = ri.imp.hasNames && (indexIn(&ri.imp.names, local) >= 0 || indexIn(&ri.imp.names, beforeColon(local)) >= 0);
+    out = [];
+    if bareForListed || ri.level = 2 { out = push(out, []); };
+    if ri.level = 2 { return push(out, []); };
+    if ri.level = 1 {
+        out = push(out, push([], clone(fileSeg)));
+        if ri.imp.hasAlias { out = push(out, push([], clone(ri.imp.alias))); };
+        return out;
+    };
+    full = push([], clone(pkgName));
+    for m in &modSegs { full = push(full, clone(m)); };
+    full = push(full, clone(fileSeg));
+    out = push(out, push(push([], clone(moduleSeg)), clone(fileSeg)));
+    out = push(out, full);
+    if isCollapsed {
+        out = push(out, push([], clone(moduleSeg)));
+        collapsedFull = push([], clone(pkgName));
+        for m in &modSegs { collapsedFull = push(collapsedFull, clone(m)); };
+        out = push(out, collapsedFull);
+    };
+    if ri.imp.hasAlias {
+        out = push(out, push(push([], clone(ri.imp.alias)), clone(fileSeg)));
+        if isCollapsed { out = push(out, push([], clone(ri.imp.alias))); };
+    };
+    return out;
+};
+
+// ---- Modules.parseModuleFiles: the parse rounds of a module's files ----
+
+fn parseModuleFiles(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout, id: &ModId, entries: &List<FE>, seeds: &List<Decls>, texts: &List<String>) -> FilesR ~ {
+    declared = emptyDecls();
+    if !layout.noPrelude {
+        if !ls.libOk { return FilesR { ls: failed(ls, clone(ls.libMsg)), files: [] }; };
+        declared = clone(ls.libDecls);
+    };
+    d = seedDecls(entries, seeds, texts, declared);
+    n = size(entries);
+    results = [];
+    for i in 0..n { results = push(results, PR { ok: false, msg: "", imports: [], program: AstProgram { stage: "parsed", nodes: [], root: 0 }, decls: emptyDecls() }); };
+    pending = [];
+    for i in 0..n { pending = push(pending, i); };
+    while size(pending) > 0 ~ {
+        remaining = [];
+        for i in &pending {
+            r = parseOne(&d, seeds, texts, i);
+            if r.ok {
+                own = declsFromStatements(emptyDecls(), &r.program.nodes, statementsOfProgram(&r.program));
+                d = withoutImported(&d, seedAt(seeds, i), clone(r.decls), &own);
+                if i >= 0 && i < size(results) { results = set(results, i, PR { decls: emptyDecls(), ..r }); };
+            } else { remaining = push(remaining, i); };
+        };
+        if size(remaining) = size(pending) && size(remaining) > 0 {
+            k = get(&remaining, 0);
+            path = "";
+            text = "";
+            if k >= 0 && k < size(entries) && k < size(texts) { path = clone(get(entries, k).path); text = clone(get(texts, k)); };
+            plain = parseWith(locating(emptyDecls()), &text);
+            prefix = cat(cat(cat(cat("parse error in module ", modKey(id)), " file "), &path), ": ");
+            if !plain.ok { return FilesR { ls: failed(ls, cat(&prefix, &plain.msg)), files: [] }; };
+            return FilesR { ls: failed(ls, cat(&prefix, "could not be parsed with the declarations of its package")), files: [] };
+        };
+        pending = remaining;
+    };
+    files = [];
+    for i in 0..n {
+        if i < size(entries) && i < size(results) {
+            e = get(entries, i);
+            r = get(&results, i);
+            stmts = statementsOfProgram(&r.program);
+            check = checkDeclarationsOnly(id, e, e.path = clone(entryPath), &r.program.nodes, &stmts);
+            if !check.ok { return FilesR { ls: failed(ls, check.text), files: [] }; };
+            ls = LS { programs: ls.programs.insert(clone(e.path), clone(r.program)), ..ls };
+            files = push(files, LFile { entry: clone(e), names: declarationNames(&r.program.nodes, &stmts), imports: clone(r.imports) });
+        };
+    };
+    return FilesR { ls: ls, files: files };
+};
+
+fn seedAt(seeds: &List<Decls>, i: Int) -> Decls ~ {
+    if i < 0 || i >= size(seeds) { return emptyDecls(); };
+    return clone(get(seeds, i));
+};
+
+fn parseOne(d: &Decls, seeds: &List<Decls>, texts: &List<String>, i: Int) -> PR ~ {
+    text = "";
+    if i >= 0 && i < size(texts) { text = clone(get(texts, i)); };
+    return parseWith(locating(addImported(clone(d), seedAt(seeds, i))), &text);
+};
+
+// Modules.seedDecls: the declarations the module's files give each other, as far as they parse
+fn seedDecls(entries: &List<FE>, seeds: &List<Decls>, texts: &List<String>, initial: Decls) -> Decls ~ {
+    d = initial;
+    pending = [];
+    for i in 0..size(entries) { pending = push(pending, i); };
+    while size(pending) > 0 ~ {
+        remaining = [];
+        for i in &pending {
+            r = parseOne(&d, seeds, texts, i);
+            if r.ok {
+                own = declsFromStatements(emptyDecls(), &r.program.nodes, statementsOfProgram(&r.program));
+                d = withoutImported(&d, seedAt(seeds, i), r.decls, &own);
+            } else { remaining = push(remaining, i); };
+        };
+        if size(remaining) = size(pending) { return d; };
+        pending = remaining;
+    };
+    return d;
+};
+
+// ---- declarations only ----
+
+fn isDeclaration(nodes: &List<AstNode>, s: Int) -> Bool ~ {
+    stmt = statementOf(nodes, s);
+    if stmt is AstStatement::Assign { return functValue(nodes, (stmt as AstStatement::Assign).e) >= 0; };
+    if stmt is AstStatement::BoundedDef { return isDeclaration(nodes, (stmt as AstStatement::BoundedDef).s); };
+    return stmt is AstStatement::StructDef || stmt is AstStatement::EnumDef || stmt is AstStatement::TraitDef || stmt is AstStatement::ImplDef
+        || stmt is AstStatement::ExternDef || stmt is AstStatement::AxiomDef || stmt is AstStatement::ProofDef || stmt is AstStatement::Mark
+        || stmt is AstStatement::CopyDef || stmt is AstStatement::LinearDef || stmt is AstStatement::DropDef;
+};
+
+fn statementKind(stmt: &AstStatement) -> String ~ {
+    if stmt is AstStatement::Assign || stmt is AstStatement::AssignDeref { return "an assignment"; };
+    if stmt is AstStatement::Return { return "a return"; };
+    if stmt is AstStatement::If { return "an if statement"; };
+    if stmt is AstStatement::While { return "a while statement"; };
+    if stmt is AstStatement::Block { return "a block"; };
+    if stmt is AstStatement::ValidationStatement { return "a validation statement"; };
+    if stmt is AstStatement::Let { return "a let"; };
+    if stmt is AstStatement::Dissolve { return "a dissolve"; };
+    return "a statement";
+};
+
+fn checkDeclarationsOnly(id: &ModId, entry: &FE, isEntry: Bool, nodes: &List<AstNode>, stmts: &List<Int>) -> Found ~ {
+    if isEntry { return Found { ok: true, text: "" }; };
+    line = 1;
+    for s in stmts {
+        stmt = statementOf(nodes, s);
+        if stmt is AstStatement::Mark { line = (stmt as AstStatement::Mark).line; }
+        else if !isDeclaration(nodes, s) {
+            msg = cat(cat(cat(cat("in module ", modKey(id)), " file "), &entry.path), ":");
+            msg = cat(cat(cat(&msg, intText(line)), ": modules declare, programs run: "), statementKind(&stmt));
+            return Found { ok: false, text: cat(&msg, " is not a declaration") };
+        };
+    };
+    return Found { ok: true, text: "" };
+};
+
+// ---- Modules.ensureLayout ----
+
+fn layoutNames(ls: &LS) -> List<String> ~ {
+    out = [];
+    for e in HashMap::entries(&ls.layouts) { out = push(out, clone(e.key)); };
+    return out;
+};
+
+fn requestedRoots(snap: &Snap, pkg: &String) -> List<String> ~ {
+    out = [];
+    r = packageRootOf(snap, pkg);
+    if r.ok { out = push(out, normalizePath(&r.text)); };
+    if pkg = "std" && snap.hasStd { out = push(out, normalizePath(&snap.std)); };
+    return nubTexts(&out);
+};
+
+fn hasMarker(snap: &Snap, root: &String) -> Bool ~ { return hasFile(snap, joinPath(root, "package.tersus")); };
+
+fn ensureLayout(ls: LS, snap: &Snap, source: &Layout, pkg: &String) -> EnsureR ~ {
+    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false };
+    if clone(pkg) = reservedPackage() { return EnsureR { ls: ls, ok: false, msg: cat(reservedPackageWhy(), ", which a program does not import by name"), layout: bad }; };
+    requested = requestedRoots(snap, pkg);
+    sibling = joinPath(dirNameOf(&source.root), pkg);
+    eligible = clone(requested);
+    if source.isPackage {
+        if source.name = clone(pkg) { eligible = push(eligible, clone(source.root)); };
+        if hasMarker(snap, &sibling) { eligible = push(eligible, clone(sibling)); };
+    };
+    candidates = [];
+    for root in &eligible { candidates = push(candidates, canonicalRoot(snap, root)); };
+    candidates = nubTexts(&candidates);
+    shown = showText(pkg);
+    for root in &requested {
+        if !hasMarker(snap, root) {
+            return EnsureR { ls: ls, ok: false, msg: cat(cat(cat(cat("package ", &shown), " not found: no package.tersus in requested root "), root), ""), layout: bad };
+        };
+    };
+    if size(candidates) = 0 {
+        if source.isPackage { return EnsureR { ls: ls, ok: false, msg: cat(cat(cat("package ", &shown), " not found: no package.tersus in "), &sibling), layout: bad }; };
+        return EnsureR { ls: ls, ok: false, msg: cat(cat("package ", &shown), " is not configured for standalone source"), layout: bad };
+    };
+    if size(candidates) > 1 {
+        return EnsureR { ls: ls, ok: false, msg: cat(cat(cat("conflicting roots for package ", &shown), ": "), joinWith(&candidates, ", ")), layout: bad };
+    };
+    root = clone(get(&candidates, 0));
+    for name in sortNames(layoutNames(&ls)) {
+        known = HashMap::lookup(&ls.layouts, &name, clone(bad));
+        if known.isPackage && known.root = root && known.name != clone(pkg) {
+            return EnsureR { ls: ls, ok: false, msg: cat(cat(cat(cat(cat("conflicting package identities for root ", &root), ": "), &known.name), " and "), pkg), layout: bad };
+        };
+    };
+    if HashMap::contains(&ls.layouts, pkg) {
+        known = HashMap::lookup(&ls.layouts, pkg, clone(bad));
+        if known.root = root { return EnsureR { ls: ls, ok: true, msg: "", layout: known }; };
+        roots = push(push([], clone(known.root)), root);
+        return EnsureR { ls: ls, ok: false, msg: cat(cat(cat("conflicting roots for package ", &shown), ": "), joinWith(&roots, ", ")), layout: bad };
+    };
+    if source.name = clone(pkg) { return EnsureR { ls: ls, ok: true, msg: "", layout: clone(source) }; };
+    built = buildLayout(snap, &root, false);
+    if !built.ok { return EnsureR { ls: ls, ok: false, msg: built.msg, layout: bad }; };
+    layout = Layout { name: clone(pkg), ..built.layout };
+    ls = LS { layouts: ls.layouts.insert(clone(pkg), clone(layout)), ..ls };
+    return EnsureR { ls: ls, ok: true, msg: "", layout: layout };
+};
+
+// ---- Modules.resolveImport ----
+
+fn noRImp(imp: &ps::FileImport) -> RImp ~ {
+    return RImp { imp: clone(imp), level: 0, target: ModId { pkg: "", modu: "", has: false }, hasFile: false, file: "", hasSymbol: false, symbol: "", canonical: "" };
+};
+
+fn rrFailed(ls: LS, imp: &ps::FileImport, msg: String) -> RR ~ {
+    return RR { ls: failed(ls, msg), ri: noRImp(imp), hasDep: false, dep: ModId { pkg: "", modu: "", has: false } };
+};
+
+fn atImport(source: &PMod, file: &FE, imp: &ps::FileImport, message: &String) -> String ~ {
+    msg = cat(cat(cat("import ", renderPath(&imp.path)), " (in module "), modKey(&source.id));
+    msg = cat(cat(cat(&msg, " file "), &file.path), ":");
+    return cat(cat(cat(&msg, intText(imp.line)), "): "), message);
+};
+
+fn resolveImport(ls: LS, snap: &Snap, seeding: Bool, entryPath: &String, sourceLayout: &Layout, source: &PMod, file: &FE, imp: &ps::FileImport) -> RR ~ {
+    target = ensureLayout(ls, snap, sourceLayout, firstSegment(imp));
+    targetOk = target.ok;
+    targetMsg = clone(target.msg);
+    tl = clone(target.layout);
+    ls = stateOfEnsure(target);
+    if !targetOk { return rrFailed(ls, imp, atImport(source, file, imp, &targetMsg)); };
+    return resolveInPackage(ls, snap, seeding, entryPath, source, file, imp, &tl, restSegments(imp));
+};
+
+fn finish(ls: LS, snap: &Snap, entryPath: &String, source: &PMod, file: &FE, imp: &ps::FileImport, layout: &Layout, r: &Reading) -> RR ~ {
+    ri = RImp { imp: clone(imp), level: r.level, target: clone(r.target), hasFile: r.hasFile, file: clone(r.file), hasSymbol: r.hasSymbol, symbol: clone(r.symbol),
+        canonical: canonicalOf(&r.target, r.hasFile, &r.file, r.hasSymbol, &r.symbol) };
+    hasDep = !sameId(&r.target, &source.id);
+    if !imp.hasNames { return RR { ls: ls, ri: ri, hasDep: hasDep, dep: clone(r.target) }; };
+    pm = parseModule(ls, snap, entryPath, layout, r.target.has, &r.target.modu);
+    pmod = clone(pm.pm);
+    ls = stateOfModule(pm);
+    if !ls.ok { return RR { ls: ls, ri: ri, hasDep: false, dep: clone(r.target) }; };
+    available = declsOfModule(&pmod);
+    if r.hasFile { available = declsOfFile(&pmod, &r.file); };
+    for name in &imp.names {
+        if indexIn(&available, name) < 0 {
+            return rrFailed(ls, imp, atImport(source, file, imp, cat(cat(cat("name ", name), " is not declared there; it declares: "), listDecls(&available))));
+        };
+    };
+    return RR { ls: ls, ri: ri, hasDep: hasDep, dep: clone(r.target) };
+};
+
+fn reading(level: Int, target: ModId, hasFile: Bool, file: String, hasSymbol: Bool, symbol: String) -> Reading ~ {
+    return Reading { level: level, target: target, hasFile: hasFile, file: file, hasSymbol: hasSymbol, symbol: symbol };
+};
+
+fn rootProbeEntries(layout: &Layout, path: &List<String>) -> List<FE> ~ {
+    if size(path) = 0 { return clone(layout.rootFiles); };
+    name = clone(get(path, 0));
+    if size(path) = 1 {
+        if isModule(layout, &name) || size(stemsNamed(&layout.rootFiles, &name)) > 0 {
+            c = collapsedFile(layout, false, "");
+            if c.ok { return push([], c.entry); };
+            return [];
+        };
+        return clone(layout.rootFiles);
+    };
+    if size(path) = 3 && isModule(layout, &name) { return []; };
+    return stemsNamed(&layout.rootFiles, &name);
+};
+
+fn rootProbe(ls: LS, snap: &Snap, layout: &Layout, path: &List<String>) -> PMR ~ {
+    rootId = layoutId(layout, false, "");
+    key = modKey(&rootId);
+    if HashMap::contains(&ls.parsed, &key) { return PMR { pm: HashMap::lookup(&ls.parsed, &key, emptyMod(layout, &rootId)), ls: ls }; };
+    entries = rootProbeEntries(layout, path);
+    if size(entries) = 0 { return PMR { ls: ls, pm: emptyMod(layout, &rootId) }; };
+    files = [];
+    for e in &entries {
+        read = readFile(snap, &e.path);
+        if !read.ok { return PMR { ls: failed(ls, cat("file not found: ", &e.path)), pm: emptyMod(layout, &rootId) }; };
+        ls = probed(ls, &e.path);
+        names = ps::declarationNamesText(ps::newSt(), read.text);
+        if !names.ok { return PMR { ls: failed(ls, names.message), pm: emptyMod(layout, &rootId) }; };
+        files = push(files, LFile { entry: clone(e), names: names.names, imports: [] });
+    };
+    return PMR { ls: ls, pm: PMod { id: rootId, layout: clone(layout), files: files } };
+};
+
+fn resolveInPackage(ls: LS, snap: &Snap, seeding: Bool, entryPath: &String, source: &PMod, file: &FE, imp: &ps::FileImport, layout: &Layout, rest: &List<String>) -> RR ~ {
+    rootId = layoutId(layout, false, "");
+    if size(rest) = 0 { return finish(ls, snap, entryPath, source, file, imp, layout, reading(0, rootId, false, "", false, "")); };
+    if size(rest) = 1 { return resolveOne(ls, snap, seeding, entryPath, source, file, imp, layout, &get(rest, 0)); };
+    if size(rest) = 2 { return resolveTwo(ls, snap, seeding, entryPath, source, file, imp, layout, &get(rest, 0), &get(rest, 1)); };
+    if size(rest) = 3 { return resolveThree(ls, snap, entryPath, source, file, imp, layout, &get(rest, 0), &get(rest, 1), &get(rest, 2)); };
+    return rrFailed(ls, imp, atImport(source, file, imp, cat(cat("import path ", renderPath(&imp.path)), " has too many segments: a path is package[::module[::file[::symbol]]]; deeper nesting is not a module")));
+};
+
+fn resolveOne(ls: LS, snap: &Snap, seeding: Bool, entryPath: &String, source: &PMod, file: &FE, imp: &ps::FileImport, layout: &Layout, x: &String) -> RR ~ {
+    rootId = layoutId(layout, false, "");
+    if seeding && isModule(layout, x) { return finish(ls, snap, entryPath, source, file, imp, layout, reading(0, layoutId(layout, true, x), false, "", false, "")); };
+    probe = rootProbe(ls, snap, layout, push([], clone(x)));
+    rootParsed = clone(probe.pm);
+    ls = stateOfModule(probe);
+    if !ls.ok { return rrFailed(ls, imp, ""); };
+    collapsed = collapsedFile(layout, false, "");
+    readings = [];
+    if isModule(layout, x) { readings = push(readings, reading(0, layoutId(layout, true, x), false, "", false, "")); };
+    if size(stemsNamed(&layout.rootFiles, x)) > 0 { readings = push(readings, reading(1, clone(rootId), true, clone(x), false, "")); };
+    if collapsed.ok && indexIn(declsOfFile(&rootParsed, &collapsed.entry.stem), x) >= 0 { readings = push(readings, reading(2, clone(rootId), true, clone(collapsed.entry.stem), true, clone(x))); };
+    if size(readings) = 1 { return finish(ls, snap, entryPath, source, file, imp, layout, &get(readings, 0)); };
+    if size(readings) > 1 {
+        return rrFailed(ls, imp, atImport(source, file, imp, cat(cat("ambiguous import: ", showText(x)), " names more than one of a module, a file of the root module, or a symbol of the root module; spell out the intended level")));
+    };
+    holder = fileWithDecl(&rootParsed, x);
+    if holder.ok {
+        msg = cat(cat(cat(cat("symbol ", x), " is declared in file "), &holder.text), " of the root module; write ");
+        msg = cat(cat(&msg, renderPath(push(push(push([], clone(layout.name)), clone(holder.text)), clone(x)))), " (or ");
+        msg = cat(cat(&msg, renderPath(push(push([], clone(layout.name)), clone(x)))), " only when the root module has the single file ");
+        return rrFailed(ls, imp, atImport(source, file, imp, cat(cat(&msg, &layout.name), ".tersus)")));
+    };
+    msg = cat(cat(cat(showText(x), " is not a module of package "), &layout.name), ", a file of its root module, or a symbol of its root module; modules are: ");
+    msg = cat(cat(cat(&msg, joinWith(&layout.modNames, ", ")), "; the root module's files are: "), joinWith(feNames(&layout.rootFiles), ", "));
+    return rrFailed(ls, imp, atImport(source, file, imp, cat(cat(&msg, "; it declares: "), listDecls(declsOfModule(&rootParsed)))));
+};
+
+fn nestedMessage(x: &String, m: &String) -> String ~ {
+    return cat(cat(cat(showText(x), " is a directory inside module "), m), "; deeper nesting is not a module (modules are only the package root and its immediate subdirectories)");
+};
+
+fn resolveTwo(ls: LS, snap: &Snap, seeding: Bool, entryPath: &String, source: &PMod, file: &FE, imp: &ps::FileImport, layout: &Layout, m: &String, x: &String) -> RR ~ {
+    rootId = layoutId(layout, false, "");
+    modHere = isModule(layout, m);
+    rootFileStems = stemsNamed(&layout.rootFiles, m);
+    modParsed = emptyMod(layout, layoutId(layout, true, m));
+    if modHere {
+        pm = parseModule(ls, snap, entryPath, layout, true, m);
+        modParsed = clone(pm.pm);
+        ls = stateOfModule(pm);
+        if !ls.ok { return rrFailed(ls, imp, ""); };
+    };
+    rootParsed = emptyMod(layout, &rootId);
+    if !(seeding && modHere) {
+        probe = rootProbe(ls, snap, layout, push(push([], clone(m)), clone(x)));
+        rootParsed = clone(probe.pm);
+        ls = stateOfModule(probe);
+        if !ls.ok { return rrFailed(ls, imp, ""); };
+    };
+    entries = moduleFiles(layout, true, m);
+    readings = [];
+    if modHere {
+        if size(stemsNamed(&entries, x)) > 0 { readings = push(readings, reading(1, layoutId(layout, true, m), true, clone(x), false, "")); }
+        else {
+            here = collapsedFile(layout, true, m);
+            if here.ok && indexIn(declsOfFile(&modParsed, &here.entry.stem), x) >= 0 { readings = push(readings, reading(2, layoutId(layout, true, m), true, clone(here.entry.stem), true, clone(x))); };
+        };
+    };
+    if size(rootFileStems) > 0 {
+        stem = clone(get(&rootFileStems, 0).stem);
+        if indexIn(declsOfFile(&rootParsed, &stem), x) >= 0 { readings = push(readings, reading(2, clone(rootId), true, stem, true, clone(x))); };
+    };
+    if size(readings) = 1 { return finish(ls, snap, entryPath, source, file, imp, layout, &get(readings, 0)); };
+    pair = renderPath(push(push([], clone(m)), clone(x)));
+    if size(readings) > 1 {
+        return rrFailed(ls, imp, atImport(source, file, imp, cat(cat(cat(cat(cat(cat("ambiguous import: ", &pair), " reads both as a file/symbol of module "), m), " and as a symbol of root-module file "), m), "; rename one of them")));
+    };
+    if modHere {
+        if indexIn(moduleNested(layout, m), x) >= 0 { return rrFailed(ls, imp, atImport(source, file, imp, nestedMessage(x, m))); };
+        dirNamed = stemsNamed(&entries, m);
+        if size(dirNamed) > 0 && size(entries) > 1 && indexIn(declsOfFile(&modParsed, &get(dirNamed, 0).stem), x) >= 0 {
+            written = renderPath(&imp.path);
+            spelled = renderPath(push(push(push(push([], clone(layout.name)), clone(m)), clone(get(&dirNamed, 0).stem)), clone(x)));
+            msg = cat(cat(cat(cat(cat(cat("symbol ", x), " no longer resolves as "), &written), ": module "), m), " has grown to ");
+            msg = cat(cat(cat(cat(cat(&msg, intText(size(entries))), " files, so the single-file collapse no longer applies; write "), &spelled), " instead of "), &written);
+            return rrFailed(ls, imp, atImport(source, file, imp, &msg));
+        };
+        holder = fileWithDecl(&modParsed, x);
+        files = joinWith(feNames(&entries), ", ");
+        declares = listDecls(declsOfModule(&modParsed));
+        if holder.ok {
+            spelled = renderPath(push(push(push(push([], clone(layout.name)), clone(m)), clone(holder.text)), clone(x)));
+            msg = cat(cat(cat(cat(cat(cat("symbol ", x), " is declared in file "), &holder.text), " of module "), m), "; write ");
+            msg = cat(cat(cat(cat(cat(&msg, &spelled), "; module "), m), "'s files are: "), &files);
+            return rrFailed(ls, imp, atImport(source, file, imp, cat(cat(&msg, "; it declares: "), &declares)));
+        };
+        msg = cat(cat(cat(cat(cat(showText(x), " is not a file of module "), m), " or a symbol of its collapsed file; module "), m), "'s files are: ");
+        return rrFailed(ls, imp, atImport(source, file, imp, cat(cat(cat(&msg, &files), "; it declares: "), &declares)));
+    };
+    if size(rootFileStems) > 0 {
+        stem = clone(get(&rootFileStems, 0).stem);
+        msg = cat(cat(cat(cat(cat("symbol ", x), " is not declared in root-module file "), &stem), "; it declares: "), listDecls(declsOfFile(&rootParsed, &stem)));
+        return rrFailed(ls, imp, atImport(source, file, imp, &msg));
+    };
+    msg = cat(cat(cat(cat(cat("module ", showText(m)), " not found in package "), &layout.name), "; modules are: "), joinWith(&layout.modNames, ", "));
+    msg = cat(cat(&msg, " (plus the root module); the root module's files are: "), joinWith(feNames(&layout.rootFiles), ", "));
+    return rrFailed(ls, imp, atImport(source, file, imp, &msg));
+};
+
+fn resolveThree(ls: LS, snap: &Snap, entryPath: &String, source: &PMod, file: &FE, imp: &ps::FileImport, layout: &Layout, m: &String, f: &String, s: &String) -> RR ~ {
+    if isModule(layout, m) {
+        pm = parseModule(ls, snap, entryPath, layout, true, m);
+        pmod = clone(pm.pm);
+        ls = stateOfModule(pm);
+        if !ls.ok { return rrFailed(ls, imp, ""); };
+        entries = moduleFiles(layout, true, m);
+        if indexIn(moduleNested(layout, m), f) >= 0 { return rrFailed(ls, imp, atImport(source, file, imp, nestedMessage(f, m))); };
+        if size(stemsNamed(&entries, f)) = 0 {
+            msg = cat(cat(cat(cat(cat("file ", showText(f)), " not found in module "), m), "; its files are: "), joinWith(feNames(&entries), ", "));
+            return rrFailed(ls, imp, atImport(source, file, imp, cat(cat(&msg, "; it declares: "), listDecls(declsOfModule(&pmod)))));
+        };
+        if indexIn(declsOfFile(&pmod, f), s) >= 0 { return finish(ls, snap, entryPath, source, file, imp, layout, reading(2, layoutId(layout, true, m), true, clone(f), true, clone(s))); };
+        msg = cat(cat(cat(cat(cat(cat("symbol ", s), " is not declared in file "), f), " of module "), m), "; it declares: ");
+        return rrFailed(ls, imp, atImport(source, file, imp, cat(&msg, listDecls(declsOfFile(&pmod, f)))));
+    };
+    probe = rootProbe(ls, snap, layout, push(push(push([], clone(m)), clone(f)), clone(s)));
+    probedRoot = clone(probe.pm);
+    ls = stateOfModule(probe);
+    if !ls.ok { return rrFailed(ls, imp, ""); };
+    if size(stemsNamed(&layout.rootFiles, m)) > 0 {
+        msg = cat(cat(cat(cat("too many segments for the root module: ", renderPath(&imp.path)), " would name a symbol of root-module file "), m), " as ");
+        msg = cat(cat(cat(cat(&msg, renderPath(push(push(push([], clone(layout.name)), clone(m)), clone(f)))), " ("), showText(s)), " is one segment too many); root-module file ");
+        return rrFailed(ls, imp, atImport(source, file, imp, cat(cat(cat(&msg, m), " declares: "), listDecls(declsOfFile(&probedRoot, m)))));
+    };
+    msg = cat(cat(cat(cat(cat("module ", showText(m)), " not found in package "), &layout.name), "; modules are: "), joinWith(&layout.modNames, ", "));
+    return rrFailed(ls, imp, atImport(source, file, imp, cat(&msg, " (plus the root module)")));
+};
+
+// ---- Modules.visitModule: the module graph, dependencies first ----
+
+fn stateOfModule(r: PMR) -> LS ~ { return r.ls; };
+
+fn stateOfSeed(r: SeedR) -> LS ~ { return r.ls; };
+
+fn stateOfFiles(r: FilesR) -> LS ~ { return r.ls; };
+
+fn stateOfEnsure(r: EnsureR) -> LS ~ { return r.ls; };
+
+fn stateOfLoad(r: Loaded) -> LS ~ { return r.ls; };
+
+fn stateOfResolution(r: RR) -> LS ~ { return r.ls; };
+
+fn noIds() -> List<ModId> ~ { return []; };
+
+fn resolvedKey(id: &ModId, fileName: &String) -> String ~ { return cat(cat(modKey(id), "\n"), fileName); };
+
+fn visitModule(ls: LS, snap: &Snap, entryPath: &String, stack: &List<ModId>, id: &ModId, layout: &Layout) -> LS ~ {
+    key = modKey(id);
+    if HashSet::contains(&ls.done, &key) { return ls; };
+    for s in stack {
+        if sameId(s, id) {
+            chain = [];
+            seen = false;
+            for t in stack { if sameId(t, id) { seen = true; }; if seen { chain = push(chain, modKey(t)); }; };
+            chain = push(chain, clone(key));
+            return failed(ls, cat("module import cycle: ", joinWith(&chain, " -> ")));
+        };
+    };
+    parsedModule = parseModule(ls, snap, entryPath, layout, id.has, &id.modu);
+    pmod = clone(parsedModule.pm);
+    ls = stateOfModule(parsedModule);
+    if !ls.ok { return ls; };
+    deps = [];
+    for f in &pmod.files {
+        resolved = [];
+        for imp in &f.imports {
+            r = resolveImport(ls, snap, false, entryPath, &pmod.layout, &pmod, &f.entry, imp);
+            ri = clone(r.ri);
+            hasDep = r.hasDep;
+            dep = clone(r.dep);
+            ls = stateOfResolution(r);
+            if !ls.ok { return ls; };
+            resolved = push(resolved, ri);
+            if hasDep {
+                known = false;
+                for d in &deps { if sameId(d, &dep) { known = true; }; };
+                if !known { deps = push(deps, dep); };
+            };
+        };
+        ls = LS { resolved: ls.resolved.insert(resolvedKey(&pmod.id, &f.entry.name), resolved), ..ls };
+    };
+    chain = push(clone(stack), clone(id));
+    for d in &deps {
+        depLayout = clone(layout);
+        if HashMap::contains(&ls.layouts, &d.pkg) { depLayout = HashMap::lookup(&ls.layouts, &d.pkg, clone(layout)); }
+        else if d.pkg != layout.name { return failed(ls, cat(cat("internal: package ", &d.pkg), " was resolved but its layout is missing")); };
+        ls = visitModule(ls, snap, entryPath, &chain, d, &depLayout);
+        if !ls.ok { return ls; };
+    };
+    return LS { done: ls.done.insert(clone(key)), order: push(clone(ls.order), clone(id)), ..ls };
+};
+
+// ---- loading an entry ----
+
+fn findPackageRoot(snap: &Snap, entry: &String) -> Found ~ {
+    dir = dirNameOf(normalizePath(entry));
+    going = true;
+    while going ~ {
+        if hasMarker(snap, &dir) { return Found { ok: true, text: dir }; };
+        parent = dirNameOf(&dir);
+        if parent = dir { going = false; } else { dir = parent; };
+    };
+    return Found { ok: false, text: "" };
+};
+
+fn soloLayout(entryPath: &String, noPrelude: Bool) -> Layout ~ {
+    entry = FE { name: pathBaseName(entryPath), stem: fileStem(entryPath), path: clone(entryPath) };
+    return Layout { name: "", root: dirNameOf(entryPath), rootFiles: push([], entry), modNames: [], modFiles: [], modNested: [], noPrelude: noPrelude, isPackage: false };
+};
+
+fn notLoaded(ls: LS, msg: String) -> Loaded ~ {
+    return Loaded { ok: false, msg: msg, standalone: false, standaloneProgram: AstProgram { stage: "parsed", nodes: [], root: 0 }, root: "", name: "", entryPath: "",
+        entryId: ModId { pkg: "", modu: "", has: false }, ls: ls };
+};
+
+fn loadEntry(ls: LS, snap: &Snap) -> Loaded ~ {
+    entryPath = normalizePath(&snap.entry);
+    if snap.fromSource { return loadLayout(ls, snap, &entryPath, soloLayout(&entryPath, snap.noPrelude)); };
+    root = findPackageRoot(snap, &entryPath);
+    if root.ok {
+        built = buildLayout(snap, &root.text, snap.noPrelude);
+        if !built.ok { return notLoaded(ls, built.msg); };
+        return loadLayout(ls, snap, &entryPath, &built.layout);
+    };
+    read = readFile(snap, &entryPath);
+    if !read.ok { return notLoaded(ls, cat("file not found: ", &entryPath)); };
+    if rootsConfigured(snap) { return loadLayout(ls, snap, &entryPath, soloLayout(&entryPath, snap.noPrelude)); };
+    parsed = parseWith(locating(emptyDecls()), &read.text);
+    if !parsed.ok { return notLoaded(ls, cat(cat(cat("parse error in file ", &entryPath), ": "), &parsed.msg)); };
+    if size(parsed.imports) > 0 {
+        msg = cat(cat("standalone program ", &entryPath), ": imports are not supported without a package (no package.tersus found in any ancestor directory); first import: ");
+        return notLoaded(ls, cat(&msg, renderPath(&get(parsed.imports, 0).path)));
+    };
+    base = notLoaded(ls, "");
+    return Loaded { standalone: true, standaloneProgram: parsed.program, entryPath: entryPath, ok: true, ..base };
+};
+
+// The package the compiler libraries are compiled as (LibPackage). The elaborator treats some of its modules as the
+// libraries they are, so no package a program loads may have its name.
+fn reservedPackage() -> String ~ { return "tersuslib"; };
+
+fn reservedPackageWhy() -> String ~ { return cat(cat("the package name ", reservedPackage()), " is reserved for the compiler libraries"); };
+
+fn loadLayout(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout) -> Loaded ~ {
+    entryDir = dirNameOf(entryPath);
+    has = entryDir != layout.root;
+    name = "";
+    if has { name = pathBaseName(&entryDir); };
+    spoofed = packageRootOf(snap, reservedPackage());
+    if spoofed.ok {
+        return notLoaded(ls, cat(cat(cat(cat(cat("--package-root ", reservedPackage()), "="), &spoofed.text), ": "), reservedPackageWhy()));
+    };
+    if layout.isPackage && layout.name = reservedPackage() {
+        return notLoaded(ls, cat(cat(cat(cat(cat("package ", &layout.root), ": "), reservedPackageWhy()), ", so a package directory cannot be named "), reservedPackage()));
+    };
+    if has && dirNameOf(&entryDir) != layout.root {
+        return notLoaded(ls, cat(cat(cat(cat("entry file ", entryPath), " is in a directory nested below module level under package "), &layout.name), "; deeper nesting is not a module"));
+    };
+    entryId = layoutId(layout, has, &name);
+    ls = LS { layouts: ls.layouts.insert(clone(layout.name), clone(layout)), ..ls };
+    ls = visitModule(ls, snap, entryPath, noIds(), &entryId, layout);
+    if !ls.ok { return notLoaded(ls, ""); };
+    return Loaded { ok: true, msg: "", standalone: false, standaloneProgram: AstProgram { stage: "parsed", nodes: [], root: 0 }, root: clone(layout.root), name: clone(layout.name),
+        entryPath: clone(entryPath), entryId: entryId, ls: ls };
+};
+
+// The loaded module's dependencies, sorted (LoadedModule.loadedDependencies)
+fn dependenciesOf(ls: &LS, pm: &PMod) -> List<ModId> ~ {
+    deps = [];
+    for f in &pm.files {
+        for ri in HashMap::lookup(&ls.resolved, resolvedKey(&pm.id, &f.entry.name), []) {
+            if !sameId(&ri.target, &pm.id) {
+                known = false;
+                for d in &deps { if sameId(d, &ri.target) { known = true; }; };
+                if !known {
+                    placed = [];
+                    done = false;
+                    for d in deps {
+                        if !done && idLess(&ri.target, &d) { placed = push(placed, clone(ri.target)); done = true; };
+                        placed = push(placed, clone(d));
+                    };
+                    if !done { placed = push(placed, clone(ri.target)); };
+                    deps = placed;
+                };
+            };
+        };
+    };
+    return deps;
+};
+
+// ---- the marker configuration (Text.Parsec, with the token parser's whitespace and line comments) ----
+
+// Parsec's reading of `noPrelude = true|false;`, in its words: a token is shown as a character where a keyword's end
+// or the end of the input was expected there, and as a string where a symbol was; a keyword just before the error,
+// with no space after it, adds that its end was expected
+fn markerConfig(marker: &String, text: &String) -> Config ~ {
+    t = skipSpace(Cursor { text: clone(text), pos: 0, line: 1, col: 1 });
+    if !startsAt(&t, "noPrelude") {
+        if atEndOf(&t) { return Config { ok: true, msg: "", noPrelude: false }; };
+        return configError(marker, &t, true, "expecting \"noPrelude\" or end of input");
+    };
+    t = advance(t, 9);
+    if identByte(byteAtCursor(&t)) { return keywordRunsOn(marker, t, "noPrelude"); };
+    before = t.pos;
+    t = skipSpace(t);
+    glued = t.pos = before;
+    if byteAtCursor(&t) != 61 { return configError(marker, &t, false, afterKeyword(glued, "noPrelude", "\"=\"")); };
+    t = skipSpace(advance(t, 1));
+    word = "false";
+    if startsAt(&t, "true") { word = "true"; }
+    else if !startsAt(&t, "false") { return configError(marker, &t, false, "expecting \"true\" or \"false\""); };
+    t = advance(t, size(word.bytes));
+    if identByte(byteAtCursor(&t)) { return keywordRunsOn(marker, t, &word); };
+    before = t.pos;
+    t = skipSpace(t);
+    glued = t.pos = before;
+    if byteAtCursor(&t) != 59 { return configError(marker, &t, false, afterKeyword(glued, &word, "\";\"")); };
+    t = skipSpace(advance(t, 1));
+    if !atEndOf(&t) { return configError(marker, &t, true, "expecting end of input"); };
+    return Config { ok: true, msg: "", noPrelude: word = "true" };
+};
+
+// (Parsec reads the character that continues the keyword before refusing it, so the place is after it)
+fn keywordRunsOn(marker: &String, t: Cursor, word: &String) -> Config ~ {
+    c = byteAtCursor(&t);
+    after = advance(t, 1);
+    return configErrorAt(marker, &after, c, true, catStrings(catStrings("expecting end of \"", word), "\""));
+};
+
+fn afterKeyword(glued: Bool, word: &String, expected: &String) -> String ~ {
+    if !glued { return catStrings("expecting ", expected); };
+    return catStrings(catStrings(catStrings("expecting end of \"", word), "\" or "), expected);
+};
+
+fn startsAt(t: &Cursor, w: &String) -> Bool ~ {
+    if t.pos < 0 { return false; };
+    n = size(w.bytes);
+    for i in 0..n {
+        p = t.pos + i;
+        if p >= size(t.text.bytes) || toInt(get(&t.text.bytes, p)) != toInt(get(&w.bytes, i)) { return false; };
+    };
+    return true;
+};
+
+fn byteAtCursor(t: &Cursor) -> Int ~ {
+    if t.pos < 0 || t.pos >= size(t.text.bytes) { return 0 - 1; };
+    return toInt(get(&t.text.bytes, t.pos));
+};
+
+fn atEndOf(t: &Cursor) -> Bool ~ { return t.pos >= size(t.text.bytes); };
+
+fn advance(t: Cursor, n: Int) -> Cursor ~ {
+    if n <= 0 { return t; };
+    for i in 0..n {
+        c = byteAtCursor(&t);
+        if c = 10 { t = Cursor { pos: t.pos + 1, line: t.line + 1, col: 1, ..t }; }
+        else if c = 9 { t = Cursor { pos: t.pos + 1, col: t.col + 8 - (t.col - 1) % 8, ..t }; }
+        else if c >= 128 && c < 192 { t = Cursor { pos: t.pos + 1, ..t }; }
+        else { t = Cursor { pos: t.pos + 1, col: t.col + 1, ..t }; };
+    };
+    return t;
+};
+
+fn skipSpace(t: Cursor) -> Cursor ~ {
+    going = true;
+    while going ~ {
+        c = byteAtCursor(&t);
+        if c = 32 || c = 9 || c = 10 || c = 13 || c = 11 || c = 12 { t = advance(t, 1); }
+        else if c = 47 && t.pos >= 0 && t.pos + 1 < size(t.text.bytes) && toInt(get(&t.text.bytes, t.pos + 1)) = 47 {
+            while byteAtCursor(&t) >= 0 && byteAtCursor(&t) != 10 ~ { t = advance(t, 1); };
+        } else { going = false; };
+    };
+    return t;
+};
+
+fn identByte(c: Int) -> Bool ~ { return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c = 95 || c = 39; };
+
+// (Haskell's show of the character: a keyword's end or the end of the input was expected; of a one-character string:
+// a symbol was)
+fn configError(marker: &String, t: &Cursor, asCharacter: Bool, expecting: &String) -> Config ~ {
+    return configErrorAt(marker, t, byteAtCursor(t), asCharacter, expecting);
+};
+
+fn configErrorAt(marker: &String, t: &Cursor, c: Int, asCharacter: Bool, expecting: &String) -> Config ~ {
+    msg = cat(cat(cat(cat(cat("package configuration: ", showText(marker)), " (line "), intText(t.line)), ", column "), intText(t.col));
+    unexpected = "end of input";
+    if c >= 0 && c < 256 {
+        unexpected = showText(String { bytes: push([], toByte(c)) });
+        if asCharacter {
+            quoted = push([], toByte(39));
+            if c = 39 { quoted = push(push(quoted, toByte(92)), toByte(39)); }
+            else if c = 34 { quoted = push(quoted, toByte(34)); }
+            else {
+                n = size(unexpected.bytes);
+                if n >= 2 { for i in 1..n - 1 { quoted = push(quoted, get(&unexpected.bytes, i)); }; };
+            };
+            unexpected = String { bytes: push(quoted, toByte(39)) };
+        };
+    };
+    msg = cat(cat(cat(&msg, "):\nunexpected "), &unexpected), "\n");
+    return Config { ok: false, msg: cat(&msg, expecting), noPrelude: false };
+};

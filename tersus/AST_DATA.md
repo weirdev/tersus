@@ -211,9 +211,9 @@ single-file program, `module` for every ordinary package module, `lib` for a
 compiler-library module's physical constructor view), the interfaces of the modules
 it imports in merge order (the first wins a name), the checked defining dependency
 interfaces used only during template instantiation, the compiler libraries it may
-be given, the package its names are resolved in, its statements as read, and how
+be given, its statements as read, and how
 many of the first statements are compiler libraries put in front of a single-file
-program (`Compile.elaborateWith`, counted by `LibParsed.inlinedLibraryLength`):
+program (`Compile.elaborateWith`, counted by `LibPackage.inlinedLibraryLength`):
 their functions with bounds were checked against their bounds where the libraries
 were compiled as modules, so the elaborator does not check them again. The count
 is written as `builtins checked N` only when it is not 0, so a request without one
@@ -239,26 +239,18 @@ libraries N         (when the module may be given compiler libraries)
 library "NAME" K "IMPORT"... (N times, in the libraries' order: what the library imports)
 data LINES          (its interface)
 ...
-package "PKG" none|"MODULE" N (for a package module: every file of its package)
-file "PKG" none|"MODULE" "STEM" "NAME" D I (N times, in the loader's module order)
-decl type|variant|trait|function|axiom|proof "LOCAL" K "FUNCTION"... (D times: what the file declares)
-import module|file|symbol "PKG" none|"MODULE" FILE SYMBOL ALIAS NAMES (I times: its resolved imports)
-data LINES          (the module's `tersus-ast 1 parsed` syntax, as read: one block for each of
-...                  its files in the package's order, one for a program)
+data LINES          (the program's `tersus-ast 1 parsed` syntax, as read)
 ```
 
-`FILE`, `SYMBOL` and `ALIAS` are each `none` or a quoted name, and `NAMES` is `none` or a count and the names an
-import lists.
+The `definitions` blocks extend the experimental `tersus-elaborate 1` envelope; they are mandatory, and older envelopes without them are refused rather than accepted with missing context. They reuse ordinary interface records and do not change the AST/interface record schema. The `libraries` section is optional, and a request without it is the envelope as it was.
 
-The `definitions` blocks extend the experimental `tersus-elaborate 1` envelope; they are mandatory, and older envelopes without them are refused rather than accepted with missing context. They reuse ordinary interface records and do not change the AST/interface record schema. The `libraries` and `package` sections are optional, and a request without them is the envelope as it was.
-
-With a package, the elaborator resolves the module's names before it checks them: it names each file's
+For a module of a package (in a `package` load, below), the elaborator resolves the module's names before it checks them: it names each file's
 declarations canonically (`package$module$file$Local`; the entry module's keep their names), rewrites each file's
 references through the spellings its imports give, puts the files' statements in the package's order of the module's
 files with types and traits first, then impls, then the rest, and refuses a module that declares one of the List and Box helper functions native
 code calls (`listNew`, `listLen`, `listGet`, `listFirst`, `listLast`, `listPop`, `listSet`, `listPush`, `listFilled`,
 `boxNew`, `boxUnbox`) or impls a trait for a type when neither is the module's. With libraries, it selects those the
-module's statements as read call for (the rule `Compile.librariesFor` applies to a program's parse; for a module, the
+module's statements as read call for (the rule a program is parsed with; for a module, the
 `String`, `HashMap` and `HashSet` the interfaces it imports name count as mentions) and sees their interfaces, closed
 over what they import (the list and Box types only when selected) and without what the module declares itself, in
 front of the module's `interfaces`; a module that impls Drop without the prelude sees the prelude's Drop trait alone,
@@ -288,15 +280,57 @@ cannot be given it; the message is whole),
 `interfaceRefused "MESSAGE"` (it checks, but the requested interface cannot be given)
 or `unmodelled "WHAT"` (the elaborator
 does not handle the program yet, which is no verdict on it).
-The compiler makes its requests through an `Elaborator` (`Compile.lowerSourcePartsWith`
-and `lowerStatementsWith`, `PackageCompile.compileModulesWith`,
-`LibPackage.compileLibPackageWith` and `nativeStorageUnitsWith`). In production
-that is an executable of the elaborator written in Tersus (`ElaboratorTool`):
-the seed F0 for the compiler's own code (its tools, the compiler libraries and
-the List and Box helper units) and the source elaborator for the programs and
-modules it is given. A failure of the executable refuses the module; nothing
-answers in its place. The differential harness (`test/Differential.hs`) records
-the requests and puts them to another elaborator too.
+The compiler sends a module request itself only for a program it is given as statements
+(`Compile.lowerStatementsWith`); files, packages and the compiler libraries go as load requests (below), whose answers
+carry module responses. In production the elaborator is an executable of the elaborator written in Tersus
+(`ElaboratorTool`): the seed F0 for the compiler's own code (its tools, the compiler libraries and the List and Box
+helper units) and the source elaborator for the programs and modules it is given. A failure of the executable refuses
+the module; nothing answers in its place. The differential harness (`test/Differential.hs`) records the requests and
+puts them to another elaborator too.
+
+## Loading
+
+The elaborator written in Tersus also loads: it reads a program's or a package's files from a snapshot the compiler
+captures, parses them in process with the parser's declarations library (`lib/parser/syntax/`), seeds each file with
+the declarations its imports name, reads a module's files again until its declarations settle, walks the import graph
+and elaborates what the request asks for (`lib/elaborate/load.tersus`, `units.tersus`, `snapshot.tersus`,
+`decls.tersus`). The compiler lists directories and reads files (`Modules.captureFilesystemInput`, which follows the
+loader's own reads, reading each file's import prefix with P0 to know which modules to follow); it parses nothing else.
+One request is one package or one program, so that a process parses each file
+once and elaborates the modules in the order it loaded them:
+
+```
+tersus-elaborate 1
+load graph|package|program|parse|equality|libraries
+noPrelude true|false
+reserving true|false
+roots N ("NAME" "ROOT")*                (the --package-root map)
+std none|"ROOT"                         (the --std-root)
+entry none|"PATH" file|source           (source: the program came on standard input)
+canonical N ("FROM" "TO")*              (each root as the filesystem canonicalized it)
+dirs N
+dir "PATH" S "SUB"... F "FILE"...       (N times: what listing the directory gave)
+files N
+file "PATH" BYTES                       (N times, followed by the file's UTF-8 bytes and a line feed)
+sources N
+source "NAME" implicit|native BYTES     (the compiler libraries' sources, then their bytes and a line feed)
+builtins
+data LINES
+libraries N ...                         (as in a module request: the compiled libraries, for an elaboration)
+```
+
+`graph` answers the module graph the compiler reports and tests (each module's files with their declarations, imports
+and parsed syntax, the packages' policies and the files read), or `standalone "PATH"` and the program's syntax for a
+program with no package; `package` answers every module of the entry's package and its dependencies, in order, each
+with the interfaces it is lowered with (`module P M`, `lowering K ...`, then a module response), and stops at the first
+refusal (a program with no package is `notLoaded`); `program` answers one single-file program's response; `parse` and
+`equality` answer a program as read: `parsed`, `libraries N "NAME"...` for the libraries it is read with (the type,
+clone and equality libraries it calls for, for `equality`), each library's statements as read in the libraries'
+order, then the program's; `libraries` answers each compiler library (and List and Box helper) with what it imports,
+its statements as read and its response. A load that fails answers `notLoaded "MESSAGE"` in the words the Haskell
+loader used, and a program that does not parse `unparsed "MESSAGE"`. The compiler asks through a `Loader`
+(`Pipeline.loadFromEntry`, `PackageCompile.compileModulesUsing`, `Compile.lowerSourceUsing`,
+`LibPackage.compileLibPackageWith`), F0 for its own code and the source elaborator otherwise.
 
 ## The packages
 
@@ -308,7 +342,7 @@ snapshot so its Unicode predicates match the serving Haskell compiler.
 
 | Entry | What it does | With no input |
 | --- | --- | --- |
-| `parser/parser.tersus` | Native source/file parser: builds exact AST arenas and reads imports plus declaration state. `PreludeSource.parserPackageFiles` embeds the parser package, generated Unicode root-module file and shared data dependencies for the embedded snapshot for P0-based package checking and parser builds; ordinary source does not receive those helpers. `Pipeline.validatedSource`, `compileSource` and package loading consume its ASTs. `TERSUS_PARSER=haskell` is refused; a pinned native LLVM parser seed bootstraps the current parser | |
+| `parser/parser.tersus` | Native source/file parser: the driver of `parser/syntax/` (the grammar, also imported by the elaborator), which builds exact AST arenas and reads imports plus declaration state. `PreludeSource.parserPackageFiles` embeds the parser package, the generated Unicode file of `parser::syntax` and shared data dependencies; ordinary source does not receive those helpers. `TERSUS_PARSER=haskell` is refused; a pinned native LLVM parser seed bootstraps the current parser | |
 | `ast_reader/ast_reader.tersus` | Parsed, elaborated, interface and builtin-table data, read into typed syntax arena payloads and written again, including contracts, proofs, builtin arguments and metadata, source marks and ordered occurrence types. Reuses the MIR type/size codec; `mutate` changes `Plus` to `Minus` as a semantic edit demonstration | returns `1` with no input and reports that the input is not AST data |
 
 ## The parser written in Tersus
@@ -325,13 +359,17 @@ shared `catStrings` helper still borrows both arguments.
 The arena is built in parse order and renumbered at the end into the emission
 order above; nodes a failed speculation built are unreachable and dropped.
 
-The host (`src/TersusParser.hs`) runs the current packaged parser as a native
-executable (P1). `ParserSeed` first verifies `bootstrap/parser.sha256` and builds
-its pinned LLVM seed with clang (P0). P0 parses `LibParsed`'s compiler libraries
-and the current parser/MIR packages through the ordinary `Modules` resolver
-and `PackageCompile` checker/lowering. The embedded snapshot includes package
-markers, shared data modules and generated `unicode.tersus`, whose predicates
-use the serving GHC's Unicode categories. The emitter seed builds current E1,
+The parser's grammar is a library module, `lib/parser/syntax/syntax.tersus`, with
+`parser.tersus` a driver of three lines that runs its request loop: the elaborator
+imports the library and parses in process (Loading, above), and the driver
+answers the file protocol below. The host (`src/TersusParser.hs`) runs the current
+packaged parser as a native executable (P1). `ParserSeed` first verifies
+`bootstrap/parser.sha256` and builds its pinned LLVM seed with clang (P0). P0 reads
+the compiler's own sources where the host still parses them (`StdLibDefs` and the
+snapshot's import prefixes), and the current parser and MIR packages are loaded by
+F0 and compiled as every package is. The embedded snapshot includes package
+markers, shared data modules and `lib/parser/syntax/unicode.tersus`, the
+classifiers of code points from 128 up, pinned to Unicode 15.0. The emitter seed builds current E1,
 which emits P1. `Native.cachedProgram` supplies the existing caches and build
 locks; imported source, parser pin, compiler and runtime changes rekey them.
 
@@ -349,8 +387,8 @@ a missing native executable is rebuilt through the existing cache lock.
 The pure cached library/program values are read after successful IO bootstrap,
 not used as a mutable-configuration or retry interface.
 
-Production source and module loading use the file protocol in
-`src/FileParserProtocol.hs`:
+The parser executables answer the file protocol in `src/FileParserProtocol.hs`
+(the compiler's loads parse in the elaborator's process instead):
 
 ```
 tersus-file-parse 1
@@ -429,29 +467,25 @@ tersus-parse 1
 ... (per segment)
 ```
 
-`Pipeline.validatedSource` and `compileSource` lower the Tersus-parsed source
-AST through `Compile.lowerSourceParts`. A source-only native probe chooses
-libraries; their frozen ASTs and declarations come from the shared lazy P0 cache in
-`SourceParse`. The final native file parse receives those declarations. Keeping
-library names, library AST and source AST separate preserves the prepared
-library-prefix cache. Package loading injects the same native file parser
-through `Pipeline.loadFromFilesystem`; imports are linked by the module
-pipeline. Standalone compilation still rejects unlinked imports.
-
-`Compile` and the default `Modules` loaders use P0 only for bootstrap work.
-Production source and package loading use P1. `ParsedFile` holds only the file,
-import and declaration records; `AstData` depends on `Syntax`, not the checker.
-This keeps P0 below the compiler and prevents bootstrap calls from entering a
-P1 build already in progress.
+`Pipeline.validatedSource` and `compileSource` send the source as a `program` load:
+the elaborator probes it for the libraries it calls for, parses it with their
+declarations and elaborates it in one process. Standalone compilation still
+rejects unlinked imports. `ParsedFile` holds only the file, import and
+declaration records; `AstData` depends on `Syntax`, not the checker.
 
 Immutable input is indexed once; consumed state uses lightweight checkpoints
 and append-only arena rollback. Flat arena-list emission is iterative.
-`ParserUnicodeSource` generates pure Tersus comparisons from the serving GHC's
-`Data.Char.isLetter`, `isUpper`, `isLower` and `isAlphaNum` predicates. P1 includes
-those current classifiers in `PreludeSource.parserPackageFiles` and its fingerprint.
-P0 retains the classifier version recorded in its authenticated LLVM asset.
-The ASCII identifiers of the bootstrap corpus let P0 read a newer generated
-classifier without requiring the two Unicode versions to agree. New bootstrap
+`lib/parser/syntax/unicode.tersus` is checked in: balanced comparisons over the
+Unicode 15.0 general categories (letter is L*, upper is Lu or Lt, lower is Ll,
+alphanum is L* or N*), split into functions of at most 32 intervals so that each
+validates. `dev/parser-unicode/generate.py` writes it and refuses to run on a
+Python whose `unicodedata` is not Unicode 15.0, so a regeneration cannot change
+the tables unnoticed; moving to another Unicode version is a change of that
+script. P1, the elaborator's in-process parser and the frontend fingerprint all
+include the file, so a classifier change needs a new frontend seed. P0 retains
+the classifier recorded in its authenticated LLVM asset (made with GHC 8.10's
+tables). The ASCII identifiers of the bootstrap corpus let P0 read the sources
+without requiring the two Unicode versions to agree. New bootstrap
 identifiers must be accepted by P0 before they can be used. No names or source
 bytes are normalized.
 
@@ -479,24 +513,32 @@ refuses interfaces with entries out of order or of the wrong kind;
 `testAstReader` round-trips those interfaces and the table natively and refuses
 the malformed interfaces. `testDifferential` records every request the compiler
 makes over the corpus (single files, the tool packages, `examples/modules` and
-the compiler libraries, and the programs of `testTypeCheck`) and requires the
-compiler's elaborator behind a second trip through the text protocol to agree
-with itself on each, so a request or a response that loses something fails; it
+the compiler libraries as loads, and the programs of `testTypeCheck` as module
+requests) and requires the compiler's frontend to agree with itself on each: a
+module request and its response take a second trip through the text protocol,
+so one that loses something fails; a load is asked again as it was (the host has
+no reader of load requests, so a load request that loses something is not caught
+here), and load requests with a section malformed must go unanswered. It
 also checks that a candidate with a wrong type, other words or nothing modelled
 is not counted as agreeing, and that the lowering takes exactly the elaborated
 expression types, in their order.
 
-`testParser` compares P0 and P1 over the same corpus and generated snippets.
+`testParser` compares P0 and P1 over the same corpus and generated snippets. A
+file alone is parsed by both with the declarations of every compiler library; a
+package file with the declarations accumulated where its package's load reads
+it (the libraries', then those of the modules before its own, then its own
+module's, round after round), and P0 has to read every package file.
 The language tests keep their independent literal ASTs, verdicts and rejected
 fixtures, parsed through native test fragment wrappers. `TestParserUnicode`
-checks current GHC predicate boundaries and version-sensitive P1 identifiers.
-`testParserBootstrap` compares P0/P1 ASTs and all final declarations for the
-same prepared current parser source, then requires identical checked/lowered
-MIR and regenerated IR and tests P2 behavior. It does not require historical
+checks the classifiers at every boundary of the checked-in intervals and parses
+identifiers of letters new in Unicode 13 to 15 through the production frontend
+and P1.
+`testParserBootstrap` compares P0/P1 ASTs and all final declarations for every
+file of the current parser package, read with its accumulated declarations, then requires identical checked/lowered
+MIR and regenerated IR and compares P1 and P2 the same way. It does not require historical
 P0 seed IR to equal current IR. Within one fixpoint, successful P0 replies are
-reused only for byte-identical complete file requests. Full prepared packages
-must byte-compare before lowering once; the result must equal P1's actual
-prepared emitter input. Independent E1 emission must equal the LLVM saved by
+reused only for byte-identical complete file requests. The loaded package is
+lowered once; the result must equal P1's actual prepared emitter input. Independent E1 emission must equal the LLVM saved by
 P1's successful build before P2 is built and checked. P1 and P2 parsing and all
 comparisons still execute.
 
@@ -508,8 +550,9 @@ previous build's output.
 
 ## Refreshing the parser seed
 
-Use the development seed driver, not `llvm lib/parser/parser.tersus`: the raw
-entry omits the generated Unicode classifier that the serving parser uses.
+Use the development seed driver, not `llvm lib/parser/parser.tersus`: it emits
+the exact prepared parser package and writes the header that names the commit,
+the classifier and package fingerprints and the emitter seed.
 From `tersus/`, with the current pinned seeds available:
 
 ```sh
@@ -519,7 +562,7 @@ sha256sum /tmp/parser.ll.new
 
 The driver uses `TersusParser.emitParserIr` to read the LLVM retained by P1's
 successful build from its exact prepared owned input. It writes provenance
-comments for the source commit, GHC version, classifier/source fingerprints
+comments for the source commit, classifier/source fingerprints
 and emitter seed pin. Only a successful build and verified digest may replace
 a pin. Never redirect into a seed file used by the running compiler.
 

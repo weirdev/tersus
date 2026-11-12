@@ -1,9 +1,6 @@
-module TestParser (testParser) where
+module TestParser (testParser, libraryDecls, packageFileDecls, pairedWith) where
 
-import Control.Monad (forM)
-import Control.Exception (evaluate)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import System.IO.Unsafe (unsafePerformIO)
+import Control.Monad (foldM, forM)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath ((</>), takeFileName)
@@ -19,7 +16,7 @@ import ParsedFile (Decls, ParsedFile, emptyDecls, fileBody, locating)
 import qualified FileParserProtocol as File
 import PreludeSource (elaboratePackageFiles, toolPackageFiles, validationPackageFiles)
 import qualified Modules
-import qualified SourceParse
+import PreludeSource (typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource)
 import qualified ParserSeed
 import Syntax (Expression (..), Statement (..), Value (..))
 import Types (Type (..))
@@ -27,10 +24,14 @@ import qualified TestParserFragments as Fragment
 import TestHarness
 import Utils
 
+-- The declarations of the compiler libraries, read in order by P0: what a program is parsed with when it may use any
+-- of them (the frontend picks the libraries a program is read with; the parsers are compared with all of them)
+libraryDecls :: Either String Decls
+libraryDecls = foldl (\acc text -> acc >>= \decls -> fmap snd (ParserSeed.parseFileWith decls text)) (Right emptyDecls)
+    [typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource]
+
 seedParsed :: String -> Either String [Statement]
-seedParsed source = case Compile.parseSource source of
-    Ok statements -> Right statements
-    Error e -> Left e
+seedParsed source = libraryDecls >>= \decls -> fmap (fileBody . fst) (ParserSeed.parseFileWith (locating decls) source)
 
 seedPlainParsed :: String -> Either String [Statement]
 seedPlainParsed source = case ParserSeed.parseFileWith emptyDecls source of
@@ -49,10 +50,11 @@ seedData = writeData . seedParsed
 seedPlainData :: String -> Either String String
 seedPlainData = writeData . seedPlainParsed
 
--- The same program as the pipeline parses it: the probe, the libraries it chooses, then the
--- source located, all through the tool
+-- The same program, located with the libraries' declarations, through the native parser built from the sources
 tersusData :: String -> IO (Either String String)
-tersusData = TersusParser.toolParseSource
+tersusData source = case libraryDecls of
+    Left e -> pure (Left e)
+    Right decls -> writeData . fmap (fileBody . fst) <$> TersusParser.parseFileNative (locating decls) source
 
 -- The source alone, unlocated, through the interpreted tool: the shape of the generated snippets
 tersusPlain :: String -> IO (Either String String)
@@ -138,7 +140,7 @@ corpusParity batch = do
                     Nothing -> observedSource source <$> comparePreparedPackage resolver path
             _ -> do
                 ast <- compareSource tersusData source
-                wire <- compareFileRecords source
+                wire <- pairedFile source
                 pure (firstFailure [ast, wire])
         pure (fmap ((path ++ ": ") ++) result)
     putStrLn ("Native corpus parity: " ++ show (length sources) ++ " files in batch " ++ show batch ++ "/4, " ++ show (length [e | Just e <- results]) ++ " failures")
@@ -160,27 +162,63 @@ observedSource source (observations, result) = firstFailure
     , if source `elem` observations then Nothing else Just "requested corpus source was not observed by the paired P0/P1 parsers"
     ]
 
+-- Every file of the package as its load reads it, parsed by P0 and P1 with the declarations the package has
+-- accumulated where it is read; P0 has to read every file
 comparePreparedPackage :: Modules.Resolver -> FilePath -> IO ([String], TestResult)
-comparePreparedPackage resolver path = do
-    observations <- newIORef []
-    let paired declared source = unsafePerformIO $ do
-            seed <- ParserSeed.parseFileNative declared source
-            current <- TersusParser.parseFileNative declared source
-            let result = case (seed, current) of
-                    (Right (a, da), Right (b, db)) -> testAssertEq a b <> testAssertEq (File.writeParsedFile a da) (File.writeParsedFile b db)
-                    (Left a, Left b) | not (ParserSeed.toolFailure a || ParserSeed.toolFailure b) -> Nothing
-                    (Left e, _) -> Just ("P0 prepared package file: " ++ e)
-                    (_, Left e) -> Just ("P1 prepared package file: " ++ e)
-            modifyIORef' observations ((source, result) :)
-            pure current
-        loaded = Modules.loadFromEntryWith paired resolver path
-    _ <- evaluate (length (show loaded))
-    records <- readIORef observations
-    let results = map snd records
-    pure (map fst records, firstFailure (case loaded of
-        Left e -> Just e : results
-        Right (Modules.PackageResult _) -> testAssertTrue (not (null results)) : results
-        Right _ -> Just "expected a prepared package" : results))
+comparePreparedPackage resolver path = case Modules.loadFromEntry resolver path of
+    Left e -> pure ([], Just e)
+    Right (Modules.PackageResult pkg) -> do
+        prepared <- packageFileDecls ParserSeed.parseFileNative pkg
+        case prepared of
+            Left e -> pure ([], Just e)
+            Right files -> do
+                results <- mapM (\(source, decls) -> pairedWith True [ParserSeed.parseFileNative, TersusParser.parseFileNative] decls source) files
+                pure (map fst files, firstFailure (testAssertTrue (not (null files)) : results))
+    Right _ -> pure ([], Just "expected a prepared package")
+
+-- Each file of the package with declarations P0 reads it with: the compiler libraries', then those of the modules
+-- before its own, then those of its module's files read before it, round after round as the loader reads them
+packageFileDecls :: (Decls -> String -> IO (Either String (ParsedFile, Decls))) -> Modules.LoadedPackage -> IO (Either String [(String, Decls)])
+packageFileDecls parser pkg = case libraryDecls of
+    Left e -> pure (Left e)
+    Right libraries -> go (locating libraries) (Modules.packageModules pkg) []
+  where
+    go _ [] done = pure (Right (reverse done))
+    go declared (modu : rest) done = do
+        let sources = map Modules.loadedFileSource (Modules.loadedModuleFiles modu)
+        settled <- rounds declared sources []
+        case settled of
+            Left e -> pure (Left (Modules.renderModuleId (Modules.loadedModuleId modu) ++ ": " ++ e))
+            Right (final, read') -> go final rest (read' ++ done)
+    rounds declared [] read' = pure (Right (declared, read'))
+    rounds declared pending read' = do
+        (declared', refused, read'') <- foldM readOne (declared, [], read') pending
+        case reverse refused of
+            [] -> pure (Right (declared', read''))
+            (_, e) : _ | any (ParserSeed.toolFailure . snd) refused -> pure (Left e)
+            (_, e) : _ | length refused == length pending -> pure (Left ("P0 refuses a corpus file: " ++ e))
+            remaining -> rounds declared' (map fst remaining) read''
+    readOne (declared, refused, read') source = do
+        answer <- parser declared source
+        pure $ case answer of
+            Right (_, final) -> (final, refused, (source, declared) : read')
+            Left e -> (declared, (source, e) : refused, read')
+
+pairedFile :: String -> IO TestResult
+pairedFile source = case libraryDecls of
+    Left e -> pure (Just e)
+    Right decls -> pairedWith False [ParserSeed.parseFileNative, TersusParser.parseFileNative] (locating decls) source
+
+-- The parsers give the same file and final declarations, or refuse alike; reading, the first has to read it
+pairedWith :: Bool -> [Decls -> String -> IO (Either String (ParsedFile, Decls))] -> Decls -> String -> IO TestResult
+pairedWith reading parsers decls source = do
+    answers <- mapM (\parse -> parse decls source) parsers
+    pure $ firstFailure ([Just ("the first parser refuses a corpus file: " ++ e) | reading, Left e : _ <- [answers]] ++ [same a b | (a, b) <- zip answers (drop 1 answers)])
+  where
+    same (Right (a, da)) (Right (b, db)) = testAssertEq a b <> testAssertEq (File.writeParsedFile a da) (File.writeParsedFile b db)
+    same (Left a) (Left b) | not (ParserSeed.toolFailure a || ParserSeed.toolFailure b) = Nothing
+    same (Left e) _ = Just ("first parser: " ++ e)
+    same _ (Left e) = Just ("second parser: " ++ e)
 
 preparedEmitterHelper :: IO TestResult
 preparedEmitterHelper = do
@@ -198,33 +236,6 @@ preparedEmitterHelper = do
         , testAssertEq (observedSource "fn unseen() -> Int { return 0; };" report)
             (Just "requested corpus source was not observed by the paired P0/P1 parsers")
         ]
-
-{-# NOINLINE recordedFile #-}
-recordedFile :: IORef [Either String String] -> (Decls -> String -> IO (Either String (ParsedFile, Decls))) -> Decls -> String -> Either String (ParsedFile, Decls)
-recordedFile history parser declared source = unsafePerformIO $ do
-    answer <- parser declared source
-    let record = case answer of
-            Left e -> Left e
-            Right (parsed, final) -> case File.writeParsedFile parsed final of
-                Error e -> Left (ParserSeed.failure e)
-                Ok wire -> Right wire
-    modifyIORef' history (record :)
-    pure answer
-
-fileRecords :: (Decls -> String -> IO (Either String (ParsedFile, Decls))) -> String -> IO [Either String String]
-fileRecords parser source = do
-    history <- newIORef []
-    let result = SourceParse.parseSourcePartsWith (recordedFile history parser) True False source
-    _ <- evaluate (length (show result))
-    reverse <$> readIORef history
-
-compareFileRecords :: String -> IO TestResult
-compareFileRecords source = do
-    seed <- fileRecords ParserSeed.parseFileNative source
-    current <- fileRecords TersusParser.parseFileNative source
-    pure $ firstFailure
-        ([Just e | Left e <- seed ++ current, ParserSeed.toolFailure e]
-        ++ [testAssertTrue (not (null seed)), testAssertEq current seed])
 
 interpretedSmoke :: IO TestResult
 interpretedSmoke = do
@@ -350,15 +361,10 @@ locatedSnippets =
     , ("empty import name list", "import geo { }; return 0;")
     ]
 
--- A file with imports is parsed whole and then refused as the P0 reading refuses it, in
--- the same words (Compile.parseSourceParts), not by falling back to the P0 parser
+-- A program with imports is parsed whole by the frontend and then refused, not read as a package
 importsVerdict :: IO TestResult
-importsVerdict = do
-    tersus <- TersusParser.toolParseSource "import geo; import geo::Point as P { x }; return 0;"
-    pure $ firstFailure
-        [ testAssertEq tersus (Left "imports are not linked yet: geo, geo::Point")
-        , testAssertEq (seedData "import geo; import geo::Point as P { x }; return 0;") (Left "imports are not linked yet: geo, geo::Point")
-        ]
+importsVerdict = pure $ testAssertEq (writeData (case Compile.parseSource "import geo; import geo::Point as P { x }; return 0;" of { Ok ss -> Right ss; Error e -> Left e }))
+    (Left "imports are not linked yet: geo, geo::Point")
 
 
 firstFailure :: [TestResult] -> TestResult
@@ -417,10 +423,10 @@ noArenaCopies = do
         Error e -> Just e
         Ok _ -> case TersusParser.ownedParserProgram of
             Error e -> Just e
-            Ok program -> case Map.lookup "nameLedExpr" (M.progFunctions program) of
+            Ok program -> case Map.lookup "parser$syntax$syntax$nameLedExpr" (M.progFunctions program) of
                 Nothing -> Just "nameLedExpr is missing"
                 Just fn -> testAssertEq
-                    [operand | body <- Map.elems (M.fnBlocks fn), M.Assign _ (M.CopyOf operand) <- M.blockStatements body, operandType fn operand == Just (TNamed "St" [])]
+                    [operand | body <- Map.elems (M.fnBlocks fn), M.Assign _ (M.CopyOf operand) <- M.blockStatements body, operandType fn operand == Just (TNamed "parser$syntax$syntax$St" [])]
                     []
   where
     operandType fn operand = case operand of

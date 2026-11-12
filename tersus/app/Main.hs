@@ -10,7 +10,7 @@ import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Modules
 import Native (buildExecutable, runExecutable)
-import Pipeline (compileModulesToOwned, compileSourceNoPrelude, ownedOfProgram, loadFromFilesystemWithOptions, loadFromSource)
+import Pipeline (compileModulesToOwned, compileSourceNoPrelude, ownedOfProgram)
 import qualified Data.Map.Strict as Map
 import Utils
 
@@ -71,13 +71,11 @@ failWith e = hPutStrLn stderr e >> exitWith (ExitFailure 1)
 readSource :: FilePath -> IO String
 readSource = readSourceFile
 
-loadPackage :: Modules.LoadOptions -> FilePath -> IO (Maybe (Either String Modules.LoadedPackage))
+-- The snapshot of a package's files, which one load compiles; a program alone is read as a source
+loadPackage :: Modules.LoadOptions -> FilePath -> IO (Maybe (Either String Modules.Snapshot))
 loadPackage options file = do
     root <- if file == "-" then pure Nothing else Modules.findPackageRootIO file
     let configuredRoots = not (Map.null (Modules.packageRoots options)) || Modules.installedStdRoot options /= Nothing
     if root == Nothing && not configuredRoots then pure Nothing else do
-        loaded <- if file == "-" then readSource file >>= loadFromSource options else loadFromFilesystemWithOptions options file
-        pure $ case loaded of
-            Left err -> Just (Left err)
-            Right (Modules.PackageResult pkg) -> Just (Right pkg)
-            Right _ -> Nothing
+        source <- if file == "-" then Just <$> readSource file else pure Nothing
+        Just <$> Modules.captureSnapshot options file source

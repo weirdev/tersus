@@ -8,37 +8,112 @@ module LibPackage
     , libModuleId
     , libSelection
     , libCatalog
-    , libDefinitionContexts
+    , inlinedLibraryLength
     , stripDeclaredFromUnits
     , withoutReplacedEq
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.IO.Unsafe (unsafePerformIO)
 
-import ElaborateRequest (Elaborator, Extraction (..), Library (..), Request (..), Response (..))
-import ElaboratorTool (bootstrapElaborator)
+import ElaborateRequest (Library (..), LibraryAnswer (..), LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..))
+import ElaboratorTool (Loader, bootstrapLoader)
 import Interface (ModuleInterface (..))
-import Syntax (Statement (..))
-import LibParsed (LibParsed (..), libParsed)
-import qualified LibParsed
 import qualified Mir as M
 import MirLower (lowerModuleWith)
-import Modules (ModuleId (..), renderModuleId)
-import Utils (Result (..), bindResult, flatResultMap)
+import Modules (librarySources)
+import PackageData (ModuleId (..), renderModuleId, resolverFromFiles)
+import PreludeSource (libModules, nativeStorageModules)
+import Syntax (Statement (..))
+import Utils (Result (..))
 
--- The implicit libraries and native storage helpers share one compiler-owned
--- package and one parse. Native units never enter user-facing selection.
+-- The implicit libraries and native storage helpers share one compiler-owned package, read and elaborated by the
+-- loader written in Tersus in one load; the host lowers them. Native units never enter user-facing selection.
 
 libModuleNames :: [String]
-libModuleNames = LibParsed.libModuleNames
+libModuleNames = [name | (name, _, _) <- libModules, name `notElem` nativeStorageModules]
 
-libDependencies :: String -> [String]
-libDependencies name = case libParsed of
-    Right parsed -> Map.findWithDefault [] name (lpDependencies parsed)
-    Left _ -> []
+libModuleId :: String -> ModuleId
+libModuleId name = ModuleId "tersuslib" (Just name)
+
+data LibPackage = LibPackage
+    { libInterfaces :: Map.Map String ModuleInterface
+    , libPrograms :: Map.Map String M.Program
+    , libOrder :: [String]
+    , libImports :: Map.Map String [String]
+    , libStatements :: Map.Map String [Statement]
+    }
+    deriving (Show)
+
+type NativeUnits = [(ModuleId, ModuleInterface, M.Program)]
+
+-- Every library and native helper, lowered: the libraries in order, then the helpers, each against the interfaces of
+-- the libraries it imports. A helper that fails fails the helpers alone.
+compiledLibraries :: Loader -> (Result LibPackage String, Result NativeUnits String)
+compiledLibraries loader = case loader (LoadRequest LoadLibraries False (resolverFromFiles []) Nothing librarySources []) of
+    LoadedLibraries answers failure -> go answers (LibPackage Map.empty Map.empty [] Map.empty Map.empty) [] failure
+    NotLoaded e -> (Error e, Error e)
+    _ -> let e = "internal: the loader did not answer with the compiler libraries" in (Error e, Error e)
+  where
+    complete pkg = pkg{libOrder = reverse (libOrder pkg)}
+    failed pkg e
+        | length (libOrder pkg) == length libModuleNames = (Ok (complete pkg), Error e)
+        | otherwise = (Error e, Error e)
+    go [] pkg natives failure = case failure of
+        Just e -> failed pkg e
+        Nothing -> (Ok (complete pkg), Ok (reverse natives))
+    go (LibraryAnswer name imports stmts response : rest) pkg natives failure =
+        let moduId = libModuleId name
+            inModule err = "in lib module " ++ renderModuleId moduId ++ ": " ++ err
+            depIfaces = [libInterfaces pkg Map.! dep | dep <- imports, Map.member dep (libInterfaces pkg)]
+         in case response of
+                Accepted elaborated (Just iface) _ -> case lowerModuleWith depIfaces elaborated of
+                    Error err -> failed pkg (inModule err)
+                    Ok program
+                        | name `elem` nativeStorageModules -> go rest pkg ((moduId, iface, program) : natives) failure
+                        | otherwise -> go rest pkg
+                            { libInterfaces = Map.insert name iface (libInterfaces pkg)
+                            , libPrograms = Map.insert name program (libPrograms pkg)
+                            , libOrder = name : libOrder pkg
+                            , libImports = Map.insert name imports (libImports pkg)
+                            , libStatements = Map.insert name stmts (libStatements pkg)
+                            } natives failure
+                Accepted _ Nothing _ -> failed pkg (inModule "the elaborator gave no interface")
+                Refused err -> failed pkg (inModule err)
+                RefusedInterface err -> failed pkg err
+                Unresolved err -> failed pkg err
+                NotModelled what -> failed pkg (inModule ("the elaborator does not handle this module yet: " ++ what))
+
+compileLibPackageWith :: Loader -> Result LibPackage String
+compileLibPackageWith loader = fst (compiledLibraries loader)
+
+nativeStorageUnitsWith :: Loader -> Result NativeUnits String
+nativeStorageUnitsWith loader = snd (compiledLibraries loader)
+
+{-# NOINLINE libraryCache #-}
+libraryCache :: MVar (Maybe (Result LibPackage String, Result NativeUnits String))
+libraryCache = unsafePerformIO (newMVar Nothing)
+
+-- The libraries the seed elaborates, made on first use and kept for the process
+bootstrapLibraries :: (Result LibPackage String, Result NativeUnits String)
+bootstrapLibraries = unsafePerformIO $ modifyMVar libraryCache $ \cached -> case cached of
+    Just result -> pure (cached, result)
+    Nothing ->
+        let result@(libraries, natives) = compiledLibraries bootstrapLoader
+            forced = either' (Map.size . libInterfaces) libraries `seq` either' length natives `seq` result
+         in pure (Just forced, forced)
+  where
+    either' f (Ok a) = f a
+    either' _ (Error e) = length e
+
+libPackage :: Result LibPackage String
+libPackage = fst bootstrapLibraries
+
+nativeStorageUnits :: Result NativeUnits String
+nativeStorageUnits = snd bootstrapLibraries
 
 -- A library unit lowered against the types its fellow libraries declare
 -- carries those types' declarations and invariants seeded from their
@@ -59,72 +134,8 @@ stripDeclaredFromUnits declared units = map strip units
             }
         )
 
-libModuleId :: String -> ModuleId
-libModuleId name = ModuleId "tersuslib" (Just name)
-
-data LibPackage = LibPackage
-    { libInterfaces :: Map.Map String ModuleInterface
-    , libPrograms :: Map.Map String M.Program
-    , libOrder :: [String]
-    }
-    deriving (Show)
-
-compileLibPackage :: Result LibPackage String
-compileLibPackage = compileLibPackageWith bootstrapElaborator
-
-compileLibPackageWith :: Elaborator -> Result LibPackage String
-compileLibPackageWith elaborator = case libParsed of
-    Left err -> Error ("the lib package does not parse: " ++ err)
-    Right parsed -> go (lpOrder parsed) (lpStatements parsed) Map.empty Map.empty []
-  where
-    go [] _ ifaces programs done = Ok (LibPackage ifaces programs (reverse done))
-    go (name : rest) statements ifaces programs done = case compileLibModule elaborator ifaces (libDependencies name) name (Map.findWithDefault [] name statements) of
-        Error err -> Error err
-        Ok (iface, program) -> go rest statements (Map.insert name iface ifaces) (Map.insert name program programs) (name : done)
-
-compileLibModule :: Elaborator -> Map.Map String ModuleInterface -> [String] -> String -> [Statement] -> Result (ModuleInterface, M.Program) String
-compileLibModule elaborator ifaces deps name statements =
-    let moduId = libModuleId name
-        depIfaces = [ifaces Map.! dep | dep <- deps]
-     in case elaborator (Request moduId True True LibInterfaceOf depIfaces (definitionContexts ifaces (Map.keys ifaces) deps) [] Nothing [statements] 0) of
-            Accepted elaborated (Just iface) _ -> case lowerModuleWith depIfaces elaborated of
-                Error err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
-                Ok program -> Ok (iface, program)
-            Accepted _ Nothing _ -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator gave no interface")
-            Refused err -> Error ("in lib module " ++ renderModuleId moduId ++ ": " ++ err)
-            RefusedInterface err -> Error err
-            Unresolved err -> Error err
-            NotModelled what -> Error ("in lib module " ++ renderModuleId moduId ++ ": the elaborator does not handle this module yet: " ++ what)
-
-nativeStorageUnits :: Result [(ModuleId, ModuleInterface, M.Program)] String
-nativeStorageUnits = nativeStorageUnitsWith bootstrapElaborator
-
-nativeStorageUnitsWith :: Elaborator -> Result [(ModuleId, ModuleInterface, M.Program)] String
-nativeStorageUnitsWith elaborator = libPackage `bindResult` \pkg -> case LibParsed.nativeLibParsed of
-    Left err -> Error err
-    Right parsed -> flatResultMap (compileNative pkg parsed) LibParsed.nativeStorageModules
-  where
-    compileNative pkg parsed name =
-        compileLibModule elaborator (libInterfaces pkg) (Map.findWithDefault [] name (lpDependencies parsed)) name (lpStatements parsed Map.! name)
-            `bindResult` \(iface, program) -> Ok (libModuleId name, iface, program)
-
-{-# NOINLINE libPackageCache #-}
-libPackageCache :: MVar (Maybe (Result LibPackage String))
-libPackageCache = unsafePerformIO (newMVar Nothing)
-
--- The lib package, compiled on first use and kept for the process.
-libPackage :: Result LibPackage String
-libPackage = unsafePerformIO $ modifyMVar libPackageCache $ \cached -> case cached of
-    Just result -> pure (cached, result)
-    Nothing ->
-        let result = compileLibPackage
-            forced = case result of
-                Ok pkg -> Map.size (libInterfaces pkg) `seq` result
-                Error _ -> result
-         in pure (Just forced, forced)
-
 libCatalog :: LibPackage -> [Library]
-libCatalog pkg = [Library name (libDependencies name) iface | name <- libOrder pkg, Just iface <- [Map.lookup name (libInterfaces pkg)]]
+libCatalog pkg = [Library name (Map.findWithDefault [] name (libImports pkg)) iface | name <- libOrder pkg, Just iface <- [Map.lookup name (libInterfaces pkg)]]
 
 withoutReplacedEq :: [Statement] -> [ModuleInterface] -> [ModuleInterface]
 withoutReplacedEq statements ifaces
@@ -135,30 +146,32 @@ withoutReplacedEq statements ifaces
         TraitDef "Eq" _ _ -> True
         _ -> False
 
-libDefinitionContexts :: LibPackage -> [String] -> [[ModuleInterface]]
-libDefinitionContexts pkg = definitionContexts (libInterfaces pkg) (libOrder pkg)
-
-definitionContexts :: Map.Map String ModuleInterface -> [String] -> [String] -> [[ModuleInterface]]
-definitionContexts ifaces order names =
-    [ iface : [ifaces Map.! dependency | dependency <- order, dependency `elem` libDependencyClosure (libDependencies name)]
-    | name <- order, name `elem` libDependencyClosure names
-    , Just iface <- [Map.lookup name ifaces]
-    ]
-
-libDependencyClosure :: [String] -> [String]
-libDependencyClosure pending = go pending []
+libDependencyClosure :: LibPackage -> [String] -> [String]
+libDependencyClosure pkg pending = go pending []
   where
     go [] done = done
     go (name : rest) done
         | name `elem` done = go rest done
-        | otherwise = go (libDependencies name ++ rest) (done ++ [name])
+        | otherwise = go (Map.findWithDefault [] name (libImports pkg) ++ rest) (done ++ [name])
 
 -- The interfaces and lowered units of the libraries selected for a module, closed over what they import (the list and
 -- Box types only when selected), in the libraries' order, which the linked program's ghost statements follow
 libSelection :: LibPackage -> [String] -> ([ModuleInterface], [(ModuleId, M.Program)])
 libSelection pkg names =
-    let wanted = [name | name <- libDependencyClosure names, name /= "types" || "types" `elem` names]
+    let wanted = [name | name <- libDependencyClosure pkg names, name /= "types" || "types" `elem` names]
         ordered = [name | name <- libOrder pkg, name `elem` wanted]
      in ( [libInterfaces pkg Map.! name | name <- ordered]
         , [(libModuleId name, libPrograms pkg Map.! name) | name <- ordered]
         )
+
+-- How many of a program's first statements are compiler libraries put in front of it as they were read (as a parse
+-- load gives them), each library in the libraries' order
+inlinedLibraryLength :: [Statement] -> Int
+inlinedLibraryLength stmts = case libPackage of
+    Error _ -> 0
+    Ok pkg -> strip stmts [Map.findWithDefault [] name (libStatements pkg) | name <- libOrder pkg]
+  where
+    strip rest (library : more)
+        | not (null library) && library `isPrefixOf` rest = length library + strip (drop (length library) rest) more
+        | otherwise = strip rest more
+    strip _ [] = 0

@@ -1,0 +1,316 @@
+import data::codec::codec { catStrings };
+import elaborate::resolve { Line, countAt, quotedAt, readLine, textAt, wordIs };
+import elaborate::state { intText, joinWith };
+
+// What the host read from the filesystem (Modules.captureFilesystemInput) or was given: the files, the directories with
+// their subdirectories and files, the roots it canonicalized, and the options of the load (AST_DATA.md, "Loading")
+struct Dir { subdirs: List<String>, files: List<String> };
+impl Clone for Dir { };
+
+struct Source { name: String, native: Bool, text: String };
+impl Clone for Source { };
+
+struct Snap {
+    ok: Bool, kind: String, noPrelude: Bool, reserving: Bool,
+    rootNames: List<String>, rootPaths: List<String>, hasStd: Bool, std: String,
+    hasEntry: Bool, entry: String, fromSource: Bool,
+    canonical: HashMap<String, String>, dirs: HashMap<String, Dir>, files: HashMap<String, String>, sources: List<Source>
+};
+
+fn emptySnap() -> Snap ~ {
+    return Snap { ok: false, kind: "", noPrelude: false, reserving: false, rootNames: [], rootPaths: [], hasStd: false, std: "",
+        hasEntry: false, entry: "", fromSource: false, canonical: HashMap::new(), dirs: HashMap::new(), files: HashMap::new(), sources: [] };
+};
+
+// Haskell's `show` of a string, which the loader's messages quote names with
+fn showText(text: &String) -> String ~ {
+    out = push([], toByte(34));
+    i = 0;
+    numeric = false;
+    shiftOut = false;
+    while i < size(text.bytes) ~ {
+        c = byteAt(text, i);
+        width = 1;
+        if c >= 192 && c < 224 { c = (c % 32) * 64 + byteAt(text, i + 1) % 64; width = 2; }
+        else if c >= 224 && c < 240 { c = ((c % 16) * 64 + byteAt(text, i + 1) % 64) * 64 + byteAt(text, i + 2) % 64; width = 3; }
+        else if c >= 240 { c = (((c % 8) * 64 + byteAt(text, i + 1) % 64) * 64 + byteAt(text, i + 2) % 64) * 64 + byteAt(text, i + 3) % 64; width = 4; };
+        if (numeric && c >= 48 && c <= 57) || (shiftOut && c = 72) { out = pushText(out, "\\&"); };
+        numeric = false;
+        shiftOut = false;
+        if c = 34 { out = pushText(out, "\\\""); }
+        else if c = 92 { out = pushText(out, "\\\\"); }
+        else if c >= 32 && c < 127 { out = push(out, toByte(c)); }
+        else if c = 127 { out = pushText(out, "\\DEL"); }
+        else if c > 127 { out = pushText(pushText(out, "\\"), intText(c)); numeric = true; }
+        else {
+            out = pushText(pushText(out, "\\"), controlName(c));
+            shiftOut = c = 14;
+        };
+        i = i + width;
+    };
+    return String { bytes: push(out, toByte(34)) };
+};
+
+fn byteAt(text: &String, i: Int) -> Int ~ {
+    if i < 0 || i >= size(text.bytes) { return 0; };
+    return toInt(get(&text.bytes, i));
+};
+
+fn pushText(out: List<Byte>, text: &String) -> List<Byte> ~ {
+    for b in &text.bytes { out = push(out, b); };
+    return out;
+};
+
+fn controlName(c: Int) -> String ~ {
+    names = push(push(push(push(push(push(push(push([], "NUL"), "SOH"), "STX"), "ETX"), "EOT"), "ENQ"), "ACK"), "a");
+    names = push(push(push(push(push(push(push(push(names, "b"), "t"), "n"), "v"), "f"), "r"), "SO"), "SI");
+    names = push(push(push(push(push(push(push(push(names, "DLE"), "DC1"), "DC2"), "DC3"), "DC4"), "NAK"), "SYN"), "ETB");
+    names = push(push(push(push(push(push(push(push(names, "CAN"), "EM"), "SUB"), "ESC"), "FS"), "GS"), "RS"), "US");
+    if c < 0 || c >= size(names) { return ""; };
+    return clone(get(&names, c));
+};
+
+// Haskell's `show` of a list of strings
+fn showTexts(texts: &List<String>) -> String ~ {
+    parts = [];
+    for t in texts { parts = push(parts, showText(t)); };
+    joined = joinWith(&parts, ",");
+    return catStrings(catStrings("[", &joined), "]");
+};
+
+// ---- paths (Modules.hs) ----
+
+fn pathParts(path: &String) -> List<String> ~ {
+    out = [];
+    seg = [];
+    for b in &path.bytes {
+        c = toInt(b);
+        if c = 47 || c = 92 { out = pushSegment(out, seg); seg = []; } else { seg = push(seg, b); };
+    };
+    return pushSegment(out, seg);
+};
+
+fn pushSegment(out: List<String>, seg: List<Byte>) -> List<String> ~ {
+    text = String { bytes: seg };
+    if size(text.bytes) = 0 || text = "." { return out; };
+    return push(out, text);
+};
+
+fn isAbsolute(path: &String) -> Bool ~ { return size(path.bytes) > 0 && byteAt(path, 0) = 47; };
+
+fn normalizePath(path: &String) -> String ~ {
+    segments = [];
+    for seg in pathParts(path) {
+        if seg = ".." {
+            if size(segments) > 0 { segments = pop(segments); };
+        } else { segments = push(segments, clone(seg)); };
+    };
+    rendered = joinWith(&segments, "/");
+    if isAbsolute(path) { return catStrings("/", &rendered); };
+    return rendered;
+};
+
+fn joinPath(dir: &String, name: &String) -> String ~ {
+    if size(dir.bytes) = 0 { return clone(name); };
+    if dir = "/" { return catStrings("/", name); };
+    withSlash = catStrings(dir, "/");
+    return catStrings(&withSlash, name);
+};
+
+fn dirNameOf(path: &String) -> String ~ {
+    lead = "";
+    if isAbsolute(path) { lead = "/"; };
+    normal = normalizePath(path);
+    segments = pathParts(&normal);
+    if size(segments) <= 1 { return lead; };
+    parents = pop(segments);
+    joined = joinWith(&parents, "/");
+    if isAbsolute(path) { return catStrings("/", &joined); };
+    return joined;
+};
+
+fn pathBaseName(path: &String) -> String ~ {
+    normal = normalizePath(path);
+    segments = pathParts(&normal);
+    if size(segments) = 0 { return ""; };
+    return clone(get(&segments, size(segments) - 1));
+};
+
+fn stemOf(name: &String) -> String ~ {
+    out = [];
+    for b in &name.bytes {
+        if toInt(b) = 46 { return String { bytes: out }; };
+        out = push(out, b);
+    };
+    return String { bytes: out };
+};
+
+fn fileStem(file: &String) -> String ~ {
+    segments = pathParts(file);
+    if size(segments) = 0 { return ""; };
+    return stemOf(&get(segments, size(segments) - 1));
+};
+
+fn hasSuffix(text: &String, suffix: &String) -> Bool ~ {
+    n = size(text.bytes);
+    k = size(suffix.bytes);
+    if k > n { return false; };
+    for i in 0..k { if byteAt(text, n - k + i) != byteAt(suffix, i) { return false; }; };
+    return true;
+};
+
+// ---- the resolver ----
+
+struct Read { ok: Bool, text: String };
+
+fn readFile(snap: &Snap, path: &String) -> Read ~ {
+    key = normalizePath(path);
+    if !HashMap::contains(&snap.files, &key) { return Read { ok: false, text: "" }; };
+    return Read { ok: true, text: HashMap::lookup(&snap.files, &key, "") };
+};
+
+fn hasFile(snap: &Snap, path: &String) -> Bool ~ {
+    key = normalizePath(path);
+    return HashMap::contains(&snap.files, &key);
+};
+
+struct Listing { ok: Bool, subdirs: List<String>, files: List<String> };
+
+fn listDir(snap: &Snap, dir: &String) -> Listing ~ {
+    key = normalizePath(dir);
+    if !HashMap::contains(&snap.dirs, &key) { return Listing { ok: false, subdirs: [], files: [] }; };
+    d = HashMap::lookup(&snap.dirs, &key, Dir { subdirs: [], files: [] });
+    return Listing { ok: true, subdirs: d.subdirs, files: d.files };
+};
+
+fn canonicalRoot(snap: &Snap, root: &String) -> String ~ {
+    key = normalizePath(root);
+    if HashMap::contains(&snap.canonical, &key) { return HashMap::lookup(&snap.canonical, &key, ""); };
+    return key;
+};
+
+fn packageRootOf(snap: &Snap, name: &String) -> Read ~ {
+    for i in 0..size(snap.rootNames) {
+        if i < size(snap.rootPaths) && get(&snap.rootNames, i) = clone(name) { return Read { ok: true, text: clone(get(&snap.rootPaths, i)) }; };
+    };
+    return Read { ok: false, text: "" };
+};
+
+fn rootsConfigured(snap: &Snap) -> Bool ~ { return size(snap.rootNames) > 0 || snap.hasStd; };
+
+// ---- reading the load request ----
+
+fn boolWord(line: &Line, i: Int) -> Int ~ {
+    if wordIs(line, i, "true") { return 1; };
+    if wordIs(line, i, "false") { return 0; };
+    return 0 - 1;
+};
+
+fn readBytes(count: Int) -> Read ~ {
+    if count < 0 { return Read { ok: false, text: "" }; };
+    text = String::read(count);
+    if size(text.bytes) != count || readByte() != 10 { return Read { ok: false, text: "" }; };
+    return Read { ok: true, text: text };
+};
+
+fn quotedTexts(line: &Line, from: Int, n: Int) -> List<String> ~ {
+    out = [];
+    if n <= 0 { return out; };
+    for i in 0..n { out = push(out, textAt(line, from + i)); };
+    return out;
+};
+
+fn allQuoted(line: &Line, from: Int, n: Int) -> Bool ~ {
+    if n <= 0 { return true; };
+    for i in 0..n { if !quotedAt(line, from + i) { return false; }; };
+    return true;
+};
+
+// After the `load` line: the options, the snapshot and the compiler libraries' sources
+fn readSnapshot(kind: String) -> Snap ~ {
+    bad = emptySnap();
+    blank = emptySnap();
+    s = Snap { kind: kind, ..blank };
+    line = readLine();
+    prelude = boolWord(&line, 1);
+    if !wordIs(&line, 0, "noPrelude") || size(line.words) != 2 || prelude < 0 { return bad; };
+    line = readLine();
+    reserving = boolWord(&line, 1);
+    if !wordIs(&line, 0, "reserving") || size(line.words) != 2 || reserving < 0 { return bad; };
+    s = Snap { noPrelude: prelude = 1, reserving: reserving = 1, ..s };
+    line = readLine();
+    n = countAt(&line, 1);
+    if !wordIs(&line, 0, "roots") || n < 0 || size(line.words) != 2 + 2 * n || !allQuoted(&line, 2, 2 * n) { return bad; };
+    for i in 0..n {
+        s = Snap { rootNames: push(s.rootNames, textAt(&line, 2 + 2 * i)), ..s };
+        s = Snap { rootPaths: push(s.rootPaths, textAt(&line, 3 + 2 * i)), ..s };
+    };
+    line = readLine();
+    if !wordIs(&line, 0, "std") || size(line.words) != 2 || (!quotedAt(&line, 1) && !wordIs(&line, 1, "none")) { return bad; };
+    if quotedAt(&line, 1) { s = Snap { hasStd: true, std: textAt(&line, 1), ..s }; };
+    line = readLine();
+    if !wordIs(&line, 0, "entry") { return bad; };
+    if quotedAt(&line, 1) {
+        if size(line.words) != 3 || (!wordIs(&line, 2, "file") && !wordIs(&line, 2, "source")) { return bad; };
+        s = Snap { hasEntry: true, entry: textAt(&line, 1), fromSource: wordIs(&line, 2, "source"), ..s };
+    } else { if size(line.words) != 2 || !wordIs(&line, 1, "none") { return bad; }; };
+    line = readLine();
+    n = countAt(&line, 1);
+    if !wordIs(&line, 0, "canonical") || n < 0 || size(line.words) != 2 + 2 * n || !allQuoted(&line, 2, 2 * n) { return bad; };
+    canonical = HashMap::new();
+    for i in 0..n { canonical = canonical.insert(textAt(&line, 2 + 2 * i), textAt(&line, 3 + 2 * i)); };
+    s = Snap { canonical: canonical, ..s };
+    s = readDirs(s);
+    if !s.ok { return bad; };
+    s = readFiles(s);
+    if !s.ok { return bad; };
+    return readSources(s);
+};
+
+fn readDirs(s: Snap) -> Snap ~ {
+    line = readLine();
+    n = countAt(&line, 1);
+    if !wordIs(&line, 0, "dirs") || n < 0 || size(line.words) != 2 { return Snap { ok: false, ..s }; };
+    dirs = HashMap::new();
+    for i in 0..n {
+        d = readLine();
+        k = countAt(&d, 2);
+        if !wordIs(&d, 0, "dir") || !quotedAt(&d, 1) || k < 0 || !allQuoted(&d, 3, k) { return Snap { ok: false, ..s }; };
+        m = countAt(&d, 3 + k);
+        if m < 0 || size(d.words) != 4 + k + m || !allQuoted(&d, 4 + k, m) { return Snap { ok: false, ..s }; };
+        dirs = dirs.insert(textAt(&d, 1), Dir { subdirs: quotedTexts(&d, 3, k), files: quotedTexts(&d, 4 + k, m) });
+    };
+    return Snap { ok: true, dirs: dirs, ..s };
+};
+
+fn readFiles(s: Snap) -> Snap ~ {
+    line = readLine();
+    n = countAt(&line, 1);
+    if !wordIs(&line, 0, "files") || n < 0 || size(line.words) != 2 { return Snap { ok: false, ..s }; };
+    files = HashMap::new();
+    for i in 0..n {
+        f = readLine();
+        count = countAt(&f, 2);
+        if !wordIs(&f, 0, "file") || !quotedAt(&f, 1) || count < 0 || size(f.words) != 3 { return Snap { ok: false, ..s }; };
+        text = readBytes(count);
+        if !text.ok { return Snap { ok: false, ..s }; };
+        files = files.insert(textAt(&f, 1), text.text);
+    };
+    return Snap { ok: true, files: files, ..s };
+};
+
+fn readSources(s: Snap) -> Snap ~ {
+    line = readLine();
+    n = countAt(&line, 1);
+    if !wordIs(&line, 0, "sources") || n < 0 || size(line.words) != 2 { return Snap { ok: false, ..s }; };
+    sources = [];
+    for i in 0..n {
+        f = readLine();
+        count = countAt(&f, 3);
+        if !wordIs(&f, 0, "source") || !quotedAt(&f, 1) || (!wordIs(&f, 2, "implicit") && !wordIs(&f, 2, "native")) || count < 0 || size(f.words) != 4 { return Snap { ok: false, ..s }; };
+        text = readBytes(count);
+        if !text.ok { return Snap { ok: false, ..s }; };
+        sources = push(sources, Source { name: textAt(&f, 1), native: wordIs(&f, 2, "native"), text: text.text });
+    };
+    return Snap { ok: true, sources: sources, ..s };
+};

@@ -8,8 +8,8 @@ module Pipeline
     , compileSource
     , validatedSourceNoPrelude
     , compileSourceNoPrelude
-    , validatedSourceWith
-    , compileSourceWith
+    , validatedSourceUsing
+    , compileSourceUsing
     , loadFromEntry
     , loadFromFilesystem
     , loadFromFilesystemWithOptions
@@ -37,10 +37,8 @@ module Pipeline
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (SourceParts, lowerSourceParts, lowerStatements)
-import TersusParser (parseSource, parseWithEquality)
-import qualified TersusParser
-import ElaborateRequest (Elaborator)
+import Compile (lowerSourceUsing, lowerStatements, parseSource, parseSourcePartsNoPrelude, parseWithEquality)
+import ElaboratorTool (Loader, sourceLoader)
 import LibPackage (compileLibPackageWith)
 import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked, compileModulesUsing, lowerCompiledPackage)
 import Link (pruneProgram)
@@ -58,8 +56,7 @@ import Utils
 
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
 --
---   source -> AST (TersusParser.parseSourceParts; Compile stays the explicit Haskell oracle/bootstrap)
---          -> checked AST (elaborate) -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateCompiled: the validator written in Tersus, compiled to native code) -> executed (runProgram)
+--   source -> AST and checked AST (the loader written in Tersus reads and elaborates it in one process, Compile.lowerSourceUsing) -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateCompiled: the validator written in Tersus, compiled to native code) -> executed (runProgram)
 --                                                                    or -> owned MIR (ownedSource) -> LLVM IR (the emitter written in Tersus, see Bootstrap)
 --
 -- The validated MIR has its permissions (ghost values, POINTERS.md) taken out by `eraseGhosts` before anything runs it or makes native code of it.
@@ -75,7 +72,7 @@ assumptionsOf :: String -> Result [String] String
 assumptionsOf = assumptionsOfNoPrelude False
 
 assumptionsOfNoPrelude :: Bool -> String -> Result [String] String
-assumptionsOfNoPrelude noPrelude source = mapResult (snd . statements Nothing . (\(_, library, body) -> library ++ body)) (TersusParser.parseSourcePartsNoPrelude noPrelude True source)
+assumptionsOfNoPrelude noPrelude source = mapResult (snd . statements Nothing . (\(_, library, body) -> library ++ body)) (parseSourcePartsNoPrelude noPrelude True source)
   where
     statements place = foldl (\(p, found) stmt -> let (p', more) = statement p stmt in (p', found ++ more)) (place, [])
     statement place stmt = case stmt of
@@ -108,11 +105,12 @@ validatedSource :: String -> Result M.Program String
 validatedSource = validatedSourceNoPrelude False
 
 validatedSourceNoPrelude :: Bool -> String -> Result M.Program String
-validatedSourceNoPrelude noPrelude = validatedSourceWith (TersusParser.parseSourcePartsNoPrelude noPrelude)
+validatedSourceNoPrelude noPrelude = validatedSourceUsing sourceLoader noPrelude
 
-validatedSourceWith :: (Bool -> String -> Result SourceParts String) -> String -> Result M.Program String
-validatedSourceWith readSource source =
-    readSource True source `bindResult` lowerSourceParts True `bindResult` \program ->
+-- With the loader that reads and checks the source given (a test substitutes one)
+validatedSourceUsing :: Loader -> Bool -> String -> Result M.Program String
+validatedSourceUsing loader noPrelude source =
+    lowerSourceUsing loader noPrelude True source `bindResult` \program ->
         checkedLowered program `bindResult` \checked ->
             stage "Validation failed: " (validateCompiled checked) `bindResult` \_ ->
                 Ok checked
@@ -124,21 +122,21 @@ compileSource = compileSourceNoPrelude False
 compileSourceNoPrelude :: Bool -> String -> Result M.Program String
 compileSourceNoPrelude noPrelude source = validatedSourceNoPrelude noPrelude source `bindResult` eraseGhosts
 
-compileSourceWith :: (Bool -> String -> Result SourceParts String) -> String -> Result M.Program String
-compileSourceWith readSource source = validatedSourceWith readSource source `bindResult` eraseGhosts
+compileSourceUsing :: Loader -> Bool -> String -> Result M.Program String
+compileSourceUsing loader noPrelude source = validatedSourceUsing loader noPrelude source `bindResult` eraseGhosts
 
--- The production file boundary; the default Modules loaders remain the isolated bootstrap path.
+-- The production loads; the default Modules loads are the seed's, for the compiler's own code.
 loadFromEntry :: Mod.Resolver -> FilePath -> Either String Mod.LoadResult
-loadFromEntry = Mod.loadFromEntryWith TersusParser.parseFileWith
+loadFromEntry = Mod.loadFromEntryWith sourceLoader
 
 loadFromFilesystem :: FilePath -> IO (Either String Mod.LoadResult)
 loadFromFilesystem = loadFromFilesystemWithOptions Mod.defaultLoadOptions
 
 loadFromFilesystemWithOptions :: Mod.LoadOptions -> FilePath -> IO (Either String Mod.LoadResult)
-loadFromFilesystemWithOptions = Mod.loadFromFilesystemWithOptions TersusParser.parseFileWith
+loadFromFilesystemWithOptions = Mod.loadFromFilesystemWithOptions sourceLoader
 
 loadFromSource :: Mod.LoadOptions -> String -> IO (Either String Mod.LoadResult)
-loadFromSource = Mod.loadFromSourceWith TersusParser.parseFileWith
+loadFromSource = Mod.loadFromSourceWith sourceLoader
 
 -- A lowered program that the checker written in Tersus (MirHousekeeping) accepts; a refusal is the
 -- lowering's, as it was when the lowering checked its own work
@@ -213,7 +211,7 @@ runStatements stmts =
 
 -- A package's modules lowered, linked and validated (by the validator
 -- written in Tersus, as a single-file program is)
-compileModulesValidated :: Mod.LoadedPackage -> Result M.Program String
+compileModulesValidated :: Mod.Snapshot -> Result M.Program String
 compileModulesValidated pkg =
     compileModulesLinked pkg `bindResult` \linked ->
         stage "Validation failed: " (validateCompiled (oneMarkerEach linked)) `bindResult` \_ -> Ok linked
@@ -242,21 +240,21 @@ oneMarkerEach program =
 
 -- A package of the compiler's own programs as the host builds it: linked,
 -- its ghosts erased, not validated (see MirHousekeeping.toolProgram)
-compileModulesBootstrap :: Mod.LoadedPackage -> Result M.Program String
+compileModulesBootstrap :: Mod.Snapshot -> Result M.Program String
 compileModulesBootstrap pkg = mapResult pruneProgram (compileModulesLinked pkg `bindResult` eraseGhosts)
 
--- compileModulesBootstrap with the package's modules and the compiler libraries elaborated by the given elaborator
-compileModulesBootstrapWith :: Elaborator -> Mod.LoadedPackage -> Result M.Program String
-compileModulesBootstrapWith elaborator pkg =
-    mapResult pruneProgram (compileModulesUsing elaborator (compileLibPackageWith elaborator) pkg `bindResult` lowerCompiledPackage pkg `bindResult` eraseGhosts)
+-- compileModulesBootstrap with the package's modules and the compiler libraries elaborated by the given loader
+compileModulesBootstrapWith :: Loader -> Mod.Snapshot -> Result M.Program String
+compileModulesBootstrapWith loader pkg =
+    mapResult pruneProgram (compileModulesUsing loader (compileLibPackageWith loader) pkg `bindResult` lowerCompiledPackage `bindResult` eraseGhosts)
 
-compileModulesToProgram :: Mod.LoadedPackage -> Result M.Program String
+compileModulesToProgram :: Mod.Snapshot -> Result M.Program String
 compileModulesToProgram pkg = compileModulesValidated pkg `bindResult` erasedModuleProgram
 
 erasedModuleProgram :: M.Program -> Result M.Program String
 erasedModuleProgram = mapResult pruneProgram . eraseGhosts
 
-compileModulesToOwned :: Mod.LoadedPackage -> Result M.Program String
+compileModulesToOwned :: Mod.Snapshot -> Result M.Program String
 compileModulesToOwned pkg = compileModulesToProgram pkg `bindResult` ownedModuleProgram
 
 ownedModuleProgram :: M.Program -> Result M.Program String

@@ -7,18 +7,18 @@ module PackageCompile
     , lowerCompiledPackage
     , compileModulesLinked
     , assumptionsOfPackage
+    , packageFailure
     ) where
 
 import Data.List (nubBy)
 import qualified Data.Map as Map
 import qualified Mir as M
-import ElaborateRequest (Elaborator, Extraction (..), FileImport (..), Package (..), PackageFile (..), Request (..), Response (..))
-import ElaboratorTool (sourceElaborator)
+import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..))
+import ElaboratorTool (Loader, sourceLoader)
 import Interface (ModuleInterface (..))
-import LibPackage (LibPackage, libCatalog, libPackage, libDefinitionContexts, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
+import LibPackage (LibPackage, libCatalog, libInterfaces, libModuleId, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
 import Link (linkPrograms)
 import qualified Modules as Mod
-import ParsedFile (Import (..), ParsedFile (..))
 import MirLower (lowerModuleWith)
 import Pretty (renderVarProof)
 import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
@@ -32,7 +32,6 @@ data CompiledModule = CompiledModule
     , compiledLibInterfaces :: [ModuleInterface]
     , compiledLibUnits :: [(Mod.ModuleId, M.Program)]
     , compiledImportInterfaces :: [ModuleInterface]
-    , compiledDefinitionContexts :: [[ModuleInterface]]
     }
     deriving (Show)
 
@@ -42,54 +41,54 @@ data CompiledPackage = CompiledPackage
     }
     deriving (Show)
 
-compileModules :: Mod.LoadedPackage -> Result CompiledPackage String
-compileModules = compileModulesWith sourceElaborator
+compileModules :: Mod.Snapshot -> Result CompiledPackage String
+compileModules = compileModulesWith sourceLoader
 
-compileModulesWith :: Elaborator -> Mod.LoadedPackage -> Result CompiledPackage String
-compileModulesWith elaborator = compileModulesUsing elaborator libPackage
+compileModulesWith :: Loader -> Mod.Snapshot -> Result CompiledPackage String
+compileModulesWith loader = compileModulesUsing loader libPackage
 
--- The libraries are a parameter so that the frontend seed's stages can give ones elaborated by the same elaborator
-compileModulesUsing :: Elaborator -> Result LibPackage String -> Mod.LoadedPackage -> Result CompiledPackage String
-compileModulesUsing elaborator libraries pkg = go (Mod.packageModules pkg) Map.empty []
+-- The package of the snapshot's entry, loaded and every module elaborated in order by the loader written in Tersus,
+-- which names the interfaces each is lowered with. The libraries are a parameter so that the frontend seed's stages
+-- can give ones elaborated by the same elaborator; when they failed, the first module that is given them refuses.
+compileModulesUsing :: Loader -> Result LibPackage String -> Mod.Snapshot -> Result CompiledPackage String
+compileModulesUsing loader libraries snapshot = case loader ((Mod.loadRequest LoadPackage snapshot) {lrLibraries = either' [] libCatalog libraries}) of
+    LoadedModules answers -> go answers Map.empty [] `bindResult` \modules ->
+        if any ((== entry) . compiledModuleId) modules
+            then Ok (CompiledPackage entry modules)
+            else Error ("internal: the loader did not answer for the entry module " ++ Mod.renderModuleId entry)
+    NotLoaded err -> Error err
+    _ -> Error "internal: the loader did not answer with the package's modules"
   where
-    package = packageOf pkg
-    go [] _ done = Ok (CompiledPackage (Mod.packageEntryModule pkg) (reverse done))
-    go (modu : rest) compiled done =
-        case compileOne compiled modu of
-            Error err -> Error err
-            Ok unit -> go rest (Map.insert (Mod.loadedModuleId modu) unit compiled) (unit : done)
-    compileOne compiled modu =
-        let moduId = Mod.loadedModuleId modu
-            inModule err = "in module " ++ Mod.renderModuleId moduId ++ ": " ++ err
-            depModules = [compiled Map.! dep | dep <- Mod.loadedDependencies modu, Map.member dep compiled]
-            depInterfaces = map compiledInterface depModules
-            definingContexts = uniqueContexts (concatMap compiledDefinitionContexts depModules)
-            missing = [dep | dep <- Mod.loadedDependencies modu, not (Map.member dep compiled)]
-            given = if Mod.loadedNoPrelude modu then Ok Nothing else mapResult Just libraries
-         in case (missing, given) of
-                (dep : _, _) -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": dependency " ++ Mod.renderModuleId dep ++ " was not compiled before it (the loader gives modules dependencies first)")
-                (_, Error err) -> Error (inModule err)
-                (_, Ok libPkg) ->
-                    let request = Request moduId True False ModuleInterfaceOf depInterfaces definingContexts (maybe [] libCatalog libPkg) (Just package) [fileBody (Mod.loadedParsed file) | file <- Mod.loadedModuleFiles modu] 0
-                     in case elaborator request of
-                            Accepted elaborated@(Elaborated elaboratedStmts _) (Just iface) selected ->
-                                let (selectedIfaces, libUnits) = maybe ([], []) (`libSelection` selected) libPkg
-                                    libIfaces = withoutReplacedEq elaboratedStmts selectedIfaces
-                                    definitions = uniqueContexts (maybe [] (`libDefinitionContexts` selected) libPkg ++ definingContexts)
-                                    lowering = uniqueInterfaces (libIfaces ++ depInterfaces ++ concat definitions)
-                                 in Ok (CompiledModule moduId elaboratedStmts elaborated iface libIfaces (stripDeclaredFromUnits (moduleDeclaredNames elaboratedStmts) libUnits) lowering (uniqueContexts ((iface : lowering) : definitions)))
-                            Accepted _ Nothing _ -> Error (inModule "the elaborator gave no interface")
-                            Refused err -> Error (inModule err)
-                            RefusedInterface err -> Error err
-                            Unresolved err -> Error err
-                            NotModelled what -> Error (inModule ("the elaborator does not handle this module yet: " ++ what))
+    entry = Mod.entryModuleOf snapshot
+    either' d f r = case r of
+        Ok a -> f a
+        Error _ -> d
+    -- (only when the libraries failed: which modules are given none)
+    noPrelude = case Mod.graphResult snapshot loader of
+        Right (Mod.PackageResult pkg) -> [Mod.loadedModuleId m | m <- Mod.packageModules pkg, Mod.loadedNoPrelude m]
+        _ -> []
+    go [] _ done = Ok (reverse done)
+    go ((moduId, lowering, response) : rest) ifaces done = case (libraries, response) of
+        (Error err, _) | moduId `notElem` noPrelude -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
+        (_, Accepted elaborated@(Elaborated stmts _) (Just iface) selected) ->
+            let (selectedIfaces, units) = either' ([], []) (`libSelection` selected) libraries
+                known = Map.insert moduId iface ifaces
+                libIfaces = either' Map.empty (\p -> Map.fromList [(libModuleId n, i) | (n, i) <- Map.toList (libInterfaces p)]) libraries
+             in case mapM (\i -> maybe (Map.lookup i libIfaces) Just (Map.lookup i known)) lowering of
+                    Nothing -> Error ("internal: the loader named an interface it did not give for module " ++ Mod.renderModuleId moduId)
+                    Just loweringIfaces ->
+                        go rest known (CompiledModule moduId stmts elaborated iface (withoutReplacedEq stmts selectedIfaces) (stripDeclaredFromUnits (moduleDeclaredNames stmts) units) loweringIfaces : done)
+        _ -> Error (packageFailure moduId response)
 
-packageOf :: Mod.LoadedPackage -> Package
-packageOf pkg = Package (Mod.packageEntryModule pkg) [packageFile file | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
+packageFailure :: Mod.ModuleId -> Response -> String
+packageFailure moduId response = case response of
+    Refused err -> inModule err
+    NotModelled what -> inModule ("the elaborator does not handle this module yet: " ++ what)
+    RefusedInterface err -> err
+    Unresolved err -> err
+    Accepted _ _ _ -> inModule "the elaborator gave no interface"
   where
-    packageFile file = PackageFile (Mod.loadedFileModule file) (Mod.loadedFileStem file) (Mod.loadedFileName file) (Mod.fileDeclarations (fileBody (Mod.loadedParsed file))) (map fileImport (Mod.loadedImports file))
-    fileImport ri = FileImport (Mod.resolvedLevel ri) (Mod.resolvedTargetModule ri) (Mod.resolvedTargetFile ri) (Mod.resolvedTargetSymbol ri) (importAlias (Mod.resolvedImport ri)) (importNames (Mod.resolvedImport ri))
-
+    inModule err = "in module " ++ Mod.renderModuleId moduId ++ ": " ++ err
 -- The names a module itself declares, under the names it declares them (the entry module's are the bare names the
 -- libraries use; another module's are canonical and so do not meet the libraries' bare names), which the library units
 -- linked for it do not declare again
@@ -110,18 +109,13 @@ moduleDeclaredNames prepared = concatMap declared prepared ++ concatMap defined 
 -- The modules of a package lowered and linked into one program, not yet
 -- validated (Pipeline.compileModulesValidated validates it; the host's own
 -- programs are built from this, see MirHousekeeping.toolProgram)
-compileModulesLinked :: Mod.LoadedPackage -> Result M.Program String
-compileModulesLinked pkg = compileModules pkg `bindResult` lowerCompiledPackage pkg
+compileModulesLinked :: Mod.Snapshot -> Result M.Program String
+compileModulesLinked snapshot = compileModules snapshot `bindResult` lowerCompiledPackage
 
 -- Callers must validate the linked program before erasure or execution.
-lowerCompiledPackage :: Mod.LoadedPackage -> CompiledPackage -> Result M.Program String
-lowerCompiledPackage pkg compiled =
-    let loadedMap = Map.fromList [(Mod.loadedModuleId modu, modu) | modu <- Mod.packageModules pkg]
-        lowerOne modu = case Map.lookup (compiledModuleId modu) loadedMap of
-            Nothing -> Error ("internal: compiled module " ++ Mod.renderModuleId (compiledModuleId modu) ++ " is not in the loaded package")
-            Just _ ->
-                let allIfaces = compiledImportInterfaces modu
-                 in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith allIfaces (compiledElaborated modu)))
+lowerCompiledPackage :: CompiledPackage -> Result M.Program String
+lowerCompiledPackage compiled =
+    let lowerOne modu = mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (compiledImportInterfaces modu) (compiledElaborated modu)))
         libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
      in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
 
@@ -146,12 +140,6 @@ assumptionsOfPackage compiled = concatMap perModule (compiledModules compiled)
         ImplDef _ _ _ _ _ body -> concatMap assumesIn body
         BoundedDef _ inner -> assumesIn inner
         _ -> []
-
-uniqueContexts :: [[ModuleInterface]] -> [[ModuleInterface]]
-uniqueContexts = nubBy (\a b -> map ifModule (take 1 a) == map ifModule (take 1 b))
-
-uniqueInterfaces :: [ModuleInterface] -> [ModuleInterface]
-uniqueInterfaces = nubBy (\a b -> ifModule a == ifModule b)
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

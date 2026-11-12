@@ -7,32 +7,30 @@ module TestModules
 
 import Control.Exception (bracket, evaluate, finally, try, SomeException)
 import Control.Monad (when)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, createDirectoryLink, doesDirectoryExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, withCurrentDirectory)
 import System.IO (hClose, openTempFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath (takeDirectory, (</>))
-import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Bootstrap
 import qualified AstData
 import qualified PackageCompile
-import PreludeSource (parserPackageFiles, astReaderPackageFiles, toolPackageFiles, validationPackageFiles)
+import PreludeSource (parserPackageFiles, astReaderPackageFiles, toolPackageFiles, validationPackageFiles, typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource)
 import qualified MirHousekeeping
 import qualified Compile
 import FileParserProtocol
 import qualified FileParserProtocol as File
 import qualified Cli
 import Cli (Command (..), World (..), noWorld, runPackageFiles)
-import qualified ElaborateRequest as Elaboration
 import InterfaceData (readInterface, writeInterface)
 import Interface
 import qualified Mir as M
 import MirEval (renderMirValue, runProgram, runNamedFunction, MirValue (..))
 import qualified Pipeline
-import qualified SourceParse
+import ElaborateRequest (LoadRequest (..), LoadResponse (..))
+import ElaboratorTool (Loader, sourceLoader)
 import Modules
 import TestParserFragments
 import ParsedFile
@@ -47,8 +45,7 @@ import Pipeline (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage
 import Syntax
 import Types
 import TestHarness
-import Compile (elaborateStatements)
-import ElaboratorTool (noVerdict, sourceElaborator)
+import ElaboratorTool (noVerdict)
 import Utils (Result (..), bindResult)
 
 parsed :: String -> Either String [Statement]
@@ -138,7 +135,7 @@ testCanonical =
         let imports = concat ["import pkg::" ++ takeWhile (/= '/') (drop 4 path) ++ "; " | (path, _) <- files]
          in case loadFromEntry (resolverFromFiles ([("pkg/package.tersus", ""), ("pkg/main.tersus", imports ++ programA ++ " return 0;")] ++ files)) "pkg/main.tersus" of
                 Left err -> Error err
-                Right (PackageResult pkg) -> compileModules pkg
+                Right (PackageResult pkg) -> compileModules (packageSnapshot pkg)
                 Right _ -> Error "fixture did not load as a package"
     inspectModules files check = case compiledWith files of
         Error err -> Just err
@@ -480,7 +477,7 @@ testLoaderFilesystem = TestCase "loader-filesystem" $ do
     runFs root pkgDir = do
         entry <- writeGeoPackageFs pkgDir "import app::geo; x = 1;" "struct Point { x: Int };"
         loaded <- loadFromFilesystem entry
-        injected <- loadFromFilesystemWith injectedFileParser entry
+        injected <- loadFromFilesystemWith (const (NotLoaded "injected refusal sentinel")) entry
         return ((case loaded of
             Left err -> Just ("filesystem load failed: " ++ err)
             Right (PackageResult pkg) -> testAssertEq (moduleOrder pkg) ["app::geo", "app"]
@@ -521,7 +518,7 @@ testSnapshotToolFailure = TestCase "snapshot capture refuses a parser tool failu
 compilePkg :: Files -> FilePath -> Either String CompiledPackage
 compilePkg files entry = case loadPkg files entry of
     Left err -> Left err
-    Right pkg -> case compileModules pkg of
+    Right pkg -> case compileModules (packageSnapshot pkg) of
         Error err -> Left err
         Ok compiled -> Right compiled
 
@@ -701,14 +698,14 @@ testModuleCheckWithin =
 programPkg :: Files -> FilePath -> Either String M.Program
 programPkg files entry = case loadPkg files entry of
     Left err -> Left err
-    Right pkg -> case compileModulesToProgram pkg of
+    Right pkg -> case compileModulesToProgram (packageSnapshot pkg) of
         Error err -> Left err
         Ok program -> Right program
 
 ownedPkg :: Files -> FilePath -> Either String M.Program
 ownedPkg files entry = case loadPkg files entry of
     Left err -> Left err
-    Right pkg -> case compileModulesToOwned pkg of
+    Right pkg -> case compileModulesToOwned (packageSnapshot pkg) of
         Error err -> Left err
         Ok program -> Right program
 
@@ -887,7 +884,7 @@ testModuleAssumptions =
         "module-assumptions"
         [ case loadPkg assumptionFiles "app/main.tersus" of
             Left err -> Just ("assumption package should load: " ++ err)
-            Right pkg -> case compileModules pkg of
+            Right pkg -> case compileModules (packageSnapshot pkg) of
                 Error err -> Just ("assumption package should compile: " ++ err)
                 Ok compiled ->
                     let found = assumptionsOfPackage compiled
@@ -917,7 +914,7 @@ testModuleCliFilesystem = TestCase "module-cli-filesystem" $ do
         loaded <- loadFromFilesystem entry
         value <- case loaded of
             Left err -> return (Just ("filesystem load failed: " ++ err))
-            Right (PackageResult pkg) -> return (case runPackageFiles noWorld Interpret pkg of
+            Right (PackageResult pkg) -> return (case runPackageFiles noWorld Interpret (packageSnapshot pkg) of
                 Error err -> Just ("package eval failed: " ++ err)
                 Ok ((output, _), _) -> if output == "3" then Nothing else Just ("expected package eval to print 3, got: " ++ show output))
             Right other -> return (Just ("expected a package result, got: " ++ show other))
@@ -1207,72 +1204,81 @@ testFileProtocol = TestList "file-protocol"
 nativeEntrySource :: String
 nativeEntrySource = "\n  import app::geo::NativePoint as p;\n@native-entry@"
 
-injectedFileParser :: FileParser
-injectedFileParser decls source
-    | not (declLocate decls) = Left "injected parser requires source positions"
-    | source == nativeEntrySource =
-        if Map.member "NativePoint" (declCtors decls)
-            then Right (ParsedFile [Import ["app", "geo", "NativePoint"] (Just "p") Nothing 2 3] [Mark 7 9, Return (Val (VInt 77))], decls)
-            else Left "native seed missing"
-    | source == "@native-type@" = Right (ParsedFile [] [Mark 11 13, StructDef "NativePoint" [] [] []], decls{declCtors = Map.insert "NativePoint" [] (declCtors decls)})
-    | source == "@need-final@" =
-        if Map.member "finalGate" (declCtors decls)
-            then Right (ParsedFile [] [Return (Val (VInt 88))], decls)
-            else Left "iterative callback state missing"
-    | source == "@promote@" =
-        let key = if Map.member "seedGate" (declCtors decls) then "finalGate" else "seedGate"
-         in Right (ParsedFile [] [StructDef "Gate" [] [] []], decls{declCtors = Map.insert key [] (declCtors decls)})
-    | otherwise = Left "injected refusal sentinel"
-
+-- The load answers what the loader it is given answers, and the loader seeds, re-parses and refuses as the parser
+-- written in Tersus reads the files
 testLoaderInjection :: Test
 testLoaderInjection = testCaseSeq "loader-injection"
     [ testAssertEq (Oracle.parseImportPrefix nativeEntrySource) (Right [Import ["app", "geo", "NativePoint"] (Just "p") Nothing 2 3])
-    , case loadFromEntryWith injectedFileParser (resolverFromFiles [("solo.tersus", "@need-final@")]) "solo.tersus" of
-        Left err -> testAssertTrue ("iterative callback state missing" `isInfixOf` err)
-        Right _ -> Just "standalone loader did not use injected parser"
-    , case loadFromEntryWith (\d _ -> Right (ParsedFile [] [Return (Val (VInt 99))], d)) (resolverFromFiles [("solo.tersus", "not Haskell syntax")]) "solo.tersus" of
-        Right (StandaloneResult path pf) -> testAssertEq path "solo.tersus" <> testAssertEq (fileBody pf) [Return (Val (VInt 99))]
+    , case loadFromEntryWith (const (NotLoaded "injected refusal sentinel")) (resolverFromFiles [("solo.tersus", "return 1;")]) "solo.tersus" of
+        Left err -> testAssertTrue ("injected refusal sentinel" `isInfixOf` err)
+        Right _ -> Just "standalone loader did not use the injected loader"
+    , case loadFromEntryWith (\request -> sourceLoader request{lrResolver = resolverFromFiles [("solo.tersus", "return 99;")]}) (resolverFromFiles [("solo.tersus", "not Tersus syntax")]) "solo.tersus" of
+        Right (StandaloneResult path pf) -> testAssertEq path "solo.tersus" <> testAssertEq [stmt | stmt <- fileBody pf, not (isMark stmt)] [Return (Val (VInt 99))]
         other -> Just ("standalone AST substitution failed: " ++ show other)
-    , case loadFromEntryWith injectedFileParser (resolverFromFiles nativeFiles) "app/main.tersus" of
-        Left err -> Just ("native-only files should load through callback: " ++ err)
+    , case loadFromEntry (resolverFromFiles nativeFiles) "app/main.tersus" of
+        Left err -> Just ("seeded files should load: " ++ err)
         Right (PackageResult pkg) ->
             let files = concatMap loadedModuleFiles (packageModules pkg)
                 mainFiles = [file | file <- files, loadedFileName file == "main.tersus"]
              in testAssertEq (moduleOrder pkg) ["app::geo", "app"]
                 <> case mainFiles of
-                    [file] -> testAssertEq (loadedFileSource file) nativeEntrySource
+                    [file] -> testAssertEq (loadedFileSource file) nativeSource
                         <> testAssertEq (loadedFilePath file) "app/main.tersus"
-                        <> testAssertEq (fileBody (loadedParsed file)) [Mark 7 9, Return (Val (VInt 77))]
-                        <> testAssertEq (map resolvedImport (loadedImports file)) [Import ["app", "geo", "NativePoint"] (Just "p") Nothing 2 3]
+                        <> testAssertEq (map resolvedImport (loadedImports file)) [Import ["app", "geo", "NativePoint"] Nothing Nothing 1 1]
                         <> testAssertEq (map resolvedCanonical (loadedImports file)) ["app$geo$geo$NativePoint"]
-                        <> case compileModulesToProgram pkg of
-                            Error err -> Just ("substituted AST should compile without reparsing source: " ++ err)
+                        <> case compileModulesToProgram (packageSnapshot pkg) of
+                            Error err -> Just ("the loaded package should compile: " ++ err)
                             Ok program -> case runProgram program of
                                 Error err -> Just err
                                 Ok returned -> testAssertEq (fmap renderMirValue returned) (Just "77")
-                    _ -> Just "expected one substituted main file"
-        Right _ -> Just "expected injected package result"
-    , case loadFromEntryWith injectedFileParser (resolverFromFiles nativeFiles){resolverOptions = defaultLoadOptions{noPrelude = True}} "app/main.tersus" of
+                    _ -> Just "expected one main file"
+        Right _ -> Just "expected a package result"
+    , case loadFromEntry (resolverFromFiles nativeFiles){resolverOptions = defaultLoadOptions{noPrelude = True}} "app/main.tersus" of
         Right (PackageResult pkg) -> testAssertEq (map loadedNoPrelude (packageModules pkg)) [True, True]
-            <> testAssertEq [fileBody (loadedParsed file) | modu <- packageModules pkg, file <- loadedModuleFiles modu, loadedFileName file == "main.tersus"] [[Mark 7 9, Return (Val (VInt 77))]]
-        other -> Just ("noPrelude callback must receive explicit dependency seed and preserve substituted body: " ++ show other)
+        other -> Just ("noPrelude packages must load with their explicit dependency seed: " ++ show other)
     , foldr (<>) Nothing
-        [ case loadFromEntryWith (\decls source -> injectedFileParser decls (if source == "@hidden-import@" then nativeEntrySource else source))
-            (resolverFromFiles [(path, if path == "app/main.tersus" then "@hidden-import@" else source) | (path,source) <- nativeFiles]){resolverOptions = defaultLoadOptions{noPrelude = enabled}}
-            "app/main.tersus" of
-                Left err -> testAssertTrue ("native seed missing" `isInfixOf` err)
-                Right _ -> Just "callback received a constructor without a source import"
+        [ case loadFromEntry (resolverFromFiles [(path, if path == "app/main.tersus" then "n = NativePoint { };\nreturn 77;" else source) | (path, source) <- nativeFiles]){resolverOptions = defaultLoadOptions{noPrelude = enabled}} "app/main.tersus" of
+            Left _ -> Nothing
+            Right (PackageResult pkg) -> case compileModulesToProgram (packageSnapshot pkg) of
+                Error _ -> Nothing
+                Ok _ -> Just "a constructor reached a file without a source import"
+            Right _ -> Just "expected a package result"
         | enabled <- [False, True]
         ]
-    , case loadFromEntryWith injectedFileParser (resolverFromFiles [("app/package.tersus", ""), ("app/a.tersus", "@need-final@"), ("app/z.tersus", "@promote@")]) "app/a.tersus" of
-        Right (PackageResult pkg) -> testAssertEq [fileBody (loadedParsed file) | modu <- packageModules pkg, file <- loadedModuleFiles modu, loadedFileName file == "a.tersus"] [[Return (Val (VInt 88))]]
-        other -> Just ("iterative passes must use callback and its final Decls: " ++ show other)
-    , case loadFromEntryWith injectedFileParser (resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "@never@")]) "app/main.tersus" of
-        Left err -> testAssertTrue ("injected refusal sentinel" `isInfixOf` err)
-        Right _ -> Just "diagnostic parse bypassed callback"
+    , case loadFromEntry (resolverFromFiles [("app/package.tersus", ""), ("app/a.tersus", "import app::z::Gate;\ng = Gate { };\nreturn 88;"), ("app/z.tersus", "struct Gate { };")]) "app/a.tersus" of
+        Right (PackageResult pkg) -> case compileModulesToProgram (packageSnapshot pkg) `bindResult` runProgram of
+            Error err -> Just err
+            Ok returned -> testAssertEq (fmap renderMirValue returned) (Just "88")
+        other -> Just ("a sibling's type imported by name must load and run: " ++ show other)
+    -- (a reads Gate only in the second round, with its module's final declarations; using it unimported is then the
+    -- elaborator's refusal, not a parse error)
+    , case loadFromEntry (resolverFromFiles [("app/package.tersus", ""), ("app/a.tersus", "g = Gate { };\nreturn 88;"), ("app/z.tersus", "struct Gate { };")]) "app/a.tersus" of
+        Right (PackageResult pkg) -> case compileModulesToProgram (packageSnapshot pkg) of
+            Error err -> testAssertTrue ("declared in another file or module" `isInfixOf` err && not ("parse error" `isInfixOf` err))
+            Ok _ -> Just "an unimported sibling type was used"
+        other -> Just ("a file must be read again with its module's final declarations: " ++ show other)
+    -- (z's import of dep seeds z alone: a, which spells dep's type without importing it, does not parse)
+    , case loadFromEntry (resolverFromFiles (leakFiles "")) "pkgs/app/a.tersus" of
+        Left err -> testAssertTrue ("parse error in module app file pkgs/app/a.tersus" `isInfixOf` err)
+        Right _ -> Just "a sibling's imported declarations leaked into a file that does not import them"
+    , case loadFromEntry (resolverFromFiles (leakFiles "import dep;\n")) "pkgs/app/a.tersus" of
+        Right (PackageResult _) -> Nothing
+        other -> Just ("a file that imports dep must read its type: " ++ show other)
+    , case loadFromEntry (resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "@never@")]) "app/main.tersus" of
+        Left err -> testAssertTrue ("parse error in module app file app/main.tersus" `isInfixOf` err)
+        Right _ -> Just "a file that does not parse was loaded"
     ]
   where
-    nativeFiles = [("app/package.tersus", ""), ("app/main.tersus", nativeEntrySource), ("app/geo/geo.tersus", "@native-type@")]
+    leakFiles prefix =
+        [ ("pkgs/app/package.tersus", ""), ("pkgs/app/a.tersus", prefix ++ "s = dep::Seed { };\nreturn 1;")
+        , ("pkgs/app/z.tersus", "import dep;\nfn zf() -> Int ~ { return 0; };")
+        , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "struct Seed { };")
+        ]
+    nativeSource = "import app::geo::NativePoint;\nn = NativePoint { };\nreturn 77;"
+    nativeFiles = [("app/package.tersus", ""), ("app/main.tersus", nativeSource), ("app/geo/geo.tersus", "struct NativePoint { };")]
+    isMark stmt = case stmt of
+        Mark _ _ -> True
+        _ -> False
 
 canonicalDeclsEqual :: Decls -> Decls -> TestResult
 canonicalDeclsEqual actual expected = case (File.writeFileRequest actual "", File.writeFileRequest expected "") of
@@ -1377,7 +1383,7 @@ testNativeFiles = TestList "native-file-transport"
             , ("misplaced import", False, locating emptyDecls, "return 0; import app::geo;")
             , ("malformed path", False, locating emptyDecls, "import app:::geo;")
             ]
-        ] ++ [TestCase "full library declarations and UTF-8 source" $ case Compile.probeDecls of
+        ] ++ [TestCase "full library declarations and UTF-8 source" $ case libraryDecls of
             Left e -> pure (Just e)
             Right declared -> do
                 let source = "// String in a comment is not a declaration\ns = \"λ🙂\"; return size(s.bytes);"
@@ -1435,15 +1441,6 @@ testNativeFiles = TestList "native-file-transport"
   where
     source = "\nimport app::geo as g { Point };\nstruct Local { z: Int, a: Bool }; return 1;"
 
-{-# NOINLINE nativeLoaderParser #-}
-nativeLoaderParser :: IORef [String] -> FileParser
-nativeLoaderParser failures decls source = unsafePerformIO $ do
-    actual <- NativeParser.parseFileNative decls source
-    case actual of
-        Left err | "Parser tool failure:" `isInfixOf` err -> modifyIORef' failures (err :)
-        _ -> pure ()
-    pure actual
-
 loadedParity :: LoadResult -> LoadResult -> TestResult
 loadedParity (StandaloneResult actualPath actualFile) (StandaloneResult expectedPath expectedFile) =
     testAssertEq actualPath expectedPath <> testAssertEq actualFile expectedFile
@@ -1459,7 +1456,7 @@ loadedParity _ _ = Just "native and oracle loaders disagreed on standalone/packa
 
 nativeLoadVerdict :: Bool -> Either String LoadResult -> Either String LoadResult -> TestResult
 nativeLoadVerdict accepted actual expected = case actual of
-    Left err | "Parser tool failure:" `isInfixOf` err -> Just err
+    Left err | "Parser tool failure:" `isInfixOf` err || "Elaborator tool failure:" `isInfixOf` err -> Just err
     _ -> case (expected, actual) of
         (Right expectedLoad, Right actualLoad)
             | accepted -> loadedParity actualLoad expectedLoad
@@ -1470,24 +1467,19 @@ nativeLoadVerdict accepted actual expected = case actual of
         (Left err, Right _) -> Just ("native loader accepted what oracle rejected: " ++ err)
         (Right _, Left err) -> Just ("native loader rejected accepted control: " ++ err)
 
-nativeLoadCase :: String -> Bool -> IO (Either String LoadResult) -> (FileParser -> IO (Either String LoadResult)) -> Maybe String -> Test
+nativeLoadCase :: String -> Bool -> IO (Either String LoadResult) -> (Loader -> IO (Either String LoadResult)) -> Maybe String -> Test
 nativeLoadCase label accepted oracleAction nativeAction expectedOutput = TestCase label $ do
-    failures <- newIORef []
     expected <- oracleAction
-    actual <- nativeAction (nativeLoaderParser failures)
+    actual <- nativeAction sourceLoader
     let verdict = nativeLoadVerdict accepted actual expected <> case (actual, expectedOutput) of
-            (Right (PackageResult pkg), Just output) -> case compileModulesToProgram pkg of
+            (Right (PackageResult pkg), Just output) -> case compileModulesToProgram (packageSnapshot pkg) of
                 Error err -> Just ("native-loaded AST did not compile directly: " ++ err)
                 Ok program -> case runProgram program of
                     Error err -> Just err
                     Ok returned -> testAssertEq (fmap renderMirValue returned) (Just output)
             (_, Nothing) -> Nothing
             _ -> Just "expected native-loaded package for execution control"
-    _ <- evaluate (forceTestResult verdict)
-    toolFailures <- readIORef failures
-    pure (case toolFailures of
-        err : _ -> Just err
-        [] -> verdict)
+    pure verdict
 
 testNativeModuleLoader :: Test
 testNativeModuleLoader = TestList "native-module-loader"
@@ -1560,7 +1552,7 @@ toolPackageIsolation entry = do
         root = "lib/" ++ pkg ++ "/"
     pure $ case (alone, beside) of
         (Right (PackageResult a), Right (PackageResult b)) -> mconcat
-            [ testAssertEq (show b) (show a)
+            [ testAssertEq (show (graphOf b)) (show (graphOf a))
             , testAssertEq (packageRootDir b, onDisk) ("lib/" ++ pkg, Just ("lib/" ++ pkg))
             , case discoverEntry besideFiles entry of
                 InPackage r name -> testAssertEq (r, name) ("lib/" ++ pkg, pkg)
@@ -1570,6 +1562,9 @@ toolPackageIsolation entry = do
         (Left e, _) -> Just e
         (_, Left e) -> Just e
         _ -> Just (entry ++ " is not a package")
+  where
+    -- (the snapshot each load read differs; the package loaded from it does not)
+    graphOf loaded = loaded{packageSnapshot = Snapshot (resolverFromFiles []) "" False}
 
 crossPackageFiles :: String -> Files
 crossPackageFiles source =
@@ -1605,10 +1600,10 @@ testCrossPackageBoundaries = TestList "cross-package-boundaries"
       | (label, accepted, source) <- crossPackageSyntax]
     ++ [ testCase "owning package preserves nominal identity" $ case loadPkg (crossPackageFiles "import left as l; import right as r; fn bad(x: l::model::Twin) -> r::model::Twin { return x; }; return 0;") "pkgs/app/main.tersus" of
             Left err -> Just err
-            Right pkg -> testAssertErrorContains "right$model$Twin" (compileModulesValidated pkg)
+            Right pkg -> testAssertErrorContains "right$model$Twin" (compileModulesValidated (packageSnapshot pkg))
        , testCase "unimported type cannot compile" $ case loadPkg (crossPackageFiles "fn f(s: left::a::E) -> Int { return 0; }; return 0;") "pkgs/app/main.tersus" of
             Left _ -> Nothing
-            Right pkg -> testAssertErrorContains "unknown type" (compileModulesValidated pkg)
+            Right pkg -> testAssertErrorContains "unknown type" (compileModulesValidated (packageSnapshot pkg))
        , testCase "unused dependency root cannot introduce a cycle" $ case loadPkg
             [ ("pkgs/app/package.tersus", ""), ("pkgs/app/main.tersus", "import dep::core { Point }; p = Point { x: 1 }; return p.x;")
             , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "import dep::unused;")
@@ -1628,35 +1623,7 @@ testCrossPackageBoundaries = TestList "cross-package-boundaries"
        , testCase "declaration scan ignores comments and quoted bodies" $ case Oracle.parseDeclarationNames "// fn hidden() {};\nfn core() -> Int { s = \"{ fn fake; }\"; return 0; }; enum E { A { x: Int }, B }; struct S { x: Int };" of
             Left err -> Just (show err)
             Right names -> testAssertEq names ["core", "E", "E::A", "E::B", "S"]
-       , testCase "callback deletion of an overlapped seed is retained" $ case loadFromEntryWith deleteCallback (resolverFromFiles
-            [ ("pkgs/app/package.tersus", ""), ("pkgs/app/a.tersus", "@deleted@"), ("pkgs/app/gate.tersus", "@gate@"), ("pkgs/app/z.tersus", "import dep { Gate };\n@delete@")
-            , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "@incoming@")
-            ]) "pkgs/app/a.tersus" of
-                Left err -> Just err
-                Right (PackageResult _) -> Nothing
-                Right _ -> Just "expected callback package"
-       , testCase "callback delta survives without imported seed leakage" $ case loadFromEntryWith callback (resolverFromFiles
-            [ ("pkgs/app/package.tersus", ""), ("pkgs/app/a.tersus", "@need-final@"), ("pkgs/app/z.tersus", "import dep;\n@promote@")
-            , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "@seed@")
-            ]) "pkgs/app/a.tersus" of
-                Left err -> Just err
-                Right (PackageResult pkg) -> testAssertTrue (any (elem (Return (Val (VInt 88))) . fileBody . loadedParsed) [file | modu <- packageModules pkg, file <- loadedModuleFiles modu, loadedFileName file == "a.tersus"])
-                Right _ -> Just "expected callback package"
        ])
-  where
-    deleteCallback decls source
-        | source == "@incoming@" = Right (ParsedFile [] [StructDef "Gate" [] [("new", TBool)] []], decls{declCtors = Map.insert "Gate" ["new"] (declCtors decls)})
-        | source == "@gate@" = Right (ParsedFile [] [StructDef "Gate" [] [("old", TInt)] []], decls{declCtors = Map.insert "Gate" ["old"] (declCtors decls)})
-        | source == "import dep { Gate };\n@delete@" = Right (ParsedFile [Import ["dep"] Nothing (Just ["Gate"]) 1 1] [], decls{declCtors = Map.insert "deleted" [] (Map.delete "Gate" (declCtors decls))})
-        | source == "@deleted@", Map.member "deleted" (declCtors decls), Map.notMember "Gate" (declCtors decls) = Right (ParsedFile [] [Return (Val (VInt 88))], decls)
-        | otherwise = Left "callback deletion was not preserved"
-    callback decls source
-        | source == "@seed@" = Right (ParsedFile [] [StructDef "Seed" [] [] []], decls)
-        | source == "import dep;\n@promote@" = do
-            (parsedFile, returned) <- injectedFileParser decls "@promote@"
-            Right (parsedFile{fileImports = [Import ["dep"] Nothing Nothing 1 1]}, returned)
-        | source == "@need-final@", any (`Map.member` declCtors decls) ["dep::Seed", "dep::dep::Seed"] = Left "imported seed leaked between files"
-        | otherwise = injectedFileParser decls source
 
 testCrossPackageConstructors :: Test
 testCrossPackageConstructors = testCaseSeq "cross-package-constructor-seeds"
@@ -1678,7 +1645,7 @@ testCrossPackageConstructors = testCaseSeq "cross-package-constructor-seeds"
         ]
     checked source = case loadPkg (files source) "pkgs/app/main.tersus" of
         Left err -> Error err
-        Right pkg -> compileModulesValidated pkg
+        Right pkg -> compileModulesValidated (packageSnapshot pkg)
     accepts source expected = case checked source of
         Error err -> Just err
         Ok program -> case runProgram program of
@@ -1693,7 +1660,7 @@ testModuleLateDeclarations :: Test
 testModuleLateDeclarations = testCaseSeq "late top-level definitions consume expression types once"
     ([ case loadPkg (files entry helper) ("app/" ++ entry ++ ".tersus") of
         Left e -> Just e
-        Right pkg -> case PackageCompile.compileModulesLinked pkg of
+        Right pkg -> case PackageCompile.compileModulesLinked (packageSnapshot pkg) of
             Error e -> Just e
             Ok program -> foldr (<>) Nothing
                 [ testAssertEq (runProgram program) (Ok (Just (MInt 42)))
@@ -1706,14 +1673,14 @@ testModuleLateDeclarations = testCaseSeq "late top-level definitions consume exp
      ] ++
      [ case loadPkg [("app/package.tersus", ""), ("app/main.tersus", "return sameName(7); fn sameName(sameName: Int) -> Int { return sameName; };")] "app/main.tersus" of
         Left e -> Just e
-        Right pkg -> case PackageCompile.compileModulesLinked pkg of
+        Right pkg -> case PackageCompile.compileModulesLinked (packageSnapshot pkg) of
             Error e -> Just e
             Ok p -> case Map.lookup "sameName" (M.progFunctions p) of
                 Nothing -> Just "missing sameName"
                 Just fn -> testAssertEq (Map.lookup "sameName" (M.specEnv (M.fnSpec fn))) (Just (M.Copy (M.Local 1)))
      , case loadPkg [("app/package.tersus", ""), ("app/main.tersus", "fn globalKey() -> Int { return 0; }; fn localLoop(globalKey: Int) -> Int { while globalKey > 0 [{ affirm globalKey >= 0; }] shrinks globalKey { globalKey = globalKey - 1; }; return globalKey; }; return 0;")] "app/main.tersus" of
         Left e -> Just e
-        Right pkg -> case PackageCompile.compileModulesLinked pkg of
+        Right pkg -> case PackageCompile.compileModulesLinked (packageSnapshot pkg) of
             Error e -> Just e
             Ok p -> case Map.lookup "localLoop" (M.progFunctions p) of
                 Nothing -> Just "missing localLoop"
@@ -1724,7 +1691,7 @@ testModuleLateDeclarations = testCaseSeq "late top-level definitions consume exp
          ("app/z.tersus", "fn bad(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n; };")]
         "app/a.tersus" of
         Left e -> Just e
-        Right pkg -> testAssertErrorContains "Could not prove" (compileModulesValidated pkg)
+        Right pkg -> testAssertErrorContains "Could not prove" (compileModulesValidated (packageSnapshot pkg))
      , case Compile.lowerSource True "return answer(); dead = 1 + 2; { fn hiddenAfterReturn() -> Int { return 91; }; }; fn answer() -> Int { return 42; }; fn uncalled() -> Int { return 99; };" of
         Error e -> Just e
         Ok p -> testAssertEq (runProgram p) (Ok (Just (MInt 42)))
@@ -1747,9 +1714,9 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
     refused <- programFromFiles MirHousekeeping.validationEntry changed
     pure $ case loadPkg validationPackageFiles MirHousekeeping.validationEntry of
         Left e -> Just e
-        Right pkg -> case PackageCompile.compileModules pkg of
+        Right pkg -> case PackageCompile.compileModules (packageSnapshot pkg) of
             Error e -> Just e
-            Ok compiled -> case PackageCompile.lowerCompiledPackage pkg compiled of
+            Ok compiled -> case PackageCompile.lowerCompiledPackage compiled of
                 Error e -> Just e
                 Ok raw -> case MirHousekeeping.eraseGhosts raw of
                     Error e -> Just e
@@ -1874,7 +1841,7 @@ phase1Filesystem = bracket create removeDirectoryRecursive $ \root -> do
     stdinSource <- Pipeline.loadFromSource options phase1Program
     let evaluated result = case result of
             Left err -> Error err
-            Right (PackageResult pkg) -> runPackageFiles noWorld Interpret pkg
+            Right (PackageResult pkg) -> runPackageFiles noWorld Interpret (packageSnapshot pkg)
             Right _ -> Error "configured source did not use the normal package loader"
     pure (testAssertEq (evaluated loaded) (Ok ((("42", "")), []))
         <> testAssertEq (evaluated stdinSource) (evaluated loaded))
@@ -1917,7 +1884,7 @@ phase1StandaloneRoots = TestCase "standalone and stdin units resolve only config
         writeFiles source = mapM_ (\(path,text) -> createDirectoryIfMissing True (takeDirectory path) >> writeFile path text) (files source)
         value loaded = case loaded of
             Left err -> Error err
-            Right (PackageResult pkg) -> compileModulesToProgram pkg `bindResult` runProgram
+            Right (PackageResult pkg) -> compileModulesToProgram (packageSnapshot pkg) `bindResult` runProgram
             Right _ -> Error "expected configured standalone package"
         unconfigured source = do
             writeFiles source
@@ -1964,7 +1931,7 @@ phase1CurrentImporterRoots = TestCase "real packages discover roots from the cur
         memory config files = Pipeline.loadFromEntry (resolverFromFiles files){resolverOptions = config} entry
         output loaded = case loaded of
             Left err -> Error err
-            Right (PackageResult pkg) -> compileModulesToProgram pkg `bindResult` runProgram
+            Right (PackageResult pkg) -> compileModulesToProgram (packageSnapshot pkg) `bindResult` runProgram
             Right _ -> Error "expected package"
     refused <- mapM (\source -> do
         let files = (entry, source) : common
@@ -2015,10 +1982,10 @@ phase1SymlinkRoots = TestCase "physical root aliases deduplicate one name and re
     duplicate <- Pipeline.loadFromFilesystemWithOptions opts{packageRoots = Map.fromList [("first",pkg),("second",alias)]} solo
     pure (testAssertEq (fmap loadedIdentity direct) (fmap loadedIdentity throughAlias)
         <> (case direct of
-            Right (PackageResult loaded) -> testAssertEq (compileModulesToProgram loaded `bindResult` runProgram) (Ok (Just (MInt 42)))
+            Right (PackageResult loaded) -> testAssertEq (compileModulesToProgram (packageSnapshot loaded) `bindResult` runProgram) (Ok (Just (MInt 42)))
             other -> Just (show other))
         <> (case mappedSibling of
-            Right (PackageResult loaded) -> testAssertEq (compileModulesToProgram loaded `bindResult` runProgram) (Ok (Just (MInt 42)))
+            Right (PackageResult loaded) -> testAssertEq (compileModulesToProgram (packageSnapshot loaded) `bindResult` runProgram) (Ok (Just (MInt 42)))
             other -> Just ("canonical mapped sibling disagreed: " ++ show other))
         <> phase1Refusal "conflicting package identities" duplicate)
   where
@@ -2027,31 +1994,25 @@ phase1SymlinkRoots = TestCase "physical root aliases deduplicate one name and re
 
 phase1UnimportedParsing :: Test
 phase1UnimportedParsing = TestCase "default and no-prelude parsing never seed an unimported declaration" $ do
-    seen <- newIORef []
-    let unrelated = "enum Unimported { A { hidden: Bool }, B };"
+    -- (a file the load parsed would refuse it)
+    let unrelated = "enum Unimported { A { hidden: Bool }, B } this is not Tersus"
         files = phase1Files phase1Program ++ [("unrelated/app/unused/unused.tersus", unrelated)]
-        observing decls source = unsafePerformIO $ do
-            modifyIORef' seen (source :)
-            pure (NativeParser.parseFileWith decls source)
-        check options = case loadFromEntryWith observing (resolverFromFiles files){resolverOptions = options} phase1Entry of
+        check options = case loadFromEntry (resolverFromFiles files){resolverOptions = options} phase1Entry of
             Left err -> Just err
-            Right (PackageResult pkg) -> case PackageCompile.compileModulesLinked pkg of
+            Right (PackageResult pkg) -> case PackageCompile.compileModulesLinked (packageSnapshot pkg) of
                 Error err -> Just err
                 Ok program -> testAssertEq (runProgram program) (Ok (Just (MInt 42)))
             Right _ -> Just "expected package"
-    let results = [check phase1Options{noPrelude = enabled} | enabled <- [False, True]]
-    _ <- evaluate (forceTestResult (foldr (<>) Nothing results))
-    observed <- readIORef seen
-    pure (foldr (<>) Nothing results <> testAssertTrue (unrelated `notElem` observed))
+    pure (foldr (<>) Nothing [check phase1Options{noPrelude = enabled} | enabled <- [False, True]])
 
 testPhase1RootAvailability :: Test
 testPhase1RootAvailability = TestList "root declaration availability is independent of import order"
     ([ testCase (show (enabled, prefix, "extern/module ambiguity")) $
-        phase1Refusal "ambiguous import: \"child\"" (loadFromEntryWith NativeParser.parseFileWith (resolver enabled
+        phase1Refusal "ambiguous import: \"child\"" (Pipeline.loadFromEntry (resolver enabled
             (prefix ++ "import vendor::child; return 0;") rootSource True) "pkgs/app/main.tersus")
     | enabled <- [False, True], prefix <- ["", "import vendor; "]
     ] ++
-    [ testCase (show (enabled, prefix, "explicit extern")) $ case loadFromEntryWith NativeParser.parseFileWith
+    [ testCase (show (enabled, prefix, "explicit extern")) $ case Pipeline.loadFromEntry
         (resolver enabled (prefix ++ "import vendor::vendor::child; return 0;") rootSource False) "pkgs/app/main.tersus" of
             Left err -> Just err
             Right (PackageResult pkg) -> testAssertEq
@@ -2060,16 +2021,16 @@ testPhase1RootAvailability = TestList "root declaration availability is independ
             Right _ -> Just "expected package"
     | enabled <- [False, True], prefix <- ["", "import vendor; "]
     ] ++
-    [ testCase (show (enabled, prefix, "missing name")) $ case loadFromEntryWith NativeParser.parseFileWith
+    [ testCase (show (enabled, prefix, "missing name")) $ case Pipeline.loadFromEntry
         (resolver enabled (prefix ++ "import vendor::vendor::Missing; return 0;") rootSource False) "pkgs/app/main.tersus" of
             Left err -> testAssertTrue ("it declares: child, Point" `isInfixOf` err && not ("<Point>::answer" `isInfixOf` err))
             Right _ -> Just "missing name became importable"
     | enabled <- [False, True], prefix <- ["", "import vendor; "]
     ] ++
-    [ testCase (show (enabled, "associated method through type import")) $ case loadFromEntryWith NativeParser.parseFileWith
+    [ testCase (show (enabled, "associated method through type import")) $ case Pipeline.loadFromEntry
         (resolver enabled "import vendor::vendor { Point }; p = Point { n: 42 }; return p.answer();" methodSource False) "pkgs/app/main.tersus" of
             Left err -> Just err
-            Right (PackageResult pkg) -> case compileModulesToProgram pkg of
+            Right (PackageResult pkg) -> case compileModulesToProgram (packageSnapshot pkg) of
                 Error err -> Just err
                 Ok program -> testAssertEq (runProgram program) (Ok (Just (MInt 42)))
                     <> testAssertTrue (any (elem "<Point>::answer" . loadedDeclNames) [file | modu <- packageModules pkg, modulePackage (loadedModuleId modu) == "vendor", file <- loadedModuleFiles modu])
@@ -2102,7 +2063,7 @@ testPhase1Packages = TestList "testPhase1Packages"
     , testPhase1RootAvailability
     , testCase "external roots seed imported enums and check link evaluate normally" $ case phase1Load phase1Options (phase1Files phase1Program) of
         Left err -> Just err
-        Right pkg -> case compileModulesToProgram pkg of
+        Right pkg -> case compileModulesToProgram (packageSnapshot pkg) of
             Error err -> Just err
             Ok program -> testAssertEq (runProgram program) (Ok (Just (MInt 42)))
                 <> testAssertEq (moduleOrder pkg) ["vendor::model", "app"]
@@ -2112,12 +2073,12 @@ testPhase1Packages = TestList "testPhase1Packages"
             options = defaultLoadOptions{installedStdRoot = Just phase1Root, noPrelude = True}
          in case phase1Load options (phase1Files source) of
                 Left err -> Just err
-                Right pkg -> case compileModulesToProgram pkg of
+                Right pkg -> case compileModulesToProgram (packageSnapshot pkg) of
                     Error err -> Just err
                     Ok program -> testAssertEq (runProgram program) (Ok (Just (MInt 42)))
     , testCase "installed dependency opts out while default importing user does not" $ case phase1Load phase1Options{noPrelude = False} (phase1Files phase1Program) of
         Left err -> Just err
-        Right pkg -> case compileModules pkg of
+        Right pkg -> case compileModules (packageSnapshot pkg) of
             Error err -> Just err
             Ok compiled -> testAssertEq (map loadedNoPrelude (packageModules pkg)) [True, False]
                 <> testAssertTrue (case compiledModules compiled of
@@ -2125,23 +2086,23 @@ testPhase1Packages = TestList "testPhase1Packages"
                         && not (null (compiledLibInterfaces user)) && not (null (compiledLibUnits user))
                     _ -> False)
     , testCase "no-prelude source files receive no implicit library declaration seed" $
-        let guarded declarations source
-                | any (`Map.member` declTypes declarations) ["List", "Box", "String", "HashMap"] = Left "implicit library seed reached no-prelude source"
-                | otherwise = Oracle.parseFileWith declarations source
-         in case loadFromEntryWith guarded (resolverFromFiles (phase1Files phase1Program)){resolverOptions = phase1Options} phase1Entry of
+        case loadFromEntry (resolverFromFiles (phase1Files phase1Program)){resolverOptions = phase1Options} phase1Entry of
                 Left err -> Just err
-                Right (PackageResult pkg) -> case compileModules pkg of
+                Right (PackageResult pkg) -> case compileModules (packageSnapshot pkg) of
                     Error err -> Just err
                     Ok compiled -> testAssertTrue (all (\modu -> null (compiledLibInterfaces modu) && null (compiledLibUnits modu)) (compiledModules compiled))
                 Right _ -> Just "expected package"
+    , testCase "a no-prelude package file is read without the String library" $
+        case phase1Load phase1Options (phase1Files "s = \"hi\"; return size(s.bytes);") of
+            Left err -> testAssertTrue ("String" `isInfixOf` err)
+            Right pkg -> phase1ResultRefusal "String" (compileModulesToProgram (packageSnapshot pkg))
+    , testCase "a no-prelude program is read without the String library" $
+        phase1ResultRefusal "String" (Pipeline.compileSourceNoPrelude True "s = \"hi\"; return size(s.bytes);")
     , testCase "standalone no-prelude parsing never probes implicit source declarations" $
-        let guarded declarations source
-                | declarations /= locating emptyDecls = Left "nonempty source declaration seed"
-                | otherwise = Oracle.parseFileWith declarations source
-         in case SourceParse.parseSourcePartsWith guarded True True "return 17 + 25;" of
+        case Compile.parseSourcePartsNoPrelude True True "return 17 + 25;" of
                 Error err -> Just err
                 Ok (names, library, _) -> testAssertEq names [] <> testAssertEq library []
-    , testCase "empty-library source lowering has no implicit package dependency" $ case Compile.lowerSourceParts True ([], [], [Return (Val (VInt 42))]) of
+    , testCase "empty-library source lowering has no implicit package dependency" $ case Compile.lowerSourceNoPrelude True True "return 42;" of
         Error err -> Just err
         Ok program -> testAssertEq (runProgram program) (Ok (Just (MInt 42)))
             <> testAssertTrue (Map.null (M.progFunctions program) && Map.null (M.progTypes program))
@@ -2149,7 +2110,7 @@ testPhase1Packages = TestList "testPhase1Packages"
         phase1ResultRefusal "Could not prove:" (Pipeline.compileSourceNoPrelude True "affirm 1 = 2; return 42;")
     , testCase "no-prelude packages still validate their source bodies" $ case phase1Load phase1Options (phase1Files "affirm 1 = 2; return 42;") of
         Left err -> Just err
-        Right pkg -> phase1ResultRefusal "Could not prove:" (compileModulesToProgram pkg)
+        Right pkg -> phase1ResultRefusal "Could not prove:" (compileModulesToProgram (packageSnapshot pkg))
     , testCase "a package directory cannot be named tersuslib" $
         phase1Refusal "a package directory cannot be named tersuslib" (loadAt defaultLoadOptions{noPrelude = True}
             [("tersuslib/package.tersus", ""), ("tersuslib/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };"), ("tersuslib/main.tersus", "import tersuslib::lists { dup }; return 0;")]
@@ -2167,7 +2128,7 @@ testPhase1Packages = TestList "testPhase1Packages"
             [("app/package.tersus", ""), ("app/main.tersus", "import std::lists { dup }; struct NC { v: List<Int> }; n = NC { v: [1, 2] }; m = dup(&n); return size(m.v);"), ("installed/tersuslib/package.tersus", ""), ("installed/tersuslib/lists/lists.tersus", "fn dup<T>(x: &T) -> T { return clone(*x); };")]
             "app/main.tersus" of
             Left err -> Just err
-            Right pkg -> phase1ResultRefusal "dup clones a T, and its bounds do not say T: Clone" (compileModulesToProgram pkg)
+            Right pkg -> phase1ResultRefusal "dup clones a T, and its bounds do not say T: Clone" (compileModulesToProgram (packageSnapshot pkg))
     , testCase "a missing requested root fails even when a sibling exists" $
         phase1Refusal "requested root" (phase1Load phase1Options{packageRoots = Map.singleton "vendor" "absent/vendor"}
             (phase1Files phase1Program ++ [("unrelated/vendor/package.tersus", ""), ("unrelated/vendor/model/model.tersus", "struct Choice { n: Int };")]))
@@ -2197,7 +2158,7 @@ testPhase1Packages = TestList "testPhase1Packages"
     , testCase "same-module declaration contexts survive no-prelude" $ case phase1Load phase1Options
         (phase1Files "import app::late { Local }; c = Local::Value { n: 42 }; return match c { Local::Value { n: n } => n, };" ++ [("unrelated/app/late.tersus", "enum Local { Value { n: Int } };")]) of
             Left err -> Just err
-            Right pkg -> case compileModulesToProgram pkg of
+            Right pkg -> case compileModulesToProgram (packageSnapshot pkg) of
                 Error err -> Just err
                 Ok program -> testAssertEq (runProgram program) (Ok (Just (MInt 42)))
     , testCase "package CLI options do not consume program arguments" $
@@ -2229,14 +2190,14 @@ phase2Load files = case Pipeline.loadFromEntry
 phase2Runs :: Files -> Int -> TestResult
 phase2Runs files expected = case phase2Load files of
     Left err -> Just err
-    Right pkg -> case compileModulesToProgram pkg `bindResult` runProgram of
+    Right pkg -> case compileModulesToProgram (packageSnapshot pkg) `bindResult` runProgram of
         Error err -> Just err
         Ok value -> testAssertEq value (Just (MInt (toInteger expected)))
 
 phase2Rejects :: Files -> [String] -> TestResult
 phase2Rejects files needles = case phase2Load files of
     Left err -> check err
-    Right pkg -> case compileModulesToProgram pkg of
+    Right pkg -> case compileModulesToProgram (packageSnapshot pkg) of
         Error err -> check err
         Ok _ -> Just ("accepted instead of refusing " ++ show needles)
   where
@@ -2413,9 +2374,9 @@ phase2FilesystemWith files = withPhase1Directory $ \root -> do
     loaded <- Pipeline.loadFromFilesystemWithOptions options entry
     case loaded of
         Left err -> pure (Just err)
-        Right (PackageResult pkg) -> case compileModulesToProgram pkg of
+        Right (PackageResult pkg) -> case compileModulesToProgram (packageSnapshot pkg) of
             Error err -> pure (Just err)
-            Ok reference -> case compileModulesToOwned pkg of
+            Ok reference -> case compileModulesToOwned (packageSnapshot pkg) of
                 Error err -> pure (Just err)
                 Ok owned -> do
                     emitted <- Bootstrap.llvmOfOwned owned
@@ -2442,7 +2403,7 @@ phase2InferredConstructor :: TestResult
 phase2InferredConstructor = case loadFromEntry
     (resolverFromFiles phase2InferredFiles){resolverOptions = defaultLoadOptions{packageRoots = Map.singleton "vendor" "installed/vendor"}} phase2Entry of
         Left err -> Just err
-        Right (PackageResult pkg) -> case PackageCompile.compileModulesLinked pkg of
+        Right (PackageResult pkg) -> case PackageCompile.compileModulesLinked (packageSnapshot pkg) of
             Error err -> Just err
             Ok raw -> testAssertTrue (Map.member "vendor$api$api$value[Int]" (M.progFunctions raw))
         Right _ -> Just "expected package"
@@ -2466,7 +2427,7 @@ phase2CheckedShadow :: Files -> TestResult
 phase2CheckedShadow files =
     (case phase2Load files of
         Left err -> Just err
-        Right pkg -> case PackageCompile.compileModulesLinked pkg `bindResult` runProgram of
+        Right pkg -> case PackageCompile.compileModulesLinked (packageSnapshot pkg) `bindResult` runProgram of
             Error err -> Just err
             Ok value -> testAssertEq value (Just (MInt 42)))
     <> phase2Rejects files ["does not model yet: two functions with one name"]
@@ -2482,7 +2443,7 @@ phase2Dedup = phase2DedupWith phase2Identity
 phase2DedupWith :: String -> TestResult
 phase2DedupWith api = case phase2Load files of
     Left err -> Just err
-    Right pkg -> case PackageCompile.compileModulesLinked pkg of
+    Right pkg -> case PackageCompile.compileModulesLinked (packageSnapshot pkg) of
         Error err -> Just err
         Ok raw -> testAssertTrue (all (`elem` map (renderModuleId . loadedModuleId) (packageModules pkg)) ["app::left", "app::right"])
             <> foldr (<>) Nothing [testAssertEq [name | name <- Map.keys (M.progFunctions raw), name == expected] [expected] | expected <- ["vendor$api$api$value[Int]", method, companion]]
@@ -2509,29 +2470,36 @@ phase2DedupWith api = case phase2Load files of
 phase2RoundTrip :: TestResult
 phase2RoundTrip = case phase2Load phase2Private of
     Left err -> Just err
-    Right pkg -> case PackageCompile.compileModulesWith throughWire pkg of
+    Right pkg -> case PackageCompile.compileModulesWith sourceLoader (packageSnapshot pkg) of
         Error err -> Just err
         Ok compiled -> foldr (<>) Nothing (map roundTrip (compiledModules compiled))
-            <> case PackageCompile.lowerCompiledPackage pkg compiled `bindResult` runProgram of
+            <> case PackageCompile.lowerCompiledPackage compiled `bindResult` runProgram of
                 Error err -> Just err
                 Ok value -> testAssertEq value (Just (MInt 42))
   where
-    throughWire request = case Elaboration.writeRequest request `bindResult` checkedRequest request of
-        Error err -> Elaboration.Refused err
-        Ok decoded | decoded /= request -> Elaboration.Refused "defining context changed during request round trip"
-        Ok decoded -> case Elaboration.writeResponse (sourceElaborator decoded) `bindResult` Elaboration.readResponse of
-            Error err -> Elaboration.Refused err
-            Ok response -> response
-    checkedRequest request encoded
-        | not (null (Elaboration.rqDefinitions request)) = case Elaboration.readRequest (unlines (filter (not . isPrefixOf "definition ") (lines encoded))) of
-            Ok _ -> Error "accepted a legacy flat defining context"
-            Error _ -> Elaboration.readRequest encoded
-        | otherwise = case Elaboration.readRequest (unlines (filter (/= "definitions 0") (lines encoded))) of
-            Ok _ -> Error "accepted a request without defining contexts"
-            Error _ -> Elaboration.readRequest encoded
     roundTrip modu = case writeInterface (compiledInterface modu) `bindResult` readInterface of
         Error err -> Just err
         Ok decoded -> testAssertEq decoded (compiledInterface modu)
 
 testModules :: Test
 testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testSnapshotToolFailure, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
+
+-- The names a file declares at its top: types, variants, traits, functions (in impls too), axioms and proofs
+declarationNames :: [Statement] -> [Name]
+declarationNames = concatMap top
+  where
+    top stmt = case stmt of
+        StructDef name _ _ _ -> [name]
+        EnumDef name variants -> name : map fst variants
+        TraitDef name _ _ -> [name]
+        Assign name (Val VFunct{}) -> [name]
+        BoundedDef _ inner -> top inner
+        AxiomDef name _ _ _ -> [name]
+        ProofDef name _ _ _ _ -> [name]
+        ImplDef _ _ _ _ _ functions -> concatMap top functions
+        _ -> []
+
+-- The declarations of every compiler library, read in order by P0
+libraryDecls :: Either String Decls
+libraryDecls = foldl (\acc text -> acc >>= \decls -> fmap snd (Oracle.parseFileWith decls text)) (Right emptyDecls)
+    [typesSource, cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource]

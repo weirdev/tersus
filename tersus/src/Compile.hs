@@ -1,63 +1,81 @@
 module Compile
-    ( parseSource, SourceParts, parseSourceParts, parsedLibraries, probeDecls
-    , lowerSourceParts, lowerSourcePartsWith, parseWithEquality, librariesFor, lowerSource
-    , lowerStatements, lowerStatementsWith, elaborateStatements, reservedName, reservedError, completeSpecEnvs
+    ( SourceParts, parseSource, parseSourceParts, parseSourcePartsNoPrelude, parseWithEquality, parseWithEqualityUsing
+    , lowerSource, lowerSourceNoPrelude, lowerSourceUsing
+    , lowerStatements, lowerStatementsWith, elaborateStatements, completeSpecEnvs
+    , sourceRequest
     ) where
 
 import qualified Mir as M
 import MirLower (lowerElaborated, lowerModuleWith)
-import LibParsed (inlinedLibraryLength)
-import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
+import LibPackage (inlinedLibraryLength, libCatalog, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
 import Link (linkPrograms, completeSpecEnvs)
-import Modules (ModuleId (..))
-import qualified ParserSeed
-import SourceParse (SourceParts, parsedLibraries, probeDecls, librariesFor, reservedName, reservedError, declaredNames, definedFunctionNames)
-import qualified SourceParse
-import Syntax (Elaborated, Statement)
-import ElaborateRequest (Elaborator, Extraction (..), Request (..), Response (..), acceptedElaboration)
-import ElaboratorTool (sourceElaborator)
+import PackageData (ModuleId (..), LoadOptions (..), Resolver (..), defaultLoadOptions, resolverFromFiles)
+import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), Value (..))
+import ElaborateRequest (Elaborator, Extraction (..), Library, LoadKind (..), LoadRequest (..), LoadResponse (..), Request (..), Response (..), acceptedElaboration)
+import ElaboratorTool (Loader, sourceElaborator, sourceLoader)
+import Modules (librarySources)
 import Utils
+
+-- A program as read: the compiler libraries it is read with (in front of it), their statements, and its own
+type SourceParts = ([String], [Statement], [Statement])
+
+-- A single file the loader written in Tersus reads (and checks, for a program): no package, the libraries' sources, and
+-- the compiled libraries the elaborator selects among
+sourceRequest :: LoadKind -> Bool -> Bool -> [Library] -> String -> LoadRequest
+sourceRequest kind noPrelude' reserving catalog source =
+    LoadRequest kind reserving ((resolverFromFiles [("<source>", source)]) {resolverOptions = defaultLoadOptions {noPrelude = noPrelude'}}) (Just ("<source>", True))
+        librarySources catalog
 
 parseSource :: String -> Result [Statement] String
 parseSource source = mapResult (\(_, library, body) -> library ++ body) (parseSourceParts True source)
 
 parseSourceParts :: Bool -> String -> Result SourceParts String
-parseSourceParts reserving = SourceParse.parseSourcePartsWith ParserSeed.parseFileWith reserving False
+parseSourceParts = parseSourcePartsNoPrelude False
 
+parseSourcePartsNoPrelude :: Bool -> Bool -> String -> Result SourceParts String
+parseSourcePartsNoPrelude noPrelude' reserving source = case sourceLoader (sourceRequest LoadParse noPrelude' reserving [] source) of
+    ParsedSource names library body -> Ok (names, library, body)
+    Unparsed e -> Error e
+    NotLoaded e -> Error e
+    _ -> Error "internal: the loader did not answer with the program as read"
+
+-- The program with the type, clone and equality libraries it calls for in front of it
 parseWithEquality :: String -> Either String [Statement]
-parseWithEquality = SourceParse.parseWithEqualityWith ParserSeed.parseFileWith
+parseWithEquality = parseWithEqualityUsing sourceLoader
+
+parseWithEqualityUsing :: Loader -> String -> Either String [Statement]
+parseWithEqualityUsing loader source = case loader (sourceRequest LoadEquality False False [] source) of
+    ParsedSource _ library body -> Right (library ++ body)
+    Unparsed e -> Left e
+    NotLoaded e -> Left e
+    _ -> Left "internal: the loader did not answer with the program as read"
 
 lowerSource :: Bool -> String -> Result M.Program String
-lowerSource reserving source =
-    parseSourceParts reserving source `bindResult` lowerSourceParts reserving
+lowerSource = lowerSourceNoPrelude False
 
-lowerSourceParts :: Bool -> SourceParts -> Result M.Program String
-lowerSourceParts = lowerSourcePartsWith sourceElaborator
+lowerSourceNoPrelude :: Bool -> Bool -> String -> Result M.Program String
+lowerSourceNoPrelude = lowerSourceUsing sourceLoader
 
--- A program with the compiler libraries for the elaborator to select among, unless its parse called for none (with no
--- prelude, or declaring what every library declares); the libraries the elaborator selected are linked
-lowerSourcePartsWith :: Elaborator -> Bool -> SourceParts -> Result M.Program String
-lowerSourcePartsWith elaborator _reserving (names, _library, stmts) =
-    catalog `bindResult` \libraries ->
-        case elaborator (Request mainModule False False NoInterface [] [] libraries Nothing [stmts] 0) of
-            Unresolved err -> Error err
-            response ->
-                stage "Validation failed: " (acceptedElaboration response) `bindResult` \elaborated ->
-                    sameSelection (selectedOf response) `bindResult` \selected ->
-                    selection selected `bindResult` \(ifaces, units) ->
-                        stage "Lowering failed: " (lowerModuleWith (withoutReplacedEq stmts ifaces) elaborated) `bindResult` \entryProgram ->
-                            linkPrograms (stripDeclaredFromUnits own units ++ [(mainModule, entryProgram)])
+-- A program read and checked by the loader, lowered with the libraries the elaborator selected, which are linked
+lowerSourceUsing :: Loader -> Bool -> Bool -> String -> Result M.Program String
+lowerSourceUsing loader noPrelude' reserving source = catalog `bindResult` \libraries -> case loader (sourceRequest LoadProgram noPrelude' reserving libraries source) of
+    Unparsed e -> Error e
+    NotLoaded e -> Error e
+    LoadedProgram (Unresolved err) -> Error err
+    LoadedProgram response ->
+        stage "Validation failed: " (acceptedElaboration response) `bindResult` \elaborated@(Elaborated stmts _) ->
+            selection (selectedOf response) `bindResult` \(ifaces, units) ->
+                stage "Lowering failed: " (lowerModuleWith (withoutReplacedEq stmts ifaces) elaborated) `bindResult` \entryProgram ->
+                    linkPrograms (stripDeclaredFromUnits (own stmts) units ++ [(mainModule, entryProgram)])
+    _ -> Error "internal: the loader did not answer with the program's elaboration"
   where
-    catalog = if null names then Ok [] else mapResult libCatalog libPackage
     selectedOf response = case response of
         Accepted _ _ selected -> selected
         _ -> []
-    sameSelection selected
-        | selected == names = Ok selected
-        | otherwise = Error ("internal: the elaborator selected the libraries " ++ show selected ++ " for a program parsed with " ++ show names)
     selection [] = Ok ([], [])
     selection selected = mapResult (`libSelection` selected) libPackage
-    own = concatMap declaredNames stmts ++ concatMap definedFunctionNames stmts
+    own stmts = concatMap declaredNames stmts ++ concatMap definedFunctionNames stmts
+    catalog = if noPrelude' then Ok [] else mapResult libCatalog libPackage
 
 mainModule :: ModuleId
 mainModule = ModuleId "main" Nothing
@@ -73,8 +91,31 @@ elaborateStatements :: [Statement] -> Result Elaborated String
 elaborateStatements = elaborateWith sourceElaborator
 
 elaborateWith :: Elaborator -> [Statement] -> Result Elaborated String
-elaborateWith elaborator stmts = acceptedElaboration (elaborator (Request mainModule False False NoInterface [] [] [] Nothing [stmts] (inlinedLibraryLength stmts)))
+elaborateWith elaborator stmts = acceptedElaboration (elaborator (Request mainModule False False NoInterface [] [] [] [stmts] (inlinedLibraryLength stmts)))
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a
 stage prefix (Error e) = Error (prefix ++ e)
+
+-- The names a program declares as a struct, an enum or a trait, wherever it declares them
+declaredNames :: Statement -> [String]
+declaredNames stmt = case stmt of
+    StructDef name _ _ _ -> [name]
+    EnumDef name _ -> [name]
+    TraitDef name _ _ -> [name]
+    Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> concatMap declaredNames body
+    Block body -> concatMap declaredNames body
+    If _ yes no -> concatMap declaredNames (yes ++ no)
+    While _ _ _ body -> concatMap declaredNames body
+    ImplDef _ _ _ _ _ body -> concatMap declaredNames body
+    BoundedDef _ inner -> declaredNames inner
+    _ -> []
+
+-- The functions a program defines at its top, in its impls included
+definedFunctionNames :: Statement -> [String]
+definedFunctionNames stmt = case stmt of
+    Assign name (Val VFunct{}) -> [name]
+    ImplDef _ _ _ _ _ body -> concatMap definedFunctionNames body
+    BoundedDef _ inner -> definedFunctionNames inner
+    _ -> []
+

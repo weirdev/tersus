@@ -16,6 +16,7 @@ module PreludeSource
     , mirPackageFiles
     , elaboratePackageFiles
     , parserPackageFiles
+    , parserUnicodeSource
     , astReaderPackageFiles
     , toolPackageFiles
     , stdlibSource
@@ -31,7 +32,6 @@ import Data.List (isSuffixOf, sort)
 import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import System.Directory (listDirectory)
-import ParserUnicodeSource (parserUnicodeSource)
 
 compilerSourceHash :: String
 compilerSourceHash =
@@ -242,10 +242,20 @@ dataPackageFiles =
         lift files
      )
 
-parserPackageFiles :: [(FilePath, String)]
-parserPackageFiles = dataPackageFiles ++ [("lib/parser/unicode.tersus", parserUnicodeSource)] ++
+-- The parser's classifiers of code points from 128 up, pinned to one Unicode version (dev/parser-unicode/generate.py)
+parserUnicodeSource :: String
+parserUnicodeSource =
     $( do
-        let paths = ["lib/parser/package.tersus", "lib/parser/parser.tersus"]
+        let path = "lib/parser/syntax/unicode.tersus"
+        addDependentFile path
+        contents <- runIO (readFile path)
+        lift contents
+     )
+
+parserPackageFiles :: [(FilePath, String)]
+parserPackageFiles = dataPackageFiles ++ [("lib/parser/syntax/unicode.tersus", parserUnicodeSource)] ++
+    $( do
+        let paths = ["lib/parser/package.tersus", "lib/parser/parser.tersus", "lib/parser/syntax/syntax.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )
@@ -260,9 +270,9 @@ astReaderPackageFiles = dataPackageFiles ++
 
 -- The elaborator written in Tersus (REPLACING_HASKELL.md), the compiler's type checker
 elaboratePackageFiles :: [(FilePath, String)]
-elaboratePackageFiles = dataPackageFiles ++
+elaboratePackageFiles = dataPackageFiles ++ [("lib/parser/syntax/unicode.tersus", parserUnicodeSource)] ++
     $( do
-        let paths = ["lib/elaborate/package.tersus", "lib/elaborate/builtins.tersus", "lib/elaborate/calls.tersus", "lib/elaborate/check.tersus", "lib/elaborate/core.tersus", "lib/elaborate/elaborate.tersus", "lib/elaborate/expr.tersus", "lib/elaborate/exports.tersus", "lib/elaborate/libraries.tersus", "lib/elaborate/out.tersus", "lib/elaborate/proofs.tersus", "lib/elaborate/records.tersus", "lib/elaborate/refs.tersus", "lib/elaborate/resolve.tersus", "lib/elaborate/rewrite.tersus", "lib/elaborate/state.tersus", "lib/elaborate/traits.tersus"]
+        let paths = ["lib/parser/package.tersus", "lib/parser/syntax/syntax.tersus", "lib/elaborate/package.tersus", "lib/elaborate/builtins.tersus", "lib/elaborate/calls.tersus", "lib/elaborate/check.tersus", "lib/elaborate/core.tersus", "lib/elaborate/decls.tersus", "lib/elaborate/elaborate.tersus", "lib/elaborate/expr.tersus", "lib/elaborate/exports.tersus", "lib/elaborate/libraries.tersus", "lib/elaborate/load.tersus", "lib/elaborate/out.tersus", "lib/elaborate/proofs.tersus", "lib/elaborate/records.tersus", "lib/elaborate/refs.tersus", "lib/elaborate/resolve.tersus", "lib/elaborate/rewrite.tersus", "lib/elaborate/snapshot.tersus", "lib/elaborate/state.tersus", "lib/elaborate/traits.tersus", "lib/elaborate/units.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )

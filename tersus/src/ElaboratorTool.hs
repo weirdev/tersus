@@ -3,6 +3,7 @@
 module ElaboratorTool
     ( runElaborator
     , runElaboratorText
+    , runElaboratorRaw
     , nativeElaborator
     , frontendToolFailure
     , bootstrapElaborator
@@ -10,9 +11,15 @@ module ElaboratorTool
     , sourceElaboratorExecutable
     , frontendSources
     , noVerdict
+    , Loader
+    , runLoader
+    , nativeLoader
+    , bootstrapLoader
+    , sourceLoader
     ) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception (IOException, finally, try)
 import qualified Data.ByteString.Char8 as B
 import Data.List (isInfixOf)
@@ -23,11 +30,12 @@ import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess,
 
 import BuiltinTable (builtinTableText)
 import ElaborateRequest
-import {-# SOURCE #-} ElaboratorNative (frontendStage)
+import {-# SOURCE #-} ElaboratorNative (frontendStage, productionTools)
 import Hash (fingerprint)
 import Native (raiseStack)
 import PreludeSource (elaboratePackageFiles, frontendSeedSources)
-import Seed (cachedFrontendSeed)
+import qualified ParserSeed
+import Seed (cachedFrontendSeed, cachedParserSeed)
 import Utils
 
 runElaborator :: FilePath -> Request -> IO (Result Response String)
@@ -36,7 +44,11 @@ runElaborator exe rq = case writeRequest rq of
     Ok text -> runElaboratorText exe text
 
 runElaboratorText :: FilePath -> String -> IO (Result Response String)
-runElaboratorText exe text = do
+runElaboratorText exe text = (`bindResult` readResponseBytes) <$> runElaboratorRaw exe text
+
+-- The executable on the request, and the lines of its response
+runElaboratorRaw :: FilePath -> String -> IO (Result [B.ByteString] String)
+runElaboratorRaw exe text = do
     -- (the elaborator recurses over the nesting of expressions, deeper than a default stack allows for a deep one;
     -- the data is ASCII, so it is passed as bytes rather than through the locale's decoding of a String)
     (code, out, err) <- withCreateProcess (proc "/bin/sh" ["-c", raiseStack, exe]){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe} $
@@ -54,8 +66,69 @@ runElaboratorText exe text = do
                 pure (code, out, err)
             _ -> pure (ExitFailure 1, B.empty, B.pack "no pipes to the elaborator")
     pure $ case code of
-        ExitSuccess -> readResponseBytes (B.lines out)
+        ExitSuccess -> Ok (B.lines out)
         ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 (B.unpack err))
+
+type Loader = LoadRequest -> LoadResponse
+
+runLoader :: FilePath -> LoadRequest -> IO (Result LoadResponse String)
+runLoader exe rq = case writeLoadRequest rq of
+    Error e -> pure (Error e)
+    Ok text -> (`bindResult` readLoadResponseBytes (lrKind rq)) <$> runElaboratorRaw exe text
+
+-- A load the executable cannot answer refuses it, with a reason that says the tool failed
+{-# NOINLINE nativeLoader #-}
+nativeLoader :: FilePath -> Loader
+nativeLoader exe rq = unsafePerformIO (loaded <$> runLoader exe rq)
+
+loaded :: Result LoadResponse String -> LoadResponse
+loaded (Ok response) = response
+loaded (Error e) = NotLoaded (toolFailurePrefix ++ e)
+
+bootstrapLoader :: Loader
+bootstrapLoader = withStageLoader 0
+
+-- (a program or package it loads is checked and validated next, with the tools made beforehand, side by side; a tool
+-- that fails refuses the load in its own words)
+{-# NOINLINE sourceLoader #-}
+sourceLoader :: Loader
+sourceLoader rq
+    | lrKind rq `elem` [LoadProgram, LoadPackage] = unsafePerformIO $ do
+        ready <- sourceTools
+        pure $ case ready of
+            Error e -> NotLoaded e
+            Ok () -> withStageLoader sourceStage rq
+    | otherwise = withStageLoader sourceStage rq
+
+{-# NOINLINE sourceToolsReady #-}
+sourceToolsReady :: MVar Bool
+sourceToolsReady = unsafePerformIO (newMVar False)
+
+-- (once per process, and not kept when it fails)
+sourceTools :: IO (Result () String)
+sourceTools = modifyMVar sourceToolsReady $ \ready ->
+    if ready then pure (True, Ok ()) else do
+        reader <- cachedParserSeed
+        made <- case reader of
+            Error e -> pure (Error (ParserSeed.failure e))
+            Ok _ -> productionTools
+        pure (succeeded made, made)
+  where
+    succeeded (Ok ()) = True
+    succeeded (Error _) = False
+
+{-# NOINLINE withStageLoader #-}
+withStageLoader :: Int -> Loader
+withStageLoader n rq = unsafePerformIO $ do
+    -- (a request carries the builtin table, which P0 reads from lib/stdlib.tersus)
+    reader <- cachedParserSeed
+    case reader of
+        Error e -> pure (NotLoaded (ParserSeed.failure e))
+        Ok _ -> do
+            exe <- stageExecutable n
+            case exe of
+                Ok path -> loaded <$> runLoader path rq
+                Error e -> pure (NotLoaded (toolFailurePrefix ++ e))
 
 -- The executable as the compiler's elaborator. An answer it cannot give refuses the module, with a reason that says
 -- the tool failed, rather than being taken for the program's fault or answered by another elaborator.
@@ -95,6 +168,7 @@ sourceStage = if frontendSources == Ok frontendSeedSources then 0 else 1
 -- table every request carries
 frontendSources :: Result String String
 frontendSources = mapResult (\table -> fingerprint ([requestHeader, responseHeader, table] ++ concatMap (\(path, contents) -> [path, contents]) elaboratePackageFiles)) builtinTableText
+  where
 
 -- (the stage is looked up in the cache for each request, as the cache directory can change within a process)
 {-# NOINLINE withStage #-}
