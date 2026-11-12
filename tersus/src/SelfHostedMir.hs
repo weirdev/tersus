@@ -2347,6 +2347,11 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             (yes, no, compare) <- case (M.blockStatements next, M.blockTerminator next) of
                 ([M.Assign condDest (M.BinaryOp (M.Compare r) a c)], M.SwitchBool (M.Copy condLocal) yes no)
                     | condDest == condLocal -> Just (yes, no, (r, a, c))
+                -- (a condition the call returns itself: while f(...) enters the body when it is true, while !f(...)
+                -- when it is false)
+                ([], M.SwitchBool (M.Copy condLocal) yes no)
+                    | condLocal == dest && yes == M.loopBody spec -> Just (yes, no, (Eq, M.Copy dest, M.Const (M.CBool True)))
+                    | condLocal == dest && no == M.loopBody spec -> Just (no, yes, (Eq, M.Copy dest, M.Const (M.CBool False)))
                 _ -> Nothing
             name <- case calleeOp of
                 M.Const (M.CFn n) -> Just n
