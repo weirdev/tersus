@@ -15,6 +15,7 @@ module Differential
     , compareAnswers
     , corpusUnits
     , suiteUnits
+    , toolPackages
     , unitRequests
     , unitThrough
     , compareResponses

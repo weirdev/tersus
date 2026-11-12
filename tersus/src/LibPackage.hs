@@ -21,12 +21,13 @@ import ElaborateRequest (Library (..), LibraryAnswer (..), LoadKind (..), LoadRe
 import ElaboratorTool (Loader, bootstrapLoader)
 import Interface (ModuleInterface (..))
 import qualified Mir as M
-import MirLower (lowerModuleWith)
+import Lowering (lowerAccepted)
+import MirMoves (finishLowered)
 import Modules (librarySources)
 import PackageData (ModuleId (..), renderModuleId, resolverFromFiles)
 import PreludeSource (libModules, nativeStorageModules)
 import Syntax (Statement (..))
-import Utils (Result (..))
+import Utils (Result (..), bindResult)
 
 -- The implicit libraries and native storage helpers share one compiler-owned package, read and elaborated by the
 -- loader written in Tersus in one load; the host lowers them. Native units never enter user-facing selection.
@@ -67,7 +68,7 @@ compiledLibraries loader = case loader (LoadRequest LoadLibraries False (resolve
             inModule err = "in lib module " ++ renderModuleId moduId ++ ": " ++ err
             depIfaces = [libInterfaces pkg Map.! dep | dep <- imports, Map.member dep (libInterfaces pkg)]
          in case response of
-                Accepted elaborated (Just iface) _ -> case lowerModuleWith depIfaces elaborated of
+                Accepted _ (Just iface) _ -> case lowerAccepted depIfaces response `bindResult` finishLowered of
                     Error err -> failed pkg (inModule err)
                     Ok program
                         | name `elem` nativeStorageModules -> go rest pkg ((moduId, iface, program) : natives) failure

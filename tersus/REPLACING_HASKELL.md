@@ -588,13 +588,38 @@ to 0.91 times each): the seed is larger, but the compiler's own packages are
 loaded and parsed in the elaborator's process, without a parser process per
 file.
 
+### 3. MIR lowering in Tersus
+
+The elaborator answers a module request with the module's MIR, and `MirLower`
+and the `Elaborated` handoff are deleted. What runs after lowering does not
+change: `MirMoves.finishLowered`, `Link`, `MirLists`, monomorphization,
+validation, ownership and emission. Four phases, one PR each:
+
+1. Contract and seam (done). `MirLower.lowerRaw` gives the raw unit
+   (`Mir.Lowered`), `MirMoves.finishLowered` finishes it with the code that
+   used to end the lowering, and every production lowering starts at
+   `Lowering.lowerAccepted`. `MirData` writes and reads the raw unit as
+   `tersus-mir 3` (`MIR.md`), and `testMirLowered` round trips every unit of
+   the corpus through it.
+2. The lowering written in Tersus (`lib/elaborate/lower*.tersus`) beside the
+   Haskell one, the elaborator's answer gaining a `mir` section, and a
+   differential: raw units equal and lowering errors byte for byte, over the
+   corpus and over every lowering the suite makes. A new seed.
+3. Every lowering function validates, and cold bootstrap and the suite stay
+   within 1.25x of master. A new seed.
+4. `lowerAccepted` reads only the elaborator's MIR; `MirLower`, the
+   differential switch and the `Elaborated` handoff are deleted, and
+   `declared` and `assumes` replace the walks of the statements in `Compile`
+   and `PackageCompile`.
+
 ### Deferred or coordinated work
 
 Draft [PR #157](https://github.com/weirdev/tersus/pull/157) changes collection
 proof frames and overlaps moves, ownership and late list lowering. It remains
 open at this survey. Do not adopt its unlanded invariants or change its branch.
-Leave `MirLists`, `MirMoves` and `MirLower` replacements until that design settles;
-check fresh master before implementing each.
+Leave `MirLists` and `MirMoves` replacements until that design settles; the MIR
+lowering (above) keeps the check of moves in Haskell and does not touch them.
+Check fresh master before implementing each.
 
 `SelfHostedMir` is large but still tracks active validator changes. Preserve it
 until a Tersus frontend can supply the validator's complete input. Retire

@@ -186,6 +186,7 @@ originalGroups =
     , testBytes
     , testConnectives
     , testMirData
+    , testMirLowered
     , testMirOwnership
     , testOwnershipMetadata
     , testOwnershipInterpreted

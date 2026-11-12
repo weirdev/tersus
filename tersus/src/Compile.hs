@@ -2,11 +2,12 @@ module Compile
     ( SourceParts, parseSource, parseSourceParts, parseSourcePartsNoPrelude, parseWithEquality, parseWithEqualityUsing
     , lowerSource, lowerSourceNoPrelude, lowerSourceUsing
     , lowerStatements, lowerStatementsWith, elaborateStatements, completeSpecEnvs
-    , sourceRequest
+    , sourceRequest, ownNames
     ) where
 
 import qualified Mir as M
-import MirLower (lowerElaborated, lowerModuleWith)
+import Lowering (finishProgram, lowerAccepted)
+import MirMoves (finishLowered)
 import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
 import Link (linkPrograms, completeSpecEnvs)
 import PackageData (ModuleId (..), LoadOptions (..), Resolver (..), defaultLoadOptions, resolverFromFiles)
@@ -63,10 +64,10 @@ lowerSourceUsing loader noPrelude' reserving source = catalog `bindResult` \libr
     NotLoaded e -> Error e
     LoadedProgram (Unresolved err) -> Error err
     LoadedProgram response ->
-        stage "Validation failed: " (acceptedElaboration response) `bindResult` \elaborated@(Elaborated stmts _) ->
+        stage "Validation failed: " (acceptedElaboration response) `bindResult` \(Elaborated stmts _) ->
             selection (selectedOf response) `bindResult` \(ifaces, units) ->
-                stage "Lowering failed: " (lowerModuleWith (withoutReplacedEq stmts ifaces) elaborated) `bindResult` \entryProgram ->
-                    linkPrograms (stripDeclaredFromUnits (own stmts) units ++ [(mainModule, entryProgram)])
+                stage "Lowering failed: " (lowerAccepted (withoutReplacedEq stmts ifaces) response `bindResult` finishLowered) `bindResult` \entryProgram ->
+                    linkPrograms (stripDeclaredFromUnits (ownNames stmts) units ++ [(mainModule, entryProgram)])
     _ -> Error "internal: the loader did not answer with the program's elaboration"
   where
     selectedOf response = case response of
@@ -74,7 +75,6 @@ lowerSourceUsing loader noPrelude' reserving source = catalog `bindResult` \libr
         _ -> []
     selection [] = Ok ([], [])
     selection selected = mapResult (`libSelection` selected) libPackage
-    own stmts = concatMap declaredNames stmts ++ concatMap definedFunctionNames stmts
     catalog = if noPrelude' then Ok [] else mapResult libCatalog libPackage
 
 -- The functions an elaborated program defines at the top, those with bounds and the functions of its impls included
@@ -86,6 +86,10 @@ elaboratedFunctions (Elaborated stmts _) = concatMap defined stmts
         BoundedDef _ inner -> defined inner
         _ -> []
 
+-- The names a single file declares, which the library units linked with it do not declare again
+ownNames :: [Statement] -> [String]
+ownNames stmts = concatMap declaredNames stmts ++ concatMap definedFunctionNames stmts
+
 mainModule :: ModuleId
 mainModule = ModuleId "main" Nothing
 
@@ -94,13 +98,13 @@ lowerStatements = lowerStatementsWith sourceElaborator
 
 -- A program as given, with no libraries in front of it
 lowerStatementsWith :: Elaborator -> [Statement] -> Result M.Program String
-lowerStatementsWith elaborator stmts = elaborateWith elaborator stmts `bindResult` lowerElaborated
+lowerStatementsWith elaborator stmts = lowerAccepted [] (elaborator (statementsRequest stmts)) `bindResult` finishProgram
 
 elaborateStatements :: [Statement] -> Result Elaborated String
-elaborateStatements = elaborateWith sourceElaborator
+elaborateStatements stmts = acceptedElaboration (sourceElaborator (statementsRequest stmts))
 
-elaborateWith :: Elaborator -> [Statement] -> Result Elaborated String
-elaborateWith elaborator stmts = acceptedElaboration (elaborator (Request mainModule False False NoInterface [] [] [] [stmts]))
+statementsRequest :: [Statement] -> Request
+statementsRequest stmts = Request mainModule False False NoInterface [] [] [] [stmts]
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

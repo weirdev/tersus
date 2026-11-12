@@ -1,7 +1,7 @@
-module MirLower (lowerElaborated, lowerLibrary, lowerModuleWith) where
+module MirLower (lowerRaw, lowerElaborated, lowerModuleWith) where
 
 import Control.Monad (forM, unless, when)
-import Data.List (intercalate, isPrefixOf)
+import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -9,7 +9,7 @@ import qualified Data.Set as Set
 import Interface (InterfaceFunction (..), ModuleInterface (..))
 import qualified Mir as M
 import MirCopies (makeCopies)
-import MirMoves (checkMovesExcluding, stripPositions)
+import MirMoves (finishLowered)
 import Pretty (renderType)
 import StdLib (builtinFunct)
 import StdLibDefs (stdLibCtx)
@@ -26,31 +26,58 @@ import Utils
 -- program (see Syntax.Elaborated), one for each expression in the order the lowering visits them, fully
 -- resolved: that is how `x = []` gets the element type that a later `push(x, 1)` decides. The lowering takes
 -- the next one as it reaches each expression (`claim`), and infers nothing itself.
--- For a program the elaborator has checked and handed back (the pipeline checks a program once)
+-- For a program the elaborator has checked and handed back (the pipeline checks a program once), finished as
+-- Lowering.finishProgram finishes it
 lowerElaborated :: Elaborated -> Result M.Program String
-lowerElaborated = lowerWith True
-
--- A library of the compiler (lib/lists.tersus and lib/box.tersus), checked for moves like any program:
--- the exemption it had would have let a reference in library code go unchecked (REFERENCES.md, stage 5)
-lowerLibrary :: Elaborated -> Result M.Program String
-lowerLibrary = lowerWith True
-
--- (a program lowered on its own is the whole program, so the copies of its functions with bounds are made here; a module's
--- are made when the program it is part of is linked, Link)
-lowerWith :: Bool -> Elaborated -> Result M.Program String
-lowerWith checking elaborated@(Elaborated stmts _) =
-    case runL (program stmts) ((initialState elaborated){lsChecking = checking}) of
-        Left e -> Error e
-        Right (p, finalState) -> makeCopies (withoutStubs finalState p)
-
-withoutStubs :: LS -> M.Program -> M.Program
-withoutStubs finalState p = p{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs finalState) (M.progFunctions p)}
+lowerElaborated elaborated = lowerModuleWith [] elaborated `bindResult` makeCopies
 
 lowerModuleWith :: [ModuleInterface] -> Elaborated -> Result M.Program String
-lowerModuleWith ifaces elaborated@(Elaborated stmts _) =
+lowerModuleWith ifaces elaborated = lowerRaw ifaces elaborated `bindResult` finishLowered
+
+lowerRaw :: [ModuleInterface] -> Elaborated -> Result M.Lowered String
+lowerRaw ifaces elaborated@(Elaborated stmts _) =
     case runL (program stmts) (seededModuleState ifaces elaborated) of
         Left e -> Error e
-        Right (p, finalState) -> Ok (withoutStubs finalState p)
+        Right (p, s) -> Ok (M.Lowered p (lsCopies s) (lsLinear s) (lsDrops s) (lsStubs s) (Set.fromList (concatMap topDeclared stmts ++ concatMap definedFunctionNames stmts)) (Set.fromList (concatMap nestedDeclared stmts)) (concatMap assumesIn stmts))
+  where
+    topDeclared stmt = case stmt of
+        StructDef name _ _ _ -> [name]
+        EnumDef name _ -> [name]
+        TraitDef name _ _ -> [name]
+        _ -> []
+    nestedDeclared stmt = if null (topDeclared stmt) then declaredNames stmt else []
+
+-- (the same walks as Compile.ownNames, PackageCompile.moduleDeclaredNames and PackageCompile.assumesIn)
+declaredNames :: Statement -> [Name]
+declaredNames stmt = case stmt of
+    StructDef name _ _ _ -> [name]
+    EnumDef name _ -> [name]
+    TraitDef name _ _ -> [name]
+    Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> concatMap declaredNames body
+    Block body -> concatMap declaredNames body
+    If _ yes no -> concatMap declaredNames (yes ++ no)
+    While _ _ _ body -> concatMap declaredNames body
+    ImplDef _ _ _ _ _ body -> concatMap declaredNames body
+    BoundedDef _ inner -> declaredNames inner
+    _ -> []
+
+definedFunctionNames :: Statement -> [Name]
+definedFunctionNames stmt = case stmt of
+    Assign name (Val VFunct{}) -> [name]
+    ImplDef _ _ _ _ _ body -> concatMap definedFunctionNames body
+    BoundedDef _ inner -> definedFunctionNames inner
+    _ -> []
+
+assumesIn :: Statement -> [VariableProof]
+assumesIn stmt = case stmt of
+    ValidationStatement (Assume proof) -> [proof]
+    Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> concatMap assumesIn body
+    Block body -> concatMap assumesIn body
+    If _ yes no -> concatMap assumesIn (yes ++ no)
+    While _ _ _ body -> concatMap assumesIn body
+    ImplDef _ _ _ _ _ body -> concatMap assumesIn body
+    BoundedDef _ inner -> assumesIn inner
+    _ -> []
 
 seededModuleState :: [ModuleInterface] -> Elaborated -> LS
 seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
@@ -196,19 +223,18 @@ data LS = LS
     , lsBuilder :: Builder
     , lsGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes
     , lsInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets
-    , lsChecking :: Bool -- whether the program is checked for values used after they were moved
     , lsCopies :: Set.Set Name -- the structs and enums that implement Copy
     , lsLinear :: Set.Set Name -- the structs and enums that are linear
     , lsExterns :: Set.Set Variable -- the functions that are extern
     , lsDrops :: Set.Set Name -- the structs and enums that have a drop
     , lsPrereg :: Map Variable [Name] -- the names given to the functions defined at the top, before any body is lowered (one for each definition of the name)
-    , lsStubs :: Set.Set Name -- imported functions seeded as stubs: present while lowering, never part of the unit
+    , lsStubs :: Set.Set Name -- imported functions and the names of copies seeded as stubs: in the raw unit, dropped when it is finished
     , lsBounded :: Map Name M.BoundedFn -- the functions with bounds (BoundedDef)
     , lsInstances :: Map Name (Name, [Arg]) -- the copies the program names (Instance)
     }
 
 initialState :: Elaborated -> LS
-initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty Map.empty Set.empty Map.empty Map.empty
+initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty Map.empty Set.empty Map.empty Map.empty
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
 -- others are known functions, and a call of one is a call by name.
@@ -417,15 +443,7 @@ program stmts = do
     let (resolvedMain, others) = case resolved of
             m : rest -> (m, rest)
             [] -> (main', [])
-        result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s) (lsBounded s) (lsInstances s))
-    -- (that the program is well formed is checked by the pipeline on what is lowered, with the checker
-    -- written in Tersus (MirHousekeeping): it is not checked here, so that the checker and the eraser can
-    -- themselves be lowered to be made from the seed. The stub functions of imported modules stay in the
-    -- program for this check, so a call of one is seen with its signature; they are not checked themselves,
-    -- and lowerModuleWith takes them out of the unit it returns.)
-    case if lsChecking s then checkMovesExcluding (lsCopies s) (lsLinear s) (lsDrops s) (lsStubs s) result else [] of
-        [] -> return (stripPositions result)
-        errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
+    return (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s) (lsBounded s) (lsInstances s))
 
 -- One type variable the checker never learned (the elements of a list that is never used) is an Int
 resolveFunction :: M.Function -> L M.Function

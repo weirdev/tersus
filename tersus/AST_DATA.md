@@ -22,6 +22,8 @@ writeInterfaceRecord :: InterfaceRecord -> Result String String
 readInterfaceRecord  :: String -> Result InterfaceRecord String
 writeBuiltinTable    :: [BuiltinRecord] -> Result String String
 readBuiltinTable     :: String -> Result [BuiltinRecord] String
+writeMirPayloadLines :: [Statement] -> Result [String] String
+readMirPayloadBytes  :: [ByteString] -> Result [Statement] String
 ```
 
 `InterfaceData.writeInterface`/`readInterface` write and read an
@@ -89,6 +91,7 @@ tersus-ast 1 parsed
 tersus-ast 1 elaborated
 tersus-ast 1 interface
 tersus-ast 1 builtins
+tersus-ast 1 mir
 ```
 
 Each subsequent line is one node. Its zero-based ID is its position after the
@@ -158,6 +161,10 @@ type parameters of the function with bounds that uses it, or, with an empty
 `FUNCTION` is `$builtin` for one of the prelude's `Sequence` or `Growable` that a
 builtin has), with the parameter names and signature of `NAME`. The records are
 in name order and claim no expression types (MIR.md, "The copy step").
+
+A mir root is a `Statements` list: the validator's payloads of a lowered unit,
+each one statement record (`MIR.md`, "Version 3: a lowered unit"). Only
+Haskell reads this stage; the Tersus reader does not accept it.
 
 An interface root is `Interface PACKAGE MODULE TYPES CTORS GENERICS INVARIANTS
 TRAITS TRAITPARAMS FUNCTIONS IMPLS ASSOC IMPLARGS IMPLBOUNDS COPIES LINEAR DROPS

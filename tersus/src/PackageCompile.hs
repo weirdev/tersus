@@ -8,6 +8,8 @@ module PackageCompile
     , compileModulesLinked
     , assumptionsOfPackage
     , packageFailure
+    , moduleDeclaredNames
+    , assumesIn
     ) where
 
 import Data.List (nubBy)
@@ -19,9 +21,11 @@ import Interface (ModuleInterface (..))
 import LibPackage (LibPackage, libCatalog, libInterfaces, libModuleId, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
 import Link (linkPrograms)
 import qualified Modules as Mod
-import MirLower (lowerModuleWith)
+import Lowering (lowerAccepted)
+import Mir (Lowered)
+import MirMoves (finishLowered)
 import Pretty (renderVarProof)
-import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
+import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), VariableProof)
 import Utils
 
 data CompiledModule = CompiledModule
@@ -32,6 +36,7 @@ data CompiledModule = CompiledModule
     , compiledLibInterfaces :: [ModuleInterface]
     , compiledLibUnits :: [(Mod.ModuleId, M.Program)]
     , compiledImportInterfaces :: [ModuleInterface]
+    , compiledLowered :: Result Lowered String -- made when the package is lowered
     }
     deriving (Show)
 
@@ -77,7 +82,7 @@ compileModulesUsing loader libraries snapshot = case loader ((Mod.loadRequest Lo
              in case mapM (\i -> maybe (Map.lookup i libIfaces) Just (Map.lookup i known)) lowering of
                     Nothing -> Error ("internal: the loader named an interface it did not give for module " ++ Mod.renderModuleId moduId)
                     Just loweringIfaces ->
-                        go rest known (CompiledModule moduId stmts elaborated iface (withoutReplacedEq stmts selectedIfaces) (stripDeclaredFromUnits (moduleDeclaredNames stmts) units) loweringIfaces : done)
+                        go rest known (CompiledModule moduId stmts elaborated iface (withoutReplacedEq stmts selectedIfaces) (stripDeclaredFromUnits (moduleDeclaredNames stmts) units) loweringIfaces (lowerAccepted loweringIfaces response) : done)
         _ -> Error (packageFailure moduId response)
 
 packageFailure :: Mod.ModuleId -> Response -> String
@@ -115,7 +120,7 @@ compileModulesLinked snapshot = compileModules snapshot `bindResult` lowerCompil
 -- Callers must validate the linked program before erasure or execution.
 lowerCompiledPackage :: CompiledPackage -> Result M.Program String
 lowerCompiledPackage compiled =
-    let lowerOne modu = mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (compiledImportInterfaces modu) (compiledElaborated modu)))
+    let lowerOne modu = mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (compiledLowered modu `bindResult` finishLowered))
         libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
      in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
 
@@ -131,15 +136,17 @@ assumptionsOfPackage compiled = concatMap perModule (compiledModules compiled)
          in axioms ++ externs ++ assumes
     localName name = reverse (takeWhile (/= '$') (reverse name))
     commas = foldr (\a b -> if null b then a else a ++ ", " ++ b) ""
-    assumesIn stmt = case stmt of
-        ValidationStatement (Assume proof) -> [proof]
-        Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> concatMap assumesIn body
-        Block body -> concatMap assumesIn body
-        If _ yes no -> concatMap assumesIn (yes ++ no)
-        While _ _ _ body -> concatMap assumesIn body
-        ImplDef _ _ _ _ _ body -> concatMap assumesIn body
-        BoundedDef _ inner -> assumesIn inner
-        _ -> []
+
+assumesIn :: Statement -> [VariableProof]
+assumesIn stmt = case stmt of
+    ValidationStatement (Assume proof) -> [proof]
+    Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> concatMap assumesIn body
+    Block body -> concatMap assumesIn body
+    If _ yes no -> concatMap assumesIn (yes ++ no)
+    While _ _ _ body -> concatMap assumesIn body
+    ImplDef _ _ _ _ _ body -> concatMap assumesIn body
+    BoundedDef _ inner -> assumesIn inner
+    _ -> []
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

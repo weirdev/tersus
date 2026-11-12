@@ -8,6 +8,8 @@ module AstData
     , readElaborated
     , readElaboratedLines
     , readElaboratedBytes
+    , writeMirPayloadLines
+    , readMirPayloadBytes
     , InterfaceRecord (..)
     , FunctionRecord (..)
     , TemplateRecord (..)
@@ -117,6 +119,10 @@ writeElaboratedLines (Elaborated ss ts) =
     let (s, b) = putStatements ss (0, [])
         (t, b') = putTypes ts b
      in finish "elaborated" (emit "Elaborated" [show s, show t] b')
+
+-- The validator's payloads of a lowered unit (MirData.writeLowered), each one statement
+writeMirPayloadLines :: [Statement] -> Result [String] String
+writeMirPayloadLines ss = finish "mir" (putStatements ss (0, []))
 
 writeInterfaceRecord :: InterfaceRecord -> Result String String
 writeInterfaceRecord = mapResult unlines . writeInterfaceRecordLines
@@ -802,6 +808,11 @@ readElaboratedBytes ls = decodeBytes "elaborated" ls `bindResult` elaboratedRoot
 elaboratedRoot :: Node -> Result Elaborated String
 elaboratedRoot n = case n of
     NElaborated e -> Ok e
+    _ -> Error "AstData: wrong root kind"
+
+readMirPayloadBytes :: [B.ByteString] -> Result [Statement] String
+readMirPayloadBytes ls = decodeBytes "mir" ls `bindResult` \n -> case n of
+    NStatements ss -> Ok ss
     _ -> Error "AstData: wrong root kind"
 
 decode :: String -> [String] -> Result Node String

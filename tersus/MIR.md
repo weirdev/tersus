@@ -390,6 +390,110 @@ end
 
 A type is `int`, `byte`, `bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`, `forall N "n"... N "n"... T`, `param "n"` or `ref T`, and a size is `c N`, `any`, `p "n"` or `v N`. An operand is `copy L`, `move L` or `const C`, and a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. A statement is `assign L RVALUE`, `peek L RVALUE` or `drop L`, and a terminator `goto B`, `switch O B B`, `call O N O... L B`, `return` or `unreachable`. An rvalue is `use O`, `binary OP O O` (`add sub mul div mod eq noteq lt lteq gt gteq`), `listop OP N O...` (the names of the `ListOp`s, as `get`, `newArray` and `writeByte`), `makelist N O...`, `makebox O`, `unbox O`, `unsize O`, `makedata "n" N ("f" O)...`, `readfield O "n" "f"`, `isvariant O "n"`, `asvariant O "n"`, `clone O` or `takefield L "n" "f"`.
 
+### Version 3: a lowered unit
+
+`MirData.writeLowered` and `MirData.readLowered` (`readLoweredBytes` for the
+lines of a response as bytes) write and read a whole module as lowering gives
+it, `Mir.Lowered`: the program before `MirMoves.finishLowered` completes its
+instances, checks its moves, takes out its source positions and drops the
+stubs of imported functions and of the copies it names, with the sets the check
+of moves needs and what the host takes from the module's statements. A program
+lowered on its own (a statement list) is the whole program, so
+`Lowering.finishProgram` also makes its copies (`MirCopies`); a module's are
+made when the program is linked. It is the contract of the lowering written in
+Tersus (`REPLACING_HASKELL.md`, "MIR lowering in Tersus"), which the host will
+finish with the same code. Only Haskell reads it yet.
+
+Version 3 keeps the type, operand, constant, rvalue, statement and terminator
+words of the earlier versions. Its records come in this order, each kind by
+name (functions, then `main`), and a function's loops by header block:
+
+```
+tersus-mir 3
+struct ... | enum ...                  as in version 1
+generic "S" N "n"... M ("f" TYPE)...   a struct with sizes: its sizes and fields
+invariant "S" P                        what every value of the struct meets
+bounded "f" N "s"... M "p"... K "g"... a function with bounds: the sizes its bounds name, its
+                                       type parameters bounded by Copy, the functions lifted out of it
+instance "n" "f" N ARG...              what the name of a copy stands for: the function with bounds
+                                       and its arguments (each ARG `size SIZE` or `type T`); "" and
+                                       none for a function a bound gives
+shared N ("x" OPERAND)...              a shared environment, numbered from 0 in order
+function ... | main ...                the version 1 header line, then:
+spec requires P ensures P termination P|none writes N "w"... mutparams N "p"... from N "p"...
+env ENV
+local ...
+loop B body B invariant P termination P|none env ENV
+block B, its statements and terminator, ..., end
+copies N "x"...
+linear N "x"...
+drops N "x"...
+stubs N "x"...                         the imported functions seeded as stubs
+declared N "x"...                      the names the module declares at its top
+nested N "x"...                        the names it declares inside its functions
+assumes N P...                         every `assume` of its statements
+data N
+N lines of AST data, stage mir
+```
+
+`ENV` is `S N ("x" OPERAND)...`: the names listed (by name), and those of
+shared environment `S` that are not listed, or none when `S` is `none`. The
+writer puts the function constants of an environment (the program's functions,
+which nearly every environment names) in a shared environment, so that each
+set of them is written once; without that a compiler package is tens of times
+larger. A ghost statement names its kind and carries its environment:
+
+```
+ghost validation ENV P
+ghost axiom ENV P
+ghost proof ENV P
+ghost function ENV "name" "source name" true|false
+ghost position ENV LINE COLUMN
+ghost dissolve ENV L
+```
+
+The bare `ghost`, the numbered `ghost N` and `dissolve L` of version 2 are not
+records of version 3. The sets (`copies` to `nested`) are in ascending order.
+`declared` holds the structs, enums and traits at the module's top and the
+functions at its top and in its impls, the names a package module's library
+units do not declare again (`PackageCompile.moduleDeclaredNames`); `nested`
+holds the structs, enums and traits declared inside its functions and blocks,
+which a single file's library units do not declare again either
+(`Compile.ownNames` is both). `assumes` holds every `assume` in order, dead
+code included.
+
+A count is nonnegative and no more than the tokens that follow it in its
+record. A local, a block, a line or column and an index are signed 64-bit
+numbers; an integer constant and a size are numbers of any size, so the unit
+holds every value lowering gives. The fixed-width types are `i8 i16 i32 u16
+u32`: `writeLowered` gives an error, not data its reader refuses, for a unit
+with any other fixed-width type or a narrowing to one, as the AST data writer
+does for its payloads.
+
+`P` is a zero-based index into the root list of the AST data block
+(`AST_DATA.md`, stage `mir`). A payload is one existing statement record:
+
+| Referred to by | Payload |
+|---|---|
+| `ghost validation` | `ValidationStatement V` |
+| `ghost axiom` | `AxiomDef NAME PARAMS REQUIRES ENSURES` |
+| `ghost proof` | `ProofDef NAME PARAMS REQUIRES ENSURES BODY` |
+| `requires`, `ensures`, `invariant` (of a loop or a struct) | `Block STATEMENTS`, each a `ValidationStatement` |
+| `termination` | `While` with the condition `true` (`Val (VBool true)`), no invariant, the termination and no body |
+| `assumes` | `ValidationStatement (Assume PROOF)` |
+
+The reader refuses a payload of the wrong kind, an index with no payload, a
+payload referred to twice or not at all, a shared environment that does not
+exist, a name twice in an environment or a set, a type, generic, invariant,
+function, local, loop or block twice, a count that is negative or longer than
+its record, a number out of range, a record out of this order or that it does
+not know, and a `data` count that is not the block's length. `testMirLowered` round trips every unit the compiler
+lowers from `examples/`, `examples/modules`, the compiler libraries and the
+compiler's own packages (the elaborator and the MIR reader among them), with
+the examples the elaborator refuses listed; checks the names and assumes
+against the walks of the statements; checks the finished MIR and the move error
+of small programs against fixed text; and checks the refusals.
+
 ## The mir package
 
 `lib/mir/` is a package (package name `mir`) whose four entry programs share one MIR reader. The round-trip reader, the eraser and the ownership passes share the declarations-only `writer` module; its `printProgramWithGhosts` preserves ghost IDs in MIR v2. The emitter imports the ownership request dispatcher as well as its LLVM lowering files. The checker, eraser and emitter also import `support` for phase-neutral metadata. Only the selected entry file runs; sibling files and the ownership module contain declarations. Full layouts stay local. The eraser writes with the shared writer too (`printProgramAsRead` keeps the `list` and `box` tokens of older data).
