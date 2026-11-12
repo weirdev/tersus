@@ -15,7 +15,7 @@ module PackageCompile
 import Data.List (nubBy)
 import qualified Data.Map as Map
 import qualified Mir as M
-import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..))
+import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..), MirAnswer, Response (..), responseMir)
 import ElaboratorTool (Loader, sourceLoader)
 import Interface (ModuleInterface (..))
 import LibPackage (LibPackage, libCatalog, libInterfaces, libModuleId, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
@@ -37,6 +37,7 @@ data CompiledModule = CompiledModule
     , compiledLibUnits :: [(Mod.ModuleId, M.Program)]
     , compiledImportInterfaces :: [ModuleInterface]
     , compiledLowered :: Result Lowered String -- made when the package is lowered
+    , compiledMir :: Maybe MirAnswer -- the elaborator's MIR of the module, when it gave one
     }
     deriving (Show)
 
@@ -82,7 +83,7 @@ compileModulesUsing loader libraries snapshot = case loader ((Mod.loadRequest Lo
              in case mapM (\i -> maybe (Map.lookup i libIfaces) Just (Map.lookup i known)) lowering of
                     Nothing -> Error ("internal: the loader named an interface it did not give for module " ++ Mod.renderModuleId moduId)
                     Just loweringIfaces ->
-                        go rest known (CompiledModule moduId stmts elaborated iface (withoutReplacedEq stmts selectedIfaces) (stripDeclaredFromUnits (moduleDeclaredNames stmts) units) loweringIfaces (lowerAccepted loweringIfaces response) : done)
+                        go rest known (CompiledModule moduId stmts elaborated iface (withoutReplacedEq stmts selectedIfaces) (stripDeclaredFromUnits (moduleDeclaredNames stmts) units) loweringIfaces (lowerAccepted loweringIfaces response) (responseMir response) : done)
         _ -> Error (packageFailure moduId response)
 
 packageFailure :: Mod.ModuleId -> Response -> String

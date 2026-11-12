@@ -430,7 +430,7 @@ forms such as `0x1F` and `(5)` that no writer of the data writes).
 Built: the elaborator written in Tersus bootstraps from a pinned seed, as the
 emitter and the parser do. F0 is the elaborator built with clang from seed IR
 (`bootstrap/frontend.sha256`, the `frontend.ll` asset of release
-`bootstrap-f1b9ff712d99`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
+`bootstrap-9fc6933dcb68`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
 `bootstrap/frontend.ll` supplies local bytes, verified against the same pin).
 F1 is the elaborator as it is now, its modules and the compiler libraries
 elaborated by F0 and the rest of the build done by the host as for its other
@@ -606,14 +606,25 @@ validation, ownership and emission. Four phases, one PR each:
    `Lowering.lowerAccepted`. `MirData` writes and reads the raw unit as
    `tersus-mir 3` (`MIR.md`), and `testMirLowered` round trips every unit of
    the corpus through it.
-2. The lowering written in Tersus (`lib/elaborate/lower*.tersus`) beside the
-   Haskell one, the elaborator's answer gaining a `mir` section, and a
-   differential: raw units equal and lowering errors byte for byte, over the
-   corpus and over every lowering the suite makes. A new seed.
-3. Every lowering function validates, and cold bootstrap and the suite stay
-   within 1.25x of master. A new seed.
-4. `lowerAccepted` reads only the elaborator's MIR; `MirLower`, the
-   differential switch and the `Elaborated` handoff are deleted, and
+2. The lowering written in Tersus beside the Haskell one (done).
+   `lib/elaborate/lower.tersus` (statements, control flow, functions and the
+   program), `lowerexpr.tersus` (operands, builtins, conditions),
+   `lowerplace.tersus` (places and assignments through references),
+   `loweriface.tersus` (what a module is lowered against: the types, marks and
+   stub functions of its interfaces), `lowerout.tersus` (the `tersus-mir 3`
+   writer) and `lowerstate.tersus`/`lowerbuild.tersus` (its types and state)
+   port `MirLower.lowerRaw` function by function: the lowering walks the
+   elaborated program the elaborator is about to write and takes its types in
+   `MirLower`'s order. The elaborator's answer carries the unit in a `mir`
+   section (`AST_DATA.md`). `testMirDifferential` compares it with the
+   Haskell lowering of the same answer for every unit of the corpus (equal
+   units, refusals word for word) and checks that a changed unit is caught.
+   Every function of the lowering validates with the elaborator
+   (`testHostValidation:elaborator`). A new seed.
+3. Cold bootstrap and the suite stay within 1.25x of master (the lowering's
+   cost, measured beside the Haskell one). A new seed.
+4. `lowerAccepted` reads only the elaborator's MIR; `MirLower`,
+   `testMirDifferential` and the `Elaborated` handoff are deleted, and
    `declared` and `assumes` replace the walks of the statements in `Compile`
    and `PackageCompile`.
 

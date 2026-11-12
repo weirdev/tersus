@@ -402,7 +402,9 @@ lowered on its own (a statement list) is the whole program, so
 `Lowering.finishProgram` also makes its copies (`MirCopies`); a module's are
 made when the program is linked. It is the contract of the lowering written in
 Tersus (`REPLACING_HASKELL.md`, "MIR lowering in Tersus"), which the host will
-finish with the same code. Only Haskell reads it yet.
+finish with the same code. The elaborator written in Tersus writes it in the
+`mir` section of its answer (`AST_DATA.md`); the host reads it only to compare
+it with its own lowering yet.
 
 Version 3 keeps the type, operand, constant, rvalue, statement and terminator
 words of the earlier versions. Its records come in this order, each kind by

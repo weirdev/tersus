@@ -290,13 +290,25 @@ checked, the compiler libraries put in front of a single-file program included.
 
 The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
 the elaborated syntax, `interface none` or `interface` with a `data` block of
-the interface and, when the elaborator selected compiler libraries,
+the interface, the module's MIR and, when the elaborator selected compiler libraries,
 `libraries N "NAME"...`, which the compiler links; or `refused "MESSAGE"` (the module does not check),
 `unresolved "MESSAGE"` (its names do not resolve, or the libraries it calls for
 cannot be given it; the message is whole),
 `interfaceRefused "MESSAGE"` (it checks, but the requested interface cannot be given)
 or `unmodelled "WHAT"` (the elaborator
 does not handle the program yet, which is no verdict on it).
+The MIR is `mir N` and the N lines of the module's lowered unit (`tersus-mir 3`,
+MIR.md, "Version 3", its payload block included), or `mir refused "MESSAGE"` when the
+lowering refuses the module, with the words of `MirLower`'s refusal
+(`lib/elaborate/lower.tersus` and its siblings). The elaborator lowers each module against
+the interfaces the compiler lowers it with: for a module request, the request's
+interfaces; for a program, the libraries it selected, in the libraries' order, without
+`eq` when the program declares a trait `Eq`; for a package module, the interfaces its
+answer names as `lowering`; for a compiler library, the libraries it imports. An answer
+without a `mir` section is read as before (the seed of an older elaborator writes none).
+The compiler still lowers with `MirLower`; only `testMirDifferential` reads the section,
+to compare the two.
+
 The compiler sends a module request itself only for a program it is given as statements
 (`Compile.lowerStatementsWith`); files, packages and the compiler libraries go as load requests (below), whose answers
 carry module responses. In production the elaborator is an executable of the elaborator written in Tersus

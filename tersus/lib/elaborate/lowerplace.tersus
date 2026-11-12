@@ -1,0 +1,251 @@
+import data::ast::ast { AstExpression, AstNode };
+import elaborate::records { listItems, nameText, nodeIn };
+import elaborate::lowerstate { lwMalformed, LowSt, Op, Step, Stmt, TDecl, boxInner, claim, hasInt, intAt, isMutRefTy, isRefTy, isTupleBase, lfail, lwCat, lwCat3, lwInstanceText, lwKind, noOp, quote, simpleType, lwSp, tyOf, unrefTy, wrapType };
+import elaborate::lowerbuild { Bi, biOf, borrowRv, builtinOfExpr, cloneVariantPayload, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, ghostStmt, isPrim, lookupBinding, singleEnv, tempLocal, useRv, varNameOf };
+import elaborate::lowerexpr { lowerOperand };
+
+// A place as the local it starts from (ls.root), the steps from there (ls.steps) and its type (ls.ty). Each
+// expression of the place takes the type the elaborator gave it, in the order it gave them.
+
+// What a place expression is: 0 a variable, 1 a field, 2 a cast, 3 an element, 4 a dereference, 5 anything else
+struct PlaceForm { kind: Int, name: String, field: String, sub: Int, index: Int };
+
+fn lwPlaceForm(src: &List<AstNode>, e: Int) -> PlaceForm ~ {
+    other = PlaceForm { kind: 5, name: "", field: "", sub: 0 - 1, index: 0 - 1 };
+    x = exprAt(src, e);
+    if x is AstExpression::Var { return PlaceForm { kind: 0, name: nameText(src, (x as AstExpression::Var).n), ..other }; };
+    if !(x is AstExpression::F) { return other; };
+    f = (x as AstExpression::F).f;
+    args = listItems(src, (x as AstExpression::F).xs);
+    if varNameOf(src, f) = "get" && exprAt(src, f) is AstExpression::Var && size(args) = 2 {
+        return PlaceForm { kind: 3, sub: intAt(&args, 0), index: intAt(&args, 1), ..other };
+    };
+    b = builtinOfExpr(src, f);
+    if b < 0 { return other; };
+    bi = biOf(src, b);
+    if bi.kind = 2 && size(args) = 1 { return PlaceForm { kind: 1, field: clone(bi.field), sub: intAt(&args, 0), ..other }; };
+    if bi.kind = 5 && size(args) = 1 { return PlaceForm { kind: 2, name: clone(bi.name), sub: intAt(&args, 0), ..other }; };
+    if isPrim(&bi, "Get") && size(args) = 2 { return PlaceForm { kind: 3, sub: intAt(&args, 0), index: intAt(&args, 1), ..other }; };
+    if isPrim(&bi, "DerefOf") && size(args) = 1 { return PlaceForm { kind: 4, sub: intAt(&args, 0), ..other }; };
+    return other;
+};
+
+fn placeResult(ls: LowSt, root: Int, steps: List<Step>, ty: Int) -> LowSt ~ {
+    return LowSt { root: root, steps: steps, ty: ty, ..ls };
+};
+
+fn fieldStep(ctor: String, field: String) -> Step ~ { return Step { isField: true, ctor: ctor, field: field, index: noOp() }; };
+
+fn indexStep(o: Op) -> Step ~ { return Step { isField: false, ctor: "", field: "", index: o }; };
+
+fn lowerPlace(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    if !ls.ok { return ls; };
+    if !(nodeIn(src, e) is AstNode::Expression) { return lwMalformed(ls, "an expression"); };
+    form = lwPlaceForm(src, e);
+    if form.kind = 0 { return varPlace(ls, &form.name); };
+    if form.kind = 1 { return fieldPlace(ls, src, &form); };
+    if form.kind = 2 { return castPlace(ls, src, &form); };
+    if form.kind = 3 { return indexPlace(ls, src, &form); };
+    if form.kind = 4 {
+        ls = claim(ls);
+        t = ls.ty;
+        ls = lowerPlace(ls, src, form.sub);
+        return LowSt { ty: t, ..ls };
+    };
+    return operandPlace(ls, src, e);
+};
+
+fn varPlace(ls: LowSt, name: &String) -> LowSt ~ {
+    ls = claim(ls);
+    t = ls.ty;
+    found = lookupBinding(&ls, name);
+    if found.found && found.b.isLocal { return placeResult(ls, found.b.local, [], t); };
+    return lfail(ls, lwCat3("Lowering failed: ", name, " is not a value that a place can start from"));
+};
+
+fn fieldPlace(ls: LowSt, src: &List<AstNode>, form: &PlaceForm) -> LowSt ~ {
+    ls = claim(ls);
+    fieldTy = ls.ty;
+    ls = lowerPlace(ls, src, form.sub);
+    if !ls.ok { return ls; };
+    root = ls.root;
+    steps = clone(ls.steps);
+    ls = fieldCtor(ls, &form.field, ls.ty);
+    if !ls.ok { return ls; };
+    ctor = clone(ls.name);
+    return placeResult(ls, root, push(steps, fieldStep(ctor, clone(form.field))), fieldTy);
+};
+
+// (the variant is checked without an owned copy of it: a borrow of the place, and a ghost that it is the variant)
+fn castPlace(ls: LowSt, src: &List<AstNode>, form: &PlaceForm) -> LowSt ~ {
+    ls = claim(ls);
+    variantTy = ls.ty;
+    ls = lowerPlace(ls, src, form.sub);
+    if !ls.ok { return ls; };
+    root = ls.root;
+    steps = clone(ls.steps);
+    subTy = ls.ty;
+    ls = wrapType(ls, 10, subTy);
+    refTy = ls.ty;
+    ls = tempLocal(ls, refTy);
+    borrowed = ls.root;
+    rv = borrowRv(root, clone(steps), false);
+    ls = emitAssign(ls, borrowed, &rv);
+    if ls.bHasOpen {
+        ls = singleEnv(ls, "$cloneVariant", borrowed);
+        env = ls.id;
+        ls = cloneVariantPayload(ls, &form.name);
+        pay = ls.id;
+        ls = emitStmt(ls, ghostStmt(0, env, pay, ""));
+    };
+    return placeResult(ls, root, steps, variantTy);
+};
+
+fn indexPlace(ls: LowSt, src: &List<AstNode>, form: &PlaceForm) -> LowSt ~ {
+    ls = claim(ls);
+    elementTy = ls.ty;
+    ls = lowerPlace(ls, src, form.sub);
+    if !ls.ok { return ls; };
+    root = ls.root;
+    steps = clone(ls.steps);
+    ls = lowerOperand(ls, src, form.index);
+    if !ls.ok { return ls; };
+    o = clone(ls.op);
+    ls = captureIndex(ls, o);
+    captured = clone(ls.op);
+    return placeResult(ls, root, push(steps, indexStep(captured)), elementTy);
+};
+
+fn captureIndex(ls: LowSt, o: Op) -> LowSt ~ {
+    if o.k = 2 { return LowSt { op: o, ..ls }; };
+    ls = simpleType(ls, 0);
+    intTy = ls.ty;
+    ls = tempLocal(ls, intTy);
+    at = ls.root;
+    rv = useRv(o);
+    ls = emitAssign(ls, at, &rv);
+    return LowSt { op: copyOp(at), ..ls };
+};
+
+fn operandPlace(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    ls = lowerOperand(ls, src, e);
+    if !ls.ok { return ls; };
+    if ls.op.k = 2 { return lfail(ls, "Lowering failed: a reference cannot be to a value that has no place"); };
+    l = ls.op.l;
+    t = ls.ty;
+    return placeResult(ls, l, [], t);
+};
+
+// The local a reference expression stands in (ls.root)
+fn lowerRefRoot(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    if lwIsVar(src, e) {
+        name = varNameOf(src, e);
+        ls = claim(ls);
+        found = lookupBinding(&ls, &name);
+        if found.found && found.b.isLocal {
+            l = found.b.local;
+            bty = found.b.ty;
+            if isRefTy(&ls, bty) || boxInner(&ls, bty) >= 0 || hasInt(&ls.bBorrowed, l) { return LowSt { root: l, ..ls }; };
+        };
+        return lfail(ls, lwCat3("Lowering failed: ", &name, " is not a reference"));
+    };
+    ls = lowerOperand(ls, src, e);
+    if !ls.ok { return ls; };
+    if ls.op.k = 2 { return lfail(ls, "Lowering failed: * of a value that is not a reference"); };
+    l = ls.op.l;
+    return LowSt { root: l, ..ls };
+};
+
+fn lwIsVar(src: &List<AstNode>, e: Int) -> Bool ~ { return exprAt(src, e) is AstExpression::Var; };
+
+// The place an assignment through a reference is to: through an update parameter (the parameter local itself), or
+// through a reference local made by &mut place in this function (the place it was made to)
+fn lowerDerefPlace(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    if !ls.ok { return ls; };
+    form = lwPlaceForm(src, e);
+    if form.kind = 4 { return lwDerefRoot(ls, src, form.sub); };
+    if form.kind = 1 {
+        ls = claim(ls);
+        fieldTy = ls.ty;
+        ls = lowerDerefPlace(ls, src, form.sub);
+        if !ls.ok { return ls; };
+        root = ls.root;
+        steps = clone(ls.steps);
+        ls = fieldCtor(ls, &form.field, ls.ty);
+        if !ls.ok { return ls; };
+        ctor = clone(ls.name);
+        return placeResult(ls, root, push(steps, fieldStep(ctor, clone(form.field))), fieldTy);
+    };
+    if form.kind = 3 && isIndexForm(src, e) {
+        ls = claim(ls);
+        elementTy = ls.ty;
+        ls = lowerDerefPlace(ls, src, form.sub);
+        if !ls.ok { return ls; };
+        root = ls.root;
+        steps = clone(ls.steps);
+        ls = lowerOperand(ls, src, form.index);
+        if !ls.ok { return ls; };
+        o = clone(ls.op);
+        return placeResult(ls, root, push(steps, indexStep(o)), elementTy);
+    };
+    return lfail(ls, "Lowering failed: an assignment through a reference is to *r, (*r).field or (*r) at an index");
+};
+
+fn isIndexForm(src: &List<AstNode>, e: Int) -> Bool ~ { return lwPlaceForm(src, e).kind = 3; };
+
+fn lwDerefRoot(ls: LowSt, src: &List<AstNode>, inner: Int) -> LowSt ~ {
+    ls = claim(ls);
+    t = ls.ty;
+    if !lwIsVar(src, inner) {
+        ls = lowerRefRoot(ls, src, inner);
+        if !ls.ok { return ls; };
+        root = ls.root;
+        return placeResult(ls, root, [], t);
+    };
+    name = varNameOf(src, inner);
+    ls = claim(ls);
+    found = lookupBinding(&ls, &name);
+    if !found.found || !found.b.isLocal { return lfail(ls, lwCat3("Lowering failed: ", &name, " is not a reference")); };
+    l = found.b.local;
+    bty = found.b.ty;
+    if hasInt(&ls.bMutBorrowed, l) { return placeResult(ls, l, [], t); };
+    if !isRefTy(&ls, bty) { return lfail(ls, lwCat3("Lowering failed: ", &name, " is not a reference")); };
+    i = findRefTarget(ls, l);
+    if i >= 0 && i < size(ls.bRefTargets) {
+        target = clone(get(ls.bRefTargets, i));
+        return placeResult(ls, target.root, target.steps, t);
+    };
+    if isMutRefTy(&ls, bty) { return placeResult(ls, l, [], t); };
+    return lfail(ls, lwCat3("Lowering failed: the place that ", &name, " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter"));
+};
+
+// The constructor that a struct type has, or the variant a value is known to be (ls.name)
+fn fieldCtor(ls: LowSt, field: &String, t: Int) -> LowSt ~ {
+    k = lwKind(&ls, t);
+    inner = boxInner(&ls, t);
+    if inner >= 0 && field != "addr" && field != "blk" { return fieldCtor(ls, field, inner); };
+    if k = 5 {
+        v = tyOf(&ls, t).name;
+        return LowSt { name: v, ..ls };
+    };
+    if k != 4 { return lfail(ls, "A field is read from something that is not a struct"); };
+    x = tyOf(&ls, t);
+    name = lwInstanceText(&ls, &x.name, &x.args);
+    ctors = ctorsOf(&ls, &name, &x.name);
+    if size(ctors) = 1 { return LowSt { name: clone(get(ctors, 0)), ..ls }; };
+    return lfail(ls, lwCat3("The field of an enum ", &name, " is read without a cast"));
+};
+
+fn ctorsOf(ls: &LowSt, name: &String, base: &String) -> List<String> ~ {
+    if HashMap::contains(&ls.types, name) { return declCtors(HashMap::lookup(&ls.types, name, noDecl()), name); };
+    if HashMap::contains(&ls.types, base) { return declCtors(HashMap::lookup(&ls.types, base, noDecl()), name); };
+    if HashMap::contains(&ls.generics, base) || isTupleBase(base) { return push([], clone(name)); };
+    return [];
+};
+
+fn declCtors(d: TDecl, name: &String) -> List<String> ~ {
+    if d.isStruct { return push([], clone(name)); };
+    return d.variants;
+};
+
+fn noDecl() -> TDecl ~ { return TDecl { isStruct: true, fieldNames: [], fieldTypes: [], variants: [], line: "" }; };
