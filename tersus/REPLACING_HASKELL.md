@@ -178,7 +178,7 @@ release asset and pin, and the full test evidence below.
 Gate: the independent heap model against the executor and native/reference
 parity for the corpus and the reference-write fixtures; interpreted/native
 parity of the ownership tool on MIR fixtures; metadata and malformed-input
-checks; the complete suite and opt-in host validation; and independent
+checks; the complete suite and host validation; and independent
 stage-0/stage-1 ownership and emitter/parser bootstrap fixpoints. Cold bootstrap
 must also stay within the agreed performance budget against the same-host base.
 
@@ -365,11 +365,16 @@ unification lets Int and Bool stand for each other is caught. The
 differential runs the elaborator with the largest stack the system allows,
 as the validator is run: it recurses over the nesting of expressions.
 
-The elaborator is validated (`testHostValidation`) by the unmodified
-validator, with no `assume`, axiom or fuel: all 1,026 functions of its
-program, with the libraries it links, validate (`tersus-exe check
-lib/elaborate/elaborate.tersus`). The host validates one function at a time,
-so a check with no verdicts cached takes hours, as for the AST reader. The
+The elaborator is validated (`testHostValidation:elaborator`, which CI runs
+for every change) by the unmodified validator, with no `assume`, axiom or
+fuel: all 2,337 functions of its program, with the grammar and the libraries
+it links, validate (`tersus-exe check lib/elaborate/elaborate.tersus`, which
+checks one function at a time and stops at the first it refuses). The test
+checks every function, several at once, and reports each one refused; with no
+verdicts cached, the seven host programs take about 20 minutes on a
+four-CPU CI runner,
+and CI keeps the verdicts, so a change proves again only the functions whose
+data it changed. The
 elaborator's own functions are `~`: they walk the program recursively, as
 the AST writer and the ownership passes do, and a function that terminates
 cannot call one that may not. What the validator needs, the code gives

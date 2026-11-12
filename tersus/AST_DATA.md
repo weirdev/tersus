@@ -584,7 +584,7 @@ corrupt/missing-seed, cache-reuse and fixpoint gates must pass before release.
 mutation (`7 + 2` becomes `7 - 2`, evaluated as `5` by Haskell), then native
 round trips over that whole corpus, the reader's own source, constructor
 fixtures and large/deep fixtures. Native refusal checks share the Haskell
-malformed-input corpus. `testHostValidation` (run only when named) checks the
+malformed-input corpus. `testHostValidation` (on a CI runner of its own) checks the
 new example with no input, which validates the reader.
 
 The native tests use the host-tool bootstrap route already used by

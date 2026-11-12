@@ -248,14 +248,21 @@ Work from `tersus/`.
   F2 and checks their fixpoint (`REPLACING_HASKELL.md`, "The frontend seed").
   CI reserves one runner for each of these four bootstrap groups; the
   remaining groups use three runners, with four worker processes per runner.
-  The required aggregate check still requires every shard to pass.
-  `testHostValidation`, which validates the compiler's own programs (the parser, the
-  AST reader, the MIR reader, checker and eraser, the emitter and the elaborator),
-  runs only when named, since it
-  takes far longer than the rest of the suite (`TestTersus.optInGroups`), as
-  does `testElaborateMutant` (an elaborator whose unification is broken, which
-  the differential against the compiler's elaborator has to catch; it builds
-  an elaborator of its own).
+  `testHostValidation` validates the compiler's own programs (the parser, the
+  AST reader, the MIR reader, checker and eraser, the emitter and the
+  elaborator) in full: it registers one group per program
+  (`testHostValidation:parser` through `testHostValidation:elaborator`), each
+  checking every function of its program, several at once, and reporting every
+  function that does not validate. It runs only when named, and never in a
+  shard (`TestScheduling.optInGroups`), as does `testElaborateMutant` (an
+  elaborator whose unification is broken, which the differential against the
+  compiler's elaborator has to catch; it builds an elaborator of its own). CI
+  runs `testHostValidation` on a runner of its own (`host` in the matrix), whose
+  cache keeps the verdicts, so a pull request proves again only the functions
+  whose data changed (a function's data holds the contracts of what it calls;
+  the verdicts are kept under the build of the validator, so a change to the
+  validator proves everything again); on master it proves every function.
+  The required aggregate check requires every runner to pass.
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in
   `tersus/README.md`.
 

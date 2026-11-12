@@ -15,7 +15,7 @@ import Seed (compilerSnapshotHash)
 import TestHarness
 import Utils
 
--- Run only when named (TestTersus.optInGroups): it builds an elaborator of its own
+-- Run only when named (TestScheduling.optInGroups): it builds an elaborator of its own
 testElaborateMutant :: Test
 testElaborateMutant = TestList "testElaborateMutant"
     [ TestCase "an elaborator that unifies Int and Bool is caught" unificationMutant

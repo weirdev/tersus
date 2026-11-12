@@ -2,6 +2,8 @@ module TestScheduling
     ( Arguments (..)
     , parseArguments
     , selectGroupNames
+    , optInGroups
+    , isOptIn
     , useWorkerProcesses
     , assignShards
     , groupWeight
@@ -77,9 +79,18 @@ positiveInt text
         [(number, "")] | number >= 1 && number <= toInteger (maxBound :: Int) -> Just (fromInteger number)
         _ -> Nothing
 
+-- Groups that run only when they are named (with the groups registered for them), and never in a shard: too slow
+-- for every run of the suite
+optInGroups :: [String]
+optInGroups = ["testHostValidation", "testElaborateMutant"]
+
+isOptIn :: String -> Bool
+isOptIn name = takeWhile (/= ':') name `elem` optInGroups
+
 selectGroupNames :: Arguments -> [String] -> Either String [String]
 selectGroupNames arguments names
     | not (null unknown) = Left ("unknown test groups: " ++ unwords unknown)
+    | argumentShard arguments /= Nothing && any isOptIn expanded = Left "opt-in groups run only without --shard"
     | otherwise = Right [name | name <- names, requested name, inShard name]
   where
     chosen = argumentGroups arguments
@@ -87,10 +98,10 @@ selectGroupNames arguments names
         registered == name || (name ++ ":") `isPrefixOf` registered]
     unknown = [name | name <- chosen, null (expansion name)]
     expanded = concatMap expansion chosen
-    requested name = null chosen || name `elem` expanded
+    requested name = if null chosen then not (isOptIn name) else name `elem` expanded
     assignments = case argumentShard arguments of
         Nothing -> []
-        Just (_, count) -> assignShards count names
+        Just (_, count) -> assignShards count (filter (not . isOptIn) names)
     inShard name = case argumentShard arguments of
         Nothing -> True
         Just (index, _) -> lookup name assignments == Just index
@@ -278,9 +289,15 @@ groupWeight name = maybe 1 id (lookup name weights)
 -- The budget leaves the OS and runner about 3.6 GiB. Counting only self-hosted and parser groups let a warm
 -- cache line up SelfHosted:3, Parser:3, Parity and Native:2 at 15.6 GiB, and the runner was shut down
 -- (run 42861235242, twice). These are estimates for admission, not a limit the processes are held to.
+-- The host validation groups, measured on the CI runner: the elaborator's reached 10.7 GiB, and a group beside it
+-- doing the preparation they share took 3.4 GiB, so the elaborator runs alone, and first.
 estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
     | isSelfHosted name = 7680
+    | name == "testHostValidation:elaborator" = memoryBudgetMiB
+    | name == "testHostValidation:parser" = 4096
+    | name == "testHostValidation:mirReader" = 3584
+    | name `elem` ["testHostValidation:astReader", "testHostValidation:mirVerify"] = 2560
     | name `elem` ["testParser:2/4", "testParser:3/4"] = 6144
     | name `elem` ["testParity", "testAstData:2/4", "testAstReader:2/4"] = 2560
     | otherwise = 1024
@@ -379,8 +396,8 @@ routingProbe arguments capabilities worker summarized = do
 
 testScheduling :: [String] -> [(Test, [Test])] -> Test
 testScheduling names batches = TestList "testScheduling"
-    [ testCase "no flags preserve the full suite" $
-        testAssertEq (parseArguments [] >>= (`selectGroupNames` names)) (Right names)
+    [ testCase "no flags select every group but the opt-in ones" $
+        testAssertEq (parseArguments [] >>= (`selectGroupNames` names)) (Right suite)
     , testCase "job forms and group filters are preserved" $
         testAssertTrue (all (== Right (Arguments (Just 2) ["testCli"] False Nothing))
             [parseArguments ["testCli", "-j", "2"], parseArguments ["--jobs", "2", "testCli"],
@@ -439,7 +456,7 @@ testScheduling names batches = TestList "testScheduling"
                 == Right ["testFrontendBootstrap" | index == 7]
             && selectGroupNames (Arguments Nothing ["testNative"] False (Just (index, 7))) names
                 == Right [name | name <- names, "testNative:" `isPrefixOf` name,
-                    lookup name (assignShards 7 names) == Just index]) [1 .. 7])
+                    lookup name (assignShards 7 suite) == Just index]) [1 .. 7])
     , testCase "bootstrap isolation is limited to seven shards and handles sparse inputs" $
         testAssertTrue
             ( assignShards 7 ["testBootstrap"] == [("testBootstrap", 6)]
@@ -610,6 +627,18 @@ testScheduling names batches = TestList "testScheduling"
                  in sort [name | (_, _, name) <- trace] == sort shard
                     && all (\(running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace
             Left _ -> False) [1 .. 7])
+    , testCase "the host runner's groups launch once, with estimated memory within the budget whenever two run" $
+        case selectGroupNames (Arguments Nothing ["testHostValidation"] False Nothing) names of
+            Right host -> let trace = admissionTrace host
+                 in testAssertTrue (length host == 7 && sort [name | (_, _, name) <- trace] == sort host
+                    && all (\(running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace)
+            Left e -> Just e
+    , testCase "naming an opt-in group with a shard is refused" $
+        testAssertTrue (isLeft (selectGroupNames (Arguments Nothing ["testHostValidation"] False (Just (1, 7))) names))
+    , testCase "opt-in groups take no part in the shard assignment" $
+        testAssertTrue (any isOptIn names && all (\count -> all (\index ->
+            fmap (any isOptIn) (selectGroupNames (Arguments Nothing [] False (Just (index, count))) names) == Right False)
+            [1 .. count]) [1, 3, 7])
     , testCase "the groups running at the shard 3 shutdown are not admitted together; small groups fill in instead" $
         testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity", "testNative:2/4", "testCli"])
             ["testMirSelfHosted:3/4", "testParity", "testNative:2/4", "testCli"]
@@ -639,14 +668,15 @@ testScheduling names batches = TestList "testScheduling"
         go used queue = case admitGroup memoryBudgetMiB estimatedPeakMiB used queue of
             Just (name, rest) -> name : go (used + estimatedPeakMiB name) rest
             Nothing -> []
-    assignments = assignShards 3 names
+    suite = filter (not . isOptIn) names
+    assignments = assignShards 3 suite
     loads = [shardWeight [name | (name, assigned) <- assignments, assigned == index] | index <- [1 .. 3]]
     complete count =
         let assigned = assignShards count names
             selected = [selectGroupNames (Arguments Nothing [] False (Just (index, count))) names | index <- [1 .. count]]
          in sort (map fst assigned) == sort names
             && all (\(_, index) -> index >= 1 && index <= count) assigned
-            && fmap (sort . concat) (sequence selected) == Right (sort names)
+            && fmap (sort . concat) (sequence selected) == Right (sort suite)
     filtered index =
         let chosen = ["testCli", "testBootstrap"] ++ [groupName batch | (_, split) <- batches, batch <- take 1 split]
          in selectGroupNames (Arguments Nothing chosen False (Just (index, 3))) names
@@ -659,7 +689,7 @@ testScheduling names batches = TestList "testScheduling"
     aliasFiltered (original, split) index =
         selectGroupNames (Arguments Nothing [groupName original] False (Just (index, 4))) names
             == Right [groupName batch | batch <- split,
-                lookup (groupName batch) (assignShards 4 names) == Just index]
+                lookup (groupName batch) (assignShards 4 suite) == Just index]
     memorySerial (original, split) =
         let originalPaths = filter (elem "memory") (leafPaths original)
             holders = [filter (elem "memory") (map (drop 1) (leafPaths batch)) | batch <- split]

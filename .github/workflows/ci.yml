@@ -15,12 +15,13 @@ concurrency:
 
 jobs:
   haskell:
-    name: Haskell build and tests (${{ matrix.shard }}/7)
+    # (`host` runs testHostValidation; see tersus/README.md)
+    name: ${{ matrix.shard == 'host' && 'Host validation' || format('Haskell build and tests ({0}/7)', matrix.shard) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3, 4, 5, 6, 7, host]
     # Keep the failure bound independent of the measured turnaround target.
     timeout-minutes: 60
     defaults:
@@ -71,6 +72,12 @@ jobs:
             emitter-${{ runner.os }}-shard-${{ matrix.shard }}-${{ steps.runner-image.outputs.version }}-
             emitter-${{ runner.os }}-shard-${{ matrix.shard }}-
 
+      # On master the host runner proves every function itself, so the verdicts it saves, which pull requests start
+      # from, were given by master's own code.
+      - name: Forget the restored verdicts on master
+        if: ${{ matrix.shard == 'host' && github.event_name == 'push' }}
+        run: rm -rf ~/.cache/tersus/verdicts-*
+
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
       # reports "cannot find 'ld'". ld.bfd takes the same options, so let it answer to that name.
       - name: Provide ld.gold
@@ -89,7 +96,9 @@ jobs:
           TERSUS_TEST_RTS_STATS: '1'
         run: |
           python3 dev/ci_resources.py
-          /usr/bin/time -v stack test --test-arguments='-j 4 --shard ${{ matrix.shard }}/7 +RTS -N2 -RTS'
+          # (a host run takes about 20 minutes with no verdicts cached; one that hangs leaves what it was waiting on)
+          if [ '${{ matrix.shard }}' = host ]; then (sleep 1800; echo '[HANG DUMP]'; ps -eo pid,ppid,stat,etime,wchan:30,rss,args --forest | grep -v ' \[' | cut -c1-240; for pid in $(pgrep -f tersus); do echo "== $pid"; sudo cat /proc/$pid/stack; ls -l /proc/$pid/fd | cut -c40-; done) & fi
+          /usr/bin/time -v stack test --test-arguments='-j 4 ${{ matrix.shard == 'host' && 'testHostValidation' || format('--shard {0}/7', matrix.shard) }} +RTS -N2 -RTS'
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)
@@ -101,6 +110,14 @@ jobs:
       - name: Check the emitter in Tersus through the CLI
         if: ${{ matrix.shard == 1 }}
         run: stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/tersus.ll"
+
+      # A function's verdict is kept under the build of the validator that gave it, and a run uses one build, so the
+      # verdicts under any other are never used again: keep only the newest.
+      - name: Drop the verdicts of older validators
+        if: ${{ !cancelled() && matrix.shard == 'host' }}
+        run: |
+          namespaces=(~/.cache/tersus/verdicts-*)
+          if [ -e "${namespaces[0]}" ]; then ls -dt "${namespaces[@]}" | tail -n +2 | xargs -r rm -rf; fi
 
       # Keep successfully compiled entries even when later tests or CLI checks fail.
       - name: Save the emitter and test compilation

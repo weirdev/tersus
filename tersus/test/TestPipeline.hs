@@ -1,6 +1,7 @@
 module TestPipeline
     ( testExamples
     , testHostValidation
+    , hostValidationGroups
     , testCli
     , testMir
     , testMirSelfHosted
@@ -34,7 +35,8 @@ import MirLower
 import MirHousekeeping (verifyProgram, validationEntry)
 import Pipeline
 import SelfHostedMir (encode, validateMirSubset, verdictProved)
-import ValidatorNative (prepareTexts)
+import PackageCompile (compileModulesLinked)
+import ValidatorNative (prepareTexts, validationRefusals)
 import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
@@ -98,22 +100,43 @@ testModulesPackageExample = TestCase "examples/modules/app/main.tersus" $ do
             Ok ((output, _), _) -> testAssertEq output "64"
         Right other -> Just ("modules example should be a package, got: " ++ show other)
 
--- The compiler's own programs (the parser, the AST reader, the MIR reader, checker and eraser and the
--- emitter of the mir package, and the elaborator, under lib/) validated. They are large enough that validating them takes far longer than
--- the rest of the suite, so this group runs only when it is named (TestTersus.optInGroups); the
--- groups that run them build them unvalidated, as the host does.
+-- The compiler's own programs validated in full (the groups that run them build them unvalidated, as the host does).
+-- Each is a group of its own: compiled in one process, they held 13 GiB at once.
+hostPrograms :: [(String, FilePath)]
+hostPrograms =
+    [ ("parser", "lib/parser/parser.tersus")
+    , ("astReader", "lib/ast_reader/ast_reader.tersus")
+    , ("mirReader", "lib/mir/mir_reader/mir_reader.tersus")
+    , ("mirVerify", "lib/mir/mir_verify/mir_verify.tersus")
+    , ("mirErase", "lib/mir/mir_erase/mir_erase.tersus")
+    , ("emitter", "lib/mir/emit/emit.tersus")
+    , ("elaborator", "lib/elaborate/elaborate.tersus")
+    ]
+
 testHostValidation :: Test
-testHostValidation =
-    TestList
-        "testHostValidation"
-        [ testExampleFile "lib/parser/parser.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "lib/ast_reader/ast_reader.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "lib/mir/mir_reader/mir_reader.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "lib/mir/mir_verify/mir_verify.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "lib/mir/mir_erase/mir_erase.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "lib/mir/emit/emit.tersus" (ExpectReturn (VInt 1))
-        , testExampleFile "lib/elaborate/elaborate.tersus" (ExpectReturn (VInt 1))
-        ]
+testHostValidation = TestList "testHostValidation" [testHostProgram path | (_, path) <- hostPrograms]
+
+hostValidationGroups :: [Test]
+hostValidationGroups = [TestList ("testHostValidation:" ++ name) [testHostProgram path] | (name, path) <- hostPrograms]
+
+testHostProgram :: FilePath -> Test
+testHostProgram path = TestCase path $ do
+    loaded <- if path == "lib/parser/parser.tersus"
+        then pure (Modules.loadFromEntry (Modules.resolverFromFiles parserPackageFiles) path)
+        else loadFromFilesystem path
+    case loaded of
+        Right (PackageResult pkg) -> case compileModulesLinked (Modules.packageSnapshot pkg) of
+            Error err -> pure (Just ("does not compile: " ++ err))
+            Ok linked -> do
+                refused <- validationRefusals (oneMarkerEach linked)
+                pure $ case refused of
+                    Error err -> Just ("validation failed: " ++ err)
+                    Ok failures@(_ : _) -> Just ("functions that do not validate (" ++ show (length failures) ++ "):\n" ++ unlines failures)
+                    Ok [] -> case erasedModuleProgram linked `bindResult` runProgram of
+                        Error err -> Just ("Evaluation failed with error: " ++ err)
+                        Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt 1))
+        Right _ -> pure (Just "not a package")
+        Left err -> pure (Just err)
 
 testExamples :: Test
 testExamples =
