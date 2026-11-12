@@ -4,7 +4,6 @@ import AstData (writeBuiltinTable)
 import BuiltinTable (builtinTable)
 import Compile (parseWithEquality)
 import Data.List (isInfixOf)
-import LibPackage (inlinedLibraryLength)
 import Modules (ModuleId (..))
 import Differential
 import ElaborateRequest
@@ -182,38 +181,22 @@ malformedLoads = case writeLoadRequest (sourceRequest LoadParse False False [] "
   where
     replaceLine matches change text = unlines [if matches l then change l else l | l <- lines text]
 
--- A request says how many of its first statements are libraries checked where they were defined, and the elaborator
--- does not check their functions with bounds again: a count that covers the trait and the function below accepts a body
--- that its bounds do not allow, and one statement fewer, the libraries alone or one statement less than them refuses it
+-- Every function with bounds of a program is checked against its bounds, the compiler libraries put in front of it
+-- included (their checked bodies are what the copy step makes their copies from), and a request names no checked prefix
 checkedStatements :: TestResult
 checkedStatements = case parseWithEquality "trait Show { fn show(self: &Self) -> Int; }; fn same<T: Show>(a: T, b: T) -> Bool { return a = b; }; return 0;" of
     Left e -> Just e
     Right stmts ->
-        let inlined = inlinedLibraryLength stmts
-            request n = Request (ModuleId "main" Nothing) False False NoInterface [] [] [] [stmts] n
-            refusedAt n = case sourceElaborator (request n) of
-                Refused m | "T is compared with =" `isInfixOf` m -> Nothing
-                other -> Just ("checked " ++ show n ++ " was not refused at the definition: " ++ show other)
-            acceptedAt n = case sourceElaborator (request n) of
-                Accepted {} -> Nothing
-                other -> Just ("checked " ++ show n ++ " checked a definition again: " ++ show other)
+        let request = Request (ModuleId "main" Nothing) False False NoInterface [] [] [] [stmts]
          in firstFailure
-                [ if inlined > 0 && inlined + 3 == length stmts then Nothing else Just ("the inlined libraries are " ++ show inlined ++ " of " ++ show (length stmts) ++ " statements")
-                , refusedAt (inlined - 1)
-                , refusedAt inlined
-                , refusedAt (inlined + 1)
-                , acceptedAt (inlined + 2)
-                , acceptedAt (inlined + 3)
-                , case writeRequest (request (inlined + 2)) of
+                [ case sourceElaborator request of
+                    Refused m | "T is compared with =" `isInfixOf` m -> Nothing
+                    other -> Just ("the definition was not refused: " ++ show other)
+                , case writeRequest request of
                     Error e -> Just e
-                    Ok text -> firstFailure
-                        [ case readRequest text of
-                            Ok rq | rq == request (inlined + 2) -> Nothing
-                            _ -> Just "the checked count did not read back"
-                        , case readRequest (unlines [if take 8 l == "builtins" then "builtins checked 0" else l | l <- lines text]) of
-                            Error _ -> Nothing
-                            Ok _ -> Just "accepted a checked count of 0"
-                        ]
+                    Ok text -> case readRequest (unlines [if take 8 l == "builtins" then "builtins checked 3" else l | l <- lines text]) of
+                        Error _ -> Nothing
+                        Ok _ -> Just "accepted a checked count"
                 ]
 
 firstFailure :: [TestResult] -> TestResult
@@ -225,6 +208,6 @@ testDifferential = TestList "testDifferential"
     , TestCase "a candidate's mistakes are not agreements" mutationControls
     , testCase "the lowering takes exactly the elaborated expression types" visitOrder
     , TestCase "the text protocol loses nothing" protocolAgreement
-    , testCase "functions with bounds of statements already checked are not checked again" checkedStatements
+    , testCase "functions with bounds of the libraries in front of a program are checked too" checkedStatements
     , TestCase "malformed load requests are not answered" malformedLoads
     ]

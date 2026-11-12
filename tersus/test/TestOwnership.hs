@@ -1010,6 +1010,8 @@ mainProgram locals stmts =
                 }
         , progGenerics = Map.empty
         , progInvariants = Map.empty
+        , progBounded = Map.empty
+        , progInstances = Map.empty
         }
 
 -- A part of a list that is read after the list changes is copied: the change of a list is a call, which ends the block, and a part that

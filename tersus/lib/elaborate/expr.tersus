@@ -8,7 +8,7 @@ import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, em
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
 import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
-import elaborate::traits { boundCallWritten, builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, sequenceFunction, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
+import elaborate::traits { builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
     return St { te: TE { node: node, types: push([], t) }, ..st };
@@ -721,11 +721,23 @@ fn methodCall(st: St, funct: Int, method: String, args: &List<Int>) -> St ~ {
     st = ownerOfValue(st, &method, teHeadAt(&inferred, 0));
     if st.status != 0 { return st; };
     owner = firstText(&st.names);
-    st = sequenceFunction(st, &owner, &method);
+    st = resolveAssociated(st, &owner, &method);
     if st.status != 0 { return st; };
-    resolved = firstText(&st.names);
-    if size(ownedParameter(&owner).bytes) > 0 { st = boundCallWritten(st, funct, &owner, &method, false); };
-    return callResolved(st, resolved, &inferred);
+    name = firstText(&st.names);
+    if size(ownedParameter(&owner).bytes) > 0 { st = throughTrait(st, funct, &owner, &method); };
+    return callResolved(st, name, &inferred);
+};
+
+// A call of a function a bound gives, written as the call of the trait's function (Tr::f), whose signature says what a
+// reference it returns is from
+fn throughTrait(st: St, head: Int, owner: &String, function: &String) -> St ~ {
+    origins = HashMap::lookup(&st.assoc, catStrings(catStrings(clone(owner), " "), clone(function)), []);
+    if size(origins) != 1 { return st; };
+    traitName = clone(get(origins, 0));
+    st = emitName(st, catStrings(catStrings(traitName, "::"), clone(function)));
+    if head < 0 || head >= size(st.nodes) { return st; };
+    node = AstNode::Expression { value: AstExpression::Var { n: st.nid } };
+    return St { nodes: set(st.nodes, head, node), ..st };
 };
 
 fn sequenceType(st: &St, t: Int) -> Bool ~ {
@@ -962,7 +974,10 @@ fn cloneCall(st: St, args: &List<Int>) -> St ~ {
         if size(uncloned.bytes) > 0 {
             return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(st.current), " clones a "), render(st, xtz)), ", and its bounds do not say "), uncloned), ": Clone"));
         };
-        return cloneWrap(st, x, xt);
+        // (in a function with bounds, a value of a type made of type parameters bounded by Clone is cloned as a value of any
+        // type is; the clone of a value of a type parameter is the copy, which each copy of the function makes the clone of
+        // its type, MIR.md "The copy step")
+        if !st.defChecking || k = 12 || k = 15 || !boundedByClone(&st, xtz) { return cloneWrap(st, x, xt); };
     };
     xx = tyAt(st, xtz);
     if isBoxTy(st, xtz) && kindOf(st, nth(&xx.args, 0)) = 6 && kindOf(st, argAt(st, nth(&xx.args, 0), 1)) = 21 {
@@ -1012,6 +1027,14 @@ fn cloneCall(st: St, args: &List<Int>) -> St ~ {
         return typed(st, st.nid, xt, &parts);
     };
     return cloneTrait(st, x);
+};
+
+fn boundedByClone(st: &St, t: Int) -> Bool ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 12 { return HashSet::contains(&st.impls, catStrings("Clone ", parameterOwner(&x.name))); };
+    if x.kind = 15 { return false; };
+    for a in &x.args { if !boundedByClone(st, a) { return false; }; };
+    return true;
 };
 
 fn cloneWrap(st: St, x: TE, xt: Int) -> St ~ {
@@ -1260,6 +1283,9 @@ fn refResultKnown(st: St, funct: Int) -> St ~ {
             callee = nameText(&st.nodes, (fex as AstExpression::Var).n);
             named = refResultIndex(st, &callee) >= 0 || callee = st.current;
         };
+        // (or the function the call was resolved to: the copy of a function with bounds, or a function a bound gives)
+        emitted = callOf(&st, st.te.node);
+        if emitted.ok && size(emitted.callee.bytes) > 0 && refResultIndex(st, &emitted.callee) >= 0 { named = true; };
         if !(named || fex is AstExpression::Val) {
             return fail(st, "Type error: this call returns a reference, but what the result is from is not known: a reference result comes from a function whose signature names it (as in -> &T from xs), called by name");
         };
@@ -1327,7 +1353,7 @@ fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
             x = tyAt(st, st.ty);
             if x.kind = 4 && x.name != "List" && x.name != "Box" {
                 owner = clone(x.name);
-                st = sequenceFunction(st, &owner, &fname);
+                st = resolveAssociated(st, &owner, &fname);
                 if st.status != 0 { return st; };
                 return callResolved(st, firstText(&st.names), &inferred0);
             };
@@ -1336,7 +1362,7 @@ fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
                 st = resolveAssociated(st, &powner, &fname);
                 if st.status != 0 { return st; };
                 resolved = firstText(&st.names);
-                st = boundCallWritten(st, funct, &powner, &fname, false);
+                st = throughTrait(st, funct, &powner, &fname);
                 return callResolved(st, resolved, &inferred0);
             };
         };

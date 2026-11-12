@@ -1,8 +1,8 @@
-import data::ast::ast { AstEntries, AstEntry, AstInterface, AstNode, AstOptName, AstOptNames, AstOptType, AstStatement };
+import data::ast::ast { AstEntries, AstEntry, AstInterface, AstNode, AstOptName, AstOptNames, AstOptTermination, AstOptType, AstStatement };
 import data::codec::codec { Type, catStrings };
 import elaborate::check { functionValue, stmtOf };
 import elaborate::core { baseNameOf };
-import elaborate::out { emit, emitName, emitNames, emitStatements, emitType };
+import elaborate::out { emit, emitName, emitNames, emitStatements, emitType, emitValidations };
 import elaborate::records { fieldCodecTypes, fieldNames, fromCodecs, listItems, nameText, namesText, nativeFn, nodeIn };
 import elaborate::state { CtorInfo, Generic, St, Template, firstText, indexIn, isTypeName, joinWith, notModelled, nth, typeError };
 import elaborate::traits { optName, sortTexts, textBefore };
@@ -239,12 +239,6 @@ fn breakOn(needle: &String, text: &String) -> Broken ~ {
     return Broken { ok: false, before: "", after: "" };
 };
 
-fn takeUntil(text: &String, stop: Int) -> String ~ {
-    i = 0;
-    while i < size(text.bytes) && toInt(get(text.bytes, i)) != stop [{ affirm i >= 0; affirm i <= size(text.bytes); }] shrinks size(text.bytes) - i { i = i + 1; };
-    return text.slice(0, i);
-};
-
 // Which names are the module's own, and the rules of what its interface keeps (Interface.extractInterfaceWith)
 struct Scope { isLib: Bool, prefix: String, ownNames: List<String>, declaredImpls: List<String>, bounded: List<String>, declaredFns: List<String> };
 impl Clone for Scope { };
@@ -274,28 +268,6 @@ fn typeVisible(sc: &Scope, name: &String) -> Bool ~ {
     base = baseNameOf(name);
     if sc.isLib { return indexIn(&sc.ownNames, &base) >= 0; };
     return inModule(sc, name);
-};
-
-fn templateHere(sc: &Scope, name: &String) -> Bool ~ {
-    if indexIn(&sc.bounded, name) >= 0 { return true; };
-    if size(name.bytes) > 0 && get(name.bytes, 0) = toByte(60) {
-        rest = name.slice(1, size(name.bytes));
-        inner = takeUntil(&rest, 62);
-        b = breakOn(" as ", &inner);
-        if b.ok {
-            owner = baseNameOf(&b.before);
-            return indexIn(&sc.ownNames, &owner) >= 0 || indexIn(&sc.ownNames, &b.after) >= 0;
-        };
-        base = baseNameOf(&inner);
-        return indexIn(&sc.ownNames, &base) >= 0;
-    };
-    b = breakOn(" for ", name);
-    if b.ok {
-        typePart = takeUntil(&b.after, 58);
-        base = baseNameOf(&typePart);
-        return indexIn(&sc.ownNames, &b.before) >= 0 || indexIn(&sc.ownNames, &base) >= 0;
-    };
-    return false;
 };
 
 // The names of the functions a module declares: at the top, in its impls, with bounds (declaredFunctions)
@@ -752,18 +724,12 @@ fn implBoundsSection(st: St, sc: &Scope) -> St ~ {
     return emitEntries(st, &implBounds);
 };
 
-fn templateKept(st: &St, sc: &Scope, name: &String) -> Bool ~ {
-    if indexIn(&sc.declaredFns, name) >= 0 { return true; };
-    for function in &sc.declaredFns {
-        if indexIn(HashMap::lookup(&st.companions, function, []), name) >= 0 { return true; };
-    };
-    return false;
-};
+fn templateKept(sc: &Scope, name: &String) -> Bool ~ { return indexIn(&sc.declaredFns, name) >= 0; };
 
 fn templatesSection(st: St, sc: &Scope) -> St ~ {
     templates = [];
     for e in HashMap::entries(&st.templates) {
-        if templateKept(st, sc, &e.key) {
+        if templateKept(sc, &e.key) {
             st = templateEntry(st, &e.key, &e.value);
             templates = push(templates, Keyed { a: clone(e.key), b: "", node: st.nid });
         };
@@ -771,15 +737,11 @@ fn templatesSection(st: St, sc: &Scope) -> St ~ {
     return emitEntries(st, &templates);
 };
 
+// (no interface has companions now: the copy step makes the checks of an impl's functions against its trait from the
+// module that defines it)
 fn companionsSection(st: St, sc: &Scope) -> St ~ {
-    companions = [];
-    for e in HashMap::entries(&st.companions) {
-        if templateKept(st, sc, &e.key) {
-            st = namesEntry(st, &e.key, &e.value);
-            companions = push(companions, Keyed { a: clone(e.key), b: "", node: st.nid });
-        };
-    };
-    return emitEntries(st, &companions);
+    none = [];
+    return emitEntries(st, &none);
 };
 
 fn replaceKeyed(xs: List<Keyed>, k: Keyed) -> List<Keyed> ~ {
@@ -792,28 +754,27 @@ fn replaceKeyed(xs: List<Keyed>, k: Keyed) -> List<Keyed> ~ {
     return out;
 };
 
-// A template as an interface writes it, with the functions it saw where it was declared
+// A template as an interface writes it: its name, bounds, signature and parameters, which a call of it is checked against
+// (the functions it saw, its contracts and its body are written empty, as the record still has them)
 fn templateEntry(st: St, name: &String, tm: &Template) -> St ~ {
-    fnEntries = [];
-    i = 0;
-    while i < size(tm.fnNames) && i < size(tm.fnTypes) [{ affirm i >= 0; }] ~ {
-        fname = clone(get(tm.fnNames, i));
-        if !keyIn(&fnEntries, &fname, "") {
-            st = emitName(st, clone(fname));
-            nameNode = st.nid;
-            st = emitType(st, get(tm.fnTypes, i));
-            st = emit(st, AstNode::Entry { value: AstEntry::TypeEntry { n: nameNode, ty: st.nid } });
-            fnEntries = push(fnEntries, Keyed { a: fname, b: "", node: st.nid });
-        };
-        i = i + 1;
-    };
-    st = emitEntries(st, &fnEntries);
+    noEntries = [];
+    st = emitEntries(st, &noEntries);
     fnsNode = st.nid;
+    noValidations = [];
+    st = emitValidations(st, &noValidations);
+    insNode = st.nid;
+    st = emitValidations(st, &noValidations);
+    outsNode = st.nid;
+    st = emit(st, AstNode::OptTermination { value: AstOptTermination::NoTermination });
+    termNode = st.nid;
+    noStatements = [];
+    st = emitStatements(st, &noStatements);
+    bodyNode = st.nid;
     retNode = tm.retNode;
     if retNode < 0 {
         st = emit(st, AstNode::OptType { value: AstOptType::NoType });
         retNode = st.nid;
     };
     st = emitName(st, clone(name));
-    return emit(st, AstNode::Entry { value: AstEntry::TemplateEntry { n: st.nid, bs: tm.boundsNode, fns: fnsNode, ret: retNode, ps: tm.paramsNode, sig: tm.sigNode, ins: tm.ins, outs: tm.outs, term: tm.term, body: tm.body } });
+    return emit(st, AstNode::Entry { value: AstEntry::TemplateEntry { n: st.nid, bs: tm.boundsNode, fns: fnsNode, ret: retNode, ps: tm.paramsNode, sig: tm.sigNode, ins: insNode, outs: outsNode, term: termNode, body: bodyNode } });
 };

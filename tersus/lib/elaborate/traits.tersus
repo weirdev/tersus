@@ -9,7 +9,7 @@ import elaborate::expr { coerceArguments, genericCall, implementsMarker, nodesOf
 import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { BoundInfo, BoundedParts, Defined, Defining, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, finalRefusal, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
+import elaborate::state { BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -257,8 +257,8 @@ fn checkBoundTrait(st: St, b: &BoundInfo, noTypesWhere: String, whereText: Strin
     return st;
 };
 
-// fn name<bounds>(...) at the top: kept, checked against its bounds once the module is (checkDefinitions), and made for the
-// types each call gives it (declareTemplate)
+// fn name<bounds>(...) at the top: kept, checked against its bounds once the module is, and given to the program with its
+// type parameters (checkDefinitions)
 fn declareTemplate(st: St, name: String, bounds: List<BoundInfo>, tm: Template) -> St ~ {
     if HashMap::contains(&st.fns, &name) || HashMap::contains(&st.templates, &name) || HashMap::contains(&st.stdNames, &name) { return typeError(st, catStrings(clone(name), " is already defined")); };
     for b in &bounds {
@@ -269,6 +269,8 @@ fn declareTemplate(st: St, name: String, bounds: List<BoundInfo>, tm: Template) 
     fs = FnSig { params: clone(tm.params), ptys: clone(tm.ptys), rty: tm.rty, sizes: clone(tm.sizes), types: clone(tm.types), writes: [], froms: clone(tm.from) };
     st = checkTemplateSignature(st, &name, &fs, &bounds);
     if st.status != 0 { return st; };
+    // (what a reference it returns is from, which a call of it reads by its name)
+    if size(tm.from) > 0 { st = putRefResult(st, clone(name), clone(tm.params), clone(tm.from)); };
     return St { templates: st.templates.insert(clone(name), tm), defQueue: push(st.defQueue, name), ..st };
 };
 
@@ -288,30 +290,12 @@ fn checkTemplateSignature(st: St, name: &String, fs: &FnSig, bounds: &List<Bound
 };
 
 // A template of a function value record, with its signature as types (rewritten by the caller when an impl's Self is in it)
-// (the functions it sees are those of where it is declared, kept for its interface; sigNode -1 for the record's own)
+// (sigNode -1 for the record's own)
 fn templateOf(st: &St, v: Int, bounds: &List<BoundInfo>, boundsNode: Int, fs: &FnSig, sigNode: Int) -> Template ~ {
     value = nativeFn(&st.nodes, v);
-    fnNames = [];
-    fnTypes = [];
-    for e in HashMap::entries(&st.fns) { fnNames = push(fnNames, clone(e.key)); fnTypes = push(fnTypes, e.value); };
     sig = sigNode;
     if sig < 0 { sig = value.sig; };
-    return Template { bounds: clone(bounds), fnNames: fnNames, fnTypes: fnTypes, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: value.ins, outs: value.outs, term: value.term, body: value.stmts, boundsNode: boundsNode, paramsNode: value.ps, sigNode: sig, retNode: 0 - 1 };
-};
-
-// How big a type is, so that a function with bounds can call itself for a part of the type it is made for (typeBigness)
-fn typeBigness(st: &St, t: Int) -> Int ~ {
-    x = tyAt(st, resolve(st, t));
-    k = x.kind;
-    if k = 6 || k = 7 || k = 8 || k = 9 || k = 10 || k = 11 { return 1 + typeBigness(st, nth(&x.args, 0)); };
-    if k = 4 || k = 14 {
-        total = 1;
-        for a in x.args {
-            if !isSize(st, a) { total = total + typeBigness(st, a); };
-        };
-        return total;
-    };
-    return 1;
+    return Template { bounds: clone(bounds), params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: clone(fs.sizes), types: clone(fs.types), from: clone(fs.froms), ins: value.ins, outs: value.outs, term: value.term, body: value.stmts, boundsNode: boundsNode, paramsNode: value.ps, sigNode: sig, retNode: 0 - 1 };
 };
 
 // Whether a type still has an unknown in it (templateCall's unknown)
@@ -328,167 +312,10 @@ fn unknownIn(st: &St, t: Int) -> Bool ~ {
     return false;
 };
 
-// A call of a function with bounds: the types of the arguments give the function's types, each meets its bounds, and the
-// function is checked for them once, as a function of the program named after them (templateCall), in what the module
-// that defines it sees (withDefinitions). st.te: the call.
+// A call of a function with bounds: the types of the arguments give the function's types and each meets its bounds, and
+// the call names the copy of the function for them (templateReference), which the copy step makes (MirCopies): the call
+// is checked against the function's signature and bounds alone. st.te: the call.
 fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~ {
-    at = definingIndex(&st, &name, &tm);
-    if at < 0 || at >= size(st.definitions) { return templateInContext(st, name, tm, inferred); };
-    defining = clone(get(st.definitions, at));
-    st = enterDefinitions(st, &defining);
-    scopedRefNames = clone(st.refResultNames);
-    st = templateInContext(st, name, tm, inferred);
-    return leaveDefinitions(st, &defining, &scopedRefNames);
-};
-
-fn sameTemplate(a: &Template, b: &Template) -> Bool ~ {
-    return a.sigNode = b.sigNode && a.body = b.body && a.ins = b.ins && a.outs = b.outs && a.term = b.term && a.boundsNode = b.boundsNode && a.paramsNode = b.paramsNode;
-};
-
-// The first defining context that owns this template (definingContext), or -1
-fn definingIndex(st: &St, name: &String, tm: &Template) -> Int ~ {
-    i = 0;
-    for d in &st.definitions {
-        if HashMap::contains(&d.owned, name) {
-            owned = HashMap::lookup(&d.owned, name, emptyTemplate());
-            if sameTemplate(&owned, tm) { return i; };
-        };
-        i = i + 1;
-    };
-    return 0 - 1;
-};
-
-fn isCanonical(name: &String) -> Bool ~ {
-    for b in &name.bytes { if b = toByte(36) { return true; }; };
-    return false;
-};
-
-// withDefinitions' callerAssoc and callerNames
-struct CallerAssoc { assoc: HashMap<String, List<String>>, names: HashSet<String> };
-impl Clone for CallerAssoc { };
-
-fn callerAssocOf(assoc: &HashMap<String, List<String>>, traits: &HashSet<String>) -> CallerAssoc ~ {
-    kept = HashMap::new();
-    names = HashSet::new();
-    for bucket in &assoc.buckets {
-        for e in bucket {
-            origins = [];
-            for o in &e.value { if size(o.bytes) > 0 && HashSet::contains(traits, o) { origins = push(origins, clone(o)); }; };
-            if size(origins) > 0 {
-                pair = pairParts(&e.key);
-                for o in &origins { names = names.insert(implFunctionName(&pair.before, o, &pair.after)); };
-                kept = kept.insert(clone(e.key), origins);
-            };
-        };
-    };
-    return CallerAssoc { assoc: kept, names: names };
-};
-
-// The state a call of a template is checked in: the defining context's types beside the caller's, its traits, and the
-// caller's impls (and their templates) of those traits only (withDefinitions)
-fn enterDefinitions(st: St, d: &Defining) -> St ~ {
-    caller = callerAssocOf(&st.assoc, &d.traits);
-    callerCompanions = HashMap::new();
-    callerTemplates = clone(caller.names);
-    for bucket in &caller.names.map.buckets {
-        for e in bucket {
-            if HashMap::contains(&st.companions, &e.key) {
-                cs = HashMap::lookup(&st.companions, &e.key, []);
-                for c in &cs { callerTemplates = callerTemplates.insert(clone(c)); };
-                callerCompanions = callerCompanions.insert(clone(e.key), cs);
-            };
-        };
-    };
-    owned = clone(st.templates);
-    outer = Defining { owned: owned, types: st.types, ctors: st.ctors, generics: st.generics, linearTypes: st.linearTypes, drops: st.drops, traits: st.traits, traitFns: st.traitFns, traitParams: st.traitParams, assoc: st.assoc, impls: st.impls, implArgs: st.implArgs, implBounds: st.implBounds, implBoundsNodes: st.implBoundsNodes, templates: st.templates, companions: st.companions, refResultNames: st.refResultNames, refResultParams: st.refResultParams, refResultFroms: st.refResultFroms };
-    types = clone(outer.types);
-    for bucket in &d.types.buckets { for e in bucket { types = types.insert(clone(e.key), clone(e.value)); }; };
-    ctors = clone(outer.ctors);
-    for bucket in &d.ctors.buckets { for e in bucket { ctors = ctors.insert(clone(e.key), clone(e.value)); }; };
-    generics = clone(outer.generics);
-    for bucket in &d.generics.buckets { for e in bucket { generics = generics.insert(clone(e.key), clone(e.value)); }; };
-    linearTypes = clone(outer.linearTypes);
-    for bucket in &d.linearTypes.map.buckets { for e in bucket { linearTypes = linearTypes.insert(clone(e.key)); }; };
-    drops = clone(outer.drops);
-    for bucket in &d.drops.map.buckets { for e in bucket { drops = drops.insert(clone(e.key)); }; };
-    impls = clone(d.impls);
-    for bucket in &outer.impls.map.buckets { for e in bucket { pair = pairParts(&e.key); if pair.ok && HashSet::contains(&d.traits, &pair.before) { impls = impls.insert(clone(e.key)); }; }; };
-    assoc = caller.assoc;
-    for bucket in &d.assoc.buckets { for e in bucket { assoc = assoc.insert(clone(e.key), clone(e.value)); }; };
-    implArgs = clone(d.implArgs);
-    for bucket in &outer.implArgs.buckets { for e in bucket { pair = pairParts(&e.key); if pair.ok && HashSet::contains(&d.traits, &pair.before) && !HashMap::contains(&implArgs, &e.key) { implArgs = implArgs.insert(clone(e.key), clone(e.value)); }; }; };
-    implBounds = clone(d.implBounds);
-    for bucket in &outer.implBounds.buckets { for e in bucket { pair = pairParts(&e.key); if pair.ok && HashSet::contains(&d.traits, &pair.before) && !HashMap::contains(&implBounds, &e.key) { implBounds = implBounds.insert(clone(e.key), clone(e.value)); }; }; };
-    implBoundsNodes = clone(d.implBoundsNodes);
-    for bucket in &outer.implBoundsNodes.buckets { for e in bucket { pair = pairParts(&e.key); if pair.ok && HashSet::contains(&d.traits, &pair.before) && !HashMap::contains(&implBoundsNodes, &e.key) { implBoundsNodes = implBoundsNodes.insert(clone(e.key), e.value); }; }; };
-    templates = clone(d.templates);
-    for bucket in &callerTemplates.map.buckets {
-        for e in bucket {
-            if HashMap::contains(&outer.templates, &e.key) && !HashMap::contains(&templates, &e.key) { templates = templates.insert(clone(e.key), HashMap::lookup(&outer.templates, &e.key, emptyTemplate())); };
-        };
-    };
-    companions = clone(d.companions);
-    for bucket in &callerCompanions.buckets { for e in bucket { if !HashMap::contains(&companions, &e.key) { companions = companions.insert(clone(e.key), clone(e.value)); }; }; };
-    refNames = clone(d.refResultNames);
-    refParams = clone(d.refResultParams);
-    refFroms = clone(d.refResultFroms);
-    i = 0;
-    while i < size(outer.refResultNames) && i < size(outer.refResultParams) && i < size(outer.refResultFroms) [{ affirm i >= 0; }] shrinks size(outer.refResultNames) - i {
-        n = get(outer.refResultNames, i);
-        if HashSet::contains(&callerTemplates, &n) && indexIn(&refNames, &n) < 0 {
-            refNames = push(refNames, clone(n));
-            refParams = push(refParams, clone(get(outer.refResultParams, i)));
-            refFroms = push(refFroms, clone(get(outer.refResultFroms, i)));
-        };
-        i = i + 1;
-    };
-    traits = clone(d.traits);
-    traitFns = clone(d.traitFns);
-    traitParams = clone(d.traitParams);
-    definitions = push(st.definitions, outer);
-    return St { types: types, ctors: ctors, generics: generics, linearTypes: linearTypes, drops: drops, traits: traits, traitFns: traitFns, traitParams: traitParams, impls: impls, assoc: assoc, implArgs: implArgs, implBounds: implBounds, implBoundsNodes: implBoundsNodes, templates: templates, companions: companions, refResultNames: refNames, refResultParams: refParams, refResultFroms: refFroms, definitions: definitions, ghostCache: HashMap::new(), refCache: HashMap::new(), ..st };
-};
-
-// The caller's state again after the call, with the canonical types and the reference results the call made (withDefinitions)
-fn leaveDefinitions(st: St, d: &Defining, scopedRefNames: &List<String>) -> St ~ {
-    if size(st.definitions) = 0 { return st; };
-    outer = clone(get(st.definitions, size(st.definitions) - 1));
-    definitions = pop(st.definitions);
-    types = outer.types;
-    for bucket in &st.types.buckets {
-        for e in bucket {
-            if !HashMap::contains(&types, &e.key) && (isCanonical(&e.key) || !HashMap::contains(&d.types, &e.key)) { types = types.insert(clone(e.key), clone(e.value)); };
-        };
-    };
-    ctors = outer.ctors;
-    for bucket in &st.ctors.buckets {
-        for e in bucket {
-            if !HashMap::contains(&ctors, &e.key) && (isCanonical(&e.key) || !HashMap::contains(&d.ctors, &e.key)) { ctors = ctors.insert(clone(e.key), clone(e.value)); };
-        };
-    };
-    generics = outer.generics;
-    for bucket in &st.generics.buckets {
-        for e in bucket {
-            if !HashMap::contains(&generics, &e.key) && isCanonical(&e.key) { generics = generics.insert(clone(e.key), clone(e.value)); };
-        };
-    };
-    refNames = outer.refResultNames;
-    refParams = outer.refResultParams;
-    refFroms = outer.refResultFroms;
-    i = 0;
-    while i < size(st.refResultNames) && i < size(st.refResultParams) && i < size(st.refResultFroms) [{ affirm i >= 0; }] shrinks size(st.refResultNames) - i {
-        n = get(st.refResultNames, i);
-        if indexIn(scopedRefNames, &n) < 0 && indexIn(&refNames, &n) < 0 {
-            refNames = push(refNames, clone(n));
-            refParams = push(refParams, clone(get(st.refResultParams, i)));
-            refFroms = push(refFroms, clone(get(st.refResultFroms, i)));
-        };
-        i = i + 1;
-    };
-    return St { types: types, ctors: ctors, generics: generics, linearTypes: outer.linearTypes, drops: outer.drops, traits: outer.traits, traitFns: outer.traitFns, traitParams: outer.traitParams, impls: outer.impls, assoc: outer.assoc, implArgs: outer.implArgs, implBounds: outer.implBounds, implBoundsNodes: outer.implBoundsNodes, templates: outer.templates, companions: outer.companions, refResultNames: refNames, refResultParams: refParams, refResultFroms: refFroms, definitions: definitions, ghostCache: HashMap::new(), refCache: HashMap::new(), ..st };
-};
-
-fn templateInContext(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~ {
     st = fnTy(st, clone(tm.ptys), tm.rty);
     st = instantiateGenerics(st, &tm.sizes, &tm.types, st.ty);
     instantiated = st.ty;
@@ -520,16 +347,14 @@ fn templateInContext(st: St, name: String, tm: Template, inferred: &List<TE>) ->
     if st.status != 0 { return st; };
     bounded = clone(st.names);
     boundedValues = clone(st.te.types);
-    // (a call in a body checked against its bounds needs the callee's bounds met, and no copy of the callee)
-    instance = clone(name);
-    if !st.defChecking {
-        st = templateInstance(st, &name, &tm, &concrete, &bounded, &boundedValues);
-        if st.status != 0 { return st; };
-        instance = firstText(&st.names);
+    st = templateReference(st, &name, &tm, &concrete, &bounded, &boundedValues);
+    instance = firstText(&st.names);
+    // (what a reference the callee returns is from, as its signature names it)
+    named = refResultIndex(&st, &name);
+    if refResultIndex(&st, &instance) < 0 && named >= 0 && named < size(st.refResultParams) && named < size(st.refResultFroms) {
+        st = putRefResult(st, clone(instance), clone(get(st.refResultParams, named)), clone(get(st.refResultFroms, named)));
     };
-    // (what a reference the callee returns is from, as its signature names it, for a call that names the function
-    // itself: one in a function with bounds checked against its bounds, or in a copy made from its syntax)
-    if size(tm.from) > 0 && refResultIndex(&st, &name) < 0 { st = putRefResult(st, clone(name), clone(tm.params), clone(tm.from)); };
+    if size(tm.from) > 0 && refResultIndex(&st, &instance) < 0 { st = putRefResult(st, clone(instance), clone(tm.params), clone(tm.from)); };
     st = templateSizeArguments(st, &name, &tm, &sizeVars);
     if st.status != 0 { return st; };
     sizeArgs = clone(st.tes);
@@ -612,6 +437,13 @@ fn templateConcrete(st: St, name: &String, tm: &Template, concrete: &List<Int>) 
         if mentionsParameter(st, t) && !st.defChecking {
             return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("the type ", clone(get(tm.types, i))), " of "), clone(name)), " would be "), render(st, t)), ", which is made of a type parameter of the function that calls: a function with bounds is made for types a call writes"));
         };
+        // (as for a function written for any type: a copy may drop or keep a value of its type parameter)
+        if !st.defChecking {
+            st = holdsGhost(st, t);
+            if st.ok {
+                return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("the type ", clone(get(tm.types, i))), " of "), clone(name)), catStrings(" would be ", render(st, t))), ", which holds a permission, and a type parameter is not one (a function that takes any type may drop or keep a value of it, and a permission is used exactly once)"));
+            };
+        };
         i = i + 1;
     };
     return st;
@@ -647,40 +479,109 @@ fn mentionsSize(st: &St, t: Int, n: &String) -> Bool ~ {
     return false;
 };
 
-// The instance of a function with bounds for the types of a call, made with its companions when it is not yet
-// (st.names its name)
-fn templateInstance(st: St, name: &String, tm: &Template, concrete: &List<Int>, bounded: &List<String>, boundedValues: &List<Int>) -> St ~ {
+// The copy of a function with bounds that a call names, `f[T1, ..., s1, ...]`: its types as an instance writes them, then
+// the sizes its bounds name, recorded with the copy's signature for the Instance record the output gives it (st.names)
+fn templateReference(st: St, name: &String, tm: &Template, concrete: &List<Int>, bounded: &List<String>, boundedValues: &List<Int>) -> St ~ {
     names = [];
-    rendered = [];
-    bigness = 0;
-    for t in concrete {
-        names = push(names, typeNameText(st, t, true));
-        rendered = push(rendered, render(st, t));
-        bigness = bigness + typeBigness(st, t);
-    };
+    for t in concrete { names = push(names, typeNameText(&st, t, true)); };
     for sz in boundedValues { names = push(names, sizeText(&st, sz, true)); };
-    suffix = catStrings(catStrings("[", joinWith(&names, ", ")), "]");
-    instance = catStrings(clone(name), clone(suffix));
-    if !HashMap::contains(&st.instances, &instance) {
-        i = 0;
-        while i < size(st.activeNames) && i < size(st.activeSizes) [{ affirm i >= 0; }] ~ {
-            if get(st.activeNames, i) = clone(name) && bigness >= get(st.activeSizes, i) {
-                return finalRefusal(st, catStrings(catStrings(catStrings(catStrings("Type error: ", clone(name)), " calls itself with the types "), joinWith(&rendered, ", ")), ", which are not those it is made for: a function with bounds is made for each type, and one that is made for a bigger type at each call would never end"));
-            };
-            i = i + 1;
-        };
-        st = makeTemplateInstance(st, name, tm, &instance, bigness, bounded, boundedValues, concrete);
-        if st.status != 0 { return st; };
-        for companion in HashMap::lookup(&st.companions, name, []) {
-            companionName = catStrings(clone(companion), clone(suffix));
-            if HashMap::contains(&st.templates, &companion) && !HashMap::contains(&st.instances, &companionName) {
-                ctm = HashMap::lookup(&st.templates, &companion, emptyTemplate());
-                st = makeTemplateInstance(st, &companion, &ctm, &companionName, bigness, bounded, boundedValues, concrete);
-                if st.status != 0 { return st; };
-            };
-        };
+    instance = catStrings(clone(name), catStrings(catStrings("[", joinWith(&names, ", ")), "]"));
+    if !HashMap::contains(&st.references, &instance) {
+        ptys = [];
+        for p in &tm.ptys { st = substitute(st, p, bounded, boundedValues, &tm.types, concrete); ptys = push(ptys, st.ty); };
+        st = substitute(st, tm.rty, bounded, boundedValues, &tm.types, concrete);
+        rty = st.ty;
+        writes = namesText(&st.nodes, signatureOf(&st.nodes, tm.sigNode).ws);
+        sig = FnSig { params: clone(tm.params), ptys: ptys, rty: rty, sizes: clone(tm.sizes), types: [], writes: writes, froms: clone(tm.from) };
+        st = St { references: st.references.insert(clone(instance), size(st.referenceList)), referenceList: push(st.referenceList, Reference { f: clone(name), types: clone(concrete), sizes: clone(boundedValues), sig: sig }), ..st };
     };
     return St { names: push([], instance), ..st };
+};
+
+fn sizeValue(st: &St, t: Int) -> Size ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 20 { return Size::SConst { n: x.n }; };
+    if x.kind = 21 { return Size::SAny; };
+    if x.kind = 22 { return Size::SParam { name: clone(x.name) }; };
+    return Size::SVar { n: x.n };
+};
+
+// The Instance records of the copies the module names and of the functions the bounds of its functions with bounds
+// give, by name (st.outs)
+fn emitInstances(st: St) -> St ~ {
+    out = [];
+    names = [];
+    for e in HashMap::entries(&st.references) { names = push(names, clone(e.key)); };
+    for n in sortTexts(names) {
+        at = HashMap::lookup(&st.references, &n, 0 - 1);
+        if at >= 0 && at < size(st.referenceList) {
+            r = clone(get(st.referenceList, at));
+            st = emitInstance(st, &n, &r.f, &r.types, &r.sizes, &r.sig);
+            out = push(out, st.nid);
+        };
+    };
+    stubs = [];
+    for e in HashMap::entries(&st.boundStubs) { stubs = push(stubs, clone(e.key)); };
+    for n in sortTexts(stubs) {
+        at = HashMap::lookup(&st.boundStubs, &n, 0 - 1);
+        if at >= 0 && at < size(st.boundStubSigs) {
+            sig = clone(get(st.boundStubSigs, at));
+            noTypes = [];
+            mark = "";
+            if HashSet::contains(&st.builtinStubs, &n) { mark = "$builtin"; };
+            st = emitInstance(st, &n, &mark, &noTypes, &noTypes, &sig);
+            out = push(out, st.nid);
+        };
+    };
+    return St { outs: out, ..st };
+};
+
+fn emitInstance(st: St, n: &String, f: &String, types: &List<Int>, sizes: &List<Int>, sig: &FnSig) -> St ~ {
+    st = emitName(st, clone(n));
+    nNode = st.nid;
+    st = emitName(st, clone(f));
+    fNode = st.nid;
+    argNodes = [];
+    for t in types {
+        st = zonk(st, t);
+        st = emitType(st, st.ty);
+        st = emit(st, AstNode::Arg { value: AstArg::ArgType { t: st.nid } });
+        argNodes = push(argNodes, st.nid);
+    };
+    for s in sizes {
+        st = emit(st, AstNode::Size { value: sizeValue(&st, s) });
+        st = emit(st, AstNode::Arg { value: AstArg::ArgSize { s: st.nid } });
+        argNodes = push(argNodes, st.nid);
+    };
+    st = emit(st, AstNode::Args { value: AstArgs::End });
+    tail = st.nid;
+    i = size(argNodes) - 1;
+    while i >= 0 [{ affirm i < size(argNodes); }] shrinks i + 1 {
+        st = emit(st, AstNode::Args { value: AstArgs::Cons { head: get(argNodes, i), tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    argsNode = tail;
+    st = emitNames(st, &sig.params);
+    psNode = st.nid;
+    st = emitSignature(st, sig);
+    return emit(st, AstNode::Statement { value: AstStatement::Instance { n: nNode, f: fNode, args: argsNode, ps: psNode, sig: st.nid } });
+};
+
+fn emitSignature(st: St, sig: &FnSig) -> St ~ {
+    st = emitTypes(st, &sig.ptys);
+    tsNode = st.nid;
+    st = zonk(st, sig.rty);
+    st = emitType(st, st.ty);
+    retNode = st.nid;
+    st = emitNames(st, &sig.sizes);
+    ssNode = st.nid;
+    st = emitNames(st, &sig.types);
+    psNode = st.nid;
+    st = emitNames(st, &sig.writes);
+    wsNode = st.nid;
+    st = emitNames(st, &sig.froms);
+    return emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: ssNode, ps: psNode, ws: wsNode, fs: st.nid } });
 };
 
 // The size arguments of a call of a function with bounds (st.tes)
@@ -725,650 +626,6 @@ fn checkBound(st: St, name: &String, sizes: &List<String>, sizeVars: &List<Int>,
         i = i + 1;
     };
     return St { ok: true, ..st };
-};
-
-// A template with the types it was called with in place of its own, checked like any function, and given to the program
-// before the statement that called it (makeTemplateInstance)
-fn makeTemplateInstance(st: St, name: &String, tm: &Template, instance: &String, bigness: Int, bounded: &List<String>, boundedValues: &List<Int>, concrete: &List<Int>) -> St ~ {
-    if indexIn(&st.defQueue, name) >= 0 {
-        st = checkQueued(st, name);
-        // (the function's own error, which a copy that called it passes on as it is)
-        if st.status = 1 { st = St { status: 5, ..st }; };
-        if st.status != 0 { return st; };
-    };
-    ptys = [];
-    for p in &tm.ptys { st = substitute(st, p, bounded, boundedValues, &tm.types, concrete); ptys = push(ptys, st.ty); };
-    st = substitute(st, tm.rty, bounded, boundedValues, &tm.types, concrete);
-    rty = st.ty;
-    writes = namesText(&st.nodes, signatureOf(&st.nodes, tm.sigNode).ws);
-    fs = FnSig { params: clone(tm.params), ptys: clone(ptys), rty: rty, sizes: clone(tm.sizes), types: [], writes: writes, froms: clone(tm.from) };
-    st = fnTypeOf(st, &fs);
-    fnT = st.ty;
-    savedFns = clone(st.fns);
-    at = definingIndex(&st, name, tm);
-    if at >= 0 && at < size(st.definitions) {
-        visibleTraits = clone(get(st.definitions, at).traits);
-        visible = callerAssocOf(&st.assoc, &visibleTraits).names;
-        fns = HashMap::new();
-        for bucket in &savedFns.buckets { for e in bucket { if HashSet::contains(&visible, &e.key) { fns = fns.insert(clone(e.key), e.value); }; }; };
-        st = St { fns: fns, ..st };
-    };
-    i = 0;
-    while i < size(tm.fnNames) && i < size(tm.fnTypes) [{ affirm i >= 0; }] ~ {
-        st = St { fns: st.fns.insert(clone(get(tm.fnNames, i)), get(tm.fnTypes, i)), ..st };
-        i = i + 1;
-    };
-    st = St { fns: st.fns.insert(clone(instance), fnT), instances: st.instances.insert(clone(instance), fnT), ..st };
-    outerNames = clone(st.activeNames);
-    outerSizes = clone(st.activeSizes);
-    st = St { activeNames: push(st.activeNames, clone(name)), activeSizes: push(st.activeSizes, bigness), ..st };
-    st = specializeTemplate(st, tm, bounded, boundedValues, concrete);
-    specialized = clone(st.outs);
-    st = checkFunction(st, instance, clone(fs), nth(&specialized, 0), nth(&specialized, 1), nth(&specialized, 2), nth(&specialized, 3));
-    if st.status != 0 { return copyRefused(st, name, instance); };
-    parts = clone(st.outs);
-    bodyTypes = clone(st.te.types);
-    from = clone(st.names);
-    st = St { fns: savedFns, ..st };
-    st = emitName(st, clone(instance));
-    nameNode = st.nid;
-    st = emitNames(st, &tm.params);
-    paramsNode = st.nid;
-    st = emitTypes(st, &ptys);
-    tsNode = st.nid;
-    st = emitType(st, rty);
-    retNode = st.nid;
-    st = emitNames(st, &tm.sizes);
-    ssNode = st.nid;
-    noNames = [];
-    st = emitNames(st, &noNames);
-    psNode = st.nid;
-    st = emitNames(st, &fs.writes);
-    wsNode = st.nid;
-    st = emitNames(st, &from);
-    st = emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: ssNode, ps: psNode, ws: wsNode, fs: st.nid } });
-    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: st.nid, term: nth(&parts, 2), stmts: nth(&parts, 3) } });
-    bodyNode = st.nid;
-    noProofs = [];
-    st = emitProofs(st, &noProofs);
-    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: paramsNode, ins: nth(&parts, 0), outs: nth(&parts, 1), body: bodyNode, exports: st.nid } });
-    st = emitVal(st, st.nid);
-    st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: nameNode, e: st.nid } });
-    emittedTypes = clone(st.emittedTypes);
-    for t in &bodyTypes { emittedTypes = push(emittedTypes, t); };
-    st = St { emitted: push(st.emitted, st.nid), emittedTypes: emittedTypes, activeNames: outerNames, activeSizes: outerSizes, ..st };
-    if size(from) > 0 { st = putRefResult(st, clone(instance), clone(tm.params), from); };
-    return st;
-};
-
-// What specializeTemplate puts in place of a template's type parameters and of the sizes its bounds name; a record it
-// leaves unchanged is given back as it is
-struct Spec { sizeNames: List<String>, sizeValues: List<Int>, sizeTys: List<Int>, typeNames: List<String>, typeTys: List<Int> };
-impl Clone for Spec { };
-
-fn noSpec(sp: &Spec) -> Bool ~ { return size(sp.sizeNames) = 0 && size(sp.typeNames) = 0; };
-
-// The contracts, termination and body of a template with its types and bounded sizes in place (specializeTemplate):
-// st.outs the requires, ensures, termination and body records
-fn specializeTemplate(st: St, tm: &Template, bounded: &List<String>, boundedValues: &List<Int>, concrete: &List<Int>) -> St ~ {
-    locals = localNames(&st, tm.body);
-    sizeNames = [];
-    sizeValues = [];
-    sizeTys = [];
-    i = 0;
-    while i < size(bounded) && i < size(boundedValues) [{ affirm i >= 0; }] ~ {
-        if indexIn(&locals, &get(bounded, i)) < 0 {
-            sizeNames = push(sizeNames, clone(get(bounded, i)));
-            sizeValues = push(sizeValues, tyAt(&st, get(boundedValues, i)).n);
-            sizeTys = push(sizeTys, get(boundedValues, i));
-        };
-        i = i + 1;
-    };
-    sp = Spec { sizeNames: sizeNames, sizeValues: sizeValues, sizeTys: sizeTys, typeNames: clone(tm.types), typeTys: clone(concrete) };
-    if noSpec(&sp) { return St { outs: push(push(push(push([], tm.ins), tm.outs), tm.term), tm.body), ..st }; };
-    st = specValidations(st, &sp, tm.ins);
-    ins = st.nid;
-    st = specValidations(st, &sp, tm.outs);
-    outs = st.nid;
-    st = specOptTermination(st, &sp, tm.term);
-    term = st.nid;
-    st = specStatements(st, &sp, tm.body);
-    return St { outs: push(push(push(push([], ins), outs), term), st.nid), ..st };
-};
-
-// The names a body binds, which hide a size of the same name (specializeTemplate's localNames)
-fn localNames(st: &St, body: Int) -> List<String> ~ {
-    out = [];
-    for s in listItems(&st.nodes, body) {
-        node = nodeIn(&st.nodes, s);
-        if node is AstNode::Statement {
-            stmt = (node as AstNode::Statement).value;
-            if stmt is AstStatement::Assign { out = push(out, nameText(&st.nodes, (stmt as AstStatement::Assign).n)); };
-            if stmt is AstStatement::Let { out = push(out, nameText(&st.nodes, (stmt as AstStatement::Let).n)); };
-            if stmt is AstStatement::ValidationStatement {
-                v = nodeIn(&st.nodes, (stmt as AstStatement::ValidationStatement).v);
-                if v is AstNode::Validation && (v as AstNode::Validation).value is AstValidation::AssignProofVar {
-                    out = push(out, nameText(&st.nodes, ((v as AstNode::Validation).value as AstValidation::AssignProofVar).n));
-                };
-            };
-            if stmt is AstStatement::Block { out = concatFront(out, localNames(st, (stmt as AstStatement::Block).xs)); };
-            if stmt is AstStatement::If {
-                b = stmt as AstStatement::If;
-                out = concatFront(concatFront(out, localNames(st, b.a)), localNames(st, b.b));
-            };
-            if stmt is AstStatement::While { out = concatFront(out, localNames(st, (stmt as AstStatement::While).xs)); };
-        };
-    };
-    return out;
-};
-
-fn same(st: St, id: Int) -> St ~ { return St { nid: id, ..st }; };
-
-fn specExpr(st: St, sp: &Spec, e: Int) -> St ~ {
-    ex = exprOf(&st, e);
-    if ex is AstExpression::Var {
-        name = nameText(&st.nodes, (ex as AstExpression::Var).n);
-        at = indexIn(&sp.sizeNames, &name);
-        if at < 0 || at >= size(sp.sizeValues) { return same(st, e); };
-        st = emitIntValue(st, get(sp.sizeValues, at));
-        return emitVal(st, st.nid);
-    };
-    if ex is AstExpression::Val {
-        v = (ex as AstExpression::Val).v;
-        st = specValue(st, sp, v);
-        if st.nid = v { return same(st, e); };
-        return emitVal(st, st.nid);
-    };
-    if ex is AstExpression::F {
-        f = ex as AstExpression::F;
-        st = specExpr(st, sp, f.f);
-        funct = st.nid;
-        st = specExprs(st, sp, f.xs);
-        if funct = f.f && st.nid = f.xs { return same(st, e); };
-        return emit(st, AstNode::Expression { value: AstExpression::F { f: funct, xs: st.nid } });
-    };
-    return same(st, e);
-};
-
-fn specExprs(st: St, sp: &Spec, xs: Int) -> St ~ {
-    items = listItems(&st.nodes, xs);
-    out = [];
-    changed = false;
-    for x in &items {
-        st = specExpr(st, sp, x);
-        if st.nid != x { changed = true; };
-        out = push(out, st.nid);
-    };
-    if !changed { return same(st, xs); };
-    return emitExpressions(st, &out);
-};
-
-fn specValue(st: St, sp: &Spec, v: Int) -> St ~ {
-    node = nodeIn(&st.nodes, v);
-    if !(node is AstNode::Value) { return same(st, v); };
-    value = (node as AstNode::Value).value;
-    if value is AstValue::VFunct {
-        body = nodeIn(&st.nodes, (value as AstValue::VFunct).body);
-        if body is AstNode::Body && (body as AstNode::Body).value is AstBody::NativeFunct { return specFunction(st, sp, v); };
-        if body is AstNode::Body && (body as AstNode::Body).value is AstBody::BuiltinFunct { return specBuiltin(st, sp, v); };
-        return same(st, v);
-    };
-    if value is AstValue::VList {
-        xs = (value as AstValue::VList).xs;
-        st = specValues(st, sp, xs);
-        if st.nid = xs { return same(st, v); };
-        return emit(st, AstNode::Value { value: AstValue::VList { xs: st.nid } });
-    };
-    if value is AstValue::VData {
-        d = value as AstValue::VData;
-        st = specValueFields(st, sp, d.xs);
-        if st.nid = d.xs { return same(st, v); };
-        return emit(st, AstNode::Value { value: AstValue::VData { n: d.n, xs: st.nid } });
-    };
-    return same(st, v);
-};
-
-fn specValues(st: St, sp: &Spec, xs: Int) -> St ~ {
-    items = listItems(&st.nodes, xs);
-    out = [];
-    changed = false;
-    for x in &items {
-        st = specValue(st, sp, x);
-        if st.nid != x { changed = true; };
-        out = push(out, st.nid);
-    };
-    if !changed { return same(st, xs); };
-    st = emit(st, AstNode::Values { value: AstValues::End });
-    tail = st.nid;
-    i = size(out) - 1;
-    while i >= 0 [{ affirm i < size(out); }] shrinks i + 1 {
-        st = emit(st, AstNode::Values { value: AstValues::Cons { head: get(out, i), tail: tail } });
-        tail = st.nid;
-        i = i - 1;
-    };
-    return same(st, tail);
-};
-
-fn specValueFields(st: St, sp: &Spec, xs: Int) -> St ~ {
-    items = listItems(&st.nodes, xs);
-    out = [];
-    changed = false;
-    for x in &items {
-        node = nodeIn(&st.nodes, x);
-        if node is AstNode::ValueField {
-            f = (node as AstNode::ValueField).value;
-            st = specValue(st, sp, f.v);
-            if st.nid != f.v {
-                changed = true;
-                st = emit(st, AstNode::ValueField { value: AstValueField { n: f.n, v: st.nid } });
-            } else { st = same(st, x); };
-        } else { st = same(st, x); };
-        out = push(out, st.nid);
-    };
-    if !changed { return same(st, xs); };
-    st = emit(st, AstNode::ValueFields { value: AstValueFields::End });
-    tail = st.nid;
-    i = size(out) - 1;
-    while i >= 0 [{ affirm i < size(out); }] shrinks i + 1 {
-        st = emit(st, AstNode::ValueFields { value: AstValueFields::Cons { head: get(out, i), tail: tail } });
-        tail = st.nid;
-        i = i - 1;
-    };
-    return same(st, tail);
-};
-
-fn specType(st: St, sp: &Spec, id: Int) -> St ~ {
-    if noSpec(sp) { return same(st, id); };
-    c = codecTypeAt(&st.nodes, id);
-    st = fromCodec(st, &c);
-    t = st.ty;
-    st = substitute(st, t, &sp.sizeNames, &sp.sizeTys, &sp.typeNames, &sp.typeTys);
-    if st.ty = t { return same(st, id); };
-    return emitType(st, st.ty);
-};
-
-fn specTypes(st: St, sp: &Spec, xs: Int) -> St ~ {
-    items = listItems(&st.nodes, xs);
-    out = [];
-    changed = false;
-    for x in &items {
-        st = specType(st, sp, x);
-        if st.nid != x { changed = true; };
-        out = push(out, st.nid);
-    };
-    if !changed { return same(st, xs); };
-    st = emit(st, AstNode::Types { value: AstTypes::End });
-    tail = st.nid;
-    i = size(out) - 1;
-    while i >= 0 [{ affirm i < size(out); }] shrinks i + 1 {
-        st = emit(st, AstNode::Types { value: AstTypes::Cons { head: get(out, i), tail: tail } });
-        tail = st.nid;
-        i = i - 1;
-    };
-    return same(st, tail);
-};
-
-// A function value inside the template: what it declares itself, and what its body binds, hide what is substituted
-fn specFunction(st: St, sp: &Spec, v: Int) -> St ~ {
-    f = nativeFn(&st.nodes, v);
-    sig = signatureOf(&st.nodes, f.sig);
-    hidden = concatFront(concatFront(localNames(&st, f.stmts), namesText(&st.nodes, sig.ss)), namesText(&st.nodes, f.ps));
-    ownTypes = namesText(&st.nodes, sig.ps);
-    inner = Spec { sizeNames: [], sizeValues: [], sizeTys: [], typeNames: [], typeTys: [] };
-    i = 0;
-    while i < size(sp.sizeNames) && i < size(sp.sizeValues) && i < size(sp.sizeTys) [{ affirm i >= 0; }] ~ {
-        if indexIn(&hidden, &get(sp.sizeNames, i)) < 0 {
-            inner = Spec { sizeNames: push(inner.sizeNames, clone(get(sp.sizeNames, i))), sizeValues: push(inner.sizeValues, get(sp.sizeValues, i)), sizeTys: push(inner.sizeTys, get(sp.sizeTys, i)), ..inner };
-        };
-        i = i + 1;
-    };
-    i = 0;
-    while i < size(sp.typeNames) && i < size(sp.typeTys) [{ affirm i >= 0; }] ~ {
-        if indexIn(&ownTypes, &get(sp.typeNames, i)) < 0 {
-            inner = Spec { typeNames: push(inner.typeNames, clone(get(sp.typeNames, i))), typeTys: push(inner.typeTys, get(sp.typeTys, i)), ..inner };
-        };
-        i = i + 1;
-    };
-    st = specTypes(st, &inner, sig.ts);
-    ts = st.nid;
-    st = specType(st, &inner, sig.ret);
-    ret = st.nid;
-    st = specValidations(st, &inner, f.ins);
-    ins = st.nid;
-    st = specValidations(st, &inner, f.outs);
-    outs = st.nid;
-    st = specOptTermination(st, &inner, f.term);
-    term = st.nid;
-    st = specStatements(st, &inner, f.stmts);
-    stmts = st.nid;
-    if ts = sig.ts && ret = sig.ret && ins = f.ins && outs = f.outs && term = f.term && stmts = f.stmts { return same(st, v); };
-    sigNode = f.sig;
-    if ts != sig.ts || ret != sig.ret {
-        st = emit(st, AstNode::Signature { value: AstSignature { ts: ts, ret: ret, ss: sig.ss, ps: sig.ps, ws: sig.ws, fs: sig.fs } });
-        sigNode = st.nid;
-    };
-    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: term, stmts: stmts } });
-    return emit(st, AstNode::Value { value: AstValue::VFunct { ps: f.ps, ins: ins, outs: outs, body: st.nid, exports: f.exports } });
-};
-
-fn specBuiltin(st: St, sp: &Spec, v: Int) -> St ~ {
-    vnode = nodeIn(&st.nodes, v);
-    if !(vnode is AstNode::Value) { return same(st, v); };
-    vv = (vnode as AstNode::Value).value;
-    if !(vv is AstValue::VFunct) { return same(st, v); };
-    value = vv as AstValue::VFunct;
-    bnode = nodeIn(&st.nodes, value.body);
-    if !(bnode is AstNode::Body) { return same(st, v); };
-    bv = (bnode as AstNode::Body).value;
-    if !(bv is AstBody::BuiltinFunct) { return same(st, v); };
-    bnode2 = nodeIn(&st.nodes, (bv as AstBody::BuiltinFunct).b);
-    if !(bnode2 is AstNode::Builtin) { return same(st, v); };
-    rec = (bnode2 as AstNode::Builtin).value;
-    if !(rec is AstBuiltin::Ctor) { return same(st, v); };
-    c = rec as AstBuiltin::Ctor;
-    items = listItems(&st.nodes, c.args);
-    out = [];
-    argTys = [];
-    changed = false;
-    for a in &items {
-        st = specArg(st, sp, a);
-        if st.nid != a { changed = true; };
-        out = push(out, st.nid);
-        argTys = push(argTys, st.ty);
-    };
-    if !changed { return same(st, v); };
-    st = emit(st, AstNode::Args { value: AstArgs::End });
-    tail = st.nid;
-    i = size(out) - 1;
-    while i >= 0 [{ affirm i < size(out); }] shrinks i + 1 {
-        st = emit(st, AstNode::Args { value: AstArgs::Cons { head: get(out, i), tail: tail } });
-        tail = st.nid;
-        i = i - 1;
-    };
-    ctorName = nameText(&st.nodes, c.n);
-    st = namedTy(st, baseNameOf(&ctorName), argTys);
-    st = emitName(st, instanceName(&st, st.ty));
-    st = emit(st, AstNode::Builtin { value: AstBuiltin::Ctor { n: st.nid, args: tail, fs: c.fs } });
-    st = emit(st, AstNode::Body { value: AstBody::BuiltinFunct { b: st.nid } });
-    return emit(st, AstNode::Value { value: AstValue::VFunct { ps: value.ps, ins: value.ins, outs: value.outs, body: st.nid, exports: value.exports } });
-};
-
-// st.nid the argument's record, st.ty the argument as a type
-fn specArg(st: St, sp: &Spec, a: Int) -> St ~ {
-    node = nodeIn(&st.nodes, a);
-    if !(node is AstNode::Arg) { return same(st, a); };
-    arg = (node as AstNode::Arg).value;
-    if arg is AstArg::ArgType {
-        t = (arg as AstArg::ArgType).t;
-        st = specType(st, sp, t);
-        changed = st.nid != t;
-        typeNode = st.nid;
-        c = codecTypeAt(&st.nodes, typeNode);
-        st = fromCodec(st, &c);
-        if !changed { return same(st, a); };
-        return emit(st, AstNode::Arg { value: AstArg::ArgType { t: typeNode } });
-    };
-    if !(arg is AstArg::ArgSize) { return same(st, a); };
-    s = (arg as AstArg::ArgSize).s;
-    sz = codecSizeAt(&st.nodes, s);
-    st = codecSize(st, &sz);
-    if !(sz is Size::SParam) { return same(st, a); };
-    param = (sz as Size::SParam).name;
-    at = indexIn(&sp.sizeNames, &param);
-    if at < 0 || at >= size(sp.sizeValues) || at >= size(sp.sizeTys) { return same(st, a); };
-    sizeTy = get(sp.sizeTys, at);
-    st = emit(st, AstNode::Size { value: Size::SConst { n: get(sp.sizeValues, at) } });
-    st = emit(st, AstNode::Arg { value: AstArg::ArgSize { s: st.nid } });
-    return St { ty: sizeTy, ..st };
-};
-
-fn specOptTermination(st: St, sp: &Spec, t: Int) -> St ~ {
-    node = nodeIn(&st.nodes, t);
-    if !(node is AstNode::OptTermination) || !((node as AstNode::OptTermination).value is AstOptTermination::SomeTermination) { return same(st, t); };
-    inner = ((node as AstNode::OptTermination).value as AstOptTermination::SomeTermination).t;
-    st = specTermination(st, sp, inner);
-    if st.nid = inner { return same(st, t); };
-    return emit(st, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: st.nid } });
-};
-
-fn specTermination(st: St, sp: &Spec, t: Int) -> St ~ {
-    node = nodeIn(&st.nodes, t);
-    if !(node is AstNode::Termination) { return same(st, t); };
-    term = (node as AstNode::Termination).value;
-    if term is AstTermination::Shrinks {
-        e = (term as AstTermination::Shrinks).e;
-        st = specExpr(st, sp, e);
-        if st.nid = e { return same(st, t); };
-        return emit(st, AstNode::Termination { value: AstTermination::Shrinks { e: st.nid } });
-    };
-    if term is AstTermination::Counting {
-        e = (term as AstTermination::Counting).e;
-        st = specExpr(st, sp, e);
-        if st.nid = e { return same(st, t); };
-        return emit(st, AstNode::Termination { value: AstTermination::Counting { e: st.nid } });
-    };
-    if term is AstTermination::Parts {
-        e = (term as AstTermination::Parts).e;
-        st = specExpr(st, sp, e);
-        if st.nid = e { return same(st, t); };
-        return emit(st, AstNode::Termination { value: AstTermination::Parts { e: st.nid } });
-    };
-    return same(st, t);
-};
-
-fn specProof(st: St, sp: &Spec, p: Int) -> St ~ {
-    node = nodeIn(&st.nodes, p);
-    if !(node is AstNode::Proof) { return same(st, p); };
-    pf = (node as AstNode::Proof).value;
-    if pf is AstProof::ATerm {
-        name = nameText(&st.nodes, (pf as AstProof::ATerm).n);
-        at = indexIn(&sp.sizeNames, &name);
-        if at < 0 || at >= size(sp.sizeValues) { return same(st, p); };
-        st = emitIntValue(st, get(sp.sizeValues, at));
-        return emit(st, AstNode::Proof { value: AstProof::CTerm { v: st.nid } });
-    };
-    if pf is AstProof::CTerm {
-        v = (pf as AstProof::CTerm).v;
-        st = specValue(st, sp, v);
-        if st.nid = v { return same(st, p); };
-        return emit(st, AstNode::Proof { value: AstProof::CTerm { v: st.nid } });
-    };
-    if pf is AstProof::FApp {
-        f = pf as AstProof::FApp;
-        st = specProof(st, sp, f.f);
-        funct = st.nid;
-        st = specProofs(st, sp, f.xs);
-        if funct = f.f && st.nid = f.xs { return same(st, p); };
-        return emit(st, AstNode::Proof { value: AstProof::FApp { f: funct, xs: st.nid } });
-    };
-    if pf is AstProof::Forall {
-        f = pf as AstProof::Forall;
-        st = specProofs(st, sp, f.gs);
-        guards = st.nid;
-        st = specProof(st, sp, f.b);
-        if guards = f.gs && st.nid = f.b { return same(st, p); };
-        return emit(st, AstNode::Proof { value: AstProof::Forall { n: f.n, gs: guards, b: st.nid } });
-    };
-    return same(st, p);
-};
-
-fn specProofs(st: St, sp: &Spec, xs: Int) -> St ~ {
-    items = listItems(&st.nodes, xs);
-    out = [];
-    changed = false;
-    for x in &items {
-        st = specProof(st, sp, x);
-        if st.nid != x { changed = true; };
-        out = push(out, st.nid);
-    };
-    if !changed { return same(st, xs); };
-    return emitProofs(st, &out);
-};
-
-fn specRule(st: St, sp: &Spec, r: Int) -> St ~ {
-    node = nodeIn(&st.nodes, r);
-    if !(node is AstNode::Rule) { return same(st, r); };
-    rule = (node as AstNode::Rule).value;
-    if rule is AstRule::Refl {
-        p = (rule as AstRule::Refl).p;
-        st = specProof(st, sp, p);
-        if st.nid = p { return same(st, r); };
-        return emit(st, AstNode::Rule { value: AstRule::Refl { p: st.nid } });
-    };
-    if rule is AstRule::CheckGtZero {
-        p = (rule as AstRule::CheckGtZero).p;
-        st = specProof(st, sp, p);
-        if st.nid = p { return same(st, r); };
-        return emit(st, AstNode::Rule { value: AstRule::CheckGtZero { p: st.nid } });
-    };
-    if rule is AstRule::CheckRel {
-        p = (rule as AstRule::CheckRel).p;
-        st = specProof(st, sp, p);
-        if st.nid = p { return same(st, r); };
-        return emit(st, AstNode::Rule { value: AstRule::CheckRel { p: st.nid } });
-    };
-    if rule is AstRule::UserRewrite {
-        u = rule as AstRule::UserRewrite;
-        st = specProofs(st, sp, u.xs);
-        if st.nid = u.xs { return same(st, r); };
-        return emit(st, AstNode::Rule { value: AstRule::UserRewrite { n: u.n, xs: st.nid } });
-    };
-    return same(st, r);
-};
-
-fn specValidation(st: St, sp: &Spec, v: Int) -> St ~ {
-    node = nodeIn(&st.nodes, v);
-    if !(node is AstNode::Validation) { return same(st, v); };
-    item = (node as AstNode::Validation).value;
-    if item is AstValidation::ProofAssert {
-        p = (item as AstValidation::ProofAssert).p;
-        st = specProof(st, sp, p);
-        if st.nid = p { return same(st, v); };
-        return emit(st, AstNode::Validation { value: AstValidation::ProofAssert { p: st.nid } });
-    };
-    if item is AstValidation::Assume {
-        p = (item as AstValidation::Assume).p;
-        st = specProof(st, sp, p);
-        if st.nid = p { return same(st, v); };
-        return emit(st, AstNode::Validation { value: AstValidation::Assume { p: st.nid } });
-    };
-    if item is AstValidation::AssignProofVar {
-        a = item as AstValidation::AssignProofVar;
-        st = specExpr(st, sp, a.e);
-        if st.nid = a.e { return same(st, v); };
-        return emit(st, AstNode::Validation { value: AstValidation::AssignProofVar { n: a.n, e: st.nid } });
-    };
-    if item is AstValidation::Rewrite {
-        r = (item as AstValidation::Rewrite).r;
-        st = specRule(st, sp, r);
-        if st.nid = r { return same(st, v); };
-        return emit(st, AstNode::Validation { value: AstValidation::Rewrite { r: st.nid } });
-    };
-    return same(st, v);
-};
-
-fn specValidations(st: St, sp: &Spec, xs: Int) -> St ~ {
-    items = listItems(&st.nodes, xs);
-    out = [];
-    changed = false;
-    for x in &items {
-        st = specValidation(st, sp, x);
-        if st.nid != x { changed = true; };
-        out = push(out, st.nid);
-    };
-    if !changed { return same(st, xs); };
-    return emitValidations(st, &out);
-};
-
-fn specStatements(st: St, sp: &Spec, xs: Int) -> St ~ {
-    items = listItems(&st.nodes, xs);
-    out = [];
-    changed = false;
-    for x in &items {
-        st = specStatement(st, sp, x);
-        if st.nid != x { changed = true; };
-        out = push(out, st.nid);
-    };
-    if !changed { return same(st, xs); };
-    return emitStatements(st, &out);
-};
-
-fn specStatement(st: St, sp: &Spec, s: Int) -> St ~ {
-    node = nodeIn(&st.nodes, s);
-    if !(node is AstNode::Statement) { return same(st, s); };
-    stmt = (node as AstNode::Statement).value;
-    if stmt is AstStatement::Assign || stmt is AstStatement::Let || stmt is AstStatement::Return || stmt is AstStatement::AssignDeref { return specSimpleStatement(st, sp, s, &stmt); };
-    if stmt is AstStatement::ValidationStatement {
-        v = (stmt as AstStatement::ValidationStatement).v;
-        st = specValidation(st, sp, v);
-        if st.nid = v { return same(st, s); };
-        return emit(st, AstNode::Statement { value: AstStatement::ValidationStatement { v: st.nid } });
-    };
-    if stmt is AstStatement::Block {
-        xs = (stmt as AstStatement::Block).xs;
-        st = specStatements(st, sp, xs);
-        if st.nid = xs { return same(st, s); };
-        return emit(st, AstNode::Statement { value: AstStatement::Block { xs: st.nid } });
-    };
-    if stmt is AstStatement::If { return specIf(st, sp, s, &stmt); };
-    if stmt is AstStatement::While { return specWhile(st, sp, s, &stmt); };
-    return same(st, s);
-};
-
-fn specSimpleStatement(st: St, sp: &Spec, s: Int, stmt: &AstStatement) -> St ~ {
-    if stmt is AstStatement::Assign {
-        a = stmt as AstStatement::Assign;
-        st = specExpr(st, sp, a.e);
-        if st.nid = a.e { return same(st, s); };
-        return emit(st, AstNode::Statement { value: AstStatement::Assign { n: a.n, e: st.nid } });
-    };
-    if stmt is AstStatement::Let {
-        a = stmt as AstStatement::Let;
-        st = specExpr(st, sp, a.e);
-        if st.nid = a.e { return same(st, s); };
-        return emit(st, AstNode::Statement { value: AstStatement::Let { n: a.n, e: st.nid } });
-    };
-    if stmt is AstStatement::Return {
-        e = (stmt as AstStatement::Return).e;
-        st = specExpr(st, sp, e);
-        if st.nid = e { return same(st, s); };
-        return emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
-    };
-    if stmt is AstStatement::AssignDeref {
-        a = stmt as AstStatement::AssignDeref;
-        st = specExpr(st, sp, a.a);
-        lhs = st.nid;
-        st = specExpr(st, sp, a.b);
-        if lhs = a.a && st.nid = a.b { return same(st, s); };
-        return emit(st, AstNode::Statement { value: AstStatement::AssignDeref { a: lhs, b: st.nid } });
-    };
-    return same(st, s);
-};
-
-fn specIf(st: St, sp: &Spec, s: Int, stmt: &AstStatement) -> St ~ {
-    if !(stmt is AstStatement::If) { return same(st, s); };
-    b = stmt as AstStatement::If;
-    st = specExpr(st, sp, b.e);
-    cond = st.nid;
-    st = specStatements(st, sp, b.a);
-    yes = st.nid;
-    st = specStatements(st, sp, b.b);
-    if cond = b.e && yes = b.a && st.nid = b.b { return same(st, s); };
-    return emit(st, AstNode::Statement { value: AstStatement::If { e: cond, a: yes, b: st.nid } });
-};
-
-fn specWhile(st: St, sp: &Spec, s: Int, stmt: &AstStatement) -> St ~ {
-    if !(stmt is AstStatement::While) { return same(st, s); };
-    w = stmt as AstStatement::While;
-    st = specExpr(st, sp, w.e);
-    cond = st.nid;
-    st = specValidations(st, sp, w.vs);
-    invariant = st.nid;
-    st = specOptTermination(st, sp, w.t);
-    term = st.nid;
-    st = specStatements(st, sp, w.xs);
-    if cond = w.e && invariant = w.vs && term = w.t && st.nid = w.xs { return same(st, s); };
-    return emit(st, AstNode::Statement { value: AstStatement::While { e: cond, vs: invariant, t: term, xs: st.nid } });
 };
 
 // The call of a function of the program by name, with arguments checked already (callResolved). st.te: the call.
@@ -1418,7 +675,7 @@ fn callResolved(st: St, name: String, inferred: &List<TE>) -> St ~ {
 };
 
 fn emptyTemplate() -> Template ~ {
-    return Template { bounds: [], fnNames: [], fnTypes: [], params: [], ptys: [], rty: 0, sizes: [], types: [], from: [], ins: 0 - 1, outs: 0 - 1, term: 0 - 1, body: 0 - 1, boundsNode: 0 - 1, paramsNode: 0 - 1, sigNode: 0 - 1, retNode: 0 - 1 };
+    return Template { bounds: [], params: [], ptys: [], rty: 0, sizes: [], types: [], from: [], ins: 0 - 1, outs: 0 - 1, term: 0 - 1, body: 0 - 1, boundsNode: 0 - 1, paramsNode: 0 - 1, sigNode: 0 - 1, retNode: 0 - 1 };
 };
 
 // The function that Type::f means: the one function of that name that the impls of Type define (resolveAssociated); st.names
@@ -1633,12 +890,7 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     sizes = ownSizeBindings(&st, &key, &args);
     boundVals = [];
     for b in &boundTypes { boundVals = push(boundVals, head(&b.types)); };
-    at = implementationContext(&st, &key);
-    if at < 0 || at >= size(st.definitions) {
-        st = boundsMet(st, &bounds, &boundNames, &boundVals, &sizes);
-    } else {
-        st = boundsMetIn(st, at, &bounds, &boundNames, &boundVals, &sizes);
-    };
+    st = boundsMet(st, &bounds, &boundNames, &boundVals, &sizes);
     if st.status != 0 { return st; };
     if !st.ok { return gives(st, false, []); };
     return gives(st, true, found);
@@ -1664,81 +916,6 @@ fn boundsMet(st: St, bounds: &List<BoundInfo>, boundNames: &List<String>, boundV
         };
     };
     return St { ok: true, ..st };
-};
-
-// The bounds met with the traits and impls of the defining context that has the impl as the caller has it as well
-// (inImplementationContext)
-fn boundsMetIn(st: St, at: Int, bounds: &List<BoundInfo>, boundNames: &List<String>, boundVals: &List<Int>, sizes: &Matched) -> St ~ {
-    if at < 0 || at >= size(st.definitions) { return boundsMet(st, bounds, boundNames, boundVals, sizes); };
-    d = clone(get(st.definitions, at));
-    outerTraits = clone(st.traits);
-    outerTraitFns = clone(st.traitFns);
-    outerTraitParams = clone(st.traitParams);
-    outerImpls = clone(st.impls);
-    outerImplArgs = clone(st.implArgs);
-    outerImplBounds = clone(st.implBounds);
-    outerImplBoundsNodes = clone(st.implBoundsNodes);
-    traits = clone(outerTraits);
-    for bucket in &d.traits.map.buckets { for e in bucket { traits = traits.insert(clone(e.key)); }; };
-    traitFns = clone(outerTraitFns);
-    for bucket in &d.traitFns.buckets { for e in bucket { traitFns = traitFns.insert(clone(e.key), clone(e.value)); }; };
-    traitParams = clone(outerTraitParams);
-    for bucket in &d.traitParams.buckets { for e in bucket { traitParams = traitParams.insert(clone(e.key), clone(e.value)); }; };
-    impls = clone(outerImpls);
-    for bucket in &d.impls.map.buckets { for e in bucket { impls = impls.insert(clone(e.key)); }; };
-    implArgs = clone(outerImplArgs);
-    for bucket in &d.implArgs.buckets { for e in bucket { implArgs = implArgs.insert(clone(e.key), clone(e.value)); }; };
-    implBounds = clone(outerImplBounds);
-    for bucket in &d.implBounds.buckets { for e in bucket { implBounds = implBounds.insert(clone(e.key), clone(e.value)); }; };
-    implBoundsNodes = clone(outerImplBoundsNodes);
-    for bucket in &d.implBoundsNodes.buckets { for e in bucket { implBoundsNodes = implBoundsNodes.insert(clone(e.key), e.value); }; };
-    st = St { traits: traits, traitFns: traitFns, traitParams: traitParams, impls: impls, implArgs: implArgs, implBounds: implBounds, implBoundsNodes: implBoundsNodes, ..st };
-    st = boundsMet(st, bounds, boundNames, boundVals, sizes);
-    return St { traits: outerTraits, traitFns: outerTraitFns, traitParams: outerTraitParams, impls: outerImpls, implArgs: outerImplArgs, implBounds: outerImplBounds, implBoundsNodes: outerImplBoundsNodes, ..st };
-};
-
-// The first defining context with the impl, given the same types and bounds there as the caller gives it, or -1
-fn implementationContext(st: &St, key: &String) -> Int ~ {
-    if !HashMap::contains(&st.implArgs, key) { return 0 - 1; };
-    given = HashMap::lookup(&st.implArgs, key, ImplArgs { ty: 0, args: [], tyNode: 0 - 1, argsNode: 0 - 1 });
-    hasBounds = HashMap::contains(&st.implBounds, key);
-    bounds = HashMap::lookup(&st.implBounds, key, []);
-    i = 0;
-    for d in &st.definitions {
-        if HashSet::contains(&d.impls, key) && HashMap::contains(&d.implArgs, key) && HashMap::contains(&d.implBounds, key) = hasBounds {
-            theirs = HashMap::lookup(&d.implArgs, key, ImplArgs { ty: 0, args: [], tyNode: 0 - 1, argsNode: 0 - 1 });
-            theirBounds = HashMap::lookup(&d.implBounds, key, []);
-            if sameImplArgs(st, &theirs, &given) && sameBounds(st, &theirBounds, &bounds) { return i; };
-        };
-        i = i + 1;
-    };
-    return 0 - 1;
-};
-
-fn sameTys(st: &St, xs: &List<Int>, ys: &List<Int>) -> Bool ~ {
-    if size(xs) != size(ys) { return false; };
-    i = 0;
-    while i < size(xs) && i < size(ys) [{ affirm i >= 0; }] ~ {
-        if !sameTy(st, get(xs, i), get(ys, i)) { return false; };
-        i = i + 1;
-    };
-    return true;
-};
-
-fn sameImplArgs(st: &St, a: &ImplArgs, b: &ImplArgs) -> Bool ~ {
-    return sameTy(st, a.ty, b.ty) && sameTys(st, &a.args, &b.args);
-};
-
-fn sameBounds(st: &St, xs: &List<BoundInfo>, ys: &List<BoundInfo>) -> Bool ~ {
-    if size(xs) != size(ys) { return false; };
-    i = 0;
-    while i < size(xs) && i < size(ys) [{ affirm i >= 0; }] ~ {
-        x = get(xs, i);
-        y = get(ys, i);
-        if x.p != y.p || x.n != y.n || !sameTys(st, &x.ts, &y.ts) { return false; };
-        i = i + 1;
-    };
-    return true;
 };
 
 // The size parameters of an impl's type matched against the sizes of a type (traitArgumentsOf's sizes bound)
@@ -2315,13 +1492,14 @@ fn boundedImplTemplates(st: St, tname: &String, typeName: &String, bounds: &List
         tm = templateOf(st, get(parts.values, i), bounds, boundsNode, &fs, get(parts.defined, i).sigNode);
         part = implFunctionPart(&name);
         st = addAssoc(st, typeName, &part, tname);
+        if size(tm.from) > 0 { st = putRefResult(st, clone(name), clone(tm.params), clone(tm.from)); };
         st = St { templates: st.templates.insert(clone(name), tm), defQueue: push(st.defQueue, name), ..st };
         i = i + 1;
     };
     return st;
 };
 
-// The check of each function against the trait made a template too, with the function
+// The check of each function against the trait made a template too (the copy step makes it with each copy of the function)
 fn boundedWrapperTemplates(st: St, bounds: &List<BoundInfo>, boundsNode: Int) -> St ~ {
     parts = clone(st.boundedParts);
     i = 0;
@@ -2332,15 +1510,15 @@ fn boundedWrapperTemplates(st: St, bounds: &List<BoundInfo>, boundsNode: Int) ->
         fs = clone(st.fnSig);
         tm = templateOf(st, v, bounds, boundsNode, &fs, 0 - 1);
         wname = clone(get(parts.wrapperNames, i));
-        function = clone(get(parts.wrapperOf, i));
-        existing = HashMap::lookup(&st.companions, &function, []);
-        st = St { templates: st.templates.insert(clone(wname), tm), companions: st.companions.insert(clone(function), concatFront(push([], clone(wname)), existing)), defQueue: push(st.defQueue, wname), ..st };
+        if size(tm.from) > 0 { st = putRefResult(st, clone(wname), clone(tm.params), clone(tm.from)); };
+        st = St { templates: st.templates.insert(clone(wname), tm), defQueue: push(st.defQueue, wname), ..st };
         i = i + 1;
     };
     return st;
 };
 
-// The functions with bounds the module defines, each checked once against its written bounds alone (definition-time checking)
+// The functions with bounds the module defines, each checked once against its written bounds alone (definition-time
+// checking), and given to the program with their type parameters
 fn checkDefinitions(st: St) -> St ~ {
     while size(st.defQueue) > 0 [{ }] ~ {
         name = clone(get(st.defQueue, 0));
@@ -2350,8 +1528,7 @@ fn checkDefinitions(st: St) -> St ~ {
     return st;
 };
 
-// The definition check of a function with bounds of the module, taken from the queue: once the module is checked, or
-// before its first copy is made, so that the copies are made from the body the check wrote again (boundCallWritten)
+// The definition check of a function with bounds of the module, taken from the queue once the module is checked
 fn checkQueued(st: St, name: &String) -> St ~ {
     rest = [];
     i = 0;
@@ -2363,27 +1540,11 @@ fn checkQueued(st: St, name: &String) -> St ~ {
     return checkDefinition(st, name);
 };
 
-// In a body checked against its bounds, a call of a bound's function written as a method (x.f(...)) or by the name of a
-// sequence function (size(x)) is written again as Trait::f(...), its head replaced where it is: a copy then calls the
-// function the check resolved, not another of that name the type given for the parameter has, and what a reference it
-// returns is from is the trait function's
-fn boundCallWritten(st: St, head: Int, owner: &String, function: &String, proof: Bool) -> St ~ {
-    origins = HashMap::lookup(&st.assoc, assocKey(owner, function), []);
-    if size(origins) != 1 || head < 0 || head >= size(st.nodes) { return st; };
-    // (a sequence function of the library's Sequence or Growable stays as it is written: a list, an array and a Box of
-    // an array implement those with the builtins, which a copy for one calls, and a copy for another type calls the
-    // function of its impl, sequenceFunction)
-    if HashSet::contains(&st.sequenceTraits, &get(origins, 0)) && HashMap::contains(&st.methods, function) { return st; };
-    st = emitName(st, catStrings(catStrings(clone(get(origins, 0)), "::"), clone(function)));
-    if head >= size(st.nodes) { return st; };
-    node = AstNode::Expression { value: AstExpression::Var { n: st.nid } };
-    if proof { node = AstNode::Proof { value: AstProof::ATerm { n: st.nid } }; };
-    return St { nodes: set(st.nodes, head, node), ..st };
-};
-
 
 // The body of a function with bounds with its type parameters opaque: a value of one has what any type has, and what its
-// bounds give it, which are impls of their traits whose functions are <T as Trait>::f. What the check adds is taken back.
+// bounds give it, which are impls of their traits whose functions are <T as Trait>::f. What the check adds is taken back,
+// and the checked body is given to the program as it is (a BoundedDef after the module's statements), with the
+// expression types of its code after the module's.
 fn checkDefinition(st: St, name: &String) -> St ~ {
     tm = HashMap::lookup(&st.templates, name, emptyTemplate());
     impls = clone(st.impls);
@@ -2400,15 +1561,30 @@ fn checkDefinition(st: St, name: &String) -> St ~ {
         pty = st.ty;
         st = boundAsImpl(st, &b.p, pty, &b.n, &b.ts);
     };
-    i = 0;
-    while i < size(tm.fnNames) && i < size(tm.fnTypes) [{ affirm i >= 0; }] ~ {
-        st = St { fns: st.fns.insert(clone(get(tm.fnNames, i)), get(tm.fnTypes, i)), ..st };
-        i = i + 1;
-    };
     writes = namesText(&st.nodes, signatureOf(&st.nodes, tm.sigNode).ws);
     fs = FnSig { params: clone(tm.params), ptys: clone(tm.ptys), rty: tm.rty, sizes: clone(tm.sizes), types: clone(tm.types), writes: writes, froms: clone(tm.from) };
-    st = checkFunction(st, name, fs, tm.ins, tm.outs, tm.term, tm.body);
+    st = checkFunction(st, name, clone(fs), tm.ins, tm.outs, tm.term, tm.body);
     if st.status != 0 { return st; };
+    parts = clone(st.outs);
+    bodyTypes = clone(st.te.types);
+    from = clone(st.names);
+    st = emitName(st, clone(name));
+    nameNode = st.nid;
+    st = emitNames(st, &fs.params);
+    paramsNode = st.nid;
+    checkedSig = FnSig { froms: from, ..fs };
+    st = emitSignature(st, &checkedSig);
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: st.nid, term: nth(&parts, 2), stmts: nth(&parts, 3) } });
+    bodyNode = st.nid;
+    noProofs = [];
+    st = emitProofs(st, &noProofs);
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: paramsNode, ins: nth(&parts, 0), outs: nth(&parts, 1), body: bodyNode, exports: st.nid } });
+    st = emitVal(st, st.nid);
+    st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: nameNode, e: st.nid } });
+    st = emit(st, AstNode::Statement { value: AstStatement::BoundedDef { bs: tm.boundsNode, s: st.nid } });
+    genericTypes = clone(st.genericTypes);
+    for t in &bodyTypes { genericTypes = push(genericTypes, t); };
+    st = St { genericOut: push(st.genericOut, st.nid), genericTypes: genericTypes, ..st };
     return St { defChecking: outerDefChecking, impls: impls, implArgs: implArgs, assoc: assoc, fns: fns, refResultNames: refResultNames, refResultParams: refResultParams, refResultFroms: refResultFroms, ..st };
 };
 
@@ -2434,6 +1610,10 @@ fn boundAsImpl(st: St, p: &String, pty: Int, tname: &String, args: &List<Int>) -
         fty = st.ty;
         bname = implFunctionName(&owner, tname, &fname);
         st = addAssoc(st, &owner, &fname, tname);
+        if !HashMap::contains(&st.boundStubs, &bname) { st = St { boundStubs: st.boundStubs.insert(clone(bname), size(st.boundStubSigs)), boundStubSigs: push(st.boundStubSigs, clone(boundSig)), ..st }; };
+        // (a sequence function of the library's Sequence or Growable is the builtin for a list, an array and a Box of an
+        // array, which implement those with the builtins: the copy step reads the mark)
+        if HashSet::contains(&st.sequenceTraits, tname) && HashMap::contains(&st.methods, &fname) { st = St { builtinStubs: st.builtinStubs.insert(clone(bname)), ..st }; };
         st = St { fns: st.fns.insert(clone(bname), fty), ..st };
         if size(fs.froms) > 0 { st = putRefResult(st, bname, clone(fs.params), clone(fs.froms)); };
     };
@@ -2451,57 +1631,7 @@ fn parameterTraitArguments(st: St, tname: &String, p: &String) -> St ~ {
     return gives(st, true, out);
 };
 
-// A copy of a function with bounds that does not check, though its definition did (makeTemplateInstance checks the
-// module's own first). A rule the definition check cannot apply to a type parameter, as it depends on the type a call
-// gives (how many words an array of it in a frame takes, whether it holds a permission), is the call's to meet, and its
-// refusal is the call's; any other is an internal error, as a function that checks against its bounds checks for any
-// types that meet them.
-fn copyRefused(st: St, name: &String, instance: &String) -> St ~ {
-    if st.status != 1 { return st; };
-    why = clone(st.msg);
-    st = St { status: 0, msg: "", ..st };
-    if dependsOnTheType(&why) {
-        return finalRefusal(st, catStrings(catStrings(catStrings(catStrings("Type error: ", clone(name)), " cannot be made as "), clone(instance)), catStrings(" for this call: ", dropTypeError(&why))));
-    };
-    return finalRefusal(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("internal compiler error: the copy ", clone(instance)), " of "), clone(name)), " does not check, though "), clone(name)), catStrings(" checks against its bounds: ", why)));
-};
 
-fn dependsOnTheType(msg: &String) -> Bool ~ {
-    return containsText(msg, " words, more than the 8192 that an array held in a frame can have") || containsText(msg, ", which holds a permission, and a type parameter is not one");
-};
-
-fn containsText(s: &String, part: &String) -> Bool ~ {
-    n = size(part.bytes);
-    i = 0;
-    while i + n <= size(s.bytes) [{ affirm i >= 0; }] shrinks size(s.bytes) - i {
-        if s.slice(i, i + n) = clone(part) { return true; };
-        i = i + 1;
-    };
-    return false;
-};
-
-fn dropTypeError(msg: &String) -> String ~ {
-    prefix = "Type error: ";
-    if size(msg.bytes) >= size(prefix.bytes) && msg.slice(0, size(prefix.bytes)) = prefix { return msg.slice(size(prefix.bytes), size(msg.bytes)); };
-    return clone(msg);
-};
-
-
-
-// A sequence function called by name or as a method on a value of a struct or an enum (size(v), v.get(i)), st.names: in a
-// copy of a function with bounds, that of the type's impl of Sequence or Growable when the type has another function of
-// that name too, as the bound resolved it where the function was checked against its bounds
-fn sequenceFunction(st: St, owner: &String, function: &String) -> St ~ {
-    if size(st.activeNames) > 0 && !st.defChecking && HashMap::contains(&st.methods, function) {
-        origins = HashMap::lookup(&st.assoc, assocKey(owner, function), []);
-        if size(origins) > 1 {
-            chosen = [];
-            for o in &origins { if HashSet::contains(&st.sequenceTraits, o) { chosen = push(chosen, clone(o)); }; };
-            if size(chosen) = 1 { return St { names: push([], implFunctionName(owner, &get(chosen, 0), function)), ..st }; };
-        };
-    };
-    return resolveAssociated(st, owner, function);
-};
 
 // Whether Trait::f(x) on a list, an array or a Box of an array is the builtin f: for a Sequence or Growable that is not the
 // library's (whose impls for them are written), when the type has no impl of it, as it implements it by being one

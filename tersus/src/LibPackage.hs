@@ -8,13 +8,11 @@ module LibPackage
     , libModuleId
     , libSelection
     , libCatalog
-    , inlinedLibraryLength
     , stripDeclaredFromUnits
     , withoutReplacedEq
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
-import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.IO.Unsafe (unsafePerformIO)
@@ -44,7 +42,6 @@ data LibPackage = LibPackage
     , libPrograms :: Map.Map String M.Program
     , libOrder :: [String]
     , libImports :: Map.Map String [String]
-    , libStatements :: Map.Map String [Statement]
     }
     deriving (Show)
 
@@ -54,7 +51,7 @@ type NativeUnits = [(ModuleId, ModuleInterface, M.Program)]
 -- the libraries it imports. A helper that fails fails the helpers alone.
 compiledLibraries :: Loader -> (Result LibPackage String, Result NativeUnits String)
 compiledLibraries loader = case loader (LoadRequest LoadLibraries False (resolverFromFiles []) Nothing librarySources []) of
-    LoadedLibraries answers failure -> go answers (LibPackage Map.empty Map.empty [] Map.empty Map.empty) [] failure
+    LoadedLibraries answers failure -> go answers (LibPackage Map.empty Map.empty [] Map.empty) [] failure
     NotLoaded e -> (Error e, Error e)
     _ -> let e = "internal: the loader did not answer with the compiler libraries" in (Error e, Error e)
   where
@@ -65,7 +62,7 @@ compiledLibraries loader = case loader (LoadRequest LoadLibraries False (resolve
     go [] pkg natives failure = case failure of
         Just e -> failed pkg e
         Nothing -> (Ok (complete pkg), Ok (reverse natives))
-    go (LibraryAnswer name imports stmts response : rest) pkg natives failure =
+    go (LibraryAnswer name imports _ response : rest) pkg natives failure =
         let moduId = libModuleId name
             inModule err = "in lib module " ++ renderModuleId moduId ++ ": " ++ err
             depIfaces = [libInterfaces pkg Map.! dep | dep <- imports, Map.member dep (libInterfaces pkg)]
@@ -79,7 +76,6 @@ compiledLibraries loader = case loader (LoadRequest LoadLibraries False (resolve
                             , libPrograms = Map.insert name program (libPrograms pkg)
                             , libOrder = name : libOrder pkg
                             , libImports = Map.insert name imports (libImports pkg)
-                            , libStatements = Map.insert name stmts (libStatements pkg)
                             } natives failure
                 Accepted _ Nothing _ -> failed pkg (inModule "the elaborator gave no interface")
                 Refused err -> failed pkg (inModule err)
@@ -131,8 +127,14 @@ stripDeclaredFromUnits declared units = map strip units
             { M.progTypes = Map.withoutKeys (M.progTypes program) declaredSet
             , M.progGenerics = Map.withoutKeys (M.progGenerics program) declaredSet
             , M.progInvariants = Map.withoutKeys (M.progInvariants program) declaredSet
+            , M.progFunctions = Map.withoutKeys (M.progFunctions program) (replacedBounded program)
+            , M.progBounded = Map.withoutKeys (M.progBounded program) declaredSet
             }
         )
+    -- (a function with bounds of the library that the module defines itself, as a replacement Eq's impls do, is the
+    -- module's: a library's function with bounds is in its unit only to be copied, and the module's copies are of its own)
+    replacedBounded program =
+        Set.fromList (concat [name : M.boundedLifted bounded | (name, bounded) <- Map.toList (M.progBounded program), name `Set.member` declaredSet])
 
 libCatalog :: LibPackage -> [Library]
 libCatalog pkg = [Library name (Map.findWithDefault [] name (libImports pkg)) iface | name <- libOrder pkg, Just iface <- [Map.lookup name (libInterfaces pkg)]]
@@ -164,14 +166,3 @@ libSelection pkg names =
         , [(libModuleId name, libPrograms pkg Map.! name) | name <- ordered]
         )
 
--- How many of a program's first statements are compiler libraries put in front of it as they were read (as a parse
--- load gives them), each library in the libraries' order
-inlinedLibraryLength :: [Statement] -> Int
-inlinedLibraryLength stmts = case libPackage of
-    Error _ -> 0
-    Ok pkg -> strip stmts [Map.findWithDefault [] name (libStatements pkg) | name <- libOrder pkg]
-  where
-    strip rest (library : more)
-        | not (null library) && library `isPrefixOf` rest = length library + strip (drop (length library) rest) more
-        | otherwise = strip rest more
-    strip _ [] = 0

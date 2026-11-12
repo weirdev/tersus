@@ -7,7 +7,7 @@ module Compile
 
 import qualified Mir as M
 import MirLower (lowerElaborated, lowerModuleWith)
-import LibPackage (inlinedLibraryLength, libCatalog, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
+import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
 import Link (linkPrograms, completeSpecEnvs)
 import PackageData (ModuleId (..), LoadOptions (..), Resolver (..), defaultLoadOptions, resolverFromFiles)
 import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), Value (..))
@@ -77,6 +77,15 @@ lowerSourceUsing loader noPrelude' reserving source = catalog `bindResult` \libr
     own stmts = concatMap declaredNames stmts ++ concatMap definedFunctionNames stmts
     catalog = if noPrelude' then Ok [] else mapResult libCatalog libPackage
 
+-- The functions an elaborated program defines at the top, those with bounds and the functions of its impls included
+elaboratedFunctions :: Elaborated -> [String]
+elaboratedFunctions (Elaborated stmts _) = concatMap defined stmts
+  where
+    defined stmt = case stmt of
+        Assign name (Val VFunct{}) -> [name]
+        BoundedDef _ inner -> defined inner
+        _ -> []
+
 mainModule :: ModuleId
 mainModule = ModuleId "main" Nothing
 
@@ -91,7 +100,7 @@ elaborateStatements :: [Statement] -> Result Elaborated String
 elaborateStatements = elaborateWith sourceElaborator
 
 elaborateWith :: Elaborator -> [Statement] -> Result Elaborated String
-elaborateWith elaborator stmts = acceptedElaboration (elaborator (Request mainModule False False NoInterface [] [] [] [stmts] (inlinedLibraryLength stmts)))
+elaborateWith elaborator stmts = acceptedElaboration (elaborator (Request mainModule False False NoInterface [] [] [] [stmts]))
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

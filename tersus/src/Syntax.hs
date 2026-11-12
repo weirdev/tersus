@@ -108,9 +108,14 @@ data Statement
       -- checks them against the trait and hands them back as ordinary function definitions, so the lowering never sees it.
       ImplDef (Maybe Name) [Arg] Name Type [Bound] [Statement]
     | -- fn f<S: Sequence<Int>, T>(...) ...: a function whose type parameters have bounds (`BoundedDef [(S, Sequence, [Int])] (the function)`),
-      -- which the type checker keeps as a template and makes a function of for each type it is called with (see templateCall in lib/elaborate/traits.tersus).
-      -- It does not reach the lowering.
+      -- which the elaborator checks once against its bounds and hands back with its type parameters as parameters; the lowering lowers it
+      -- once, and the copy step (MirCopies) makes a copy of it for each list of types the program calls it with.
       BoundedDef [Bound] Statement
+    | -- What a callee name the program uses and does not define stands for (the elaborator's, AST_DATA.md): `Instance n f args params
+      -- signature` says that n is the copy of the function with bounds f for the types and bounded sizes args (which may name the type
+      -- parameters of the function with bounds that uses it), and `Instance n "" [] params signature` that n is a function a bound gives
+      -- (`<$param T as Tr>::g`). The signature is n's own; the copy step (MirCopies) makes the copies.
+      Instance Name Name [Arg] [Variable] Signature
     | -- The line and column of the statement that follows it in its block, in a program that was parsed to keep them (`Pipeline`
       -- does, the parser functions called on their own do not). Nothing runs it: the lowering takes it as the place that the
       -- MIR statements after it come from, for the errors that name a place (a value used after it was moved).

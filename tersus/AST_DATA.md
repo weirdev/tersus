@@ -145,6 +145,20 @@ constructor order. Options are `NoName`/`SomeName NAME` and
 `NoTermination`/`SomeTermination TERMINATION`. Booleans are `true`/`false`;
 relations are `Eq`, `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq`.
 
+An elaborated program is the `Instance` records first, then the module's
+statements, then a `BoundedDef BOUNDS STATEMENT` for each function with bounds
+the module defines: its body as checked against its bounds, an `Assign` of the
+function with its type parameters as parameters, whose expression types follow
+the module's in the type list. `Instance NAME FUNCTION ARGS NAMES SIGNATURE`
+(response only; no parser writes it) says what a callee name the program uses
+and does not define stands for: the copy `NAME` (`total[List<Int>]`) of the
+function with bounds `FUNCTION` for the type and size `ARGS`, which may name the
+type parameters of the function with bounds that uses it, or, with an empty
+`FUNCTION` and no `ARGS`, a function a bound gives (`<$param T as Tr>::g`;
+`FUNCTION` is `$builtin` for one of the prelude's `Sequence` or `Growable` that a
+builtin has), with the parameter names and signature of `NAME`. The records are
+in name order and claim no expression types (MIR.md, "The copy step").
+
 An interface root is `Interface PACKAGE MODULE TYPES CTORS GENERICS INVARIANTS
 TRAITS TRAITPARAMS FUNCTIONS IMPLS ASSOC IMPLARGS IMPLBOUNDS COPIES LINEAR DROPS
 AXIOMS PROOFS EXTERNS TEMPLATES COMPANIONS`, the fields of
@@ -158,9 +172,11 @@ holds: `NamesEntry NAME NAMES` (types, trait parameters, companions),
 PROOFS`, `PairEntry NAME NAME` (impls), `AssocEntry NAME NAME OPTNAMES`,
 `ImplArgsEntry NAME NAME TYPE ARGS`, `ImplBoundsEntry NAME NAME BOUNDS` and
 `TemplateEntry NAME BOUNDS TYPEENTRIES OPTTYPE NAMES SIGNATURE VALIDATIONS
-VALIDATIONS OPTTERMINATION STATEMENTS`, whose `TypeEntry NAME TYPE` list and
-optional type are the functions and the return type of the context the template
-was declared in. A set is a `Names` list in ascending order; `OptNames` is a
+VALIDATIONS OPTTERMINATION STATEMENTS`, of which a call is checked against the
+name, bounds, return type, parameter names and signature: the elaborator writes
+the `TypeEntry NAME TYPE` list, the contracts, the termination and the body
+empty, and reads none of them (the record keeps them for the pinned seed until
+the next one). The companions map is written empty. A set is a `Names` list in ascending order; `OptNames` is a
 list of `NoName`/`SomeName`, and `NoType`/`SomeType TYPE` an optional type.
 Both readers refuse an entry of the wrong kind for its map and entries or set
 members out of order (Haskell in `InterfaceData`; names compare by code point,
@@ -209,15 +225,9 @@ whether it is a module of the compiler libraries (which see a generic struct's
 constructor as the struct it builds), which interface to give back (none for a
 single-file program, `module` for every ordinary package module, `lib` for a
 compiler-library module's physical constructor view), the interfaces of the modules
-it imports in merge order (the first wins a name), the checked defining dependency
-interfaces used only during template instantiation, the compiler libraries it may
-be given, its statements as read, and how
-many of the first statements are compiler libraries put in front of a single-file
-program (`Compile.elaborateWith`, counted by `LibPackage.inlinedLibraryLength`):
-their functions with bounds were checked against their bounds where the libraries
-were compiled as modules, so the elaborator does not check them again. The count
-is written as `builtins checked N` only when it is not 0, so a request without one
-is the plain `builtins` line an older elaborator reads:
+it imports in merge order (the first wins a name), the interfaces of the modules
+that define the functions with bounds it calls (their defining contexts), the
+compiler libraries it may be given, and its statements as read:
 
 ```
 tersus-elaborate 1
@@ -225,7 +235,7 @@ module "PACKAGE" none|"MODULE"
 predeclare true|false
 library true|false
 extract none|module|lib
-builtins [checked N]
+builtins
 data LINES          (the builtin table, `tersus-ast 1 builtins`)
 ...
 interfaces N
@@ -242,7 +252,7 @@ data LINES          (its interface)
 data LINES          (the program's `tersus-ast 1 parsed` syntax, as read)
 ```
 
-The `definitions` blocks extend the experimental `tersus-elaborate 1` envelope; they are mandatory, and older envelopes without them are refused rather than accepted with missing context. They reuse ordinary interface records and do not change the AST/interface record schema. The `libraries` section is optional, and a request without it is the envelope as it was.
+The `definitions` blocks extend the experimental `tersus-elaborate 1` envelope; they are mandatory, and older envelopes without them are refused rather than accepted with missing context. A call of an imported function with bounds is checked against its signature and bounds alone, which may name types, traits and impls of modules the importer does not import: from these blocks the elaborator takes what they declare under canonical names (types, constructors, traits and impls, `contextFacts`), and none of their functions, so nothing becomes visible by a name the module can write. They reuse ordinary interface records and do not change the AST/interface record schema. The `libraries` section is optional, and a request without it is the envelope as it was.
 
 For a module of a package (in a `package` load, below), the elaborator resolves the module's names before it checks them: it names each file's
 declarations canonically (`package$module$file$Local`; the entry module's keep their names), rewrites each file's
@@ -254,22 +264,17 @@ module's statements as read call for (the rule a program is parsed with; for a m
 `String`, `HashMap` and `HashSet` the interfaces it imports name count as mentions) and sees their interfaces, closed
 over what they import (the list and Box types only when selected) and without what the module declares itself, in
 front of the module's `interfaces`; a module that impls Drop without the prelude sees the prelude's Drop trait alone,
-and the selected libraries' defining contexts come first among the `definitions`. A replacement `Eq` beside library
+and the `definitions` it is given add only canonical names. A replacement `Eq` beside library
 impls checked against the library's `Eq` has to be that `Eq` exactly.
 
-The elaborator seeds a checker state of its own from each provider's
-interfaces and keeps it with the templates the provider's interface owns. A
-call of one of those templates is checked in that state: the provider's types
-beside the caller's, the provider's traits, and the caller's impls of those
-traits only. The bounds of a caller's impl are met with the traits and impls of
-the defining context that has the impl as the caller does. Each function with
-bounds the module itself defines (a bounded function, a function of a bounded
-impl, and the check of a bounded trait impl's function against the trait) is
-checked once against its bounds alone, after the module's statements are or
-before its first copy is made, and a method call on a value of a type parameter
-is written into the template as the call of its bound's trait function, which an
-interface then carries; a copy of one that does not check is refused as an
-internal compiler error (LANGUAGE.md, Bounded types).
+Each function with bounds the module itself defines (a bounded function, a
+function of a bounded impl, and the check of a bounded trait impl's function
+against the trait) is checked once against its bounds alone, after the module's
+statements are, and given back with its type parameters (a `BoundedDef`, above);
+a call of a function with bounds, the module's or an imported one, is checked
+against its signature and bounds alone and names its copy, which the copy step
+makes (LANGUAGE.md, Bounded types). Every program's functions with bounds are
+checked, the compiler libraries put in front of a single-file program included.
 
 The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
 the elaborated syntax, `interface none` or `interface` with a `data` block of

@@ -2,7 +2,9 @@ module TestTraits (testTraits) where
 
 import MirEval (fromMirValue)
 import Compile (lowerSource)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
+import qualified Data.Map.Strict as Map
+import qualified Mir as M
 import Pipeline (parseSource, parseWithEquality, runStatements, validateStatements)
 import Types
 import Syntax
@@ -217,6 +219,23 @@ testTraits =
                 , testCase "and a program's own Growable" (parseEvalProgramHelper "trait Growable { fn push(self: Self, x: Int) -> Bool; }; impl Growable for List<Int> { fn push(self: Self, x: Int) -> Bool { return true; }; }; fn f<S: Growable>(s: S) -> Bool { return push(s, 3); }; if f(push([], 1)) { return 1; }; return 0;" (Just (VInt 1)))
                 , testCase "a reference returned onward by a bound's method" (parseEvalProgramHelper "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T) -> &Int from x { return x.first(); }; w = W { x: 3 }; r = pick(w); return *r;" (Just (VInt 3)))
                 , testCase "a function of a bounded impl calls another of it" (bounded "struct Pair<T> { a: T, b: T }; impl<T: Show> Pair<T> { fn both(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.a.show() + self.one(); }; fn one(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.b.show(); }; }; return Pair<Cell> { a: Cell { v: 0 }, b: Cell { v: 0 } }.both();" 2)
+                , testCase "and one that is not Copy is moved once, whatever the types a call gives" (parseValidateFailProgramHelper "fn twice<T: Clone>(x: T) -> Int { a = push([], x); b = push(a, x); return size(b); }; return 0;" "Move error: in twice")
+                , testCase "a function with bounds that nothing calls has no function in the program" (case lowerSource True "fn unused<T: Eq>(x: T) -> Bool { return x = x; }; return 0;" of
+                    Ok p -> case [n | n <- Map.keys (M.progFunctions p), "unused" `isInfixOf` n] of
+                        [] -> Nothing
+                        names -> Just ("the program has " ++ show names)
+                    Error e -> Just e)
+                , testCase "a call with a type that holds a permission is refused where it is made" (boundedRejected "struct H { a: Addr<Int>, ghost b: Block<Int> }; trait Mark { }; impl Mark for H { }; fn f<T: Mark>(x: &T) -> Int { return 0; }; fn g(h: &H) -> Int { return f(h); }; return 0;" "the type T of f would be H, which holds a permission, and a type parameter is not one")
+                , testCase "clone(x) of a word copies it, whatever the program's own trait Clone says" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Int { fn clone(self: &Self) -> Int { return *self + 1; }; }; fn c<T: Clone>(x: T) -> T { return clone(x); }; return c(5) * 10 + clone(5);" (Just (VInt 55)))
+                , testCase "and so does x.clone()" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Int { fn clone(self: &Self) -> Int { return *self + 1; }; }; fn c<T: Clone>(x: T) -> T { return x.clone(); }; y = 5; return c(5) * 10 + y.clone();" (Just (VInt 55)))
+                , testCase "and Clone::clone is the impl's, as for the type itself" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Int { fn clone(self: &Self) -> Int { return *self + 1; }; }; fn c<T: Clone>(x: T) -> T { return Clone::clone(x); }; y = 5; return c(5) * 10 + Clone::clone(y);" (Just (VInt 66)))
+                , testCase "a Box of an array of no size is cloned by the program's own Clone when the library's is not there" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Box<Array<Int>> { fn clone(self: &Self) -> Box<Array<Int>> { return Array::boxed(1, 9); }; }; fn c<T: Clone>(x: &T) -> T { return x.clone(); }; b = Array::boxed(2, 7); d = c(b); e = b.clone(); return size(d) * 10 + size(e);" (Just (VInt 11)))
+                , testCase "a copy with an array of structs too big for a frame is the call's refusal" (parseValidateFailProgramHelper "struct P { a: Int, b: Int, c: Int }; impl Clone for P { }; fn f<T: Clone>(x: T) -> Int { a = array(3000, x); return 0; }; return f(P { a: 1, b: 2, c: 3 });" "f cannot be made as f[P] for this call: Array<P, 3000> takes 9000 words")
+                , testCase "and of tuples" (parseValidateFailProgramHelper "fn f<T: Clone>(x: T) -> Int { a = array(3000, (x, 1)); return 0; }; return f(#[1, 2, 3]);" "f cannot be made as f[Array<Int, 3>] for this call")
+                , testCase "a copy's refusal is a refusal of the program, as the elaborator's is" (case lowerSource True "fn grow<T: Eq>(x: T, n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return grow(push([], x), n - 1); }; return grow(1, 2);" of
+                    Error e | "Validation failed: Type error: grow calls itself" `isPrefixOf` e -> Nothing
+                    Error e -> Just e
+                    Ok _ -> Just "the program was accepted")
                 , testCase "a function written for any type still cannot call a bounded one with its own type" (boundedRejected "fn f<T: Show>(x: &T) -> Int { return x.show(); }; fn h<T>(x: &T) -> Int { return f(x); }; return h(Cell { v: 0 });" "f needs T to implement Show, and T does not")
                 , testCase "a function nested in a bounded body does not clone its own type parameter" (boundedRejected "fn f<T: Show>(x: T) -> Int { fn inner<U>(y: U) -> List<U> { return push(push([], clone(y)), y); }; return size(inner(x)); }; return f(Cell { v: 0 });" "inner clones a U, and its bounds do not say U: Clone")
                 , testCase "and is not given the bounds of the function it is in" (boundedRejected "fn f<T: Show>(x: &T) -> Int { fn inner<T>(y: &T) -> Int { return y.show(); }; return inner(x); }; return f(Cell { v: 0 });" "show is called on a T, which has no functions")

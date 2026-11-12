@@ -2771,7 +2771,7 @@ encodeFunction physical types invariants functions rules allowCalls fn
     -- in every other program, is not one it may use)
     | physical && any logicalContainerUse (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))) = Nothing
     | otherwise = do
-        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
+        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires0, withRequires0) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes

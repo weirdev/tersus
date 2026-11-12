@@ -407,6 +407,13 @@ putStatement value b0 = case value of
         let (r0, b1) = putBounds bs b0
             (r1, b2) = putStatement s b1
          in emit "BoundedDef" [show r0, show r1] b2
+    Instance n f args ps sig ->
+        let (r0, b1) = putName n b0
+            (r1, b2) = putName f b1
+            (r2, b3) = putArgs args b2
+            (r3, b4) = putNames ps b3
+            (r4, b5) = putSignature sig b4
+         in emit "Instance" [show r0, show r1, show r2, show r3, show r4] b5
     Mark line col -> emit "Mark" [show line, show col] b0
     CopyDef n ->
         let (r0, b1) = putName n b0
@@ -1090,6 +1097,14 @@ nodeParsers = Map.fromList
         (bs, r0) <- ref nodes (\node -> case node of NBounds payload -> Just payload; _ -> Nothing)
         (s, r1) <- ref nodes (\node -> case node of NStatement payload -> Just payload; _ -> Nothing)
         pure (NStatement (BoundedDef bs s), [r0, r1])
+      )
+    , ("Instance", \nodes -> do
+        (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
+        (f, r1) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
+        (args, r2) <- ref nodes (\node -> case node of NArgs payload -> Just payload; _ -> Nothing)
+        (ps, r3) <- ref nodes (\node -> case node of NNames payload -> Just payload; _ -> Nothing)
+        (sig, r4) <- ref nodes (\node -> case node of NSignature payload -> Just payload; _ -> Nothing)
+        pure (NStatement (Instance n f args ps sig), [r0, r1, r2, r3, r4])
       )
     , ("Mark", \_ -> do
         line <- int
