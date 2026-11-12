@@ -51,6 +51,7 @@ import TestBuiltinRegistry
 import TestSharedCache
 import TestScheduling
 import TestAstData
+import TestOwnershipCodec
 import TestDifferential
 import TestElaborate
 import TestFrontendBootstrap
@@ -206,6 +207,7 @@ originalGroups =
     , testSharedCacheProbe
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
+    , testOwnershipCodec
     , testDataCodec
     , testParser
     , testParserBootstrap

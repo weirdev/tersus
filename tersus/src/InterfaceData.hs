@@ -53,6 +53,7 @@ recordOf iface =
         , irExterns = Set.toAscList (ifExterns iface)
         , irTemplates = [(name, templateRecord t) | (name, t) <- Map.toAscList (ifTemplates iface)]
         , irCompanions = Map.toAscList (ifCompanions iface)
+        , irOwnershipTransport = ifOwnershipTransport iface
         }
   where
     ModuleId package modu = ifModule iface
@@ -102,6 +103,7 @@ interfaceOf r =
                 , ifExterns = Set.fromDistinctAscList externs
                 , ifTemplates = Map.fromDistinctAscList (zip templates [template t | (_, t) <- irTemplates r])
                 , ifCompanions = Map.fromDistinctAscList (zip companions (map snd (irCompanions r)))
+                , ifOwnershipTransport = irOwnershipTransport r
                 }
   where
     interfaceFunction (FunctionRecord ps sig ins outs term exported) = InterfaceFunction ps sig ins outs term exported

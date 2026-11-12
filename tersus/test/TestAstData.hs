@@ -1,4 +1,4 @@
-module TestAstData (testAstData, testAstReader) where
+module TestAstData (testAstData, testAstReader, withAstReader) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Monad (forM)

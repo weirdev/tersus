@@ -252,6 +252,8 @@ enum AstNode {
     TraitFns { value: AstTraitFns },
     Bounds { value: AstBounds },
     Elaborated { value: AstElaborated },
+    OwnershipElaborated { statements: Int, types: Int, protocols: Int, ownership: Int },
+    OwnershipInterface { base: Int, protocols: Int, ownership: Int },
     Entry { value: AstEntry },
     Entries { value: AstEntries },
     OptNames { value: AstOptNames },
@@ -420,6 +422,8 @@ fn printNode(node: &AstNode) -> Int ~ {
         AstNode::Entries { value: v } => { match v { AstEntries::End => { bytesWritten = "EntriesEnd".print(); }, AstEntries::Cons { head: h, tail: t } => { bytesWritten = "EntriesCons".print() + printInt(h) + printInt(t); }, }; },
         AstNode::OptNames { value: v } => { match v { AstOptNames::End => { bytesWritten = "OptNamesEnd".print(); }, AstOptNames::Cons { head: h, tail: t } => { bytesWritten = "OptNamesCons".print() + printInt(h) + printInt(t); }, }; },
         AstNode::OptType { value: v } => { match v { AstOptType::NoType => { bytesWritten = "NoType".print(); }, AstOptType::SomeType { t: t } => { bytesWritten = "SomeType".print() + printInt(t); }, }; },
+        AstNode::OwnershipElaborated { statements: s, types: t, protocols: p, ownership: o } => { bytesWritten = "OwnershipElaborated".print() + printInt(s) + printInt(t) + printInt(p) + printInt(o); },
+        AstNode::OwnershipInterface { base: b, protocols: p, ownership: o } => { bytesWritten = "OwnershipInterface".print() + printInt(b) + printInt(p) + printInt(o); },
         AstNode::Interface { value: v } => { bytesWritten = printInterface(v); },
         AstNode::Scheme { value: v } => {
             match v {
@@ -464,7 +468,12 @@ fn printInterface(v: &AstInterface) -> Int [{ }] [{ }] {
 fn printBool(b: Bool) -> Int [{ }] [{ }] { if b { return " true".print(); }; return " false".print(); };
 
 fn printAst(p: &AstProgram) -> Int ~ {
-    n = "tersus-ast 1 ".print() + p.stage.print() + newLine();
+    version = "1";
+    if p.root >= 0 && p.root < size(p.nodes) {
+        root = get(p.nodes, p.root);
+        if root is AstNode::OwnershipElaborated || root is AstNode::OwnershipInterface { version = "2"; };
+    };
+    n = "tersus-ast ".print() + version.print() + " ".print() + p.stage.print() + newLine();
     for node in &p.nodes { n = n + printNode(node); };
     return n + "root".print() + printInt(p.root) + newLine();
 };

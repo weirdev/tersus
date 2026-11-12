@@ -1,5 +1,5 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
-import data::codec::codec { Size, catStrings };
+import data::codec::codec { Size, catStrings, wireOwnershipRole };
 import elaborate::builtins { substitute };
 import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, sizeArgument, teHead };
 import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, mentionsParameter, refResultFrom, stmtOf };
@@ -9,7 +9,7 @@ import elaborate::expr { coerceArguments, genericCall, implementsMarker, nodesOf
 import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
+import elaborate::state { BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -765,7 +765,7 @@ fn ownerThroughTrait(st: St, tname: &String, fns: &List<Int>, function: &String,
 
 // Eq::eq on words is the builtin comparison (primitiveTraitCall); st.ok says whether it was one
 fn primitiveTraitCall(st: St, tname: &String, fns: &List<Int>, function: &String, inferred: &List<TE>) -> St ~ {
-    if tname != "Eq" || function != "eq" || size(inferred) != 2 { return St { ok: false, ..st }; };
+    if !protocolIs(&st, "Eq", tname) || function != "eq" || size(inferred) != 2 { return St { ok: false, ..st }; };
     f = traitFnNamed(st, fns, "eq");
     if f < 0 { return St { ok: false, ..st }; };
     a = clone(get(inferred, 0));
@@ -821,7 +821,12 @@ impl Clone for Matched { };
 
 // The types a type gives a trait that it implements (traitArguments): st.ok, and st.te.types
 fn traitArguments(st: St, tname: String, t: Int) -> St ~ {
-    if (tname = "Clone" || tname = "Copy") && HashMap::contains(&st.traitFns, &tname) && size(HashMap::lookup(&st.traitFns, &tname, [])) = 0 && size(HashMap::lookup(&st.traitParams, &tname, [])) = 0 {
+    if st.wireVersion && wireOwnershipRole(&tname) {
+        provider = protocolName(&st, &tname);
+        if size(provider.bytes) = 0 { return gives(st, false, []); };
+        tname = provider;
+    };
+    if (protocolIs(&st, "Clone", &tname) || protocolIs(&st, "Copy", &tname)) && HashMap::contains(&st.traitFns, &tname) && size(HashMap::lookup(&st.traitFns, &tname, [])) = 0 && size(HashMap::lookup(&st.traitParams, &tname, [])) = 0 {
         st = implementsMarker(st, clone(tname), t, 0);
         return St { te: TE { node: 0 - 1, types: [] }, ..st };
     };
@@ -832,14 +837,14 @@ fn gives(st: St, ok: Bool, ts: List<Int>) -> St ~ { return St { ok: ok, te: TE {
 
 fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     x = tyAt(st, t);
-    if (tname = "Eq" || tname = "Clone") && primitiveEqRaw(&x) { return gives(st, true, []); };
-    if tname = "Clone" && x.kind = 12 { return gives(st, parametersClone(&st, t), []); };
-    if tname = "Clone" && (x.kind = 3 || x.kind = 14 || x.kind = 7 || x.kind = 15) { return gives(st, true, []); };
-    if tname = "Clone" && (isListTy(st, t) || x.kind = 6 || isBoxTy(st, t)) {
+    if (protocolIs(&st, "Eq", &tname) || protocolIs(&st, "Clone", &tname)) && primitiveEqRaw(&x) { return gives(st, true, []); };
+    if protocolIs(&st, "Clone", &tname) && x.kind = 12 { return gives(st, parametersClone(&st, t), []); };
+    if protocolIs(&st, "Clone", &tname) && (x.kind = 3 || x.kind = 14 || x.kind = 7 || x.kind = 15) { return gives(st, true, []); };
+    if protocolIs(&st, "Clone", &tname) && (isListTy(st, t) || x.kind = 6 || isBoxTy(st, t)) {
         st = traitArguments(st, "Clone", nth(&x.args, 0));
         return gives(st, st.ok, []);
     };
-    if tname = "Eq" && isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 {
+    if protocolIs(&st, "Eq", &tname) && isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 {
         st = traitArguments(st, "Eq", argAt(st, nth(&x.args, 0), 0));
         return gives(st, st.ok, []);
     };
@@ -1014,7 +1019,8 @@ fn checkMarkerImpl(st: St, tname: &String, typeName: &String) -> St ~ {
     if HashSet::contains(&st.drops, typeName) {
         return typeError(st, catStrings(catStrings(here, clone(typeName)), " has a drop, and a copy of a value with a drop would be dropped twice"));
     };
-    if tname = "Copy" && !HashSet::contains(&st.impls, pairKey("Clone", typeName)) {
+    cloneProvider = protocolName(&st, "Clone");
+    if protocolIs(&st, "Copy", tname) && !HashSet::contains(&st.impls, pairKey(&cloneProvider, typeName)) {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings("impl Copy for ", clone(typeName)), ": "), clone(typeName)), " is Copy only if it is Clone, so write impl Clone for "), catStrings(clone(typeName), " { }; first")));
     };
     ctorNames = [];
@@ -1060,7 +1066,7 @@ fn parameterOk(st: St, tname: &String, t: Int) -> St ~ {
     st = zonk(st, t);
     x = tyAt(st, st.ty);
     if x.kind = 12 { return St { ok: true, ..st }; };
-    if tname = "Clone" && (isListTy(st, st.ty) || isBoxTy(st, st.ty)) { return parameterOk(st, tname, nth(&x.args, 0)); };
+    if protocolIs(&st, "Clone", tname) && (isListTy(st, st.ty) || isBoxTy(st, st.ty)) { return parameterOk(st, tname, nth(&x.args, 0)); };
     if x.kind = 6 { return parameterOk(st, tname, nth(&x.args, 0)); };
     return implementsMarker(st, clone(tname), st.ty, 0);
 };
@@ -1155,9 +1161,9 @@ fn checkImplDef(st: St, top: Bool, traitNode: Int, argsNode: Int, nameNode: Int,
     tname = optName(st, traitNode);
     typeName = nameText(&st.nodes, nameNode);
     // (a copy of a linear value would use it twice, and a copy of a value with a drop would be dropped twice)
-    if tname = "Clone" {
+    if protocolIs(&st, "Clone", &tname) {
         if HashSet::contains(&st.linearTypes, &typeName) { return typeError(st, catStrings(catStrings(catStrings(catStrings("impl Clone for ", clone(typeName)), ": "), clone(typeName)), " is linear, so a value of it is used exactly once and is never copied")); };
-        if HashSet::contains(&st.drops, &typeName) { return typeError(st, catStrings(catStrings(catStrings(catStrings("impl Clone for ", clone(typeName)), ": "), clone(typeName)), " has a drop, and a copy of a value with a drop would be dropped twice")); };
+        if !st.wireVersion && HashSet::contains(&st.drops, &typeName) { return typeError(st, catStrings(catStrings(catStrings(catStrings("impl Clone for ", clone(typeName)), ": "), clone(typeName)), " has a drop, and a copy of a value with a drop would be dropped twice")); };
     };
     tyc = codecTypeAt(&st.nodes, tyNode);
     st = fromCodec(st, &tyc);
@@ -1269,11 +1275,11 @@ fn checkImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, name
     checks = clone(st.outs);
     for t in &st.te.types { types = push(types, t); };
     out = [];
-    if tname = "Copy" && size(required) = 0 {
+    if protocolIs(&st, "Copy", &tname) && size(required) = 0 {
         st = emit(st, AstNode::Statement { value: AstStatement::CopyDef { n: nameNode } });
         out = push(out, st.nid);
     };
-    if tname = "Drop" {
+    if protocolIs(&st, "Drop", &tname) {
         st = emit(st, AstNode::Statement { value: AstStatement::DropDef { n: nameNode } });
         out = push(out, st.nid);
     };
@@ -1288,30 +1294,31 @@ fn registerImpl(st: St, tname: &String, traitArgs: &List<Int>, typeName: &String
     params = HashMap::lookup(&st.traitParams, tname, []);
     if size(params) != size(traitArgs) { return wrongTraitArity(st, tname, &params, typeName, size(traitArgs)); };
     if HashSet::contains(&st.impls, pairKey(tname, typeName)) { return typeError(st, catStrings(catStrings(clone(typeName), " already implements "), clone(tname))); };
-    if wordEq(tname, typeName) { return typeError(st, catStrings(clone(typeName), " implements Eq by the language: its values are compared as words")); };
+    if wordEq(&st, tname, typeName) { return typeError(st, catStrings(clone(typeName), " implements Eq by the language: its values are compared as words")); };
     key = pairKey(tname, typeName);
     args = ImplArgs { ty: selfInput, args: clone(traitArgs), tyNode: tyNode, argsNode: argsNode };
     st = St { impls: st.impls.insert(clone(key)), implArgs: st.implArgs.insert(clone(key), args), ..st };
     return implMarks(st, tname, typeName, size(found) = 0 && size(params) = 0);
 };
 
-fn wordEq(tname: &String, typeName: &String) -> Bool ~ {
-    return tname = "Eq" && (typeName = "Int" || typeName = "Byte" || typeName = "Bool");
+fn wordEq(st: &St, tname: &String, typeName: &String) -> Bool ~ {
+    return protocolIs(st, "Eq", tname) && (typeName = "Int" || typeName = "Byte" || typeName = "Bool");
 };
 
 fn implMarks(st: St, tname: &String, typeName: &String, marker: Bool) -> St ~ {
-    if (tname = "Clone" || tname = "Copy") && marker {
+    if (protocolIs(&st, "Clone", tname) || protocolIs(&st, "Copy", tname)) && marker {
         st = checkMarkerImpl(st, tname, typeName);
         if st.status != 0 { return st; };
     };
-    if tname = "Drop" { return checkDropImpl(st, typeName); };
+    if protocolIs(&st, "Drop", tname) { return checkDropImpl(st, typeName); };
     return st;
 };
 
 fn checkDropImpl(st: St, typeName: &String) -> St ~ {
     here = catStrings(catStrings(catStrings("impl Drop for ", clone(typeName)), ": "), clone(typeName));
     if HashSet::contains(&st.linearTypes, typeName) { return typeError(st, catStrings(here, " is linear, so it is used by the program and not dropped")); };
-    if HashSet::contains(&st.impls, pairKey("Copy", typeName)) { return typeError(st, catStrings(here, " is Copy, and a copy of a value with a drop would be dropped twice")); };
+    copyProvider = protocolName(&st, "Copy");
+    if HashSet::contains(&st.impls, pairKey(&copyProvider, typeName)) { return typeError(st, catStrings(here, " is Copy, and a copy of a value with a drop would be dropped twice")); };
     holding = false;
     if HashMap::contains(&st.generics, typeName) {
         g = HashMap::lookup(&st.generics, typeName, Generic { params: [], names: [], types: [] });

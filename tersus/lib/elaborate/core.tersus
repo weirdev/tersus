@@ -1,6 +1,6 @@
 import data::codec::codec { catStrings };
 import elaborate::builtins { substitute };
-import elaborate::state { CtorInfo, Generic, St, TE, Ty, addTy, expect, fail, freshSize, freshVar, indexIn, instanceName, intText, isSize, isTypeName, joinWith, kindOf, namedTy, nth, rawInstanceName, render, resolve, tyAt, typeError, typesChanged, unify, withTy, zonk };
+import elaborate::state { CtorInfo, Generic, St, TE, Ty, addTy, expect, fail, freshSize, freshVar, indexIn, instanceName, intText, isSize, isTypeName, joinWith, kindOf, namedTy, nth, protocolName, rawInstanceName, render, resolve, tyAt, typeError, typesChanged, unify, withTy, zonk };
 
 // Types.tupleGeneric: TupleN for N from 2 to 16 is a struct with parameters T0..T(N-1) and fields 0..N-1
 fn tupleArity(base: &String) -> Int ~ {
@@ -358,7 +358,7 @@ fn readField(st: St, owner: &String, field: &String, structTy: Int) -> St ~ {
     typed = st.ty;
     held = typed;
     tx = tyAt(st, typed);
-    if tx.kind = 4 && tx.name = "Box" && size(tx.args) = 1 && !isSize(st, nth(&tx.args, 0)) {
+    if isBoxTy(st, typed) {
         if size(owner.bytes) = 0 || instanceName(st, typed) != clone(owner) { held = nth(&tx.args, 0); };
     };
     if size(owner.bytes) > 0 {
@@ -386,7 +386,7 @@ fn fieldType(st: St, field: &String, structTy: Int) -> St ~ {
     st = zonk(st, structTy);
     t = st.ty;
     x = tyAt(st, t);
-    if x.kind = 4 && x.name = "Box" && size(x.args) = 1 && !isSize(st, nth(&x.args, 0)) && field != "addr" && field != "blk" {
+    if isBoxTy(st, t) && field != "addr" && field != "blk" {
         return fieldType(st, field, nth(&x.args, 0));
     };
     if x.kind = 4 && x.name = "Self" {
@@ -468,19 +468,19 @@ fn checkFinite(st: St, root: &String, variants: &List<List<Int>>) -> St ~ {
 fn hasFunction(st: &St, t: Int) -> Bool ~ {
     x = tyAt(st, resolve(st, t));
     if x.kind = 14 { return true; };
-    if x.kind = 4 && (x.name = "List" || x.name = "Box") && size(x.args) = 1 && !isSize(st, nth(&x.args, 0)) { return hasFunction(st, nth(&x.args, 0)); };
+    if isListTy(st, t) || isBoxTy(st, t) { return hasFunction(st, nth(&x.args, 0)); };
     if x.kind >= 6 && x.kind <= 11 { return hasFunction(st, nth(&x.args, 0)); };
     return false;
 };
 
 fn isListTy(st: &St, t: Int) -> Bool ~ {
     x = tyAt(st, t);
-    return x.kind = 4 && x.name = "List" && size(x.args) = 1 && !isSize(st, nth(&x.args, 0));
+    return x.kind = 4 && x.name = protocolName(st, "List") && size(x.args) = 1 && !isSize(st, nth(&x.args, 0));
 };
 
 fn isBoxTy(st: &St, t: Int) -> Bool ~ {
     x = tyAt(st, t);
-    return x.kind = 4 && x.name = "Box" && size(x.args) = 1 && !isSize(st, nth(&x.args, 0));
+    return x.kind = 4 && x.name = protocolName(st, "Box") && size(x.args) = 1 && !isSize(st, nth(&x.args, 0));
 };
 
 fn checkType(st: St, t: Int) -> St ~ {

@@ -1,0 +1,307 @@
+import data::ast::ast { AstEntries, AstEntry, AstInterface, AstNode, AstStatement, AstExpression, AstProgram };
+import data::codec::codec { catStrings, wireOwnershipRole };
+import data::reader::reader { entryKey, transportNames };
+import elaborate::check { stmtOf, mentionsParameter };
+import elaborate::core { baseNameOf };
+import elaborate::out { emit, emitName, emitNames };
+import elaborate::records { listItems, nameText, nodeIn };
+import elaborate::state { St, TE, Ty, addTy, firstText, indexIn, joinWith, kindOf, namedTy, notModelled, rawInstanceName, protocolName, resolve, tyAt, typeError, zonk };
+import elaborate::traits { emptyTemplate, implFunctionName, pairKey, sortTexts, templateCall, traitArguments, unknownIn };
+
+fn wireLoad(st: St, iface: &AstProgram, root: &AstNode, collectBindings: Bool) -> St ~ {
+    if !(root is AstNode::OwnershipInterface) { return notModelled(st, "version 2 requires checked interface ownership transport"); };
+    value = root as AstNode::OwnershipInterface;
+    protocolEntries = [];
+    if collectBindings { protocolEntries = listItems(&iface.nodes, value.protocols); };
+    for e in &protocolEntries {
+        entryNode = nodeIn(&iface.nodes, e);
+        if !(entryNode is AstNode::Entry) { return notModelled(st, "ownership transport has no names entry"); };
+        entryValue = (entryNode as AstNode::Entry).value;
+        if !(entryValue is AstEntry::NamesEntry) { return notModelled(st, "ownership transport has the wrong entry kind"); };
+        entry = entryValue as AstEntry::NamesEntry;
+        role = nameText(&iface.nodes, entry.n);
+        providers = transportNames(&iface.nodes, entry.ns);
+        previous = st.wireProtocols.lookup(&role, []);
+        base = nodeIn(&iface.nodes, value.base);
+        if !(base is AstNode::Interface) { return notModelled(st, "ownership transport has no interface"); };
+        visibleTraits = (base as AstNode::Interface).value.traits;
+        for provider in &providers {
+            visible = false;
+            for t in listItems(&iface.nodes, visibleTraits) {
+                traitNode = nodeIn(&iface.nodes, t);
+                if !(traitNode is AstNode::Entry) { return notModelled(st, "protocol provider has no trait entry"); };
+                traitValue = (traitNode as AstNode::Entry).value;
+                if !(traitValue is AstEntry::TraitEntry) { return notModelled(st, "protocol provider has the wrong entry kind"); };
+                declaredTrait = traitValue as AstEntry::TraitEntry;
+                if nameText(&iface.nodes, declaredTrait.n) = clone(provider) { visible = true; };
+            };
+            if role = "List" || role = "Box" {
+                v = (base as AstNode::Interface).value;
+                candidates = listItems(&iface.nodes, v.types);
+                for e in listItems(&iface.nodes, v.generics) { candidates = push(candidates, e); };
+                for e in &candidates {
+                    storageNode = nodeIn(&iface.nodes, e);
+                    if !(storageNode is AstNode::Entry) { return notModelled(st, "storage protocol has no declaration entry"); };
+                    storageEntry = (storageNode as AstNode::Entry).value;
+                    keys = entryKey(&iface.nodes, &storageEntry);
+                    if size(keys) = 1 && get(keys, 0) = clone(provider) { visible = true; };
+                };
+            };
+            if visible && indexIn(&previous, provider) < 0 { previous = push(previous, clone(provider)); };
+        };
+        if size(previous) > 0 { st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st }; };
+    };
+    for e in listItems(&iface.nodes, value.ownership) {
+        entryNode = nodeIn(&iface.nodes, e);
+        if !(entryNode is AstNode::Entry) { return notModelled(st, "ownership transport has no names entry"); };
+        entryValue = (entryNode as AstNode::Entry).value;
+        if !(entryValue is AstEntry::NamesEntry) { return notModelled(st, "ownership transport has the wrong entry kind"); };
+        entry = entryValue as AstEntry::NamesEntry;
+        owner = nameText(&iface.nodes, entry.n);
+        facts = transportNames(&iface.nodes, entry.ns);
+        if st.wireOwnership.contains(&owner) && st.wireOwnership.lookup(&owner, []) != facts { return notModelled(st, catStrings("conflicting checked ownership for ", &owner)); };
+        st = St { wireOwnership: st.wireOwnership.insert(owner, facts), ..st };
+    };
+    if collectBindings { st = wireValidateBindings(st); };
+    return st;
+};
+
+fn wireValidateBindings(st: St) -> St ~ {
+    bindings = clone(st.wireProtocols);
+    for bucket in &bindings.buckets {
+        for e in bucket {
+            if size(e.value) > 1 {
+                return typeError(st, catStrings(catStrings(catStrings("conflicting ", &e.key), " providers: "), joinWith(&e.value, ", ")));
+            };
+        };
+    };
+    return st;
+};
+
+fn wireOwnerBindings(st: St, iface: &AstProgram) -> St ~ {
+    root = nodeIn(&iface.nodes, iface.root);
+    if !(root is AstNode::OwnershipInterface) { return notModelled(st, "defining context has no checked protocol transport"); };
+    value = root as AstNode::OwnershipInterface;
+    bindings = HashMap::new();
+    for e in listItems(&iface.nodes, value.protocols) {
+        node = nodeIn(&iface.nodes, e);
+        if !(node is AstNode::Entry) { return notModelled(st, "defining protocol has no entry"); };
+        entry = (node as AstNode::Entry).value;
+        if !(entry is AstEntry::NamesEntry) { return notModelled(st, "defining protocol has the wrong entry kind"); };
+        pair = entry as AstEntry::NamesEntry;
+        bindings = bindings.insert(nameText(&iface.nodes, pair.n), transportNames(&iface.nodes, pair.ns));
+    };
+    return wireValidateBindings(St { wireProtocols: bindings, ..st });
+};
+
+fn wireLocal(name: &String) -> String ~ {
+    start = 0;
+    i = 0;
+    for c in &name.bytes { if c = toByte(36) { start = i + 1; }; i = i + 1; };
+    return name.slice(start, size(name.bytes));
+};
+
+fn wireBindDeclarations(st: St, statements: &List<Int>) -> St ~ {
+    for s in statements {
+        stmt = stmtOf(&st, s);
+        if stmt is AstStatement::TraitDef {
+            name = nameText(&st.nodes, (stmt as AstStatement::TraitDef).n);
+            role = wireLocal(&name);
+            if wireOwnershipRole(&role) {
+                previous = st.wireProtocols.lookup(&role, []);
+                if indexIn(&previous, &name) < 0 { previous = push(previous, clone(name)); };
+                st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
+            };
+        };
+    };
+    return st;
+};
+
+fn wireStorageDeclarations(st: St, statements: &List<Int>) -> St ~ {
+    for s in statements {
+        stmt = stmtOf(&st, s);
+        if stmt is AstStatement::StructDef {
+            name = nameText(&st.nodes, (stmt as AstStatement::StructDef).n);
+            role = wireLocal(&name);
+            if role = "List" || role = "Box" {
+                previous = st.wireProtocols.lookup(&role, []);
+                if indexIn(&previous, &name) < 0 { previous = push(previous, clone(name)); };
+                st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
+            };
+        };
+    };
+    return st;
+};
+
+fn wireNoFacts() -> List<String> [{ }] [{ affirm size(return) = 7; }] { return push(push(push(push(push(push(push([], ""), ""), ""), ""), ""), ""), ""); };
+
+fn wireBaseFacts(st: &St, owner: &String) -> List<String> [{ }] [{ affirm size(return) = 7; }] ~ {
+    facts = wireNoFacts();
+    copy = protocolName(st, "Copy");
+    if size(copy.bytes) > 0 && st.impls.contains(pairKey(&copy, owner)) { facts = set(facts, 0, copy); };
+    roles = push(push(push([], "Drop"), "Clone"), "Deref");
+    methods = push(push(push([], "drop"), "clone"), "deref");
+    for i in 0..3 [{ affirm size(facts) = 7; affirm size(roles) = 3; affirm size(methods) = 3; }] {
+        provider = protocolName(st, &get(roles, i));
+        if size(provider.bytes) > 0 && st.impls.contains(pairKey(&provider, owner)) {
+            function = implFunctionName(owner, &provider, &get(methods, i));
+            facts = set(facts, 1 + 2 * i, provider);
+            facts = set(facts, 2 + 2 * i, function);
+        };
+    };
+    return facts;
+};
+
+fn wireSelect(st: St, t: Int, provider: &String, function: &String) -> St ~ {
+    if size(function.bytes) = 0 { return St { names: push(push([], ""), ""), ..st }; };
+    hasTemplate = st.templates.contains(function);
+    tm = st.templates.lookup(function, emptyTemplate());
+    if !hasTemplate && !st.fns.contains(function) { return notModelled(st, catStrings("the checked ownership target is absent: ", function)); };
+    st = traitArguments(st, clone(provider), t);
+    if st.status != 0 { return st; };
+    selected = "";
+    if st.ok {
+        selected = clone(function);
+        if hasTemplate {
+            argument = t;
+            if size(tm.ptys) > 0 {
+                kind = kindOf(&st, get(tm.ptys, 0));
+                if kind = 10 || kind = 11 { st = addTy(st, Ty { kind: kind, name: "", args: push([], t), n: 0, flag: false, sizes: [], types: [] }); argument = st.ty; };
+            };
+            st = emitName(st, "self");
+            node = st.nid;
+            st = emit(st, AstNode::Expression { value: AstExpression::Var { n: node } });
+            args = push([], TE { node: st.nid, types: push([], argument) });
+            st = templateCall(st, clone(function), tm, &args);
+            if st.status != 0 { return st; };
+            selected = firstText(&st.names);
+        };
+    };
+    if size(selected.bytes) = 0 { return St { names: push(push([], ""), ""), ..st }; };
+    return St { names: push(push([], clone(provider)), selected), ..st };
+};
+
+// The state with each role an owner's checked facts name taken by that fact's provider: a type of a module the caller
+// does not import is selected for as its module sees its own providers
+fn wireFactRoles(st: St, copyProvider: String, dropProvider: String, cloneProvider: String, derefProvider: String) -> St ~ {
+    roles = clone(st.wireProtocols);
+    if size(copyProvider.bytes) > 0 { roles = roles.insert("Copy", push([], copyProvider)); };
+    if size(dropProvider.bytes) > 0 { roles = roles.insert("Drop", push([], dropProvider)); };
+    if size(cloneProvider.bytes) > 0 { roles = roles.insert("Clone", push([], cloneProvider)); };
+    if size(derefProvider.bytes) > 0 { roles = roles.insert("Deref", push([], derefProvider)); };
+    return St { wireProtocols: roles, ..st };
+};
+
+fn wireDeferred(st: &St, t: Int) -> Bool ~ {
+    ty = tyAt(st, resolve(st, t));
+    if ty.kind = 12 || ty.kind = 15 || ty.kind = 22 || ty.kind = 23 { return true; };
+    for a in &ty.args { if wireDeferred(st, a) { return true; }; };
+    return false;
+};
+
+fn wireComplete(st: St) -> St ~ {
+    original = clone(st.te);
+    checked = clone(st.wireOwnership);
+    bases = [];
+    for bucket in &st.types.buckets { for e in bucket { bases = push(bases, clone(e.key)); }; };
+    for bucket in &st.generics.buckets { for e in bucket { if indexIn(&bases, &e.key) < 0 { bases = push(bases, clone(e.key)); }; }; };
+    for owner in &bases {
+        candidate = wireBaseFacts(&st, owner);
+        facts = st.wireOwnership.lookup(owner, wireNoFacts());
+        if size(facts) != 7 { return notModelled(st, "ownership facts must have seven names"); };
+        for slot in 0..7 [{ affirm size(facts) = 7; affirm size(candidate) = 7; }] {
+            if size(get(facts, slot).bytes) = 0 && size(get(candidate, slot).bytes) > 0 { facts = set(facts, slot, clone(get(candidate, slot))); };
+        };
+        st = St { wireOwnership: st.wireOwnership.insert(clone(owner), facts), ..st };
+    };
+    seen = HashSet::new();
+    i = 0;
+    while i < size(st.tys) [{ affirm i >= 0; }] ~ {
+        st = zonk(st, i);
+        t = st.ty;
+        ty = tyAt(&st, t);
+        if ty.kind = 4 && !wireDeferred(&st, t) {
+            owner = rawInstanceName(&st, t);
+            if !seen.contains(&owner) && !checked.contains(&owner) {
+                seen = seen.insert(clone(owner));
+                facts = st.wireOwnership.lookup(&ty.name, wireBaseFacts(&st, &ty.name));
+                if size(facts) != 7 { return notModelled(st, "ownership facts must have seven names"); };
+                callerRoles = clone(st.wireProtocols);
+                st = wireFactRoles(st, clone(get(facts, 0)), clone(get(facts, 1)), clone(get(facts, 3)), clone(get(facts, 5)));
+                copyProvider = get(facts, 0);
+                if size(copyProvider.bytes) > 0 {
+                    st = traitArguments(st, clone(copyProvider), t);
+                    if st.status != 0 { return st; };
+                    if !st.ok { facts = set(facts, 0, ""); };
+                };
+                for slot in 0..3 [{ affirm size(facts) = 7; }] {
+                    provider = get(facts, 1 + 2 * slot);
+                    function = get(facts, 2 + 2 * slot);
+                    st = wireSelect(st, t, &provider, &function);
+                    if st.status != 0 { return st; };
+                    selected = clone(st.names);
+                    if size(selected) != 2 { return notModelled(st, "ownership selection did not return a provider and callee"); };
+                    facts = set(facts, 1 + 2 * slot, clone(get(selected, 0)));
+                    facts = set(facts, 2 + 2 * slot, clone(get(selected, 1)));
+                };
+                st = St { wireProtocols: callerRoles, wireOwnership: st.wireOwnership.insert(owner, facts), ..st };
+            };
+        };
+        i = i + 1;
+    };
+    return St { te: original, ..st };
+};
+
+fn wireEntries(st: St, values: &HashMap<String, List<String>>) -> St ~ {
+    keys = [];
+    for bucket in &values.buckets { for e in bucket { keys = push(keys, clone(e.key)); }; };
+    entries = [];
+    for key in sortTexts(keys) {
+        st = emitName(st, clone(key));
+        name = st.nid;
+        names = values.lookup(&key, []);
+        st = emitNames(st, &names);
+        st = emit(st, AstNode::Entry { value: AstEntry::NamesEntry { n: name, ns: st.nid } });
+        entries = push(entries, st.nid);
+    };
+    st = emit(st, AstNode::Entries { value: AstEntries::End });
+    tail = st.nid;
+    i = size(entries) - 1;
+    while i >= 0 [{ affirm i < size(entries); }] ~ {
+        st = emit(st, AstNode::Entries { value: AstEntries::Cons { head: get(entries, i), tail: tail } });
+        tail = st.nid;
+        i = i - 1;
+    };
+    return st;
+};
+
+fn wireWrapInterface(st: St, base: Int) -> St ~ {
+    node = nodeIn(&st.nodes, base);
+    if !(node is AstNode::Interface) { return notModelled(st, "checked interface ownership has no interface root"); };
+    value = (node as AstNode::Interface).value;
+    owners = [];
+    for e in listItems(&st.nodes, value.types) {
+        entryNode = nodeIn(&st.nodes, e);
+        if !(entryNode is AstNode::Entry) { return notModelled(st, "checked ownership declaration has no interface entry"); };
+        entry = (entryNode as AstNode::Entry).value;
+        keys = entryKey(&st.nodes, &entry);
+        if size(keys) = 1 { owners = push(owners, clone(get(keys, 0))); };
+    };
+    for e in listItems(&st.nodes, value.generics) {
+        entryNode = nodeIn(&st.nodes, e);
+        if !(entryNode is AstNode::Entry) { return notModelled(st, "checked ownership declaration has no interface entry"); };
+        entry = (entryNode as AstNode::Entry).value;
+        keys = entryKey(&st.nodes, &entry);
+        if size(keys) = 1 { owners = push(owners, clone(get(keys, 0))); };
+    };
+    roles = clone(st.wireProtocols);
+    st = wireEntries(st, &roles);
+    protocols = st.nid;
+    facts = HashMap::new();
+    for owner in &owners {
+        if !st.wireOwnership.contains(owner) { return notModelled(st, "checked interface declaration has no ownership verdict"); };
+        facts = facts.insert(clone(owner), st.wireOwnership.lookup(owner, wireNoFacts()));
+    };
+    st = wireEntries(st, &facts);
+    return emit(st, AstNode::OwnershipInterface { base: base, protocols: protocols, ownership: st.nid });
+};

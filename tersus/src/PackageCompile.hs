@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module PackageCompile
     ( CompiledModule (..)
     , CompiledPackage (..)
@@ -25,7 +26,7 @@ import Lowering (lowerAccepted)
 import Mir (Lowered)
 import MirMoves (finishLowered)
 import Pretty (renderVarProof)
-import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), VariableProof)
+import Syntax (Elaborated (..), pattern Elaborated, Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), VariableProof)
 import Utils
 
 data CompiledModule = CompiledModule

@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module TestDifferential (testDifferential) where
 
 import AstData (writeBuiltinTable)
@@ -8,7 +9,7 @@ import Modules (ModuleId (..))
 import Differential
 import ElaborateRequest
 import MirLower (lowerElaborated)
-import Syntax (Elaborated (..))
+import Syntax (Elaborated (..), pattern Elaborated)
 import TestData (typeCheckSources)
 import TestHarness
 import Compile (elaborateStatements)

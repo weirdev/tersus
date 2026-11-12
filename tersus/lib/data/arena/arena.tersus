@@ -132,6 +132,7 @@ fn isListNode(node: &AstNode) -> Bool ~ {
 
 fn nodeChildren(node: &AstNode) -> List<Int> ~ {
     // (the records of an interface refer to their parts as the reader reads them)
+    if node is AstNode::OwnershipElaborated || node is AstNode::OwnershipInterface { return nodeRefs(node); };
     if node is AstNode::Entry || node is AstNode::Interface || node is AstNode::OptType { return nodeRefs(node); };
     if node is AstNode::Name || node is AstNode::Value || node is AstNode::Body || node is AstNode::Expression || node is AstNode::Termination || node is AstNode::Validation { return nodeChildren1(node); };
     if node is AstNode::Proof || node is AstNode::Rule || node is AstNode::Statement || node is AstNode::Arg || node is AstNode::OptName || node is AstNode::OptTermination { return nodeChildren2(node); };
@@ -330,6 +331,14 @@ fn nodeChildren6(node: &AstNode) -> List<Int> ~ {
 };
 
 fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
+    if node is AstNode::OwnershipElaborated {
+        v = node as AstNode::OwnershipElaborated;
+        return AstNode::OwnershipElaborated { statements: intAtOr(map, v.statements, v.statements), types: intAtOr(map, v.types, v.types), protocols: intAtOr(map, v.protocols, v.protocols), ownership: intAtOr(map, v.ownership, v.ownership) };
+    };
+    if node is AstNode::OwnershipInterface {
+        v = node as AstNode::OwnershipInterface;
+        return AstNode::OwnershipInterface { base: intAtOr(map, v.base, v.base), protocols: intAtOr(map, v.protocols, v.protocols), ownership: intAtOr(map, v.ownership, v.ownership) };
+    };
     if node is AstNode::Name || node is AstNode::Value || node is AstNode::Body || node is AstNode::Expression || node is AstNode::Termination || node is AstNode::Validation { return remapNode1(node, map); };
     if node is AstNode::Proof || node is AstNode::Rule || node is AstNode::Statement || node is AstNode::Arg || node is AstNode::OptName || node is AstNode::OptTermination { return remapNode2(node, map); };
     if node is AstNode::Builtin || node is AstNode::Signature || node is AstNode::TraitFn || node is AstNode::Bound || node is AstNode::Field || node is AstNode::Variant { return remapNode3(node, map); };

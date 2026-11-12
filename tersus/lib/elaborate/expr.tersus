@@ -7,7 +7,7 @@ import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureIn
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
-import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
+import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
 import elaborate::traits { builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
@@ -611,7 +611,8 @@ fn derefStepExpr(st: St, te: TE) -> St ~ {
     st = derefOwner(st, t);
     if st.status != 0 { return st; };
     owner = firstText(&st.names);
-    st = emitVar(st, implFunctionName(&owner, "Deref", "deref"));
+    provider = protocolName(&st, "Deref");
+    st = emitVar(st, implFunctionName(&owner, &provider, "deref"));
     functNode = st.nid;
     callArgs = push([], te.node);
     st = emitCall(st, functNode, &callArgs);
@@ -821,7 +822,8 @@ fn inferEquality(st: St, funct: Int, negated: Bool, args: &List<Int>) -> St ~ {
 
 // A comparison of values of a type that implements Eq: a call of its eq (equalityCall)
 fn equalityCall(st: St, t: Int, operands: &List<TE>) -> St ~ {
-    if !HashSet::contains(&st.traits, "Eq") {
+    provider = protocolName(&st, "Eq");
+    if !HashSet::contains(&st.traits, &provider) {
         return typeError(st, catStrings(render(st, t), " is compared with =, which needs the trait Eq of lib/eq.tersus, which a program has unless it declares a trait Eq of its own"));
     };
     st = traitArguments(st, "Eq", t);
@@ -837,7 +839,7 @@ fn equalityCall(st: St, t: Int, operands: &List<TE>) -> St ~ {
     st = traitOwner(st, "eq", t);
     if st.status != 0 { return st; };
     owner = firstText(&st.names);
-    return callResolved(st, implFunctionName(&owner, "Eq", "eq"), operands);
+    return callResolved(st, implFunctionName(&owner, &provider, "eq"), operands);
 };
 
 // Which part of a type has no Eq, to say what to write (missingEq); st.names
@@ -941,8 +943,9 @@ fn cloneMethod(st: St, args: &List<Int>) -> St ~ {
     if st.status != 0 { return st; };
     name = firstText(&st.names);
     input = clone(receiver);
-    if HashMap::contains(&st.traitFns, "Clone") && name = implFunctionName(&owner, "Clone", "clone") {
-        fns = HashMap::lookup(&st.traitFns, "Clone", []);
+    provider = protocolName(&st, "Clone");
+    if HashMap::contains(&st.traitFns, &provider) && name = implFunctionName(&owner, &provider, "clone") {
+        fns = HashMap::lookup(&st.traitFns, &provider, []);
         st = cloneTraitInput(st, &fns, receiver);
         input = clone(st.te);
     };
@@ -1046,19 +1049,20 @@ fn cloneWrap(st: St, x: TE, xt: Int) -> St ~ {
 
 // The impl's clone, given a borrow of the value when it takes one (cloneTrait)
 fn cloneTrait(st: St, x: TE) -> St ~ {
-    if !HashMap::contains(&st.traitFns, "Clone") {
+    provider = protocolName(&st, "Clone");
+    if !HashMap::contains(&st.traitFns, &provider) {
         args = push([], x.node);
-        return traitCall(st, 0 - 1, "Clone", "clone", &args);
+        return traitCall(st, 0 - 1, provider, "clone", &args);
     };
-    fns = HashMap::lookup(&st.traitFns, "Clone", []);
+    fns = HashMap::lookup(&st.traitFns, &provider, []);
     st = cloneTraitInput(st, &fns, clone(x));
     input = clone(st.te);
     ats = push([], teHead(&x));
-    st = ownerThroughTrait(st, "Clone", &fns, "clone", &ats);
+    st = ownerThroughTrait(st, &provider, &fns, "clone", &ats);
     if st.status != 0 { return st; };
     owner = firstText(&st.names);
     inputs = push([], input);
-    return callResolved(st, implFunctionName(&owner, "Clone", "clone"), &inputs);
+    return callResolved(st, implFunctionName(&owner, &provider, "clone"), &inputs);
 };
 
 fn cloneTraitInput(st: St, fns: &List<Int>, x: TE) -> St ~ {

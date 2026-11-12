@@ -2,7 +2,7 @@ import data::ast::ast { AstNode, AstProgram, AstStatement, printAst };
 import data::codec::codec { catStrings, intAt };
 import data::reader::reader { parseAstLines, readRecord };
 import elaborate::decls { Decls, FileDecl, declsFromStatements, emptyDecls, fileDeclarations, locating, textLess };
-import elaborate::elaborate { Answer, Program, Unit, elaborateUnit, joinBlock, malformed, noProgram, printAnswerBody, printIntWord, printQuoted, readBlock };
+import elaborate::elaborate { Answer, Program, Unit, Wire, elaborateUnit, joinBlock, malformed, noProgram, noWire, printAnswerBody, printIntWord, printQuoted, readBlock, readProtocols };
 import elaborate::libraries { Catalog, Lib, closure, declaredNames, libIndex, libraryContexts, librariesFor, probeModule, readCatalog, seenLibraries };
 import elaborate::load { LFile, LS, Loaded, ModId, PMod, PR, RImp, dependenciesOf, emptyMod, layoutNames, soloLayout, stateOfLoad, idLess, loadEntry, modKey, newLS, parseWith, renderPath, resolvedKey, sameId, sortNames, statementsOfProgram };
 import elaborate::records { listItems, nameText, nodeIn };
@@ -15,8 +15,14 @@ import parser::syntax::syntax as ps;
 // A load request (AST_DATA.md, "Loading"): the snapshot is loaded, parsed in process and answered as a whole: the module
 // graph, every module of a package elaborated in order, a program, or the compiler libraries.
 
-fn answerLoad(line: &Line) -> Int ~ {
+fn answerLoad(line: &Line, version2: Bool) -> Int ~ {
     if size(line.words) != 2 { return malformed(); };
+    wire = noWire();
+    if version2 {
+        read = readProtocols();
+        if !read.ok { return malformed(); };
+        wire = read.wire;
+    };
     snap = readSnapshot(textAt(line, 1));
     if !snap.ok { return malformed(); };
     builtinsLine = readLine();
@@ -35,9 +41,9 @@ fn answerLoad(line: &Line) -> Int ~ {
     libs = parseLibraries(&snap.sources);
     "tersus-elaborated 1\n".print();
     if snap.kind = "graph" { return answerGraph(&snap, &libs); };
-    if snap.kind = "package" { return answerPackage(&snap, &libs, &table.value, &catalog); };
-    if snap.kind = "program" || snap.kind = "parse" || snap.kind = "equality" { return answerProgram(&snap, &libs, &table.value, &catalog); };
-    if snap.kind = "libraries" { return answerLibraries(&libs, &table.value); };
+    if snap.kind = "package" { return answerPackage(&snap, &libs, &table.value, &catalog, &wire); };
+    if snap.kind = "program" || snap.kind = "parse" || snap.kind = "equality" { return answerProgram(&snap, &libs, &table.value, &catalog, &wire); };
+    if snap.kind = "libraries" { return answerLibraries(&libs, &table.value, &wire); };
     return malformed();
 };
 
@@ -344,7 +350,7 @@ fn printAnswered(id: &ModId, lowering: &List<String>, t: &Ifaces, answer: &Answe
     return n + "\n".print() + printAnswerBody(answer);
 };
 
-fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Catalog) -> Int ~ {
+fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Catalog, wire: &Wire) -> Int ~ {
     loaded = loadEntry(newLS(clone(libs.decls), libs.ok, clone(libs.msg)), snap);
     if !loaded.ok {
         message = clone(loaded.msg);
@@ -388,7 +394,8 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         for ctx in &defining { definitionPrograms = push(definitionPrograms, programsOf(&t, ctx)); };
         unit = Unit { pkgName: clone(id.pkg), modu: clone(id.modu), hasModule: id.has, predeclaring: true, viewing: false, extracting: true, libExtract: false,
             ifaces: programsOf(&t, &depKeys), ifaceKeys: clone(depKeys), definitions: definitionPrograms, definitionKeys: clone(defining),
-            hasCatalog: given, catalog: unitCatalog, pkg: clone(pkg), program: joinedProgram(&ls, &pm.files) };
+            hasCatalog: given, catalog: unitCatalog, pkg: clone(pkg), program: joinedProgram(&ls, &pm.files),
+            wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
         answer = elaborateUnit(table, unit, &seen);
         if answer.status < 0 { return malformed(); };
         if answer.status != 0 {
@@ -522,7 +529,7 @@ fn checkedSource(snap: &Snap, parsed: PR, names: List<String>) -> SourceParse ~ 
     return SourceParse { ok: true, msg: "", names: names, program: parsed.program };
 };
 
-fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Catalog) -> Int ~ {
+fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Catalog, wire: &Wire) -> Int ~ {
     read = readFile(snap, &snap.entry);
     if !snap.hasEntry || !read.ok { return malformed(); };
     source = parseSource(snap, libs, &read.text);
@@ -538,7 +545,8 @@ fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
     if given { unitCatalog = Catalog { ok: true, libs: clone(catalog.libs) }; };
     unit = Unit { pkgName: "main", modu: "", hasModule: false, predeclaring: false, viewing: false, extracting: false, libExtract: false,
         ifaces: [], ifaceKeys: [], definitions: [], definitionKeys: [], hasCatalog: given, catalog: unitCatalog, pkg: noPackage(),
-        program: joinBlock(Program { nodes: [], roots: [] }, &source.program) };
+        program: joinBlock(Program { nodes: [], roots: [] }, &source.program),
+        wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
     seen = HashMap::new();
     answer = elaborateUnit(table, unit, &seen);
     if answer.status < 0 { return malformed(); };
@@ -570,7 +578,7 @@ fn libContextsFor(libs: &LibParse, ifaces: &List<String>, deps: &List<String>) -
     return out;
 };
 
-fn compileLibrary(libs: &LibParse, table: &AstProgram, t: &Ifaces, done: &List<String>, i: Int) -> Answer ~ {
+fn compileLibrary(libs: &LibParse, table: &AstProgram, t: &Ifaces, done: &List<String>, i: Int, wire: &Wire) -> Answer ~ {
     name = "";
     if i >= 0 && i < size(libs.names) { name = clone(get(&libs.names, i)); };
     deps = libDepsOf(libs, &name);
@@ -581,19 +589,20 @@ fn compileLibrary(libs: &LibParse, table: &AstProgram, t: &Ifaces, done: &List<S
     for ctx in &contexts { definitionPrograms = push(definitionPrograms, programsOf(t, ctx)); };
     unit = Unit { pkgName: "tersuslib", modu: clone(name), hasModule: true, predeclaring: true, viewing: true, extracting: true, libExtract: true,
         ifaces: programsOf(t, &depKeys), ifaceKeys: depKeys, definitions: definitionPrograms, definitionKeys: contexts,
-        hasCatalog: false, catalog: Catalog { ok: true, libs: [] }, pkg: noPackage(), program: joinBlock(Program { nodes: [], roots: [] }, libProgramOf(libs, &name)) };
+        hasCatalog: false, catalog: Catalog { ok: true, libs: [] }, pkg: noPackage(), program: joinBlock(Program { nodes: [], roots: [] }, libProgramOf(libs, &name)),
+        wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
     seen = HashMap::new();
     return elaborateUnit(table, unit, &seen);
 };
 
-fn answerLibraries(libs: &LibParse, table: &AstProgram) -> Int ~ {
+fn answerLibraries(libs: &LibParse, table: &AstProgram, wire: &Wire) -> Int ~ {
     if !libs.ok { "librariesFailed ".print(); printQuoted(catStrings("the lib package does not parse: ", libs.msg)); "\n".print(); return 0; };
     t = Ifaces { programs: HashMap::new(), ids: HashMap::new() };
     done = [];
     for i in 0..size(libs.names) {
         if i = libs.regular && !libs.nativeOk { "nativesFailed ".print(); printQuoted(&libs.nativeMsg); "\n".print(); return 0; };
         name = clone(get(&libs.names, i));
-        answer = compileLibrary(libs, table, &t, &done, i);
+        answer = compileLibrary(libs, table, &t, &done, i, wire);
         if answer.status < 0 { return malformed(); };
         deps = libDepsOf(libs, &name);
         "library ".print(); printQuoted(&name); printIntWord(size(deps)); printWords(&deps); "\n".print();

@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module Compile
     ( SourceParts, parseSource, parseSourceParts, parseSourcePartsNoPrelude, parseWithEquality, parseWithEqualityUsing
     , lowerSource, lowerSourceNoPrelude, lowerSourceUsing
@@ -11,7 +12,7 @@ import MirMoves (finishLowered)
 import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
 import Link (linkPrograms, completeSpecEnvs)
 import PackageData (ModuleId (..), LoadOptions (..), Resolver (..), defaultLoadOptions, resolverFromFiles)
-import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), Value (..))
+import Syntax (Elaborated (..), pattern Elaborated, Expression (..), FunctBody (..), Statement (..), Value (..))
 import ElaborateRequest (Elaborator, Extraction (..), Library, LoadKind (..), LoadRequest (..), LoadResponse (..), Request (..), Response (..), acceptedElaboration)
 import ElaboratorTool (Loader, sourceElaborator, sourceLoader)
 import Modules (librarySources)
