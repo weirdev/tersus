@@ -308,6 +308,7 @@ fn entryOf(nodes: &List<AstNode>, e: Int) -> AstEntry ~ {
 
 fn interfaceOf(iface: &AstProgram) -> AstInterface ~ {
     root = nodeIn(&iface.nodes, iface.root);
+    if root is AstNode::OwnershipInterface { root = nodeIn(&iface.nodes, (root as AstNode::OwnershipInterface).base); };
     if root is AstNode::Interface { return (root as AstNode::Interface).value; };
     return AstInterface { pkg: 0 - 1, modu: 0 - 1, types: 0 - 1, ctors: 0 - 1, generics: 0 - 1, invariants: 0 - 1, traits: 0 - 1, traitParams: 0 - 1, functions: 0 - 1, impls: 0 - 1, assoc: 0 - 1, implArgs: 0 - 1, implBounds: 0 - 1, copies: 0 - 1, linear: 0 - 1, drops: 0 - 1, axioms: 0 - 1, proofs: 0 - 1, externs: 0 - 1, templates: 0 - 1, companions: 0 - 1 };
 };
@@ -519,6 +520,12 @@ fn viewRest(nodes: List<AstNode>, root: Int, v: AstInterface, changed: Bool, h: 
     if !changed { return View { program: AstProgram { stage: "interface", nodes: nodes, root: root }, changed: false }; };
     whole = AstInterface { copies: copies, linear: linears, drops: drops, axioms: axioms, proofs: proofs, externs: externs, templates: templates, companions: companions, ..v };
     if root < 0 || root >= size(nodes) { return View { program: AstProgram { stage: "interface", nodes: nodes, root: root }, changed: false }; };
+    rootNode = get(nodes, root);
+    if rootNode is AstNode::OwnershipInterface {
+        wrapper = rootNode as AstNode::OwnershipInterface;
+        if wrapper.base < 0 || wrapper.base >= size(nodes) { return View { program: AstProgram { stage: "interface", nodes: nodes, root: root }, changed: false }; };
+        return View { program: AstProgram { stage: "interface", nodes: set(nodes, wrapper.base, AstNode::Interface { value: whole }), root: root }, changed: true };
+    };
     return View { program: AstProgram { stage: "interface", nodes: set(nodes, root, AstNode::Interface { value: whole }), root: root }, changed: true };
 };
 

@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module Syntax where
 
 import Data.List (isPrefixOf)
@@ -5,8 +6,18 @@ import Data.Map (Map)
 
 import Types
 
-data Elaborated = Elaborated [Statement] [Type]
+data Elaborated = CheckedElaborated
+    { elaboratedStatements :: [Statement]
+    , elaboratedTypes :: [Type]
+    , elaboratedOwnership :: Maybe OwnershipTransport
+    }
     deriving (Show, Eq)
+
+pattern Elaborated :: [Statement] -> [Type] -> Elaborated
+pattern Elaborated statements types <- CheckedElaborated statements types _
+  where Elaborated statements types = CheckedElaborated statements types Nothing
+
+{-# COMPLETE Elaborated #-}
 
 -- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
 -- terminate, and so may not call itself.

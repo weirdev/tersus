@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module PackageCompile
     ( CompiledModule (..)
     , CompiledPackage (..)
@@ -21,7 +22,7 @@ import Link (linkPrograms)
 import qualified Modules as Mod
 import MirLower (lowerModuleWith)
 import Pretty (renderVarProof)
-import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
+import Syntax (Elaborated (..), pattern Elaborated, Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
 import Utils
 
 data CompiledModule = CompiledModule

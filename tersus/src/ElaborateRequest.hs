@@ -1,9 +1,10 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- The elaborator's request and response (AST_DATA.md, "Elaboration requests"): what a host gives an
 -- elaborator to elaborate one module, and what it gets back (ElaboratorTool runs the elaborator written in Tersus).
 module ElaborateRequest
     ( Elaborator
     , Extraction (..)
-    , Request (..)
+    , Request (Request, RequestData, rqModule, rqPredeclare, rqLibrary, rqExtraction, rqInterfaces, rqDefinitions, rqLibraries, rqStatements, rqCheckedStatements, rqProtocols)
     , Library (..)
     , Response (..)
     , writeRequest
@@ -16,7 +17,7 @@ module ElaborateRequest
     , requestHeader
     , responseHeader
     , LoadKind (..)
-    , LoadRequest (..)
+    , LoadRequest (LoadRequest, LoadRequestData, lrKind, lrReserving, lrResolver, lrEntry, lrSources, lrLibraries, lrProtocols)
     , LoadResponse (..)
     , LibraryAnswer (..)
     , Graph (..)
@@ -36,7 +37,8 @@ import Interface (ModuleInterface (..))
 import InterfaceData (readInterfaceBytes, readInterfaceLines, writeInterfaceLines)
 import PackageData (ImportLevel (..), LoadOptions (..), ModuleId (..), Resolver (..))
 import ParsedFile (Import (..))
-import Syntax (Elaborated (..), Statement)
+import Syntax (Elaborated (..), pattern Elaborated, Statement)
+import Types (Name, validProtocolProviders)
 import Utils
 
 -- Which interface to return: ordinary modules share one template export policy;
@@ -51,7 +53,7 @@ data Extraction = NoInterface | ModuleInterfaceOf | LibInterfaceOf
 -- in the package's order, or one for a program, and how many of the program's first statements are compiler libraries
 -- put in front of it, whose functions with bounds were checked against their bounds where the libraries were (written
 -- `builtins checked N`, only when N is not 0, so a request that has none reads as before).
-data Request = Request
+data Request = RequestData
     { rqModule :: ModuleId
     , rqPredeclare :: Bool
     , rqLibrary :: Bool
@@ -61,8 +63,15 @@ data Request = Request
     , rqLibraries :: [Library]
     , rqStatements :: [[Statement]]
     , rqCheckedStatements :: Int
+    , rqProtocols :: Maybe (Map.Map Name [Name])
     }
     deriving (Show, Eq)
+
+pattern Request :: ModuleId -> Bool -> Bool -> Extraction -> [ModuleInterface] -> [[ModuleInterface]] -> [Library] -> [[Statement]] -> Int -> Request
+pattern Request modu predeclaring library extraction interfaces definitions libraries statements checked <- RequestData modu predeclaring library extraction interfaces definitions libraries statements checked _
+  where Request modu predeclaring library extraction interfaces definitions libraries statements checked = RequestData modu predeclaring library extraction interfaces definitions libraries statements checked Nothing
+
+{-# COMPLETE Request #-}
 
 data Library = Library
     { libraryName :: String
@@ -89,6 +98,7 @@ type Elaborator = Request -> Response
 writeRequest :: Request -> Result String String
 writeRequest rq =
     syntax `bindResult` \() ->
+    protocolRecords (rqProtocols rq) `bindResult` \protocols ->
     builtinTableLines `bindResult` \builtins ->
     mapAll linesOf (rqInterfaces rq) `bindResult` \ifaces ->
         mapAll writeDefinition (rqDefinitions rq) `bindResult` \definitions ->
@@ -96,12 +106,13 @@ writeRequest rq =
         mapAll writeParsedLines (rqStatements rq) `bindResult` \asts ->
             Ok $
                 unlines
-                    ( [ requestHeader
+                    ( [ if rqProtocols rq == Nothing then requestHeader else "tersus-elaborate 2"
                       , unwords ["module", quote pkg, maybe "none" quote modu]
                       , "predeclare " ++ boolWord (rqPredeclare rq)
                       , "library " ++ boolWord (rqLibrary rq)
                       , "extract " ++ extractionWord (rqExtraction rq)
-                      , "builtins" ++ (if rqCheckedStatements rq > 0 then " checked " ++ show (rqCheckedStatements rq) else "")
+                      ] ++ protocols ++
+                      [ "builtins" ++ (if rqCheckedStatements rq > 0 then " checked " ++ show (rqCheckedStatements rq) else "")
                       ]
                         ++ block builtins
                         ++ ["interfaces " ++ show (length ifaces)]
@@ -132,7 +143,37 @@ levelWord level = case level of
     LevelSymbol -> "symbol"
 
 readRequest :: String -> Result Request String
-readRequest text = case lines text of
+readRequest text = requestEnvelope (lines text) `bindResult` \(protocols, records) -> readRequestRecords protocols records
+
+protocolRecords :: Maybe (Map.Map Name [Name]) -> Result [String] String
+protocolRecords Nothing = Ok []
+protocolRecords (Just protocols)
+    | any (not . uncurry validProtocolProviders) (Map.toList protocols) = Error "ElaborateRequest: malformed protocol providers"
+    | otherwise = Ok (("protocols " ++ show (Map.size protocols)) : [unwords (["protocol", quote role, show (length providers)] ++ map quote providers) | (role, providers) <- Map.toAscList protocols])
+
+requestEnvelope :: [String] -> Result (Maybe (Map.Map Name [Name]), [String]) String
+requestEnvelope records@(header : _)
+    | header == "tersus-elaborate 1" = Ok (Nothing, records)
+requestEnvelope ("tersus-elaborate 2" : modu : predeclaring : library : extraction : countLine : rest) =
+    wordAfter "protocols" countLine `bindResult` countOf `bindResult` \count -> parseProtocols count rest `bindResult` \(pairs, remaining) ->
+        let protocols = Map.fromList pairs
+         in protocolRecords (Just protocols) `bindResult` \_ ->
+            if and (zipWith (<) (map fst pairs) (drop 1 (map fst pairs)))
+                then Ok (Just protocols, "tersus-elaborate 1" : modu : predeclaring : library : extraction : remaining)
+                else Error "ElaborateRequest: protocol roles out of order or repeated"
+  where
+    parseProtocols 0 remaining = Ok ([], remaining)
+    parseProtocols n (line : remaining) = strictTokenize line `bindResult` \tokens -> case tokens of
+        Word "protocol" : Str role : Word k : names | n > 0 -> countOf k `bindResult` \size ->
+            if length names == size && all (\token -> case token of Str _ -> True; _ -> False) names
+                then parseProtocols (n-1) remaining `bindResult` \(more, after) -> Ok ((role, [name | Str name <- names]) : more, after)
+                else Error "ElaborateRequest: malformed protocol binding"
+        _ -> Error "ElaborateRequest: malformed protocol binding"
+    parseProtocols _ [] = Error "ElaborateRequest: missing protocol binding"
+requestEnvelope _ = Error "ElaborateRequest: not an elaboration request"
+
+readRequestRecords :: Maybe (Map.Map Name [Name]) -> [String] -> Result Request String
+readRequestRecords protocols records = case records of
     "tersus-elaborate 1" : moduleLine : predeclareLine : libraryLine : extractLine : builtinsLine : afterBuiltins ->
         checkedOf builtinsLine `bindResult` \checked ->
         moduleOf moduleLine `bindResult` \modu ->
@@ -157,7 +198,7 @@ readRequest text = case lines text of
             if not (null rest'')
                 then Error "ElaborateRequest: records after the module's syntax"
                 else if null astTexts then Error "ElaborateRequest: no syntax"
-                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions libraries stmts checked)
+                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok ((Request modu flag libraryFlag extraction ifaces definitions libraries stmts checked){rqProtocols = protocols})
     _ -> Error "ElaborateRequest: not an elaboration request"
   where
     definitionBlocks (line : rest) = wordAfter "definitions" line `bindResult` countOf `bindResult` \count -> contexts count rest
@@ -321,16 +362,24 @@ responseHeader = "tersus-elaborated 1"
 data LoadKind = LoadGraph | LoadPackage | LoadProgram | LoadParse | LoadEquality | LoadLibraries
     deriving (Show, Eq)
 
--- The entry is a file of the snapshot, read from the filesystem or given as source (standard input, a program's text)
-data LoadRequest = LoadRequest
+-- The entry is a file of the snapshot, read from the filesystem or given as source (standard input, a program's text);
+-- lrProtocols asks for version 2 (checked ownership transport) for every unit the load elaborates, as rqProtocols does
+data LoadRequest = LoadRequestData
     { lrKind :: LoadKind
     , lrReserving :: Bool
     , lrResolver :: Resolver
     , lrEntry :: Maybe (FilePath, Bool)
     , lrSources :: [(String, Bool, String)]
     , lrLibraries :: [Library]
+    , lrProtocols :: Maybe (Map.Map Name [Name])
     }
     deriving (Show, Eq)
+
+pattern LoadRequest :: LoadKind -> Bool -> Resolver -> Maybe (FilePath, Bool) -> [(String, Bool, String)] -> [Library] -> LoadRequest
+pattern LoadRequest kind reserving resolver entry sources libraries <- LoadRequestData kind reserving resolver entry sources libraries _
+  where LoadRequest kind reserving resolver entry sources libraries = LoadRequestData kind reserving resolver entry sources libraries Nothing
+
+{-# COMPLETE LoadRequest #-}
 
 data GraphFile = GraphFile
     { gfName :: String
@@ -396,13 +445,15 @@ loadKindWord kind = case kind of
 
 writeLoadRequest :: LoadRequest -> Result String String
 writeLoadRequest rq =
+    protocolRecords (lrProtocols rq) `bindResult` \protocols ->
     builtinTableLines `bindResult` \builtins ->
     mapAll writeLibrary (lrLibraries rq) `bindResult` \libraries ->
         Ok $ concat
             ( map (++ "\n")
-                ( [ requestHeader
+                ( [ if lrProtocols rq == Nothing then requestHeader else "tersus-elaborate 2"
                   , "load " ++ loadKindWord (lrKind rq)
-                  , "noPrelude " ++ boolWord (noPrelude options)
+                  ] ++ protocols ++
+                  [ "noPrelude " ++ boolWord (noPrelude options)
                   , "reserving " ++ boolWord (lrReserving rq)
                   , unwords (["roots", show (length roots)] ++ concat [[quote name, quote root] | (name, root) <- roots])
                   , "std " ++ maybe "none" quote (installedStdRoot options)

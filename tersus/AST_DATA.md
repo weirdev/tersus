@@ -332,6 +332,39 @@ loader used, and a program that does not parse `unparsed "MESSAGE"`. The compile
 (`Pipeline.loadFromEntry`, `PackageCompile.compileModulesUsing`, `Compile.lowerSourceUsing`,
 `LibPackage.compileLibPackageWith`), F0 for its own code and the source elaborator otherwise.
 
+## Versioned ownership transport migration
+
+The compatibility prerequisite keeps `tersus-elaborate 1` and `tersus-ast 1`
+for ordinary clients. An explicit `rqProtocols = Just ...` selects request
+version 2: after `extract`, it requires `protocols N` and ascending
+`protocol "ROLE" COUNT "PROVIDER"...` records, followed by the existing
+builtin table (including `checked N`), interfaces, defining contexts, library
+catalog, package and syntax. A load request selects it the same way
+(`lrProtocols = Just ...`): `tersus-elaborate 2`, then the `load` line and the
+same `protocols` records before the snapshot; every unit the load elaborates
+(the modules of a package, a program, the compiler libraries) is then checked
+and answered as version 2, so the interfaces the units give one another carry
+the transport too. Unknown versions, missing records, repeated keys and
+incomplete provider/callee pairs are refused.
+
+AST version 2 is restricted to checked elaboration and interfaces. Its roots
+are `OwnershipElaborated STATEMENTS TYPES PROTOCOLS OWNERSHIP` and
+`OwnershipInterface INTERFACE PROTOCOLS OWNERSHIP`; `INTERFACE` refers to the
+existing interface record. The two metadata references point to ascending
+`NamesEntry` maps. Ownership entries carry seven names: Copy provider, then
+Drop, Clone and Deref provider/callee pairs. Empty pairs mean checked absence;
+a half-empty pair is malformed. Legacy DTOs carry `Nothing`, not a checked
+empty map. Readers and printers preserve this distinction.
+
+The native elaborator produces this metadata only for version-2 requests,
+through its existing checked impl/template and defining-context machinery.
+Version-1 checking and output remain unchanged. This prerequisite does not
+relocate the standard library or activate the strict schema. The next PR
+removes the legacy version and makes complete selected facts mandatory.
+Its bootstrap must use the regenerated frontend seed: that seed accepts
+version-2 requests and produces real checked facts, including conditional
+ineligibility, before compiling the next frontend stage.
+
 ## The packages
 
 `lib/data/` is the `data` package: `codec/codec.tersus` (tokens, escaping, decimal

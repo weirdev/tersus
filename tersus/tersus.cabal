@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.34.6.
+-- This file has been generated from package.yaml by hpack version 0.39.6.
 --
 -- see: https://github.com/sol/hpack
 
@@ -64,6 +64,7 @@ extra-source-files:
     lib/elaborate/state.tersus
     lib/elaborate/traits.tersus
     lib/elaborate/units.tersus
+    lib/elaborate/wire.tersus
     lib/data/builtins.ast
     lib/ast_reader/package.tersus
     lib/ast_reader/ast_reader.tersus
@@ -345,6 +346,7 @@ test-suite tersus-test
       TestModules
       TestNative
       TestOwnership
+      TestOwnershipCodec
       TestParity
       TestParser
       TestParserBootstrap

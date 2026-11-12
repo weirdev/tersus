@@ -55,6 +55,7 @@ impl Clone for Template { };
 // the templates it owns, and its types, traits, impls and templates
 struct Defining {
     owned: HashMap<String, Template>,
+    wireProtocols: HashMap<String, List<String>>,
     types: HashMap<String, List<String>>, ctors: HashMap<String, CtorInfo>, generics: HashMap<String, Generic>,
     linearTypes: HashSet<String>, drops: HashSet<String>,
     traits: HashSet<String>, traitFns: HashMap<String, List<Int>>, traitParams: HashMap<String, List<String>>,
@@ -95,6 +96,9 @@ struct St {
     subst: HashMap<Int, Int>,
     sizeSubst: HashMap<Int, Int>,
     next: Int,
+    wireVersion: Bool,
+    wireProtocols: HashMap<String, List<String>>,
+    wireOwnership: HashMap<String, List<String>>,
     types: HashMap<String, List<String>>,
     ctors: HashMap<String, CtorInfo>,
     generics: HashMap<String, Generic>,
@@ -206,7 +210,7 @@ fn finalRefusal(st: St, msg: String) -> St ~ {
 fn unclonedParameter(st: &St, t: Int) -> String ~ {
     x = tyAt(st, resolve(st, t));
     if x.kind = 12 {
-        if st.storageCopies || (st.defChecking && (HashSet::contains(&st.impls, catStrings("Clone ", parameterOwner(&x.name))) || HashSet::contains(&st.impls, catStrings("Copy ", parameterOwner(&x.name))))) { return ""; };
+        if st.storageCopies || (st.defChecking && (HashSet::contains(&st.impls, catStrings(catStrings(protocolName(st, "Clone"), " "), parameterOwner(&x.name))) || HashSet::contains(&st.impls, catStrings(catStrings(protocolName(st, "Copy"), " "), parameterOwner(&x.name))))) { return ""; };
         return clone(x.name);
     };
     for a in &x.args {
@@ -315,12 +319,28 @@ fn namedTy(st: St, base: String, args: List<Int>) -> St ~ {
     return addTy(st, Ty { kind: 4, name: base, args: args, n: 0, flag: false, sizes: [], types: [] });
 };
 
+fn protocolName(st: &St, role: &String) -> String ~ {
+    if !st.wireVersion { return clone(role); };
+    providers = st.wireProtocols.lookup(role, []);
+    if size(providers) = 1 { return clone(get(providers, 0)); };
+    return "";
+};
+
+fn protocolIs(st: &St, role: &String, provider: &String) -> Bool ~ {
+    name = protocolName(st, role);
+    return size(name.bytes) > 0 && name = clone(provider);
+};
+
 fn listTy(st: St, elem: Int) -> St ~ {
-    return namedTy(st, "List", push([], elem));
+    provider = protocolName(&st, "List");
+    if size(provider.bytes) = 0 { return typeError(st, "List syntax requires its checked provider"); };
+    return namedTy(st, provider, push([], elem));
 };
 
 fn boxTy(st: St, inner: Int) -> St ~ {
-    return namedTy(st, "Box", push([], inner));
+    provider = protocolName(&st, "Box");
+    if size(provider.bytes) = 0 { return typeError(st, "Box syntax requires its checked provider"); };
+    return namedTy(st, provider, push([], inner));
 };
 
 fn fnTy(st: St, params: List<Int>, ret: Int) -> St ~ {

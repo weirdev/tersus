@@ -6,12 +6,15 @@ import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
 import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, definedFunctions, entryOf, implsEq, libIndex, libraryContexts, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
-import elaborate::resolve { Line, Pkg, moduleKey, noPackage, readLine, wordIs };
+import elaborate::resolve { Line, Pkg, countAt, moduleKey, noPackage, readLine, wordIs };
 import elaborate::rewrite { Prepared, prepareModule };
 import elaborate::out { emit, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, Defining, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope };
+import data::codec::codec { wireRoles };
+import data::reader::reader { before };
+import elaborate::wire { wireBindDeclarations, wireComplete, wireEntries, wireLoad, wireOwnerBindings, wireStorageDeclarations, wireValidateBindings, wireWrapInterface };
 import elaborate::traits { argListOf, boundsOf, checkDefinitions, emptyTemplate };
 import elaborate::units { answerLoad };
 
@@ -21,6 +24,7 @@ import elaborate::units { answerLoad };
 fn newState() -> St ~ {
     return St {
         nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0,
+        wireVersion: false, wireProtocols: HashMap::new(), wireOwnership: HashMap::new(),
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
         traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), instances: HashMap::new(), emitted: [], emittedTypes: [], activeNames: [], activeSizes: [], companions: HashMap::new(), definitions: [], fns: HashMap::new(), scopes: oneScope(),
         ret: 0 - 1, programReturn: 0 - 1, sizeScope: [], typeScope: [], readOnly: [], mutParams: [], writes: [], aliasNames: [], aliasPlaces: [], originNames: [], originRoots: [], refResultNames: [], refResultParams: [], refResultFroms: [], resultFrom: [], params: [], current: "", inGhost: false,
@@ -88,8 +92,16 @@ fn appendInterface(st: St, iface: &AstProgram) -> St ~ {
 
 // What an interface whose records start at base gives the checker (Interface.interfaceImportEnv, merged so that the first
 // interface wins a name)
-fn loadInterface(st: St, iface: &AstProgram, base: Int) -> St ~ {
+fn loadInterface(st: St, iface: &AstProgram, base: Int, collectBindings: Bool) -> St ~ {
     root = nodeIn(&iface.nodes, iface.root);
+    if st.wireVersion {
+        st = wireLoad(st, iface, &root, collectBindings);
+        if st.status != 0 { return st; };
+        if !(root is AstNode::OwnershipInterface) { return notModelled(st, "version 2 requires checked interface ownership transport"); };
+        root = nodeIn(&iface.nodes, (root as AstNode::OwnershipInterface).base);
+    } else {
+        if root is AstNode::OwnershipInterface { return notModelled(st, "version 1 cannot consume checked ownership transport"); };
+    };
     if !(root is AstNode::Interface) { return notModelled(st, "an interface the data does not give"); };
     v = (root as AstNode::Interface).value;
     nodes = &iface.nodes;
@@ -283,6 +295,7 @@ fn definingContext(st: St, context: &List<AstProgram>, bases: &List<Int>) -> St 
     if size(context) = 0 { return notModelled(st, "an empty template defining context"); };
     if size(context) != size(bases) { return notModelled(st, "a template defining context whose interfaces were not all read"); };
     types = st.types;
+    wireProtocols = clone(st.wireProtocols);
     ctors = st.ctors;
     generics = st.generics;
     linearTypes = st.linearTypes;
@@ -302,15 +315,17 @@ fn definingContext(st: St, context: &List<AstProgram>, bases: &List<Int>) -> St 
     refResultParams = st.refResultParams;
     refResultFroms = st.refResultFroms;
     ownerViews = st.ownerViews;
-    st = St { types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(), traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), assoc: HashMap::new(), impls: HashSet::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), templates: HashMap::new(), companions: HashMap::new(), fns: HashMap::new(), refResultNames: [], refResultParams: [], refResultFroms: [], ownerViews: [], ..st };
+    st = St { wireProtocols: HashMap::new(), types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(), traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), assoc: HashMap::new(), impls: HashSet::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), templates: HashMap::new(), companions: HashMap::new(), fns: HashMap::new(), refResultNames: [], refResultParams: [], refResultFroms: [], ownerViews: [], ..st };
+    owner = get(context, 0);
+    if st.wireVersion { st = wireOwnerBindings(st, &owner); if st.status != 0 { return st; }; };
     i = 0;
     while i < size(context) && i < size(bases) [{ affirm i >= 0; }] shrinks size(context) - i {
-        st = loadInterface(st, &get(context, i), get(bases, i));
+        st = loadInterface(st, &get(context, i), get(bases, i), false);
         i = i + 1;
     };
-    owner = get(context, 0);
     owned = HashMap::new();
     root = nodeIn(&owner.nodes, owner.root);
+    if root is AstNode::OwnershipInterface { root = nodeIn(&owner.nodes, (root as AstNode::OwnershipInterface).base); };
     if root is AstNode::Interface {
         for e in listItems(&owner.nodes, (root as AstNode::Interface).value.templates) {
             entry = entryOf(&owner.nodes, e);
@@ -320,9 +335,9 @@ fn definingContext(st: St, context: &List<AstProgram>, bases: &List<Int>) -> St 
             };
         };
     };
-    d = Defining { owned: owned, types: clone(st.types), ctors: clone(st.ctors), generics: clone(st.generics), linearTypes: clone(st.linearTypes), drops: clone(st.drops), traits: clone(st.traits), traitFns: clone(st.traitFns), traitParams: clone(st.traitParams), assoc: clone(st.assoc), impls: clone(st.impls), implArgs: clone(st.implArgs), implBounds: clone(st.implBounds), implBoundsNodes: clone(st.implBoundsNodes), templates: clone(st.templates), companions: clone(st.companions), refResultNames: clone(st.refResultNames), refResultParams: clone(st.refResultParams), refResultFroms: clone(st.refResultFroms) };
+    d = Defining { owned: owned, wireProtocols: clone(st.wireProtocols), types: clone(st.types), ctors: clone(st.ctors), generics: clone(st.generics), linearTypes: clone(st.linearTypes), drops: clone(st.drops), traits: clone(st.traits), traitFns: clone(st.traitFns), traitParams: clone(st.traitParams), assoc: clone(st.assoc), impls: clone(st.impls), implArgs: clone(st.implArgs), implBounds: clone(st.implBounds), implBoundsNodes: clone(st.implBoundsNodes), templates: clone(st.templates), companions: clone(st.companions), refResultNames: clone(st.refResultNames), refResultParams: clone(st.refResultParams), refResultFroms: clone(st.refResultFroms) };
     definitions = push(clone(st.definitions), d);
-    return St { types: types, ctors: ctors, generics: generics, linearTypes: linearTypes, drops: drops, traits: traits, traitFns: traitFns, traitParams: traitParams, assoc: assoc, impls: impls, implArgs: implArgs, implBounds: implBounds, implBoundsNodes: implBoundsNodes, templates: templates, companions: companions, fns: fns, refResultNames: refResultNames, refResultParams: refResultParams, refResultFroms: refResultFroms, ownerViews: ownerViews, definitions: definitions, ..st };
+    return St { wireProtocols: wireProtocols, types: types, ctors: ctors, generics: generics, linearTypes: linearTypes, drops: drops, traits: traits, traitFns: traitFns, traitParams: traitParams, assoc: assoc, impls: impls, implArgs: implArgs, implBounds: implBounds, implBoundsNodes: implBoundsNodes, templates: templates, companions: companions, fns: fns, refResultNames: refResultNames, refResultParams: refResultParams, refResultFroms: refResultFroms, ownerViews: ownerViews, definitions: definitions, ..st };
 };
 
 fn isRefCodec(t: &Type) -> Bool ~ { return t is Type::TRef || t is Type::TMutRef; };
@@ -443,7 +458,7 @@ fn giveLibraries(st: St, catalog: &Catalog, selected: &List<String>, stmts: &Lis
     dropOnly = viewOf(&prelude.value, &dropHide);
     st = appendInterface(loaded.st, &dropOnly.program);
     base = st.n;
-    st = loadInterface(st, &dropOnly.program, base);
+    st = loadInterface(st, &dropOnly.program, base, true);
     return Given { st: st, bases: loaded.bases, status: 0 };
 };
 
@@ -475,14 +490,14 @@ fn loadViews(st: St, views: &List<AstProgram>, names: &List<String>, libs: &List
         if view.changed {
             st = appendInterface(st, &view.program);
             base = st.n;
-            st = loadInterface(st, &view.program, base);
+            st = loadInterface(st, &view.program, base, true);
         } else {
             libKey = libraryKey(libs, &get(names, k));
             if !HashMap::contains(&bases, &libKey) {
                 st = appendInterface(st, &lib);
                 bases = bases.insert(clone(libKey), st.n);
             };
-            st = loadInterface(st, &lib, HashMap::lookup(&bases, &libKey, 0));
+            st = loadInterface(st, &lib, HashMap::lookup(&bases, &libKey, 0), true);
         };
         k = k + 1;
     };
@@ -537,7 +552,43 @@ struct Unit {
     hasCatalog: Bool, catalog: Catalog, pkg: Pkg, program: Program,
     // (how many of the program's first statements are libraries whose functions with bounds were checked where the
     // libraries were defined)
-    checked: Int
+    checked: Int,
+    wireVersion: Bool, wireProtocols: HashMap<String, List<String>>
+};
+
+// What a request of version 2 says it is: its explicit protocol providers (AST_DATA.md, "Ownership transport")
+struct Wire { version: Bool, protocols: HashMap<String, List<String>> };
+
+fn noWire() -> Wire ~ { return Wire { version: false, protocols: HashMap::new() }; };
+
+struct Protocols { ok: Bool, wire: Wire };
+
+// The `protocols` section of a version 2 request: each role once and in order, each with its providers in order
+fn readProtocols() -> Protocols ~ {
+    bad = Protocols { ok: false, wire: noWire() };
+    protocols = readLine();
+    count = countAt(&protocols, 1);
+    if size(protocols.words) != 2 || !wordIs(&protocols, 0, "protocols") || count < 0 { return bad; };
+    roles = noWire().protocols;
+    previous = "";
+    for i in 0..count {
+        line = readLine();
+        n = countAt(&line, 2);
+        if size(line.words) < 3 || !wordIs(&line, 0, "protocol") || !get(line.words, 1).quoted || n < 1 || size(line.words) != n + 3 { return bad; };
+        role = clone(get(line.words, 1).text);
+        if indexIn(wireRoles(), &role) < 0 || roles.contains(&role) || (size(previous.bytes) > 0 && !before(&previous, &role)) { return bad; };
+        previous = clone(role);
+        providers = [];
+        priorProvider = "";
+        for j in 0..n {
+            item = get(line.words, 3 + j);
+            if !item.quoted || size(item.text.bytes) = 0 || (size(priorProvider.bytes) > 0 && !before(&priorProvider, &item.text)) { return bad; };
+            priorProvider = clone(item.text);
+            providers = push(providers, clone(item.text));
+        };
+        roles = roles.insert(role, providers);
+    };
+    return Protocols { ok: true, wire: Wire { version: true, protocols: roles } };
 };
 
 // status: St.status, or -1 when the request does not give a library it names
@@ -568,7 +619,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     if unit.hasCatalog { probe = probeModule(&program.nodes, &raw, &ifaces); };
     prepared = preparedProgram(program, raw, &pkg, &modKey);
     stmts = prepared.stmts;
-    st = St { nodes: prepared.nodes, checkedItems: unit.checked, storageCopies: unit.pkgName = "tersuslib" && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
+    st = St { nodes: prepared.nodes, checkedItems: unit.checked, wireVersion: unit.wireVersion, wireProtocols: clone(unit.wireProtocols), storageCopies: unit.pkgName = "tersuslib" && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
     if unit.hasModule && unit.pkgName = "tersuslib" && unit.modu = "prelude" { st = St { sequenceTraits: st.sequenceTraits.insert("Sequence").insert("Growable"), ..st }; };
     if !prepared.ok { st = unresolvedState(st, prepared.msg); };
     st = loadBuiltins(st, table);
@@ -588,7 +639,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     while k < size(ifaces) && k < size(ifaceKeys) [{ affirm k >= 0; }] shrinks size(ifaces) - k {
         st = appendInterface(st, &get(ifaces, k));
         bases = bases.insert(clone(get(ifaceKeys, k)), st.n);
-        st = loadInterface(st, &get(ifaces, k), st.n);
+        st = loadInterface(st, &get(ifaces, k), st.n, true);
         k = k + 1;
     };
     k = 0;
@@ -615,12 +666,18 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         };
     };
     if st.status = 0 {
+        if st.wireVersion {
+            st = wireBindDeclarations(st, &stmts);
+            st = wireStorageDeclarations(st, &stmts);
+            st = wireValidateBindings(st);
+        };
         st = gatherSignatures(st, &stmts);
         if unit.predeclaring {
             st = predeclareOwn(st, &stmts);
             st = checkOwnFinite(st, &stmts);
         };
         if st.status = 0 { st = checkStatements(st, true, &stmts); };
+        if st.status = 0 && st.wireVersion { st = wireBindDeclarations(st, &stmts); st = wireComplete(st); };
     };
     out = noProgram("elaborated");
     iface = noProgram("interface");
@@ -630,11 +687,22 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         st = checkDefinitions(st);
         st = emitTypes(st, &types);
         if st.status = 0 {
-            st = emit(st, AstNode::Elaborated { value: AstElaborated { statements: statementsNode, types: st.nid } });
+            typeNode = st.nid;
+            if st.wireVersion {
+                roles = clone(st.wireProtocols);
+                st = wireEntries(st, &roles);
+                protocolNode = st.nid;
+                facts = clone(st.wireOwnership);
+                st = wireEntries(st, &facts);
+                st = emit(st, AstNode::OwnershipElaborated { statements: statementsNode, types: typeNode, protocols: protocolNode, ownership: st.nid });
+            } else {
+                st = emit(st, AstNode::Elaborated { value: AstElaborated { statements: statementsNode, types: typeNode } });
+            };
             out = reorderArena(&st.nodes, st.nid, "elaborated");
             if unit.extracting {
                 elaborated = listItems(&st.nodes, statementsNode);
                 st = extractInterface(st, unit.libExtract, clone(unit.pkgName), clone(unit.modu), unit.hasModule, &stmts, &elaborated);
+                if st.status = 0 && st.wireVersion { st = wireWrapInterface(st, st.nid); };
                 if st.status = 0 { iface = reorderArena(&st.nodes, st.nid, "interface"); };
             };
         };
@@ -668,13 +736,19 @@ fn printAnswerBody(a: &Answer) -> Int ~ {
 };
 
 // A module request (AST_DATA.md, "Elaboration requests"), after its header and module lines
-fn answerModule(moduleLine: &Line) -> Int ~ {
+fn answerModule(moduleLine: &Line, version2: Bool) -> Int ~ {
     predeclare = readLine();
     library = readLine();
     extract = readLine();
     if !wordIs(moduleLine, 0, "module") || size(moduleLine.words) != 3 || !get(moduleLine.words, 1).quoted || size(predeclare.words) != 2 || size(library.words) != 2 || size(extract.words) != 2 || !wordIs(&predeclare, 0, "predeclare") || !wordIs(&library, 0, "library") || !wordIs(&extract, 0, "extract") { return malformed(); };
     hasModule = get(moduleLine.words, 2).quoted;
     if !hasModule && !wordIs(moduleLine, 2, "none") { return malformed(); };
+    wire = noWire();
+    if version2 {
+        read = readProtocols();
+        if !read.ok { return malformed(); };
+        wire = read.wire;
+    };
     builtinsLine = readLine();
     if !wordIs(&builtinsLine, 0, "builtins") { return malformed(); };
     // (`builtins checked N`: the first N statements of the program are libraries whose functions with bounds were checked
@@ -739,7 +813,8 @@ fn answerModule(moduleLine: &Line) -> Int ~ {
     if (!predeclaring && !wordIs(&predeclare, 1, "false")) || (!viewing && !wordIs(&library, 1, "false")) || (extracting && !wordIs(&extract, 1, "module") && !wordIs(&extract, 1, "lib")) { return malformed(); };
     unit = Unit { pkgName: pkgName, modu: modu, hasModule: hasModule, predeclaring: predeclaring, viewing: viewing, extracting: extracting, libExtract: wordIs(&extract, 1, "lib"),
         ifaces: ifaces, ifaceKeys: ifaceKeys, definitions: definitions, definitionKeys: definitionKeys,
-        hasCatalog: sections.given, catalog: sections.catalog, pkg: sections.pkg, program: sections.program, checked: checkedItems };
+        hasCatalog: sections.given, catalog: sections.catalog, pkg: sections.pkg, program: sections.program, checked: checkedItems,
+        wireVersion: wire.version, wireProtocols: wire.protocols };
     answer = elaborateUnit(&table.value, unit, &seenBlocks);
     if answer.status < 0 { return malformed(); };
     printAnswer(&answer);
@@ -747,10 +822,11 @@ fn answerModule(moduleLine: &Line) -> Int ~ {
 };
 
 header = readLine();
-if !wordIs(&header, 0, "tersus-elaborate") || !wordIs(&header, 1, "1") { return malformed(); };
+if size(header.words) != 2 || !wordIs(&header, 0, "tersus-elaborate") || (!wordIs(&header, 1, "1") && !wordIs(&header, 1, "2")) { return malformed(); };
+version2 = wordIs(&header, 1, "2");
 second = readLine();
 if wordIs(&second, 0, "load") {
-    if answerLoad(&second) != 0 { return 1; };
+    if answerLoad(&second, version2) != 0 { return 1; };
 } else {
-    if answerModule(&second) != 0 { return 1; };
+    if answerModule(&second, version2) != 0 { return 1; };
 };

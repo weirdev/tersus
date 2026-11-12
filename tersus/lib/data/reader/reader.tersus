@@ -1,4 +1,4 @@
-import data::codec::codec { Token, Parsed, Size, Type, failed, done, noInts, quoted, tokenize, parseInt, wordAt, nameAt, intAt, sizeAt, catStrings, typeAt, isWord, indexOf };
+import data::codec::codec { Token, Parsed, Size, Type, failed, done, noInts, quoted, tokenize, parseInt, wordAt, nameAt, intAt, sizeAt, catStrings, typeAt, isWord, indexOf, wireRoles };
 import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstEntry, AstEntries, AstOptNames, AstOptType, AstScheme, AstInterface, AstNode, AstProgram, relationWords };
 
 // The reader of the AST arena data (AST_DATA.md): every stage, with its strict record, reference and UTF-8 checks.
@@ -46,6 +46,8 @@ fn nodeKind(node: &AstNode) -> Int [{ }] [{ }] {
         AstNode::OptType { value: v } => 39,
         AstNode::Interface { value: v } => 40,
         AstNode::Scheme { value: v } => 41,
+        AstNode::OwnershipElaborated { statements: s, types: t, protocols: p, ownership: o } => 42,
+        AstNode::OwnershipInterface { base: b, protocols: p, ownership: o } => 43,
     };
 };
 
@@ -299,6 +301,8 @@ fn recordTags() -> Tags [{ }] [{ }] {
     codes = codes.insert("OptNamesEnd", 225);
     codes = codes.insert("OptNamesCons", 226);
     codes = codes.insert("Interface", 227);
+    codes = codes.insert("OwnershipElaborated", 232);
+    codes = codes.insert("OwnershipInterface", 233);
     primitives = HashMap::new();
     for w in primitiveWords() { primitives = primitives.insert(clone(w), 1); };
     return Tags { codes: codes, primitives: primitives };
@@ -343,7 +347,152 @@ fn nodeAt(tags: &Tags, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNod
     if c = 26 { return entryNodeAt3(k, ts, nodes); };
     if c = 27 { return entryNodeAt4(k, ts, nodes); };
     if c = 28 { return entryNodeAt5(k, ts, nodes); };
+    if c = 29 { return ownershipNodeAt(k, ts, nodes); };
     return bad;
+};
+
+fn ownershipNodeAt(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<AstNode> [{ }] [{ }] {
+    bad = failed(noNode(), ts);
+    if k = 0 && size(ts) = 5 {
+        s = refAt(ts, 1, nodes, 24);
+        t = refAt(ts, 2, nodes, 31);
+        p = refAt(ts, 3, nodes, 37);
+        o = refAt(ts, 4, nodes, 37);
+        if !s.ok || !t.ok || !p.ok || !o.ok || !transportEntries(nodes, p.value, false) || !transportEntries(nodes, o.value, true) { return bad; };
+        if !transportCoversStatements(nodes, s.value, o.value) { return bad; };
+        return done(AstNode::OwnershipElaborated { statements: s.value, types: t.value, protocols: p.value, ownership: o.value }, size(ts));
+    };
+    if k = 1 && size(ts) = 4 {
+        b = refAt(ts, 1, nodes, 40);
+        p = refAt(ts, 2, nodes, 37);
+        o = refAt(ts, 3, nodes, 37);
+        if !b.ok || !p.ok || !o.ok || !transportEntries(nodes, p.value, false) || !transportEntries(nodes, o.value, true) { return bad; };
+        if b.value < 0 || b.value >= size(nodes) { return bad; };
+        base = get(nodes, b.value);
+        if !(base is AstNode::Interface) { return bad; };
+        iface = (base as AstNode::Interface).value;
+        if !transportCoversEntries(nodes, iface.types, o.value) || !transportCoversEntries(nodes, iface.generics, o.value) { return bad; };
+        return done(AstNode::OwnershipInterface { base: b.value, protocols: p.value, ownership: o.value }, size(ts));
+    };
+    return bad;
+};
+
+fn transportNames(nodes: &List<AstNode>, start: Int) -> List<String> [{ }] [{ }] {
+    out = [];
+    id = start;
+    while id >= 0 && id < size(nodes) [{ }] shrinks id + 1 {
+        node = get(nodes, id);
+        if !(node is AstNode::Names) { return []; };
+        value = (node as AstNode::Names).value;
+        if value is AstNames::End { return out; };
+        part = value as AstNames::Cons;
+        out = push(out, nameValue(nodes, part.head));
+        if part.tail >= id { return []; };
+        id = part.tail;
+    };
+    return [];
+};
+
+fn transportHas(nodes: &List<AstNode>, start: Int, name: &String) -> Bool [{ }] [{ }] {
+    id = start;
+    while id >= 0 && id < size(nodes) [{ }] shrinks id + 1 {
+        node = get(nodes, id);
+        if !(node is AstNode::Entries) { return false; };
+        value = (node as AstNode::Entries).value;
+        if value is AstEntries::End { return false; };
+        part = value as AstEntries::Cons;
+        if part.head < 0 || part.head >= size(nodes) { return false; };
+        entryNode = get(nodes, part.head);
+        if !(entryNode is AstNode::Entry) { return false; };
+        entry = (entryNode as AstNode::Entry).value;
+        if !(entry is AstEntry::NamesEntry) { return false; };
+        item = entry as AstEntry::NamesEntry;
+        if nameValue(nodes, item.n) = clone(name) { return true; };
+        if part.tail >= id { return false; };
+        id = part.tail;
+    };
+    return false;
+};
+
+fn transportCoversStatements(nodes: &List<AstNode>, start: Int, ownership: Int) -> Bool [{ }] [{ }] {
+    id = start;
+    while id >= 0 && id < size(nodes) [{ }] shrinks id + 1 {
+        node = get(nodes, id);
+        if !(node is AstNode::Statements) { return false; };
+        value = (node as AstNode::Statements).value;
+        if value is AstStatements::End { return true; };
+        part = value as AstStatements::Cons;
+        if part.head < 0 || part.head >= size(nodes) { return false; };
+        statementNode = get(nodes, part.head);
+        if !(statementNode is AstNode::Statement) { return false; };
+        statement = (statementNode as AstNode::Statement).value;
+        name = "";
+        if statement is AstStatement::StructDef { name = nameValue(nodes, (statement as AstStatement::StructDef).n); };
+        if statement is AstStatement::EnumDef { name = nameValue(nodes, (statement as AstStatement::EnumDef).n); };
+        if size(name.bytes) > 0 && !transportHas(nodes, ownership, &name) { return false; };
+        if part.tail >= id { return false; };
+        id = part.tail;
+    };
+    return false;
+};
+
+fn transportCoversEntries(nodes: &List<AstNode>, start: Int, ownership: Int) -> Bool [{ }] [{ }] {
+    id = start;
+    while id >= 0 && id < size(nodes) [{ }] shrinks id + 1 {
+        node = get(nodes, id);
+        if !(node is AstNode::Entries) { return false; };
+        value = (node as AstNode::Entries).value;
+        if value is AstEntries::End { return true; };
+        part = value as AstEntries::Cons;
+        if part.head < 0 || part.head >= size(nodes) { return false; };
+        entryNode = get(nodes, part.head);
+        if !(entryNode is AstNode::Entry) { return false; };
+        entry = (entryNode as AstNode::Entry).value;
+        key = entryKey(nodes, &entry);
+        if size(key) != 1 || !transportHas(nodes, ownership, &get(key, 0)) { return false; };
+        if part.tail >= id { return false; };
+        id = part.tail;
+    };
+    return false;
+};
+
+fn transportEntries(nodes: &List<AstNode>, start: Int, ownership: Bool) -> Bool [{ }] [{ }] {
+    if !entriesAre(nodes, start, 0) || !entriesAscending(nodes, start) { return false; };
+    id = start;
+    while id >= 0 && id < size(nodes) [{ }] shrinks id + 1 {
+        node = get(nodes, id);
+        if !(node is AstNode::Entries) { return false; };
+        value = (node as AstNode::Entries).value;
+        if value is AstEntries::End { return true; };
+        part = value as AstEntries::Cons;
+        if part.head < 0 || part.head >= size(nodes) { return false; };
+        entryNode = get(nodes, part.head);
+        if !(entryNode is AstNode::Entry) { return false; };
+        entry = (entryNode as AstNode::Entry).value;
+        if !(entry is AstEntry::NamesEntry) { return false; };
+        item = entry as AstEntry::NamesEntry;
+        name = nameValue(nodes, item.n);
+        names = transportNames(nodes, item.ns);
+        if size(name.bytes) = 0 { return false; };
+        if ownership {
+            if size(names) != 7 { return false; };
+            for i in 0..3 [{ affirm size(names) = 7; }] {
+                provider = get(names, 1 + 2 * i);
+                callee = get(names, 2 + 2 * i);
+                if (size(provider.bytes) = 0) != (size(callee.bytes) = 0) { return false; };
+            };
+        } else {
+            if indexOf(wireRoles(), clone(name)) < 0 || size(names) = 0 { return false; };
+            previous = "";
+            for n in &names {
+                if size(n.bytes) = 0 || (size(previous.bytes) > 0 && !before(&previous, n)) { return false; };
+                previous = clone(n);
+            };
+        };
+        if part.tail >= id { return false; };
+        id = part.tail;
+    };
+    return false;
 };
 
 fn leafNodeAt(k: Int, ts: &List<Token>, nodes: &List<AstNode>, primitives: &HashMap<String, Int>) -> Parsed<AstNode> [{ }] [{ }] {
@@ -1493,6 +1642,8 @@ fn nodeRefs(node: &AstNode) -> List<Int> [{ }] [{ }] {
         AstNode::Entries { value: v } => { match v { AstEntries::End => { }, AstEntries::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
         AstNode::OptNames { value: v } => { match v { AstOptNames::End => { }, AstOptNames::Cons { head: h, tail: t } => { refs = push(refs, h); refs = push(refs, t); }, }; },
         AstNode::OptType { value: v } => { match v { AstOptType::NoType => { }, AstOptType::SomeType { t: t } => { refs = push(refs, t); }, }; },
+        AstNode::OwnershipElaborated { statements: s, types: t, protocols: p, ownership: o } => { refs = push(push(push(push(refs, s), t), p), o); },
+        AstNode::OwnershipInterface { base: b, protocols: p, ownership: o } => { refs = push(push(push(refs, b), p), o); },
         AstNode::Interface { value: v } => { refs = interfaceRefs(v); },
         AstNode::Scheme { value: v } => {
             match v {
@@ -1631,9 +1782,11 @@ fn readRecords(count: Int) -> Parsed<List<String>> ~ {
 fn parseAstLines(lines: &List<String>) -> Parsed<AstProgram> ~ {
     if size(lines) < 2 { return badAst(); };
     header = get(lines, 0);
-    if size(header.bytes) < 14 || !header.startsWith("tersus-ast 1 ") { return badAst(); };
+    versioned = header.startsWith("tersus-ast 2 ");
+    if size(header.bytes) < 14 || (!header.startsWith("tersus-ast 1 ") && !versioned) { return badAst(); };
     stage = header.slice(13, size(header.bytes));
     rootKind = rootKindOf(stage);
+    if versioned { if stage = "elaborated" { rootKind = 42; } else { if stage = "interface" { rootKind = 43; } else { return badAst(); }; }; };
     if rootKind < 0 { return badAst(); };
     tags = recordTags();
     nodes = [];
@@ -1661,6 +1814,7 @@ fn parseAstLines(lines: &List<String>) -> Parsed<AstProgram> ~ {
         };
         node = nodeAt(&tags, ts, nodes);
         if !node.ok { return badAst(); };
+        if !versioned && (node.value is AstNode::OwnershipElaborated || node.value is AstNode::OwnershipInterface) { return badAst(); };
         refs = nodeRefs(node.value);
         for r in refs {
             if r < 0 || r >= size(uses) { return badAst(); };

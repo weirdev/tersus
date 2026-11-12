@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module AstData
     ( writeParsed
     , writeParsedLines
@@ -60,6 +61,7 @@ data InterfaceRecord = InterfaceRecord
     , irExterns :: [Name]
     , irTemplates :: [(Name, TemplateRecord)]
     , irCompanions :: [(Name, [Name])]
+    , irOwnershipTransport :: Maybe OwnershipTransport
     }
     deriving (Show, Eq)
 
@@ -113,16 +115,74 @@ writeElaborated :: Elaborated -> Result String String
 writeElaborated = mapResult unlines . writeElaboratedLines
 
 writeElaboratedLines :: Elaborated -> Result [String] String
-writeElaboratedLines (Elaborated ss ts) =
+writeElaboratedLines elaborated@(Elaborated ss ts) =
     let (s, b) = putStatements ss (0, [])
         (t, b') = putTypes ts b
-     in finish "elaborated" (emit "Elaborated" [show s, show t] b')
+     in case elaboratedOwnership elaborated of
+        Nothing -> finish "elaborated" (emit "Elaborated" [show s, show t] b')
+        Just transport -> validTransport transport `bindResult` \() ->
+            completeTransport (declaredTransportNames ss) transport `bindResult` \() ->
+            let (p, b'') = putEntries [ENames name providers | (name, providers) <- Map.toAscList (transportProtocols transport)] b'
+                (o, b''') = putEntries [ENames name (ownershipNames facts) | (name, facts) <- Map.toAscList (transportOwnership transport)] b''
+             in finishVersion 2 "elaborated" (emit "OwnershipElaborated" [show s, show t, show p, show o] b''')
 
 writeInterfaceRecord :: InterfaceRecord -> Result String String
 writeInterfaceRecord = mapResult unlines . writeInterfaceRecordLines
 
 writeInterfaceRecordLines :: InterfaceRecord -> Result [String] String
-writeInterfaceRecordLines r = finish "interface" (putInterface r (0, []))
+writeInterfaceRecordLines r = case irOwnershipTransport r of
+    Nothing -> finish "interface" (putInterface r (0, []))
+    Just transport -> validTransport transport `bindResult` \() ->
+        completeTransport (map fst (irTypes r) ++ map fst (irGenerics r)) transport `bindResult` \() ->
+        let (i, b) = putInterface r (0, [])
+            (p, b') = putEntries [ENames name providers | (name, providers) <- Map.toAscList (transportProtocols transport)] b
+            (o, b'') = putEntries [ENames name (ownershipNames facts) | (name, facts) <- Map.toAscList (transportOwnership transport)] b'
+         in finishVersion 2 "interface" (emit "OwnershipInterface" [show i, show p, show o] b'')
+
+ownershipNames :: OwnershipFacts -> [Name]
+ownershipNames facts = maybe "" id (ownershipCopy facts) : concatMap (maybe ["", ""] (\(provider, callee) -> [provider, callee]))
+    [ownershipDrop facts, ownershipClone facts, ownershipDeref facts]
+
+declaredTransportNames :: [Statement] -> [Name]
+declaredTransportNames ss = [name | StructDef name _ _ _ <- ss] ++ [name | EnumDef name _ <- ss]
+
+completeTransport :: [Name] -> OwnershipTransport -> Result () String
+completeTransport names transport
+    | all (`Map.member` transportOwnership transport) names = Ok ()
+    | otherwise = Error "AstData: missing required declaration ownership facts"
+
+validTransport :: OwnershipTransport -> Result () String
+validTransport transport
+    | any (not . uncurry validProtocolProviders) (Map.toList (transportProtocols transport)) =
+        Error "AstData: malformed protocol providers"
+    | any (\(name, facts) -> null name || maybe False null (ownershipCopy facts) ||
+            any (maybe False (\(provider, callee) -> null provider || null callee)) [ownershipDrop facts, ownershipClone facts, ownershipDeref facts]) (Map.toList (transportOwnership transport)) =
+        Error "AstData: incomplete ownership selection"
+    | otherwise = Ok ()
+
+ownershipFromNames :: [Name] -> P OwnershipFacts
+ownershipFromNames names = case names of
+    [copy, dp, df, cp, cf, rp, rf] -> OwnershipFacts (if null copy then Nothing else Just copy)
+        <$> selected dp df <*> selected cp cf <*> selected rp rf
+    _ -> failP "AstData: ownership facts must have seven names"
+  where
+    selected "" "" = pure Nothing
+    selected provider callee
+        | not (null provider || null callee) = pure (Just (provider, callee))
+        | otherwise = failP "AstData: incomplete ownership selection"
+
+entries :: IM.IntMap Node -> (Entry -> Maybe a) -> P ([a], Int)
+entries nodes project = ref nodes (\node -> case node of NEntries es -> mapM project es; _ -> Nothing)
+
+transportP :: IM.IntMap Node -> P (OwnershipTransport, [Int])
+transportP nodes = do
+    (protocols, p) <- entries nodes (\entry -> case entry of ENames name values -> Just (name, values); _ -> Nothing)
+    (ownership, o) <- entries nodes (\entry -> case entry of ENames name values -> Just (name, values); _ -> Nothing)
+    let ordered names = and (zipWith (<) names (drop 1 names))
+    if ordered (map fst protocols) && ordered (map fst ownership) then pure () else failP "AstData: repeated or out-of-order ownership transport key"
+    facts <- mapM (\(name, values) -> (,) name <$> ownershipFromNames values) ownership
+    let transport = OwnershipTransport (Map.fromDistinctAscList protocols) (Map.fromDistinctAscList facts)
+    case validTransport transport of Error e -> failP e; Ok () -> pure (transport, [p, o])
 
 writeBuiltinTable :: [BuiltinRecord] -> Result String String
 writeBuiltinTable = mapResult unlines . writeBuiltinTableLines
@@ -131,9 +191,12 @@ writeBuiltinTableLines :: [BuiltinRecord] -> Result [String] String
 writeBuiltinTableLines rs = finish "builtins" (putEntries (map EBuiltin rs) (0, []))
 
 finish :: String -> (Int, Build) -> Result [String] String
-finish stage (root, (_, records)) =
+finish = finishVersion 1
+
+finishVersion :: Int -> String -> (Int, Build) -> Result [String] String
+finishVersion version stage (root, (_, records)) =
     checkRecords records `bindResult` \() ->
-        Ok (("tersus-ast 1 " ++ stage) : reverse records ++ ["root " ++ show root])
+        Ok (("tersus-ast " ++ show version ++ " " ++ stage) : reverse records ++ ["root " ++ show root])
   where
     -- (a record's words are made by the writer and its names are quoted, so only the size of a record and the types
     -- and sizes, whose tokens are made by typeTokens and sizeTokens, are read back)
@@ -813,17 +876,21 @@ decodeBytes = decodeWith B.unpack byteTokens
 
 decodeWith :: (l -> String) -> (l -> Result [Token] String) -> String -> [l] -> Result Node String
 decodeWith text tokens stage ls = case ls of
-    header : rest | text header == "tersus-ast 1 " ++ stage -> case reverse rest of
-        root : reversed -> doResult (reverse reversed) root
+    header : rest | text header `elem` ["tersus-ast 1 " ++ stage, "tersus-ast 2 " ++ stage] -> case reverse rest of
+        root : reversed -> doResult (text header == "tersus-ast 2 " ++ stage) (reverse reversed) root
         _ -> Error "AstData: missing root"
     _ -> Error "AstData: unknown header"
   where
     -- (IM.size walks the map, so the count is kept beside it)
-    doResult records root = foldRecords (IM.empty, 0, IS.empty) records `bindResult` \(nodes, count, uses) ->
+    doResult versioned records root = foldRecords (IM.empty, 0, IS.empty) records `bindResult` \(nodes, count, uses) ->
         lineOf (expect "root" >> int) root `bindResult` \r ->
         case IM.lookup r nodes of
-            Just node | r == count - 1 && all (\i -> IS.member i uses == (i /= r)) [0 .. r] -> Ok node
-            _ -> Error "AstData: dangling root or extra records"
+            Just node | r == count - 1 && all (\i -> IS.member i uses == (i /= r)) [0 .. r], versioned == hasOwnership node -> Ok node
+            _ -> Error "AstData: dangling root, extra records or ownership version mismatch"
+    hasOwnership node = case node of
+        NElaborated e -> maybe False (const True) (elaboratedOwnership e)
+        NInterface i -> maybe False (const True) (irOwnershipTransport i)
+        _ -> False
     foldRecords state [] = Ok state
     foldRecords state (line : rest) = add state line `bindResult` \next -> foldRecords next rest
     add (nodes, count, uses) line = lineOf (nodeP nodes) line `bindResult` \(node, refs) ->
@@ -867,6 +934,19 @@ nodeParsers = Map.fromList
         (ss, s) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
         (ts, t) <- ref nodes (\node -> case node of NTypes payload -> Just payload; _ -> Nothing)
         pure (NElaborated (Elaborated ss ts), [s, t])
+      )
+    , ("OwnershipElaborated", \nodes -> do
+        (ss, s) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
+        (ts, t) <- ref nodes (\node -> case node of NTypes payload -> Just payload; _ -> Nothing)
+        (transport, refs) <- transportP nodes
+        case completeTransport (declaredTransportNames ss) transport of Error e -> failP e; Ok () -> pure ()
+        pure (NElaborated (CheckedElaborated ss ts (Just transport)), s : t : refs)
+      )
+    , ("OwnershipInterface", \nodes -> do
+        (iface, i) <- ref nodes (\node -> case node of NInterface r | irOwnershipTransport r == Nothing -> Just r; _ -> Nothing)
+        (transport, refs) <- transportP nodes
+        case completeTransport (map fst (irTypes iface) ++ map fst (irGenerics iface)) transport of Error e -> failP e; Ok () -> pure ()
+        pure (NInterface iface{irOwnershipTransport = Just transport}, i : refs)
       )
     , ("VInt", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)
@@ -1322,7 +1402,7 @@ nodeParsers = Map.fromList
         (externs, r18) <- refNames nodes
         (templates, r19) <- entries nodes (\e -> case e of ETemplate k t -> Just (k, t); _ -> Nothing)
         (companions, r20) <- entries nodes (\e -> case e of ENames k v -> Just (k, v); _ -> Nothing)
-        pure (NInterface (InterfaceRecord pkg modu types ctors generics invariants traits traitParams functions impls assoc implArgs implBounds copies linear drops axioms proofs externs templates companions), [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20])
+        pure (NInterface (InterfaceRecord pkg modu types ctors generics invariants traits traitParams functions impls assoc implArgs implBounds copies linear drops axioms proofs externs templates companions Nothing), [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20])
       )
     , ("NamesEntry", \nodes -> do
         (k, r0) <- refName nodes
@@ -1459,7 +1539,6 @@ nodeParsers = Map.fromList
     refBounds nodes = ref nodes (\node -> case node of NBounds payload -> Just payload; _ -> Nothing)
     refSignature nodes = ref nodes (\node -> case node of NSignature payload -> Just payload; _ -> Nothing)
     refOptTermination nodes = ref nodes (\node -> case node of NOptTermination payload -> Just payload; _ -> Nothing)
-    entries nodes project = ref nodes (\node -> case node of NEntries es -> mapM project es; _ -> Nothing)
 
 astTypeP :: P Type
 astTypeP = word >>= \w -> case w of
