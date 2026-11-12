@@ -124,7 +124,7 @@ testSequence =
                 , testCase "it has a name of its own" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; fn total(x: Int) -> Int { return x; }; return 0;" "is already defined")
                 , testCase "and is not a builtin's" (errorHas "fn size<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; return 0;" "size is already defined")
                 , testCase "it is a function of the program only at the top" (errorHas "fn f() -> Int [{ }] [{ }] { fn g<S: Sequence<Int>>(s: &S) -> Int { return 0; }; return 0; }; return f();" "only be defined at the top")
-                , testCase "an impl has none" (errorHas "struct A { n: Int }; impl A { fn f<S: Sequence<Int>>(self: &Self, s: &S) -> Int { return 0; }; }; return 0;" "cannot be written in an impl")
+                , testCase "and a function of an impl of a type can have one" (runsAs "struct A { n: Int }; impl A { fn f<S: Sequence<Int>>(self: &Self, s: &S) -> Int { return self.n + size(s); }; }; a = A { n: 1 }; return a.f(push(push([], 4), 5));" "3")
                 , testCase "it is not a value" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; f = total; return 0;" "Undefined variable: total")
                 , testCase "a call with the wrong number of arguments" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; return total([1], [2]);" "total takes 1 arguments, got 2")
                 ]

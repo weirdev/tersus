@@ -2274,6 +2274,14 @@ phase2Private = phase2Files
     "import vendor::helpers { Good, pass }; trait Mark { }; impl Mark for Int { }; fn value<T: Mark + Good>(x: T) -> T { return pass(x); };"
     [("installed/vendor/helpers/helpers.tersus", "trait Good { }; impl Good for Int { }; struct Hidden<T> { value: T }; fn pack<T: Good>(x: T) -> Hidden<T> { return Hidden { value: x }; }; fn pass<T: Good>(x: T) -> T { h = pack(x); return h.value; };")]
 
+phase3MethodApi :: String
+phase3MethodApi = "trait Mark { fn marked(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl Mark for Int { fn marked(self: &Int) -> Int [{ }] [{ affirm return >= 0; }] { if *self < 0 { return 0; }; return *self; }; }; struct Acc { total: Int }; fn helper<T: Mark>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return x.marked(); }; impl Acc { fn add<T: Mark>(self: Acc, x: &T) -> Acc { return Acc { total: self.total + helper(x) }; }; fn of<T: Mark>(x: &T) -> Acc { return Acc { total: x.marked() }; }; };"
+
+phase3MethodFiles :: Files
+phase3MethodFiles = phase2Files
+    "import vendor::api { Acc, Mark }; struct Local { n: Int } invariant [{ affirm n >= 0; }]; impl Mark for Local { fn marked(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.n; }; }; a = Acc::of(30); b = a.add(Local { n: 10 }); c = Acc::add(b, 2); return c.total;"
+    phase3MethodApi []
+
 testPhase2Packages :: Test
 testPhase2Packages = TestList "testPhase2Packages"
     [ TestCase "external private templates run identically from disk in reference and native code" phase2Filesystem
@@ -2282,6 +2290,17 @@ testPhase2Packages = TestList "testPhase2Packages"
         case Pipeline.compileSourceNoPrelude True (phase2Identity ++ " return value(42);") `bindResult` runProgram of
             Error err -> Just err
             Ok value -> testAssertEq value (Just (MInt 42))
+    , TestCase "an imported method with bounds of its own runs in reference and native code" (phase2FilesystemWith phase3MethodFiles)
+    , testCase "an interface carries a method with bounds as its signature and bounds alone" $ case phase2Load phase3MethodFiles of
+        Left err -> Just err
+        Right pkg -> case compileModules (packageSnapshot pkg) of
+            Error err -> Just err
+            Ok compiled -> case [(name, t) | modu <- compiledModules compiled, (name, t) <- Map.toList (ifTemplates (compiledInterface modu)), "Acc>::" `isInfixOf` name] of
+                templates | length templates /= 2 -> Just ("expected the two methods of Acc, got " ++ show (map fst templates))
+                          | all (\(_, t) -> null (tmplBody t) && map (\(_, trait, _) -> "Mark" `isSuffixOf` trait) (tmplBounds t) == [True]) templates -> Nothing
+                          | otherwise -> Just ("these carry more than their signatures and bounds: " ++ show (map fst templates))
+    , testCase "an importer's call that does not meet an imported method's bound is refused" $
+        phase2Rejects (phase2Files "import vendor::api { Acc }; struct Plain { n: Int }; a = Acc::of(1); return a.add(Plain { n: 1 }).total;" phase3MethodApi []) ["::add needs T to implement", "Plain does not"]
     , testCase "an interface carries a function with bounds as its signature and bounds alone" $ case phase2Load phase2Private of
         Left err -> Just err
         Right pkg -> case compileModules (packageSnapshot pkg) of

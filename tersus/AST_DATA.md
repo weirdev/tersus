@@ -148,6 +148,11 @@ constructor order. Options are `NoName`/`SomeName NAME` and
 `NoTermination`/`SomeTermination TERMINATION`. Booleans are `true`/`false`;
 relations are `Eq`, `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq`.
 
+The parser writes a function of an impl as an `Assign` of `<Type>::f` (or
+`<Type as Trait>::f`), except one with bounds of its own, which stays a
+`BoundedDef` whose `Assign` names the bare `f`; the elaborator renames it to
+`<Type>::f` as it reads the parsed file, before anything else looks at it.
+
 An elaborated program is the `Instance` records first, then the module's
 statements, then a `BoundedDef BOUNDS STATEMENT` for each function with bounds
 the module defines: its body as checked against its bounds, an `Assign` of the

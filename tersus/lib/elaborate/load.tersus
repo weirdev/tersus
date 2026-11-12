@@ -1,8 +1,8 @@
-import data::ast::ast { AstNode, AstProgram, AstStatement };
+import data::ast::ast { AstName, AstNode, AstOptName, AstProgram, AstStatement };
 import data::codec::codec { catStrings };
 import elaborate::decls { Decls, FileDecl, Variant, addImported, declarationNames, declsFromStatements, emptyDecls, fieldNamesOf, fileDeclarations, fieldsAt, fromParser, locating, nameEnt, stepEnum, stepStruct, stepTrait, textLess, toParser, variantsAt, withoutImported };
-import elaborate::records { listItems, nameText, namesText };
-import elaborate::rewrite { functValue, statementOf };
+import elaborate::records { listItems, nameText, namesText, nodeIn };
+import elaborate::rewrite { functValue, nameEnd, statementOf };
 import elaborate::snapshot { Snap, pathBaseName, canonicalRoot, dirNameOf, fileStem, hasFile, hasSuffix, joinPath, listDir, normalizePath, packageRootOf, readFile, rootsConfigured, showText, stemOf };
 import elaborate::state { indexIn, intText, joinWith };
 import parser::syntax::syntax as ps;
@@ -37,6 +37,7 @@ struct Config { ok: Bool, msg: String, noPrelude: Bool };
 struct LayoutR { ok: Bool, msg: String, layout: Layout };
 struct Found { ok: Bool, text: String };
 struct PR { ok: Bool, msg: String, imports: List<ps::FileImport>, program: AstProgram, decls: Decls };
+struct Named { ok: Bool, msg: String, program: AstProgram };
 struct PMR { ls: LS, pm: PMod };
 struct SeedR { ls: LS, decls: Decls };
 struct FilesR { ls: LS, files: List<LFile> };
@@ -275,8 +276,47 @@ fn statementsOfProgram(program: &AstProgram) -> List<Int> ~ { return listItems(&
 fn parseWith(d: &Decls, text: &String) -> PR ~ {
     r = ps::parseFileText(toParser(d), clone(text));
     if !r.ok { return PR { ok: false, msg: r.message, imports: [], program: AstProgram { stage: "parsed", nodes: [], root: 0 }, decls: emptyDecls() }; };
-    return PR { ok: true, msg: "", imports: r.imports, program: r.program, decls: fromParser(&r.st) };
+    named = implBoundedNames(r.program);
+    if !named.ok { return PR { ok: false, msg: named.msg, imports: [], program: AstProgram { stage: "parsed", nodes: [], root: 0 }, decls: emptyDecls() }; };
+    return PR { ok: true, msg: "", imports: r.imports, program: named.program, decls: fromParser(&r.st) };
 };
+
+// The parser names an impl's functions <Type>::f and <Type as Trait>::f, but leaves a function with bounds of its own
+// under its bare name f: it is given its impl name here, before anything reads the program
+fn implBoundedNames(program: AstProgram) -> Named ~ {
+    nodes = program.nodes;
+    for s in listItems(&nodes, program.root) {
+        stmt = statementOf(&nodes, s);
+        if stmt is AstStatement::ImplDef {
+            d = stmt as AstStatement::ImplDef;
+            owner = nameText(&nodes, d.n);
+            t = nodeIn(&nodes, d.traitName);
+            traitName = "";
+            if t is AstNode::OptName && (t as AstNode::OptName).value is AstOptName::SomeName { traitName = nameText(&nodes, ((t as AstNode::OptName).value as AstOptName::SomeName).n); };
+            for x in listItems(&nodes, d.xs) {
+                xs = statementOf(&nodes, x);
+                if xs is AstStatement::BoundedDef {
+                    inner = (xs as AstStatement::BoundedDef).s;
+                    a = statementOf(&nodes, inner);
+                    if a is AstStatement::Assign {
+                        assign = a as AstStatement::Assign;
+                        bare = nameText(&nodes, assign.n);
+                        if !bare.startsWith("<") {
+                            full = catStrings(catStrings(catStrings("<", &owner), ">::"), &bare);
+                            if size(traitName.bytes) > 0 { full = catStrings(catStrings(catStrings(catStrings(catStrings("<", &owner), " as "), &traitName), ">::"), &bare); };
+                            // (in place: a record refers only to records before it)
+                            end = nameEnd(&nodes, assign.n);
+                            if end < 0 || end >= assign.n || assign.n >= size(nodes) { return Named { ok: false, msg: catStrings(catStrings("internal compiler error: the parsed name of ", &full), " is not a name record"), program: AstProgram { stage: "parsed", nodes: [], root: 0 } }; };
+                            nodes = set(nodes, assign.n, AstNode::Name { value: AstName::Part { text: full, tail: end } });
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return Named { ok: true, msg: "", program: AstProgram { nodes: nodes, ..program } };
+};
+
 
 // ---- Modules.parseModule ----
 
