@@ -39,6 +39,9 @@ import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
 import Compile (elaborateStatements, lowerStatements)
+import ElaborateRequest (LoadRequest (..), LoadResponse (..))
+import PackageData (Resolver (..))
+import ElaboratorTool (Loader, sourceLoader)
 import Types
 import Syntax
 import Utils
@@ -66,7 +69,7 @@ testExampleFile path expectation = TestCase path $ do
                 else loadFromFilesystem path
             case loaded of
                 Left err -> pure (Error err)
-                Right (PackageResult pkg) -> pure (compileModulesToProgram pkg)
+                Right (PackageResult pkg) -> pure (compileModulesToProgram (Modules.packageSnapshot pkg))
                 Right (StandaloneResult _ _) -> compileSource <$> readFile path
     pure $ case lowered of
         Error err -> case expectation of
@@ -90,7 +93,7 @@ testModulesPackageExample = TestCase "examples/modules/app/main.tersus" $ do
     loaded <- loadFromFilesystem "examples/modules/app/main.tersus"
     pure $ case loaded of
         Left err -> Just ("modules example should load: " ++ err)
-        Right (PackageResult pkg) -> case runPackageFiles noWorld Interpret pkg of
+        Right (PackageResult pkg) -> case runPackageFiles noWorld Interpret (Modules.packageSnapshot pkg) of
             Error err -> Just ("modules example should run: " ++ err)
             Ok ((output, _), _) -> testAssertEq output "64"
         Right other -> Just ("modules example should be a package, got: " ++ show other)
@@ -1762,6 +1765,10 @@ structFields name stmts = [map fst fields | StructDef n _ fields _ <- stmts, n =
 
 -- The stages of a program, and what each one hands to the next
 testPipeline :: Test
+-- A frontend that answers every program with what the production one answers for another
+substitutedFrontend :: String -> Loader
+substitutedFrontend source request = sourceLoader request{lrResolver = (lrResolver request){resolverFiles = Map.fromList [("<source>", source)]}}
+
 testPipeline =
     testCaseSeq
         "testPipeline"
@@ -1769,12 +1776,12 @@ testPipeline =
             Ok _ -> Just "ordinary source received private parser helpers"
             Error err | "Parser tool failure:" `isInfixOf` err -> Just err
             Error err -> testAssertTrue ("parserUnicodeLetter" `isInfixOf` err)
-        , testAssertErrorContains "frontend sentinel" (validatedSourceWith (\_ _ -> Error "frontend sentinel") "return 1;")
-        , testAssertErrorContains "frontend sentinel" (compileSourceWith (\_ _ -> Error "frontend sentinel") "return 1;")
-        , case compileSourceWith (\_ _ -> Ok ([], [], [Return (Val (VInt 7))])) "return 1;" of
+        , testAssertErrorContains "frontend sentinel" (validatedSourceUsing (const (Unparsed "frontend sentinel")) False "return 1;")
+        , testAssertErrorContains "frontend sentinel" (compileSourceUsing (const (Unparsed "frontend sentinel")) False "return 1;")
+        , case compileSourceUsing (substitutedFrontend "return 7;") False "return 1;" of
             Error err -> Just err
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program)) (Ok (Just "7"))
-        , case validatedSourceWith (\_ _ -> Ok ([], [], [Return (Val (VInt 7))])) "return 1;" of
+        , case validatedSourceUsing (substitutedFrontend "return 7;") False "return 1;" of
             Error err -> Just err
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program)) (Ok (Just "7"))
         , -- Each stage names itself in its error

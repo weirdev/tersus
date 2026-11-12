@@ -2,6 +2,7 @@
 module ElaboratorNative
     ( frontendStage
     , frontendStageIr
+    , productionTools
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
@@ -15,28 +16,33 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import Bootstrap (llvmOfOwned)
 import CacheLock (openTempFileCloexec)
-import ElaborateRequest (Elaborator)
-import ElaboratorTool (nativeElaborator)
+import ElaboratorTool (Loader, nativeLoader)
 import Hash (fingerprint)
 import qualified Mir as M
 import MirData (writeProgram)
 import qualified Modules as Mod
 import Native (buildExecutable, cacheDirectory, cachedProgramWithArtifacts)
-import Pipeline (compileModulesBootstrapWith, ownedModuleProgram)
+import LibPackage (compileLibPackageWith)
+import Link (pruneProgram)
+import MirHousekeeping (eraseGhosts)
+import PackageCompile (compileModulesUsing, lowerCompiledPackage)
+import Pipeline (ownedModuleProgram)
 import PreludeSource (elaboratePackageFiles)
 import Seed (cachedFrontendSeed, compilerSnapshotHash, frontendSeedHash)
 import Utils
+import ValidatorNative (cachedBootstrapEmitter)
 
--- The elaborator as it is now, its modules and the compiler libraries elaborated by the given elaborator, linked and
+-- What reading a program the compiler is given leads to: the emitter and the checked validator, made side by side
+-- (ValidatorNative.cachedBootstrapEmitter) before the first load, as the production parser's bootstrap made them
+productionTools :: IO (Result () String)
+productionTools = mapResult (const ()) <$> cachedBootstrapEmitter
+
+-- The elaborator as it is now, its modules and the compiler libraries loaded and elaborated by the given loader, linked and
 -- erased as the host makes its own programs
-elaboratorProgramWith :: Elaborator -> Result M.Program String
-elaboratorProgramWith elaborator = case Mod.loadFromEntry (Mod.resolverFromFiles elaboratePackageFiles) "lib/elaborate/elaborate.tersus" of
-    Left e -> Error e
-    Right (Mod.PackageResult pkg) -> compileModulesBootstrapWith elaborator pkg
-    Right _ -> Error "lib/elaborate is not a package"
-
-elaboratorIrWith :: Elaborator -> IO (Result String String)
-elaboratorIrWith elaborator = irOf (elaboratorProgramWith elaborator)
+elaboratorProgramWith :: Loader -> Result M.Program String
+elaboratorProgramWith loader =
+    mapResult pruneProgram (compileModulesUsing loader (compileLibPackageWith loader) (Mod.Snapshot (Mod.resolverFromFiles elaboratePackageFiles) "lib/elaborate/elaborate.tersus" False)
+        `bindResult` lowerCompiledPackage `bindResult` eraseGhosts)
 
 irOf :: Result M.Program String -> IO (Result String String)
 irOf program = case program `bindResult` ownedModuleProgram of
@@ -76,7 +82,7 @@ makeStage n
         before <- frontendStage (n - 1)
         case before of
             Error e -> pure (Error e)
-            Ok (exe, _) -> case elaboratorProgramWith (nativeElaborator exe) of
+            Ok (exe, _) -> case elaboratorProgramWith (nativeLoader exe) of
                 Error e -> pure (Error ("the elaborator elaborated by stage " ++ show (n - 1) ++ ": " ++ e))
                 Ok program -> do
                     let hash = fingerprint ["frontend", writeProgram program, compilerSnapshotHash]

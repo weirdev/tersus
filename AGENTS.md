@@ -18,25 +18,28 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   Type checking is the elaborator written in Tersus (`lib/elaborate/`); there
   is no Haskell checker. The CLI entry point is `tersus/app/Main.hs` (logic in
   `src/Cli.hs`).
-  Packages and modules are in `src/Modules.hs` (package discovery, the module
-  graph and the loader), `src/Interface.hs` (what a checked module exposes to
+  Packages and modules are loaded by the elaborator written in Tersus
+  (`lib/elaborate/load.tersus`) from a snapshot the host captures
+  (`src/Modules.hs`, with the module graph types in `src/PackageData.hs`).
+  The other package modules are `src/Interface.hs` (what a checked module exposes to
   its importers), `src/LibPackage.hs` (the
   compiler libraries compiled once as a synthetic `tersuslib` package, one
   module per lib file, from the `PreludeSource` texts) and `src/Link.hs`
   (merging the lowered modules into one program and pruning what the entry
-  program does not reach); `src/ElaborateRequest.hs` is the elaborator's request and response
-  for one module (the compiler elaborates every program and module through it,
-  `AST_DATA.md`), and `src/ElaboratorTool.hs` the executables that answer it
-  (`bootstrapElaborator`, the seed F0, for the compiler's own code;
-  `sourceElaborator` for the programs it is given); `src/Pipeline.hs` compiles each module, sent as it was read with its package's
-  files and the compiler libraries for the elaborator to resolve its names and
-  select its libraries (the package path in `src/PackageCompile.hs`), and links
-  the package with the libraries the elaborator selected.
+  program does not reach); `src/ElaborateRequest.hs` is the elaborator's requests and responses: a load of
+  a program, a package or the compiler libraries, and one module given as
+  statements (`AST_DATA.md`), and `src/ElaboratorTool.hs` the executables that
+  answer them (`bootstrapLoader`, the seed F0, for the compiler's own code;
+  `sourceLoader` for the programs it is given); `src/Pipeline.hs` sends a
+  program or a package's snapshot and the compiler libraries for the elaborator
+  to load, parse, resolve, select libraries and check (the package path in
+  `src/PackageCompile.hs`), then lowers and links the modules with the
+  libraries the elaborator selected.
 - `tersus/lib/` (Tersus sources the Haskell implementation depends on). The
   first seven are the compiler libraries: each is compiled as one module of the
   synthetic `tersuslib` package (`src/LibPackage.hs`) from its `PreludeSource`
   text, selected per module by the elaborator by the rule of
-  `Compile.librariesFor` (which also picks the declarations a single file is
+  `lib/elaborate/libraries.tersus` (which also picks the declarations a single file is
   parsed with) on both the single-file and package paths:
   - `types.tersus`: the structs `List` and `Box` that a list and a Box are
     values of, imported for every program that does not declare `List` or
@@ -108,7 +111,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     AST codecs, the reader of AST data (`data::reader`, which the AST
     reader runs and the elaborator written in Tersus reads its requests with)
     and the renumbering of an arena into the order the data is written in
-    (`data::arena`), `parser/parser.tersus` is the native parser and
+    (`data::arena`), `parser/parser.tersus` is the native parser (a driver of the grammar in
+    `parser/syntax/`, which the elaborator imports to parse in process) and
     `ast_reader/ast_reader.tersus` the AST reader (`AST_DATA.md`). All are
     embedded by `PreludeSource` (`mirPackageFiles`, `dataPackageFiles`,
     `parserPackageFiles`, `astReaderPackageFiles`) and listed in
@@ -192,8 +196,10 @@ Work from `tersus/`.
   file the running compiler is using.
 - The elaborator seed (F0): `bootstrap/frontend.sha256` holds the seed's
   SHA-256 and then the fingerprint of what it was made from (the
-  `lib/elaborate` and `lib/data` files, the builtin table and the protocol
-  headers; `stack run frontend-seed -- sources` prints it). The compiler uses
+  `lib/elaborate` and `lib/data` files, the parser's grammar in
+  `lib/parser/syntax/` with its Unicode classifier, the builtin
+  table and the protocol headers; `stack run frontend-seed -- sources` prints
+  it). The compiler uses
   F0 while the fingerprint matches and builds stage 1 from the sources when it
   does not, and `testFrontendBootstrap` fails on a mismatch: a change to any
   of those comes with a new seed in the same PR, as for the emitter. Run
@@ -211,8 +217,11 @@ Work from `tersus/`.
   `testFrontendBootstrap` check it: `emit` with `TERSUS_FRONTEND_SEED_FILE` set
   to the new seed and the same commit gives the same bytes. Never write into a
   seed file the running compiler is using.
-- Production parsing uses native P1. Bootstrap readers (`StdLibDefs`,
-  `LibParsed`, `Compile`, default `Modules`) use the pinned native P0 leaf;
+- Production parsing is in process in the elaborator written in Tersus, which
+  imports the parser's grammar (`lib/parser/syntax/`); the parser executables
+  P1 (current sources) and P0 (pinned seed) answer the file protocol for the
+  parser's tests and fixpoint. `StdLibDefs` and the snapshot's import prefixes
+  use the pinned native P0 leaf;
   there is no Haskell grammar or fallback. Building Haskell needs no clang
   or network; the first language parse needs clang and verified parser/emitter
   seeds. The parser seed override is `TERSUS_PARSER_SEED_FILE` (the emitter's

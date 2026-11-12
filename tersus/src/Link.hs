@@ -10,9 +10,9 @@ import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import LibParsed (nativeStorageModules)
+import PreludeSource (nativeStorageModules)
 import qualified Mir as M
-import Modules (ModuleId (..), renderModuleId)
+import PackageData (ModuleId (..), renderModuleId)
 import qualified Syntax
 import Syntax (Proof (..), ValidationStatement (..), VariableProof, Value (..))
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, baseNameOf)

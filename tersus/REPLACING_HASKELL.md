@@ -486,9 +486,9 @@ what it declares itself; it answers `unresolved` with the whole message where
 Haskell refused. The response names the libraries it selected, and the compiler
 links their units (`LibPackage.libSelection`, without the module's own type
 names) and lowers with their interfaces, `MirLower` leaving out what the module
-declares itself. A single file's parse still selects the declarations it is
-parsed with in Haskell (`SourceParse`), until parsing moves in process; the
-compiler refuses, as an internal error, a response that selects other libraries.
+declares itself. A single file's parse still selected the declarations it was
+parsed with in Haskell (`SourceParse`) until parsing moved in process ("Loading and
+parsing in process", below); the compiler refuses, as an internal error, a response that selects other libraries.
 A module that impls Drop without the prelude still sees the prelude's Drop trait,
 but the defining contexts its dependents get no longer carry that view.
 
@@ -513,6 +513,74 @@ seven shards; 1.07 times the summed group time, 12,255 s against 11,491 s).
 From an empty cache, `tersus-exe run examples/basics.tersus` takes as long
 (271 s against 269 s, the mean of three alternating pairs on eight pinned CPUs,
 0.94 to 1.06 times each).
+
+#### Loading and parsing in process
+
+Built: the elaborator written in Tersus loads programs and packages and parses
+them in its own process, and the Haskell loader (`Modules`' graph walk, import
+seeding and retry rounds), `LibParsed` and `SourceParse` are gone. The parser is
+a declarations library, `lib/parser/syntax/syntax.tersus` (module
+`parser::syntax`; an imported module may not run statements, so the grammar
+moved below the driver), and `lib/parser/parser.tersus` a driver that runs its
+request loop: P0 and P1 keep the file protocol and their fixpoint, and the
+elaborator imports the library. The host captures a snapshot of what a load
+reads (the directories it lists and the files it reads, as before) and sends it
+in a `load` section, one request per program or package (`AST_DATA.md`,
+"Loading"): one process then parses each file once and elaborates the modules in
+the order it loaded them, where a request per module would parse the package
+again for each, and the compiler libraries' sources travel with it so that the
+elaborator parses them for the declarations files are read with. The loader
+(`lib/elaborate/load.tersus`) is a port of the Haskell one, refusals word for
+word; `units.tersus` answers each kind of load, and the package answer names the
+interfaces each module is lowered with.
+
+What stayed in Haskell, and why: `Modules` captures the snapshot (directory
+listing and file reading are the host's) and reads its import prefixes with P0
+to follow them; `PackageData` holds the graph types the compiler and the tests
+read; `PackageCompile` sends the request, assembles the modules the answer
+gives and lowers them; `LibPackage` keeps the compiled libraries, selection and
+catalog, filled from the `libraries` answer, because `MirLower` and `Link` lower
+and link in Haskell; `TersusParser`, `ParserSeed` and `FileParserProtocol` run
+P1 and P0 for the parser's own tests, its fixpoint, `dev/parser-seed` and
+`StdLibDefs` (they stay in the library, which the tests and the seed drivers
+link). The module request's `package` section is gone on both sides. The CLI
+compiles a package from one `package` load of its snapshot.
+
+The parser's Unicode classifier (`lib/parser/syntax/unicode.tersus`) is checked
+in, pinned to Unicode 15.0 (`dev/parser-unicode/generate.py` refuses another
+version), and the frontend fingerprint covers it: it was generated from the
+tables of the GHC that built the compiler, so F0, now the parser of every
+program, would have carried the classifier of whichever GHC made it.
+
+Before the switch, a hook in the compiler (an environment variable, removed at
+the switch) put every load the Haskell loader made to the Tersus loader and
+compared graphs, package compiles, programs and the compiler libraries.
+Over the corpus all 223 loads agreed: the compiler libraries, 206 programs (the
+examples and the rejected examples, and those again without the prelude) and
+the graph and package compile of 8 packages (`examples/modules` and the
+compiler's parser, AST reader, emitter, MIR checker, eraser, validator and
+elaborator). Under `testModules` and `testLibModules` 300 of 314 loads agreed;
+the other 14 are the fixtures whose injected parser answers text that is not
+Tersus (`@supplied-ast@` and the like) or refuses with a sentinel, which the
+switch replaced with fixtures of real sources. All 2,316 functions of the
+elaborator, the parser's grammar included, validate.
+
+The production parser's bootstrap used to build the emitter and the checked
+validator side by side; the source frontend now does that once per process
+before its first load, since checking and validating what it loads need them,
+and checks P0 first, which reads the builtin table every request carries.
+
+Cost, against the branch base 1a9b4cce5 built on the same host, with the seed
+made from these sources: the full suite takes 1.11 times as long (1,348 s
+against 1,209 s of wall time on seven shards, the base's run beside it; the
+base's three runs took 1,171 s to 1,248 s), and 1.10 times the summed group
+time (14,563 s against a mean of 13,265 s); the longest shard is
+`testFrontendBootstrap`, whose stage 1 now holds the parser too. From an empty
+cache, `tersus-exe run examples/basics.tersus` takes 0.89 times as long (244 s
+against 276 s, the mean of three alternating pairs on eight pinned CPUs, 0.87
+to 0.91 times each): the seed is larger, but the compiler's own packages are
+loaded and parsed in the elaborator's process, without a parser process per
+file.
 
 ### Deferred or coordinated work
 

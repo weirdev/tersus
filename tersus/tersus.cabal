@@ -48,18 +48,22 @@ extra-source-files:
     lib/elaborate/calls.tersus
     lib/elaborate/check.tersus
     lib/elaborate/core.tersus
+    lib/elaborate/decls.tersus
     lib/elaborate/elaborate.tersus
     lib/elaborate/expr.tersus
     lib/elaborate/exports.tersus
     lib/elaborate/libraries.tersus
+    lib/elaborate/load.tersus
     lib/elaborate/out.tersus
     lib/elaborate/proofs.tersus
     lib/elaborate/records.tersus
     lib/elaborate/refs.tersus
     lib/elaborate/resolve.tersus
     lib/elaborate/rewrite.tersus
+    lib/elaborate/snapshot.tersus
     lib/elaborate/state.tersus
     lib/elaborate/traits.tersus
+    lib/elaborate/units.tersus
     lib/data/builtins.ast
     lib/ast_reader/package.tersus
     lib/ast_reader/ast_reader.tersus
@@ -69,6 +73,8 @@ extra-source-files:
     bootstrap/frontend.sha256
     lib/parser/package.tersus
     lib/parser/parser.tersus
+    lib/parser/syntax/syntax.tersus
+    lib/parser/syntax/unicode.tersus
     lib/mir/mir_verify/mir_verify.tersus
     lib/mir/mir_erase/mir_erase.tersus
     lib/validation/package.tersus
@@ -115,7 +121,6 @@ library
       Interface
       InterfaceData
       LibPackage
-      LibParsed
       Link
       LlvmRuntime
       Mir
@@ -130,16 +135,15 @@ library
       Modules
       Native
       PackageCompile
+      PackageData
       ParsedFile
       ParserSeed
-      ParserUnicodeSource
       Pipeline
       PreludeSource
       Pretty
       Seed
       SelfHostedMir
       Solver
-      SourceParse
       StdLib
       StdLibDefs
       Syntax

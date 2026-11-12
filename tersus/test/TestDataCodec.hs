@@ -45,7 +45,7 @@ codecRun :: String -> (Outcome -> TestResult) -> IO TestResult
 codecRun source check = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles (toolPackageFiles ++ [("lib/codec_test/package.tersus", ""), ("lib/codec_test/main.tersus", source)])) "lib/codec_test/main.tersus" of
     Left err -> Just err
     Right (Mod.PackageResult pkg) -> -- (the codec is the compiler's own code, built as the host builds it, not validated)
-        case PackageCompile.compileModulesLinked pkg `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of
+        case PackageCompile.compileModulesLinked (Mod.packageSnapshot pkg) `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of
         Error err -> Just err
         Ok outcome -> check outcome
     Right _ -> Just "codec fixture is standalone"

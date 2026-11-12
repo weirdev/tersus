@@ -14,7 +14,8 @@ import qualified PackageCompile as Package
 import ParsedFile (fileBody)
 import PreludeSource (toolPackageFiles, validationPackageFiles)
 import MirHousekeeping (validationEntry)
-import qualified LibParsed as Lib
+import ElaborateRequest (LibraryAnswer (..), LoadKind (..), LoadRequest (..), LoadResponse (..))
+import ElaboratorTool (bootstrapLoader)
 import qualified AstData as A
 import BuiltinTable (builtinTableText)
 import Interface (ModuleInterface)
@@ -60,14 +61,14 @@ corpusUnits = do
             Right _ -> [(entry, Error "AST corpus tool is not a package")]
     pure ([[(path, parseCorpusFile path source)] | (path, source) <- fromFiles ++ generated] ++ map packageTrees packages)
   where
-    parseCorpusFile path source = case [name | name <- Lib.libModuleNames ++ Lib.nativeStorageModules, path == "lib/" ++ name ++ ".tersus"] of
-        name : _ -> case if name `elem` Lib.nativeStorageModules then Lib.nativeLibParsed else Lib.libParsed of
-            Left e -> Error e
-            Right parsed ->
-                let closure [] done = done
-                    closure (n : rest) done | n `elem` done = closure rest done
-                    closure (n : rest) done = closure (Map.findWithDefault [] n (Lib.lpDependencies parsed) ++ rest) (n : done)
-                 in Ok (Lib.statementsForLibModules parsed (closure [name] []))
+    -- (a library as the compiler reads it: with the libraries it imports in front of it, from the libraries' load)
+    parseCorpusFile path source = case [name | (name, _) <- libraryAnswers, path == "lib/" ++ name ++ ".tersus"] of
+        name : _ ->
+            let closure [] done = done
+                closure (n : rest) done | n `elem` done = closure rest done
+                closure (n : rest) done = closure (maybe [] fst (lookup n libraryAnswers) ++ rest) (n : done)
+                wanted = closure [name] []
+             in Ok (concat [stmts | (n, (_, stmts)) <- libraryAnswers, n `elem` wanted])
         [] -> parsed source
     files dir = map ((dir ++ "/") ++) . filter (isSuffixOf ".tersus") . sort <$> listDirectory dir
     generated =
@@ -76,6 +77,11 @@ corpusUnits = do
         , ("generated UTF-8", "naïve = 3; café = naïve + 1; return café;")
         , ("generated maximum integer literal", "return 9223372036854775807;")
         ]
+
+libraryAnswers :: [(String, ([String], [Statement]))]
+libraryAnswers = case bootstrapLoader (LoadRequest LoadLibraries False (Mod.resolverFromFiles []) Nothing Mod.librarySources []) of
+    LoadedLibraries answers _ -> [(name, (imports, stmts)) | LibraryAnswer name imports stmts _ <- answers]
+    _ -> []
 
 parsed :: String -> Result [Statement] String
 parsed source = case parseSource source of
@@ -151,7 +157,7 @@ corpusHaskell batch = do
 toolElaborated :: FilePath -> Result [Elaborated] String
 toolElaborated entry = case Mod.loadFromEntry (Mod.resolverFromFiles (if entry == validationEntry then validationPackageFiles else toolPackageFiles)) entry of
     Left err -> Error err
-    Right (Mod.PackageResult pkg) -> Package.compileModules pkg `bindResult` \compiled ->
+    Right (Mod.PackageResult pkg) -> Package.compileModules (Mod.packageSnapshot pkg) `bindResult` \compiled ->
         Ok (map Package.compiledElaborated (Package.compiledModules compiled))
     Right _ -> Error "AST corpus tool is not a package"
 
@@ -177,7 +183,7 @@ toolInterfaces =
   where
     interfacesOf entry = case Mod.loadFromEntry (Mod.resolverFromFiles (if entry == validationEntry then validationPackageFiles else toolPackageFiles)) entry of
         Left err -> Error err
-        Right (Mod.PackageResult pkg) -> Package.compileModules pkg `bindResult` \compiled -> Ok (map Package.compiledInterface (Package.compiledModules compiled))
+        Right (Mod.PackageResult pkg) -> Package.compileModules (Mod.packageSnapshot pkg) `bindResult` \compiled -> Ok (map Package.compiledInterface (Package.compiledModules compiled))
         Right _ -> Error "not a package"
 
 toolEntries :: [FilePath]

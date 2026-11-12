@@ -27,6 +27,7 @@ import qualified TestMirReader
 import TestNative (runExecutableBytes)
 import qualified Seed
 import qualified TersusParser
+import ElaboratorTool (sourceElaboratorExecutable)
 import qualified Modules
 import qualified Compile
 import qualified Pipeline
@@ -77,7 +78,7 @@ testPhase1Cache = TestList "testPhase1Cache"
     [ TestCase "source unit no-prelude policy isolates validated and compiled cache entries" phase1SourceCache
     , TestCase "selected roots markers sources and resolution conflicts govern no-prelude package reuse" (phase1PackageCache True)
     , TestCase "default package context does not widen filesystem source capture or mask new candidates" (phase1PackageCache False)
-    , TestCase "native executable warm keys avoid P0 bodies and retain source marker and backend invalidation" nativeSnapshotReuse
+    , TestCase "native executable warm keys avoid P0 bodies and retain source and marker invalidation" nativeSnapshotReuse
     , TestCase "filesystem validator warm hits retain all helpers without another P1 body request" filesystemWarmParserReuse
     , TestCase "filesystem snapshot keys bind structure and misses parse exactly their captured bytes" filesystemSnapshotMisses
     , TestCase "in-memory default cached program and ownership ignore unimported declarations and match filesystem loading" phase1InMemoryCache
@@ -129,7 +130,6 @@ nativeSnapshotReuse = withToolsCacheHome $ \home -> do
                 writeFile entry "return 2;"
                 writeFile (takeDirectory entry </> "package.tersus") "noPrelude = false;"
                 marked <- request
-                wrongBackend <- withCacheVariable "TERSUS_PARSER" "invalid-native-key-backend" request
                 let brokenSeed = home </> "invalid-parser-override.ll"
                 writeFile brokenSeed "not a pinned parser seed"
                 wrongProducer <- withCacheVariable "TERSUS_PARSER_SEED_FILE" brokenSeed request
@@ -148,7 +148,6 @@ nativeSnapshotReuse = withToolsCacheHome $ \home -> do
                     , testAssertEq actual (ExitSuccess, "2\n", "")
                     , testAssertErrorContains "Could not prove:" refused
                     , case (changed, marked) of (Ok a, Ok b) -> testAssertTrue (a /= b); other -> Just (show other)
-                    , testAssertErrorContains "Unknown TERSUS_PARSER backend:" wrongBackend
                     , testAssertErrorContains "Could not verify the native test build identity or seed overrides" wrongProducer
                     , namedResult "native unrelated body key" (testAssertEq withNoise sameNoise)
                     ]
@@ -375,7 +374,7 @@ testSharedCache =
         , TestCase "package snapshots invalidate on dependencies, entry, imports and file layout" packageSnapshots
         , TestCase "duplicate paths and normalized aliases use the resolver's snapshot" packageAliases
         , TestCase "independent processes reuse a package snapshot" packageProcesses
-        , TestCase "failed native parsing is retried in the same process" parserRetry
+        , TestCase "a failed frontend run is retried in the same process" parserRetry
         , TestCase "lossless roundtrip keeps contracts, invariants, generics and ghosts" roundtrip
         , TestCase "source change misses" sourceChange
         , TestCase "stage isolation" stageIsolation
@@ -505,9 +504,10 @@ hotSingleSource stage = withToolsCacheHome $ \home -> do
     checked <- runSingleSourceProbe home ("hot-" ++ stage)
     pure (sameProgram seeded sentinel <> checked)
 
-withParserTrap :: FilePath -> IO a -> IO a
-withParserTrap marker action = do
-    tool <- TersusParser.parserExecutable
+-- (the frontend reads and checks a single source: it is what a cached stage must not reach)
+withFrontendTrap :: FilePath -> IO a -> IO a
+withFrontendTrap marker action = do
+    tool <- sourceElaboratorExecutable
     case tool of
         Error e -> fail e
         Ok parser -> bracket (renameFile parser (parser ++ ".held"))
@@ -527,7 +527,7 @@ singleSourceProbe mode = do
             trap = marker ++ ".upstream"
             expected = freshSingleSourceStage stage richSource
         _ <- Exception.evaluate (force (show expected))
-        withParserTrap trap $ do
+        withFrontendTrap trap $ do
             downstream <- singleSourceStage stage source
             eager <- doesFileExist trap
             control <- validatedOnce source
@@ -2308,7 +2308,7 @@ toolValidationParity =
     let entry = MirHousekeeping.mirEraseEntry
         fresh = case Modules.loadFromEntry (Modules.resolverFromFiles mirPackageFiles) entry of
             Left e -> Error e
-            Right (Modules.PackageResult pkg) -> PackageCompile.compileModulesLinked pkg
+            Right (Modules.PackageResult pkg) -> PackageCompile.compileModulesLinked (Modules.packageSnapshot pkg)
             Right _ -> Error "the frozen eraser is not a package"
      in pure (testAssertEq (MirHousekeeping.toolProgram entry) fresh)
 
@@ -2470,13 +2470,14 @@ parserRetry = do
 parserRetryProbe :: IO TestResult
 parserRetryProbe = do
     Just home <- lookupEnv "XDG_CACHE_HOME"
-    primed <- TersusParser.runParserTool False ["return 0;"]
-    case primed of
-        Left e -> pure (Just e)
-        Right _ -> do
-            identity <- TersusParser.parserKey >>= \result -> case result of Error e -> fail e; Ok key -> pure key
-            let parser = home </> "tersus" </> ("tersus-parser-" ++ identity)
-                source = "return 987823;"
+    -- (the compiler libraries are elaborated once per process; they are in place before the frontend fails)
+    primed <- sourceElaboratorExecutable
+    libraries <- compileOnce "return 987822;"
+    case (primed, libraries) of
+        (Error e, _) -> pure (Just e)
+        (_, Error e) -> pure (Just e)
+        (Ok parser, Ok _) -> do
+            let source = "return 987823;"
             permissions <- getPermissions parser
             modified <- getModificationTime parser
             before <- bracket (renameFile parser (parser ++ ".held"))
@@ -2485,7 +2486,7 @@ parserRetryProbe = do
                     when present (removeFile parser)
                     renameFile (parser ++ ".held") parser)
                 (\_ -> do
-                    writeFile parser "#!/bin/sh\nprintf '%s\\n' 'intentional transient parser failure' >&2\nexit 23\n"
+                    writeFile parser "#!/bin/sh\nprintf '%s\\n' 'intentional transient frontend failure' >&2\nexit 23\n"
                     setPermissions parser permissions
                     compileOnce source)
             restoredPermissions <- getPermissions parser
@@ -2498,10 +2499,10 @@ parserRetryProbe = do
                 , testAssertTrue (not wasFiled)
                 , case (before, after) of
                     (Error e, Ok _)
-                        | "Parser tool failure:" `isPrefixOf` e
-                        , "native parser exited 23" `isInfixOf` e
-                        , "intentional transient parser failure" `isInfixOf` e -> Nothing
-                    _ -> Just ("native parser retry: before=" ++ describe before ++ "; after=" ++ describe after)
+                        | "Elaborator tool failure:" `isInfixOf` e
+                        , "exit 23" `isInfixOf` e
+                        , "intentional transient frontend failure" `isInfixOf` e -> Nothing
+                    _ -> Just ("frontend retry: before=" ++ describe before ++ "; after=" ++ describe after)
                 ]
   where
     describe (Error e) = e

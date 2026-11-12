@@ -34,7 +34,7 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import Mir (Program, renderProgram)
 import MirData (writeProgram, writeProgramWithGhosts)
-import Modules (LoadedPackage)
+import Modules (Snapshot)
 import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
 import Pipeline
 import Types
@@ -184,7 +184,7 @@ runProgramIn world program =
         -- (what the program wrote, then its value: the same text as an executable prints)
         Ok o -> Ok ((decodeUtf8 (outStdout o) ++ maybe "" renderMirValue (outValue o), decodeUtf8 (outStderr o)), outFiles o)
 
-runPackageFiles :: World -> Command -> LoadedPackage -> Result ((String, String), [(FilePath, String)]) String
+runPackageFiles :: World -> Command -> Snapshot -> Result ((String, String), [(FilePath, String)]) String
 runPackageFiles _ Check pkg = mapResult (\_ -> (("OK", ""), [])) (compileModulesToProgram pkg)
 runPackageFiles world Interpret pkg = compileModulesToProgram pkg `bindResult` runProgramIn world
 runPackageFiles _ Mir pkg = mapResult (\program -> ((renderProgram program, ""), [])) (compileModulesToProgram pkg)

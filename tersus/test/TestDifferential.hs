@@ -4,7 +4,7 @@ import AstData (writeBuiltinTable)
 import BuiltinTable (builtinTable)
 import Compile (parseWithEquality)
 import Data.List (isInfixOf)
-import LibParsed (inlinedLibraryLength)
+import LibPackage (inlinedLibraryLength)
 import Modules (ModuleId (..))
 import Differential
 import ElaborateRequest
@@ -13,7 +13,9 @@ import Syntax (Elaborated (..))
 import TestData (typeCheckSources)
 import TestHarness
 import Compile (elaborateStatements)
-import ElaboratorTool (runElaboratorText, sourceElaborator, sourceElaboratorExecutable)
+import qualified Data.ByteString.Char8 as B
+import ElaboratorTool (runElaboratorRaw, sourceElaborator, sourceElaboratorExecutable)
+import Compile (sourceRequest)
 import Types (Type (..))
 import Utils
 
@@ -38,7 +40,7 @@ mutationControls = do
     let units = [SourceFile "examples/arithmetic.tersus", SourceFile "examples/rejected/type_argument_mismatch.tersus"]
     retyped <- runDifferential (perturbed retype) units
     reworded <- runDifferential (perturbed reword) units
-    unmodelled <- runDifferential (\_ -> pure (Ok (NotModelled "everything"))) units
+    unmodelled <- runDifferential (\asked -> mapResult (map (\(m, _) -> (m, NotModelled "everything"))) <$> throughText asked) units
     pure $ firstFailure
         [ expect "retyped" retyped (\o -> case o of Disagree _ -> True; _ -> o == Agree)
         , atLeastOne "retyped" retyped (\o -> case o of Disagree _ -> True; _ -> False)
@@ -47,7 +49,7 @@ mutationControls = do
         , expect "not modelled" unmodelled (\o -> case o of NotModelledBy _ -> True; _ -> False)
         ]
   where
-    perturbed change rq = pure (Ok (change (sourceElaborator rq)))
+    perturbed change asked = mapResult (map (fmap change)) <$> throughText asked
     retype response = case response of
         Accepted (Elaborated stmts (t : ts)) i ls -> Accepted (Elaborated stmts ((if t == TBool then TInt else TBool) : ts)) i ls
         other -> other
@@ -82,17 +84,19 @@ visitOrder = case parseWithEquality "x = [true]; n = 3; return n;" of
                             else Nothing
             ]
 
--- A request and a response read back as written, and malformed ones are refused
+-- A module's request and response read back as written, and malformed ones are refused
 protocolRoundTrip :: IO TestResult
 protocolRoundTrip = do
-    requests <- unitRequests sourceElaborator (FilePackage "examples/modules/app/main.tersus")
-    case requests of
-        Error e -> pure (Just e)
-        Ok [] -> pure (Just "no requests")
-        Ok answered -> do
-            sections <- malformedSections [rq | (rq, _) <- answered, length (rqStatements rq) > 1]
-            pure $ firstFailure (map (one . fst) answered ++ [malformed (fst (last answered)), sections] ++ map verdict ([Refused "a \"refusal\"", RefusedInterface "in module p::m: no interface", Unresolved "in module p::m: unknown name q", NotModelled "what"] ++ withLibraries (map snd answered)))
+    requests <- mapM (unitRequests compilerFrontend) [SourceText name source | (name, source) <- take 8 typeCheckSources]
+    case sequence (map resultList requests) of
+        Left e -> pure (Just e)
+        Right exchanges -> case [(rq, r) | (AskedModule rq, answers) <- concat exchanges, (_, r) <- answers] of
+            [] -> pure (Just "no requests")
+            answered -> pure $ firstFailure (map (one . fst) answered ++ [malformed (fst (last answered))] ++ map verdict ([Refused "a \"refusal\"", RefusedInterface "in module p::m: no interface", Unresolved "in module p::m: unknown name q", NotModelled "what"] ++ withLibraries (map snd answered)))
   where
+    resultList r = case r of
+        Ok a -> Right a
+        Error e -> Left e
     withLibraries responses = take 1 [Accepted e i ["types", "clone"] | Accepted e i _ <- responses]
     malformed rq = case (writeRequest rq, writeResponse (sourceElaborator rq)) of
         (Ok request, Ok response) ->
@@ -105,17 +109,17 @@ protocolRoundTrip = do
                     Ok a -> Right a
                     Error e -> Left e
                 withTable table text =
-                    let (before, rest) = break (== "builtins") (lines text)
+                    let (before, rest) = break (\l -> take 8 l == "builtins") (lines text)
                         after = drop 1 (dropWhile (\l -> take 11 l /= "interfaces ") rest)
                         interfacesLine = head [l | l <- rest, take 11 l == "interfaces "]
-                     in unlines (before ++ ["builtins", "data " ++ show (length (lines table))] ++ lines table ++ [interfacesLine] ++ after)
+                     in unlines (before ++ take 1 rest ++ ["data " ++ show (length (lines table))] ++ lines table ++ [interfacesLine] ++ after)
              in firstFailure
                     [ refused "a request with another header" (readRequest (swapLine "tersus-elaborate 1" "tersus-elaborate 2" request))
                     , refused "an unknown extraction" (readRequest (unlines [if take 8 l == "extract " then "extract all" else l | l <- lines request]))
                     , refused "a count with a leading zero" (readRequest (swapLine (firstData request) ("data 0" ++ drop 5 (firstData request)) request))
                     , refused "a block cut short" (readRequest (unlines (init (lines request))))
                     , refused "a line after the syntax" (readRequest (request ++ "more\n"))
-                    , refused "two spaces after a key" (readRequest (swapLine "predeclare true" "predeclare  true" request))
+                    , refused "two spaces after a key" (readRequest (unlines [if take 11 l == "predeclare " then "predeclare  " ++ drop 11 l else l | l <- lines request]))
                     , case (writeBuiltinTable builtinTable, writeBuiltinTable (take 1 builtinTable)) of
                         (Ok same, Ok other) -> firstFailure
                             [ either (Just . ("the same table put back: " ++)) (const Nothing) (resultEither (readRequest (withTable same request)))
@@ -123,7 +127,7 @@ protocolRoundTrip = do
                             ]
                         (Error e, _) -> Just e
                         (_, Error e) -> Just e
-                    , refused "a response with no interface line" (readResponse (unlines (takeWhile (/= "interface") (lines response))))
+                    , refused "a response with no interface line" (readResponse (unlines (takeWhile (\l -> take 9 l /= "interface") (lines response))))
                     , case [(e, i) | Accepted e i _ <- [sourceElaborator rq]] of
                         [] -> Just "the request was not accepted"
                         (e, i) : _ -> case writeResponse (Accepted e i ["types", "clone"]) of
@@ -146,47 +150,37 @@ protocolRoundTrip = do
                 Error e -> Just e
                 Ok text' -> testAssertEq text' text
 
--- A package module's request with its new sections malformed is refused by the compiler's reader and by the
--- elaborator's, and one whose syntax is not a block per file of the module is not written
-malformedSections :: [Request] -> IO TestResult
-malformedSections [] = pure (Just "no request for a module of several files")
-malformedSections (rq : _) = case writeRequest rq of
+-- A load request with a section malformed gets no answer: the executable exits saying it is not a request
+malformedLoads :: IO TestResult
+malformedLoads = case writeLoadRequest (sourceRequest LoadParse False False [] "return 1;") of
     Error e -> pure (Just e)
     Ok request -> do
         exe <- sourceElaboratorExecutable
         case exe of
             Error e -> pure (Just e)
             Ok path -> do
-                asWritten <- runElaboratorText path request
                 let cases =
-                        [ ("an empty library catalog", renameWord "libraries " "0" request)
-                        , ("an unknown declaration kind", renameWord "decl " "constant" request)
-                        , ("an unknown import level", renameWord "import " "package" request)
-                        , ("a file of the module without its syntax", unlines (take (lastBlock (lines request)) (lines request)))
-                        , ("syntax for a file the module does not have", unlines (lines request ++ drop (lastBlock (lines request)) (lines request)))
+                        [ ("a file with a wrong byte count", replaceLine (\l -> take 16 l == "file \"<source>\" ") (\l -> unwords (init (words l) ++ [show (read (last (words l)) + 1 :: Int)])) request)
+                        , ("a count of files that is not the files given", replaceLine (== "files 1") (const "files 2") request)
+                        , ("no builtins", replaceLine (== "builtins") (const "") request)
+                        , ("a record after the request", request ++ "more\n")
+                        , ("an unknown kind of load", replaceLine (== "load parse") (const "load everything") request)
                         ]
-                answers <- mapM (runElaboratorText path . snd) cases
+                asWritten <- runElaboratorRaw path request
+                answers <- mapM (runElaboratorRaw path . snd) cases
                 pure $ firstFailure $
                     [ case asWritten of
-                        Error e -> Just ("the elaborator refused the request as written: " ++ e)
-                        Ok _ -> Nothing
+                        Ok (header : _) | B.unpack header == "tersus-elaborated 1" -> Nothing
+                        other -> Just ("the request as written was not answered: " ++ take 200 (show other))
                     ]
                         ++ [if text == request then Just (name ++ " changed nothing") else Nothing | (name, text) <- cases]
-                        ++ [refusedBy ("the compiler's reader accepted " ++ name) (readRequest text) | (name, text) <- cases]
-                        ++ [refusedBy ("the elaborator accepted " ++ name) answer | ((name, _), answer) <- zip cases answers]
-                        ++ [ refusedBy "a module's syntax with a file missing was written" (writeRequest rq{rqStatements = init (rqStatements rq)})
-                           , refusedBy "a program's syntax of several blocks was written" (writeRequest rq{rqPackage = Nothing})
+                        ++ [ case answer of
+                            Ok (header : _) | B.unpack header == "tersus-elaborated 1" -> Just ("the elaborator answered " ++ name)
+                            _ -> Nothing
+                           | ((name, _), answer) <- zip cases answers
                            ]
   where
-    refusedBy what r = case r of
-        Error _ -> Nothing
-        Ok _ -> Just what
-    renameWord prefix new text = unlines (renameIn prefix new (lines text))
-    renameIn prefix new (l : ls)
-        | take (length prefix) l == prefix = (prefix ++ new ++ dropWhile (/= ' ') (drop (length prefix) l)) : ls
-        | otherwise = l : renameIn prefix new ls
-    renameIn _ _ [] = []
-    lastBlock ls = head ([i | i <- reverse [0 .. length ls - 1], ls !! i == "data " ++ show (length ls - i - 1)] ++ [length ls])
+    replaceLine matches change text = unlines [if matches l then change l else l | l <- lines text]
 
 -- A request says how many of its first statements are libraries checked where they were defined, and the elaborator
 -- does not check their functions with bounds again: a count that covers the trait and the function below accepts a body
@@ -196,7 +190,7 @@ checkedStatements = case parseWithEquality "trait Show { fn show(self: &Self) ->
     Left e -> Just e
     Right stmts ->
         let inlined = inlinedLibraryLength stmts
-            request n = Request (ModuleId "main" Nothing) False False NoInterface [] [] [] Nothing [stmts] n
+            request n = Request (ModuleId "main" Nothing) False False NoInterface [] [] [] [stmts] n
             refusedAt n = case sourceElaborator (request n) of
                 Refused m | "T is compared with =" `isInfixOf` m -> Nothing
                 other -> Just ("checked " ++ show n ++ " was not refused at the definition: " ++ show other)
@@ -232,4 +226,5 @@ testDifferential = TestList "testDifferential"
     , testCase "the lowering takes exactly the elaborated expression types" visitOrder
     , TestCase "the text protocol loses nothing" protocolAgreement
     , testCase "functions with bounds of statements already checked are not checked again" checkedStatements
+    , TestCase "malformed load requests are not answered" malformedLoads
     ]

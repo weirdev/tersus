@@ -106,7 +106,7 @@ import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
 import qualified Pipeline
-import qualified TersusParser
+import ElaboratorTool (sourceLoader)
 import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseWithEquality, runStatements, validateStatements)
 import Types
 import Syntax
@@ -475,9 +475,9 @@ cachedFilesystemSnapshot = consumeFilesystemSnapshot (pure ())
 consumeFilesystemSnapshot :: IO () -> String -> (Modules.Resolver, FilePath, String) -> IO (Result Program String)
 consumeFilesystemSnapshot beforeParse stage (resolver, entry, input) = do
     key <- Exception.evaluate (force input)
-    let parser decls source = unsafePerformIO (beforeParse >> Exception.evaluate (TersusParser.parseFileWith decls source))
+    let loader request = unsafePerformIO (beforeParse >> Exception.evaluate (sourceLoader request))
     packageStage (packageStageName stage entry) key
-        (validatedPackage entry (Modules.loadFromEntryWith parser resolver entry))
+        (validatedPackage entry (Modules.loadFromEntryWith loader resolver entry))
 
 programFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
 programFromFiles = programFromFilesWith Modules.defaultLoadOptions
@@ -520,10 +520,11 @@ matchesEmbeddedPackage path actual
     -- The cached tool is compiled by the bootstrap/oracle loader. Compare
     -- against that exact input, not a second production-parser reading.
     | otherwise = case Modules.loadFromEntry (resolverFromFiles files) (normalizePath path) of
-        Right (PackageResult embedded) -> show actual == show embedded
+        Right (PackageResult embedded) -> show (graphOf actual) == show (graphOf embedded)
         _ -> False
   where
     files = if normalizePath path == validationEntry then validationPackageFiles else toolPackageFiles
+    graphOf pkg = pkg{Modules.packageSnapshot = Modules.Snapshot (resolverFromFiles []) "" False}
 
 cachedFromPackage :: String -> FilePath -> [(FilePath, String)] -> IO (Result Program String)
 cachedFromPackage = cachedFromPackageWith Modules.defaultLoadOptions
@@ -547,7 +548,7 @@ validatedPackage path loaded = case loaded of
     Left err -> Error err
     Right (PackageResult pkg)
         | matchesEmbeddedPackage path pkg -> toolProgram (normalizePath path)
-        | otherwise -> compileModulesValidated pkg
+        | otherwise -> compileModulesValidated (Modules.packageSnapshot pkg)
     Right _ -> Error (path ++ " is not in a package")
 
 packageStage :: String -> String -> Result Program String -> IO (Result Program String)

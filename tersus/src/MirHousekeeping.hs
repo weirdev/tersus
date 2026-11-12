@@ -51,9 +51,8 @@ import System.Info (os, arch)
 import System.Exit (ExitCode (..))
 
 import Hash (fingerprint)
-import ElaborateRequest (Elaborator)
-import ElaboratorTool (bootstrapElaborator)
-import LibPackage (LibPackage, compileLibPackageWith, libPackage, nativeStorageUnits)
+import ElaboratorTool (Loader, bootstrapLoader)
+import LibPackage (LibPackage, libPackage, nativeStorageUnits)
 import Link (linkPrograms)
 import LlvmRuntime (runtimeSource)
 import Mir
@@ -65,7 +64,7 @@ import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (cachedFrontendSeed, cachedSeed, cachedParserSeed, frontendSeedHash, seedHash, parserSeedHash)
 import Compile (lowerSource)
-import Modules (LoadedPackage, ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
+import Modules (ModuleId, Snapshot (..), resolverFromFiles)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, boxSource, listsSource, mirPackageFiles, parserPackageFiles, toolPackageFiles, validationPackageFiles)
 import Types (Type (..))
@@ -296,9 +295,9 @@ nativeTools = do
         Error e -> pure (Tools (ToolFailed e) (ToolFailed e))
         Ok () -> do
             built <- parallelBuilds [cachedEmitterExe, cachedTool "mir-verify" mirVerifyEntry,
-                cachedTool "mir-erase" mirEraseEntry, cachedParserExe, cachedUncheckedValidatorExe]
+                cachedTool "mir-erase" mirEraseEntry, cachedUncheckedValidatorExe]
             pure $ case built of
-                [Ok _, Ok checker, Ok eraser, Ok _, Ok _] -> Tools (ToolNative checker) (ToolNative eraser)
+                [Ok _, Ok checker, Ok eraser, Ok _] -> Tools (ToolNative checker) (ToolNative eraser)
                 _ -> case [e | Error e <- built] of
                     e : _ -> Tools (ToolFailed e) (ToolFailed e)
                     [] -> Tools (ToolFailed "incomplete native tool build") (ToolFailed "incomplete native tool build")
@@ -694,20 +693,11 @@ toolProgram entry = unsafePerformIO $ do
             Ok program -> pure (Just program, Ok program)
 
 compileToolProgram :: FilePath -> Result Program String
-compileToolProgram entry = withToolPackage entry (compileToolWith bootstrapElaborator libPackage)
+compileToolProgram entry = toolProgramWith bootstrapLoader libPackage entry
 
--- A program the host compiles itself, its modules and the compiler libraries elaborated by the given elaborator
-toolProgramWith :: Elaborator -> FilePath -> Result Program String
-toolProgramWith elaborator entry = withToolPackage entry (compileToolWith elaborator (compileLibPackageWith elaborator))
-
-compileToolWith :: Elaborator -> Result LibPackage String -> LoadedPackage -> Result Program String
-compileToolWith elaborator libraries pkg = compileModulesUsing elaborator libraries pkg `bindResult` lowerCompiledPackage pkg
-
-withToolPackage :: FilePath -> (LoadedPackage -> Result Program String) -> Result Program String
-withToolPackage entry compile = case loadFromEntry (resolverFromFiles files) entry of
-    Left e -> Error e
-    Right (PackageResult pkg) -> compile pkg
-    Right (StandaloneResult _ _) -> Error ("internal: " ++ entry ++ " is not in an embedded tool package")
+-- A program the host compiles itself, with the given loader and the compiler libraries it elaborated
+toolProgramWith :: Loader -> Result LibPackage String -> FilePath -> Result Program String
+toolProgramWith loader libraries entry = compileModulesUsing loader libraries (Snapshot (resolverFromFiles files) entry False) `bindResult` lowerCompiledPackage
   where
     files = if entry == validationEntry then validationPackageFiles else toolPackageFiles
 

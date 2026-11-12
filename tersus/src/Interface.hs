@@ -6,7 +6,7 @@ module Interface
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import Modules (ModuleId (..))
+import PackageData (ModuleId (..))
 import Syntax
 import Types
 import Elaboration (Template)

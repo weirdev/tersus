@@ -40,8 +40,8 @@ import qualified Pipeline
 import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, toolPackageFiles, mirPackageFiles)
 import Hash (fingerprint)
 import Seed (cachedParserSeed, frontendSeedHash, parserSeedHash, seedHash, compilerSnapshotHash)
-import qualified SourceParse
 import qualified TersusParser
+import TestParser (libraryDecls, packageFileDecls, pairedWith)
 import TestHarness
 import Utils
 
@@ -249,14 +249,22 @@ wrongSeed variable home = do
 
 failureCase :: String -> String -> IO TestResult
 failureCase mode expected = inFreshWorker mode setup $ do
-    result <- evaluate (Pipeline.compileSource "return 17;")
+    -- (the backend selects the parser executable; compiling a program does not run one)
+    result <- if mode == "haskell-refused"
+        then evaluate (either Error (const (Ok ())) (TersusParser.parseFileWith emptyDecls "return 17;"))
+        else evaluate (mapResult (const ()) (Pipeline.compileSource "return 17;"))
     pure $ case result of
         Error err -> firstFailure
             [ testAssertErrorContains expected (Error err :: Result () String)
-            , testAssertTrue ("Parser tool failure:" `isPrefixOf` err || "Unknown TERSUS_PARSER" `isPrefixOf` err)
+            , testAssertTrue (tool `isPrefixOf` err)
             ]
         Ok _ -> Just "a failed bootstrap was hidden by another parser"
   where
+    -- (the tool that fails, in its own words)
+    tool = case mode of
+        "emitter-corrupt" -> "The emitter bootstrap seed"
+        "haskell-refused" -> "Unknown TERSUS_PARSER"
+        _ -> "Parser tool failure:"
     setup home = case mode of
         "emitter-corrupt" -> wrongSeed "TERSUS_SEED_FILE" home
         "parser-corrupt" -> wrongSeed "TERSUS_PARSER_SEED_FILE" home
@@ -273,6 +281,10 @@ failureCase mode expected = inFreshWorker mode setup $ do
                     Nothing -> pure ()) ["sha256sum", "shasum", "curl"]
             pure [("PATH", bin)]
         _ -> fail ("unknown bootstrap control: " ++ mode)
+
+resultToEither :: Result a String -> Either String a
+resultToEither (Ok a) = Right a
+resultToEither (Error e) = Left e
 
 withSetting :: String -> Maybe String -> IO a -> IO a
 withSetting name value action = bracket (lookupEnv name) restore $ \_ -> do
@@ -349,13 +361,15 @@ retryStagesRecipe = inPrimedWorker "repair" ["parser-seed-", "tersus-parser-", "
                 case found of
                     Nothing -> pure ()
                     Just path -> createFileLink path (bin </> name)) ["sha256sum", "shasum"]
-            sourceFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.toolParseSource "return 41;")
+            sourceFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (pure (resultToEither (Compile.parseSource "return 41;")))
             nativeFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.parseFileNative emptyDecls "return 42;")
             clangFailed <- withSetting "PATH" (Just bin) (TersusParser.parseFileNative emptyDecls "return 42;")
             evictEmitterSeed
             emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) (TersusParser.parseFileNative emptyDecls "return 42;")
             nativeReady <- TersusParser.parseFileNative emptyDecls "return 42;"
-            sourceReady <- TersusParser.toolParseSource "return 43;"
+            let sourceReady = case Compile.parseSource "return 43;" `bindResult` AstData.writeParsed of
+                    Ok wire -> Right wire
+                    Error e -> Left e
             case firstFailure [refused "source P0" sourceFailed, refused "native P0" nativeFailed, refused "clang" clangFailed, refused "emitter E0" emitterFailed, parsed nativeReady, sourceValue sourceReady] of
                 Just e -> pure (Just e)
                 Nothing -> do
@@ -466,7 +480,7 @@ coldStages = do
             source <- timed "source" (evaluate (Pipeline.compileSource "return 42;"))
             package <- timed "user package" $ evaluate $ case Pipeline.loadFromEntry (resolver userPackage) "bootstrapprobe/main.tersus" of
                 Left e -> Error e
-                Right (PackageResult pkg) -> Pipeline.compileModulesValidated pkg
+                Right (PackageResult pkg) -> Pipeline.compileModulesValidated (Modules.packageSnapshot pkg)
                 Right _ -> Error "the importing user program is not a package"
             emitterIdentity <- Housekeeping.emitterKey
             parserIdentity <- TersusParser.parserKey
@@ -615,64 +629,44 @@ parserFixpointRecipe = inPrimedWorker "fixpoint" [] $ do
                             Right _ -> atomicModifyIORef' replies (\saved -> ((request, answer) : saved, ()))
                             Left _ -> pure ()
                         pure answer
-        zeroPackage = loadPackage (\decls source -> unsafePerformIO (p0File decls source))
-        onePackage = loadPackage (checkedParser p0File TersusParser.parseFileNative)
-    case (emitter, expected, compiledInput, zeroPackage, onePackage) of
-        (Ok exe, Ok currentIr, Ok actualInput, Ok a, Ok b)
-            | packageBytes a /= packageBytes b -> pure (Just "P0/P1 prepared current PACKAGE AST/imports/Marks/identities differ")
-            | otherwise -> case ownPackage a of
-                Error e -> pure (Just e)
-                Ok owned | writeProgram owned /= actualInput -> pure (Just "P0/P1 current checking/lowering/MIR differs")
-                Ok owned -> do
-                    regenerated <- Bootstrap.emitWith exe (writeProgram owned)
-                    case regenerated of
-                        Error e -> pure (Just e)
-                        Ok ir | encodeUtf8 ir /= encodeUtf8 currentIr -> pure (Just "regenerated current P1/P2 IR differs")
-                        Ok ir -> withDirectory $ \home -> do
-                            let two = home </> "parser-two"
-                            built <- buildExecutable two ir
-                            case built of
-                                Error e -> pure (Just e)
-                                Ok () -> do
-                                    let twoParser = ParserSeed.parseFileWithTool (pure (Ok two))
-                                        twoPackage = loadPackage (checkedParser p0File twoParser)
-                                    case twoPackage of
-                                        Error e -> pure (Just e)
-                                        Ok c | packageBytes b /= packageBytes c -> pure (Just "P1/P2 prepared current PACKAGE differs")
-                                        Ok _ -> case SourceParse.probeDecls of
-                                            Left e -> pure (Just e)
-                                            Right decls -> do
-                                                results <- forM ["return 42;", "s = \"λ🙂\"; return size(s.bytes);", "enum E { A, B }; enum E { C }; return E::C;", "import app::geo as g { Point }; return 0;"] $ \source -> do
-                                                    p0 <- p0File (locating decls) source
-                                                    p1 <- TersusParser.parseFileNative (locating decls) source
-                                                    p2 <- twoParser (locating decls) source
-                                                    pure (sameFile p0 p1 <> sameFile p1 p2)
-                                                pure (firstFailure results)
+        package = case Modules.loadFromEntry (resolverFromFiles toolPackageFiles) "lib/parser/parser.tersus" of
+            Left e -> Error e
+            Right (PackageResult pkg) -> Ok pkg
+            Right _ -> Error "parser was not loaded as its current package"
+    prepared <- case package of
+        Ok pkg -> packageFileDecls p0File pkg
+        Error e -> pure (Left e)
+    case (emitter, expected, compiledInput, package, (,) <$> libraryDecls <*> prepared) of
+        (Ok exe, Ok currentIr, Ok actualInput, Ok pkg, Right (decls, files)) -> do
+            let samples = ["return 42;", "s = \"\955\128578\"; return size(s.bytes);", "enum E { A, B }; enum E { C }; return E::C;", "import app::geo as g { Point }; return 0;"]
+                parity parsers = fmap firstFailure $ sequence $
+                    [pairedWith True parsers declared source | (source, declared) <- files]
+                        ++ [pairedWith False parsers (locating decls) source | source <- samples]
+            current <- parity [p0File, TersusParser.parseFileNative]
+            case current of
+                Just e -> pure (Just ("P0/P1 prepared current files differ: " ++ e))
+                Nothing -> case ownPackage pkg of
+                    Error e -> pure (Just e)
+                    Ok owned | writeProgram owned /= actualInput -> pure (Just "P0/P1 current checking/lowering/MIR differs")
+                    Ok owned -> do
+                        regenerated <- Bootstrap.emitWith exe (writeProgram owned)
+                        case regenerated of
+                            Error e -> pure (Just e)
+                            Ok ir | encodeUtf8 ir /= encodeUtf8 currentIr -> pure (Just "regenerated current P1/P2 IR differs")
+                            Ok ir -> withDirectory $ \home -> do
+                                let two = home </> "parser-two"
+                                built <- buildExecutable two ir
+                                case built of
+                                    Error e -> pure (Just e)
+                                    Ok () -> fmap (fmap ("P1/P2 prepared current files differ: " ++)) (parity [TersusParser.parseFileNative, ParserSeed.parseFileWithTool (pure (Ok two))])
         (Error e, _, _, _, _) -> pure (Just e)
         (_, Error e, _, _, _) -> pure (Just e)
         (_, _, Error e, _, _) -> pure (Just e)
         (_, _, _, Error e, _) -> pure (Just e)
-        (_, _, _, _, Error e) -> pure (Just e)
+        (_, _, _, _, Left e) -> pure (Just e)
   where
-    packageBytes = encodeUtf8 . show
-    loadPackage parser = case Modules.loadFromEntryWith parser (resolverFromFiles toolPackageFiles) "lib/parser/parser.tersus" of
-        Left e -> Error e
-        Right (PackageResult pkg) -> Ok pkg
-        Right _ -> Error "parser was not loaded as its current package"
-    ownPackage pkg = PackageCompile.compileModulesLinked pkg `bindResult` \program ->
+    ownPackage pkg = PackageCompile.compileModulesLinked (Modules.packageSnapshot pkg) `bindResult` \program ->
         Housekeeping.nativeProgram program `bindResult` insertOwnership
-    checkedParser reference current decls source = unsafePerformIO $ do
-        p0 <- reference decls source
-        pn <- current decls source
-        pure $ case (p0, pn) of
-            (Left e, Left _) | not (ParserSeed.toolFailure e) -> pn
-            _ -> case sameFile p0 pn of
-                Nothing -> pn
-                Just e -> Left (ParserSeed.failure ("prepared package file parity: " ++ e))
-    sameFile (Right (a, da)) (Right (b, db)) = testAssertEq a b <>
-        testAssertEq (mapResult encodeUtf8 (File.writeParsedFile a da)) (mapResult encodeUtf8 (File.writeParsedFile b db))
-    sameFile (Left e) _ = Just e
-    sameFile _ (Left e) = Just e
 
 overlapControls :: IO TestResult
 overlapControls = do

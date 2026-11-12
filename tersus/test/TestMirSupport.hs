@@ -153,7 +153,7 @@ emitterSourceSnapshot = do
 emitterImportRefusal :: TestResult
 emitterImportRefusal = case Mod.loadFromEntry (Mod.resolverFromFiles changed) "lib/mir/emit/emit.tersus" of
     Left err -> Just ("removing the values import unexpectedly failed loading: " ++ err)
-    Right (Mod.PackageResult pkg) -> testAssertErrorContains "covering import" (Package.compileModules pkg)
+    Right (Mod.PackageResult pkg) -> testAssertErrorContains "covering import" (Package.compileModules (Mod.packageSnapshot pkg))
     Right _ -> Just "emitter stopped being a package"
   where
     changed = [(path, if path == "lib/mir/emit/functions.tersus" then unlines (filter (not . isPrefixOf "import mir::emit::values ") (lines source)) else source) | (path, source) <- mirPackageFiles]
@@ -235,8 +235,8 @@ toolSnapshots = [(name, snapshot name) | name <- ["emit", "mir_verify", "mir_era
   where
     snapshot name = case Mod.loadFromEntry (Mod.resolverFromFiles mirPackageFiles) ("lib/mir/" ++ name ++ "/" ++ name ++ ".tersus") of
         Left err -> Error err
-        Right (Mod.PackageResult loaded) -> Package.compileModules loaded `bindResult` \compiled ->
-            mapResult (\program -> (loaded, compiled, program)) (Package.lowerCompiledPackage loaded compiled)
+        Right (Mod.PackageResult loaded) -> Package.compileModules (Mod.packageSnapshot loaded) `bindResult` \compiled ->
+            mapResult (\program -> (loaded, compiled, program)) (Package.lowerCompiledPackage compiled)
         Right _ -> Error "MIR tool snapshot did not load as a package"
 
 inspect :: Result a String -> (a -> TestResult) -> TestResult

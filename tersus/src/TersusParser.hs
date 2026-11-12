@@ -1,23 +1,17 @@
 module TersusParser
-    ( parseSource
-    , parseSourceParts
-    , parseSourcePartsNoPrelude
-    , parseFileWith
+    ( parseFileWith
     , parseFileNative
     , parserExecutable
     , parseFileInterpreted
-    , toolParseSource
     , runParserTool
     , runParserToolInterpreted
     , parserToolInput
     , parserResponse
     , emitParserIr
     , ownedParserProgram
-    , parseWithEquality
     , parserKey
     ) where
 
-import Control.Exception (evaluate)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import System.Environment (lookupEnv)
 import System.Directory (doesFileExist)
@@ -28,31 +22,13 @@ import qualified AstData as A
 import qualified FileParserProtocol as File
 import qualified ParsedFile as FileData
 import qualified ParserSeed
-import SourceParse (SourceParts, parseSourcePartsWith, parseWithEqualityWith)
 import Mir (Program)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirHousekeeping (cachedParser, insertOwnership, nativeProgram, parserKey, parserIr, toolProgram)
 import Native (runWithInputFull)
 import Seed (cachedParserSeed)
-import Syntax (Statement)
 import ValidatorNative (cachedBootstrapEmitter)
 import Utils
-
-parseSource :: String -> Result [Statement] String
-parseSource source = mapResult (\(_, library, body) -> library ++ body) (parseSourceParts True source)
-
-parseSourceParts :: Bool -> String -> Result SourceParts String
-parseSourceParts reserving = parseSourcePartsNoPrelude False reserving
-
-parseSourcePartsNoPrelude :: Bool -> Bool -> String -> Result SourceParts String
-parseSourcePartsNoPrelude noPrelude reserving source = unsafePerformIO $ do
-    selected <- parserBackend
-    pure $ case selected of
-        Left e -> Error e
-        Right _ -> parseSourcePartsWith parseFileWith reserving noPrelude source
-
-parseWithEquality :: String -> Either String [Statement]
-parseWithEquality = parseWithEqualityWith parseFileWith
 
 parserBackend :: IO (Either String String)
 parserBackend = do
@@ -92,16 +68,6 @@ parseFileInterpreted declarations source = case File.writeFileRequest declaratio
             Right text -> case File.readParsedFile text of
                 Error e -> Left (failure ("invalid file reply: " ++ e))
                 Ok parsed -> Right parsed
-
--- The exact production source orchestration with the native parser.
-toolParseSource :: String -> IO (Either String String)
-toolParseSource source = do
-    parsed <- evaluate (parseSourcePartsWith (\declared text -> unsafePerformIO (parseFileNative declared text)) True False source)
-    pure $ case parsed of
-        Error e -> Left e
-        Ok (_, library, body) -> case A.writeParsed (library ++ body) of
-            Error e -> Left (failure e)
-            Ok text -> Right text
 
 -- The parsed-AST stream protocol remains useful for exact stdout tests and the tiny
 -- interpreted smoke set; the file protocol transports imports and declaration seeds.

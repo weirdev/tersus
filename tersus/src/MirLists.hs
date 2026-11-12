@@ -10,10 +10,10 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, listToMaybe)
 
-import LibParsed (nativeStorageModules)
+import PreludeSource (nativeStorageModules)
 import Link (linkPrograms)
 import LibPackage (libModuleId, stripDeclaredFromUnits)
-import Modules (ModuleId (..))
+import PackageData (ModuleId (..))
 import Utils (Result (..), bindResult, mapResult)
 import Mir
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, instanceName, mentionsParameter)

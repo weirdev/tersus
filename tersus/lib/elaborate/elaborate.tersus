@@ -6,13 +6,14 @@ import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
 import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, definedFunctions, entryOf, implsEq, libIndex, libraryContexts, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
-import elaborate::resolve { Line, Pkg, moduleKey, noPackage, readLine, readPackage, wordIs };
+import elaborate::resolve { Line, Pkg, moduleKey, noPackage, readLine, wordIs };
 import elaborate::rewrite { Prepared, prepareModule };
 import elaborate::out { emit, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, Defining, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope };
 import elaborate::traits { argListOf, boundsOf, checkDefinitions, emptyTemplate };
+import elaborate::units { answerLoad };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
 // response on standard output (AST_DATA.md). It answers `unmodelled` for what it does not handle yet.
@@ -347,26 +348,6 @@ fn gatherSignatures(st: St, stmts: &List<Int>) -> St ~ {
     return St { fns: fns, ..st };
 };
 
-fn respond(st: &St, program: &AstProgram, iface: &AstProgram, hasInterface: Bool, libraries: &List<String>) -> Int ~ {
-    n = "tersus-elaborated 1\n".print();
-    if st.status = 0 {
-        n = n + "accepted\ndata".print() + printIntWord(size(program.nodes) + 2) + "\n".print();
-        n = n + printAst(program);
-        if !hasInterface { n = n + "interface none\n".print(); } else {
-            n = n + "interface\ndata".print() + printIntWord(size(iface.nodes) + 2) + "\n".print();
-            n = n + printAst(iface);
-        };
-        if size(libraries) = 0 { return n; };
-        n = n + "libraries".print() + printIntWord(size(libraries));
-        for l in libraries { n = n + " ".print() + printQuoted(l); };
-        return n + "\n".print();
-    };
-    if st.status = 2 { return n + "unmodelled ".print() + printQuoted(&st.msg) + "\n".print(); };
-    if st.status = 3 { return n + "interfaceRefused ".print() + printQuoted(&st.msg) + "\n".print(); };
-    if st.status = 4 { return n + "unresolved ".print() + printQuoted(&st.msg) + "\n".print(); };
-    return n + "refused ".print() + printQuoted(&st.msg) + "\n".print();
-};
-
 fn noBases() -> HashMap<String, Int> ~ { return HashMap::new(); };
 
 fn unresolvedState(st: St, msg: String) -> St ~ {
@@ -409,7 +390,7 @@ fn joinBlock(p: Program, block: &AstProgram) -> Program ~ {
 
 struct Sections { ok: Bool, given: Bool, catalog: Catalog, pkg: Pkg, program: Program };
 
-fn readSections(key: &String) -> Sections ~ {
+fn readSections() -> Sections ~ {
     bad = Sections { ok: false, given: false, catalog: Catalog { ok: false, libs: [] }, pkg: noPackage(), program: Program { nodes: [], roots: [] } };
     next = readLine();
     catalog = Catalog { ok: true, libs: [] };
@@ -419,28 +400,11 @@ fn readSections(key: &String) -> Sections ~ {
         if !catalog.ok { return bad; };
         next = readLine();
     };
-    pkg = noPackage();
-    if wordIs(&next, 0, "package") {
-        pkg = readPackage(&next);
-        if !pkg.ok { return bad; };
-        next = readLine();
-    };
-    fileCount = 1;
-    if pkg.present {
-        fileCount = 0;
-        for f in &pkg.files { if f.key = clone(key) { fileCount = fileCount + 1; }; };
-    };
-    if fileCount = 0 { return bad; };
-    program = Program { nodes: [], roots: [] };
-    for i in 0..fileCount {
-        if i > 0 { next = readLine(); };
-        block = readBlockAfter(&next);
-        if !block.ok || block.value.stage != "parsed" { return bad; };
-        program = joinBlock(program, &block.value);
-    };
+    block = readBlockAfter(&next);
+    if !block.ok || block.value.stage != "parsed" { return bad; };
     end = readRecord();
     if !end.ok || end.pos != 0 { return bad; };
-    return Sections { ok: true, given: given, catalog: catalog, pkg: pkg, program: program };
+    return Sections { ok: true, given: given, catalog: catalog, pkg: noPackage(), program: joinBlock(Program { nodes: [], roots: [] }, &block.value) };
 };
 
 fn givenState(g: Given) -> St ~ { return g.st; };
@@ -566,156 +530,227 @@ fn malformed() -> Int ~ {
     return 1;
 };
 
-st = newState();
-header = readLine();
-if !wordIs(&header, 0, "tersus-elaborate") || !wordIs(&header, 1, "1") { return malformed(); };
-moduleLine = readLine();
-predeclare = readLine();
-library = readLine();
-extract = readLine();
-if !wordIs(&moduleLine, 0, "module") || size(moduleLine.words) != 3 || !get(moduleLine.words, 1).quoted || size(predeclare.words) != 2 || size(library.words) != 2 || size(extract.words) != 2 || !wordIs(&predeclare, 0, "predeclare") || !wordIs(&library, 0, "library") || !wordIs(&extract, 0, "extract") { return malformed(); };
-hasModule = get(moduleLine.words, 2).quoted;
-if !hasModule && !wordIs(&moduleLine, 2, "none") { return malformed(); };
-builtinsLine = readLine();
-if !wordIs(&builtinsLine, 0, "builtins") { return malformed(); };
-// (`builtins checked N`: the first N statements of the program are libraries whose functions with bounds were checked
-// where the libraries were defined)
-checkedItems = 0;
-if size(builtinsLine.words) != 1 {
-    if size(builtinsLine.words) != 3 || !wordIs(&builtinsLine, 1, "checked") { return malformed(); };
-    checkedCount = intAt(&builtinsLine.words, 2);
-    if !checkedCount.ok || checkedCount.value < 1 { return malformed(); };
-    checkedItems = checkedCount.value;
+// One module's elaboration (ElaborateRequest.Request): read from a module request, or made by a load (elaborate::units)
+struct Unit {
+    pkgName: String, modu: String, hasModule: Bool, predeclaring: Bool, viewing: Bool, extracting: Bool, libExtract: Bool,
+    ifaces: List<AstProgram>, ifaceKeys: List<String>, definitions: List<List<AstProgram>>, definitionKeys: List<List<String>>,
+    hasCatalog: Bool, catalog: Catalog, pkg: Pkg, program: Program,
+    // (how many of the program's first statements are libraries whose functions with bounds were checked where the
+    // libraries were defined)
+    checked: Int
 };
-table = readBlock();
-if !table.ok { return malformed(); };
-countLine = readLine();
-if !wordIs(&countLine, 0, "interfaces") || size(countLine.words) != 2 { return malformed(); };
-count = intAt(&countLine.words, 1);
-if !count.ok || count.value < 0 { return malformed(); };
-ifaces = [];
-ifaceKeys = [];
-seenBlocks = HashMap::new();
-for i in 0..count.value {
-    read = readCachedBlock(seenBlocks);
-    seenBlocks = read.seen;
-    b = read.block;
-    if !b.ok || b.value.stage != "interface" { return malformed(); };
-    ifaces = push(ifaces, b.value);
-    ifaceKeys = push(ifaceKeys, read.key);
+
+// status: St.status, or -1 when the request does not give a library it names
+struct Answer { status: Int, msg: String, out: AstProgram, iface: AstProgram, extracting: Bool, selected: List<String> };
+
+fn unitAnswer(st: &St, out: AstProgram, iface: AstProgram, extracting: Bool, selected: List<String>) -> Answer ~ {
+    return Answer { status: st.status, msg: clone(st.msg), out: out, iface: iface, extracting: extracting, selected: selected };
 };
-definitionsLine = readLine();
-if !wordIs(&definitionsLine, 0, "definitions") || size(definitionsLine.words) != 2 { return malformed(); };
-definitionCount = intAt(&definitionsLine.words, 1);
-if !definitionCount.ok || definitionCount.value < 0 { return malformed(); };
-definitions = [];
-definitionKeys = [];
-for i in 0..definitionCount.value {
-    contextLine = readLine();
-    if !wordIs(&contextLine, 0, "definition") || size(contextLine.words) != 2 { return malformed(); };
-    contextCount = intAt(&contextLine.words, 1);
-    if !contextCount.ok || contextCount.value < 1 { return malformed(); };
-    context = [];
-    keys = [];
-    for j in 0..contextCount.value {
+
+fn noProgram(stage: String) -> AstProgram ~ { return AstProgram { stage: stage, nodes: [], root: 0 }; };
+
+fn malformedAnswer() -> Answer ~ {
+    return Answer { status: 0 - 1, msg: "", out: noProgram("elaborated"), iface: noProgram("interface"), extracting: false, selected: [] };
+};
+
+fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, AstProgram>) -> Answer ~ {
+    st = newState();
+    modKey = moduleKey(&unit.pkgName, &unit.modu, unit.hasModule);
+    program = unit.program;
+    catalog = unit.catalog;
+    pkg = unit.pkg;
+    ifaces = unit.ifaces;
+    ifaceKeys = unit.ifaceKeys;
+    givenDefinitions = unit.definitions;
+    givenDefinitionKeys = unit.definitionKeys;
+    raw = statementsOf(&program);
+    probe = Probe { declared: [], mentioned: HashSet::new(), literal: false };
+    if unit.hasCatalog { probe = probeModule(&program.nodes, &raw, &ifaces); };
+    prepared = preparedProgram(program, raw, &pkg, &modKey);
+    stmts = prepared.stmts;
+    st = St { nodes: prepared.nodes, checkedItems: unit.checked, storageCopies: unit.pkgName = "tersuslib" && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
+    if unit.hasModule && unit.pkgName = "tersuslib" && unit.modu = "prelude" { st = St { sequenceTraits: st.sequenceTraits.insert("Sequence").insert("Growable"), ..st }; };
+    if !prepared.ok { st = unresolvedState(st, prepared.msg); };
+    st = loadBuiltins(st, table);
+    selected = [];
+    if unit.hasCatalog && st.status = 0 { selected = librariesFor(&probe); };
+    given = giveLibraries(st, &catalog, &selected, &stmts, seenBlocks, pkg.present, &modKey);
+    if given.status = 1 { return malformedAnswer(); };
+    bases = clone(given.bases);
+    st = givenState(given);
+    contexts = withLibraryContexts(&catalog.libs, &selected, seenBlocks, &givenDefinitions, &givenDefinitionKeys);
+    if !contexts.ok { return malformedAnswer(); };
+    definitions = contexts.contexts;
+    definitionKeys = contexts.keys;
+    // (an interface a defining context carries again is read where its records already are, so that its templates are
+    // those the module imported)
+    k = 0;
+    while k < size(ifaces) && k < size(ifaceKeys) [{ affirm k >= 0; }] shrinks size(ifaces) - k {
+        st = appendInterface(st, &get(ifaces, k));
+        bases = bases.insert(clone(get(ifaceKeys, k)), st.n);
+        st = loadInterface(st, &get(ifaces, k), st.n);
+        k = k + 1;
+    };
+    k = 0;
+    while k < size(definitions) && k < size(definitionKeys) [{ affirm k >= 0; }] shrinks size(definitions) - k {
+        context = clone(get(definitions, k));
+        keys = clone(get(definitionKeys, k));
+        contextBases = [];
+        j = 0;
+        while j < size(context) && j < size(keys) [{ affirm j >= 0; }] shrinks size(context) - j {
+            key = clone(get(keys, j));
+            if !HashMap::contains(&bases, &key) {
+                st = appendInterface(st, &get(context, j));
+                bases = bases.insert(clone(key), st.n);
+            };
+            contextBases = push(contextBases, HashMap::lookup(&bases, &key, 0));
+            j = j + 1;
+        };
+        st = definingContext(st, &context, &contextBases);
+        k = k + 1;
+    };
+    if unit.viewing {
+        for o in clone(st.ownerViews) {
+            if !HashMap::contains(&st.types, &o) { st = St { types: st.types.insert(clone(o), push([], clone(o))), ..st }; };
+        };
+    };
+    if st.status = 0 {
+        st = gatherSignatures(st, &stmts);
+        if unit.predeclaring {
+            st = predeclareOwn(st, &stmts);
+            st = checkOwnFinite(st, &stmts);
+        };
+        if st.status = 0 { st = checkStatements(st, true, &stmts); };
+    };
+    out = noProgram("elaborated");
+    iface = noProgram("interface");
+    if st.status = 0 {
+        statementsNode = st.te.node;
+        types = clone(st.te.types);
+        st = checkDefinitions(st);
+        st = emitTypes(st, &types);
+        if st.status = 0 {
+            st = emit(st, AstNode::Elaborated { value: AstElaborated { statements: statementsNode, types: st.nid } });
+            out = reorderArena(&st.nodes, st.nid, "elaborated");
+            if unit.extracting {
+                elaborated = listItems(&st.nodes, statementsNode);
+                st = extractInterface(st, unit.libExtract, clone(unit.pkgName), clone(unit.modu), unit.hasModule, &stmts, &elaborated);
+                if st.status = 0 { iface = reorderArena(&st.nodes, st.nid, "interface"); };
+            };
+        };
+    };
+    return unitAnswer(&st, out, iface, unit.extracting, selected);
+};
+
+fn printAnswer(a: &Answer) -> Int ~ {
+    n = "tersus-elaborated 1\n".print();
+    return n + printAnswerBody(a);
+};
+
+fn printAnswerBody(a: &Answer) -> Int ~ {
+    n = 0;
+    if a.status = 0 {
+        n = n + "accepted\ndata".print() + printIntWord(size(a.out.nodes) + 2) + "\n".print();
+        n = n + printAst(&a.out);
+        if !a.extracting { n = n + "interface none\n".print(); } else {
+            n = n + "interface\ndata".print() + printIntWord(size(a.iface.nodes) + 2) + "\n".print();
+            n = n + printAst(&a.iface);
+        };
+        if size(a.selected) = 0 { return n; };
+        n = n + "libraries".print() + printIntWord(size(a.selected));
+        for l in &a.selected { n = n + " ".print() + printQuoted(l); };
+        return n + "\n".print();
+    };
+    if a.status = 2 { return n + "unmodelled ".print() + printQuoted(&a.msg) + "\n".print(); };
+    if a.status = 3 { return n + "interfaceRefused ".print() + printQuoted(&a.msg) + "\n".print(); };
+    if a.status = 4 { return n + "unresolved ".print() + printQuoted(&a.msg) + "\n".print(); };
+    return n + "refused ".print() + printQuoted(&a.msg) + "\n".print();
+};
+
+// A module request (AST_DATA.md, "Elaboration requests"), after its header and module lines
+fn answerModule(moduleLine: &Line) -> Int ~ {
+    predeclare = readLine();
+    library = readLine();
+    extract = readLine();
+    if !wordIs(moduleLine, 0, "module") || size(moduleLine.words) != 3 || !get(moduleLine.words, 1).quoted || size(predeclare.words) != 2 || size(library.words) != 2 || size(extract.words) != 2 || !wordIs(&predeclare, 0, "predeclare") || !wordIs(&library, 0, "library") || !wordIs(&extract, 0, "extract") { return malformed(); };
+    hasModule = get(moduleLine.words, 2).quoted;
+    if !hasModule && !wordIs(moduleLine, 2, "none") { return malformed(); };
+    builtinsLine = readLine();
+    if !wordIs(&builtinsLine, 0, "builtins") { return malformed(); };
+    // (`builtins checked N`: the first N statements of the program are libraries whose functions with bounds were checked
+    // where the libraries were defined)
+    checkedItems = 0;
+    if size(builtinsLine.words) != 1 {
+        if size(builtinsLine.words) != 3 || !wordIs(&builtinsLine, 1, "checked") { return malformed(); };
+        checkedCount = intAt(&builtinsLine.words, 2);
+        if !checkedCount.ok || checkedCount.value < 1 { return malformed(); };
+        checkedItems = checkedCount.value;
+    };
+    table = readBlock();
+    if !table.ok { return malformed(); };
+    countLine = readLine();
+    if !wordIs(&countLine, 0, "interfaces") || size(countLine.words) != 2 { return malformed(); };
+    count = intAt(&countLine.words, 1);
+    if !count.ok || count.value < 0 { return malformed(); };
+    ifaces = [];
+    ifaceKeys = [];
+    seenBlocks = HashMap::new();
+    for i in 0..count.value {
         read = readCachedBlock(seenBlocks);
         seenBlocks = read.seen;
         b = read.block;
         if !b.ok || b.value.stage != "interface" { return malformed(); };
-        context = push(context, b.value);
-        keys = push(keys, read.key);
+        ifaces = push(ifaces, b.value);
+        ifaceKeys = push(ifaceKeys, read.key);
     };
-    definitions = push(definitions, context);
-    definitionKeys = push(definitionKeys, keys);
-};
-pkgName = clone(get(moduleLine.words, 1).text);
-modu = "";
-if hasModule { modu = clone(get(moduleLine.words, 2).text); };
-modKey = moduleKey(&pkgName, &modu, hasModule);
-sections = readSections(&modKey);
-if !sections.ok { return malformed(); };
-hasCatalog = sections.given;
-program = sections.program;
-catalog = sections.catalog;
-pkg = sections.pkg;
-raw = statementsOf(&program);
-probe = Probe { declared: [], mentioned: HashSet::new(), literal: false };
-if hasCatalog { probe = probeModule(&program.nodes, &raw, &ifaces); };
-prepared = preparedProgram(program, raw, &pkg, &modKey);
-stmts = prepared.stmts;
-st = St { nodes: prepared.nodes, checkedItems: checkedItems, storageCopies: pkgName = "tersuslib" && hasModule && (modu = "lists" || modu = "box"), ..st };
-if hasModule && pkgName = "tersuslib" && modu = "prelude" { st = St { sequenceTraits: st.sequenceTraits.insert("Sequence").insert("Growable"), ..st }; };
-if !prepared.ok { st = unresolvedState(st, prepared.msg); };
-st = loadBuiltins(st, &table.value);
-selected = [];
-if hasCatalog && st.status = 0 { selected = librariesFor(&probe); };
-given = giveLibraries(st, &catalog, &selected, &stmts, &seenBlocks, pkg.present, &modKey);
-if given.status = 1 { return malformed(); };
-bases = clone(given.bases);
-st = givenState(given);
-contexts = withLibraryContexts(&catalog.libs, &selected, &seenBlocks, &definitions, &definitionKeys);
-if !contexts.ok { return malformed(); };
-definitions = contexts.contexts;
-definitionKeys = contexts.keys;
-// (an interface a defining context carries again is read where its records already are, so that its templates are
-// those the module imported)
-k = 0;
-while k < size(ifaces) && k < size(ifaceKeys) [{ affirm k >= 0; }] shrinks size(ifaces) - k {
-    st = appendInterface(st, &get(ifaces, k));
-    bases = bases.insert(clone(get(ifaceKeys, k)), st.n);
-    st = loadInterface(st, &get(ifaces, k), st.n);
-    k = k + 1;
-};
-k = 0;
-while k < size(definitions) && k < size(definitionKeys) [{ affirm k >= 0; }] shrinks size(definitions) - k {
-    context = clone(get(definitions, k));
-    keys = clone(get(definitionKeys, k));
-    contextBases = [];
-    j = 0;
-    while j < size(context) && j < size(keys) [{ affirm j >= 0; }] shrinks size(context) - j {
-        key = clone(get(keys, j));
-        if !HashMap::contains(&bases, &key) {
-            st = appendInterface(st, &get(context, j));
-            bases = bases.insert(clone(key), st.n);
+    definitionsLine = readLine();
+    if !wordIs(&definitionsLine, 0, "definitions") || size(definitionsLine.words) != 2 { return malformed(); };
+    definitionCount = intAt(&definitionsLine.words, 1);
+    if !definitionCount.ok || definitionCount.value < 0 { return malformed(); };
+    definitions = [];
+    definitionKeys = [];
+    for i in 0..definitionCount.value {
+        contextLine = readLine();
+        if !wordIs(&contextLine, 0, "definition") || size(contextLine.words) != 2 { return malformed(); };
+        contextCount = intAt(&contextLine.words, 1);
+        if !contextCount.ok || contextCount.value < 1 { return malformed(); };
+        context = [];
+        keys = [];
+        for j in 0..contextCount.value {
+            read = readCachedBlock(seenBlocks);
+            seenBlocks = read.seen;
+            b = read.block;
+            if !b.ok || b.value.stage != "interface" { return malformed(); };
+            context = push(context, b.value);
+            keys = push(keys, read.key);
         };
-        contextBases = push(contextBases, HashMap::lookup(&bases, &key, 0));
-        j = j + 1;
+        definitions = push(definitions, context);
+        definitionKeys = push(definitionKeys, keys);
     };
-    st = definingContext(st, &context, &contextBases);
-    k = k + 1;
+    pkgName = clone(get(moduleLine.words, 1).text);
+    modu = "";
+    if hasModule { modu = clone(get(moduleLine.words, 2).text); };
+    modKey = moduleKey(&pkgName, &modu, hasModule);
+    sections = readSections();
+    if !sections.ok { return malformed(); };
+    predeclaring = wordIs(&predeclare, 1, "true");
+    viewing = wordIs(&library, 1, "true");
+    extracting = !wordIs(&extract, 1, "none");
+    if (!predeclaring && !wordIs(&predeclare, 1, "false")) || (!viewing && !wordIs(&library, 1, "false")) || (extracting && !wordIs(&extract, 1, "module") && !wordIs(&extract, 1, "lib")) { return malformed(); };
+    unit = Unit { pkgName: pkgName, modu: modu, hasModule: hasModule, predeclaring: predeclaring, viewing: viewing, extracting: extracting, libExtract: wordIs(&extract, 1, "lib"),
+        ifaces: ifaces, ifaceKeys: ifaceKeys, definitions: definitions, definitionKeys: definitionKeys,
+        hasCatalog: sections.given, catalog: sections.catalog, pkg: sections.pkg, program: sections.program, checked: checkedItems };
+    answer = elaborateUnit(&table.value, unit, &seenBlocks);
+    if answer.status < 0 { return malformed(); };
+    printAnswer(&answer);
+    return 0;
 };
-predeclaring = wordIs(&predeclare, 1, "true");
-viewing = wordIs(&library, 1, "true");
-extracting = !wordIs(&extract, 1, "none");
-if (!predeclaring && !wordIs(&predeclare, 1, "false")) || (!viewing && !wordIs(&library, 1, "false")) || (extracting && !wordIs(&extract, 1, "module") && !wordIs(&extract, 1, "lib")) { return malformed(); };
-if viewing {
-    for o in clone(st.ownerViews) {
-        if !HashMap::contains(&st.types, &o) { st = St { types: st.types.insert(clone(o), push([], clone(o))), ..st }; };
-    };
+
+header = readLine();
+if !wordIs(&header, 0, "tersus-elaborate") || !wordIs(&header, 1, "1") { return malformed(); };
+second = readLine();
+if wordIs(&second, 0, "load") {
+    if answerLoad(&second) != 0 { return 1; };
+} else {
+    if answerModule(&second) != 0 { return 1; };
 };
-if st.status = 0 {
-    st = gatherSignatures(st, &stmts);
-    if predeclaring {
-        st = predeclareOwn(st, &stmts);
-        st = checkOwnFinite(st, &stmts);
-    };
-    if st.status = 0 { st = checkStatements(st, true, &stmts); };
-};
-out = AstProgram { stage: "elaborated", nodes: [], root: 0 };
-iface = AstProgram { stage: "interface", nodes: [], root: 0 };
-if st.status = 0 {
-    statementsNode = st.te.node;
-    types = clone(st.te.types);
-    st = checkDefinitions(st);
-    st = emitTypes(st, &types);
-    if st.status = 0 {
-        st = emit(st, AstNode::Elaborated { value: AstElaborated { statements: statementsNode, types: st.nid } });
-        out = reorderArena(&st.nodes, st.nid, "elaborated");
-        if extracting {
-            elaborated = listItems(&st.nodes, statementsNode);
-            st = extractInterface(st, wordIs(&extract, 1, "lib"), pkgName, modu, hasModule, &stmts, &elaborated);
-            if st.status = 0 { iface = reorderArena(&st.nodes, st.nid, "interface"); };
-        };
-    };
-};
-respond(&st, &out, &iface, extracting, &selected);
