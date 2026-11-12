@@ -41,6 +41,12 @@ fn containsBlock(blocks: &List<Int>, id: Int) -> Bool {
     return false;
 };
 
+fn blockSet(blocks: &List<Int>) -> HashSet<Int> {
+    out = HashSet::new();
+    for block in blocks { out = out.insert(block); };
+    return out;
+};
+
 fn stepRange(steps: &List<ExecutionStep>, from: Int, to: Int) -> List<ExecutionStep> {
     out = [];
     for position in 0..size(steps) {
@@ -203,6 +209,8 @@ fn sweepReached(blocks: &HashMap<Int, ExecutionBlock>, start: Int, header: Int, 
 // and against what this sweep reached, never against the enclosing region.
 fn sweepGraphFault(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, reached: &List<Int>) -> Int {
     if size(reached) = 0 { return 9; };
+    active = blockSet(frame.active);
+    reachedSet = blockSet(reached);
     for position in 0..size(reached) {
         id = get(reached, position);
         if blocks.contains(id) {
@@ -210,28 +218,29 @@ fn sweepGraphFault(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, rea
             end = (*block).end;
             if end is ExecutionEnd::Loop {
                 inner = (end as ExecutionEnd::Loop).region;
-                if containsBlock(frame.active, id) { return 2; };
+                if active.contains(id) { return 2; };
                 if containsBlock(inner, id) = false { return 4; };
                 for innerPosition in 0..size(inner) {
                     member = get(inner, innerPosition);
                     if blocks.contains(member) = false { return 5; };
-                    if containsBlock(frame.active, member) { return 3; };
+                    if active.contains(member) { return 3; };
                     if member != id {
-                        if containsBlock(reached, member) { return 6; };
+                        if reachedSet.contains(member) { return 6; };
                     };
                 };
             };
         } else { return 1; };
     };
     if frame.header < 0 { return 0; };
+    region = blockSet(frame.region);
     for position in 0..size(reached) {
         id = get(reached, position);
-        if containsBlock(frame.region, id) = false {
+        if region.contains(id) = false {
             successors = sweepSuccessors(blocks, id);
             for successorPosition in 0..size(successors) {
                 target = get(successors, successorPosition);
                 if target = frame.header { return 7; };
-                if containsBlock(frame.region, target) { return 8; };
+                if region.contains(target) { return 8; };
             };
         };
     };
@@ -286,13 +295,11 @@ fn sweepTopologicalOrder(blocks: &HashMap<Int, ExecutionBlock>, header: Int, rea
 // arbitrary, then what the loop assumes, the candidates that are still
 // standing, and the header's own steps.
 fn loopEntryState(initial: &ExecutionState, havoc: &List<Int>, assumptions: &List<ExecutionStep>, candAssumes: &List<ExecutionStep>, steps: &List<ExecutionStep>) -> ExecutionResult {
-    arbitrary = clone(initial);
-    for position in 0..size(havoc) {
-        changed = executeSteps(clone(arbitrary), push([], ExecutionStep::Havoc { local: get(havoc, position) }));
-        if changed.status != 0 { return ExecutionResult { status: changed.status, failedAt: -1, state: changed.state }; };
-        arbitrary = changed.state;
-    };
-    assumed = executeSteps(arbitrary, assumptions);
+    havocSteps = [];
+    for position in 0..size(havoc) { havocSteps = push(havocSteps, ExecutionStep::Havoc { local: get(havoc, position) }); };
+    changed = executeSteps(clone(initial), havocSteps);
+    if changed.status != 0 { return ExecutionResult { status: changed.status, failedAt: -1, state: changed.state }; };
+    assumed = executeSteps(changed.state, assumptions);
     if assumed.status != 0 { return assumed; };
     assumed = executeSteps(assumed.state, candAssumes);
     if assumed.status != 0 { return assumed; };
