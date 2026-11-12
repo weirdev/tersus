@@ -1,4 +1,4 @@
-import validation::execution { assumeBooleanFact, assumeRelation, checkNear, contextSizes, entailsIn, executeIndexed, goalInSlices, indexTo, localGoal, maxScopeDepth, quietStep };
+import validation::execution { assumeBooleanFact, assumeBooleanTest, assumeRelation, checkNear, contextSizes, entailsIn, executeIndexed, goalInSlices, indexTo, localGoal, maxScopeDepth, quietStep };
 import validation::joins { commonContext, emptyContext, leastTermInUse, linkAppend, linkedItems, mergeArrivals, noLinks };
 import validation::loopInference { copyPartners, inferLoopCandidateGoals, loopMentions };
 import validation::model { Arrival, CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, ForallTemplate, HullLinks, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StepsRun, SweepOrder, SweepResult, TrailEntry, Trunk, TrunkAnswer, TrunkRun, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
@@ -735,7 +735,8 @@ fn loopSplit(trunk: Trunk, tests: &List<LoopTest>, prior: Int, priorOther: Int) 
         if terms.found = false { return splitFailure(trunk); };
         ta = terms.left;
         tb = terms.right;
-        pathFacts = assumeRelation(clone(negated), test.relation, ta, tb);
+        // (an = or != test against a Boolean literal also gives what it says about the comparison behind the value)
+        pathFacts = assumeBooleanTest(&trunk.state.context, &trunk.index, assumeRelation(clone(negated), test.relation, ta, tb), test.relation, ta, tb);
         ValidatorContext { equalities: pathEqualities, applications: pathApplications, constants: pathConstants, orders: pathOrders, different: pathDifferent, variants: pathVariants, fieldFunctions: pathFields, constructorFunctions: pathConstructors, constructorFields: pathConstructorFields, differences: pathDifferences } = pathFacts;
         pathEqualities = push(push(pathEqualities, EqualityFact { left: prior, right: prior }), EqualityFact { left: priorOther, right: priorOther });
         path = ValidatorContext { equalities: pathEqualities, applications: pathApplications, constants: pathConstants, orders: pathOrders, different: pathDifferent, variants: pathVariants, fieldFunctions: pathFields, constructorFunctions: pathConstructors, constructorFields: pathConstructorFields, differences: pathDifferences };
@@ -761,7 +762,7 @@ fn loopSplit(trunk: Trunk, tests: &List<LoopTest>, prior: Int, priorOther: Int) 
             };
         };
         inverse = negateRelation(test.relation, ta, tb);
-        negated = assumeRelation(negated, inverse.relation, inverse.left, inverse.right);
+        negated = assumeBooleanTest(&trunk.state.context, &trunk.index, assumeRelation(negated, inverse.relation, inverse.left, inverse.right), inverse.relation, inverse.left, inverse.right);
     };
     if haveYes = false { return splitFailure(trunk); };
     if size(tests) > 1 {
