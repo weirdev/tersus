@@ -8,6 +8,11 @@ constant makes every program new to the verdict cache, so each is checked.
   python3 dev/validator_scaling.py                 # every family, default sizes
   python3 dev/validator_scaling.py --family unrelated --sizes 0,16,32,64
   python3 dev/validator_scaling.py --tersus /path/to/tersus-exe --timeout 300
+  python3 dev/validator_scaling.py --sizes 0,64,128,256,512,1024 --timeout 300
+
+`excess` is the time minus the family's N = 0 time in the same run, which
+takes out process start, parsing and the validator's start-up. Once a size
+times out, the family's larger sizes are not run.
 
 A family whose shape repeats a condition tests a parameter of its own each
 time, so that no condition follows from another and the arms are not pruned.
@@ -34,6 +39,10 @@ Families:
   hintgoal       a goal N hops along a chain from the fact that proves it
   hintlinked     the same goal with that fact affirmed beside it
   nestedloops    loops nested N deep, each changing a local of its own
+  ifdepth        N `if pK > 0 { y = y + 1; … }` nested N deep, so the if-depth
+                 grows with the length (the native parser crashes from N = 62)
+  listchain      N steps of push, set and get on one list, each get read back
+                 through the set and the push before it
 """
 import argparse
 import os
@@ -143,6 +152,18 @@ def nested_loops(n):
     return f"n0 = 0; {inits} {body}"
 
 
+def if_depth(n):
+    body = ""
+    for k in reversed(range(n)):
+        body = f"if p{k} > 0 {{ y = y + 1; {body} }};"
+    return f"y = 0; {body} n0 = y;"
+
+
+def list_chain(n):
+    steps = " ".join(f"l = push(l, {k}); l = set(l, 0, {k}); v{k} = get(l, {k + 1});" for k in range(n))
+    return f"l = push([], x); {steps} n0 = size(l);"
+
+
 def shape(family, n):
     """The declarations before `f`, its extra parameters and arguments, and its body."""
     if family == "unrelated":
@@ -179,6 +200,10 @@ def shape(family, n):
         return "", ([], []), hint_goal(n, True)
     if family == "nestedloops":
         return "", ([], []), nested_loops(n)
+    if family == "ifdepth":
+        return "", int_params(n), if_depth(n)
+    if family == "listchain":
+        return "", ([], []), list_chain(n)
     raise ValueError(family)
 
 
@@ -210,6 +235,8 @@ FAMILIES = {
     "hintgoal": [0, 32, 64, 128],
     "hintlinked": [0, 32, 64, 128],
     "nestedloops": [0, 2, 4, 6],
+    "ifdepth": [0, 8, 16, 32],
+    "listchain": [0, 32, 64, 128],
 }
 
 
@@ -247,13 +274,22 @@ def main():
         for family in families:
             print(f"// {family}\n{program(family, args.print, 0)}")
         return
-    print(f"{'family':<14} {'N':>4} {'seconds':>9}  verdict")
+    print(f"{'family':<14} {'N':>4} {'seconds':>9} {'excess':>9}  verdict")
     for family in families:
         sizes = [int(s) for s in args.sizes.split(",")] if args.sizes else FAMILIES[family]
+        floor = None
+        timed_out = False
         for n in sizes:
+            if timed_out:
+                print(f"{family:<14} {n:>4} {'-':>9} {'-':>9}  not run", flush=True)
+                continue
             elapsed, verdict = check(args.tersus, program(family, n, random.randrange(1 << 30)), args.timeout)
+            if n == 0:
+                floor = elapsed
+            timed_out = elapsed is None
             shown = f"{elapsed:9.2f}" if elapsed is not None else f"{'>' + str(int(args.timeout)):>9}"
-            print(f"{family:<14} {n:>4} {shown}  {verdict}", flush=True)
+            excess = f"{elapsed - floor:9.2f}" if elapsed is not None and floor is not None else f"{'-':>9}"
+            print(f"{family:<14} {n:>4} {shown} {excess}  {verdict}", flush=True)
 
 
 if __name__ == "__main__":
