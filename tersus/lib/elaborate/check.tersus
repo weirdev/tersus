@@ -48,7 +48,7 @@ fn checkItem(st: St, top: Bool, s: Int) -> St ~ {
             a = inner as AstStatement::Assign;
             v = functionValue(st, a.e);
             if v >= 0 {
-                if !top { return fail(st, "Type error: a function with bounds on its types can only be defined at the top of the program"); };
+                if !top { return fail(st, "Type error: a function with bounds on its types can only be defined at the top of the program or in an impl of a type, not in a block or a function"); };
                 st = boundsOf(st, bd.bs);
                 bounds = clone(st.boundsOut);
                 value = nativeFn(&st.nodes, v);
@@ -116,7 +116,7 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
         AstStatement::AssignDeref { a: a, b: b } => { return checkAssignDeref(st, a, b); },
         AstStatement::TraitDef { n: n, ps: ps, fs: fs } => { return fail(st, "Type error: a trait can only be defined at the top of the program"); },
         AstStatement::ImplDef { traitName: tn, args: args, n: n, ty: ty, bs: bs, xs: xs } => { return fail(st, "Type error: an impl can only be written at the top of the program"); },
-        AstStatement::BoundedDef { bs: bs, s: inner } => { return fail(st, "Type error: a function with bounds on its types cannot be written in an impl or a block"); },
+        AstStatement::BoundedDef { bs: bs, s: inner } => { return fail(st, "Type error: a function with bounds on its types cannot be written in a block"); },
         AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { return fail(st, "Type error: an instance record is written by the elaborator, not by a program"); },
     };
     return st;

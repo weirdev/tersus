@@ -1,4 +1,4 @@
-import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
+import data::ast::ast { AstArg, AstArgs, AstBody, AstBounds, AstBuiltin, AstExpression, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
 import data::codec::codec { Size, catStrings };
 import elaborate::builtins { substitute };
 import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, sizeArgument, teHead };
@@ -7,7 +7,7 @@ import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInf
 import elaborate::exports { pairParts };
 import elaborate::expr { coerceArguments, genericCall, implementsMarker, nodesOf, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
-import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf };
+import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
@@ -261,6 +261,15 @@ fn checkBoundTrait(st: St, b: &BoundInfo, noTypesWhere: String, whereText: Strin
 // type parameters (checkDefinitions)
 fn declareTemplate(st: St, name: String, bounds: List<BoundInfo>, tm: Template) -> St ~ {
     if HashMap::contains(&st.fns, &name) || HashMap::contains(&st.templates, &name) || HashMap::contains(&st.stdNames, &name) { return typeError(st, catStrings(clone(name), " is already defined")); };
+    // (a parameter named twice would take the bounds of both: for a function of an impl, the impl's come after its own)
+    parameters = clone(tm.types);
+    for z in &tm.sizes { parameters = push(parameters, clone(z)); };
+    twice = repeatedName(&parameters);
+    if size(twice.bytes) > 0 {
+        whose = " among its type and size parameters";
+        if name.startsWith("<") { whose = " among its own type and size parameters and its impl's"; };
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " names "), twice), catStrings(" twice", whose)), ": give one of them another name"));
+    };
     for b in &bounds {
         if indexIn(&tm.types, &b.p) < 0 { return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(b.p), " is bounded by "), clone(b.n)), " but is not a type of "), clone(name))); };
         st = checkBoundTrait(st, b, "", catStrings(" of ", clone(name)), catStrings(" of ", clone(name)));
@@ -272,6 +281,16 @@ fn declareTemplate(st: St, name: String, bounds: List<BoundInfo>, tm: Template) 
     // (what a reference it returns is from, which a call of it reads by its name)
     if size(tm.from) > 0 { st = putRefResult(st, clone(name), clone(tm.params), clone(tm.from)); };
     return St { templates: st.templates.insert(clone(name), tm), defQueue: push(st.defQueue, name), ..st };
+};
+
+// The first name a list has twice, or ""
+fn repeatedName(names: &List<String>) -> String ~ {
+    seen = HashSet::new();
+    for n in names {
+        if HashSet::contains(&seen, n) { return clone(n); };
+        seen = seen.insert(clone(n));
+    };
+    return "";
 };
 
 fn checkTemplateSignature(st: St, name: &String, fs: &FnSig, bounds: &List<BoundInfo>) -> St ~ {
@@ -387,6 +406,11 @@ fn templateArguments(st: St, name: &String, pts: &List<Int>, inferred: &List<TE>
         if (pk = 10 && (ak = 10 || ak = 11)) || (pk = 11 && ak = 11) {
             st = expect(st, what, argAt(st, ptz, 0), argAt(st, atz, 0));
         } else {
+            if pk = 11 && ak = 10 { return fail(st, "Type error: a read reference (&T) cannot be given where an update reference (&mut T) is wanted: borrow the place for updating, as in &mut x"); };
+            argName = varName(st, arg.node);
+            if pk = 11 && !(isVar(st, arg.node) && indexIn(&st.mutParams, &argName) >= 0) {
+                return fail(st, "Type error: an update reference (&mut T) is not lent silently: write &mut and the place, as in &mut x");
+            };
             st = expect(st, what, unrefOf(st, ptz), atz);
         };
         if st.status != 0 { return st; };
@@ -1337,9 +1361,12 @@ fn checkImplFunctions(st: St, tname: &String, typeName: &String, selfName: &Stri
     checked = [];
     types = [];
     defined = [];
+    noBounds = [];
     for s in functions {
         stmt = stmtOf(st, s);
         v = 0 - 1;
+        bounded = stmt is AstStatement::BoundedDef;
+        if bounded { st = boundedMethod(st, tname, typeName, selfName, selfType, s, &noBounds, 0 - 1); };
         if stmt is AstStatement::Assign {
             a = stmt as AstStatement::Assign;
             name = nameText(&st.nodes, a.n);
@@ -1356,10 +1383,12 @@ fn checkImplFunctions(st: St, tname: &String, typeName: &String, selfName: &Stri
                 defined = push(defined, Defined { name: part, params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: size(fs.sizes), term: native.term, sigNode: st.sigNode });
             };
         };
-        if v < 0 { st = checkStatement(st, true, s); };
+        if v < 0 && !bounded { st = checkStatement(st, true, s); };
         if st.status != 0 { return st; };
-        checked = push(checked, st.nid);
-        for t in &st.te.types { types = push(types, t); };
+        if !bounded {
+            checked = push(checked, st.nid);
+            for t in &st.te.types { types = push(types, t); };
+        };
     };
     return St { outs: checked, te: TE { node: 0 - 1, types: types }, implDefined: defined, ..st };
 };
@@ -1400,12 +1429,17 @@ fn checkBoundedImpl(st: St, tname: String, traitArgs: List<Int>, typeName: Strin
         st = checkBoundTrait(st, b, clone(implWhere), clone(implWhere), clone(implWhere));
         if st.status != 0 { return st; };
     };
+    if size(tname.bytes) > 0 {
+        for s in &functions {
+            if stmtOf(st, s) is AstStatement::BoundedDef { return boundedMethod(st, &tname, &typeName, &selfName, selfType, s, &bounds, boundsNode); };
+        };
+    };
     st = boundedImplSignatures(st, &selfName, selfType, &functions);
     if size(tname.bytes) > 0 {
         st = registerBoundedImpl(st, &tname, &traitArgs, &typeName, selfInput, &bounds, tyNode, argsNode, boundsNode, &selfName, selfType);
         if st.status != 0 { return st; };
     };
-    st = boundedImplTemplates(st, &tname, &typeName, &bounds, boundsNode, &functions);
+    st = boundedImplTemplates(st, &tname, &typeName, &selfName, selfType, &bounds, boundsNode, &functions);
     if st.status != 0 { return st; };
     st = boundedWrapperTemplates(st, &bounds, boundsNode);
     return St { outs: [], te: TE { node: 0 - 1, types: [] }, boundedParts: noBoundedParts(), ..st };
@@ -1425,18 +1459,70 @@ fn boundedImplSignatures(st: St, selfName: &String, selfType: Int, functions: &L
                 fs = clone(st.fnSig);
                 native = nativeFn(&st.nodes, v);
                 // (the wrapper is given the impl function's signature, rewritten)
-                st = emitTypes(st, &fs.ptys);
-                tsNode = st.nid;
-                st = emitType(st, fs.rty);
-                retNode = st.nid;
-                sig = signatureOf(&st.nodes, native.sig);
-                st = emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: sig.ss, ps: sig.ps, ws: sig.ws, fs: sig.fs } });
+                st = rewrittenSignature(st, native.sig, &fs);
                 defined = Defined { name: implFunctionPart(&name), params: clone(fs.params), ptys: clone(fs.ptys), rty: fs.rty, sizes: size(fs.sizes), term: native.term, sigNode: st.nid };
                 parts = BoundedParts { names: push(parts.names, name), values: push(parts.values, v), sigs: push(parts.sigs, fs), defined: push(parts.defined, defined), ..parts };
             };
         };
     };
     return St { boundedParts: parts, ..st };
+};
+
+// A function's signature record with the types an impl's Self is replaced in (st.nid)
+fn rewrittenSignature(st: St, sigNode: Int, fs: &FnSig) -> St ~ {
+    st = emitTypes(st, &fs.ptys);
+    tsNode = st.nid;
+    st = emitType(st, fs.rty);
+    retNode = st.nid;
+    sig = signatureOf(&st.nodes, sigNode);
+    return emit(st, AstNode::Signature { value: AstSignature { ts: tsNode, ret: retNode, ss: sig.ss, ps: sig.ps, ws: sig.ws, fs: sig.fs } });
+};
+
+// A function with bounds of its own in an impl of a type (impl X { fn f<T: B>(...) }): a template whose bounds are the
+// impl's and then its own, called as X::f and x.f(...) through the association. A function of an impl of a trait has the
+// types the trait declares, so it has no bounds of its own.
+fn boundedMethod(st: St, tname: &String, typeName: &String, selfName: &String, selfType: Int, s: Int, implBounds: &List<BoundInfo>, implBoundsNode: Int) -> St ~ {
+    stmt = stmtOf(st, s);
+    if !(stmt is AstStatement::BoundedDef) { return st; };
+    bd = stmt as AstStatement::BoundedDef;
+    inner = stmtOf(st, bd.s);
+    v = 0 - 1;
+    name = "";
+    if inner is AstStatement::Assign { a = inner as AstStatement::Assign; v = functionValue(st, a.e); name = nameText(&st.nodes, a.n); };
+    if v < 0 { return fail(st, "Type error: only a function can have bounds on its types"); };
+    if size(tname.bytes) > 0 {
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(implFunctionPart(&name)), " in impl "), clone(tname)), " for "), clone(typeName)), " has bounds on its types, but a function of an impl of a trait has the types the trait declares"), ": put the bounds on the impl"));
+    };
+    st = boundsOf(st, bd.bs);
+    bounds = clone(implBounds);
+    for b in &st.boundsOut { bounds = push(bounds, clone(b)); };
+    st = implFnSig(st, v, selfName, selfType);
+    fs = clone(st.fnSig);
+    st = rewrittenSignature(st, nativeFn(&st.nodes, v).sig, &fs);
+    sigNode = st.nid;
+    boundsNode = bd.bs;
+    if size(implBounds) > 0 {
+        st = boundsListNode(st, push(push([], listItems(&st.nodes, implBoundsNode)), listItems(&st.nodes, bd.bs)));
+        boundsNode = st.nid;
+    };
+    tm = templateOf(st, v, &bounds, boundsNode, &fs, sigNode);
+    st = declareTemplate(st, clone(name), bounds, tm);
+    if st.status != 0 { return st; };
+    part = implFunctionPart(&name);
+    return addAssoc(st, typeName, &part, tname);
+};
+
+// A bounds record of the bound records given (st.nid)
+fn boundsListNode(st: St, parts: List<List<Int>>) -> St ~ {
+    ids = [];
+    for xs in &parts { for x in xs { ids = push(ids, x); }; };
+    st = emit(st, AstNode::Bounds { value: AstBounds::End });
+    i = size(ids);
+    while i > 0 [{ affirm i <= size(ids); }] shrinks i {
+        i = i - 1;
+        st = emit(st, AstNode::Bounds { value: AstBounds::Cons { head: get(ids, i), tail: st.nid } });
+    };
+    return st;
 };
 
 // An impl with bounds of a trait recorded and checked against the trait, with the functions that make those checks
@@ -1470,31 +1556,36 @@ fn registerBoundedImpl(st: St, tname: &String, traitArgs: &List<Int>, typeName: 
 
 // Each function of an impl with bounds made a template (anything else in the impl is refused where it stands among
 // the functions)
-fn boundedImplTemplates(st: St, tname: &String, typeName: &String, bounds: &List<BoundInfo>, boundsNode: Int, functions: &List<Int>) -> St ~ {
+fn boundedImplTemplates(st: St, tname: &String, typeName: &String, selfName: &String, selfType: Int, bounds: &List<BoundInfo>, boundsNode: Int, functions: &List<Int>) -> St ~ {
     parts = clone(st.boundedParts);
     i = 0;
     for s in functions {
         stmt = stmtOf(st, s);
         isFunction = false;
         if stmt is AstStatement::Assign { isFunction = functionValue(st, (stmt as AstStatement::Assign).e) >= 0; };
-        if !isFunction { return fail(st, "Type error: an impl with bounds can only hold functions"); };
-        if i >= size(parts.names) || i >= size(parts.values) || i >= size(parts.sigs) || i >= size(parts.defined) { return st; };
-        name = clone(get(parts.names, i));
-        fs = clone(get(parts.sigs, i));
-        for b in bounds {
-            if indexIn(&fs.types, &b.p) < 0 {
-                return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(b.p), " is bounded by "), clone(b.n)), " in the impl for "), clone(typeName)), " but is not a type of "), clone(name)));
+        if stmt is AstStatement::BoundedDef {
+            st = boundedMethod(st, tname, typeName, selfName, selfType, s, bounds, boundsNode);
+            if st.status != 0 { return st; };
+        } else {
+            if !isFunction { return fail(st, "Type error: an impl with bounds can only hold functions"); };
+            if i >= size(parts.names) || i >= size(parts.values) || i >= size(parts.sigs) || i >= size(parts.defined) { return st; };
+            name = clone(get(parts.names, i));
+            fs = clone(get(parts.sigs, i));
+            for b in bounds {
+                if indexIn(&fs.types, &b.p) < 0 {
+                    return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(b.p), " is bounded by "), clone(b.n)), " in the impl for "), clone(typeName)), " but is not a type of "), clone(name)));
+                };
             };
+            if HashMap::contains(&st.templates, &name) || HashMap::contains(&st.fns, &name) { return typeError(st, catStrings(clone(name), " is already defined")); };
+            st = checkTemplateSignature(st, &name, &fs, bounds);
+            if st.status != 0 { return st; };
+            tm = templateOf(st, get(parts.values, i), bounds, boundsNode, &fs, get(parts.defined, i).sigNode);
+            part = implFunctionPart(&name);
+            st = addAssoc(st, typeName, &part, tname);
+            if size(tm.from) > 0 { st = putRefResult(st, clone(name), clone(tm.params), clone(tm.from)); };
+            st = St { templates: st.templates.insert(clone(name), tm), defQueue: push(st.defQueue, name), ..st };
+            i = i + 1;
         };
-        if HashMap::contains(&st.templates, &name) || HashMap::contains(&st.fns, &name) { return typeError(st, catStrings(clone(name), " is already defined")); };
-        st = checkTemplateSignature(st, &name, &fs, bounds);
-        if st.status != 0 { return st; };
-        tm = templateOf(st, get(parts.values, i), bounds, boundsNode, &fs, get(parts.defined, i).sigNode);
-        part = implFunctionPart(&name);
-        st = addAssoc(st, typeName, &part, tname);
-        if size(tm.from) > 0 { st = putRefResult(st, clone(name), clone(tm.params), clone(tm.from)); };
-        st = St { templates: st.templates.insert(clone(name), tm), defQueue: push(st.defQueue, name), ..st };
-        i = i + 1;
     };
     return st;
 };
