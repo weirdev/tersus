@@ -1,6 +1,7 @@
 module DataCodec
     ( Token (..), P (..), quote, tokenize, strictTokenize, strictTokenizeBytes, parseLine
-    , word, name, expect, integer, int, failP, typeTokens, sizeTokens, argTokens
+    , word, name, expect, integer, int, itemCount, failP, typeTokens, sizeTokens, argTokens
+    , strictTokenizeBytesAnyNumber
     , typeP, sizeP, argP, decimal
     ) where
 
@@ -109,7 +110,13 @@ integer = word >>= \w -> case decimal w of
     Nothing -> failP ("a number was expected, found " ++ w)
 
 int :: P Int
-int = fromInteger <$> integer
+int = integer >>= \n ->
+    if n >= toInteger (minBound :: Int) && n <= toInteger (maxBound :: Int) then pure (fromInteger n) else failP ("a number out of range: " ++ show n)
+
+-- The length of what follows in the record, each item at least one token
+itemCount :: P Int
+itemCount = P (\ts -> runP int ts `bindResult` \(n, rest) ->
+    if n >= 0 && length (take n rest) == n then Ok (n, rest) else Error ("not a count of what follows: " ++ show n))
 
 -- A line parsed whole
 parseLine :: P a -> [Token] -> Result a String
@@ -132,13 +139,13 @@ typeP = word >>= \w -> case w of
     "addr" -> TAddr <$> typeP
     "uninit" -> TUninit <$> typeP
     "block" -> TBlock <$> typeP
-    "fn" -> int >>= \n -> replicateM n typeP >>= \args -> TFn args <$> typeP
-    "named" -> name >>= \base -> int >>= \n -> TNamed base <$> replicateM n argP
+    "fn" -> itemCount >>= \n -> replicateM n typeP >>= \args -> TFn args <$> typeP
+    "named" -> name >>= \base -> itemCount >>= \n -> TNamed base <$> replicateM n argP
     "variant" -> TVariant <$> name
     "var" -> TVar <$> int
     "forall" -> do
-        sizes <- int >>= \n -> replicateM n name
-        types <- int >>= \n -> replicateM n name
+        sizes <- itemCount >>= \n -> replicateM n name
+        types <- itemCount >>= \n -> replicateM n name
         TForall sizes types <$> typeP
     "param" -> TParam <$> name
     "ref" -> TRef <$> typeP
@@ -193,7 +200,14 @@ strictTokenize line
     quotedStrict (c : xs) acc = quotedStrict xs (c : acc)
 
 strictTokenizeBytes :: B.ByteString -> Result [Token] String
-strictTokenizeBytes line
+strictTokenizeBytes = strictTokenizeBytesWith validWord
+
+-- The same, with numbers of any size (integer constants of the MIR, which `int` still bounds where an Int is read)
+strictTokenizeBytesAnyNumber :: B.ByteString -> Result [Token] String
+strictTokenizeBytesAnyNumber = strictTokenizeBytesWith (\w -> maybe (validWord w) (const True) (decimal w))
+
+strictTokenizeBytesWith :: (String -> Bool) -> B.ByteString -> Result [Token] String
+strictTokenizeBytesWith validWord' line
     | B.any (\c -> c < ' ' || c > '~') line = Error "non-ASCII record"
     | otherwise = scan line `bindResult` \(ts, allValid) ->
         if allValid then Ok ts else Error "invalid UTF-8 or numeric token"
@@ -207,7 +221,7 @@ strictTokenizeBytes line
             let (w, rest) = B.break (== ' ') s
              in if B.elem '"' w || B.elem '\\' w
                     then Error "malformed word"
-                    else let text = B.unpack w in mapResult (\(ts, ok) -> (Word text : ts, ok && validWord text)) (scan rest)
+                    else let text = B.unpack w in mapResult (\(ts, ok) -> (Word text : ts, ok && validWord' text)) (scan rest)
     quotedStrict s acc = case B.uncons s of
         Nothing -> Error "unclosed name"
         Just ('"', xs) -> Ok (reverse acc, xs)

@@ -160,7 +160,8 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
 
 -- Measured four-CPU warm-tool work on eb8bb49 (2026-11-05), rounded up; the testAstData, testAstReader and
 -- testDifferential batches on the commit that added interface data (2026-11-08); testDifferential
--- after it left the compiler's own packages (one CPU, warm tools, scaled as the earlier batches).
+-- after it left the compiler's own packages (one CPU, warm tools, scaled as the earlier batches); testMirLowered
+-- from its full-suite time against testParity's, testModules' and testOwnership's (2026-11-12).
 -- The native preparation prefix is measured separately; genuine cold A and
 -- Bootstrap include their cold work. Unmeasured rows retain run 41978818567.
 groupWeight :: String -> Int
@@ -237,6 +238,7 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testBytes", 1)
         , ("testConnectives", 1)
         , ("testMirData", 51)
+        , ("testMirLowered", 220)
         , ("testMirEvalLists", 1)
         , ("testMirReader", 58)
         , ("testMirVerify:1/4", 31)

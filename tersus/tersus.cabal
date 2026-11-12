@@ -123,6 +123,7 @@ library
       LibPackage
       Link
       LlvmRuntime
+      Lowering
       Mir
       MirCopies
       MirData

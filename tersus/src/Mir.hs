@@ -5,6 +5,7 @@ module Mir
     , BlockId (..)
     , Program (..)
     , BoundedFn (..)
+    , Lowered (..)
     , TypeDecl (..)
     , Function (..)
     , LocalDecl (..)
@@ -54,7 +55,7 @@ import Text.ParserCombinators.ReadPrec (lift)
 import Text.Read (readPrec)
 import qualified Data.Set as Set
 import Types (Arg (..), Name, Rel (..), Type (..), Variable, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray, pattern TList, pattern TBox)
-import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, exprToProof)
+import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, VariableProof, exprToProof)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -274,6 +275,21 @@ data LoopSpec = LoopSpec
     , loopBody :: BlockId -- the first block of the body: an iteration starts on each edge into it (a condition made of && and || has several tests)
     }
     deriving (Show, Eq, Read)
+
+-- A module as lowering gives it, before MirMoves.finishLowered: instances not completed, source positions and the
+-- stubs of imported functions still in it, with the sets the check of moves needs and what the host needs of the
+-- module's statements
+data Lowered = Lowered
+    { lowProgram :: Program
+    , lowCopies :: Set.Set Name
+    , lowLinear :: Set.Set Name
+    , lowDrops :: Set.Set Name
+    , lowStubs :: Set.Set Name
+    , lowDeclared :: Set.Set Name -- the structs, enums and traits at the module's top and the functions at its top and in its impls (what a package module's library units do not declare again)
+    , lowNested :: Set.Set Name -- the structs, enums and traits declared inside its functions and blocks (which a single file's library units do not declare again either)
+    , lowAssumes :: [VariableProof] -- every `assume` of the module's statements, in order, dead code included
+    }
+    deriving (Show, Eq)
 
 -- A struct with sizes is a struct of its own for each list of sizes (`Packet<4>`, and `Packet<n>` in a function that has the size n),
 -- named by them. This declares every one the program mentions, from the declaration of the struct with the sizes put in.

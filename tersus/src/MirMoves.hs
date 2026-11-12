@@ -3,6 +3,7 @@
 module MirMoves
     ( checkMoves
     , checkMovesExcluding
+    , finishLowered
     , isCopyType
     , stripPositions
     , Role (..)
@@ -11,7 +12,7 @@ module MirMoves
     , operandLocal
     ) where
 
-import Data.List (foldl', isPrefixOf, nub)
+import Data.List (foldl', intercalate, isPrefixOf, nub)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -20,6 +21,7 @@ import qualified Data.Set as Set
 
 import Mir
 import Types (Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
+import Utils (Result (..))
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
 -- is wanted, and the local it came from holds nothing after. So a program cannot use it again, and this checks that it does not.
@@ -852,6 +854,21 @@ describe cx (l, steps) = describeLocal cx l ++ concat [part s | s <- steps]
 
 message :: Cx -> Pos -> String -> String
 message cx pos text = "in " ++ fnName (cxFn cx) ++ maybe "" (\(line, column) -> ", line " ++ show line ++ ":" ++ show column) pos ++ ": " ++ text
+
+-- A lowered module as the pipeline takes it: its instances completed, its moves checked, the places lowering wrote
+-- taken out, and the stubs of imported functions dropped. (That the program is well formed is checked by the pipeline
+-- on what is lowered, with the checker written in Tersus (MirHousekeeping): it is not checked here, so that the
+-- checker and the eraser can themselves be lowered to be made from the seed. The stubs stay in the program for the
+-- check of moves, so a call of one is seen with its signature; they are not checked themselves.)
+finishLowered :: Lowered -> Result Program String
+finishLowered lowered =
+    case checkMovesExcluding (lowCopies lowered) (lowLinear lowered) (lowDrops lowered) (lowStubs lowered) completed of
+        [] ->
+            let stripped = stripPositions completed
+             in Ok stripped{progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lowStubs lowered) (progFunctions stripped)}
+        errors -> Error (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
+  where
+    completed = completeInstances (lowProgram lowered)
 
 -- The program without the places that lowering wrote into it
 stripPositions :: Program -> Program
