@@ -42,32 +42,24 @@ impl Clone for BoundInfo { };
 struct ImplArgs { ty: Int, args: List<Int>, tyNode: Int, argsNode: Int };
 impl Clone for ImplArgs { };
 
-// A function with bounds on its types (Template): its bounds, the functions it sees beside the caller's, its parameters,
-// its signature as types, and the records of its contracts, termination and body
+// A function with bounds on its types (Template): its bounds, its parameters, its signature as types, and the records of
+// its contracts, termination and body (an imported one has only its signature and bounds)
 struct Template {
-    bounds: List<BoundInfo>, fnNames: List<String>, fnTypes: List<Int>, params: List<String>, ptys: List<Int>, rty: Int,
+    bounds: List<BoundInfo>, params: List<String>, ptys: List<Int>, rty: Int,
     sizes: List<String>, types: List<String>, from: List<String>, ins: Int, outs: Int, term: Int, body: Int,
     boundsNode: Int, paramsNode: Int, sigNode: Int, retNode: Int
 };
 impl Clone for Template { };
 
-// What the module that defines a function with bounds sees, which a call of it is checked in (TcState of tcDefinitions):
-// the templates it owns, and its types, traits, impls and templates
-struct Defining {
-    owned: HashMap<String, Template>,
-    types: HashMap<String, List<String>>, ctors: HashMap<String, CtorInfo>, generics: HashMap<String, Generic>,
-    linearTypes: HashSet<String>, drops: HashSet<String>,
-    traits: HashSet<String>, traitFns: HashMap<String, List<Int>>, traitParams: HashMap<String, List<String>>,
-    assoc: HashMap<String, List<String>>, impls: HashSet<String>, implArgs: HashMap<String, ImplArgs>,
-    implBounds: HashMap<String, List<BoundInfo>>, implBoundsNodes: HashMap<String, Int>,
-    templates: HashMap<String, Template>, companions: HashMap<String, List<String>>,
-    refResultNames: List<String>, refResultParams: List<List<String>>, refResultFroms: List<List<String>>
-};
-impl Clone for Defining { };
 
 // A function's parameters and signature, its types as types of the arena (Signature)
 struct FnSig { params: List<String>, ptys: List<Int>, rty: Int, sizes: List<String>, types: List<String>, writes: List<String>, froms: List<String> };
 impl Clone for FnSig { };
+
+// A copy of a function with bounds that the module names (templateReference): the function, its types and the sizes its
+// bounds name, and the copy's signature
+struct Reference { f: String, types: List<Int>, sizes: List<Int>, sig: FnSig };
+impl Clone for Reference { };
 
 // A place as the root it starts from and its steps: a field's name, or "" for an element
 struct Place { ok: Bool, root: String, steps: List<String> };
@@ -80,11 +72,10 @@ impl Clone for BoundedParts { };
 
 fn noBoundedParts() -> BoundedParts ~ { return BoundedParts { names: [], values: [], sigs: [], defined: [], wrapperOf: [], wrapperValues: [], wrapperNames: [] }; };
 
-// The checker's state. status: 0 checking, 1 refused, 2 not modelled, 3 interface refused, 4 unresolved, 5 refused with a
-// message that a copy of a function with bounds passes on as it is (finalRefusal), answered as a refusal; msg says why. defQueue holds the functions with bounds the module defines, which are checked against their bounds alone once
-// it is checked, and defChecking is set while one is; checkedItems counts the statements in front of the program whose
-// functions with bounds were checked where they were defined (the libraries a single-file program has in front of it);
-// sequenceTraits holds the library's Sequence and Growable when the module has them, which lists, arrays and Boxes of
+// The checker's state. status: 0 checking, 1 refused, 2 not modelled, 3 interface refused, 4 unresolved; msg says why. defQueue holds the functions with bounds the module defines, which are checked against their bounds alone once
+// it is checked, and defChecking is set while one is; genericOut and genericTypes are the checked bodies and their
+// expression types, references the copies the module names and boundStubs the functions bounds give (all given to the
+// program after it is checked); sequenceTraits holds the library's Sequence and Growable when the module has them, which lists, arrays and Boxes of
 // arrays implement with the builtins;
 // storageCopies is set for the native storage helpers (tersuslib's lists and box), whose clones are the copies native code
 // makes of a value of any type.
@@ -119,13 +110,13 @@ struct St {
     undo: List<Int>,
     sizeUndo: List<Int>,
     templates: HashMap<String, Template>,
-    instances: HashMap<String, Int>,
-    emitted: List<Int>,
-    emittedTypes: List<Int>,
-    activeNames: List<String>,
-    activeSizes: List<Int>,
-    companions: HashMap<String, List<String>>,
-    definitions: List<Defining>,
+    references: HashMap<String, Int>,
+    referenceList: List<Reference>,
+    boundStubs: HashMap<String, Int>,
+    boundStubSigs: List<FnSig>,
+    builtinStubs: HashSet<String>,
+    genericOut: List<Int>,
+    genericTypes: List<Int>,
     fns: HashMap<String, Int>,
     scopes: Scopes,
     ret: Int,
@@ -173,7 +164,6 @@ struct St {
     seen: List<String>,
     defQueue: List<String>,
     defChecking: Bool,
-    checkedItems: Int,
     sequenceTraits: HashSet<String>,
     storageCopies: Bool,
     status: Int,
@@ -192,12 +182,6 @@ fn notModelled(st: St, what: String) -> St ~ {
 
 fn typeError(st: St, what: String) -> St ~ {
     return fail(st, "Type error: ".concat(what));
-};
-
-// A refusal that a copy of a function with bounds passes on as it is, not as an internal error of the copy
-fn finalRefusal(st: St, msg: String) -> St ~ {
-    if st.status != 0 { return st; };
-    return St { status: 5, msg: msg, ..st };
 };
 
 // The first type parameter of a type that keeps a value of it from being cloned, or "": a type parameter is cloned only in a

@@ -24,6 +24,7 @@ import FileParserProtocol
 import qualified FileParserProtocol as File
 import qualified Cli
 import Cli (Command (..), World (..), noWorld, runPackageFiles)
+import Elaboration (Ctx (..), Template (..))
 import InterfaceData (readInterface, writeInterface)
 import Interface
 import qualified Mir as M
@@ -1735,7 +1736,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
                             , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
-                            , testAssertEq (validatorMetadataFingerprint raw) "7a600b44484b054c"
+                            , testAssertEq (validatorMetadataFingerprint raw) "c05f6c44f8ee5584"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
@@ -2281,6 +2282,16 @@ testPhase2Packages = TestList "testPhase2Packages"
         case Pipeline.compileSourceNoPrelude True (phase2Identity ++ " return value(42);") `bindResult` runProgram of
             Error err -> Just err
             Ok value -> testAssertEq value (Just (MInt 42))
+    , testCase "an interface carries a function with bounds as its signature and bounds alone" $ case phase2Load phase2Private of
+        Left err -> Just err
+        Right pkg -> case compileModules (packageSnapshot pkg) of
+            Error err -> Just err
+            Ok compiled -> case [(name, t) | modu <- compiledModules compiled, (name, t) <- Map.toList (ifTemplates (compiledInterface modu))] of
+                [] -> Just "no module exported a function with bounds"
+                templates -> case [name | (name, t) <- templates, not (null (tmplBody t) && null (tmplRequires t) && null (tmplEnsures t) && tmplTermination t == Nothing && Map.null (ctxFns (tmplCtx t)))] of
+                    [] | all (Map.null . ifCompanions . compiledInterface) (compiledModules compiled) -> Nothing
+                       | otherwise -> Just "an interface has companions"
+                    names -> Just ("these carry more than their signatures and bounds: " ++ show names)
     , testCase "external bounded function uses ordinary checked exports" $
         phase2Runs (phase2Files "import vendor::api { value }; return value(42);" phase2Identity []) 42
     , testCase "bounded return signatures preserve current implicit library selection" $

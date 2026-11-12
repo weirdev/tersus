@@ -124,6 +124,7 @@ library
       Link
       LlvmRuntime
       Mir
+      MirCopies
       MirData
       MirEval
       MirHousekeeping
@@ -334,6 +335,7 @@ test-suite tersus-test
       TestHashMap
       TestHashSet
       TestLibModules
+      TestMirCopies
       TestMirData
       TestMirEmit
       TestMirErase

@@ -20,18 +20,9 @@ fn stmtOf(st: &St, s: Int) -> AstStatement ~ {
 fn checkStatements(st: St, top: Bool, stmts: &List<Int>) -> St ~ {
     out = [];
     types = [];
-    index = 0;
     for s in stmts {
         st = checkItem(st, top, s);
         if st.status != 0 { return st; };
-        index = index + 1;
-        if top && index = st.checkedItems { st = St { defQueue: [], ..st }; };
-        // (the functions that templates were made into while it was checked come before it)
-        if top {
-            for m in &st.emitted { out = push(out, m); };
-            for t in &st.emittedTypes { types = push(types, t); };
-            st = St { emitted: [], emittedTypes: [], ..st };
-        };
         for o in &st.outs { out = push(out, o); };
         for t in &st.te.types { types = push(types, t); };
     };
@@ -126,6 +117,7 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
         AstStatement::TraitDef { n: n, ps: ps, fs: fs } => { return fail(st, "Type error: a trait can only be defined at the top of the program"); },
         AstStatement::ImplDef { traitName: tn, args: args, n: n, ty: ty, bs: bs, xs: xs } => { return fail(st, "Type error: an impl can only be written at the top of the program"); },
         AstStatement::BoundedDef { bs: bs, s: inner } => { return fail(st, "Type error: a function with bounds on its types cannot be written in an impl or a block"); },
+        AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { return fail(st, "Type error: an instance record is written by the elaborator, not by a program"); },
     };
     return st;
 };

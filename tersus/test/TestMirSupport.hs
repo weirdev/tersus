@@ -372,12 +372,15 @@ directCalls (loaded, compiled, program) = firstFailure
 
 supportUnitIdentity :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
 supportUnitIdentity (loaded, compiled, _) = inspect (lowerSupportUnit loaded compiled) $ \unit@(_, program) -> firstFailure
-    [ case (linkPrograms [unit], linkPrograms [unit, unit]) of
+    [ case (linkPrograms (libraries ++ [unit]), linkPrograms (libraries ++ [unit, unit])) of
         (Ok once, Ok twice) -> testAssertEq twice once
         (Error err, _) -> Just err
         (_, Error err) -> Just err
-    , testAssertErrorContains "inconsistent units" (linkPrograms [unit, (supportId, program{M.progFunctions = Map.delete (supportName "lookupDecl") (M.progFunctions program)})])
+    , testAssertErrorContains "inconsistent units" (linkPrograms (libraries ++ [unit, (supportId, program{M.progFunctions = Map.delete (supportName "lookupDecl") (M.progFunctions program)})]))
     ]
+  where
+    -- (the copies of the libraries' functions with bounds that the unit calls are made from the libraries' units)
+    libraries = concat [Package.compiledLibUnits modu | modu <- Package.compiledModules compiled, Package.compiledModuleId modu == supportId]
 
 lowerSupportUnit :: Mod.LoadedPackage -> Package.CompiledPackage -> Result (Mod.ModuleId, M.Program) String
 lowerSupportUnit loaded compiled =

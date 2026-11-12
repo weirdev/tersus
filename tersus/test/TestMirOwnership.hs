@@ -672,6 +672,8 @@ metadataFixture = Program
     { progTypes = Map.fromList [("Packet<n>", StructDecl [("items", TArrayOf (TParam "T") (SizeParam "n"))]), ("E", EnumDecl [("E::Some", [("value", TInt)]), ("E::None", [])])]
     , progGenerics = Map.singleton "Packet" (["T", "n"], [("items", TArrayOf (TParam "T") (SizeParam "n")), ("permission", TBlock (TParam "T"))])
     , progInvariants = Map.singleton "Packet" [S.AssignProofVar "invariant" (S.Val (S.VBool True))]
+    , progBounded = Map.empty
+    , progInstances = Map.empty
     , progFunctions = Map.singleton "symbolic" symbolic
     , progMain = mainFn
     }
@@ -709,7 +711,7 @@ ownershipFixture = metadataFixture
     cloneFn = dropFn{fnName = "<Plain as Clone>::clone", fnReturns = Just (TNamed "Plain" []), fnLocals = Map.insert (Local 0) (LocalDecl (TNamed "Plain" []) Nothing) (fnLocals dropFn), fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (Use (Copy (Local 1)))] Return)}
 
 wireEmpty :: Program
-wireEmpty = Program Map.empty Map.empty (Function "main" [] Nothing Map.empty (Map.singleton (BlockId 0) (BasicBlock [] Return)) [] [] [] [] [] emptySpec) Map.empty Map.empty
+wireEmpty = Program Map.empty Map.empty (Function "main" [] Nothing Map.empty (Map.singleton (BlockId 0) (BasicBlock [] Return)) [] [] [] [] [] emptySpec) Map.empty Map.empty Map.empty Map.empty
 
 wireMain :: Statement -> Program
 wireMain statement = wireEmpty{progMain = (progMain wireEmpty){fnBlocks = Map.singleton (BlockId 0) (BasicBlock [statement] Return)}}

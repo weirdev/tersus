@@ -388,7 +388,7 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         for ctx in &defining { definitionPrograms = push(definitionPrograms, programsOf(&t, ctx)); };
         unit = Unit { pkgName: clone(id.pkg), modu: clone(id.modu), hasModule: id.has, predeclaring: true, viewing: false, extracting: true, libExtract: false,
             ifaces: programsOf(&t, &depKeys), ifaceKeys: clone(depKeys), definitions: definitionPrograms, definitionKeys: clone(defining),
-            hasCatalog: given, catalog: unitCatalog, pkg: clone(pkg), program: joinedProgram(&ls, &pm.files), checked: 0 };
+            hasCatalog: given, catalog: unitCatalog, pkg: clone(pkg), program: joinedProgram(&ls, &pm.files) };
         answer = elaborateUnit(table, unit, &seen);
         if answer.status < 0 { return malformed(); };
         if answer.status != 0 {
@@ -538,7 +538,7 @@ fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
     if given { unitCatalog = Catalog { ok: true, libs: clone(catalog.libs) }; };
     unit = Unit { pkgName: "main", modu: "", hasModule: false, predeclaring: false, viewing: false, extracting: false, libExtract: false,
         ifaces: [], ifaceKeys: [], definitions: [], definitionKeys: [], hasCatalog: given, catalog: unitCatalog, pkg: noPackage(),
-        program: joinBlock(Program { nodes: [], roots: [] }, &source.program), checked: 0 };
+        program: joinBlock(Program { nodes: [], roots: [] }, &source.program) };
     seen = HashMap::new();
     answer = elaborateUnit(table, unit, &seen);
     if answer.status < 0 { return malformed(); };
@@ -581,7 +581,7 @@ fn compileLibrary(libs: &LibParse, table: &AstProgram, t: &Ifaces, done: &List<S
     for ctx in &contexts { definitionPrograms = push(definitionPrograms, programsOf(t, ctx)); };
     unit = Unit { pkgName: "tersuslib", modu: clone(name), hasModule: true, predeclaring: true, viewing: true, extracting: true, libExtract: true,
         ifaces: programsOf(t, &depKeys), ifaceKeys: depKeys, definitions: definitionPrograms, definitionKeys: contexts,
-        hasCatalog: false, catalog: Catalog { ok: true, libs: [] }, pkg: noPackage(), program: joinBlock(Program { nodes: [], roots: [] }, libProgramOf(libs, &name)), checked: 0 };
+        hasCatalog: false, catalog: Catalog { ok: true, libs: [] }, pkg: noPackage(), program: joinBlock(Program { nodes: [], roots: [] }, libProgramOf(libs, &name)) };
     seen = HashMap::new();
     return elaborateUnit(table, unit, &seen);
 };

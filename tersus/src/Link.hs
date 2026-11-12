@@ -13,6 +13,7 @@ import qualified Data.Set as Set
 import PreludeSource (nativeStorageModules)
 import qualified Mir as M
 import PackageData (ModuleId (..), renderModuleId)
+import MirCopies (makeCopies)
 import qualified Syntax
 import Syntax (Proof (..), ValidationStatement (..), VariableProof, Value (..))
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, baseNameOf)
@@ -36,7 +37,12 @@ linkNormalized normalized =
         mergeFunctions functionEnv normalized `bindResult` \functions ->
             mergeAll "generic struct" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progGenerics program)] `bindResult` \generics ->
                 mergeAll "invariant" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInvariants program)] `bindResult` \invariants ->
-                    Ok (M.completeInstances (M.Program types functions linkedMain generics invariants))
+                    mergeAll "function with bounds" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progBounded program)] `bindResult` \bounded ->
+                        mergeAll "copy" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInstances program)] `bindResult` \instances ->
+                            -- (a copy the call cannot have is refused as the elaborator refuses a call)
+                            case makeCopies (M.completeInstances (M.Program types functions linkedMain generics invariants bounded instances)) of
+                                Error e -> Error ("Validation failed: " ++ e)
+                                ok -> ok
   where
     functionEnv = Map.fromList [(name, M.Const (M.CFn name)) | (_, program) <- normalized, name <- Map.keys (M.progFunctions program)]
     rootMain = M.progMain (snd (last normalized))

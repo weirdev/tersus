@@ -84,6 +84,7 @@ enum AstStatement {
     ExternDef { n: Int },
     DropDef { n: Int },
     Dissolve { n: Int },
+    Instance { n: Int, f: Int, args: Int, ps: Int, sig: Int },
 };
 impl Clone for AstStatement { };
 
@@ -362,6 +363,7 @@ fn printNode(node: &AstNode) -> Int ~ {
                 AstStatement::ExternDef { n: n } => { bytesWritten = "ExternDef".print() + printInt(n); },
                 AstStatement::DropDef { n: n } => { bytesWritten = "DropDef".print() + printInt(n); },
                 AstStatement::Dissolve { n: n } => { bytesWritten = "Dissolve".print() + printInt(n); },
+                AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { bytesWritten = "Instance".print() + printInt(n) + printInt(f) + printInt(args) + printInt(ps) + printInt(sig); },
             };
         },
         AstNode::Signature { value: v } => { bytesWritten = "Signature".print() + printInt(v.ts) + printInt(v.ret) + printInt(v.ss) + printInt(v.ps) + printInt(v.ws) + printInt(v.fs); },

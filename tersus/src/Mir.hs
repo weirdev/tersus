@@ -4,6 +4,7 @@ module Mir
     ( Local (..)
     , BlockId (..)
     , Program (..)
+    , BoundedFn (..)
     , TypeDecl (..)
     , Function (..)
     , LocalDecl (..)
@@ -86,6 +87,16 @@ data Program = Program
     , progMain :: Function -- the statements of the program; no parameters
     , progGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields (see completeInstances)
     , progInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets, by the name of the struct (not of an instance of it)
+    , progBounded :: Map Name BoundedFn -- the functions with bounds, lowered once with their type parameters (MirCopies makes their copies)
+    , progInstances :: Map Name (Name, [Arg]) -- what each name a reference to a copy is written with stands for: the function with bounds and its type and bounded size arguments
+    }
+    deriving (Show, Eq, Read)
+
+-- What the copy step needs of a function with bounds beyond its MIR
+data BoundedFn = BoundedFn
+    { boundedSizes :: [Variable] -- the size parameters its bounds name, which a copy is made for (as constants) and named by
+    , boundedCopy :: [Variable] -- the type parameters bounded by Copy, whose values the check of moves copies
+    , boundedLifted :: [Name] -- the functions lifted out of its body, copied with it
     }
     deriving (Show, Eq, Read)
 

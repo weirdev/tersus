@@ -186,7 +186,9 @@ must also stay within the agreed performance budget against the same-host base.
 
 ### 1. Native monomorphization
 
-Replace `MirMono.monomorphize` after the ownership gates pass. Its baseline is
+Replace `MirMono.monomorphize` after the ownership gates pass. (`MirCopies`, the copy
+step of functions with bounds, runs before it at link time and makes copies the
+same way, from MIR; MIR.md, "The copy step".) Its baseline is
 276 lines, but it needs a data
 contract for generic type templates and type/size substitution, reachable
 instances, and implicit Drop instantiation. `monomorphizeForValidation` preserves
@@ -343,10 +345,9 @@ parameter only under a `Clone` or `Copy` bound) and the Copy and Clone
 markers, traits and impls (method resolution, `Type::f`, `Trait::f(x)`, `Eq`
 behind `=`, Deref look-through and the functions that check an impl against
 its trait), functions with bounds (each checked once against its bounds alone where it is
-defined, then made for each list of types a call gives them, placed before the
-statement that called them; one another package's
-module defines is checked in what that module sees, its defining context, and
-the sizes its bounds name are in the instance's name and body), and the modules of
+defined and given back with its type parameters, a call checked against the
+signature and bounds alone and naming the copy it needs, with the sizes its bounds
+name in the copy's name; the copies are made from MIR, MIR.md "The copy step"), and the modules of
 packages and of the compiler libraries: a module predeclares its own types,
 a library module sees a generic constructor's owner as a type, and the
 elaborator gives back the interface the module exposes
@@ -384,7 +385,7 @@ kinds, and the elaborator's large functions (`checkStatement`,
 smaller ones.
 
 Open: `emit` and `emitName` (`out.tersus`) have no contracts, so a caller
-knows nothing of `st.nodes` after either. `boundCallWritten` therefore checks
+knows nothing of `st.nodes` after either. `throughTrait` (`expr.tersus`) therefore checks
 `head` against the arena again after `emitName`; a postcondition such as
 `size(return.nodes) >= size(st.nodes)` would let that check go.
 
@@ -407,9 +408,10 @@ with it decides most of the cost:
 A request carries an interface for the module and again in the defining
 context of every module that depends on it; the host writes each interface
 once, and the elaborator parses a block whose records it has already read
-once (it keeps the blocks it has read by their text) and reads a defining
-context's interface where the module's own copy of it already is, so that a
-template the module imported is the one its defining context owns.
+once (it keeps the blocks it has read by their text). Since copies are made
+from MIR, it takes from a defining context only what it declares under canonical
+names (types, traits and impls), which the signature and bounds of an imported
+function with bounds may name.
 
 `holdsGhost` and `holdsRef` keep what they found for a named type until a
 type, a linear type or a drop is declared. On the host's side, the request
@@ -457,9 +459,8 @@ tools, the compiler libraries, the List and Box helper units and the stages)
 is always elaborated by F0 (`bootstrapElaborator`), as P0 reads the compiler's
 own sources. A failure of the elaborator executable refuses the module. Before
 the switch, the elaborator was brought up to the Haskell checker on imported
-templates: one is checked in a state seeded from its provider's interfaces, the
-sizes its bounds name are part of the instance, and a caller's impl meets its
-bounds in the context that defines it. The differential agreed on every
+templates (since replaced by copies made from MIR: an imported function with
+bounds is checked against its signature and bounds alone). The differential agreed on every
 request of the corpus, the examples and the probes, and the `testPhase2Packages`
 packages (168, 180 and 90 requests) on its last run.
 

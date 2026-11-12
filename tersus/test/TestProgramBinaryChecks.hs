@@ -24,7 +24,7 @@ assert :: String -> Bool -> IO ()
 assert label ok = unless ok (error label) >> putStrLn ("PASS " ++ label)
 
 richProgram :: M.Program
-richProgram = M.Program types functions mainFn generics invariants
+richProgram = M.Program types functions mainFn generics invariants bounded instances
   where
     huge :: Integer
     huge = 2 ^ (130 :: Int)
@@ -44,6 +44,8 @@ richProgram = M.Program types functions mainFn generics invariants
     functions = Map.singleton "fn" mainFn{M.fnName = "fn"}
     generics = Map.singleton "G" (["n","T"],[("arr", T.TArrayOf (T.TParam "T") (T.SizeVar 7))])
     invariants = Map.singleton "G" validations
+    bounded = Map.singleton "fn" (M.BoundedFn ["n"] ["T"] ["fn::inner"])
+    instances = Map.singleton "fn[Int, 3]" ("fn", [T.ArgType T.TInt, T.ArgSize (T.SizeConst 3)])
 
 binaryChecks :: FilePath -> IO ()
 binaryChecks dir = do

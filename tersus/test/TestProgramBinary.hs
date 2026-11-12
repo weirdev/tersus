@@ -31,6 +31,9 @@ instance NFData M.BlockId
 deriving instance Generic M.Program
 instance Binary M.Program
 instance NFData M.Program
+deriving instance Generic M.BoundedFn
+instance Binary M.BoundedFn
+instance NFData M.BoundedFn
 deriving instance Generic M.TypeDecl
 instance Binary M.TypeDecl
 instance NFData M.TypeDecl

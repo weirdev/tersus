@@ -711,5 +711,6 @@ fn statementTag(s: &AstStatement) -> String ~ {
         AstStatement::ExternDef { n: n } => "extern",
         AstStatement::DropDef { n: n } => "drop",
         AstStatement::Dissolve { n: n } => "dissolve",
+        AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => "instance",
     };
 };

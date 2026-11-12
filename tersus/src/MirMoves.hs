@@ -101,6 +101,7 @@ isCopyType copies program = go (0 :: Int)
             TRef t -> go (depth + 1) t
             TNamed base args -> declared depth (instanceName base args)
             TVariant v -> maybe False (declared depth) (ownerOf program v)
+            TParam p -> parameterCopy p `Set.member` copies
             _ -> False
     declared depth n =
         let base = baseNameOf n
@@ -305,7 +306,15 @@ checkMoves copies linear drops program = checkMovesExcluding copies linear drops
 -- As checkMoves, but the named functions are not checked themselves: they stay in the program so that
 -- calls of them are still seen with their signatures (what they lend, and what a result is from).
 checkMovesExcluding :: Set Name -> Set Name -> Set Name -> Set Name -> Program -> [String]
-checkMovesExcluding copies linear drops excluded program = concatMap (checkFunction copies linear drops program) ([fn | fn <- Map.elems (progFunctions program), fnName fn `Set.notMember` excluded] ++ [progMain program])
+checkMovesExcluding copies linear drops excluded program = concatMap (\fn -> checkFunction (copiesIn fn) linear drops program fn) ([fn | fn <- Map.elems (progFunctions program), fnName fn `Set.notMember` excluded] ++ [progMain program])
+  where
+    -- (a type parameter of a function with bounds is Copy in its body, and in the functions lifted out of it that do not
+    -- have a type parameter of that name of their own, when a bound says so)
+    copiesIn fn = Set.union copies (Set.fromList [parameterCopy p | (name, bounded) <- Map.toList (progBounded program), p <- boundedCopy bounded, name == fnName fn || (fnName fn `elem` boundedLifted bounded && p `notElem` fnTypeParams fn)])
+
+-- How a type parameter bounded by Copy is named among the Copy types (no type's name has a space)
+parameterCopy :: Variable -> Name
+parameterCopy p = "$param " ++ p
 
 checkFunction :: Set Name -> Set Name -> Set Name -> Program -> Function -> [String]
 checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])

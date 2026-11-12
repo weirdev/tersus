@@ -40,6 +40,7 @@ import TestMirEval
 import TestMirReader
 import TestMirVerify
 import TestMirErase
+import TestMirCopies
 import TestMirEmit
 import TestMirSupport
 import TestBootstrap
@@ -192,6 +193,7 @@ originalGroups =
     , testMirReader
     , testMirVerify
     , testMirErase
+    , testMirCopies
     , testMirVerifyPrograms
     , testMirEmit
     , testMirEmitPrograms

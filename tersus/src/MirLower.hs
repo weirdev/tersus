@@ -1,13 +1,14 @@
 module MirLower (lowerElaborated, lowerLibrary, lowerModuleWith) where
 
 import Control.Monad (forM, unless, when)
-import Data.List (intercalate)
+import Data.List (intercalate, isPrefixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Interface (InterfaceFunction (..), ModuleInterface (..))
 import qualified Mir as M
+import MirCopies (makeCopies)
 import MirMoves (checkMovesExcluding, stripPositions)
 import Pretty (renderType)
 import StdLib (builtinFunct)
@@ -34,17 +35,22 @@ lowerElaborated = lowerWith True
 lowerLibrary :: Elaborated -> Result M.Program String
 lowerLibrary = lowerWith True
 
+-- (a program lowered on its own is the whole program, so the copies of its functions with bounds are made here; a module's
+-- are made when the program it is part of is linked, Link)
 lowerWith :: Bool -> Elaborated -> Result M.Program String
 lowerWith checking elaborated@(Elaborated stmts _) =
     case runL (program stmts) ((initialState elaborated){lsChecking = checking}) of
         Left e -> Error e
-        Right (p, _) -> Ok p
+        Right (p, finalState) -> makeCopies (withoutStubs finalState p)
+
+withoutStubs :: LS -> M.Program -> M.Program
+withoutStubs finalState p = p{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs finalState) (M.progFunctions p)}
 
 lowerModuleWith :: [ModuleInterface] -> Elaborated -> Result M.Program String
 lowerModuleWith ifaces elaborated@(Elaborated stmts _) =
     case runL (program stmts) (seededModuleState ifaces elaborated) of
         Left e -> Error e
-        Right (p, finalState) -> Ok p{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs finalState) (M.progFunctions p)}
+        Right (p, finalState) -> Ok (withoutStubs finalState p)
 
 seededModuleState :: [ModuleInterface] -> Elaborated -> LS
 seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
@@ -88,9 +94,14 @@ seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
 
 stubFunction :: Name -> InterfaceFunction -> M.Function
 stubFunction mirName fn =
-    let Signature ptys rty sizes types _ _ = fnSignature fn
-        params = [M.Local (i + 1) | i <- [0 .. length ptys - 1]]
-        locals = Map.fromList ((M.Local 0, M.LocalDecl rty Nothing) : [(l, M.LocalDecl ty (Just v)) | (l, ty, v) <- zip3 params ptys (fnParams fn)])
+    let stub = signatureStub mirName (fnParams fn) (fnSignature fn)
+     in stub{M.fnSpec = (M.fnSpec stub){M.specRequires = fnRequires fn, M.specEnsures = fnEnsures fn, M.specTermination = fnTermination fn}}
+
+-- A function of that signature and no body, which a call of it is lowered and checked for moves against
+signatureStub :: Name -> [Variable] -> Signature -> M.Function
+signatureStub mirName paramNames (Signature ptys rty sizes types _ froms) =
+    let params = [M.Local (i + 1) | i <- [0 .. length ptys - 1]]
+        locals = Map.fromList ((M.Local 0, M.LocalDecl rty Nothing) : [(l, M.LocalDecl ty (Just v)) | (l, ty, v) <- zip3 params ptys paramNames])
      in M.Function
             { M.fnName = mirName
             , M.fnParams = params
@@ -100,12 +111,10 @@ stubFunction mirName fn =
             , M.fnTypeParams = types
             , M.fnBorrowed = [l | (l, ty) <- zip params ptys, isRefType ty]
             , M.fnMutBorrowed = [l | (l, ty) <- zip params ptys, isMutRefType ty]
-            , M.fnFrom = [l | (l, v) <- zip params (fnParams fn), v `elem` froms]
+            , M.fnFrom = [l | (l, v) <- zip params paramNames, v `elem` froms]
             , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)
-            , M.fnSpec = M.emptySpec{M.specRequires = fnRequires fn, M.specEnsures = fnEnsures fn, M.specTermination = fnTermination fn, M.specMutParams = [v | (v, ty) <- zip (fnParams fn) ptys, isMutRefType ty], M.specFrom = froms}
+            , M.fnSpec = M.emptySpec{M.specMutParams = [v | (v, ty) <- zip paramNames ptys, isMutRefType ty], M.specFrom = froms}
             }
-  where
-    Signature _ _ _ _ _ froms = fnSignature fn
 
 interfaceTypeDecls :: ModuleInterface -> Map Name M.TypeDecl
 interfaceTypeDecls iface =
@@ -194,10 +203,12 @@ data LS = LS
     , lsDrops :: Set.Set Name -- the structs and enums that have a drop
     , lsPrereg :: Map Variable [Name] -- the names given to the functions defined at the top, before any body is lowered (one for each definition of the name)
     , lsStubs :: Set.Set Name -- imported functions seeded as stubs: present while lowering, never part of the unit
+    , lsBounded :: Map Name M.BoundedFn -- the functions with bounds (BoundedDef)
+    , lsInstances :: Map Name (Name, [Arg]) -- the copies the program names (Instance)
     }
 
 initialState :: Elaborated -> LS
-initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty Map.empty Set.empty
+initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty Map.empty Set.empty Map.empty Map.empty
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
 -- others are known functions, and a call of one is a call by name.
@@ -316,6 +327,21 @@ registerTopLevel stmts = do
     modifyS (\s -> s{lsExterns = Set.union (lsExterns s) (Set.fromList [name | ExternDef name <- stmts])})
     mapM_ register stmts
   where
+    register (BoundedDef _ inner) = register inner
+    -- (a name the program uses for a copy, or for a function a bound gives, is a stub of its signature while the program is lowered)
+    register (Instance name generic args params sig@(Signature ptys rty sizes types _ _)) = do
+        known <- Set.member name . lsNames <$> getS
+        unless known $
+            modifyS
+                ( \s ->
+                    s
+                        { lsNames = Set.insert name (lsNames s)
+                        , lsFunctions = Map.insert name (signatureStub name params sig) (lsFunctions s)
+                        , lsGlobals = Map.insert name (name, functionType sizes types ptys rty) (lsGlobals s)
+                        , lsStubs = Set.insert name (lsStubs s)
+                        , lsInstances = if null generic then lsInstances s else Map.insert name (generic, args) (lsInstances s)
+                        }
+                )
     register (Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _))) = do
         extern <- Set.member var . lsExterns <$> getS
         assigned <- (\s -> Set.member var (lsAssigned s) && null sizes) <$> getS
@@ -327,6 +353,7 @@ lowerProgramStatement :: Statement -> L ()
 lowerProgramStatement stmt = do
     open <- isOpen
     if open then lowerStatement stmt else case stmt of
+        BoundedDef bounds inner -> lowerBounded bounds (lowerProgramStatement inner) inner
         Assign var (Val (VFunct _ _ _ (NativeFunct _ _ _) _)) -> do
             names <- Map.findWithDefault [] var . lsPrereg <$> getS
             env <- visibleEnv
@@ -335,6 +362,45 @@ lowerProgramStatement stmt = do
                 name : _ -> modifyB (\b -> b{bBlocks = Map.adjust (\(M.BasicBlock ss t) -> M.BasicBlock (ss ++ [M.Ghost env (M.GhostFunction name var True)]) t) (M.BlockId 0) (bBlocks b)})
                 [] -> return ()
         _ -> skipStatement stmt
+
+-- A function with bounds is lowered as any function with type parameters, and recorded for the copy step: the sizes its bounds
+-- name, its type parameters bounded by Copy, and the functions lifted out of its body
+lowerBounded :: [Bound] -> L () -> Statement -> L ()
+lowerBounded bounds lowerInner inner = case inner of
+    Assign var (Val (VFunct _ _ _ (NativeFunct (Signature _ _ sizes _ _ _) _ _) _)) -> do
+        prereg <- Map.findWithDefault [] var . lsPrereg <$> getS
+        before <- Map.keysSet . lsFunctions <$> getS
+        lowerInner
+        after <- lsFunctions <$> getS
+        let name = case prereg of
+                n : _ -> n
+                [] -> var
+            lifted = [n | n <- Map.keys after, n `Set.notMember` before, (name ++ "::") `isPrefixOf` n]
+            boundedSizes' = [n | n <- sizes, any (any (mentionsSize n)) [ts | (_, _, ts) <- bounds]]
+            copyParams = [p | (p, "Copy", _) <- bounds]
+        modifyS (\s -> s{lsBounded = Map.insert name (M.BoundedFn boundedSizes' copyParams lifted) (lsBounded s)})
+    _ -> failL "A bound is on something other than a function"
+
+mentionsSize :: Variable -> Type -> Bool
+mentionsSize n ty = case ty of
+    TArrayOf t size -> sizeIs size || mentionsSize n t
+    TNamed _ args -> any argMentions args
+    TList t -> mentionsSize n t
+    TBox t -> mentionsSize n t
+    TAddr t -> mentionsSize n t
+    TBlock t -> mentionsSize n t
+    TUninit t -> mentionsSize n t
+    TRef t -> mentionsSize n t
+    TMutRef t -> mentionsSize n t
+    TFn args ret -> any (mentionsSize n) (ret : args)
+    _ -> False
+  where
+    sizeIs size = case size of
+        SizeParam p -> p == n
+        _ -> False
+    argMentions arg = case arg of
+        ArgSize size -> sizeIs size
+        ArgType t -> mentionsSize n t
 
 program :: [Statement] -> L M.Program
 program stmts = do
@@ -351,7 +417,7 @@ program stmts = do
     let (resolvedMain, others) = case resolved of
             m : rest -> (m, rest)
             [] -> (main', [])
-        result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s))
+        result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s) (lsBounded s) (lsInstances s))
     -- (that the program is well formed is checked by the pipeline on what is lowered, with the checker
     -- written in Tersus (MirHousekeeping): it is not checked here, so that the checker and the eraser can
     -- themselves be lowered to be made from the seed. The stub functions of imported modules stay in the
@@ -548,7 +614,8 @@ lowerStatement stmt =
         -- (the checker takes a trait apart and hands an impl back as the functions it defines)
         TraitDef{} -> failL "A trait reached the lowering"
         ImplDef{} -> failL "An impl reached the lowering"
-        BoundedDef{} -> failL "A function with bounds reached the lowering"
+        BoundedDef bounds inner -> lowerBounded bounds (lowerStatement inner) inner
+        Instance{} -> return ()
         AxiomDef name args ins outs -> ghost (M.GhostAxiom name args ins outs)
         ProofDef name args ins outs body -> ghost (M.GhostProof name args ins outs body)
         Block stmts -> scoped (lowerStatements stmts)

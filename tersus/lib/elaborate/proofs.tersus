@@ -9,7 +9,7 @@ import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
 import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { callOf };
 import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt };
-import elaborate::traits { boundCallWritten, builtinSequenceCall, emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, sequenceFunction, templateCall, traitFnName, traitFnOf };
+import elaborate::traits { builtinSequenceCall, emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof ~ {
     node = nodeIn(&st.nodes, p);
@@ -240,7 +240,7 @@ fn inferProofOther(st: St, funct: Int, args: &List<Int>) -> St ~ {
             };
             if x.kind = 4 && x.name != "List" && x.name != "Box" {
                 owner = clone(x.name);
-                st = sequenceFunction(st, &owner, &fname);
+                st = resolveAssociated(st, &owner, &fname);
                 if st.status != 0 { return st; };
                 return ghostCall(st, 0 - 1, firstText(&st.names), &argTys, &argNodes);
             };
@@ -248,9 +248,7 @@ fn inferProofOther(st: St, funct: Int, args: &List<Int>) -> St ~ {
                 powner = parameterOwner(&x.name);
                 st = resolveAssociated(st, &powner, &fname);
                 if st.status != 0 { return st; };
-                resolved = firstText(&st.names);
-                st = boundCallWritten(st, funct, &powner, &fname, true);
-                return ghostCall(st, 0 - 1, resolved, &argTys, &argNodes);
+                return ghostCall(st, 0 - 1, firstText(&st.names), &argTys, &argNodes);
             };
         };
     };

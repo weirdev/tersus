@@ -133,6 +133,8 @@ nestedInstanceIsDeclared =
                         , ("Inner", (["T"], [("value", TParam "T")]))
                         ]
                 , progInvariants = Map.empty
+                , progBounded = Map.empty
+                , progInstances = Map.empty
                 }
         completed = completeInstances program
      in if Map.lookup "Outer<Int>" (progTypes completed) == Just (StructDecl [("inner", TNamed "Inner" [ArgType TInt]), ("tag", TInt)])
@@ -171,6 +173,8 @@ roundTripsNames =
         , progMain = fn "main"
         , progGenerics = Map.empty
         , progInvariants = Map.empty
+        , progBounded = Map.empty
+        , progInstances = Map.empty
         }
   where
     oddName = "a \"quoted\" \\ name\nwith caf\233, \955 and \128512"
