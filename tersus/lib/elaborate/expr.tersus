@@ -54,7 +54,12 @@ fn inferArgs(st: St, ft: Int, args: &List<Int>) -> St ~ {
     while i < size(args) [{ affirm i >= 0; affirm size(params) = size(args); }] ~ {
         a = get(args, i);
         p = unrefOf(st, get(params, i));
-        if isListTy(st, p) && literalContext(st, a) { st = inferExpected(st, "expression result", p, a, false); } else { st = inferExpr(st, a); };
+        if isListTy(st, p) && literalContext(st, a) {
+            c = callOf(&st, a);
+            if pushOnValue(&st, &c) {
+                st = routePush(st, &c, p);
+            } else { st = inferExpected(st, "expression result", p, a, false); };
+        } else { st = inferExpr(st, a); };
         if st.status != 0 { return St { tes: tes, ..st }; };
         tes = push(tes, clone(st.te));
         i = i + 1;
@@ -72,6 +77,20 @@ fn literalContext(st: &St, e: Int) -> Bool ~ {
     if ex is AstExpression::BlockExpr { return literalContext(st, (ex as AstExpression::BlockExpr).e); };
     c = callOf(st, e);
     return c.ok && size(c.args) = 2 && headKey(st, c.head) = "Push";
+};
+
+// A list the expression builds itself: a list literal, or push onto one (through if and block results), whose type
+// the wanted list gives
+fn listBuilt(st: &St, e: Int) -> Bool ~ {
+    if listLiteral(st, e) { return true; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        return listBuilt(st, a.a) || listBuilt(st, a.b);
+    };
+    if ex is AstExpression::BlockExpr { return listBuilt(st, (ex as AstExpression::BlockExpr).e); };
+    c = callOf(st, e);
+    return c.ok && size(c.args) = 2 && headKey(st, c.head) = "Push" && listBuilt(st, get(c.args, 0));
 };
 
 fn argsCountText(name: String, n: Int, args: Int) -> String ~ {
@@ -95,11 +114,11 @@ fn inferExprCore(st: St, e: Int) -> St ~ {
     ex = exprOf(st, e);
     if ex is AstExpression::IfExpr {
         a = ex as AstExpression::IfExpr;
-        return inferIf(st, a.c, a.a, a.b, 0 - 1, false, "branch result");
+        return inferIf(st, a.c, a.a, a.b, 0 - 1, false, "branch result", 0 - 1);
     };
     if ex is AstExpression::BlockExpr {
         a = ex as AstExpression::BlockExpr;
-        return inferBlock(st, a.xs, a.e, 0 - 1, false, "expression result");
+        return inferBlock(st, a.xs, a.e, 0 - 1, false, "expression result", 0 - 1);
     };
     if ex is AstExpression::Ascribed {
         a = ex as AstExpression::Ascribed;
@@ -125,27 +144,19 @@ fn inferExpectedCore(st: St, context: String, wanted: Int, e: Int, returning: Bo
     ex = exprOf(st, e);
     if ex is AstExpression::IfExpr {
         a = ex as AstExpression::IfExpr;
-        return inferIf(st, a.c, a.a, a.b, wanted, returning, context);
+        return inferIf(st, a.c, a.a, a.b, wanted, returning, context, 0 - 1);
     };
     if ex is AstExpression::BlockExpr {
         a = ex as AstExpression::BlockExpr;
-        return inferBlock(st, a.xs, a.e, wanted, returning, context);
+        return inferBlock(st, a.xs, a.e, wanted, returning, context, 0 - 1);
     };
     c = callOf(st, e);
-    if isListTy(st, wanted) && c.ok && headKey(st, c.head) = "Push" && size(c.args) = 2 {
+    if isListTy(st, wanted) && c.ok && headKey(st, c.head) = "Push" && size(c.args) = 2 && listBuilt(&st, get(c.args, 0)) {
         st = inferExpected(st, "argument 1 of push", wanted, get(c.args, 0), false);
         if st.status != 0 { return st; };
-        list = clone(st.te);
-        element = argAt(st, wanted, 0);
-        st = inferExpected(st, "argument 2 of push", element, get(c.args, 1), false);
-        if st.status != 0 { return st; };
-        value = clone(st.te);
-        args = push(push([], list.node), value.node);
-        st = emitCall(st, c.head, &args);
-        parts = push(push([], list), value);
-        return typed(st, st.nid, wanted, &parts);
+        return pushOnto(st, c.head, wanted, clone(st.te), get(c.args, 1));
     };
-    st = inferExpr(st, e);
+    if isListTy(st, wanted) && pushOnValue(&st, &c) { st = routePush(st, &c, wanted); } else { st = inferExpr(st, e); };
     if st.status != 0 { return st; };
     arg = clone(st.te);
     st = zonk(st, wanted);
@@ -175,7 +186,94 @@ fn inferExpectedCore(st: St, context: String, wanted: Int, e: Int, returning: Bo
     return St { te: result, ..st };
 };
 
-fn inferIf(st: St, c: Int, a: Int, b: Int, wanted: Int, returning: Bool, context: String) -> St ~ {
+// A call push(v, x) whose receiver the call does not build itself: v's own type decides which push it is
+fn pushOnValue(st: &St, c: &Call) -> Bool ~ {
+    if !c.ok || size(c.args) != 2 || headKey(st, c.head) != "Push" || listBuilt(st, get(c.args, 0)) { return false; };
+    // (a template named push that is not shadowed is the call general makes of it)
+    if isVar(st, c.head) {
+        name = varName(st, c.head);
+        if HashMap::contains(&st.templates, &name) && !inScope(st, &name) { return false; };
+    };
+    return true;
+};
+
+// push(v, x) where a list is wanted. The head, then v, are inferred once: on a list it is the builtin, v given the
+// wanted type and x its element type; on any other value it is the function of v's impl or bound, called with what
+// was inferred, and the result is left to whoever wanted the list. Either way the call is captured, as inferExpr
+// captures a call
+fn routePush(st: St, c: &Call, wanted: Int) -> St ~ {
+    st = inferExpr(st, c.head);
+    if st.status != 0 { return st; };
+    functT = clone(st.te);
+    st = routeReceiver(st, get(c.args, 0), wanted);
+    if st.status != 0 { return st; };
+    receiver = clone(st.te);
+    st = zonk(st, teHead(&receiver));
+    if isListTy(st, st.ty) {
+        st = coerce(st, wanted, receiver);
+        if st.status != 0 { return st; };
+        list = clone(st.te);
+        st = expect(st, "argument 1 of push", wanted, teHead(&list));
+        if st.status != 0 { return st; };
+        st = pushOnto(st, functT.node, wanted, list, get(c.args, 1));
+        if st.status != 0 { return st; };
+        built = clone(st.te);
+        return captureExpression(st, &built);
+    };
+    st = inferExpr(st, get(c.args, 1));
+    if st.status != 0 { return st; };
+    inferred = push(push([], receiver), clone(st.te));
+    st = dispatchOrdinary(st, c.head, functT, head(&functT.types), &inferred);
+    st = refResultKnown(st, c.head);
+    return completed(st);
+};
+
+// The receiver of such a push, inferred once with the list type it may turn out to be as a hint: a list it builds
+// takes the type, a push on a value is routed again, and the arms of an if and the result of a block are given the
+// hint in turn; anything else is inferred as it is
+fn routeReceiver(st: St, e: Int, hint: Int) -> St ~ {
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        st = inferIf(st, a.c, a.a, a.b, 0 - 1, false, "branch result", hint);
+        return completed(st);
+    };
+    if ex is AstExpression::BlockExpr {
+        a = ex as AstExpression::BlockExpr;
+        st = inferBlock(st, a.xs, a.e, 0 - 1, false, "expression result", hint);
+        return completed(st);
+    };
+    if listBuilt(&st, e) { return inferExpected(st, "argument 1 of push", hint, e, false); };
+    c = callOf(&st, e);
+    if pushOnValue(&st, &c) { return routePush(st, &c, hint); };
+    return inferExpr(st, e);
+};
+
+// What inferExpr does after an expression is inferred: the fields its call writes and its origins recorded, and the
+// expression captured
+fn completed(st: St) -> St ~ {
+    if st.status != 0 { return st; };
+    value = clone(st.te);
+    st = recordCallFieldOrigins(st, &value);
+    if st.status != 0 { return st; };
+    st = St { te: clone(value), ..st };
+    return captureExpression(st, &value);
+};
+
+// push(list, x) of the builtin, the list already given the wanted type
+fn pushOnto(st: St, funct: Int, wanted: Int, list: TE, x: Int) -> St ~ {
+    element = argAt(st, wanted, 0);
+    st = inferExpected(st, "argument 2 of push", element, x, false);
+    if st.status != 0 { return st; };
+    value = clone(st.te);
+    args = push(push([], list.node), value.node);
+    st = emitCall(st, funct, &args);
+    parts = push(push([], list), value);
+    return typed(st, st.nid, wanted, &parts);
+};
+
+// (hint: a list type a push receiver may turn out to be, given to the arms when nothing is wanted, -1 for none)
+fn inferIf(st: St, c: Int, a: Int, b: Int, wanted: Int, returning: Bool, context: String, hint: Int) -> St ~ {
     if st.inGhost { return typeError(st, "a proof cannot contain an if expression"); };
     st = inferExpr(st, c);
     if st.status != 0 { return st; };
@@ -184,12 +282,12 @@ fn inferIf(st: St, c: Int, a: Int, b: Int, wanted: Int, returning: Bool, context
     st = expect(st, "condition of if", st.ty, teHead(&cond));
     if st.status != 0 { return st; };
     before = refsOf(&st);
-    if wanted >= 0 { st = inferExpected(st, clone(context), wanted, a, returning); } else { st = inferExpr(st, a); };
+    if wanted >= 0 { st = inferExpected(st, clone(context), wanted, a, returning); } else { if hint >= 0 { st = routeReceiver(st, a, hint); } else { st = inferExpr(st, a); }; };
     if st.status != 0 { return st; };
     yes = clone(st.te);
     left = refsOf(&st);
     st = resetBranchReferences(st, &before);
-    if wanted >= 0 { st = inferExpected(st, context, wanted, b, returning); } else { st = inferExpr(st, b); };
+    if wanted >= 0 { st = inferExpected(st, context, wanted, b, returning); } else { if hint >= 0 { st = routeReceiver(st, b, hint); } else { st = inferExpr(st, b); }; };
     if st.status != 0 { return st; };
     no = clone(st.te);
     st = joinBranchReferences(st, &left);
@@ -213,7 +311,7 @@ fn inferIf(st: St, c: Int, a: Int, b: Int, wanted: Int, returning: Bool, context
     return typed(st, st.nid, result, &parts);
 };
 
-fn inferBlock(st: St, xs: Int, e: Int, wanted: Int, returning: Bool, context: String) -> St ~ {
+fn inferBlock(st: St, xs: Int, e: Int, wanted: Int, returning: Bool, context: String, hint: Int) -> St ~ {
     if st.inGhost { return typeError(st, "a proof cannot contain a block expression"); };
     st = pushScope(st);
     body = listItems(&st.nodes, xs);
@@ -221,7 +319,7 @@ fn inferBlock(st: St, xs: Int, e: Int, wanted: Int, returning: Bool, context: St
     if st.status != 0 { return st; };
     statements = st.te.node;
     bodyTypes = clone(st.te.types);
-    if wanted >= 0 { st = inferExpected(st, context, wanted, e, returning); } else { st = inferExpr(st, e); };
+    if wanted >= 0 { st = inferExpected(st, context, wanted, e, returning); } else { if hint >= 0 { st = routeReceiver(st, e, hint); } else { st = inferExpr(st, e); }; };
     if st.status != 0 { return st; };
     result = clone(st.te);
     st = captureExpression(st, &result);
@@ -1917,6 +2015,13 @@ fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
     st = inferArgs(st, ft, args);
     if st.status != 0 { return st; };
     inferred0 = clone(st.tes);
+    return dispatchOrdinary(st, funct, functT, ft, &inferred0);
+};
+
+// A call of a builtin or a function of the program, its arguments inferred: a sequence builtin on a value of a struct
+// or a type parameter is the function of its impl or bound
+fn dispatchOrdinary(st: St, funct: Int, functT: TE, ft: Int, inferred: &List<TE>) -> St ~ {
+    inferred0 = clone(inferred);
     b = builtinHead(st, funct);
     if b >= 0 && size(inferred0) > 0 {
         key = builtinKey(st, b);
