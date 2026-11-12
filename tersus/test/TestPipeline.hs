@@ -715,16 +715,46 @@ selfHostedQueryFamilies program =
                 emptyContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkUnknownGoal = testAssertEq (runNamedFunction program "entailsGoal" [emptyContext, MData "ValidatorGoal::Unknown" []]) (Ok (Just (MBool False)))
                 localsValue bindings = MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt k), ("value", MInt v)] | (k, v) <- bindings]]), ("count", MInt (toInteger (length bindings)))]
-                initialExecution = MData "ExecutionState" [("context", emptyContext), ("locals", localsValue []), ("templates", MList [])]
+                initialExecution = floored $ MData "ExecutionState" [("context", emptyContext), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                 termRef i = MData "ValueRef::Term" [("term", MInt i)]
                 localRef i = MData "ValueRef::Local" [("local", MInt i)]
                 assignLocal i ref = MData "ExecutionStep::Assign" [("local", MInt i), ("value", ref)]
                 applyLocal local result = MData "ExecutionStep::Apply" [("local", MInt local), ("result", MInt result), ("function", MInt 10), ("arguments", MList [localRef 0])]
                 checkLocals = MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", localRef 2)]
                 executionSteps = [assignLocal 0 (termRef 1), applyLocal 1 2, applyLocal 2 3, checkLocals]
-                checkExecution steps status step = case runNamedFunction program "executeSteps" [initialExecution, MList steps] of
-                    Ok (Just (MData "ExecutionResult" fields)) -> testAssertEq (lookup "status" fields, lookup "failedAt" fields) (Just (MInt status), Just (MInt step))
+                checkExecution steps status step = case runNamedFunction program "executeSteps" [stepsFloored steps initialExecution, MList steps] of
+                    Ok (Just (MData "ExecutionResult" fields)) -> testAssertEq (lookup "status" fields, lookup "failedAt" fields) (Just (MInt status), Just (MInt step)) `orElse` stateFloorHolds (lookup "state" fields)
                     result -> Just ("Unexpected execution result: " ++ show result)
+                -- (a hand-made state is given the floor the validator's entry gives one: at or
+                -- below every id it mentions, and below every id the steps run on it name)
+                withFloor least state = case state of
+                    MData "ExecutionState" fields -> MData "ExecutionState" [(k, if k == "floor" then MInt least else v) | (k, v) <- fields]
+                    other -> other
+                floored state = case runNamedFunction program "leastTermInUse" [state] of
+                    Ok (Just (MInt least)) -> withFloor least state
+                    _ -> state
+                stepsFloored steps state = case (state, runNamedFunction program "stepsFloor" [MList steps, MInt (-999), MInt 16]) of
+                    (MData "ExecutionState" fields, Ok (Just (MInt least))) | Just (MInt floor) <- lookup "floor" fields -> withFloor (min floor least) state
+                    _ -> state
+                -- (the floor a state carries is at or below every id it mentions, as the full scan finds them)
+                stateFloorHolds found = case found of
+                    Just state@(MData "ExecutionState" fields) -> case (lookup "floor" fields, runNamedFunction program "leastTermInUse" [state]) of
+                        (Just (MInt floor), Ok (Just (MInt least))) | floor <= least -> Nothing
+                        other -> Just ("floor above the least term in use: " ++ show other)
+                    other -> Just ("no state: " ++ show other)
+                applyFresh local function args = MData "ExecutionStep::ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList args)]
+                -- Two right-hand terms minted on one side: the joined term must be below both,
+                -- not only below the side whose floor is higher.
+                checkMergeFloor =
+                    let left = floored $ MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] []), ("locals", localsValue [(1, 10)]), ("templates", MList []), ("floor", MInt (-999))]
+                        right = MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (-1000, 11)]), ("locals", localsValue [(1, -1001), (2, -1000)]), ("templates", MList []), ("floor", MInt (-1001))]
+                     in case runNamedFunction program "mergeStates" [left, right] of
+                            Ok (Just (MData "StateMergeLookup::Found" [("state", merged@(MData "ExecutionState" fields))])) -> case lookup "locals" fields of
+                                Just locals -> case runNamedFunction program "lookupLocal" [locals, MInt 1] of
+                                    Ok (Just (MData "ValueLookup::Found" [("term", MInt joined)])) -> testAssertTrue (joined < -1001) `orElse` stateFloorHolds (Just merged)
+                                    other -> Just ("Merged local missing: " ++ show other)
+                                Nothing -> Just "Merged state without locals"
+                            result -> Just ("Unexpected mergeStates result: " ++ show result)
                 checkTerms relation a b = MData "ExecutionStep::Check" [("relation", MInt relation), ("left", termRef a), ("right", termRef b)]
                 assumeTerms a b = MData "ExecutionStep::Assume" [("relation", MInt 0), ("left", termRef a), ("right", termRef b)]
                 scoped steps = MData "ExecutionStep::Scoped" [("steps", MList steps)]
@@ -781,7 +811,7 @@ selfHostedQueryFamilies program =
                 drivenProved = "0 -1 -1 -1\n"
                 drivenRefused = "2 -1 -1 0\n"
                 drivenContext constantTerms = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                drivenState constantTerms = MData "ExecutionState" [("context", drivenContext constantTerms), ("locals", localsValue []), ("templates", MList [])]
+                drivenState constantTerms = floored $ MData "ExecutionState" [("context", drivenContext constantTerms), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                 dBooleanBranchTo yes no value = dData "ExecutionEnd::BooleanBranch" [dInt yes, dInt no, value, dTerm 20, dTerm 21]
                 checkDrivenEnd constantTerms end = checkDrivenIn (drivenState constantTerms) (dList [dBlock (dList []) end, dBlockAt 1 (dList []) dDone, dBlockAt 2 (dList []) dDone])
                 checkDrivenBoolean value = checkDrivenEnd boolConstants (dBooleanBranchTo 1 2 value)
@@ -795,7 +825,7 @@ selfHostedQueryFamilies program =
                     let comparison = app (10, function, [0,1])
                         bool = constant (20, 1, if truth then 1 else 0)
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [comparison]), ("constants", MList [bool]), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
+                        initial = floored $ MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                         assume = MData "ExecutionStep::Assume" [("relation", MInt 0), ("left", termRef 10), ("right", termRef 20)]
                         obligation = MData "ExecutionStep::Check" [("relation", MInt relation), ("left", termRef left), ("right", termRef right)]
                      in case runNamedFunction program "executeSteps" [initial, MList [assume, obligation]] of
@@ -808,7 +838,11 @@ selfHostedQueryFamilies program =
                 -- carry, so it must happen only with the index proved in range.
                 readThroughPushContext extraConstants extraOrders = MData "ValidatorContext" [("equalities", MList []), ("applications", MList (map app [(3, -16, [1, 2]), (4, -13, [1]), (6, -14, [1, 5]), (40, -14, [3, 5])])), ("constants", MList (map constant ((7, 0, 0) : extraConstants))), ("orders", MList (map mixedFact extraOrders)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [diffFact (5, 4, -1)])]
                 checkReadThroughPush extraConstants extraOrders expected =
-                    case runNamedFunction program "readThroughSequence" [readThroughPushContext extraConstants extraOrders, MInt 40, MInt 3, MInt 5] of
+                    let context = readThroughPushContext extraConstants extraOrders
+                        index = case runNamedFunction program "noFactIndex" [] `bindResult` maybe (Error "no index") (\none -> runNamedFunction program "indexFacts" [none, context]) of
+                            Ok (Just made) -> made
+                            _ -> MEmpty
+                     in case runNamedFunction program "readThroughSequence" [context, index, MInt 40, MInt 3, MInt 5] of
                         Ok (Just (MData "ValidatorContext" fields)) -> case lookup "applications" fields of
                             Just (MList traced) -> testAssertEq (app (40, -14, [1, 5]) `elem` traced) expected
                             other -> Just ("Unexpected traced applications: " ++ show other)
@@ -856,7 +890,7 @@ selfHostedQueryFamilies program =
                     , execBlock 2 [assignLocal 1 (termRef 1)] (execBranchTo 4 5), execBlock 3 [assignLocal 1 (termRef 2)] (execJump 7)
                     , execBlock 4 [assignLocal 1 (termRef 2)] (execJump 6), execBlock 5 [] (execJump 6), execBlock 6 [] (execJump 7)
                     , execBlock 7 [] (execJump 8), execBlock 8 [assignLocal 2 (termRef 1)] (execJump 0), execBlock 90 [] execEndDone ]
-                loopInitial = MData "ExecutionState" [("context", mergeContext [constant (5, 0, 0)] []), ("locals", localsValue []), ("templates", MList [])]
+                loopInitial = floored $ MData "ExecutionState" [("context", mergeContext [constant (5, 0, 0)] []), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                 -- (the test is term 5 < term 6, which always holds, so a loop is left only
                 -- through a later conjunct's edge to its exit)
                 execGuardedLoopEnd exitBlock bodyBlock regionBlocks checks assumptions havoc = MData "ExecutionEnd::Loop"
@@ -889,9 +923,9 @@ selfHostedQueryFamilies program =
                     , [execBlock 9 [] (execJump 0), execBlock 0 [] (plainExitLoop 0 1 [0, 1, 2]), execBlock 1 [] (execBranchTo 2 3), execBlock 2 [] (execJump 0), execBlock 3 [] execEndDone]
                     , [execBlock 9 [] (execJump 0), execBlock 0 [] (plainExitLoop 2 1 [0, 1, 2]), execBlock 1 [] (execBranchTo 2 4), execBlock 2 [] (execJump 0), execBlock 4 [] execEndDone]
                     ]
-                exitInitial = MData "ExecutionState" [("context", mergeContext [constant (1, 0, 7), constant (2, 0, 8), constant (5, 0, 0), constant (6, 0, 1)] []), ("locals", localsValue []), ("templates", MList [])]
+                exitInitial = floored $ MData "ExecutionState" [("context", mergeContext [constant (1, 0, 7), constant (2, 0, 8), constant (5, 0, 0), constant (6, 0, 1)] []), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                 checkFlowFrom entry blocks state status = case runNamedFunction program "validateExecution" [MList blocks, MInt entry, state] of
-                    Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt status))
+                    Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt status)) `orElse` stateFloorHolds (lookup "state" fields)
                     result -> Just ("Unexpected execution flow result: " ++ show result)
                 -- Loops left by later conjuncts: three extra conjuncts at the top level, the same
                 -- loop as the last statement of an outer loop, k such loops in sequence, and three
@@ -918,11 +952,11 @@ selfHostedQueryFamilies program =
                         other -> Just ("Sweep result without a flow result: " ++ show other)
                     result -> Just ("Unexpected sweep result: " ++ show result)
                 checkExecutionFlow blocks status blockId = case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initialExecution] of
-                    Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields, lookup "block" fields) (Just (MInt status), Just (MInt blockId))
+                    Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields, lookup "block" fields) (Just (MInt status), Just (MInt blockId)) `orElse` stateFloorHolds (lookup "state" fields)
                     result -> Just ("Unexpected execution flow result: " ++ show result)
                 checkBooleanBranch constantTerms destinations blocks expected =
                     let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
+                        initial = floored $ MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                      in case runNamedFunction program "validateExecution" [MList (execBlock 0 [] end : blocks), MInt 0, initial] of
                             Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
@@ -930,7 +964,7 @@ selfHostedQueryFamilies program =
                 checkBooleanJoin rightValue expected =
                     let joinConstants = boolConstants ++ [constant (30, 0, 3), constant (31, 0, rightValue), constant (32, 0, 3)]
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
+                        initial = floored $ MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                         blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
                      in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
@@ -939,7 +973,7 @@ selfHostedQueryFamilies program =
                 checkBooleanJoinKnown expected =
                     let joinConstants = boolConstants ++ [constant (0, 0, 1), constant (1, 0, 2), constant (30, 0, 3), constant (31, 0, 4), constant (32, 0, 3)]
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList [])]
+                        initial = floored $ MData "ExecutionState" [("context", context), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                         blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
                      in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
@@ -981,8 +1015,8 @@ selfHostedQueryFamilies program =
                 withinContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (11, 200, [10]), app (12, 201, [11])]), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt 200, MInt 201]), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkWithin a b expected = testAssertEq (runNamedFunction program "entailsGoal" [withinContext, withinGoal a b]) (Ok (Just (MBool expected)))
                 mergeContext constants equalities = MData "ValidatorContext" [("equalities", MList equalities), ("applications", MList []), ("constants", MList constants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                mergeLeftState = MData "ExecutionState" [("context", mergeContext [constant (10, 0, 3)] [fact (10, 10)]), ("locals", localsValue [(1, 10)]), ("templates", MList [])]
-                mergeRightState = MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (11, 11)]), ("locals", localsValue [(1, 11)]), ("templates", MList [])]
+                mergeLeftState = floored $ MData "ExecutionState" [("context", mergeContext [constant (10, 0, 3)] [fact (10, 10)]), ("locals", localsValue [(1, 10)]), ("templates", MList []), ("floor", MInt (-999))]
+                mergeRightState = floored $ MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (11, 11)]), ("locals", localsValue [(1, 11)]), ("templates", MList []), ("floor", MInt (-999))]
                 checkCommonContext =
                     let left = mergeContext [] [fact (0, 1), fact (2, 3)]
                         right = mergeContext [] [fact (1, 0), fact (2, 4)]
@@ -990,7 +1024,7 @@ selfHostedQueryFamilies program =
                      in testAssertEq (runNamedFunction program "commonContext" [left, right]) (Ok (Just expected))
                 -- (both sides hold 3 in local 1: the merged context says the merged local is 3)
                 checkMergeStates = case runNamedFunction program "mergeStates" [mergeLeftState, mergeRightState] of
-                    Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" [("context", context), ("locals", mergedLocals), ("templates", _)])])) ->
+                    Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" [("context", context), ("locals", mergedLocals), ("templates", _), ("floor", _)])])) ->
                         case runNamedFunction program "lookupLocal" [mergedLocals, MInt 1] of
                             Ok (Just (MData "ValueLookup::Found" [("term", MInt found)])) ->
                                 testAssertEq (runNamedFunction program "entailsGoal" [context, goal "Equal" found 10]) (Ok (Just (MBool True)))
@@ -1001,7 +1035,7 @@ selfHostedQueryFamilies program =
                 -- own (T1) or through unnamed intermediates (A1, A1b). Their source rows in testIfJoin
                 -- do not isolate this: each arm's Add steps state relations of their own.
                 contestState = contestStateWith []
-                contestStateWith equalities contestApps constantTerms orders bindings = MData "ExecutionState" [("context", MData "ValidatorContext" [("equalities", MList (map fact equalities)), ("applications", MList (map app contestApps)), ("constants", MList (map constant constantTerms)), ("orders", MList (map mixedFact orders)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]), ("locals", localsValue bindings), ("templates", MList [])]
+                contestStateWith equalities contestApps constantTerms orders bindings = floored $ MData "ExecutionState" [("context", MData "ValidatorContext" [("equalities", MList (map fact equalities)), ("applications", MList (map app contestApps)), ("constants", MList (map constant constantTerms)), ("orders", MList (map mixedFact orders)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]), ("locals", localsValue bindings), ("templates", MList []), ("floor", MInt (-999))]
                 checkMergedGoal name leftApps rightApps constantTerms orders bindings goalName a b =
                     case runNamedFunction program "mergeStates" [contestState leftApps constantTerms orders bindings, contestState rightApps constantTerms orders bindings] of
                         Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" (("context", context) : _))])) ->
@@ -1084,7 +1118,7 @@ selfHostedQueryFamilies program =
                 -- assertion pins.
                 inferContextOf constantTerms = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 inferSubject local subjectTerm = MData "InferSubject" [("local", MInt local), ("isSize", MBool False), ("temp", MInt 0), ("term", MInt subjectTerm)]
-                scratchInferState constantTerms = MData "InferState" [("work", MData "ExecutionState" [("context", inferContextOf constantTerms), ("locals", localsValue [(20, 20), (21, 21)]), ("templates", MList [])]), ("index", MInt 0), ("candIndex", MInt 0), ("assigned", MList []), ("anchors", MList []), ("goals", MList [])]
+                scratchInferState constantTerms = MData "InferState" [("work", floored $ MData "ExecutionState" [("context", inferContextOf constantTerms), ("locals", localsValue [(20, 20), (21, 21)]), ("templates", MList []), ("floor", MInt (-999))]), ("index", MInt 0), ("candIndex", MInt 0), ("assigned", MList []), ("anchors", MList []), ("goals", MList [])]
                 replayedTerms value = case value of
                     MData "ValueRef::Term" fields -> [named | Just (MInt named) <- [lookup "term" fields]]
                     MData _ fields -> concatMap (replayedTerms . snd) fields
@@ -1099,7 +1133,7 @@ selfHostedQueryFamilies program =
                     testAssertEq
                         (inferredGoals (runNamedFunction program name [scratchInferState (map constant workConstants), inferContextOf (map constant initialConstants), inferSubject 20 20, inferSubject 21 21, MInt 7, MInt 4]))
                         (Right expected)
-                inferredEntryState = MData "ExecutionState" [("context", MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList (map constant [(1, 0, 0), (2, 0, 1), (3, 0, 3), (4, 0, -1)])), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]), ("locals", localsValue [(1, 3), (2, 4)]), ("templates", MList [])]
+                inferredEntryState = floored $ MData "ExecutionState" [("context", MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList (map constant [(1, 0, 0), (2, 0, 1), (3, 0, 3), (4, 0, -1)])), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]), ("locals", localsValue [(1, 3), (2, 4)]), ("templates", MList []), ("floor", MInt (-999))]
                 -- The scans inside the phases are reached through no parameter, so the whole
                 -- inference is run over an entry state of its own: it has to keep candidates,
                 -- and every term they replay has to be one the entry state names. The two
@@ -1305,6 +1339,8 @@ selfHostedQueryFamilies program =
                       , checkReadThroughPush [] [(7, 5, False)] True
                       , checkReadThroughPush [(5, 0, -1), (4, 0, 2)] [] False
                       , checkExecution [MData "ExecutionStep::Unsupported" []] 2 0
+                        -- (two terms minted in a row are two terms: f(1) = g(1) is not known)
+                      , checkExecution [assignLocal 0 (termRef 1), applyFresh 1 10 [localRef 0], applyFresh 2 11 [localRef 0], checkLocals] 1 3
                       ])
                 , ("driver",
                       [ checkDrivenSteps [dStep "Assign" [dInt 0, dTerm 1], dCheck (dLocal 0) (dTerm 1)] 0
@@ -1576,7 +1612,7 @@ selfHostedQueryFamilies program =
                       [ checkVariantGoal "Different" 0 1 True, checkVariantGoal "Equal" 0 1 False
                       , checkConstructorGoal "Equal" 11 1 True, checkConstructorGoal "Equal" 11 0 False
                       , checkWithin 12 10 True, checkWithin 10 12 False, checkWithin 10 10 False
-                      , checkCommonContext, checkMergeStates, checkContestT1, checkContestA1, checkContestA1b
+                      , checkCommonContext, checkMergeStates, checkMergeFloor, checkContestT1, checkContestA1, checkContestA1b
                       , checkContestT1WithCondition
                       , checkIntegerSelfPair "AtMost" 20 (-31) False, checkIntegerSelfPair "AtMost" (-31) 21 False, checkIntegerSelfPair "Less" 20 (-31) False
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])

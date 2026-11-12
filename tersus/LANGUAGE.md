@@ -153,7 +153,7 @@ The same holds after operations on a memory block: each gives a new permission t
 
 More facts do not always help: every `affirm` adds a fact to each term it mentions, so many affirms about one term can make it a hub the walk no longer expands. Affirm what the next goal needs, about the terms it uses.
 
-The bound is per check. Validating a program still does work that grows with the facts of a function: indexing them once per block, running each step, merging the states where paths meet, and filtering the candidate invariants of a loop, which still asks about every fact. Validation time is therefore not linear in the length of the code.
+The bound is per check, and a step's other questions (the value or sign of a term, what a list was made of and what was read of it) are bounded the same way: a fact they need that lies beyond the nearby facts is not known, so a step can lose what a later check needs, and an `affirm` near the use states it again. Validating a program still does work that grows with the facts of a function: indexing them once per block, copying them for a `forall` check, merging the states where paths meet, and filtering the candidate invariants of a loop, which still asks about every fact. Validation time is therefore not linear in the length of the code.
 
 ## Values
 

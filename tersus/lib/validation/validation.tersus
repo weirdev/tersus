@@ -1,9 +1,9 @@
 import validation::context { analyzeContext, contextDifferent, contextEqual, contextWithin, contextWithinUnder, deriveSumOrders, entailsConstructorDisequality, entailsPartDisequality, entailsVariantDisequality, hasOrderFact, integerValue, integerValueIn };
 import validation::differences { isSizeTerm, semanticFacts };
-import validation::execution { lastRung };
+import validation::execution { firstRung, lastRung, sliceBudgets };
 import validation::linear { linearEntailsIn };
 import validation::joins { linkAppend, linkedItems, noLinks };
-import validation::model { AnalysisLookup, ApplicationTerm, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, FactIndex, GetFact, HullLinks, IntegerLookup, OrderFact, RelationFact, ValidatorContext, ValidatorGoal };
+import validation::model { AnalysisLookup, ApplicationTerm, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, FactIndex, GetFact, HullLinks, IntegerLookup, NearApplications, OrderFact, RelationFact, ValidatorContext, ValidatorGoal, ValueLookup };
 import validation::relations { closedDisequality, containsValue, emptyIntMap, hasDifferenceIn, intAt, leastClasses, sameIn };
 import validation::sequenceFacts { finiteGetEqual, forallConstant, forallEqual, forallShift, getFactsTranslated, modDifferent, modIsSelf, setGetEqual };
 
@@ -557,7 +557,7 @@ fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
 };
 
 fn noFactIndex() -> FactIndex {
-    return FactIndex { equalities: noLinks(), applications: noLinks(), orders: noLinks(), different: noLinks(), variants: noLinks(), differences: noLinks(), weights: emptyIntMap(), constantAt: emptyIntMap(), counts: push(push(push(push(push(push(push([], 0), 0), 0), 0), 0), 0), 0), work: 0 };
+    return FactIndex { equalities: noLinks(), applications: noLinks(), orders: noLinks(), different: noLinks(), variants: noLinks(), differences: noLinks(), weights: emptyIntMap(), constantAt: emptyIntMap(), valueAt: emptyIntMap(), counts: push(push(push(push(push(push(push([], 0), 0), 0), 0), 0), 0), 0), work: 0 };
 };
 
 // A fact costs 1, plus 2 per term it mentions: reaching the term and copying
@@ -581,7 +581,7 @@ fn indexedFrom(counts: &List<Int>, k: Int, limit: Int) -> Int [{ affirm limit >=
 
 // The index extended with the facts appended since it was last extended
 fn indexFacts(index: FactIndex, context: &ValidatorContext) -> FactIndex {
-    FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, counts: counts, work: work } = index;
+    FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, valueAt: valueAt, counts: counts, work: work } = index;
     binary = 1 + 2 * termCost();
     for p in indexedFrom(counts, 0, size(context.equalities))..size(context.equalities) {
         f = get(context.equalities, p);
@@ -594,6 +594,9 @@ fn indexFacts(index: FactIndex, context: &ValidatorContext) -> FactIndex {
         cost = 1 + (1 + size(a.arguments)) * termCost();
         applications = linkAppend(applications, a.id, p);
         weights = addWeight(weights, a.id, cost);
+        // (a function id is entered with no weight, so that every id the facts
+        // mention is a key: termInUse asks the weights whether an id is taken)
+        if weights.contains(a.function) = false { weights = weights.insert(a.function, 0); };
         for k in 0..size(a.arguments) {
             applications = linkAppend(applications, get(a.arguments, k), p);
             weights = addWeight(weights, get(a.arguments, k), cost);
@@ -603,6 +606,8 @@ fn indexFacts(index: FactIndex, context: &ValidatorContext) -> FactIndex {
     for p in indexedFrom(counts, 2, size(context.constants))..size(context.constants) {
         c = get(context.constants, p);
         if constantAt.contains(c.id) = false { constantAt = constantAt.insert(c.id, p); };
+        // (the first term stated to have an integer value, for a step that needs a term of that value)
+        if c.kind = 0 && valueAt.contains(c.value) = false { valueAt = valueAt.insert(c.value, c.id); };
         work = work + 1;
     };
     for p in indexedFrom(counts, 3, size(context.orders))..size(context.orders) {
@@ -630,7 +635,7 @@ fn indexFacts(index: FactIndex, context: &ValidatorContext) -> FactIndex {
         work = work + 3;
     };
     sizes = push(push(push(push(push(push(push([], size(context.equalities)), size(context.applications)), size(context.constants)), size(context.orders)), size(context.different)), size(context.variants)), size(context.differences));
-    return FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, counts: sizes, work: work };
+    return FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, valueAt: valueAt, counts: sizes, work: work };
 };
 
 fn goalTerms(goal: &ValidatorGoal) -> List<Int> {
@@ -985,6 +990,87 @@ fn followChain(walk: GoalSlice, context: &ValidatorContext, index: &FactIndex, f
         head = head + 1;
     };
     return w;
+};
+
+// What a step asks of the facts is answered on a slice from its terms, climbing
+// the rungs while a walk is cut short, so an answer costs at most the whole
+// ladder, never the context.
+fn nearFacts(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>) -> ValidatorContext {
+    budgets = sliceBudgets();
+    walk = goalSlice(context, index, seeds, firstRung());
+    for r in 0..size(budgets) {
+        if r > 0 && walk.capped { walk = goalSlice(context, index, seeds, intAt(budgets, r, lastRung())); };
+    };
+    return walk.slice;
+};
+
+// The first rung's slice alone, for a question its seeds' own facts answer
+fn rungFacts(context: &ValidatorContext, index: &FactIndex, seeds: &List<Int>) -> ValidatorContext {
+    return goalSlice(context, index, seeds, firstRung()).slice;
+};
+
+fn termOfValue(index: &FactIndex, value: Int) -> ValueLookup {
+    if index.valueAt.contains(value) { return ValueLookup::Found { term: index.valueAt.lookup(value, 0) }; };
+    return ValueLookup::Missing;
+};
+
+fn valueNear(context: &ValidatorContext, index: &FactIndex, term: Int) -> IntegerLookup {
+    budgets = sliceBudgets();
+    for r in 0..size(budgets) {
+        walk = goalSlice(context, index, push([], term), intAt(budgets, r, lastRung()));
+        value = integerValue(walk.slice, term);
+        if value is IntegerLookup::Found { return value; };
+        if walk.capped = false { return value; };
+    };
+    return IntegerLookup::Missing;
+};
+
+// The items on the first links of a key, at most cap of them, oldest first
+fn linkedWithin(links: &HullLinks, key: Int, cap: Int) -> List<Int> {
+    taken = [];
+    at = links.first.lookup(key, -1);
+    walked = 0;
+    linkCount = size(links.items);
+    while at >= 0 && at < size(links.items) && walked < linkCount && walked < cap [{ affirm walked >= 0; affirm walked <= linkCount; }] shrinks linkCount - walked {
+        taken = push(taken, get(links.items, at));
+        at = intAt(links.next, at, -1);
+        walked = walked + 1;
+    };
+    return taken;
+};
+
+// The applications on the first links of a term and of the terms its first
+// equality links make it equal to (the terms), a rung of links in all: a step
+// finds what a term is made of, or what is read of it, at the cost of a leaf
+// even when the term is a hub. One a cap leaves out is not seen.
+fn nearApplications(context: &ValidatorContext, index: &FactIndex, term: Int) -> NearApplications {
+    terms = HashSet::new();
+    terms = terms.insert(term);
+    order = push([], term);
+    for p in linkedWithin(index.equalities, term, firstRung()) {
+        if p >= 0 && p < size(context.equalities) {
+            e = get(context.equalities, p);
+            other = e.left;
+            if other = term { other = e.right; };
+            if terms.contains(other) = false { terms = terms.insert(other); order = push(order, other); };
+        };
+    };
+    applications = [];
+    seen = HashSet::new();
+    room = firstRung();
+    for t in order {
+        if room > 0 {
+            positions = linkedWithin(index.applications, t, room);
+            room = room - size(positions);
+            for p in positions {
+                if p >= 0 && p < size(context.applications) && seen.contains(p) = false {
+                    seen = seen.insert(p);
+                    applications = push(applications, clone(get(context.applications, p)));
+                };
+            };
+        };
+    };
+    return NearApplications { terms: terms, applications: applications };
 };
 
 // The facts within the radius of the goal terms whose terms' weights fit the

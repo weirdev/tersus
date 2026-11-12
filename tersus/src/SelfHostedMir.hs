@@ -2732,7 +2732,7 @@ encodeRule rules (_, (params, ins, outs, Just body)) = do
     (bodySteps, b2, env2, next2) <- genericClauses rules False env1 body b1 next1
     (outSteps, b3, _, _) <- genericClauses rules False env2 outs b2 next2
     let block' = record "ExecutionBlock" [("id", MInt 0), ("steps", MList (inSteps ++ bodySteps ++ outSteps)), ("end", record "ExecutionEnd::Done" [])]
-        initial = record "ExecutionState" [("context", contextOf b3), ("locals", MList paramBindings), ("templates", MList [])]
+        initial = record "ExecutionState" [("context", contextOf b3), ("locals", MList paramBindings), ("templates", MList []), ("floor", MInt 0)]
     pure (MList [block'], initial, 0)
 encodeRule _ _ = Nothing
 
@@ -2801,7 +2801,8 @@ encodeFunction physical types invariants functions rules allowCalls fn
             oldSteps = [step "Assign" [("local", MInt (-(1000000 + localNum p))), ("value", record "ValueRef::Local" [("local", MInt (localNum p))])] | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], Just name <- [M.localName d], name `elem` M.specMutParams spec]
             entrySteps = [step "Assign" [("local", MInt (-(2000000 + localNum p))), ("value", record "ValueRef::Local" [("local", MInt (localNum p))])] | (_, p) <- reassignedParams fn]
             entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (entryLiterals ++ paramFacts ++ sizeFacts ++ requires ++ variantSteps ++ oldSteps ++ entrySteps)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
-        pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", localsMap params), ("templates", MList [])], -1)
+        -- (a floor of 0 claims nothing: validateExecution lowers it to the least id the state mentions)
+        pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", localsMap params), ("templates", MList []), ("floor", MInt 0)], -1)
   where
     logicalContainerUse st = case st of
         M.Assign _ rv -> logicalRvalue rv

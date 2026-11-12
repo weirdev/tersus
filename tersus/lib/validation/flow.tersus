@@ -1,9 +1,9 @@
 import validation::context { integerValue };
-import validation::execution { assumeBooleanFact, assumeRelation, checkNear, contradictoryNear, entailsNear, executeSteps, localGoal, quietStep };
-import validation::joins { commonContext, linkAppend, linkedItems, mergeStates, noLinks };
+import validation::execution { assumeBooleanFact, assumeRelation, checkNear, contradictoryNear, entailsNear, executeSteps, localGoal, maxScopeDepth, quietStep };
+import validation::joins { commonContext, leastTermInUse, linkAppend, linkedItems, mergeStates, noLinks };
 import validation::loopInference { inferLoopCandidateGoals, loopMentions };
 import validation::model { CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, HullLinks, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StateMergeLookup, SweepArrival, SweepDelivery, SweepOrder, SweepResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
-import validation::relations { containsValue };
+import validation::relations { containsValue, minInt };
 import validation::state { negateRelation, resolveValue };
 import validation::validation { indexFacts, noFactIndex };
 
@@ -434,11 +434,11 @@ fn sweepDeliveries(end: ExecutionEnd, state: ExecutionState) -> SweepDelivery {
                     noLiteral = (falseValue as ValueLookup::Found).term;
                     facts = indexFacts(noFactIndex(), state.context);
                     if checkNear(state.context, facts, 0, term, yesLiteral) {
-                        yesContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, yesLiteral), term, yesLiteral);
+                        yesContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, yesLiteral), facts, term, yesLiteral);
                         return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: branch.yes, state: ExecutionState { context: yesContext, ..state } }) };
                     };
                     if checkNear(state.context, facts, 0, term, noLiteral) {
-                        noContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, noLiteral), term, noLiteral);
+                        noContext = assumeBooleanFact(assumeRelation(clone(state.context), 0, term, noLiteral), facts, term, noLiteral);
                         return SweepDelivery { status: 0, step: -1, states: push([], SweepArrival { block: branch.no, state: ExecutionState { context: noContext, ..state } }) };
                     };
                     yesRun = executeSteps(clone(state), push([], ExecutionStep::Assume { relation: 0, left: ValueRef::Term { term: term }, right: ValueRef::Term { term: yesLiteral } }));
@@ -832,12 +832,91 @@ fn sweep(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, start: Int, s
     return SweepResult { result: work.result, dropped: work.dropped, exits: work.exits, arrivals: work.arrivals, merges: work.merges };
 };
 
+fn refFloor(ref: &ValueRef, least: Int) -> Int {
+    if ref is ValueRef::Term {
+        term = (ref as ValueRef::Term).term;
+        if term < least { return term; };
+    };
+    return least;
+};
+
+fn refsFloor(refs: &List<ValueRef>, least: Int) -> Int {
+    low = least;
+    for r in refs { low = refFloor(r, low); };
+    return low;
+};
+
+fn stepsFloor(steps: &List<ExecutionStep>, least: Int, depth: Int) -> Int [{ affirm depth >= 0; }] [{ }] shrinks depth {
+    low = least;
+    for step in steps {
+        if step is ExecutionStep::Assign { low = refFloor((step as ExecutionStep::Assign).value, low); };
+        if step is ExecutionStep::Apply {
+            apply = step as ExecutionStep::Apply;
+            low = refsFloor(apply.arguments, minInt(minInt(apply.result, apply.function), low));
+        };
+        if step is ExecutionStep::ApplyFresh {
+            fresh = step as ExecutionStep::ApplyFresh;
+            low = refsFloor(fresh.arguments, minInt(fresh.function, low));
+        };
+        if step is ExecutionStep::Literal {
+            literal = step as ExecutionStep::Literal;
+            low = refsFloor(literal.arguments, minInt(minInt(literal.result, literal.function), low));
+        };
+        if step is ExecutionStep::Push { pushed = step as ExecutionStep::Push; low = refFloor(pushed.list, refFloor(pushed.value, refFloor(pushed.zero, low))); };
+        if step is ExecutionStep::Last { last = step as ExecutionStep::Last; low = refFloor(last.list, refFloor(last.zero, low)); };
+        if step is ExecutionStep::Set { update = step as ExecutionStep::Set; low = refFloor(update.list, refFloor(update.index, refFloor(update.value, low))); };
+        if step is ExecutionStep::Pop { low = refFloor((step as ExecutionStep::Pop).list, low); };
+        if step is ExecutionStep::NewArray { array = step as ExecutionStep::NewArray; low = refFloor(array.length, refFloor(array.value, low)); };
+        if step is ExecutionStep::RequireDefined { low = refFloor((step as ExecutionStep::RequireDefined).value, low); };
+        if step is ExecutionStep::Check { check = step as ExecutionStep::Check; low = refFloor(check.left, refFloor(check.right, low)); };
+        if step is ExecutionStep::Assume { assumed = step as ExecutionStep::Assume; low = refFloor(assumed.left, refFloor(assumed.right, low)); };
+        if step is ExecutionStep::AssumeVariant { low = refFloor((step as ExecutionStep::AssumeVariant).object, low); };
+        if step is ExecutionStep::RequireVariant { low = refFloor((step as ExecutionStep::RequireVariant).object, low); };
+        if step is ExecutionStep::CheckWithin { within = step as ExecutionStep::CheckWithin; low = refFloor(within.inner, refFloor(within.outer, low)); };
+        if step is ExecutionStep::AssumeForall {
+            for node in (step as ExecutionStep::AssumeForall).template.nodes { low = refFloor(node.value, minInt(node.function, low)); };
+        };
+        if step is ExecutionStep::Scoped && depth > 0 { low = stepsFloor((step as ExecutionStep::Scoped).steps, low, depth - 1); };
+    };
+    return low;
+};
+
+fn endFloor(end: &ExecutionEnd, least: Int) -> Int {
+    low = least;
+    if end is ExecutionEnd::Branch {
+        branch = end as ExecutionEnd::Branch;
+        low = stepsFloor(branch.noSteps, stepsFloor(branch.yesSteps, low, maxScopeDepth()), maxScopeDepth());
+    };
+    if end is ExecutionEnd::BooleanBranch {
+        branch = end as ExecutionEnd::BooleanBranch;
+        low = refFloor(branch.value, refFloor(branch.trueValue, refFloor(branch.falseValue, low)));
+    };
+    if end is ExecutionEnd::Loop {
+        header = end as ExecutionEnd::Loop;
+        low = stepsFloor(header.assumptions, stepsFloor(header.checks, low, maxScopeDepth()), maxScopeDepth());
+        low = refFloor(header.left, refFloor(header.right, refFloor(header.variant, refFloor(header.variantOther, low))));
+        low = refFloor(header.zero, refFloor(header.variantObject, low));
+        for orTest in header.orTests { low = refFloor(orTest.left, refFloor(orTest.right, low)); };
+    };
+    return low;
+};
+
+// The least id the blocks name, below which every term made while they run is new
+fn blocksFloor(blocks: &List<ExecutionBlock>, least: Int) -> Int {
+    low = least;
+    for block in blocks { low = endFloor(block.end, stepsFloor(block.steps, low, maxScopeDepth())); };
+    return low;
+};
+
 fn sweepExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &ExecutionState) -> SweepResult {
     if uniqueExecutionBlocks(blocks) = false { return sweepFailure(3, entry, -1, clone(initial)); };
     whole = [];
     for blockPosition in 0..size(blocks) { whole = push(whole, get(blocks, blockPosition).id); };
     outer = LoopFrame { header: -2, exit: -2, active: [], region: whole, checks: [], candChecks: [], candEnds: [], variant: ValueRef::Term { term: 0 }, variantMode: 0, variantOther: ValueRef::Term { term: 0 }, prior: 0, priorOther: 0 };
-    return sweep(executionTable(blocks), outer, entry, initial, size(blocks), 3 * size(blocks) + 3);
+    // (the floor a caller states is trusted only as far as the scan bears it
+    // out, and an id the blocks name enters the state when its step runs)
+    start = ExecutionState { floor: blocksFloor(blocks, minInt(initial.floor, leastTermInUse(initial))), ..clone(initial) };
+    return sweep(executionTable(blocks), outer, entry, start, size(blocks), 3 * size(blocks) + 3);
 };
 
 fn validateExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &ExecutionState) -> ExecutionFlowResult {

@@ -6,7 +6,7 @@ import validation::joins { constantTermWithValue, freshBelow };
 import validation::model { ApplicationTerm, BlockedGuard, ClosedFacts, DisequalityFact, DoneKey, ExecutionState, ForallTemplate, IntegerLookup, NodeTerms, RoundResult, SatInstance, SatWork, Saturation, SplitResult, StateTerm, TermRelation, ValidatorContext, ValueLookup };
 import validation::relations { boolAt, containsValue, emptyIntMap, equalityRepresentatives, intAt, representativeOf };
 import validation::state { booleanCheck, resolveValue };
-import validation::validation { entailsGoal };
+import validation::validation { entailsGoal, indexFacts, noFactIndex };
 
 
 
@@ -62,7 +62,8 @@ fn applicationTerm(given: &ExecutionState, function: Int, args: List<Int>, next:
     };
     apps = push(clone(state.context.applications), ApplicationTerm { id: next, function: function, arguments: clone(args) });
     withApp = ValidatorContext { applications: apps, ..clone(state.context) };
-    context = builtinFacts(withApp, function, next, args);
+    facts = indexFacts(noFactIndex(), withApp);
+    context = builtinFacts(withApp, facts, function, next, args);
     return StateTerm { state: ExecutionState { context: context, ..state }, term: next, created: true, next: next - 1 };
 };
 
@@ -144,7 +145,10 @@ fn saturationRound(given: &Saturation, floor: Int) -> RoundResult {
         };
         if failing = 0 {
             context = assumeRelation(context, inst.body.relation, inst.body.left, inst.body.right);
-            if inst.body.relation = 0 { context = assumeBooleanFact(context, inst.body.left, inst.body.right); };
+            if inst.body.relation = 0 {
+                facts = indexFacts(noFactIndex(), context);
+                context = assumeBooleanFact(context, facts, inst.body.left, inst.body.right);
+            };
             done = push(done, clone(inst.key));
             accepted = accepted + 1;
         };
@@ -256,7 +260,10 @@ fn saturateRangeFacts(sat: SatWork, start: &ClosedFacts, gets: &List<Application
                                 state = shifted.state;
                                 if shifted.created {
                                     offsetContext = state.context;
-                                    if side = 0 { offsetContext = addSumOrders(offsetContext, otherIndex, k, base); };
+                                    if side = 0 {
+                                        facts = indexFacts(noFactIndex(), offsetContext);
+                                        offsetContext = addSumOrders(offsetContext, facts, otherIndex, k, base);
+                                    };
                                     state = ExecutionState { context: offsetContext, ..state };
                                 };
                             };
@@ -463,7 +470,10 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
         c = get(cases, cPosition);
         if allHold {
             caseContext = assumeRelation(clone(saturated.state.context), c.relation, c.left, c.right);
-            if c.relation = 0 { caseContext = assumeBooleanFact(caseContext, c.left, c.right); };
+            if c.relation = 0 {
+                facts = indexFacts(noFactIndex(), caseContext);
+                caseContext = assumeBooleanFact(caseContext, facts, c.left, c.right);
+            };
             caseSat = Saturation { state: ExecutionState { context: caseContext, ..clone(saturated.state) }, births: clone(saturated.births), done: clone(saturated.done), blocked: noBlocked(), closed: noClosed() };
             r = proveBySaturation(caseSat, relation, left, right, depth - 1, budget - used, deeperSplits, floor);
             used = used + r.used;
