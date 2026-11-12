@@ -1,0 +1,267 @@
+import data::arena::arena { remapNode };
+import data::ast::ast { AstEntry, AstNode, AstProgram, AstStatement };
+import elaborate::records { codecTypeAt, listItems, nameText, nodeIn, signatureOf };
+import elaborate::state { intText };
+import elaborate::lowerstate { GenericRec, LBlock, LDecl, LFn, LowSt, TDecl, Term, fromCodecTy, hasText, isMutRefTy, isRefTy, lwBaseName, lwCat, quote, lwSp };
+import elaborate::lowerbuild { emptyBlockPayload, isFunct, namesOf, stmtAt, terminationPayload, valOf, validationsPayload };
+import elaborate::lower { fieldsTokens };
+
+// What a module is lowered against (MirLower.seededModuleState): the structs, enums, structs with sizes and
+// invariants of the interfaces it is lowered with (the first interface wins a name; the module's own declarations win
+// over all), their Copy, linear and drop marks, and each imported function as a stub (the last interface wins a
+// name), which the unit carries until the host finishes it.
+
+// The unit's arena: the elaborated program's records, then each interface's, then the builtin table's
+struct Src { nodes: List<AstNode>, bases: List<Int>, tableBase: Int };
+
+fn appendArena(nodes: List<AstNode>, program: &AstProgram) -> List<AstNode> ~ {
+    base = size(nodes);
+    shift = [];
+    for i in 0..size(program.nodes) { shift = push(shift, base + i); };
+    for node in &program.nodes { nodes = push(nodes, remapNode(clone(node), &shift)); };
+    return nodes;
+};
+
+fn joinArena(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram) -> Src ~ {
+    nodes = clone(out.nodes);
+    bases = [];
+    for iface in ifaces {
+        bases = push(bases, size(nodes));
+        nodes = appendArena(nodes, iface);
+    };
+    tableBase = size(nodes);
+    nodes = appendArena(nodes, table);
+    return Src { nodes: nodes, bases: bases, tableBase: tableBase };
+};
+
+fn entryAt(src: &List<AstNode>, e: Int) -> AstEntry ~ {
+    node = nodeIn(src, e);
+    if node is AstNode::Entry { return (node as AstNode::Entry).value; };
+    return AstEntry::PairEntry { a: 0 - 1, b: 0 - 1 };
+};
+
+// The names the module's top declares as types, with the variants of its enums
+fn ownTypeNames(src: &List<AstNode>, stmts: &List<Int>) -> HashSet<String> ~ {
+    out = HashSet::new();
+    for s in stmts {
+        stmt = stmtAt(src, s);
+        if stmt is AstStatement::StructDef { out = out.insert(nameText(src, (stmt as AstStatement::StructDef).n)); };
+        if stmt is AstStatement::TraitDef { out = out.insert(nameText(src, (stmt as AstStatement::TraitDef).n)); };
+        if stmt is AstStatement::EnumDef {
+            e = stmt as AstStatement::EnumDef;
+            out = out.insert(nameText(src, e.n));
+            for v in listItems(src, e.vs) {
+                node = nodeIn(src, v);
+                if node is AstNode::Variant { out = out.insert(nameText(src, (node as AstNode::Variant).value.n)); };
+            };
+        };
+    };
+    return out;
+};
+
+// The functions the module defines at its top and in its impls (any function value)
+fn ownFunctionNames(src: &List<AstNode>, stmts: &List<Int>, out: HashSet<String>) -> HashSet<String> ~ {
+    for s in stmts {
+        stmt = stmtAt(src, s);
+        if stmt is AstStatement::Assign && valOf(src, (stmt as AstStatement::Assign).e) >= 0 && isFunct(src, valOf(src, (stmt as AstStatement::Assign).e)) {
+            out = out.insert(nameText(src, (stmt as AstStatement::Assign).n));
+        };
+        if stmt is AstStatement::ImplDef { out = ownFunctionNames(src, listItems(src, (stmt as AstStatement::ImplDef).xs), out); };
+        if stmt is AstStatement::BoundedDef { out = ownFunctionNames(src, push([], (stmt as AstStatement::BoundedDef).s), out); };
+    };
+    return out;
+};
+
+fn seedModule(ls: LowSt, src: &Src, stmts: &List<Int>, ifaces: &List<AstProgram>) -> LowSt ~ {
+    ownTypes = ownTypeNames(&src.nodes, stmts);
+    ownFns = ownFunctionNames(&src.nodes, stmts, HashSet::new());
+    k = 0;
+    while k < size(ifaces) && k < size(src.bases) && ls.ok = true [{ affirm k >= 0; }] shrinks size(ifaces) - k {
+        root = nodeIn(&src.nodes, get(src.bases, k) + get(ifaces, k).root);
+        if root is AstNode::Interface {
+            v = (root as AstNode::Interface).value;
+            ls = seedTypes(ls, &src.nodes, v.types, v.ctors, v.generics, &ownTypes);
+            ls = seedGenerics(ls, &src.nodes, v.generics, &ownTypes);
+            ls = seedInvariants(ls, &src.nodes, v.invariants, &ownTypes);
+            ls = seedMarks(ls, &src.nodes, v.copies, v.linear, v.drops, &ownTypes);
+            ls = seedStubs(ls, &src.nodes, v.functions, namesOf(&src.nodes, v.externs), &ownFns);
+        };
+        k = k + 1;
+    };
+    return ls;
+};
+
+// (a type with sizes is a generic of the interface, not a type)
+fn seedTypes(ls: LowSt, src: &List<AstNode>, types: Int, ctors: Int, generics: Int, own: &HashSet<String>) -> LowSt ~ {
+    fieldsOf = HashMap::new();
+    for e in listItems(src, ctors) {
+        entry = entryAt(src, e);
+        if entry is AstEntry::CtorEntry { fieldsOf = fieldsOf.insert(nameText(src, (entry as AstEntry::CtorEntry).n), (entry as AstEntry::CtorEntry).fs); };
+    };
+    genericNames = HashSet::new();
+    for e in listItems(src, generics) {
+        entry = entryAt(src, e);
+        if entry is AstEntry::GenericEntry { genericNames = genericNames.insert(nameText(src, (entry as AstEntry::GenericEntry).n)); };
+    };
+    for e in listItems(src, types) {
+        entry = entryAt(src, e);
+        if entry is AstEntry::NamesEntry {
+            name = nameText(src, (entry as AstEntry::NamesEntry).n);
+            if !HashSet::contains(&genericNames, &name) && !HashSet::contains(own, &name) && !HashMap::contains(&ls.types, &name) {
+                variants = namesOf(src, (entry as AstEntry::NamesEntry).ns);
+                ls = seedType(ls, src, name, variants, &fieldsOf);
+            };
+        };
+    };
+    return ls;
+};
+
+fn seedType(ls: LowSt, src: &List<AstNode>, name: String, variants: List<String>, fieldsOf: &HashMap<String, Int>) -> LowSt ~ {
+    if size(variants) = 1 && get(variants, 0) = clone(name) {
+        ls = fieldsTokens(ls, src, HashMap::lookup(fieldsOf, &name, 0 - 1));
+        line = lwSp(lwSp("struct", quote(&name)), &ls.name);
+        types = ls.types.insert(name, TDecl { isStruct: true, fieldNames: [], fieldTypes: [], variants: [], line: line });
+        return LowSt { types: types, ..ls };
+    };
+    line = lwSp(lwSp("enum", quote(&name)), intText(size(variants)));
+    for v in &variants {
+        ls = fieldsTokens(ls, src, HashMap::lookup(fieldsOf, v, 0 - 1));
+        line = lwSp(lwSp(line, quote(v)), &ls.name);
+    };
+    types = ls.types.insert(name, TDecl { isStruct: false, fieldNames: [], fieldTypes: [], variants: variants, line: line });
+    return LowSt { types: types, ..ls };
+};
+
+fn seedGenerics(ls: LowSt, src: &List<AstNode>, generics: Int, own: &HashSet<String>) -> LowSt ~ {
+    for e in listItems(src, generics) {
+        entry = entryAt(src, e);
+        if entry is AstEntry::GenericEntry {
+            ge = entry as AstEntry::GenericEntry;
+            name = nameText(src, ge.n);
+            if !HashSet::contains(own, &name) && !HashMap::contains(&ls.generics, &name) {
+                sizes = namesOf(src, ge.ps);
+                line = lwSp(lwCat("generic ", quote(&name)), intText(size(sizes)));
+                for s in &sizes { line = lwSp(line, quote(s)); };
+                ls = fieldsTokens(ls, src, ge.fs);
+                g = ls.generics.insert(name, GenericRec { line: lwSp(line, &ls.name) });
+                ls = LowSt { generics: g, ..ls };
+            };
+        };
+    };
+    return ls;
+};
+
+fn seedInvariants(ls: LowSt, src: &List<AstNode>, invariants: Int, own: &HashSet<String>) -> LowSt ~ {
+    for e in listItems(src, invariants) {
+        entry = entryAt(src, e);
+        if entry is AstEntry::InvariantEntry {
+            ie = entry as AstEntry::InvariantEntry;
+            name = nameText(src, ie.n);
+            if !HashSet::contains(own, &name) && !HashMap::contains(&ls.invariants, &name) {
+                ls = validationsPayload(ls, src, ie.vs);
+                pay = ls.id;
+                inv = ls.invariants.insert(name, pay);
+                ls = LowSt { invariants: inv, ..ls };
+            };
+        };
+    };
+    return ls;
+};
+
+// (the module's own declarations win over an imported library's of the same name)
+fn seedMarks(ls: LowSt, src: &List<AstNode>, copies: Int, linear: Int, drops: Int, own: &HashSet<String>) -> LowSt ~ {
+    c = ls.copies;
+    for n in namesOf(src, copies) { if !HashSet::contains(own, lwBaseName(&n)) { c = c.insert(clone(n)); }; };
+    l = ls.linears;
+    for n in namesOf(src, linear) { if !HashSet::contains(own, lwBaseName(&n)) { l = l.insert(clone(n)); }; };
+    d = ls.drops;
+    for n in namesOf(src, drops) { if !HashSet::contains(own, lwBaseName(&n)) { d = d.insert(clone(n)); }; };
+    return LowSt { copies: c, linears: l, drops: d, ..ls };
+};
+
+fn seedStubs(ls: LowSt, src: &List<AstNode>, functions: Int, externs: List<String>, own: &HashSet<String>) -> LowSt ~ {
+    for e in listItems(src, functions) {
+        entry = entryAt(src, e);
+        if entry is AstEntry::FunctionEntry && ls.ok {
+            fe = entry as AstEntry::FunctionEntry;
+            name = nameText(src, fe.n);
+            if !HashSet::contains(own, &name) {
+                mirName = clone(name);
+                if hasText(&externs, &name) { mirName = lwCat("extern ", &name); };
+                ls = stubFunction(ls, src, clone(mirName), fe.ps, fe.sig, fe.ins, fe.outs, fe.term);
+                globals = ls.globals.insert(name, clone(mirName));
+                stubs = ls.stubs.insert(clone(mirName));
+                names = ls.names.insert(mirName);
+                ls = LowSt { globals: globals, stubs: stubs, names: names, ..ls };
+            };
+        };
+    };
+    return ls;
+};
+
+// An imported function as a function with no body: its signature, parameters and contract
+fn stubFunction(ls: LowSt, src: &List<AstNode>, mirName: String, ps: Int, sigNode: Int, ins: Int, outs: Int, term: Int) -> LowSt ~ {
+    sig = signatureOf(src, sigNode);
+    ptys = [];
+    for t in listItems(src, sig.ts) {
+        tyc = codecTypeAt(src, t);
+        ls = fromCodecTy(ls, &tyc);
+        ptys = push(ptys, ls.ty);
+    };
+    rtyc = codecTypeAt(src, sig.ret);
+    ls = fromCodecTy(ls, &rtyc);
+    rty = ls.ty;
+    paramNames = namesOf(src, ps);
+    froms = namesOf(src, sig.fs);
+    locals = push([], LDecl { present: true, ty: rty, hasName: false, name: "" });
+    params = [];
+    borrowed = [];
+    mutBorrowed = [];
+    fromLocals = [];
+    mutParams = [];
+    i = 0;
+    while i < size(ptys) [{ affirm i >= 0; }] shrinks size(ptys) - i {
+        l = i + 1;
+        t = get(ptys, i);
+        params = push(params, l);
+        if i < size(paramNames) { locals = push(locals, LDecl { present: true, ty: t, hasName: true, name: clone(get(paramNames, i)) }); };
+        if isRefTy(&ls, t) { borrowed = push(borrowed, l); };
+        if isMutRefTy(&ls, t) { mutBorrowed = push(mutBorrowed, l); };
+        if i < size(paramNames) && hasText(&froms, &get(paramNames, i)) { fromLocals = push(fromLocals, l); };
+        if i < size(paramNames) && isMutRefTy(&ls, t) { mutParams = push(mutParams, clone(get(paramNames, i))); };
+        i = i + 1;
+    };
+    ls = validationsPayload(ls, src, ins);
+    requires = ls.id;
+    ls = validationsPayload(ls, src, outs);
+    ensures = ls.id;
+    ls = terminationPayload(ls, src, term);
+    termPay = ls.id;
+    entry = LBlock { present: true, stmts: [], term: Term { k: 3, text: "", x: 0 - 1, y: 0 - 1 } };
+    f = LFn {
+        name: clone(mirName), params: params, hasReturns: true, returns: rty, locals: locals, sizes: namesOf(src, sig.ss), typeParams: namesOf(src, sig.ps),
+        borrowed: borrowed, mutBorrowed: mutBorrowed, from: fromLocals, blocks: push([], entry), requires: requires, ensures: ensures, term: termPay,
+        loops: [], env: 0 - 1, writes: [], mutParams: mutParams, specFrom: froms
+    };
+    keys = ls.fnKeys.insert(clone(mirName));
+    functions = ls.functions.insert(mirName, f);
+    return LowSt { functions: functions, fnKeys: keys, ..ls };
+};
+
+// The names a program calls the builtins of the table by (stdLibCtx), each with its Builtin record; the last entry wins a name
+fn seedBuiltins(ls: LowSt, src: &Src, table: &AstProgram) -> LowSt ~ {
+    std = ls.std;
+    for e in listItems(&src.nodes, src.tableBase + table.root) {
+        entry = entryAt(&src.nodes, e);
+        if entry is AstEntry::BuiltinEntry {
+            be = entry as AstEntry::BuiltinEntry;
+            for s in listItems(&src.nodes, be.surface) {
+                se = entryAt(&src.nodes, s);
+                if se is AstEntry::SurfaceEntry && (se as AstEntry::SurfaceEntry).space = "std" {
+                    std = std.insert(nameText(&src.nodes, (se as AstEntry::SurfaceEntry).n), be.b);
+                };
+            };
+        };
+    };
+    return LowSt { std: std, ..ls };
+};

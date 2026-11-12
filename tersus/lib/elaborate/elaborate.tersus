@@ -14,6 +14,7 @@ import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope };
 import elaborate::traits { argListOf, boundsOf, checkDefinitions, emitInstances };
 import elaborate::units { answerLoad };
+import elaborate::lowerout { MirOut, lowerUnit, noMir };
 
 // The elaborator written in Tersus: a `tersus-elaborate 1` request on standard input, a `tersus-elaborated 1`
 // response on standard output (AST_DATA.md). It answers `unmodelled` for what it does not handle yet.
@@ -485,16 +486,17 @@ struct Unit {
 };
 
 // status: St.status, or -1 when the request does not give a library it names
-struct Answer { status: Int, msg: String, out: AstProgram, iface: AstProgram, extracting: Bool, selected: List<String> };
+// lowered: 0 when the module was not lowered, 1 when mir holds its MIR, 2 when the lowering refused it (mir.msg)
+struct Answer { status: Int, msg: String, out: AstProgram, iface: AstProgram, extracting: Bool, selected: List<String>, lowered: Int, mir: MirOut };
 
 fn unitAnswer(st: &St, out: AstProgram, iface: AstProgram, extracting: Bool, selected: List<String>) -> Answer ~ {
-    return Answer { status: st.status, msg: clone(st.msg), out: out, iface: iface, extracting: extracting, selected: selected };
+    return Answer { status: st.status, msg: clone(st.msg), out: out, iface: iface, extracting: extracting, selected: selected, lowered: 0, mir: noMir("") };
 };
 
 fn noProgram(stage: String) -> AstProgram ~ { return AstProgram { stage: stage, nodes: [], root: 0 }; };
 
 fn malformedAnswer() -> Answer ~ {
-    return Answer { status: 0 - 1, msg: "", out: noProgram("elaborated"), iface: noProgram("interface"), extracting: false, selected: [] };
+    return Answer { status: 0 - 1, msg: "", out: noProgram("elaborated"), iface: noProgram("interface"), extracting: false, selected: [], lowered: 0, mir: noMir("") };
 };
 
 fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, AstProgram>) -> Answer ~ {
@@ -603,6 +605,7 @@ fn printAnswerBody(a: &Answer) -> Int ~ {
             n = n + "interface\ndata".print() + printIntWord(size(a.iface.nodes) + 2) + "\n".print();
             n = n + printAst(&a.iface);
         };
+        n = n + printMir(a);
         if size(a.selected) = 0 { return n; };
         n = n + "libraries".print() + printIntWord(size(a.selected));
         for l in &a.selected { n = n + " ".print() + printQuoted(l); };
@@ -612,6 +615,25 @@ fn printAnswerBody(a: &Answer) -> Int ~ {
     if a.status = 3 { return n + "interfaceRefused ".print() + printQuoted(&a.msg) + "\n".print(); };
     if a.status = 4 { return n + "unresolved ".print() + printQuoted(&a.msg) + "\n".print(); };
     return n + "refused ".print() + printQuoted(&a.msg) + "\n".print();
+};
+
+// The module's MIR (`mir N` and its lines, AST_DATA.md), or why it does not lower
+fn printMir(a: &Answer) -> Int ~ {
+    if a.lowered = 2 { return "mir refused ".print() + printQuoted(&a.mir.msg) + "\n".print(); };
+    if a.lowered != 1 { return 0; };
+    count = size(a.mir.payload.nodes) + 2;
+    n = "mir".print() + printIntWord(size(a.mir.lines) + 1 + count) + "\n".print();
+    for l in &a.mir.lines { n = n + l.print() + "\n".print(); };
+    return n + "data".print() + printIntWord(count) + "\n".print() + printAst(&a.mir.payload);
+};
+
+// An accepted module lowered against the interfaces it is lowered with, in their order
+fn withMir(a: Answer, ifaces: &List<AstProgram>, table: &AstProgram) -> Answer ~ {
+    if a.status != 0 { return a; };
+    m = lowerUnit(&a.out, ifaces, table);
+    lowered = 2;
+    if m.ok { lowered = 1; };
+    return Answer { lowered: lowered, mir: m, ..a };
 };
 
 // A module request (AST_DATA.md, "Elaboration requests"), after its header and module lines
@@ -675,11 +697,13 @@ fn answerModule(moduleLine: &Line) -> Int ~ {
     viewing = wordIs(&library, 1, "true");
     extracting = !wordIs(&extract, 1, "none");
     if (!predeclaring && !wordIs(&predeclare, 1, "false")) || (!viewing && !wordIs(&library, 1, "false")) || (extracting && !wordIs(&extract, 1, "module") && !wordIs(&extract, 1, "lib")) { return malformed(); };
+    loweringIfaces = clone(ifaces);
     unit = Unit { pkgName: pkgName, modu: modu, hasModule: hasModule, predeclaring: predeclaring, viewing: viewing, extracting: extracting, libExtract: wordIs(&extract, 1, "lib"),
         ifaces: ifaces, ifaceKeys: ifaceKeys, definitions: definitions, definitionKeys: definitionKeys,
         hasCatalog: sections.given, catalog: sections.catalog, pkg: sections.pkg, program: sections.program };
     answer = elaborateUnit(&table.value, unit, &seenBlocks);
     if answer.status < 0 { return malformed(); };
+    answer = withMir(answer, &loweringIfaces, &table.value);
     printAnswer(&answer);
     return 0;
 };

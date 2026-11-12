@@ -1,0 +1,707 @@
+import data::ast::ast { AstArg, AstBody, AstBuiltin, AstExpression, AstName, AstNames, AstNode, AstOptName, AstOptTermination, AstProof, AstProofs, AstStatement, AstStatements, AstValidation, AstValidations, AstValue };
+import parser::syntax::syntax as ps;
+import data::codec::codec { Size, Token, Type, sizeAt, typeAt, wordAt };
+import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nodeIn };
+import elaborate::state { intText };
+import elaborate::lowerstate { Binding, EnvRec, LBlock, LDecl, LowSt, Op, RefTarget, Rv, Step, Stmt, Term, hasText, intAt, lfail, lwCat, lwCat3, lwSort, lwTextLess, quote, lwSp, tyText };
+
+fn stmtAt(src: &List<AstNode>, i: Int) -> AstStatement ~ {
+    node = nodeIn(src, i);
+    if node is AstNode::Statement { return (node as AstNode::Statement).value; };
+    return AstStatement::Mark { line: 0 - 1, col: 0 - 1 };
+};
+
+fn exprAt(src: &List<AstNode>, i: Int) -> AstExpression ~ {
+    node = nodeIn(src, i);
+    if node is AstNode::Expression { return (node as AstNode::Expression).value; };
+    return AstExpression::Var { n: 0 - 1 };
+};
+
+fn valueAt(src: &List<AstNode>, i: Int) -> AstValue ~ {
+    node = nodeIn(src, i);
+    if node is AstNode::Value { return (node as AstNode::Value).value; };
+    return AstValue::VBool { b: false };
+};
+
+// The builtin a value is (its Builtin record), or -1
+fn lwBuiltinOfValue(src: &List<AstNode>, v: Int) -> Int ~ {
+    value = valueAt(src, v);
+    if !(value is AstValue::VFunct) { return 0 - 1; };
+    body = nodeIn(src, (value as AstValue::VFunct).body);
+    if !(body is AstNode::Body) { return 0 - 1; };
+    b = (body as AstNode::Body).value;
+    if !(b is AstBody::BuiltinFunct) { return 0 - 1; };
+    return (b as AstBody::BuiltinFunct).b;
+};
+
+fn isFunct(src: &List<AstNode>, v: Int) -> Bool ~ { return valueAt(src, v) is AstValue::VFunct; };
+
+// The value of a Val expression, or -1
+fn valOf(src: &List<AstNode>, e: Int) -> Int ~ {
+    x = exprAt(src, e);
+    if x is AstExpression::Val { return (x as AstExpression::Val).v; };
+    return 0 - 1;
+};
+
+// The builtin a Val expression is, or -1
+fn builtinOfExpr(src: &List<AstNode>, e: Int) -> Int ~ {
+    v = valOf(src, e);
+    if v < 0 { return 0 - 1; };
+    return lwBuiltinOfValue(src, v);
+};
+
+// The function a statement defines with a body written in Tersus (Assign of Val (VFunct .. NativeFunct ..)): the value, or -1
+fn definedFunction(src: &List<AstNode>, s: AstStatement) -> Int ~ {
+    if !(s is AstStatement::Assign) { return 0 - 1; };
+    v = valOf(src, (s as AstStatement::Assign).e);
+    if v < 0 { return 0 - 1; };
+    value = valueAt(src, v);
+    if !(value is AstValue::VFunct) { return 0 - 1; };
+    body = nodeIn(src, (value as AstValue::VFunct).body);
+    if body is AstNode::Body && (body as AstNode::Body).value is AstBody::NativeFunct { return v; };
+    return 0 - 1;
+};
+
+fn bodyOf(src: &List<AstNode>, v: Int) -> List<Int> ~ {
+    value = valueAt(src, v);
+    if !(value is AstValue::VFunct) { return []; };
+    body = nodeIn(src, (value as AstValue::VFunct).body);
+    if !(body is AstNode::Body) { return []; };
+    b = (body as AstNode::Body).value;
+    if !(b is AstBody::NativeFunct) { return []; };
+    return listItems(src, (b as AstBody::NativeFunct).stmts);
+};
+
+// A builtin record, read: kind 0 a primitive (name), 1 a constructor (name, fields), 2 a field (owner when hasOwner,
+// field), 3 is (name), 4 a projection (name, field), 5 a cast (name), 6 a word (signed, bits), 7 a relation (rel), -1 none
+struct Bi { kind: Int, name: String, field: String, hasOwner: Bool, owner: String, fields: List<String>, signed: Bool, bits: Int, rel: Int, ctorArgs: String };
+
+fn noBi() -> Bi ~ { return Bi { kind: 0 - 1, name: "", field: "", hasOwner: false, owner: "", fields: [], signed: false, bits: 0, rel: 0, ctorArgs: "[]" }; };
+
+fn biOf(src: &List<AstNode>, b: Int) -> Bi ~ {
+    node = nodeIn(src, b);
+    if !(node is AstNode::Builtin) { return noBi(); };
+    v = (node as AstNode::Builtin).value;
+    none = noBi();
+    return match v {
+        AstBuiltin::Primitive { name: n } => Bi { kind: 0, name: clone(n), ..none },
+        AstBuiltin::Ctor { n: n, args: args, fs: fs } => Bi { kind: 1, name: nameText(src, n), fields: namesOf(src, fs), ctorArgs: hsShowArgs(src, args), ..none },
+        AstBuiltin::FieldBuiltin { owner: o, n: n } => fieldBi(src, o, n),
+        AstBuiltin::Is { n: n } => Bi { kind: 3, name: nameText(src, n), ..none },
+        AstBuiltin::Project { n: n, f: f } => Bi { kind: 4, name: nameText(src, n), field: nameText(src, f), ..none },
+        AstBuiltin::Cast { n: n } => Bi { kind: 5, name: nameText(src, n), ..none },
+        AstBuiltin::ToWord { signed: s, bits: bits } => Bi { kind: 6, signed: s, bits: bits, ..none },
+        AstBuiltin::Rel { r: r } => Bi { kind: 7, rel: r, ..none },
+    };
+};
+
+fn fieldBi(src: &List<AstNode>, o: Int, n: Int) -> Bi ~ {
+    none = noBi();
+    owner = nodeIn(src, o);
+    if owner is AstNode::OptName && (owner as AstNode::OptName).value is AstOptName::SomeName {
+        on = ((owner as AstNode::OptName).value as AstOptName::SomeName).n;
+        return Bi { kind: 2, field: nameText(src, n), hasOwner: true, owner: nameText(src, on), ..none };
+    };
+    return Bi { kind: 2, field: nameText(src, n), ..none };
+};
+
+fn namesOf(src: &List<AstNode>, xs: Int) -> List<String> ~ {
+    out = [];
+    for n in listItems(src, xs) { out = push(out, nameText(src, n)); };
+    return out;
+};
+
+fn isPrim(bi: &Bi, name: &String) -> Bool ~ { return bi.kind = 0 && bi.name = clone(name); };
+
+// The connective an expression applies (And, Or, Not), or ""
+fn connectiveOf(src: &List<AstNode>, e: Int) -> String ~ {
+    x = exprAt(src, e);
+    if !(x is AstExpression::F) { return ""; };
+    b = builtinOfExpr(src, (x as AstExpression::F).f);
+    if b < 0 { return ""; };
+    bi = biOf(src, b);
+    if isPrim(&bi, "And") || isPrim(&bi, "Or") || isPrim(&bi, "Not") { return clone(bi.name); };
+    return "";
+};
+
+// The name of a Var expression, or "" with isVarExpr false
+fn isVarExpr(src: &List<AstNode>, e: Int) -> Bool ~ { return exprAt(src, e) is AstExpression::Var; };
+
+fn varNameOf(src: &List<AstNode>, e: Int) -> String ~ {
+    x = exprAt(src, e);
+    if x is AstExpression::Var { return nameText(src, (x as AstExpression::Var).n); };
+    return "";
+};
+
+fn opText(o: &Op) -> String ~ {
+    if o.k = 0 { return lwCat("copy ", intText(o.l)); };
+    if o.k = 1 { return lwCat("move ", intText(o.l)); };
+    return lwCat("const ", &o.c);
+};
+
+fn copyOp(l: Int) -> Op ~ { return Op { k: 0, l: l, c: "", isList: false, bytes: false }; };
+
+fn constOp(c: String) -> Op ~ { return Op { k: 2, l: 0 - 1, c: c, isList: false, bytes: false }; };
+
+fn fnConst(name: &String) -> Op ~ { return constOp(lwCat("fn ", quote(name))); };
+
+fn opsText(ops: &List<Op>) -> String ~ {
+    out = intText(size(ops));
+    for o in ops { out = lwSp(out, opText(o)); };
+    return out;
+};
+
+fn stepsText(steps: &List<Step>) -> String ~ {
+    out = intText(size(steps));
+    for s in steps {
+        if s.isField { out = lwSp(lwSp(lwCat(out, " field"), quote(&s.ctor)), quote(&s.field)); } else { out = lwSp(lwCat(out, " index"), opText(&s.index)); };
+    };
+    return out;
+};
+
+fn textRv(text: String) -> Rv ~ { return Rv { k: 0, text: text, name: "", field: "", op: copyOp(0 - 1), root: 0 - 1, steps: [], mutable: false }; };
+
+fn useRv(o: Op) -> Rv ~ { return Rv { k: 4, text: "", name: "", field: "", op: o, root: 0 - 1, steps: [], mutable: false }; };
+
+fn listRv(word: &String, ops: &List<Op>) -> Rv ~ { return textRv(lwSp(lwSp("listop", word), opsText(ops))); };
+
+fn binaryRv(word: &String, a: &Op, b: &Op) -> Rv ~ { return textRv(lwSp(lwSp(lwSp("binary", word), opText(a)), opText(b))); };
+
+fn unaryRv(word: &String, a: &Op) -> Rv ~ { return textRv(lwSp(clone(word), opText(a))); };
+
+// makedata NAME with fields named by names and given by ops
+fn makeDataRv(name: String, names: &List<String>, ops: &List<Op>) -> Rv ~ {
+    n = size(names);
+    if size(ops) < n { n = size(ops); };
+    text = intText(n);
+    i = 0;
+    while i < n [{ affirm i >= 0; }] shrinks n - i {
+        text = lwSp(lwSp(text, quote(&get(names, i))), opText(&get(ops, i)));
+        i = i + 1;
+    };
+    return Rv { k: 1, text: text, name: name, field: "", op: copyOp(0 - 1), root: 0 - 1, steps: [], mutable: false };
+};
+
+fn pairRvOf(name: String, x: Int, y: Int) -> Rv ~ {
+    names = push(push([], "0"), "1");
+    ops = push(push([], copyOp(x)), copyOp(y));
+    return makeDataRv(name, &names, &ops);
+};
+
+fn readFieldRv(o: Op, name: String, field: String) -> Rv ~ {
+    return Rv { k: 2, text: "", name: name, field: field, op: o, root: 0 - 1, steps: [], mutable: false };
+};
+
+fn borrowRv(root: Int, steps: List<Step>, mutable: Bool) -> Rv ~ {
+    return Rv { k: 3, text: "", name: "", field: "", op: copyOp(0 - 1), root: root, steps: steps, mutable: mutable };
+};
+
+fn rvText(rv: &Rv) -> String ~ {
+    if rv.k = 1 { return lwSp(lwSp("makedata", quote(&rv.name)), &rv.text); };
+    if rv.k = 2 { return lwSp(lwSp(lwSp("readfield", opText(&rv.op)), quote(&rv.name)), quote(&rv.field)); };
+    if rv.k = 3 {
+        word = "borrow";
+        if rv.mutable { word = "borrowmut"; };
+        return lwSp(lwSp(word, intText(rv.root)), stepsText(&rv.steps));
+    };
+    if rv.k = 4 { return lwCat("use ", opText(&rv.op)); };
+    return clone(rv.text);
+};
+
+fn assignStmt(dest: Int, rv: &Rv) -> Stmt ~ {
+    if rv.k = 1 { return Stmt { k: 1, a: dest, c: 0 - 1, pay: 0 - 1, name: clone(rv.name), field: "", text: clone(rv.text) }; };
+    if rv.k = 2 {
+        read = 0 - 1;
+        if rv.op.k = 0 || rv.op.k = 1 { read = rv.op.l; };
+        return Stmt { k: 2, a: dest, c: read, pay: 0 - 1, name: clone(rv.name), field: clone(rv.field), text: opText(&rv.op) };
+    };
+    return Stmt { k: 0, a: dest, c: 0 - 1, pay: 0 - 1, name: "", field: "", text: lwSp(lwSp("assign", intText(dest)), rvText(rv)) };
+};
+
+fn ghostStmt(kind: Int, env: Int, pay: Int, text: String) -> Stmt ~ {
+    return Stmt { k: 3, a: kind, c: env, pay: pay, name: "", field: "", text: text };
+};
+
+// Haskell's show of a String (showLitChar), for the words of a refusal: a name is its code points
+fn lwShow(s: &String) -> String ~ {
+    out = "\"";
+    protectDigit = false;
+    protectH = false;
+    i = 0;
+    while i < size(s.bytes) [{ affirm i >= 0; }] shrinks size(s.bytes) - i {
+        d = ps::decodeStrAt(s, i);
+        cp = intAt(&d, 0);
+        width = intAt(&d, 1);
+        if width <= 0 { width = 1; };
+        if (protectDigit && cp >= 48 && cp <= 57) || (protectH && cp = 72) { out = lwCat(out, "\\&"); };
+        out = lwCat(out, hsChar(cp));
+        protectDigit = cp > 127;
+        protectH = cp = 14;
+        i = i + width;
+    };
+    return lwCat(out, "\"");
+};
+
+fn hsChar(cp: Int) -> String ~ {
+    if cp = 34 { return "\\\""; };
+    if cp = 92 { return "\\\\"; };
+    if cp > 127 { return lwCat("\\", intText(cp)); };
+    if cp = 127 { return "\\DEL"; };
+    if cp >= 32 { return String { bytes: push([], toByte(cp)) }; };
+    return lwCat("\\", hsControlName(cp));
+};
+
+fn hsControlName(cp: Int) -> String ~ {
+    if cp = 7 { return "a"; };
+    if cp = 8 { return "b"; };
+    if cp = 12 { return "f"; };
+    if cp = 10 { return "n"; };
+    if cp = 13 { return "r"; };
+    return hsControlName2(cp);
+};
+
+fn hsControlName2(cp: Int) -> String ~ {
+    if cp = 9 { return "t"; };
+    if cp = 11 { return "v"; };
+    names = hsAsciiNames();
+    if cp >= 0 && cp < size(names) { return clone(get(names, cp)); };
+    return "";
+};
+
+fn hsAsciiNames() -> List<String> ~ {
+    t = push(push(push(push(push(push(push(push([], "NUL"), "SOH"), "STX"), "ETX"), "EOT"), "ENQ"), "ACK"), "BEL");
+    t = push(push(push(push(push(push(push(push(t, "BS"), "HT"), "LF"), "VT"), "FF"), "CR"), "SO"), "SI");
+    t = push(push(push(push(push(push(push(push(t, "DLE"), "DC1"), "DC2"), "DC3"), "DC4"), "NAK"), "SYN"), "ETB");
+    return push(push(push(push(push(push(push(push(t, "CAN"), "EM"), "SUB"), "ESC"), "FS"), "GS"), "RS"), "US");
+};
+
+// Haskell's derived show of the arguments of a constructor builtin
+fn hsShowArgs(src: &List<AstNode>, args: Int) -> String ~ {
+    out = "[";
+    i = 0;
+    for a in listItems(src, args) {
+        if i > 0 { out = lwCat(out, ","); };
+        out = lwCat(out, hsShowArg(src, a));
+        i = i + 1;
+    };
+    return lwCat(out, "]");
+};
+
+fn hsShowArg(src: &List<AstNode>, a: Int) -> String ~ {
+    node = nodeIn(src, a);
+    if !(node is AstNode::Arg) { return ""; };
+    arg = (node as AstNode::Arg).value;
+    if arg is AstArg::ArgSize { sz = codecSizeAt(src, (arg as AstArg::ArgSize).s); return lwCat("ArgSize ", hsShowSize(&sz, 11)); };
+    if arg is AstArg::ArgType { return lwCat("ArgType ", hsShowType(codecTypeAt(src, (arg as AstArg::ArgType).t), 11)); };
+    return "";
+};
+
+fn hsParen(d: Int, text: String) -> String ~ {
+    if d > 10 { return lwCat3("(", &text, ")"); };
+    return text;
+};
+
+fn hsInt(n: Int, d: Int) -> String ~ {
+    if n < 0 && d > 6 { return lwCat3("(", intText(n), ")"); };
+    return intText(n);
+};
+
+fn hsShowSize(sz: &Size, d: Int) -> String ~ {
+    return match sz {
+        Size::SConst { n: n } => hsParen(d, lwCat("SizeConst ", hsInt(n, 11))),
+        Size::SAny => "SizeAny",
+        Size::SParam { name: name } => hsParen(d, lwCat("SizeParam ", lwShow(name))),
+        Size::SVar { n: n } => hsParen(d, lwCat("SizeVar ", hsInt(n, 11))),
+    };
+};
+
+fn hsShowStrings(xs: &List<String>) -> String ~ {
+    out = "[";
+    i = 0;
+    for x in xs {
+        if i > 0 { out = lwCat(out, ","); };
+        out = lwCat(out, lwShow(x));
+        i = i + 1;
+    };
+    return lwCat(out, "]");
+};
+
+fn hsShowType(t: Type, d: Int) -> String ~ {
+    return match t {
+        Type::TInt => "TInt",
+        Type::TByte => "TByte",
+        Type::TBool => "TBool",
+        Type::TList { elem: e } => hsParen(d, lwCat3("TNamed \"List\" [ArgType ", hsShowType(Box::unbox(e), 11), "]")),
+        Type::TBox { inner: e } => hsParen(d, lwCat3("TNamed \"Box\" [ArgType ", hsShowType(Box::unbox(e), 11), "]")),
+        Type::TArray { elem: e, size: s } => hsParen(d, lwCat3(lwCat("TArrayOf ", hsShowType(Box::unbox(e), 11)), " ", hsShowSize(&s, 11))),
+        Type::TFn { args: args, ret: r } => hsParen(d, lwCat3(lwCat("TFn ", hsShowTypes(&args)), " ", hsShowType(Box::unbox(r), 11))),
+        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => hsParen(d, lwCat3(lwCat("TNamed ", lwShow(&base)), " ", hsShowArgTokens(&argTokens))),
+        Type::TVariant { name: name } => hsParen(d, lwCat("TVariant ", lwShow(&name))),
+        Type::TVar { n: n } => hsParen(d, lwCat("TVar ", hsInt(n, 11))),
+        Type::TForall { sizes: sizes, types: types, body: body } => hsParen(d, lwCat3(lwCat3(lwCat("TForall ", hsShowStrings(&sizes)), " ", hsShowStrings(&types)), " ", hsShowType(Box::unbox(body), 11))),
+        Type::TParam { name: name } => hsParen(d, lwCat("TParam ", lwShow(&name))),
+        Type::TRef { inner: e } => hsParen(d, lwCat("TRef ", hsShowType(Box::unbox(e), 11))),
+        Type::TMutRef { inner: e } => hsParen(d, lwCat("TMutRef ", hsShowType(Box::unbox(e), 11))),
+        Type::TAddr { inner: e } => hsParen(d, lwCat("TAddr ", hsShowType(Box::unbox(e), 11))),
+        Type::TBlock { inner: e } => hsParen(d, lwCat("TBlock ", hsShowType(Box::unbox(e), 11))),
+        Type::TUninit { inner: e } => hsParen(d, lwCat("TUninit ", hsShowType(Box::unbox(e), 11))),
+        Type::TWord { signed: signed, bits: bits } => hsParen(d, lwCat3(lwCat("TWord ", hsBool(signed)), " ", hsInt(bits, 11))),
+    };
+};
+
+fn hsBool(b: Bool) -> String ~ {
+    if b { return "True"; };
+    return "False";
+};
+
+fn hsShowTypes(ts: &List<Type>) -> String ~ {
+    out = "[";
+    i = 0;
+    for t in ts {
+        if i > 0 { out = lwCat(out, ","); };
+        out = lwCat(out, hsShowType(clone(t), 0));
+        i = i + 1;
+    };
+    return lwCat(out, "]");
+};
+
+// The arguments of a named type, as the data's tokens give them
+fn hsShowArgTokens(ts: &List<Token>) -> String ~ {
+    out = "[";
+    p = 0;
+    first = true;
+    while p < size(ts) [{ affirm p >= 0; }] shrinks size(ts) - p {
+        w = wordAt(ts, p);
+        if !w.ok || w.pos <= p || w.pos >= size(ts) { p = size(ts); } else {
+            text = "";
+            next = size(ts);
+            if w.value = "size" {
+                sz = sizeAt(ts, w.pos);
+                if sz.ok { text = lwCat("ArgSize ", hsShowSize(&sz.value, 11)); next = sz.pos; };
+            } else {
+                ty = typeAt(ts, w.pos);
+                if ty.ok { next = ty.pos; text = lwCat("ArgType ", hsShowType(ty.value, 11)); };
+            };
+            if !first { out = lwCat(out, ","); };
+            out = lwCat(out, &text);
+            first = false;
+            if next <= p { p = size(ts); } else { p = next; };
+        };
+    };
+    return lwCat(out, "]");
+};
+
+fn setDecl(locals: List<LDecl>, l: Int, d: LDecl) -> List<LDecl> ~ {
+    while size(locals) <= l ~ { locals = push(locals, LDecl { present: false, ty: 0 - 1, hasName: false, name: "" }); };
+    if l < 0 { return locals; };
+    return set(locals, l, d);
+};
+
+fn setBlock(blocks: List<LBlock>, i: Int, blk: LBlock) -> List<LBlock> ~ {
+    while size(blocks) <= i ~ { blocks = push(blocks, LBlock { present: false, stmts: [], term: Term { k: 4, text: "", x: 0 - 1, y: 0 - 1 } }); };
+    if i < 0 { return blocks; };
+    return set(blocks, i, blk);
+};
+
+fn newLocal(ls: LowSt, hasName: Bool, name: String, ty: Int) -> LowSt ~ {
+    l = ls.bNextLocal;
+    locals = setDecl(ls.bLocals, l, LDecl { present: true, ty: ty, hasName: hasName, name: name });
+    return LowSt { bNextLocal: l + 1, bLocals: locals, root: l, ..ls };
+};
+
+fn tempLocal(ls: LowSt, ty: Int) -> LowSt ~ { return newLocal(ls, false, "", ty); };
+
+fn newBlock(ls: LowSt) -> LowSt ~ {
+    id = ls.bNextBlock;
+    return LowSt { bNextBlock: id + 1, id: id, ..ls };
+};
+
+// (does nothing after a return, where nothing can run)
+fn emitStmt(ls: LowSt, s: Stmt) -> LowSt ~ {
+    if !ls.bHasOpen { return ls; };
+    id = size(ls.stmts);
+    all = push(ls.stmts, s);
+    open = push(ls.bOpenStmts, id);
+    return LowSt { stmts: all, bOpenStmts: open, ..ls };
+};
+
+fn emitAssign(ls: LowSt, dest: Int, rv: &Rv) -> LowSt ~ { return emitStmt(ls, assignStmt(dest, rv)); };
+
+fn terminate(ls: LowSt, t: Term) -> LowSt ~ {
+    if !ls.bHasOpen { return ls; };
+    stmts = ls.bOpenStmts;
+    id = ls.bOpenId;
+    blocks = setBlock(ls.bBlocks, id, LBlock { present: true, stmts: stmts, term: t });
+    return LowSt { bBlocks: blocks, bHasOpen: false, bOpenStmts: [], ..ls };
+};
+
+fn gotoTerm(x: Int) -> Term ~ { return Term { k: 0, text: "", x: x, y: 0 - 1 }; };
+
+fn returnTerm() -> Term ~ { return Term { k: 3, text: "", x: 0 - 1, y: 0 - 1 }; };
+
+fn unreachableTerm() -> Term ~ { return Term { k: 4, text: "", x: 0 - 1, y: 0 - 1 }; };
+
+fn positionStmt(line: Int, col: Int) -> Stmt ~ { return ghostStmt(4, 0 - 1, 0 - 1, lwSp(intText(line), intText(col))); };
+
+// (a block starts with the place of the statement it continues)
+fn openBlock(ls: LowSt, id: Int) -> LowSt ~ {
+    ls = LowSt { bHasOpen: true, bOpenId: id, bOpenStmts: [], ..ls };
+    if !ls.bHasPlace { return ls; };
+    line = ls.bLine;
+    col = ls.bCol;
+    return emitStmt(ls, positionStmt(line, col));
+};
+
+fn enterScope(ls: LowSt) -> LowSt ~ {
+    marks = push(ls.bScopeMarks, size(ls.bScopeNames));
+    return LowSt { bScopeMarks: marks, ..ls };
+};
+
+fn leaveScope(ls: LowSt) -> LowSt ~ {
+    n = size(ls.bScopeMarks);
+    if n <= 1 { return ls; };
+    mark = intAt(&ls.bScopeMarks, n - 1);
+    names = [];
+    binds = [];
+    i = 0;
+    for x in &ls.bScopeNames { if i < mark { names = push(names, clone(x)); }; i = i + 1; };
+    i = 0;
+    for x in &ls.bScopeBinds { if i < mark { binds = push(binds, clone(x)); }; i = i + 1; };
+    marks = [];
+    i = 0;
+    for m in &ls.bScopeMarks { if i < n - 1 { marks = push(marks, m); }; i = i + 1; };
+    return LowSt { bScopeNames: names, bScopeBinds: binds, bScopeMarks: marks, ..ls };
+};
+
+fn bindName(ls: LowSt, var: String, b: Binding) -> LowSt ~ {
+    names = push(ls.bScopeNames, var);
+    binds = push(ls.bScopeBinds, b);
+    return LowSt { bScopeNames: names, bScopeBinds: binds, ..ls };
+};
+
+fn localBinding(l: Int, ty: Int) -> Binding ~ { return Binding { isLocal: true, local: l, ty: ty, fname: "" }; };
+
+struct LwFound { found: Bool, b: Binding };
+
+fn lookupBinding(ls: &LowSt, var: &String) -> LwFound ~ {
+    found = 0 - 1;
+    i = 0;
+    for n in &ls.bScopeNames {
+        if n = var { found = i; };
+        i = i + 1;
+    };
+    if found < 0 || found >= size(ls.bScopeBinds) { return LwFound { found: false, b: Binding { isLocal: false, local: 0 - 1, ty: 0 - 1, fname: "" } }; };
+    return LwFound { found: true, b: clone(get(ls.bScopeBinds, found)) };
+};
+
+// A name that no function has yet (ls.name)
+fn uniqueName(ls: LowSt, base: String) -> LowSt ~ {
+    name = clone(base);
+    n = 2;
+    while HashSet::contains(&ls.names, &name) = true ~ {
+        name = lwCat(lwCat(clone(base), "#"), intText(n));
+        n = n + 1;
+    };
+    names = ls.names.insert(clone(name));
+    return LowSt { names: names, name: name, ..ls };
+};
+
+fn setGlobal(ls: LowSt, var: String, name: String) -> LowSt ~ {
+    if HashMap::contains(&ls.globals, &var) && HashMap::lookup(&ls.globals, &var, "") = name { return ls; };
+    version = ls.globalsVersion + 1;
+    globals = ls.globals.insert(var, name);
+    return LowSt { globals: globals, globalsVersion: version, ..ls };
+};
+
+fn findRefTarget(ls: &LowSt, l: Int) -> Int ~ {
+    i = size(ls.bRefTargets) - 1;
+    while i >= 0 [{ affirm i < size(ls.bRefTargets); }] shrinks i + 1 {
+        if get(ls.bRefTargets, i).local = l { return i; };
+        i = i - 1;
+    };
+    return 0 - 1;
+};
+
+// What the names visible here stand for (MirLower.visibleEnv), as a new environment (ls.id): the locals of the
+// scopes, the innermost first, and the functions defined at the top. The functions are a shared part, kept once for
+// each set of them.
+fn visibleEnv(ls: LowSt) -> LowSt ~ {
+    seen = HashSet::new();
+    ownNames = [];
+    ownTexts = HashMap::new();
+    fnNames = [];
+    fnTexts = HashMap::new();
+    shadowed = [];
+    i = size(ls.bScopeNames) - 1;
+    while i >= 0 [{ affirm i < size(ls.bScopeNames); }] shrinks i + 1 {
+        var = clone(get(ls.bScopeNames, i));
+        if !HashSet::contains(&seen, &var) && i < size(ls.bScopeBinds) {
+            seen = seen.insert(clone(var));
+            b = get(ls.bScopeBinds, i);
+            if HashMap::contains(&ls.globals, &var) { shadowed = push(shadowed, clone(var)); };
+            if b.isLocal {
+                ownNames = push(ownNames, clone(var));
+                ownTexts = ownTexts.insert(clone(var), lwCat("copy ", intText(b.local)));
+            } else {
+                fnNames = push(fnNames, clone(var));
+                fnTexts = fnTexts.insert(clone(var), clone(b.fname));
+            };
+        };
+        i = i - 1;
+    };
+    ownText = intText(size(ownNames));
+    for n in lwSort(ownNames) { ownText = lwSp(lwSp(ownText, quote(&n)), HashMap::lookup(&ownTexts, &n, "")); };
+    sortedFns = lwSort(fnNames);
+    key = lwCat(intText(ls.globalsVersion), "|");
+    for s in lwSort(shadowed) { key = lwCat(lwSp(key, quote(&s)), ""); };
+    key = lwCat(key, "|");
+    for s in &sortedFns { key = lwSp(lwSp(key, quote(s)), quote(HashMap::lookup(&fnTexts, s, ""))); };
+    ls = sharedContent(ls, key, &seen, &sortedFns, &fnTexts);
+    content = ls.id;
+    id = size(ls.envs);
+    envs = push(ls.envs, EnvRec { content: content, ownPart: ownText });
+    return LowSt { envs: envs, id: id, ..ls };
+};
+
+// The shared part of an environment (ls.id, or -1 when it names no function): the functions at the top that no local
+// hides, and the functions of the scopes
+fn sharedContent(ls: LowSt, key: String, seen: &HashSet<String>, fnNames: &List<String>, fnTexts: &HashMap<String, String>) -> LowSt ~ {
+    if HashMap::contains(&ls.contentKeys, &key) {
+        known = HashMap::lookup(&ls.contentKeys, &key, 0 - 1);
+        return LowSt { id: known, ..ls };
+    };
+    names = [];
+    for e in ls.globals.entries() { if !HashSet::contains(seen, &e.key) { names = push(names, clone(e.key)); }; };
+    for n in fnNames { names = push(names, clone(n)); };
+    sorted = lwSort(names);
+    content = 0 - 1;
+    if size(sorted) > 0 {
+        text = intText(size(sorted));
+        for n in &sorted {
+            target = HashMap::lookup(fnTexts, n, "");
+            if !hasText(fnNames, n) { target = HashMap::lookup(&ls.globals, n, ""); };
+            text = lwSp(lwSp(lwCat(lwSp(text, quote(n)), " const"), "fn"), quote(&target));
+        };
+        if HashMap::contains(&ls.contentTexts, &text) { content = HashMap::lookup(&ls.contentTexts, &text, 0 - 1); } else {
+            content = size(ls.contents);
+            texts = ls.contentTexts.insert(clone(text), content);
+            contents = push(ls.contents, text);
+            ls = LowSt { contentTexts: texts, contents: contents, ..ls };
+        };
+    };
+    keys = ls.contentKeys.insert(key, content);
+    return LowSt { contentKeys: keys, id: content, ..ls };
+};
+
+fn singleEnv(ls: LowSt, name: &String, l: Int) -> LowSt ~ {
+    id = size(ls.envs);
+    envs = push(ls.envs, EnvRec { content: 0 - 1, ownPart: lwSp(lwSp("1", quote(name)), lwCat("copy ", intText(l))) });
+    return LowSt { envs: envs, id: id, ..ls };
+};
+
+// A statement for the validator, with the names the program can use where it stands
+fn ghostHere(ls: LowSt, kind: Int, pay: Int, text: String) -> LowSt ~ {
+    if !ls.bHasOpen { return ls; };
+    ls = visibleEnv(ls);
+    env = ls.id;
+    return emitStmt(ls, ghostStmt(kind, env, pay, text));
+};
+
+fn addNode(ls: LowSt, node: AstNode) -> LowSt ~ {
+    id = ls.pbase + size(ls.pn);
+    pn = push(ls.pn, node);
+    return LowSt { pn: pn, id: id, ..ls };
+};
+
+fn statementsList(ls: LowSt, xs: &List<Int>) -> LowSt ~ {
+    ls = addNode(ls, AstNode::Statements { value: AstStatements::End });
+    tail = ls.id;
+    i = size(xs) - 1;
+    while i >= 0 [{ affirm i < size(xs); }] shrinks i + 1 {
+        ls = addNode(ls, AstNode::Statements { value: AstStatements::Cons { head: get(xs, i), tail: tail } });
+        tail = ls.id;
+        i = i - 1;
+    };
+    return LowSt { id: tail, ..ls };
+};
+
+// A list of validation statements as one payload: a Block of ValidationStatement statements (ls.id)
+fn validationsPayload(ls: LowSt, src: &List<AstNode>, vs: Int) -> LowSt ~ {
+    items = [];
+    for v in listItems(src, vs) {
+        ls = addNode(ls, AstNode::Statement { value: AstStatement::ValidationStatement { v: v } });
+        items = push(items, ls.id);
+    };
+    ls = statementsList(ls, &items);
+    xs = ls.id;
+    return addNode(ls, AstNode::Statement { value: AstStatement::Block { xs: xs } });
+};
+
+fn emptyBlockPayload(ls: LowSt) -> LowSt ~ {
+    none = [];
+    ls = statementsList(ls, &none);
+    xs = ls.id;
+    return addNode(ls, AstNode::Statement { value: AstStatement::Block { xs: xs } });
+};
+
+// A termination as a payload: a While with the condition true and no body (ls.id, or -1 for none)
+fn terminationPayload(ls: LowSt, src: &List<AstNode>, t: Int) -> LowSt ~ {
+    node = nodeIn(src, t);
+    if !(node is AstNode::OptTermination) || !((node as AstNode::OptTermination).value is AstOptTermination::SomeTermination) { return LowSt { id: 0 - 1, ..ls }; };
+    ls = addNode(ls, AstNode::Value { value: AstValue::VBool { b: true } });
+    v = ls.id;
+    ls = addNode(ls, AstNode::Expression { value: AstExpression::Val { v: v } });
+    e = ls.id;
+    ls = addNode(ls, AstNode::Validations { value: AstValidations::End });
+    vs = ls.id;
+    none = [];
+    ls = statementsList(ls, &none);
+    xs = ls.id;
+    return addNode(ls, AstNode::Statement { value: AstStatement::While { e: e, vs: vs, t: t, xs: xs } });
+};
+
+fn addName(ls: LowSt, text: &String) -> LowSt ~ {
+    ls = addNode(ls, AstNode::Name { value: AstName::End });
+    if size(text.bytes) = 0 { return ls; };
+    tail = ls.id;
+    return addNode(ls, AstNode::Name { value: AstName::Part { text: clone(text), tail: tail } });
+};
+
+// ProofAssert (FApp (CTerm (builtinFunct (Is variant))) [ATerm "$cloneVariant"]) as a ValidationStatement statement
+fn cloneVariantPayload(ls: LowSt, variant: &String) -> LowSt ~ {
+    ls = addName(ls, "value");
+    valueName = ls.id;
+    ls = addNode(ls, AstNode::Names { value: AstNames::End });
+    namesEnd = ls.id;
+    ls = addNode(ls, AstNode::Names { value: AstNames::Cons { head: valueName, tail: namesEnd } });
+    params = ls.id;
+    ls = addNode(ls, AstNode::Validations { value: AstValidations::End });
+    ins = ls.id;
+    ls = addNode(ls, AstNode::Validations { value: AstValidations::End });
+    outs = ls.id;
+    ls = addName(ls, variant);
+    vn = ls.id;
+    ls = addNode(ls, AstNode::Builtin { value: AstBuiltin::Is { n: vn } });
+    b = ls.id;
+    ls = addNode(ls, AstNode::Body { value: AstBody::BuiltinFunct { b: b } });
+    body = ls.id;
+    ls = addNode(ls, AstNode::Proofs { value: AstProofs::End });
+    exports = ls.id;
+    ls = addNode(ls, AstNode::Value { value: AstValue::VFunct { ps: params, ins: ins, outs: outs, body: body, exports: exports } });
+    value = ls.id;
+    ls = addNode(ls, AstNode::Proof { value: AstProof::CTerm { v: value } });
+    headExpr = ls.id;
+    ls = addName(ls, "$cloneVariant");
+    an = ls.id;
+    ls = addNode(ls, AstNode::Proof { value: AstProof::ATerm { n: an } });
+    arg = ls.id;
+    ls = addNode(ls, AstNode::Proofs { value: AstProofs::End });
+    proofsEnd = ls.id;
+    ls = addNode(ls, AstNode::Proofs { value: AstProofs::Cons { head: arg, tail: proofsEnd } });
+    args = ls.id;
+    ls = addNode(ls, AstNode::Proof { value: AstProof::FApp { f: headExpr, xs: args } });
+    p = ls.id;
+    ls = addNode(ls, AstNode::Validation { value: AstValidation::ProofAssert { p: p } });
+    v = ls.id;
+    return addNode(ls, AstNode::Statement { value: AstStatement::ValidationStatement { v: v } });
+};

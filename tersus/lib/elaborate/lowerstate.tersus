@@ -1,0 +1,669 @@
+import data::ast::ast { AstNode };
+import data::codec::codec { Size, Token, Type, sizeAt, typeAt, wordAt };
+import elaborate::out { quotedName };
+import parser::syntax::syntax as ps;
+import elaborate::state { intText };
+
+// The lowering's own types, interned by their data text (MIR.md), so that two equal types are one number. kind: 0 Int,
+// 1 Byte, 2 Bool, 3 a word (flag signed, n bits), 4 a named type (name, args), 5 a variant (name), 6 an array (args:
+// element; size), 7 Addr, 8 Block, 9 Uninit, 10 &, 11 &mut (args: what it is of), 12 a type parameter (name), 13 a
+// function with parameters (sizes, types, args: its type), 14 a function (args: parameters, then the result), 15 an
+// unknown (n), 20 a size argument of a named type (size). text is the data's tokens, forName the type as an instance
+// name writes it.
+struct LTy { kind: Int, name: String, args: List<Int>, size: Size, n: Int, flag: Bool, sizes: List<String>, types: List<String>, text: String, forName: String };
+impl Clone for LTy { };
+
+// An operand: k 0 copy, 1 move, 2 a constant (c its tokens; isList when it is a list, bytes when every element is a
+// number from 0 to 255)
+struct Op { k: Int, l: Int, c: String, isList: Bool, bytes: Bool };
+impl Clone for Op { };
+
+// A step of a place: a field of a constructor, or an element at an operand
+struct Step { isField: Bool, ctor: String, field: String, index: Op };
+impl Clone for Step { };
+
+// An rvalue: k 0 tokens as they are, 1 makedata (name, fields: the tokens after the name), 2 readfield (op, name,
+// field), 3 a borrow (root, steps, mutable), 4 use (op)
+struct Rv { k: Int, text: String, name: String, field: String, op: Op, root: Int, steps: List<Step>, mutable: Bool };
+impl Clone for Rv { };
+
+// A statement: k 0 tokens as they are, 1 an assignment of makedata (a the local; name; text the tokens after the
+// name), 2 an assignment of readfield (a the local; c the local read or -1; text the operand; name; field), 3 a ghost
+// (a its kind: 0 validation, 1 axiom, 2 proof, 3 function, 4 position, 5 dissolve; c its environment; pay its payload;
+// text what follows the environment)
+struct Stmt { k: Int, a: Int, c: Int, pay: Int, name: String, field: String, text: String };
+impl Clone for Stmt { };
+
+// A terminator: k 0 goto x, 1 switch (text the operand) x y, 2 call (text the callee, arguments and destination) x,
+// 3 return, 4 unreachable
+struct Term { k: Int, text: String, x: Int, y: Int };
+impl Clone for Term { };
+
+// (a block's statements are their numbers in the state's list of statements)
+struct LBlock { present: Bool, stmts: List<Int>, term: Term };
+impl Clone for LBlock { };
+
+struct LDecl { present: Bool, ty: Int, hasName: Bool, name: String };
+impl Clone for LDecl { };
+
+struct Binding { isLocal: Bool, local: Int, ty: Int, fname: String };
+impl Clone for Binding { };
+
+struct RefTarget { local: Int, root: Int, steps: List<Step> };
+impl Clone for RefTarget { };
+
+// A loop: its header and body blocks, the payloads of its invariant and termination (-1 for none), its environment
+struct LoopRec { header: Int, body: Int, inv: Int, term: Int, env: Int };
+impl Clone for LoopRec { };
+
+// A finished function, its blocks numbered from the entry
+struct LFn {
+    name: String, params: List<Int>, hasReturns: Bool, returns: Int, locals: List<LDecl>, sizes: List<String>, typeParams: List<String>,
+    borrowed: List<Int>, mutBorrowed: List<Int>, from: List<Int>, blocks: List<LBlock>,
+    requires: Int, ensures: Int, term: Int, loops: List<LoopRec>, env: Int, writes: List<String>, mutParams: List<String>, specFrom: List<String>
+};
+impl Clone for LFn { };
+
+// The function being built (MirLower's Builder), which a nested function's body puts aside while it is built
+struct Builder {
+    name: String, isMain: Bool, sizes: List<String>, typeParams: List<String>, borrowed: List<Int>, mutBorrowed: List<Int>,
+    refTargets: List<RefTarget>, hasReturns: Bool, returns: Int, params: List<Int>, locals: List<LDecl>, nextLocal: Int,
+    blocks: List<LBlock>, nextBlock: Int, hasOpen: Bool, openId: Int, openStmts: List<Int>,
+    scopeNames: List<String>, scopeBinds: List<Binding>, scopeMarks: List<Int>, loops: List<LoopRec>,
+    hasPlace: Bool, line: Int, col: Int
+};
+impl Clone for Builder { };
+
+// A struct or an enum: its fields (a struct) or variants (an enum), and its data line
+struct TDecl { isStruct: Bool, fieldNames: List<String>, fieldTypes: List<Int>, variants: List<String>, line: String };
+impl Clone for TDecl { };
+
+// A struct with sizes, as its data line
+struct GenericRec { line: String };
+impl Clone for GenericRec { };
+
+// A function with bounds, for the step that copies it (Mir.BoundedFn): the sizes its bounds name, its type parameters
+// bounded by Copy, and the functions lifted out of its body
+struct BoundedRec { sizes: List<String>, copyParams: List<String>, lifted: List<String> };
+impl Clone for BoundedRec { };
+
+// An environment: the shared part it names (an index of contents, or -1 for none) and its own part's tokens
+struct EnvRec { content: Int, ownPart: String };
+impl Clone for EnvRec { };
+
+// The pending last step of an expression: an rvalue, or a call
+struct Pend { isCall: Bool, rv: Rv, callee: Op, args: List<Op> };
+impl Clone for Pend { };
+
+// The lowering's state (MirLower's LS with its Builder's fields), threaded by value. ok is false after the first
+// failure, msg says why. ty, op, pend, root and steps are what the last function that makes one gave.
+struct LowSt {
+    ok: Bool, msg: String,
+    tys: List<LTy>, tyIndex: HashMap<String, Int>, defaulted: HashMap<Int, Int>,
+    elab: List<Int>, nextElab: Int,
+    stmts: List<Stmt>,
+    types: HashMap<String, TDecl>, functions: HashMap<String, LFn>, fnKeys: HashSet<String>, names: HashSet<String>,
+    globals: HashMap<String, String>, globalsVersion: Int, assigned: HashSet<String>,
+    generics: HashMap<String, GenericRec>, invariants: HashMap<String, Int>,
+    bounded: HashMap<String, BoundedRec>, instances: HashMap<String, String>,
+    copies: HashSet<String>, linears: HashSet<String>, externs: HashSet<String>, drops: HashSet<String>,
+    prereg: HashMap<String, List<String>>, stubs: HashSet<String>,
+    pn: List<AstNode>, pbase: Int,
+    envs: List<EnvRec>, contents: List<String>, contentKeys: HashMap<String, Int>, contentTexts: HashMap<String, Int>,
+    std: HashMap<String, Int>,
+    bName: String, bIsMain: Bool, bSizes: List<String>, bTypeParams: List<String>, bBorrowed: List<Int>, bMutBorrowed: List<Int>,
+    bRefTargets: List<RefTarget>, bHasReturns: Bool, bReturns: Int, bParams: List<Int>, bLocals: List<LDecl>, bNextLocal: Int,
+    bBlocks: List<LBlock>, bNextBlock: Int, bHasOpen: Bool, bOpenId: Int, bOpenStmts: List<Int>,
+    bScopeNames: List<String>, bScopeBinds: List<Binding>, bScopeMarks: List<Int>, bLoops: List<LoopRec>,
+    bHasPlace: Bool, bLine: Int, bCol: Int,
+    ty: Int, op: Op, pend: Pend, root: Int, steps: List<Step>, name: String, id: Int, sig: Sig
+};
+
+struct Sig { ptys: List<Int>, rty: Int, sizes: List<String>, types: List<String>, writes: List<String>, froms: List<String> };
+impl Clone for Sig { };
+
+// The builder set aside for b, and the state building with b
+struct Swapped { ls: LowSt, b: Builder };
+
+fn swapBuilder(ls: LowSt, b: Builder) -> Swapped ~ {
+    old = Builder {
+        name: ls.bName, isMain: ls.bIsMain, sizes: ls.bSizes, typeParams: ls.bTypeParams, borrowed: ls.bBorrowed,
+        mutBorrowed: ls.bMutBorrowed, refTargets: ls.bRefTargets, hasReturns: ls.bHasReturns, returns: ls.bReturns,
+        params: ls.bParams, locals: ls.bLocals, nextLocal: ls.bNextLocal, blocks: ls.bBlocks, nextBlock: ls.bNextBlock,
+        hasOpen: ls.bHasOpen, openId: ls.bOpenId, openStmts: ls.bOpenStmts, scopeNames: ls.bScopeNames,
+        scopeBinds: ls.bScopeBinds, scopeMarks: ls.bScopeMarks, loops: ls.bLoops, hasPlace: ls.bHasPlace,
+        line: ls.bLine, col: ls.bCol
+    };
+    next = LowSt {
+        bName: b.name, bIsMain: b.isMain, bSizes: b.sizes, bTypeParams: b.typeParams, bBorrowed: b.borrowed, bMutBorrowed: b.mutBorrowed,
+        bRefTargets: b.refTargets, bHasReturns: b.hasReturns, bReturns: b.returns, bParams: b.params, bLocals: b.locals,
+        bNextLocal: b.nextLocal, bBlocks: b.blocks, bNextBlock: b.nextBlock, bHasOpen: b.hasOpen, bOpenId: b.openId,
+        bOpenStmts: b.openStmts, bScopeNames: b.scopeNames, bScopeBinds: b.scopeBinds, bScopeMarks: b.scopeMarks, bLoops: b.loops,
+        bHasPlace: b.hasPlace, bLine: b.line, bCol: b.col, ..ls
+    };
+    return Swapped { ls: next, b: old };
+};
+
+fn noOp() -> Op ~ { return Op { k: 2, l: 0 - 1, c: "", isList: false, bytes: false }; };
+
+fn noRv() -> Rv ~ { return Rv { k: 0, text: "", name: "", field: "", op: noOp(), root: 0 - 1, steps: [], mutable: false }; };
+
+fn noPend() -> Pend ~ { return Pend { isCall: false, rv: noRv(), callee: noOp(), args: [] }; };
+
+fn newBuilder(name: String, isMain: Bool, hasReturns: Bool, returns: Int) -> Builder ~ {
+    locals = [];
+    if hasReturns { locals = push(locals, LDecl { present: true, ty: returns, hasName: false, name: "" }); };
+    return Builder {
+        name: name, isMain: isMain, sizes: [], typeParams: [], borrowed: [], mutBorrowed: [], refTargets: [],
+        hasReturns: hasReturns, returns: returns, params: [], locals: locals, nextLocal: 1, blocks: [], nextBlock: 1,
+        hasOpen: true, openId: 0, openStmts: [], scopeNames: [], scopeBinds: [], scopeMarks: push([], 0), loops: [],
+        hasPlace: false, line: 0, col: 0
+    };
+};
+
+fn newLowSt(pbase: Int) -> LowSt ~ {
+    return LowSt {
+        ok: true, msg: "", tys: [], tyIndex: HashMap::new(), defaulted: HashMap::new(), elab: [], nextElab: 0,
+        stmts: [], types: HashMap::new(), functions: HashMap::new(), fnKeys: HashSet::new(), names: HashSet::new().insert("main"),
+        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(),
+        copies: HashSet::new(), linears: HashSet::new(), externs: HashSet::new(), drops: HashSet::new(),
+        prereg: HashMap::new(), stubs: HashSet::new(), pn: [], pbase: pbase,
+        envs: [], contents: [], contentKeys: HashMap::new(), contentTexts: HashMap::new(), std: HashMap::new(),
+        bName: "main", bIsMain: true, bSizes: [], bTypeParams: [], bBorrowed: [], bMutBorrowed: [], bRefTargets: [],
+        bHasReturns: false, bReturns: 0 - 1, bParams: [], bLocals: [], bNextLocal: 1, bBlocks: [], bNextBlock: 1,
+        bHasOpen: true, bOpenId: 0, bOpenStmts: [], bScopeNames: [], bScopeBinds: [], bScopeMarks: push([], 0), bLoops: [],
+        bHasPlace: false, bLine: 0, bCol: 0,
+        ty: 0 - 1, op: noOp(), pend: noPend(), root: 0 - 1, steps: [], name: "", id: 0 - 1,
+        sig: Sig { ptys: [], rty: 0 - 1, sizes: [], types: [], writes: [], froms: [] }
+    };
+};
+
+// The first failure is the lowering's answer; what follows it does nothing
+fn lfail(ls: LowSt, msg: String) -> LowSt ~ {
+    if !ls.ok { return ls; };
+    return LowSt { ok: false, msg: msg, ..ls };
+};
+
+// (the Haskell reader of the elaborated program refuses such a record before it lowers)
+fn lwMalformed(ls: LowSt, what: String) -> LowSt ~ {
+    return lfail(ls, lwCat3("Lowering: the elaborated program has a record that is not ", &what, " where one is read"));
+};
+
+fn lwCat(a: String, b: &String) -> String ~ { return a.concat(b); };
+
+fn lwCat3(a: String, b: &String, c: &String) -> String ~ { return a.concat(b).concat(c); };
+
+fn lwSp(a: String, b: &String) -> String ~ { return a.concat(" ").concat(b); };
+
+fn intAt(xs: &List<Int>, i: Int) -> Int ~ {
+    if i < 0 || i >= size(xs) { return 0 - 1; };
+    return get(xs, i);
+};
+
+fn lwTextAt(xs: &List<String>, i: Int) -> String ~ {
+    if i < 0 || i >= size(xs) { return ""; };
+    return clone(get(xs, i));
+};
+
+fn hasText(xs: &List<String>, x: &String) -> Bool ~ {
+    for y in xs { if y = x { return true; }; };
+    return false;
+};
+
+fn hasInt(xs: &List<Int>, x: Int) -> Bool ~ {
+    for y in xs { if y = x { return true; }; };
+    return false;
+};
+
+fn lwTextLess(a: &String, b: &String) -> Bool ~ {
+    n = size(a.bytes);
+    if size(b.bytes) < n { n = size(b.bytes); };
+    i = 0;
+    while i < n [{ affirm i >= 0; }] shrinks n - i {
+        x = toInt(get(a.bytes, i));
+        y = toInt(get(b.bytes, i));
+        if x != y { return x < y; };
+        i = i + 1;
+    };
+    return size(a.bytes) < size(b.bytes);
+};
+
+fn lwSort(xs: List<String>) -> List<String> ~ {
+    if size(xs) <= 1 { return xs; };
+    half = size(xs) / 2;
+    left = [];
+    right = [];
+    i = 0;
+    for x in xs {
+        if i < half { left = push(left, clone(x)); } else { right = push(right, clone(x)); };
+        i = i + 1;
+    };
+    return mergeTexts(lwSort(left), lwSort(right));
+};
+
+fn mergeTexts(a: List<String>, b: List<String>) -> List<String> ~ {
+    out = [];
+    i = 0;
+    j = 0;
+    finished = false;
+    while finished = false ~ {
+        if i < size(a) && j < size(b) {
+            if lwTextLess(&get(b, j), &get(a, i)) { out = push(out, clone(get(b, j))); j = j + 1; } else { out = push(out, clone(get(a, i))); i = i + 1; };
+        } else {
+            if i < size(a) { out = push(out, clone(get(a, i))); i = i + 1; } else {
+                if j < size(b) { out = push(out, clone(get(b, j))); j = j + 1; } else { finished = true; };
+            };
+        };
+    };
+    return out;
+};
+
+fn setTexts(s: &HashSet<String>) -> List<String> ~ { return lwSort(s.elements()); };
+
+fn quote(name: &String) -> String ~ { return quotedName(name); };
+
+fn tyOf(ls: &LowSt, t: Int) -> LTy ~ {
+    if t < 0 || t >= size(ls.tys) { return LTy { kind: 0, name: "", args: [], size: Size::SAny, n: 0, flag: false, sizes: [], types: [], text: "int", forName: "Int" }; };
+    return clone(get(ls.tys, t));
+};
+
+fn lwKind(ls: &LowSt, t: Int) -> Int ~ {
+    if t < 0 || t >= size(ls.tys) { return 0 - 1; };
+    return get(ls.tys, t).kind;
+};
+
+fn argOf(ls: &LowSt, t: Int, i: Int) -> Int ~ {
+    if t < 0 || t >= size(ls.tys) { return 0 - 1; };
+    return intAt(&get(ls.tys, t).args, i);
+};
+
+fn tyText(ls: &LowSt, t: Int) -> String ~ {
+    if t < 0 || t >= size(ls.tys) { return "int"; };
+    return clone(get(ls.tys, t).text);
+};
+
+fn forNameOf(ls: &LowSt, t: Int) -> String ~ {
+    if t < 0 || t >= size(ls.tys) { return "Int"; };
+    return clone(get(ls.tys, t).forName);
+};
+
+fn intern(ls: LowSt, t: LTy) -> LowSt ~ {
+    if HashMap::contains(&ls.tyIndex, &t.text) {
+        found = HashMap::lookup(&ls.tyIndex, &t.text, 0);
+        return LowSt { ty: found, ..ls };
+    };
+    id = size(ls.tys);
+    index = ls.tyIndex.insert(clone(t.text), id);
+    tys = push(ls.tys, t);
+    return LowSt { tys: tys, tyIndex: index, ty: id, ..ls };
+};
+
+fn lwBlank(kind: Int, text: String, forName: String) -> LTy ~ {
+    return LTy { kind: kind, name: "", args: [], size: Size::SAny, n: 0, flag: false, sizes: [], types: [], text: text, forName: forName };
+};
+
+fn simpleType(ls: LowSt, kind: Int) -> LowSt ~ {
+    if kind = 1 { return intern(ls, lwBlank(1, "byte", "Byte")); };
+    if kind = 2 { return intern(ls, lwBlank(2, "bool", "Bool")); };
+    return intern(ls, lwBlank(0, "int", "Int"));
+};
+
+fn wordType(ls: LowSt, signed: Bool, bits: Int) -> LowSt ~ {
+    text = "u";
+    name = "U";
+    if signed { text = "i"; name = "I"; };
+    t = lwBlank(3, lwCat(text, intText(bits)), lwCat(name, intText(bits)));
+    return intern(ls, LTy { flag: signed, n: bits, ..t });
+};
+
+fn lwSizeTokens(s: &Size) -> String ~ {
+    return match s {
+        Size::SConst { n: n } => lwCat("c ", intText(n)),
+        Size::SAny => "any",
+        Size::SParam { name: name } => lwCat("p ", quote(name)),
+        Size::SVar { n: n } => lwCat("v ", intText(n)),
+    };
+};
+
+fn sizeForName(s: &Size) -> String ~ {
+    return match s {
+        Size::SConst { n: n } => intText(n),
+        Size::SAny => "?",
+        Size::SParam { name: name } => clone(name),
+        Size::SVar { n: n } => lwCat("_", intText(n)),
+    };
+};
+
+fn lwSizeArg(ls: LowSt, s: Size) -> LowSt ~ {
+    t = lwBlank(20, lwCat("size ", lwSizeTokens(&s)), sizeForName(&s));
+    return intern(ls, LTy { size: s, ..t });
+};
+
+// Types.instanceName of a base and the arguments of a type
+fn lwInstanceText(ls: &LowSt, base: &String, args: &List<Int>) -> String ~ {
+    if size(args) = 0 { return clone(base); };
+    out = lwCat(clone(base), "<");
+    i = 0;
+    for a in args {
+        if i > 0 { out = lwCat(out, ", "); };
+        out = lwCat(out, forNameOf(ls, a));
+        i = i + 1;
+    };
+    return lwCat(out, ">");
+};
+
+fn namedType(ls: LowSt, base: String, args: List<Int>) -> LowSt ~ {
+    text = lwCat3(lwCat("named ", quote(&base)), " ", intText(size(args)));
+    for a in &args {
+        if lwKind(&ls, a) = 20 { text = lwSp(text, tyText(&ls, a)); } else { text = lwSp(lwCat(text, " type"), tyText(&ls, a)); };
+    };
+    forName = lwInstanceText(&ls, &base, &args);
+    if size(args) = 0 && ps::isBareLower(&base) { forName = lwCat("`", &base); };
+    t = lwBlank(4, text, forName);
+    return intern(ls, LTy { name: base, args: args, ..t });
+};
+
+fn wrapType(ls: LowSt, kind: Int, inner: Int) -> LowSt ~ {
+    word = "addr";
+    open = "Addr<";
+    close = ">";
+    if kind = 8 { word = "block"; open = "Block<"; };
+    if kind = 9 { word = "uninit"; open = "Uninit<"; };
+    if kind = 10 { word = "ref"; open = "&"; close = ""; };
+    if kind = 11 { word = "mutref"; open = "&mut "; close = ""; };
+    t = lwBlank(kind, lwSp(word, tyText(&ls, inner)), lwCat3(open, forNameOf(&ls, inner), close));
+    return intern(ls, LTy { args: push([], inner), ..t });
+};
+
+fn arrayType(ls: LowSt, elem: Int, s: Size) -> LowSt ~ {
+    t = lwBlank(6, lwSp(lwSp("array", tyText(&ls, elem)), lwSizeTokens(&s)), lwCat3(lwCat3("Array<", forNameOf(&ls, elem), ", "), sizeForName(&s), ">"));
+    return intern(ls, LTy { args: push([], elem), size: s, ..t });
+};
+
+fn variantType(ls: LowSt, name: String) -> LowSt ~ {
+    t = lwBlank(5, lwCat("variant ", quote(&name)), clone(name));
+    return intern(ls, LTy { name: name, ..t });
+};
+
+fn paramType(ls: LowSt, name: String) -> LowSt ~ {
+    t = lwBlank(12, lwCat("param ", quote(&name)), lwCat("'", &name));
+    return intern(ls, LTy { name: name, ..t });
+};
+
+fn varType(ls: LowSt, n: Int) -> LowSt ~ {
+    t = lwBlank(15, lwCat("var ", intText(n)), lwCat("?", intText(n)));
+    return intern(ls, LTy { n: n, ..t });
+};
+
+fn fnType(ls: LowSt, params: List<Int>, ret: Int) -> LowSt ~ {
+    text = lwCat("fn ", intText(size(params)));
+    forName = "fn(";
+    i = 0;
+    for p in &params {
+        text = lwSp(text, tyText(&ls, p));
+        if i > 0 { forName = lwCat(forName, ", "); };
+        forName = lwCat(forName, forNameOf(&ls, p));
+        i = i + 1;
+    };
+    text = lwSp(text, tyText(&ls, ret));
+    forName = lwCat(lwCat(forName, ") -> "), forNameOf(&ls, ret));
+    t = lwBlank(14, text, forName);
+    return intern(ls, LTy { args: push(params, ret), ..t });
+};
+
+fn forallType(ls: LowSt, sizes: List<String>, types: List<String>, body: Int) -> LowSt ~ {
+    text = lwCat("forall ", intText(size(sizes)));
+    for s in &sizes { text = lwSp(text, quote(s)); };
+    text = lwSp(text, intText(size(types)));
+    for s in &types { text = lwSp(text, quote(s)); };
+    text = lwSp(text, tyText(&ls, body));
+    t = lwBlank(13, text, forNameOf(&ls, body));
+    return intern(ls, LTy { sizes: sizes, types: types, args: push([], body), ..t });
+};
+
+// Elaboration.functionType
+fn functionType(ls: LowSt, sizes: List<String>, types: List<String>, params: List<Int>, ret: Int) -> LowSt ~ {
+    ls = fnType(ls, params, ret);
+    if size(sizes) = 0 && size(types) = 0 { return ls; };
+    f = ls.ty;
+    return forallType(ls, sizes, types, f);
+};
+
+// A type of the data (a Type record's codec type), made one of the lowering's
+fn fromCodecTy(ls: LowSt, t: &Type) -> LowSt ~ {
+    match t {
+        Type::TInt => { return simpleType(ls, 0); },
+        Type::TByte => { return simpleType(ls, 1); },
+        Type::TBool => { return simpleType(ls, 2); },
+        Type::TWord { signed: signed, bits: bits } => { return wordType(ls, signed, bits); },
+        Type::TList { elem: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return namedType(ls, "List", push([], ls.ty)); },
+        Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return namedType(ls, "Box", push([], ls.ty)); },
+        Type::TArray { elem: e, size: s } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return arrayType(ls, ls.ty, clone(s)); },
+        Type::TFn { args: args, ret: r } => { return fromCodecFn(ls, args, r); },
+        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { return fromCodecNamed(ls, base, argTokens); },
+        Type::TVariant { name: name } => { return variantType(ls, clone(name)); },
+        Type::TVar { n: n } => { return varType(ls, n); },
+        Type::TForall { sizes: sizes, types: types, body: body } => { inner = Box::unbox(clone(body)); ls = fromCodecTy(ls, &inner); return forallType(ls, clone(sizes), clone(types), ls.ty); },
+        Type::TParam { name: name } => { return paramType(ls, clone(name)); },
+        Type::TRef { inner: e } => { return fromCodecWrap(ls, 10, e); },
+        Type::TMutRef { inner: e } => { return fromCodecWrap(ls, 11, e); },
+        Type::TAddr { inner: e } => { return fromCodecWrap(ls, 7, e); },
+        Type::TBlock { inner: e } => { return fromCodecWrap(ls, 8, e); },
+        Type::TUninit { inner: e } => { return fromCodecWrap(ls, 9, e); },
+    };
+    return ls;
+};
+
+fn fromCodecWrap(ls: LowSt, kind: Int, e: &Box<Type>) -> LowSt ~ {
+    inner = Box::unbox(clone(e));
+    ls = fromCodecTy(ls, &inner);
+    return wrapType(ls, kind, ls.ty);
+};
+
+fn fromCodecFn(ls: LowSt, args: &List<Type>, r: &Box<Type>) -> LowSt ~ {
+    params = [];
+    for a in args { ls = fromCodecTy(ls, a); params = push(params, ls.ty); };
+    inner = Box::unbox(clone(r));
+    ls = fromCodecTy(ls, &inner);
+    return fnType(ls, params, ls.ty);
+};
+
+fn fromCodecNamed(ls: LowSt, base: &String, argTokens: &List<Token>) -> LowSt ~ {
+    args = [];
+    p = 0;
+    while p < size(argTokens) && ls.ok = true [{ affirm p >= 0; }] ~ {
+        w = wordAt(argTokens, p);
+        if !w.ok || w.pos >= size(argTokens) { return lfail(ls, "Lowering: a named type the data does not give whole"); };
+        if w.value = "size" {
+            s = sizeAt(argTokens, w.pos);
+            if !s.ok { return lfail(ls, "Lowering: a size the data does not give whole"); };
+            ls = lwSizeArg(ls, s.value);
+            args = push(args, ls.ty);
+            p = s.pos;
+        } else {
+            a = typeAt(argTokens, w.pos);
+            if !a.ok { return lfail(ls, "Lowering: a type the data does not give whole"); };
+            ls = fromCodecTy(ls, &a.value);
+            args = push(args, ls.ty);
+            p = a.pos;
+        };
+    };
+    return namedType(ls, clone(base), args);
+};
+
+// The type the elaborator gave the expression the lowering has just reached
+fn claim(ls: LowSt) -> LowSt ~ {
+    if !ls.ok { return LowSt { ty: 0 - 1, ..ls }; };
+    if ls.nextElab < 0 || ls.nextElab >= size(ls.elab) {
+        ls = lfail(ls, "Lowering: the elaborated program ran out of expression types");
+        return LowSt { ty: 0 - 1, ..ls };
+    };
+    t = get(ls.elab, ls.nextElab);
+    next = ls.nextElab + 1;
+    return LowSt { ty: t, nextElab: next, ..ls };
+};
+
+fn isRefTy(ls: &LowSt, t: Int) -> Bool ~ { k = lwKind(ls, t); return k = 10 || k = 11; };
+
+fn isMutRefTy(ls: &LowSt, t: Int) -> Bool ~ { return lwKind(ls, t) = 11; };
+
+fn unrefTy(ls: &LowSt, t: Int) -> Int ~ {
+    if isRefTy(ls, t) { return argOf(ls, t, 0); };
+    return t;
+};
+
+fn isNamed(ls: &LowSt, t: Int, base: &String) -> Bool ~ {
+    if t < 0 || t >= size(ls.tys) || lwKind(ls, t) != 4 { return false; };
+    return get(ls.tys, t).name = clone(base) && size(get(ls.tys, t).args) = 1 && lwKind(ls, argOf(ls, t, 0)) != 20;
+};
+
+// What a Box holds (Types.TBox), or -1
+fn boxInner(ls: &LowSt, t: Int) -> Int ~ {
+    if isNamed(ls, t, "Box") { return argOf(ls, t, 0); };
+    return 0 - 1;
+};
+
+// The base of a rendered instance name (Types.baseNameOf)
+fn lwBaseName(name: &String) -> String ~ {
+    out = [];
+    for c in &name.bytes {
+        if toInt(c) = 60 { return String { bytes: out }; };
+        out = push(out, c);
+    };
+    return String { bytes: out };
+};
+
+fn lwHasByte(name: &String, b: Int) -> Bool ~ {
+    for c in &name.bytes { if toInt(c) = b { return true; }; };
+    return false;
+};
+
+// Types.tupleGeneric's test: Tuple and a number from 2 to 16 with no leading zero
+fn isTupleBase(base: &String) -> Bool ~ {
+    n = size(base.bytes);
+    if n < 6 || n > 7 { return false; };
+    prefix = "Tuple";
+    for i in 0..5 { if get(base.bytes, i) != get(prefix.bytes, i) { return false; }; };
+    v = 0;
+    for i in 5..n {
+        d = toInt(get(base.bytes, i)) - 48;
+        if d < 0 || d > 9 { return false; };
+        if i = 5 && d = 0 { return false; };
+        v = v * 10 + d;
+    };
+    return v >= 2 && v <= 16;
+};
+
+// The types of the parts of a tuple type (Types.tupleParts), or none (ok false)
+struct Parts { ok: Bool, types: List<Int> };
+
+fn tupleParts(ls: &LowSt, t: Int) -> Parts ~ {
+    none = Parts { ok: false, types: [] };
+    if t < 0 || t >= size(ls.tys) || lwKind(ls, t) != 4 { return none; };
+    x = get(ls.tys, t);
+    if !isTupleBase(&x.name) { return none; };
+    for a in &x.args { if lwKind(ls, a) = 20 { return none; }; };
+    return Parts { ok: true, types: clone(x.args) };
+};
+
+// The name of the struct a type is (MirLower.typeName)
+fn typeNameOf(ls: &LowSt, t: Int) -> String ~ {
+    if t < 0 || t >= size(ls.tys) || lwKind(ls, t) != 4 { return ""; };
+    x = get(ls.tys, t);
+    return lwInstanceText(ls, &x.name, &x.args);
+};
+
+// Pretty.renderType, for the refusal of an array element
+fn renderTy(ls: &LowSt, t: Int) -> String ~ {
+    x = tyOf(ls, t);
+    k = x.kind;
+    if k = 4 { return renderNamed(ls, &x); };
+    if k = 0 || k = 1 || k = 2 || k = 3 || k = 5 { return clone(x.forName); };
+    if k = 6 { return lwCat3(lwCat3("Array<", renderTy(ls, intAt(&x.args, 0)), ", "), sizeForName(&x.size), ">"); };
+    if k = 7 { return lwCat3("Addr<", renderTy(ls, intAt(&x.args, 0)), ">"); };
+    if k = 8 { return lwCat3("Block<", renderTy(ls, intAt(&x.args, 0)), ">"); };
+    if k = 9 { return lwCat3("Uninit<", renderTy(ls, intAt(&x.args, 0)), ">"); };
+    if k = 10 { return lwCat("&", renderTy(ls, intAt(&x.args, 0))); };
+    if k = 11 { return lwCat("&mut ", renderTy(ls, intAt(&x.args, 0))); };
+    if k = 12 { return clone(x.name); };
+    if k = 13 { return renderForall(ls, &x); };
+    if k = 14 { return renderFn(ls, &x); };
+    if k = 15 { return "?"; };
+    return clone(x.forName);
+};
+
+// (a List and a Box show what they hold as a type; another named type's arguments are written as its instance name writes them)
+fn renderNamed(ls: &LowSt, x: &LTy) -> String ~ {
+    if size(x.args) = 1 && lwKind(ls, intAt(&x.args, 0)) != 20 && (x.name = "List" || x.name = "Box") {
+        return lwCat3(lwCat(clone(x.name), "<"), renderTy(ls, intAt(&x.args, 0)), ">");
+    };
+    return lwInstanceText(ls, &x.name, &x.args);
+};
+
+fn renderForall(ls: &LowSt, x: &LTy) -> String ~ {
+    out = "<";
+    i = 0;
+    for s in &x.types { if i > 0 { out = lwCat(out, ", "); }; out = lwCat(out, s); i = i + 1; };
+    for s in &x.sizes { if i > 0 { out = lwCat(out, ", "); }; out = lwCat(out, s); i = i + 1; };
+    return lwCat(lwCat(out, ">"), renderTy(ls, intAt(&x.args, 0)));
+};
+
+fn renderFn(ls: &LowSt, x: &LTy) -> String ~ {
+    out = "fn(";
+    n = size(x.args) - 1;
+    i = 0;
+    while i < n [{ affirm i >= 0; }] shrinks n - i {
+        if i > 0 { out = lwCat(out, ", "); };
+        out = lwCat(out, renderTy(ls, intAt(&x.args, i)));
+        i = i + 1;
+    };
+    return lwCat(lwCat(out, ") -> "), renderTy(ls, intAt(&x.args, n)));
+};
+
+// MirLower.resolveType: an unknown is an Int (not inside a function with parameters or a &mut)
+fn defaultTy(ls: LowSt, t: Int) -> LowSt ~ {
+    if HashMap::contains(&ls.defaulted, t) {
+        known = HashMap::lookup(&ls.defaulted, t, t);
+        return LowSt { ty: known, ..ls };
+    };
+    ls = defaultTyOnce(ls, t);
+    result = ls.ty;
+    memo = ls.defaulted.insert(t, result);
+    return LowSt { defaulted: memo, ty: result, ..ls };
+};
+
+fn defaultTyOnce(ls: LowSt, t: Int) -> LowSt ~ {
+    x = tyOf(&ls, t);
+    k = x.kind;
+    if k = 15 { return simpleType(ls, 0); };
+    if k = 4 { return defaultNamed(ls, x); };
+    if k = 6 {
+        ls = defaultTy(ls, intAt(&x.args, 0));
+        return arrayType(ls, ls.ty, clone(x.size));
+    };
+    if k = 7 || k = 8 || k = 9 || k = 10 {
+        ls = defaultTy(ls, intAt(&x.args, 0));
+        return wrapType(ls, k, ls.ty);
+    };
+    if k = 14 {
+        args = [];
+        for a in &x.args { ls = defaultTy(ls, a); args = push(args, ls.ty); };
+        ret = intAt(&args, size(args) - 1);
+        params = [];
+        i = 0;
+        while i + 1 < size(args) [{ affirm i >= 0; }] shrinks size(args) - i {
+            params = push(params, get(args, i));
+            i = i + 1;
+        };
+        return fnType(ls, params, ret);
+    };
+    return LowSt { ty: t, ..ls };
+};
+
+fn defaultNamed(ls: LowSt, x: LTy) -> LowSt ~ {
+    args = [];
+    for a in &x.args {
+        if lwKind(&ls, a) = 20 { args = push(args, a); } else { ls = defaultTy(ls, a); args = push(args, ls.ty); };
+    };
+    return namedType(ls, clone(x.name), args);
+};

@@ -1,0 +1,882 @@
+import data::ast::ast { AstArg, AstExpression, AstNode, AstStatement };
+import data::codec::codec { Size };
+import elaborate::loweriface { stubFunction };
+import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nativeFn, nodeIn, signatureOf };
+import elaborate::state { intText };
+import elaborate::lowerstate { lwMalformed, Swapped, swapBuilder, Binding, GenericRec, LBlock, LDecl, LFn, LoopRec, LowSt, BoundedRec, Rv, Stmt, TDecl, Term, argOf, claim, defaultTy, forNameOf, fromCodecTy, functionType, hasInt, hasText, intAt, isMutRefTy, isRefTy, lfail, lwCat, lwCat3, lwInstanceText, lwKind, lwBaseName, lwSort, lwTextAt, newBuilder, quote, renderTy, lwSizeTokens, lwSp, tyOf, tyText, typeNameOf, unrefTy, Sig };
+import elaborate::lowerbuild { assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, opText, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv };
+import elaborate::lowerexpr { finishInto, lowerCondition, lowerLast, lowerOperand, rvPend };
+import elaborate::lowerplace { lowerDerefPlace };
+
+// The lowering of a checked module to the MIR (MirLower.lowerRaw): control flow becomes blocks that jump, nested
+// expressions become temporaries, nested functions are lifted to the top, and the scopes that decide which variable an
+// assignment means are resolved to numbered locals. Every local and temporary has the type the elaborator gave its
+// expression, taken in the order MirLower visits them (claim).
+
+// (after a return nothing runs: the expression types of what follows are taken and dropped)
+fn lowerStatements(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
+    i = 0;
+    while i < size(stmts) && ls.ok = true [{ affirm i >= 0; }] shrinks size(stmts) - i {
+        if i = 0 || ls.bHasOpen { ls = lowerStatement(ls, src, get(stmts, i)); } else { ls = skipStatement(ls, src, get(stmts, i)); };
+        i = i + 1;
+    };
+    return ls;
+};
+
+fn skipStatements(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
+    for s in stmts { if ls.ok { ls = skipStatement(ls, src, s); }; };
+    return ls;
+};
+
+fn skipStatement(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
+    if !(nodeIn(src, s) is AstNode::Statement) { return lwMalformed(ls, "a statement"); };
+    stmt = stmtAt(src, s);
+    f = definedFunction(src, clone(stmt));
+    if f >= 0 { return skipStatements(ls, src, bodyOf(src, f)); };
+    if stmt is AstStatement::AssignDeref {
+        d = stmt as AstStatement::AssignDeref;
+        ls = skipExpr(ls, src, d.b);
+        return skipExpr(ls, src, d.a);
+    };
+    if stmt is AstStatement::Assign { return skipExpr(ls, src, (stmt as AstStatement::Assign).e); };
+    if stmt is AstStatement::Let { return skipExpr(ls, src, (stmt as AstStatement::Let).e); };
+    if stmt is AstStatement::Return { return skipExpr(ls, src, (stmt as AstStatement::Return).e); };
+    return skipCompound(ls, src, stmt);
+};
+
+fn skipCompound(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
+    if stmt is AstStatement::Block { return skipStatements(ls, src, listItems(src, (stmt as AstStatement::Block).xs)); };
+    if stmt is AstStatement::If {
+        x = stmt as AstStatement::If;
+        ls = skipExpr(ls, src, x.e);
+        ls = skipStatements(ls, src, listItems(src, x.a));
+        return skipStatements(ls, src, listItems(src, x.b));
+    };
+    if stmt is AstStatement::While {
+        w = stmt as AstStatement::While;
+        ls = skipExpr(ls, src, w.e);
+        return skipStatements(ls, src, listItems(src, w.xs));
+    };
+    return ls;
+};
+
+fn skipExpr(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return lwMalformed(ls, "an expression"); };
+    ls = claim(ls);
+    if !ls.ok { return ls; };
+    x = exprAt(src, e);
+    if !(x is AstExpression::F) { return ls; };
+    funct = (x as AstExpression::F).f;
+    headExpr = exprAt(src, funct);
+    if !(headExpr is AstExpression::Val) && !(headExpr is AstExpression::Var) { ls = skipExpr(ls, src, funct); };
+    for a in listItems(src, (x as AstExpression::F).xs) { if ls.ok { ls = skipExpr(ls, src, a); }; };
+    return ls;
+};
+
+fn lowerStatement(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
+    if !ls.ok { return ls; };
+    if !(nodeIn(src, s) is AstNode::Statement) { return lwMalformed(ls, "a statement"); };
+    stmt = stmtAt(src, s);
+    f = definedFunction(src, clone(stmt));
+    if f >= 0 && stmt is AstStatement::Assign { return defineFunction(ls, src, nameText(src, (stmt as AstStatement::Assign).n), f); };
+    if stmt is AstStatement::Assign || stmt is AstStatement::AssignDeref || stmt is AstStatement::Let || stmt is AstStatement::Return {
+        return lowerAssignment(ls, src, stmt);
+    };
+    if stmt is AstStatement::ValidationStatement || stmt is AstStatement::AxiomDef || stmt is AstStatement::ProofDef || stmt is AstStatement::Dissolve || stmt is AstStatement::Mark {
+        return lowerGhostStatement(ls, src, s, stmt);
+    };
+    if stmt is AstStatement::CopyDef || stmt is AstStatement::LinearDef || stmt is AstStatement::DropDef || stmt is AstStatement::ExternDef {
+        return lowerMarker(ls, src, stmt);
+    };
+    if stmt is AstStatement::StructDef || stmt is AstStatement::EnumDef { return lowerTypeDef(ls, src, stmt); };
+    return lowerControl(ls, src, stmt);
+};
+
+fn lowerAssignment(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
+    if stmt is AstStatement::Assign {
+        a = stmt as AstStatement::Assign;
+        ls = lowerLast(ls, src, a.e);
+        if !ls.ok { return ls; };
+        pend = clone(ls.pend);
+        t = ls.ty;
+        ls = assignTarget(ls, nameText(src, a.n), t);
+        dest = ls.root;
+        return finishInto(ls, dest, pend);
+    };
+    if stmt is AstStatement::AssignDeref {
+        d = stmt as AstStatement::AssignDeref;
+        ls = lowerOperand(ls, src, d.b);
+        if !ls.ok { return ls; };
+        value = clone(ls.op);
+        ls = lowerDerefPlace(ls, src, d.a);
+        if !ls.ok { return ls; };
+        text = lwSp(lwSp(lwCat3(lwCat("assignref ", intText(ls.root)), " ", stepsText(&ls.steps)), "use"), opText(&value));
+        return emitStmt(ls, Stmt { k: 0, a: 0 - 1, c: 0 - 1, pay: 0 - 1, name: "", field: "", text: text });
+    };
+    if stmt is AstStatement::Let {
+        l = stmt as AstStatement::Let;
+        ls = lowerLast(ls, src, l.e);
+        if !ls.ok { return ls; };
+        pend = clone(ls.pend);
+        t = ls.ty;
+        var = nameText(src, l.n);
+        ls = newLocal(ls, true, clone(var), t);
+        dest = ls.root;
+        ls = bindName(ls, var, localBinding(dest, t));
+        return finishInto(ls, dest, pend);
+    };
+    if stmt is AstStatement::Return { return lowerReturn(ls, src, (stmt as AstStatement::Return).e); };
+    return ls;
+};
+
+// Assigning a variable that exists keeps its local; a new one gets one in the innermost scope (ls.root)
+fn assignTarget(ls: LowSt, var: String, t: Int) -> LowSt ~ {
+    found = lookupBinding(&ls, &var);
+    if found.found && found.b.isLocal { return LowSt { root: found.b.local, ..ls }; };
+    ls = newLocal(ls, true, clone(var), t);
+    l = ls.root;
+    ls = bindName(ls, var, localBinding(l, t));
+    return LowSt { root: l, ..ls };
+};
+
+fn lowerGhostStatement(ls: LowSt, src: &List<AstNode>, s: Int, stmt: AstStatement) -> LowSt ~ {
+    if stmt is AstStatement::ValidationStatement { return ghostHere(ls, 0, s, ""); };
+    if stmt is AstStatement::AxiomDef { return ghostHere(ls, 1, s, ""); };
+    if stmt is AstStatement::ProofDef { return ghostHere(ls, 2, s, ""); };
+    if stmt is AstStatement::Dissolve {
+        var = nameText(src, (stmt as AstStatement::Dissolve).n);
+        found = lookupBinding(&ls, &var);
+        if found.found && found.b.isLocal { return emitStmt(ls, ghostStmt(5, 0 - 1, 0 - 1, intText(found.b.local))); };
+        return lfail(ls, lwCat("Undefined variable: ", &var));
+    };
+    if !(stmt is AstStatement::Mark) { return ls; };
+    m = stmt as AstStatement::Mark;
+    ls = LowSt { bHasPlace: true, bLine: m.line, bCol: m.col, ..ls };
+    return emitStmt(ls, positionStmt(m.line, m.col));
+};
+
+fn lowerMarker(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
+    if stmt is AstStatement::CopyDef {
+        copies = ls.copies.insert(nameText(src, (stmt as AstStatement::CopyDef).n));
+        return LowSt { copies: copies, ..ls };
+    };
+    if stmt is AstStatement::LinearDef {
+        linears = ls.linears.insert(nameText(src, (stmt as AstStatement::LinearDef).n));
+        return LowSt { linears: linears, ..ls };
+    };
+    if stmt is AstStatement::DropDef {
+        drops = ls.drops.insert(nameText(src, (stmt as AstStatement::DropDef).n));
+        return LowSt { drops: drops, ..ls };
+    };
+    if !(stmt is AstStatement::ExternDef) { return ls; };
+    externs = ls.externs.insert(nameText(src, (stmt as AstStatement::ExternDef).n));
+    return LowSt { externs: externs, ..ls };
+};
+
+// The fields of a Fields list as their data tokens ("f" TYPE)..., after their count
+fn fieldsTokens(ls: LowSt, src: &List<AstNode>, fs: Int) -> LowSt ~ {
+    items = listItems(src, fs);
+    text = intText(size(items));
+    for f in &items {
+        node = nodeIn(src, f);
+        if node is AstNode::Field {
+            fv = (node as AstNode::Field).value;
+            tyc = codecTypeAt(src, fv.ty);
+            ls = fromCodecTy(ls, &tyc);
+            text = lwSp(lwSp(text, quote(nameText(src, fv.n))), tyText(&ls, ls.ty));
+        };
+    };
+    return LowSt { name: text, ..ls };
+};
+
+fn lowerTypeDef(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
+    if stmt is AstStatement::EnumDef {
+        e = stmt as AstStatement::EnumDef;
+        name = nameText(src, e.n);
+        variants = listItems(src, e.vs);
+        line = lwSp(lwSp("enum", quote(&name)), intText(size(variants)));
+        names = [];
+        for v in &variants {
+            node = nodeIn(src, v);
+            if node is AstNode::Variant {
+                vv = (node as AstNode::Variant).value;
+                vname = nameText(src, vv.n);
+                ls = fieldsTokens(ls, src, vv.fs);
+                line = lwSp(lwSp(line, quote(&vname)), &ls.name);
+                names = push(names, vname);
+            };
+        };
+        return addType(ls, name, TDecl { isStruct: false, fieldNames: [], fieldTypes: [], variants: names, line: line });
+    };
+    if !(stmt is AstStatement::StructDef) { return ls; };
+    d = stmt as AstStatement::StructDef;
+    name = nameText(src, d.n);
+    sizes = namesOf(src, d.ps);
+    ls = fieldsTokens(ls, src, d.fs);
+    fields = clone(ls.name);
+    if size(sizes) > 0 {
+        line = lwSp(lwCat("generic ", quote(&name)), intText(size(sizes)));
+        for s in &sizes { line = lwSp(line, quote(s)); };
+        generics = ls.generics.insert(clone(name), GenericRec { line: lwSp(line, &fields) });
+        ls = LowSt { generics: generics, ..ls };
+    } else {
+        ls = addType(ls, clone(name), TDecl { isStruct: true, fieldNames: [], fieldTypes: [], variants: [], line: lwSp(lwSp("struct", quote(&name)), &fields) });
+    };
+    return withInvariant(ls, src, name, d.vs);
+};
+
+fn addType(ls: LowSt, name: String, d: TDecl) -> LowSt ~ {
+    types = ls.types.insert(name, d);
+    return LowSt { types: types, ..ls };
+};
+
+fn withInvariant(ls: LowSt, src: &List<AstNode>, name: String, vs: Int) -> LowSt ~ {
+    if size(listItems(src, vs)) = 0 { return ls; };
+    ls = validationsPayload(ls, src, vs);
+    pay = ls.id;
+    invariants = ls.invariants.insert(name, pay);
+    return LowSt { invariants: invariants, ..ls };
+};
+
+fn lowerControl(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
+    if stmt is AstStatement::Block {
+        ls = enterScope(ls);
+        ls = lowerStatements(ls, src, listItems(src, (stmt as AstStatement::Block).xs));
+        return leaveScope(ls);
+    };
+    if stmt is AstStatement::If {
+        x = stmt as AstStatement::If;
+        return lowerIf(ls, src, x.e, listItems(src, x.a), listItems(src, x.b));
+    };
+    if stmt is AstStatement::While {
+        w = stmt as AstStatement::While;
+        return lowerWhile(ls, src, w.e, w.vs, w.t, listItems(src, w.xs));
+    };
+    // (the checker takes a trait apart and hands an impl back as the functions it defines)
+    if stmt is AstStatement::TraitDef { return lfail(ls, "A trait reached the lowering"); };
+    if stmt is AstStatement::ImplDef { return lfail(ls, "An impl reached the lowering"); };
+    if stmt is AstStatement::BoundedDef { return lowerBounded(ls, src, (stmt as AstStatement::BoundedDef).bs, (stmt as AstStatement::BoundedDef).s, false); };
+    if stmt is AstStatement::Instance { return ls; };
+    return lfail(ls, "Lowering: a record that is not a statement");
+};
+
+fn lowerReturn(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    // (a reference parameter that is returned is returned as a reference to its place)
+    returns = ls.bReturns;
+    k = 0 - 1;
+    if ls.bHasReturns { k = lwKind(&ls, returns); };
+    viaRef = false;
+    if (k = 10 || k = 11) && isVarExpr(src, e) {
+        ls = claim(ls);
+        var = varNameOf(src, e);
+        found = lookupBinding(&ls, &var);
+        if found.found && found.b.isLocal {
+            l = found.b.local;
+            lent = (k = 10 && (hasInt(&ls.bBorrowed, l) || hasInt(&ls.bMutBorrowed, l))) || (k = 11 && hasInt(&ls.bMutBorrowed, l));
+            if lent {
+                rv = borrowRv(l, [], k = 11);
+                ls = LowSt { pend: rvPend(rv), ty: returns, ..ls };
+                viaRef = true;
+            };
+        };
+    };
+    if !viaRef { ls = lowerLast(ls, src, e); };
+    if !ls.ok { return ls; };
+    pend = clone(ls.pend);
+    t = ls.ty;
+    if !ls.bHasReturns {
+        // (the program has no declared type: the first return decides it)
+        locals = setDecl(ls.bLocals, 0, LDecl { present: true, ty: t, hasName: false, name: "" });
+        ls = LowSt { bHasReturns: true, bReturns: t, bLocals: locals, ..ls };
+    };
+    ls = finishInto(ls, 0, pend);
+    return terminate(ls, returnTerm());
+};
+
+fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<Int>) -> LowSt ~ {
+    ls = newBlock(ls);
+    thenB = ls.id;
+    ls = newBlock(ls);
+    elseB = ls.id;
+    ls = newBlock(ls);
+    joinB = ls.id;
+    ls = lowerCondition(ls, src, cond, thenB, elseB);
+    ls = openBlock(ls, thenB);
+    ls = enterScope(ls);
+    ls = lowerStatements(ls, src, &yes);
+    ls = leaveScope(ls);
+    thenOpen = ls.bHasOpen;
+    if thenOpen { ls = terminate(ls, gotoTerm(joinB)); };
+    ls = openBlock(ls, elseB);
+    ls = enterScope(ls);
+    ls = lowerStatements(ls, src, &no);
+    ls = leaveScope(ls);
+    elseOpen = ls.bHasOpen;
+    if elseOpen { ls = terminate(ls, gotoTerm(joinB)); };
+    // (when both branches returned nothing reaches the join)
+    if thenOpen || elseOpen { ls = openBlock(ls, joinB); };
+    return ls;
+};
+
+fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: List<Int>) -> LowSt ~ {
+    ls = newBlock(ls);
+    header = ls.id;
+    ls = newBlock(ls);
+    bodyB = ls.id;
+    ls = newBlock(ls);
+    exit = ls.id;
+    ls = terminate(ls, gotoTerm(header));
+    ls = openBlock(ls, header);
+    ls = visibleEnv(ls);
+    env = ls.id;
+    ls = validationsPayload(ls, src, vs);
+    inv = ls.id;
+    ls = terminationPayload(ls, src, t);
+    term = ls.id;
+    loops = push(ls.bLoops, LoopRec { header: header, body: bodyB, inv: inv, term: term, env: env });
+    ls = LowSt { bLoops: loops, ..ls };
+    ls = lowerCondition(ls, src, cond, bodyB, exit);
+    ls = openBlock(ls, bodyB);
+    ls = enterScope(ls);
+    ls = lowerStatements(ls, src, &body);
+    ls = leaveScope(ls);
+    if ls.bHasOpen { ls = terminate(ls, gotoTerm(header)); };
+    return openBlock(ls, exit);
+};
+
+fn readSig(ls: LowSt, src: &List<AstNode>, sigNode: Int) -> LowSt ~ {
+    sig = signatureOf(src, sigNode);
+    ptys = [];
+    for t in listItems(src, sig.ts) {
+        tyc = codecTypeAt(src, t);
+        ls = fromCodecTy(ls, &tyc);
+        ptys = push(ptys, ls.ty);
+    };
+    rtyc = codecTypeAt(src, sig.ret);
+    ls = fromCodecTy(ls, &rtyc);
+    rty = ls.ty;
+    return LowSt { sig: Sig { ptys: ptys, rty: rty, sizes: namesOf(src, sig.ss), types: namesOf(src, sig.ps), writes: namesOf(src, sig.ws), froms: namesOf(src, sig.fs) }, ..ls };
+};
+
+struct FnParts { params: Int, ins: Int, outs: Int, sig: Int, term: Int, stmts: Int };
+
+fn fnParts(src: &List<AstNode>, v: Int) -> FnParts ~ {
+    none = FnParts { params: 0 - 1, ins: 0 - 1, outs: 0 - 1, sig: 0 - 1, term: 0 - 1, stmts: 0 - 1 };
+    nf = nativeFn(src, v);
+    if !nf.ok { return none; };
+    return FnParts { params: nf.ps, ins: nf.ins, outs: nf.outs, sig: nf.sig, term: nf.term, stmts: nf.stmts };
+};
+
+// A function becomes a function of the program, lifted to the top whatever it is nested in. One defined at the top is
+// found by name from the bodies of the functions after it, and from itself; any other is a name in its scope.
+fn defineFunction(ls: LowSt, src: &List<AstNode>, var: String, v: Int) -> LowSt ~ {
+    parts = fnParts(src, v);
+    ls = readSig(ls, src, parts.sig);
+    sig = clone(ls.sig);
+    atTop = ls.bIsMain && size(ls.bScopeMarks) = 1;
+    ls = functionType(ls, clone(sig.sizes), clone(sig.types), clone(sig.ptys), sig.rty);
+    fnType0 = ls.ty;
+    // (an extern function is named `extern f`, which no program can write)
+    base = clone(var);
+    if HashSet::contains(&ls.externs, &var) { base = lwCat("extern ", &var); };
+    name = "";
+    if atTop {
+        pre = HashMap::lookup(&ls.prereg, &var, []);
+        if size(pre) > 0 {
+            name = clone(get(pre, 0));
+            rest = [];
+            i = 1;
+            while i < size(pre) [{ affirm i >= 1; }] shrinks size(pre) - i { rest = push(rest, clone(get(pre, i))); i = i + 1; };
+            prereg = ls.prereg.insert(clone(var), rest);
+            ls = LowSt { prereg: prereg, ..ls };
+        } else {
+            ls = uniqueName(ls, base);
+            name = clone(ls.name);
+        };
+    } else {
+        ls = uniqueName(ls, lwCat3(clone(ls.bName), "::", &var));
+        name = clone(ls.name);
+    };
+    // (a function with sizes is called by name: it has no value to put in a local)
+    assigned = HashSet::contains(&ls.assigned, &var) && size(sig.sizes) = 0;
+    if atTop { ls = setGlobal(ls, clone(var), clone(name)); };
+    top = "false";
+    if atTop { top = "true"; };
+    ls = ghostHere(ls, 3, 0 - 1, lwSp(lwSp(quote(&name), quote(&var)), top));
+    if assigned {
+        ls = newLocal(ls, true, clone(var), fnType0);
+        l = ls.root;
+        ls = bindName(ls, clone(var), localBinding(l, fnType0));
+        rv = useRv(fnConst(&name));
+        ls = emitAssign(ls, l, &rv);
+    } else {
+        if !atTop { ls = bindName(ls, clone(var), Binding { isLocal: false, local: 0 - 1, ty: fnType0, fname: clone(name) }); };
+    };
+    Swapped { ls: inner, b: outer } = swapBuilder(ls, newBuilder(clone(name), false, true, sig.rty));
+    ls = inner;
+    ls = LowSt { bSizes: clone(sig.sizes), bTypeParams: clone(sig.types), ..ls };
+    ls = lowerParams(ls, namesOf(src, parts.params), &sig);
+    ls = visibleEnv(ls);
+    env = ls.id;
+    ls = lowerStatements(ls, src, listItems(src, parts.stmts));
+    if ls.bHasOpen { ls = terminate(ls, unreachableTerm()); };
+    params = namesOf(src, parts.params);
+    mutParams = [];
+    fromLocals = [];
+    i = 0;
+    while i < size(params) && i < size(sig.ptys) [{ affirm i >= 0; }] shrinks size(params) - i {
+        if isMutRefTy(&ls, get(sig.ptys, i)) { mutParams = push(mutParams, clone(get(params, i))); };
+        if hasText(&sig.froms, &get(params, i)) { fromLocals = push(fromLocals, intAt(&ls.bParams, i)); };
+        i = i + 1;
+    };
+    ls = buildFunction(ls, src, parts.ins, parts.outs, parts.term, env, clone(sig.writes), mutParams, clone(sig.froms), fromLocals);
+    Swapped { ls: back, b: done } = swapBuilder(ls, outer);
+    return back;
+};
+
+// (a borrowed parameter is a local of its type, which the function only reads)
+fn lowerParams(ls: LowSt, params: List<String>, sig: &Sig) -> LowSt ~ {
+    locals = [];
+    borrowed = [];
+    mutBorrowed = [];
+    names = [];
+    binds = [];
+    i = 0;
+    while i < size(params) && i < size(sig.ptys) [{ affirm i >= 0; }] shrinks size(params) - i {
+        p = clone(get(params, i));
+        t = get(sig.ptys, i);
+        u = unrefTy(&ls, t);
+        ls = newLocal(ls, true, clone(p), u);
+        l = ls.root;
+        locals = push(locals, l);
+        if isRefTy(&ls, t) { borrowed = push(borrowed, l); };
+        if isMutRefTy(&ls, t) { mutBorrowed = push(mutBorrowed, l); };
+        names = push(names, p);
+        binds = push(binds, localBinding(l, u));
+        i = i + 1;
+    };
+    return LowSt { bBorrowed: borrowed, bMutBorrowed: mutBorrowed, bParams: locals, bScopeNames: names, bScopeBinds: binds, bScopeMarks: push([], 0), ..ls };
+};
+
+// The function being built, finished under its name (main under ""): its blocks numbered in the order a walk from the
+// entry reaches them, the blocks nothing jumps to dropped
+fn buildFunction(ls: LowSt, src: &List<AstNode>, ins: Int, outs: Int, term: Int, env: Int, writes: List<String>, mutParams: List<String>, specFrom: List<String>, fnFrom: List<Int>) -> LowSt ~ {
+    order = blockOrder(&ls.bBlocks);
+    mapping = [];
+    i = 0;
+    limit = ls.bNextBlock;
+    if size(ls.bBlocks) > limit { limit = size(ls.bBlocks); };
+    while i < limit [{ affirm i >= 0; }] shrinks limit - i { mapping = push(mapping, 0 - 1); i = i + 1; };
+    i = 0;
+    for prev in &order {
+        if prev >= 0 && prev < size(mapping) { mapping = set(mapping, prev, i); };
+        i = i + 1;
+    };
+    blocks = [];
+    for prev in &order {
+        if prev >= 0 && prev < size(ls.bBlocks) {
+            blk = clone(get(ls.bBlocks, prev));
+            blocks = push(blocks, LBlock { present: true, stmts: blk.stmts, term: renamedTerm(&blk.term, &mapping) });
+        };
+    };
+    loops = [];
+    for l in &ls.bLoops {
+        h = intAt(&mapping, l.header);
+        if h >= 0 { loops = push(loops, LoopRec { header: h, body: renamedBlock(&mapping, l.body), inv: l.inv, term: l.term, env: l.env }); };
+    };
+    loops = sortLoops(loops);
+    if ins >= 0 { ls = validationsPayload(ls, src, ins); } else { ls = emptyBlockPayload(ls); };
+    requires = ls.id;
+    if outs >= 0 { ls = validationsPayload(ls, src, outs); } else { ls = emptyBlockPayload(ls); };
+    ensures = ls.id;
+    termPay = 0 - 1;
+    if term >= 0 { ls = terminationPayload(ls, src, term); termPay = ls.id; };
+    key = clone(ls.bName);
+    if ls.bIsMain { key = ""; };
+    f = LFn {
+        name: clone(ls.bName), params: clone(ls.bParams), hasReturns: ls.bHasReturns, returns: ls.bReturns, locals: clone(ls.bLocals),
+        sizes: clone(ls.bSizes), typeParams: clone(ls.bTypeParams), borrowed: clone(ls.bBorrowed), mutBorrowed: clone(ls.bMutBorrowed),
+        from: fnFrom, blocks: blocks, requires: requires, ensures: ensures, term: termPay, loops: loops, env: env,
+        writes: writes, mutParams: mutParams, specFrom: specFrom
+    };
+    keys = ls.fnKeys.insert(clone(key));
+    functions = ls.functions.insert(key, f);
+    return LowSt { functions: functions, fnKeys: keys, ..ls };
+};
+
+fn renamedBlock(mapping: &List<Int>, b: Int) -> Int ~ {
+    m = intAt(mapping, b);
+    if m >= 0 { return m; };
+    return b;
+};
+
+fn renamedTerm(t: &Term, mapping: &List<Int>) -> Term ~ {
+    if t.k = 0 { return Term { k: 0, text: "", x: renamedBlock(mapping, t.x), y: 0 - 1 }; };
+    if t.k = 1 { return Term { k: 1, text: clone(t.text), x: renamedBlock(mapping, t.x), y: renamedBlock(mapping, t.y) }; };
+    if t.k = 2 { return Term { k: 2, text: clone(t.text), x: renamedBlock(mapping, t.x), y: 0 - 1 }; };
+    return clone(t);
+};
+
+fn blockPresent(blocks: &List<LBlock>, b: Int) -> Bool ~ {
+    if b < 0 || b >= size(blocks) { return false; };
+    return get(blocks, b).present;
+};
+
+// The blocks in the order a walk from the entry reaches them, each one before its successors in order
+fn blockOrder(blocks: &List<LBlock>) -> List<Int> ~ {
+    seen = [];
+    for b in blocks { seen = push(seen, false); };
+    order = [];
+    stack = push([], 0);
+    while size(stack) > 0 ~ {
+        b = get(stack, size(stack) - 1);
+        stack = pop(stack);
+        if b >= 0 && b < size(blocks) && b < size(seen) && get(blocks, b).present && get(seen, b) = false {
+            seen = set(seen, b, true);
+            order = push(order, b);
+            t = get(blocks, b).term;
+            if t.k = 1 { stack = push(push(stack, t.y), t.x); };
+            if t.k = 0 || t.k = 2 { stack = push(stack, t.x); };
+        };
+    };
+    return order;
+};
+
+fn noLoops() -> List<LoopRec> ~ { return []; };
+
+fn sortLoops(loops: List<LoopRec>) -> List<LoopRec> ~ {
+    out = noLoops();
+    for l in loops {
+        placed = noLoops();
+        finished = false;
+        for m in &out {
+            if !finished && l.header < m.header { placed = push(placed, clone(l)); finished = true; };
+            placed = push(placed, clone(m));
+        };
+        if !finished { placed = push(placed, clone(l)); };
+        out = placed;
+    };
+    return out;
+};
+
+// The variables that statements assign (or bind with let), other than the names of the functions they define
+fn assignedNames(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
+    for s in stmts {
+        stmt = stmtAt(src, s);
+        f = definedFunction(src, clone(stmt));
+        if f >= 0 { ls = assignedNames(ls, src, bodyOf(src, f)); } else {
+            if stmt is AstStatement::Assign {
+                a = ls.assigned.insert(nameText(src, (stmt as AstStatement::Assign).n));
+                ls = LowSt { assigned: a, ..ls };
+            };
+            if stmt is AstStatement::Let {
+                a = ls.assigned.insert(nameText(src, (stmt as AstStatement::Let).n));
+                ls = LowSt { assigned: a, ..ls };
+            };
+            if stmt is AstStatement::Block { ls = assignedNames(ls, src, listItems(src, (stmt as AstStatement::Block).xs)); };
+            if stmt is AstStatement::If {
+                x = stmt as AstStatement::If;
+                ls = assignedNames(ls, src, listItems(src, x.a));
+                ls = assignedNames(ls, src, listItems(src, x.b));
+            };
+            if stmt is AstStatement::While { ls = assignedNames(ls, src, listItems(src, (stmt as AstStatement::While).xs)); };
+        };
+    };
+    return ls;
+};
+
+// Every function defined at the top gets its name before any body is lowered, in the order of the definitions
+fn registerTopLevel(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
+    for s in stmts {
+        stmt = stmtAt(src, s);
+        if stmt is AstStatement::ExternDef {
+            externs = ls.externs.insert(nameText(src, (stmt as AstStatement::ExternDef).n));
+            ls = LowSt { externs: externs, ..ls };
+        };
+    };
+    for s in stmts { ls = registerOne(ls, src, s); };
+    return ls;
+};
+
+fn registerOne(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
+    if !(nodeIn(src, s) is AstNode::Statement) { return lwMalformed(ls, "a statement"); };
+    stmt = stmtAt(src, s);
+    if stmt is AstStatement::BoundedDef { return registerOne(ls, src, (stmt as AstStatement::BoundedDef).s); };
+    if stmt is AstStatement::Instance { return registerInstance(ls, src, stmt); };
+    f = definedFunction(src, clone(stmt));
+    if f < 0 || !(stmt is AstStatement::Assign) { return ls; };
+    var = nameText(src, (stmt as AstStatement::Assign).n);
+    parts = fnParts(src, f);
+    sizes = namesOf(src, signatureOf(src, parts.sig).ss);
+    assigned = HashSet::contains(&ls.assigned, &var) && size(sizes) = 0;
+    base = clone(var);
+    if HashSet::contains(&ls.externs, &var) { base = lwCat("extern ", &var); };
+    ls = uniqueName(ls, base);
+    name = clone(ls.name);
+    names = push(HashMap::lookup(&ls.prereg, &var, []), clone(name));
+    prereg = ls.prereg.insert(clone(var), names);
+    ls = LowSt { prereg: prereg, ..ls };
+    if !assigned { ls = setGlobal(ls, var, name); };
+    return ls;
+};
+
+// A name the program uses for a copy of a function with bounds, or for a function a bound gives, is a stub of its
+// signature while the program is lowered
+fn registerInstance(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
+    if !(stmt is AstStatement::Instance) { return ls; };
+    inst = stmt as AstStatement::Instance;
+    name = nameText(src, inst.n);
+    if HashSet::contains(&ls.names, &name) { return ls; };
+    ls = stubFunction(ls, src, clone(name), inst.ps, inst.sig, 0 - 1, 0 - 1, 0 - 1);
+    names = ls.names.insert(clone(name));
+    stubs = ls.stubs.insert(clone(name));
+    ls = LowSt { names: names, stubs: stubs, ..ls };
+    ls = setGlobal(ls, clone(name), clone(name));
+    generic = nameText(src, inst.f);
+    if size(generic.bytes) = 0 { return ls; };
+    ls = argsTokens(ls, src, inst.args);
+    rest = lwSp(quote(&generic), &ls.name);
+    instances = ls.instances.insert(name, rest);
+    return LowSt { instances: instances, ..ls };
+};
+
+// The tokens of an Args list after its count (ls.name)
+fn argsTokens(ls: LowSt, src: &List<AstNode>, args: Int) -> LowSt ~ {
+    items = listItems(src, args);
+    text = intText(size(items));
+    for a in &items {
+        node = nodeIn(src, a);
+        if node is AstNode::Arg {
+            arg = (node as AstNode::Arg).value;
+            if arg is AstArg::ArgSize {
+                sz = codecSizeAt(src, (arg as AstArg::ArgSize).s);
+                text = lwSp(lwSp(text, "size"), lwSizeTokens(&sz));
+            } else {
+                tyc = codecTypeAt(src, (arg as AstArg::ArgType).t);
+                ls = fromCodecTy(ls, &tyc);
+                text = lwSp(lwSp(text, "type"), tyText(&ls, ls.ty));
+            };
+        };
+    };
+    return LowSt { name: text, ..ls };
+};
+
+// A function with bounds is lowered as any function with type parameters, and recorded for the copy step
+fn lowerBounded(ls: LowSt, src: &List<AstNode>, bounds: Int, inner: Int, atProgram: Bool) -> LowSt ~ {
+    stmt = stmtAt(src, inner);
+    f = definedFunction(src, clone(stmt));
+    if f < 0 || !(stmt is AstStatement::Assign) { return lfail(ls, "A bound is on something other than a function"); };
+    var = nameText(src, (stmt as AstStatement::Assign).n);
+    pre = HashMap::lookup(&ls.prereg, &var, []);
+    before = clone(ls.fnKeys);
+    if atProgram { ls = lowerProgramStatement(ls, src, inner); } else { ls = lowerStatement(ls, src, inner); };
+    if !ls.ok { return ls; };
+    name = clone(var);
+    if size(pre) > 0 { name = clone(get(pre, 0)); };
+    prefix = lwCat(clone(name), "::");
+    lifted = [];
+    for k in lwSort(ls.fnKeys.elements()) { if !HashSet::contains(&before, &k) && k.startsWith(&prefix) { lifted = push(lifted, clone(k)); }; };
+    sizes = namesOf(src, signatureOf(src, fnParts(src, f).sig).ss);
+    boundTypes = [];
+    copyParams = [];
+    for b in listItems(src, bounds) {
+        node = nodeIn(src, b);
+        if node is AstNode::Bound {
+            bv = (node as AstNode::Bound).value;
+            if nameText(src, bv.n) = "Copy" { copyParams = push(copyParams, nameText(src, bv.p)); };
+            for t in listItems(src, bv.ts) {
+                tyc = codecTypeAt(src, t);
+                ls = fromCodecTy(ls, &tyc);
+                boundTypes = push(boundTypes, ls.ty);
+            };
+        };
+    };
+    named = [];
+    for sz in &sizes {
+        mentioned = false;
+        for t in &boundTypes { if lwMentionsSize(&ls, sz, t) { mentioned = true; }; };
+        if mentioned { named = push(named, clone(sz)); };
+    };
+    bounded = ls.bounded.insert(name, BoundedRec { sizes: named, copyParams: copyParams, lifted: lifted });
+    return LowSt { bounded: bounded, ..ls };
+};
+
+fn lwMentionsSize(ls: &LowSt, n: &String, t: Int) -> Bool ~ {
+    if t < 0 || t >= size(ls.tys) { return false; };
+    k = lwKind(ls, t);
+    if k = 20 || k = 6 {
+        sz = get(ls.tys, t).size;
+        if sz is Size::SParam && (sz as Size::SParam).name = clone(n) { return true; };
+        if k = 20 { return false; };
+        return lwMentionsSize(ls, n, argOf(ls, t, 0));
+    };
+    if k = 4 || k = 14 {
+        for a in &get(ls.tys, t).args { if lwMentionsSize(ls, n, a) { return true; }; };
+        return false;
+    };
+    if k >= 7 && k <= 11 { return lwMentionsSize(ls, n, argOf(ls, t, 0)); };
+    return false;
+};
+
+fn lowerProgramStatement(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
+    if !(nodeIn(src, s) is AstNode::Statement) { return lwMalformed(ls, "a statement"); };
+    if ls.bHasOpen { return lowerStatement(ls, src, s); };
+    stmt = stmtAt(src, s);
+    if stmt is AstStatement::BoundedDef { return lowerBounded(ls, src, (stmt as AstStatement::BoundedDef).bs, (stmt as AstStatement::BoundedDef).s, true); };
+    f = definedFunction(src, clone(stmt));
+    if f < 0 || !(stmt is AstStatement::Assign) { return skipStatement(ls, src, s); };
+    var = nameText(src, (stmt as AstStatement::Assign).n);
+    names = HashMap::lookup(&ls.prereg, &var, []);
+    ls = visibleEnv(ls);
+    env = ls.id;
+    ls = lowerStatement(ls, src, s);
+    if size(names) = 0 || !ls.ok { return ls; };
+    g = ghostStmt(3, env, 0 - 1, lwSp(lwSp(quote(&get(names, 0)), quote(&var)), "true"));
+    if size(ls.bBlocks) = 0 || !get(ls.bBlocks, 0).present { return ls; };
+    gid = size(ls.stmts);
+    all = push(ls.stmts, g);
+    blk = clone(get(ls.bBlocks, 0));
+    blocks = set(ls.bBlocks, 0, LBlock { present: true, stmts: push(blk.stmts, gid), term: blk.term });
+    return LowSt { stmts: all, bBlocks: blocks, ..ls };
+};
+
+fn lowerProgram(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
+    ls = assignedNames(ls, src, stmts);
+    ls = registerTopLevel(ls, src, stmts);
+    for s in stmts { if ls.ok { ls = lowerProgramStatement(ls, src, s); }; };
+    if !ls.ok { return ls; };
+    if ls.bHasOpen { ls = terminate(ls, returnTerm()); };
+    ls = buildFunction(ls, src, 0 - 1, 0 - 1, 0 - 1, 0 - 1, [], [], [], []);
+    if ls.nextElab < size(ls.elab) { return lfail(ls, "Lowering: the elaborated program has expression types the lowering never reached"); };
+    ls = resolveFunction(ls, "");
+    for name in functionNames(&ls) { if ls.ok { ls = resolveFunction(ls, clone(name)); }; };
+    return ls;
+};
+
+// The names of the program's functions in order, main ("") left out
+fn functionNames(ls: &LowSt) -> List<String> ~ {
+    names = [];
+    for k in ls.fnKeys.elements() { if size(k.bytes) > 0 { names = push(names, clone(k)); }; };
+    return lwSort(names);
+};
+
+// The named types inside a type, by their rendered names
+fn namedIn(ls: &LowSt, t: Int, out: HashMap<String, Int>) -> HashMap<String, Int> ~ {
+    if t < 0 || t >= size(ls.tys) { return out; };
+    k = lwKind(ls, t);
+    if k = 4 {
+        out = out.insert(typeNameOf(ls, t), t);
+        for a in &get(ls.tys, t).args { if lwKind(ls, a) != 20 { out = namedIn(ls, a, out); }; };
+        return out;
+    };
+    if k = 6 || k = 7 || k = 8 || k = 9 || k = 10 { return namedIn(ls, argOf(ls, t, 0), out); };
+    if k = 14 {
+        n = size(get(ls.tys, t).args);
+        out = namedIn(ls, argOf(ls, t, n - 1), out);
+        i = 0;
+        while i + 1 < n [{ affirm i >= 0; }] shrinks n - i { out = namedIn(ls, argOf(ls, t, i), out); i = i + 1; };
+        return out;
+    };
+    return out;
+};
+
+fn lwArrayElement(ls: &LowSt, t: Int) -> Bool ~ {
+    k = lwKind(ls, t);
+    if k = 14 || k = 13 || k = 10 || k = 11 { return false; };
+    if k = 6 { return lwArrayElement(ls, argOf(ls, t, 0)); };
+    return true;
+};
+
+// The first array in a type (pre-order) whose element has no size, or -1
+fn badArray(ls: &LowSt, t: Int) -> Int ~ {
+    if t < 0 || t >= size(ls.tys) { return 0 - 1; };
+    k = lwKind(ls, t);
+    if k = 6 && !lwArrayElement(ls, argOf(ls, t, 0)) { return argOf(ls, t, 0); };
+    if k = 4 || k = 6 {
+        for a in &get(ls.tys, t).args { if lwKind(ls, a) != 20 { b = badArray(ls, a); if b >= 0 { return b; }; }; };
+        return 0 - 1;
+    };
+    if k = 14 {
+        n = size(get(ls.tys, t).args);
+        b = badArray(ls, argOf(ls, t, n - 1));
+        if b >= 0 { return b; };
+        i = 0;
+        while i + 1 < n [{ affirm i >= 0; }] shrinks n - i {
+            c = badArray(ls, argOf(ls, t, i));
+            if c >= 0 { return c; };
+            i = i + 1;
+        };
+    };
+    return 0 - 1;
+};
+
+// One type variable the checker never learned is an Int; a struct named by types not known when it was made has the
+// name of what they came to; an array whose element has no size is refused
+fn resolveFunction(ls: LowSt, key: String) -> LowSt ~ {
+    f = HashMap::lookup(&ls.functions, &key, emptyFn());
+    oldNamed = HashMap::new();
+    for d in &f.locals { if d.present { oldNamed = namedIn(&ls, d.ty, oldNamed); }; };
+    if f.hasReturns { oldNamed = namedIn(&ls, f.returns, oldNamed); };
+    locals = [];
+    for d in &f.locals {
+        if d.present {
+            ls = defaultTy(ls, d.ty);
+            base = clone(d);
+            t = ls.ty;
+            locals = push(locals, LDecl { ty: t, ..base });
+        } else { locals = push(locals, clone(d)); };
+    };
+    returns = f.returns;
+    if f.hasReturns { ls = defaultTy(ls, f.returns); returns = ls.ty; };
+    for blk in &f.blocks {
+        for id in &blk.stmts {
+            if id >= 0 && id < size(ls.stmts) && (get(ls.stmts, id).k = 1 || get(ls.stmts, id).k = 2) {
+                s = clone(get(ls.stmts, id));
+                ls = resolveStmt(ls, &s, &locals, &oldNamed);
+                text = clone(ls.name);
+                all = ls.stmts;
+                if id < size(all) { all = set(all, id, Stmt { k: 0, a: s.a, c: 0 - 1, pay: 0 - 1, name: "", field: "", text: text }); };
+                ls = LowSt { stmts: all, ..ls };
+            };
+        };
+    };
+    for d in &locals {
+        if d.present {
+            bad = badArray(&ls, d.ty);
+            if bad >= 0 { return lfail(ls, lwCat("Type error: an array holds values that have a size, not ", renderTy(&ls, bad))); };
+        };
+    };
+    resolved = LFn { locals: locals, returns: returns, ..f };
+    functions = ls.functions.insert(key, resolved);
+    return LowSt { functions: functions, ..ls };
+};
+
+fn localTy(locals: &List<LDecl>, l: Int) -> Int ~ {
+    if l < 0 || l >= size(locals) || !get(locals, l).present { return 0 - 1; };
+    return get(locals, l).ty;
+};
+
+// The resolved text of a makedata or readfield statement (ls.name)
+fn resolveStmt(ls: LowSt, s: &Stmt, locals: &List<LDecl>, oldNamed: &HashMap<String, Int>) -> LowSt ~ {
+    l = s.a;
+    if s.k = 2 { l = s.c; };
+    t = localTy(locals, l);
+    name = clone(s.name);
+    if t >= 0 && lwKind(&ls, t) = 4 && lwBaseName(&s.name) = tyOf(&ls, t).name {
+        name = typeNameOf(&ls, t);
+    } else {
+        if HashMap::contains(oldNamed, &s.name) {
+            ls = defaultTy(ls, HashMap::lookup(oldNamed, &s.name, 0 - 1));
+            name = typeNameOf(&ls, ls.ty);
+        };
+    };
+    if s.k = 1 { return withText(ls, lwSp(lwSp(lwSp(lwCat("assign ", intText(s.a)), "makedata"), quote(&name)), &s.text)); };
+    return withText(ls, lwSp(lwSp(lwSp(lwSp(lwCat("assign ", intText(s.a)), "readfield"), &s.text), quote(&name)), quote(&s.field)));
+};
+
+fn withText(ls: LowSt, text: String) -> LowSt ~ { return LowSt { name: text, ..ls }; };
+
+fn emptyFn() -> LFn ~ {
+    return LFn { name: "", params: [], hasReturns: false, returns: 0 - 1, locals: [], sizes: [], typeParams: [], borrowed: [], mutBorrowed: [], from: [], blocks: [],
+        requires: 0 - 1, ensures: 0 - 1, term: 0 - 1, loops: [], env: 0 - 1, writes: [], mutParams: [], specFrom: [] };
+};

@@ -1,0 +1,360 @@
+import data::arena::arena { reorderArena };
+import data::ast::ast { AstElaborated, AstNode, AstProgram, AstStatement, AstValidation };
+import elaborate::records { codecTypeAt, listItems, nameText, nodeIn };
+import elaborate::state { intText };
+import elaborate::lowerstate { BoundedRec, GenericRec, EnvRec, LBlock, LDecl, LFn, LoopRec, LowSt, Stmt, TDecl, Term, fromCodecTy, intAt, lwCat, lwSort, newLowSt, quote, setTexts, lwSp, tyText };
+import elaborate::lowerbuild { bodyOf, definedFunction, isFunct, statementsList, stmtAt, valOf };
+import elaborate::lower { functionNames, lowerProgram };
+import elaborate::lowerplace { noDecl };
+import elaborate::loweriface { Src, joinArena, seedBuiltins, seedModule };
+
+// A module's lowered unit as `tersus-mir 3` (MIR.md, "Version 3"; MirData.writeLowered): its lines up to the payload
+// block, and the payload block's records; or why the module does not lower
+struct MirOut { ok: Bool, msg: String, lines: List<String>, payload: AstProgram };
+
+fn noMir(msg: String) -> MirOut ~ { return MirOut { ok: false, msg: msg, lines: [], payload: AstProgram { stage: "mir", nodes: [], root: 0 } }; };
+
+// The lowering of an accepted module (its elaborated program, out) against the interfaces it is lowered with, in their
+// order
+fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram) -> MirOut ~ {
+    src = joinArena(out, ifaces, table);
+    root = nodeIn(&src.nodes, out.root);
+    if !(root is AstNode::Elaborated) { return noMir("Lowering: the elaborated program is not one"); };
+    e = (root as AstNode::Elaborated).value;
+    stmts = listItems(&src.nodes, e.statements);
+    ls = newLowSt(size(src.nodes));
+    elab = [];
+    for t in listItems(&src.nodes, e.types) {
+        tyc = codecTypeAt(&src.nodes, t);
+        ls = fromCodecTy(ls, &tyc);
+        elab = push(elab, ls.ty);
+    };
+    ls = LowSt { elab: elab, nextElab: 0, ..ls };
+    ls = seedBuiltins(ls, &src, table);
+    ls = seedModule(ls, &src, &stmts, ifaces);
+    ls = lowerProgram(ls, &src.nodes, &stmts);
+    if !ls.ok { return noMir(clone(ls.msg)); };
+    declared = topNames(&src.nodes, &stmts, HashSet::new());
+    declared = lwDefinedNames(&src.nodes, &stmts, declared);
+    nested = HashSet::new();
+    for s in &stmts {
+        stmt = stmtAt(&src.nodes, s);
+        if !(stmt is AstStatement::StructDef) && !(stmt is AstStatement::EnumDef) && !(stmt is AstStatement::TraitDef) { nested = lwDeclaredNames(&src.nodes, push([], s), nested); };
+    };
+    assumes = assumesIn(&src.nodes, &stmts, []);
+    return writeLowered(ls, &src, setTexts(&declared), setTexts(&nested), assumes);
+};
+
+// The structs, enums and traits a module declares, wherever it declares them
+fn lwDeclaredNames(src: &List<AstNode>, stmts: &List<Int>, out: HashSet<String>) -> HashSet<String> ~ {
+    for s in stmts {
+        stmt = stmtAt(src, s);
+        out = lwTypeName(src, &stmt, out);
+        f = definedFunction(src, clone(stmt));
+        if f >= 0 { out = lwDeclaredNames(src, bodyOf(src, f), out); };
+        for inner in innerStatements(src, &stmt) { out = lwDeclaredNames(src, push([], inner), out); };
+    };
+    return out;
+};
+
+fn topNames(src: &List<AstNode>, stmts: &List<Int>, out: HashSet<String>) -> HashSet<String> ~ {
+    for s in stmts { out = lwTypeName(src, stmtAt(src, s), out); };
+    return out;
+};
+
+fn lwTypeName(src: &List<AstNode>, stmt: &AstStatement, out: HashSet<String>) -> HashSet<String> ~ {
+    if stmt is AstStatement::StructDef { return out.insert(nameText(src, (stmt as AstStatement::StructDef).n)); };
+    if stmt is AstStatement::EnumDef { return out.insert(nameText(src, (stmt as AstStatement::EnumDef).n)); };
+    if stmt is AstStatement::TraitDef { return out.insert(nameText(src, (stmt as AstStatement::TraitDef).n)); };
+    return out;
+};
+
+// The statements a statement holds that the walks of declarations look into: blocks, branches, loops, impls, bounds
+fn innerStatements(src: &List<AstNode>, stmt: &AstStatement) -> List<Int> ~ {
+    if stmt is AstStatement::Block { return listItems(src, (stmt as AstStatement::Block).xs); };
+    if stmt is AstStatement::If {
+        out = listItems(src, (stmt as AstStatement::If).a);
+        for s in listItems(src, (stmt as AstStatement::If).b) { out = push(out, s); };
+        return out;
+    };
+    if stmt is AstStatement::While { return listItems(src, (stmt as AstStatement::While).xs); };
+    if stmt is AstStatement::ImplDef { return listItems(src, (stmt as AstStatement::ImplDef).xs); };
+    if stmt is AstStatement::BoundedDef { return push([], (stmt as AstStatement::BoundedDef).s); };
+    return [];
+};
+
+fn lwDefinedNames(src: &List<AstNode>, stmts: &List<Int>, out: HashSet<String>) -> HashSet<String> ~ {
+    for s in stmts {
+        stmt = stmtAt(src, s);
+        if stmt is AstStatement::Assign {
+            v = valOf(src, (stmt as AstStatement::Assign).e);
+            if v >= 0 && isFunct(src, v) { out = out.insert(nameText(src, (stmt as AstStatement::Assign).n)); };
+        };
+        if stmt is AstStatement::ImplDef { out = lwDefinedNames(src, listItems(src, (stmt as AstStatement::ImplDef).xs), out); };
+        if stmt is AstStatement::BoundedDef { out = lwDefinedNames(src, push([], (stmt as AstStatement::BoundedDef).s), out); };
+    };
+    return out;
+};
+
+// Every assume of the statements, in order, dead code included (as their ValidationStatement records)
+fn assumesIn(src: &List<AstNode>, stmts: &List<Int>, out: List<Int>) -> List<Int> ~ {
+    for s in stmts {
+        stmt = stmtAt(src, s);
+        if stmt is AstStatement::ValidationStatement {
+            v = nodeIn(src, (stmt as AstStatement::ValidationStatement).v);
+            if v is AstNode::Validation && (v as AstNode::Validation).value is AstValidation::Assume { out = push(out, s); };
+        };
+        f = definedFunction(src, clone(stmt));
+        if f >= 0 { out = assumesIn(src, bodyOf(src, f), out); };
+        if !(stmt is AstStatement::TraitDef) { for inner in innerStatements(src, &stmt) { out = assumesIn(src, push([], inner), out); }; };
+    };
+    return out;
+};
+
+struct Out { lines: List<String>, payloads: List<Int>, bad: Bool };
+
+fn payloadRef(o: Out, pay: Int) -> Out ~ {
+    payloads = push(o.payloads, pay);
+    return Out { payloads: payloads, ..o };
+};
+
+fn outLine(o: Out, text: String) -> Out ~ {
+    lines = push(o.lines, text);
+    return Out { lines: lines, ..o };
+};
+
+fn nextPayload(o: &Out) -> String ~ { return intText(size(o.payloads)); };
+
+fn namesLine(word: String, names: &List<String>) -> String ~ {
+    out = lwSp(word, intText(size(names)));
+    for n in names { out = lwSp(out, quote(n)); };
+    return out;
+};
+
+fn localsLine(word: String, ls: &List<Int>) -> String ~ {
+    out = lwSp(word, intText(size(ls)));
+    for l in ls { out = lwSp(out, intText(l)); };
+    return out;
+};
+
+fn envRecAt(ls: &LowSt, env: Int) -> EnvRec ~ {
+    if env < 0 || env >= size(ls.envs) { return EnvRec { content: 0 - 1, ownPart: "0" }; };
+    return clone(get(ls.envs, env));
+};
+
+// The shared environments met so far, by content, and their contents in the order met
+struct SharedEnvs { index: HashMap<Int, Int>, order: List<Int> };
+
+fn noteShared(shared: SharedEnvs, ls: &LowSt, env: Int) -> SharedEnvs ~ {
+    c = envRecAt(ls, env).content;
+    if c < 0 || HashMap::contains(&shared.index, c) { return shared; };
+    n = size(shared.order);
+    order = push(shared.order, c);
+    return SharedEnvs { index: shared.index.insert(c, n), order: order };
+};
+
+fn envText(ls: &LowSt, shared: &SharedEnvs, env: Int) -> String ~ {
+    r = envRecAt(ls, env);
+    if r.content < 0 { return lwSp("none", &r.ownPart); };
+    return lwSp(intText(HashMap::lookup(&shared.index, r.content, 0 - 1)), &r.ownPart);
+};
+
+// The shared environments, numbered in the order the functions meet them
+fn sharedOf(ls: &LowSt, names: &List<String>) -> SharedEnvs ~ {
+    shared = SharedEnvs { index: HashMap::new(), order: [] };
+    for name in names {
+        if HashMap::contains(&ls.functions, name) { shared = noteFunction(shared, ls, HashMap::lookupRef(&ls.functions, name)); };
+    };
+    return shared;
+};
+
+fn noteFunction(shared: SharedEnvs, ls: &LowSt, f: &LFn) -> SharedEnvs ~ {
+    shared = noteShared(shared, ls, f.env);
+    for l in &f.loops { shared = noteShared(shared, ls, l.env); };
+    for b in &f.blocks {
+        for id in &b.stmts {
+            if id >= 0 && id < size(ls.stmts) && get(ls.stmts, id).k = 3 { shared = noteShared(shared, ls, get(ls.stmts, id).c); };
+        };
+    };
+    return shared;
+};
+
+fn writeLowered(ls: LowSt, src: &Src, declared: List<String>, nested: List<String>, assumes: List<Int>) -> MirOut ~ {
+    names = functionNames(&ls);
+    all = push(clone(names), "");
+    shared = sharedOf(&ls, &all);
+    o = Out { lines: push([], "tersus-mir 3"), payloads: [], bad: false };
+    for n in lwSort(keysOf(&ls.types)) { o = outLine(o, typeLine(&ls, &n)); };
+    for n in lwSort(genericKeys(&ls)) { o = outLine(o, genericLine(&ls, &n)); };
+    for n in lwSort(invariantKeys(&ls)) {
+        o = outLine(o, lwSp(lwSp("invariant", quote(&n)), nextPayload(&o)));
+        o = payloadRef(o, HashMap::lookup(&ls.invariants, &n, 0 - 1));
+    };
+    for n in lwSort(boundedKeys(&ls)) {
+        b = lwBoundedOf(&ls, &n);
+        o = outLine(o, lwSp(lwSp(lwSp(lwSp("bounded", quote(&n)), countedNames(&b.sizes)), countedNames(&b.copyParams)), countedNames(&b.lifted)));
+    };
+    for n in lwSort(instanceKeys(&ls)) { o = outLine(o, lwSp(lwSp("instance", quote(&n)), HashMap::lookup(&ls.instances, &n, noText()))); };
+    for c in &shared.order { o = outLine(o, sharedLine(&ls, c)); };
+    for name in &names { if HashMap::contains(&ls.functions, name) { o = functionLines(o, &ls, &shared, "function", HashMap::lookupRef(&ls.functions, name)); }; };
+    mainKey = "";
+    if HashMap::contains(&ls.functions, &mainKey) { o = functionLines(o, &ls, &shared, "main", HashMap::lookupRef(&ls.functions, &mainKey)); };
+    o = outLine(o, namesLine("copies", setTexts(&ls.copies)));
+    o = outLine(o, namesLine("linear", setTexts(&ls.linears)));
+    o = outLine(o, namesLine("drops", setTexts(&ls.drops)));
+    o = outLine(o, namesLine("stubs", setTexts(&ls.stubs)));
+    o = outLine(o, namesLine("declared", &declared));
+    o = outLine(o, namesLine("nested", &nested));
+    text = lwSp("assumes", intText(size(assumes)));
+    for a in &assumes {
+        text = lwSp(text, nextPayload(&o));
+        o = payloadRef(o, a);
+    };
+    o = outLine(o, text);
+    if o.bad { return noMir("Lowering: a block holds a statement the function does not"); };
+    nodes = clone(src.nodes);
+    for node in &ls.pn { nodes = push(nodes, clone(node)); };
+    tail = LowSt { pn: [], pbase: size(nodes), ..ls };
+    tail = statementsList(tail, &o.payloads);
+    rootId = tail.id;
+    for node in &tail.pn { nodes = push(nodes, clone(node)); };
+    return MirOut { ok: true, msg: "", lines: o.lines, payload: reorderArena(&nodes, rootId, "mir") };
+};
+
+fn noBounded() -> BoundedRec ~ { return BoundedRec { sizes: [], copyParams: [], lifted: [] }; };
+
+fn lwBoundedOf(ls: &LowSt, n: &String) -> BoundedRec ~ { return HashMap::lookup(&ls.bounded, n, noBounded()); };
+
+fn noText() -> String ~ { return ""; };
+
+fn typeLine(ls: &LowSt, n: &String) -> String ~ {
+    d = HashMap::lookup(&ls.types, n, noDecl());
+    return d.line;
+};
+
+fn genericLine(ls: &LowSt, n: &String) -> String ~ {
+    g = HashMap::lookup(&ls.generics, n, GenericRec { line: "" });
+    return g.line;
+};
+
+fn sharedLine(ls: &LowSt, c: Int) -> String ~ {
+    if c < 0 || c >= size(ls.contents) { return "shared 0"; };
+    return lwSp("shared", &get(ls.contents, c));
+};
+
+fn keysOf(m: &HashMap<String, TDecl>) -> List<String> ~ {
+    out = [];
+    for e in m.entries() { out = push(out, clone(e.key)); };
+    return out;
+};
+
+fn genericKeys(ls: &LowSt) -> List<String> ~ {
+    out = [];
+    for e in ls.generics.entries() { out = push(out, clone(e.key)); };
+    return out;
+};
+
+fn invariantKeys(ls: &LowSt) -> List<String> ~ {
+    out = [];
+    for e in ls.invariants.entries() { out = push(out, clone(e.key)); };
+    return out;
+};
+
+fn boundedKeys(ls: &LowSt) -> List<String> ~ {
+    out = [];
+    for e in ls.bounded.entries() { out = push(out, clone(e.key)); };
+    return out;
+};
+
+fn instanceKeys(ls: &LowSt) -> List<String> ~ {
+    out = [];
+    for e in ls.instances.entries() { out = push(out, clone(e.key)); };
+    return out;
+};
+
+fn countedNames(names: &List<String>) -> String ~ {
+    out = intText(size(names));
+    for n in names { out = lwSp(out, quote(n)); };
+    return out;
+};
+
+fn headerText(kind: String, f: &LFn, ls: &LowSt) -> String ~ {
+    text = lwSp(lwSp(kind, quote(&f.name)), localsLine("params", &f.params));
+    if f.hasReturns { text = lwSp(lwCat(text, " returns some"), tyText(ls, f.returns)); } else { text = lwCat(text, " returns none"); };
+    text = lwSp(text, namesLine("sizeparams", &f.sizes));
+    text = lwSp(text, namesLine("typeparams", &f.typeParams));
+    text = lwSp(text, localsLine("borrowed", &f.borrowed));
+    if size(f.mutBorrowed) > 0 || size(f.from) > 0 { text = lwSp(lwSp(text, localsLine("mutborrowed", &f.mutBorrowed)), localsLine("from", &f.from)); };
+    return text;
+};
+
+fn functionLines(o: Out, ls: &LowSt, shared: &SharedEnvs, kind: String, f: &LFn) -> Out ~ {
+    o = outLine(o, headerText(kind, f, ls));
+    requires = nextPayload(&o);
+    o = payloadRef(o, f.requires);
+    ensures = nextPayload(&o);
+    o = payloadRef(o, f.ensures);
+    term = "none";
+    if f.term >= 0 { term = nextPayload(&o); o = payloadRef(o, f.term); };
+    spec = lwSp(lwSp(lwSp(lwSp(lwSp(lwSp("spec requires", &requires), "ensures"), &ensures), "termination"), &term), namesLine("writes", &f.writes));
+    o = outLine(o, lwSp(lwSp(spec, namesLine("mutparams", &f.mutParams)), namesLine("from", &f.specFrom)));
+    o = outLine(o, lwSp("env", envText(ls, shared, f.env)));
+    i = 0;
+    for d in &f.locals {
+        if d.present {
+            text = lwCat("local ", intText(i));
+            if d.hasName { text = lwSp(lwCat(text, " some"), quote(&d.name)); } else { text = lwCat(text, " none"); };
+            o = outLine(o, lwSp(text, tyText(ls, d.ty)));
+        };
+        i = i + 1;
+    };
+    for l in &f.loops { o = loopLine(o, ls, shared, l); };
+    b = 0;
+    for blk in &f.blocks {
+        o = outLine(o, lwCat("block ", intText(b)));
+        for id in &blk.stmts {
+            if id >= 0 && id < size(ls.stmts) { o = stmtLine(o, ls, shared, &get(ls.stmts, id)); } else { o = Out { bad: true, ..o }; };
+        };
+        o = outLine(o, termText(&blk.term));
+        b = b + 1;
+    };
+    return outLine(o, "end");
+};
+
+fn loopLine(o: Out, ls: &LowSt, shared: &SharedEnvs, l: &LoopRec) -> Out ~ {
+    inv = nextPayload(&o);
+    o = payloadRef(o, l.inv);
+    term = "none";
+    if l.term >= 0 { term = nextPayload(&o); o = payloadRef(o, l.term); };
+    text = lwSp(lwSp(lwSp(lwCat("loop ", intText(l.header)), "body"), intText(l.body)), "invariant");
+    text = lwSp(lwSp(lwSp(lwSp(text, &inv), "termination"), &term), "env");
+    return outLine(o, lwSp(text, envText(ls, shared, l.env)));
+};
+
+fn ghostWord(kind: Int) -> String ~ {
+    if kind = 0 { return "validation"; };
+    if kind = 1 { return "axiom"; };
+    if kind = 2 { return "proof"; };
+    if kind = 3 { return "function"; };
+    if kind = 4 { return "position"; };
+    return "dissolve";
+};
+
+fn stmtLine(o: Out, ls: &LowSt, shared: &SharedEnvs, s: &Stmt) -> Out ~ {
+    if s.k != 3 { return outLine(o, clone(s.text)); };
+    text = lwSp(lwSp("ghost", ghostWord(s.a)), envText(ls, shared, s.c));
+    if s.a <= 2 {
+        text = lwSp(text, nextPayload(&o));
+        o = payloadRef(o, s.pay);
+        return outLine(o, text);
+    };
+    return outLine(o, lwSp(text, &s.text));
+};
+
+fn termText(t: &Term) -> String ~ {
+    if t.k = 0 { return lwCat("goto ", intText(t.x)); };
+    if t.k = 1 { return lwSp(lwSp(lwSp("switch", &t.text), intText(t.x)), intText(t.y)); };
+    if t.k = 2 { return lwSp(lwSp("call", &t.text), intText(t.x)); };
+    if t.k = 3 { return "return"; };
+    return "unreachable";
+};

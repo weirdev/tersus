@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 -- The elaborator's request and response (AST_DATA.md, "Elaboration requests"): what a host gives an
 -- elaborator to elaborate one module, and what it gets back (ElaboratorTool runs the elaborator written in Tersus).
 module ElaborateRequest
@@ -5,7 +7,9 @@ module ElaborateRequest
     , Extraction (..)
     , Request (..)
     , Library (..)
-    , Response (..)
+    , Response (AcceptedWith, Refused, RefusedInterface, Unresolved, NotModelled, Accepted)
+    , MirAnswer (..)
+    , responseMir
     , writeRequest
     , readRequest
     , writeResponse
@@ -69,8 +73,8 @@ data Library = Library
     deriving (Show, Eq)
 
 data Response
-    = -- with the compiler libraries the elaborator selected for the module
-      Accepted Elaborated (Maybe ModuleInterface) [String]
+    = -- with the compiler libraries the elaborator selected for the module, and its MIR when the elaborator lowered it
+      AcceptedWith Elaborated (Maybe ModuleInterface) [String] (Maybe MirAnswer)
     | -- the module does not check
       Refused String
     | -- it checks, but its interface cannot be given (Interface.extractInterface)
@@ -80,6 +84,24 @@ data Response
     | -- the elaborator does not handle the program yet, which is not a verdict on it
       NotModelled String
     deriving (Show)
+
+-- An accepted response, whatever MIR it carries
+pattern Accepted :: Elaborated -> Maybe ModuleInterface -> [String] -> Response
+pattern Accepted e i ls <- AcceptedWith e i ls _
+  where
+    Accepted e i ls = AcceptedWith e i ls Nothing
+
+{-# COMPLETE Accepted, Refused, RefusedInterface, Unresolved, NotModelled #-}
+
+-- The `mir` section of an accepted response (AST_DATA.md): the lines of the module's lowered unit (`tersus-mir 3`,
+-- MIR.md), which MirData.readLoweredBytes reads, or the message of the lowering's refusal
+data MirAnswer = MirLowered [B.ByteString] | MirRefused String
+    deriving (Show)
+
+responseMir :: Response -> Maybe MirAnswer
+responseMir response = case response of
+    AcceptedWith _ _ _ mir -> mir
+    _ -> Nothing
 
 type Elaborator = Request -> Response
 
@@ -193,10 +215,10 @@ readRequest text = case lines text of
 
 writeResponse :: Response -> Result String String
 writeResponse response = case response of
-    Accepted elaborated iface libraries ->
+    AcceptedWith elaborated iface libraries mir ->
         writeElaboratedLines elaborated `bindResult` \ast ->
             maybe (Ok Nothing) (mapResult Just . writeInterfaceLines) iface `bindResult` \ifaceLines ->
-                Ok (unlines ([responseHeader, "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines ++ librariesLine libraries))
+                Ok (unlines ([responseHeader, "accepted"] ++ block ast ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines ++ mirLines mir ++ librariesLine libraries))
     Refused message -> Ok (unlines [responseHeader, "refused " ++ quote message])
     RefusedInterface message -> Ok (unlines [responseHeader, "interfaceRefused " ++ quote message])
     Unresolved message -> Ok (unlines [responseHeader, "unresolved " ++ quote message])
@@ -206,13 +228,13 @@ readResponse :: String -> Result Response String
 readResponse = readResponseLines . lines
 
 readResponseLines :: [String] -> Result Response String
-readResponseLines = readResponseWith id readElaboratedLines readInterfaceLines
+readResponseLines = readResponseWith id B.pack readElaboratedLines readInterfaceLines
 
 readResponseBytes :: [B.ByteString] -> Result Response String
-readResponseBytes = readResponseWith B.unpack readElaboratedBytes readInterfaceBytes
+readResponseBytes = readResponseWith B.unpack id readElaboratedBytes readInterfaceBytes
 
-readResponseWith :: (l -> String) -> ([l] -> Result Elaborated String) -> ([l] -> Result ModuleInterface String) -> [l] -> Result Response String
-readResponseWith text elaborated interface ls = case map text (take 3 ls) of
+readResponseWith :: (l -> String) -> (l -> B.ByteString) -> ([l] -> Result Elaborated String) -> ([l] -> Result ModuleInterface String) -> [l] -> Result Response String
+readResponseWith text bytes elaborated interface ls = case map text (take 3 ls) of
     ["tersus-elaborated 1", line] -> strictTokenize line `bindResult` \ts -> case ts of
         [Word "refused", Str message] -> Ok (Refused message)
         [Word "interfaceRefused", Str message] -> Ok (RefusedInterface message)
@@ -221,13 +243,29 @@ readResponseWith text elaborated interface ls = case map text (take 3 ls) of
         _ -> Error "ElaborateRequest: malformed response"
     "tersus-elaborated 1" : "accepted" : _ ->
         blocksWith text 1 (drop 2 ls) `bindResult` \(astTexts, rest') -> case (astTexts, map text (take 1 rest')) of
-            ([ast], ["interface none"]) -> librariesOf (map text (drop 1 rest')) `bindResult` \libraries -> elaborated ast `bindResult` \e -> Ok (Accepted e Nothing libraries)
+            ([ast], ["interface none"]) -> mirOf text bytes (drop 1 rest') `bindResult` \(mir, after) -> librariesOf (map text after) `bindResult` \libraries -> elaborated ast `bindResult` \e -> Ok (AcceptedWith e Nothing libraries mir)
             ([ast], ["interface"]) ->
                 blocksWith text 1 (drop 1 rest') `bindResult` \(ifaceTexts, rest'') -> case ifaceTexts of
-                    [ifaceText] -> librariesOf (map text rest'') `bindResult` \libraries -> elaborated ast `bindResult` \e -> interface ifaceText `bindResult` \i -> Ok (Accepted e (Just i) libraries)
+                    [ifaceText] -> mirOf text bytes rest'' `bindResult` \(mir, after) -> librariesOf (map text after) `bindResult` \libraries -> elaborated ast `bindResult` \e -> interface ifaceText `bindResult` \i -> Ok (AcceptedWith e (Just i) libraries mir)
                     _ -> Error "ElaborateRequest: malformed interface"
             _ -> Error "ElaborateRequest: malformed response"
     _ -> Error "ElaborateRequest: not an elaboration response"
+
+-- The `mir` section, which follows the interface of an accepted response when the elaborator lowered the module:
+-- `mir N` and the N lines of its unit, or `mir refused "MESSAGE"`
+mirLines :: Maybe MirAnswer -> [String]
+mirLines mir = case mir of
+    Nothing -> []
+    Just (MirRefused message) -> ["mir refused " ++ quote message]
+    Just (MirLowered ls) -> ("mir " ++ show (length ls)) : map B.unpack ls
+
+mirOf :: (l -> String) -> (l -> B.ByteString) -> [l] -> Result (Maybe MirAnswer, [l]) String
+mirOf text bytes ls = case ls of
+    line : rest | take 4 (text line) == "mir " -> strictTokenize (text line) `bindResult` \ts -> case ts of
+        [Word "mir", Word "refused", Str message] -> Ok (Just (MirRefused message), rest)
+        [Word "mir", Word count] | Ok n <- countOf count, length (take n rest) == n -> Ok (Just (MirLowered (map bytes (take n rest))), drop n rest)
+        _ -> Error "ElaborateRequest: malformed mir section"
+    _ -> Ok (Nothing, ls)
 
 -- `libraries N "NAME"...`, which ends an accepted response when the elaborator selected compiler libraries
 librariesLine :: [String] -> [String]
@@ -539,9 +577,9 @@ readLoadResponseBytes kind ls = case ls of
     answerOf :: [B.ByteString] -> Result (Response, [B.ByteString]) String
     answerOf (line : rest) = case text line of
         "accepted" -> blocksWith text 1 rest `bindResult` \(asts, after) -> case (asts, map text (take 1 after)) of
-            ([ast], ["interface none"]) -> withLibraries (drop 1 after) `bindResult` \(libs, after') -> readElaboratedBytes ast `bindResult` \e -> Ok (Accepted e Nothing libs, after')
+            ([ast], ["interface none"]) -> mirOf text id (drop 1 after) `bindResult` \(mir, afterMir) -> withLibraries afterMir `bindResult` \(libs, after') -> readElaboratedBytes ast `bindResult` \e -> Ok (AcceptedWith e Nothing libs mir, after')
             ([ast], ["interface"]) -> blocksWith text 1 (drop 1 after) `bindResult` \(ifaces, after') -> case ifaces of
-                [ifaceText] -> withLibraries after' `bindResult` \(libs, after'') -> readElaboratedBytes ast `bindResult` \e -> readInterfaceBytes ifaceText `bindResult` \i -> Ok (Accepted e (Just i) libs, after'')
+                [ifaceText] -> mirOf text id after' `bindResult` \(mir, afterMir) -> withLibraries afterMir `bindResult` \(libs, after'') -> readElaboratedBytes ast `bindResult` \e -> readInterfaceBytes ifaceText `bindResult` \i -> Ok (AcceptedWith e (Just i) libs mir, after'')
                 _ -> Error "ElaborateRequest: malformed interface"
             _ -> Error "ElaborateRequest: malformed answer"
         _ -> tokens line `bindResult` \ts -> case ts of

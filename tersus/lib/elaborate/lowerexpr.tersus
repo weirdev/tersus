@@ -1,0 +1,639 @@
+import data::ast::ast { AstExpression, AstNode, AstValue };
+import elaborate::records { listItems, nameText, nodeIn };
+import elaborate::state { intText };
+import elaborate::lowerstate { lwMalformed, Swapped, swapBuilder, Builder, LowSt, Op, Pend, RefTarget, Rv, Step, Term, argOf, boxInner, claim, fnType, forNameOf, hasText, intAt, isTupleBase, lfail, lwBaseName, lwCat, lwCat3, lwHasByte, lwInstanceText, lwKind, lwTextAt, newBuilder, noOp, noRv, quote, lwSp, tupleParts, tyOf, typeNameOf };
+import elaborate::lowerbuild { Bi, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, fnConst, gotoTerm, isPrim, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valueAt, varNameOf };
+import elaborate::lower { buildFunction };
+import elaborate::lowerplace { fieldCtor, lowerPlace };
+
+// The operand that holds the value of an expression (ls.op), and the type of the value (ls.ty)
+fn lowerOperand(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    ls = claim(ls);
+    if !ls.ok { return ls; };
+    t = ls.ty;
+    return lowerOperandWith(ls, src, e, t);
+};
+
+fn lowerOperandWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return lwMalformed(ls, "an expression"); };
+    x = exprAt(src, e);
+    if x is AstExpression::Val { return valueOperand(ls, src, (x as AstExpression::Val).v, ty); };
+    if x is AstExpression::Var { return varOperand(ls, src, nameText(src, (x as AstExpression::Var).n), ty); };
+    ls = lowerLastWith(ls, src, e, ty);
+    if !ls.ok { return ls; };
+    pend = clone(ls.pend);
+    if !pend.isCall && pend.rv.k = 4 { return LowSt { op: pend.rv.op, ty: ty, ..ls }; };
+    ls = tempLocal(ls, ty);
+    temp = ls.root;
+    ls = finishInto(ls, temp, pend);
+    return LowSt { op: copyOp(temp), ty: ty, ..ls };
+};
+
+fn varOperand(ls: LowSt, src: &List<AstNode>, name: String, ty: Int) -> LowSt ~ {
+    found = lookupBinding(&ls, &name);
+    if found.found {
+        if found.b.isLocal { return LowSt { op: copyOp(found.b.local), ty: ty, ..ls }; };
+        return LowSt { op: fnConst(&found.b.fname), ty: ty, ..ls };
+    };
+    if HashMap::contains(&ls.globals, &name) {
+        g = HashMap::lookup(&ls.globals, &name, "");
+        return LowSt { op: fnConst(&g), ty: ty, ..ls };
+    };
+    if HashMap::contains(&ls.std, &name) {
+        b = HashMap::lookup(&ls.std, &name, 0 - 1);
+        return builtinFunction(ls, src, b, ty);
+    };
+    return lfail(ls, lwCat("Undefined variable: ", &name));
+};
+
+fn valueOperand(ls: LowSt, src: &List<AstNode>, v: Int, ty: Int) -> LowSt ~ {
+    if !(nodeIn(src, v) is AstNode::Value) { return lwMalformed(ls, "a value"); };
+    b = lwBuiltinOfValue(src, v);
+    if b >= 0 { return builtinFunction(ls, src, b, ty); };
+    if valueAt(src, v) is AstValue::VFunct { return lfail(ls, "A function is defined by a statement, not written in an expression"); };
+    ls = constantOf(ls, src, v);
+    return LowSt { ty: ty, ..ls };
+};
+
+fn constantOf(ls: LowSt, src: &List<AstNode>, v: Int) -> LowSt ~ {
+    value = valueAt(src, v);
+    match value {
+        AstValue::VInt { n: n } => { return LowSt { op: constOp(lwCat("int ", nameText(src, n))), ..ls }; },
+        AstValue::VBool { b: b } => { if b { return LowSt { op: constOp("bool true"), ..ls }; }; return LowSt { op: constOp("bool false"), ..ls }; },
+        AstValue::VList { xs: xs } => { return listConstant(ls, src, xs); },
+        AstValue::VData { n: n, xs: xs } => { return dataConstant(ls, src, nameText(src, n), xs); },
+        AstValue::VFnRef { n: n } => { return LowSt { op: fnConst(nameText(src, n)), ..ls }; },
+        AstValue::VFunct { ps: ps, ins: ins, outs: outs, body: body, exports: exports } => { return lfail(ls, "A function is not a constant"); },
+    };
+    return ls;
+};
+
+fn isByteValue(src: &List<AstNode>, v: Int) -> Bool ~ {
+    value = valueAt(src, v);
+    if !(value is AstValue::VInt) { return false; };
+    text = nameText(src, (value as AstValue::VInt).n);
+    if size(text.bytes) = 0 || size(text.bytes) > 3 { return false; };
+    n = 0;
+    for c in &text.bytes {
+        d = toInt(c) - 48;
+        if d < 0 || d > 9 { return false; };
+        n = n * 10 + d;
+    };
+    return n < 256;
+};
+
+fn listConstant(ls: LowSt, src: &List<AstNode>, xs: Int) -> LowSt ~ {
+    items = listItems(src, xs);
+    text = lwCat("list ", intText(size(items)));
+    bytes = true;
+    for v in &items {
+        if !isByteValue(src, v) { bytes = false; };
+        ls = constantOf(ls, src, v);
+        if !ls.ok { return ls; };
+        text = lwSp(text, &ls.op.c);
+    };
+    return LowSt { op: Op { k: 2, l: 0 - 1, c: text, isList: true, bytes: bytes }, ..ls };
+};
+
+fn dataConstant(ls: LowSt, src: &List<AstNode>, name: String, xs: Int) -> LowSt ~ {
+    fields = listItems(src, xs);
+    text = lwSp(lwCat("data ", quote(&name)), intText(size(fields)));
+    for f in &fields {
+        node = nodeIn(src, f);
+        if node is AstNode::ValueField {
+            vf = (node as AstNode::ValueField).value;
+            ls = constantOf(ls, src, vf.v);
+            if !ls.ok { return ls; };
+            text = lwSp(lwSp(text, quote(nameText(src, vf.n))), &ls.op.c);
+        };
+    };
+    return LowSt { op: constOp(text), ..ls };
+};
+
+// A builtin used as a value is a function of the program that applies it (ls.op)
+fn builtinFunction(ls: LowSt, src: &List<AstNode>, b: Int, ft: Int) -> LowSt ~ {
+    if lwKind(&ls, ft) != 14 { return lfail(ls, "A builtin is not a function"); };
+    bi = biOf(src, b);
+    x = tyOf(&ls, ft);
+    n = size(x.args) - 1;
+    rty = intAt(&x.args, n);
+    ls = uniqueName(ls, lwCat("builtin::", builtinLabel(&bi)));
+    name = clone(ls.name);
+    Swapped { ls: inner, b: outer } = swapBuilder(ls, newBuilder(clone(name), false, true, rty));
+    ls = inner;
+    ls = builtinParams(ls, &x.args, n);
+    ptys = [];
+    i = 0;
+    while i < n [{ affirm i >= 0; }] shrinks n - i { ptys = push(ptys, intAt(&x.args, i)); i = i + 1; };
+    ops = [];
+    for p in &ls.bParams { ops = push(ops, copyOp(p)); };
+    ls = builtinRvalue(ls, src, &bi, &ptys, &ops);
+    if !ls.ok { return ls; };
+    rv = clone(ls.pend.rv);
+    ls = emitAssign(ls, 0, &rv);
+    ls = terminate(ls, returnTerm());
+    ls = buildFunction(ls, src, 0 - 1, 0 - 1, 0 - 1, 0 - 1, [], [], [], []);
+    Swapped { ls: back, b: done } = swapBuilder(ls, outer);
+    return LowSt { op: fnConst(&name), ty: ft, ..back };
+};
+
+fn builtinParams(ls: LowSt, types: &List<Int>, n: Int) -> LowSt ~ {
+    params = [];
+    i = 0;
+    while i < n [{ affirm i >= 0; }] shrinks n - i {
+        ls = tempLocal(ls, intAt(types, i));
+        params = push(params, ls.root);
+        i = i + 1;
+    };
+    return LowSt { bParams: params, ..ls };
+};
+
+fn builtinLabel(bi: &Bi) -> String ~ {
+    if bi.kind = 1 { return clone(bi.name); };
+    if bi.kind = 2 { return lwCat("field_", &bi.field); };
+    if bi.kind = 3 { return lwCat("is_", &bi.name); };
+    if bi.kind = 4 { return lwCat3(clone(bi.name), ".", &bi.field); };
+    if bi.kind = 5 { return lwCat("as_", &bi.name); };
+    if bi.kind = 7 { return lwCat("compare_", relName(bi.rel)); };
+    if bi.kind = 0 { return primitiveLabel(&bi.name); };
+    return showBuiltin(bi);
+};
+
+fn primitiveLabel(name: &String) -> String ~ {
+    labels = labelTable();
+    i = 0;
+    while i + 1 < size(labels) [{ affirm i >= 0; }] shrinks size(labels) - i {
+        if get(labels, i) = clone(name) { return clone(get(labels, i + 1)); };
+        i = i + 2;
+    };
+    return clone(name);
+};
+
+fn labelTable() -> List<String> ~ {
+    t = push(push(push(push(push(push(push(push([], "Size"), "size"), "First"), "first"), "Last"), "last"), "Get"), "get");
+    t = push(push(push(push(push(push(push(push(t, "Push"), "push"), "Pop"), "pop"), "Set"), "set"), "NewBox"), "box");
+    t = push(push(push(push(push(push(push(push(t, "UnBox"), "unbox"), "CloneOf"), "clone"), "NewArray"), "array"), "NewBoxedArray"), "boxed_array");
+    t = push(push(push(push(push(push(push(push(t, "NewEmptyArray"), "empty_array"), "Unsize"), "unsize"), "WriteByte"), "writeByte"), "WriteError"), "writeError");
+    t = push(push(push(push(push(push(push(push(t, "ReadByte"), "readByte"), "ArgCount"), "argCount"), "ArgByte"), "argByte"), "PathByte"), "pathByte");
+    t = push(push(push(push(push(push(push(push(t, "FileLoad"), "fileLoad"), "FileByte"), "fileByte"), "StoreByte"), "storeByte"), "FileStore"), "fileStore");
+    t = push(push(push(push(push(push(push(push(t, "ToByte"), "toByte"), "FromByte"), "toInt"), "BytesFrom"), "bytes_from"), "ArrayFrom"), "array_from");
+    t = push(push(push(push(push(push(push(push(t, "ArrayFromList"), "array_from_list"), "Plus"), "add"), "Minus"), "sub"), "Times"), "mul");
+    t = push(push(push(push(push(push(t, "Div"), "div"), "Mod"), "mod"), "Within"), "within");
+    return t;
+};
+
+fn relName(r: Int) -> String ~ {
+    if r = 0 { return "Eq"; };
+    if r = 1 { return "NotEq"; };
+    if r = 2 { return "Lt"; };
+    if r = 3 { return "Gt"; };
+    if r = 4 { return "LtEq"; };
+    return "GtEq";
+};
+
+fn relWord(r: Int) -> String ~ {
+    if r = 0 { return "eq"; };
+    if r = 1 { return "noteq"; };
+    if r = 2 { return "lt"; };
+    if r = 3 { return "gt"; };
+    if r = 4 { return "lteq"; };
+    return "gteq";
+};
+
+// Haskell's show of a builtin, for the words of a refusal
+fn showBuiltin(bi: &Bi) -> String ~ {
+    if bi.kind = 0 { return clone(bi.name); };
+    if bi.kind = 1 {
+        fields = "[";
+        i = 0;
+        for f in &bi.fields { if i > 0 { fields = lwCat(fields, ","); }; fields = lwCat(fields, lwShow(f)); i = i + 1; };
+        return lwCat3(lwCat3(lwCat3("Ctor ", lwShow(&bi.name), " "), &bi.ctorArgs, " "), fields, "]");
+    };
+    if bi.kind = 2 {
+        owner = "Nothing";
+        if bi.hasOwner { owner = lwCat3("(Just ", lwShow(&bi.owner), ")"); };
+        return lwSp(lwSp("Field", owner), lwShow(&bi.field));
+    };
+    if bi.kind = 3 { return lwCat("Is ", lwShow(&bi.name)); };
+    if bi.kind = 4 { return lwSp(lwCat("Project ", lwShow(&bi.name)), lwShow(&bi.field)); };
+    if bi.kind = 5 { return lwCat("Cast ", lwShow(&bi.name)); };
+    if bi.kind = 6 {
+        s = "False";
+        if bi.signed { s = "True"; };
+        return lwSp(lwSp("ToWord", s), intText(bi.bits));
+    };
+    return lwCat("Rel ", relName(bi.rel));
+};
+
+// The last step of an expression (ls.pend) and the type of its value (ls.ty)
+fn lowerLast(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    ls = claim(ls);
+    if !ls.ok { return ls; };
+    t = ls.ty;
+    return lowerLastWith(ls, src, e, t);
+};
+
+fn rvPend(rv: Rv) -> Pend ~ { return Pend { isCall: false, rv: rv, callee: noOp(), args: [] }; };
+
+fn lowerLastWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return lwMalformed(ls, "an expression"); };
+    x = exprAt(src, e);
+    if x is AstExpression::Val || x is AstExpression::Var {
+        ls = lowerOperandWith(ls, src, e, ty);
+        if !ls.ok { return ls; };
+        o = clone(ls.op);
+        return LowSt { pend: rvPend(useRv(o)), ty: ty, ..ls };
+    };
+    if !(x is AstExpression::F) { return lfail(ls, "Lowering: a record that is not an expression"); };
+    c = connectiveOf(src, e);
+    args = listItems(src, (x as AstExpression::F).xs);
+    if (c = "And" || c = "Or") && size(args) = 2 { return lowerValueOfConnective(ls, src, e, ty); };
+    funct = (x as AstExpression::F).f;
+    ls = resolveHead(ls, src, funct);
+    if !ls.ok { return ls; };
+    if ls.id >= 0 {
+        b = ls.id;
+        return lowerBuiltin(ls, src, b, &args, ty);
+    };
+    callee = clone(ls.op);
+    ops = [];
+    for a in &args {
+        ls = lowerOperand(ls, src, a);
+        if !ls.ok { return ls; };
+        ops = push(ops, clone(ls.op));
+    };
+    return LowSt { pend: Pend { isCall: true, rv: noRv(), callee: callee, args: ops }, ty: ty, ..ls };
+};
+
+// What is applied: a builtin (ls.id, its record) or what is called (ls.op, with ls.id -1)
+fn resolveHead(ls: LowSt, src: &List<AstNode>, funct: Int) -> LowSt ~ {
+    b = builtinOfExpr(src, funct);
+    if b >= 0 { return LowSt { id: b, ..ls }; };
+    x = exprAt(src, funct);
+    if x is AstExpression::Var {
+        name = nameText(src, (x as AstExpression::Var).n);
+        found = lookupBinding(&ls, &name);
+        if found.found {
+            if found.b.isLocal { return LowSt { id: 0 - 1, op: copyOp(found.b.local), ..ls }; };
+            return LowSt { id: 0 - 1, op: fnConst(&found.b.fname), ..ls };
+        };
+        if HashMap::contains(&ls.globals, &name) {
+            g = HashMap::lookup(&ls.globals, &name, "");
+            return LowSt { id: 0 - 1, op: fnConst(&g), ..ls };
+        };
+        if HashMap::contains(&ls.std, &name) {
+            sb = HashMap::lookup(&ls.std, &name, 0 - 1);
+            return LowSt { id: sb, ..ls };
+        };
+        return lfail(ls, lwCat("Undefined variable: ", &name));
+    };
+    ls = lowerOperand(ls, src, funct);
+    return LowSt { id: 0 - 1, ..ls };
+};
+
+// A connective where the Bool is wanted: the expression lowered as a condition, and the local of the value assigned in
+// each of the two ways to get there
+fn lowerValueOfConnective(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ {
+    ls = tempLocal(ls, ty);
+    value = ls.root;
+    ls = newBlock(ls);
+    yes = ls.id;
+    ls = newBlock(ls);
+    no = ls.id;
+    ls = newBlock(ls);
+    join = ls.id;
+    ls = lowerConditionWith(ls, src, e, ty, yes, no);
+    ls = openBlock(ls, yes);
+    ls = emitAssign(ls, value, useRv(constOp("bool true")));
+    ls = terminate(ls, gotoTerm(join));
+    ls = openBlock(ls, no);
+    ls = emitAssign(ls, value, useRv(constOp("bool false")));
+    ls = terminate(ls, gotoTerm(join));
+    ls = openBlock(ls, join);
+    return LowSt { pend: rvPend(useRv(copyOp(value))), ty: ty, ..ls };
+};
+
+fn lowerCondition(ls: LowSt, src: &List<AstNode>, cond: Int, yes: Int, no: Int) -> LowSt ~ {
+    ls = claim(ls);
+    if !ls.ok { return ls; };
+    t = ls.ty;
+    return lowerConditionWith(ls, src, cond, t, yes, no);
+};
+
+fn lowerConditionWith(ls: LowSt, src: &List<AstNode>, cond: Int, ty: Int, yes: Int, no: Int) -> LowSt ~ {
+    if !ls.ok { return ls; };
+    if !(nodeIn(src, cond) is AstNode::Expression) { return lwMalformed(ls, "an expression"); };
+    c = connectiveOf(src, cond);
+    args = [];
+    x = exprAt(src, cond);
+    if size(c.bytes) > 0 && x is AstExpression::F { args = listItems(src, (x as AstExpression::F).xs); };
+    if c = "And" && size(args) = 2 {
+        ls = newBlock(ls);
+        middle = ls.id;
+        ls = lowerCondition(ls, src, intAt(&args, 0), middle, no);
+        ls = openBlock(ls, middle);
+        return lowerCondition(ls, src, intAt(&args, 1), yes, no);
+    };
+    if c = "Or" && size(args) = 2 {
+        ls = newBlock(ls);
+        middle = ls.id;
+        ls = lowerCondition(ls, src, intAt(&args, 0), yes, middle);
+        ls = openBlock(ls, middle);
+        return lowerCondition(ls, src, intAt(&args, 1), yes, no);
+    };
+    if c = "Not" && size(args) = 1 { return lowerCondition(ls, src, intAt(&args, 0), no, yes); };
+    ls = lowerOperandWith(ls, src, cond, ty);
+    if !ls.ok { return ls; };
+    test = opText(&ls.op);
+    return terminate(ls, Term { k: 1, text: test, x: yes, y: no });
+};
+
+// The last step of an expression gives its value to a local: an operation, or a call (a call ends a block)
+fn finishInto(ls: LowSt, dest: Int, pend: Pend) -> LowSt ~ {
+    if !pend.isCall {
+        ls = emitAssign(ls, dest, &pend.rv);
+        if pend.rv.k != 3 { return ls; };
+        targets = push(ls.bRefTargets, RefTarget { local: dest, root: pend.rv.root, steps: clone(pend.rv.steps) });
+        return LowSt { bRefTargets: targets, ..ls };
+    };
+    if !ls.bHasOpen { return ls; };
+    ls = newBlock(ls);
+    next = ls.id;
+    text = lwSp(lwSp(lwSp(opText(&pend.callee), intText(size(pend.args))), argsText(&pend.args)), intText(dest));
+    if size(pend.args) = 0 { text = lwSp(lwSp(opText(&pend.callee), "0"), intText(dest)); };
+    ls = terminate(ls, Term { k: 2, text: text, x: next, y: 0 - 1 });
+    return openBlock(ls, next);
+};
+
+fn argsText(args: &List<Op>) -> String ~ {
+    out = "";
+    i = 0;
+    for a in args { if i > 0 { out = lwCat(out, " "); }; out = lwCat(out, opText(a)); i = i + 1; };
+    return out;
+};
+
+// The result type is the one the elaborator gave the application
+fn lowerBuiltin(ls: LowSt, src: &List<AstNode>, b: Int, args: &List<Int>, result: Int) -> LowSt ~ {
+    bi = biOf(src, b);
+    if isPrim(&bi, "BorrowOf") || isPrim(&bi, "BorrowMutOf") {
+        if size(args) != 1 {
+            if isPrim(&bi, "BorrowOf") { return lfail(ls, "& takes a place"); };
+            return lfail(ls, "&mut takes a place");
+        };
+        ls = lowerPlace(ls, src, intAt(args, 0));
+        if !ls.ok { return ls; };
+        root = ls.root;
+        steps = clone(ls.steps);
+        return LowSt { pend: rvPend(borrowRv(root, steps, isPrim(&bi, "BorrowMutOf"))), ty: result, ..ls };
+    };
+    if isPrim(&bi, "DerefOf") {
+        if size(args) != 1 { return lfail(ls, "* takes a reference"); };
+        ls = lowerOperand(ls, src, intAt(args, 0));
+        if !ls.ok { return ls; };
+        o = clone(ls.op);
+        return LowSt { pend: rvPend(unaryRv("deref", &o)), ty: result, ..ls };
+    };
+    ops = [];
+    tys = [];
+    for a in args {
+        ls = lowerOperand(ls, src, a);
+        if !ls.ok { return ls; };
+        ops = push(ops, clone(ls.op));
+        tys = push(tys, ls.ty);
+    };
+    pair = pairWords(&bi);
+    if size(pair) = 2 {
+        ls = pairRvalue(ls, &bi, &pair, result, &ops);
+    } else {
+        if isPrim(&bi, "Replace") && size(ops) = 3 { ls = replaceRvalue(ls, result, &ops); } else { ls = builtinRvalue(ls, src, &bi, &tys, &ops); };
+    };
+    if !ls.ok { return ls; };
+    rv = clone(ls.pend.rv);
+    if rv.k = 1 && lwHasByte(&rv.name, 60) && lwKind(&ls, result) = 4 && lwBaseName(&rv.name) = tyOf(&ls, result).name {
+        rv = Rv { name: typeNameOf(&ls, result), ..rv };
+    };
+    return LowSt { pend: rvPend(rv), ty: result, ..ls };
+};
+
+// The forms that give two things: each is two operations, and the tuple of what they give
+fn pairWords(bi: &Bi) -> List<String> ~ {
+    if isPrim(bi, "AllocPair") { return push(push([], "addrAlloc"), "blockNew"); };
+    if isPrim(bi, "TakePair") { return push(push([], "addrTake"), "blockTaken"); };
+    if isPrim(bi, "ResizePair") { return push(push([], "addrResize"), "blockResized"); };
+    if isPrim(bi, "SplitPair") { return push(push([], "blockSplitLo"), "blockSplitHi"); };
+    return [];
+};
+
+fn pairRvalue(ls: LowSt, bi: &Bi, words: &List<String>, result: Int, ops: &List<Op>) -> LowSt ~ {
+    parts = tupleParts(&ls, result);
+    if !parts.ok || size(parts.types) != 2 { return lfail(ls, lwCat3("The result of ", showBuiltin(bi), " is not a pair")); };
+    if size(words) < 2 { return ls; };
+    ls = tempLocal(ls, intAt(&parts.types, 0));
+    x = ls.root;
+    ls = emitAssign(ls, x, listRv(&get(words, 0), ops));
+    ls = tempLocal(ls, intAt(&parts.types, 1));
+    y = ls.root;
+    second = [];
+    if isPrim(bi, "AllocPair") && size(ops) = 1 { second = push(push([], copyOp(x)), clone(get(ops, 0))); } else {
+        if isPrim(bi, "TakePair") && size(ops) = 3 { second = push(push([], clone(get(ops, 2))), clone(get(ops, 1))); } else {
+            if isPrim(bi, "ResizePair") && size(ops) = 3 { second = push(push(push([], clone(get(ops, 2))), copyOp(x)), clone(get(ops, 1))); } else {
+                if isPrim(bi, "SplitPair") { second = clone(ops); } else { return lfail(ls, lwCat("A builtin was applied to the wrong number of arguments: ", showBuiltin(bi))); };
+            };
+        };
+    };
+    ls = emitAssign(ls, y, listRv(&get(words, 1), &second));
+    return LowSt { pend: rvPend(pairRvOf(typeNameOf(&ls, result), x, y)), ..ls };
+};
+
+// replace(a, i, x): the element is copied out, then x is put in its place
+fn replaceRvalue(ls: LowSt, result: Int, ops: &List<Op>) -> LowSt ~ {
+    parts = tupleParts(&ls, result);
+    if !parts.ok || size(parts.types) != 2 { return lfail(ls, "The result of replace is not a pair"); };
+    if size(ops) < 3 { return ls; };
+    containerTy = intAt(&parts.types, 0);
+    elementTy = intAt(&parts.types, 1);
+    getOps = push(push([], clone(get(ops, 0))), clone(get(ops, 1)));
+    ls = tempLocal(ls, elementTy);
+    view = ls.root;
+    ls = emitAssign(ls, view, listRv("get", &getOps));
+    ls = tempLocal(ls, elementTy);
+    previous = ls.root;
+    ls = emitAssign(ls, previous, unaryRv("clone", copyOp(view)));
+    ls = tempLocal(ls, containerTy);
+    changed = ls.root;
+    ls = emitAssign(ls, changed, listRv("set", ops));
+    return LowSt { pend: rvPend(pairRvOf(typeNameOf(&ls, result), changed, previous)), ..ls };
+};
+
+// The operation that a builtin applied to operands stands for (ls.pend.rv)
+fn builtinRvalue(ls: LowSt, src: &List<AstNode>, bi: &Bi, tys: &List<Int>, ops: &List<Op>) -> LowSt ~ {
+    if !ls.ok { return ls; };
+    if bi.kind = 1 { return ctorRvalue(ls, bi, tys, ops); };
+    if bi.kind = 2 { return fieldRvalue(ls, bi, tys, ops); };
+    if bi.kind >= 3 && bi.kind <= 5 { return variantRvalue(ls, bi, ops); };
+    if bi.kind = 6 { return wordRvalue(ls, bi, ops); };
+    if bi.kind = 7 {
+        if size(ops) = 2 { return LowSt { pend: rvPend(binaryRv(relWord(bi.rel), &get(ops, 0), &get(ops, 1))), ..ls }; };
+        return wrongArity(ls, bi);
+    };
+    return primitiveRvalue(ls, bi, ops);
+};
+
+fn wrongArity(ls: LowSt, bi: &Bi) -> LowSt ~ { return lfail(ls, lwCat("A builtin was applied to the wrong number of arguments: ", showBuiltin(bi))); };
+
+fn setRv(ls: LowSt, rv: Rv) -> LowSt ~ { return LowSt { pend: rvPend(rv), ..ls }; };
+
+fn ctorRvalue(ls: LowSt, bi: &Bi, tys: &List<Int>, ops: &List<Op>) -> LowSt ~ {
+    if size(bi.fields) != size(ops) { return wrongArity(ls, bi); };
+    if isTupleBase(&bi.name) {
+        base = lwCat("Tuple", intText(size(tys)));
+        return setRv(ls, makeDataRv(lwInstanceText(&ls, &base, tys), &bi.fields, ops));
+    };
+    return setRv(ls, makeDataRv(clone(bi.name), &bi.fields, ops));
+};
+
+fn fieldRvalue(ls: LowSt, bi: &Bi, tys: &List<Int>, ops: &List<Op>) -> LowSt ~ {
+    if size(ops) != 1 { return wrongArity(ls, bi); };
+    ctor = clone(bi.owner);
+    if !bi.hasOwner {
+        ls = fieldCtor(ls, &bi.field, intAt(tys, 0));
+        if !ls.ok { return ls; };
+        ctor = clone(ls.name);
+    };
+    return setRv(ls, readFieldRv(clone(get(ops, 0)), ctor, clone(bi.field)));
+};
+
+fn variantRvalue(ls: LowSt, bi: &Bi, ops: &List<Op>) -> LowSt ~ {
+    if size(ops) != 1 { return wrongArity(ls, bi); };
+    o = clone(get(ops, 0));
+    if bi.kind = 3 { return setRv(ls, textRv(lwSp(lwCat("isvariant ", opText(&o)), quote(&bi.name)))); };
+    if bi.kind = 4 { return setRv(ls, readFieldRv(o, clone(bi.name), clone(bi.field))); };
+    return setRv(ls, textRv(lwSp(lwCat("asvariant ", opText(&o)), quote(&bi.name))));
+};
+
+fn wordRvalue(ls: LowSt, bi: &Bi, ops: &List<Op>) -> LowSt ~ {
+    if size(ops) != 1 { return wrongArity(ls, bi); };
+    w = "narrowU";
+    if bi.signed { w = "narrowI"; };
+    return setRv(ls, listRv(lwCat(w, intText(bi.bits)), ops));
+};
+
+fn primitiveRvalue(ls: LowSt, bi: &Bi, ops: &List<Op>) -> LowSt ~ {
+    word = listWord(&bi.name, size(ops));
+    if size(word.bytes) > 0 { return setRv(ls, listRv(&word, ops)); };
+    bin = binaryWord(&bi.name);
+    if size(bin.bytes) > 0 {
+        if size(ops) = 2 { return setRv(ls, binaryRv(&bin, &get(ops, 0), &get(ops, 1))); };
+        return primitiveRest(ls, bi, ops);
+    };
+    return primitiveRest(ls, bi, ops);
+};
+
+fn primitiveRest(ls: LowSt, bi: &Bi, ops: &List<Op>) -> LowSt ~ {
+    n = bi.name;
+    if n = "ArrayFrom" && size(ops) = 1 {
+        o = clone(get(ops, 0));
+        if o.k = 2 && o.isList && size(o.c.bytes) >= 4 { return setRv(ls, useRv(constOp(lwCat("array", o.c.slice(4, size(o.c.bytes)))))); };
+        return setRv(ls, useRv(o));
+    };
+    if n = "Not" && size(ops) = 1 { return setRv(ls, binaryRv("eq", &get(ops, 0), constOp("bool false"))); };
+    if n = "BytesFrom" {
+        if size(ops) = 1 && get(ops, 0).k = 2 && get(ops, 0).isList && get(ops, 0).bytes { return setRv(ls, useRv(clone(get(ops, 0)))); };
+        return lfail(ls, "A list of bytes is written with numbers from 0 to 255");
+    };
+    if size(ops) = 1 {
+        unary = unaryWord(&n);
+        if size(unary.bytes) > 0 { return setRv(ls, unaryRv(&unary, &get(ops, 0))); };
+    };
+    if n = "Within" { return lfail(ls, "within only exists in proofs"); };
+    pointer = pointerWord(&n);
+    if size(pointer.bytes) > 0 { return setRv(ls, listRv(&pointer, ops)); };
+    return wrongArity(ls, bi);
+};
+
+fn unaryWord(n: &String) -> String ~ {
+    if n = "NewBox" { return "makebox"; };
+    if n = "Unsize" { return "unsize"; };
+    if n = "UnBox" { return "unbox"; };
+    if n = "CloneOf" { return "clone"; };
+    return "";
+};
+
+fn binaryWord(n: &String) -> String ~ {
+    if n = "Plus" { return "add"; };
+    if n = "Minus" { return "sub"; };
+    if n = "Times" { return "mul"; };
+    if n = "Div" { return "div"; };
+    if n = "Mod" { return "mod"; };
+    return "";
+};
+
+// The list operation of a builtin with that many operands, or ""
+fn listWord(n: &String, count: Int) -> String ~ {
+    if count = 0 { return listWord0(n); };
+    if count = 1 { return listWord1(n); };
+    if count = 2 { return listWord2(n); };
+    if count = 3 && n = "Set" { return "set"; };
+    return "";
+};
+
+fn listWord0(n: &String) -> String ~ {
+    if n = "NewEmptyArray" { return "newEmptyBoxed"; };
+    if n = "ReadByte" { return "readByte"; };
+    if n = "ArgCount" { return "argCount"; };
+    if n = "FileLoad" { return "fileLoad"; };
+    if n = "FileStore" { return "fileStore"; };
+    return "";
+};
+
+fn listWord1(n: &String) -> String ~ {
+    if n = "Size" { return "length"; };
+    if n = "First" { return "first"; };
+    if n = "Last" { return "last"; };
+    if n = "Pop" { return "pop"; };
+    if n = "ArrayFromList" { return "fromList"; };
+    return listWord1b(n);
+};
+
+fn listWord1b(n: &String) -> String ~ {
+    if n = "WriteByte" { return "writeByte"; };
+    if n = "WriteError" { return "writeError"; };
+    if n = "PathByte" { return "pathByte"; };
+    if n = "FileByte" { return "fileByte"; };
+    if n = "StoreByte" { return "storeByte"; };
+    return listWord1c(n);
+};
+
+fn listWord1c(n: &String) -> String ~ {
+    if n = "ToByte" { return "toByte"; };
+    if n = "FromByte" { return "fromByte"; };
+    return "";
+};
+
+fn listWord2(n: &String) -> String ~ {
+    if n = "Get" { return "get"; };
+    if n = "Push" { return "push"; };
+    if n = "NewArray" { return "newArray"; };
+    if n = "NewBoxedArray" { return "newBoxed"; };
+    if n = "ArgByte" { return "argByte"; };
+    return "";
+};
+
+// The operations on addresses and permissions that are one operation of the MIR: the builtin's name with a small first letter
+fn pointerWord(n: &String) -> String ~ {
+    names = pointerNames();
+    if !hasText(&names, n) || size(n.bytes) = 0 { return ""; };
+    first = toInt(get(n.bytes, 0)) + 32;
+    if first > 255 { return ""; };
+    out = push([], toByte(first));
+    i = 1;
+    while i < size(n.bytes) [{ affirm i >= 1; }] shrinks size(n.bytes) - i { out = push(out, get(n.bytes, i)); i = i + 1; };
+    return String { bytes: out };
+};
+
+fn pointerNames() -> List<String> ~ {
+    t = push(push(push(push(push(push(push([], "AddrNull"), "AddrOffset"), "AddrCast"), "AddrToInt"), "AddrFromInt"), "AddrAlloc"), "AddrGet");
+    t = push(push(push(push(push(push(push(t, "AddrWrite"), "AddrTake"), "AddrDropValue"), "AddrDropRange"), "AddrResize"), "AddrFree"), "BlockNew");
+    t = push(push(push(push(push(push(push(t, "BlockTaken"), "BlockResized"), "BlockSplitLo"), "BlockSplitHi"), "BlockJoin"), "BlockAssume"), "BlockCast");
+    return push(push(push(push(push(t, "UninitEmpty"), "UninitNew"), "UninitGet"), "UninitTake"), "UninitDiscard");
+};

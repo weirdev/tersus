@@ -2,7 +2,7 @@ import data::ast::ast { AstNode, AstProgram, AstStatement, printAst };
 import data::codec::codec { catStrings, intAt };
 import data::reader::reader { parseAstLines, readRecord };
 import elaborate::decls { Decls, FileDecl, declsFromStatements, emptyDecls, fileDeclarations, locating, textLess };
-import elaborate::elaborate { Answer, Program, Unit, elaborateUnit, joinBlock, malformed, noProgram, printAnswerBody, printIntWord, printQuoted, readBlock };
+import elaborate::elaborate { Answer, Program, Unit, elaborateUnit, joinBlock, malformed, noProgram, printAnswerBody, printIntWord, printQuoted, readBlock, withMir };
 import elaborate::libraries { Catalog, Lib, closure, declaredNames, libIndex, libraryContexts, librariesFor, probeModule, readCatalog, seenLibraries };
 import elaborate::load { LFile, LS, Loaded, ModId, PMod, PR, RImp, dependenciesOf, emptyMod, layoutNames, soloLayout, stateOfLoad, idLess, loadEntry, modKey, newLS, parseWith, renderPath, resolvedKey, sameId, sortNames, statementsOfProgram };
 import elaborate::records { listItems, nameText, nodeIn };
@@ -407,6 +407,7 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         for k in &depKeys { lowering = push(lowering, clone(k)); };
         for ctx in &definitions { for k in ctx { lowering = push(lowering, clone(k)); }; };
         lowering = uniqueKeys(&t, &lowering);
+        answer = withMir(answer, programsOf(&t, &lowering), table);
         own = catStrings("module:", modKey(id));
         t = Ifaces { programs: t.programs.insert(clone(own), clone(answer.iface)), ids: t.ids.insert(clone(own), clone(id)) };
         withOwn = push([], clone(own));
@@ -547,6 +548,22 @@ fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         "unresolved ".print(); printQuoted(&message); "\n".print();
         return 0;
     };
+    if answer.status = 0 {
+        names = [];
+        replaced = declaresEq(&answer.out);
+        for n in seenLibraries(&catalog.libs, &answer.selected) { if !replaced || n != "eq" { names = push(names, clone(n)); }; };
+        ifaces = [];
+        for n in &names {
+            i = libIndex(&catalog.libs, n);
+            if i >= 0 && i < size(catalog.libs) {
+                lib = get(&catalog.libs, i);
+                parsed = parseAstLines(&lib.lines);
+                if !parsed.ok { return malformed(); };
+                ifaces = push(ifaces, parsed.value);
+            };
+        };
+        answer = withMir(answer, &ifaces, table);
+    };
     printAnswerBody(&answer);
     return 0;
 };
@@ -596,6 +613,9 @@ fn answerLibraries(libs: &LibParse, table: &AstProgram) -> Int ~ {
         answer = compileLibrary(libs, table, &t, &done, i);
         if answer.status < 0 { return malformed(); };
         deps = libDepsOf(libs, &name);
+        depKeys = [];
+        for d in &deps { if HashMap::contains(&t.programs, libKey(d)) { depKeys = push(depKeys, libKey(d)); }; };
+        answer = withMir(answer, programsOf(&t, &depKeys), table);
         "library ".print(); printQuoted(&name); printIntWord(size(deps)); printWords(&deps); "\n".print();
         printBlock(libProgramOf(libs, &name));
         printAnswerBody(&answer);
