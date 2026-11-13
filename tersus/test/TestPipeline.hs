@@ -31,7 +31,6 @@ import qualified Modules
 import PreludeSource (parserPackageFiles)
 import qualified Mir as M
 import MirEval
-import MirLower
 import MirHousekeeping (verifyProgram, validationEntry)
 import Pipeline
 import SelfHostedMir (encode, validateMirSubset, verdictProved)
@@ -814,7 +813,7 @@ selfHostedQueryFamilies program =
                     MData name fields -> MData name [(key, onLoop change field) | (key, field) <- fields]
                     MList items -> MList (map (onLoop change) items)
                     other -> other
-                checkDrivenLoop source change expected = case parseSource source `bindResult` elaborateStatements `bindResult` lowerElaborated of
+                checkDrivenLoop source change expected = case parseSource source `bindResult` lowerStatements of
                     Error e -> Just ("Could not lower test program: " ++ e)
                     Ok mir -> case fmap (lookup "f") (encode mir) of
                         Right (Just (blocks, initial, entry)) -> either Just (`testAssertEq` Just (MInt expected)) (driven (toDriver (onLoop change blocks)) entry initial)
@@ -826,7 +825,7 @@ selfHostedQueryFamilies program =
                     Ok (Just (MData "DriverParsed" fields)) -> lookup "value" fields
                     _ -> Nothing
                 malformed = Just (MData "DriverValue::DriverMalformed" [])
-                drivenTexts = parseSource "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` elaborateStatements `bindResult` lowerElaborated `bindResult` prepareTexts False
+                drivenTexts = parseSource "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` lowerStatements `bindResult` prepareTexts False
                 checkDrivenInput edit expected = case drivenTexts of
                     Error e -> Just ("Could not prepare test program: " ++ e)
                     Ok texts -> case runProgramWith (edit (show (length texts) ++ "\n") (concatMap snd texts)) program of
@@ -1013,7 +1012,7 @@ selfHostedQueryFamilies program =
                             result -> Just ("Unexpected known boolean join result: " ++ show result)
                 boolConstants = [constant (20, 1, 1), constant (21, 1, 0)]
                 checkMirSubset input expected =
-                    let lowered = parseSource input `bindResult` elaborateStatements `bindResult` lowerElaborated
+                    let lowered = parseSource input `bindResult` lowerStatements
                      in case lowered of
                             Error e -> Just ("Could not lower test program: " ++ e)
                             Ok mir ->
@@ -1023,7 +1022,7 @@ selfHostedQueryFamilies program =
                                         Nothing -> Nothing
                 checkMalformedArrayLength =
                     let input = "fn f<n>(a: Array<Int, n>, m: Int) -> Int { b = array(n, 0); return size(b); }; return 0;"
-                        lowered = parseSource input `bindResult` elaborateStatements `bindResult` lowerElaborated
+                        lowered = parseSource input `bindResult` lowerStatements
                      in case lowered of
                             Error e -> Just ("Could not lower malformed-MIR fixture: " ++ e)
                             Ok mir -> case Map.lookup "f" (M.progFunctions mir) of
@@ -1859,7 +1858,7 @@ testPipeline =
         , testAssertErrorContains "Validation failed: Type error" (compileSource "x = 1; y = x(2);")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
           case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborateStatements of
-            Ok (Elaborated stmts _) -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))
+            Ok lowered -> testAssertTrue (not (null [() | M.LoopSpec _ (Just (Counting _)) _ _ <- Map.elems (M.specLoops (M.fnSpec (M.progMain (M.lowProgram lowered))))]))
             Error e -> Just e
         , case compileSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" of
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program), Map.size (M.fnBlocks (M.progMain program))) (Ok (Just "3"), 4)

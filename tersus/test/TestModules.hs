@@ -31,6 +31,7 @@ import Elaboration (Ctx (..), Template (..))
 import InterfaceData (readInterface, writeInterface)
 import Interface
 import qualified Mir as M
+import qualified Data.Set as Set
 import MirEval (renderMirValue, runProgram, runNamedFunction, MirValue (..))
 import qualified Pipeline
 import ElaborateRequest (LoadRequest (..), LoadResponse (..))
@@ -124,7 +125,7 @@ testCanonical =
                     else Just ("Expected distinct canonical names, got: " ++ show (geo, other))
         , inspectModules [] $ \modules -> testAssertEq (filter (`elem` ["Point", "area"]) (namesIn (ModuleId "pkg" Nothing) modules)) ["Point", "area"]
         , inspectModules [("pkg/geo/shapes.tersus", "enum Shape { Circle { r: Int } }; struct Point { x: Int };")] $ \modules ->
-            testAssertEq (namesIn (ModuleId "pkg" (Just "geo")) modules) ["pkg$geo$shapes$Shape", "pkg$geo$shapes$Shape::Circle", "pkg$geo$shapes$Point"]
+            testAssertEq (namesIn (ModuleId "pkg" (Just "geo")) modules) ["pkg$geo$shapes$Point", "pkg$geo$shapes$Shape"]
         , case compiledWith [("pkg/geo/shapes.tersus", "struct Point { x: Int }; struct Point { y: Int };")] of
             Error err ->
                 if "already defined" `isInfixOf` err
@@ -144,7 +145,7 @@ testCanonical =
     inspectModules files check = case compiledWith files of
         Error err -> Just err
         Ok compiled -> check (compiledModules compiled)
-    namesIn modu modules = concat [declarationNames (compiledStatements m) | m <- modules, compiledModuleId m == modu]
+    namesIn modu modules = concat [Set.toList (M.lowDeclared lowered) | m <- modules, compiledModuleId m == modu, Ok lowered <- [compiledLowered m]]
 
 testImports :: Test
 testImports =
@@ -610,9 +611,9 @@ testModuleCheckTraits =
             Left err -> Just ("axiom package should compile: " ++ err)
             Right compiled -> case compiledNamed compiled "app" of
                 Just modu ->
-                    if "app$geo$geo$nonnegAxiom" `isInfixOf` show (compiledStatements modu)
+                    if "app$geo$geo$nonnegAxiom" `isInfixOf` show (compiledLowered modu)
                         then Nothing
-                        else Just ("expected the cross-module axiom name in elaborated root statements, got: " ++ show (compiledStatements modu))
+                        else Just ("expected the cross-module axiom name in the root module's MIR, got: " ++ show (compiledLowered modu))
                 Nothing -> Just "expected a compiled root module"
         , expectCompileErrorAll boundedFiles "app/main.tersus" ["type S", "cannot be worked out"]
         , expectCompileError orphanFiles "app/main.tersus" "orphan impl"
@@ -890,16 +891,27 @@ testModuleAssumptions =
             Left err -> Just ("assumption package should load: " ++ err)
             Right pkg -> case compileModules (packageSnapshot pkg) of
                 Error err -> Just ("assumption package should compile: " ++ err)
-                Ok compiled ->
-                    let found = assumptionsOfPackage compiled
-                     in testAssertTrue (any ("in module app::geo: axiom nonnegAxiom" `isInfixOf`) found)
+                Ok compiled -> case assumptionsOfPackage compiled of
+                    Error err -> Just err
+                    Ok found ->
+                        testAssertTrue (any ("in module app::geo: axiom nonnegAxiom" `isInfixOf`) found)
                             <> testAssertTrue (any ("in module app::geo: extern fn cfunc" `isInfixOf`) found)
+                            -- (every assume, in the order written, in blocks, branches, loops, dead code and functions with bounds)
+                            <> testAssertEq [drop (length "in module app::geo: assume ") line | line <- found, "in module app::geo: assume " `isPrefixOf` line]
+                                ["x > 1", "x > 2", "x > 3", "x > 4", "x > 5", "x > 6", "1 > 0"]
+                            <> testAssertErrorContains "in module app::geo: the unit did not lower"
+                                (assumptionsOfPackage compiled{compiledModules = [m{compiledLowered = Error "the unit did not lower"} | m <- compiledModules compiled]})
         ]
   where
     assumptionFiles =
         [ ("app/package.tersus", "")
         , ("app/main.tersus", "import app::geo; return geo::use(1);")
-        , ("app/geo/geo.tersus", "axiom nonnegAxiom(x) [{ }] [{ affirm x >= 0; }]; extern fn cfunc(x: Int) -> Int [{ }] [{ }]; fn use(x: Int) -> Int [{ }] [{ }] { return x; };")
+        , ("app/geo/geo.tersus", unlines
+            [ "axiom nonnegAxiom(x) [{ }] [{ affirm x >= 0; }]; extern fn cfunc(x: Int) -> Int [{ }] [{ }]; fn use(x: Int) -> Int [{ }] [{ }] { return x; };"
+            , "fn walk(x: Int) -> Int [{ }] [{ }] { assume x > 1; { assume x > 2; }; if x > 0 { assume x > 3; } else { assume x > 4; }; i = 0; while i < 1 shrinks 1 - i { assume x > 5; i = i + 1; }; return x; assume x > 6; };"
+            , "trait Show { fn show(self: &Self) -> Int; };"
+            , "fn shown<T: Show>(t: &T) -> Int { assume 1 > 0; return t.show(); };"
+            ])
         ]
 
 testModuleCliFilesystem :: Test
@@ -1726,8 +1738,9 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                     Error e -> Just e
                     Ok checker ->
                         let files = concatMap loadedModuleFiles (packageModules pkg)
-                            declared = [name | modu <- PackageCompile.compiledModules compiled, Assign name (Val VFunct{}) <- PackageCompile.compiledStatements modu]
-                            typeNames = [name | modu <- PackageCompile.compiledModules compiled, stmt <- PackageCompile.compiledStatements modu, name <- case stmt of StructDef n _ _ _ -> [n]; EnumDef n _ -> [n]; _ -> []]
+                            units = [lowered | modu <- PackageCompile.compiledModules compiled, Ok lowered <- [PackageCompile.compiledLowered modu]]
+                            declared = [name | lowered <- units, name <- Set.toList (M.lowDeclared lowered), Map.member name (M.progFunctions (M.lowProgram lowered)), Map.notMember name (M.progBounded (M.lowProgram lowered))]
+                            typeNames = [name | lowered <- units, name <- Set.toList (M.lowDeclared lowered), Map.member name (M.progTypes (M.lowProgram lowered)) || Map.member name (M.progGenerics (M.lowProgram lowered))]
                             markers = [(name, source, top) | block <- Map.elems (M.fnBlocks (M.progMain raw)), M.Ghost _ (M.GhostFunction name source top) <- M.blockStatements block]
                             trapped = checker{M.progMain = (M.progMain checker){M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Unreachable)}}
                          in foldr (<>) Nothing
@@ -2086,15 +2099,14 @@ testPhase1Packages = TestList "testPhase1Packages"
             Error err -> Just err
             Ok compiled -> testAssertEq (map loadedNoPrelude (packageModules pkg)) [True, False]
                 <> testAssertTrue (case compiledModules compiled of
-                    dependency : user : [] -> null (compiledLibInterfaces dependency) && null (compiledLibUnits dependency)
-                        && not (null (compiledLibInterfaces user)) && not (null (compiledLibUnits user))
+                    dependency : user : [] -> null (compiledLibUnits dependency) && not (null (compiledLibUnits user))
                     _ -> False)
     , testCase "no-prelude source files receive no implicit library declaration seed" $
         case loadFromEntry (resolverFromFiles (phase1Files phase1Program)){resolverOptions = phase1Options} phase1Entry of
                 Left err -> Just err
                 Right (PackageResult pkg) -> case compileModules (packageSnapshot pkg) of
                     Error err -> Just err
-                    Ok compiled -> testAssertTrue (all (\modu -> null (compiledLibInterfaces modu) && null (compiledLibUnits modu)) (compiledModules compiled))
+                    Ok compiled -> testAssertTrue (all (null . compiledLibUnits) (compiledModules compiled))
                 Right _ -> Just "expected package"
     , testCase "a no-prelude package file is read without the String library" $
         case phase1Load phase1Options (phase1Files "s = \"hi\"; return size(s.bytes);") of

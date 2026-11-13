@@ -821,7 +821,7 @@ expressionTerm x e = case e of
         (start, rest) | start == prefix, (_ : _, after) <- span isDigit rest, " as " `isPrefixOf` after -> Just ("<$param " ++ xType x ++ "#" ++ show k ++ after)
         _ -> Nothing
 
--- The ghost lowering writes before a read of the pack, with the place in the source it is at (MirLower.markPackReads)
+-- The ghost lowering writes before a read of the pack, with the place in the source it is at (packReadMark in lib/elaborate/lowerbuild.tersus)
 placePrefix :: String
 placePrefix = "$pack read at "
 

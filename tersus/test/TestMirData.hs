@@ -8,26 +8,26 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Cli (Command (..), runSource)
-import Compile (elaborateStatements, ownNames, sourceRequest)
+import Compile (elaborateStatements, sourceRequest)
 import Differential (Unit (..), suiteUnits, toolPackages)
 import ElaborateRequest (LibraryAnswer (..), LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..))
 import ElaboratorTool (bootstrapLoader, sourceLoader)
-import LibPackage (libCatalog, libPackage, libSelection, withoutReplacedEq)
+import LibPackage (libCatalog, libPackage)
 import Lowering (lowerAccepted)
 import Mir
 import MirHousekeeping (validationEntry)
-import MirLower (lowerRaw)
 import MirMoves (finishLowered)
 import Modules (LoadResult (..))
 import qualified Modules as Mod
 import MirData
 import qualified PackageCompile as Package
-import PreludeSource (elaboratePackageFiles, libModules, nativeStorageModules, toolPackageFiles, validationPackageFiles)
+import PreludeSource (elaboratePackageFiles, libModules, toolPackageFiles, validationPackageFiles)
 import qualified Syntax as S
 import Pipeline (ownedSource, loadFromFilesystem)
 import Types (Arg (..), Size (..), Type (..), pattern TList, pattern TBox)
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)
+import TestVariadic (variadicPrograms)
 import Utils
 
 -- The MIR as data (`tersus mir --data`, MirData): what is written is read back as the same program, for every example and every program that
@@ -208,7 +208,7 @@ roundTripsNames =
             }
 
 -- A lowered unit as data (`tersus-mir 3`, MirData.writeLowered): every unit the compiler lowers from the corpus reads
--- back as the same unit, and the names and assumes it carries are what the host takes from the module's statements.
+-- back as the same unit, and the names it carries are those the module declares.
 -- Finishing a raw unit gives fixed MIR and errors, a unit with every kind of record round trips, broken copies of it
 -- are refused, and what the data cannot hold is refused by the writer.
 testMirLowered :: Test
@@ -218,6 +218,12 @@ testMirLowered =
         [ TestParallel
             "corpus"
             ( TestCase "examples" examplesLower
+                : TestCase "variadic functions" (unitsLower [SourceText ("variadic: " ++ name) source | (name, source) <- variadicPrograms ++ variadicLowering, name /= refusedVariadic])
+                : testCase "a define of a variadic function's pack is refused by the lowering" (case lookup refusedVariadic variadicLowering of
+                    Just source -> case fileLowering refusedVariadic source of
+                        Ok [(_, lowered)] -> testAssertErrorContains "Undefined variable: n" lowered
+                        other -> Just ("not one lowering: " ++ take 300 (show other))
+                    Nothing -> Just "no such program")
                 : TestCase "examples/modules" (unitsLower [FilePackage "examples/modules/app/main.tersus"])
                 : TestCase "compiler libraries" librariesLower
                 : [TestCase entry (unitsLower [EmbeddedPackage entry]) | entry <- loweredToolEntries]
@@ -281,9 +287,8 @@ examplesLower = do
             , result
             ]
 
--- One lowering the compiler makes of a unit, through Lowering.lowerAccepted: its module, what it gave, and the
--- module's statements as the elaborator gave them back
-type UnitLowering = (String, Result Lowered String, [S.Statement])
+-- One lowering the compiler takes from the elaborator, through Lowering.lowerAccepted: its module and what it gave
+type UnitLowering = (String, Result Lowered String)
 
 unitsLower :: [Unit] -> IO TestResult
 unitsLower units = do
@@ -302,7 +307,7 @@ librariesLower = do
         [ result
         , case libraryLowerings of
             Ok lowerings ->
-                let programs = [lowProgram raw | (_, Ok raw, _) <- lowerings]
+                let programs = [lowProgram raw | (_, Ok raw) <- lowerings]
                  in testAssertTrue (any (not . Map.null . progBounded) programs && any (not . Map.null . progInstances) programs)
             Error e -> Just e
         ]
@@ -313,19 +318,17 @@ unitLowerings unit = case unit of
     EmbeddedPackage entry -> pure (packageLowerings (embeddedFiles entry) entry)
     FilePackage entry -> (`packageLowerings` entry) <$> Mod.snapshotFromFilesystem entry
     Libraries -> pure libraryLowerings
-    SourceText label _ -> pure (Error ("not a unit of the corpus: " ++ label))
+    SourceText label source -> pure (fileLowering label source)
   where
     embeddedFiles entry
         | entry == validationEntry = validationPackageFiles
         | "lib/elaborate/" `isPrefixOf` entry = elaboratePackageFiles
         | otherwise = toolPackageFiles
 
--- A single file as Compile.lowerSourceUsing asks for it and lowers it; a refusal only where one is expected
+-- A single file as Compile.lowerSourceUsing asks for it; a refusal only where one is expected
 fileLowering :: String -> String -> Result [UnitLowering] String
 fileLowering label source = libPackage `bindResult` \pkg -> case (sourceLoader (sourceRequest LoadProgram False True (libCatalog pkg) source), lookup label expectedRefusals) of
-    (LoadedProgram response@(Accepted (S.Elaborated stmts _) _ selected), Nothing) ->
-        let ifaces = withoutReplacedEq stmts (if null selected then [] else fst (libSelection pkg selected))
-         in Ok [(label, lowerAccepted ifaces response, stmts)]
+    (LoadedProgram response@Accepted{}, Nothing) -> Ok [(label, lowerAccepted response)]
     (LoadedProgram Accepted{}, Just _) -> Error "accepted, but a refusal was expected"
     (answer, expected) -> case (refusal answer, expected) of
         (Just message, Just wanted)
@@ -348,36 +351,27 @@ packageLowerings files entry =
     Package.compileModulesUsing sourceLoader libPackage (Mod.Snapshot (Mod.resolverFromFiles files) entry False) `bindResult` \compiled ->
         case Package.compiledModules compiled of
             [] -> Error "a package without modules"
-            modules -> Ok [(Mod.renderModuleId (Package.compiledModuleId m), Package.compiledLowered m, Package.compiledStatements m) | m <- modules]
+            modules -> Ok [(Mod.renderModuleId (Package.compiledModuleId m), Package.compiledLowered m) | m <- modules]
 
--- As LibPackage lowers each library against the interfaces of the libraries it imports; every library answers
+-- As LibPackage takes each library's unit; every library answers
 libraryLowerings :: Result [UnitLowering] String
 libraryLowerings = case bootstrapLoader (LoadRequest LoadLibraries False (Mod.resolverFromFiles []) Nothing Mod.librarySources []) of
     LoadedLibraries answers Nothing
-        | sort [label | LibraryAnswer label _ _ _ <- answers] == sort [label | (label, _, _) <- libModules] -> libraries Map.empty answers
+        | sort [label | LibraryAnswer label _ _ _ <- answers] == sort [label | (label, _, _) <- libModules] -> libraries answers
         | otherwise -> Error "the libraries that answered are not PreludeSource.libModules"
     LoadedLibraries _ (Just e) -> Error e
     _ -> Error "the loader did not answer with the compiler libraries"
   where
-    libraries _ [] = Ok []
-    libraries known (LibraryAnswer label imports _ response : rest) = case response of
-        Accepted (S.Elaborated stmts _) (Just iface) _ ->
-            let known' = if label `elem` nativeStorageModules then known else Map.insert label iface known
-             in mapResult (("tersuslib::" ++ label, lowerAccepted [i | dep <- imports, Just i <- [Map.lookup dep known]] response, stmts) :) (libraries known' rest)
+    libraries [] = Ok []
+    libraries (LibraryAnswer label _ _ response : rest) = case response of
+        Accepted (Just _) _ _ -> mapResult (("tersuslib::" ++ label, lowerAccepted response) :) (libraries rest)
         _ -> Error ("library " ++ label ++ " was not accepted with an interface")
 
--- The lowering succeeded and round trips, and its names and assumes are those the callers take from the statements
--- today: a package module's by PackageCompile.moduleDeclaredNames, a single file's by Compile.ownNames
+-- The lowering succeeded and round trips
 checkLowering :: UnitLowering -> TestResult
-checkLowering (label, lowered, stmts) = fmap ((label ++ ": ") ++) $ case lowered of
+checkLowering (label, lowered) = fmap ((label ++ ": ") ++) $ case lowered of
     Error e -> Just ("lowering failed: " ++ e)
-    Ok raw ->
-        firstLowering
-            [ loweredRoundTrip raw
-            , if lowDeclared raw == Set.fromList (Package.moduleDeclaredNames stmts) then Nothing else Just ("declared is not PackageCompile.moduleDeclaredNames: " ++ show (Set.toList (lowDeclared raw)))
-            , if Set.union (lowDeclared raw) (lowNested raw) == Set.fromList (ownNames stmts) then Nothing else Just ("declared and nested are not Compile.ownNames: " ++ show (Set.toList (lowNested raw)))
-            , if lowAssumes raw == concatMap Package.assumesIn stmts then Nothing else Just "assumes are not PackageCompile.assumesIn"
-            ]
+    Ok raw -> loweredRoundTrip raw
 
 nestedProgram :: String
 nestedProgram = "fn outer(x: Int) -> Int { struct Hidden { n: Int }; return x; };\nreturn outer(0);"
@@ -385,18 +379,18 @@ nestedProgram = "fn outer(x: Int) -> Int { struct Hidden { n: Int }; return x; }
 nestedInPackage :: TestResult
 nestedInPackage = case packageLowerings [("app/package.tersus", ""), ("app/main.tersus", nestedProgram)] "app/main.tersus" of
     Error e -> Just e
-    Ok [lowering@(_, Ok raw, _)] -> firstLowering [checkLowering lowering, testAssertEq (lowDeclared raw, lowNested raw) (Set.fromList ["outer"], Set.fromList ["Hidden"])]
-    Ok other -> Just ("not one lowered module: " ++ show [label | (label, _, _) <- other])
+    Ok [lowering@(_, Ok raw)] -> firstLowering [checkLowering lowering, testAssertEq (lowDeclared raw, lowNested raw) (Set.fromList ["outer"], Set.fromList ["Hidden"])]
+    Ok other -> Just ("not one lowered module: " ++ show [label | (label, _) <- other])
 
 nestedInFile :: TestResult
 nestedInFile = case fileLowering "nested" nestedProgram of
     Error e -> Just e
-    Ok [lowering@(_, Ok raw, _)] -> firstLowering [checkLowering lowering, testAssertEq (lowDeclared raw, lowNested raw) (Set.fromList ["outer"], Set.fromList ["Hidden"])]
+    Ok [lowering@(_, Ok raw)] -> firstLowering [checkLowering lowering, testAssertEq (lowDeclared raw, lowNested raw) (Set.fromList ["outer"], Set.fromList ["Hidden"])]
     Ok _ -> Just "not one lowered program"
 
 finishedInstances :: TestResult
 finishedInstances = case fileLowering "instances" "struct Pair<T> { a: T, b: T };\np = Pair<Int> { a: 1, b: 2 };\nreturn p.a;" of
-    Ok [(_, Ok raw, _)] ->
+    Ok [(_, Ok raw)] ->
         firstLowering
             [ testAssertEq (Map.keys (progTypes (lowProgram raw))) []
             , testAssertTrue (any isPosition (concatMap blockStatements (allBlocks (lowProgram raw))))
@@ -414,7 +408,7 @@ finishedInstances = case fileLowering "instances" "struct Pair<T> { a: T, b: T }
                 , "}"
                 ]))
             ]
-    other -> Just ("not one lowered program: " ++ take 300 (show [(label, r) | Ok ls <- [other], (label, r, _) <- ls]))
+    other -> Just ("not one lowered program: " ++ take 300 (show [(label, r) | Ok ls <- [other], (label, r) <- ls]))
   where
     allBlocks program = concatMap (Map.elems . fnBlocks) (progMain program : Map.elems (progFunctions program))
     isPosition stmt = case stmt of
@@ -423,12 +417,12 @@ finishedInstances = case fileLowering "instances" "struct Pair<T> { a: T, b: T }
 
 finishedMoveError :: TestResult
 finishedMoveError = case fileLowering "moves" "x = [1];\ny = x;\nz = x;\nreturn size(z);" of
-    Ok [(_, Ok raw, _)] -> testAssertEq (mapResult renderProgram (finishLowered raw)) (Error "Move error: in main, line 3:1: x was moved at line 2:1 and cannot be used again: write clone(x) where it is moved to keep it")
+    Ok [(_, Ok raw)] -> testAssertEq (mapResult renderProgram (finishLowered raw)) (Error "Move error: in main, line 3:1: x was moved at line 2:1 and cannot be used again: write clone(x) where it is moved to keep it")
     _ -> Just "not one lowered program"
 
 finishedStubs :: TestResult
 finishedStubs = case packageLowerings files "app/main.tersus" of
-    Ok [(_, Ok _, _), (_, Ok raw, _)] ->
+    Ok [(_, Ok _), (_, Ok raw)] ->
         firstLowering
             [ testAssertEq (Set.toList (lowStubs raw), Map.keys (progFunctions (lowProgram raw))) (["app$util$util$twice"], ["app$util$util$twice"])
             , testAssertEq (mapResult renderProgram (finishLowered raw)) (Ok (unlines
@@ -447,11 +441,11 @@ finishedStubs = case packageLowerings files "app/main.tersus" of
   where
     files = [("app/package.tersus", ""), ("app/main.tersus", "import app::util::twice;\nreturn twice(2);"), ("app/util/util.tersus", "fn twice(x: Int) -> Int [{ }] [{ }] { return x + x; };")]
     either' r = case r of
-        Ok ls -> show [label | (label, _, _) <- ls]
+        Ok ls -> show [label | (label, _) <- ls]
         Error e -> e
 
 bigIntegerStatements :: TestResult
-bigIntegerStatements = case elaborateStatements [S.Return (S.Val (S.VInt (2 ^ (63 :: Int))))] `bindResult` lowerRaw [] of
+bigIntegerStatements = case elaborateStatements [S.Return (S.Val (S.VInt (2 ^ (63 :: Int))))] of
     Ok raw -> loweredRoundTrip raw
     Error e -> Just e
 
@@ -637,3 +631,19 @@ malformedLowered =
     duplicateFirst p ls = case break p ls of
         (before, l : after) -> before ++ l : l : after
         _ -> ls
+
+-- Variadic functions whose lowering the programs of TestVariadic do not reach: a borrow of an element at a number, a range
+-- loop past the pack, validation statements that read the pack, a pack loop after a return, and slices forwarded
+refusedVariadic :: String
+refusedVariadic = "validation statements that read the pack"
+
+variadicLowering :: [(String, String)]
+variadicLowering =
+    [ ("a borrow of an element at a number", "fn sz<T>(r: &T) -> Int { return 1; }; fn f<..T>(args: &..T) -> Int [{ affirm size(args) >= 1; }] [{ }] {\n    r = &get(args, 0);\n    return sz(r);\n};\nreturn f(1, true);")
+    , ("a range loop past the pack", "fn f<..T>(args: &..T) -> Int {\n    t = 0;\n    for i in 0..size(args) + 1 { t = t + i; };\n    return t;\n};\nreturn f(1, true);")
+    , ("validation statements that read the pack", "fn f<..T>(args: &..T) -> Int {\n    affirm size(args) >= 0;\n    define n = size(args);\n    return n;\n};\nreturn f(1, true);")
+    , ("a loop over the pack after a return", "fn f<..T>(args: &..T) -> Int {\n    return 0;\n    for a in args { };\n};\nreturn f(1);")
+    , ("a slice forwarded after a fixed argument", "fn g<..U>(k: Int, rest: &..U) -> Int { return k + size(rest); };\nfn f<..T>(args: &..T) -> Int [{ affirm size(args) >= 2; }] [{ }] {\n    return g(10, slice(args, 1, 2));\n};\nreturn f(1, true);")
+    , ("the head and the rest forwarded by value in one call", "fn eat<T>(x: T) -> Int { return 1; };\nfn g<A, ..U>(x: A, rest: ..U) -> Int { n = eat(x); for a in rest { n = n + eat(a); }; return n; };\nfn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] {\n    return g(get(args, 0), slice(args, 1, size(args)));\n};\nreturn f(push([], 1), push([], 2));")
+    , ("a forward in a loop over the pack", "fn g<..U>(rest: &..U) -> Int { return size(rest); };\nfn f<..T>(args: &..T) -> Int {\n    t = 0;\n    for i in 0..size(args) { t = t + g(slice(args, i, size(args))); };\n    return t;\n};\nreturn f(1, 2, 3);")
+    ]

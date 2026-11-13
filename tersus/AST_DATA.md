@@ -16,8 +16,6 @@ Haskell (`src/AstData.hs`):
 ```haskell
 writeParsed     :: [Statement] -> Result String String
 readParsed      :: String -> Result [Statement] String
-writeElaborated :: Elaborated -> Result String String
-readElaborated  :: String -> Result Elaborated String
 writeInterfaceRecord :: InterfaceRecord -> Result String String
 readInterfaceRecord  :: String -> Result InterfaceRecord String
 writeBuiltinTable    :: [BuiltinRecord] -> Result String String
@@ -32,12 +30,7 @@ readMirPayloadBytes  :: [ByteString] -> Result [Statement] String
 builtin table made from `BuiltinRegistry`.
 
 `writeParsed` writes the supplied syntax, including `Mark`s when the parser
-kept locations. It also handles the resolved syntax inside `Elaborated`, but
-use `writeElaborated` to retain its expression-occurrence types. That API
-preserves **both** `[Statement]` and the complete ordered `[Type]` of
-`Syntax.Elaborated`. The types remain in the lowering's visit order; the
-bridge neither infers them again nor claims to validate an elaborated program.
-A parsed reader refuses an elaborated header, and vice versa.
+kept locations.
 
 Tersus (`lib/data/reader/reader.tersus`, read by the entry of the
 `ast_reader` package, `lib/ast_reader/ast_reader.tersus`):
@@ -140,7 +133,9 @@ root 6
 ```
 
 An elaborated root is `Elaborated STATEMENTS TYPES`, where `TYPES` references
-the complete occurrence-type list. All other syntax node tags are their
+the complete occurrence-type list, in the order the lowering takes them. It is
+the elaborator's own arena, which its lowering reads; the host neither writes
+nor reads one. All other syntax node tags are their
 Haskell constructor names, with fields in constructor order. `FieldBuiltin`
 is the builtin `Field`; `Field` is the `(name, Type)` field declaration.
 `Bound`, `Variant`, `ValueField` and `Signature` follow their Haskell tuple or
@@ -309,9 +304,8 @@ against its signature and bounds alone and names its copy, which the copy step
 makes (LANGUAGE.md, Bounded types). Every program's functions with bounds are
 checked, the compiler libraries put in front of a single-file program included.
 
-The response is `tersus-elaborated 1` and then `accepted`, a `data` block of
-the elaborated syntax, `interface none` or `interface` with a `data` block of
-the interface, the module's MIR and, when the elaborator selected compiler libraries,
+The response is `tersus-elaborated 1` and then `accepted`, `interface none` or
+`interface` with a `data` block of the interface, the module's MIR and, when the elaborator selected compiler libraries,
 `libraries N "NAME"...`, which the compiler links; or `refused "MESSAGE"` (the module does not check),
 `unresolved "MESSAGE"` (its names do not resolve, or the libraries it calls for
 cannot be given it; the message is whole),
@@ -320,15 +314,15 @@ or `unmodelled "WHAT"` (the elaborator
 does not handle the program yet, which is no verdict on it).
 The MIR is `mir N` and the N lines of the module's lowered unit (`tersus-mir 3`,
 MIR.md, "Version 3", its payload block included), or `mir refused "MESSAGE"` when the
-lowering refuses the module, with the words of `MirLower`'s refusal
-(`lib/elaborate/lower.tersus` and its siblings). The elaborator lowers each module against
+lowering refuses the module (`lib/elaborate/lower.tersus` and its siblings), which is the
+compiler's lowering error, in those words. The elaborator lowers each module against
 the interfaces the compiler lowers it with: for a module request, the request's
 interfaces; for a program, the libraries it selected, in the libraries' order, without
 `eq` when the program declares a trait `Eq`; for a package module, the interfaces its
-answer names as `lowering`; for a compiler library, the libraries it imports. An answer
-without a `mir` section is read as before (the seed of an older elaborator writes none).
-The compiler still lowers with `MirLower`; only `testMirDifferential` reads the section,
-to compare the two.
+answer names as `lowering`; for a compiler library, the libraries it imports. The compiler
+reads the unit (`Lowering.lowerAccepted`) and finishes it (`MirMoves.finishLowered`); the
+names a module declares and its `assume`s, which it takes from the unit's `declared`,
+`nested` and `assumes` records, are all it needs of the module's statements.
 
 The compiler sends a module request itself only for a program it is given as statements
 (`Compile.lowerStatementsWith`); files, packages and the compiler libraries go as load requests (below), whose answers

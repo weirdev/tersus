@@ -137,7 +137,6 @@ library
       MirEval
       MirHousekeeping
       MirLists
-      MirLower
       MirMono
       MirMoves
       MirOwnershipData
@@ -345,7 +344,6 @@ test-suite tersus-test
       TestLibModules
       TestMirCopies
       TestMirData
-      TestMirDifferential
       TestMirEmit
       TestMirErase
       TestMirEval

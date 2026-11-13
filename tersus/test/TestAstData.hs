@@ -40,6 +40,8 @@ import Syntax
 import TestHarness
 import TestNative (clangAvailable, runExecutableBytes)
 import Compile (elaborateStatements)
+import Mir (Lowered)
+import MirData (readLowered, writeLowered)
 import ElaboratorTool (noVerdict)
 import Types
 import Utils
@@ -96,16 +98,10 @@ dataParsed ss = case A.writeParsed ss of
     Ok text -> text
     Error e -> error e
 
-dataElaborated :: Elaborated -> String
-dataElaborated tree = case A.writeElaborated tree of
-    Ok text -> text
-    Error e -> error e
-
 writerLimits :: TestResult
 writerLimits = firstFailure
     [ rejected (A.writeParsed [StructDef "TooBig" [] [("x", TArrayOf TInt (SizeConst (2 ^ (63 :: Int))))] []])
     , rejected (A.writeParsed [StructDef "TooSmall" [] [("x", TArrayOf TInt (SizeConst (negate (2 ^ (63 :: Int)) - 1)))] []])
-    , rejected (A.writeElaborated (Elaborated [] [TWord True 64]))
     , rejected (A.writeParsed [StructDef "TooLong" [] [("x", TNamed (replicate 1000000 'a') [])] []])
     ]
   where
@@ -122,15 +118,16 @@ roundTrip ss =
                 | text /= dataParsed back -> Just "reserialization changed"
                 | otherwise -> Nothing
 
-elaboratedRoundTrip :: Elaborated -> TestResult
-elaboratedRoundTrip e =
-    let text = dataElaborated e
-     in case A.readElaborated text of
-            Error err -> Just err
-            Ok back
-                | show e /= show back -> Just "elaborated syntax, occurrence types or builtin metadata changed"
-                | text /= dataElaborated back -> Just "elaborated reserialization changed"
-                | otherwise -> Nothing
+-- A unit the elaborator lowered, as `tersus-mir 3` (MirData), reads back as the same unit and writes the same text
+loweredRoundTrip :: Lowered -> TestResult
+loweredRoundTrip unit = case writeLowered unit of
+    Error err -> Just err
+    Ok text -> case readLowered text of
+        Error err -> Just err
+        Ok back
+            | back /= unit || show back /= show unit -> Just "the lowered unit or its builtin metadata changed"
+            | writeLowered back /= Ok text -> Just "the lowered unit's reserialization changed"
+            | otherwise -> Nothing
 
 knownParserRejection :: String -> String -> Bool
 knownParserRejection path message =
@@ -150,30 +147,25 @@ corpusHaskell batch = do
             Ok ss -> firstFailure [roundTrip ss, case elaborateStatements ss of
                 Error e | noVerdict e -> Just e
                 Error _ -> Nothing
-                Ok e -> elaboratedRoundTrip e]
+                Ok unit -> loweredRoundTrip unit]
         | (_, _, name, tree) <- samples
         ]
 
-toolElaborated :: FilePath -> Result [Elaborated] String
-toolElaborated entry = case Mod.loadFromEntry (Mod.resolverFromFiles (if entry == validationEntry then validationPackageFiles else toolPackageFiles)) entry of
+toolLowered :: FilePath -> Result [Lowered] String
+toolLowered entry = case Mod.loadFromEntry (Mod.resolverFromFiles (if entry == validationEntry then validationPackageFiles else toolPackageFiles)) entry of
     Left err -> Error err
     Right (Mod.PackageResult pkg) -> Package.compileModules (Mod.packageSnapshot pkg) `bindResult` \compiled ->
-        Ok (map Package.compiledElaborated (Package.compiledModules compiled))
+        mapM' Package.compiledLowered (Package.compiledModules compiled)
     Right _ -> Error "AST corpus tool is not a package"
+  where
+    mapM' f = foldr (\x rest -> f x `bindResult` \y -> mapResult (y :) rest) (Ok [])
 
-packageElaboratedRoundTrips :: IO TestResult
-packageElaboratedRoundTrips = pure $ firstFailure
-    [case toolElaborated entry of
+packageLoweredRoundTrips :: IO TestResult
+packageLoweredRoundTrips = pure $ firstFailure
+    [case toolLowered entry of
         Error err -> Just err
-        Ok modules -> firstFailure (map elaboratedRoundTrip modules)
+        Ok modules -> firstFailure (map loweredRoundTrip modules)
     | entry <- [readerPath, "lib/parser/parser.tersus", validationEntry]]
-
-nativeElaboratedPackages :: IO TestResult
-nativeElaboratedPackages = withAstReader $ \exe -> do
-    results <- forM [readerPath, "lib/parser/parser.tersus", validationEntry] $ \entry -> case toolElaborated entry of
-        Error err -> pure (Just err)
-        Ok modules -> firstFailure <$> mapM (nativeText exe . dataElaborated) modules
-    pure (firstFailure results)
 
 -- Every interface the compiler makes of the compiler's own packages and libraries
 toolInterfaces :: Result [ModuleInterface] String
@@ -566,21 +558,15 @@ nativeCorpus batch = withAstReader $ \exe -> do
         sources = [(name, tree) | (_, _, name, tree) <- samples]
     putStrLn ("AST native corpus samples: " ++ show [(unitIndex, fileIndex, name) | (unitIndex, fileIndex, name, _) <- samples])
     results <- forM sources $ \(name, tree) -> case tree of
-        Error e -> pure (if knownParserRejection name e then Nothing else Just (name ++ ": " ++ e), 0 :: Int, 0 :: Int)
+        Error e -> pure (if knownParserRejection name e then Nothing else Just (name ++ ": " ++ e), 0 :: Int)
         Ok ss -> do
             p <- nativeText exe (dataParsed ss)
-            (e, count) <- case elaborateStatements ss of
-                Error refusal | noVerdict refusal -> pure (Just (name ++ ": " ++ refusal), 0)
-                Error _ -> pure (Nothing, 0)
-                Ok tree -> do
-                    result <- nativeText exe (dataElaborated tree)
-                    pure (result, 1)
-            pure (prefix name (firstFailure [p, e]), count, 1)
+            pure (prefix name p, 1)
     let extras = batchItems 4 batch [small, fixtures, deep, longNames]
     extra <- mapM (nativeText exe . dataParsed) extras
-    let parsedCount = sum [n | (_, _, n) <- results]
-    putStrLn ("AST native corpus: " ++ show (length sources) ++ " sources, " ++ show parsedCount ++ " parsed, " ++ show (sum [n | (_, n, _) <- results]) ++ " elaborated wrappers, " ++ show (length sources - parsedCount) ++ " parser-rejected, " ++ show (length extras) ++ " constructor/depth/name fixtures in batch " ++ show batch ++ "/4")
-    pure (firstFailure ([result | (result, _, _) <- results] ++ extra))
+    let parsedCount = sum [n | (_, n) <- results]
+    putStrLn ("AST native corpus: " ++ show (length sources) ++ " sources, " ++ show parsedCount ++ " parsed, " ++ show (length sources - parsedCount) ++ " parser-rejected, " ++ show (length extras) ++ " constructor/depth/name fixtures in batch " ++ show batch ++ "/4")
+    pure (firstFailure ([result | (result, _) <- results] ++ extra))
 
 nativeChunkedIntegers :: IO TestResult
 nativeChunkedIntegers = withAstReader $ \exe -> do
@@ -615,15 +601,14 @@ testAstData = TestList "testAstData"
     [ testCase "checked writer refuses unsupported numeric and record sizes" writerLimits
     , testCase "all syntax constructors and builtins" (roundTrip fixtures)
     , testCase "builtin Eq hides metadata but serialization preserves it" metadata
-    , testCase "elaborated wrapper preserves occurrence types" (elaboratedRoundTrip (Elaborated fixtures types))
     , testCase "deep expression arena" (roundTrip deep)
     , testCase "long UTF-8 names are chunked" (firstFailure [roundTrip longNames, testAssertTrue (all ((< 10000) . length) (lines (dataParsed longNames)))])
     , TestList "chunked decimal integers" [testCase n (haskellChunkedInteger text expected) | (n, text, expected) <- chunkedIntegers]
     , TestList "malformed protocol" [testCase n (firstFailure [haskellAccepted control, haskellRefused bad]) | (n, control, bad) <- refusals]
-    , TestCase "packaged tools retain elaborated AST and occurrence types" packageElaboratedRoundTrips
+    , TestCase "the packaged tools' lowered units round trip as tersus-mir 3" packageLoweredRoundTrips
     , TestCase "module interfaces of the tools and libraries round trip, and malformed ones are refused" interfaceRoundTrips
     , TestCase "the builtin table is BuiltinRegistry's" builtinTableCurrent
-    , TestList "whole parsed and elaborated source corpus"
+    , TestList "whole parsed and lowered source corpus"
         [TestCase (show batch ++ "/4") (corpusHaskell batch) | batch <- [1 .. 4]]
     ]
 
@@ -637,7 +622,6 @@ testAstReader = TestList "testAstReader"
     , TestCase "native exact chunked decimal integers" nativeChunkedIntegers
     , TestCase "native malformed protocol" nativeRefusals
     , TestCase "native semantic mutation" nativeMutation
-    , TestCase "packaged elaborated tools native round trip" nativeElaboratedPackages
     , TestCase "interfaces and the builtin table native round trip" nativeInterfaces
     , TestList "whole corpus native round trip"
         [TestCase (show batch ++ "/4") (nativeCorpus batch) | batch <- [1 .. 4]]

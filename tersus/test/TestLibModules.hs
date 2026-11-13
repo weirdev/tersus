@@ -14,7 +14,8 @@ import PreludeSource (typesSource, eqSource, cloneSource, preludeSource, stringS
 import qualified Mir as M
 import ValidatorNative (validateCompiled, validateLibrary)
 import Interface (ModuleInterface (..))
-import MirLower (lowerModuleWith)
+import Lowering (lowerAccepted)
+import MirMoves (finishLowered)
 import ElaborateRequest (Extraction (..), Request (..), Response (..))
 import ElaboratorTool (sourceElaborator)
 import LibPackage (LibPackage (..), libPackage, libModuleId, libSelection, nativeStorageUnits)
@@ -202,8 +203,8 @@ testNativeStorageModules = TestList "testNativeStorageModules"
         let iface = libInterfaces pkg Map.! "types"
          in testAssertTrue (Set.null (ifDrops iface) && Map.null (ifFunctions iface))
     , testCase "implicit selection never reaches helper interfaces or units" $ inspectPackage $ \pkg ->
-        let (ifaces, units) = libSelection pkg ["types", "prelude", "string", "map", "set"]
-         in testAssertTrue (all (\name -> libModuleId name `notElem` map ifModule ifaces ++ map fst units) ["lists", "box"])
+        let units = libSelection pkg ["types", "prelude", "string", "map", "set"]
+         in testAssertTrue (all (\name -> libModuleId name `notElem` map fst units) ["lists", "box"])
     , testCase "each helper owns only its declared Drop implementation" $ inspectPackage $ \pkg ->
         testAssertEq [ifImpls (libInterfaces pkg Map.! name) | name <- ["lists", "box"]] [Set.singleton ("Drop", "List"), Set.singleton ("Drop", "Box")]
     , testCase "helper declarations use the authoritative type interfaces" $ inspectPackage $ \pkg ->
@@ -309,8 +310,8 @@ testNativeStorageModules = TestList "testNativeStorageModules"
             Left e -> Error (show e)
             Right (Parse.ParsedFile _ stmts, _) ->
                 case sourceElaborator (Request (Modules.ModuleId "fixture" Nothing) True False LibInterfaceOf ifaces [] [] [stmts]) of
-                    Accepted elaborated (Just iface) _ -> lowerModuleWith ifaces elaborated `bindResult` \p -> Ok (iface, p)
-                    Accepted _ Nothing _ -> Error "the elaborator gave no interface"
+                    response@(Accepted (Just iface) _ _) -> lowerAccepted response `bindResult` finishLowered `bindResult` \p -> Ok (iface, p)
+                    Accepted Nothing _ _ -> Error "the elaborator gave no interface"
                     Refused e -> Error e
                     RefusedInterface e -> Error e
                     Unresolved e -> Error e

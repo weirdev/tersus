@@ -9,7 +9,7 @@ import qualified Interface as I
 import Link (linkPrograms)
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
-import MirLower (lowerModuleWith)
+import MirMoves (finishLowered)
 import qualified Modules as Mod
 import qualified PackageCompile as Package
 import ParsedFile (ParsedFile (..))
@@ -385,9 +385,7 @@ supportUnitIdentity (loaded, compiled, _) = inspect (lowerSupportUnit loaded com
 lowerSupportUnit :: Mod.LoadedPackage -> Package.CompiledPackage -> Result (Mod.ModuleId, M.Program) String
 lowerSupportUnit loaded compiled =
     case ([m | m <- Mod.packageModules loaded, Mod.loadedModuleId m == supportId], [m | m <- Package.compiledModules compiled, Package.compiledModuleId m == supportId]) of
-        ([source], [modu]) ->
-            let ifaces = Package.compiledLibInterfaces modu ++ map (`interfaceOf` compiled) (Mod.loadedDependencies source)
-             in mapResult ((,) supportId) (lowerModuleWith ifaces (Package.compiledElaborated modu))
+        ([_], [modu]) -> mapResult ((,) supportId) (Package.compiledLowered modu `bindResult` finishLowered)
         _ -> Error "expected one loaded and compiled support unit"
 
 call :: Result (Mod.LoadedPackage, Package.CompiledPackage, M.Program) String -> String -> [MirValue] -> MirValue -> TestResult

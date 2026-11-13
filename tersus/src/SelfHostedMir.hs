@@ -564,7 +564,7 @@ expandDefinitions = go Map.empty
     go subst (ProofAssert p : rest) = ProofAssert (substituteProof subst p) : go subst rest
     go subst (other : rest) = other : go subst rest
 
--- The program's own statements, which MirLower names main (no function of
+-- The program's own statements, which the lowering names main (no function of
 -- the program can have that name)
 isProgramMain :: M.Function -> Bool
 isProgramMain fn = M.fnName fn == "main" && null (M.fnParams fn)

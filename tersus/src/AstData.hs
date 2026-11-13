@@ -3,11 +3,6 @@ module AstData
     , writeParsedLines
     , readParsed
     , readParsedLines
-    , writeElaborated
-    , writeElaboratedLines
-    , readElaborated
-    , readElaboratedLines
-    , readElaboratedBytes
     , writeMirPayloadLines
     , readMirPayloadBytes
     , InterfaceRecord (..)
@@ -111,15 +106,6 @@ writeParsed = mapResult unlines . writeParsedLines
 writeParsedLines :: [Statement] -> Result [String] String
 writeParsedLines ss = finish "parsed" (putStatements ss (0, []))
 
-writeElaborated :: Elaborated -> Result String String
-writeElaborated = mapResult unlines . writeElaboratedLines
-
-writeElaboratedLines :: Elaborated -> Result [String] String
-writeElaboratedLines (Elaborated ss ts) =
-    let (s, b) = putStatements ss (0, [])
-        (t, b') = putTypes ts b
-     in finish "elaborated" (emit "Elaborated" [show s, show t] b')
-
 -- The validator's payloads of a lowered unit (MirData.writeLowered), each one statement
 writeMirPayloadLines :: [Statement] -> Result [String] String
 writeMirPayloadLines ss = finish "mir" (putStatements ss (0, []))
@@ -179,7 +165,7 @@ fixedBuiltins = [(show b, b) | entry <- builtinRegistry, b <- entryInstances ent
         Rel{} -> True
         _ -> False
 
-data Node = NName String | NType Type | NSize Size | NElaborated Elaborated
+data Node = NName String | NType Type | NSize Size
     | NValue (Value)
     | NBody (FunctBody)
     | NExpression (Expression)
@@ -804,20 +790,6 @@ readParsedLines ls = decode "parsed" ls `bindResult` \n -> case n of
     NStatements ss -> Ok ss
     _ -> Error "AstData: wrong root kind"
 
-readElaborated :: String -> Result Elaborated String
-readElaborated = readElaboratedLines . lines
-
-readElaboratedLines :: [String] -> Result Elaborated String
-readElaboratedLines ls = decode "elaborated" ls `bindResult` elaboratedRoot
-
-readElaboratedBytes :: [B.ByteString] -> Result Elaborated String
-readElaboratedBytes ls = decodeBytes "elaborated" ls `bindResult` elaboratedRoot
-
-elaboratedRoot :: Node -> Result Elaborated String
-elaboratedRoot n = case n of
-    NElaborated e -> Ok e
-    _ -> Error "AstData: wrong root kind"
-
 readMirPayloadBytes :: [B.ByteString] -> Result [Statement] String
 readMirPayloadBytes ls = decodeBytes "mir" ls `bindResult` \n -> case n of
     NStatements ss -> Ok ss
@@ -888,11 +860,6 @@ nodeParsers = Map.fromList
         case lookup n fixedBuiltins of
             Just b -> pure (NBuiltin b, [])
             _ -> failP "AstData: unknown primitive"
-      )
-    , ("Elaborated", \nodes -> do
-        (ss, s) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
-        (ts, t) <- ref nodes (\node -> case node of NTypes payload -> Just payload; _ -> Nothing)
-        pure (NElaborated (Elaborated ss ts), [s, t])
       )
     , ("VInt", \nodes -> do
         (n, r0) <- ref nodes (\node -> case node of NName payload -> Just payload; _ -> Nothing)

@@ -1,5 +1,5 @@
 import data::reader::reader { nodeRefs };
-import data::ast::ast { AstEntries, AstEntry, AstInterface, AstOptNames, AstOptType, AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram };
+import data::ast::ast { AstEntries, AstScheme, AstEntry, AstInterface, AstOptNames, AstOptType, AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram };
 
 // An arena's records reachable from a root, renumbered into the order AstData writes them: each record after the
 // records it refers to, and a list as its end record and then each element (with its records) and its link, last
@@ -337,7 +337,7 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
     if node is AstNode::ValueField || node is AstNode::Elaborated || node is AstNode::Names || node is AstNode::Values || node is AstNode::Statements || node is AstNode::Expressions { return remapNode4(node, map); };
     if node is AstNode::Validations || node is AstNode::Proofs || node is AstNode::Fields || node is AstNode::Variants || node is AstNode::ValueFields || node is AstNode::Types { return remapNode5(node, map); };
     if node is AstNode::Args || node is AstNode::TraitFns || node is AstNode::Bounds || node is AstNode::Entries || node is AstNode::OptNames || node is AstNode::OptType { return remapNode6(node, map); };
-    if node is AstNode::Entry || node is AstNode::Interface { return remapNode7(node, map); };
+    if node is AstNode::Entry || node is AstNode::Interface || node is AstNode::Scheme { return remapNode7(node, map); };
     return node;
 };
 
@@ -543,6 +543,14 @@ fn remapNode7(node: AstNode, map: &List<Int>) -> AstNode ~ {
             copies: intAtOr(map, v.copies, v.copies), linear: intAtOr(map, v.linear, v.linear), drops: intAtOr(map, v.drops, v.drops),
             axioms: intAtOr(map, v.axioms, v.axioms), proofs: intAtOr(map, v.proofs, v.proofs), externs: intAtOr(map, v.externs, v.externs),
             templates: intAtOr(map, v.templates, v.templates), companions: intAtOr(map, v.companions, v.companions) } };
+    };
+    if node is AstNode::Scheme {
+        v = clone((node as AstNode::Scheme).value);
+        match v {
+            AstScheme::SigFn { ts: ts, ret: ret } => { result = AstNode::Scheme { value: AstScheme::SigFn { ts: intAtOr(map, ts, ts), ret: intAtOr(map, ret, ret) } }; },
+            AstScheme::SigDynamic => { result = clone(node); },
+            AstScheme::SigValueError { n: n } => { result = AstNode::Scheme { value: AstScheme::SigValueError { n: intAtOr(map, n, n) } }; },
+        };
     };
     return result;
 };

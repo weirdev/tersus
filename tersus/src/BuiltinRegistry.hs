@@ -43,7 +43,7 @@ import Syntax
 -- is in scope when the text would be parsed) likewise have no parsed form that is the term the
 -- validator works with. Those contracts therefore stay as Haskell terms, inside this same registry.
 -- Adding a builtin is one entry here (and, for a ParsedContract, its `builtin fn` declaration in
--- lib/stdlib.tersus) plus its runtime semantics (StdLib.evalBuiltinFunct, the lowering in MirLower
+-- lib/stdlib.tersus) plus its runtime semantics (StdLib.evalBuiltinFunct, the lowering in lib/elaborate/lowerexpr.tersus
 -- and the MIR operations), which key off the same constructor.
 
 data BuiltinKind

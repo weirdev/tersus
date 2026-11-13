@@ -2,17 +2,18 @@ module Compile
     ( SourceParts, parseSource, parseSourceParts, parseSourcePartsNoPrelude, parseWithEquality, parseWithEqualityUsing
     , lowerSource, lowerSourceNoPrelude, lowerSourceUsing
     , lowerStatements, lowerStatementsWith, elaborateStatements, completeSpecEnvs
-    , sourceRequest, ownNames
+    , sourceRequest
     ) where
 
+import qualified Data.Set as Set
 import qualified Mir as M
 import Lowering (finishProgram, lowerAccepted)
 import MirMoves (finishLowered)
-import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits, withoutReplacedEq)
+import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits)
 import Link (linkPrograms, completeSpecEnvs)
 import PackageData (ModuleId (..), LoadOptions (..), Resolver (..), defaultLoadOptions, resolverFromFiles)
-import Syntax (Elaborated (..), Expression (..), FunctBody (..), Statement (..), Value (..))
-import ElaborateRequest (Elaborator, Extraction (..), Library, LoadKind (..), LoadRequest (..), LoadResponse (..), Request (..), Response (..), acceptedElaboration)
+import Syntax (Statement)
+import ElaborateRequest (Elaborator, Extraction (..), Library, LoadKind (..), LoadRequest (..), LoadResponse (..), Request (..), Response (..), acceptedResponse)
 import ElaboratorTool (Loader, sourceElaborator, sourceLoader)
 import Modules (librarySources)
 import Utils
@@ -64,31 +65,23 @@ lowerSourceUsing loader noPrelude' reserving source = catalog `bindResult` \libr
     NotLoaded e -> Error e
     LoadedProgram (Unresolved err) -> Error err
     LoadedProgram response ->
-        stage "Validation failed: " (acceptedElaboration response) `bindResult` \(Elaborated stmts _) ->
-            selection (selectedOf response) `bindResult` \(ifaces, units) ->
-                stage "Lowering failed: " (lowerAccepted (withoutReplacedEq stmts ifaces) response `bindResult` finishLowered) `bindResult` \entryProgram ->
-                    linkPrograms (stripDeclaredFromUnits (ownNames stmts) units ++ [(mainModule, entryProgram)])
+        stage "Validation failed: " (acceptedResponse response) `bindResult` \_ ->
+            selection (selectedOf response) `bindResult` \units ->
+                stage "Lowering failed: " (lowerAccepted response `bindResult` \lowered -> mapResult ((,) lowered) (finishLowered lowered)) `bindResult` \(lowered, entryProgram) ->
+                    linkPrograms (stripDeclaredFromUnits (ownNames lowered) units ++ [(mainModule, entryProgram)])
     _ -> Error "internal: the loader did not answer with the program's elaboration"
   where
     selectedOf response = case response of
-        Accepted _ _ selected -> selected
+        Accepted _ selected _ -> selected
         _ -> []
-    selection [] = Ok ([], [])
+    selection [] = Ok []
     selection selected = mapResult (`libSelection` selected) libPackage
     catalog = if noPrelude' then Ok [] else mapResult libCatalog libPackage
 
--- The functions an elaborated program defines at the top, those with bounds and the functions of its impls included
-elaboratedFunctions :: Elaborated -> [String]
-elaboratedFunctions (Elaborated stmts _) = concatMap defined stmts
-  where
-    defined stmt = case stmt of
-        Assign name (Val VFunct{}) -> [name]
-        BoundedDef _ inner -> defined inner
-        _ -> []
-
--- The names a single file declares, which the library units linked with it do not declare again
-ownNames :: [Statement] -> [String]
-ownNames stmts = concatMap declaredNames stmts ++ concatMap definedFunctionNames stmts
+-- The names a single file declares, wherever it declares them, which the library units linked with it do not declare
+-- again
+ownNames :: M.Lowered -> [String]
+ownNames lowered = Set.toList (Set.union (M.lowDeclared lowered) (M.lowNested lowered))
 
 mainModule :: ModuleId
 mainModule = ModuleId "main" Nothing
@@ -98,10 +91,11 @@ lowerStatements = lowerStatementsWith sourceElaborator
 
 -- A program as given, with no libraries in front of it
 lowerStatementsWith :: Elaborator -> [Statement] -> Result M.Program String
-lowerStatementsWith elaborator stmts = lowerAccepted [] (elaborator (statementsRequest stmts)) `bindResult` finishProgram
+lowerStatementsWith elaborator stmts = lowerAccepted (elaborator (statementsRequest stmts)) `bindResult` finishProgram
 
-elaborateStatements :: [Statement] -> Result Elaborated String
-elaborateStatements stmts = acceptedElaboration (sourceElaborator (statementsRequest stmts))
+-- The unit the elaborator lowers a program given as statements to, not finished
+elaborateStatements :: [Statement] -> Result M.Lowered String
+elaborateStatements stmts = lowerAccepted (sourceElaborator (statementsRequest stmts))
 
 statementsRequest :: [Statement] -> Request
 statementsRequest stmts = Request mainModule False False NoInterface [] [] [] [stmts]
@@ -109,27 +103,3 @@ statementsRequest stmts = Request mainModule False False NoInterface [] [] [] [s
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a
 stage prefix (Error e) = Error (prefix ++ e)
-
--- The names a program declares as a struct, an enum or a trait, wherever it declares them
-declaredNames :: Statement -> [String]
-declaredNames stmt = case stmt of
-    StructDef name _ _ _ -> [name]
-    EnumDef name _ -> [name]
-    TraitDef name _ _ -> [name]
-    Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> concatMap declaredNames body
-    Block body -> concatMap declaredNames body
-    If _ yes no -> concatMap declaredNames (yes ++ no)
-    While _ _ _ body -> concatMap declaredNames body
-    PackLoop _ _ _ _ _ _ body -> concatMap declaredNames body
-    ImplDef _ _ _ _ _ body -> concatMap declaredNames body
-    BoundedDef _ inner -> declaredNames inner
-    _ -> []
-
--- The functions a program defines at its top, in its impls included
-definedFunctionNames :: Statement -> [String]
-definedFunctionNames stmt = case stmt of
-    Assign name (Val VFunct{}) -> [name]
-    ImplDef _ _ _ _ _ body -> concatMap definedFunctionNames body
-    BoundedDef _ inner -> definedFunctionNames inner
-    _ -> []
-

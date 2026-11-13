@@ -90,8 +90,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     (`resolve.tersus`, `rewrite.tersus`), selects the compiler libraries a
     program or module is given (`libraries.tersus`), and lowers each module it
     accepts to its MIR (`lower.tersus` and the `lower*.tersus` files beside
-    it), which its answer carries beside the elaborated program; the compiler
-    still lowers with `MirLower` and only compares the two.
+    it), which its answer carries and the compiler finishes
+    (`Lowering`, `MirMoves.finishLowered`).
     Its declarative sibling files are one root module with `elaborate.tersus`
     as the entry. `PreludeSource.elaboratePackageFiles` embeds it. The compiler
     runs the pinned seed F0 built from it (`ElaboratorTool`), or stage 1 built
@@ -138,8 +138,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`,
   `TestCopies`, `TestEq`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
   `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
-  `TestMirEmit`, `TestBootstrap`, `TestFrontendBootstrap`, `TestParity`, `TestAstData`, `TestMirDifferential`
-  (the elaborator's MIR against the Haskell lowering), `TestDifferential`
+  `TestMirEmit`, `TestBootstrap`, `TestFrontendBootstrap`, `TestParity`, `TestAstData`, `TestDifferential`
   (the request recorder of `test/Differential.hs`, which also compares another
   elaborator with the compiler's) and `TestElaborate` (the opt-in mutation
   control), with the shared harness in `TestHarness`.

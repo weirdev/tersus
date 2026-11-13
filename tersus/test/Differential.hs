@@ -32,7 +32,8 @@ import Data.List (isPrefixOf, isSuffixOf, sort)
 import System.Directory (listDirectory)
 import System.IO.Unsafe (unsafePerformIO)
 
-import AstData (writeElaborated)
+import qualified Data.ByteString.Char8 as B
+
 import Bootstrap (llvmOfOwned)
 import Compile (lowerSourceUsing, lowerStatementsWith, parseWithEqualityUsing)
 import ElaborateRequest
@@ -173,8 +174,8 @@ compareAnswers reference candidate
 compareResponses :: Response -> Response -> Outcome
 compareResponses reference candidate = case (reference, candidate) of
     (_, NotModelled what) -> NotModelledBy what
-    (Accepted e i ls, Accepted e' i' ls')
-        | e /= e' -> Disagree ("elaborations differ" ++ firstDifference (writeElaborated e) (writeElaborated e'))
+    (Accepted i ls m, Accepted i' ls' m')
+        | mirText m /= mirText m' -> Disagree ("MIR differs" ++ firstDifference (Ok (mirText m)) (Ok (mirText m')))
         | i /= i' -> Disagree ("interfaces differ" ++ firstDifference (maybeText i) (maybeText i'))
         | ls /= ls' -> Disagree ("selected libraries differ: " ++ unwords ls ++ " / " ++ unwords ls')
         | otherwise -> Agree
@@ -184,8 +185,11 @@ compareResponses reference candidate = case (reference, candidate) of
     _ -> Disagree ("verdicts differ: " ++ verdict reference ++ " / " ++ verdict candidate)
   where
     maybeText = maybe (Ok "none") writeInterface
+    mirText mir = case mir of
+        MirLowered ls -> B.unpack (B.unlines ls)
+        MirRefused message -> "refused " ++ message
     verdict r = case r of
-        Accepted _ _ _ -> "accepted"
+        Accepted{} -> "accepted"
         Refused m -> "refused: " ++ m
         Unresolved m -> "unresolved: " ++ m
         RefusedInterface m -> "interface refused: " ++ m
@@ -261,4 +265,4 @@ noAnswer response = case response of
     RefusedInterface message -> noVerdict message
     NotModelled _ -> True
     Unresolved _ -> False
-    Accepted _ _ _ -> False
+    Accepted{} -> False

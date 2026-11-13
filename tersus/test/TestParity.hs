@@ -16,7 +16,6 @@ import System.IO.Unsafe (unsafePerformIO)
 import Cli (World (..), noWorld, runProgramIn)
 import qualified Mir as M
 import MirData (forNative, readProgram, writeProgram)
-import MirLower (lowerElaborated)
 import ValidatorNative (validateCompiled)
 import MirHousekeeping (eraseGhosts, storageProgram, validationEntry)
 import Compile (lowerSource)
@@ -28,7 +27,7 @@ import TestHarness
 import TestMirReader (sameText)
 import TestNative (validatedPrograms)
 import TestPipeline (exampleExpectations)
-import Compile (elaborateStatements)
+import Compile (lowerStatements)
 import Types
 import Utils
 
@@ -102,7 +101,7 @@ sourceContainerCapabilities = TestList "logical container layouts"
              in testAssertEq (Map.lookup "List" (M.progGenerics (sourceContainerView custom))) (Just (["T"], [("item", TParam "T")])))
     ]
   where
-    lower source = parseSource source `bindResult` elaborateStatements `bindResult` lowerElaborated
+    lower source = parseSource source `bindResult` lowerStatements
     eligible source expected = case lower source of
         Error e -> Just e
         Ok program -> testAssertEq (unsupportedReason program == Nothing) expected
@@ -303,7 +302,7 @@ validationTimeoutMicros :: Int
 validationTimeoutMicros = 10000000
 
 lower :: String -> Result M.Program String
-lower source = parseSource source `bindResult` elaborateStatements `bindResult` lowerElaborated
+lower source = parseSource source `bindResult` lowerStatements
 
 readerCase :: ParityCase -> IO TestResult
 readerCase parityCase = do

@@ -600,8 +600,7 @@ fn printAnswer(a: &Answer) -> Int ~ {
 fn printAnswerBody(a: &Answer) -> Int ~ {
     n = 0;
     if a.status = 0 {
-        n = n + "accepted\ndata".print() + printIntWord(size(a.out.nodes) + 2) + "\n".print();
-        n = n + printAst(&a.out);
+        n = n + "accepted\n".print();
         if !a.extracting { n = n + "interface none\n".print(); } else {
             n = n + "interface\ndata".print() + printIntWord(size(a.iface.nodes) + 2) + "\n".print();
             n = n + printAst(&a.iface);
@@ -620,8 +619,7 @@ fn printAnswerBody(a: &Answer) -> Int ~ {
 
 // The module's MIR (`mir N` and its lines, AST_DATA.md), or why it does not lower
 fn printMir(a: &Answer) -> Int ~ {
-    if a.lowered = 2 { return "mir refused ".print() + printQuoted(&a.mir.msg) + "\n".print(); };
-    if a.lowered != 1 { return 0; };
+    if a.lowered != 1 { return "mir refused ".print() + printQuoted(&a.mir.msg) + "\n".print(); };
     count = size(a.mir.payload.nodes) + 2;
     n = "mir".print() + printIntWord(size(a.mir.lines) + 1 + count) + "\n".print();
     for l in &a.mir.lines { n = n + l.print() + "\n".print(); };

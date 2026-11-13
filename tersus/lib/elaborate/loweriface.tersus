@@ -6,7 +6,7 @@ import elaborate::lowerstate { GenericRec, LBlock, LDecl, LFn, LowSt, TDecl, Ter
 import elaborate::lowerbuild { emptyBlockPayload, isFunct, namesOf, stmtAt, terminationPayload, valOf, validationsPayload };
 import elaborate::lower { fieldsTokens };
 
-// What a module is lowered against (MirLower.seededModuleState): the structs, enums, structs with sizes and
+// What a module is lowered against: the structs, enums, structs with sizes and
 // invariants of the interfaces it is lowered with (the first interface wins a name; the module's own declarations win
 // over all), their Copy, linear and drop marks, and each imported function as a stub (the last interface wins a
 // name), which the unit carries until the host finishes it.

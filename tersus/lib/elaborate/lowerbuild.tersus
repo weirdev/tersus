@@ -467,7 +467,7 @@ fn packParamName(ls: &LowSt, pack: Int) -> String ~ {
     return clone(d.name);
 };
 
-// Whether a statement reads the pack (MirLower.markPackReads): a field of it at a number, an element at an index, or a borrow
+// Whether a statement reads the pack: a field of it at a number, an element at an index, or a borrow
 // of either
 fn readsPack(s: &Stmt, pack: Int) -> Bool ~ {
     if s.k = 2 { return s.c = pack && s.name = "$pack" && s.text = lwCat("copy ", intText(pack)); };
@@ -500,7 +500,7 @@ fn firstWords(text: &String, n: Int) -> List<String> ~ {
     return out;
 };
 
-// Whether a validation statement of the program names the pack (MirLower.markPackReads)
+// Whether a validation statement of the program names the pack
 fn validationReadsPack(ls: &LowSt, src: &List<AstNode>, s: Int) -> Bool ~ {
     pack = packLocalOf(ls);
     if pack < 0 { return false; };
@@ -674,7 +674,7 @@ fn findRefTarget(ls: &LowSt, l: Int) -> Int ~ {
     return 0 - 1;
 };
 
-// What the names visible here stand for (MirLower.visibleEnv), as a new environment (ls.id): the locals of the
+// What the names visible here stand for, as a new environment (ls.id): the locals of the
 // scopes, the innermost first, and the functions defined at the top. The functions are a shared part, kept once for
 // each set of them.
 fn visibleEnv(ls: LowSt) -> LowSt ~ {
