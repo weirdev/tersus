@@ -13,6 +13,7 @@ import qualified Data.Set as Set
 
 import BuiltinRegistry (methodBuiltinByName)
 import Mir
+import MirPacks (Expanded (..), expandPack, isPackName)
 import Pretty (renderType)
 import StdLib (builtinFunct)
 import Syntax (Expression (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof)
@@ -63,7 +64,7 @@ makeCopies program
     lifted = Set.fromList (concatMap boundedLifted (Map.elems generics))
     named = Map.fromList [(key, name) | (name, (f, args)) <- Map.toList (progInstances program), Just key <- [concreteKey program f args]]
     roots = [fn | fn <- Map.elems (progFunctions program), fnName fn `Map.notMember` generics, fnName fn `Set.notMember` lifted]
-    rootCx = Cx program named [] [] Map.empty "" [] Map.empty Map.empty
+    rootCx = Cx program named [] [] Map.empty "" [] Map.empty Map.empty Map.empty Map.empty
     run = do
         (rootsDone, needs1) <- transformAll rootCx roots
         (mainDone, needs2) <- transformAll rootCx [progMain program]
@@ -82,6 +83,8 @@ data Cx = Cx
     , cxChain :: [(Name, Int)]
     , cxRenames :: Map Name Name -- the struct instances the function being copied names (`Pair<'T>`), with the copy's types put in
     , cxGeneric :: Map Local LocalDecl -- the locals of the function being copied, with their types as it has them
+    , cxBlockTypes :: Map BlockId [(Variable, Type)] -- in a copy of a variadic function, the element types each block binds besides cxTypes
+    , cxLocalTypes :: Map Local [(Variable, Type)] -- and each local
     }
 
 -- A queued copy and the copies around it (its chain, for the growth refusal)
@@ -106,14 +109,25 @@ build program named ((key@(f, tys, sizes), chain) : rest) done made
             case [() | (g, b) <- chain, g == f, b <= bigness] of
                 _ : _ -> Left ("Type error: " ++ f ++ " calls itself with the types " ++ intercalate ", " (map renderType tys) ++ ", which are not those it is made for: a function with bounds is made for each type, and one that is made for a bigger type at each call would never end")
                 [] -> Right ()
-            if length tys /= length (fnTypeParams generic) || length sizes /= length (boundedSizes bounded)
+            let packs = filter isPackName (fnTypeParams generic)
+                fixed = filter (not . isPackName) (fnTypeParams generic)
+                arityOk = if null packs then length tys == length (fnTypeParams generic) else length tys >= length fixed
+            if not arityOk || length sizes /= length (boundedSizes bounded)
                 then Left ("internal compiler error: " ++ name ++ " gives " ++ f ++ " " ++ show (length tys) ++ " types and " ++ show (length sizes) ++ " sizes, and it has " ++ show (length (fnTypeParams generic)) ++ " and " ++ show (length (boundedSizes bounded)))
                 else Right ()
+            -- (a variadic function is expanded for the number of its arguments first: MirPacks)
+            (body, blockTypes, localTypes, typeArgs) <- case packs of
+                [pack] -> do
+                    let elements = drop (length fixed) tys
+                        bind indexes = [(v, elements !! fromInteger k) | (v, k) <- Map.toList indexes, k >= 0, k < toInteger (length elements)]
+                    Expanded expanded blockIndexes localIndexes <- expandPack bounded pack (toInteger (length elements)) generic
+                    Right (expanded, Map.map bind blockIndexes, Map.map bind localIndexes, zip fixed tys ++ [(pack ++ "#" ++ show k, t) | (k, t) <- zip [0 :: Int ..] elements])
+                _ -> Right (generic, Map.empty, Map.empty, zip (fnTypeParams generic) tys)
             let liftedNames = Map.fromList [(l, name ++ drop (length f) l) | l <- boundedLifted bounded]
-                cx = Cx program named (zip (fnTypeParams generic) tys) (zip (boundedSizes bounded) sizes) liftedNames name (chain ++ [(f, bigness)]) Map.empty Map.empty
-            (copy, needs) <- transformFunction cx generic
+                cx = Cx program named typeArgs (zip (boundedSizes bounded) sizes) liftedNames name (chain ++ [(f, bigness)]) Map.empty Map.empty blockTypes localTypes
+            (copy, needs) <- transformFunction cx body
             liftedCopies <- mapM (\l -> maybe (Left ("internal compiler error: " ++ f ++ " lifts " ++ l ++ ", which the program does not have")) (transformFunction cx) (Map.lookup l (progFunctions program))) (boundedLifted bounded)
-            frameRefusal program f name generic copy
+            frameRefusal program f name body copy
             mapM_ (\(g, c) -> frameRefusal program f name g c) (zip [g | l <- boundedLifted bounded, Just g <- [Map.lookup l (progFunctions program)]] (map fst liftedCopies))
             -- (the check of an impl function against its trait is made with each copy of it, as the trait's contract is
             -- met by each copy)
@@ -250,10 +264,13 @@ transformFunction :: Cx -> Function -> Either String (Function, [Need])
 transformFunction cx0 fn = do
     -- (a function lifted out of the body has the copy's types and bounded sizes, but not those its own parameters hide)
     let lifted = Map.member (fnName fn) (cxLifted cx0)
-        cx1 = if lifted then cx0{cxTypes = [(n, t) | (n, t) <- cxTypes cx0, n `notElem` fnTypeParams fn], cxSizes = [(n, c) | (n, c) <- cxSizes cx0, n `notElem` fnSizeParams fn]} else cx0
+        cx1 = if lifted then cx0{cxTypes = [(n, t) | (n, t) <- cxTypes cx0, n `notElem` fnTypeParams fn], cxSizes = [(n, c) | (n, c) <- cxSizes cx0, n `notElem` fnSizeParams fn], cxBlockTypes = Map.empty, cxLocalTypes = Map.empty} else cx0
         cx = cx1{cxRenames = renamesOf cx1 fn, cxGeneric = fnLocals fn}
         types = typeIn cx
-        locals = Map.map (\d -> d{localType = types (localType d)}) (fnLocals fn)
+        localType' l d = case Map.lookup l (cxLocalTypes cx) of
+            Just extra | not (null extra) -> typeIn cx{cxTypes = extra ++ cxTypes cx} (localType d)
+            _ -> types (localType d)
+        locals = Map.mapWithKey (\l d -> d{localType = localType' l d}) (fnLocals fn)
         sizeLocals = drop (length (fnParams fn) - length (fnSizeParams fn)) (fnParams fn)
         constants = Map.fromList [(l, c) | (l, n) <- zip sizeLocals (fnSizeParams fn), Just c <- [lookup n (cxSizes cx)]]
         start = CS [] (1 + maximum (0 : [i | Local i <- Map.keys locals])) [] (1 + maximum (0 : [i | BlockId i <- Map.keys (fnBlocks fn)]))
@@ -276,8 +293,8 @@ typeIn cx
 
 transformBody :: Cx -> Map Local Integer -> Function -> C Function
 transformBody cx constants fn = do
-    blocks <- mapM (\(b, block) -> transformBlock cx constants fn b block) (Map.toList (fnBlocks fn))
-    spec' <- transformSpec cx constants (fnSpec fn)
+    blocks <- mapM (\(b, block) -> transformBlock (blockCx cx fn b) constants fn b block) (Map.toList (fnBlocks fn))
+    spec' <- transformSpec cx constants fn (fnSpec fn)
     return fn{fnBlocks = mergeInlined (fnSpec fn) (concat blocks), fnSpec = spec'}
 
 -- A block that ended in a call the copy made statements goes on into the block the call returned to, as a builtin's
@@ -295,12 +312,19 @@ mergeInlined spec blocks = go (Map.fromList [(b, (block, inlined)) | (b, block, 
              in go (Map.insert b (BasicBlock (stmts ++ stmts') term', inlined') (Map.delete n m))
     entries m n = length [() | (BasicBlock _ t, _) <- Map.elems m, s <- successors t, s == n] + (if n == BlockId 0 then 1 else 0)
 
-transformSpec :: Cx -> Map Local Integer -> FunctionSpec -> C FunctionSpec
-transformSpec cx constants spec = do
+-- The context of a block of a copy: in a copy of a variadic function, with the element types the block binds (an iteration
+-- of an unrolled loop binds its element's)
+blockCx :: Cx -> Function -> BlockId -> Cx
+blockCx cx fn b = case Map.lookup b (cxBlockTypes cx) of
+    Just extra | not (null extra) -> let cx' = cx{cxTypes = extra ++ cxTypes cx} in cx'{cxRenames = renamesOf cx' fn{fnLocals = cxGeneric cx}}
+    _ -> cx
+
+transformSpec :: Cx -> Map Local Integer -> Function -> FunctionSpec -> C FunctionSpec
+transformSpec cx constants fn spec = do
     requires <- mapM (validation cx) (specRequires spec)
     ensures <- mapM (validation cx) (specEnsures spec)
     term <- mapM (termination cx) (specTermination spec)
-    loops <- mapM (\l -> (\inv t -> l{loopInvariant = inv, loopTermination = t, loopEnv = env cx constants (loopEnv l)}) <$> mapM (validation cx) (loopInvariant l) <*> mapM (termination cx) (loopTermination l)) (specLoops spec)
+    loops <- Map.traverseWithKey (\h l -> let cxl = blockCx cx fn h in (\inv t -> l{loopInvariant = inv, loopTermination = t, loopEnv = env cxl constants (loopEnv l)}) <$> mapM (validation cxl) (loopInvariant l) <*> mapM (termination cxl) (loopTermination l)) (specLoops spec)
     return spec{specRequires = requires, specEnsures = ensures, specTermination = term, specLoops = loops, specEnv = env cx constants (specEnv spec)}
 
 -- (an environment names every function of the program; a reference's copy is named again when its arguments are known,

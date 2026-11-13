@@ -5,6 +5,7 @@ module Mir
     , BlockId (..)
     , Program (..)
     , BoundedFn (..)
+    , PackLoop (..)
     , Lowered (..)
     , TypeDecl (..)
     , Function (..)
@@ -98,6 +99,26 @@ data BoundedFn = BoundedFn
     { boundedSizes :: [Variable] -- the size parameters its bounds name, which a copy is made for (as constants) and named by
     , boundedCopy :: [Variable] -- the type parameters bounded by Copy, whose values the check of moves copies
     , boundedLifted :: [Name] -- the functions lifted out of its body, copied with it
+    , boundedPackLoops :: [PackLoop] -- the loops over its pack (a variadic function's), which each copy unrolls
+    }
+    deriving (Show, Eq, Read)
+
+-- A loop over the pack of a variadic function as lowering made it (MIR.md, "Copies of variadic functions"): before the header
+-- the index is set from lo, the header compares it with hi and goes to the body or the exit, the body starts by setting the
+-- element and ends by adding 1 to the index and going back to the header. The copy step unrolls it into a copy of the body
+-- blocks and locals for each index.
+data PackLoop = PackLoop
+    { packHeader :: BlockId
+    , packBody :: BlockId -- the first block of the body
+    , packExit :: BlockId
+    , packBlocks :: [BlockId] -- every block of the body, the first one included
+    , packLocals :: [Local] -- the locals made in the body
+    , packIndex :: Local
+    , packElement :: Local
+    , packElementType :: Variable -- the type parameter the element has, which each copy of the body binds to its element's type
+    , packLo :: Local
+    , packHi :: Local
+    , packTaken :: Maybe Local -- what the pack is moved into before a loop that takes its elements (for a in args, by value)
     }
     deriving (Show, Eq, Read)
 

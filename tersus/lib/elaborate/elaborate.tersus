@@ -30,7 +30,8 @@ fn newState() -> St ~ {
         methodOf: HashMap::new(), ty: 0, ok: true, te: TE { node: 0 - 1, types: [] }, tes: [], outs: [], nid: 0 - 1, n: 0,
         gen: Generic { params: [], names: [], types: [] }, ctor: CtorInfo { owner: "", names: [], types: [] }, names: [],
         fnSig: FnSig { params: [], ptys: [], rty: 0, sizes: [], types: [], writes: [], froms: [] }, sigNode: 0 - 1, boundsOut: [],
-        seen: [], defQueue: [], defChecking: false, sequenceTraits: HashSet::new(), storageCopies: false, status: 0, msg: ""
+        seen: [], defQueue: [], defChecking: false, sequenceTraits: HashSet::new(), storageCopies: false,
+        pack: "", packType: "", packLent: false, packBounds: [], packIndexNames: [], packIndexTypes: [], packElements: [], packElementTexts: [], packCounter: 0, packCallOffset: 0, status: 0, msg: ""
     };
 };
 

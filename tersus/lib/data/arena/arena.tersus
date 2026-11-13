@@ -238,6 +238,7 @@ fn nodeChildren2(node: &AstNode) -> List<Int> ~ {
             AstStatement::DropDef { n: n } => { out = push([], n); },
             AstStatement::Dissolve { n: n } => { out = push([], n); },
             AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { out = push(push(push(push(push([], n), f), args), ps), sig); },
+            AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => { out = push(push(push(push(push(push([], i), a), p), lo), hi), xs); },
         };
     };
     if node is AstNode::Arg { v = (node as AstNode::Arg).value;
@@ -436,6 +437,7 @@ fn remapNode2(node: AstNode, map: &List<Int>) -> AstNode ~ {
             AstStatement::DropDef { n: n } => { result = AstNode::Statement { value: AstStatement::DropDef { n: intAtOr(map, n, n) } }; },
             AstStatement::Dissolve { n: n } => { result = AstNode::Statement { value: AstStatement::Dissolve { n: intAtOr(map, n, n) } }; },
             AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { result = AstNode::Statement { value: AstStatement::Instance { n: intAtOr(map, n, n), f: intAtOr(map, f, f), args: intAtOr(map, args, args), ps: intAtOr(map, ps, ps), sig: intAtOr(map, sig, sig) } }; },
+            AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => { result = AstNode::Statement { value: AstStatement::PackLoop { i: intAtOr(map, i, i), a: intAtOr(map, a, a), p: intAtOr(map, p, p), lo: intAtOr(map, lo, lo), hi: intAtOr(map, hi, hi), take: take, xs: intAtOr(map, xs, xs) } }; },
         };
     };
     if node is AstNode::Arg { v = clone((node as AstNode::Arg).value);

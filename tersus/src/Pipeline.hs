@@ -88,6 +88,7 @@ assumptionsOfNoPrelude noPrelude source = mapResult (snd . statements Nothing . 
         Block body -> (place, snd (statements place body))
         If c yes no -> (place, expression place c ++ snd (statements place yes) ++ snd (statements place no))
         While c _ _ body -> (place, expression place c ++ snd (statements place body))
+        PackLoop _ _ _ lo hi _ body -> (place, expression place lo ++ expression place hi ++ snd (statements place body))
         ImplDef _ _ _ _ _ body -> (place, snd (statements place body))
         BoundedDef _ s -> (place, snd (statement place s))
         _ -> (place, [])

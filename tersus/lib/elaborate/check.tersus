@@ -2,12 +2,12 @@ import data::ast::ast { AstBody, AstExpression, AstNode, AstOptTermination, AstR
 import data::codec::codec { catStrings };
 import elaborate::calls { assignVar, bindIn, bindInner, coerce, head, lookupVar, popScope, pushScope, scopeLookup, teHead, withType };
 import elaborate::core { checkFieldType, checkFinite, checkType, declareTypeWith, holdsRef, isBoxTy, isListTy, readField, registerCtors, unrefOf };
-import elaborate::expr { derefExpr, inferExpr };
-import elaborate::out { emit, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations };
+import elaborate::expr { derefExpr, freshElementType, inferExpr, packIndexFolds };
+import elaborate::out { emit, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations };
 import elaborate::proofs { inferProof, rewriteOldStatements };
 import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { derefRoot, exprRefOrigins, placeSteps, putRefResult, recordAlias, recordOrigins, resolveRefPlace, withinWrites, writesTarget, writesText };
-import elaborate::state { FnSig, Generic, St, TE, Ty, addTy, argAt, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
+import elaborate::state { FnSig, Generic, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
 import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, templateOf };
 
 fn stmtOf(st: &St, s: Int) -> AstStatement ~ {
@@ -118,6 +118,7 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
         AstStatement::ImplDef { traitName: tn, args: args, n: n, ty: ty, bs: bs, xs: xs } => { return fail(st, "Type error: an impl can only be written at the top of the program"); },
         AstStatement::BoundedDef { bs: bs, s: inner } => { return fail(st, "Type error: a function with bounds on its types cannot be written in a block"); },
         AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { return fail(st, "Type error: an instance record is written by the elaborator, not by a program"); },
+        AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => { return checkStatementPackLoop(st, i, a, p, lo, hi, take, xs); },
     };
     return st;
 };
@@ -517,6 +518,27 @@ fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: In
         if pk = 11 { mutParams = push(mutParams, clone(get(params, i))); };
         i = i + 1;
     };
+    // (the pack of a variadic function is its last parameter whose type is a pack of types: a function nested in its body has
+    // its own, or none)
+    outerPack = clone(st.pack);
+    outerPackType = clone(st.packType);
+    outerPackLent = st.packLent;
+    outerPackIndexNames = clone(st.packIndexNames);
+    outerPackIndexTypes = clone(st.packIndexTypes);
+    outerPackElements = clone(st.packElements);
+    outerPackElementTexts = clone(st.packElementTexts);
+    packName = "";
+    packType = "";
+    packLent = false;
+    i = 0;
+    while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
+        px = tyAt(st, get(ptys, i));
+        lent = false;
+        if px.kind = 10 { px = tyAt(st, nth(&px.args, 0)); lent = true; };
+        if px.kind = 12 && isPackTypeName(&px.name) { packName = clone(get(params, i)); packType = clone(px.name); packLent = lent; };
+        i = i + 1;
+    };
+    st = St { pack: packName, packType: packType, packLent: packLent, packIndexNames: [], packIndexTypes: [], packElements: [], packElementTexts: [], ..st };
     outerReadOnly = clone(st.readOnly);
     outerMut = clone(st.mutParams);
     outerWrites = clone(st.writes);
@@ -579,7 +601,7 @@ fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: In
     st = checkStatements(st, false, &bodyStmts);
     if st.status != 0 { return st; };
     bodyTE = clone(st.te);
-    st = St { sizeScope: outerSizes, typeScope: outerTypes, current: outerCurrent, ret: outerRet, scopes: outerScopes, readOnly: outerReadOnly, mutParams: outerMut, writes: outerWrites, aliasNames: outerAliasNames, aliasPlaces: outerAliasPlaces, resultFrom: outerResultFrom, params: outerParams, originNames: outerOriginNames, originRoots: outerOriginRoots, ..st };
+    st = St { sizeScope: outerSizes, typeScope: outerTypes, current: outerCurrent, ret: outerRet, scopes: outerScopes, readOnly: outerReadOnly, mutParams: outerMut, writes: outerWrites, aliasNames: outerAliasNames, aliasPlaces: outerAliasPlaces, resultFrom: outerResultFrom, params: outerParams, originNames: outerOriginNames, originRoots: outerOriginRoots, pack: outerPack, packType: outerPackType, packLent: outerPackLent, packIndexNames: outerPackIndexNames, packIndexTypes: outerPackIndexTypes, packElements: outerPackElements, packElementTexts: outerPackElementTexts, ..st };
     return St { outs: push(push(push(push([], insNode), outsNode), termNode), bodyTE.node), te: bodyTE, names: from, ..st };
 };
 
@@ -835,4 +857,92 @@ fn checkAssignDeref(st: St, lhs: Int, value: Int) -> St ~ {
     types = clone(exprT.types);
     for t in &lhsT.types { types = push(types, t); };
     return St { te: TE { node: st.nid, types: types }, ..st };
+};
+
+// A loop over the pack of the enclosing variadic function, which each copy unrolls: its bounds are fixed in each copy, its
+// index is an Int that indexes the pack, and its element has a type of its own, which get(args, i) on its index shares
+fn checkStatementPackLoop(st: St, i: Int, a: Int, p: Int, lo: Int, hi: Int, take: Bool, xs: Int) -> St ~ {
+    packName = nameText(&st.nodes, p);
+    if size(st.pack.bytes) = 0 || packName != st.pack { return typeError(st, "a loop over a pack is only written in a function with a pack"); };
+    if !packIndexFolds(&st, lo) || !packIndexFolds(&st, hi) {
+        return typeError(st, catStrings(catStrings("the bounds of a for loop over ", clone(st.pack)), " are fixed in each copy: numbers, size(args), the index of a for loop over args, and + - * of those"));
+    };
+    st = inferExpr(st, lo);
+    if st.status != 0 { return st; };
+    loTE = clone(st.te);
+    st = simpleTy(st, 0);
+    intTy = st.ty;
+    st = expect(st, "the start of a for loop over a pack", intTy, head(&loTE.types));
+    st = inferExpr(st, hi);
+    if st.status != 0 { return st; };
+    hiTE = clone(st.te);
+    st = expect(st, "the end of a for loop over a pack", intTy, head(&hiTE.types));
+    if st.status != 0 { return st; };
+    indexName = nameText(&st.nodes, i);
+    elementName = nameText(&st.nodes, a);
+    firstElement = st.packCounter;
+    // (what a message calls the element: its name, or what the body reads it as when the loop names none)
+    elementText = catStrings(catStrings("the element ", clone(elementName)), catStrings(" of the loop over ", clone(st.pack)));
+    if elementName.startsWith("$") { elementText = catStrings(catStrings(catStrings("get(", clone(st.pack)), ", "), catStrings(clone(indexName), ")")); };
+    st = freshElementType(st, elementText);
+    elementTy = st.ty;
+    st = assignVar(st, &indexName, intTy);
+    if st.status != 0 { return st; };
+    outerReadOnly = clone(st.readOnly);
+    outerIndexNames = clone(st.packIndexNames);
+    outerIndexTypes = clone(st.packIndexTypes);
+    st = pushScope(st);
+    st = bindInner(st, &elementName, elementTy);
+    readOnly = clone(st.readOnly);
+    if st.packLent || !take { readOnly = push(readOnly, clone(elementName)); };
+    st = St { readOnly: readOnly, packIndexNames: push(st.packIndexNames, clone(indexName)), packIndexTypes: push(st.packIndexTypes, elementTy), ..st };
+    loopStmts = listItems(&st.nodes, xs);
+    st = checkStatements(st, false, &loopStmts);
+    st = popScope(st);
+    if st.status != 0 { return st; };
+    body = clone(st.te);
+    // (each iteration of the copy gives the element, and what the body reads of the pack at its index, a type of its own,
+    // so none of those types outlives the iteration)
+    kept = 0;
+    while kept < size(st.scopes.names) && kept < size(st.scopes.types) [{ affirm kept >= 0; }] ~ {
+        if heldElement(&st, get(st.scopes.types, kept), firstElement) {
+            readAs = clone(elementName);
+            if elementName.startsWith("$") { readAs = catStrings(catStrings(catStrings("get(", clone(st.pack)), ", "), catStrings(clone(indexName), ")")); };
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(get(st.scopes.names, kept)), " would keep an element of "), clone(st.pack)), catStrings(" after the loop over it, which reads it as ", readAs)), catStrings(catStrings(": an element has a type of its own in each iteration of the loop over ", clone(st.pack)), ", so it cannot be kept after it")), ""));
+        };
+        kept = kept + 1;
+    };
+    st = St { readOnly: outerReadOnly, packIndexNames: outerIndexNames, packIndexTypes: outerIndexTypes, ..st };
+    st = emitName(st, indexName);
+    iNode = st.nid;
+    st = emitName(st, elementName);
+    aNode = st.nid;
+    st = emitName(st, packName);
+    pNode = st.nid;
+    // (a loop over a lent pack reads its elements, however it is written)
+    takes = take && !st.packLent;
+    st = emit(st, AstNode::Statement { value: AstStatement::PackLoop { i: iNode, a: aNode, p: pNode, lo: loTE.node, hi: hiTE.node, take: takes, xs: body.node } });
+    types = push([], elementTy);
+    for t in &loTE.types { types = push(types, t); };
+    for t in &hiTE.types { types = push(types, t); };
+    for t in &body.types { types = push(types, t); };
+    return St { te: TE { node: st.nid, types: types }, ..st };
+};
+
+// Whether a type holds the type of an element of the pack made from the counter on (one of a loop over the pack, or of a read
+// of the pack in its body)
+fn heldElement(st: &St, t: Int, from: Int) -> Bool ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 12 {
+        prefix = catStrings(clone(st.packType), "@");
+        if size(x.name.bytes) > size(prefix.bytes) && x.name.slice(0, size(prefix.bytes)) = prefix {
+            digits = x.name.slice(size(prefix.bytes), size(x.name.bytes));
+            n = 0;
+            for c in &digits.bytes { n = n * 10 + (toInt(c) - 48); };
+            return n >= from;
+        };
+        return false;
+    };
+    for g in &x.args { if heldElement(st, g, from) { return true; }; };
+    return false;
 };

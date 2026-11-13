@@ -519,7 +519,7 @@ fn checkType(st: St, t: Int) -> St ~ {
     };
     if x.kind = 13 { return checkType(st, nth(&x.args, 0)); };
     if x.kind = 12 {
-        if indexIn(&st.typeScope, &x.name) < 0 {
+        if indexIn(&st.typeScope, &x.name) < 0 && indexIn(&st.packElements, &x.name) < 0 {
             return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(x.name), " is not a type here: a function declares a type parameter, as in fn f<"), clone(x.name)), catStrings(">(a: ", clone(x.name))), ")"));
         };
         return st;

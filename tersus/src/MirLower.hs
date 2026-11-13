@@ -57,6 +57,7 @@ declaredNames stmt = case stmt of
     Block body -> concatMap declaredNames body
     If _ yes no -> concatMap declaredNames (yes ++ no)
     While _ _ _ body -> concatMap declaredNames body
+    PackLoop _ _ _ _ _ _ body -> concatMap declaredNames body
     ImplDef _ _ _ _ _ body -> concatMap declaredNames body
     BoundedDef _ inner -> declaredNames inner
     _ -> []
@@ -75,6 +76,7 @@ assumesIn stmt = case stmt of
     Block body -> concatMap assumesIn body
     If _ yes no -> concatMap assumesIn (yes ++ no)
     While _ _ _ body -> concatMap assumesIn body
+    PackLoop _ _ _ _ _ _ body -> concatMap assumesIn body
     ImplDef _ _ _ _ _ body -> concatMap assumesIn body
     BoundedDef _ inner -> assumesIn inner
     _ -> []
@@ -211,6 +213,7 @@ data Builder = Builder
     , bScopes :: [Map Variable Binding] -- innermost first
     , bLoops :: Map M.BlockId M.LoopSpec
     , bPlace :: Maybe (Int, Int) -- the place in the source of the statement being lowered, when the program was parsed with places
+    , bPackLoops :: [M.PackLoop] -- the loops over the pack of a variadic function, with the blocks as they are numbered while it is built
     }
 
 data LS = LS
@@ -231,10 +234,11 @@ data LS = LS
     , lsStubs :: Set.Set Name -- imported functions and the names of copies seeded as stubs: in the raw unit, dropped when it is finished
     , lsBounded :: Map Name M.BoundedFn -- the functions with bounds (BoundedDef)
     , lsInstances :: Map Name (Name, [Arg]) -- the copies the program names (Instance)
+    , lsPackLoops :: Map Name [M.PackLoop] -- the loops over the pack of each variadic function, with its blocks as they are numbered
     }
 
 initialState :: Elaborated -> LS
-initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty Map.empty Set.empty Map.empty Map.empty
+initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty Map.empty Set.empty Map.empty Map.empty Map.empty
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
 -- others are known functions, and a call of one is a call by name.
@@ -248,6 +252,7 @@ assignedNames = foldMap names
         Block body -> assignedNames body
         If _ thenStmts elseStmts -> assignedNames thenStmts <> assignedNames elseStmts
         While _ _ _ body -> assignedNames body
+        PackLoop i a _ _ _ _ body -> Set.fromList [i, a] <> assignedNames body
         _ -> Set.empty
 
 newBuilder :: Name -> Bool -> Maybe Type -> Builder
@@ -270,6 +275,7 @@ newBuilder name isMain returns =
         , bScopes = [Map.empty]
         , bLoops = Map.empty
         , bPlace = Nothing
+        , bPackLoops = []
         }
 
 builder :: L Builder
@@ -404,8 +410,41 @@ lowerBounded bounds lowerInner inner = case inner of
             lifted = [n | n <- Map.keys after, n `Set.notMember` before, (name ++ "::") `isPrefixOf` n]
             boundedSizes' = [n | n <- sizes, any (any (mentionsSize n)) [ts | (_, _, ts) <- bounds]]
             copyParams = [p | (p, "Copy", _) <- bounds]
-        modifyS (\s -> s{lsBounded = Map.insert name (M.BoundedFn boundedSizes' copyParams lifted) (lsBounded s)})
+        loops <- Map.findWithDefault [] name . lsPackLoops <$> getS
+        modifyS (\s -> s{lsBounded = Map.insert name (M.BoundedFn boundedSizes' copyParams lifted loops) (lsBounded s), lsFunctions = Map.adjust markPackReads name (lsFunctions s)})
     _ -> failL "A bound is on something other than a function"
+
+-- Before each read of the pack of a variadic function, a define that names the place in the source it is at, which the copy
+-- step reads for the message of an index out of range and then takes out (MirPacks.placePrefix)
+markPackReads :: M.Function -> M.Function
+markPackReads fn = case [(l, M.localName d) | l <- M.fnParams fn, Just d <- [Map.lookup l (M.fnLocals fn)], TParam p <- [M.localType d], ".." `isPrefixOf` p, all (`notElem` "#@") p] of
+    [(pack, packName)] -> fn{M.fnBlocks = Map.map (mark (pack, packName)) (M.fnBlocks fn)}
+    _ -> fn
+  where
+    mark pack (M.BasicBlock ss t) = M.BasicBlock (go pack Nothing ss) t
+    go _ _ [] = []
+    go pack place (s : rest) = case s of
+        M.Ghost _ (M.GhostPosition line column) -> s : go pack (Just (line, column)) rest
+        _ | Just (line, column) <- place, readsPack pack s ->
+            M.Ghost Map.empty (M.GhostValidation (AssignProofVar ("$pack read at " ++ show line ++ ":" ++ show column) (Val (VInt 0)))) : s : go pack place rest
+        _ -> s : go pack place rest
+    readsPack (pack, packName) s = case s of
+        M.Ghost _ (M.GhostValidation v) -> maybe False (`validationMentions` v) packName
+        M.Assign _ (M.ReadField (M.Copy l) "$pack" _) -> l == pack
+        M.Assign _ (M.ListOp M.Get (M.Copy l : _)) -> l == pack
+        M.Assign _ (M.Borrow l (M.RefField "$pack" _ : _) _) -> l == pack
+        M.Assign _ (M.Borrow l (M.RefIndex _ : _) _) -> l == pack
+        _ -> False
+    validationMentions name v = case v of
+        ProofAssert p -> proofMentions name p
+        Assume p -> proofMentions name p
+        AssignProofVar _ e -> proofMentions name (exprToProof e)
+        _ -> False
+    proofMentions name p = case p of
+        ATerm a -> a == name
+        FApp f args -> proofMentions name f || any (proofMentions name) args
+        Forall _ gs b -> any (proofMentions name) gs || proofMentions name b
+        _ -> False
 
 mentionsSize :: Variable -> Type -> Bool
 mentionsSize n ty = case ty of
@@ -521,21 +560,32 @@ typeName _ = ""
 
 -- Finished blocks, numbered in the order a walk from the entry reaches them; blocks nothing jumps to are dropped
 buildFunction :: [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> M.Env -> Builder -> M.Function
-buildFunction requires ensures term env b =
-    M.Function
-        { M.fnName = bName b
-        , M.fnParams = bParams b
-        , M.fnReturns = bReturns b
-        , M.fnLocals = bLocals b
-        , M.fnSizeParams = bSizes b
-        , M.fnTypeParams = bTypeParams b
-        , M.fnBorrowed = bBorrowed b
-        , M.fnMutBorrowed = bMutBorrowed b
-        , M.fnFrom = []
-        , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
-        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec{M.loopBody = rename (M.loopBody spec)}) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env [] [] []
-        }
+buildFunction requires ensures term env b = fst (buildFunctionWithLoops requires ensures term env b)
+
+-- The function, and its loops over a pack with the blocks numbered as the function has them (a loop whose header nothing
+-- reaches is dropped, with its blocks)
+buildFunctionWithLoops :: [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> M.Env -> Builder -> (M.Function, [M.PackLoop])
+buildFunctionWithLoops requires ensures term env b = (function, packLoops)
   where
+    packLoops =
+        [ loop{M.packHeader = rename (M.packHeader loop), M.packBody = rename (M.packBody loop), M.packExit = rename (M.packExit loop), M.packBlocks = [rename x | x <- M.packBlocks loop, Map.member x mapping]}
+        | loop <- reverse (bPackLoops b)
+        , Map.member (M.packHeader loop) mapping
+        ]
+    function =
+        M.Function
+            { M.fnName = bName b
+            , M.fnParams = bParams b
+            , M.fnReturns = bReturns b
+            , M.fnLocals = bLocals b
+            , M.fnSizeParams = bSizes b
+            , M.fnTypeParams = bTypeParams b
+            , M.fnBorrowed = bBorrowed b
+            , M.fnMutBorrowed = bMutBorrowed b
+            , M.fnFrom = []
+            , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
+            , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec{M.loopBody = rename (M.loopBody spec)}) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env [] [] []
+            }
     order = reverse (walk [] (M.BlockId 0))
     walk seen block
         | block `elem` seen = seen
@@ -577,6 +627,7 @@ skipStatement stmt = case stmt of
     Block stmts -> skipStatements stmts
     If cond thenStmts elseStmts -> skipExpr cond >> skipStatements thenStmts >> skipStatements elseStmts
     While cond _ _ body -> skipExpr cond >> skipStatements body
+    PackLoop _ _ _ lo hi _ body -> claim >> skipExpr lo >> skipExpr hi >> skipStatements body
     _ -> return ()
 
 skipExpr :: Expression -> L ()
@@ -639,6 +690,7 @@ lowerStatement stmt =
         Block stmts -> scoped (lowerStatements stmts)
         If cond thenStmts elseStmts -> lowerIf cond thenStmts elseStmts
         While cond invariant term body -> lowerWhile cond invariant term body
+        PackLoop index element pack lo hi takes body -> lowerPackLoop index element pack lo hi takes body
 
 -- A statement for the validator, with the names the program can use where it stands
 ghost :: M.GhostStatement -> L ()
@@ -766,6 +818,77 @@ lowerWhile cond invariant term body = do
     when open (terminate (M.Goto header))
     openBlock exit
 
+-- A loop over the pack of a variadic function (LANGUAGE.md, "Variadic functions"), which no copy keeps: each unrolls it
+-- (MirCopies). It is lowered as a counting loop with no LoopSpec, as the generic body is never validated. Its element is an
+-- element of the pack read at the index (a view), or, for a loop that takes the elements, a fresh value after the pack is
+-- moved before the loop, so that the check of moves lets the body move it and not use the pack after.
+lowerPackLoop :: Variable -> Variable -> Variable -> Expression -> Expression -> Bool -> [Statement] -> L ()
+lowerPackLoop index element pack lo hi takes body = do
+    elementTy <- claim
+    (loOperand, _) <- lowerOperand lo
+    (hiOperand, _) <- lowerOperand hi
+    loLocal <- newLocal Nothing TInt
+    emit (M.Assign loLocal (M.Use loOperand))
+    hiLocal <- newLocal Nothing TInt
+    emit (M.Assign hiLocal (M.Use hiOperand))
+    indexLocal <- assignTarget index TInt
+    emit (M.Assign indexLocal (M.Use (M.Copy loLocal)))
+    packBinding <- lookupBinding pack
+    packLocal <- case packBinding of
+        Just (BLocal l _) -> return l
+        _ -> failL ("Lowering failed: " ++ pack ++ " is not the pack of the function")
+    taken <-
+        if takes
+            then do
+                packTy <- maybe TInt M.localType . Map.lookup packLocal . bLocals <$> builder
+                t <- newLocal Nothing packTy
+                emit (M.Assign t (M.Use (M.Copy packLocal)))
+                return (Just t)
+            else return Nothing
+    header <- newBlock
+    bodyB <- newBlock
+    exit <- newBlock
+    terminate (M.Goto header)
+    openBlock header
+    test <- newLocal Nothing TBool
+    emit (M.Assign test (M.BinaryOp (M.Compare Lt) (M.Copy indexLocal) (M.Copy hiLocal)))
+    terminate (M.SwitchBool (M.Copy test) bodyB exit)
+    openBlock bodyB
+    before <- builder
+    elementLocal <-
+        scoped $ do
+            l <- newLocal (Just element) elementTy
+            bindName element (BLocal l elementTy)
+            -- (a range loop names no element: its body may run past the pack, and reads it only at the indices it says)
+            unless ("$element " `isPrefixOf` element) $
+                emit (M.Assign l (if takes then M.Use (M.Const (M.CFn "$pack element")) else M.ListOp M.Get [M.Copy packLocal, M.Copy indexLocal]))
+            lowerStatements body
+            open <- isOpen
+            when open $ do
+                emit (M.Assign indexLocal (M.BinaryOp M.Add (M.Copy indexLocal) (M.Const (M.CInt 1))))
+                terminate (M.Goto header)
+            return l
+    after <- builder
+    let M.Local firstLocal = elementLocal
+        loop =
+            M.PackLoop
+                { M.packHeader = header
+                , M.packBody = bodyB
+                , M.packExit = exit
+                , M.packBlocks = bodyB : [M.BlockId k | k <- [bNextBlock before .. bNextBlock after - 1]]
+                , M.packLocals = [M.Local k | k <- [firstLocal + 1 .. bNextLocal after - 1]]
+                , M.packIndex = indexLocal
+                , M.packElement = elementLocal
+                , M.packElementType = case elementTy of
+                    TParam p -> p
+                    _ -> ""
+                , M.packLo = loLocal
+                , M.packHi = hiLocal
+                , M.packTaken = taken
+                }
+    modifyB (\b -> b{bPackLoops = loop : bPackLoops b})
+    openBlock exit
+
 -- A function becomes a function of the program, lifted to the top whatever it is nested in (a body sees only its
 -- parameters and the functions at the top, so there is nothing to capture). One defined at the top of the program is
 -- found by name from the bodies of the functions after it, and from itself; any other is a name in its scope.
@@ -808,9 +931,13 @@ defineFunction var params ins outs (Signature ptys rty sizes types writes sigFro
     when open (terminate M.Unreachable)
     inner <- builder
     modifyB (const outer)
-    let fn0 = buildFunction ins outs term env inner
+    let (fn0, packLoops) = buildFunctionWithLoops ins outs term env inner
         fn = fn0{M.fnSpec = (M.fnSpec fn0){M.specWrites = writes, M.specMutParams = [p | (p, TMutRef _) <- zip params ptys], M.specFrom = sigFrom}, M.fnFrom = [l | (p, l, _) <- paramLocals, p `elem` sigFrom]}
-    modifyS (\s -> s{lsFunctions = Map.insert name fn (lsFunctions s)})
+    modifyS (\s -> s{lsFunctions = Map.insert name fn (lsFunctions s), lsPackLoops = if null packLoops then lsPackLoops s else Map.insert name packLoops (lsPackLoops s)})
+
+-- The owner of the field that an element of a pack at a number is (`get(args, 0)` is the field 0 of args)
+packOwner :: Name
+packOwner = "$pack"
 
 unrefType :: Type -> Type
 unrefType (TRef t) = t
@@ -928,10 +1055,11 @@ lowerPlace expr = case expr of
         case binding of
             Just (BLocal l _) -> return (l, [], ty)
             _ -> failL ("Lowering failed: " ++ name ++ " is not a value that a place can start from")
-    F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub] -> do
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [sub] -> do
         fieldTy <- claim
         (root, steps, subTy) <- lowerPlace sub
-        ctor <- fieldCtor field subTy
+        -- (an element of a pack at a number is a field of the pack, which no type has: PackLoop)
+        ctor <- if owner == Just packOwner then return packOwner else fieldCtor field subTy
         return (root, steps ++ [M.RefField ctor field], fieldTy)
     F (Val (VFunct _ _ _ (BuiltinFunct (Cast variant)) _)) [sub] -> do
         variantTy <- claim

@@ -256,6 +256,7 @@ fn recordTags() -> Tags [{ }] [{ }] {
     codes = codes.insert("DropDef", 140);
     codes = codes.insert("Dissolve", 144);
     codes = codes.insert("Instance", 145);
+    codes = codes.insert("PackLoop", 146);
     codes = codes.insert("Shrinks", 152);
     codes = codes.insert("Counting", 153);
     codes = codes.insert("Parts", 154);
@@ -742,6 +743,17 @@ fn statementNodeAt5(k: Int, ts: &List<Token>, nodes: &List<AstNode>) -> Parsed<A
         sig = refAt(ts, 5, nodes, 12);
         if !n.ok || !f.ok || !args.ok || !ps.ok || !sig.ok { return bad; };
         return done(AstNode::Statement { value: AstStatement::Instance { n: n.value, f: f.value, args: args.value, ps: ps.value, sig: sig.value } }, size(ts));
+    };
+    if k = 2 && size(ts) = 8 {
+        i = refAt(ts, 1, nodes, 1);
+        a = refAt(ts, 2, nodes, 1);
+        p = refAt(ts, 3, nodes, 1);
+        lo = refAt(ts, 4, nodes, 6);
+        hi = refAt(ts, 5, nodes, 6);
+        take = boolAt(ts, 6);
+        xs = refAt(ts, 7, nodes, 24);
+        if !i.ok || !a.ok || !p.ok || !lo.ok || !hi.ok || !take.ok || !xs.ok { return bad; };
+        return done(AstNode::Statement { value: AstStatement::PackLoop { i: i.value, a: a.value, p: p.value, lo: lo.value, hi: hi.value, take: take.value, xs: xs.value } }, size(ts));
     };
     return bad;
 };
@@ -1448,6 +1460,7 @@ fn nodeRefs(node: &AstNode) -> List<Int> [{ }] [{ }] {
                 AstStatement::DropDef { n: n } => { refs = push(refs, n); },
                 AstStatement::Dissolve { n: n } => { refs = push(refs, n); },
                 AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { refs = push(refs, n); refs = push(refs, f); refs = push(refs, args); refs = push(refs, ps); refs = push(refs, sig); },
+                AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => { refs = push(refs, i); refs = push(refs, a); refs = push(refs, p); refs = push(refs, lo); refs = push(refs, hi); refs = push(refs, xs); },
             };
         },
         AstNode::Signature { value: v } => { refs = push(refs, v.ts); refs = push(refs, v.ret); refs = push(refs, v.ss); refs = push(refs, v.ps); refs = push(refs, v.ws); refs = push(refs, v.fs); },

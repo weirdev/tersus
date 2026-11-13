@@ -1,14 +1,14 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstValue };
 import data::codec::codec { catStrings };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
-import elaborate::calls { argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType, withType };
+import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType, withType };
 import elaborate::check { fnSigOf, mentionsParameter };
 import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureInstance, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
 import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
-import elaborate::traits { builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
+import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
     return St { te: TE { node: node, types: push([], t) }, ..st };
@@ -75,7 +75,170 @@ fn inferVarExpr(st: St, e: Int, n: Int) -> St ~ {
         for s in &x.sizes { names = push(names, clone(s)); };
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " has parameters <"), joinWith(&names, ", ")), ">, so it is called, as in "), clone(name)), "(...), and cannot be used as a value"));
     };
+    if isPackVar(&st, e) { return typeError(st, packValueText(&name)); };
     return leaf(st, t, e);
+};
+
+fn packValueText(name: &String) -> String ~ {
+    return catStrings(catStrings(catStrings(clone(name), " is a pack of arguments, not a value: use size("), clone(name)), catStrings(catStrings(catStrings("), get(", clone(name)), ", i) or a for loop over "), clone(name)));
+};
+
+// Whether an expression is the pack of the variadic function being checked (`args`, not a variable that hides it)
+fn isPackVar(st: &St, e: Int) -> Bool ~ {
+    if size(st.pack.bytes) = 0 { return false; };
+    ex = exprOf(st, e);
+    if !(ex is AstExpression::Var) { return false; };
+    name = nameText(&st.nodes, (ex as AstExpression::Var).n);
+    if name != st.pack { return false; };
+    t = scopeLookup(st, &name);
+    x = tyAt(st, t);
+    return x.kind = 12 && x.name = st.packType;
+};
+
+// Whether an index of the pack is fixed in each copy: built from numbers, size(args), the indices of the loops over the
+// pack it is in, + - * and parentheses
+fn packIndexFolds(st: &St, e: Int) -> Bool ~ {
+    if constantInt(st, e).status = 0 { return true; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::Var {
+        varText = nameText(&st.nodes, (ex as AstExpression::Var).n);
+        return indexIn(&st.packIndexNames, &varText) >= 0;
+    };
+    if !(ex is AstExpression::F) { return false; };
+    call = ex as AstExpression::F;
+    args = listItems(&st.nodes, call.xs);
+    key = headKey(st, call.f);
+    fex = exprOf(st, call.f);
+    if fex is AstExpression::Var && nameText(&st.nodes, (fex as AstExpression::Var).n) = "size" && size(args) = 1 { return isPackVar(st, nth(&args, 0)); };
+    if key = "Size" && size(args) = 1 { return isPackVar(st, nth(&args, 0)); };
+    if (key = "Plus" || key = "Minus" || key = "Times") && size(args) = 2 { return packIndexFolds(st, nth(&args, 0)) && packIndexFolds(st, nth(&args, 1)); };
+    return false;
+};
+
+// The type of an element of the pack (`..T#k` for get(args, k), `..T@n` for any other): a type parameter with the pack's bounds
+fn elementTypeNamed(st: St, name: String) -> St ~ { return elementTypeNamedAs(st, name, ""); };
+
+fn elementTypeNamedAs(st: St, name: String, text: String) -> St ~ {
+    st = addTy(st, Ty { kind: 12, name: clone(name), args: [], n: 0, flag: false, sizes: [], types: [] });
+    t = st.ty;
+    if indexIn(&st.packElements, &name) >= 0 { return withTy(st, t); };
+    st = St { packElements: push(st.packElements, clone(name)), packElementTexts: push(st.packElementTexts, text), ..st };
+    bounds = clone(st.packBounds);
+    for b in &bounds { st = boundAsImpl(st, &name, t, &b.n, &b.ts); };
+    return withTy(st, t);
+};
+
+fn freshElementType(st: St, text: String) -> St ~ {
+    name = catStrings(catStrings(clone(st.packType), "@"), intText(st.packCounter));
+    st = St { packCounter: st.packCounter + 1, ..st };
+    return elementTypeNamedAs(st, name, text);
+};
+
+// An index of the pack as the program wrote it, for a message (numbers, names, size(args), + - *)
+fn indexText(st: &St, e: Int) -> String ~ {
+    lit = intLiteral(st, e);
+    if lit.ok { return intText(lit.value); };
+    ex = exprOf(st, e);
+    if ex is AstExpression::Var { return nameText(&st.nodes, (ex as AstExpression::Var).n); };
+    if ex is AstExpression::F {
+        call = ex as AstExpression::F;
+        args = listItems(&st.nodes, call.xs);
+        key = headKey(st, call.f);
+        if size(args) = 1 && isPackVar(st, nth(&args, 0)) { return catStrings(catStrings("size(", clone(st.pack)), ")"); };
+        if size(args) = 2 {
+            op = "";
+            if key = "Plus" { op = " + "; };
+            if key = "Minus" { op = " - "; };
+            if key = "Times" { op = " * "; };
+            if size(op.bytes) > 0 { return catStrings(catStrings(indexText(st, nth(&args, 0)), op), indexText(st, nth(&args, 1))); };
+        };
+    };
+    return "…";
+};
+
+// The pack as the argument of size or get (it is no value of its own)
+fn packArgument(st: St) -> St ~ {
+    t = scopeLookup(&st, &st.pack);
+    st = emitVar(st, clone(st.pack));
+    return St { te: TE { node: st.nid, types: push([], t) }, ..st };
+};
+
+// size(args): the number of arguments, which each copy makes a constant
+fn packSize(st: St) -> St ~ {
+    st = packArgument(st);
+    packTE = clone(st.te);
+    callArgs = push([], packTE.node);
+    st = emitBuiltinCall(st, "Size", &callArgs);
+    node = st.nid;
+    st = simpleTy(st, 0);
+    parts = push([], packTE);
+    return typed(st, node, st.ty, &parts);
+};
+
+// get(args, e): the argument at an index each copy fixes, a field of the pack at a number and an element at an index otherwise
+fn packGet(st: St, index: Int) -> St ~ {
+    if !packIndexFolds(&st, index) {
+        return typeError(st, catStrings(catStrings(catStrings("get(", clone(st.pack)), ", i) needs an index that is fixed in each copy (numbers, size(args), the index of a for loop over args, and + - * of those): "), catStrings(catStrings("loop over the pack with for a in ", clone(st.pack)), " instead")));
+    };
+    lit = constantInt(&st, index);
+    if lit.status = 0 {
+        if lit.value < 0 { return typeError(st, catStrings(catStrings("get(", clone(st.pack)), ", i) needs an index of 0 or more")); };
+        st = elementTypeNamed(st, catStrings(catStrings(clone(st.packType), "#"), intText(lit.value)));
+        elementTy = st.ty;
+        st = packArgument(st);
+        packTE = clone(st.te);
+        st = emitFieldValue(st, "$pack", intText(lit.value));
+        st = emitVal(st, st.nid);
+        callArgs = push([], packTE.node);
+        st = emitCall(st, st.nid, &callArgs);
+        parts = push([], packTE);
+        return typed(st, st.nid, elementTy, &parts);
+    };
+    ex = exprOf(&st, index);
+    elementTy = 0 - 1;
+    if ex is AstExpression::Var {
+        varText = nameText(&st.nodes, (ex as AstExpression::Var).n);
+        j = size(st.packIndexNames) - 1;
+        while j >= 0 && elementTy < 0 [{ affirm j < size(st.packIndexNames); }] ~ {
+            if get(st.packIndexNames, j) = varText && j < size(st.packIndexTypes) { elementTy = get(st.packIndexTypes, j); };
+            j = j - 1;
+        };
+    };
+    if elementTy < 0 {
+        text = catStrings(catStrings(catStrings("get(", clone(st.pack)), ", "), catStrings(indexText(&st, index), ")"));
+        st = freshElementType(st, text);
+        elementTy = st.ty;
+    };
+    st = packArgument(st);
+    packTE = clone(st.te);
+    st = inferExpr(st, index);
+    if st.status != 0 { return st; };
+    indexTE = clone(st.te);
+    st = simpleTy(st, 0);
+    st = expect(st, "the index of get on a pack", st.ty, head(&indexTE.types));
+    if st.status != 0 { return st; };
+    callArgs = push(push([], packTE.node), indexTE.node);
+    st = emitBuiltinCall(st, "Get", &callArgs);
+    parts = push(push([], packTE), indexTE);
+    return typed(st, st.nid, elementTy, &parts);
+};
+
+// What a call does with the pack, when its first argument or another is the pack: 0 nothing, 1 size of it, 2 get of it, 3 a
+// slice of it, 4 a method of it, 5 the pack given to a function
+fn packCallKind(st: &St, funct: Int, args: &List<Int>) -> Int ~ {
+    fex = exprOf(st, funct);
+    fname = "";
+    if fex is AstExpression::Var { fname = nameText(&st.nodes, (fex as AstExpression::Var).n); };
+    key = headKey(st, funct);
+    if size(args) >= 1 && isPackVar(st, nth(args, 0)) {
+        local = HashMap::contains(&st.fns, &fname) || inScope(st, &fname);
+        if size(args) = 1 && (key = "Size" || (fname = "size" && !local)) { return 1; };
+        if size(args) = 2 && (key = "Get" || (fname = "get" && !local)) { return 2; };
+        if fname = "slice" && !local { return 3; };
+        if size(fname.bytes) > 1 && get(fname.bytes, 0) = toByte(46) { return 4; };
+    };
+    for a in args { if isPackVar(st, a) { return 5; }; };
+    return 0;
 };
 
 // A call: the forms the checker gives a meaning of its own first, then a call of a function (inferExprR)
@@ -142,6 +305,14 @@ fn listLiteral(st: &St, e: Int) -> Bool ~ {
 };
 
 fn inferCallRest(st: St, funct: Int, args: &List<Int>) -> St ~ {
+    if size(st.pack.bytes) > 0 {
+        kind = packCallKind(&st, funct, args);
+        if kind = 1 { return packSize(st); };
+        if kind = 2 { return packGet(st, nth(args, 1)); };
+        if kind = 3 { return typeError(st, catStrings(catStrings("a slice of the pack ", clone(st.pack)), " is not supported yet")); };
+        if kind = 4 { return typeError(st, packValueText(&st.pack)); };
+        if kind = 5 { return typeError(st, catStrings(catStrings("forwarding a pack to another function is not supported yet: ", clone(st.pack)), " is given to a call")); };
+    };
     fex = exprOf(st, funct);
     if headKey(st, funct) = "CloneOf" { return cloneCall(st, args); };
     if fex is AstExpression::Var {

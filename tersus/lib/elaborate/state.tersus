@@ -166,8 +166,24 @@ struct St {
     defChecking: Bool,
     sequenceTraits: HashSet<String>,
     storageCopies: Bool,
+    pack: String,
+    packType: String,
+    packLent: Bool,
+    packBounds: List<BoundInfo>,
+    packIndexNames: List<String>,
+    packIndexTypes: List<Int>,
+    packElements: List<String>,
+    packElementTexts: List<String>,
+    packCounter: Int,
+    packCallOffset: Int,
     status: Int,
     msg: String
+};
+
+// A pack of types of a variadic function (`..T`) and its elements' types (`..T#0`, `..T@1`) keep the dots, which no other
+// type parameter has
+fn isPackTypeName(name: &String) -> Bool ~ {
+    return size(name.bytes) >= 2 && get(name.bytes, 0) = toByte(46) && get(name.bytes, 1) = toByte(46);
 };
 
 fn fail(st: St, msg: String) -> St ~ {
@@ -695,7 +711,21 @@ fn render(st: &St, t: Int) -> String ~ {
     if k = 9 { return wrapped("Uninit<", render(st, nth(&x.args, 0)), ">"); };
     if k = 10 { return catStrings("&", render(st, nth(&x.args, 0))); };
     if k = 11 { return catStrings("&mut ", render(st, nth(&x.args, 0))); };
-    if k = 12 { return clone(x.name); };
+    if k = 12 {
+        if isPackTypeName(&x.name) && size(st.pack.bytes) > 0 {
+            hash = indexOfByteIn(&x.name, 35);
+            if hash > 0 && hash < size(x.name.bytes) { return catStrings(catStrings(catStrings("the type of get(", clone(st.pack)), catStrings(", ", x.name.slice(hash + 1, size(x.name.bytes)))), ")"); };
+            if indexOfByteIn(&x.name, 64) > 0 {
+                i = 0;
+                while i < size(st.packElements) && i < size(st.packElementTexts) [{ affirm i >= 0; }] ~ {
+                    if get(st.packElements, i) = x.name { return catStrings("the type of ", clone(get(st.packElementTexts, i))); };
+                    i = i + 1;
+                };
+                return catStrings("the type of an element of ", clone(st.pack));
+            };
+        };
+        return clone(x.name);
+    };
     if k = 13 {
         names = clone(x.types);
         for s in x.sizes { names = push(names, clone(s)); };
@@ -735,3 +765,12 @@ fn undoTry(st: St, next: Int) -> St ~ {
 };
 
 fn endTry(st: St) -> St ~ { return St { logging: false, undo: [], sizeUndo: [], ..st }; };
+
+fn indexOfByteIn(text: &String, b: Int) -> Int ~ {
+    i = 0;
+    for c in &text.bytes {
+        if toInt(c) = b { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};

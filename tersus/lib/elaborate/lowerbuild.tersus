@@ -416,13 +416,165 @@ fn newBlock(ls: LowSt) -> LowSt ~ {
     return LowSt { bNextBlock: id + 1, id: id, ..ls };
 };
 
-// (does nothing after a return, where nothing can run)
-fn emitStmt(ls: LowSt, s: Stmt) -> LowSt ~ {
+fn emitPlain(ls: LowSt, s: Stmt) -> LowSt ~ {
     if !ls.bHasOpen { return ls; };
     id = size(ls.stmts);
     all = push(ls.stmts, s);
     open = push(ls.bOpenStmts, id);
     return LowSt { stmts: all, bOpenStmts: open, ..ls };
+};
+
+fn addNode(ls: LowSt, node: AstNode) -> LowSt ~ {
+    id = ls.pbase + size(ls.pn);
+    pn = push(ls.pn, node);
+    return LowSt { pn: pn, id: id, ..ls };
+};
+
+fn addName(ls: LowSt, text: &String) -> LowSt ~ {
+    ls = addNode(ls, AstNode::Name { value: AstName::End });
+    if size(text.bytes) = 0 { return ls; };
+    tail = ls.id;
+    return addNode(ls, AstNode::Name { value: AstName::Part { text: clone(text), tail: tail } });
+};
+
+// The pack parameter of the function being built, a variadic function's (its type is the pack of types, `..T`), or -1
+fn packLocalOf(ls: &LowSt) -> Int ~ {
+    found = 0 - 1;
+    count = 0;
+    for p in &ls.bParams {
+        if p >= 0 && p < size(ls.bLocals) {
+            d = get(ls.bLocals, p);
+            if d.present && isPackTy(ls, d.ty) { found = p; count = count + 1; };
+        };
+    };
+    if count = 1 { return found; };
+    return 0 - 1;
+};
+
+fn isPackTy(ls: &LowSt, t: Int) -> Bool ~ {
+    if t < 0 || t >= size(ls.tys) { return false; };
+    x = get(ls.tys, t);
+    if x.kind != 12 || size(x.name.bytes) < 2 || get(x.name.bytes, 0) != toByte(46) || get(x.name.bytes, 1) != toByte(46) { return false; };
+    for c in &x.name.bytes { if c = toByte(35) || c = toByte(64) { return false; }; };
+    return true;
+};
+
+// The name of the pack parameter, as a proof names it
+fn packParamName(ls: &LowSt, pack: Int) -> String ~ {
+    if pack < 0 || pack >= size(ls.bLocals) { return ""; };
+    d = get(ls.bLocals, pack);
+    if !d.hasName { return ""; };
+    return clone(d.name);
+};
+
+// Whether a statement reads the pack (MirLower.markPackReads): a field of it at a number, an element at an index, or a borrow
+// of either
+fn readsPack(s: &Stmt, pack: Int) -> Bool ~ {
+    if s.k = 2 { return s.c = pack && s.name = "$pack" && s.text = lwCat("copy ", intText(pack)); };
+    if s.k != 0 { return false; };
+    w = firstWords(&s.text, 7);
+    if size(w) < 7 || get(w, 0) != "assign" { return false; };
+    p = intText(pack);
+    if get(w, 2) = "listop" { return get(w, 3) = "get" && get(w, 5) = "copy" && get(w, 6) = p; };
+    if get(w, 2) = "borrow" || get(w, 2) = "borrowmut" {
+        if get(w, 3) != p || get(w, 4) = "0" { return false; };
+        owner = "$pack";
+        return (get(w, 5) = "field" && get(w, 6) = quote(&owner)) || get(w, 5) = "index";
+    };
+    return false;
+};
+
+// The first n words of a text split at spaces (fewer when it has fewer)
+fn firstWords(text: &String, n: Int) -> List<String> ~ {
+    out = [];
+    start = 0;
+    i = 0;
+    while i < size(text.bytes) && size(out) < n [{ affirm i >= 0; affirm start >= 0; affirm start <= i; }] shrinks size(text.bytes) - i {
+        if get(text.bytes, i) = toByte(32) {
+            out = push(out, text.slice(start, i));
+            start = i + 1;
+        };
+        i = i + 1;
+    };
+    if size(out) < n && start < size(text.bytes) { out = push(out, text.slice(start, size(text.bytes))); };
+    return out;
+};
+
+// Whether a validation statement of the program names the pack (MirLower.markPackReads)
+fn validationReadsPack(ls: &LowSt, src: &List<AstNode>, s: Int) -> Bool ~ {
+    pack = packLocalOf(ls);
+    if pack < 0 { return false; };
+    name = packParamName(ls, pack);
+    if size(name.bytes) = 0 { return false; };
+    stmt = stmtAt(src, s);
+    if !(stmt is AstStatement::ValidationStatement) { return false; };
+    node = nodeIn(src, (stmt as AstStatement::ValidationStatement).v);
+    if !(node is AstNode::Validation) { return false; };
+    v = (node as AstNode::Validation).value;
+    if v is AstValidation::ProofAssert { return proofNames(src, (v as AstValidation::ProofAssert).p, &name); };
+    if v is AstValidation::Assume { return proofNames(src, (v as AstValidation::Assume).p, &name); };
+    if v is AstValidation::AssignProofVar { return exprNames(src, (v as AstValidation::AssignProofVar).e, &name); };
+    return false;
+};
+
+fn proofNames(src: &List<AstNode>, p: Int, name: &String) -> Bool ~ {
+    node = nodeIn(src, p);
+    if !(node is AstNode::Proof) { return false; };
+    pr = (node as AstNode::Proof).value;
+    if pr is AstProof::ATerm { return nameText(src, (pr as AstProof::ATerm).n) = clone(name); };
+    if pr is AstProof::FApp {
+        if proofNames(src, (pr as AstProof::FApp).f, name) { return true; };
+        for a in listItems(src, (pr as AstProof::FApp).xs) { if proofNames(src, a, name) { return true; }; };
+        return false;
+    };
+    if pr is AstProof::Forall {
+        for g in listItems(src, (pr as AstProof::Forall).gs) { if proofNames(src, g, name) { return true; }; };
+        return proofNames(src, (pr as AstProof::Forall).b, name);
+    };
+    return false;
+};
+
+// (an expression as a proof term: a variable is a term, a call an application)
+fn exprNames(src: &List<AstNode>, e: Int, name: &String) -> Bool ~ {
+    node = nodeIn(src, e);
+    if !(node is AstNode::Expression) { return false; };
+    x = (node as AstNode::Expression).value;
+    if x is AstExpression::Var { return nameText(src, (x as AstExpression::Var).n) = clone(name); };
+    if x is AstExpression::F {
+        if exprNames(src, (x as AstExpression::F).f, name) { return true; };
+        for a in listItems(src, (x as AstExpression::F).xs) { if exprNames(src, a, name) { return true; }; };
+    };
+    return false;
+};
+
+// `define $pack read at LINE:COL = 0` where the statement being lowered is (MirPacks reads it for the line of an index out
+// of range)
+fn packReadMark(ls: LowSt) -> LowSt ~ {
+    text = lwCat3(lwCat("$pack read at ", intText(ls.bLine)), ":", intText(ls.bCol));
+    ls = addName(ls, &text);
+    n = ls.id;
+    zero = "0";
+    ls = addName(ls, &zero);
+    digits = ls.id;
+    ls = addNode(ls, AstNode::Value { value: AstValue::VInt { n: digits } });
+    value = ls.id;
+    ls = addNode(ls, AstNode::Expression { value: AstExpression::Val { v: value } });
+    e = ls.id;
+    ls = addNode(ls, AstNode::Validation { value: AstValidation::AssignProofVar { n: n, e: e } });
+    v = ls.id;
+    ls = addNode(ls, AstNode::Statement { value: AstStatement::ValidationStatement { v: v } });
+    pay = ls.id;
+    return emitPlain(ls, ghostStmt(0, 0 - 1, pay, ""));
+};
+
+// (does nothing after a return, where nothing can run; a read of the pack of a variadic function is marked first)
+fn emitStmt(ls: LowSt, s: Stmt) -> LowSt ~ {
+    if !ls.bHasOpen { return ls; };
+    if ls.bHasPlace && s.k != 3 {
+        pack = packLocalOf(&ls);
+        if pack >= 0 && readsPack(&s, pack) { ls = packReadMark(ls); };
+    };
+    return emitPlain(ls, s);
 };
 
 fn emitAssign(ls: LowSt, dest: Int, rv: &Rv) -> LowSt ~ { return emitStmt(ls, assignStmt(dest, rv)); };
@@ -607,11 +759,6 @@ fn ghostHere(ls: LowSt, kind: Int, pay: Int, text: String) -> LowSt ~ {
     return emitStmt(ls, ghostStmt(kind, env, pay, text));
 };
 
-fn addNode(ls: LowSt, node: AstNode) -> LowSt ~ {
-    id = ls.pbase + size(ls.pn);
-    pn = push(ls.pn, node);
-    return LowSt { pn: pn, id: id, ..ls };
-};
 
 fn statementsList(ls: LowSt, xs: &List<Int>) -> LowSt ~ {
     ls = addNode(ls, AstNode::Statements { value: AstStatements::End });
@@ -660,12 +807,6 @@ fn terminationPayload(ls: LowSt, src: &List<AstNode>, t: Int) -> LowSt ~ {
     return addNode(ls, AstNode::Statement { value: AstStatement::While { e: e, vs: vs, t: t, xs: xs } });
 };
 
-fn addName(ls: LowSt, text: &String) -> LowSt ~ {
-    ls = addNode(ls, AstNode::Name { value: AstName::End });
-    if size(text.bytes) = 0 { return ls; };
-    tail = ls.id;
-    return addNode(ls, AstNode::Name { value: AstName::Part { text: clone(text), tail: tail } });
-};
 
 // ProofAssert (FApp (CTerm (builtinFunct (Is variant))) [ATerm "$cloneVariant"]) as a ValidationStatement statement
 fn cloneVariantPayload(ls: LowSt, variant: &String) -> LowSt ~ {

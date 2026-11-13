@@ -323,6 +323,7 @@ fixtures =
     , ImplDef Nothing [] "Packet" TInt [] [], ImplDef (Just "Trait") [ArgType TBool] "Packet" (head types) [("T", "Trait", types)] [Return (Var "self")]
     , BoundedDef [("T", "Trait", types)] (Assign "f" (Val (functionValue (NativeFunct signature Nothing []))))
     , Mark (-1) 9223372036854775807, CopyDef "Packet", LinearDef "Permit", ExternDef "write", DropDef "Packet", Dissolve "p"
+    , PackLoop "i" "a" "args" (Val (VInt 0)) (F (Var "size") [Var "args"]) True [Return (Var "a")], PackLoop "$index 1:2" "$element 1:2" "args" (Var "lo") (Var "hi") False []
     ] ++ map (Return . Val) values ++ map ValidationStatement validations ++
     [While (Val (VBool True)) validations t [] | t <- Nothing : map Just [Shrinks (Var "n"), Counting (Var "n"), Parts (Var "tree"), MayDiverge, Recursing Nothing, Recursing (Just MayDiverge)]]
 

@@ -34,6 +34,9 @@ instance NFData M.Program
 deriving instance Generic M.BoundedFn
 instance Binary M.BoundedFn
 instance NFData M.BoundedFn
+deriving instance Generic M.PackLoop
+instance Binary M.PackLoop
+instance NFData M.PackLoop
 deriving instance Generic M.TypeDecl
 instance Binary M.TypeDecl
 instance NFData M.TypeDecl

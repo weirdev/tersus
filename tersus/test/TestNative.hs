@@ -8,6 +8,7 @@ module TestNative
     , nativeMirCase
     , clangAvailable
     , runExecutableBytes
+    , sameAsMir
     ) where
 
 import Control.Concurrent (forkIO)

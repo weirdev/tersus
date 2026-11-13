@@ -428,7 +428,7 @@ fn rwStatement(rw: Rw, s: Int) -> Rw ~ {
     stmt = statementOf(&rw.nodes, s);
     if stmt is AstStatement::StructDef || stmt is AstStatement::EnumDef || stmt is AstStatement::TraitDef || stmt is AstStatement::ImplDef { return rwDeclaration(rw, &stmt); };
     if stmt is AstStatement::BoundedDef || stmt is AstStatement::AxiomDef || stmt is AstStatement::ProofDef || stmt is AstStatement::Assign { return rwDefinition(rw, &stmt); };
-    if stmt is AstStatement::Block || stmt is AstStatement::If || stmt is AstStatement::While { return rwControl(rw, &stmt); };
+    if stmt is AstStatement::Block || stmt is AstStatement::If || stmt is AstStatement::While || stmt is AstStatement::PackLoop { return rwControl(rw, &stmt); };
     if stmt is AstStatement::AssignDeref { a = stmt as AstStatement::AssignDeref; rw = rwExpr(rw, a.a); return rwExpr(rw, a.b); };
     if stmt is AstStatement::Let { a = stmt as AstStatement::Let; rw = rwExpr(rw, a.e); return bind(rw, nameText(&rw.nodes, a.n)); };
     if stmt is AstStatement::Return { return rwExpr(rw, (stmt as AstStatement::Return).e); };
@@ -570,6 +570,16 @@ fn rwControl(rw: Rw, stmt: &AstStatement) -> Rw ~ {
         rw = Rw { bound: bound, ..rw };
         rw = rwTermination(rw, a.t);
         return rwScoped(rw, a.xs);
+    };
+    if stmt is AstStatement::PackLoop {
+        a = stmt as AstStatement::PackLoop;
+        rw = rwExpr(rw, a.lo);
+        rw = rwExpr(rw, a.hi);
+        rw = bind(rw, nameText(&rw.nodes, a.i));
+        bound = clone(rw.bound);
+        rw = bind(rw, nameText(&rw.nodes, a.a));
+        rw = rwStatements(rw, a.xs);
+        return Rw { bound: bound, ..rw };
     };
     return rw;
 };

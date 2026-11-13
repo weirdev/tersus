@@ -2,7 +2,7 @@ import data::arena::arena { reorderArena };
 import data::ast::ast { AstElaborated, AstNode, AstProgram, AstStatement, AstValidation };
 import elaborate::records { codecTypeAt, listItems, nameText, nodeIn };
 import elaborate::state { intText };
-import elaborate::lowerstate { BoundedRec, GenericRec, EnvRec, LBlock, LDecl, LFn, LoopRec, LowSt, Stmt, TDecl, Term, fromCodecTy, intAt, lwCat, lwSort, newLowSt, quote, setTexts, lwSp, tyText };
+import elaborate::lowerstate { BoundedRec, PackLoopRec, GenericRec, EnvRec, LBlock, LDecl, LFn, LoopRec, LowSt, Stmt, TDecl, Term, fromCodecTy, intAt, lwCat, lwSort, newLowSt, quote, setTexts, lwSp, tyText };
 import elaborate::lowerbuild { bodyOf, definedFunction, isFunct, statementsList, stmtAt, valOf };
 import elaborate::lower { functionNames, lowerProgram };
 import elaborate::lowerplace { noDecl };
@@ -78,6 +78,7 @@ fn innerStatements(src: &List<AstNode>, stmt: &AstStatement) -> List<Int> ~ {
         return out;
     };
     if stmt is AstStatement::While { return listItems(src, (stmt as AstStatement::While).xs); };
+    if stmt is AstStatement::PackLoop { return listItems(src, (stmt as AstStatement::PackLoop).xs); };
     if stmt is AstStatement::ImplDef { return listItems(src, (stmt as AstStatement::ImplDef).xs); };
     if stmt is AstStatement::BoundedDef { return push([], (stmt as AstStatement::BoundedDef).s); };
     return [];
@@ -192,7 +193,9 @@ fn writeLowered(ls: LowSt, src: &Src, declared: List<String>, nested: List<Strin
     };
     for n in lwSort(boundedKeys(&ls)) {
         b = lwBoundedOf(&ls, &n);
-        o = outLine(o, lwSp(lwSp(lwSp(lwSp("bounded", quote(&n)), countedNames(&b.sizes)), countedNames(&b.copyParams)), countedNames(&b.lifted)));
+        line = lwSp(lwSp(lwSp(lwSp(lwSp("bounded", quote(&n)), countedNames(&b.sizes)), countedNames(&b.copyParams)), countedNames(&b.lifted)), intText(size(b.packLoops)));
+        for l in &b.packLoops { line = lwSp(line, packLoopText(l)); };
+        o = outLine(o, line);
     };
     for n in lwSort(instanceKeys(&ls)) { o = outLine(o, lwSp(lwSp("instance", quote(&n)), HashMap::lookup(&ls.instances, &n, noText()))); };
     for c in &shared.order { o = outLine(o, sharedLine(&ls, c)); };
@@ -221,7 +224,18 @@ fn writeLowered(ls: LowSt, src: &Src, declared: List<String>, nested: List<Strin
     return MirOut { ok: true, msg: "", lines: o.lines, payload: reorderArena(&nodes, rootId, "mir") };
 };
 
-fn noBounded() -> BoundedRec ~ { return BoundedRec { sizes: [], copyParams: [], lifted: [] }; };
+fn noBounded() -> BoundedRec ~ { return BoundedRec { sizes: [], copyParams: [], lifted: [], packLoops: [] }; };
+
+// A loop over the pack as the bounded line writes it (MirData.packLoopTokens)
+fn packLoopText(l: &PackLoopRec) -> String ~ {
+    text = lwSp(lwSp(lwSp(intText(l.header), intText(l.body)), intText(l.exit)), intText(size(l.blocks)));
+    for b in &l.blocks { text = lwSp(text, intText(b)); };
+    text = lwSp(text, intText(size(l.locals)));
+    for x in &l.locals { text = lwSp(text, intText(x)); };
+    text = lwSp(lwSp(lwSp(lwSp(lwSp(text, intText(l.index)), intText(l.element)), quote(&l.elementType)), intText(l.lo)), intText(l.hi));
+    if l.taken < 0 { return lwSp(text, "none"); };
+    return lwSp(text, intText(l.taken));
+};
 
 fn lwBoundedOf(ls: &LowSt, n: &String) -> BoundedRec ~ { return HashMap::lookup(&ls.bounded, n, noBounded()); };
 

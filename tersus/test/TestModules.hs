@@ -3,6 +3,9 @@ module TestModules
     , testPhase1Packages
     , testPhase2Packages
     , validatorMetadataFingerprint
+    , phase2Files
+    , phase2Runs
+    , phase2Rejects
     ) where
 
 import Control.Exception (bracket, evaluate, finally, try, SomeException)

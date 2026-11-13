@@ -608,6 +608,7 @@ fn statementKind(stmt: &AstStatement) -> String ~ {
     if stmt is AstStatement::Return { return "a return"; };
     if stmt is AstStatement::If { return "an if statement"; };
     if stmt is AstStatement::While { return "a while statement"; };
+    if stmt is AstStatement::PackLoop { return "a for loop over a pack"; };
     if stmt is AstStatement::Block { return "a block"; };
     if stmt is AstStatement::ValidationStatement { return "a validation statement"; };
     if stmt is AstStatement::Let { return "a let"; };

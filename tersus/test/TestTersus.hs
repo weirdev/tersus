@@ -27,6 +27,7 @@ import TestArrays
 import TestBorrow
 import TestCopies
 import TestGenerics
+import TestVariadic
 import TestBox
 import TestDeref
 import TestPointers
@@ -176,6 +177,7 @@ originalGroups =
     , testBorrow
     , testCopies
     , testGenerics
+    , testVariadic
     , testSequence
     , testStrings
     , testBytes
