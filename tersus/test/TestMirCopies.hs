@@ -2,11 +2,12 @@
 
 module TestMirCopies (testMirCopies) where
 
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 
 import Mir
 import MirCopies (makeCopies)
-import Syntax (Proof (..), ValidationStatement (..))
+import Syntax (Proof (..), ValidationStatement (..), Value (..))
 import TestHarness
 import Types (Arg (..), BuiltinFunct (..), Rel (..), Size (..), Type (..), pattern TBox, pattern TList)
 import StdLib (builtinFunct)
@@ -31,6 +32,15 @@ testMirCopies =
         , testCase "a copy for a bigger type at each call is refused" growthRefused
         , testCase "an array a copy makes too big for a frame is the call's refusal" frameRefused
         , testCase "the marker of a function with bounds goes, and its copies are defined where the program starts" markersReplaced
+        , testCase "a variadic copy has a parameter for each argument, lent with the pack, and size(args) is their number" packParameters
+        , testCase "a copy for no arguments has no parameters" emptyPack
+        , testCase "get(args, k) is the parameter at k, in blocks and environments" literalElement
+        , testCase "get(args, k) out of range is the obligation k < N" outOfRange
+        , testCase "a branch the copy does not take goes with its references and obligations" pruning
+        , testCase "a loop over the pack is a copy of its body for each argument" unrolled
+        , testCase "a forall over the pack in a contract is a fact for each argument" packForall
+        , testCase "the blocks after an element read out of range go" outOfRangePruned
+        , testCase "a variadic copy's locals are checked against the frame" variadicFrame
         ]
 
 blockOf :: [Statement] -> Terminator -> Map.Map BlockId BasicBlock
@@ -79,7 +89,7 @@ withCopies p check = case makeCopies p of
     Error e -> Just ("the copy step failed: " ++ e)
 
 substituted :: TestResult
-substituted = withCopies (program [ident] (mainCalling [] [("ident[Int]", TInt)]) [("ident", BoundedFn [] [] [])] [("ident[Int]", ("ident", [ArgType TInt]))]) $ \out ->
+substituted = withCopies (program [ident] (mainCalling [] [("ident[Int]", TInt)]) [("ident", BoundedFn [] [] [] [])] [("ident[Int]", ("ident", [ArgType TInt]))]) $ \out ->
     case Map.lookup "ident[Int]" (progFunctions out) of
         Just copy
             | Map.member "ident" (progFunctions out) -> Just "the function with bounds is still there"
@@ -91,7 +101,7 @@ substituted = withCopies (program [ident] (mainCalling [] [("ident[Int]", TInt)]
 
 -- fn wrap<T: Eq>(x: T) -> Pair<T> { return Pair<T> { a: x }; }
 structNamed :: TestResult
-structNamed = withCopies (program [wrap] (mainCalling [] [("wrap[Int]", TNamed "Pair" [ArgType TInt])]) [("wrap", BoundedFn [] [] [])] [("wrap[Int]", ("wrap", [ArgType TInt]))]) $ \out ->
+structNamed = withCopies (program [wrap] (mainCalling [] [("wrap[Int]", TNamed "Pair" [ArgType TInt])]) [("wrap", BoundedFn [] [] [] [])] [("wrap[Int]", ("wrap", [ArgType TInt]))]) $ \out ->
     case blockStatements <$> (Map.lookup "wrap[Int]" (progFunctions out) >>= Map.lookup (BlockId 0) . fnBlocks) of
         Just [Assign (Local 0) (MakeData "Pair<Int>" [("a", Copy (Local 1))])] -> Nothing
         other -> Just (show other)
@@ -109,7 +119,7 @@ sizedFn =
         }
 
 boundedSize :: TestResult
-boundedSize = withCopies (program [sizedFn] (mainCalling [] [("sized[Bool, 3]", TInt)]) [("sized", BoundedFn ["n"] [] [])] [("sized[Bool, 3]", ("sized", [ArgType TBool, ArgSize (SizeConst 3)]))]) $ \out ->
+boundedSize = withCopies (program [sizedFn] (mainCalling [] [("sized[Bool, 3]", TInt)]) [("sized", BoundedFn ["n"] [] [] [])] [("sized[Bool, 3]", ("sized", [ArgType TBool, ArgSize (SizeConst 3)]))]) $ \out ->
     case Map.lookup "sized[Bool, 3]" (progFunctions out) of
         Just copy
             | fnSizeParams copy /= ["n"] || length (fnParams copy) /= 2 -> Just "the size parameter was dropped"
@@ -120,13 +130,13 @@ boundedSize = withCopies (program [sizedFn] (mainCalling [] [("sized[Bool, 3]", 
         Nothing -> Just "no copy"
 
 deduplicated :: TestResult
-deduplicated = withCopies (program [ident] (mainCalling [] [("ident[Int]", TInt), ("again", TInt)]) [("ident", BoundedFn [] [] [])] [("ident[Int]", ("ident", [ArgType TInt])), ("again", ("ident", [ArgType TInt]))]) $ \out ->
+deduplicated = withCopies (program [ident] (mainCalling [] [("ident[Int]", TInt), ("again", TInt)]) [("ident", BoundedFn [] [] [] [])] [("ident[Int]", ("ident", [ArgType TInt])), ("again", ("ident", [ArgType TInt]))]) $ \out ->
     let copies = [n | n <- Map.keys (progFunctions out), n `elem` ["ident[Int]", "again"]]
      in if length copies == 1 then Nothing else Just ("copies: " ++ show copies)
 
 -- fn outer<T: Eq>(x: T) -> T { fn inner(y: T) -> T { return y; }; return inner(x); }
 liftedCopied :: TestResult
-liftedCopied = withCopies (program [outer, inner] (mainCalling [] [("outer[Int]", TInt)]) [("outer", BoundedFn [] [] ["outer::inner"])] [("outer[Int]", ("outer", [ArgType TInt]))]) $ \out ->
+liftedCopied = withCopies (program [outer, inner] (mainCalling [] [("outer[Int]", TInt)]) [("outer", BoundedFn [] [] ["outer::inner"] [])] [("outer[Int]", ("outer", [ArgType TInt]))]) $ \out ->
     case (Map.lookup "outer[Int]" (progFunctions out), Map.lookup "outer[Int]::inner" (progFunctions out)) of
         (Just copy, Just innerCopy)
             | Map.member "outer::inner" (progFunctions out) -> Just "the lifted function with type parameters is still there"
@@ -140,7 +150,7 @@ liftedCopied = withCopies (program [outer, inner] (mainCalling [] [("outer[Int]"
 
 -- fn caller<T: Eq>(x: T) -> T [{ affirm ident['T](x) = x; }] { return ident['T](x); }
 referencesRenamed :: TestResult
-referencesRenamed = withCopies (program [ident, caller] (mainCalling [] [("caller[Bool]", TBool)]) [("ident", BoundedFn [] [] []), ("caller", BoundedFn [] [] [])] [("caller[Bool]", ("caller", [ArgType TBool])), ("ident['T]", ("ident", [ArgType (TParam "T")]))]) $ \out ->
+referencesRenamed = withCopies (program [ident, caller] (mainCalling [] [("caller[Bool]", TBool)]) [("ident", BoundedFn [] [] [] []), ("caller", BoundedFn [] [] [] [])] [("caller[Bool]", ("caller", [ArgType TBool])), ("ident['T]", ("ident", [ArgType (TParam "T")]))]) $ \out ->
     case Map.lookup "caller[Bool]" (progFunctions out) of
         Just copy
             | not (Map.member "ident[Bool]" (progFunctions out)) -> Just ("the copy the body names was not made: " ++ show (Map.keys (progFunctions out)))
@@ -163,7 +173,7 @@ boundCall callee param result =
     (function "through" [(param, "x")] result [] (Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn callee)) [Copy (Local 1)] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)])){fnTypeParams = ["T"]}
 
 rowCopy :: [Function] -> [(String, BoundedFn)] -> Function -> Type -> (Function -> Program -> TestResult) -> TestResult
-rowCopy others bounded through t check = withCopies (program (through : others) (mainCalling [] [("through[x]", TInt)]) (("through", BoundedFn [] [] []) : bounded) [("through[x]", ("through", [ArgType t]))]) $ \out ->
+rowCopy others bounded through t check = withCopies (program (through : others) (mainCalling [] [("through[x]", TInt)]) (("through", BoundedFn [] [] [] []) : bounded) [("through[x]", ("through", [ArgType t]))]) $ \out ->
     case Map.lookup "through[x]" (progFunctions out) of
         Just copy -> check copy out
         Nothing -> Just "no copy"
@@ -179,7 +189,7 @@ resolutionRows =
     , ("Eq of words is a comparison", rowCopy [] [] (eqCall "<$param T as Eq>::eq") TByte $ \copy _ -> case lastBlock copy of
         Just (BasicBlock stmts Return) | Assign (Local 0) (BinaryOp (Compare Eq) (Copy (Local 1)) (Copy (Local 2))) `elem` stmts -> Nothing
         other -> Just (show other))
-    , ("Eq of Boxes of arrays of no size calls eqBoxedArrays", rowCopy [eqBoxed] [("eqBoxedArrays", BoundedFn [] [] [])] (eqCall "<$param T as Eq>::eq") (TBox (TArrayOf TInt SizeAny)) $ \copy out -> case lastBlock copy of
+    , ("Eq of Boxes of arrays of no size calls eqBoxedArrays", rowCopy [eqBoxed] [("eqBoxedArrays", BoundedFn [] [] [] [])] (eqCall "<$param T as Eq>::eq") (TBox (TArrayOf TInt SizeAny)) $ \copy out -> case lastBlock copy of
         Just (BasicBlock _ (Call (Const (CFn "eqBoxedArrays[Int]")) _ _ _)) | Map.member "eqBoxedArrays[Int]" (progFunctions out) -> Nothing
         other -> Just (show other))
     , ("a reference argument is read where it is to", rowCopy [] [] (boundCall "<$param T as Clone>::clone" (TRef (TParam "T")) (TParam "T")) TInt $ \copy _ -> case lastBlock copy of
@@ -190,19 +200,19 @@ resolutionRows =
         other -> Just (show other))
     , ("a sequence function in a proof is the builtin's term", rowCopy [] [] ((boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt){fnSpec = emptySpec{specEnsures = [ProofAssert (FApp (ATerm "<$param T as Sequence>::size") [ATerm "x"])]}}) (TList TInt) $ \copy _ ->
         if specEnsures (fnSpec copy) == [ProofAssert (FApp (CTerm (builtinFunct Size)) [ATerm "x"])] then Nothing else Just (show (specEnsures (fnSpec copy))))
-    , ("a sequence function of the library's traits is the builtin, though the list has the impl", withCopies (program [boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt, listSize] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [])] [("through[x]", ("through", [ArgType (TList TInt)])), ("<$param T as Sequence>::size", ("$builtin", []))]) $ \out -> case Map.lookup "through[x]" (progFunctions out) >>= lastBlock of
+    , ("a sequence function of the library's traits is the builtin, though the list has the impl", withCopies (program [boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt, listSize] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [] [])] [("through[x]", ("through", [ArgType (TList TInt)])), ("<$param T as Sequence>::size", ("$builtin", []))]) $ \out -> case Map.lookup "through[x]" (progFunctions out) >>= lastBlock of
         Just (BasicBlock stmts Return) | any (\s -> case s of Assign (Local 0) (ListOp Length [_]) -> True; _ -> False) stmts -> Nothing
         other -> Just (show other))
     , ("Clone of a struct with a Clone impl calls it", rowCopy [cloneS] [] (boundCall "<$param T as Clone>::clone" (TParam "T") (TParam "T")) (TNamed "S" []) $ \copy _ -> case lastBlock copy of
         Just (BasicBlock _ (Call (Const (CFn "<S as Clone>::clone")) [Copy (Local 1)] (Local 0) _)) -> Nothing
         other -> Just (show other))
-    , ("a clone of a value of a type parameter in a lifted function calls the Clone impl of the type", withCopies (program [outer, inner, cloneS] (mainCalling [] [("outer[S]", TNamed "S" [])]) [("outer", BoundedFn [] [] ["outer::inner"])] [("outer[S]", ("outer", [ArgType (TNamed "S" [])]))]) $ \out -> case fnBlocks <$> Map.lookup "outer[S]::inner" (progFunctions out) of
+    , ("a clone of a value of a type parameter in a lifted function calls the Clone impl of the type", withCopies (program [outer, inner, cloneS] (mainCalling [] [("outer[S]", TNamed "S" [])]) [("outer", BoundedFn [] [] ["outer::inner"] [])] [("outer[S]", ("outer", [ArgType (TNamed "S" [])]))]) $ \out -> case fnBlocks <$> Map.lookup "outer[S]::inner" (progFunctions out) of
         Just blocks | [(BlockId 0, BasicBlock [] (Call (Const (CFn "<S as Clone>::clone")) [Copy (Local 1)] (Local 0) next)), (next', BasicBlock [Assign (Local 0) (Use (Copy (Local 0)))] Return)] <- Map.toList blocks, next == next' -> Nothing
         other -> Just (show other))
     , ("a clone of what a Box holds is given a borrow of it, and the value is not read", rowCopy [cloneS] [] unboxClone (TNamed "S" []) $ \copy _ -> case Map.lookup (BlockId 0) (fnBlocks copy) of
         Just (BasicBlock [Assign r (Borrow (Local 1) [] False)] (Call (Const (CFn "<S as Clone>::clone")) [Copy r'] (Local 0) _)) | r == r' -> Nothing
         other -> Just (show other))
-    , ("and a Box of an array is given the array", rowCopy [arrayClone] [("<Array as Clone>::clone", BoundedFn [] [] [])] unboxClone (TArrayOf TInt (SizeConst 2)) $ \copy out -> case Map.lookup (BlockId 0) (fnBlocks copy) of
+    , ("and a Box of an array is given the array", rowCopy [arrayClone] [("<Array as Clone>::clone", BoundedFn [] [] [] [])] unboxClone (TArrayOf TInt (SizeConst 2)) $ \copy out -> case Map.lookup (BlockId 0) (fnBlocks copy) of
         Just (BasicBlock [Assign (Local 2) (Unbox (Copy (Local 1)))] (Call (Const (CFn "<Array as Clone>::clone[Int]")) [Copy (Local 2), Const (CInt 2)] (Local 0) _)) | Map.member "<Array as Clone>::clone[Int]" (progFunctions out) -> Nothing
         other -> Just (show other))
     , ("an impl with sizes is given the sizes of the arguments", rowCopy [arraySize] [] (boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt) (TArrayOf TInt (SizeConst 3)) $ \copy _ -> case lastBlock copy of
@@ -214,10 +224,10 @@ resolutionRows =
     , ("anything else calls the type's impl", rowCopy [hashInt] [] (boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt) TInt $ \copy _ -> case lastBlock copy of
         Just (BasicBlock _ (Call (Const (CFn "<Int as Hash>::hash")) [Copy (Local 1)] (Local 0) _)) -> Nothing
         other -> Just (show other))
-    , ("an impl with bounds is copied for the types the call gives it", rowCopy [listEq] [("<List as Eq>::eq", BoundedFn [] [] [])] (eqCall "<$param T as Eq>::eq") (TList TBool) $ \copy out -> case lastBlock copy of
+    , ("an impl with bounds is copied for the types the call gives it", rowCopy [listEq] [("<List as Eq>::eq", BoundedFn [] [] [] [])] (eqCall "<$param T as Eq>::eq") (TList TBool) $ \copy out -> case lastBlock copy of
         Just (BasicBlock _ (Call (Const (CFn "<List as Eq>::eq[Bool]")) _ _ _)) | Map.member "<List as Eq>::eq[Bool]" (progFunctions out) -> Nothing
         other -> Just (show other ++ show (Map.keys (progFunctions out))))
-    , ("a type with no impl of the trait is an internal error", testAssertErrorContains "internal compiler error" (makeCopies (program [boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [])] [("through[x]", ("through", [ArgType TBool]))])))
+    , ("a type with no impl of the trait is an internal error", testAssertErrorContains "internal compiler error" (makeCopies (program [boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [] [])] [("through[x]", ("through", [ArgType TBool]))])))
     ]
   where
     eqCall callee = (function "through" [(TParam "T", "a"), (TParam "T", "b")] TBool [] (Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn callee)) [Copy (Local 1), Copy (Local 2)] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)])){fnTypeParams = ["T"]}
@@ -233,7 +243,7 @@ resolutionRows =
     listEq = (function "<List as Eq>::eq" [(TRef (TList (TParam "T")), "self"), (TRef (TList (TParam "T")), "other")] TBool [] (blockOf [Assign (Local 0) (Use (Const (CBool True)))] Return)){fnTypeParams = ["T"]}
 
 companionCopied :: TestResult
-companionCopied = withCopies (program [listEq, check] (mainCalling [] [("<List as Eq>::eq[Int]", TBool)]) [("<List as Eq>::eq", BoundedFn [] [] []), ("Eq for List::eq", BoundedFn [] [] [])] [("<List as Eq>::eq[Int]", ("<List as Eq>::eq", [ArgType TInt])), ("<List as Eq>::eq['T]", ("<List as Eq>::eq", [ArgType (TParam "T")]))]) $ \out ->
+companionCopied = withCopies (program [listEq, check] (mainCalling [] [("<List as Eq>::eq[Int]", TBool)]) [("<List as Eq>::eq", BoundedFn [] [] [] []), ("Eq for List::eq", BoundedFn [] [] [] [])] [("<List as Eq>::eq[Int]", ("<List as Eq>::eq", [ArgType TInt])), ("<List as Eq>::eq['T]", ("<List as Eq>::eq", [ArgType (TParam "T")]))]) $ \out ->
     if Map.member "Eq for List::eq[Int]" (progFunctions out) then Nothing else Just (show (Map.keys (progFunctions out)))
   where
     listEq = (function "<List as Eq>::eq" [(TRef (TList (TParam "T")), "self"), (TRef (TList (TParam "T")), "other")] TBool [] (blockOf [Assign (Local 0) (Use (Const (CBool True)))] Return)){fnTypeParams = ["T"]}
@@ -241,17 +251,147 @@ companionCopied = withCopies (program [listEq, check] (mainCalling [] [("<List a
 
 -- fn grow<T: Eq>(x: T) -> Int { return grow[List<'T>](push([], x)); }
 growthRefused :: TestResult
-growthRefused = testAssertErrorContains "Type error: grow calls itself with the types List<List<Int>>, which are not those it is made for" (makeCopies (program [grow] (mainCalling [] [("grow[List<Int>]", TInt)]) [("grow", BoundedFn [] [] [])] [("grow[List<Int>]", ("grow", [ArgType (TList TInt)])), ("grow[List<'T>]", ("grow", [ArgType (TList (TParam "T"))]))]))
+growthRefused = testAssertErrorContains "Type error: grow calls itself with the types List<List<Int>>, which are not those it is made for" (makeCopies (program [grow] (mainCalling [] [("grow[List<Int>]", TInt)]) [("grow", BoundedFn [] [] [] [])] [("grow[List<Int>]", ("grow", [ArgType (TList TInt)])), ("grow[List<'T>]", ("grow", [ArgType (TList (TParam "T"))]))]))
   where
     grow = (function "grow" [(TParam "T", "x")] TInt [(TList (TParam "T"), Nothing)] (Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn "grow[List<'T>]")) [Copy (Local 2)] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)])){fnTypeParams = ["T"]}
 
 -- fn big<T: Clone>(x: T) -> Int { a = array(3000, x); return 0; } for an array of 3
 frameRefused :: TestResult
-frameRefused = testAssertErrorContains "Type error: big cannot be made as big[Array<Int, 3>] for this call: Array<Array<Int, 3>, 3000> takes 9000 words, more than the 8192 that an array held in a frame can have" (makeCopies (program [big] (mainCalling [] [("big[Array<Int, 3>]", TInt)]) [("big", BoundedFn [] [] [])] [("big[Array<Int, 3>]", ("big", [ArgType (TArrayOf TInt (SizeConst 3))]))]))
+frameRefused = testAssertErrorContains "Type error: big cannot be made as big[Array<Int, 3>] for this call: Array<Array<Int, 3>, 3000> takes 9000 words, more than the 8192 that an array held in a frame can have" (makeCopies (program [big] (mainCalling [] [("big[Array<Int, 3>]", TInt)]) [("big", BoundedFn [] [] [] [])] [("big[Array<Int, 3>]", ("big", [ArgType (TArrayOf TInt (SizeConst 3))]))]))
   where
     big = (function "big" [(TParam "T", "x")] TInt [(TArrayOf (TParam "T") (SizeConst 3000), Just "a")] (blockOf [Assign (Local 0) (Use (Const (CInt 0)))] Return)){fnTypeParams = ["T"]}
 
 markersReplaced :: TestResult
-markersReplaced = withCopies (program [ident] (mainCalling [Ghost Map.empty (GhostFunction "ident" "ident" True)] [("ident[Int]", TInt), ("ident[Bool]", TBool)]) [("ident", BoundedFn [] [] [])] [("ident[Int]", ("ident", [ArgType TInt])), ("ident[Bool]", ("ident", [ArgType TBool]))]) $ \out ->
+markersReplaced = withCopies (program [ident] (mainCalling [Ghost Map.empty (GhostFunction "ident" "ident" True)] [("ident[Int]", TInt), ("ident[Bool]", TBool)]) [("ident", BoundedFn [] [] [] [])] [("ident[Int]", ("ident", [ArgType TInt])), ("ident[Bool]", ("ident", [ArgType TBool]))]) $ \out ->
     let markers = [n | BasicBlock stmts _ <- Map.elems (fnBlocks (progMain out)), Ghost _ (GhostFunction n _ _) <- stmts]
      in if markers == ["ident[Bool]", "ident[Int]"] then Nothing else Just ("markers: " ++ show markers)
+
+-- A variadic function as lowering writes it (MirLower.lowerPackLoop): the pack is its parameter _1 of type ..T, lent
+variadic :: String -> Type -> Map.Map BlockId BasicBlock -> [(Type, Maybe String)] -> Function
+variadic name result blocks others = (function name [(TParam "..T", "args")] result others blocks){fnTypeParams = ["..T"], fnBorrowed = [Local 1]}
+
+-- fn sz<..T>(args: &..T) -> Int { return size(args); }
+sizeOfPack :: Function
+sizeOfPack = variadic "sz" TInt (blockOf [Assign (Local 0) (ListOp Length [Copy (Local 1)])] Return) []
+
+packProgram :: [Function] -> [(String, Type)] -> [(String, (String, [Arg]))] -> [String] -> Program
+packProgram fns calls instances bounded = program fns (mainCalling [] calls) [(b, BoundedFn [] [] [] loops) | b <- bounded, let loops = if b == "count" then [countLoop] else []] instances
+
+copyOf :: Program -> String -> (Function -> TestResult) -> TestResult
+copyOf p name check = withCopies p $ \out -> case Map.lookup name (progFunctions out) of
+    Just copy -> check copy
+    Nothing -> Just ("no copy " ++ name ++ ": " ++ show (Map.keys (progFunctions out)))
+
+packParameters :: TestResult
+packParameters = copyOf (packProgram [sizeOfPack] [("sz[Int, Bool, Int]", TInt), ("sz[]", TInt)] [("sz[Int, Bool, Int]", ("sz", map ArgType [TInt, TBool, TInt])), ("sz[]", ("sz", []))] ["sz"]) "sz[Int, Bool, Int]" $ \copy ->
+    let params = [(localType d, localName d) | p <- fnParams copy, Just d <- [Map.lookup p (fnLocals copy)]]
+     in if params /= [(TInt, Just "args 0"), (TBool, Just "args 1"), (TInt, Just "args 2")] then Just ("the parameters are " ++ show params)
+        else if fnBorrowed copy /= fnParams copy then Just "a lent pack's parameters are not all lent"
+        else if fnTypeParams copy /= [] then Just ("type parameters " ++ show (fnTypeParams copy))
+        else if (blockStatements <$> Map.lookup (BlockId 0) (fnBlocks copy)) /= Just [Assign (Local 0) (Use (Const (CInt 3)))] then Just "size(args) is not the number of arguments"
+        else Nothing
+
+emptyPack :: TestResult
+emptyPack = copyOf (packProgram [sizeOfPack] [("sz[]", TInt)] [("sz[]", ("sz", []))] ["sz"]) "sz[]" $ \copy ->
+    if null (fnParams copy) && (blockStatements <$> Map.lookup (BlockId 0) (fnBlocks copy)) == Just [Assign (Local 0) (Use (Const (CInt 0)))] then Nothing else Just (show copy)
+
+-- fn second<..T>(args: ..T) -> Int { x = get(args, 1); return size(args); }, by value
+secondOfPack :: Function
+secondOfPack = (variadic "second" TInt (blockOf [Assign (Local 2) (ReadField (Copy (Local 1)) "$pack" "1"), Ghost (Map.fromList [("x", Copy (Local 2)), ("args", Copy (Local 1))]) (GhostValidation (ProofAssert (FApp (CTerm (builtinFunct (Rel Eq))) [ATerm "x", ATerm "x"]))), Assign (Local 0) (Use (Const (CInt 0)))] Return) [(TParam "..T#1", Just "x")]){fnBorrowed = []}
+
+literalElement :: TestResult
+literalElement = copyOf (packProgram [secondOfPack] [("second[Int, Bool]", TInt)] [("second[Int, Bool]", ("second", map ArgType [TInt, TBool]))] ["second"]) "second[Int, Bool]" $ \copy -> case Map.lookup (BlockId 0) (fnBlocks copy) of
+    Just (BasicBlock [Ghost env _, Assign (Local 0) _] Return)
+        | Map.lookup "x" env /= Just (Copy (fnParams copy !! 1)) -> Just ("the element is not the parameter: " ++ show env)
+        | Map.member "args" env || Map.lookup "args 0" env /= Just (Copy (head (fnParams copy))) -> Just ("the environment names the pack: " ++ show env)
+        | Map.member (Local 2) (fnLocals copy) -> Just "the local of the element is kept"
+        | (localType <$> Map.lookup (fnParams copy !! 1) (fnLocals copy)) /= Just TBool -> Just "the element's type is not the argument's"
+        | not (null (fnBorrowed copy)) -> Just "a pack taken by value is lent"
+        | otherwise -> Nothing
+    other -> Just (show other)
+
+outOfRange :: TestResult
+outOfRange = copyOf (packProgram [secondOfPack] [("second[Int]", TInt)] [("second[Int]", ("second", [ArgType TInt]))] ["second"]) "second[Int]" $ \copy -> case Map.lookup (BlockId 0) (fnBlocks copy) of
+    Just (BasicBlock [Ghost names (GhostValidation (ProofAssert (FApp (CTerm f) [ATerm index, ATerm count]))), Ghost _ (GhostValidation (Assume _))] Return)
+        | show f == show (builtinFunct (Rel Lt)), Map.lookup index names == Just (Const (CInt 1)), Map.lookup count names == Just (Const (CInt 1)), "get(args, ...)" `isInfixOf` index -> Nothing
+    other -> Just (show other)
+
+-- fn show1<..T: Tr>(args: &..T) -> Int { if size(args) > 0 { return show['..T#0](get(args, 0)); }; return 0; }
+pruned :: Function
+pruned =
+    variadic "pick" TInt (Map.fromList
+        [ (BlockId 0, BasicBlock [Assign (Local 2) (ListOp Length [Copy (Local 1)]), Assign (Local 3) (BinaryOp (Compare Gt) (Copy (Local 2)) (Const (CInt 0)))] (SwitchBool (Copy (Local 3)) (BlockId 1) (BlockId 2)))
+        , (BlockId 1, BasicBlock [Assign (Local 4) (ReadField (Copy (Local 1)) "$pack" "0")] (Call (Const (CFn "ident['..T#0]")) [Copy (Local 4)] (Local 0) (BlockId 3)))
+        , (BlockId 2, BasicBlock [Assign (Local 0) (Use (Const (CInt 0)))] (Goto (BlockId 3)))
+        , (BlockId 3, BasicBlock [] Return)
+        ]) [(TInt, Nothing), (TBool, Nothing), (TParam "..T#0", Nothing)]
+
+pruning :: TestResult
+pruning = withCopies (program [pruned, ident] (mainCalling [] [("pick[]", TInt), ("pick[Bool]", TInt)]) [("pick", BoundedFn [] [] [] []), ("ident", BoundedFn [] [] [] [])] [("pick[]", ("pick", [])), ("pick[Bool]", ("pick", [ArgType TBool])), ("ident['..T#0]", ("ident", [ArgType (TParam "..T#0")]))]) $ \out ->
+    case (Map.lookup "pick[]" (progFunctions out), Map.lookup "pick[Bool]" (progFunctions out)) of
+        (Just none, Just one)
+            | Map.member "ident[Int]" (progFunctions out) -> Just "a copy for a type no call gives"
+            | or [True | BasicBlock ss _ <- Map.elems (fnBlocks none), Ghost _ (GhostValidation (Assume _)) <- ss] -> Just "the branch the empty pack does not take has an obligation"
+            | or [True | BasicBlock _ (Call{}) <- Map.elems (fnBlocks none)] -> Just "the branch the empty pack does not take is kept"
+            | not (or [True | BasicBlock _ (Call (Const (CFn "ident[Bool]")) [Copy p] _ _) <- Map.elems (fnBlocks one), p == head (fnParams one)]) -> Just ("the call of the copy for the argument is missing: " ++ show (fnBlocks one))
+            | not (Map.member "ident[Bool]" (progFunctions out)) -> Just "the copy the branch names was not made"
+            | otherwise -> Nothing
+        _ -> Just (show (Map.keys (progFunctions out)))
+
+-- fn count<..T: Tr>(args: &..T) -> Int { n = 0; for a in &args { n = n + Tr::f(a); }; return n; }, as lowering writes it
+countFn :: Function
+countFn =
+    variadic "count" TInt (Map.fromList
+        [ (BlockId 0, BasicBlock [Assign (Local 8) (Use (Const (CInt 0))), Assign (Local 2) (Use (Const (CInt 0))), Assign (Local 3) (ListOp Length [Copy (Local 1)]), Assign (Local 4) (Use (Copy (Local 2)))] (Goto (BlockId 1)))
+        , (BlockId 1, BasicBlock [Assign (Local 5) (BinaryOp (Compare Lt) (Copy (Local 4)) (Copy (Local 3)))] (SwitchBool (Copy (Local 5)) (BlockId 2) (BlockId 3)))
+        , (BlockId 2, BasicBlock [Assign (Local 6) (ListOp Mir.Get [Copy (Local 1), Copy (Local 4)])] (Call (Const (CFn "<$param ..T@0 as Tr>::f")) [Copy (Local 6)] (Local 7) (BlockId 4)))
+        , (BlockId 4, BasicBlock [Assign (Local 8) (BinaryOp Add (Copy (Local 8)) (Copy (Local 7))), Assign (Local 4) (BinaryOp Add (Copy (Local 4)) (Const (CInt 1)))] (Goto (BlockId 1)))
+        , (BlockId 3, BasicBlock [Assign (Local 0) (Use (Copy (Local 8)))] Return)
+        ]) [(TInt, Nothing), (TInt, Nothing), (TInt, Just "$index"), (TBool, Nothing), (TParam "..T@0", Just "a"), (TInt, Nothing), (TInt, Just "n")]
+
+countLoop :: PackLoop
+countLoop = PackLoop (BlockId 1) (BlockId 2) (BlockId 3) [BlockId 2, BlockId 4] [Local 7] (Local 4) (Local 6) "..T@0" (Local 2) (Local 3) Nothing
+
+trImpl :: String -> Type -> Function
+trImpl owner t = function ("<" ++ owner ++ " as Tr>::f") [(t, "self")] TInt [] (blockOf [Assign (Local 0) (Use (Const (CInt 1)))] Return)
+
+unrolled :: TestResult
+unrolled = copyOf (packProgram [countFn, trImpl "Int" TInt, trImpl "Bool" TBool] [("count[Int, Bool]", TInt)] [("count[Int, Bool]", ("count", map ArgType [TInt, TBool])), ("<$param ..T@0 as Tr>::f", ("", []))] ["count"]) "count[Int, Bool]" $ \copy ->
+    let calls = [(f, args, d) | BasicBlock _ (Call (Const (CFn f)) args d _) <- Map.elems (fnBlocks copy)]
+        params = fnParams copy
+     in case calls of
+            [("<Int as Tr>::f", [Copy a], d1), ("<Bool as Tr>::f", [Copy b], d2)]
+                | [a, b] /= params -> Just ("the iterations do not read the arguments in order: " ++ show calls)
+                | d1 == d2 -> Just "the iterations share a local"
+                | or [True | BasicBlock ss _ <- Map.elems (fnBlocks copy), Assign _ (ListOp Mir.Get _) <- ss] -> Just "an element read is left"
+                | or [True | BasicBlock _ (SwitchBool{}) <- Map.elems (fnBlocks copy)] -> Just "the loop's test is left"
+                | otherwise -> Nothing
+            _ -> Just ("the calls are " ++ show calls)
+
+-- [{ affirm forall i in 0..size(args): Tr::f(get(args, i)) >= 0; affirm size(args) >= 1; }]
+forallFn :: Function
+forallFn = (variadic "all" TInt (blockOf [Assign (Local 0) (Use (Const (CInt 0)))] Return) []){fnSpec = emptySpec{specRequires = [forallFact, sizeFact], specEnv = Map.fromList [("args", Copy (Local 1))]}}
+  where
+    rel r = CTerm (builtinFunct (Rel r))
+    forallFact = ProofAssert (Forall "i" [FApp (rel LtEq) [CTerm (VInt 0), BVar "i"], FApp (rel Lt) [BVar "i", FApp (CTerm (builtinFunct Size)) [ATerm "args"]]] (FApp (rel GtEq) [FApp (ATerm "<$param ..T@1 as Tr>::f") [FApp (CTerm (builtinFunct Types.Get)) [ATerm "args", BVar "i"]], CTerm (VInt 0)]))
+    sizeFact = ProofAssert (FApp (rel GtEq) [FApp (CTerm (builtinFunct Size)) [ATerm "args"], CTerm (VInt 1)])
+
+packForall :: TestResult
+packForall = copyOf (packProgram [forallFn, trImpl "Int" TInt, trImpl "Bool" TBool] [("all[Int, Bool]", TInt)] [("all[Int, Bool]", ("all", map ArgType [TInt, TBool])), ("<$param ..T@1 as Tr>::f", ("", []))] ["all"]) "all[Int, Bool]" $ \copy ->
+    let rel r = CTerm (builtinFunct (Rel r))
+        fact owner k = ProofAssert (FApp (rel GtEq) [FApp (ATerm ("<" ++ owner ++ " as Tr>::f")) [ATerm ("args " ++ show (k :: Int))], CTerm (VInt 0)])
+        expected = [fact "Int" 0, fact "Bool" 1, ProofAssert (FApp (rel GtEq) [CTerm (VInt 2), CTerm (VInt 1)])]
+     in if specRequires (fnSpec copy) == expected then Nothing else Just (show (specRequires (fnSpec copy)))
+
+-- fn after<..T>(args: ..T) -> Int { x = get(args, 1); return x; }, for one argument
+outOfRangePruned :: TestResult
+outOfRangePruned =
+    let afterFn = (variadic "after" (TParam "..T#1") (Map.fromList [(BlockId 0, BasicBlock [Assign (Local 2) (ReadField (Copy (Local 1)) "$pack" "1")] (Goto (BlockId 1))), (BlockId 1, BasicBlock [Assign (Local 0) (Use (Copy (Local 2)))] Return)]) [(TParam "..T#1", Just "x")]){fnBorrowed = []}
+     in copyOf (packProgram [afterFn] [("after[Int]", TInt)] [("after[Int]", ("after", [ArgType TInt]))] ["after"]) "after[Int]" $ \copy ->
+            if Map.keys (fnBlocks copy) == [BlockId 0] then Nothing else Just ("blocks: " ++ show (fnBlocks copy))
+
+-- fn big<..T: Clone>(args: &..T) -> Int { a = array(3000, get(args, 0)); return 0; }, for an array of 3
+variadicFrame :: TestResult
+variadicFrame =
+    let bigFn = variadic "big" TInt (blockOf [Assign (Local 3) (ReadField (Copy (Local 1)) "$pack" "0"), Assign (Local 2) (ListOp Mir.NewArray [Const (CInt 3000), Copy (Local 3)]), Assign (Local 0) (Use (Const (CInt 0)))] Return) [(TArrayOf (TParam "..T#0") (SizeConst 3000), Just "a"), (TParam "..T#0", Nothing)]
+     in testAssertErrorContains "Array<Array<Int, 3>, 3000> takes 9000 words" (makeCopies (packProgram [bigFn] [("big[Array<Int, 3>]", TInt)] [("big[Array<Int, 3>]", ("big", [ArgType (TArrayOf TInt (SizeConst 3))]))] ["big"]))

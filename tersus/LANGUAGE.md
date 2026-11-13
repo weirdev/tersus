@@ -689,6 +689,48 @@ fn add<S: Sequence<Int> + Growable<Int>>(s: S, x: Int) -> S { return push(s, x);
 
   Its bounds are the impl's followed by its own, so its body is checked once against both (`self.a` has `Show`, `u` has `Size`, nothing else), and it is called as any function of the impl is, `p.with(c)` or `Pair::with(p, c)`, with each call checked against both (`<Pair>::with needs U to implement Size, and Plain does not`) and a copy made for each list of types, as for any function with bounds. It may take `self` lent, lent for updating or by value, or no `self`, may hold nested functions, and crosses modules and packages by its signature and bounds. Its own type parameters are named apart from the impl's, since the bounds of both would fall on one parameter (`<W>::f names T twice among its own type and size parameters and its impl's: give one of them another name`, and a function with bounds anywhere names each parameter once), and one that takes `self` lent for updating is called with `&mut` and the place, `Counter::bump(&mut c, x)`, as any function lent a value for updating is (`c.bump(x)` is `an update reference (&mut T) is not lent silently`). A function of an impl of a trait has the types the trait declares, so it has no bounds of its own (`show in impl Show for B has bounds on its types, but a function of an impl of a trait has the types the trait declares: put the bounds on the impl`), and neither has a function nested in another or one written in a block (`a function with bounds on its types can only be defined at the top of the program or in an impl of a type, not in a block or a function`). Not yet: a function of an impl with bounds of its own is not checked against the variants of the type, so one named like a variant (`fn Circle<T: Show>(...)` in `impl Shape`) is not refused as a function without bounds is (`Shape::Circle is a variant, and cannot also be a function`).
 
+### Variadic functions
+
+A function can take any number of trailing arguments, each of its own type, through a pack of types:
+
+```tersus
+trait Measure { fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; };
+
+fn total<..T: Measure>(args: &..T) -> Int [{ }] [{ affirm return >= 0; }] {
+    sum = 0;
+    for a in args { sum = sum + a.measure(); };
+    return sum;
+};
+
+return total(3, true, 0 - 4);    // each argument has a type that implements Measure
+```
+
+- **`..T` is a pack of types**, written among the type parameters with bounds like any of them (`<..T: Measure + Named>`, or `<..T>` with none). A function has at most one, and its last parameter is the pack: `args: &..T` lends each argument, as a `&T` parameter is lent (the caller keeps it, and plain values and temporaries are accepted), and `args: ..T` takes each by value, moved unless it is `Copy`. Other parameters come first (`fn log<K: Hash, ..T: Format>(key: K, args: &..T)`). `..T` is the type of the pack parameter and of nothing else (`List<..T>` is `..T is a pack of types: only the pack parameter has it`).
+- **A call needs no marker**: the arguments after the fixed parameters fill the pack, and a call with none gives an empty pack. Each argument meets every bound of the pack, and an argument that does not is named by its position: `show needs T (argument 2, P) to implement Measure`. A bound whose trait has types is solved across the pack, so in `fn firsts<E: Clone, ..S: Sequence<E>>(seqs: &..S)` every argument is a sequence of one `E`.
+- **Inside the body the pack is used through `size(args)`, `get(args, e)` and loops**, and it is no value of its own (`x = args;` is `args is a pack of arguments, not a value: use size(args), get(args, i) or a for loop over args`):
+
+  | Form | Meaning |
+  |---|---|
+  | `size(args)` | the number of arguments |
+  | `get(args, e)` | the argument at `e`, which must be fixed in each copy: numbers, `size(args)`, the index of a loop over the pack, and `+ - *` of those |
+  | `for a in args { ... }` | the body once for each argument, in order |
+  | `for i in lo..hi { ... }` | over a range whose bounds mention the pack and are fixed in each copy, as `0..size(args)`; after it `i` is `hi` |
+  | `for i, a in args { ... }` | both |
+
+  A loop over the pack has no invariant and no `shrinks`, since each copy has it once for each argument. Its body cannot assign its index or its element, and loops nest.
+- **Each element has a type of its own**, which has the pack's bounds and nothing else: `get(args, 0)` and `get(args, 0)` have one type, the element of a loop and `get(args, i)` on its index have one type, and any other two have two (`x = get(args, 0); x = get(args, 1);` is `expected the type of get(args, 0), got the type of get(args, 1)`). The element of a loop over the pack, and what its body reads of the pack at an index that is not a number, have a type of their own in each iteration, so a variable outside the loop cannot keep one (`xs = []; for a in args { xs = push(xs, clone(a)); };` is `xs would keep an element of args after the loop over it, ...`).
+- **Ownership.** An element of a lent pack is read, and a variable given one is a view of it, as `x = p.xs` is for a lent `p`; it cannot be moved. An element of a pack taken by value at a number can be moved, once (`eat(get(args, 0)) + eat(get(args, 0))` is a use of `get(args, 0)` after it was moved); one at another index can be read and not moved. `for a in args` over a pack taken by value takes the elements, so each can be moved and no element is used after the loop (`size(args)` still is: it is a number); `for a in &args` reads them and keeps it.
+- **Contracts** use `size(args)` and `get(args, e)`, and a `forall` over the indices of the pack, which each copy makes one fact for each argument:
+
+  ```tersus
+  fn total<..T: Measure>(args: &..T) -> Int [{ affirm size(args) >= 1; affirm forall i in 0..size(args): Measure::measure(get(args, i)) >= 0; }] [{ affirm return >= 0; }] { ... };
+  ```
+
+  A `get` needs its index in range, `0 <= e < size(args)`, as a `get` of a list does: a copy where it is out of range on a path it can take is refused by the validator, and one under a branch or contract that rules it out is accepted The refusal names the index and where the `get` is: `Could not prove: the index 2 of get(args, ...) at line 3:20 < 2 arguments (in f[Int, Int])`. Validation statements, `define`s and contracts read the pack as code does, at the index of a loop over it too (`for i, a in args { affirm Measure::measure(get(args, i)) = Measure::measure(a); }`), and an element can be given to a generic struct or function like any value (`h = Hold { u: clone(get(args, 0)) };`). A `forall` that reads the pack at its index needs bounds every copy fixes, and one whose bounds name anything else is refused where it is written (`a forall over the elements of args is written forall i in lo..hi with bounds fixed in each copy ...`).
+- **A function of an impl can take a pack** as any function of an impl can have bounds: `impl S { fn add<..T: Measure>(self: &Self, args: &..T) -> Int { ... }; }`, called as `s.add(2, true)` or `S::add(s, 2, true)`.
+- **Each call is made into a copy for its arguments' types**, `total[Int, Bool, Int]` above, as a function with bounds is: in it the pack is one parameter for each argument, `size(args)` is a number, `get(args, k)` is the parameter at `k`, each loop over the pack is its body once for each argument, and an `if` whose test the copy knows keeps only the branch it takes (so `if size(args) > 0 { ... get(args, 0) ... }` is fine with no arguments). The body itself is checked once, against its bounds alone. Nothing makes a tuple, so a call with no arguments, one, or more than sixteen is the same.
+- **Not yet**: giving the pack, or a slice of it, to another function (`forwarding a pack to another function is not supported yet`), and `slice(args, a, b)`.
+
 ## Expressions
 
 Expressions can be literals, variables, function calls, parenthesized expressions, or infix operations.
@@ -2116,6 +2158,7 @@ return a;                             // [[1], [2, 3], [1]]
 
 ## Current Limitations
 
+- Variadic functions (see Variadic functions): a pack cannot yet be given to another function, whole or as `slice(args, a, b)`, and a function with a pack is not a value. Each copy is validated as straight-line code, so a long pack makes a long proof: a postcondition that sums sixteen measures (`affirm return >= 0` over `for a in args { t = t + a.measure(); }`) is past what the bounded search proves, where one over four is proved.
 - Equality (see Equality): `Eq::eq` cannot be called by name on a Box of an array of no size (`=` can), the impl that compares the fields cannot compare a type that holds itself through a list of lists or through another type (that would be two functions that call each other, which no function can do), and the validator proves `return = (self = other)` from branches that return `true` and `false`, not from a `return` of another comparison (`return self.x = other.x && ...`).
 - No `break` or `continue`. `for` goes through a range or the elements of a list, not by a step other than `1` or backwards.
 - Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field (or is an element of a list it held) at each step. Nothing else is a variant: not a lexicographic pair of integers, and not the length of a list that shrinks (`size(l)` is an integer that can be used, but one that shrinks only if the program says so). The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: it never runs a function of the program (see Function Contracts).

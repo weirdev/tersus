@@ -69,7 +69,7 @@ struct St {
     ctors: List<CtorInfo>, fieldsOf: List<FieldsInfo>, types: List<TypeInfo>, generics: List<GenInfo>,
     selfName: String, hasSelf: Bool, selfTy: Type, hasSelfTy: Bool,
     typeParams: List<String>, implParams: List<String>, ownClone: Bool, locate: Bool,
-    err: String, errPos: Int, genLine: Int, genCol: Int
+    err: String, errPos: Int, genLine: Int, genCol: Int, pack: String
 };
 impl Clone for St { };
 
@@ -79,7 +79,7 @@ fn checkpoint(st: &St) -> Checkpoint ~ {
     saved = St { pos: st.pos, nodes: [], ctors: [], fieldsOf: [], types: [], generics: [],
         selfName: clone(st.selfName), hasSelf: st.hasSelf, selfTy: clone(st.selfTy), hasSelfTy: st.hasSelfTy,
         typeParams: clone(st.typeParams), implParams: clone(st.implParams), ownClone: st.ownClone, locate: st.locate,
-        err: clone(st.err), errPos: st.errPos, genLine: st.genLine, genCol: st.genCol };
+        err: clone(st.err), errPos: st.errPos, genLine: st.genLine, genCol: st.genCol, pack: clone(st.pack) };
     return Checkpoint { state: saved, nodeCount: size(st.nodes), ctorCount: size(st.ctors), fieldCount: size(st.fieldsOf), typeCount: size(st.types), genericCount: size(st.generics) };
 };
 
@@ -87,7 +87,7 @@ fn restore(st: St, saved: Checkpoint) -> St ~ {
     St { pos: ignoredPos, nodes: nodes, ctors: ctors, fieldsOf: fieldsOf, types: types, generics: generics,
         selfName: ignoredSelf, hasSelf: ignoredHasSelf, selfTy: ignoredSelfType, hasSelfTy: ignoredHasSelfType,
         typeParams: ignoredTypeParams, implParams: ignoredImplParams, ownClone: ignoredClone, locate: ignoredLocate,
-        err: ignoredError, errPos: ignoredErrorPos, genLine: ignoredLine, genCol: ignoredCol } = st;
+        err: ignoredError, errPos: ignoredErrorPos, genLine: ignoredLine, genCol: ignoredCol, pack: ignoredPack } = st;
     while size(nodes) > saved.nodeCount && size(nodes) > 0 ~ { nodes = pop(nodes); };
     while size(ctors) > saved.ctorCount && size(ctors) > 0 ~ { ctors = pop(ctors); };
     while size(fieldsOf) > saved.fieldCount && size(fieldsOf) > 0 ~ { fieldsOf = pop(fieldsOf); };
@@ -126,7 +126,7 @@ impl Clone for FieldOut { };
 fn newSt() -> St ~ {
     return St { pos: 0, nodes: [], ctors: [], fieldsOf: [], types: [], generics: [],
         selfName: "", hasSelf: false, selfTy: Type::TInt, hasSelfTy: false,
-        typeParams: [], implParams: [], ownClone: false, locate: false, err: "", errPos: 0, genLine: 0, genCol: 0 };
+        typeParams: [], implParams: [], ownClone: false, locate: false, err: "", errPos: 0, genLine: 0, genCol: 0, pack: "" };
 };
 
 fn fail<T>(st: St, v: T, msg: &String) -> Res<T> ~ {
@@ -290,8 +290,59 @@ fn isUpperCp(cp: Int) -> Bool ~ {
 
 fn isTypeParamName(name: &String) -> Bool ~ {
     if size(name.bytes) = 0 { return false; };
+    if isPackName(name) { return size(name.bytes) > 2 && isUpperCp(get(decodeStrAt(name, 2), 0)); };
     first = decodeStrAt(name, 0);
     return isUpperCp(get(first, 0));
+};
+
+// A pack of types (`..T`): its name keeps the dots, which no other name has
+fn isPackName(name: &String) -> Bool ~ {
+    return size(name.bytes) >= 2 && toInt(get(&name.bytes, 0)) = 46 && toInt(get(&name.bytes, 1)) = 46;
+};
+
+// The pack of types a parameter's type is (`..T` or `&..T`), or ""
+fn packTypeName(t: Type) -> String ~ {
+    x = t;
+    if x is Type::TRef { b = clone((x as Type::TRef).inner); x = Box::unbox(b); };
+    if x is Type::TParam {
+        n = clone((x as Type::TParam).name);
+        if isPackName(&n) { return n; };
+    };
+    return "";
+};
+
+fn isWordByte(b: Int) -> Bool ~ { return b >= 128 || b = 95 || isIdentCp(b); };
+
+// Whether the source from one place to another, without the spaces around it, is the text
+fn sourceIs(sourceText: &Input, st: &St, from: Int, to: Int, text: &String) -> Bool ~ {
+    a = from;
+    b = to;
+    while a < b && (byteAt(sourceText, st, a) = 32 || byteAt(sourceText, st, a) = 10 || byteAt(sourceText, st, a) = 9 || byteAt(sourceText, st, a) = 13) ~ { a = a + 1; };
+    while b > a && (byteAt(sourceText, st, b - 1) = 32 || byteAt(sourceText, st, b - 1) = 10 || byteAt(sourceText, st, b - 1) = 9 || byteAt(sourceText, st, b - 1) = 13) ~ { b = b - 1; };
+    if b - a != size(text.bytes) { return false; };
+    i = 0;
+    while i < size(text.bytes) [{ affirm i >= 0; }] ~ {
+        if byteAt(sourceText, st, a + i) != toInt(get(&text.bytes, i)) { return false; };
+        i = i + 1;
+    };
+    return true;
+};
+
+// Whether the source from one place to another has the name as a word of its own
+fn sourceMentions(sourceText: &Input, st: &St, from: Int, to: Int, name: &String) -> Bool ~ {
+    n = size(name.bytes);
+    a = from;
+    while a + n <= to ~ {
+        same = true;
+        i = 0;
+        while i < size(name.bytes) && same [{ affirm i >= 0; }] ~ {
+            if byteAt(sourceText, st, a + i) != toInt(get(&name.bytes, i)) { same = false; };
+            i = i + 1;
+        };
+        if same && !isWordByte(byteAt(sourceText, st, a - 1)) && !isWordByte(byteAt(sourceText, st, a + n)) { return true; };
+        a = a + 1;
+    };
+    return false;
 };
 
 fn lineCol(src: &String, pos: Int) -> List<Int> [{ }] [{ affirm size(return) = 2; }] ~ {
@@ -1556,6 +1607,10 @@ fn typeAnnotation(sourceText: &Input, st: St) -> Res<Type> ~ {
 
 fn typeInner(sourceText: &Input, st: St) -> Res<Type> ~ {
     s = st;
+    if peekIs(sourceText, s, "..") {
+        pv = parseVariable(sourceText, St { pos: s.pos + 2, ..s }); Res { st: resultPartspvState, v: resultPartspvValue, ok: resultPartspvOk } = pv;
+        return fail( resultPartspvState, Type::TInt, catStrings(catStrings("..", resultPartspvValue), " is a pack of types: only the pack parameter has it"));
+    };
     // borrowed
     if peekIs(sourceText, s, "&mut") {
         after = s.pos + 4;
@@ -3924,6 +3979,15 @@ fn oneParameter(sourceText: &Input, st: St) -> Res<OneParam> ~ {
     if byteAt(sourceText, s, s.pos) != 58 { return fail( s, OneParam { name: "", ty: Type::TInt }, "expected :"); };
     s = St { pos: s.pos + 1, ..s };
     s = skipWs(sourceText, s);
+    lentPack = peekIs(sourceText, s, "&..");
+    if lentPack || peekIs(sourceText, s, "..") {
+        if lentPack { s = St { pos: s.pos + 3, ..s }; } else { s = St { pos: s.pos + 2, ..s }; };
+        pv = parseVariable(sourceText, s); Res { st: resultPartspvState, v: resultPartspvValue, ok: resultPartspvOk } = pv;
+        if !resultPartspvOk { return Res<OneParam> { st: resultPartspvState, v: OneParam { name: "", ty: Type::TInt }, ok: false }; };
+        packTy = Type::TParam { name: catStrings("..", resultPartspvValue) };
+        if lentPack { packTy = Type::TRef { inner: Box::new(packTy) }; };
+        return ok( skipWs(sourceText, resultPartspvState), OneParam { name: resultPartsvValue, ty: packTy });
+    };
     t = typeAnnotation(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
     if !resultPartstOk { return Res<OneParam> { st: resultPartstState, v: OneParam { name: "", ty: Type::TInt }, ok: false }; };
     if ghostly && !ghostTypeOf(clone(resultPartstValue)) { return fail( resultPartstState, OneParam { name: "", ty: Type::TInt }, "ghost is written before a type that is a permission, Block<T>"); };
@@ -4272,6 +4336,7 @@ fn linearStatements(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
             AstStatement::ImplDef { traitName: a, args: b, n: c, ty: d, bs: e, xs: f } => { isStruct = false; },
             AstStatement::BoundedDef { bs: a, s: b } => { isStruct = false; },
             AstStatement::Instance { n: a, f: b, args: c, ps: d, sig: e } => { isStruct = false; },
+            AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, xs: g } => { isStruct = false; },
             AstStatement::Mark { line: a, col: b } => { isStruct = false; },
             AstStatement::CopyDef { n: a } => { isStruct = false; },
             AstStatement::LinearDef { n: a } => { isStruct = false; },
@@ -5193,6 +5258,7 @@ fn assignsVar(st: &St, var: &String, stmts: &List<Int>) -> Bool ~ {
                 AstStatement::ImplDef { traitName: a, args: b, n: c, ty: d, bs: e, xs: f } => { found = false; },
                 AstStatement::BoundedDef { bs: a, s: b } => { found = false; },
                 AstStatement::Instance { n: a, f: b, args: c, ps: d, sig: e } => { found = false; },
+                AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, xs: g } => { found = nameText( st, a) = var || nameText( st, b) = var || assignsVar( st, var, statementsListIds( st, g)); },
                 AstStatement::Mark { line: a, col: b } => { found = false; },
                 AstStatement::CopyDef { n: a } => { found = false; },
                 AstStatement::LinearDef { n: a } => { found = false; },
@@ -5244,8 +5310,10 @@ fn forStatement(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     ik = eatKeyword(sourceText, s, "in"); Res { st: resultPartsikState, v: resultPartsikValue, ok: resultPartsikOk } = ik;
     if !resultPartsikValue { return fail( resultPartsikState, [], "expected in"); };
     s = skipWs(sourceText, resultPartsikState);
+    sourceFrom = s.pos;
     start = expression(sourceText, s); Res { st: resultPartsstartState, v: resultPartsstartValue, ok: resultPartsstartOk } = start;
     if !resultPartsstartOk { return Res<List<Int>> { st: resultPartsstartState, v: [], ok: false }; };
+    sourceTo = resultPartsstartState.pos;
     s = skipWs(sourceText, resultPartsstartState);
     hasEnd = false;
     endExpr = 0;
@@ -5256,6 +5324,7 @@ fn forStatement(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
         if !resultPartseOk { return Res<List<Int>> { st: resultPartseState, v: [], ok: false }; };
         endExpr = resultPartseValue;
         hasEnd = true;
+        sourceTo = resultPartseState.pos;
         s = skipWs(sourceText, resultPartseState);
     };
     inv = optContract(sourceText, s); Res { st: resultPartsinvState, v: resultPartsinvValue, ok: resultPartsinvOk } = inv;
@@ -5267,6 +5336,20 @@ fn forStatement(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     lc = srcLineCol(sourceText, s, startPos);
     place = catStrings(String::fromInt(get(lc, 0)), catStrings(":", String::fromInt(get(lc, 1))));
     if hasSecond && hasEnd { return fail( s, [], "A for loop over a range has one variable, as in for i in 0..n"); };
+    pack = clone(s.pack);
+    if size(pack.bytes) > 0 {
+        overPack = false;
+        takes = false;
+        if hasEnd { overPack = sourceMentions(sourceText, &s, sourceFrom, sourceTo, &pack); }
+        else {
+            takes = sourceIs(sourceText, &s, sourceFrom, sourceTo, &pack);
+            lentPack = catStrings("&", clone(pack));
+            overPack = takes || sourceIs(sourceText, &s, sourceFrom, sourceTo, &lentPack);
+        };
+        if overPack {
+            return packLoop( s, place, resultPartsfirstValue, second, hasSecond, hasEnd, &pack, takes, resultPartsstartValue, endExpr, resultPartsinvValue, resultPartsbodyValue);
+        };
+    };
     if hasEnd {
         return countingLoop( s, resultPartsfirstValue, resultPartsstartValue, endExpr, resultPartsinvValue, resultPartsbodyValue);
     };
@@ -5302,6 +5385,48 @@ fn forStatement(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     out = push([], resultPartsassignListValue);
     for x in resultPartsloopStmtsValue { out = push(out, x); };
     return ok( s, out);
+};
+
+// A loop over the pack of the enclosing function, which each copy of it unrolls: its record keeps the index, the element and the bounds
+fn packLoop(st: St, place: &String, first: &String, second: &String, hasSecond: Bool, hasEnd: Bool, pack: &String, takes: Bool, start: Int, endExpr: Int, inv: &List<Int>, body: &List<Int>) -> Res<List<Int>> ~ {
+    s = st;
+    if size(inv) > 0 { return fail( s, [], "a loop over a pack is unrolled: it has no invariant"); };
+    indexName = catStrings("$index ", place);
+    elementName = catStrings("$element ", place);
+    if hasEnd { indexName = clone(first); }
+    else { if hasSecond { indexName = clone(first); elementName = clone(second); } else { elementName = clone(first); }; };
+    if assignsVar( s, &indexName, body) { return fail( s, [], cat3("The body of a for loop over a pack cannot assign its index ", indexName, "")); };
+    if assignsVar( s, &elementName, body) { return fail( s, [], cat3("The body of a for loop over a pack cannot assign its element ", elementName, "")); };
+    lo = start;
+    hi = endExpr;
+    if !hasEnd {
+        z = intExpr( s, 0); Res { st: resultPartszState, v: resultPartszValue, ok: resultPartszOk } = z;
+        if !resultPartszOk { return Res<List<Int>> { st: resultPartszState, v: [], ok: false }; };
+        s = resultPartszState;
+        lo = resultPartszValue;
+        pv = varExprNode( s, pack); Res { st: resultPartspvState, v: resultPartspvValue, ok: resultPartspvOk } = pv;
+        if !resultPartspvOk { return Res<List<Int>> { st: resultPartspvState, v: [], ok: false }; };
+        s = resultPartspvState;
+        se = primExpr( s, "Size", push([], resultPartspvValue)); Res { st: resultPartsseState, v: resultPartsseValue, ok: resultPartsseOk } = se;
+        if !resultPartsseOk { return Res<List<Int>> { st: resultPartsseState, v: [], ok: false }; };
+        s = resultPartsseState;
+        hi = resultPartsseValue;
+    };
+    iName = putName( s, &indexName); Res { st: resultPartsiNameState, v: resultPartsiNameValue, ok: resultPartsiNameOk } = iName;
+    if !resultPartsiNameOk { return Res<List<Int>> { st: resultPartsiNameState, v: [], ok: false }; };
+    s = resultPartsiNameState;
+    aName = putName( s, &elementName); Res { st: resultPartsaNameState, v: resultPartsaNameValue, ok: resultPartsaNameOk } = aName;
+    if !resultPartsaNameOk { return Res<List<Int>> { st: resultPartsaNameState, v: [], ok: false }; };
+    s = resultPartsaNameState;
+    pName = putName( s, pack); Res { st: resultPartspNameState, v: resultPartspNameValue, ok: resultPartspNameOk } = pName;
+    if !resultPartspNameOk { return Res<List<Int>> { st: resultPartspNameState, v: [], ok: false }; };
+    s = resultPartspNameState;
+    xs = statementsList( s, body); Res { st: resultPartsxsState, v: resultPartsxsValue, ok: resultPartsxsOk } = xs;
+    if !resultPartsxsOk { return Res<List<Int>> { st: resultPartsxsState, v: [], ok: false }; };
+    s = resultPartsxsState;
+    node = stmtNode( s, AstStatement::PackLoop { i: resultPartsiNameValue, a: resultPartsaNameValue, p: resultPartspNameValue, lo: lo, hi: hi, take: takes, xs: resultPartsxsValue }); Res { st: resultPartsnodeState, v: resultPartsnodeValue, ok: resultPartsnodeOk } = node;
+    if !resultPartsnodeOk { return Res<List<Int>> { st: resultPartsnodeState, v: [], ok: false }; };
+    return ok( resultPartsnodeState, push([], resultPartsnodeValue));
 };
 
 fn elementLoopBody(st: St, place: &String, indexName: &String, element: &String, listName: &String, inv: &List<Int>, body: &List<Int>) -> Res<List<Int>> ~ {
@@ -5982,8 +6107,13 @@ fn genericParamList(sourceText: &Input, st: St) -> Res<List<GenParam>> ~ {
 
 fn oneGenericParam(sourceText: &Input, st: St) -> Res<GenParam> ~ {
     empty = GenParam { name: "", boundTraits: [], boundArgs: [] };
-    v = parseVariable(sourceText, st); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
+    dots = peekIs(sourceText, &st, "..");
+    startPos = st.pos;
+    if dots { startPos = st.pos + 2; };
+    v = parseVariable(sourceText, St { pos: startPos, ..st }); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
     if !resultPartsvOk { return Res<GenParam> { st: resultPartsvState, v: empty, ok: false }; };
+    if dots { resultPartsvValue = catStrings("..", resultPartsvValue); };
+    if dots && !isTypeParamName(&resultPartsvValue) { return fail( resultPartsvState, empty, cat3("a pack of types is named as a type is, with a capital letter: ", resultPartsvValue, " is not")); };
     s = skipWs(sourceText, resultPartsvState);
     traits = [];
     argss = [];
@@ -6091,13 +6221,35 @@ fn functStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     h = functHeader(sourceText, s); Res { st: resultPartshState, v: resultPartshValue, ok: resultPartshOk } = h;
     if !resultPartshOk { return Res<Int> { st: resultPartshState, v: 0, ok: false }; };
     s = resultPartshState;
+    packName = "";
+    for tp in &typeParams {
+        if isPackName(tp) {
+            if size(packName.bytes) > 0 { return fail( s, 0, cat3(var, " has two packs of types: a function has at most one", "")); };
+            packName = clone(tp);
+        };
+    };
+    packParam = "";
+    pi = 0;
+    for pt in &resultPartshValue.types {
+        pn = packTypeName(clone(pt));
+        if size(pn.bytes) > 0 {
+            if pn != packName { return fail( s, 0, cat3(pn, " is not a pack of types of ", var)); };
+            if size(packParam.bytes) > 0 { return fail( s, 0, cat3(var, " has two pack parameters: a function has at most one", "")); };
+            packParam = nameAtOr(&resultPartshValue.names, pi, "");
+            if pi + 1 != size(resultPartshValue.types) { return fail( s, 0, catStrings(cat3("the pack parameter ", packParam, " is the last parameter of "), var)); };
+        };
+        pi = pi + 1;
+    };
+    if size(packName.bytes) > 0 && size(packParam.bytes) = 0 { return fail( s, 0, catStrings(cat3(var, " has the pack of types ", packName), cat3(" and no pack parameter: its last parameter is args: ", packName, " or args: &..T"))); };
+    outerPack = clone(s.pack);
+    s = St { pack: packParam, ..s };
     term = terminationClause(sourceText, s); Res { st: resultPartstermState, v: resultPartstermValue, ok: resultPartstermOk } = term;
     if !resultPartstermOk { return Res<Int> { st: resultPartstermState, v: 0, ok: false }; };
     s = resultPartstermState;
     body = curlyBlock(sourceText, s); Res { st: resultPartsbodyState, v: resultPartsbodyValue, ok: resultPartsbodyOk } = body;
     if !resultPartsbodyOk { return Res<Int> { st: resultPartsbodyState, v: 0, ok: false }; };
     s = resultPartsbodyState;
-    s = St { typeParams: outerParams, ..s };
+    s = St { typeParams: outerParams, pack: outerPack, ..s };
     allNames = clone(resultPartshValue.names);
     allTypesList = clone(resultPartshValue.types);
     for sz in allSizes { allNames = push(allNames, clone(sz)); allTypesList = push(allTypesList, Type::TInt); };
@@ -6107,7 +6259,7 @@ fn functStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = resultPartsassignState;
     hasBounds = false;
     for gp in gps { if size(gp.boundTraits) > 0 { hasBounds = true; }; };
-    if !hasBounds { return ok( s, resultPartsassignValue); };
+    if !hasBounds && size(packName.bytes) = 0 { return ok( s, resultPartsassignValue); };
     bIds = boundsNodes( s, gps); Res { st: resultPartsbIdsState, v: resultPartsbIdsValue, ok: resultPartsbIdsOk } = bIds;
     if !resultPartsbIdsOk { return Res<Int> { st: resultPartsbIdsState, v: 0, ok: false }; };
     s = resultPartsbIdsState;
@@ -6163,10 +6315,12 @@ fn scanGenericNames(sourceText: &Input, st: &St) -> List<String> ~ {
         if atEnd(sourceText, s) { loop = false; }
         else {
             if expectName {
+                dots = peekIs(sourceText, s, "..");
+                if dots { s = St { pos: s.pos + 2, ..s }; };
                 v = parseVariable(sourceText, s); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
                 if !resultPartsvOk { s = resultPartsvState; loop = false; }
                 else {
-                    names = push(names, resultPartsvValue);
+                    if dots { names = push(names, catStrings("..", resultPartsvValue)); } else { names = push(names, resultPartsvValue); };
                     s = resultPartsvState;
                     expectName = false;
                 };
@@ -6200,6 +6354,7 @@ fn implStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = St { typeParams: outerParams0, ..s };
     implParams = [];
     for gp in implParamList { implParams = push(implParams, clone(gp.name)); };
+    for ip in &implParams { if isPackName(ip) { return fail( s, 0, cat3("an impl has no pack of types (", ip, "): only a function has one")); }; };
     outerParams = s.typeParams;
     tpsOnly = [];
     for n in implParams { if isTypeParamName(n) { tpsOnly = push(tpsOnly, clone(n)); }; };
@@ -6477,6 +6632,7 @@ fn statementAssignParts(st: &St, id: Int) -> List<Int> ~ {
             AstStatement::ImplDef { traitName: a, args: b, n: c, ty: d, bs: e, xs: f } => { out = []; },
             AstStatement::BoundedDef { bs: a, s: b } => { out = []; },
             AstStatement::Instance { n: a, f: b, args: c, ps: d, sig: e } => { out = []; },
+            AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, xs: g } => { out = []; },
             AstStatement::Mark { line: a, col: b } => { out = []; },
             AstStatement::CopyDef { n: a } => { out = []; },
             AstStatement::LinearDef { n: a } => { out = []; },

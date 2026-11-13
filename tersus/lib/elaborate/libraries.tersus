@@ -248,6 +248,7 @@ fn nestedStatements(nodes: &List<AstNode>, stmt: &AstStatement) -> List<List<Int
     if stmt is AstStatement::Block { out = push(out, listItems(nodes, (stmt as AstStatement::Block).xs)); };
     if stmt is AstStatement::If { out = push(out, listItems(nodes, (stmt as AstStatement::If).a)); out = push(out, listItems(nodes, (stmt as AstStatement::If).b)); };
     if stmt is AstStatement::While { out = push(out, listItems(nodes, (stmt as AstStatement::While).xs)); };
+    if stmt is AstStatement::PackLoop { out = push(out, listItems(nodes, (stmt as AstStatement::PackLoop).xs)); };
     if stmt is AstStatement::ImplDef { out = push(out, listItems(nodes, (stmt as AstStatement::ImplDef).xs)); };
     if stmt is AstStatement::BoundedDef { out = push(out, push([], (stmt as AstStatement::BoundedDef).s)); };
     return out;
@@ -712,5 +713,6 @@ fn statementTag(s: &AstStatement) -> String ~ {
         AstStatement::DropDef { n: n } => "drop",
         AstStatement::Dissolve { n: n } => "dissolve",
         AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => "instance",
+        AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => "pack loop",
     };
 };

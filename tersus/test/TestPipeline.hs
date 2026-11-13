@@ -176,6 +176,7 @@ exampleExpectations =
     , ("examples/box_array.tersus", ((ExpectReturn (VInt 34))))
     , ("examples/array_sizes.tersus", ((ExpectReturn (VInt 42))))
     , ("examples/type_parameters.tersus", ((ExpectReturn (VInt 2045))))
+    , ("examples/variadic.tersus", ((ExpectReturn (VInt 815))))
     , ("examples/generic_structs.tersus", ((ExpectReturn (VInt 2224))))
     , ("examples/files.tersus", ((ExpectReturn (VInt (-1)))))
     , ("examples/args.tersus", ((ExpectReturn (VInt 0))))

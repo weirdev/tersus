@@ -167,6 +167,21 @@ type parameters of the function with bounds that uses it, or, with an empty
 builtin has), with the parameter names and signature of `NAME`. The records are
 in name order and claim no expression types (MIR.md, "The copy step").
 
+A variadic function's pack of types is the type parameter `..T` (the name keeps
+its dots, which no program can write as a name), in the signature's type
+parameters and in its `Bound` records, and its pack parameter has the type
+`param "..T"`, or `ref` of it when lent; the elaborator names the type of an
+element `..T#k` for `get(args, k)` and `..T@n` for any other element, and writes
+`get(args, k)` as the builtin `Field` with the owner `$pack` and the field `k`.
+`PackLoop INDEX ELEMENT PACK LO HI TAKE STATEMENTS` (parser and response) is a
+loop over the pack, which each copy unrolls: the index runs from `LO` to
+`HI - 1`, the element is the argument at the index (the parser names the one
+the program does not, `$index LINE:COL` or `$element LINE:COL`; a range loop
+names no element and reads none), and `TAKE` is `true` for `for a in args`.
+The parser writes it whatever the pack's passing, which it does not know;
+the elaborator keeps it `true` only for a pack taken by value, whose loop
+takes the elements, and writes `false` for a lent pack. In an elaborated program its first expression type is the element's.
+
 A mir root is a `Statements` list: the validator's payloads of a lowered unit,
 each one statement record (`MIR.md`, "Version 3: a lowered unit"). Only
 Haskell reads this stage; the Tersus reader does not accept it.

@@ -484,7 +484,10 @@ loweredLines lowered = do
     shared = sharedEnvironments program
     namesLine w names = unwords (w : namesTokens (Set.toList names))
     genericLine (n, (sizes, fields)) = unwords (["generic", quote n] ++ namesTokens sizes ++ [show (length fields)] ++ concatMap fieldTokens fields)
-    boundedLine (n, BoundedFn sizes copy lifted) = unwords (["bounded", quote n] ++ namesTokens sizes ++ namesTokens copy ++ namesTokens lifted)
+    boundedLine (n, BoundedFn sizes copy lifted loops) = unwords (["bounded", quote n] ++ namesTokens sizes ++ namesTokens copy ++ namesTokens lifted ++ [show (length loops)] ++ concatMap packLoopTokens loops)
+    packLoopTokens (PackLoop h b x bs ls i e et lo hi taken) =
+        [blockText h, blockText b, blockText x, show (length bs)] ++ map blockText bs ++ [show (length ls)] ++ map localText ls
+            ++ [localText i, localText e, quote et, localText lo, localText hi, maybe "none" localText taken]
     instanceLine (n, (generic, args)) = unwords (["instance", quote n, quote generic, show (length args)] ++ concatMap argTokens args)
     invariantLine (n, invariant) = (\p -> unwords ["invariant", quote n, p]) <$> payload (validationsPayload invariant)
 
@@ -674,7 +677,7 @@ loweredFrom payloads records0 =
         Word "invariant" : ts -> Just (parseLine ((\n (vs, i) -> ((n, vs), i)) <$> name <*> payloadP (Tables payloads Map.empty) "a list of validation statements" validationsOf) ts)
         _ -> Nothing
     boundedRecord record = case record of
-        Word "bounded" : ts -> Just (parseLine ((\n sizes copy lifted -> (n, BoundedFn sizes copy lifted)) <$> name <*> namesP <*> namesP <*> namesP) ts)
+        Word "bounded" : ts -> Just (parseLine ((\n sizes copy lifted loops -> (n, BoundedFn sizes copy lifted loops)) <$> name <*> namesP <*> namesP <*> namesP <*> (itemCount >>= \k -> replicateM k packLoopP)) ts)
         _ -> Nothing
     instanceRecord record = case record of
         Word "instance" : ts -> Just (parseLine ((\n generic args -> (n, (generic, args))) <$> name <*> name <*> (itemCount >>= \k -> replicateM k argP)) ts)
@@ -820,6 +823,15 @@ entriesP = itemCount >>= \n -> replicateM n ((,) <$> name <*> operandP) >>= \pai
 
 namesP :: P [Name]
 namesP = itemCount >>= \n -> replicateM n name
+
+packLoopP :: P PackLoop
+packLoopP =
+    PackLoop <$> block <*> block <*> block <*> (itemCount >>= \n -> replicateM n block) <*> (itemCount >>= \n -> replicateM n local)
+        <*> local <*> local <*> name <*> local <*> local <*> takenP
+  where
+    takenP = P (\ts -> case ts of
+        Word "none" : rest -> Ok (Nothing, rest)
+        _ -> runP (Just <$> local) ts)
 
 payloadP :: Tables -> String -> (S.Statement -> Maybe a) -> P (a, Int)
 payloadP (Tables payloads _) kind project = int >>= \i -> case Map.lookup i payloads of

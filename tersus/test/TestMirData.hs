@@ -519,7 +519,7 @@ everyRecord =
                 , progMain = mainFn
                 , progGenerics = Map.singleton "G" (["n"], [("a", TArrayOf TInt (SizeParam "n"))])
                 , progInvariants = Map.singleton "P" [holds]
-                , progBounded = Map.singleton "f" (BoundedFn ["n"] ["T"] ["f::g"])
+                , progBounded = Map.singleton "f" (BoundedFn ["n"] ["T"] ["f::g"] [PackLoop (BlockId 1) (BlockId 2) (BlockId 3) [BlockId 2, BlockId 4] [Local 7, Local 8] (Local 4) (Local 6) "..T@0" (Local 2) (Local 3) Nothing, PackLoop (BlockId 5) (BlockId 6) (BlockId 7) [BlockId 6] [] (Local 9) (Local 10) "..T@1" (Local 11) (Local 12) (Just (Local 13))])
                 , progInstances = Map.fromList [("f[Int, 3]", ("f", [ArgType TInt, ArgSize (SizeConst 3)])), ("g[T]", ("f", [ArgType (TParam "T")])), ("<$param T as Hash>::hash", ("", []))]
                 }
         , lowCopies = Set.singleton "P"

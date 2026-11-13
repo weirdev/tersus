@@ -23,7 +23,12 @@ fn lwPlaceForm(src: &List<AstNode>, e: Int) -> PlaceForm ~ {
     b = builtinOfExpr(src, f);
     if b < 0 { return other; };
     bi = biOf(src, b);
-    if bi.kind = 2 && size(args) = 1 { return PlaceForm { kind: 1, field: clone(bi.field), sub: intAt(&args, 0), ..other }; };
+    // (an element of a pack at a number is a field of the pack, owner `$pack`, which no type has: name)
+    if bi.kind = 2 && size(args) = 1 {
+        owner = "";
+        if bi.hasOwner && bi.owner = "$pack" { owner = "$pack"; };
+        return PlaceForm { kind: 1, name: owner, field: clone(bi.field), sub: intAt(&args, 0), ..other };
+    };
     if bi.kind = 5 && size(args) = 1 { return PlaceForm { kind: 2, name: clone(bi.name), sub: intAt(&args, 0), ..other }; };
     if isPrim(&bi, "Get") && size(args) = 2 { return PlaceForm { kind: 3, sub: intAt(&args, 0), index: intAt(&args, 1), ..other }; };
     if isPrim(&bi, "DerefOf") && size(args) = 1 { return PlaceForm { kind: 4, sub: intAt(&args, 0), ..other }; };
@@ -70,6 +75,7 @@ fn fieldPlace(ls: LowSt, src: &List<AstNode>, form: &PlaceForm) -> LowSt ~ {
     if !ls.ok { return ls; };
     root = ls.root;
     steps = clone(ls.steps);
+    if form.name = "$pack" { return placeResult(ls, root, push(steps, fieldStep("$pack", clone(form.field))), fieldTy); };
     ls = fieldCtor(ls, &form.field, ls.ty);
     if !ls.ok { return ls; };
     ctor = clone(ls.name);

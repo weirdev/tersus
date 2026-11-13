@@ -30,6 +30,7 @@ import PreludeSource (elaboratePackageFiles, nativeStorageModules, toolPackageFi
 import qualified Syntax as S
 import Types
 import TestHarness
+import TestVariadic (variadicPrograms)
 import Utils
 
 testMirDifferential :: Test
@@ -43,6 +44,7 @@ testMirDifferential =
             )
         , TestCase "a lowercase Unicode type argument" (unitsAgree [SourceText "unicode" "struct caf\233 { x: Int };\nv = (caf\233 { x: 1 }, 0);\nreturn 0;\n"])
         , TestCase "functions of an impl with bounds of their own" (unitsAgree [SourceText ("impl bounds " ++ show i) (showSize ++ body) | (i, body) <- zip [1 :: Int ..] implBounds])
+        , TestCase "variadic functions" (unitsAgree [SourceText ("variadic: " ++ name) source | (name, source) <- variadicPrograms ++ variadicLowering])
         , TestCase "a changed unit is caught" changedUnitsDiffer
         , TestCase "the mir section reads back" mirSectionFraming
         , TestCase "a tool failure or a missing library is not a refusal" incompleteAnswersFail
@@ -307,3 +309,13 @@ firstFailure :: [TestResult] -> TestResult
 firstFailure results = case [e | Just e <- results] of
     e : _ -> Just e
     [] -> Nothing
+
+-- Variadic functions whose lowering the programs of TestVariadic do not reach: a borrow of an element at a number, a range
+-- loop past the pack, validation statements that read the pack, and a pack loop after a return
+variadicLowering :: [(String, String)]
+variadicLowering =
+    [ ("a borrow of an element at a number", "fn sz<T>(r: &T) -> Int { return 1; }; fn f<..T>(args: &..T) -> Int [{ affirm size(args) >= 1; }] [{ }] {\n    r = &get(args, 0);\n    return sz(r);\n};\nreturn f(1, true);")
+    , ("a range loop past the pack", "fn f<..T>(args: &..T) -> Int {\n    t = 0;\n    for i in 0..size(args) + 1 { t = t + i; };\n    return t;\n};\nreturn f(1, true);")
+    , ("validation statements that read the pack", "fn f<..T>(args: &..T) -> Int {\n    affirm size(args) >= 0;\n    define n = size(args);\n    return n;\n};\nreturn f(1, true);")
+    , ("a loop over the pack after a return", "fn f<..T>(args: &..T) -> Int {\n    return 0;\n    for a in args { };\n};\nreturn f(1);")
+    ]

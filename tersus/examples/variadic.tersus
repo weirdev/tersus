@@ -1,0 +1,43 @@
+// A variadic function takes any number of trailing arguments, each of its own type. `..T` is a pack of types, bounded like any
+// type parameter, and `args: &..T` lends each argument (`args: ..T` would take each by value). The body is checked once against
+// the bounds, and each call is made into a copy for its arguments' types, with one parameter per argument, `size(args)` a number,
+// the loops over the pack unrolled and the branches the copy does not take dropped.
+trait Measure {
+    fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
+};
+
+impl Measure for Int {
+    fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] {
+        if self < 0 { return 0 - self; };
+        return self;
+    };
+};
+
+impl Measure for Bool {
+    fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] {
+        if self { return 1; };
+        return 0;
+    };
+};
+
+// A loop over the pack runs its body once for each argument; the contract is a fact for each of them
+fn total<..T: Measure>(args: &..T) -> Int [{ affirm forall i in 0..size(args): Measure::measure(get(args, i)) >= 0; }] [{ affirm return >= 0; }] {
+    sum = 0;
+    for a in args { sum = sum + a.measure(); };
+    return sum;
+};
+
+// get(args, 0) is fine with no arguments: a copy for none never takes the branch
+fn leading<..T: Measure>(args: &..T) -> Int {
+    if size(args) > 0 { return get(args, 0).measure(); };
+    return 0;
+};
+
+// The index of a loop over the pack indexes it too
+fn weighted<..T: Measure>(args: &..T) -> Int {
+    sum = 0;
+    for i, a in args { sum = sum + (i + 1) * a.measure(); };
+    return sum;
+};
+
+return total(3, true, 0 - 4) * 100 + leading() * 10 + leading(7, false) + weighted(1, 2, true);    // 800 + 0 + 7 + 8

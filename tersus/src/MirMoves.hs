@@ -103,7 +103,8 @@ isCopyType copies program = go (0 :: Int)
             TRef t -> go (depth + 1) t
             TNamed base args -> declared depth (instanceName base args)
             TVariant v -> maybe False (declared depth) (ownerOf program v)
-            TParam p -> parameterCopy p `Set.member` copies
+            -- (an element of a pack, `..T#0`, is Copy when the pack is)
+            TParam p -> parameterCopy (takeWhile (`notElem` "#@") p) `Set.member` copies
             _ -> False
     declared depth n =
         let base = baseNameOf n
@@ -314,6 +315,12 @@ checkMovesExcluding copies linear drops excluded program = concatMap (\fn -> che
     -- have a type parameter of that name of their own, when a bound says so)
     copiesIn fn = Set.union copies (Set.fromList [parameterCopy p | (name, bounded) <- Map.toList (progBounded program), p <- boundedCopy bounded, name == fnName fn || (fnName fn `elem` boundedLifted bounded && p `notElem` fnTypeParams fn)])
 
+-- The pack parameter of a variadic function (its type is the pack of types `..T` itself, not one of its elements')
+isPackRoot :: Cx -> Local -> Bool
+isPackRoot cx r = case typeOf cx r of
+    TParam p -> ".." `isPrefixOf` p && all (`notElem` "#@") p
+    _ -> False
+
 -- How a type parameter bounded by Copy is named among the Copy types (no type's name has a space)
 parameterCopy :: Variable -> Name
 parameterCopy p = "$param " ++ p
@@ -506,7 +513,15 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
             [ message cx pos (describeLocal cx d ++ " cannot be assigned while it is borrowed by " ++ describeLocal cx ref ++ ": the borrow ends at the last use of " ++ describeLocal cx ref)
             | (ref, lplace, _) <- activeLoans, fst lplace == d
             ]
-    used = if forLoopList then [(l, ps, Read) | (l, ps, _) <- accesses rv] else if tuplePart then [(l, ps, Consume) | (l, ps, _) <- accesses rv] else accesses rv
+    -- (the size of the pack of a variadic function is a number in each copy, which reads none of its elements)
+    packSize = case rv of
+        ListOp Length [o] | Just l <- operandLocal o, TParam p <- typeOf cx l -> ".." `isPrefixOf` p
+        _ -> False
+    used
+        | packSize = []
+        | forLoopList = [(l, ps, Read) | (l, ps, _) <- accesses rv]
+        | tuplePart = [(l, ps, Consume) | (l, ps, _) <- accesses rv]
+        | otherwise = accesses rv
     sameStatement = take 1 (lentAndMoved cx pos st0 "borrowed in this expression" (loanPlacesOf st0 (rvalueUses rv)) [l | (l, _, Consume) <- used])
     (st1, errs) = takenApart (foldl' (access cx pos) (st0, sameStatement) used)
     -- (a value of a linear type is used when a function of its own impl takes it apart: reads a field of it, or tests or casts its variant)
@@ -591,9 +606,13 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++
     movedText q m mpos via =
         let written = fromMaybe (describe cx m) via
             label = maybe (describe cx m) (\v -> if v == describe cx m then v else v ++ " (" ++ describe cx m ++ ")") via
-         in if q == m
+         in if null (snd m) && packLocal (fst m)
+                then describe cx m ++ " was taken by the loop over it" ++ at mpos ++ " (for a in " ++ describe cx m ++ " takes the elements of a pack taken by value) and cannot be used after it: loop with for a in &" ++ describe cx m ++ " to keep it"
+            else if q == m
                 then label ++ " was moved" ++ at mpos ++ " and cannot be used again: write clone(" ++ written ++ ") where it is moved to keep it"
                 else label ++ " was moved" ++ at mpos ++ ", and " ++ describe cx q ++ " is a part of it or has it as a part: write clone(" ++ written ++ ") where it is moved to keep it"
+    -- (the pack of a variadic function is moved only by a loop that takes its elements: MirLower.lowerPackLoop)
+    packLocal r = isPackRoot cx r
     taking = role == Consume && not (isCopy cx l)
     moveErrs
         | not taking = []
@@ -603,6 +622,8 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++
         | permissionPlace q, root `Set.notMember` cxLent cx, Just n <- dropTypeOf root, maybe True (not . ("$struct " `isPrefixOf`)) (localNameOf cx root) =
             [message cx pos ("the permission " ++ named q ++ " is moved out of a value of " ++ n ++ ", which has a drop that would free the memory again: take the value apart, as in " ++ n ++ " { ... } = " ++ describeLocal cx root ++ ";, which uses it up")]
         | SSlot `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of the memory of a permission or an Uninit, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it, or take it out with Addr::take or Uninit::take")]
+        | isPackRoot cx root, (SElem _ : _) <- ps = [message cx pos ("cannot move " ++ named q ++ " out of the pack " ++ describeLocal cx root ++ ": an element at an index that is not a number, or read by for a in &" ++ describeLocal cx root ++ ", is only read: take the elements with for a in " ++ describeLocal cx root ++ " over a pack taken by value, or write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ")")]
+        | isPackRoot cx root, (SField "$pack" _ : _) <- ps, root `Set.member` cxLent cx = [message cx pos ("cannot move " ++ named q ++ " out of the pack " ++ describeLocal cx root ++ ", which is lent (&..T) to this function and can only be read: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to get a value of its own")]
         | [s | s@(SElem _) <- ps] /= [] = [message cx pos ("cannot move " ++ named q ++ " out of a list, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it")]
         | root `Set.member` cxLent cx, permissionPlace q, not (dropsPermission q) = [message cx pos (named q ++ " is a permission in a value that is lent (&T) to this function, which can lend it to an operation (Addr::get) but not use it up")]
         | root `Set.member` cxLent cx, not (dropsPermission q) = [message cx pos (describe cx q ++ " is lent (&T) to this function and can only be read: write clone(" ++ describe cx q ++ ") to get a value of its own")]
@@ -844,6 +865,10 @@ describeLocal cx l = case localNameOf cx l of
     _ -> "the value in " ++ show l
 
 describe :: Cx -> Place -> String
+describe cx (l, SField "$pack" k : steps) = "get(" ++ describeLocal cx l ++ ", " ++ k ++ ")" ++ describe cx (l, steps) `withoutRoot` describeLocal cx l
+  where
+    withoutRoot text root = drop (length root) text
+describe cx (l, SElem _ : steps) | TParam p <- typeOf cx l, ".." `isPrefixOf` p = "get(" ++ describeLocal cx l ++ ", i)" ++ drop (length (describeLocal cx l)) (describe cx (l, steps))
 describe cx (l, steps) = describeLocal cx l ++ concat [part s | s <- steps]
   where
     part (SField _ field) = "." ++ field

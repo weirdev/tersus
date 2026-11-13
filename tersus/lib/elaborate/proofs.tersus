@@ -4,11 +4,11 @@ import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, builtinVa
 import elaborate::calls { bindInner, builtinIndexType, builtinRecord, checkCall, ctorArgTypes, emitIntValue, inScope, keyType, lookupProofVar, lookupVar, popScope, pushScope, teHead, valueInt, valueType };
 import elaborate::check { fnSigOf };
 import elaborate::core { arrayOk, baseNameOf, checkConstruct, holdsGhost, isBoxTy, isListTy, literalOk, readField };
-import elaborate::expr { Folded, argsCountText, arrayCall, constantArithmetic, derefOwner, derefTarget, emitFieldValue, functionOf, genericCall, isLookThroughKey, noConstantSize, nodesOf, pathOf, permissionType, takesNoPermission, traitPath };
+import elaborate::expr { elementTypeNamed, freshElementType, Folded, argsCountText, arrayCall, constantArithmetic, derefOwner, derefTarget, emitFieldValue, functionOf, genericCall, isLookThroughKey, noConstantSize, nodesOf, pathOf, permissionType, takesNoPermission, traitPath };
 import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
 import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { callOf };
-import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt };
+import elaborate::state { intText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt };
 import elaborate::traits { builtinSequenceCall, emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof ~ {
@@ -51,6 +51,29 @@ fn inferProof(st: St, p: Int) -> St ~ {
         AstProof::CTerm { v: v } => { st = valueType(st, v); return St { nid: p, ..st }; },
         AstProof::Forall { n: n, gs: gs, b: b } => {
             index = nameText(&st.nodes, n);
+            // (a forall that reads the pack at its index is one fact for each index in each copy, so its bounds are fixed there)
+            if size(st.pack.bytes) > 0 && readsPackAt(&st, b, &index) {
+                guardNodes = listItems(&st.nodes, gs);
+                bounded = size(guardNodes) = 2;
+                for g in &guardNodes {
+                    gp = proofOf(&st, g);
+                    if gp is AstProof::FApp {
+                        parts = listItems(&st.nodes, (gp as AstProof::FApp).xs);
+                        if size(parts) != 2 || !proofFolds(&st, nth(&parts, 1)) { bounded = false; };
+                    } else { bounded = false; };
+                };
+                if !bounded {
+                    return typeError(st, catStrings(catStrings(catStrings("a forall over the elements of ", clone(st.pack)), " is written forall i in lo..hi with bounds fixed in each copy (numbers, size("), catStrings(clone(st.pack), "), the index of a for loop over it, and + - * of those)")));
+                };
+            };
+            // (in a variadic function, get(args, i) on the index of a forall has a type of its own, which each copy gives the
+            // type of each argument it unrolls the forall into)
+            outerIndexNames = clone(st.packIndexNames);
+            outerIndexTypes = clone(st.packIndexTypes);
+            if size(st.pack.bytes) > 0 {
+                st = freshElementType(st, catStrings(catStrings(catStrings("get(", clone(st.pack)), ", "), catStrings(clone(index), ")")));
+                st = St { packIndexNames: push(st.packIndexNames, clone(index)), packIndexTypes: push(st.packIndexTypes, st.ty), ..st };
+            };
             st = simpleTy(st, 0);
             st = pushScope(st);
             st = bindInner(st, &index, st.ty);
@@ -73,6 +96,7 @@ fn inferProof(st: St, p: Int) -> St ~ {
             st = expect(st, "body of forall", boolTy, bt);
             st = popScope(st);
             if st.status != 0 { return st; };
+            st = St { packIndexNames: outerIndexNames, packIndexTypes: outerIndexTypes, ..st };
             st = emitProofs(st, &guards);
             st = emit(st, AstNode::Proof { value: AstProof::Forall { n: n, gs: st.nid, b: bn } });
             return St { ty: boolTy, ..st };
@@ -83,6 +107,7 @@ fn inferProof(st: St, p: Int) -> St ~ {
 };
 
 fn inferProofCall(st: St, p: Int, funct: Int, args: &List<Int>) -> St ~ {
+    if size(st.pack.bytes) > 0 && size(args) >= 1 && isPackProof(&st, nth(args, 0)) { return packProofCall(st, funct, args); };
     b = proofBuiltin(st, funct);
     if b < 0 { return inferProofHead(st, funct, args); };
     key = builtinKey(st, b);
@@ -92,6 +117,109 @@ fn inferProofCall(st: St, p: Int, funct: Int, args: &List<Int>) -> St ~ {
     if rec is AstBuiltin::FieldBuiltin && size(args) = 1 { return proofField(st, funct, rec as AstBuiltin::FieldBuiltin, nth(args, 0)); };
     if rec is AstBuiltin::Ctor { return proofCtorCall(st, funct, rec as AstBuiltin::Ctor, args); };
     return proofArrayCall(st, p, funct, args, &key);
+};
+
+// Whether a proof reads the pack at an index made of the name
+fn readsPackAt(st: &St, p: Int, name: &String) -> Bool ~ {
+    pr = proofOf(st, p);
+    if !(pr is AstProof::FApp) { return false; };
+    call = pr as AstProof::FApp;
+    args = listItems(&st.nodes, call.xs);
+    if size(args) = 2 && isPackProof(st, nth(&args, 0)) && proofMentions(st, nth(&args, 1), name) { return true; };
+    if readsPackAt(st, call.f, name) { return true; };
+    for a in &args { if readsPackAt(st, a, name) { return true; }; };
+    return false;
+};
+
+fn proofMentions(st: &St, p: Int, name: &String) -> Bool ~ {
+    pr = proofOf(st, p);
+    if pr is AstProof::ATerm { return nameText(&st.nodes, (pr as AstProof::ATerm).n) = clone(name); };
+    if pr is AstProof::BVar { return nameText(&st.nodes, (pr as AstProof::BVar).n) = clone(name); };
+    if pr is AstProof::FApp {
+        call = pr as AstProof::FApp;
+        if proofMentions(st, call.f, name) { return true; };
+        for a in listItems(&st.nodes, call.xs) { if proofMentions(st, a, name) { return true; }; };
+    };
+    return false;
+};
+
+// Whether a bound of a forall over the pack is fixed in each copy: numbers, size(args), the indices of the loops over the
+// pack it is in, and + - * of those
+fn proofFolds(st: &St, p: Int) -> Bool ~ {
+    pr = proofOf(st, p);
+    if pr is AstProof::CTerm { return valueInt(st, (pr as AstProof::CTerm).v).ok; };
+    if pr is AstProof::ATerm { atermName = nameText(&st.nodes, (pr as AstProof::ATerm).n); return indexIn(&st.packIndexNames, &atermName) >= 0; };
+    if !(pr is AstProof::FApp) { return false; };
+    call = pr as AstProof::FApp;
+    args = listItems(&st.nodes, call.xs);
+    name = "";
+    b = proofBuiltin(st, call.f);
+    if b >= 0 { name = builtinKey(st, b); } else {
+        fp = proofOf(st, call.f);
+        if fp is AstProof::ATerm { name = nameText(&st.nodes, (fp as AstProof::ATerm).n); };
+    };
+    if size(args) = 1 && (name = "Size" || name = "size") { return isPackProof(st, nth(&args, 0)); };
+    if size(args) = 2 && (name = "Plus" || name = "Minus" || name = "Times") { return proofFolds(st, nth(&args, 0)) && proofFolds(st, nth(&args, 1)); };
+    return false;
+};
+
+fn isPackProof(st: &St, p: Int) -> Bool ~ {
+    pr = proofOf(st, p);
+    if !(pr is AstProof::ATerm) { return false; };
+    return nameText(&st.nodes, (pr as AstProof::ATerm).n) = st.pack;
+};
+
+// size(args) and get(args, e) in a contract of a variadic function, which each copy makes a number and a parameter
+fn packProofCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
+    name = "";
+    b = proofBuiltin(&st, funct);
+    if b >= 0 { name = builtinKey(&st, b); } else {
+        fp = proofOf(&st, funct);
+        if fp is AstProof::ATerm { name = nameText(&st.nodes, (fp as AstProof::ATerm).n); };
+    };
+    packNode = nth(args, 0);
+    if size(args) = 1 && (name = "Size" || name = "size") {
+        argNodes = push([], packNode);
+        st = emitFApp(st, funct, &argNodes);
+        node = st.nid;
+        st = simpleTy(st, 0);
+        return St { nid: node, ..st };
+    };
+    if size(args) = 2 && (name = "Get" || name = "get") {
+        index = nth(args, 1);
+        elementTy = 0 - 1;
+        ip = proofOf(&st, index);
+        if ip is AstProof::CTerm {
+            lit = valueInt(&st, (ip as AstProof::CTerm).v);
+            if lit.ok {
+                if lit.value < 0 { return typeError(st, catStrings(catStrings("get(", clone(st.pack)), ", i) needs an index of 0 or more")); };
+                st = elementTypeNamed(st, catStrings(catStrings(clone(st.packType), "#"), intText(lit.value)));
+                elementTy = st.ty;
+            };
+        };
+        varText = "";
+        if ip is AstProof::ATerm { varText = nameText(&st.nodes, (ip as AstProof::ATerm).n); };
+        if ip is AstProof::BVar { varText = nameText(&st.nodes, (ip as AstProof::BVar).n); };
+        if size(varText.bytes) > 0 {
+            j = size(st.packIndexNames) - 1;
+            while j >= 0 && elementTy < 0 [{ affirm j < size(st.packIndexNames); }] ~ {
+                if get(st.packIndexNames, j) = varText && j < size(st.packIndexTypes) { elementTy = get(st.packIndexTypes, j); };
+                j = j - 1;
+            };
+        };
+        if elementTy < 0 { st = freshElementType(st, catStrings(catStrings("get(", clone(st.pack)), ", …)")); elementTy = st.ty; };
+        st = inferProof(st, index);
+        if st.status != 0 { return st; };
+        indexNode = st.nid;
+        indexTy = st.ty;
+        st = simpleTy(st, 0);
+        st = expect(st, "the index of get on a pack", st.ty, indexTy);
+        if st.status != 0 { return st; };
+        argNodes = push(push([], packNode), indexNode);
+        st = emitFApp(st, funct, &argNodes);
+        return St { ty: elementTy, ..st };
+    };
+    return typeError(st, catStrings(catStrings(catStrings(clone(st.pack), " is a pack of arguments: a contract uses size("), clone(st.pack)), catStrings(catStrings(") and get(", clone(st.pack)), ", i)")));
 };
 
 fn proofArrayCall(st: St, p: Int, funct: Int, args: &List<Int>, key: &String) -> St ~ {

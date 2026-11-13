@@ -120,6 +120,7 @@ declaredNames stmt = case stmt of
     Block body -> concatMap declaredNames body
     If _ yes no -> concatMap declaredNames (yes ++ no)
     While _ _ _ body -> concatMap declaredNames body
+    PackLoop _ _ _ _ _ _ body -> concatMap declaredNames body
     ImplDef _ _ _ _ _ body -> concatMap declaredNames body
     BoundedDef _ inner -> declaredNames inner
     _ -> []

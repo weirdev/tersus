@@ -145,6 +145,7 @@ assumesIn stmt = case stmt of
     Block body -> concatMap assumesIn body
     If _ yes no -> concatMap assumesIn (yes ++ no)
     While _ _ _ body -> concatMap assumesIn body
+    PackLoop _ _ _ _ _ _ body -> concatMap assumesIn body
     ImplDef _ _ _ _ _ body -> concatMap assumesIn body
     BoundedDef _ inner -> assumesIn inner
     _ -> []

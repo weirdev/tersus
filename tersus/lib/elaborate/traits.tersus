@@ -9,7 +9,7 @@ import elaborate::expr { coerceArguments, genericCall, implementsMarker, nodesOf
 import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
+import elaborate::state { indexOfByteIn, isPackTypeName, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -278,6 +278,10 @@ fn declareTemplate(st: St, name: String, bounds: List<BoundInfo>, tm: Template) 
     fs = FnSig { params: clone(tm.params), ptys: clone(tm.ptys), rty: tm.rty, sizes: clone(tm.sizes), types: clone(tm.types), writes: [], froms: clone(tm.from) };
     st = checkTemplateSignature(st, &name, &fs, &bounds);
     if st.status != 0 { return st; };
+    packAt = packParameter(&st, &tm);
+    if packAt >= 0 && packAt < size(tm.params) && indexIn(&tm.from, &get(tm.params, packAt)) >= 0 {
+        return typeError(st, catStrings(catStrings(catStrings(clone(name), " is written from "), clone(get(tm.params, packAt))), ", a pack: a reference result is from one parameter"));
+    };
     // (what a reference it returns is from, which a call of it reads by its name)
     if size(tm.from) > 0 { st = putRefResult(st, clone(name), clone(tm.params), clone(tm.from)); };
     return St { templates: st.templates.insert(clone(name), tm), defQueue: push(st.defQueue, name), ..st };
@@ -331,10 +335,24 @@ fn unknownIn(st: &St, t: Int) -> Bool ~ {
     return false;
 };
 
+struct PackedTemplate { st: St, tm: Template };
+
 // A call of a function with bounds: the types of the arguments give the function's types and each meets its bounds, and
 // the call names the copy of the function for them (templateReference), which the copy step makes (MirCopies): the call
 // is checked against the function's signature and bounds alone. st.te: the call.
-fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~ {
+fn templateCall(st: St, name: String, tm0: Template, inferred: &List<TE>) -> St ~ {
+    tm = tm0;
+    packAt = packParameter(&st, &tm);
+    if packAt >= 0 {
+        fixed = size(tm.params) - size(tm.sizes) - 1;
+        if size(inferred) < fixed {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " takes at least "), intText(fixed)), " arguments, got "), intText(size(inferred))));
+        };
+        PackedTemplate { st: packedSt, tm: packedTm } = packTemplate(st, &tm, packAt, size(inferred) - fixed);
+        st = packedSt;
+        tm = packedTm;
+    };
+    st = St { packCallOffset: packAt, ..st };
     st = fnTy(st, clone(tm.ptys), tm.rty);
     st = instantiateGenerics(st, &tm.sizes, &tm.types, st.ty);
     instantiated = st.ty;
@@ -386,6 +404,82 @@ fn templateCall(st: St, name: String, tm: Template, inferred: &List<TE>) -> St ~
     argNodes = nodesOf(&all);
     st = emitCall(st, functNode, &argNodes);
     return typed(st, st.nid, resultTy, &all);
+};
+
+// The parameter of a function with bounds whose type is a pack of types (`args: ..T` or `args: &..T`), or -1
+fn packParameter(st: &St, tm: &Template) -> Int ~ {
+    i = 0;
+    for p in &tm.ptys {
+        x = tyAt(st, p);
+        if x.kind = 10 { x = tyAt(st, nth(&x.args, 0)); };
+        if x.kind = 12 && isPackTypeName(&x.name) { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// A variadic function as a call with n arguments in its pack sees it: the pack's parameter is n parameters `args 0` ... of the
+// element types `..T#0` ..., each with the bounds of the pack, which a call meets for each argument (with the others' types
+// worked out with them: `..S: Sequence<E>` gives every argument one E)
+fn packTemplate(st: St, tm: &Template, packAt: Int, n: Int) -> PackedTemplate ~ {
+    if packAt < 0 || packAt >= size(tm.ptys) || packAt >= size(tm.params) { return PackedTemplate { st: st, tm: clone(tm) }; };
+    packTy = tyAt(&st, get(tm.ptys, packAt));
+    lent = packTy.kind = 10;
+    if lent { packTy = tyAt(&st, nth(&packTy.args, 0)); };
+    packName = clone(packTy.name);
+    packParam = clone(get(tm.params, packAt));
+    types = [];
+    for t in &tm.types { if t != packName { types = push(types, clone(t)); }; };
+    elementParams = [];
+    elementTypes = [];
+    k = 0;
+    while k < n [{ affirm k >= 0; }] ~ {
+        element = catStrings(catStrings(clone(packName), "#"), intText(k));
+        types = push(types, clone(element));
+        st = addTy(st, Ty { kind: 12, name: element, args: [], n: 0, flag: false, sizes: [], types: [] });
+        if lent { st = addTy(st, Ty { kind: 10, name: "", args: push([], st.ty), n: 0, flag: false, sizes: [], types: [] }); };
+        elementTypes = push(elementTypes, st.ty);
+        elementParams = push(elementParams, catStrings(catStrings(clone(packParam), " "), intText(k)));
+        k = k + 1;
+    };
+    params = [];
+    ptys = [];
+    i = 0;
+    while i < size(tm.params) && i < size(tm.ptys) [{ affirm i >= 0; }] ~ {
+        if i = packAt {
+            for q in &elementParams { params = push(params, clone(q)); };
+            for q in &elementTypes { ptys = push(ptys, q); };
+        } else {
+            params = push(params, clone(get(tm.params, i)));
+            ptys = push(ptys, get(tm.ptys, i));
+        };
+        i = i + 1;
+    };
+    bounds = [];
+    for b in &tm.bounds { if b.p != packName { bounds = push(bounds, clone(b)); }; };
+    k = 0;
+    while k < n [{ affirm k >= 0; }] ~ {
+        for b in &tm.bounds {
+            if b.p = packName { bounds = push(bounds, BoundInfo { p: catStrings(catStrings(clone(packName), "#"), intText(k)), n: clone(b.n), ts: clone(b.ts) }); };
+        };
+        k = k + 1;
+    };
+    base = clone(tm);
+    return PackedTemplate { st: st, tm: Template { bounds: bounds, params: params, ptys: ptys, types: types, ..base } };
+};
+
+// How a bound's type parameter is named in a message: an element of a pack by the argument it is (`T (argument 2, Point)`)
+fn boundParameterText(st: &St, p: &String, t: Int) -> String ~ {
+    hash = indexOfByteIn(p, 35);
+    if !isPackTypeName(p) || hash < 2 || hash >= size(p.bytes) { return clone(p); };
+    k = parsedInt(p.slice(hash + 1, size(p.bytes)));
+    return catStrings(catStrings(catStrings(p.slice(2, hash), " (argument "), intText(st.packCallOffset + k + 1)), catStrings(catStrings(", ", render(st, t)), ")"));
+};
+
+fn parsedInt(text: String) -> Int ~ {
+    n = 0;
+    for c in &text.bytes { n = n * 10 + (toInt(c) - 48); };
+    return n;
 };
 
 // The arguments of a call of a function with bounds coerced to its parameters (st.tes)
@@ -631,6 +725,7 @@ fn checkBound(st: St, name: &String, sizes: &List<String>, sizeVars: &List<Int>,
     if !st.ok && st.defChecking && kindOf(st, t) = 12 {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), clone(b.p)), " to implement "), clone(b.n)), ", and the bounds of "), clone(st.current)), " do not say "), render(st, t)), catStrings(": ", clone(b.n))));
     };
+    if !st.ok && isPackTypeName(&b.p) { return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), boundParameterText(&st, &b.p, t)), " to implement "), clone(b.n))); };
     if !st.ok { return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), clone(b.p)), " to implement "), clone(b.n)), ", and "), render(st, t)), " does not")); };
     actual = clone(st.te.types);
     if size(actual) != size(b.ts) {
@@ -645,7 +740,7 @@ fn checkBound(st: St, name: &String, sizes: &List<String>, sizeVars: &List<Int>,
         want = st.ty;
         st = unify(st, have, want);
         if !st.ok {
-            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), clone(b.p)), " to implement "), clone(b.n)), "<"), render(st, want)), ">, and "), render(st, t)), catStrings(catStrings(catStrings(" implements ", clone(b.n)), "<"), render(st, have))), ">"));
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), boundParameterText(&st, &b.p, t)), " to implement "), clone(b.n)), "<"), render(st, want)), ">, and "), render(st, t)), catStrings(catStrings(catStrings(" implements ", clone(b.n)), "<"), render(st, have))), ">"));
         };
         i = i + 1;
     };
@@ -1647,11 +1742,17 @@ fn checkDefinition(st: St, name: &String) -> St ~ {
     refResultFroms = clone(st.refResultFroms);
     outerDefChecking = st.defChecking;
     st = St { defChecking: true, ..st };
+    // (the bounds of a pack of types are those of each of its elements' types, which the body makes as it reads them)
+    packBounds = [];
     for b in &tm.bounds {
-        st = addTy(st, Ty { kind: 12, name: clone(b.p), args: [], n: 0, flag: false, sizes: [], types: [] });
-        pty = st.ty;
-        st = boundAsImpl(st, &b.p, pty, &b.n, &b.ts);
+        if isPackTypeName(&b.p) { packBounds = push(packBounds, clone(b)); } else {
+            st = addTy(st, Ty { kind: 12, name: clone(b.p), args: [], n: 0, flag: false, sizes: [], types: [] });
+            pty = st.ty;
+            st = boundAsImpl(st, &b.p, pty, &b.n, &b.ts);
+        };
     };
+    outerPackBounds = clone(st.packBounds);
+    st = St { packBounds: packBounds, ..st };
     writes = namesText(&st.nodes, signatureOf(&st.nodes, tm.sigNode).ws);
     fs = FnSig { params: clone(tm.params), ptys: clone(tm.ptys), rty: tm.rty, sizes: clone(tm.sizes), types: clone(tm.types), writes: writes, froms: clone(tm.from) };
     st = checkFunction(st, name, clone(fs), tm.ins, tm.outs, tm.term, tm.body);
@@ -1676,7 +1777,7 @@ fn checkDefinition(st: St, name: &String) -> St ~ {
     genericTypes = clone(st.genericTypes);
     for t in &bodyTypes { genericTypes = push(genericTypes, t); };
     st = St { genericOut: push(st.genericOut, st.nid), genericTypes: genericTypes, ..st };
-    return St { defChecking: outerDefChecking, impls: impls, implArgs: implArgs, assoc: assoc, fns: fns, refResultNames: refResultNames, refResultParams: refResultParams, refResultFroms: refResultFroms, ..st };
+    return St { defChecking: outerDefChecking, impls: impls, implArgs: implArgs, assoc: assoc, fns: fns, refResultNames: refResultNames, refResultParams: refResultParams, refResultFroms: refResultFroms, packBounds: outerPackBounds, ..st };
 };
 
 // The bound p: tname<args> as an impl of the trait for p's owner (parameterOwner), with each function of the trait as

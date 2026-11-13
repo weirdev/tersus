@@ -116,6 +116,10 @@ data Statement
       -- parameters of the function with bounds that uses it), and `Instance n "" [] params signature` that n is a function a bound gives
       -- (`<$param T as Tr>::g`). The signature is n's own; the copy step (MirCopies) makes the copies.
       Instance Name Name [Arg] [Variable] Signature
+    | -- A loop over the pack of a variadic function, which each copy unrolls (LANGUAGE.md, "Variadic functions"): `PackLoop i a
+      -- args lo hi take body` runs body with the index i from lo to hi - 1 and the element a at i (the parser names the one the program
+      -- does not, `$index ...` or `$element ...`); take is `for a in args` over a pack taken by value, which takes the elements.
+      PackLoop Variable Variable Variable Expression Expression Bool [Statement]
     | -- The line and column of the statement that follows it in its block, in a program that was parsed to keep them (`Pipeline`
       -- does, the parser functions called on their own do not). Nothing runs it: the lowering takes it as the place that the
       -- MIR statements after it come from, for the errors that name a place (a value used after it was moved).

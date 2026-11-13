@@ -56,6 +56,12 @@ impl Clone for RefTarget { };
 struct LoopRec { header: Int, body: Int, inv: Int, term: Int, env: Int };
 impl Clone for LoopRec { };
 
+// A loop over the pack of a variadic function (Mir.PackLoop): its header, first body block and exit, every block of its
+// body, the locals made in it, its index and element locals, the element's type parameter, the locals of its bounds, and
+// what the pack is moved into before a loop that takes its elements (-1 for none)
+struct PackLoopRec { header: Int, body: Int, exit: Int, blocks: List<Int>, locals: List<Int>, index: Int, element: Int, elementType: String, lo: Int, hi: Int, taken: Int };
+impl Clone for PackLoopRec { };
+
 // A finished function, its blocks numbered from the entry
 struct LFn {
     name: String, params: List<Int>, hasReturns: Bool, returns: Int, locals: List<LDecl>, sizes: List<String>, typeParams: List<String>,
@@ -70,7 +76,7 @@ struct Builder {
     refTargets: List<RefTarget>, hasReturns: Bool, returns: Int, params: List<Int>, locals: List<LDecl>, nextLocal: Int,
     blocks: List<LBlock>, nextBlock: Int, hasOpen: Bool, openId: Int, openStmts: List<Int>,
     scopeNames: List<String>, scopeBinds: List<Binding>, scopeMarks: List<Int>, loops: List<LoopRec>,
-    hasPlace: Bool, line: Int, col: Int
+    hasPlace: Bool, line: Int, col: Int, packLoops: List<PackLoopRec>
 };
 impl Clone for Builder { };
 
@@ -82,10 +88,12 @@ impl Clone for TDecl { };
 struct GenericRec { line: String };
 impl Clone for GenericRec { };
 
+
 // A function with bounds, for the step that copies it (Mir.BoundedFn): the sizes its bounds name, its type parameters
 // bounded by Copy, and the functions lifted out of its body
-struct BoundedRec { sizes: List<String>, copyParams: List<String>, lifted: List<String> };
+struct BoundedRec { sizes: List<String>, copyParams: List<String>, lifted: List<String>, packLoops: List<PackLoopRec> };
 impl Clone for BoundedRec { };
+
 
 // An environment: the shared part it names (an index of contents, or -1 for none) and its own part's tokens
 struct EnvRec { content: Int, ownPart: String };
@@ -105,7 +113,7 @@ struct LowSt {
     types: HashMap<String, TDecl>, functions: HashMap<String, LFn>, fnKeys: HashSet<String>, names: HashSet<String>,
     globals: HashMap<String, String>, globalsVersion: Int, assigned: HashSet<String>,
     generics: HashMap<String, GenericRec>, invariants: HashMap<String, Int>,
-    bounded: HashMap<String, BoundedRec>, instances: HashMap<String, String>,
+    bounded: HashMap<String, BoundedRec>, instances: HashMap<String, String>, packLoops: HashMap<String, List<PackLoopRec>>,
     copies: HashSet<String>, linears: HashSet<String>, externs: HashSet<String>, drops: HashSet<String>,
     prereg: HashMap<String, List<String>>, stubs: HashSet<String>,
     pn: List<AstNode>, pbase: Int,
@@ -115,7 +123,7 @@ struct LowSt {
     bRefTargets: List<RefTarget>, bHasReturns: Bool, bReturns: Int, bParams: List<Int>, bLocals: List<LDecl>, bNextLocal: Int,
     bBlocks: List<LBlock>, bNextBlock: Int, bHasOpen: Bool, bOpenId: Int, bOpenStmts: List<Int>,
     bScopeNames: List<String>, bScopeBinds: List<Binding>, bScopeMarks: List<Int>, bLoops: List<LoopRec>,
-    bHasPlace: Bool, bLine: Int, bCol: Int,
+    bHasPlace: Bool, bLine: Int, bCol: Int, bPackLoops: List<PackLoopRec>,
     ty: Int, op: Op, pend: Pend, root: Int, steps: List<Step>, name: String, id: Int, sig: Sig
 };
 
@@ -132,14 +140,14 @@ fn swapBuilder(ls: LowSt, b: Builder) -> Swapped ~ {
         params: ls.bParams, locals: ls.bLocals, nextLocal: ls.bNextLocal, blocks: ls.bBlocks, nextBlock: ls.bNextBlock,
         hasOpen: ls.bHasOpen, openId: ls.bOpenId, openStmts: ls.bOpenStmts, scopeNames: ls.bScopeNames,
         scopeBinds: ls.bScopeBinds, scopeMarks: ls.bScopeMarks, loops: ls.bLoops, hasPlace: ls.bHasPlace,
-        line: ls.bLine, col: ls.bCol
+        line: ls.bLine, col: ls.bCol, packLoops: ls.bPackLoops
     };
     next = LowSt {
         bName: b.name, bIsMain: b.isMain, bSizes: b.sizes, bTypeParams: b.typeParams, bBorrowed: b.borrowed, bMutBorrowed: b.mutBorrowed,
         bRefTargets: b.refTargets, bHasReturns: b.hasReturns, bReturns: b.returns, bParams: b.params, bLocals: b.locals,
         bNextLocal: b.nextLocal, bBlocks: b.blocks, bNextBlock: b.nextBlock, bHasOpen: b.hasOpen, bOpenId: b.openId,
         bOpenStmts: b.openStmts, bScopeNames: b.scopeNames, bScopeBinds: b.scopeBinds, bScopeMarks: b.scopeMarks, bLoops: b.loops,
-        bHasPlace: b.hasPlace, bLine: b.line, bCol: b.col, ..ls
+        bHasPlace: b.hasPlace, bLine: b.line, bCol: b.col, bPackLoops: b.packLoops, ..ls
     };
     return Swapped { ls: next, b: old };
 };
@@ -157,7 +165,7 @@ fn newBuilder(name: String, isMain: Bool, hasReturns: Bool, returns: Int) -> Bui
         name: name, isMain: isMain, sizes: [], typeParams: [], borrowed: [], mutBorrowed: [], refTargets: [],
         hasReturns: hasReturns, returns: returns, params: [], locals: locals, nextLocal: 1, blocks: [], nextBlock: 1,
         hasOpen: true, openId: 0, openStmts: [], scopeNames: [], scopeBinds: [], scopeMarks: push([], 0), loops: [],
-        hasPlace: false, line: 0, col: 0
+        hasPlace: false, line: 0, col: 0, packLoops: []
     };
 };
 
@@ -165,14 +173,14 @@ fn newLowSt(pbase: Int) -> LowSt ~ {
     return LowSt {
         ok: true, msg: "", tys: [], tyIndex: HashMap::new(), defaulted: HashMap::new(), elab: [], nextElab: 0,
         stmts: [], types: HashMap::new(), functions: HashMap::new(), fnKeys: HashSet::new(), names: HashSet::new().insert("main"),
-        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(),
+        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
         copies: HashSet::new(), linears: HashSet::new(), externs: HashSet::new(), drops: HashSet::new(),
         prereg: HashMap::new(), stubs: HashSet::new(), pn: [], pbase: pbase,
         envs: [], contents: [], contentKeys: HashMap::new(), contentTexts: HashMap::new(), std: HashMap::new(),
         bName: "main", bIsMain: true, bSizes: [], bTypeParams: [], bBorrowed: [], bMutBorrowed: [], bRefTargets: [],
         bHasReturns: false, bReturns: 0 - 1, bParams: [], bLocals: [], bNextLocal: 1, bBlocks: [], bNextBlock: 1,
         bHasOpen: true, bOpenId: 0, bOpenStmts: [], bScopeNames: [], bScopeBinds: [], bScopeMarks: push([], 0), bLoops: [],
-        bHasPlace: false, bLine: 0, bCol: 0,
+        bHasPlace: false, bLine: 0, bCol: 0, bPackLoops: [],
         ty: 0 - 1, op: noOp(), pend: noPend(), root: 0 - 1, steps: [], name: "", id: 0 - 1,
         sig: Sig { ptys: [], rty: 0 - 1, sizes: [], types: [], writes: [], froms: [] }
     };
