@@ -907,7 +907,8 @@ fn f(n: Int) -> Int {
 
 The join reads what it keeps off the two branches' facts, without asking what the program needs later:
 
-- the facts both branches hold once each branch's values are renamed to the joined ones, so a fact about a value neither branch changed, such as one that held before the `if`, is kept as it was, and
+- every fact that held before the `if`, as it was (one about the old value of a variable a branch assigns stays about that old value, not the variable's new one),
+- the facts both branches add once each branch's values are renamed to the joined ones, and
 - for each variable the branches assign, the constants each branch bounds it by, and its distance from the value it was computed from directly and from the other end of each fact stated about it (`x = y + 1;` in one branch and `x = y + 2;` in the other keep `y + 1 <= x <= y + 2`), with the weaker bound of the two branches and nothing that either branch lacks.
 
 ```tersus
@@ -927,7 +928,7 @@ The validator visits each block once and merges what arrives there, so a later `
 
 In a loop, an `if` in the body does not have to restate the invariant or the variant in each branch (`examples/linear.tersus` searches by halving a range with an `if` that moves one end, and writes neither). The join derives nothing else: no congruence, no `forall` instance, no case split and no relation deeper than the definitions above, so a fact that needs those is lost there unless each branch states it in a form the join keeps (below).
 
-This is sound but incomplete. A fact about values that existed before the `if` that the branches do not both state is dropped, so state it in both branches or after the `if` when you need it. A relation between two variables that each branch sets to constants is not kept: after `if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; };` the join knows `1 <= x <= 3` and `2 <= z <= 4`, so `affirm x < z; if y > 5 { return 1; };` is refused even when each branch ends with `affirm x < z;` (directly before a `return`, the affirm is checked once for each branch and holds). An `affirm` at the end of each branch brings a fact back only where the join keeps that fact's form or compares one of its ends; it is not a general remedy. The output contract of the function is checked in the block of the `return`, once for each way into it, so `r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r;` meets `affirm return > 0;` when `n > 0`.
+This is sound but incomplete. A fact a branch establishes about values that existed before the `if` is dropped unless both branches establish it, so state it in both branches or after the `if` when you need it. A relation between two variables that each branch sets to constants is not kept: after `if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; };` the join knows `1 <= x <= 3` and `2 <= z <= 4`, so `affirm x < z; if y > 5 { return 1; };` is refused even when each branch ends with `affirm x < z;` (directly before a `return`, the affirm is checked once for each branch and holds). An `affirm` at the end of each branch brings a fact back only where the join keeps that fact's form or compares one of its ends; it is not a general remedy. The output contract of the function is checked in the block of the `return`, once for each way into it, so `r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r;` meets `affirm return > 0;` when `n > 0`.
 
 #### Early return
 

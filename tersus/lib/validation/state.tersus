@@ -1,5 +1,5 @@
 import validation::execution { localGoal };
-import validation::model { ArgumentsLookup, CachedAnswer, EntailmentCache, ExecutionState, FactIndex, ForallTemplate, IntegerLookup, MergePair, NegatedRelation, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef };
+import validation::model { ArgumentsLookup, CachedAnswer, EntailmentCache, ExecutionState, ExecutionStep, FactIndex, ForallTemplate, TrailEntry, IntegerLookup, MergePair, NegatedRelation, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef };
 import validation::validation { entailmentCache, entailsAnyCached };
 
 
@@ -21,6 +21,63 @@ fn bindLocal(locals: HashMap<Int, Int>, local: Int, term: Int) -> HashMap<Int, I
 
 fn forgetLocal(locals: HashMap<Int, Int>, local: Int) -> HashMap<Int, Int> {
     return locals.remove(local);
+};
+
+// The local a step binds, if any (a scoped body's steps bind none outside it).
+// A step that binds a local must be here: undoing an arm puts back only these.
+fn stepLocals(step: &ExecutionStep) -> List<Int> {
+    if step is ExecutionStep::Assign { return push([], (step as ExecutionStep::Assign).local); };
+    if step is ExecutionStep::Apply { return push([], (step as ExecutionStep::Apply).local); };
+    if step is ExecutionStep::ApplyFresh { return push([], (step as ExecutionStep::ApplyFresh).local); };
+    if step is ExecutionStep::Push { return push([], (step as ExecutionStep::Push).local); };
+    if step is ExecutionStep::Last { return push([], (step as ExecutionStep::Last).local); };
+    if step is ExecutionStep::Set { return push([], (step as ExecutionStep::Set).local); };
+    if step is ExecutionStep::Pop { return push([], (step as ExecutionStep::Pop).local); };
+    if step is ExecutionStep::NewArray { return push([], (step as ExecutionStep::NewArray).local); };
+    if step is ExecutionStep::Havoc { return push([], (step as ExecutionStep::Havoc).local); };
+    return [];
+};
+
+fn assumesForall(steps: &List<ExecutionStep>) -> Bool {
+    for step in steps { if step is ExecutionStep::AssumeForall { return true; }; };
+    return false;
+};
+
+fn localEntry(locals: &HashMap<Int, Int>, local: Int) -> TrailEntry {
+    return TrailEntry { local: local, had: locals.contains(local), term: locals.lookup(local, 0), isTemplates: false };
+};
+
+// What the steps' own locals are bound to before they run, to undo them by
+fn localsBefore(trail: List<TrailEntry>, locals: &HashMap<Int, Int>, steps: &List<ExecutionStep>) -> List<TrailEntry> {
+    out = trail;
+    for step in steps {
+        for local in stepLocals(step) { out = push(out, localEntry(locals, local)); };
+    };
+    return out;
+};
+
+fn countPast(count: Int, length: Int) -> Int [{ }] [{ affirm return >= 0; }] {
+    if count > length { return count - length; };
+    return 0;
+};
+
+fn stateLocalsBefore(trail: List<TrailEntry>, state: &ExecutionState, steps: &List<ExecutionStep>) -> List<TrailEntry> {
+    return localsBefore(trail, state.locals, steps);
+};
+
+// The locals with the trail's local entries past length undone, newest first
+fn localsUndone(locals: HashMap<Int, Int>, trail: &List<TrailEntry>, length: Int) -> HashMap<Int, Int> {
+    out = locals;
+    for back in 0..countPast(size(trail), length) {
+        k = size(trail) - 1 - back;
+        if k >= 0 && k < size(trail) {
+            entry = get(trail, k);
+            if entry.isTemplates = false {
+                if entry.had { out = out.insert(entry.local, entry.term); } else { out = out.remove(entry.local); };
+            };
+        };
+    };
+    return out;
 };
 
 // Term references are supplied by the host's term interner; a Local reference

@@ -913,6 +913,14 @@ selfHostedQueryFamilies program =
                     , execBlock 2 [assignLocal 1 (termRef 1)] (execBranchTo 4 5), execBlock 3 [assignLocal 1 (termRef 2)] (execJump 7)
                     , execBlock 4 [assignLocal 1 (termRef 2)] (execJump 6), execBlock 5 [] (execJump 6), execBlock 6 [] (execJump 7)
                     , execBlock 7 [] (execJump 8), execBlock 8 [assignLocal 2 (termRef 1)] (execJump 0), execBlock 90 [] execEndDone ]
+                -- A round whose exits arrive out of the order of their marks: block 2 leaves
+                -- straight to the exit, and the state block 1 left earlier reaches it later
+                -- through the empty block 3. Stored in that order they would break the order
+                -- rebasing relies on, so the sweep refuses (the bridge never makes this shape).
+                outOfOrderExitBlocks =
+                    [ execBlock 0 [] (execLoopEnd 90 1 [0, 1, 2, 4]), execBlock 1 [] (execBranchTo 2 3)
+                    , execBlock 2 [assignLocal 3 (termRef 1)] (execBranchTo 4 90), execBlock 3 [] (execJump 90)
+                    , execBlock 4 [assignLocal 2 (termRef 1)] (execJump 0), execBlock 90 [] execEndDone ]
                 loopInitial = floored $ MData "ExecutionState" [("context", mergeContext [constant (5, 0, 0)] []), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                 -- (the test is term 5 < term 6, which always holds, so a loop is left only
                 -- through a later conjunct's edge to its exit)
@@ -1343,6 +1351,7 @@ selfHostedQueryFamilies program =
                       , checkSweepCounts (diamondLoopBlocks 8) (Just (MInt 0), Just (MInt 90), Just (MInt 35), Just (MInt 7))
                       , checkSweepCounts (diamondLoopBlocks 16) (Just (MInt 0), Just (MInt 90), Just (MInt 67), Just (MInt 15))
                       , checkSweepCounts forwardedLoopBlocks (Just (MInt 0), Just (MInt 90), Just (MInt 9), Just (MInt 0))
+                      , checkSweepCounts outOfOrderExitBlocks (Just (MInt 3), Just (MInt 0), Just (MInt 5), Just (MInt 0))
                       , checkFlowFrom 9 bodyExitTopBlocks exitInitial 1, checkFlowFrom 9 (bodyExitLatchBlocks 1) exitInitial 1
                       , checkFlowFrom 9 (bodyExitLatchBlocks 5) exitInitial 0
                       ] ++ [checkFlowFrom 9 blocks exitInitial 3 | blocks <- strayExitBlocks] ++

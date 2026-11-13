@@ -2,9 +2,9 @@ import validation::context { analyzeContext, contextDifferent, contextEqual, con
 import validation::differences { isSizeTerm, semanticFacts };
 import validation::execution { firstRung, lastRung, sliceBudgets };
 import validation::linear { linearEntailsIn };
-import validation::joins { linkAppend, linkedItems, noLinks };
-import validation::model { AnalysisLookup, ApplicationTerm, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, FactIndex, GetFact, HullLinks, IntegerLookup, NearApplications, OrderFact, RelationFact, ValidatorContext, ValidatorGoal, ValueLookup };
-import validation::relations { closedDisequality, containsValue, emptyIntMap, hasDifferenceIn, intAt, leastClasses, sameIn };
+import validation::joins { linkAppend, linkPop, linkedItems, noLinks };
+import validation::model { AnalysisLookup, ApplicationTerm, CachedAnswer, ContextAnalysis, EntailmentCache, EqualityFact, ExecutionState, FactIndex, GetFact, HullLinks, IntegerLookup, NearApplications, OrderFact, RelationFact, ValidatorContext, ValidatorGoal, ValueLookup };
+import validation::relations { closedDisequality, containsValue, emptyIntMap, hasDifferenceIn, intAt, leastClasses, minInt, sameIn };
 import validation::sequenceFacts { finiteGetEqual, forallConstant, forallEqual, forallShift, getFactsTranslated, modDifferent, modIsSelf, setGetEqual };
 
 
@@ -636,6 +636,192 @@ fn indexFacts(index: FactIndex, context: &ValidatorContext) -> FactIndex {
     };
     sizes = push(push(push(push(push(push(push([], size(context.equalities)), size(context.applications)), size(context.constants)), size(context.orders)), size(context.different)), size(context.variants)), size(context.differences));
     return FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, valueAt: valueAt, counts: sizes, work: work };
+};
+
+fn clampedStart(from: Int, limit: Int) -> Int [{ affirm limit >= 0; }] [{ affirm return >= 0; affirm return <= limit; }] {
+    if from < 0 { return 0; };
+    if from > limit { return limit; };
+    return from;
+};
+
+// The facts of a list from position from up to position to, then rest
+fn spanThen<T: Clone>(facts: &List<T>, from: Int, to: Int, rest: &List<T>) -> List<T> {
+    out = [];
+    end = clampedStart(to, size(facts));
+    for p in clampedStart(from, end)..end { out = push(out, clone(get(facts, p))); };
+    for f in rest { out = push(out, clone(f)); };
+    return out;
+};
+
+fn truncatedTo<T>(facts: List<T>, length: Int) -> List<T> {
+    out = facts;
+    while size(out) > length && size(out) > 0 [{ affirm size(out) >= 0; }] shrinks size(out) { out = pop(out); };
+    return out;
+};
+
+fn appended<T: Clone>(facts: List<T>, more: &List<T>) -> List<T> {
+    out = facts;
+    for f in more { out = push(out, clone(f)); };
+    return out;
+};
+
+// The facts of a context from one size of each list (in the order of
+// contextSizes) to another, then those of rest; no metadata
+fn factsBetween(context: &ValidatorContext, from: &List<Int>, to: &List<Int>, rest: &ValidatorContext) -> ValidatorContext {
+    return ValidatorContext {
+        equalities: spanThen(context.equalities, intAt(from, 0, 0), intAt(to, 0, 0), rest.equalities),
+        applications: spanThen(context.applications, intAt(from, 1, 0), intAt(to, 1, 0), rest.applications),
+        constants: spanThen(context.constants, intAt(from, 2, 0), intAt(to, 2, 0), rest.constants),
+        orders: spanThen(context.orders, intAt(from, 3, 0), intAt(to, 3, 0), rest.orders),
+        different: spanThen(context.different, intAt(from, 4, 0), intAt(to, 4, 0), rest.different),
+        variants: spanThen(context.variants, intAt(from, 5, 0), intAt(to, 5, 0), rest.variants),
+        fieldFunctions: [], constructorFunctions: [], constructorFields: [],
+        differences: spanThen(context.differences, intAt(from, 6, 0), intAt(to, 6, 0), rest.differences) };
+};
+
+// The context with the facts of more appended to each list
+fn withFacts(context: ValidatorContext, more: &ValidatorContext) -> ValidatorContext {
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    return ValidatorContext { equalities: appended(equalities, more.equalities), applications: appended(applications, more.applications), constants: appended(constants, more.constants), orders: appended(orders, more.orders), different: appended(different, more.different), variants: appended(variants, more.variants), fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: appended(differences, more.differences) };
+};
+
+fn truncatedContext(context: ValidatorContext, sizes: &List<Int>) -> ValidatorContext {
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    return ValidatorContext { equalities: truncatedTo(equalities, intAt(sizes, 0, 0)), applications: truncatedTo(applications, intAt(sizes, 1, 0)), constants: truncatedTo(constants, intAt(sizes, 2, 0)), orders: truncatedTo(orders, intAt(sizes, 3, 0)), different: truncatedTo(different, intAt(sizes, 4, 0)), variants: truncatedTo(variants, intAt(sizes, 5, 0)), fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: truncatedTo(differences, intAt(sizes, 6, 0)) };
+};
+
+fn lessWeight(weights: HashMap<Int, Int>, term: Int, cost: Int) -> HashMap<Int, Int> {
+    return weights.insert(term, weights.lookup(term, 0) - cost);
+};
+
+// Links of two-term facts from one position down to another, newest first,
+// the right term's link before the left's (the reverse of indexFacts)
+struct PairsPopped { links: HullLinks, weights: HashMap<Int, Int>, ok: Bool };
+
+fn popPairLinks(links: HullLinks, weights: HashMap<Int, Int>, lefts: &List<Int>, rights: &List<Int>, from: Int) -> PairsPopped {
+    ok = size(lefts) = size(rights);
+    binary = 1 + 2 * termCost();
+    for back in 0..size(rights) {
+        k = size(rights) - 1 - back;
+        right = linkPop(links, intAt(rights, k, 0), from + k);
+        left = linkPop(right.links, intAt(lefts, k, 0), from + k);
+        links = left.links;
+        ok = ok && right.ok && left.ok;
+        weights = lessWeight(lessWeight(weights, intAt(rights, k, 0), binary), intAt(lefts, k, 0), binary);
+    };
+    return PairsPopped { links: links, weights: weights, ok: ok };
+};
+
+fn endFor(counts: &List<Int>, sizes: &List<Int>, k: Int, limit: Int) -> Int [{ affirm limit >= 0; }] [{ affirm return >= 0; affirm return <= limit; }] {
+    return clampedStart(minInt(intAt(counts, k, 0), intAt(sizes, k, 0)), limit);
+};
+
+struct IndexPop { index: FactIndex, ok: Bool };
+
+// The index without the links of the facts at and past sizes (the context is
+// the one they were indexed from), taken off in the reverse of the order
+// indexFacts made them. ok is false when a link is not where that order puts
+// it, which would mean the index is not this context's.
+fn unindexed(index: FactIndex, context: &ValidatorContext, sizes: &List<Int>) -> IndexPop {
+    FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, valueAt: valueAt, counts: counts, work: work } = index;
+    ok = true;
+    lefts = [];
+    rights = [];
+    to0 = indexedFrom(counts, 0, size(context.equalities));
+    from0 = endFor(counts, sizes, 0, to0);
+    for p in from0..to0 { lefts = push(lefts, get(context.equalities, p).left); rights = push(rights, get(context.equalities, p).right); };
+    popped = popPairLinks(equalities, weights, lefts, rights, from0);
+    PairsPopped { links: equalities, weights: weights, ok: okEqualities } = popped;
+    ok = ok && okEqualities;
+    appTo = indexedFrom(counts, 1, size(context.applications));
+    appFrom = endFor(counts, sizes, 1, appTo);
+    for back in 0..appTo - appFrom {
+        p = appTo - 1 - back;
+        if p >= 0 && p < size(context.applications) {
+            a = get(context.applications, p);
+            cost = 1 + (1 + size(a.arguments)) * termCost();
+            for k in 0..size(a.arguments) {
+                argument = intAt(a.arguments, size(a.arguments) - 1 - k, 0);
+                took = linkPop(applications, argument, p);
+                applications = took.links;
+                ok = ok && took.ok;
+                weights = lessWeight(weights, argument, cost);
+            };
+            took = linkPop(applications, a.id, p);
+            applications = took.links;
+            ok = ok && took.ok;
+            weights = lessWeight(weights, a.id, cost);
+        } else { ok = false; };
+    };
+    constTo = indexedFrom(counts, 2, size(context.constants));
+    constFrom = endFor(counts, sizes, 2, constTo);
+    for back in 0..constTo - constFrom {
+        p = constTo - 1 - back;
+        if p >= 0 && p < size(context.constants) {
+            c = get(context.constants, p);
+            if constantAt.lookup(c.id, -1) = p { constantAt = constantAt.remove(c.id); };
+            // (a value whose first term was this one's is forgotten even when
+            // an earlier fact of the same term states it too: a miss, never a
+            // stale term)
+            if c.kind = 0 && valueAt.contains(c.value) && valueAt.lookup(c.value, 0) = c.id { valueAt = valueAt.remove(c.value); };
+        } else { ok = false; };
+    };
+    lefts = [];
+    rights = [];
+    to3 = indexedFrom(counts, 3, size(context.orders));
+    from3 = endFor(counts, sizes, 3, to3);
+    for p in from3..to3 { lefts = push(lefts, get(context.orders, p).smaller); rights = push(rights, get(context.orders, p).greater); };
+    poppedOrders = popPairLinks(orders, weights, lefts, rights, from3);
+    PairsPopped { links: orders, weights: weights, ok: okOrders } = poppedOrders;
+    ok = ok && okOrders;
+    lefts = [];
+    rights = [];
+    to4 = indexedFrom(counts, 4, size(context.different));
+    from4 = endFor(counts, sizes, 4, to4);
+    for p in from4..to4 { lefts = push(lefts, get(context.different, p).left); rights = push(rights, get(context.different, p).right); };
+    poppedDifferent = popPairLinks(different, weights, lefts, rights, from4);
+    PairsPopped { links: different, weights: weights, ok: okDifferent } = poppedDifferent;
+    ok = ok && okDifferent;
+    varTo = indexedFrom(counts, 5, size(context.variants));
+    varFrom = endFor(counts, sizes, 5, varTo);
+    for back in 0..varTo - varFrom {
+        p = varTo - 1 - back;
+        if p >= 0 && p < size(context.variants) {
+            object = get(context.variants, p).object;
+            took = linkPop(variants, object, p);
+            variants = took.links;
+            ok = ok && took.ok;
+            weights = lessWeight(weights, object, 1 + termCost());
+        } else { ok = false; };
+    };
+    lefts = [];
+    rights = [];
+    to6 = indexedFrom(counts, 6, size(context.differences));
+    from6 = endFor(counts, sizes, 6, to6);
+    for p in from6..to6 { lefts = push(lefts, get(context.differences, p).left); rights = push(rights, get(context.differences, p).right); };
+    poppedDifferences = popPairLinks(differences, weights, lefts, rights, from6);
+    PairsPopped { links: differences, weights: weights, ok: okDifferences } = poppedDifferences;
+    ok = ok && okDifferences;
+    kept = [];
+    for k in 0..7 { kept = push(kept, minInt(intAt(counts, k, 0), intAt(sizes, k, 0))); };
+    return IndexPop { index: FactIndex { equalities: equalities, applications: applications, orders: orders, different: different, variants: variants, differences: differences, weights: weights, constantAt: constantAt, valueAt: valueAt, counts: kept, work: work }, ok: ok };
+};
+
+struct Truncated { state: ExecutionState, index: FactIndex };
+
+// The state with each fact list cut back to sizes, and its index with them
+// (built again should the index turn out not to be the state's)
+fn truncatedState(state: ExecutionState, index: FactIndex, sizes: &List<Int>) -> Truncated {
+    popped = unindexedState(index, state, sizes);
+    ExecutionState { context: context, locals: locals, templates: templates, floor: floor } = state;
+    cut = truncatedContext(context, sizes);
+    IndexPop { index: kept, ok: ok } = popped;
+    if ok = false { kept = indexFacts(noFactIndex(), cut); };
+    return Truncated { state: ExecutionState { context: cut, locals: locals, templates: templates, floor: floor }, index: kept };
+};
+
+fn unindexedState(index: FactIndex, state: &ExecutionState, sizes: &List<Int>) -> IndexPop {
+    return unindexed(index, state.context, sizes);
 };
 
 fn goalTerms(goal: &ValidatorGoal) -> List<Int> {

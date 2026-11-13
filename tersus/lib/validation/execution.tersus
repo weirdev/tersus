@@ -2,11 +2,11 @@ import validation::context { closeContext, knownVariant };
 import validation::differences { safeBoundDifference, safeBoundSum };
 import validation::evaluation { addOffsetFacts, builtinFacts, contextWithApplication, readThroughSequence, recordEvaluatedSize, recordEvaluatedValue, stateWithApplication, stateWithConstant };
 import validation::joins { mint, splitReadOverWrite };
-import validation::model { ApplicationTerm, ArgumentsLookup, ConstantTerm, DisequalityFact, EqualityFact, ExecutionResult, ExecutionState, ExecutionStep, FactIndex, IntegerLookup, Minted, NearApplications, OrderFact, Saturation, SharedIndex, Stepped, SumResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
+import validation::model { ApplicationTerm, ArgumentsLookup, ConstantTerm, DisequalityFact, EqualityFact, ExecutionResult, ExecutionState, ExecutionStep, FactIndex, IntegerLookup, Minted, NearApplications, OrderFact, Saturation, Stepped, StepsRun, SumResult, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
 import validation::relations { boolAt, containsValue, emptyIntMap, equalArguments, hasEquality, intAt, leastClasses };
 import validation::saturation { noBlocked, noClosed, noDoneKeys, proveBySaturation };
-import validation::state { bindLocal, booleanCheck, noTemplates, resolveArguments, resolveValue, termInUse };
-import validation::validation { GoalSlice, chainSlice, entailsGoal, goalSlice, goalTerms, indexFacts, linkedWithin, nearApplications, noFactIndex, termOfValue, valueNear };
+import validation::state { assumesForall, bindLocal, booleanCheck, localsUndone, stateLocalsBefore, noTemplates, resolveArguments, resolveValue, termInUse };
+import validation::validation { GoalSlice, Truncated, chainSlice, entailsGoal, goalSlice, goalTerms, indexFacts, linkedWithin, nearApplications, noFactIndex, termOfValue, truncatedState, valueNear };
 
 
 
@@ -376,7 +376,31 @@ fn knownApplication(state: &ExecutionState, index: &FactIndex, function: Int, ar
 
 // The steps of a block in order, as far as the first that fails (a step of a kind not known fails as unsupported)
 fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
-    return executeStepsWithin(initial, steps, maxScopeDepth());
+    run = executeStepsWithin(initial, noFactIndex(), steps, maxScopeDepth());
+    StepsRun { result: result, index: index } = run;
+    return result;
+};
+
+// The steps on a state and an index of it, which they extend and give back
+fn executeIndexed(initial: ExecutionState, index: FactIndex, steps: &List<ExecutionStep>) -> StepsRun {
+    run = executeStepsWithin(initial, index, steps, maxScopeDepth());
+    StepsRun { result: result, index: after } = run;
+    return StepsRun { index: consistentWith(after, result), result: result };
+};
+
+// The index unless it indexes a position past the result state's lists (a
+// step that failed after extending it for facts it then dropped): a stale
+// position could name a term whose fact the state no longer has
+fn consistentIndex(index: FactIndex, state: &ExecutionState) -> FactIndex {
+    sizes = contextSizes(state);
+    for k in 0..size(sizes) {
+        if intAt(index.counts, k, 0) > intAt(sizes, k, 0) { return indexFacts(noFactIndex(), state.context); };
+    };
+    return index;
+};
+
+fn consistentWith(index: FactIndex, result: &ExecutionResult) -> FactIndex {
+    return consistentIndex(index, result.state);
 };
 
 // Scoped steps nested deeper than this are refused as unsupported.
@@ -384,37 +408,61 @@ fn maxScopeDepth() -> Int [{ }] [{ affirm return >= 0; }] {
     return 16;
 };
 
-fn executeStepsWithin(initial: ExecutionState, steps: &List<ExecutionStep>, depth: Int) -> ExecutionResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
+fn executeStepsWithin(initial: ExecutionState, given: FactIndex, steps: &List<ExecutionStep>, depth: Int) -> StepsRun [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
     state = initial;
-    shared = SharedIndex::Missing;
+    index = given;
     for i in 0..size(steps) {
         before = contextSizes(state);
         if asksFacts(get(steps, i)) {
-            index = extendedIndex(shared, state);
+            index = indexTo(index, state);
             Stepped { result: result, index: after } = stepAsking(state, get(steps, i), i, index);
-            if result.status != 0 { return result; };
+            if result.status != 0 { return StepsRun { result: result, index: after }; };
             state = stateOf(result);
-            shared = SharedIndex::Found { index: after };
+            index = after;
+        } else if get(steps, i) is ExecutionStep::Scoped && depth > 0 {
+            StepsRun { result: result, index: after } = scopedRun(state, index, (get(steps, i) as ExecutionStep::Scoped).steps, i, depth - 1);
+            if result.status != 0 { return StepsRun { result: result, index: after }; };
+            state = stateOf(result);
+            index = after;
         } else {
-            result = executeStep(state, get(steps, i), i, depth);
-            if result.status != 0 { return result; };
+            result = executeStep(state, get(steps, i), i);
+            if result.status != 0 { return StepsRun { result: result, index: index }; };
             state = stateOf(result);
-            if addsFactsOnly(get(steps, i)) = false { shared = SharedIndex::Missing; };
+            if addsFactsOnly(get(steps, i)) = false { index = noFactIndex(); };
         };
         // (and, should a step ever drop a fact, a list that got shorter drops it too)
-        if shrank(before, contextSizes(state)) { shared = SharedIndex::Missing; };
+        if shrank(before, contextSizes(state)) { index = noFactIndex(); };
         seeds = assumedTerms(state, get(steps, i));
         if size(seeds) > 0 {
-            index = extendedIndex(shared, state);
-            gone = unreachableAt(state, index, seeds);
-            shared = SharedIndex::Found { index: index };
-            if gone { return ExecutionResult { status: 0, failedAt: -2, state: state }; };
+            index = indexTo(index, state);
+            if unreachableAt(state, index, seeds) { return StepsRun { result: ExecutionResult { status: 0, failedAt: -2, state: state }, index: index }; };
         };
     };
-    return ExecutionResult { status: 0, failedAt: -1, state: state };
+    return StepsRun { result: ExecutionResult { status: 0, failedAt: -1, state: state }, index: index };
 };
 
-// The steps that ask the facts a question: each is given the block's index,
+// A scoped body runs on the state itself and is then undone: its facts are
+// cut off with their links, its locals and templates put back, and its floor
+// restored, so nothing it assumed survives it.
+fn scopedRun(state: ExecutionState, index: FactIndex, steps: &List<ExecutionStep>, i: Int, depth: Int) -> StepsRun [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 2 {
+    sizes = contextSizes(state);
+    undo = stateLocalsBefore([], state, steps);
+    keepTemplates = assumesForall(steps);
+    saved = noTemplates();
+    if keepTemplates { saved = clone(state.templates); };
+    floor = state.floor;
+    StepsRun { result: result, index: after } = executeStepsWithin(state, index, steps, depth);
+    ExecutionResult { status: status, failedAt: failedAt, state: ran } = result;
+    checked = consistentIndex(after, ran);
+    Truncated { state: cut, index: cutIndex } = truncatedState(ran, checked, sizes);
+    ExecutionState { context: context, locals: locals, templates: templates, floor: lowered } = cut;
+    if keepTemplates { templates = saved; };
+    restored = ExecutionState { context: context, locals: localsUndone(locals, undo, 0), templates: templates, floor: floor };
+    if status != 0 { return StepsRun { result: ExecutionResult { status: status, failedAt: i, state: restored }, index: cutIndex }; };
+    return StepsRun { result: ExecutionResult { status: 0, failedAt: -1, state: restored }, index: cutIndex };
+};
+
+// The steps that ask the facts a question: each is given the trunk's index,
 // extended to the state it starts from, and answers on slices of it
 fn asksFacts(step: &ExecutionStep) -> Bool {
     if step is ExecutionStep::Check || step is ExecutionStep::Push || step is ExecutionStep::Last || step is ExecutionStep::CheckWithin || step is ExecutionStep::RequireVariant { return true; };
@@ -461,18 +509,13 @@ fn addsFactsOnly(step: &ExecutionStep) -> Bool {
     return false;
 };
 
-fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int, depth: Int) -> ExecutionResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth {
+fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
     if step is ExecutionStep::Assign { return stepAssign(state, step, i); };
     if step is ExecutionStep::NewArray { return stepNewArray(state, step, i); };
     if step is ExecutionStep::Havoc { return stepHavoc(state, step, i); };
     if step is ExecutionStep::RequireDefined { return stepRequireDefined(state, step, i); };
     if step is ExecutionStep::AssumeForall { return stepAssumeForall(state, step, i); };
     if step is ExecutionStep::AssumeVariant { return stepAssumeVariant(state, step, i); };
-    if step is ExecutionStep::Scoped && depth > 0 {
-        inner = executeStepsWithin(clone(state), (step as ExecutionStep::Scoped).steps, depth - 1);
-        if inner.status != 0 { return ExecutionResult { status: inner.status, failedAt: i, state: state }; };
-        return ExecutionResult { status: 0, failedAt: -1, state: state };
-    };
     return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
@@ -770,21 +813,8 @@ fn entailsIn(context: &ValidatorContext, index: &FactIndex, goal: ValidatorGoal)
     return goalInSlices(context, index, goalTerms(goal), goal, -1).holds;
 };
 
-// For a question asked outside a block's steps, which has no index of its own:
-// one pass over the context indexes it, and the walk reads only the slice.
-fn entailsNear(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
-    return entailsIn(context, indexFacts(noFactIndex(), context), goal);
-};
-
 fn checkNear(context: &ValidatorContext, index: &FactIndex, relation: Int, a: Int, b: Int) -> Bool {
     return checkInSlices(context, index, relation, a, b).holds;
-};
-
-// Whether the facts near the seeds contradict each other (only a contradiction entails x < x)
-fn contradictoryNear(context: &ValidatorContext, seeds: &List<Int>) -> Bool {
-    if size(seeds) = 0 { return false; };
-    probe = get(seeds, 0);
-    return goalInSlices(context, indexFacts(noFactIndex(), context), seeds, ValidatorGoal::Less { left: probe, right: probe }, -1).holds;
 };
 
 fn variantInSlices(context: &ValidatorContext, index: &FactIndex, term: Int, family: Int, constructor: Int) -> Bool {
@@ -795,11 +825,6 @@ fn variantInSlices(context: &ValidatorContext, index: &FactIndex, term: Int, fam
         if walk.capped = false { return false; };
     };
     return false;
-};
-
-fn extendedIndex(shared: SharedIndex, state: &ExecutionState) -> FactIndex {
-    if shared is SharedIndex::Found { return indexFacts((shared as SharedIndex::Found).index, state.context); };
-    return indexFacts(noFactIndex(), state.context);
 };
 
 fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int, index: FactIndex) -> Stepped {
