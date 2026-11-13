@@ -416,25 +416,58 @@ struct SatWork { state: ExecutionState, births: HashMap<Int, Int>, pending: List
 impl Clone for SatWork { };
 
 // The items appended under each key, in order: first and last positions per
-// key and a next position per item, so an append never copies a list.
-struct HullLinks { first: HashMap<Int, Int>, last: HashMap<Int, Int>, next: List<Int>, items: List<Int> };
+// key and a next and a previous position per item, so an append never copies
+// a list and the newest item can be taken off again.
+struct HullLinks { first: HashMap<Int, Int>, last: HashMap<Int, Int>, next: List<Int>, prev: List<Int>, items: List<Int> };
 
-// The facts of a block's context by the terms they mention, as positions in
-// each list (an application under its id and arguments, never its function),
-// with the work of admitting all of a term's facts, the position of each
-// term's first constant fact, and how far each list is indexed. A later state
-// of the block keeps every indexed position while every step between only
-// adds facts and binds locals (addsFactsOnly); any other step drops it.
+// The facts of a context by the terms they mention, as positions in each
+// list (an application under its id and arguments, never its function), with
+// the work of admitting all of a term's facts, the position of each term's
+// first constant fact, and how far each list is indexed. The index follows the
+// sweep's trunk across blocks, forks and merges: appending facts extends it,
+// and taking facts off the end of the lists (an arm, a round or a scoped body
+// undone) takes their links off with them (truncatedState), so every indexed
+// position holds the fact it was indexed for. A step that changes the facts
+// any other way drops it (addsFactsOnly, shrank).
 struct FactIndex { equalities: HullLinks, applications: HullLinks, orders: HullLinks, different: HullLinks, variants: HullLinks, differences: HullLinks, weights: HashMap<Int, Int>, constantAt: HashMap<Int, Int>, valueAt: HashMap<Int, Int>, counts: List<Int>, work: Int };
 
-enum SharedIndex { Missing, Found { index: FactIndex } };
-
-// A step's result and the block index, extended to what the step asked of
+// A step's result and the index, extended to what the step asked of
 struct Stepped { result: ExecutionResult, index: FactIndex };
 
 struct Minted { state: ExecutionState, term: Int };
 
 struct NearApplications { terms: HashSet<Int>, applications: List<ApplicationTerm> };
+
+// A change the sweep made to its trunk's locals or templates, and what it
+// replaced: a local's binding (had: whether it had one), or the templates,
+// which are the newest of the trunk's saved lists.
+struct TrailEntry { local: Int, had: Bool, term: Int, isTemplates: Bool };
+
+impl Clone for TrailEntry { };
+
+impl Copy for TrailEntry { };
+
+// The one state a sweep runs blocks on, its index, and the trail that undoes
+// the changes to its locals and templates. A mark is the size of each fact
+// list (in the order of contextSizes) and then of the trail.
+struct Trunk { state: ExecutionState, index: FactIndex, trail: List<TrailEntry>, saved: List<List<ForallTemplate>> };
+
+// A state waiting at a block, kept as the trunk up to its mark (a prefix of
+// the trunk) and what it has beyond: the facts, the locals it binds otherwise
+// (overlay), its templates when they are not the trunk's at the mark, and its
+// floor.
+struct Arrival { mark: List<Int>, suffix: ValidatorContext, overlay: HashMap<Int, Int>, ownTemplates: Bool, templates: List<ForallTemplate>, floor: Int };
+
+impl Clone for Arrival { };
+
+// The steps' verdict on the trunk, and the trunk after them
+struct TrunkRun { trunk: Trunk, status: Int, failedAt: Int };
+
+// A trunk after a question it was extended for
+struct TrunkAnswer { trunk: Trunk, holds: Bool };
+
+// The steps' result and the index, extended or truncated with the state
+struct StepsRun { result: ExecutionResult, index: FactIndex };
 
 // The loop a region is being swept for: its header, what the user's invariant
 // asks at each back edge, the inferred candidates (checks of candidate i are
@@ -460,20 +493,11 @@ struct LoopFrame {
 
 impl Clone for LoopFrame { };
 
-struct SweepArrival { block: Int, state: ExecutionState };
-
-impl Clone for SweepArrival { };
-
 // The blocks of a region in an order where every block follows the blocks
 // that can deliver to it, or status 3 and no order.
 struct SweepOrder { status: Int, order: List<Int> };
 
 impl Clone for SweepOrder { };
-
-// The states a block's end hands on, one per edge it takes.
-struct SweepDelivery { status: Int, step: Int, states: List<SweepArrival> };
-
-impl Clone for SweepDelivery { };
 
 // The terms an iteration's entry state gives the loop's variant and its test,
 // with the zero the variant is measured against confirmed to be 0.
@@ -483,21 +507,19 @@ impl Clone for LoopEntryTerms { };
 
 impl Copy for LoopEntryTerms { };
 
-// The two ways out of a loop's test: the state an iteration runs in (the
-// tests joined where there are several), and the context its exit edge has.
-struct LoopSplit { status: Int, yes: ExecutionState, no: ValidatorContext };
-
-impl Clone for LoopSplit { };
+// The two ways out of a loop's test, as facts beyond the header state (the
+// trunk's top): those an iteration runs with (the tests joined where there
+// are several), and those its exit edge has.
+struct LoopSplit { status: Int, trunk: Trunk, yes: ValidatorContext, no: ValidatorContext };
 
 struct CandidateSteps { assumes: List<ExecutionStep>, checks: List<ExecutionStep>, ends: List<Int> };
 
 impl Clone for CandidateSteps { };
 
-// An iteration ready to sweep: the header state, the state the body starts
-// in, the exit edge's context, and the variant's value at the start.
-struct LoopIteration { status: Int, step: Int, header: ExecutionState, yes: ExecutionState, no: ValidatorContext, prior: Int, priorOther: Int };
-
-impl Clone for LoopIteration { };
+// An iteration ready to sweep, at the header state on the trunk: the state
+// the body starts in, the exit edge's state and whether its nearby facts are
+// consistent, and the variant's value at the start.
+struct LoopIteration { status: Int, step: Int, trunk: Trunk, yes: Arrival, no: Arrival, noFeasible: Bool, prior: Int, priorOther: Int };
 
 // Edge steps are host-supplied consequences of the branch condition. An
 // unsupported MIR operation must be represented by ExecutionEnd::Unsupported.
@@ -527,16 +549,13 @@ impl Clone for ExecutionFlowResult { };
 
 // How a region sweep ended, the candidates that failed at one of its back
 // edges (a round that dropped any proves nothing), the states delivered to
-// the loop's own exit, and how many states were delivered and merged.
-struct SweepResult { result: ExecutionFlowResult, dropped: List<Int>, exits: List<ExecutionState>, arrivals: Int, merges: Int };
-
-impl Clone for SweepResult { };
+// the loop's own exit, how many states were delivered and merged, and the
+// trunk. A nested sweep's result carries no state: the trunk is the state.
+struct SweepResult { result: ExecutionFlowResult, dropped: List<Int>, exits: List<Arrival>, arrivals: Int, merges: Int, trunk: Trunk };
 
 // A loop round: the region's sweep, and the states it leaves the loop with
 // (none when the round failed).
-struct LoopRound { swept: SweepResult, exits: List<ExecutionState> };
-
-impl Clone for LoopRound { };
+struct LoopRound { swept: SweepResult, exits: List<Arrival> };
 
 struct InferSubject { local: Int, isSize: Bool, temp: Int, term: Int };
 

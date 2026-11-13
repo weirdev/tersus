@@ -108,6 +108,20 @@ testIfJoin =
               -- The arms mint fresh terms from the same state, so the same id on the two
               -- sides is two values: a fact one arm holds of its own is not the other's
             , ( "fail-swapped-fresh-terms-across-arms", "fn f(c: Bool, p: Int) -> Int { x = p; y = p; if c { x = p + 1; } else { y = p + 1; }; affirm x = y + 1; return 0; }; return 0;", ControlFails "Could not prove: x = y + 1" )
+              -- A join keeps the facts from before the if as they are: one about the old value
+              -- of a variable an arm reassigns is not about its joined value (the if after
+              -- the affirm makes the join a merge rather than a return checked per path)
+            , ( "fail-prefix-fact-of-old-value-is-not-the-joined-value", (fn' "x = y + 1; affirm x > 1; if c > 0 { x = x - 5; } else { }; affirm x > 1; if y > 5 { return 1; };"), ControlFails "Could not prove: x > 1" )
+              -- A term from before the if that both arms read again into locals of their
+              -- own keeps its name on both sides, so what each arm proves of it meets
+            , ( "valid-prefix-term-both-arms-read-keeps-its-name", "struct P { ok: Bool, pos: Int }; fn word(n: Int, pos: Int) -> P [{ affirm pos >= 0; affirm pos < n; }] [{ affirm return.pos > pos; affirm return.pos <= n; }] { return P { ok: true, pos: pos + 1 }; }; fn g(n: Int, start: Int, k: Int, c: Bool) -> Int [{ affirm start >= 0; affirm start < n; affirm k >= 0; }] [{ }] { p = start; for i in 0..k [{ affirm p >= start; affirm p <= n; }] { if p >= n { return 0; }; argStart = p; w = word(n, p); if w.pos >= n { return 0; }; if c { s = word(n, w.pos); p = s.pos; } else { a = word(n, w.pos); p = a.pos; }; affirm argStart <= p; if p > 5 { return 1; }; }; return 0; }; return 0;", ControlValid )
+            , ( "valid-prefix-term-kept-past-an-arm-that-returns", "struct P { ok: Bool, pos: Int }; fn word(n: Int, pos: Int) -> P [{ affirm pos >= 0; affirm pos < n; }] [{ affirm return.pos > pos; affirm return.pos <= n; }] { return P { ok: true, pos: pos + 1 }; }; fn g(n: Int, start: Int, k: Int, c: Bool) -> Int [{ affirm start >= 0; affirm start < n; affirm k >= 0; }] [{ }] { p = start; for i in 0..k [{ affirm p >= start; affirm p <= n; }] { if p >= n { return 0; }; argStart = p; w = word(n, p); if !w.ok { return 0; }; if w.pos >= n { return 0; }; if c { s = word(n, w.pos); p = s.pos; } else { if k = 7 { return 0; }; a = word(n, w.pos); p = a.pos; }; affirm argStart <= p; if p > 5 { return 1; }; }; return 0; }; return 0;", ControlValid )
+              -- What one arm assumes is undone before the other arm runs
+            , ( "fail-arm-condition-not-seen-by-other-arm", (fn' "x = 0; if c > 0 { x = 1; } else { affirm c > 0; };"), ControlFails "Could not prove: c > 0" )
+              -- Both arms mint the same id for different applications: neither is kept
+            , ( "fail-same-fresh-term-two-applications-across-arms", "fn f(c: Bool, p: Int) -> Int { a = 0; if c { a = p + 1; } else { a = p * 3; }; affirm a = p + 1; if p > 5 { return 1; }; return 0; }; return 0;", ControlFails "Could not prove: a = p + 1" )
+              -- A forall check's body is undone: guards that cannot hold prove nothing after it
+            , ( "fail-empty-forall-range-proves-nothing-after-it", "fn f(l: List<Int>, n: Int) -> Int [{ affirm n <= 0; }] [{ }] { affirm forall j in 0..n: get(l, j) = 5; affirm n = 1; return 0; }; return 0;", ControlFails "Could not prove: n = 1" )
             , ( "fail-swapped-locals-order-across-arms", "fn f(c: Bool, p: Int, q: Int) -> Int [{ affirm p < q; }] [{ }] { x = p; y = q; if c { } else { x = q; y = p; }; affirm x < y; return 0; }; return 0;", ControlFails "Could not prove: x < y" )
               -- One term the arms take in two directions, and an alias only one arm keeps
             , ( "fail-one-source-two-joined-locals", "fn f(c: Bool, p: Int) -> Int { s = p + 1; x = s; y = s; if c { x = s + 1; y = s + 2; }; affirm x = y; return 0; }; return 0;", ControlFails "Could not prove: x = y" )
