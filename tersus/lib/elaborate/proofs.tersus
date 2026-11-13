@@ -8,7 +8,7 @@ import elaborate::expr { elementTypeNamed, freshElementType, Folded, argsCountTe
 import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
 import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { callOf };
-import elaborate::state { intText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt };
+import elaborate::state { forwardInProofText, intText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt };
 import elaborate::traits { builtinSequenceCall, emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof ~ {
@@ -108,6 +108,7 @@ fn inferProof(st: St, p: Int) -> St ~ {
 
 fn inferProofCall(st: St, p: Int, funct: Int, args: &List<Int>) -> St ~ {
     if size(st.pack.bytes) > 0 && size(args) >= 1 && isPackProof(&st, nth(args, 0)) { return packProofCall(st, funct, args); };
+    if size(st.pack.bytes) > 0 { for a in args { if isPackProof(&st, a) { return typeError(st, forwardInProofText(&st.pack)); }; }; };
     b = proofBuiltin(st, funct);
     if b < 0 { return inferProofHead(st, funct, args); };
     key = builtinKey(st, b);
@@ -219,8 +220,9 @@ fn packProofCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
         st = emitFApp(st, funct, &argNodes);
         return St { ty: elementTy, ..st };
     };
-    return typeError(st, catStrings(catStrings(catStrings(clone(st.pack), " is a pack of arguments: a contract uses size("), clone(st.pack)), catStrings(catStrings(") and get(", clone(st.pack)), ", i)")));
+    return typeError(st, forwardInProofText(&st.pack));
 };
+
 
 fn proofArrayCall(st: St, p: Int, funct: Int, args: &List<Int>, key: &String) -> St ~ {
     if key = "NewArray" { return proofNewArrayCall(st, funct, args); };

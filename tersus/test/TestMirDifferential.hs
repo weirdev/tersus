@@ -318,4 +318,7 @@ variadicLowering =
     , ("a range loop past the pack", "fn f<..T>(args: &..T) -> Int {\n    t = 0;\n    for i in 0..size(args) + 1 { t = t + i; };\n    return t;\n};\nreturn f(1, true);")
     , ("validation statements that read the pack", "fn f<..T>(args: &..T) -> Int {\n    affirm size(args) >= 0;\n    define n = size(args);\n    return n;\n};\nreturn f(1, true);")
     , ("a loop over the pack after a return", "fn f<..T>(args: &..T) -> Int {\n    return 0;\n    for a in args { };\n};\nreturn f(1);")
+    , ("a slice forwarded after a fixed argument", "fn g<..U>(k: Int, rest: &..U) -> Int { return k + size(rest); };\nfn f<..T>(args: &..T) -> Int [{ affirm size(args) >= 2; }] [{ }] {\n    return g(10, slice(args, 1, 2));\n};\nreturn f(1, true);")
+    , ("the head and the rest forwarded by value in one call", "fn eat<T>(x: T) -> Int { return 1; };\nfn g<A, ..U>(x: A, rest: ..U) -> Int { n = eat(x); for a in rest { n = n + eat(a); }; return n; };\nfn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] {\n    return g(get(args, 0), slice(args, 1, size(args)));\n};\nreturn f(push([], 1), push([], 2));")
+    , ("a forward in a loop over the pack", "fn g<..U>(rest: &..U) -> Int { return size(rest); };\nfn f<..T>(args: &..T) -> Int {\n    t = 0;\n    for i in 0..size(args) { t = t + g(slice(args, i, size(args))); };\n    return t;\n};\nreturn f(1, 2, 3);")
     ]

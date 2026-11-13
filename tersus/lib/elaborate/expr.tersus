@@ -7,7 +7,7 @@ import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureIn
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
-import elaborate::state { St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
+import elaborate::state { forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
 import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
@@ -75,7 +75,18 @@ fn inferVarExpr(st: St, e: Int, n: Int) -> St ~ {
         for s in &x.sizes { names = push(names, clone(s)); };
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " has parameters <"), joinWith(&names, ", ")), ">, so it is called, as in "), clone(name)), "(...), and cannot be used as a value"));
     };
-    if isPackVar(&st, e) { return typeError(st, packValueText(&name)); };
+    if isPackVar(&st, e) {
+        // (the pack a call forwards: one element of it stands for all of them, with the pack's bounds, in the callee's pack)
+        if e = st.forwardNode {
+            text = catStrings("an element of ", clone(st.pack));
+            if st.forwardLo >= 0 && st.forwardHi >= 0 {
+                text = catStrings(catStrings(catStrings(catStrings(catStrings("an element of slice(", clone(st.pack)), ", "), indexText(&st, st.forwardLo)), ", "), catStrings(indexText(&st, st.forwardHi), ")"));
+            };
+            st = freshElementType(st, text);
+            return leaf(st, st.ty, e);
+        };
+        return typeError(st, packValueText(&name));
+    };
     return leaf(st, t, e);
 };
 
@@ -224,7 +235,8 @@ fn packGet(st: St, index: Int) -> St ~ {
 };
 
 // What a call does with the pack, when its first argument or another is the pack: 0 nothing, 1 size of it, 2 get of it, 3 a
-// slice of it, 4 a method of it, 5 the pack given to a function
+// slice of it, 4 a method of it, 5 the pack given to a function not as its last argument, 6 the pack or a slice of it
+// forwarded as the last argument
 fn packCallKind(st: &St, funct: Int, args: &List<Int>) -> Int ~ {
     fex = exprOf(st, funct);
     fname = "";
@@ -237,8 +249,93 @@ fn packCallKind(st: &St, funct: Int, args: &List<Int>) -> Int ~ {
         if fname = "slice" && !local { return 3; };
         if size(fname.bytes) > 1 && get(fname.bytes, 0) = toByte(46) { return 4; };
     };
-    for a in args { if isPackVar(st, a) { return 5; }; };
-    return 0;
+    packs = 0;
+    for a in args { if isPackVar(st, a) || isPackSlice(st, a) { packs = packs + 1; }; };
+    if packs = 0 { return 0; };
+    last = nth(args, size(args) - 1);
+    if packs = 1 && (isPackVar(st, last) || isPackSlice(st, last)) { return 6; };
+    return 5;
+};
+
+// Whether an expression is slice(args, ...) of the pack being checked
+fn isPackSlice(st: &St, e: Int) -> Bool ~ {
+    ex = exprOf(st, e);
+    if !(ex is AstExpression::F) { return false; };
+    call = ex as AstExpression::F;
+    fex = exprOf(st, call.f);
+    if !(fex is AstExpression::Var) { return false; };
+    fname = nameText(&st.nodes, (fex as AstExpression::Var).n);
+    if fname != "slice" || HashMap::contains(&st.fns, "slice") || inScope(st, "slice") { return false; };
+    sliceArgs = listItems(&st.nodes, call.xs);
+    return size(sliceArgs) >= 1 && isPackVar(st, nth(&sliceArgs, 0));
+};
+
+// A call that forwards the pack, or a slice of it, as its last argument: the callee has to be a variadic function, whose
+// pack it fills (templateCall); a slice's bounds are fixed in each copy, which proves them in range
+fn forwardCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
+    if st.inGhost { return typeError(st, forwardInProofText(&st.pack)); };
+    // (a callee that cannot have a pack is named before its arguments are checked against its parameters: a function value,
+    // a function of the program with no bounds, clone and the other builtins)
+    noPack = "";
+    fex = exprOf(&st, funct);
+    if fex is AstExpression::Var {
+        fname = nameText(&st.nodes, (fex as AstExpression::Var).n);
+        method = size(fname.bytes) > 1 && get(fname.bytes, 0) = toByte(46);
+        resolved = size(fname.bytes) > 0 && get(fname.bytes, 0) = toByte(60);
+        isTemplate = HashMap::contains(&st.templates, &fname) && !inScope(&st, &fname);
+        if inScope(&st, &fname) || fname = "clone" || fname = ".clone" { noPack = clone(fname); };
+        if !isTemplate && !method && !resolved && !traitPath(&fname) { noPack = clone(fname); };
+    };
+    if !(fex is AstExpression::Var) { noPack = "the function it calls"; };
+    if size(noPack.bytes) > 0 {
+        if size(noPack.bytes) > 1 && get(noPack.bytes, 0) = toByte(46) { noPack = noPack.slice(1, size(noPack.bytes)); };
+        return typeError(st, catStrings(catStrings(catStrings(clone(st.pack), " is given to "), noPack), ", which has no pack: a pack is forwarded only to the pack parameter of a variadic function"));
+    };
+    last = nth(args, size(args) - 1);
+    packNode = last;
+    lo = 0 - 1;
+    hi = 0 - 1;
+    if !isPackVar(&st, last) {
+        ex = exprOf(&st, last);
+        if !(ex is AstExpression::F) { return typeError(st, packValueText(&st.pack)); };
+        sliceArgs = listItems(&st.nodes, (ex as AstExpression::F).xs);
+        if size(sliceArgs) != 3 { return typeError(st, catStrings(catStrings("slice(", clone(st.pack)), ", a, b) takes the pack and the two bounds of the part of it it forwards")); };
+        packNode = nth(&sliceArgs, 0);
+        lo = nth(&sliceArgs, 1);
+        hi = nth(&sliceArgs, 2);
+        for b in &sliceArgs {
+            if b != packNode {
+                if !packIndexFolds(&st, b) {
+                    return typeError(st, catStrings(catStrings("slice(", clone(st.pack)), ", a, b) needs bounds fixed in each copy (numbers, size(args), the index of a for loop over args, and + - * of those)"));
+                };
+                lit = constantInt(&st, b);
+                if lit.status = 0 && lit.value < 0 { return typeError(st, catStrings(catStrings("slice(", clone(st.pack)), ", a, b) needs bounds of 0 or more")); };
+            };
+        };
+    };
+    callArgs = [];
+    i = 0;
+    while i + 1 < size(args) [{ affirm i >= 0; }] ~ { callArgs = push(callArgs, nth(args, i)); i = i + 1; };
+    callArgs = push(callArgs, packNode);
+    outerNode = st.forwardNode;
+    outerUsed = st.forwardUsed;
+    outerLo = st.forwardLo;
+    outerHi = st.forwardHi;
+    outerRep = clone(st.forwardRep);
+    st = St { forwardNode: packNode, forwardUsed: false, forwardLo: lo, forwardHi: hi, ..st };
+    st = inferCallDispatch(st, funct, &callArgs);
+    used = st.forwardUsed;
+    st = St { forwardNode: outerNode, forwardUsed: outerUsed, forwardLo: outerLo, forwardHi: outerHi, forwardRep: outerRep, ..st };
+    if st.status != 0 { return st; };
+    if !used {
+        callee = "the function it calls";
+        if fex is AstExpression::Var {
+            callee = nameText(&st.nodes, (fex as AstExpression::Var).n);
+            if size(callee.bytes) > 1 && get(callee.bytes, 0) = toByte(46) { callee = callee.slice(1, size(callee.bytes)); };
+        };
+        return typeError(st, catStrings(catStrings(catStrings(clone(st.pack), " is given to "), callee), ", which has no pack: a pack is forwarded only to the pack parameter of a variadic function"));
+    };
+    return st;
 };
 
 // A call: the forms the checker gives a meaning of its own first, then a call of a function (inferExprR)
@@ -309,10 +406,17 @@ fn inferCallRest(st: St, funct: Int, args: &List<Int>) -> St ~ {
         kind = packCallKind(&st, funct, args);
         if kind = 1 { return packSize(st); };
         if kind = 2 { return packGet(st, nth(args, 1)); };
-        if kind = 3 { return typeError(st, catStrings(catStrings("a slice of the pack ", clone(st.pack)), " is not supported yet")); };
+        if kind = 3 {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings("slice(", clone(st.pack)), ", a, b) is only given as the last argument of a call to a variadic function (to loop over a part of the pack, write for i in a..b and get("), clone(st.pack)), ", i))"));
+        };
         if kind = 4 { return typeError(st, packValueText(&st.pack)); };
-        if kind = 5 { return typeError(st, catStrings(catStrings("forwarding a pack to another function is not supported yet: ", clone(st.pack)), " is given to a call")); };
+        if kind = 5 { return typeError(st, catStrings(clone(st.pack), " is forwarded only as the last argument of a call, where it fills the callee's pack, and once")); };
+        if kind = 6 { return forwardCall(st, funct, args); };
     };
+    return inferCallDispatch(st, funct, args);
+};
+
+fn inferCallDispatch(st: St, funct: Int, args: &List<Int>) -> St ~ {
     fex = exprOf(st, funct);
     if headKey(st, funct) = "CloneOf" { return cloneCall(st, args); };
     if fex is AstExpression::Var {

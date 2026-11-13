@@ -71,8 +71,7 @@ testVariadic =
                 "refusals"
                 [ testCase "the pack is not a value" (refused "fn f<..T>(args: &..T) -> Int { x = args; return 0; }; return f(1);" "args is a pack of arguments, not a value")
                 , testCase "a method of the pack is not called" (refused "fn f<..T>(args: &..T) -> Int { return args.size(); }; return f(1);" "args is a pack of arguments, not a value")
-                , testCase "the pack is not given to another function yet" (refused "fn g<..T>(args: &..T) -> Int { return 0; }; fn f<..T>(args: &..T) -> Int { return g(args); }; return f(1);" "forwarding a pack to another function is not supported yet")
-                , testCase "a slice of the pack is not supported yet" (refused "fn f<..T>(args: &..T) -> Int { x = slice(args, 0, 1); return 0; }; return f(1);" "a slice of the pack args is not supported yet")
+                , testCase "the pack is given to another function only to fill its pack" (refused "fn g(x: &Int) -> Int { return 0; }; fn f<..T>(args: &..T) -> Int { return g(args); }; return f(1);" "args is given to g, which has no pack")
                 , testCase "an index that is not fixed in each copy" (refused "fn f<..T>(args: &..T) -> Int { j = 0; x = get(args, j); return 0; }; return f(1);" "needs an index that is fixed in each copy")
                 , testCase "a reference result is not from the pack" (refused "fn f<..T>(l: &List<Int>, args: &..T) -> &List<Int> from args { return l; }; return 0;" "a reference result is from one parameter")
                 , testCase "two packs" (refused "fn f<..T, ..U>(args: &..T) -> Int { return 0; }; return 0;" "f has two packs of types")
@@ -160,6 +159,58 @@ testVariadic =
                 , testCase "a define outside the loop read before the body defines the name again" (runs (measure ++ "fn f<..T: Measure>(args: &..T) -> Int { define m = size(args); for a in args { affirm m >= 0; define m = 5; }; return size(args); }; return f(5, true);") (VInt 2))
                 ]
             , TestList
+                "forwarding"
+                [ testCase "the whole pack" (runs (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int { return total(args); }; return f(1, true, 3);") (VInt 5))
+                , testCase "a slice with numbers" (runs (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int [{ affirm size(args) >= 3; }] [{ }] { return total(slice(args, 1, 3)); }; return f(1, true, 3);") (VInt 4))
+                , testCase "a slice per iteration of a loop over the pack" (runs (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int { t = 0; for i in 0..size(args) { t = t * 10 + total(slice(args, i, size(args))); }; return t; }; return f(1, 2, 3);") (VInt 653))
+                , testCase "after fixed arguments" (runs (measure ++ "fn g<..U: Measure>(k: Int, rest: &..U) -> Int { t = k; for a in rest { t = t + a.measure(); }; return t; }; fn f<..T: Measure>(args: &..T) -> Int { return g(10, args); }; return f(1, true);") (VInt 12))
+                , testCase "after plain arguments that fill the callee's pack first" (runs (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int { return total(5, args); }; return f(1, true);") (VInt 7))
+                , testCase "recursion through a shrinking slice, with no shrinks" (runs (measure ++ sumRec ++ "return sum(1, true, 3) * 10 + sum();") (VInt 50))
+                , testCase "on 17 arguments" (runs (measure ++ sumRec ++ "return sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, true);") (VInt 137))
+                , testCase "by value, moving the head and forwarding the rest" (runs (eat ++ "fn cnt<..T>(args: ..T) -> Int { if size(args) = 0 { return 0; }; return eat(get(args, 0)) + cnt(slice(args, 1, size(args))); }; return cnt(push([], 1), push([], 2));") (VInt 2))
+                , testCase "the head given as an argument of the same call" (runs (eat ++ headRest ++ "fn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { return g(get(args, 0), slice(args, 1, size(args))); }; return f(push([], 1), push([], 2));") (VInt 2))
+                , testCase "the head moved into a variable first" (runs (eat ++ headRest ++ "fn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { a = get(args, 0); return g(a, slice(args, 1, size(args))); }; return f(push([], 1), push([], 2));") (VInt 2))
+                , testCase "the head given with the rest lent" (runs (eat ++ "fn g<A, ..U>(x: A, rest: &..U) -> Int { return eat(x) + size(rest); }; fn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { return g(get(args, 0), slice(args, 1, size(args))); }; return f(push([], 1), push([], 2), true);") (VInt 3))
+                , testCase "the head borrowed while the rest is forwarded by value" (runs (eat ++ "fn sz<T>(r: &T) -> Int { return 10; }; fn h<..U>(rest: ..U) -> Int { n = 0; for a in rest { n = n + eat(a); }; return n; }; fn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { r = &get(args, 0); n = h(slice(args, 1, size(args))); return n + sz(r); }; return f(push([], 1), push([], 2), true);") (VInt 12))
+                , testCase "but not an element moved inside the part forwarded" (refused (eat ++ "fn h<..U>(rest: ..U) -> Int { return 0; }; fn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 2; }] [{ }] { n = eat(get(args, 1)); return h(slice(args, 1, size(args))); }; return f(1, 2);") "was moved")
+                , testCase "forwarding the whole pack to itself does not end" (refused "fn f<..T>(args: &..T) -> Int { return f(args); }; return f(1);" "Could not prove")
+                , testCase "a forward that grows the pack is refused" (refused "fn f<..T>(args: &..T) -> Int { if size(args) < 3 { return f(0, args); }; return 0; }; return f();" "f calls itself with the types Int")
+                , testCase "an unguarded slice past an empty pack is refused with its bounds" (refused (measure ++ total ++ "fn r<..T: Measure>(args: &..T) -> Int {\n return total(slice(args, 1, size(args)));\n};\nreturn r();") "Could not prove: the start 1 of slice(args, ...) at line 2:")
+                , testCase "and past the end of the pack" (refused (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int { return total(slice(args, 0, 3)); }; return f(1, 2);") "the end 3 of slice(args, ...)")
+                , testCase "accepted under a guard" (runs (measure ++ total ++ "fn r<..T: Measure>(args: &..T) -> Int { if size(args) > 0 { return total(slice(args, 1, size(args))); }; return 0; }; return r() + r(4, 5);") (VInt 5))
+                , testCase "and under a contract" (runs (measure ++ total ++ "fn r<..T: Measure>(args: &..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { return total(slice(args, 1, size(args))); }; return r(4, 5);") (VInt 5))
+                , testCase "the caller's bounds meet the callee's" (runs (measure ++ total ++ "fn f<..T: Measure + Clone>(args: &..T) -> Int { return total(args); }; return f(2, 3);") (VInt 5))
+                , testCase "a bound of the callee the caller lacks is refused where the forward is written" (refused "trait Measure { fn measure(self: &Self) -> Int; }; fn h<..U: Measure>(rest: &..U) -> Int { return 0; }; fn f<..T>(args: &..T) -> Int { return h(args); }; return 0;" "f forwards args to h, which needs each element of its pack U to implement Measure, and the bounds of ..T in f do not say it: add Measure to them")
+                , testCase "trait parameters solved across the forward" (runs "fn lens<E, ..S: Sequence<E>>(seqs: &..S) -> Int { n = 0; for s in seqs { n = n + size(s); }; return n; }; fn f<E, ..T: Sequence<E>>(args: &..T) -> Int { return lens(args); }; return f(push([], 1), push(push([], 2), 3));" (VInt 3))
+                , testCase "a lent pack keeps its elements" (runs (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int { return total(args) + total(args); }; return f(1, 2);") (VInt 6))
+                , testCase "a pack taken by value lent to a lent pack is kept" (runs (measure ++ total ++ "fn f<..T: Measure>(args: ..T) -> Int { t = total(args); return t + size(args); }; return f(1, true);") (VInt 4))
+                , testCase "and given to a pack taken by value moves its elements" (runs (eat ++ "fn h<..U>(rest: ..U) -> Int { n = 0; for a in rest { n = n + eat(a); }; return n; }; fn f<..T>(args: ..T) -> Int { return h(args); }; return f(push([], 1), push([], 2));") (VInt 2))
+                , testCase "after which the pack is not used" (refused (eat ++ "fn h<..U>(rest: ..U) -> Int { return 0; }; fn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { n = h(args); return eat(get(args, 0)); }; return f(1);") "args was forwarded at line 1:")
+                , testCase "a lent pack is not forwarded to a pack taken by value" (refused "fn h<..U>(rest: ..U) -> Int { return 0; }; fn f<..T>(args: &..T) -> Int { return h(args); }; return 0;" "args is lent to f (&..T), so it can be forwarded only to a lent pack, and h takes its pack by value")
+                , testCase "the callee's contract is met in one copy" (runs (measure ++ need ++ "fn f<..T: Measure>(args: &..T) -> Int { return need(slice(args, 1, size(args))); }; return f(1, 2);") (VInt 1))
+                , testCase "and refused in another" (refused (measure ++ need ++ "fn f<..T: Measure>(args: &..T) -> Int { return need(slice(args, 1, size(args))); }; return f(1);") "Could not prove: 0 >= 1 (in f[Int])")
+                , testCase "a method takes a forwarded pack" (runs (measure ++ "struct S { k: Int }; impl S { fn add<..U: Measure>(self: &Self, rest: &..U) -> Int { t = self.k; for a in rest { t = t + a.measure(); }; return t; }; }; fn f<..T: Measure>(args: &..T) -> Int { s = S { k: 100 }; return s.add(args) + S::add(&s, slice(args, 1, size(args))); }; return f(1, true);") (VInt 203))
+                , testCase "to a plain function, refused" (refused "fn p(x: Int) -> Int { return x; }; fn f<..T>(args: &..T) -> Int { return p(args); }; return 0;" "args is given to p, which has no pack")
+                , testCase "to a function written for any type, refused" (refused "fn eat<T>(x: &T) -> Int { return 1; }; fn f<..T>(args: &..T) -> Int { return eat(args); }; return 0;" "args is given to eat, which has no pack: a pack is forwarded only to the pack parameter of a variadic function")
+                , testCase "to a function with bounds and no pack, refused" (refused (measure ++ "fn one<T: Measure>(x: &T) -> Int { return 1; }; fn f<..T: Measure>(args: &..T) -> Int { return one(args); }; return 0;") "one has no pack: args is forwarded only to the pack parameter of a variadic function")
+                , testCase "to a builtin, refused" (refused "fn f<..T>(args: &..T) -> Int { x = push([], args); return 0; }; return 0;" "args is given to push, which has no pack")
+                , testCase "not as the last argument, refused" (refused (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int { return total(args, 1); }; return 0;") "args is forwarded only as the last argument of a call, where it fills the callee's pack, and once")
+                , testCase "twice in one call, refused" (refused (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int { return total(args, args); }; return 0;") "and once")
+                , testCase "a slice that is not forwarded, refused" (refused "fn f<..T>(args: &..T) -> Int { x = slice(args, 0, 1); return 0; }; return 0;" "slice(args, a, b) is only given as the last argument of a call to a variadic function")
+                , testCase "a loop over a slice, refused" (refused "fn f<..T>(args: &..T) -> Int { for a in slice(args, 0, 1) { }; return 0; }; return 0;" "to loop over a part of the pack, write for i in a..b and get(args, i)")
+                , testCase "slice bounds no copy fixes, refused" (refused (measure ++ total ++ "fn f<..T: Measure>(n: Int, args: &..T) -> Int { return total(slice(args, n, size(args))); }; return 0;") "slice(args, a, b) needs bounds fixed in each copy")
+                , testCase "a negative slice bound, refused" (refused (measure ++ total ++ "fn f<..T: Measure>(args: &..T) -> Int { return total(slice(args, 0 - 1, 1)); }; return 0;") "slice(args, a, b) needs bounds of 0 or more")
+                , testCase "too few arguments before the pack, refused" (refused (measure ++ "fn g<..U: Measure>(k: Int, j: Int, rest: &..U) -> Int { return k; }; fn f<..T: Measure>(args: &..T) -> Int { return g(1, args); }; return 0;") "g takes 2 arguments before its pack, and args comes after 1: a forwarded pack fills only the pack")
+                , testCase "clone of the pack, refused" (refused "fn f<..T>(args: &..T) -> Int { x = clone(args); return 0; }; return 0;" "args is given to clone, which has no pack")
+                , testCase "to a function value, refused" (refused "fn f<..T>(k: fn(Int) -> Int, args: &..T) -> Int { return k(args); }; return 0;" "args is given to k, which has no pack")
+                , testCase "forwarding in a define, refused" (refused "fn cnt<..U>(rest: &..U) -> Int { return size(rest); }; fn f<..T>(args: &..T) -> Int { define d = cnt(args); return 0; }; return 0;" "forwarding args in a contract or a validation statement is not supported yet")
+                , testCase "and a slice in one" (refused "fn cnt<..U>(rest: &..U) -> Int { return size(rest); }; fn f<..T>(args: &..T) -> Int { define d = cnt(slice(args, 0, size(args))); return 0; }; return 0;" "forwarding args in a contract or a validation statement is not supported yet")
+                , testCase "forwarding in a contract, refused" (refused "fn g<..U>(rest: &..U) -> Int { return 0; }; fn f<..T>(args: &..T) -> Int [{ affirm g(args) >= 0; }] [{ }] { return 0; }; return 0;" "forwarding args in a contract or a validation statement is not supported yet")
+                , testCase "after another argument too" (refused "fn g<..U>(k: Int, rest: &..U) -> Int { return 0; }; fn f<..T>(args: &..T) -> Int [{ affirm g(0, args) >= 0; }] [{ }] { return 0; }; return 0;" "forwarding args in a contract or a validation statement is not supported yet")
+                , testCase "to a variadic function of another package" (phase2Runs forwardingPackage 12)
+                , testCase "by a variadic function of another package to its private helper" (phase2Runs forwardingHelperPackage 13)
+                ]
+            , TestList
                 "methods"
                 [ testCase "a method with self and a pack" (runs (measure ++ "struct S { k: Int }; impl S { fn add<..T: Measure>(self: &Self, args: &..T) -> Int { t = self.k; for a in args { t = t + a.measure(); }; return t; }; }; s = S { k: 1 }; return s.add(2, true) * 10 + S::add(s, 3);") (VInt 44))
                 , testCase "in an impl with bounds" (runs (measure ++ "struct W<T> { v: T }; impl<T: Measure> W<T> { fn plus<..U: Measure>(self: &Self, args: &..U) -> Int { t = self.v.measure(); for a in args { t = t + a.measure(); }; return t; }; }; w = W<Int> { v: 5 }; return w.plus(1, true);") (VInt 7))
@@ -201,6 +252,30 @@ count = "fn count<..T>(args: &..T) -> Int { n = 0; for a in args { n = n + 1; };
 eat :: String
 eat = "fn eat<T>(x: T) -> Int { return 1; }; "
 
+total :: String
+total = "fn total<..U: Measure>(rest: &..U) -> Int { t = 0; for a in rest { t = t + a.measure(); }; return t; }; "
+
+sumRec :: String
+sumRec = "fn sum<..T: Measure>(args: &..T) -> Int { if size(args) = 0 { return 0; }; return get(args, 0).measure() + sum(slice(args, 1, size(args))); }; "
+
+headRest :: String
+headRest = "fn g<A, ..U>(x: A, rest: ..U) -> Int { n = eat(x); for a in rest { n = n + eat(a); }; return n; }; "
+
+need :: String
+need = "fn need<..U: Measure>(rest: &..U) -> Int [{ affirm size(rest) >= 1; }] [{ }] { return 1; }; "
+
+forwardingPackage :: [(FilePath, String)]
+forwardingPackage = phase2Files
+    "import vendor::api { total, Mark }; fn f<..T: Mark>(args: &..T) -> Int { return total(args); }; return f(2, 3);"
+    "trait Mark { fn mark(self: &Self) -> Int; }; impl Mark for Int { fn mark(self: &Self) -> Int { return self; }; }; fn total<..T: Mark>(args: &..T) -> Int { n = 7; for a in args { n = n + a.mark(); }; return n; };"
+    []
+
+forwardingHelperPackage :: [(FilePath, String)]
+forwardingHelperPackage = phase2Files
+    "import vendor::api { total }; return total(100, 4, 8);"
+    "trait Mark { fn mark(self: &Self) -> Int; }; impl Mark for Int { fn mark(self: &Self) -> Int { return self; }; }; fn helper<..T: Mark>(args: &..T) -> Int { n = 0; for a in args { n = n + a.mark(); }; return n; }; fn total<..T: Mark>(args: &..T) -> Int { if size(args) = 0 { return 0; }; return helper(slice(args, 1, size(args))) + 1; };"
+    []
+
 variadicPackage :: [(FilePath, String)]
 variadicPackage = phase2Files
     "import vendor::api { total, Mark }; struct Item { }; impl Mark for Item { fn mark(self: &Self) -> Int { return 30; }; }; return total(Item { }, 2, 3);"
@@ -228,5 +303,10 @@ variadicPrograms =
     , ("validation statements and defines at loop indices", measure ++ "fn f<..T: Measure>(args: &..T) -> Int { for i, a in args { affirm Measure::measure(get(args, i)) = Measure::measure(a); define m = Measure::measure(get(args, i)); for b in args { affirm m >= 0; }; }; return size(args); }; return f(5, true);")
     , ("a define of an element at a computed index", measure ++ "fn f<..T: Measure>(args: &..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { define k = get(args, size(args) - 1); affirm Measure::measure(k) >= 0; return get(args, size(args) - 1).measure(); }; return f(4) + f(4, true);")
     , ("defines of elements on a path the call rules out, in loop invariants and before a body's own", measure ++ "fn f<..T: Measure>(args: &..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { define k = get(args, 0); affirm Measure::measure(k) >= 0; define n = size(args); for a in args { affirm n >= 0; define n = 5; define m = Measure::measure(a); j = 0; while j < 2 [{ affirm j >= 0; affirm j <= 2; affirm m >= 0; }] shrinks 2 - j { j = j + 1; }; }; return 4; }; n = 0; if n > 0 { return f(); }; return f(4, true);")
+    , ("lent recursion through a slice", measure ++ sumRec ++ "return sum(1, true, 3, 0 - 4) * 10 + sum();")
+    , ("by-value recursion moving heap values", eat ++ "fn cnt<..T>(args: ..T) -> Int { if size(args) = 0 { return 0; }; return eat(get(args, 0)) + cnt(slice(args, 1, size(args))); }; return cnt(push([], 1), \"two\", push([], push([], 3)));")
+    , ("a pack of heap values taken by value lent to a lent pack and then forwarded by value", count ++ eat ++ "fn h<..U>(rest: ..U) -> Int { n = 0; for a in rest { n = n + eat(a); }; return n; }; fn f<..T>(args: ..T) -> Int { c = count(args); return c * 10 + h(slice(args, 1, size(args))); }; return f(push([], 1), \"two\", push([], push([], 3)));")
+    , ("the head moved and the rest forwarded by value through a helper", eat ++ "fn walk<..T>(args: ..T) -> Int { if size(args) = 0 { return 0; }; return step(get(args, 0), slice(args, 1, size(args))); }; fn step<A, ..U>(x: A, rest: ..U) -> Int { return eat(x) + walk(rest); }; return walk(push([], 1), \"two\", push([], push([], 3)));")
+    , ("the head borrowed while the rest is forwarded by value", eat ++ "fn sz<T>(r: &T) -> Int { return 10; }; fn h<..U>(rest: ..U) -> Int { n = 0; for a in rest { n = n + eat(a); }; return n; }; fn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { r = &get(args, 0); n = h(slice(args, 1, size(args))); return n + sz(r); }; return f(push([], 1), \"two\", push([], push([], 3)));")
     , ("nested loops and indices", measure ++ "fn grid<..T: Measure>(args: &..T) -> Int { t = 0; for i, a in args { for j in 0..size(args) { if i < j { t = t + a.measure() * get(args, j).measure(); }; }; }; return t; }; return grid(1, 2, 3);")
     ]
