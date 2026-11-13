@@ -116,15 +116,19 @@ build program named ((key@(f, tys, sizes), chain) : rest) done made
                 then Left ("internal compiler error: " ++ name ++ " gives " ++ f ++ " " ++ show (length tys) ++ " types and " ++ show (length sizes) ++ " sizes, and it has " ++ show (length (fnTypeParams generic)) ++ " and " ++ show (length (boundedSizes bounded)))
                 else Right ()
             -- (a variadic function is expanded for the number of its arguments first: MirPacks)
-            (body, blockTypes, localTypes, typeArgs) <- case packs of
+            (body, blockTypes, localTypes, typeArgs, spreadInstances) <- case packs of
                 [pack] -> do
                     let elements = drop (length fixed) tys
                         bind indexes = [(v, elements !! fromInteger k) | (v, k) <- Map.toList indexes, k >= 0, k < toInteger (length elements)]
-                    Expanded expanded blockIndexes localIndexes <- expandPack bounded pack (toInteger (length elements)) generic
-                    Right (expanded, Map.map bind blockIndexes, Map.map bind localIndexes, zip fixed tys ++ [(pack ++ "#" ++ show k, t) | (k, t) <- zip [0 :: Int ..] elements])
-                _ -> Right (generic, Map.empty, Map.empty, zip (fnTypeParams generic) tys)
+                    Expanded expanded blockIndexes localIndexes spreads <- expandPack bounded pack (toInteger (length elements)) generic
+                    -- (a forwarding call names the reference it spreads with the pack in place of the elements: the spread
+                    -- names them, so the callee's copy is named by their types)
+                    spreadInstances <- mapM (spreadInstance pack program) (Map.toList spreads)
+                    Right (expanded, Map.map bind blockIndexes, Map.map bind localIndexes, zip fixed tys ++ [(pack ++ "#" ++ show k, t) | (k, t) <- zip [0 :: Int ..] elements], Map.fromList spreadInstances)
+                _ -> Right (generic, Map.empty, Map.empty, zip (fnTypeParams generic) tys, Map.empty)
             let liftedNames = Map.fromList [(l, name ++ drop (length f) l) | l <- boundedLifted bounded]
-                cx = Cx program named typeArgs (zip (boundedSizes bounded) sizes) liftedNames name (chain ++ [(f, bigness)]) Map.empty Map.empty blockTypes localTypes
+                program' = program{progInstances = Map.union spreadInstances (progInstances program)}
+                cx = Cx program' named typeArgs (zip (boundedSizes bounded) sizes) liftedNames name (chain ++ [(f, bigness)]) Map.empty Map.empty blockTypes localTypes
             (copy, needs) <- transformFunction cx body
             liftedCopies <- mapM (\l -> maybe (Left ("internal compiler error: " ++ f ++ " lifts " ++ l ++ ", which the program does not have")) (transformFunction cx) (Map.lookup l (progFunctions program))) (boundedLifted bounded)
             frameRefusal program f name body copy
@@ -134,6 +138,16 @@ build program named ((key@(f, tys, sizes), chain) : rest) done made
             let companion = [((c, tys, sizes), chain ++ [(f, bigness)]) | Just c <- [companionOf f], Map.member c (progBounded program)]
             build program named (rest ++ needs ++ concatMap snd liftedCopies ++ companion) (Map.insert key name done) ((f, copy, map fst liftedCopies) : made)
         _ -> Left ("internal compiler error: the copy " ++ nameOf named key ++ " is of " ++ f ++ ", which is not a function with bounds of the program")
+
+-- The reference a spread names: the forwarded reference's arguments with the elements from lo to hi - 1 in place of the pack
+spreadInstance :: Name -> Program -> (Name, (Name, Integer, Integer)) -> Either String (Name, (Name, [Arg]))
+spreadInstance pack program (spread, (g, lo, hi)) = case Map.lookup g (progInstances program) of
+    Just (f, args) -> Right (spread, (f, concatMap element args))
+    Nothing -> Left ("internal compiler error: a call forwards a pack to " ++ g ++ ", which names no copy")
+  where
+    element a = case a of
+        ArgType (TParam p) | p == pack -> [ArgType (TParam (pack ++ "#" ++ show k)) | k <- [lo .. hi - 1]]
+        _ -> [a]
 
 nameOf :: Map Key Name -> Key -> Name
 nameOf named key@(f, tys, sizes) = Map.findWithDefault (copyName f tys sizes) key named

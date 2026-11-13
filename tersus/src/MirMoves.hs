@@ -12,7 +12,8 @@ module MirMoves
     , operandLocal
     ) where
 
-import Data.List (foldl', intercalate, isPrefixOf, nub)
+import Data.Char (isDigit)
+import Data.List (foldl', intercalate, isPrefixOf, nub, tails)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -315,6 +316,10 @@ checkMovesExcluding copies linear drops excluded program = concatMap (\fn -> che
     -- have a type parameter of that name of their own, when a bound says so)
     copiesIn fn = Set.union copies (Set.fromList [parameterCopy p | (name, bounded) <- Map.toList (progBounded program), p <- boundedCopy bounded, name == fnName fn || (fnName fn `elem` boundedLifted bounded && p `notElem` fnTypeParams fn)])
 
+-- What the record of a move of the pack says when a call forwarded it, not a loop over it
+forwardedMark :: String
+forwardedMark = "$forwarded"
+
 -- The pack parameter of a variadic function (its type is the pack of types `..T` itself, not one of its elements')
 isPackRoot :: Cx -> Local -> Bool
 isPackRoot cx r = case typeOf cx r of
@@ -587,8 +592,23 @@ updatePlace cx pos st0 root steps rv = (define cx st1 root [], errs ++ conflicts
         ]
 
 -- The effect of the use of a part of a local
+-- The elements of a pack a call forwards that are outside the bounds of the part forwarded, when those are numbers: the call
+-- does not give them, so what is done to them does not count against the forward
+forwardedOutside :: Cx -> [Operand] -> Local -> Place -> Bool
+forwardedOutside cx args l q = case q of
+    (r, SField "$pack" k : _) | r == l, all isDigit k, not (null k), isPackRoot cx l -> or [outsideOf (read k) more | (a : more) <- tails args, operandLocal a == Just l]
+    _ -> False
+  where
+    outsideOf k more = case more of
+        Const (CInt lo) : rest -> k < lo || (case rest of Const (CInt hi) : _ -> k >= hi; _ -> False)
+        _ -> False
+
 access :: Cx -> Pos -> (St, [String]) -> (Local, [Step], Role) -> (St, [String])
-access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++ loanErrs)
+access = accessExcept (const False)
+
+-- An access that does not see the places the predicate gives: their moves and their loans
+accessExcept :: (Place -> Bool) -> Cx -> Pos -> (St, [String]) -> (Local, [Step], Role) -> (St, [String])
+accessExcept except cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++ loanErrs)
   where
     loanErrs
         | role == Consume && not (isCopy cx l) =
@@ -598,15 +618,18 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++
             , ref `Set.member` cxLiveNow cx
             , ref /= l
             , overlaps q lplace
+            , not (except lplace)
             ]
         | otherwise = []
     places = [(r, ps ++ steps) | (r, ps) <- placesOf st l]
-    useErrs = take 1 [message cx pos (movedText q m mpos via) | q <- places, (m, (mpos, via)) <- Map.toList (stMoved st), overlaps q m]
+    useErrs = take 1 [message cx pos (movedText q m mpos via) | q <- places, (m, (mpos, via)) <- Map.toList (stMoved st), overlaps q m, not (except m)]
     -- (the text names what the program wrote where the place was moved: the variable that was used, or else the place)
     movedText q m mpos via =
         let written = fromMaybe (describe cx m) via
             label = maybe (describe cx m) (\v -> if v == describe cx m then v else v ++ " (" ++ describe cx m ++ ")") via
-         in if null (snd m) && packLocal (fst m)
+         in if null (snd m) && packLocal (fst m) && via == Just forwardedMark
+                then describe cx m ++ " was forwarded" ++ at mpos ++ " to a pack taken by value and cannot be used after it: forward it to a lent pack (&..U) to keep it"
+            else if null (snd m) && packLocal (fst m)
                 then describe cx m ++ " was taken by the loop over it" ++ at mpos ++ " (for a in " ++ describe cx m ++ " takes the elements of a pack taken by value) and cannot be used after it: loop with for a in &" ++ describe cx m ++ " to keep it"
             else if q == m
                 then label ++ " was moved" ++ at mpos ++ " and cannot be used again: write clone(" ++ written ++ ") where it is moved to keep it"
@@ -662,13 +685,17 @@ readPlace cx st place = case resolvePlace cx st place of
 -- A place lent to an operation stays in use until the operation ends, so the operation cannot also move it, a
 -- value that holds it, or a part of it
 lentAndMoved :: Cx -> Pos -> St -> String -> [Place] -> [Local] -> [String]
-lentAndMoved cx pos st how lent consumed =
+lentAndMoved = lentAndMovedExcept (\_ _ -> False)
+
+lentAndMovedExcept :: (Place -> Place -> Bool) -> Cx -> Pos -> St -> String -> [Place] -> [Local] -> [String]
+lentAndMovedExcept except cx pos st how lent consumed =
     [ message cx pos (text h q)
     | c <- consumed
     , not (isCopy cx c)
     , q <- mayPlacesOf st c
     , h <- map (readPlace cx st) lent
     , overlaps h q
+    , not (except h q)
     ]
   where
     text h q
@@ -752,7 +779,7 @@ terminator cx pos st term = case term of
             mut = mutArguments cx callee (length args)
             argLocals = [(l, b) | (a, b) <- zip args lent, Just l <- [operandLocal a]]
             lentPlaces = [q | (l, True) <- argLocals, q <- mayPlacesOf st l] ++ loanPlacesOf st (map fst argLocals)
-            conflicts = lentAndMoved cx pos st "lent to this call" lentPlaces [l | (l, False) <- argLocals]
+            conflicts = lentAndMovedExcept (\h q -> null (snd h) && forwardedOutside cx args (fst h) q) cx pos st "lent to this call" lentPlaces [l | (l, False) <- argLocals]
             argPlace l = maybe (l, []) (\(place, _, _) -> place) (Map.lookup l (stLoans st))
             mutErrs =
                 [ message cx pos (describe cx (argPlace l) ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be lent for updating to this call: the borrow ends at the last use of " ++ describeLocal cx ref)
@@ -773,8 +800,14 @@ terminator cx pos st term = case term of
                 , h <- map (readPlace cx st) (mayPlacesOf st l)
                 , overlaps h (argPlace m)
                 ]
-            (st', errs) = foldl' (access cx pos) (st, []) ([(l, [], Read) | Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
-            defined = (define cx st' dest []){stConst = Map.delete dest (stConst st')}
+            -- (a forwarded pack is followed by the bounds of the part forwarded: an element outside bounds written as numbers,
+            -- which are those of every copy, is not given to the call, so its moves, its loans and the other arguments of the
+            -- call that move it do not stop the forward)
+            outside = forwardedOutside cx args
+            (st', errs) = foldl' (\acc (l, steps, role) -> accessExcept (outside l) cx pos acc (l, steps, role)) (st, []) ([(l, [], Read) | Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
+            forwarded = [l | (l, False) <- argLocals, isPackRoot cx l]
+            stMarked = st'{stMoved = foldl' (\m l -> Map.adjust (\(p, _) -> (p, Just forwardedMark)) (l, []) m) (stMoved st') forwarded}
+            defined = (define cx stMarked dest []){stConst = Map.delete dest (stConst stMarked)}
             -- (a result that is a reference is a borrow of a place of one of the arguments it is from, made here)
             loaned = case resultFromPlaces cx st' callee args of
                 [] -> defined

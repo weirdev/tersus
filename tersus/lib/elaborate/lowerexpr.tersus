@@ -2,7 +2,7 @@ import data::ast::ast { AstExpression, AstNode, AstValue };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::state { intText };
 import elaborate::lowerstate { lwMalformed, Swapped, swapBuilder, Builder, LowSt, Op, Pend, RefTarget, Rv, Step, Term, argOf, boxInner, claim, fnType, forNameOf, hasText, intAt, isTupleBase, lfail, lwBaseName, lwCat, lwCat3, lwHasByte, lwInstanceText, lwKind, lwTextAt, newBuilder, noOp, noRv, quote, lwSp, tupleParts, tyOf, typeNameOf };
-import elaborate::lowerbuild { Bi, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, fnConst, gotoTerm, isPrim, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valueAt, varNameOf };
+import elaborate::lowerbuild { Bi, packLocalOf, packReadMark, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, fnConst, gotoTerm, isPrim, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valueAt, varNameOf };
 import elaborate::lower { buildFunction };
 import elaborate::lowerplace { fieldCtor, lowerPlace };
 
@@ -361,6 +361,14 @@ fn finishInto(ls: LowSt, dest: Int, pend: Pend) -> LowSt ~ {
     next = ls.id;
     text = lwSp(lwSp(lwSp(opText(&pend.callee), intText(size(pend.args))), argsText(&pend.args)), intText(dest));
     if size(pend.args) = 0 { text = lwSp(lwSp(opText(&pend.callee), "0"), intText(dest)); };
+    // (a call that forwards the pack of a variadic function, whose slice the copy step proves in range, is marked at the end
+    // of its block: MirLower.markPackReads)
+    if ls.bHasPlace {
+        pack = packLocalOf(&ls);
+        forwards = false;
+        for a in &pend.args { if pack >= 0 && (a.k = 0 || a.k = 1) && a.l = pack { forwards = true; }; };
+        if forwards { ls = packReadMark(ls); };
+    };
     ls = terminate(ls, Term { k: 2, text: text, x: next, y: 0 - 1 });
     return openBlock(ls, next);
 };

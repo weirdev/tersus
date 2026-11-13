@@ -176,6 +176,11 @@ struct St {
     packElementTexts: List<String>,
     packCounter: Int,
     packCallOffset: Int,
+    forwardNode: Int,
+    forwardUsed: Bool,
+    forwardLo: Int,
+    forwardHi: Int,
+    forwardRep: String,
     status: Int,
     msg: String
 };
@@ -773,4 +778,9 @@ fn indexOfByteIn(text: &String, b: Int) -> Int ~ {
         i = i + 1;
     };
     return 0 - 1;
+};
+
+// What a contract, a validation statement or a define that forwards the pack is told
+fn forwardInProofText(pack: &String) -> String ~ {
+    return catStrings(catStrings(catStrings("forwarding ", clone(pack)), " in a contract or a validation statement is not supported yet: a contract uses size("), catStrings(catStrings(clone(pack), ") and get("), catStrings(clone(pack), ", i)")));
 };

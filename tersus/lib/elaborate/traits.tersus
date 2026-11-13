@@ -1,15 +1,15 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBounds, AstBuiltin, AstExpression, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
 import data::codec::codec { Size, catStrings };
 import elaborate::builtins { substitute };
-import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, sizeArgument, teHead };
+import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, scopeLookup, sizeArgument, teHead };
 import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, mentionsParameter, refResultFrom, stmtOf };
 import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInfo, hasFunction, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
 import elaborate::exports { pairParts };
-import elaborate::expr { coerceArguments, genericCall, implementsMarker, nodesOf, primitiveEq, typed, typesHeads };
+import elaborate::expr { coerceArguments, genericCall, implementsMarker, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { indexOfByteIn, isPackTypeName, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
+import elaborate::state { indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -343,6 +343,29 @@ struct PackedTemplate { st: St, tm: Template };
 fn templateCall(st: St, name: String, tm0: Template, inferred: &List<TE>) -> St ~ {
     tm = tm0;
     packAt = packParameter(&st, &tm);
+    // (a call that forwards the caller's pack as its last argument: one element of it stands for the elements it fills the
+    // callee's pack with, and the copy step spreads them, MirPacks)
+    forwardAt = 0 - 1;
+    if st.forwardNode >= 0 && size(inferred) > 0 {
+        lastAt = size(inferred) - 1;
+        if get(inferred, lastAt).node = st.forwardNode { forwardAt = lastAt; };
+    };
+    calleePackParam = "";
+    calleeLent = false;
+    if forwardAt >= 0 {
+        if packAt < 0 || packAt >= size(tm.params) || packAt >= size(tm.ptys) { return typeError(st, catStrings(catStrings(clone(name), " has no pack: "), catStrings(clone(st.pack), " is forwarded only to the pack parameter of a variadic function"))); };
+        before = size(tm.params) - size(tm.sizes) - 1;
+        if forwardAt < before {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " takes "), intText(before)), " arguments before its pack, and "), catStrings(clone(st.pack), " comes after ")), catStrings(intText(forwardAt), ": a forwarded pack fills only the pack")));
+        };
+        calleePackParam = clone(get(tm.params, packAt));
+        calleeLent = kindOf(&st, get(tm.ptys, packAt)) = 10;
+        if st.packLent && !calleeLent {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(st.pack), " is lent to "), clone(st.current)), catStrings(catStrings(" (&", clone(st.packType)), "), so it can be forwarded only to a lent pack, and ")), clone(name)), " takes its pack by value"));
+        };
+        repName = clone(tyAt(&st, teHeadAt(inferred, forwardAt)).name);
+        st = St { forwardRep: repName, ..st };
+    };
     if packAt >= 0 {
         fixed = size(tm.params) - size(tm.sizes) - 1;
         if size(inferred) < fixed {
@@ -384,7 +407,36 @@ fn templateCall(st: St, name: String, tm0: Template, inferred: &List<TE>) -> St 
     if st.status != 0 { return st; };
     bounded = clone(st.names);
     boundedValues = clone(st.te.types);
-    st = templateReference(st, &name, &tm, &concrete, &bounded, &boundedValues);
+    refTm = clone(tm);
+    refTypes = clone(concrete);
+    if forwardAt >= 0 {
+        // (the copy a forward names has the caller's pack in place of the element standing for it, given as the pack and the
+        // bounds of the part forwarded: `g[K, '..T]` with the parameters `rest`, `rest lo` and `rest hi`)
+        packTy = scopeLookup(&st, &st.pack);
+        refTypes = [];
+        for c in &concrete {
+            st = zonk(st, c);
+            cz = st.ty;
+            if kindOf(&st, cz) = 12 && tyAt(&st, cz).name = st.forwardRep { refTypes = push(refTypes, packTy); } else { refTypes = push(refTypes, cz); };
+        };
+        st = simpleTy(st, 0);
+        intTy = st.ty;
+        params = [];
+        ptys = [];
+        i = 0;
+        while i < size(tm.params) && i < size(tm.ptys) [{ affirm i >= 0; }] ~ {
+            if i = forwardAt {
+                params = push(push(push(params, clone(calleePackParam)), catStrings(clone(calleePackParam), " lo")), catStrings(clone(calleePackParam), " hi"));
+                ptys = push(push(push(ptys, get(tm.ptys, i)), intTy), intTy);
+            } else {
+                params = push(params, clone(get(tm.params, i)));
+                ptys = push(ptys, get(tm.ptys, i));
+            };
+            i = i + 1;
+        };
+        refTm = Template { params: params, ptys: ptys, ..refTm };
+    };
+    st = templateReference(st, &name, &refTm, &refTypes, &bounded, &boundedValues);
     instance = firstText(&st.names);
     // (what a reference the callee returns is from, as its signature names it)
     named = refResultIndex(&st, &name);
@@ -398,6 +450,37 @@ fn templateCall(st: St, name: String, tm0: Template, inferred: &List<TE>) -> St 
     st = zonk(st, result);
     resultTy = st.ty;
     all = clone(args);
+    if forwardAt >= 0 {
+        // (the pack, then the bounds of the part of it forwarded: 0 and size(args) for all of it)
+        lo = st.forwardLo;
+        hi = st.forwardHi;
+        all = [];
+        i = 0;
+        while i < forwardAt && i < size(args) [{ affirm i >= 0; }] ~ { all = push(all, clone(get(args, i))); i = i + 1; };
+        st = packArgument(st);
+        all = push(all, clone(st.te));
+        if lo >= 0 && hi >= 0 {
+            sliceBounds = push(push([], lo), hi);
+            for b in &sliceBounds {
+                st = inferExpr(st, b);
+                if st.status != 0 { return st; };
+                bound = clone(st.te);
+                st = simpleTy(st, 0);
+                st = expect(st, "a bound of slice on a pack", st.ty, teHead(&bound));
+                if st.status != 0 { return st; };
+                all = push(all, bound);
+            };
+        } else {
+            st = emitIntValue(st, 0);
+            st = emitVal(st, st.nid);
+            node = st.nid;
+            st = simpleTy(st, 0);
+            all = push(all, TE { node: node, types: push([], st.ty) });
+            st = packSize(st);
+            all = push(all, clone(st.te));
+        };
+        st = St { forwardUsed: true, ..st };
+    };
     for a in &sizeArgs { all = push(all, clone(a)); };
     st = emitVar(st, clone(instance));
     functNode = st.nid;
@@ -722,6 +805,12 @@ fn templateSizeArguments(st: St, name: &String, tm: &Template, sizeVars: &List<I
 fn checkBound(st: St, name: &String, sizes: &List<String>, sizeVars: &List<Int>, types: &List<String>, typeVars: &List<Int>, b: &BoundInfo, t: Int) -> St ~ {
     st = traitArguments(st, clone(b.n), t);
     if st.status != 0 { return st; };
+    if !st.ok && st.defChecking && kindOf(st, t) = 12 && size(st.forwardRep.bytes) > 0 && tyAt(st, t).name = st.forwardRep {
+        hash = indexOfByteIn(&b.p, 35);
+        calleePack = clone(b.p);
+        if hash > 2 && hash <= size(b.p.bytes) { calleePack = b.p.slice(2, hash); };
+        return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(clone(st.current), " forwards "), clone(st.pack)), catStrings(catStrings(" to ", clone(name)), ", which needs each element of its pack ")), catStrings(catStrings(calleePack, " to implement "), clone(b.n))), catStrings(catStrings(catStrings(", and the bounds of ", clone(st.packType)), catStrings(catStrings(" in ", clone(st.current)), " do not say it: add ")), catStrings(clone(b.n), " to them"))));
+    };
     if !st.ok && st.defChecking && kindOf(st, t) = 12 {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), clone(b.p)), " to implement "), clone(b.n)), ", and the bounds of "), clone(st.current)), " do not say "), render(st, t)), catStrings(": ", clone(b.n))));
     };

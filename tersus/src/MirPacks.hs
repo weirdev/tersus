@@ -31,6 +31,7 @@ data Expanded = Expanded
     { exFunction :: Function
     , exBlockIndexes :: Map BlockId (Map Variable Integer) -- the element types each block binds, to the index of their argument
     , exLocalIndexes :: Map Local (Map Variable Integer) -- and each local
+    , exSpreads :: Map T.Name (T.Name, Integer, Integer) -- each name a forwarding call is given, for the reference it spreads and the bounds of the part forwarded
     }
 
 -- What the expansion knows of the copy: the pack's local and name, the number of arguments and their parameters
@@ -67,7 +68,8 @@ expandPack bounded pack n fn0 = do
         nextBlock = 1 + maximum (0 : [i | BlockId i <- Map.keys (fnBlocks fn1)])
     st <- unrollAll x (XS fn1 (next0 + fromInteger n) nextBlock Map.empty Map.empty (boundedPackLoops bounded))
     (fn2a, bindings) <- resolveElements x (xsFn st)
-    let fn2 = pruneUnreachable fn2a
+    (fn2b, spreads) <- spreadForwards x (pruneUnreachable fn2a)
+    let fn2 = pruneUnreachable fn2b
     fn3 <- packProofs x fn2
     let fn4 = dropUnused (spreadEnvs x fn3)
     case [() | usesLocal packLocal fn4] of
@@ -98,6 +100,7 @@ expandPack bounded pack n fn0 = do
             fn5{fnLocals = Map.delete packLocal (fnLocals fn5)}
             (Map.filter (not . Map.null) blockBindings)
             (Map.filterWithKey (\l m -> Set.member l kept && not (Map.null m)) localBindings)
+            spreads
         )
 
 -- The element types of the pack read at an index that is not a number a type names
@@ -516,6 +519,53 @@ resolveElements x fn = do
             [] -> Nothing
     inRange k = k >= 0 && k < xCount x
     parameter k = xElements x !! fromInteger k
+
+-- A call that forwards the pack gives it with the bounds of the part forwarded, `g(.., args, lo, hi)`: in the copy the bounds
+-- are numbers, and the call gives the parameters from lo to hi - 1 instead, and names what the reference spreads (the copy
+-- step names the callee's copy for their types, MirCopies); bounds out of range in a block the copy runs are the obligation
+-- `0 <= lo <= hi <= N`, which the validator refuses unless the path is ruled out
+spreadForwards :: X -> Function -> Either String (Function, Map T.Name (T.Name, Integer, Integer))
+spreadForwards x fn = do
+    blocks <- mapM block (fnBlocks fn)
+    Right (fn{fnBlocks = Map.map fst blocks}, Map.fromList (concatMap snd (Map.elems blocks)))
+  where
+    known = constantsOf x fn
+    isPack o = case o of
+        Copy l -> l == xPack x
+        Move l -> l == xPack x
+        _ -> False
+    block blk@(BasicBlock ss t) = case t of
+        Call f as d next | (before, packArg : loArg : hiArg : after) <- break isPack as -> case (operandConstant known loArg, operandConstant known hiArg, f) of
+            (Just (CInt lo), Just (CInt hi), Const (CFn g))
+                | lo < 0 || lo > hi || hi > xCount x ->
+                    let (fact, names) = sliceFact x (maybe "" (" at line " ++) (lastPlace ss)) lo hi
+                     in Right (BasicBlock (filter (not . placeMark) ss ++ [Ghost names (GhostValidation fact), Ghost Map.empty (GhostValidation (Assume (FApp (CTerm (builtinFunct (T.Rel Eq))) [CTerm (VInt 0), CTerm (VInt 1)])))]) Return, [])
+                | otherwise ->
+                    let spread = g ++ " spread " ++ show lo ++ " " ++ show hi
+                        element k = case packArg of
+                            Move _ -> Move (xElements x !! fromInteger k)
+                            _ -> Copy (xElements x !! fromInteger k)
+                     in Right (BasicBlock ss (Call (Const (CFn spread)) (before ++ map element [lo .. hi - 1] ++ after) d next), [(spread, (g, lo, hi))])
+            _ -> Left ("internal compiler error: the part of the pack of " ++ fnName fn ++ " a call forwards is not fixed in a copy")
+        _ -> Right (blk, [])
+    lastPlace ss = case reverse [p | Ghost _ (GhostValidation (AssignProofVar n _)) <- ss, Just p <- [stripPrefix placePrefix n]] of
+        p : _ -> Just p
+        [] -> Nothing
+
+-- The fact the bounds of a slice of the pack need, which fails: 0 <= lo, lo <= hi, or hi <= N
+sliceFact :: X -> String -> Integer -> Integer -> (ValidationStatement, Env)
+sliceFact x place lo hi =
+    ( ProofAssert (FApp (CTerm (builtinFunct (T.Rel LtEq))) facts)
+    , Map.fromList [(start, Const (CInt lo)), (end, Const (CInt hi)), (count, Const (CInt (xCount x)))]
+    )
+  where
+    facts
+        | lo < 0 = [CTerm (VInt 0), ATerm start]
+        | lo > hi = [ATerm start, ATerm end]
+        | otherwise = [ATerm end, ATerm count]
+    start = "the start " ++ show lo ++ " of slice(" ++ xName x ++ ", ...)" ++ place
+    end = "the end " ++ show hi ++ " of slice(" ++ xName x ++ ", ...)" ++ place
+    count = show (xCount x) ++ (if xCount x == 1 then " argument" else " arguments")
 
 -- The fact an index k of the pack needs, which fails: 0 <= k, or k < N, with the names its message reads (the get and where
 -- the program wrote it), which the environment gives their numbers

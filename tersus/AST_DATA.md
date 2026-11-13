@@ -172,7 +172,13 @@ its dots, which no program can write as a name), in the signature's type
 parameters and in its `Bound` records, and its pack parameter has the type
 `param "..T"`, or `ref` of it when lent; the elaborator names the type of an
 element `..T#k` for `get(args, k)` and `..T@n` for any other element, and writes
-`get(args, k)` as the builtin `Field` with the owner `$pack` and the field `k`.
+`get(args, k)` as the builtin `Field` with the owner `$pack` and the field `k`. A call that forwards the pack, or `slice(args, a, b)`, gives
+three arguments in its place: the pack variable, then the bounds of the part
+forwarded (`0` and `size(args)` for all of it); its `Instance` names the
+caller's pack among its type arguments (`g['..T]`), and its signature has the
+parameters `rest` (of the pack type, `ref` when the callee's pack is lent),
+`rest lo` and `rest hi` in place of the callee's pack (MIR.md, "Copies of
+variadic functions").
 `PackLoop INDEX ELEMENT PACK LO HI TAKE STATEMENTS` (parser and response) is a
 loop over the pack, which each copy unrolls: the index runs from `LO` to
 `HI - 1`, the element is the argument at the index (the parser names the one

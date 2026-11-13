@@ -421,7 +421,11 @@ markPackReads fn = case [(l, M.localName d) | l <- M.fnParams fn, Just d <- [Map
     [(pack, packName)] -> fn{M.fnBlocks = Map.map (mark (pack, packName)) (M.fnBlocks fn)}
     _ -> fn
   where
-    mark pack (M.BasicBlock ss t) = M.BasicBlock (go pack Nothing ss) t
+    mark pack (M.BasicBlock ss t) = M.BasicBlock (go pack Nothing ss ++ callMark pack ss t) t
+    -- (a call that forwards the pack, whose slice the copy step proves in range, at the end of its block)
+    callMark (pack, _) ss t = case (t, reverse [(line, column) | M.Ghost _ (M.GhostPosition line column) <- ss]) of
+        (M.Call _ as _ _, (line, column) : _) | any (\o -> o == M.Copy pack || o == M.Move pack) as -> [M.Ghost Map.empty (M.GhostValidation (AssignProofVar ("$pack read at " ++ show line ++ ":" ++ show column) (Val (VInt 0))))]
+        _ -> []
     go _ _ [] = []
     go pack place (s : rest) = case s of
         M.Ghost _ (M.GhostPosition line column) -> s : go pack (Just (line, column)) rest

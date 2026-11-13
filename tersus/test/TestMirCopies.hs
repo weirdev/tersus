@@ -2,7 +2,7 @@
 
 module TestMirCopies (testMirCopies) where
 
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 
 import Mir
@@ -41,6 +41,8 @@ testMirCopies =
         , testCase "a forall over the pack in a contract is a fact for each argument" packForall
         , testCase "the blocks after an element read out of range go" outOfRangePruned
         , testCase "a variadic copy's locals are checked against the frame" variadicFrame
+        , testCase "a forwarded slice is spread into the callee's arguments, whose copy is the one a direct call names" forwardSpread
+        , testCase "a forwarded slice out of range is the obligation on its bounds" forwardOutOfRange
         ]
 
 blockOf :: [Statement] -> Terminator -> Map.Map BlockId BasicBlock
@@ -395,3 +397,30 @@ variadicFrame :: TestResult
 variadicFrame =
     let bigFn = variadic "big" TInt (blockOf [Assign (Local 3) (ReadField (Copy (Local 1)) "$pack" "0"), Assign (Local 2) (ListOp Mir.NewArray [Const (CInt 3000), Copy (Local 3)]), Assign (Local 0) (Use (Const (CInt 0)))] Return) [(TArrayOf (TParam "..T#0") (SizeConst 3000), Just "a"), (TParam "..T#0", Nothing)]
      in testAssertErrorContains "Array<Array<Int, 3>, 3000> takes 9000 words" (makeCopies (packProgram [bigFn] [("big[Array<Int, 3>]", TInt)] [("big[Array<Int, 3>]", ("big", [ArgType (TArrayOf TInt (SizeConst 3))]))] ["big"]))
+
+-- fn fw<..T>(args: &..T) -> Int { return sz(slice(args, 1, 3)); }, which lowering gives as sz['..T](args, 1, 3)
+forwarder :: Integer -> Integer -> Function
+forwarder lo hi = variadic "fw" TInt (Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn "sz['..T]")) [Copy (Local 1), Const (CInt lo), Const (CInt hi)] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)]) []
+
+forwardProgram :: Integer -> Integer -> [(String, Type)] -> [(String, (String, [Arg]))] -> Program
+forwardProgram lo hi calls instances = packProgram [sizeOfPack, forwarder lo hi] calls (("sz['..T]", ("sz", [ArgType (TParam "..T")])) : instances) ["sz", "fw"]
+
+forwardSpread :: TestResult
+forwardSpread =
+    withCopies (forwardProgram 1 3 [("fw[Int, Bool, Int]", TInt), ("sz[Bool, Int]", TInt)] [("fw[Int, Bool, Int]", ("fw", map ArgType [TInt, TBool, TInt])), ("sz[Bool, Int]", ("sz", map ArgType [TBool, TInt]))]) $ \out ->
+        case Map.lookup "fw[Int, Bool, Int]" (progFunctions out) of
+            Nothing -> Just ("no copy of fw: " ++ show (Map.keys (progFunctions out)))
+            Just copy -> case blockTerminator <$> Map.lookup (BlockId 0) (fnBlocks copy) of
+                Just (Call (Const (CFn callee)) args _ _)
+                    | callee /= "sz[Bool, Int]" -> Just ("the forward calls " ++ callee)
+                    | [localName d | Copy l <- args, Just d <- [Map.lookup l (fnLocals copy)]] /= [Just "args 1", Just "args 2"] -> Just ("the forward gives " ++ show args)
+                    | length [n | n <- Map.keys (progFunctions out), "sz[" `isPrefixOf` n] /= 1 -> Just ("copies of sz: " ++ show (Map.keys (progFunctions out)))
+                    | otherwise -> Nothing
+                other -> Just ("the block ends with " ++ show other)
+
+forwardOutOfRange :: TestResult
+forwardOutOfRange =
+    copyOf (forwardProgram 0 2 [("fw[Int]", TInt)] [("fw[Int]", ("fw", [ArgType TInt]))]) "fw[Int]" $ \copy -> case Map.lookup (BlockId 0) (fnBlocks copy) of
+        Just (BasicBlock [Ghost names (GhostValidation (ProofAssert (FApp (CTerm f) [ATerm end, ATerm count]))), Ghost _ (GhostValidation (Assume _))] Return)
+            | show f == show (builtinFunct (Rel LtEq)), Map.lookup end names == Just (Const (CInt 2)), Map.lookup count names == Just (Const (CInt 1)), "slice(args, ...)" `isInfixOf` end -> Nothing
+        other -> Just ("block 0 is " ++ show other)
