@@ -193,7 +193,7 @@ runPackageFiles _ MirText pkg = mapResult (\program -> ((writeProgram program, "
 runPackageFiles _ GhostText pkg = mapResult (\program -> ((writeProgramWithGhosts program, ""), [])) (compileModulesValidated pkg)
 runPackageFiles _ Assumptions pkg = case compileModules pkg of
     Error err -> Error err
-    Ok compiled -> let found = assumptionsOfPackage compiled in Ok ((if null found then "No assumptions" else intercalate "\n" found, ""), [])
+    Ok compiled -> assumptionsOfPackage compiled `bindResult` \found -> Ok ((if null found then "No assumptions" else intercalate "\n" found, ""), [])
 runPackageFiles _ _ _ = Error "not a command that is run on its own"
 
 renderValue :: Value -> String

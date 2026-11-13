@@ -268,7 +268,7 @@ markersReplaced = withCopies (program [ident] (mainCalling [Ghost Map.empty (Gho
     let markers = [n | BasicBlock stmts _ <- Map.elems (fnBlocks (progMain out)), Ghost _ (GhostFunction n _ _) <- stmts]
      in if markers == ["ident[Bool]", "ident[Int]"] then Nothing else Just ("markers: " ++ show markers)
 
--- A variadic function as lowering writes it (MirLower.lowerPackLoop): the pack is its parameter _1 of type ..T, lent
+-- A variadic function as lowering writes it (lowerPackLoop in lib/elaborate/lower.tersus): the pack is its parameter _1 of type ..T, lent
 variadic :: String -> Type -> Map.Map BlockId BasicBlock -> [(Type, Maybe String)] -> Function
 variadic name result blocks others = (function name [(TParam "..T", "args")] result others blocks){fnTypeParams = ["..T"], fnBorrowed = [Local 1]}
 

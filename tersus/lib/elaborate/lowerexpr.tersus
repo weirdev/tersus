@@ -362,7 +362,7 @@ fn finishInto(ls: LowSt, dest: Int, pend: Pend) -> LowSt ~ {
     text = lwSp(lwSp(lwSp(opText(&pend.callee), intText(size(pend.args))), argsText(&pend.args)), intText(dest));
     if size(pend.args) = 0 { text = lwSp(lwSp(opText(&pend.callee), "0"), intText(dest)); };
     // (a call that forwards the pack of a variadic function, whose slice the copy step proves in range, is marked at the end
-    // of its block: MirLower.markPackReads)
+    // of its block)
     if ls.bHasPlace {
         pack = packLocalOf(&ls);
         forwards = false;

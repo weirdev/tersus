@@ -430,7 +430,7 @@ forms such as `0x1F` and `(5)` that no writer of the data writes).
 Built: the elaborator written in Tersus bootstraps from a pinned seed, as the
 emitter and the parser do. F0 is the elaborator built with clang from seed IR
 (`bootstrap/frontend.sha256`, the `frontend.ll` asset of release
-`bootstrap-9fc6933dcb68`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
+`bootstrap-d4fde7289e78`; `TERSUS_FRONTEND_SEED_FILE` or an ignored
 `bootstrap/frontend.ll` supplies local bytes, verified against the same pin).
 F1 is the elaborator as it is now, its modules and the compiler libraries
 elaborated by F0 and the rest of the build done by the host as for its other
@@ -496,8 +496,8 @@ to a parse (`libraries.tersus`), and gives the module their interfaces without
 what it declares itself; it answers `unresolved` with the whole message where
 Haskell refused. The response names the libraries it selected, and the compiler
 links their units (`LibPackage.libSelection`, without the module's own type
-names) and lowers with their interfaces, `MirLower` leaving out what the module
-declares itself. A single file's parse still selected the declarations it was
+names); the elaborator lowers the module with their interfaces, leaving out what
+it declares itself. A single file's parse still selected the declarations it was
 parsed with in Haskell (`SourceParse`) until parsing moved in process ("Loading and
 parsing in process", below); the compiler refuses, as an internal error, a response that selects other libraries.
 A module that impls Drop without the prelude still sees the prelude's Drop trait,
@@ -549,9 +549,9 @@ What stayed in Haskell, and why: `Modules` captures the snapshot (directory
 listing and file reading are the host's) and reads its import prefixes with P0
 to follow them; `PackageData` holds the graph types the compiler and the tests
 read; `PackageCompile` sends the request, assembles the modules the answer
-gives and lowers them; `LibPackage` keeps the compiled libraries, selection and
-catalog, filled from the `libraries` answer, because `MirLower` and `Link` lower
-and link in Haskell; `TersusParser`, `ParserSeed` and `FileParserProtocol` run
+gives and finishes the units it lowered them to; `LibPackage` keeps the compiled
+libraries, selection and catalog, filled from the `libraries` answer, because
+`Link` links in Haskell; `TersusParser`, `ParserSeed` and `FileParserProtocol` run
 P1 and P0 for the parser's own tests, its fixpoint, `dev/parser-seed` and
 `StdLibDefs` (they stay in the library, which the tests and the seed drivers
 link). The module request's `package` section is gone on both sides. The CLI
@@ -595,10 +595,12 @@ file.
 
 ### 3. MIR lowering in Tersus
 
-The elaborator answers a module request with the module's MIR, and `MirLower`
-and the `Elaborated` handoff are deleted. What runs after lowering does not
-change: `MirMoves.finishLowered`, `Link`, `MirLists`, monomorphization,
-validation, ownership and emission. Four phases, one PR each:
+Done. The elaborator answers every module it accepts with the module's MIR, and
+`MirLower` and the `Elaborated` handoff are deleted. What runs after lowering
+did not change: in Haskell, `MirData`'s reader of the unit,
+`MirMoves.finishLowered` (instances completed, moves checked, positions and
+stubs taken out), `MirCopies`, `Link`, `MirLists` and monomorphization; then the
+validator, ownership and the emitter, which are Tersus programs the host runs. Four phases, one PR each:
 
 1. Contract and seam (done). `MirLower.lowerRaw` gives the raw unit
    (`Mir.Lowered`), `MirMoves.finishLowered` finishes it with the code that
@@ -614,19 +616,26 @@ validation, ownership and emission. Four phases, one PR each:
    stub functions of its interfaces), `lowerout.tersus` (the `tersus-mir 3`
    writer) and `lowerstate.tersus`/`lowerbuild.tersus` (its types and state)
    port `MirLower.lowerRaw` function by function: the lowering walks the
-   elaborated program the elaborator is about to write and takes its types in
-   `MirLower`'s order. The elaborator's answer carries the unit in a `mir`
+   elaborated program and takes its types in `MirLower`'s order. The elaborator's answer carries the unit in a `mir`
    section (`AST_DATA.md`). `testMirDifferential` compares it with the
    Haskell lowering of the same answer for every unit of the corpus (equal
    units, refusals word for word) and checks that a changed unit is caught.
    Every function of the lowering validates with the elaborator
    (`testHostValidation:elaborator`). A new seed.
-3. Cold bootstrap and the suite stay within 1.25x of master (the lowering's
-   cost, measured beside the Haskell one). A new seed.
-4. `lowerAccepted` reads only the elaborator's MIR; `MirLower`,
-   `testMirDifferential` and the `Elaborated` handoff are deleted, and
-   `declared` and `assumes` replace the walks of the statements in `Compile`
-   and `PackageCompile`.
+3. Performance (not needed): with both lowerings running, the suite took 1.22
+   times and a cold bootstrap 1.03 times as long as master's.
+4. The flip (done). `Lowering.lowerAccepted` reads only the elaborator's MIR,
+   and a `mir refused` answer is the lowering error in its words. `MirLower`,
+   `testMirDifferential`, `Syntax.Elaborated`, `AstData`'s elaborated writer
+   and reader and the response's `data` block are deleted; the unit's
+   `declared`, `nested` and `assumes` replace the walks of the statements in
+   `Compile` and `PackageCompile`, and nothing the host lowers is given
+   interfaces any more. The lowering checks the arenas it reads (the elaborated
+   program, each interface and the builtin table, each on its own) as the
+   reader of AST data would: references to earlier records of the kinds their
+   fields hold, the roots, and the entry kinds and order of interface maps and
+   sets, since no other reader sees them. The elaborated root stays in `data::ast`: the
+   elaborator's lowering reads it.
 
 ### Deferred or coordinated work
 

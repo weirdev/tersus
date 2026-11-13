@@ -70,7 +70,7 @@ struct LFn {
 };
 impl Clone for LFn { };
 
-// The function being built (MirLower's Builder), which a nested function's body puts aside while it is built
+// The function being built, which a nested function's body puts aside while it is built
 struct Builder {
     name: String, isMain: Bool, sizes: List<String>, typeParams: List<String>, borrowed: List<Int>, mutBorrowed: List<Int>,
     refTargets: List<RefTarget>, hasReturns: Bool, returns: Int, params: List<Int>, locals: List<LDecl>, nextLocal: Int,
@@ -103,7 +103,7 @@ impl Clone for EnvRec { };
 struct Pend { isCall: Bool, rv: Rv, callee: Op, args: List<Op> };
 impl Clone for Pend { };
 
-// The lowering's state (MirLower's LS with its Builder's fields), threaded by value. ok is false after the first
+// The lowering's state with the fields of the function being built, threaded by value. ok is false after the first
 // failure, msg says why. ty, op, pend, root and steps are what the last function that makes one gave.
 struct LowSt {
     ok: Bool, msg: String,
@@ -192,7 +192,6 @@ fn lfail(ls: LowSt, msg: String) -> LowSt ~ {
     return LowSt { ok: false, msg: msg, ..ls };
 };
 
-// (the Haskell reader of the elaborated program refuses such a record before it lowers)
 fn lwMalformed(ls: LowSt, what: String) -> LowSt ~ {
     return lfail(ls, lwCat3("Lowering: the elaborated program has a record that is not ", &what, " where one is read"));
 };
@@ -574,7 +573,7 @@ fn tupleParts(ls: &LowSt, t: Int) -> Parts ~ {
     return Parts { ok: true, types: clone(x.args) };
 };
 
-// The name of the struct a type is (MirLower.typeName)
+// The name of the struct a type is
 fn typeNameOf(ls: &LowSt, t: Int) -> String ~ {
     if t < 0 || t >= size(ls.tys) || lwKind(ls, t) != 4 { return ""; };
     x = get(ls.tys, t);
@@ -628,7 +627,7 @@ fn renderFn(ls: &LowSt, x: &LTy) -> String ~ {
     return lwCat(lwCat(out, ") -> "), renderTy(ls, intAt(&x.args, n)));
 };
 
-// MirLower.resolveType: an unknown is an Int (not inside a function with parameters or a &mut)
+// An unknown is an Int (not inside a function with parameters or a &mut)
 fn defaultTy(ls: LowSt, t: Int) -> LowSt ~ {
     if HashMap::contains(&ls.defaulted, t) {
         known = HashMap::lookup(&ls.defaulted, t, t);

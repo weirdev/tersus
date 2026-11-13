@@ -1,5 +1,6 @@
 import data::arena::arena { reorderArena };
-import data::ast::ast { AstElaborated, AstNode, AstProgram, AstStatement, AstValidation };
+import data::ast::ast { AstArg, AstArgs, AstBody, AstBounds, AstBuiltin, AstElaborated, AstEntries, AstEntry, AstExpression, AstExpressions, AstFields, AstName, AstNames, AstNode, AstOptName, AstOptNames, AstOptTermination, AstOptType, AstProgram, AstProof, AstProofs, AstRule, AstScheme, AstStatement, AstStatements, AstTermination, AstTraitFns, AstTypes, AstValidation, AstValidations, AstValue, AstValueFields, AstValues, AstVariants };
+import data::reader::reader { entriesAre, entriesAscending, namesAscending, nodeKind, nodeRefs };
 import elaborate::records { codecTypeAt, listItems, nameText, nodeIn };
 import elaborate::state { intText };
 import elaborate::lowerstate { BoundedRec, PackLoopRec, GenericRec, EnvRec, LBlock, LDecl, LFn, LoopRec, LowSt, Stmt, TDecl, Term, fromCodecTy, intAt, lwCat, lwSort, newLowSt, quote, setTexts, lwSp, tyText };
@@ -17,6 +18,8 @@ fn noMir(msg: String) -> MirOut ~ { return MirOut { ok: false, msg: msg, lines: 
 // The lowering of an accepted module (its elaborated program, out) against the interfaces it is lowered with, in their
 // order
 fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram) -> MirOut ~ {
+    problem = arenasProblem(out, ifaces, table);
+    if size(problem.bytes) > 0 { return noMir(lwCat("Lowering: ", &problem)); };
     src = joinArena(out, ifaces, table);
     root = nodeIn(&src.nodes, out.root);
     if !(root is AstNode::Elaborated) { return noMir("Lowering: the elaborated program is not one"); };
@@ -43,6 +46,271 @@ fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram) ->
     };
     assumes = assumesIn(&src.nodes, &stmts, []);
     return writeLowered(ls, &src, setTexts(&declared), setTexts(&nested), assumes);
+};
+
+// Why the arenas the lowering reads (the elaborated program, the interfaces and the builtin table, each on its own before
+// they are joined) are not what the reader of AST data accepts, or "": nothing else checks them
+fn arenasProblem(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram) -> String ~ {
+    problem = arenaProblem(out, 35, "the elaborated program");
+    if size(problem.bytes) > 0 { return problem; };
+    for iface in ifaces {
+        problem = arenaProblem(iface, 40, "an interface");
+        if size(problem.bytes) > 0 { return problem; };
+        if !interfaceHolds(iface) { return "an interface has a map or set that is out of order or holds entries of another kind"; };
+    };
+    problem = arenaProblem(table, 37, "the builtin table");
+    if size(problem.bytes) > 0 { return problem; };
+    if !entriesAre(&table.nodes, table.root, 13) { return "the builtin table holds an entry that is not a builtin's"; };
+    return "";
+};
+
+fn arenaProblem(arena: &AstProgram, rootKind: Int, what: String) -> String ~ {
+    bad = lwBadRecord(&arena.nodes);
+    if bad >= 0 { return lwCat(lwCat(what, " is malformed at record "), intText(bad)); };
+    if arena.root < 0 || arena.root >= size(arena.nodes) || nodeKind(&get(arena.nodes, arena.root)) != rootKind { return lwCat(what, " has a root of another kind"); };
+    return "";
+};
+
+// (the maps and sets of an interface as the reader's interface record requires them)
+fn interfaceHolds(iface: &AstProgram) -> Bool ~ {
+    if iface.root < 0 || iface.root >= size(iface.nodes) { return false; };
+    node = get(iface.nodes, iface.root);
+    if !(node is AstNode::Interface) { return false; };
+    v = (node as AstNode::Interface).value;
+    maps = push(push(push(push(push(push(push(push(push(push(push(push(push([], v.types), v.ctors), v.generics), v.invariants), v.traits), v.traitParams), v.functions), v.impls), v.assoc), v.implArgs), v.implBounds), v.templates), v.companions);
+    kinds = push(push(push(push(push(push(push(push(push(push(push(push(push([], 0), 1), 2), 3), 4), 0), 5), 6), 7), 8), 9), 10), 0);
+    i = 0;
+    while i < size(maps) && i < size(kinds) [{ affirm i >= 0; }] shrinks size(maps) - i {
+        if !entriesAre(&iface.nodes, get(maps, i), get(kinds, i)) || !entriesAscending(&iface.nodes, get(maps, i)) { return false; };
+        i = i + 1;
+    };
+    return namesAscending(&iface.nodes, v.copies) && namesAscending(&iface.nodes, v.linear) && namesAscending(&iface.nodes, v.drops) && namesAscending(&iface.nodes, v.externs);
+};
+
+// (the entry lists inside a template and a builtin, as the reader's entry records require them)
+fn entryHolds(nodes: &List<AstNode>, node: &AstNode) -> Bool ~ {
+    if !(node is AstNode::Entry) { return true; };
+    e = (node as AstNode::Entry).value;
+    if e is AstEntry::TemplateEntry {
+        fns = (e as AstEntry::TemplateEntry).fns;
+        return entriesAre(nodes, fns, 11) && entriesAscending(nodes, fns);
+    };
+    if e is AstEntry::BuiltinEntry { return entriesAre(nodes, (e as AstEntry::BuiltinEntry).surface, 12); };
+    return true;
+};
+
+// The first record that refers to one after it, or to one of another kind than its field holds, or -1
+fn lwBadRecord(nodes: &List<AstNode>) -> Int ~ {
+    i = 0;
+    while i < size(nodes) [{ affirm i >= 0; }] shrinks size(nodes) - i {
+        refs = nodeRefs(&get(nodes, i));
+        kinds = lwRefKinds(&get(nodes, i));
+        if size(refs) != size(kinds) || !entryHolds(nodes, &get(nodes, i)) { return i; };
+        j = 0;
+        while j < size(refs) [{ affirm j >= 0; }] shrinks size(refs) - j {
+            r = get(refs, j);
+            if r < 0 || r >= i || r >= size(nodes) { return i; };
+            if nodeKind(&get(nodes, r)) != get(kinds, j) { return i; };
+            j = j + 1;
+        };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn lwNoInts() -> List<Int> ~ { return []; };
+
+// The kind of record each reference of a record is to (as nodeRefs lists the references)
+fn lwRefKinds(node: &AstNode) -> List<Int> ~ {
+    refs = lwNoInts();
+    match node {
+        AstNode::Name { value: v } => { match v { AstName::End => { }, AstName::Part { text: s, tail: t } => { refs = push(refs, 1); }, }; },
+        AstNode::Type { value: v } => { },
+        AstNode::Size { value: v } => { },
+        AstNode::Value { value: v } => {
+            match v {
+                AstValue::VInt { n: n } => { refs = push(refs, 1); },
+                AstValue::VList { xs: xs } => { refs = push(refs, 23); },
+                AstValue::VBool { b: b } => {  },
+                AstValue::VData { n: n, xs: xs } => { refs = push(refs, 1); refs = push(refs, 30); },
+                AstValue::VFnRef { n: n } => { refs = push(refs, 1); },
+                AstValue::VFunct { ps: ps, ins: ins, outs: outs, body: body, exports: exports } => { refs = push(refs, 22); refs = push(refs, 26); refs = push(refs, 26); refs = push(refs, 5); refs = push(refs, 27); },
+            };
+        },
+        AstNode::Body { value: v } => {
+            match v {
+                AstBody::NativeFunct { sig: sig, term: term, stmts: stmts } => { refs = push(refs, 12); refs = push(refs, 20); refs = push(refs, 24); },
+                AstBody::BuiltinFunct { b: b } => { refs = push(refs, 21); },
+            };
+        },
+        AstNode::Expression { value: v } => {
+            match v {
+                AstExpression::Val { v: v } => { refs = push(refs, 4); },
+                AstExpression::Var { n: n } => { refs = push(refs, 1); },
+                AstExpression::F { f: f, xs: xs } => { refs = push(refs, 6); refs = push(refs, 25); },
+            };
+        },
+        AstNode::Termination { value: v } => {
+            match v {
+                AstTermination::Shrinks { e: e } => { refs = push(refs, 6); },
+                AstTermination::Counting { e: e } => { refs = push(refs, 6); },
+                AstTermination::Parts { e: e } => { refs = push(refs, 6); },
+                AstTermination::MayDiverge => {  },
+                AstTermination::Recursing { t: t } => { refs = push(refs, 20); },
+            };
+        },
+        AstNode::Validation { value: v } => {
+            match v {
+                AstValidation::Rewrite { r: r } => { refs = push(refs, 10); },
+                AstValidation::ProofAssert { p: p } => { refs = push(refs, 9); },
+                AstValidation::AssignProofVar { n: n, e: e } => { refs = push(refs, 1); refs = push(refs, 6); },
+                AstValidation::Assume { p: p } => { refs = push(refs, 9); },
+            };
+        },
+        AstNode::Proof { value: v } => {
+            match v {
+                AstProof::FApp { f: f, xs: xs } => { refs = push(refs, 9); refs = push(refs, 27); },
+                AstProof::ATerm { n: n } => { refs = push(refs, 1); },
+                AstProof::CTerm { v: v } => { refs = push(refs, 4); },
+                AstProof::Forall { n: n, gs: gs, b: b } => { refs = push(refs, 1); refs = push(refs, 27); refs = push(refs, 9); },
+                AstProof::BVar { n: n } => { refs = push(refs, 1); },
+            };
+        },
+        AstNode::Rule { value: v } => {
+            match v {
+                AstRule::Refl { p: p } => { refs = push(refs, 9); },
+                AstRule::Eval { n: n } => { refs = push(refs, 1); },
+                AstRule::EvalAll => {  },
+                AstRule::CheckGtZero { p: p } => { refs = push(refs, 9); },
+                AstRule::CheckRel { p: p } => { refs = push(refs, 9); },
+                AstRule::UserRewrite { n: n, xs: xs } => { refs = push(refs, 1); refs = push(refs, 27); },
+            };
+        },
+        AstNode::Statement { value: v } => {
+            match v {
+                AstStatement::Assign { n: n, e: e } => { refs = push(refs, 1); refs = push(refs, 6); },
+                AstStatement::AssignDeref { a: a, b: b } => { refs = push(refs, 6); refs = push(refs, 6); },
+                AstStatement::Let { n: n, e: e } => { refs = push(refs, 1); refs = push(refs, 6); },
+                AstStatement::Return { e: e } => { refs = push(refs, 6); },
+                AstStatement::ValidationStatement { v: v } => { refs = push(refs, 8); },
+                AstStatement::StructDef { n: n, ps: ps, fs: fs, vs: vs } => { refs = push(refs, 1); refs = push(refs, 22); refs = push(refs, 28); refs = push(refs, 26); },
+                AstStatement::EnumDef { n: n, vs: vs } => { refs = push(refs, 1); refs = push(refs, 29); },
+                AstStatement::AxiomDef { n: n, ps: ps, ins: ins, outs: outs } => { refs = push(refs, 1); refs = push(refs, 22); refs = push(refs, 26); refs = push(refs, 26); },
+                AstStatement::ProofDef { n: n, ps: ps, ins: ins, outs: outs, body: body } => { refs = push(refs, 1); refs = push(refs, 22); refs = push(refs, 26); refs = push(refs, 26); refs = push(refs, 26); },
+                AstStatement::Block { xs: xs } => { refs = push(refs, 24); },
+                AstStatement::If { e: e, a: a, b: b } => { refs = push(refs, 6); refs = push(refs, 24); refs = push(refs, 24); },
+                AstStatement::While { e: e, vs: vs, t: t, xs: xs } => { refs = push(refs, 6); refs = push(refs, 26); refs = push(refs, 20); refs = push(refs, 24); },
+                AstStatement::TraitDef { n: n, ps: ps, fs: fs } => { refs = push(refs, 1); refs = push(refs, 22); refs = push(refs, 33); },
+                AstStatement::ImplDef { traitName: traitName, args: args, n: n, ty: ty, bs: bs, xs: xs } => { refs = push(refs, 19); refs = push(refs, 32); refs = push(refs, 1); refs = push(refs, 2); refs = push(refs, 34); refs = push(refs, 24); },
+                AstStatement::BoundedDef { bs: bs, s: s } => { refs = push(refs, 34); refs = push(refs, 11); },
+                AstStatement::Mark { line: line, col: col } => {  },
+                AstStatement::CopyDef { n: n } => { refs = push(refs, 1); },
+                AstStatement::LinearDef { n: n } => { refs = push(refs, 1); },
+                AstStatement::ExternDef { n: n } => { refs = push(refs, 1); },
+                AstStatement::DropDef { n: n } => { refs = push(refs, 1); },
+                AstStatement::Dissolve { n: n } => { refs = push(refs, 1); },
+                AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 32); refs = push(refs, 22); refs = push(refs, 12); },
+                AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => { refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 6); refs = push(refs, 6); refs = push(refs, 24); },
+            };
+        },
+        AstNode::Signature { value: v } => { refs = push(refs, 31); refs = push(refs, 2); refs = push(refs, 22); refs = push(refs, 22); refs = push(refs, 22); refs = push(refs, 22); },
+        AstNode::TraitFn { value: v } => { refs = push(refs, 1); refs = push(refs, 22); refs = push(refs, 12); refs = push(refs, 26); refs = push(refs, 26); },
+        AstNode::Bound { value: v } => { refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 31); },
+        AstNode::Field { value: v } => { refs = push(refs, 1); refs = push(refs, 2); },
+        AstNode::Variant { value: v } => { refs = push(refs, 1); refs = push(refs, 28); },
+        AstNode::ValueField { value: v } => { refs = push(refs, 1); refs = push(refs, 4); },
+        AstNode::Arg { value: v } => {
+            match v {
+                AstArg::ArgSize { s: s } => { refs = push(refs, 3); },
+                AstArg::ArgType { t: t } => { refs = push(refs, 2); },
+            };
+        },
+        AstNode::OptName { value: v } => {
+            match v {
+                AstOptName::NoName => {  },
+                AstOptName::SomeName { n: n } => { refs = push(refs, 1); },
+            };
+        },
+        AstNode::OptTermination { value: v } => {
+            match v {
+                AstOptTermination::NoTermination => {  },
+                AstOptTermination::SomeTermination { t: t } => { refs = push(refs, 7); },
+            };
+        },
+        AstNode::Builtin { value: v } => {
+            match v {
+                AstBuiltin::Ctor { n: n, args: args, fs: fs } => { refs = push(refs, 1); refs = push(refs, 32); refs = push(refs, 22); },
+                AstBuiltin::FieldBuiltin { owner: owner, n: n } => { refs = push(refs, 19); refs = push(refs, 1); },
+                AstBuiltin::Is { n: n } => { refs = push(refs, 1); },
+                AstBuiltin::Project { n: n, f: f } => { refs = push(refs, 1); refs = push(refs, 1); },
+                AstBuiltin::Cast { n: n } => { refs = push(refs, 1); },
+                AstBuiltin::ToWord { signed: signed, bits: bits } => {  },
+                AstBuiltin::Rel { r: r } => {  },
+                AstBuiltin::Primitive { name: n } => { },
+            };
+        },
+        AstNode::Names { value: v } => { match v { AstNames::End => { }, AstNames::Cons { head: h, tail: t } => { refs = push(refs, 1); refs = push(refs, 22); }, }; },
+        AstNode::Values { value: v } => { match v { AstValues::End => { }, AstValues::Cons { head: h, tail: t } => { refs = push(refs, 4); refs = push(refs, 23); }, }; },
+        AstNode::Statements { value: v } => { match v { AstStatements::End => { }, AstStatements::Cons { head: h, tail: t } => { refs = push(refs, 11); refs = push(refs, 24); }, }; },
+        AstNode::Expressions { value: v } => { match v { AstExpressions::End => { }, AstExpressions::Cons { head: h, tail: t } => { refs = push(refs, 6); refs = push(refs, 25); }, }; },
+        AstNode::Validations { value: v } => { match v { AstValidations::End => { }, AstValidations::Cons { head: h, tail: t } => { refs = push(refs, 8); refs = push(refs, 26); }, }; },
+        AstNode::Proofs { value: v } => { match v { AstProofs::End => { }, AstProofs::Cons { head: h, tail: t } => { refs = push(refs, 9); refs = push(refs, 27); }, }; },
+        AstNode::Fields { value: v } => { match v { AstFields::End => { }, AstFields::Cons { head: h, tail: t } => { refs = push(refs, 15); refs = push(refs, 28); }, }; },
+        AstNode::Variants { value: v } => { match v { AstVariants::End => { }, AstVariants::Cons { head: h, tail: t } => { refs = push(refs, 16); refs = push(refs, 29); }, }; },
+        AstNode::ValueFields { value: v } => { match v { AstValueFields::End => { }, AstValueFields::Cons { head: h, tail: t } => { refs = push(refs, 17); refs = push(refs, 30); }, }; },
+        AstNode::Types { value: v } => { match v { AstTypes::End => { }, AstTypes::Cons { head: h, tail: t } => { refs = push(refs, 2); refs = push(refs, 31); }, }; },
+        AstNode::Args { value: v } => { match v { AstArgs::End => { }, AstArgs::Cons { head: h, tail: t } => { refs = push(refs, 18); refs = push(refs, 32); }, }; },
+        AstNode::TraitFns { value: v } => { match v { AstTraitFns::End => { }, AstTraitFns::Cons { head: h, tail: t } => { refs = push(refs, 13); refs = push(refs, 33); }, }; },
+        AstNode::Bounds { value: v } => { match v { AstBounds::End => { }, AstBounds::Cons { head: h, tail: t } => { refs = push(refs, 14); refs = push(refs, 34); }, }; },
+        AstNode::Elaborated { value: v } => { refs = push(refs, 24); refs = push(refs, 31); },
+        AstNode::Entry { value: v } => { refs = lwEntryKinds(v); },
+        AstNode::Entries { value: v } => { match v { AstEntries::End => { }, AstEntries::Cons { head: h, tail: t } => { refs = push(refs, 36); refs = push(refs, 37); }, }; },
+        AstNode::OptNames { value: v } => { match v { AstOptNames::End => { }, AstOptNames::Cons { head: h, tail: t } => { refs = push(refs, 19); refs = push(refs, 38); }, }; },
+        AstNode::OptType { value: v } => { match v { AstOptType::NoType => { }, AstOptType::SomeType { t: t } => { refs = push(refs, 2); }, }; },
+        AstNode::Interface { value: v } => { refs = lwInterfaceKinds(); },
+        AstNode::Scheme { value: v } => {
+            match v {
+                AstScheme::SigFn { ts: ts, ret: ret } => { refs = push(refs, 31); refs = push(refs, 2); },
+                AstScheme::SigDynamic => { },
+                AstScheme::SigValueError { n: n } => { refs = push(refs, 1); },
+            };
+        },
+    };
+    return refs;
+};
+
+fn lwEntryKinds(e: &AstEntry) -> List<Int> ~ {
+    refs = lwNoInts();
+    match e {
+        AstEntry::NamesEntry { n: n, ns: ns } => { refs = push(push(refs, 1), 22); },
+        AstEntry::CtorEntry { n: n, owner: o, fs: fs } => { refs = push(push(push(refs, 1), 1), 28); },
+        AstEntry::GenericEntry { n: n, ps: ps, fs: fs } => { refs = push(push(push(refs, 1), 22), 28); },
+        AstEntry::InvariantEntry { n: n, vs: vs } => { refs = push(push(refs, 1), 26); },
+        AstEntry::TraitEntry { n: n, fs: fs } => { refs = push(push(refs, 1), 33); },
+        AstEntry::FunctionEntry { n: n, ps: ps, sig: sig, ins: ins, outs: outs, term: term, exports: exports } => {
+            refs = push(push(push(push(push(push(push(refs, 1), 22), 12), 26), 26), 20), 27);
+        },
+        AstEntry::PairEntry { a: a, b: b } => { refs = push(push(refs, 1), 1); },
+        AstEntry::AssocEntry { a: a, b: b, origins: os } => { refs = push(push(push(refs, 1), 1), 38); },
+        AstEntry::ImplArgsEntry { a: a, b: b, ty: ty, args: args } => { refs = push(push(push(push(refs, 1), 1), 2), 32); },
+        AstEntry::ImplBoundsEntry { a: a, b: b, bs: bs } => { refs = push(push(push(refs, 1), 1), 34); },
+        AstEntry::TemplateEntry { n: n, bs: bs, fns: fns, ret: ret, ps: ps, sig: sig, ins: ins, outs: outs, term: term, body: body } => {
+            refs = push(push(push(push(push(refs, 1), 34), 37), 39), 22);
+            refs = push(push(push(push(push(refs, 12), 26), 26), 20), 24);
+        },
+        AstEntry::TypeEntry { n: n, ty: ty } => { refs = push(push(refs, 1), 2); },
+        AstEntry::SurfaceEntry { space: space, n: n } => { refs = push(refs, 1); },
+        AstEntry::BuiltinEntry { b: b, surface: surface, scheme: scheme, value: value } => { refs = push(push(push(push(refs, 21), 37), 41), 4); },
+    };
+    return refs;
+};
+
+fn lwInterfaceKinds() -> List<Int> ~ {
+    refs = push(push(push(push(push(lwNoInts(), 1), 19), 37), 37), 37);
+    refs = push(push(push(push(push(refs, 37), 37), 37), 37), 37);
+    refs = push(push(push(push(push(refs, 37), 37), 37), 22), 22);
+    refs = push(push(push(push(push(refs, 22), 24), 24), 22), 37);
+    return push(refs, 37);
 };
 
 // The structs, enums and traits a module declares, wherever it declares them

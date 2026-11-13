@@ -240,7 +240,6 @@ groupWeight name = maybe 1 id (lookup name weights)
         , ("testConnectives", 1)
         , ("testMirData", 51)
         , ("testMirLowered", 220)
-        , ("testMirDifferential", 220)
         , ("testMirEvalLists", 1)
         , ("testMirReader", 58)
         , ("testMirVerify:1/4", 31)
@@ -295,13 +294,12 @@ groupWeight name = maybe 1 id (lookup name weights)
 -- (run 42861235242, twice). These are estimates for admission, not a limit the processes are held to.
 -- The host validation groups, measured on the CI runner: the elaborator's reached 10.7 GiB, and a group beside it
 -- doing the preparation they share took 3.4 GiB, so the elaborator runs alone, and first.
--- testMirLowered and testMirDifferential, each alone at -N1 on a devserver: 8.1 to 10.4 GiB and 4.2 GiB; together beside
--- testMirSelfHosted:4/4 they ended a 16 GB runner.
+-- testMirLowered alone at -N1 on a devserver: 8.1 to 10.4 GiB; beside testMirSelfHosted:4/4 and another group it
+-- ended a 16 GB runner.
 estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
     | isSelfHosted name = 7680
     | name == "testMirLowered" = 10240
-    | name == "testMirDifferential" = 4352
     | name == "testHostValidation:elaborator" = memoryBudgetMiB
     | name == "testHostValidation:parser" = 4096
     | name == "testHostValidation:mirReader" = 3584
@@ -510,7 +508,7 @@ testScheduling names batches = TestList "testScheduling"
         testAssertTrue (all (\(original, split) ->
             if groupName original `elem` ["testAstData", "testParser", "testAstReader"] then
                 let label = case groupName original of
-                        "testAstData" -> "whole parsed and elaborated source corpus"
+                        "testAstData" -> "whole parsed and lowered source corpus"
                         "testAstReader" -> "whole corpus native round trip"
                         _ -> "whole corpus parity"
                     chunks batch = [last path | path <- leafPaths batch, label `elem` path]

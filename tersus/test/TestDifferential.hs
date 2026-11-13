@@ -3,19 +3,26 @@ module TestDifferential (testDifferential) where
 import AstData (writeBuiltinTable)
 import BuiltinTable (builtinTable)
 import Compile (parseWithEquality)
-import Data.List (isInfixOf)
+import Data.Char (ord)
+import Data.List (isInfixOf, isPrefixOf)
+import DataCodec (typeTokens)
+import Lowering (lowerAccepted)
+import MirEval (Outcome (..), RunEnv (..), runProgramEnv)
 import Modules (ModuleId (..))
+import qualified Modules as Mod
+import Numeric (showHex)
+import qualified PackageCompile as Package
+import Pretty (renderType)
+import PreludeSource (elaboratePackageFiles)
+import qualified Syntax as S
+import Types
 import Differential
 import ElaborateRequest
-import MirLower (lowerElaborated)
-import Syntax (Elaborated (..))
 import TestData (typeCheckSources)
 import TestHarness
-import Compile (elaborateStatements)
 import qualified Data.ByteString.Char8 as B
-import ElaboratorTool (runElaboratorRaw, sourceElaborator, sourceElaboratorExecutable)
+import ElaboratorTool (frontendToolFailure, runElaboratorRaw, sourceElaborator, sourceElaboratorExecutable)
 import Compile (sourceRequest)
-import Types (Type (..))
 import Utils
 
 -- The compiler's elaborator behind the text protocol agrees with itself on the requests of a package, of the compiler
@@ -32,7 +39,7 @@ protocolAgreement = do
         [] -> Just "no requests"
         (unit, modu, o) : _ -> Just (show unit ++ " " ++ modu ++ ": " ++ show o)
 
--- A candidate that gives one expression another type, or a refusal other words, or does not handle the program,
+-- A candidate that gives a local of the MIR another type, or a refusal other words, or does not handle the program,
 -- is not counted as agreeing
 mutationControls :: IO TestResult
 mutationControls = do
@@ -50,8 +57,11 @@ mutationControls = do
   where
     perturbed change asked = mapResult (map (fmap change)) <$> throughText asked
     retype response = case response of
-        Accepted (Elaborated stmts (t : ts)) i ls -> Accepted (Elaborated stmts ((if t == TBool then TInt else TBool) : ts)) i ls
+        Accepted i ls (MirLowered unit) -> Accepted i ls (MirLowered (retypeFirst unit))
         other -> other
+    retypeFirst unit = case break (\l -> B.pack "local " `B.isPrefixOf` l && B.pack " int" `B.isSuffixOf` l) unit of
+        (before, l : after) -> before ++ B.take (B.length l - 3) l <> B.pack "bool" : after
+        _ -> unit
     reword response = case response of
         Refused m -> Refused (m ++ "!")
         other -> other
@@ -59,29 +69,6 @@ mutationControls = do
         [] -> Nothing
         o : _ -> Just (name ++ ": " ++ show o)
     atLeastOne name results ok = if any (\(_, _, o) -> ok o) results then Nothing else Just (name ++ ": no request was caught")
-
--- The lowering takes exactly the expression types the elaboration gives, in their order: one more or one fewer is
--- refused, and two in the wrong order give another program (not every pair would: some types the lowering takes
--- leave no trace in what it writes)
-visitOrder :: TestResult
-visitOrder = case parseWithEquality "x = [true]; n = 3; return n;" of
-    Left e -> Just e
-    Right program -> case elaborateStatements program of
-        Error e -> Just e
-        Ok (Elaborated stmts types) -> firstFailure
-            [ case lowerElaborated (Elaborated stmts types) of
-                Error e -> Just e
-                Ok _ -> Nothing
-            , testAssertErrorContains "never reached" (lowerElaborated (Elaborated stmts (types ++ [TInt])))
-            , testAssertErrorContains "ran out of expression types" (lowerElaborated (Elaborated stmts (drop 1 types)))
-            , case [i | (i, (a, b)) <- zip [0 ..] (zip types (drop 1 types)), a /= b] of
-                [] -> Just "no two neighbouring types differ"
-                i : _ ->
-                    let swapped = take i types ++ [types !! (i + 1), types !! i] ++ drop (i + 2) types
-                     in if show (lowerElaborated (Elaborated stmts swapped)) == show (lowerElaborated (Elaborated stmts types))
-                            then Just "the lowering did not notice two types in the wrong order"
-                            else Nothing
-            ]
 
 -- A module's request and response read back as written, and malformed ones are refused
 protocolRoundTrip :: IO TestResult
@@ -96,7 +83,7 @@ protocolRoundTrip = do
     resultList r = case r of
         Ok a -> Right a
         Error e -> Left e
-    withLibraries responses = take 1 [Accepted e i ["types", "clone"] | Accepted e i _ <- responses]
+    withLibraries responses = take 1 [Accepted i ["types", "clone"] m | Accepted i _ m <- responses]
     malformed rq = case (writeRequest rq, writeResponse (sourceElaborator rq)) of
         (Ok request, Ok response) ->
             let refused name r = case r of
@@ -127,9 +114,9 @@ protocolRoundTrip = do
                         (Error e, _) -> Just e
                         (_, Error e) -> Just e
                     , refused "a response with no interface line" (readResponse (unlines (takeWhile (\l -> take 9 l /= "interface") (lines response))))
-                    , case [(e, i) | Accepted e i _ <- [sourceElaborator rq]] of
+                    , case [(i, m) | Accepted i _ m <- [sourceElaborator rq]] of
                         [] -> Just "the request was not accepted"
-                        (e, i) : _ -> case writeResponse (Accepted e i ["types", "clone"]) of
+                        (i, m) : _ -> case writeResponse (Accepted i ["types", "clone"] m) of
                             Error err -> Just err
                             Ok text -> refused "a libraries line with a wrong count" (readResponse (swapLine "libraries 2 \"types\" \"clone\"" "libraries 3 \"types\" \"clone\"" text))
                     , refused "a response with another header" (readResponse (swapLine "tersus-elaborated 1" "tersus-elaborated 2" response))
@@ -148,6 +135,125 @@ protocolRoundTrip = do
             Ok text -> case readResponse text `bindResult` writeResponse of
                 Error e -> Just e
                 Ok text' -> testAssertEq text' text
+
+-- A refusal, and a section whose count runs past the response, read back as written; a unit that does not read is
+-- the elaborator's failure as a tool, while a refusal to lower is the lowering's error in its words
+mirSection :: TestResult
+mirSection = case sourceElaborator (Request (ModuleId "main" Nothing) False False NoInterface [] [] [] [[S.Return (S.Val (S.VInt 0))]]) of
+    Accepted iface libs _ ->
+        let refusal = "a \"quoted\" refusal"
+         in case writeResponse (Accepted iface libs (MirRefused refusal)) of
+                Error err -> Just err
+                Ok text -> firstFailure
+                    [ case readResponse text of
+                        Ok (Accepted _ _ (MirRefused m)) | m == refusal -> Nothing
+                        other -> Just ("a refusal read back as " ++ take 400 (show other))
+                    , case readResponse (unlines (map overlong (lines text))) of
+                        Error err | "malformed mir section" `isInfixOf` err -> Nothing
+                        other -> Just ("an overlong mir section read as " ++ take 400 (show other))
+                    , testAssertEq (lowerAccepted (Accepted iface libs (MirRefused refusal))) (Error refusal)
+                    , case lowerAccepted (Accepted iface libs (MirLowered [B.pack "garbage"])) of
+                        Error err | frontendToolFailure err -> Nothing
+                        other -> Just ("a unit that does not read gave " ++ take 400 (show other))
+                    ]
+    other -> Just ("expected an accepted answer, got " ++ take 400 (show other))
+  where
+    overlong line
+        | "mir refused " `isPrefixOf` line = "mir 1000"
+        | otherwise = line
+
+-- The elaborator's own functions, run with a table as its program: the lowering's refusal words for types
+-- (Pretty.renderType) and for the names and types in a builtin (Haskell's show); arenas the lowering refuses (a reference
+-- out of its own arena, which joining would make another arena's record, a root of another kind, and an interface map
+-- holding entries of another kind) and one it reads; and a builtin's scheme renumbered
+elaboratorChecks :: IO TestResult
+elaboratorChecks = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles files) entry of
+    _ | length [() | (path, text) <- elaboratePackageFiles, path == entry, marker `elem` lines text] /= 1 -> Just "the elaborator's program does not start where expected"
+    Left err -> Just err
+    Right (Mod.PackageResult pkg) -> case Package.compileModulesLinked (Mod.packageSnapshot pkg) `bindResult` runProgramEnv RunEnv{envArgs = [], envInput = "", envFile = const Nothing} of
+        Error err -> Just err
+        Ok outcome ->
+            let expected = [line | ty <- types, line <- [show ty, renderType ty]] ++ map show strings ++ arenaLines
+             in firstFailure [if a == e then Nothing else Just ("expected " ++ e ++ ", got " ++ a) | (e, a) <- zip expected (lines (decodeUtf8 (outStdout outcome)) ++ repeat "(nothing)")]
+    Right _ -> Just "the fixture is standalone"
+  where
+    entry = "lib/elaborate/elaborate.tersus"
+    marker = "header = readLine();"
+    files = [(path, if path == entry then unlines (map imported (takeWhile (/= marker) (lines text))) ++ source else text) | (path, text) <- elaboratePackageFiles]
+    imported l
+        | "import data::codec::codec { " `isPrefixOf` l = "import data::codec::codec { typeAt, " ++ drop (length "import data::codec::codec { ") l
+        | "import elaborate::lowerout " `isPrefixOf` l = l ++ "\nimport elaborate::lowerbuild { lwShow, hsShowType };\nimport elaborate::lowerstate { fromCodecTy, newLowSt, renderTy };"
+        | "import data::ast::ast { " `isPrefixOf` l = "import data::ast::ast { AstEntries, AstInterface, AstName, AstNames, AstScheme, AstStatements, AstTypes, AstValue, AstValues, " ++ drop (length "import data::ast::ast { ") l
+        | otherwise = l
+    types =
+        [ TNamed "item" []
+        , TList (TParam "T")
+        , TFn [TNamed "item" []] TInt
+        , TArrayOf (TNamed "Pair" [ArgType TInt, ArgSize (SizeConst 3)]) (SizeParam "n")
+        , TBox (TNamed "caf\233" [])
+        , TForall ["n"] ["T"] (TFn [TParam "T"] (TArrayOf TInt (SizeParam "n")))
+        , TNamed "Map" [ArgType (TList (TWord True 8)), ArgSize SizeAny, ArgSize (SizeConst (-2))]
+        , TRef (TMutRef (TVar (-3)))
+        , TVariant "Some"
+        ]
+    strings = ["plain", "a\"b\\c", "caf\233", "\233" ++ "1", "\SO" ++ "H", "\DEL\t\1" ++ "2", "\128\2047"]
+    source =
+        unlines $
+            [ "fn wordsLine(s: String) -> Int { n = s.print(); return n + \"\\n\".print(); };"
+            , "fn wordsShown(data: String) -> Int ~ {"
+            , "    tokens = tokenize(&data);"
+            , "    if !tokens.ok || size(tokens.value) = 0 { return wordsLine(\"(no tokens)\"); };"
+            , "    ty = typeAt(&tokens.value, 0);"
+            , "    if !ty.ok { return wordsLine(\"(no type)\"); };"
+            , "    n = wordsLine(hsShowType(clone(ty.value), 0));"
+            , "    ls = fromCodecTy(newLowSt(0), &ty.value);"
+            , "    return n + wordsLine(renderTy(&ls, ls.ty));"
+            , "};"
+            , "words = 0;"
+            ]
+                ++ ["words = words + wordsShown(" ++ literal (unwords (typeTokens ty)) ++ ");" | ty <- types]
+                ++ ["text = " ++ literal text ++ "; words = words + wordsLine(lwShow(&text));" | text <- strings]
+                ++ arenaSource
+                ++ ["return 0;"]
+    -- (the module's arena: an empty program; record 1 and 2 are a Value and a Values)
+    arenaSource =
+        [ "fn arenaOf(stage: String, nodes: List<AstNode>, root: Int) -> AstProgram ~ { return AstProgram { stage: stage, nodes: nodes, root: root }; };"
+        , "fn lowered(ifaces: List<AstProgram>) -> Int ~ {"
+        , "    nodes = push(push(push([], AstNode::Name { value: AstName::End }), AstNode::Value { value: AstValue::VBool { b: true } }), AstNode::Values { value: AstValues::End });"
+        , "    nodes = push(push(push(nodes, AstNode::Statements { value: AstStatements::End }), AstNode::Types { value: AstTypes::End }), AstNode::Elaborated { value: AstElaborated { statements: 3, types: 4 } });"
+        , "    m = lowerUnit(arenaOf(\"elaborated\", nodes, 5), &ifaces, arenaOf(\"builtins\", push([], AstNode::Entries { value: AstEntries::End }), 0));"
+        , "    if m.ok { return wordsLine(\"lowered\"); };"
+        , "    return wordsLine(clone(m.msg));"
+        , "};"
+        , "fn interfaceWithTypes(pair: Bool) -> AstProgram ~ {"
+        , "    nodes = push(push(push([], AstNode::Name { value: AstName::End }), AstNode::OptName { value: AstOptName::NoName }), AstNode::Entries { value: AstEntries::End });"
+        , "    nodes = push(push(push(nodes, AstNode::Names { value: AstNames::End }), AstNode::Statements { value: AstStatements::End }), AstNode::Entry { value: AstEntry::PairEntry { a: 0, b: 0 } });"
+        , "    nodes = push(nodes, AstNode::Entries { value: AstEntries::Cons { head: 5, tail: 2 } });"
+        , "    types = 2;"
+        , "    if pair { types = 6; };"
+        , "    nodes = push(nodes, AstNode::Interface { value: AstInterface { pkg: 0, modu: 1, types: types, ctors: 2, generics: 2, invariants: 2, traits: 2, traitParams: 2, functions: 2, impls: 2, assoc: 2, implArgs: 2, implBounds: 2, copies: 3, linear: 3, drops: 3, axioms: 4, proofs: 4, externs: 3, templates: 2, companions: 2 } });"
+        , "    return arenaOf(\"interface\", nodes, 7);"
+        , "};"
+        , "words = words + lowered(push([], arenaOf(\"interface\", push([], AstNode::Values { value: AstValues::Cons { head: 1, tail: 2 } }), 0)));"
+        , "words = words + lowered(push([], arenaOf(\"interface\", push([], AstNode::Name { value: AstName::End }), 0)));"
+        , "words = words + lowered(push([], interfaceWithTypes(true)));"
+        , "words = words + lowered(push([], interfaceWithTypes(false)));"
+        , "scheme = remapNode(AstNode::Scheme { value: AstScheme::SigFn { ts: 0, ret: 1 } }, push(push([], 5), 6));"
+        , "if scheme is AstNode::Scheme && (scheme as AstNode::Scheme).value is AstScheme::SigFn { f = (scheme as AstNode::Scheme).value as AstScheme::SigFn; words = words + wordsLine(catStrings(catStrings(intText(f.ts), \" \"), intText(f.ret))); };"
+        ]
+    arenaLines =
+        [ "Lowering: an interface is malformed at record 0"
+        , "Lowering: an interface has a root of another kind"
+        , "Lowering: an interface has a map or set that is out of order or holds entries of another kind"
+        , "lowered"
+        , "5 6"
+        ]
+    literal text = "\"" ++ concatMap escape text ++ "\""
+    escape c
+        | c == '"' = "\\\""
+        | c == '\\' = "\\\\"
+        | ord c >= 32 && ord c < 127 = [c]
+        | otherwise = "\\u{" ++ showHex (ord c) "" ++ "}"
 
 -- A load request with a section malformed gets no answer: the executable exits saying it is not a request
 malformedLoads :: IO TestResult
@@ -206,8 +312,9 @@ testDifferential :: Test
 testDifferential = TestList "testDifferential"
     [ TestCase "requests and responses read back as written" protocolRoundTrip
     , TestCase "a candidate's mistakes are not agreements" mutationControls
-    , testCase "the lowering takes exactly the elaborated expression types" visitOrder
     , TestCase "the text protocol loses nothing" protocolAgreement
     , testCase "functions with bounds of the libraries in front of a program are checked too" checkedStatements
     , TestCase "malformed load requests are not answered" malformedLoads
+    , testCase "the mir section reads back, and a unit that does not read is a tool failure" mirSection
+    , TestCase "the elaborator's refusal words, arena checks and renumbering" elaboratorChecks
     ]

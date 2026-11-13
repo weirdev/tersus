@@ -364,17 +364,17 @@ testTermination =
               case parseStatementBlock "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right stmts -> case elaborateStatements stmts of
-                    Ok (Elaborated [_, While _ _ (Just (Counting _)) _] _) -> Nothing
+                    Ok lowered | [Just (Counting _)] <- loopTerminations lowered -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , case parseStatementBlock (tree ++ "t = Box::new(Tree::Leaf); while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; };") of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right stmts -> case elaborateStatements stmts of
-                    Ok (Elaborated [_, _, While _ _ (Just (Parts _)) _] _) -> Nothing
+                    Ok lowered | [Just (Parts _)] <- loopTerminations lowered -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , case parseStatementBlock "fn f(n: Int) -> Int shrinks n { return 0; };" of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right stmts -> case elaborateStatements stmts of
-                    Ok (Elaborated [Assign _ (Val (VFunct _ _ _ (NativeFunct _ (Just (Counting _)) _) _))] _) -> Nothing
+                    Ok lowered | Just f <- Map.lookup "f" (M.progFunctions (M.lowProgram lowered)), Just (Counting _) <- M.specTermination (M.fnSpec f) -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , parseValidateFailProgramHelper "x = [1]; while x = x shrinks x { x = x; };" "Loop variant does not shrink: x"
             , parseValidateFailProgramHelper "fn f(b: Bool) -> Int shrinks b { return 0; };" "shrinks needs an Int, an enum or a struct, got Bool"
@@ -578,3 +578,7 @@ bothEdgesOfATestIntoOneBlock = case lowerSource True "enum E { A, B, C }; fn f(e
         jumpOnly b = case Map.lookup b (M.fnBlocks fn) of
             Just (M.BasicBlock [] (M.Goto target)) -> Just target
             _ -> Nothing
+
+-- What each loop of a program's main function says shrinks
+loopTerminations :: M.Lowered -> [Maybe Termination]
+loopTerminations lowered = [t | M.LoopSpec _ t _ _ <- Map.elems (M.specLoops (M.fnSpec (M.progMain (M.lowProgram lowered))))]

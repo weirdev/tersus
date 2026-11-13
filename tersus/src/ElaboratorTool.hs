@@ -6,6 +6,7 @@ module ElaboratorTool
     , runElaboratorRaw
     , nativeElaborator
     , frontendToolFailure
+    , toolFailurePrefix
     , bootstrapElaborator
     , sourceElaborator
     , sourceElaboratorExecutable

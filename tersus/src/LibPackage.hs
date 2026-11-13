@@ -9,7 +9,6 @@ module LibPackage
     , libSelection
     , libCatalog
     , stripDeclaredFromUnits
-    , withoutReplacedEq
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
@@ -26,7 +25,6 @@ import MirMoves (finishLowered)
 import Modules (librarySources)
 import PackageData (ModuleId (..), renderModuleId, resolverFromFiles)
 import PreludeSource (libModules, nativeStorageModules)
-import Syntax (Statement (..))
 import Utils (Result (..), bindResult)
 
 -- The implicit libraries and native storage helpers share one compiler-owned package, read and elaborated by the
@@ -66,9 +64,8 @@ compiledLibraries loader = case loader (LoadRequest LoadLibraries False (resolve
     go (LibraryAnswer name imports _ response : rest) pkg natives failure =
         let moduId = libModuleId name
             inModule err = "in lib module " ++ renderModuleId moduId ++ ": " ++ err
-            depIfaces = [libInterfaces pkg Map.! dep | dep <- imports, Map.member dep (libInterfaces pkg)]
          in case response of
-                Accepted _ (Just iface) _ -> case lowerAccepted depIfaces response `bindResult` finishLowered of
+                Accepted (Just iface) _ _ -> case lowerAccepted response `bindResult` finishLowered of
                     Error err -> failed pkg (inModule err)
                     Ok program
                         | name `elem` nativeStorageModules -> go rest pkg ((moduId, iface, program) : natives) failure
@@ -78,7 +75,7 @@ compiledLibraries loader = case loader (LoadRequest LoadLibraries False (resolve
                             , libOrder = name : libOrder pkg
                             , libImports = Map.insert name imports (libImports pkg)
                             } natives failure
-                Accepted _ Nothing _ -> failed pkg (inModule "the elaborator gave no interface")
+                Accepted Nothing _ _ -> failed pkg (inModule "the elaborator gave no interface")
                 Refused err -> failed pkg (inModule err)
                 RefusedInterface err -> failed pkg err
                 Unresolved err -> failed pkg err
@@ -140,15 +137,6 @@ stripDeclaredFromUnits declared units = map strip units
 libCatalog :: LibPackage -> [Library]
 libCatalog pkg = [Library name (Map.findWithDefault [] name (libImports pkg)) iface | name <- libOrder pkg, Just iface <- [Map.lookup name (libInterfaces pkg)]]
 
-withoutReplacedEq :: [Statement] -> [ModuleInterface] -> [ModuleInterface]
-withoutReplacedEq statements ifaces
-    | any declaresEq statements = filter ((/= libModuleId "eq") . ifModule) ifaces
-    | otherwise = ifaces
-  where
-    declaresEq stmt = case stmt of
-        TraitDef "Eq" _ _ -> True
-        _ -> False
-
 libDependencyClosure :: LibPackage -> [String] -> [String]
 libDependencyClosure pkg pending = go pending []
   where
@@ -157,13 +145,10 @@ libDependencyClosure pkg pending = go pending []
         | name `elem` done = go rest done
         | otherwise = go (Map.findWithDefault [] name (libImports pkg) ++ rest) (done ++ [name])
 
--- The interfaces and lowered units of the libraries selected for a module, closed over what they import (the list and
--- Box types only when selected), in the libraries' order, which the linked program's ghost statements follow
-libSelection :: LibPackage -> [String] -> ([ModuleInterface], [(ModuleId, M.Program)])
+-- The lowered units of the libraries selected for a module, closed over what they import (the list and Box types only
+-- when selected), in the libraries' order, which the linked program's ghost statements follow
+libSelection :: LibPackage -> [String] -> [(ModuleId, M.Program)]
 libSelection pkg names =
     let wanted = [name | name <- libDependencyClosure pkg names, name /= "types" || "types" `elem` names]
-        ordered = [name | name <- libOrder pkg, name `elem` wanted]
-     in ( [libInterfaces pkg Map.! name | name <- ordered]
-        , [(libModuleId name, libPrograms pkg Map.! name) | name <- ordered]
-        )
+     in [(libModuleId name, libPrograms pkg Map.! name) | name <- libOrder pkg, name `elem` wanted]
 

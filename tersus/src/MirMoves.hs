@@ -634,7 +634,7 @@ accessExcept except cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs +
             else if q == m
                 then label ++ " was moved" ++ at mpos ++ " and cannot be used again: write clone(" ++ written ++ ") where it is moved to keep it"
                 else label ++ " was moved" ++ at mpos ++ ", and " ++ describe cx q ++ " is a part of it or has it as a part: write clone(" ++ written ++ ") where it is moved to keep it"
-    -- (the pack of a variadic function is moved only by a loop that takes its elements: MirLower.lowerPackLoop)
+    -- (the pack of a variadic function is moved only by a loop that takes its elements: lowerPackLoop in lib/elaborate/lower.tersus)
     packLocal r = isPackRoot cx r
     taking = role == Consume && not (isCopy cx l)
     moveErrs

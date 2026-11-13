@@ -8,10 +8,10 @@ import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, t
 import elaborate::lowerexpr { finishInto, lowerCondition, lowerLast, lowerOperand, rvPend };
 import elaborate::lowerplace { lowerDerefPlace };
 
-// The lowering of a checked module to the MIR (MirLower.lowerRaw): control flow becomes blocks that jump, nested
+// The lowering of a checked module to the MIR: control flow becomes blocks that jump, nested
 // expressions become temporaries, nested functions are lifted to the top, and the scopes that decide which variable an
 // assignment means are resolved to numbered locals. Every local and temporary has the type the elaborator gave its
-// expression, taken in the order MirLower visits them (claim).
+// expression, taken in the order the lowering visits them (claim).
 
 // (after a return nothing runs: the expression types of what follows are taken and dropped)
 fn lowerStatements(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
@@ -358,7 +358,7 @@ fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: 
     return openBlock(ls, exit);
 };
 
-// A loop over the pack of a variadic function (MirLower.lowerPackLoop), which no copy keeps: each unrolls it (MirPacks). It is
+// A loop over the pack of a variadic function, which no copy keeps: each unrolls it (MirPacks). It is
 // a counting loop with no LoopSpec; its element is an element of the pack read at the index, or, for a loop that takes the
 // elements, a fresh value after the pack is moved before the loop.
 fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName: String, packName: String, lo: Int, hi: Int, take: Bool, body: List<Int>) -> LowSt ~ {
