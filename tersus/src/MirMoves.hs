@@ -177,12 +177,18 @@ type Pos = Maybe (Int, Int)
 type Loan = (Place, Bool, Pos)
 
 data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place], stFieldLoans :: Map (Local, Variable) [Place], stConst :: Map Local Integer, stFnAlias :: Map Local Name}
+    deriving (Eq)
 
 emptySt :: St
 emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
 joinSt :: St -> St -> St
-joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith (++) (stExtraLoans a) (stExtraLoans b)) (Map.unionWith (++) (stFieldLoans a) (stFieldLoans b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stConst a) (stConst b))) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v])
+joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith unionPlaces (stExtraLoans a) (stExtraLoans b)) (Map.unionWith unionPlaces (stFieldLoans a) (stFieldLoans b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stConst a) (stConst b))) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v])
+
+-- (only what is new is appended, so that joining a state that is already in a join changes nothing: the fixpoint of
+-- checkFunction skips a block whose predecessors' states have not changed)
+unionPlaces :: [Place] -> [Place] -> [Place]
+unionPlaces xs ys = xs ++ [y | y <- ys, y `notElem` xs]
 
 sameShape :: St -> St -> Bool
 sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.keysSet (stLoans a) == Map.keysSet (stLoans b) && Map.keysSet (stExtraLoans a) == Map.keysSet (stExtraLoans b) && Map.keysSet (stFieldLoans a) == Map.keysSet (stFieldLoans b)
@@ -265,37 +271,40 @@ termUses term = [l | o <- operands, Just l <- [operandLocal o]]
 -- Where each local is still going to be read: for every block, the set live after each of its statements and at
 -- its end. Computed backwards from the ends of the function, as the usual liveness of locals.
 liveness :: Function -> (Map BlockId [Set Local], Map BlockId (Set Local))
-liveness fn = fixpoint (Map.empty, Map.empty, Map.empty)
+liveness fn = go (Map.keysSet blocks) Map.empty Map.empty Map.empty
   where
     blocks = fnBlocks fn
+    predecessors = Map.fromListWith (++) [(s, [b]) | (b, BasicBlock _ term) <- Map.toList blocks, s <- successors term]
     -- (an assignment through a reference uses the reference locals that are to its root, which the place has
     -- already been resolved away from, so they are uses of the statement too)
     borrowRefs = Map.fromListWith (++) [(root, [d]) | BasicBlock stmts _ <- Map.elems blocks, Assign d (Borrow root _ _) <- stmts]
     usesOf stmt@(AssignRef root _ _) = stmtUses stmt ++ Map.findWithDefault [] root borrowRefs
     usesOf stmt = stmtUses stmt
-    fixpoint state@(after, liveIn, liveOut)
-        | after == after' && liveIn == liveIn' && liveOut == liveOut' = (after', liveOut')
-        | otherwise = fixpoint (after', liveIn', liveOut')
-      where
-        (after', liveIn', liveOut') = foldl step state (Map.keys blocks)
-        step (accAfter, accIn, accOut) b = case Map.lookup b blocks of
-            Nothing -> (accAfter, accIn, accOut)
+    -- (the highest block first: lowering numbers blocks in program order, so liveness, which flows backwards, crosses a
+    -- block's successors before the block itself)
+    go pending after liveIn liveOut = case Set.maxView pending of
+        Nothing -> (after, liveOut)
+        Just (b, rest) -> case Map.lookup b blocks of
+            Nothing -> go rest after liveIn liveOut
             Just (BasicBlock stmts term) ->
-                let liveEnd = Set.unions [Map.findWithDefault Set.empty s accIn | s <- successors term]
+                let liveEnd = Set.unions [Map.findWithDefault Set.empty s liveIn | s <- successors term]
                     termLive = Set.fromList (termUses term) `Set.union` (liveEnd `Set.difference` callDest term)
                     stmtAfter = scanBack termLive stmts
                     liveBefore = case (stmts, stmtAfter) of
                         (stmt : _, after0 : _) -> Set.fromList (usesOf stmt) `Set.union` (after0 `Set.difference` defOf stmt)
                         _ -> termLive
-                 in (Map.insert b stmtAfter accAfter, Map.insert b liveBefore accIn, Map.insert b liveEnd accOut)
-        callDest (Call _ _ d _) = Set.singleton d
-        callDest _ = Set.empty
-        defOf (Assign d _) = Set.singleton d
-        defOf (Peek d _) = Set.singleton d
-        defOf _ = Set.empty
-        scanBack liveAfterLast stmts = snd (foldl step (liveAfterLast, []) (reverse stmts))
-          where
-            step (liveAfter, acc) stmt = (Set.fromList (usesOf stmt) `Set.union` (liveAfter `Set.difference` defOf stmt), liveAfter : acc)
+                    pending'
+                        | liveBefore == Map.findWithDefault Set.empty b liveIn = rest
+                        | otherwise = foldr Set.insert rest (Map.findWithDefault [] b predecessors)
+                 in go pending' (Map.insert b stmtAfter after) (Map.insert b liveBefore liveIn) (Map.insert b liveEnd liveOut)
+    callDest (Call _ _ d _) = Set.singleton d
+    callDest _ = Set.empty
+    defOf (Assign d _) = Set.singleton d
+    defOf (Peek d _) = Set.singleton d
+    defOf _ = Set.empty
+    scanBack liveAfterLast stmts = snd (foldl step (liveAfterLast, []) (reverse stmts))
+      where
+        step (liveAfter, acc) stmt = (Set.fromList (usesOf stmt) `Set.union` (liveAfter `Set.difference` defOf stmt), liveAfter : acc)
 
 typeOf :: Cx -> Local -> Type
 typeOf cx l = maybe TInt localType (Map.lookup l (fnLocals (cxFn cx)))
@@ -344,12 +353,21 @@ checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b s
     -- (a permission given to the function, and not lent, is the function's to use)
     entry = emptySt{stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)])}
     isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)
-    ins = fixpoint (Map.singleton (BlockId 0) entry)
-    fixpoint known =
-        let outs = [(b, fst (runBlock cx b st block)) | (b, st) <- Map.toList known, Just block <- [Map.lookup b (fnBlocks fn)]]
-            reached = Map.fromListWith (flip joinSt) [(s, out) | (b, out) <- outs, Just block <- [Map.lookup b (fnBlocks fn)], s <- successors (blockTerminator block)]
-            known' = Map.unionWith joinSt known reached
-         in if Map.keysSet known' == Map.keysSet known && and (Map.elems (Map.intersectionWith sameShape known known')) then known else fixpoint known'
+    -- The fixpoint goes in rounds: each round joins every reached block's state with what its predecessors' states lead
+    -- to (in the order of the predecessors), and the first round that changes no block's shape ends it. It keeps rounds,
+    -- rather than joining as it goes, because a join keeps the record of the move that reaches it first, and a message
+    -- says where that move was. A block whose state a round leaves equal is not run again, and a block none of whose
+    -- predecessors was run is not joined again: the join is idempotent, so neither would change anything.
+    predecessors = Map.fromListWith (flip (++)) [(s, [b]) | (b, block) <- Map.toAscList (fnBlocks fn), s <- successors (blockTerminator block)]
+    ins = fixpoint (Map.singleton (BlockId 0) entry) Map.empty (Set.singleton (BlockId 0))
+    fixpoint known outs changed =
+        let ran = [(b, block) | b <- Set.toList changed, Just block <- [Map.lookup b (fnBlocks fn)]]
+            outs' = foldl' (\m (b, block) -> Map.insert b (fst (runBlock cx b (known Map.! b) block)) m) outs ran
+            touched = Set.fromList [s | (_, block) <- ran, s <- successors (blockTerminator block)]
+            reached s = foldl1 joinSt [out | p <- Map.findWithDefault [] s predecessors, Just out <- [Map.lookup p outs']]
+            joined = [(s, st) | s <- Set.toList touched, let st = maybe (reached s) (`joinSt` reached s) (Map.lookup s known), Map.lookup s known /= Just st]
+            known' = foldl' (\m (s, st) -> Map.insert s st m) known joined
+         in if and [maybe False (sameShape st) (Map.lookup s known) | (s, st) <- joined] then known else fixpoint known' outs' (Set.fromList (map fst joined))
 
 runBlock :: Cx -> BlockId -> St -> BasicBlock -> (St, [String])
 runBlock cx b st0 (BasicBlock stmts term) = (st2, reverse errs1 ++ errs2)

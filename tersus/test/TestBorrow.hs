@@ -1,5 +1,7 @@
 module TestBorrow (testBorrow) where
 
+import Data.List (intercalate)
+
 import Syntax
 import TestHarness
 
@@ -119,6 +121,8 @@ testBorrow =
                 , testCase "a field read out of a moved holder still freezes its place" (rejected "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; w2 = w; f = w2.last; xs = [99]; return *f;" "cannot be assigned while it is borrowed")
                 , testCase "a struct update keeps the fields it does not name" (runs "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; w2 = Window { first: &get(xs, 1), ..w }; f = w2.first; l = w2.last; return *f + *l;" (VInt 50))
                 , testCase "an update reference can be a field" (runs "struct W { r: &mut Int }; x = 1; w = W { r: &mut x }; *w.r = 41; return x;" (VInt 41))
+                , testCase "and is written through after the paths join" (runs "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; d = 0; if c > 0 { d = 1; } else { d = 2; }; p = w.r; *p = 41; q = *p; return q + d; }; return f(1);" (VInt 42))
+                , testCase "a holder of a reference is followed across many branches" (runs ("struct S { xs: List<Int>, n: Int }; struct W { r: &List<Int>, ys: List<Int> }; fn f(" ++ intercalate ", " ["p" ++ show k ++ ": Int" | k <- [0 .. 15 :: Int]] ++ ") -> Int { s = S { xs: [1, 2, 3], n: 4 }; w = W { r: &s.xs, ys: [7] }; " ++ concat ["if p" ++ show k ++ " > 0 { c" ++ show k ++ " = 1; } else { c" ++ show k ++ " = 2; }; " | k <- [0 .. 15 :: Int]] ++ "r = w.r; return size(*r); }; return f(" ++ intercalate ", " (replicate 16 "1") ++ ");") (VInt 3))
                 , testCase "a struct can hold a value that holds references" (runs "struct Window { first: &Int, last: &Int }; struct Outer { w: Window, n: Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; o = Outer { w: w, n: 1 }; f = o.w.first; return *f + o.n;" (VInt 11))
                 , testCase "a value that holds references can be given to a function" (runs "struct Window { first: &Int, last: &Int }; fn total(w: Window) -> Int { f = w.first; return *f; }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; return total(w);" (VInt 10))
                 , testCase "and put in a list" (runs "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; ws = push([], w); w0 = get(ws, 0); f = w0.first; return *f + size(ws);" (VInt 11))
