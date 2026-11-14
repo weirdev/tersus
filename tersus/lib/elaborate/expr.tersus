@@ -8,7 +8,7 @@ import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, em
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
 import elaborate::state { stubTraitParameter, forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
-import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
+import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, fnBoundCall, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
     return St { te: TE { node: node, types: push([], t) }, ..st };
@@ -441,6 +441,11 @@ fn inferCallDispatch(st: St, funct: Int, args: &List<Int>) -> St ~ {
             return callResolved(st, fname, &inferred);
         };
         if traitPath(&fname) { return traitCall(st, funct, pathOf(&fname), functionOf(&fname), args); };
+        if inScope(st, &fname) && !HashMap::contains(&st.fns, &fname) {
+            bound = fnBoundCall(st, funct, &fname, args);
+            if bound.status != 0 || bound.ok { return bound; };
+            st = bound;
+        };
     };
     if fex is AstExpression::Val && size(args) = 2 {
         key = headKey(st, funct);
