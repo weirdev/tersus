@@ -40,13 +40,11 @@ fn sameRecordsWithEnvs(a: &List<FullRecord>, an: &List<AstNode>, b: &List<FullRe
     for r in a { i = rowIndex(b, &r.name); if i < 0 || i >= size(b) || !sameRowWithEnvs(&r.tokens, an, &get(b, i).tokens, bn, ashared, bshared, common) { return false; }; };
     return true;
 };
-fn blockIndex(blocks: &List<FullBlock>, id: Int) -> Int ~ { i = 0; for b in blocks { if b.id = id { return i; }; i = i + 1; }; return 0 - 1; };
 fn sameFunction(a: &FullFunction, an: &List<AstNode>, b: &FullFunction, bn: &List<AstNode>, ashared: &List<List<Token>>, bshared: &List<List<Token>>, common: Bool) -> Bool ~ {
     if a.header != b.header || !sameRowWithEnvs(&a.env, an, &b.env, bn, ashared, bshared, common) || !sameRow(&a.spec, an, &b.spec, bn) || !sameRecords(&a.locals, an, &b.locals, bn) || !sameRecordsWithEnvs(&a.loops, an, &b.loops, bn, ashared, bshared, common) || size(a.blocks) != size(b.blocks) { return false; };
     for i in 0..size(a.blocks) {
-        x = get(a.blocks, i); other = blockIndex(&b.blocks, x.id);
-        if other < 0 || other >= size(b.blocks) { return false; }; y = get(b.blocks, other);
-        if size(x.lines) != size(y.lines) { return false; };
+        x = get(a.blocks, i); y = get(b.blocks, i);
+        if x.id != y.id || size(x.lines) != size(y.lines) { return false; };
         for j in 0..size(x.lines) { if j >= size(y.lines) || !sameRowWithEnvs(get(&x.lines, j), an, get(&y.lines, j), bn, ashared, bshared, common) { return false; }; };
     };
     return true;

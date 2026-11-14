@@ -3,7 +3,7 @@ import data::reader::reader { parseAstLines };
 import data::ast::ast { AstNode };
 import mir::full::full { FullRecord, FullBlock, FullFunction, FullProgram };
 import mir::full::tokens { argsEnd, integerAt, intsEnd, namesEnd, numberAt, operandsEnd, operandEnd, quotedAt, rvalueEnd, stepsEnd, textAt, tokenLine, typeEnd, word, wordIs, normalizeNumbers, normalizeTypes };
-import mir::full::records { EnvEntry, envEnd, envEntries, expandEnv, listItems, mapPayloadLine, payloadMatches, payloadSlots, uniqueEntries, orderEntries, envTokens };
+import mir::full::records { EnvEntry, envEnd, envEntries, expandEnv, listItems, mapPayloadLine, payloadMatches, payloadSlots, uniqueEntries, orderEntries, envTokens, keyOrder };
 import mir::full::write { mapProgramPayloads };
 
 fn noFunction() -> FullFunction ~ { return FullFunction { header: [], spec: [], env: [], locals: [], loops: [], blocks: [] }; };
@@ -159,8 +159,16 @@ fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry
     };
     end = recordAt(lines, at);
     if !wordIs(&end, 0, "end") || size(end) != 1 || !uniqueNumericRecords(&fun.locals) || !uniqueNumericRecords(&fun.loops) { return bad; };
-    ids = HashSet::new();
-    for b in &fun.blocks { if HashSet::contains(&ids, b.id) { return bad; }; ids = ids.insert(b.id); };
+    ids = HashSet::new(); keys = [];
+    for b in &fun.blocks {
+        if HashSet::contains(&ids, b.id) { return bad; }; ids = ids.insert(b.id);
+        keys = push(keys, String::fromInt(b.id));
+    };
+    blocks = [];
+    for i in keyOrder(&keys, true) {
+        if i >= 0 && i < size(fun.blocks) { blocks = push(blocks, clone(get(&fun.blocks, i))); };
+    };
+    fun = FullFunction { blocks: blocks, ..fun };
     return Parsed<FullFunction> { value: fun, pos: at + 1, ok: true };
 };
 fn uniqueNumericRecords(rows: &List<FullRecord>) -> Bool ~ {
