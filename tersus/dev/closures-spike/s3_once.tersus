@@ -1,0 +1,10 @@
+trait FnOnce0<R> {
+    fn callOnce(self: Self) -> R [{ }] [{ }];
+};
+struct TakeList { xs: List<Int> };
+impl FnOnce0<Int> for TakeList {
+    fn callOnce(self: Self) -> Int [{ }] [{ }] { return size(self.xs); };
+};
+fn runOnce<F: FnOnce0<Int>>(f: F) -> Int [{ }] [{ }] { return f.callOnce(); };
+xs = push(push([], 1), 2);
+return runOnce(TakeList { xs: xs });

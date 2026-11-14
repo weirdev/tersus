@@ -1,0 +1,10 @@
+trait Fn1<A, R> {
+    fn call(self: &Self, a: A) -> R [{ affirm a > 0; }] [{ affirm return > a; }];
+};
+struct Inc { n: Int };
+impl Fn1<Int, Int> for Inc {
+    fn call(self: &Self, a: Int) -> Int [{ }] [{ affirm return > a; }] { return a + 1; };
+};
+fn useIt<F: Fn1<Int, Int>>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f.call(x); };
+inc = Inc { n: 0 };
+return useIt(&inc, 5);
