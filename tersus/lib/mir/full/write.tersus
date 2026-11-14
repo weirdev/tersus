@@ -30,15 +30,15 @@ fn appendRecords(out: List<List<Token>>, rows: &List<FullRecord>) -> List<List<T
     for r in sortRecords(clone(rows)) { out = push(out, clone(r.tokens)); };
     return out;
 };
-fn functionLines(out: List<List<Token>>, fn: &FullFunction, main: Bool) -> List<List<Token>> ~ {
-    header = clone(fn.header);
+fn functionLines(out: List<List<Token>>, fun: &FullFunction, main: Bool) -> List<List<Token>> ~ {
+    header = clone(fun.header);
     if size(header) > 0 { if main { header = set(header, 0, word("main")); } else { header = set(header, 0, word("function")); }; };
-    out = push(push(push(out, header), clone(fn.spec)), clone(fn.env));
+    out = push(push(push(out, header), clone(fun.spec)), clone(fun.env));
     // Numeric maps cannot use the lexicographic order of their wire keys.
-    locals = clone(fn.locals); loops = clone(fn.loops);
+    locals = clone(fun.locals); loops = clone(fun.loops);
     out = appendNumericRecords(out, &locals); out = appendNumericRecords(out, &loops);
     blocks = [];
-    for b in &fn.blocks {
+    for b in &fun.blocks {
         next = []; placed = false;
         for old in &blocks { if !placed && b.id < old.id { next = push(next, clone(b)); placed = true; }; next = push(next, clone(old)); };
         if !placed { next = push(next, clone(b)); }; blocks = next;
@@ -132,32 +132,32 @@ fn emitFull(out: FullOutput) -> Int ~ {
     n = n + "data ".print() + String::fromInt(size(out.data.nodes) + 2).print(); writeByte(toByte(10));
     return n + 1 + printAst(&out.data);
 };
-fn mapFunctionPayloads(fn: FullFunction, map: &List<Int>) -> FullFunction ~ {
-    fn = FullFunction { spec: mapPayloadLine(fn.spec, map), ..fn };
+fn mapFunctionPayloads(fun: FullFunction, map: &List<Int>) -> FullFunction ~ {
+    fun = FullFunction { spec: mapPayloadLine(fun.spec, map), ..fun };
     loops = []; blocks = [];
-    for row in &fn.loops { loops = push(loops, FullRecord { tokens: mapPayloadLine(clone(row.tokens), map), ..row }); };
-    for b in &fn.blocks { lines = []; for row in &b.lines { lines = push(lines, mapPayloadLine(clone(row), map)); }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
-    return FullFunction { loops: loops, blocks: blocks, ..fn };
+    for row in &fun.loops { loops = push(loops, FullRecord { tokens: mapPayloadLine(clone(row.tokens), map), ..row }); };
+    for b in &fun.blocks { lines = []; for row in &b.lines { lines = push(lines, mapPayloadLine(clone(row), map)); }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
+    return FullFunction { loops: loops, blocks: blocks, ..fun };
 };
 fn mapProgramPayloads(p: FullProgram, map: &List<Int>) -> FullProgram ~ {
     invariants = []; functions = []; trailer = [];
     for row in &p.invariants { invariants = push(invariants, FullRecord { tokens: mapPayloadLine(clone(row.tokens), map), ..row }); };
-    for fn in &p.functions { functions = push(functions, mapFunctionPayloads(clone(fn), map)); };
+    for fun in &p.functions { functions = push(functions, mapFunctionPayloads(clone(fun), map)); };
     for row in &p.trailer { trailer = push(trailer, mapPayloadLine(clone(row), map)); };
     return FullProgram { invariants: invariants, functions: functions, entry: mapFunctionPayloads(p.entry, map), trailer: trailer, ..p };
 };
-fn emptyFunctionMetadata(fn: FullFunction, empty: Int) -> FullFunction ~ {
+fn emptyFunctionMetadata(fun: FullFunction, empty: Int) -> FullFunction ~ {
     spec = push(push(push(push(push(push(push([], word("spec")), word("requires")), intToken(empty)), word("ensures")), intToken(empty)), word("termination")), word("none"));
     spec = push(push(push(push(push(push(spec, word("writes")), intToken(0)), word("mutparams")), intToken(0)), word("from")), intToken(0));
     env = push(push(push([], word("env")), word("none")), intToken(0));
     blocks = [];
-    for b in &fn.blocks { lines = []; for row in &b.lines { if !wordIs(row, 0, "ghost") { lines = push(lines, clone(row)); }; }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
-    return FullFunction { spec: spec, env: env, loops: [], blocks: blocks, ..fn };
+    for b in &fun.blocks { lines = []; for row in &b.lines { if !wordIs(row, 0, "ghost") { lines = push(lines, clone(row)); }; }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
+    return FullFunction { spec: spec, env: env, loops: [], blocks: blocks, ..fun };
 };
 fn clearMetadata(p: FullProgram) -> FullProgram ~ {
     end = size(p.arena); nodes = push(p.arena, AstNode::Statements { value: AstStatements::End });
     empty = size(nodes); nodes = push(nodes, AstNode::Statement { value: AstStatement::Block { xs: end } });
     functions = [];
-    for fn in &p.functions { functions = push(functions, emptyFunctionMetadata(clone(fn), empty)); };
+    for fun in &p.functions { functions = push(functions, emptyFunctionMetadata(clone(fun), empty)); };
     return FullProgram { arena: nodes, functions: functions, entry: emptyFunctionMetadata(p.entry, empty), ..p };
 };
