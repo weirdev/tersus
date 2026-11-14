@@ -936,6 +936,37 @@ fn isFunctionValue(src: &List<AstNode>, e: Int) -> Bool ~ {
     return v >= 0 && isFunct(src, v);
 };
 
+// The variable an operand reads, through fields, elements, variants and Box contents of it, or "" for another operand
+fn viewedVariable(src: &List<AstNode>, e: Int) -> String ~ {
+    x = exprAt(src, e);
+    if x is AstExpression::Var { return nameText(src, (x as AstExpression::Var).n); };
+    if x is AstExpression::Ascribed { return viewedVariable(src, (x as AstExpression::Ascribed).e); };
+    if !(x is AstExpression::F) { return ""; };
+    call = x as AstExpression::F;
+    b = builtinOfExpr(src, call.f);
+    args = listItems(src, call.xs);
+    if b < 0 || size(args) = 0 { return ""; };
+    bi = biOf(src, b);
+    projection = bi.kind = 2 || bi.kind = 4 || bi.kind = 5 || isPrim(&bi, "UnBox") || isPrim(&bi, "Get") || isPrim(&bi, "First") || isPrim(&bi, "Last");
+    if !projection { return ""; };
+    return viewedVariable(src, get(args, 0));
+};
+
+// Whether a later argument can change what an operand read, so that the call would not see the value it had. Only a
+// variable, or a field, element, variant or Box content of one, is left uncaptured, and only when the variable cannot
+// change before the call: a variable changes by an assignment, through a loan for updating, which is `&mut` of a place
+// naming it, or, for a parameter lent for updating, by being lent on. Any other operand is captured.
+fn mayChange(ls: &LowSt, src: &List<AstNode>, e: Int, rest: &List<Int>) -> Bool ~ {
+    var = viewedVariable(src, e);
+    if size(var.bytes) = 0 { return true; };
+    found = lookupBinding(ls, &var);
+    if found.found && found.b.isLocal && hasInt(&ls.bMutBorrowed, found.b.local) { return true; };
+    if hasText(&ls.bLent, &var) { return true; };
+    assigned = [];
+    for r in rest { assigned = assignedIn(src, r, assigned); };
+    return hasText(&assigned, &var);
+};
+
 // A copy of an operand made before the later arguments run (ls.op, ls.ty): for a parameter lent (reference 0 for
 // reading, 1 for updating), a borrow of the local instead, unless the local is already a reference
 fn captureOperand(ls: LowSt, reference: Int, o: Op, ty: Int) -> LowSt ~ {
@@ -984,7 +1015,7 @@ fn lowerOperands(ls: LowSt, src: &List<AstNode>, references: &List<Int>, args: &
             j = j + 1;
         };
         ls = anyEffects(ls, src, &rest);
-        if ls.yes {
+        if ls.yes && mayChange(&ls, src, e, &rest) {
             ls = captureOperand(ls, intAt(references, i), o, t);
             o = clone(ls.op);
             t = ls.ty;
@@ -994,4 +1025,218 @@ fn lowerOperands(ls: LowSt, src: &List<AstNode>, references: &List<Int>, args: &
         i = i + 1;
     };
     return LoweredOps { ls: ls, ops: ops, tys: tys };
+};
+
+// ---- names an expression or statements assign, lend or name ----
+
+// The variables an expression assigns or binds again
+fn assignedIn(src: &List<AstNode>, e: Int, out: List<String>) -> List<String> ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return out; };
+    x = exprAt(src, e);
+    if x is AstExpression::F {
+        call = x as AstExpression::F;
+        out = assignedIn(src, call.f, out);
+        for a in listItems(src, call.xs) { out = assignedIn(src, a, out); };
+        return out;
+    };
+    if x is AstExpression::IfExpr {
+        branch = x as AstExpression::IfExpr;
+        return assignedIn(src, branch.b, assignedIn(src, branch.a, assignedIn(src, branch.c, out)));
+    };
+    if x is AstExpression::BlockExpr {
+        block = x as AstExpression::BlockExpr;
+        for s in listItems(src, block.xs) { out = statementAssigned(src, s, out); };
+        return assignedIn(src, block.e, out);
+    };
+    if x is AstExpression::Ascribed { return assignedIn(src, (x as AstExpression::Ascribed).e, out); };
+    return out;
+};
+
+fn statementAssigned(src: &List<AstNode>, s: Int, out: List<String>) -> List<String> ~ {
+    if !(nodeIn(src, s) is AstNode::Statement) { return out; };
+    stmt = stmtAt(src, s);
+    if stmt is AstStatement::Assign {
+        a = stmt as AstStatement::Assign;
+        if isFunctionValue(src, a.e) { return out; };
+        return assignedIn(src, a.e, push(out, nameText(src, a.n)));
+    };
+    if stmt is AstStatement::Let {
+        l = stmt as AstStatement::Let;
+        return assignedIn(src, l.e, push(out, nameText(src, l.n)));
+    };
+    if stmt is AstStatement::AssignDeref {
+        d = stmt as AstStatement::AssignDeref;
+        return assignedIn(src, d.b, assignedIn(src, d.a, namesIn(src, d.a, out)));
+    };
+    if stmt is AstStatement::Return { return assignedIn(src, (stmt as AstStatement::Return).e, out); };
+    if stmt is AstStatement::Block {
+        for inner in listItems(src, (stmt as AstStatement::Block).xs) { out = statementAssigned(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::If {
+        branch = stmt as AstStatement::If;
+        out = assignedIn(src, branch.e, out);
+        for inner in listItems(src, branch.a) { out = statementAssigned(src, inner, out); };
+        for inner in listItems(src, branch.b) { out = statementAssigned(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::While {
+        w = stmt as AstStatement::While;
+        out = assignedIn(src, w.e, out);
+        for inner in listItems(src, w.xs) { out = statementAssigned(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::PackLoop {
+        pl = stmt as AstStatement::PackLoop;
+        out = push(push(out, nameText(src, pl.i)), nameText(src, pl.a));
+        for inner in listItems(src, pl.xs) { out = statementAssigned(src, inner, out); };
+        return out;
+    };
+    return out;
+};
+
+// Every variable an expression names
+fn namesIn(src: &List<AstNode>, e: Int, out: List<String>) -> List<String> ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return out; };
+    x = exprAt(src, e);
+    if x is AstExpression::Var { return push(out, nameText(src, (x as AstExpression::Var).n)); };
+    if x is AstExpression::F {
+        call = x as AstExpression::F;
+        out = namesIn(src, call.f, out);
+        for a in listItems(src, call.xs) { out = namesIn(src, a, out); };
+        return out;
+    };
+    if x is AstExpression::IfExpr {
+        branch = x as AstExpression::IfExpr;
+        return namesIn(src, branch.b, namesIn(src, branch.a, namesIn(src, branch.c, out)));
+    };
+    if x is AstExpression::BlockExpr {
+        block = x as AstExpression::BlockExpr;
+        for s in listItems(src, block.xs) { out = statementNames(src, s, out); };
+        return namesIn(src, block.e, out);
+    };
+    if x is AstExpression::Ascribed { return namesIn(src, (x as AstExpression::Ascribed).e, out); };
+    return out;
+};
+
+fn statementNames(src: &List<AstNode>, s: Int, out: List<String>) -> List<String> ~ {
+    if !(nodeIn(src, s) is AstNode::Statement) { return out; };
+    stmt = stmtAt(src, s);
+    if stmt is AstStatement::Assign {
+        a = stmt as AstStatement::Assign;
+        if isFunctionValue(src, a.e) { return out; };
+        return namesIn(src, a.e, push(out, nameText(src, a.n)));
+    };
+    if stmt is AstStatement::Let {
+        l = stmt as AstStatement::Let;
+        return namesIn(src, l.e, push(out, nameText(src, l.n)));
+    };
+    if stmt is AstStatement::AssignDeref {
+        d = stmt as AstStatement::AssignDeref;
+        return namesIn(src, d.b, namesIn(src, d.a, out));
+    };
+    if stmt is AstStatement::Return { return namesIn(src, (stmt as AstStatement::Return).e, out); };
+    if stmt is AstStatement::Block {
+        for inner in listItems(src, (stmt as AstStatement::Block).xs) { out = statementNames(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::If {
+        branch = stmt as AstStatement::If;
+        out = namesIn(src, branch.e, out);
+        for inner in listItems(src, branch.a) { out = statementNames(src, inner, out); };
+        for inner in listItems(src, branch.b) { out = statementNames(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::While {
+        w = stmt as AstStatement::While;
+        out = namesIn(src, w.e, out);
+        for inner in listItems(src, w.xs) { out = statementNames(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::PackLoop {
+        pl = stmt as AstStatement::PackLoop;
+        out = push(push(out, nameText(src, pl.i)), nameText(src, pl.a));
+        for inner in listItems(src, pl.xs) { out = statementNames(src, inner, out); };
+        return out;
+    };
+    return out;
+};
+
+// The variables a function's code lends for updating: every variable named in a place written after `&mut` (not in the
+// bodies of functions it defines, which are lowered with their own)
+fn lentNames(src: &List<AstNode>, stmts: &List<Int>) -> List<String> ~ {
+    out = [];
+    for s in stmts { out = lentInStatement(src, s, out); };
+    return out;
+};
+
+fn lentInStatement(src: &List<AstNode>, s: Int, out: List<String>) -> List<String> ~ {
+    if !(nodeIn(src, s) is AstNode::Statement) { return out; };
+    stmt = stmtAt(src, s);
+    if stmt is AstStatement::Assign {
+        a = stmt as AstStatement::Assign;
+        if isFunctionValue(src, a.e) { return out; };
+        return lentInExpression(src, a.e, out);
+    };
+    if stmt is AstStatement::Let { return lentInExpression(src, (stmt as AstStatement::Let).e, out); };
+    if stmt is AstStatement::AssignDeref {
+        d = stmt as AstStatement::AssignDeref;
+        return lentInExpression(src, d.b, lentInExpression(src, d.a, out));
+    };
+    if stmt is AstStatement::Return { return lentInExpression(src, (stmt as AstStatement::Return).e, out); };
+    if stmt is AstStatement::Block {
+        for inner in listItems(src, (stmt as AstStatement::Block).xs) { out = lentInStatement(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::If {
+        branch = stmt as AstStatement::If;
+        out = lentInExpression(src, branch.e, out);
+        for inner in listItems(src, branch.a) { out = lentInStatement(src, inner, out); };
+        for inner in listItems(src, branch.b) { out = lentInStatement(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::While {
+        w = stmt as AstStatement::While;
+        out = lentInExpression(src, w.e, out);
+        for inner in listItems(src, w.xs) { out = lentInStatement(src, inner, out); };
+        return out;
+    };
+    if stmt is AstStatement::PackLoop {
+        for inner in listItems(src, (stmt as AstStatement::PackLoop).xs) { out = lentInStatement(src, inner, out); };
+        return out;
+    };
+    return out;
+};
+
+fn lentInExpression(src: &List<AstNode>, e: Int, out: List<String>) -> List<String> ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return out; };
+    x = exprAt(src, e);
+    if x is AstExpression::F {
+        call = x as AstExpression::F;
+        args = listItems(src, call.xs);
+        b = builtinOfExpr(src, call.f);
+        lends = false;
+        if b >= 0 {
+            bi = biOf(src, b);
+            lends = isPrim(&bi, "BorrowMutOf");
+        };
+        if lends {
+            for a in &args { out = namesIn(src, a, out); };
+        } else {
+            out = lentInExpression(src, call.f, out);
+        };
+        for a in &args { out = lentInExpression(src, a, out); };
+        return out;
+    };
+    if x is AstExpression::IfExpr {
+        branch = x as AstExpression::IfExpr;
+        return lentInExpression(src, branch.b, lentInExpression(src, branch.a, lentInExpression(src, branch.c, out)));
+    };
+    if x is AstExpression::BlockExpr {
+        block = x as AstExpression::BlockExpr;
+        for s in listItems(src, block.xs) { out = lentInStatement(src, s, out); };
+        return lentInExpression(src, block.e, out);
+    };
+    if x is AstExpression::Ascribed { return lentInExpression(src, (x as AstExpression::Ascribed).e, out); };
+    return out;
 };
