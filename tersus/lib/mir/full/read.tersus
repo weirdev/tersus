@@ -117,13 +117,14 @@ fn lineOk(ts: &List<Token>) -> Bool ~ {
 };
 fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry>>) -> Parsed<FullFunction> ~ {
     bad = Parsed<FullFunction> { value: noFunction(), pos: 0, ok: false };
+    if start < 0 { return bad; };
     header = normalizeTypes(recordAt(lines, start)); spec = recordAt(lines, start + 1); env = recordAt(lines, start + 2);
     if !headerOk(&header) || !specOk(&spec) || !wordIs(&env, 0, "env") || envEnd(&env, 1) != size(env) { return bad; };
     e = expandEnv(&env, shared); if !e.ok { return bad; };
     fun = FullFunction { header: header, spec: spec, env: e.value, locals: [], loops: [], blocks: [] };
     at = start + 3;
     more = true;
-    while more ~ {
+    while more [{ affirm at >= 0; }] ~ {
         row = recordAt(lines, at);
         if !wordIs(&row, 0, "local") { more = false; } else {
             row = normalizeTypes(row); if !localOk(&row) { return bad; };
@@ -131,7 +132,7 @@ fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry
         };
     };
     more = true;
-    while more ~ {
+    while more [{ affirm at >= 0; }] ~ {
         row = recordAt(lines, at);
         if !wordIs(&row, 0, "loop") { more = false; } else {
             if !loopOk(&row) { return bad; };
@@ -140,7 +141,7 @@ fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry
         };
     };
     more = true;
-    while more ~ {
+    while more [{ affirm at >= 0; }] ~ {
         row = recordAt(lines, at);
         if !wordIs(&row, 0, "block") { more = false; } else {
             id = integerAt(&row, 1);
@@ -186,7 +187,7 @@ fn trailerOk(rows: &List<List<Token>>) -> Bool ~ {
     if size(rows) != 7 { return false; };
     for i in 0..6 {
         ts = recordAt(rows, i);
-        if !wordIs(&ts, 0, get(&labels, i)) || namesEnd(&ts, 1) != size(ts) { return false; };
+        if size(ts) < 2 || !wordIs(&ts, 0, get(&labels, i)) || namesEnd(&ts, 1) != size(ts) { return false; };
         seen = HashSet::new();
         for j in 2..size(ts) { n = textAt(&ts, j); if HashSet::contains(&seen, &n) { return false; }; seen = seen.insert(n); };
     };
@@ -237,6 +238,7 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
             if kind < phase || kind < 0 { return bad; };
             phase = kind;
             if kind = 5 {
+                if size(row) < 1 { return bad; };
                 env = push([], word("none"));
                 for i in 1..size(row) { env = push(env, clone(get(&row, i))); };
                 if envEnd(&env, 0) != size(env) { return bad; };
