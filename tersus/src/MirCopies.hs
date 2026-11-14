@@ -3,6 +3,8 @@
 module MirCopies
     ( makeCopies
     , copyName
+    , isCopyName
+    , opaqueKey
     , boundCallParts
     ) where
 
@@ -16,7 +18,7 @@ import Mir
 import MirPacks (Expanded (..), expandPack, isPackName)
 import Pretty (renderType)
 import StdLib (builtinFunct)
-import Syntax (Expression (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof)
+import Syntax (Expression (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof, parseImplCheckName)
 import qualified Types as T
 import Types (Arg (..), BuiltinFunct, Name, Rel (..), Size (..), Type (..), Variable, instanceName, pattern TBox, pattern TList, renderTypeForName, substitute, tupleGeneric, baseNameOf)
 import Utils (Result (..))
@@ -25,7 +27,8 @@ import Utils (Result (..))
 -- lowered once with its type parameters, and checked for moves once; the program names each copy it calls (`f[Int]`,
 -- an Instance record, progInstances). This makes each copy the program reaches from the generic MIR, by substitution:
 -- the types and the sizes its bounds name are put in, the references of the body are made the copies they name, and a
--- call through a bound (`<$param T as Tr>::g`) is made what a copy calls for the type (resolveBound). The functions with
+-- call through a bound (`<$param T as Tr>::g`) is made what a copy calls for the type (resolveBound): the check function of
+-- the type's impl (`Tr for O::g`), which has the trait's contracts, or what the language gives. The functions with
 -- bounds are then dropped, so nothing after this step sees a type parameter that a bound was on.
 
 -- A copy: the function with bounds, its type arguments and the values of the sizes its bounds name
@@ -34,6 +37,15 @@ type Key = (Name, [Type], [Integer])
 -- The name of a copy that no reference wrote (one made for a copy, from a body with type parameters)
 copyName :: Name -> [Type] -> [Integer] -> Name
 copyName f tys sizes = f ++ "[" ++ intercalate ", " (map renderTypeForName tys ++ map show sizes) ++ "]"
+
+-- The entry of a copy's environment that marks a local opaque to its proofs (no program writes a name with `$`)
+opaqueKey :: Local -> Name
+opaqueKey (Local n) = "$opaque " ++ show n
+
+-- Whether a function is a copy of a function with bounds (or lifted out of one), by the naming scheme copyName and the
+-- elaborator's Instance names share (no name a program writes has a `[`), and not the check function of an impl
+isCopyName :: Name -> Bool
+isCopyName name = '[' `elem` name && parseImplCheckName name == Nothing
 
 -- `<$param T as Tr>::g` as the parameter, the trait and the function
 boundCallParts :: Name -> Maybe (Variable, Name, Name)
@@ -291,9 +303,22 @@ transformFunction cx0 fn = do
         fn0 = fn{fnLocals = locals, fnReturns = fmap types (fnReturns fn)}
     (fn', st) <- runC (transformBody cx constants fn0) start
     let name = if null (cxCopy cx) then fnName fn else Map.findWithDefault (cxCopy cx) (fnName fn) (cxLifted cx)
+        -- (a value whose type in the body is a type parameter the copy fills is opaque to the copy's proofs: it knows of it
+        -- what the bounds promise, not what its type is, so copies that differ only in such types prove the same; the facts a
+        -- type gives reach into a part of it only through a reference or a Box (SelfHostedMir.typeSteps), so a value that
+        -- holds one there is opaque too)
+        filled ty = case ty of
+            TParam p -> types (TParam p) /= TParam p
+            TRef inner -> filled inner
+            TMutRef inner -> filled inner
+            TBox inner -> filled inner
+            _ -> False
+        opaque = if null (cxCopy cx) then [] else [l | (l, d) <- Map.toList (fnLocals fn), filled (localType d)]
+        spec'' = (fnSpec fn'){specEnv = Map.union (Map.fromList [(opaqueKey l, Copy l) | l <- opaque]) (specEnv (fnSpec fn'))}
     Right
         ( fn'
             { fnName = name
+            , fnSpec = spec''
             , fnTypeParams = if null (cxCopy cx) then fnTypeParams fn else [p | p <- fnTypeParams fn, p `notElem` map fst (cxTypes cx)]
             , fnLocals = Map.union (fnLocals fn') (Map.fromList (csLocals st))
             }
@@ -402,13 +427,24 @@ resolveBound cx constants fn library trait function t args dest
     | trait == "Clone", function == "clone" = traitClone cx constants fn t args dest
     | trait == "Eq", function == "eq", word t = return (Inline InlineEq)
     | trait == "Eq", function == "eq", Just e <- unsizedBoxed t, Map.member "eqBoxedArrays" (progBounded (cxProgram cx)) = (\n -> Named n []) <$> withBoundsCopy cx "eqBoxedArrays" [e]
-    | library, Just builtin <- sequenceBuiltin = return builtin
-    | Just owner <- ownerOfType (cxProgram cx) t, let callee = implName owner, Map.member callee (progFunctions (cxProgram cx)) = calling cx constants fn (Just t) callee args dest
+    | library, Just builtin <- sequenceBuiltin, sizedBoxedArray t = return builtin
+    | Just owner <- ownerOfType (cxProgram cx) t, let callee = implName owner, Map.member callee (progFunctions (cxProgram cx)) = checkOrSize callee >>= \check -> calling cx constants fn (Just t) check args dest
     | Just builtin <- sequenceBuiltin, trait `elem` ["Sequence", "Growable"] = return builtin
     | otherwise = failC ("internal compiler error: " ++ trait ++ "::" ++ function ++ " is called on a " ++ renderType t ++ " in " ++ cxCopy cx ++ ", which has no impl of it")
   where
     implName owner = "<" ++ owner ++ " as " ++ trait ++ ">::" ++ function
-    sequenceBuiltin = case (methodBuiltinByName function, sequenceLike t) of
+    -- (the library's size and get of a list, an array and a Box of an array stay their impls', which are the builtins: the
+    -- trait's contracts of those impls are written with the builtin size and get, so a copy relates what it knows of a call
+    -- of set or push through the trait to what it knows of size and get)
+    checkOrSize callee
+        | library, function `elem` ["size", "get"], sequenceType t = return callee
+        | otherwise = checkOf cx callee
+    -- (the prelude's impl for a Box of an array is for one of no size: a Box of an array of a size has no impl, and its
+    -- sequence functions are the builtins, which give a copy more than the trait promises)
+    sizedBoxedArray ty = case unref ty of
+        TBox (TArrayOf _ size) -> size /= SizeAny
+        _ -> False
+    sequenceBuiltin = case (methodBuiltinByName function, sequenceType t) of
         (Just b, True) | Just op <- listOpOf b -> Just (Inline (InlineBuiltin b op))
         _ -> Nothing
     word ty = case unref ty of
@@ -417,11 +453,6 @@ resolveBound cx constants fn library trait function t args dest
         TBool -> True
         TWord _ _ -> True
         TAddr _ -> True
-        _ -> False
-    sequenceLike ty = case unref ty of
-        TList _ -> True
-        TArrayOf _ _ -> True
-        TBox (TArrayOf _ _) -> True
         _ -> False
 
 -- The clone of a value of a type, as the elaborator writes clone(x) and x.clone() for a type it knows (cloneCall): a word,
@@ -439,8 +470,23 @@ traitClone cx constants fn t args dest = case unref t of
     ty | Just e <- unsizedBoxed ty, Map.member "cloneBoxedArray" (progBounded (cxProgram cx)) -> (\n -> Named n []) <$> withBoundsCopy cx "cloneBoxedArray" [e]
     TNamed base _ | Just _ <- tupleGeneric base -> return (Inline InlineCopy)
     ty -> case ownerOfType (cxProgram cx) ty of
-        Just owner | let callee = "<" ++ owner ++ " as Clone>::clone", Map.member callee (progFunctions (cxProgram cx)) -> calling cx constants fn (Just t) callee args dest
+        Just owner | let callee = "<" ++ owner ++ " as Clone>::clone", Map.member callee (progFunctions (cxProgram cx)) -> checkOf cx callee >>= \check -> calling cx constants fn (Just t) check args dest
         _ -> return (Inline InlineCopy)
+
+-- The check function of an impl's function, `Tr for O::g`, which a copy calls through a bound: it has the trait's contracts,
+-- so a copy knows of the call what the bound promises and nothing the impl promises more (the validator takes it as the
+-- impl's function, SelfHostedMir.validatorSymbol)
+checkOf :: Cx -> Name -> C Name
+checkOf cx callee = case companionOf callee of
+    Just check | Map.member check (progFunctions (cxProgram cx)) -> return check
+    _ -> failC ("internal compiler error: " ++ callee ++ " has no check function, which a call through a bound in " ++ cxCopy cx ++ " calls")
+
+sequenceType :: Type -> Bool
+sequenceType ty = case unref ty of
+    TList _ -> True
+    TArrayOf _ _ -> True
+    TBox (TArrayOf _ _) -> True
+    _ -> False
 
 ownCopy :: Type -> Bool
 ownCopy ty = case ty of
@@ -846,8 +892,9 @@ validation cx v = case v of
         UserRewrite n ps -> UserRewrite n <$> mapM (proof cx) ps
         _ -> return rule
 
--- A proof names a copy and a function a bound gives as a term; a library sequence function of a list, an array or a Box
--- of an array is the builtin's term, as a proof writes it for one
+-- A proof names a copy and a function a bound gives as a term; the library's size and get of a list, an array or a Box of
+-- an array are the builtins' terms, which their impls promise to be (a caller's proof of a copy's contract needs no
+-- second-level facts to relate them)
 proof :: Cx -> VariableProof -> C VariableProof
 proof cx p = case p of
     ATerm n -> nameTerm n
@@ -859,6 +906,12 @@ proof cx p = case p of
 
 proofName :: Cx -> Name -> C (Either Name BuiltinFunct)
 proofName cx n
+    | Just (p, _, function) <- boundCallParts n
+    , function `elem` ["size", "get"]
+    , Map.lookup n (progInstances (cxProgram cx)) == Just (libraryBuiltin, [])
+    , Just t <- lookup p (cxTypes cx)
+    , sequenceType t
+    , Just b <- methodBuiltinByName function = return (Right b)
     | Map.member n (progInstances (cxProgram cx)) || Map.member n (cxLifted cx) || isBound = do
         t <- target cx Map.empty noFunction n [] Nothing
         case t of
@@ -892,7 +945,7 @@ finish program roots main' made =
     completeInstances
         program
             { progTypes = Map.filterWithKey (\name _ -> not (derived name)) (progTypes program)
-            , progFunctions = Map.map completeEnvs functions
+            , progFunctions = Map.map (checkContracts . completeEnvs) functions
             , progMain = completeEnvs (replaceMarkers main')
             , progBounded = Map.empty
             , progInstances = Map.empty
@@ -917,6 +970,14 @@ finish program roots main' made =
     boundedMarker s = case s of
         Ghost _ (GhostFunction n _ _) -> Map.member n (progBounded program)
         _ -> False
+    -- (the contracts of a check function name the check functions of the same impl, as the trait's contracts name the trait's
+    -- functions: a copy that calls one proves what it asks of what it knows of the others)
+    checkContracts fn = case parseImplCheckName (fnName fn) of
+        Just (_, owner, _) -> fn{fnSpec = (fnSpec fn){specEnv = Map.map (toCheck owner) (specEnv (fnSpec fn))}}
+        Nothing -> fn
+    toCheck owner o = case o of
+        Const (CFn n) | Just c <- companionOf n, Just (_, owner', _) <- parseImplCheckName c, owner' == owner, Map.member c functions -> Const (CFn c)
+        _ -> o
     completeEnvs fn = fn{fnSpec = completeSpec (fnSpec fn), fnBlocks = Map.map completeBlock (fnBlocks fn)}
       where
         completeBlock (BasicBlock stmts term) = BasicBlock (map completeStatement stmts) term

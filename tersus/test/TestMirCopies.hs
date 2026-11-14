@@ -6,7 +6,7 @@ import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 
 import Mir
-import MirCopies (makeCopies)
+import MirCopies (opaqueKey, makeCopies)
 import Syntax (Proof (..), ValidationStatement (..), Value (..))
 import TestHarness
 import Types (Arg (..), BuiltinFunct (..), Rel (..), Size (..), Type (..), pattern TBox, pattern TList)
@@ -180,6 +180,18 @@ rowCopy others bounded through t check = withCopies (program (through : others) 
         Just copy -> check copy out
         Nothing -> Just "no copy"
 
+-- The check function an impl's function has (the elaborator's traitCheckWrapper): the same parameters, a body that calls it
+checkOfFn :: Function -> Function
+checkOfFn impl =
+    impl
+        { fnName = maybe (fnName impl) id (implCheck (fnName impl))
+        , fnBlocks = Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn (fnName impl))) [Copy p | p <- fnParams impl] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)]
+        }
+  where
+    implCheck name = case break (== ' ') (drop 1 name) of
+        (owner, rest) | take 4 rest == " as " -> let (trait, after) = break (== '>') (drop 4 rest) in Just (trait ++ " for " ++ owner ++ "::" ++ drop 3 after)
+        _ -> Nothing
+
 lastBlock :: Function -> Maybe BasicBlock
 lastBlock copy = Map.lookup (BlockId 0) (fnBlocks copy)
 
@@ -202,33 +214,43 @@ resolutionRows =
         other -> Just (show other))
     , ("a sequence function in a proof is the builtin's term", rowCopy [] [] ((boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt){fnSpec = emptySpec{specEnsures = [ProofAssert (FApp (ATerm "<$param T as Sequence>::size") [ATerm "x"])]}}) (TList TInt) $ \copy _ ->
         if specEnsures (fnSpec copy) == [ProofAssert (FApp (CTerm (builtinFunct Size)) [ATerm "x"])] then Nothing else Just (show (specEnsures (fnSpec copy))))
-    , ("a sequence function of the library's traits is the builtin, though the list has the impl", withCopies (program [boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt, listSize] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [] [])] [("through[x]", ("through", [ArgType (TList TInt)])), ("<$param T as Sequence>::size", ("$builtin", []))]) $ \out -> case Map.lookup "through[x]" (progFunctions out) >>= lastBlock of
-        Just (BasicBlock stmts Return) | any (\s -> case s of Assign (Local 0) (ListOp Length [_]) -> True; _ -> False) stmts -> Nothing
+    , ("a sequence function of the library's traits calls the list's impl through its check function", withCopies (program [pushThrough, listPush, checkOfFn listPush] (mainCalling [] [("through[x]", TList TInt)]) [("through", BoundedFn [] [] [] [])] [("through[x]", ("through", [ArgType (TList TInt)])), ("<$param T as Growable>::push", ("$builtin", []))]) $ \out -> case Map.lookup "through[x]" (progFunctions out) >>= lastBlock of
+        Just (BasicBlock _ (Call (Const (CFn callee)) _ _ _)) | takeWhile (/= '[') callee == "Growable for List::push" -> Nothing
         other -> Just (show other))
-    , ("Clone of a struct with a Clone impl calls it", rowCopy [cloneS] [] (boundCall "<$param T as Clone>::clone" (TParam "T") (TParam "T")) (TNamed "S" []) $ \copy _ -> case lastBlock copy of
-        Just (BasicBlock _ (Call (Const (CFn "<S as Clone>::clone")) [Copy (Local 1)] (Local 0) _)) -> Nothing
-        other -> Just (show other))
-    , ("a clone of a value of a type parameter in a lifted function calls the Clone impl of the type", withCopies (program [outer, inner, cloneS] (mainCalling [] [("outer[S]", TNamed "S" [])]) [("outer", BoundedFn [] [] ["outer::inner"] [])] [("outer[S]", ("outer", [ArgType (TNamed "S" [])]))]) $ \out -> case fnBlocks <$> Map.lookup "outer[S]::inner" (progFunctions out) of
-        Just blocks | [(BlockId 0, BasicBlock [] (Call (Const (CFn "<S as Clone>::clone")) [Copy (Local 1)] (Local 0) next)), (next', BasicBlock [Assign (Local 0) (Use (Copy (Local 0)))] Return)] <- Map.toList blocks, next == next' -> Nothing
-        other -> Just (show other))
-    , ("a clone of what a Box holds is given a borrow of it, and the value is not read", rowCopy [cloneS] [] unboxClone (TNamed "S" []) $ \copy _ -> case Map.lookup (BlockId 0) (fnBlocks copy) of
-        Just (BasicBlock [Assign r (Borrow (Local 1) [] False)] (Call (Const (CFn "<S as Clone>::clone")) [Copy r'] (Local 0) _)) | r == r' -> Nothing
-        other -> Just (show other))
-    , ("and a Box of an array is given the array", rowCopy [arrayClone] [("<Array as Clone>::clone", BoundedFn [] [] [] [])] unboxClone (TArrayOf TInt (SizeConst 2)) $ \copy out -> case Map.lookup (BlockId 0) (fnBlocks copy) of
-        Just (BasicBlock [Assign (Local 2) (Unbox (Copy (Local 1)))] (Call (Const (CFn "<Array as Clone>::clone[Int]")) [Copy (Local 2), Const (CInt 2)] (Local 0) _)) | Map.member "<Array as Clone>::clone[Int]" (progFunctions out) -> Nothing
-        other -> Just (show other))
-    , ("an impl with sizes is given the sizes of the arguments", rowCopy [arraySize] [] (boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt) (TArrayOf TInt (SizeConst 3)) $ \copy _ -> case lastBlock copy of
-        Just (BasicBlock _ (Call (Const (CFn "<Array as Sequence>::size")) [Copy (Local 1), Const (CInt 3)] (Local 0) _)) -> Nothing
-        other -> Just (show other))
-    , ("a sequence function of a list that an impl gives is the impl's", rowCopy [listSize] [] (boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt) (TList TInt) $ \copy _ -> case lastBlock copy of
+    , ("but the size of a list stays its impl's, the builtin size the trait's contracts of the list name", withCopies (program [boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt, listSize, checkOfFn listSize] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [] [])] [("through[x]", ("through", [ArgType (TList TInt)])), ("<$param T as Sequence>::size", ("$builtin", []))]) $ \out -> case Map.lookup "through[x]" (progFunctions out) >>= lastBlock of
         Just (BasicBlock _ (Call (Const (CFn "<List as Sequence>::size")) _ _ _)) -> Nothing
         other -> Just (show other))
-    , ("anything else calls the type's impl", rowCopy [hashInt] [] (boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt) TInt $ \copy _ -> case lastBlock copy of
-        Just (BasicBlock _ (Call (Const (CFn "<Int as Hash>::hash")) [Copy (Local 1)] (Local 0) _)) -> Nothing
+    , ("a value of a type parameter the copy fills is opaque to its proofs", rowCopy [hashInt, checkOfFn hashInt] [] (boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt) TInt $ \copy _ ->
+        let env = specEnv (fnSpec copy)
+         in if Map.lookup (opaqueKey (Local 1)) env == Just (Copy (Local 1)) && Map.notMember (opaqueKey (Local 0)) env then Nothing else Just (show env))
+    , ("Clone of a struct with a Clone impl calls its check function", rowCopy [cloneS, checkOfFn cloneS] [] (boundCall "<$param T as Clone>::clone" (TParam "T") (TParam "T")) (TNamed "S" []) $ \copy _ -> case lastBlock copy of
+        Just (BasicBlock _ (Call (Const (CFn "Clone for S::clone")) [Copy (Local 1)] (Local 0) _)) -> Nothing
         other -> Just (show other))
-    , ("an impl with bounds is copied for the types the call gives it", rowCopy [listEq] [("<List as Eq>::eq", BoundedFn [] [] [] [])] (eqCall "<$param T as Eq>::eq") (TList TBool) $ \copy out -> case lastBlock copy of
-        Just (BasicBlock _ (Call (Const (CFn "<List as Eq>::eq[Bool]")) _ _ _)) | Map.member "<List as Eq>::eq[Bool]" (progFunctions out) -> Nothing
+    , ("a clone of a value of a type parameter in a lifted function calls the Clone impl of the type", withCopies (program [outer, inner, cloneS, checkOfFn cloneS] (mainCalling [] [("outer[S]", TNamed "S" [])]) [("outer", BoundedFn [] [] ["outer::inner"] [])] [("outer[S]", ("outer", [ArgType (TNamed "S" [])]))]) $ \out -> case fnBlocks <$> Map.lookup "outer[S]::inner" (progFunctions out) of
+        Just blocks | [(BlockId 0, BasicBlock [] (Call (Const (CFn "Clone for S::clone")) [Copy (Local 1)] (Local 0) next)), (next', BasicBlock [Assign (Local 0) (Use (Copy (Local 0)))] Return)] <- Map.toList blocks, next == next' -> Nothing
+        other -> Just (show other))
+    , ("a clone of what a Box holds is given a borrow of it, and the value is not read", rowCopy [cloneS, checkOfFn cloneS] [] unboxClone (TNamed "S" []) $ \copy _ -> case Map.lookup (BlockId 0) (fnBlocks copy) of
+        Just (BasicBlock [Assign r (Borrow (Local 1) [] False)] (Call (Const (CFn "Clone for S::clone")) [Copy r'] (Local 0) _)) | r == r' -> Nothing
+        other -> Just (show other))
+    , ("and a Box of an array is given the array", rowCopy [arrayClone, checkOfFn arrayClone] [("<Array as Clone>::clone", BoundedFn [] [] [] []), ("Clone for Array::clone", BoundedFn [] [] [] [])] unboxClone (TArrayOf TInt (SizeConst 2)) $ \copy out -> case Map.lookup (BlockId 0) (fnBlocks copy) of
+        Just (BasicBlock [Assign (Local 2) (Unbox (Copy (Local 1)))] (Call (Const (CFn "Clone for Array::clone[Int]")) [Copy (Local 2), Const (CInt 2)] (Local 0) _)) | Map.member "Clone for Array::clone[Int]" (progFunctions out) -> Nothing
+        other -> Just (show other))
+    , ("an impl with sizes is given the sizes of the arguments", rowCopy [arraySize, checkOfFn arraySize] [] (boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt) (TArrayOf TInt (SizeConst 3)) $ \copy _ -> case lastBlock copy of
+        Just (BasicBlock _ (Call (Const (CFn "Sequence for Array::size")) [Copy (Local 1), Const (CInt 3)] (Local 0) _)) -> Nothing
+        other -> Just (show other))
+    , ("a sequence function of a list that an impl gives is the impl's check function", rowCopy [listSize, checkOfFn listSize] [] (boundCall "<$param T as Sequence>::size" (TRef (TParam "T")) TInt) (TList TInt) $ \copy _ -> case lastBlock copy of
+        Just (BasicBlock _ (Call (Const (CFn "Sequence for List::size")) _ _ _)) -> Nothing
+        other -> Just (show other))
+    , ("anything else calls the check function of the type's impl", rowCopy [hashInt, checkOfFn hashInt] [] (boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt) TInt $ \copy _ -> case lastBlock copy of
+        Just (BasicBlock _ (Call (Const (CFn "Hash for Int::hash")) [Copy (Local 1)] (Local 0) _)) -> Nothing
+        other -> Just (show other))
+    , ("an impl with bounds is copied for the types the call gives it, its check function with it", rowCopy [listEq, checkOfFn listEq] [("<List as Eq>::eq", BoundedFn [] [] [] []), ("Eq for List::eq", BoundedFn [] [] [] [])] (eqCall "<$param T as Eq>::eq") (TList TBool) $ \copy out -> case lastBlock copy of
+        Just (BasicBlock _ (Call (Const (CFn "Eq for List::eq[Bool]")) _ _ _)) | Map.member "Eq for List::eq[Bool]" (progFunctions out) -> Nothing
         other -> Just (show other ++ show (Map.keys (progFunctions out))))
+    , ("an impl with no check function is an internal error", testAssertErrorContains "<Int as Hash>::hash has no check function" (makeCopies (program [boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt, hashInt] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [] [])] [("through[x]", ("through", [ArgType TInt]))])))
+    , ("the contracts of a check function name the check functions of its impl", withCopies (program [boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt, hashInt, (checkOfFn hashInt){fnSpec = emptySpec{specEnv = Map.fromList [("<Int as Hash>::hash", Const (CFn "<Int as Hash>::hash"))]}}] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [] [])] [("through[x]", ("through", [ArgType TInt]))]) $ \out -> case specEnv . fnSpec <$> Map.lookup "Hash for Int::hash" (progFunctions out) of
+        Just env | Map.lookup "<Int as Hash>::hash" env == Just (Const (CFn "Hash for Int::hash")) -> Nothing
+        other -> Just (show other))
     , ("a type with no impl of the trait is an internal error", testAssertErrorContains "internal compiler error" (makeCopies (program [boundCall "<$param T as Hash>::hash" (TRef (TParam "T")) TInt] (mainCalling [] [("through[x]", TInt)]) [("through", BoundedFn [] [] [] [])] [("through[x]", ("through", [ArgType TBool]))])))
     ]
   where
@@ -242,6 +264,8 @@ resolutionRows =
     arraySize = (function "<Array as Sequence>::size" [(TArrayOf (TParam "T") (SizeParam "n"), "self"), (TInt, "n")] TInt [] (blockOf [Assign (Local 0) (Use (Copy (Local 2)))] Return)){fnTypeParams = ["T"], fnSizeParams = ["n"]}
     listSize = (function "<List as Sequence>::size" [(TRef (TList (TParam "T")), "self")] TInt [] (blockOf [Assign (Local 0) (Use (Const (CInt 0)))] Return)){fnTypeParams = ["T"]}
     hashInt = function "<Int as Hash>::hash" [(TRef TInt, "self")] TInt [] (blockOf [Assign (Local 0) (Use (Const (CInt 0)))] Return)
+    pushThrough = (function "through" [(TParam "T", "s"), (TInt, "x")] (TParam "T") [] (Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn "<$param T as Growable>::push")) [Copy (Local 1), Copy (Local 2)] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)])){fnTypeParams = ["T"]}
+    listPush = (function "<List as Growable>::push" [(TList (TParam "T"), "self"), (TParam "T", "x")] (TList (TParam "T")) [] (blockOf [Assign (Local 0) (Use (Copy (Local 1)))] Return)){fnTypeParams = ["T"]}
     listEq = (function "<List as Eq>::eq" [(TRef (TList (TParam "T")), "self"), (TRef (TList (TParam "T")), "other")] TBool [] (blockOf [Assign (Local 0) (Use (Const (CBool True)))] Return)){fnTypeParams = ["T"]}
 
 companionCopied :: TestResult
@@ -358,11 +382,11 @@ trImpl :: String -> Type -> Function
 trImpl owner t = function ("<" ++ owner ++ " as Tr>::f") [(t, "self")] TInt [] (blockOf [Assign (Local 0) (Use (Const (CInt 1)))] Return)
 
 unrolled :: TestResult
-unrolled = copyOf (packProgram [countFn, trImpl "Int" TInt, trImpl "Bool" TBool] [("count[Int, Bool]", TInt)] [("count[Int, Bool]", ("count", map ArgType [TInt, TBool])), ("<$param ..T@0 as Tr>::f", ("", []))] ["count"]) "count[Int, Bool]" $ \copy ->
+unrolled = copyOf (packProgram [countFn, trImpl "Int" TInt, trImpl "Bool" TBool, checkOfFn (trImpl "Int" TInt), checkOfFn (trImpl "Bool" TBool)] [("count[Int, Bool]", TInt)] [("count[Int, Bool]", ("count", map ArgType [TInt, TBool])), ("<$param ..T@0 as Tr>::f", ("", []))] ["count"]) "count[Int, Bool]" $ \copy ->
     let calls = [(f, args, d) | BasicBlock _ (Call (Const (CFn f)) args d _) <- Map.elems (fnBlocks copy)]
         params = fnParams copy
      in case calls of
-            [("<Int as Tr>::f", [Copy a], d1), ("<Bool as Tr>::f", [Copy b], d2)]
+            [("Tr for Int::f", [Copy a], d1), ("Tr for Bool::f", [Copy b], d2)]
                 | [a, b] /= params -> Just ("the iterations do not read the arguments in order: " ++ show calls)
                 | d1 == d2 -> Just "the iterations share a local"
                 | or [True | BasicBlock ss _ <- Map.elems (fnBlocks copy), Assign _ (ListOp Mir.Get _) <- ss] -> Just "an element read is left"
@@ -379,9 +403,9 @@ forallFn = (variadic "all" TInt (blockOf [Assign (Local 0) (Use (Const (CInt 0))
     sizeFact = ProofAssert (FApp (rel GtEq) [FApp (CTerm (builtinFunct Size)) [ATerm "args"], CTerm (VInt 1)])
 
 packForall :: TestResult
-packForall = copyOf (packProgram [forallFn, trImpl "Int" TInt, trImpl "Bool" TBool] [("all[Int, Bool]", TInt)] [("all[Int, Bool]", ("all", map ArgType [TInt, TBool])), ("<$param ..T@1 as Tr>::f", ("", []))] ["all"]) "all[Int, Bool]" $ \copy ->
+packForall = copyOf (packProgram [forallFn, trImpl "Int" TInt, trImpl "Bool" TBool, checkOfFn (trImpl "Int" TInt), checkOfFn (trImpl "Bool" TBool)] [("all[Int, Bool]", TInt)] [("all[Int, Bool]", ("all", map ArgType [TInt, TBool])), ("<$param ..T@1 as Tr>::f", ("", []))] ["all"]) "all[Int, Bool]" $ \copy ->
     let rel r = CTerm (builtinFunct (Rel r))
-        fact owner k = ProofAssert (FApp (rel GtEq) [FApp (ATerm ("<" ++ owner ++ " as Tr>::f")) [ATerm ("args " ++ show (k :: Int))], CTerm (VInt 0)])
+        fact owner k = ProofAssert (FApp (rel GtEq) [FApp (ATerm ("Tr for " ++ owner ++ "::f")) [ATerm ("args " ++ show (k :: Int))], CTerm (VInt 0)])
         expected = [fact "Int" 0, fact "Bool" 1, ProofAssert (FApp (rel GtEq) [CTerm (VInt 2), CTerm (VInt 1)])]
      in if specRequires (fnSpec copy) == expected then Nothing else Just (show (specRequires (fnSpec copy)))
 
