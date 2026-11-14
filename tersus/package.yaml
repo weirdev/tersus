@@ -83,7 +83,7 @@ extra-source-files:
 - lib/parser/package.tersus
 - lib/parser/parser.tersus
 - lib/parser/syntax/syntax.tersus
-- lib/parser/syntax/unicode.tersus
+- lib/data/unicode/unicode.tersus
 - lib/mir/mir_verify/mir_verify.tersus
 - lib/mir/mir_erase/mir_erase.tersus
 - lib/validation/package.tersus
