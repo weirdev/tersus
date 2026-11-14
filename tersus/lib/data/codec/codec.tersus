@@ -1,3 +1,11 @@
+fn wireRoles() -> List<String> {
+    return push(push(push(push(push(push(push([], "Box"), "Clone"), "Copy"), "Deref"), "Drop"), "Eq"), "List");
+};
+
+fn wireOwnershipRole(role: &String) -> Bool ~ {
+    return indexOf(wireRoles(), clone(role)) >= 0 && role != "List" && role != "Box";
+};
+
 struct Token { quoted: Bool, text: String };
 
 impl Clone for Token { };
