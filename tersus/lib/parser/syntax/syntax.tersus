@@ -6120,13 +6120,13 @@ fn emptyFnShape() -> FnShape ~ { return FnShape { kind: "", names: [], types: []
 
 fn sanitizeFnName(s: &String) -> String ~ {
     out = [];
-    for b in &s.bytes { if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) { out = push(out, b); } else { out = push(out, 95); }; };
+    for i in 0..size(s.bytes) { b = toInt(get(&s.bytes, i)); if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) { out = push(out, b); } else { out = push(out, 95); }; };
     return bytesToString(out);
 };
 
 fn fnContractHash(text: &String) -> String ~ {
     h = 5381;
-    for b in &text.bytes { if b != 32 && b != 9 && b != 10 && b != 13 { h = (h * 33 + b) % 1000000007; }; };
+    for i in 0..size(text.bytes) { b = toInt(get(&text.bytes, i)); if b != 32 && b != 9 && b != 10 && b != 13 { h = (h * 33 + b) % 1000000007; }; };
     return String::fromInt(h);
 };
 

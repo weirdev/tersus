@@ -2068,7 +2068,7 @@ fn isFnTraitName(name: &String) -> Bool ~ {
 fn fnTraitDisplay(name: &String) -> String ~ {
     if !isFnTraitName(name) { return clone(name); };
     i = 0;
-    while i < size(name.bytes) && get(name.bytes, i) != 36 [{ affirm i >= 0; }] ~ { i = i + 1; };
+    while i < size(name.bytes) && get(name.bytes, i) != toByte(36) [{ affirm i >= 0; }] ~ { i = i + 1; };
     return catStrings(name.slice(0, i), "(...)");
 };
 
