@@ -120,16 +120,16 @@ fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry
     header = recordAt(lines, start); spec = recordAt(lines, start + 1); env = recordAt(lines, start + 2);
     if !headerOk(&header) || !specOk(&spec) || !wordIs(&env, 0, "env") || envEnd(&env, 1) != size(env) { return bad; };
     e = expandEnv(&env, shared); if !e.ok { return bad; };
-    fn = FullFunction { header: header, spec: spec, env: e.value, locals: [], loops: [], blocks: [] };
+    fun = FullFunction { header: header, spec: spec, env: e.value, locals: [], loops: [], blocks: [] };
     at = start + 3;
     while wordIs(recordAt(lines, at), 0, "local") ~ {
         row = recordAt(lines, at); if !localOk(&row) { return bad; };
-        fn = FullFunction { locals: push(fn.locals, FullRecord { name: textAt(&row, 1), tokens: row }), ..fn }; at = at + 1;
+        fun = FullFunction { locals: push(fun.locals, FullRecord { name: textAt(&row, 1), tokens: row }), ..fun }; at = at + 1;
     };
     while wordIs(recordAt(lines, at), 0, "loop") ~ {
         row = recordAt(lines, at); if !loopOk(&row) { return bad; };
         e = expandEnv(&row, shared); if !e.ok { return bad; };
-        fn = FullFunction { loops: push(fn.loops, FullRecord { name: textAt(&row, 1), tokens: e.value }), ..fn }; at = at + 1;
+        fun = FullFunction { loops: push(fun.loops, FullRecord { name: textAt(&row, 1), tokens: e.value }), ..fun }; at = at + 1;
     };
     while wordIs(recordAt(lines, at), 0, "block") ~ {
         row = recordAt(lines, at); id = integerAt(&row, 1);
@@ -143,13 +143,13 @@ fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry
             block = FullBlock { lines: push(block.lines, e.value), ..block }; at = at + 1;
         };
         if !done { return bad; };
-        fn = FullFunction { blocks: push(fn.blocks, block), ..fn };
+        fun = FullFunction { blocks: push(fun.blocks, block), ..fun };
     };
     end = recordAt(lines, at);
-    if !wordIs(&end, 0, "end") || size(end) != 1 || !uniqueRecords(&fn.locals) || !uniqueRecords(&fn.loops) { return bad; };
+    if !wordIs(&end, 0, "end") || size(end) != 1 || !uniqueRecords(&fun.locals) || !uniqueRecords(&fun.loops) { return bad; };
     ids = HashSet::new();
-    for b in &fn.blocks { if HashSet::contains(&ids, b.id) { return bad; }; ids = ids.insert(b.id); };
-    return Parsed<FullFunction> { value: fn, pos: at + 1, ok: true };
+    for b in &fun.blocks { if HashSet::contains(&ids, b.id) { return bad; }; ids = ids.insert(b.id); };
+    return Parsed<FullFunction> { value: fun, pos: at + 1, ok: true };
 };
 fn uniqueRecords(rows: &List<FullRecord>) -> Bool ~ {
     names = HashSet::new();
@@ -171,15 +171,15 @@ fn trailerOk(rows: &List<List<Token>>) -> Bool ~ {
 fn fullRows(program: &FullProgram) -> List<List<Token>> ~ {
     out = [];
     for r in &program.invariants { out = push(out, clone(r.tokens)); };
-    for fn in &program.functions { out = functionRows(out, fn); };
+    for fun in &program.functions { out = functionRows(out, fun); };
     out = functionRows(out, &program.entry);
     for row in &program.trailer { out = push(out, clone(row)); };
     return out;
 };
-fn functionRows(out: List<List<Token>>, fn: &FullFunction) -> List<List<Token>> ~ {
-    out = push(out, clone(fn.spec));
-    for r in &fn.loops { out = push(out, clone(r.tokens)); };
-    for b in &fn.blocks { for row in &b.lines { out = push(out, clone(row)); }; };
+fn functionRows(out: List<List<Token>>, fun: &FullFunction) -> List<List<Token>> ~ {
+    out = push(out, clone(fun.spec));
+    for r in &fun.loops { out = push(out, clone(r.tokens)); };
+    for b in &fun.blocks { for row in &b.lines { out = push(out, clone(row)); }; };
     return out;
 };
 fn payloadsOk(program: &FullProgram, roots: &List<Int>) -> Bool ~ {
@@ -220,12 +220,12 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
         at = at + 1;
     };
     while wordIs(recordAt(lines, at), 0, "function") ~ {
-        fn = functionAt(lines, at, &shared); if !fn.ok { return bad; };
-        program = FullProgram { functions: push(program.functions, fn.value), ..program }; at = fn.pos;
+        fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
+        program = FullProgram { functions: push(program.functions, fun.value), ..program }; at = fun.pos;
     };
     if !wordIs(recordAt(lines, at), 0, "main") { return bad; };
-    fn = functionAt(lines, at, &shared); if !fn.ok { return bad; };
-    program = FullProgram { entry: fn.value, ..program }; at = fn.pos;
+    fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
+    program = FullProgram { entry: fun.value, ..program }; at = fun.pos;
     for i in 0..7 { program = FullProgram { trailer: push(program.trailer, recordAt(lines, at)), ..program }; at = at + 1; };
     if !trailerOk(&program.trailer) { return bad; };
     data = recordAt(lines, at); count = integerAt(&data, 1);
@@ -257,6 +257,6 @@ fn addRecord(p: FullProgram, kind: Int, r: FullRecord) -> FullProgram ~ {
 };
 fn uniqueFunctions(fns: &List<FullFunction>) -> Bool ~ {
     seen = HashSet::new();
-    for fn in fns { n = textAt(&fn.header, 1); if HashSet::contains(&seen, &n) { return false; }; seen = seen.insert(n); };
+    for fun in fns { n = textAt(&fun.header, 1); if HashSet::contains(&seen, &n) { return false; }; seen = seen.insert(n); };
     return true;
 };
