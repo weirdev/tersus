@@ -1,0 +1,163 @@
+import data::codec::codec { Token };
+import data::ast::ast { AstNode, AstProgram, AstStatements, AstStatement, printAst };
+import data::arena::arena { reorderArena };
+import mir::full::full { FullRecord, FullBlock, FullFunction, FullProgram };
+import mir::full::tokens { appendTokens, integerAt, intToken, name, sliceTokens, textAt, tokenLine, word, wordIs };
+import mir::full::records { beforeText, EnvEntry, envStart, envEnd, envEntries, envTokens, mapPayloadLine, payloadSlots };
+
+struct FullOutput { records: List<List<Token>>, data: AstProgram };
+impl Clone for FullOutput { };
+
+fn sortRecords(rows: List<FullRecord>) -> List<FullRecord> ~ {
+    out = [];
+    for r in &rows {
+        next = []; placed = false;
+        for old in &out { if !placed && beforeText(&r.name, &old.name) { next = push(next, clone(r)); placed = true; }; next = push(next, clone(old)); };
+        if !placed { next = push(next, clone(r)); }; out = next;
+    };
+    return out;
+};
+fn sortFunctions(fns: List<FullFunction>) -> List<FullFunction> ~ {
+    out = [];
+    for f in &fns {
+        next = []; placed = false;
+        for old in &out { if !placed && beforeText(textAt(&f.header, 1), textAt(&old.header, 1)) { next = push(next, clone(f)); placed = true; }; next = push(next, clone(old)); };
+        if !placed { next = push(next, clone(f)); }; out = next;
+    };
+    return out;
+};
+fn appendRecords(out: List<List<Token>>, rows: &List<FullRecord>) -> List<List<Token>> ~ {
+    for r in sortRecords(clone(rows)) { out = push(out, clone(r.tokens)); };
+    return out;
+};
+fn functionLines(out: List<List<Token>>, fn: &FullFunction, main: Bool) -> List<List<Token>> ~ {
+    header = clone(fn.header);
+    if size(header) > 0 { if main { header = set(header, 0, word("main")); } else { header = set(header, 0, word("function")); }; };
+    out = push(push(push(out, header), clone(fn.spec)), clone(fn.env));
+    // Numeric maps cannot use the lexicographic order of their wire keys.
+    locals = clone(fn.locals); loops = clone(fn.loops);
+    out = appendNumericRecords(out, &locals); out = appendNumericRecords(out, &loops);
+    blocks = [];
+    for b in &fn.blocks {
+        next = []; placed = false;
+        for old in &blocks { if !placed && b.id < old.id { next = push(next, clone(b)); placed = true; }; next = push(next, clone(old)); };
+        if !placed { next = push(next, clone(b)); }; blocks = next;
+    };
+    for b in &blocks { out = push(out, push(push([], word("block")), intToken(b.id))); for l in &b.lines { out = push(out, clone(l)); }; };
+    return push(out, push([], word("end")));
+};
+fn appendNumericRecords(out: List<List<Token>>, rows: &List<FullRecord>) -> List<List<Token>> ~ {
+    ordered = [];
+    for r in rows {
+        next = []; placed = false; id = integerAt(&r.tokens, 1).value;
+        for old in &ordered { if !placed && id < integerAt(&old.tokens, 1).value { next = push(next, clone(r)); placed = true; }; next = push(next, clone(old)); };
+        if !placed { next = push(next, clone(r)); }; ordered = next;
+    };
+    for r in &ordered { out = push(out, clone(r.tokens)); };
+    return out;
+};
+fn programLines(p: &FullProgram) -> List<List<Token>> ~ {
+    out = push([], push(push([], word("tersus-mir")), word("3")));
+    out = appendRecords(out, &p.types); out = appendRecords(out, &p.generics); out = appendRecords(out, &p.invariants); out = appendRecords(out, &p.bounded); out = appendRecords(out, &p.instances);
+    for f in sortFunctions(clone(p.functions)) { out = functionLines(out, &f, false); };
+    out = functionLines(out, &p.entry, true);
+    for l in &p.trailer { out = push(out, clone(l)); };
+    return out;
+};
+fn functionPart(entries: &List<EnvEntry>) -> List<EnvEntry> ~ {
+    out = [];
+    for e in entries { if wordIs(&e.value, 0, "const") && wordIs(&e.value, 1, "fn") && size(e.value) = 3 { out = push(out, clone(e)); }; };
+    return out;
+};
+fn ownPart(entries: &List<EnvEntry>) -> List<EnvEntry> ~ {
+    out = [];
+    for e in entries { if !(wordIs(&e.value, 0, "const") && wordIs(&e.value, 1, "fn") && size(e.value) = 3) { out = push(out, clone(e)); }; };
+    return out;
+};
+fn sharedEnvs(lines: &List<List<Token>>) -> List<List<Token>> ~ {
+    out = [];
+    for row in lines {
+        at = envStart(row);
+        if at >= 0 {
+            common = functionPart(envEntries(row, at));
+            if size(common) > 0 {
+                ts = envTokens(&common); found = false;
+                for old in &out { if old = &ts { found = true; }; };
+                if !found { out = push(out, ts); };
+            };
+        };
+    };
+    return out;
+};
+fn shareLine(row: List<Token>, shared: &List<List<Token>>) -> List<Token> ~ {
+    at = envStart(&row); end = envEnd(&row, at);
+    if at < 0 || end < 0 { return row; };
+    entries = envEntries(&row, at); common = envTokens(functionPart(&entries)); own = envTokens(ownPart(&entries));
+    id = 0 - 1; i = 0;
+    for env in shared { if env = &common { id = i; }; i = i + 1; };
+    if size(own) > 0 && id >= 0 { own = set(own, 0, intToken(id)); };
+    return appendTokens(appendTokens(sliceTokens(&row, 0, at), &own), sliceTokens(&row, end, size(row)));
+};
+fn rootList(nodes: List<AstNode>, roots: &List<Int>) -> AstProgram ~ {
+    tail = size(nodes); nodes = push(nodes, AstNode::Statements { value: AstStatements::End });
+    i = size(roots);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(roots); }] shrinks i {
+        i = i - 1; next = size(nodes);
+        nodes = push(nodes, AstNode::Statements { value: AstStatements::Cons { head: get(roots, i), tail: tail } }); tail = next;
+    };
+    return reorderArena(&nodes, tail, "mir");
+};
+fn outputFull(p: &FullProgram) -> FullOutput ~ {
+    lines = programLines(p); shared = sharedEnvs(&lines);
+    records = []; roots = []; emittedShared = false;
+    for row in &lines {
+        if !emittedShared && (wordIs(row, 0, "function") || wordIs(row, 0, "main")) {
+            for env in &shared { ts = clone(env); if size(ts) > 0 { ts = set(ts, 0, word("shared")); }; records = push(records, ts); };
+            emittedShared = true;
+        };
+        out = clone(row);
+        for slot in payloadSlots(row) {
+            r = integerAt(row, slot);
+            if slot >= 0 && slot < size(out) && r.ok {
+                ordinal = size(roots); roots = push(roots, r.value); out = set(out, slot, intToken(ordinal));
+            };
+        };
+        records = push(records, shareLine(out, &shared));
+    };
+    return FullOutput { records: records, data: rootList(clone(p.arena), &roots) };
+};
+fn emitFull(out: FullOutput) -> Int ~ {
+    n = 0;
+    for row in &out.records { n = n + tokenLine(row).print(); writeByte(toByte(10)); n = n + 1; };
+    n = n + "data ".print() + String::fromInt(size(out.data.nodes) + 2).print(); writeByte(toByte(10));
+    return n + 1 + printAst(&out.data);
+};
+fn mapFunctionPayloads(fn: FullFunction, map: &List<Int>) -> FullFunction ~ {
+    fn = FullFunction { spec: mapPayloadLine(fn.spec, map), ..fn };
+    loops = []; blocks = [];
+    for row in &fn.loops { loops = push(loops, FullRecord { tokens: mapPayloadLine(clone(row.tokens), map), ..row }); };
+    for b in &fn.blocks { lines = []; for row in &b.lines { lines = push(lines, mapPayloadLine(clone(row), map)); }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
+    return FullFunction { loops: loops, blocks: blocks, ..fn };
+};
+fn mapProgramPayloads(p: FullProgram, map: &List<Int>) -> FullProgram ~ {
+    invariants = []; functions = []; trailer = [];
+    for row in &p.invariants { invariants = push(invariants, FullRecord { tokens: mapPayloadLine(clone(row.tokens), map), ..row }); };
+    for fn in &p.functions { functions = push(functions, mapFunctionPayloads(clone(fn), map)); };
+    for row in &p.trailer { trailer = push(trailer, mapPayloadLine(clone(row), map)); };
+    return FullProgram { invariants: invariants, functions: functions, entry: mapFunctionPayloads(p.entry, map), trailer: trailer, ..p };
+};
+fn emptyFunctionMetadata(fn: FullFunction, empty: Int) -> FullFunction ~ {
+    spec = push(push(push(push(push(push(push([], word("spec")), word("requires")), intToken(empty)), word("ensures")), intToken(empty)), word("termination")), word("none"));
+    spec = push(push(push(push(push(push(spec, word("writes")), intToken(0)), word("mutparams")), intToken(0)), word("from")), intToken(0));
+    env = push(push(push([], word("env")), word("none")), intToken(0));
+    blocks = [];
+    for b in &fn.blocks { lines = []; for row in &b.lines { if !wordIs(row, 0, "ghost") { lines = push(lines, clone(row)); }; }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
+    return FullFunction { spec: spec, env: env, loops: [], blocks: blocks, ..fn };
+};
+fn clearMetadata(p: FullProgram) -> FullProgram ~ {
+    end = size(p.arena); nodes = push(p.arena, AstNode::Statements { value: AstStatements::End });
+    empty = size(nodes); nodes = push(nodes, AstNode::Statement { value: AstStatement::Block { xs: end } });
+    functions = [];
+    for fn in &p.functions { functions = push(functions, emptyFunctionMetadata(clone(fn), empty)); };
+    return FullProgram { arena: nodes, functions: functions, entry: emptyFunctionMetadata(p.entry, empty), ..p };
+};
