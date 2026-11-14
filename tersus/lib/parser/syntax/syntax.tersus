@@ -89,7 +89,7 @@ fn restore(st: St, saved: Checkpoint) -> St ~ {
     St { pos: ignoredPos, nodes: nodes, ctors: ctors, fieldsOf: fieldsOf, types: types, generics: generics,
         selfName: ignoredSelf, hasSelf: ignoredHasSelf, selfTy: ignoredSelfType, hasSelfTy: ignoredHasSelfType,
         typeParams: ignoredTypeParams, implParams: ignoredImplParams, ownClone: ignoredClone, locate: ignoredLocate,
-        err: ignoredError, errPos: ignoredErrorPos, genLine: ignoredLine, genCol: ignoredCol, pack: ignoredPack } = st;
+        err: ignoredError, errPos: ignoredErrorPos, genLine: ignoredLine, genCol: ignoredCol, pack: ignoredPack, pending: ignoredPending, minted: ignoredMinted } = st;
     while size(nodes) > saved.nodeCount && size(nodes) > 0 ~ { nodes = pop(nodes); };
     while size(ctors) > saved.ctorCount && size(ctors) > 0 ~ { ctors = pop(ctors); };
     while size(fieldsOf) > saved.fieldCount && size(fieldsOf) > 0 ~ { fieldsOf = pop(fieldsOf); };
