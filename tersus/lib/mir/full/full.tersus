@@ -20,7 +20,7 @@ struct FullFunction {
 impl Clone for FullFunction { };
 
 // Payload tokens hold AST node IDs internally; only the wire uses payload ordinals.
-// Shared environments are expanded on input and collected again on output.
+// Shared environments remain referenced until their canonical wire variants are written.
 struct FullProgram {
     types: List<FullRecord>, generics: List<FullRecord>, invariants: List<FullRecord>,
     bounded: List<FullRecord>, instances: List<FullRecord>,

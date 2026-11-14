@@ -122,28 +122,40 @@ fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry
     e = expandEnv(&env, shared); if !e.ok { return bad; };
     fun = FullFunction { header: header, spec: spec, env: e.value, locals: [], loops: [], blocks: [] };
     at = start + 3;
-    while wordIs(recordAt(lines, at), 0, "local") ~ {
-        row = normalizeTypes(recordAt(lines, at)); if !localOk(&row) { return bad; };
-        fun = FullFunction { locals: push(fun.locals, FullRecord { name: textAt(&row, 1), tokens: row }), ..fun }; at = at + 1;
-    };
-    while wordIs(recordAt(lines, at), 0, "loop") ~ {
-        row = recordAt(lines, at); if !loopOk(&row) { return bad; };
-        e = expandEnv(&row, shared); if !e.ok { return bad; };
-        fun = FullFunction { loops: push(fun.loops, FullRecord { name: textAt(&row, 1), tokens: e.value }), ..fun }; at = at + 1;
-    };
-    while wordIs(recordAt(lines, at), 0, "block") ~ {
-        row = recordAt(lines, at); id = integerAt(&row, 1);
-        if size(row) != 2 || !id.ok { return bad; };
-        block = FullBlock { id: id.value, lines: [] }; at = at + 1;
-        done = false;
-        while !done && at < size(lines) [{ affirm at >= 0; }] ~ {
-            row = recordAt(lines, at); if !lineOk(&row) { return bad; };
-            e = expandEnv(&row, shared); if !e.ok { return bad; };
-            done = terminator(&row);
-            block = FullBlock { lines: push(block.lines, e.value), ..block }; at = at + 1;
+    more = true;
+    while more ~ {
+        row = recordAt(lines, at);
+        if !wordIs(&row, 0, "local") { more = false; } else {
+            row = normalizeTypes(row); if !localOk(&row) { return bad; };
+            fun = FullFunction { locals: push(fun.locals, FullRecord { name: textAt(&row, 1), tokens: row }), ..fun }; at = at + 1;
         };
-        if !done { return bad; };
-        fun = FullFunction { blocks: push(fun.blocks, block), ..fun };
+    };
+    more = true;
+    while more ~ {
+        row = recordAt(lines, at);
+        if !wordIs(&row, 0, "loop") { more = false; } else {
+            if !loopOk(&row) { return bad; };
+            e = expandEnv(&row, shared); if !e.ok { return bad; };
+            fun = FullFunction { loops: push(fun.loops, FullRecord { name: textAt(&row, 1), tokens: e.value }), ..fun }; at = at + 1;
+        };
+    };
+    more = true;
+    while more ~ {
+        row = recordAt(lines, at);
+        if !wordIs(&row, 0, "block") { more = false; } else {
+            id = integerAt(&row, 1);
+            if size(row) != 2 || !id.ok { return bad; };
+            block = FullBlock { id: id.value, lines: [] }; at = at + 1;
+            active = true;
+            while active [{ affirm at >= 0; }] ~ {
+                if at >= size(lines) { return bad; };
+                row = recordAt(lines, at); if !lineOk(&row) { return bad; };
+                e = expandEnv(&row, shared); if !e.ok { return bad; };
+                if terminator(&row) { active = false; };
+                block = FullBlock { lines: push(block.lines, e.value), ..block }; at = at + 1;
+            };
+            fun = FullFunction { blocks: push(fun.blocks, block), ..fun };
+        };
     };
     end = recordAt(lines, at);
     if !wordIs(&end, 0, "end") || size(end) != 1 || !uniqueNumericRecords(&fun.locals) || !uniqueNumericRecords(&fun.loops) { return bad; };
@@ -208,27 +220,36 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     at = 1;
     shared = [];
     phase = 0;
-    while at < size(lines) && !wordIs(recordAt(lines, at), 0, "function") && !wordIs(recordAt(lines, at), 0, "main") [{ affirm at >= 1; }] ~ {
-        row = recordAt(lines, at); kind = recordPhase(&row);
-        if kind < phase || kind < 0 { return bad; };
-        phase = kind;
-        if kind = 5 {
-            env = push([], word("none"));
-            for i in 1..size(row) { env = push(env, clone(get(&row, i))); };
-            if envEnd(&env, 0) != size(env) { return bad; };
-            entries = envEntries(&env, 0); if !uniqueEntries(&entries) { return bad; };
-            shared = push(shared, orderEntries(entries));
-        } else {
-            row = normalizeTypes(row);
-            if declarationEnd(&row) != size(row) { return bad; };
-            r = FullRecord { name: textAt(&row, 1), tokens: row };
-            program = addRecord(program, kind, r);
+    declaring = true;
+    while declaring [{ affirm at >= 1; }] ~ {
+        if at >= size(lines) { return bad; };
+        row = recordAt(lines, at);
+        if wordIs(&row, 0, "function") || wordIs(&row, 0, "main") { declaring = false; } else {
+            kind = recordPhase(&row);
+            if kind < phase || kind < 0 { return bad; };
+            phase = kind;
+            if kind = 5 {
+                env = push([], word("none"));
+                for i in 1..size(row) { env = push(env, clone(get(&row, i))); };
+                if envEnd(&env, 0) != size(env) { return bad; };
+                entries = envEntries(&env, 0); if !uniqueEntries(&entries) { return bad; };
+                shared = push(shared, orderEntries(entries));
+            } else {
+                row = normalizeTypes(row);
+                if declarationEnd(&row) != size(row) { return bad; };
+                r = FullRecord { name: textAt(&row, 1), tokens: row };
+                program = addRecord(program, kind, r);
+            };
+            at = at + 1;
         };
-        at = at + 1;
     };
-    while wordIs(recordAt(lines, at), 0, "function") ~ {
-        fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
-        program = FullProgram { functions: push(program.functions, fun.value), ..program }; at = fun.pos;
+    readingFunctions = true;
+    while readingFunctions ~ {
+        row = recordAt(lines, at);
+        if !wordIs(&row, 0, "function") { readingFunctions = false; } else {
+            fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
+            program = FullProgram { functions: push(program.functions, fun.value), ..program }; at = fun.pos;
+        };
     };
     if !wordIs(recordAt(lines, at), 0, "main") { return bad; };
     fun = functionAt(lines, at, &shared); if !fun.ok { return bad; };
