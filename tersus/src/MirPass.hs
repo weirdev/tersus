@@ -1,5 +1,6 @@
 module MirPass (programData, runPassWith) where
 
+import Data.Char (isSpace)
 import qualified Data.Set as Set
 import System.Exit (ExitCode (..))
 import Mir (Lowered (..), Program)
@@ -23,3 +24,13 @@ runPassWith tool label input = do
                     | trim out == "1" -> Error (trimEnd (decodeUtf8 errors))
                     | not (null (trim errors)) -> Error (label ++ " reported: " ++ trimEnd (decodeUtf8 errors))
                     | otherwise -> stage (label ++ " wrote unreadable MIR3: ") (mapResult lowProgram (readLowered out))
+
+trim :: String -> String
+trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+
+trimEnd :: String -> String
+trimEnd = reverse . dropWhile (== '\n') . reverse
+
+stage :: String -> Result a String -> Result a String
+stage prefix (Error e) = Error (prefix ++ e)
+stage _ ok = ok
