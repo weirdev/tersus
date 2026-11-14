@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes lib/parser/syntax/unicode.tersus: the parser's classifiers of code points from 128 up.
+"""Writes lib/data/unicode/unicode.tersus: the parser's classifiers of code points from 128 up.
 
 Run from tersus/ with a Python whose unicodedata is Unicode 15.0: python3 dev/parser-unicode/generate.py
 """
@@ -8,7 +8,7 @@ import unicodedata
 
 VERSION = "15.0.0"
 PART_SIZE = 32  # intervals per function, so that no function is too large for the validator
-OUTPUT = "lib/parser/syntax/unicode.tersus"
+OUTPUT = "lib/data/unicode/unicode.tersus"
 
 if unicodedata.unidata_version != VERSION:
     sys.exit(f"unicodedata is Unicode {unicodedata.unidata_version}; the classifier is pinned to {VERSION}")
@@ -49,7 +49,7 @@ def branch(intervals):
 def split(name, intervals):
     if len(intervals) <= PART_SIZE:
         part = f"{name}Part{intervals[0][0]}"
-        return f"return {part}(cp);", [f"fn {part}(cp: Int) -> Bool ~ {{\n{branch(intervals)}\n}};\n"]
+        return f"return {part}(cp);", [f"fn {part}(cp: Int) -> Bool {{\n{branch(intervals)}\n}};\n"]
     left, right = intervals[: len(intervals) // 2], intervals[len(intervals) // 2 :]
     left_body, left_parts = split(name, left)
     right_body, right_parts = split(name, right)
@@ -58,7 +58,7 @@ def split(name, intervals):
 
 def predicate(name, classify):
     body, parts = split(name, ranges(classify))
-    return "".join(parts) + f"fn {name}(cp: Int) -> Bool ~ {{\n{body}\n}};\n"
+    return "".join(parts) + f"fn {name}(cp: Int) -> Bool {{\n{body}\n}};\n"
 
 
 header = (

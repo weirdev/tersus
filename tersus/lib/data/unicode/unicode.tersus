@@ -1,5 +1,5 @@
 // Unicode 15.0 general categories: letter = L*, upper = Lu or Lt, lower = Ll, alphanum = L* or N* (dev/parser-unicode/generate.py)
-fn parserUnicodeLetterPart170(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart170(cp: Int) -> Bool {
 if cp < 880 {
 if cp < 248 {
 if cp < 186 {
@@ -78,7 +78,7 @@ return cp >= 1015 && cp <= 1153;
 };
 };
 };
-fn parserUnicodeLetterPart1162(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart1162(cp: Int) -> Bool {
 if cp < 1765 {
 if cp < 1519 {
 if cp < 1369 {
@@ -161,7 +161,7 @@ return cp >= 2042 && cp <= 2042;
 };
 };
 };
-fn parserUnicodeLetterPart2048(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart2048(cp: Int) -> Bool {
 if cp < 2365 {
 if cp < 2144 {
 if cp < 2084 {
@@ -240,7 +240,7 @@ return cp >= 2486 && cp <= 2489;
 };
 };
 };
-fn parserUnicodeLetterPart2493(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart2493(cp: Int) -> Bool {
 if cp < 2610 {
 if cp < 2556 {
 if cp < 2524 {
@@ -323,7 +323,7 @@ return cp >= 2738 && cp <= 2739;
 };
 };
 };
-fn parserUnicodeLetterPart2741(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart2741(cp: Int) -> Bool {
 if cp < 2869 {
 if cp < 2821 {
 if cp < 2768 {
@@ -402,7 +402,7 @@ return cp >= 2969 && cp <= 2970;
 };
 };
 };
-fn parserUnicodeLetterPart2972(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart2972(cp: Int) -> Bool {
 if cp < 3133 {
 if cp < 3024 {
 if cp < 2979 {
@@ -485,7 +485,7 @@ return cp >= 3261 && cp <= 3261;
 };
 };
 };
-fn parserUnicodeLetterPart3293(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart3293(cp: Int) -> Bool {
 if cp < 3450 {
 if cp < 3346 {
 if cp < 3313 {
@@ -564,7 +564,7 @@ return cp >= 3713 && cp <= 3714;
 };
 };
 };
-fn parserUnicodeLetterPart3716(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart3716(cp: Int) -> Bool {
 if cp < 3840 {
 if cp < 3762 {
 if cp < 3724 {
@@ -647,7 +647,7 @@ return cp >= 4206 && cp <= 4208;
 };
 };
 };
-fn parserUnicodeLetterPart4213(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart4213(cp: Int) -> Bool {
 if cp < 4698 {
 if cp < 4304 {
 if cp < 4256 {
@@ -726,7 +726,7 @@ return cp >= 4824 && cp <= 4880;
 };
 };
 };
-fn parserUnicodeLetterPart4882(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart4882(cp: Int) -> Bool {
 if cp < 5888 {
 if cp < 5121 {
 if cp < 4992 {
@@ -809,7 +809,7 @@ return cp >= 6279 && cp <= 6312;
 };
 };
 };
-fn parserUnicodeLetterPart6314(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart6314(cp: Int) -> Bool {
 if cp < 6917 {
 if cp < 6528 {
 if cp < 6400 {
@@ -888,7 +888,7 @@ return cp >= 7312 && cp <= 7354;
 };
 };
 };
-fn parserUnicodeLetterPart7357(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart7357(cp: Int) -> Bool {
 if cp < 8016 {
 if cp < 7424 {
 if cp < 7406 {
@@ -971,7 +971,7 @@ return cp >= 8144 && cp <= 8147;
 };
 };
 };
-fn parserUnicodeLetterPart8150(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart8150(cp: Int) -> Bool {
 if cp < 8469 {
 if cp < 8319 {
 if cp < 8178 {
@@ -1050,7 +1050,7 @@ return cp >= 8526 && cp <= 8526;
 };
 };
 };
-fn parserUnicodeLetterPart8579(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart8579(cp: Int) -> Bool {
 if cp < 11680 {
 if cp < 11559 {
 if cp < 11499 {
@@ -1133,7 +1133,7 @@ return cp >= 12337 && cp <= 12341;
 };
 };
 };
-fn parserUnicodeLetterPart12347(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart12347(cp: Int) -> Bool {
 if cp < 19968 {
 if cp < 12549 {
 if cp < 12445 {
@@ -1212,7 +1212,7 @@ return cp >= 42786 && cp <= 42888;
 };
 };
 };
-fn parserUnicodeLetterPart42891(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart42891(cp: Int) -> Bool {
 if cp < 43250 {
 if cp < 43011 {
 if cp < 42963 {
@@ -1295,7 +1295,7 @@ return cp >= 43514 && cp <= 43518;
 };
 };
 };
-fn parserUnicodeLetterPart43520(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart43520(cp: Int) -> Bool {
 if cp < 43714 {
 if cp < 43646 {
 if cp < 43588 {
@@ -1374,7 +1374,7 @@ return cp >= 43824 && cp <= 43866;
 };
 };
 };
-fn parserUnicodeLetterPart43868(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart43868(cp: Int) -> Bool {
 if cp < 64287 {
 if cp < 63744 {
 if cp < 44032 {
@@ -1457,7 +1457,7 @@ return cp >= 65008 && cp <= 65019;
 };
 };
 };
-fn parserUnicodeLetterPart65136(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart65136(cp: Int) -> Bool {
 if cp < 65549 {
 if cp < 65474 {
 if cp < 65313 {
@@ -1536,7 +1536,7 @@ return cp >= 66349 && cp <= 66368;
 };
 };
 };
-fn parserUnicodeLetterPart66370(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart66370(cp: Int) -> Bool {
 if cp < 66928 {
 if cp < 66560 {
 if cp < 66432 {
@@ -1619,7 +1619,7 @@ return cp >= 67424 && cp <= 67431;
 };
 };
 };
-fn parserUnicodeLetterPart67456(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart67456(cp: Int) -> Bool {
 if cp < 67712 {
 if cp < 67594 {
 if cp < 67506 {
@@ -1698,7 +1698,7 @@ return cp >= 68117 && cp <= 68119;
 };
 };
 };
-fn parserUnicodeLetterPart68121(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart68121(cp: Int) -> Bool {
 if cp < 68736 {
 if cp < 68352 {
 if cp < 68224 {
@@ -1781,7 +1781,7 @@ return cp >= 69600 && cp <= 69622;
 };
 };
 };
-fn parserUnicodeLetterPart69635(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart69635(cp: Int) -> Bool {
 if cp < 70019 {
 if cp < 69891 {
 if cp < 69749 {
@@ -1860,7 +1860,7 @@ return cp >= 70282 && cp <= 70285;
 };
 };
 };
-fn parserUnicodeLetterPart70287(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart70287(cp: Int) -> Bool {
 if cp < 70480 {
 if cp < 70419 {
 if cp < 70320 {
@@ -1943,7 +1943,7 @@ return cp >= 71168 && cp <= 71215;
 };
 };
 };
-fn parserUnicodeLetterPart71236(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart71236(cp: Int) -> Bool {
 if cp < 71957 {
 if cp < 71680 {
 if cp < 71352 {
@@ -2022,7 +2022,7 @@ return cp >= 72203 && cp <= 72242;
 };
 };
 };
-fn parserUnicodeLetterPart72250(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart72250(cp: Int) -> Bool {
 if cp < 72968 {
 if cp < 72704 {
 if cp < 72284 {
@@ -2105,7 +2105,7 @@ return cp >= 73490 && cp <= 73523;
 };
 };
 };
-fn parserUnicodeLetterPart73648(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart73648(cp: Int) -> Bool {
 if cp < 92880 {
 if cp < 78913 {
 if cp < 74880 {
@@ -2184,7 +2184,7 @@ return cp >= 94176 && cp <= 94177;
 };
 };
 };
-fn parserUnicodeLetterPart94179(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart94179(cp: Int) -> Bool {
 if cp < 110933 {
 if cp < 110581 {
 if cp < 100352 {
@@ -2267,7 +2267,7 @@ return cp >= 119970 && cp <= 119970;
 };
 };
 };
-fn parserUnicodeLetterPart119973(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart119973(cp: Int) -> Bool {
 if cp < 120123 {
 if cp < 120005 {
 if cp < 119982 {
@@ -2346,7 +2346,7 @@ return cp >= 120598 && cp <= 120628;
 };
 };
 };
-fn parserUnicodeLetterPart120630(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart120630(cp: Int) -> Bool {
 if cp < 123191 {
 if cp < 120772 {
 if cp < 120688 {
@@ -2429,7 +2429,7 @@ return cp >= 125184 && cp <= 125251;
 };
 };
 };
-fn parserUnicodeLetterPart125259(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart125259(cp: Int) -> Bool {
 if cp < 126530 {
 if cp < 126503 {
 if cp < 126469 {
@@ -2512,7 +2512,7 @@ return cp >= 126557 && cp <= 126557;
 };
 };
 };
-fn parserUnicodeLetterPart126559(cp: Int) -> Bool ~ {
+fn parserUnicodeLetterPart126559(cp: Int) -> Bool {
 if cp < 126625 {
 if cp < 126580 {
 if cp < 126564 {
@@ -2595,7 +2595,7 @@ return cp >= 201552 && cp <= 205743;
 };
 };
 };
-fn parserUnicodeLetter(cp: Int) -> Bool ~ {
+fn parserUnicodeLetter(cp: Int) -> Bool {
 if cp < 43520 {
 if cp < 4213 {
 if cp < 2741 {
@@ -2722,7 +2722,7 @@ return parserUnicodeLetterPart126559(cp);
 };
 };
 };
-fn parserUnicodeUpperPart192(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart192(cp: Int) -> Bool {
 if cp < 272 {
 if cp < 262 {
 if cp < 256 {
@@ -2801,7 +2801,7 @@ return cp >= 290 && cp <= 290;
 };
 };
 };
-fn parserUnicodeUpperPart292(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart292(cp: Int) -> Bool {
 if cp < 313 {
 if cp < 302 {
 if cp < 296 {
@@ -2880,7 +2880,7 @@ return cp >= 332 && cp <= 332;
 };
 };
 };
-fn parserUnicodeUpperPart334(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart334(cp: Int) -> Bool {
 if cp < 354 {
 if cp < 344 {
 if cp < 338 {
@@ -2959,7 +2959,7 @@ return cp >= 372 && cp <= 372;
 };
 };
 };
-fn parserUnicodeUpperPart374(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart374(cp: Int) -> Bool {
 if cp < 406 {
 if cp < 388 {
 if cp < 379 {
@@ -3042,7 +3042,7 @@ return cp >= 437 && cp <= 437;
 };
 };
 };
-fn parserUnicodeUpperPart439(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart439(cp: Int) -> Bool {
 if cp < 471 {
 if cp < 461 {
 if cp < 452 {
@@ -3121,7 +3121,7 @@ return cp >= 490 && cp <= 490;
 };
 };
 };
-fn parserUnicodeUpperPart492(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart492(cp: Int) -> Bool {
 if cp < 516 {
 if cp < 506 {
 if cp < 497 {
@@ -3200,7 +3200,7 @@ return cp >= 534 && cp <= 534;
 };
 };
 };
-fn parserUnicodeUpperPart536(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart536(cp: Int) -> Bool {
 if cp < 556 {
 if cp < 546 {
 if cp < 540 {
@@ -3279,7 +3279,7 @@ return cp >= 586 && cp <= 586;
 };
 };
 };
-fn parserUnicodeUpperPart588(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart588(cp: Int) -> Bool {
 if cp < 913 {
 if cp < 895 {
 if cp < 880 {
@@ -3362,7 +3362,7 @@ return cp >= 996 && cp <= 996;
 };
 };
 };
-fn parserUnicodeUpperPart998(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart998(cp: Int) -> Bool {
 if cp < 1122 {
 if cp < 1012 {
 if cp < 1002 {
@@ -3441,7 +3441,7 @@ return cp >= 1140 && cp <= 1140;
 };
 };
 };
-fn parserUnicodeUpperPart1142(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart1142(cp: Int) -> Bool {
 if cp < 1170 {
 if cp < 1152 {
 if cp < 1146 {
@@ -3520,7 +3520,7 @@ return cp >= 1188 && cp <= 1188;
 };
 };
 };
-fn parserUnicodeUpperPart1190(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart1190(cp: Int) -> Bool {
 if cp < 1210 {
 if cp < 1200 {
 if cp < 1194 {
@@ -3599,7 +3599,7 @@ return cp >= 1229 && cp <= 1229;
 };
 };
 };
-fn parserUnicodeUpperPart1232(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart1232(cp: Int) -> Bool {
 if cp < 1252 {
 if cp < 1242 {
 if cp < 1236 {
@@ -3682,7 +3682,7 @@ return cp >= 1272 && cp <= 1272;
 };
 };
 };
-fn parserUnicodeUpperPart1274(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart1274(cp: Int) -> Bool {
 if cp < 1294 {
 if cp < 1284 {
 if cp < 1278 {
@@ -3761,7 +3761,7 @@ return cp >= 1312 && cp <= 1312;
 };
 };
 };
-fn parserUnicodeUpperPart1314(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart1314(cp: Int) -> Bool {
 if cp < 4301 {
 if cp < 1324 {
 if cp < 1318 {
@@ -3840,7 +3840,7 @@ return cp >= 7690 && cp <= 7690;
 };
 };
 };
-fn parserUnicodeUpperPart7692(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart7692(cp: Int) -> Bool {
 if cp < 7712 {
 if cp < 7702 {
 if cp < 7696 {
@@ -3919,7 +3919,7 @@ return cp >= 7730 && cp <= 7730;
 };
 };
 };
-fn parserUnicodeUpperPart7732(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart7732(cp: Int) -> Bool {
 if cp < 7752 {
 if cp < 7742 {
 if cp < 7736 {
@@ -4002,7 +4002,7 @@ return cp >= 7772 && cp <= 7772;
 };
 };
 };
-fn parserUnicodeUpperPart7774(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart7774(cp: Int) -> Bool {
 if cp < 7794 {
 if cp < 7784 {
 if cp < 7778 {
@@ -4081,7 +4081,7 @@ return cp >= 7812 && cp <= 7812;
 };
 };
 };
-fn parserUnicodeUpperPart7814(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart7814(cp: Int) -> Bool {
 if cp < 7842 {
 if cp < 7824 {
 if cp < 7818 {
@@ -4160,7 +4160,7 @@ return cp >= 7860 && cp <= 7860;
 };
 };
 };
-fn parserUnicodeUpperPart7862(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart7862(cp: Int) -> Bool {
 if cp < 7882 {
 if cp < 7872 {
 if cp < 7866 {
@@ -4239,7 +4239,7 @@ return cp >= 7900 && cp <= 7900;
 };
 };
 };
-fn parserUnicodeUpperPart7902(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart7902(cp: Int) -> Bool {
 if cp < 7922 {
 if cp < 7912 {
 if cp < 7906 {
@@ -4322,7 +4322,7 @@ return cp >= 7992 && cp <= 7999;
 };
 };
 };
-fn parserUnicodeUpperPart8008(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart8008(cp: Int) -> Bool {
 if cp < 8136 {
 if cp < 8040 {
 if cp < 8027 {
@@ -4401,7 +4401,7 @@ return cp >= 8473 && cp <= 8477;
 };
 };
 };
-fn parserUnicodeUpperPart8484(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart8484(cp: Int) -> Bool {
 if cp < 11362 {
 if cp < 8510 {
 if cp < 8488 {
@@ -4480,7 +4480,7 @@ return cp >= 11396 && cp <= 11396;
 };
 };
 };
-fn parserUnicodeUpperPart11398(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart11398(cp: Int) -> Bool {
 if cp < 11418 {
 if cp < 11408 {
 if cp < 11402 {
@@ -4559,7 +4559,7 @@ return cp >= 11436 && cp <= 11436;
 };
 };
 };
-fn parserUnicodeUpperPart11438(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart11438(cp: Int) -> Bool {
 if cp < 11458 {
 if cp < 11448 {
 if cp < 11442 {
@@ -4642,7 +4642,7 @@ return cp >= 11478 && cp <= 11478;
 };
 };
 };
-fn parserUnicodeUpperPart11480(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart11480(cp: Int) -> Bool {
 if cp < 42562 {
 if cp < 11490 {
 if cp < 11484 {
@@ -4721,7 +4721,7 @@ return cp >= 42580 && cp <= 42580;
 };
 };
 };
-fn parserUnicodeUpperPart42582(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart42582(cp: Int) -> Bool {
 if cp < 42602 {
 if cp < 42592 {
 if cp < 42586 {
@@ -4800,7 +4800,7 @@ return cp >= 42638 && cp <= 42638;
 };
 };
 };
-fn parserUnicodeUpperPart42640(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart42640(cp: Int) -> Bool {
 if cp < 42794 {
 if cp < 42650 {
 if cp < 42644 {
@@ -4879,7 +4879,7 @@ return cp >= 42814 && cp <= 42814;
 };
 };
 };
-fn parserUnicodeUpperPart42816(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart42816(cp: Int) -> Bool {
 if cp < 42836 {
 if cp < 42826 {
 if cp < 42820 {
@@ -4962,7 +4962,7 @@ return cp >= 42856 && cp <= 42856;
 };
 };
 };
-fn parserUnicodeUpperPart42858(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart42858(cp: Int) -> Bool {
 if cp < 42891 {
 if cp < 42877 {
 if cp < 42862 {
@@ -5041,7 +5041,7 @@ return cp >= 42912 && cp <= 42912;
 };
 };
 };
-fn parserUnicodeUpperPart42914(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart42914(cp: Int) -> Bool {
 if cp < 42942 {
 if cp < 42928 {
 if cp < 42918 {
@@ -5120,7 +5120,7 @@ return cp >= 65313 && cp <= 65338;
 };
 };
 };
-fn parserUnicodeUpperPart66560(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart66560(cp: Int) -> Bool {
 if cp < 119860 {
 if cp < 66964 {
 if cp < 66928 {
@@ -5199,7 +5199,7 @@ return cp >= 120068 && cp <= 120069;
 };
 };
 };
-fn parserUnicodeUpperPart120071(cp: Int) -> Bool ~ {
+fn parserUnicodeUpperPart120071(cp: Int) -> Bool {
 if cp < 120276 {
 if cp < 120128 {
 if cp < 120086 {
@@ -5282,7 +5282,7 @@ return cp >= 125184 && cp <= 125217;
 };
 };
 };
-fn parserUnicodeUpper(cp: Int) -> Bool ~ {
+fn parserUnicodeUpper(cp: Int) -> Bool {
 if cp < 7774 {
 if cp < 998 {
 if cp < 439 {
@@ -5409,7 +5409,7 @@ return parserUnicodeUpperPart120071(cp);
 };
 };
 };
-fn parserUnicodeLowerPart181(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart181(cp: Int) -> Bool {
 if cp < 271 {
 if cp < 261 {
 if cp < 248 {
@@ -5488,7 +5488,7 @@ return cp >= 289 && cp <= 289;
 };
 };
 };
-fn parserUnicodeLowerPart291(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart291(cp: Int) -> Bool {
 if cp < 311 {
 if cp < 301 {
 if cp < 295 {
@@ -5571,7 +5571,7 @@ return cp >= 333 && cp <= 333;
 };
 };
 };
-fn parserUnicodeLowerPart335(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart335(cp: Int) -> Bool {
 if cp < 355 {
 if cp < 345 {
 if cp < 339 {
@@ -5650,7 +5650,7 @@ return cp >= 373 && cp <= 373;
 };
 };
 };
-fn parserUnicodeLowerPart375(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart375(cp: Int) -> Bool {
 if cp < 409 {
 if cp < 389 {
 if cp < 380 {
@@ -5733,7 +5733,7 @@ return cp >= 438 && cp <= 438;
 };
 };
 };
-fn parserUnicodeLowerPart441(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart441(cp: Int) -> Bool {
 if cp < 472 {
 if cp < 462 {
 if cp < 454 {
@@ -5812,7 +5812,7 @@ return cp >= 491 && cp <= 491;
 };
 };
 };
-fn parserUnicodeLowerPart493(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart493(cp: Int) -> Bool {
 if cp < 517 {
 if cp < 507 {
 if cp < 499 {
@@ -5895,7 +5895,7 @@ return cp >= 537 && cp <= 537;
 };
 };
 };
-fn parserUnicodeLowerPart539(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart539(cp: Int) -> Bool {
 if cp < 559 {
 if cp < 549 {
 if cp < 543 {
@@ -5974,7 +5974,7 @@ return cp >= 589 && cp <= 589;
 };
 };
 };
-fn parserUnicodeLowerPart591(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart591(cp: Int) -> Bool {
 if cp < 985 {
 if cp < 891 {
 if cp < 881 {
@@ -6057,7 +6057,7 @@ return cp >= 1005 && cp <= 1005;
 };
 };
 };
-fn parserUnicodeLowerPart1007(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart1007(cp: Int) -> Bool {
 if cp < 1131 {
 if cp < 1121 {
 if cp < 1016 {
@@ -6136,7 +6136,7 @@ return cp >= 1149 && cp <= 1149;
 };
 };
 };
-fn parserUnicodeLowerPart1151(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart1151(cp: Int) -> Bool {
 if cp < 1179 {
 if cp < 1169 {
 if cp < 1163 {
@@ -6219,7 +6219,7 @@ return cp >= 1199 && cp <= 1199;
 };
 };
 };
-fn parserUnicodeLowerPart1201(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart1201(cp: Int) -> Bool {
 if cp < 1222 {
 if cp < 1211 {
 if cp < 1205 {
@@ -6298,7 +6298,7 @@ return cp >= 1241 && cp <= 1241;
 };
 };
 };
-fn parserUnicodeLowerPart1243(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart1243(cp: Int) -> Bool {
 if cp < 1263 {
 if cp < 1253 {
 if cp < 1247 {
@@ -6381,7 +6381,7 @@ return cp >= 1283 && cp <= 1283;
 };
 };
 };
-fn parserUnicodeLowerPart1285(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart1285(cp: Int) -> Bool {
 if cp < 1305 {
 if cp < 1295 {
 if cp < 1289 {
@@ -6460,7 +6460,7 @@ return cp >= 1323 && cp <= 1323;
 };
 };
 };
-fn parserUnicodeLowerPart1325(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart1325(cp: Int) -> Bool {
 if cp < 7681 {
 if cp < 5112 {
 if cp < 1376 {
@@ -6543,7 +6543,7 @@ return cp >= 7701 && cp <= 7701;
 };
 };
 };
-fn parserUnicodeLowerPart7703(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart7703(cp: Int) -> Bool {
 if cp < 7723 {
 if cp < 7713 {
 if cp < 7707 {
@@ -6622,7 +6622,7 @@ return cp >= 7741 && cp <= 7741;
 };
 };
 };
-fn parserUnicodeLowerPart7743(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart7743(cp: Int) -> Bool {
 if cp < 7763 {
 if cp < 7753 {
 if cp < 7747 {
@@ -6705,7 +6705,7 @@ return cp >= 7783 && cp <= 7783;
 };
 };
 };
-fn parserUnicodeLowerPart7785(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart7785(cp: Int) -> Bool {
 if cp < 7805 {
 if cp < 7795 {
 if cp < 7789 {
@@ -6784,7 +6784,7 @@ return cp >= 7823 && cp <= 7823;
 };
 };
 };
-fn parserUnicodeLowerPart7825(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart7825(cp: Int) -> Bool {
 if cp < 7853 {
 if cp < 7843 {
 if cp < 7829 {
@@ -6867,7 +6867,7 @@ return cp >= 7873 && cp <= 7873;
 };
 };
 };
-fn parserUnicodeLowerPart7875(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart7875(cp: Int) -> Bool {
 if cp < 7895 {
 if cp < 7885 {
 if cp < 7879 {
@@ -6946,7 +6946,7 @@ return cp >= 7913 && cp <= 7913;
 };
 };
 };
-fn parserUnicodeLowerPart7915(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart7915(cp: Int) -> Bool {
 if cp < 7935 {
 if cp < 7925 {
 if cp < 7919 {
@@ -7029,7 +7029,7 @@ return cp >= 8096 && cp <= 8103;
 };
 };
 };
-fn parserUnicodeLowerPart8112(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart8112(cp: Int) -> Bool {
 if cp < 8458 {
 if cp < 8144 {
 if cp < 8126 {
@@ -7108,7 +7108,7 @@ return cp >= 8580 && cp <= 8580;
 };
 };
 };
-fn parserUnicodeLowerPart11312(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart11312(cp: Int) -> Bool {
 if cp < 11395 {
 if cp < 11372 {
 if cp < 11365 {
@@ -7191,7 +7191,7 @@ return cp >= 11415 && cp <= 11415;
 };
 };
 };
-fn parserUnicodeLowerPart11417(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart11417(cp: Int) -> Bool {
 if cp < 11437 {
 if cp < 11427 {
 if cp < 11421 {
@@ -7270,7 +7270,7 @@ return cp >= 11455 && cp <= 11455;
 };
 };
 };
-fn parserUnicodeLowerPart11457(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart11457(cp: Int) -> Bool {
 if cp < 11477 {
 if cp < 11467 {
 if cp < 11461 {
@@ -7353,7 +7353,7 @@ return cp >= 11507 && cp <= 11507;
 };
 };
 };
-fn parserUnicodeLowerPart11520(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart11520(cp: Int) -> Bool {
 if cp < 42575 {
 if cp < 42565 {
 if cp < 11565 {
@@ -7432,7 +7432,7 @@ return cp >= 42593 && cp <= 42593;
 };
 };
 };
-fn parserUnicodeLowerPart42595(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart42595(cp: Int) -> Bool {
 if cp < 42633 {
 if cp < 42605 {
 if cp < 42599 {
@@ -7515,7 +7515,7 @@ return cp >= 42787 && cp <= 42787;
 };
 };
 };
-fn parserUnicodeLowerPart42789(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart42789(cp: Int) -> Bool {
 if cp < 42811 {
 if cp < 42799 {
 if cp < 42793 {
@@ -7594,7 +7594,7 @@ return cp >= 42829 && cp <= 42829;
 };
 };
 };
-fn parserUnicodeLowerPart42831(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart42831(cp: Int) -> Bool {
 if cp < 42851 {
 if cp < 42841 {
 if cp < 42835 {
@@ -7677,7 +7677,7 @@ return cp >= 42879 && cp <= 42879;
 };
 };
 };
-fn parserUnicodeLowerPart42881(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart42881(cp: Int) -> Bool {
 if cp < 42907 {
 if cp < 42894 {
 if cp < 42885 {
@@ -7756,7 +7756,7 @@ return cp >= 42933 && cp <= 42933;
 };
 };
 };
-fn parserUnicodeLowerPart42935(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart42935(cp: Int) -> Bool {
 if cp < 42963 {
 if cp < 42945 {
 if cp < 42939 {
@@ -7839,7 +7839,7 @@ return cp >= 64275 && cp <= 64279;
 };
 };
 };
-fn parserUnicodeLowerPart65345(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart65345(cp: Int) -> Bool {
 if cp < 119834 {
 if cp < 66995 {
 if cp < 66776 {
@@ -7922,7 +7922,7 @@ return cp >= 120146 && cp <= 120171;
 };
 };
 };
-fn parserUnicodeLowerPart120198(cp: Int) -> Bool ~ {
+fn parserUnicodeLowerPart120198(cp: Int) -> Bool {
 if cp < 120630 {
 if cp < 120458 {
 if cp < 120302 {
@@ -8005,7 +8005,7 @@ return cp >= 125218 && cp <= 125251;
 };
 };
 };
-fn parserUnicodeLower(cp: Int) -> Bool ~ {
+fn parserUnicodeLower(cp: Int) -> Bool {
 if cp < 7785 {
 if cp < 1007 {
 if cp < 441 {
@@ -8132,7 +8132,7 @@ return parserUnicodeLowerPart120198(cp);
 };
 };
 };
-fn parserUnicodeAlphaNumPart170(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart170(cp: Int) -> Bool {
 if cp < 750 {
 if cp < 192 {
 if cp < 181 {
@@ -8223,7 +8223,7 @@ return cp >= 1162 && cp <= 1327;
 };
 };
 };
-fn parserUnicodeAlphaNumPart1329(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart1329(cp: Int) -> Bool {
 if cp < 1774 {
 if cp < 1568 {
 if cp < 1376 {
@@ -8314,7 +8314,7 @@ return cp >= 2084 && cp <= 2084;
 };
 };
 };
-fn parserUnicodeAlphaNumPart2088(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart2088(cp: Int) -> Bool {
 if cp < 2417 {
 if cp < 2208 {
 if cp < 2144 {
@@ -8405,7 +8405,7 @@ return cp >= 2534 && cp <= 2545;
 };
 };
 };
-fn parserUnicodeAlphaNumPart2548(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart2548(cp: Int) -> Bool {
 if cp < 2674 {
 if cp < 2610 {
 if cp < 2575 {
@@ -8500,7 +8500,7 @@ return cp >= 2809 && cp <= 2809;
 };
 };
 };
-fn parserUnicodeAlphaNumPart2821(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart2821(cp: Int) -> Bool {
 if cp < 2947 {
 if cp < 2869 {
 if cp < 2835 {
@@ -8591,7 +8591,7 @@ return cp >= 3046 && cp <= 3058;
 };
 };
 };
-fn parserUnicodeAlphaNumPart3077(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart3077(cp: Int) -> Bool {
 if cp < 3205 {
 if cp < 3160 {
 if cp < 3090 {
@@ -8682,7 +8682,7 @@ return cp >= 3342 && cp <= 3344;
 };
 };
 };
-fn parserUnicodeAlphaNumPart3346(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart3346(cp: Int) -> Bool {
 if cp < 3520 {
 if cp < 3430 {
 if cp < 3406 {
@@ -8773,7 +8773,7 @@ return cp >= 3751 && cp <= 3760;
 };
 };
 };
-fn parserUnicodeAlphaNumPart3762(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart3762(cp: Int) -> Bool {
 if cp < 4159 {
 if cp < 3840 {
 if cp < 3782 {
@@ -8868,7 +8868,7 @@ return cp >= 4301 && cp <= 4301;
 };
 };
 };
-fn parserUnicodeAlphaNumPart4304(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart4304(cp: Int) -> Bool {
 if cp < 4800 {
 if cp < 4698 {
 if cp < 4682 {
@@ -8959,7 +8959,7 @@ return cp >= 5743 && cp <= 5759;
 };
 };
 };
-fn parserUnicodeAlphaNumPart5761(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart5761(cp: Int) -> Bool {
 if cp < 6112 {
 if cp < 5952 {
 if cp < 5870 {
@@ -9050,7 +9050,7 @@ return cp >= 6528 && cp <= 6571;
 };
 };
 };
-fn parserUnicodeAlphaNumPart6576(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart6576(cp: Int) -> Bool {
 if cp < 7086 {
 if cp < 6800 {
 if cp < 6656 {
@@ -9141,7 +9141,7 @@ return cp >= 7424 && cp <= 7615;
 };
 };
 };
-fn parserUnicodeAlphaNumPart7680(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart7680(cp: Int) -> Bool {
 if cp < 8130 {
 if cp < 8027 {
 if cp < 8008 {
@@ -9236,7 +9236,7 @@ return cp >= 8450 && cp <= 8450;
 };
 };
 };
-fn parserUnicodeAlphaNumPart8455(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart8455(cp: Int) -> Bool {
 if cp < 8526 {
 if cp < 8486 {
 if cp < 8469 {
@@ -9327,7 +9327,7 @@ return cp >= 11565 && cp <= 11565;
 };
 };
 };
-fn parserUnicodeAlphaNumPart11568(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart11568(cp: Int) -> Bool {
 if cp < 11823 {
 if cp < 11696 {
 if cp < 11648 {
@@ -9418,7 +9418,7 @@ return cp >= 12690 && cp <= 12693;
 };
 };
 };
-fn parserUnicodeAlphaNumPart12704(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart12704(cp: Int) -> Bool {
 if cp < 42512 {
 if cp < 12928 {
 if cp < 12832 {
@@ -9509,7 +9509,7 @@ return cp >= 43011 && cp <= 43013;
 };
 };
 };
-fn parserUnicodeAlphaNumPart43015(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart43015(cp: Int) -> Bool {
 if cp < 43396 {
 if cp < 43250 {
 if cp < 43072 {
@@ -9604,7 +9604,7 @@ return cp >= 43697 && cp <= 43697;
 };
 };
 };
-fn parserUnicodeAlphaNumPart43701(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart43701(cp: Int) -> Bool {
 if cp < 43816 {
 if cp < 43744 {
 if cp < 43712 {
@@ -9695,7 +9695,7 @@ return cp >= 64275 && cp <= 64279;
 };
 };
 };
-fn parserUnicodeAlphaNumPart64285(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart64285(cp: Int) -> Bool {
 if cp < 65008 {
 if cp < 64320 {
 if cp < 64298 {
@@ -9786,7 +9786,7 @@ return cp >= 65536 && cp <= 65547;
 };
 };
 };
-fn parserUnicodeAlphaNumPart65549(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart65549(cp: Int) -> Bool {
 if cp < 66273 {
 if cp < 65664 {
 if cp < 65596 {
@@ -9877,7 +9877,7 @@ return cp >= 66776 && cp <= 66811;
 };
 };
 };
-fn parserUnicodeAlphaNumPart66816(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart66816(cp: Int) -> Bool {
 if cp < 67424 {
 if cp < 66967 {
 if cp < 66940 {
@@ -9972,7 +9972,7 @@ return cp >= 67705 && cp <= 67742;
 };
 };
 };
-fn parserUnicodeAlphaNumPart67751(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart67751(cp: Int) -> Bool {
 if cp < 68160 {
 if cp < 67968 {
 if cp < 67828 {
@@ -10063,7 +10063,7 @@ return cp >= 68608 && cp <= 68680;
 };
 };
 };
-fn parserUnicodeAlphaNumPart68736(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart68736(cp: Int) -> Bool {
 if cp < 69552 {
 if cp < 69248 {
 if cp < 68858 {
@@ -10154,7 +10154,7 @@ return cp >= 69956 && cp <= 69956;
 };
 };
 };
-fn parserUnicodeAlphaNumPart69959(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart69959(cp: Int) -> Bool {
 if cp < 70272 {
 if cp < 70096 {
 if cp < 70006 {
@@ -10245,7 +10245,7 @@ return cp >= 70450 && cp <= 70451;
 };
 };
 };
-fn parserUnicodeAlphaNumPart70453(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart70453(cp: Int) -> Bool {
 if cp < 71040 {
 if cp < 70736 {
 if cp < 70493 {
@@ -10340,7 +10340,7 @@ return cp >= 71680 && cp <= 71723;
 };
 };
 };
-fn parserUnicodeAlphaNumPart71840(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart71840(cp: Int) -> Bool {
 if cp < 72161 {
 if cp < 71960 {
 if cp < 71945 {
@@ -10431,7 +10431,7 @@ return cp >= 72768 && cp <= 72768;
 };
 };
 };
-fn parserUnicodeAlphaNumPart72784(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart72784(cp: Int) -> Bool {
 if cp < 73120 {
 if cp < 73030 {
 if cp < 72960 {
@@ -10522,7 +10522,7 @@ return cp >= 77712 && cp <= 77808;
 };
 };
 };
-fn parserUnicodeAlphaNumPart77824(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart77824(cp: Int) -> Bool {
 if cp < 93008 {
 if cp < 92768 {
 if cp < 82944 {
@@ -10613,7 +10613,7 @@ return cp >= 100352 && cp <= 101589;
 };
 };
 };
-fn parserUnicodeAlphaNumPart101632(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart101632(cp: Int) -> Bool {
 if cp < 113792 {
 if cp < 110928 {
 if cp < 110589 {
@@ -10708,7 +10708,7 @@ return cp >= 119982 && cp <= 119993;
 };
 };
 };
-fn parserUnicodeAlphaNumPart119995(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart119995(cp: Int) -> Bool {
 if cp < 120146 {
 if cp < 120086 {
 if cp < 120005 {
@@ -10799,7 +10799,7 @@ return cp >= 120772 && cp <= 120779;
 };
 };
 };
-fn parserUnicodeAlphaNumPart120782(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart120782(cp: Int) -> Bool {
 if cp < 124112 {
 if cp < 123191 {
 if cp < 122661 {
@@ -10890,7 +10890,7 @@ return cp >= 126065 && cp <= 126123;
 };
 };
 };
-fn parserUnicodeAlphaNumPart126125(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart126125(cp: Int) -> Bool {
 if cp < 126521 {
 if cp < 126469 {
 if cp < 126209 {
@@ -10981,7 +10981,7 @@ return cp >= 126555 && cp <= 126555;
 };
 };
 };
-fn parserUnicodeAlphaNumPart126557(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNumPart126557(cp: Int) -> Bool {
 if cp < 126629 {
 if cp < 126580 {
 if cp < 126564 {
@@ -11076,7 +11076,7 @@ return cp >= 201552 && cp <= 205743;
 };
 };
 };
-fn parserUnicodeAlphaNum(cp: Int) -> Bool ~ {
+fn parserUnicodeAlphaNum(cp: Int) -> Bool {
 if cp < 43701 {
 if cp < 4304 {
 if cp < 2821 {

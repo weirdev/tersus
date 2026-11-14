@@ -247,7 +247,7 @@ frontendSeedSha256 =
 dataPackageFiles :: [(FilePath, String)]
 dataPackageFiles =
     $( do
-        let paths = ["lib/data/package.tersus", "lib/data/codec/codec.tersus", "lib/data/ast/ast.tersus", "lib/data/reader/reader.tersus", "lib/data/arena/arena.tersus"]
+        let paths = ["lib/data/package.tersus", "lib/data/unicode/unicode.tersus", "lib/data/codec/codec.tersus", "lib/data/ast/ast.tersus", "lib/data/reader/reader.tersus", "lib/data/arena/arena.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
         lift files
      )
@@ -256,14 +256,14 @@ dataPackageFiles =
 parserUnicodeSource :: String
 parserUnicodeSource =
     $( do
-        let path = "lib/parser/syntax/unicode.tersus"
+        let path = "lib/data/unicode/unicode.tersus"
         addDependentFile path
         contents <- runIO (readFile path)
         lift contents
      )
 
 parserPackageFiles :: [(FilePath, String)]
-parserPackageFiles = dataPackageFiles ++ [("lib/parser/syntax/unicode.tersus", parserUnicodeSource)] ++
+parserPackageFiles = dataPackageFiles ++
     $( do
         let paths = ["lib/parser/package.tersus", "lib/parser/parser.tersus", "lib/parser/syntax/syntax.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
@@ -280,7 +280,7 @@ astReaderPackageFiles = dataPackageFiles ++
 
 -- The elaborator written in Tersus (REPLACING_HASKELL.md), the compiler's type checker
 elaboratePackageFiles :: [(FilePath, String)]
-elaboratePackageFiles = dataPackageFiles ++ [("lib/parser/syntax/unicode.tersus", parserUnicodeSource)] ++
+elaboratePackageFiles = dataPackageFiles ++
     $( do
         let paths = ["lib/parser/package.tersus", "lib/parser/syntax/syntax.tersus", "lib/elaborate/package.tersus", "lib/elaborate/builtins.tersus", "lib/elaborate/calls.tersus", "lib/elaborate/check.tersus", "lib/elaborate/core.tersus", "lib/elaborate/decls.tersus", "lib/elaborate/elaborate.tersus", "lib/elaborate/expr.tersus", "lib/elaborate/exports.tersus", "lib/elaborate/libraries.tersus", "lib/elaborate/load.tersus", "lib/elaborate/lower.tersus", "lib/elaborate/lowerbuild.tersus", "lib/elaborate/lowerexpr.tersus", "lib/elaborate/loweriface.tersus", "lib/elaborate/lowerout.tersus", "lib/elaborate/lowerplace.tersus", "lib/elaborate/lowerstate.tersus", "lib/elaborate/out.tersus", "lib/elaborate/proofs.tersus", "lib/elaborate/records.tersus", "lib/elaborate/refs.tersus", "lib/elaborate/resolve.tersus", "lib/elaborate/rewrite.tersus", "lib/elaborate/snapshot.tersus", "lib/elaborate/state.tersus", "lib/elaborate/traits.tersus", "lib/elaborate/units.tersus", "lib/elaborate/wire.tersus"]
         files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths

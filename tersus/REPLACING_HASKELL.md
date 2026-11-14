@@ -557,7 +557,7 @@ P1 and P0 for the parser's own tests, its fixpoint, `dev/parser-seed` and
 link). The module request's `package` section is gone on both sides. The CLI
 compiles a package from one `package` load of its snapshot.
 
-The parser's Unicode classifier (`lib/parser/syntax/unicode.tersus`) is checked
+The parser's Unicode classifier (`lib/data/unicode/unicode.tersus`) is checked
 in, pinned to Unicode 15.0 (`dev/parser-unicode/generate.py` refuses another
 version), and the frontend fingerprint covers it: it was generated from the
 tables of the GHC that built the compiler, so F0, now the parser of every

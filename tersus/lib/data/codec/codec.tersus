@@ -1,3 +1,5 @@
+import data::unicode::unicode { parserUnicodeAlphaNum, parserUnicodeLower, parserUnicodeUpper };
+
 fn wireRoles() -> List<String> {
     return push(push(push(push(push(push(push([], "Box"), "Clone"), "Copy"), "Deref"), "Drop"), "Eq"), "List");
 };
@@ -224,13 +226,56 @@ fn renderSizeForName(s: &Size) -> String [{ }] [{ }] {
     };
 };
 
+struct Utf8Point { value: Int, next: Int, ok: Bool };
+impl Clone for Utf8Point { };
+
+fn utf8Point(text: &String, start: Int) -> Utf8Point [{ }] [{ affirm return.next >= 0; affirm return.next <= size(text.bytes); }] {
+    n = size(text.bytes);
+    bad = Utf8Point { value: 0, next: n, ok: false };
+    if start < 0 || start >= n { return bad; };
+    c = toInt(get(text.bytes, start));
+    if c < 128 { return Utf8Point { value: c, next: start + 1, ok: true }; };
+    count = 0; point = 0; least = 0;
+    if c >= 194 && c <= 223 { count = 1; point = c - 192; least = 128; }
+    else { if c >= 224 && c <= 239 { count = 2; point = c - 224; least = 2048; }
+    else { if c >= 240 && c <= 244 { count = 3; point = c - 240; least = 65536; }
+    else { return bad; }; }; };
+    if start + count >= n { return bad; };
+    for i in 0..count [{ affirm start >= 0; affirm start + count < size(text.bytes); }] {
+        b = toInt(get(text.bytes, start + i + 1));
+        if b < 128 || b > 191 { return bad; };
+        point = point * 64 + b - 128;
+    };
+    if point < least || point > 1114111 || (point >= 55296 && point <= 57343) { return bad; };
+    return Utf8Point { value: point, next: start + count + 1, ok: true };
+};
+
+fn unicodeLower(cp: Int) -> Bool {
+    if cp < 128 { return cp >= 97 && cp <= 122; };
+    return parserUnicodeLower(cp);
+};
+
+fn unicodeAlphaNum(cp: Int) -> Bool {
+    if cp < 128 { return (cp >= 65 && cp <= 90) || (cp >= 97 && cp <= 122) || (cp >= 48 && cp <= 57); };
+    return parserUnicodeAlphaNum(cp);
+};
+
+fn isUpperName(name: &String) -> Bool {
+    point = utf8Point(name, 0);
+    if !point.ok { return false; };
+    if point.value < 128 { return point.value >= 65 && point.value <= 90; };
+    return parserUnicodeUpper(point.value);
+};
+
 fn isBareLowerName(name: &String) -> Bool [{ }] [{ }] {
-    if size(name.bytes) = 0 { return false; };
-    c = toInt(get(name.bytes, 0));
-    if c < 97 || c > 122 { return false; };
-    for i in 0..size(name.bytes) {
-        b = toInt(get(name.bytes, i));
-        if !((b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)) { return false; };
+    point = utf8Point(name, 0);
+    if !point.ok || !unicodeLower(point.value) { return false; };
+    i = point.next;
+    n = size(name.bytes);
+    while i < n [{ affirm i >= 0; affirm i <= size(name.bytes); }] shrinks n - i {
+        next = utf8Point(name, i);
+        if !next.ok || next.next <= i || !unicodeAlphaNum(next.value) { return false; };
+        i = next.next;
     };
     return true;
 };
