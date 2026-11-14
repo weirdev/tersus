@@ -1,0 +1,20 @@
+trait Fn1<A, R> {
+    fn call(self: &Self, a: A) -> R [{ }] [{ }];
+};
+struct AddN { n: Int };
+impl Fn1<Int, Int> for AddN {
+    fn call(self: &Self, a: Int) -> Int [{ }] [{ affirm return = a + self.n; }] { return a + self.n; };
+};
+fn mapInts<F: Fn1<Int, Int>>(xs: &List<Int>, f: &F) -> List<Int> [{ }] [{ affirm size(return) = size(xs); }] {
+    out = [];
+    i = 0;
+    while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); affirm size(out) = i; }] shrinks size(xs) - i {
+        out = push(out, f.call(get(xs, i)));
+        i = i + 1;
+    };
+    return out;
+};
+xs = push(push(push([], 1), 2), 3);
+add10 = AddN { n: 10 };
+ys = mapInts(xs, &add10);
+return get(ys, 0) * 100 + get(ys, 1) * 10 + get(ys, 2);

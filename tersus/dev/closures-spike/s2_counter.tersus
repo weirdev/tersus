@@ -1,0 +1,16 @@
+trait FnMut0<R> {
+    fn callMut(self: &Self) -> R [{ }] [{ }];
+};
+struct Counter { count: &mut Int };
+impl FnMut0<Int> for Counter {
+    fn callMut(self: &Self) -> Int [{ }] [{ }] { *self.count = *self.count + 1; return *self.count; };
+};
+fn callTwice<F: FnMut0<Int>>(f: &F) -> Int [{ }] [{ }] {
+    a = f.callMut();
+    b = f.callMut();
+    return a * 10 + b;
+};
+n = 0;
+c = Counter { count: &mut n };
+r = callTwice(&c);
+return r * 100 + n;

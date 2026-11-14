@@ -1,0 +1,9 @@
+xs = push(push(push([], 1), 2), 3);
+out = [];
+i = 0;
+n = 10;
+while i < size(xs) [{ affirm i >= 0; affirm i <= size(xs); affirm size(out) = i; }] shrinks size(xs) - i {
+    out = push(out, get(xs, i) + n);
+    i = i + 1;
+};
+return get(out, 0) * 100 + get(out, 1) * 10 + get(out, 2);
