@@ -61,6 +61,11 @@ testVariadic =
                 , testCase "no arguments, one, and seventeen" (runs (count ++ "return count() * 10000 + count(1) * 100 + count(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, true);") (VInt 117))
                 ]
             , TestList
+                "copies and trait contracts"
+                [ testCase "a pack element's method gives a copy only the trait's contract" (refused "trait W { fn w(self: &Self) -> Int [{ }] [{ }]; }; impl W for Int { fn w(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 1; }; }; impl W for Bool { fn w(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 1; }; }; fn sum<..T: W>(args: &..T) -> Int [{ }] [{ affirm return >= 0; }] { t = 0; for a in args { t = t + a.w(); }; return t; }; return sum(1, true);" "Could not prove: return >= 0 (in sum[Int, Bool])")
+                , testCase "and what the trait promises is enough" (runs (measure ++ "fn sum<..T: Measure>(args: &..T) -> Int [{ }] [{ affirm return >= 0; }] { t = 0; for a in args { t = t + a.measure(); }; return t; }; return sum(0 - 3, true);") (VInt 4))
+                ]
+            , TestList
                 "element types"
                 [ testCase "the same number is the same type" (runs "fn same<..T>(args: &..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { x = get(args, 0); x = get(args, 0); return size(args); }; return same(1, true);" (VInt 2))
                 , testCase "two numbers are two types" (refused "fn two<..T>(args: &..T) -> Int [{ affirm size(args) >= 2; }] [{ }] { x = get(args, 0); x = get(args, 1); return 0; }; return two(1, 2);" "expected the type of get(args, 0), got the type of get(args, 1)")
