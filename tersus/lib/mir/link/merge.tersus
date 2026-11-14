@@ -1,0 +1,230 @@
+import data::codec::codec { Token, Parsed, catStrings };
+import data::ast::ast { AstNode };
+import data::arena::arena { remapNode };
+import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock };
+import mir::full::tokens { appendTokens, integerAt, intToken, name, namesEnd, intsEnd, quotedAt, sliceTokens, textAt, typeEnd, word, wordIs };
+import mir::full::records { EnvEntry, entryAt, envEnd, envEntries, envTokens, envStart, mapPayloadLine, payloadSlots, replaceEnv, mergeEntries, orderEntries, emptyEntries };
+import mir::full::write { mapProgramPayloads, mapProgramEnvRefs, mapFunctionEnvRefs, sortFunctions, sortRecords };
+import mir::full::environments { sameEnv, withoutEnv, completeShared };
+import mir::full::read { noFull };
+import mir::full::equality { sameAst };
+
+struct LinkUnit { pkg: String, modu: String, hasModule: Bool, program: FullProgram };
+impl Clone for LinkUnit { };
+struct Linked { ok: Bool, message: String, program: FullProgram };
+impl Clone for Linked { };
+fn failedLink(message: String) -> Linked ~ { return Linked { ok: false, message: message, program: noFull() }; };
+fn unitName(unit: &LinkUnit) -> String ~ { if unit.hasModule { return catStrings(catStrings(clone(unit.pkg), "::"), clone(unit.modu)); }; return clone(unit.pkg); };
+fn sameId(a: &LinkUnit, b: &LinkUnit) -> Bool ~ { return a.pkg = b.pkg && a.hasModule = b.hasModule && (!a.hasModule || a.modu = b.modu); };
+fn privateUnit(u: &LinkUnit) -> Bool ~ { return u.pkg = "tersuslib" && u.hasModule && (u.modu = "lists" || u.modu = "box"); };
+fn rowIndex(rows: &List<FullRecord>, n: &String) -> Int ~ { i = 0; for r in rows { if r.name = n { return i; }; i = i + 1; }; return 0 - 1; };
+fn fnIndex(fns: &List<FullFunction>, n: &String) -> Int ~ { i = 0; for f in fns { if textAt(&f.header, 1) = n { return i; }; i = i + 1; }; return 0 - 1; };
+fn sameRow(a: &List<Token>, an: &List<AstNode>, b: &List<Token>, bn: &List<AstNode>) -> Bool ~ {
+    return sameRowWithEnvs(a, an, b, bn, [], [], true);
+};
+fn sameRowWithEnvs(a: &List<Token>, an: &List<AstNode>, b: &List<Token>, bn: &List<AstNode>, ashared: &List<List<Token>>, bshared: &List<List<Token>>, common: Bool) -> Bool ~ {
+    if !sameEnv(a, ashared, b, bshared, common) { return false; };
+    left = clone(a); right = clone(b); slots = payloadSlots(a); other = payloadSlots(b);
+    if size(slots) != size(other) { return false; };
+    for i in 0..size(slots) {
+        if i >= size(other) { return false; }; slot = get(&slots, i); rslot = get(&other, i);
+        x = integerAt(a, slot); y = integerAt(b, rslot);
+        if !x.ok || !y.ok || !sameAst(an, x.value, bn, y.value) { return false; };
+        if slot >= 0 && slot < size(left) && rslot >= 0 && rslot < size(right) { left = set(left, slot, intToken(0)); right = set(right, rslot, intToken(0)); };
+    };
+    return withoutEnv(&left) = withoutEnv(&right);
+};
+fn sameRecords(a: &List<FullRecord>, an: &List<AstNode>, b: &List<FullRecord>, bn: &List<AstNode>) -> Bool ~ { return sameRecordsWithEnvs(a, an, b, bn, [], [], true); };
+fn sameRecordsWithEnvs(a: &List<FullRecord>, an: &List<AstNode>, b: &List<FullRecord>, bn: &List<AstNode>, ashared: &List<List<Token>>, bshared: &List<List<Token>>, common: Bool) -> Bool ~ {
+    if size(a) != size(b) { return false; };
+    for r in a { i = rowIndex(b, &r.name); if i < 0 || i >= size(b) || !sameRowWithEnvs(&r.tokens, an, &get(b, i).tokens, bn, ashared, bshared, common) { return false; }; };
+    return true;
+};
+fn sameFunction(a: &FullFunction, an: &List<AstNode>, b: &FullFunction, bn: &List<AstNode>, ashared: &List<List<Token>>, bshared: &List<List<Token>>, common: Bool) -> Bool ~ {
+    if a.header != b.header || !sameRowWithEnvs(&a.env, an, &b.env, bn, ashared, bshared, common) || !sameRow(&a.spec, an, &b.spec, bn) || !sameRecords(&a.locals, an, &b.locals, bn) || !sameRecordsWithEnvs(&a.loops, an, &b.loops, bn, ashared, bshared, common) || size(a.blocks) != size(b.blocks) { return false; };
+    for i in 0..size(a.blocks) {
+        if i >= size(b.blocks) { return false; };
+        x = get(a.blocks, i); y = get(b.blocks, i);
+        if x.id != y.id || size(x.lines) != size(y.lines) { return false; };
+        for j in 0..size(x.lines) { if j >= size(y.lines) || !sameRowWithEnvs(get(&x.lines, j), an, get(&y.lines, j), bn, ashared, bshared, common) { return false; }; };
+    };
+    return true;
+};
+fn sameProgram(a: &FullProgram, b: &FullProgram) -> Bool ~ {
+    if !sameRecords(&a.types, &a.arena, &b.types, &b.arena) || !sameRecords(&a.generics, &a.arena, &b.generics, &b.arena) || !sameRecords(&a.invariants, &a.arena, &b.invariants, &b.arena) || !sameRecords(&a.bounded, &a.arena, &b.bounded, &b.arena) || !sameRecords(&a.instances, &a.arena, &b.instances, &b.arena) || size(a.functions) != size(b.functions) { return false; };
+    common = a.shared = b.shared;
+    for f in &a.functions { i = fnIndex(&b.functions, textAt(&f.header, 1)); if i < 0 || i >= size(b.functions) || !sameFunction(f, &a.arena, &get(b.functions, i), &b.arena, &a.shared, &b.shared, common) { return false; }; };
+    return sameFunction(&a.entry, &a.arena, &b.entry, &b.arena, &a.shared, &b.shared, common);
+};
+fn externName(n: &String) -> String ~ {
+    if !n.startsWith("extern ") { return clone(n); };
+    at = 7;
+    for i in 7..size(n.bytes) { if get(n.bytes, i) = toByte(36) { at = i + 1; }; };
+    return catStrings("extern ", n.slice(at, size(n.bytes)));
+};
+fn renameTokens(ts: List<Token>, renames: &List<EnvEntry>) -> List<Token> ~ {
+    i = 0;
+    while i + 1 < size(ts) [{ affirm i >= 0; }] ~ {
+        if wordIs(&ts, i, "fn") && quotedAt(&ts, i + 1) {
+            id = entryAt(renames, textAt(&ts, i + 1));
+            if id >= 0 && id < size(renames) { ts = set(ts, i + 1, name(textAt(&get(renames, id).value, 0))); };
+        };
+        i = i + 1;
+    };
+    if wordIs(&ts, 0, "ghost") && wordIs(&ts, 1, "function") {
+        p = envEnd(&ts, 2); id = entryAt(renames, textAt(&ts, p));
+        if p >= 0 && p < size(ts) && id >= 0 && id < size(renames) { ts = set(ts, p, name(textAt(&get(renames, id).value, 0))); };
+    };
+    return ts;
+};
+fn renameFunction(fun: FullFunction, renames: &List<EnvEntry>) -> FullFunction ~ {
+    header = clone(fun.header); id = entryAt(renames, textAt(&header, 1));
+    if size(header) > 1 && id >= 0 && id < size(renames) { header = set(header, 1, name(textAt(&get(renames, id).value, 0))); };
+    loops = []; blocks = [];
+    for row in &fun.loops { loops = push(loops, FullRecord { name: clone(row.name), tokens: renameTokens(clone(row.tokens), renames) }); };
+    for b in &fun.blocks { rows = []; for row in &b.lines { rows = push(rows, renameTokens(clone(row), renames)); }; blocks = push(blocks, FullBlock { lines: rows, ..b }); };
+    return FullFunction { header: header, env: renameTokens(fun.env, renames), loops: loops, blocks: blocks, ..fun };
+};
+fn normalizeExterns(p: FullProgram) -> FullProgram ~ {
+    renames = [];
+    for fun in &p.functions { old = textAt(&fun.header, 1); new = externName(&old); if old != new { renames = push(renames, EnvEntry { name: old, value: push([], name(new)) }); }; };
+    if size(renames) = 0 { return p; };
+    functions = [];
+    for fun in sortFunctions(clone(p.functions)) {
+        f = renameFunction(clone(fun), &renames); id = fnIndex(&functions, textAt(&f.header, 1));
+        if id >= 0 && id < size(functions) { functions = set(functions, id, f); } else { functions = push(functions, f); };
+    };
+    shared = []; for table in &p.shared { shared = push(shared, renameTokens(clone(table), &renames)); };
+    return FullProgram { shared: shared, functions: sortFunctions(functions), entry: renameFunction(p.entry, &renames), ..p };
+};
+fn completeFunction(fun: FullFunction, mapping: &List<Int>, default: Int, main: Bool) -> FullFunction ~ {
+    return mapFunctionEnvRefs(fun, mapping, default, main);
+};
+fn globalsOf(units: &List<LinkUnit>) -> List<EnvEntry> ~ {
+    table = HashMap::new();
+    for unit in units { for fun in &unit.program.functions {
+        n = textAt(&fun.header, 1);
+        table = table.insert(clone(n), push(push(push([], word("const")), word("fn")), name(n)));
+    }; };
+    out = emptyEntries();
+    for e in table.entries() { out = push(out, EnvEntry { name: clone(e.key), value: clone(e.value) }); };
+    return orderEntries(out);
+};
+fn completeSpecEnvs(p: FullProgram) -> FullProgram ~ {
+    globals = emptyEntries();
+    for fun in &p.functions {
+        n = textAt(&fun.header, 1);
+        globals = push(globals, EnvEntry { name: clone(n), value: push(push(push([], word("const")), word("fn")), name(n)) });
+    };
+    globals = orderEntries(globals); functions = [];
+    completion = completeShared(clone(p.shared), &globals);
+    for fun in &p.functions { functions = push(functions, completeFunction(clone(fun), &completion.mapping, completion.empty, false)); };
+    entry = completeFunction(p.entry, &completion.mapping, completion.empty, true);
+    return FullProgram { shared: completion.tables, functions: functions, entry: entry, ..p };
+};
+struct MergeRows { ok: Bool, message: String, rows: List<FullRecord>, origins: List<String> };
+impl Clone for MergeRows { };
+fn mergeRows(what: &String, units: &List<LinkUnit>, arena: &List<AstNode>, kind: Int) -> MergeRows ~ {
+    out = MergeRows { ok: true, message: "", rows: [], origins: [] };
+    for unit in units {
+        rows = rowsOf(&unit.program, kind);
+        for row in rows {
+            i = rowIndex(&out.rows, &row.name);
+            if i >= 0 && i < size(out.rows) && i < size(out.origins) {
+                if !sameRow(&get(out.rows, i).tokens, arena, &row.tokens, arena) {
+                    out = MergeRows { ok: false, message: collision(what, &row.name, &get(out.origins, i), unitName(unit)), ..out }; return out;
+                };
+            } else { origins = push(out.origins, unitName(unit)); out = MergeRows { rows: push(out.rows, clone(row)), origins: origins, ..out }; };
+        };
+    };
+    return out;
+};
+fn rowsOf(p: &FullProgram, kind: Int) -> List<FullRecord> ~ {
+    if kind = 0 { return clone(p.types); }; if kind = 1 { return clone(p.generics); }; if kind = 2 { return clone(p.invariants); }; if kind = 3 { return clone(p.bounded); }; return clone(p.instances);
+};
+fn collision(what: &String, n: &String, a: &String, b: &String) -> String ~ {
+    out = catStrings(catStrings(catStrings("link error: ", clone(what)), " "), clone(n));
+    out = catStrings(catStrings(out, " is defined by both module "), clone(a));
+    return catStrings(catStrings(catStrings(out, " and module "), clone(b)), " with different definitions");
+};
+fn signatureHeader(fun: &FullFunction) -> List<Token> ~ {
+    at = intsEnd(&fun.header, 3); start = at;
+    if wordIs(&fun.header, at + 1, "none") { at = at + 2; } else { at = typeEnd(&fun.header, at + 2); };
+    at = namesEnd(&fun.header, at + 1); at = namesEnd(&fun.header, at + 1);
+    return sliceTokens(&fun.header, start, at);
+};
+fn paramTypes(fun: &FullFunction) -> List<List<Token>> ~ {
+    out = []; end = intsEnd(&fun.header, 3);
+    for i in 4..end { key = textAt(&fun.header, i); at = rowIndex(&fun.locals, &key); t = [];
+        if at >= 0 && at < size(fun.locals) { row = get(fun.locals, at).tokens; p = 3; if wordIs(&row, 2, "some") { p = 4; }; t = sliceTokens(&row, p, size(row)); };
+        out = push(out, t);
+    };
+    return out;
+};
+fn externSpec(fun: &FullFunction) -> List<Token> ~ {
+    at = namesEnd(&fun.spec, 8);
+    out = sliceTokens(&fun.spec, 0, 8); out = push(out, intToken(0));
+    return appendTokens(out, sliceTokens(&fun.spec, at, size(fun.spec)));
+};
+fn sameExtern(a: &FullFunction, b: &FullFunction, nodes: &List<AstNode>) -> Bool ~ { return paramTypes(a) = paramTypes(b) && signatureHeader(a) = signatureHeader(b) && sameRow(externSpec(a), nodes, externSpec(b), nodes); };
+struct MergeFns { ok: Bool, message: String, functions: List<FullFunction> };
+impl Clone for MergeFns { };
+fn mergeFunctions(units: &List<LinkUnit>, mapping: &List<Int>, default: Int, arena: &List<AstNode>, shared: &List<List<Token>>) -> MergeFns ~ {
+    out = MergeFns { ok: true, message: "", functions: [] }; origins = []; private = [];
+    for unit in units { for f in &unit.program.functions {
+        fun = completeFunction(clone(f), mapping, default, false); n = textAt(&fun.header, 1); i = fnIndex(&out.functions, &n);
+        if i >= 0 && i < size(out.functions) && i < size(origins) && i < size(private) {
+            existing = get(&out.functions, i); same = sameFunction(&existing, arena, &fun, arena, shared, shared, true);
+            if n.startsWith("extern ") { same = sameExtern(&existing, &fun, arena); };
+            if !same || get(&private, i) || privateUnit(unit) {
+                display = clone(n); if n.startsWith("extern ") { display = catStrings("extern fn ", n.slice(7, size(n.bytes))); };
+                return MergeFns { ok: false, message: collision("function", &display, &get(origins, i), unitName(unit)), ..out };
+            };
+        } else {
+            origins = push(origins, unitName(unit)); private = push(private, privateUnit(unit)); out = MergeFns { functions: push(out.functions, fun), ..out };
+        };
+    }; };
+    return out;
+};
+fn prependGhosts(root: FullFunction, units: &List<LinkUnit>) -> FullFunction ~ {
+    ghosts = []; count = size(units);
+    if count > 0 { for i in 0..count - 1 { for b in &get(units, i).program.entry.blocks { for row in &b.lines { if wordIs(row, 0, "ghost") { ghosts = push(ghosts, clone(row)); }; }; }; }; };
+    blocks = [];
+    for b in &root.blocks { block = clone(b); if b.id = 0 { rows = clone(ghosts); for row in &b.lines { rows = push(rows, clone(row)); }; block = FullBlock { lines: rows, ..block }; }; blocks = push(blocks, block); };
+    return FullFunction { blocks: blocks, ..root };
+};
+fn linkPrograms(input: &List<LinkUnit>) -> Linked ~ {
+    if size(input) = 0 { return failedLink("link error: no modules to link"); };
+    units = [];
+    for unit in input {
+        u = LinkUnit { pkg: clone(unit.pkg), modu: clone(unit.modu), hasModule: unit.hasModule, program: normalizeExterns(clone(unit.program)) }; found = false;
+        for old in &units { if sameId(&u, old) { found = true; if !sameProgram(&u.program, &old.program) { return failedLink(catStrings(catStrings("link error: module ", unitName(&u)), " has inconsistent units")); }; }; };
+        if !found { units = push(units, u); };
+    };
+    nodes = []; shared = []; globalUnits = [];
+    for unit in &units {
+        shift = []; base = size(nodes);
+        for i in 0..size(unit.program.arena) { shift = push(shift, base + i); };
+        for node in &unit.program.arena { nodes = push(nodes, remapNode(clone(node), &shift)); };
+        p = mapProgramPayloads(clone(unit.program), &shift);
+        envShift = []; envBase = size(shared);
+        for i in 0..size(unit.program.shared) { envShift = push(envShift, envBase + i); };
+        for table in &unit.program.shared { shared = push(shared, clone(table)); };
+        p = mapProgramEnvRefs(p, &envShift, 0 - 1);
+        p = FullProgram { arena: [], shared: [], ..p }; globalUnits = push(globalUnits, LinkUnit { pkg: clone(unit.pkg), modu: clone(unit.modu), hasModule: unit.hasModule, program: p });
+    };
+    return linkNormalized(&globalUnits, nodes, shared);
+};
+fn linkNormalized(units: &List<LinkUnit>, nodes: List<AstNode>, shared: List<List<Token>>) -> Linked ~ {
+    types = mergeRows("type", units, &nodes, 0); if !types.ok { return failedLink(types.message); };
+    globals = globalsOf(units); completion = completeShared(shared, &globals);
+    functions = mergeFunctions(units, &completion.mapping, completion.empty, &nodes, &completion.tables); if !functions.ok { return failedLink(functions.message); };
+    generics = mergeRows("generic struct", units, &nodes, 1); if !generics.ok { return failedLink(generics.message); };
+    invariants = mergeRows("invariant", units, &nodes, 2); if !invariants.ok { return failedLink(invariants.message); };
+    bounded = mergeRows("function with bounds", units, &nodes, 3); if !bounded.ok { return failedLink(bounded.message); };
+    instances = mergeRows("copy", units, &nodes, 4); if !instances.ok { return failedLink(instances.message); };
+    if size(units) = 0 { return failedLink("link error: no modules to link"); };
+    root = &get(units, size(units) - 1).program;
+    entry = completeFunction(prependGhosts(clone((*root).entry), units), &completion.mapping, completion.empty, true);
+    return Linked { ok: true, message: "", program: FullProgram { types: types.rows, functions: functions.functions, entry: entry, generics: generics.rows, invariants: invariants.rows, bounded: bounded.rows, instances: instances.rows, trailer: clone((*root).trailer), arena: nodes, shared: completion.tables } };
+};

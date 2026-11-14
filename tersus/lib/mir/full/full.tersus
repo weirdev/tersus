@@ -25,6 +25,6 @@ struct FullProgram {
     types: List<FullRecord>, generics: List<FullRecord>, invariants: List<FullRecord>,
     bounded: List<FullRecord>, instances: List<FullRecord>,
     functions: List<FullFunction>, entry: FullFunction,
-    trailer: List<List<Token>>, arena: List<AstNode>
+    trailer: List<List<Token>>, arena: List<AstNode>, shared: List<List<Token>>
 };
 impl Clone for FullProgram { };

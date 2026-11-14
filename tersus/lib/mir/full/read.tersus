@@ -3,11 +3,11 @@ import data::reader::reader { parseAstLines };
 import data::ast::ast { AstNode };
 import mir::full::full { FullRecord, FullBlock, FullFunction, FullProgram };
 import mir::full::tokens { argsEnd, integerAt, intsEnd, namesEnd, numberAt, operandsEnd, operandEnd, quotedAt, rvalueEnd, stepsEnd, textAt, tokenLine, typeEnd, word, wordIs, normalizeNumbers, normalizeTypes };
-import mir::full::records { EnvEntry, envEnd, envEntries, expandEnv, listItems, mapPayloadLine, payloadMatches, payloadSlots, uniqueEntries, orderEntries };
+import mir::full::records { EnvEntry, envEnd, envEntries, expandEnv, listItems, mapPayloadLine, payloadMatches, payloadSlots, uniqueEntries, orderEntries, envTokens };
 import mir::full::write { mapProgramPayloads };
 
 fn noFunction() -> FullFunction ~ { return FullFunction { header: [], spec: [], env: [], locals: [], loops: [], blocks: [] }; };
-fn noFull() -> FullProgram ~ { return FullProgram { types: [], generics: [], invariants: [], bounded: [], instances: [], functions: [], entry: noFunction(), trailer: [], arena: [] }; };
+fn noFull() -> FullProgram ~ { return FullProgram { types: [], generics: [], invariants: [], bounded: [], instances: [], functions: [], entry: noFunction(), trailer: [], arena: [], shared: [] }; };
 fn badFull() -> Parsed<FullProgram> ~ { return Parsed<FullProgram> { value: noFull(), pos: 0, ok: false }; };
 fn recordAt(lines: &List<List<Token>>, i: Int) -> List<Token> ~ {
     if i < 0 || i >= size(lines) { return []; };
@@ -246,6 +246,8 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     program = FullProgram { arena: ast.value.nodes, ..program };
     roots = listItems(&program.arena, root);
     if !payloadsOk(&program, &roots) || !uniqueRecords(&program.types) || !uniqueRecords(&program.generics) || !uniqueRecords(&program.invariants) || !uniqueRecords(&program.bounded) || !uniqueRecords(&program.instances) || !uniqueFunctions(&program.functions) { return bad; };
+    tables = []; for entries in &shared { tables = push(tables, envTokens(entries)); };
+    program = FullProgram { shared: tables, ..program };
     return Parsed<FullProgram> { value: mapProgramPayloads(program, &roots), pos: size(lines), ok: true };
 };
 fn recordPhase(ts: &List<Token>) -> Int ~ {

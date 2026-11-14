@@ -1,0 +1,114 @@
+import data::codec::codec { Token };
+import mir::full::tokens { appendTokens, integerAt, intToken, name, sliceTokens, textAt, tokenLine, word, wordIs };
+import mir::full::records { EnvEntry, envStart, envEnd, envEntries, envTokens, mergeEntries, orderEntries };
+
+struct EnvBase { functions: List<EnvEntry>, other: List<EnvEntry>, keys: HashSet<String> };
+struct EnvOutput { tables: List<List<Token>>, variants: HashMap<String, Int>, contents: HashMap<String, Int> };
+struct EnvRendered { context: EnvOutput, row: List<Token> };
+
+struct EnvCompletion { tables: List<List<Token>>, mapping: List<Int>, empty: Int };
+fn completeShared(tables: List<List<Token>>, globals: &List<EnvEntry>) -> EnvCompletion ~ {
+    known = HashMap::new();
+    for i in 0..size(tables) { known = known.insert(tokenLine(get(&tables, i)), i); };
+    original = size(tables); mapping = [];
+    for i in 0..original {
+        merged = envTokens(mergeEntries(envEntries(get(&tables, i), 0), globals));
+        signature = tokenLine(&merged); id = HashMap::lookup(&known, &signature, 0 - 1);
+        if id < 0 { id = size(tables); tables = push(tables, merged); known = known.insert(signature, id); };
+        mapping = push(mapping, id);
+    };
+    globalTable = envTokens(globals); signature = tokenLine(&globalTable); id = HashMap::lookup(&known, &signature, 0 - 1);
+    if id < 0 { id = size(tables); tables = push(tables, globalTable); };
+    return EnvCompletion { tables: tables, mapping: mapping, empty: id };
+};
+fn emptyEnvOutput() -> EnvOutput ~ { return EnvOutput { tables: [], variants: HashMap::new(), contents: HashMap::new() }; };
+fn functionEntry(e: &EnvEntry) -> Bool ~ { return size(e.value) = 3 && wordIs(&e.value, 0, "const") && wordIs(&e.value, 1, "fn"); };
+fn splitFunctions(entries: &List<EnvEntry>, functions: Bool) -> List<EnvEntry> ~ {
+    out = []; for e in entries { if functionEntry(e) = functions { out = push(out, clone(e)); }; }; return out;
+};
+fn envBases(shared: &List<List<Token>>) -> List<EnvBase> ~ {
+    out = [];
+    for table in shared {
+        entries = envEntries(table, 0); functions = splitFunctions(&entries, true); keys = HashSet::new();
+        for f in &functions { keys = keys.insert(clone(f.name)); };
+        out = push(out, EnvBase { functions: functions, other: splitFunctions(&entries, false), keys: keys });
+    };
+    return out;
+};
+fn emptyEnvBase() -> EnvBase ~ { return EnvBase { functions: [], other: [], keys: HashSet::new() }; };
+fn baseIndex(row: &List<Token>) -> Int ~ {
+    at = envStart(row); id = integerAt(row, at);
+    if at < 0 || !id.ok || id.value < 0 { return 0 - 1; }; return id.value;
+};
+fn replaceEnvBase(row: &List<Token>, reference: Token, own: &List<EnvEntry>) -> List<Token> ~ {
+    at = envStart(row); end = envEnd(row, at); if at < 0 || end < 0 { return clone(row); };
+    tokens = envTokens(own); if size(tokens) > 0 { tokens = set(tokens, 0, reference); };
+    return appendTokens(appendTokens(sliceTokens(row, 0, at), &tokens), sliceTokens(row, end, size(row)));
+};
+fn mapEnvReference(row: List<Token>, mapping: &List<Int>, default: Int) -> List<Token> ~ {
+    at = envStart(&row); if at < 0 || at >= size(row) { return row; };
+    old = baseIndex(&row); new = default;
+    if old >= 0 && old < size(mapping) { new = get(mapping, old); };
+    if new >= 0 { row = set(row, at, intToken(new)); };
+    return row;
+};
+fn resolveEnv(row: &List<Token>, shared: &List<List<Token>>) -> List<EnvEntry> ~ {
+    at = envStart(row); own = envEntries(row, at); id = baseIndex(row);
+    if id >= 0 && id < size(shared) { return mergeEntries(&own, envEntries(get(shared, id), 0)); };
+    return own;
+};
+fn sameEnv(a: &List<Token>, ashared: &List<List<Token>>, b: &List<Token>, bshared: &List<List<Token>>, common: Bool) -> Bool ~ {
+    aa = envStart(a); ba = envStart(b); ae = envEnd(a, aa); be = envEnd(b, ba);
+    if aa < 0 || ba < 0 || ae < 0 || be < 0 { return aa = ba; };
+    ai = baseIndex(a); bi = baseIndex(b); basesEqual = ai < 0 && bi < 0;
+    ownEqual = sliceTokens(a, aa + 1, ae) = sliceTokens(b, ba + 1, be);
+    if common && ai = bi && ownEqual { return true; };
+    if ai >= 0 && ai < size(ashared) && bi >= 0 && bi < size(bshared) { basesEqual = get(ashared, ai) = get(bshared, bi); };
+    if basesEqual && ownEqual { return true; };
+    return envTokens(resolveEnv(a, ashared)) = envTokens(resolveEnv(b, bshared));
+};
+fn withoutEnv(row: &List<Token>) -> List<Token> ~ {
+    at = envStart(row); end = envEnd(row, at); if at < 0 || end < 0 { return clone(row); };
+    return appendTokens(sliceTokens(row, 0, at), sliceTokens(row, end, size(row)));
+};
+fn shadowKeys(own: &List<EnvEntry>, base: &EnvBase) -> List<String> ~ {
+    out = []; for e in own { if !functionEntry(e) && HashSet::contains(&base.keys, &e.name) { out = push(out, clone(e.name)); }; }; return out;
+};
+fn variantKey(id: Int, functions: &List<EnvEntry>, shadows: &List<String>) -> String ~ {
+    out = push([], intToken(id)); out = appendTokens(out, envTokens(functions));
+    for n in shadows { out = push(out, name(clone(n))); }; return tokenLine(&out);
+};
+fn activeFunctions(base: &EnvBase, own: &List<EnvEntry>, shadows: &List<String>) -> List<EnvEntry> ~ {
+    excluded = HashSet::new(); for n in shadows { excluded = excluded.insert(clone(n)); };
+    active = []; for e in &base.functions { if !HashSet::contains(&excluded, &e.name) { active = push(active, clone(e)); }; };
+    return mergeEntries(own, &active);
+};
+fn renderEnv(row: List<Token>, bases: &List<EnvBase>, context: EnvOutput) -> EnvRendered ~ {
+    at = envStart(&row); if at < 0 { return EnvRendered { context: context, row: row }; };
+    id = baseIndex(&row);
+    if id >= 0 && id < size(bases) { return renderEnvWithBase(row, id, &get(bases, id), context); };
+    empty = emptyEnvBase(); return renderEnvWithBase(row, 0 - 1, &empty, context);
+};
+fn renderEnvWithBase(row: List<Token>, id: Int, base: &EnvBase, context: EnvOutput) -> EnvRendered ~ {
+    at = envStart(&row);
+    own = envEntries(&row, at); functions = splitFunctions(&own, true); shadows = shadowKeys(&own, base);
+    key = variantKey(id, &functions, &shadows);
+    outputId = HashMap::lookup(&context.variants, &key, 0 - 2);
+    if outputId = 0 - 2 {
+        common = activeFunctions(base, &functions, &shadows);
+        outputId = 0 - 1;
+        if size(common) > 0 {
+            table = envTokens(&common); signature = tokenLine(&table);
+            outputId = HashMap::lookup(&context.contents, &signature, 0 - 1);
+            if outputId < 0 {
+                outputId = size(context.tables); tables = push(context.tables, table);
+                contents = context.contents.insert(signature, outputId);
+                context = EnvOutput { tables: tables, contents: contents, ..context };
+            };
+        };
+        variants = context.variants.insert(key, outputId); context = EnvOutput { variants: variants, ..context };
+    };
+    locals = splitFunctions(mergeEntries(&own, &base.other), false);
+    reference = word("none"); if outputId >= 0 { reference = intToken(outputId); };
+    return EnvRendered { row: replaceEnvBase(&row, reference, &locals), context: context };
+};

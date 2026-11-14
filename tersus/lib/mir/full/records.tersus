@@ -130,9 +130,10 @@ fn expandEnv(ts: &List<Token>, shared: &List<List<EnvEntry>>) -> Parsed<List<Tok
     if !wordIs(ts, p, "none") {
         id = integerAt(ts, p);
         if !id.ok || id.value < 0 || id.value >= size(shared) { return bad; };
-        own = mergeEntries(&own, &get(shared, id.value));
     };
-    return Parsed<List<Token>> { value: replaceEnv(ts, &own), pos: end, ok: true };
+    out = replaceEnv(ts, &own);
+    if p >= 0 && p < size(out) && p < size(ts) { out = set(out, p, clone(get(ts, p))); };
+    return Parsed<List<Token>> { value: out, pos: end, ok: true };
 };
 fn payloadSlots(ts: &List<Token>) -> List<Int> ~ {
     out = [];

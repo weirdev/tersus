@@ -184,6 +184,7 @@ originalGroups =
     , testConnectives
     , testMirData
     , testLink
+    , testLinkNative
     , testMirLowered
     , testMirOwnership
     , testOwnershipMetadata
