@@ -921,6 +921,11 @@ selfHostedQueryFamilies program =
                     [ execBlock 0 [] (execLoopEnd 90 1 [0, 1, 2, 4]), execBlock 1 [] (execBranchTo 2 3)
                     , execBlock 2 [assignLocal 3 (termRef 1)] (execBranchTo 4 90), execBlock 3 [] (execJump 90)
                     , execBlock 4 [assignLocal 2 (termRef 1)] (execJump 0), execBlock 90 [] execEndDone ]
+                -- Both arms forward to the return block 3, which runs once per arrival: the
+                -- second run starts from a cut below the first run's application of 20.
+                tombstoneReturnBlocks =
+                    [ execBlock 0 [] execBranch, execBlock 1 [] (execJump 3), execBlock 2 [] (execJump 3)
+                    , execBlock 3 [applyTo 1 20 10 [termRef 1]] execEndDone ]
                 loopInitial = floored $ MData "ExecutionState" [("context", mergeContext [constant (5, 0, 0)] []), ("locals", localsValue []), ("templates", MList []), ("floor", MInt (-999))]
                 -- (the test is term 5 < term 6, which always holds, so a loop is left only
                 -- through a later conjunct's edge to its exit)
@@ -1373,6 +1378,12 @@ selfHostedQueryFamilies program =
                       , checkExecution [MData "ExecutionStep::Unsupported" []] 2 0
                         -- (two terms minted in a row are two terms: f(1) = g(1) is not known)
                       , checkExecution [assignLocal 0 (termRef 1), applyFresh 1 10 [localRef 0], applyFresh 2 11 [localRef 0], checkLocals] 1 3
+                        -- (a result id whose facts a cut removed is free again; one a live
+                        -- application names as its function is not, also after a cut)
+                      , checkExecution [scoped [applyTo 1 20 10 [termRef 1]], applyTo 1 20 11 [termRef 1]] 0 (-1)
+                      , checkExecutionFlow tombstoneReturnBlocks 0 3
+                      , checkExecution [applyTo 1 20 10 [termRef 1], applyTo 2 10 11 [termRef 1]] 2 1
+                      , checkExecution [applyTo 1 20 10 [termRef 1], scoped [applyTo 2 30 11 [termRef 10]], applyTo 3 10 12 [termRef 1]] 2 2
                       ])
                 , ("driver",
                       [ checkDrivenSteps [dStep "Assign" [dInt 0, dTerm 1], dCheck (dLocal 0) (dTerm 1)] 0

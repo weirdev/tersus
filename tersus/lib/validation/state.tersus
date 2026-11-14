@@ -108,10 +108,16 @@ fn resolveArguments(state: &ExecutionState, values: &List<ValueRef>) -> Argument
 
 // A fresh result must not alias any term already present on this path: a
 // local's value, or an id an indexed fact mentions (the index is the block's,
-// extended to the state's facts).
+// extended to the state's facts). A term weighs more than 0 exactly while a
+// fact mentions it outside a function position; a zero weight is a function
+// id or a term whose facts were cut, which only the applications tell apart.
 fn termInUse(state: &ExecutionState, index: &FactIndex, term: Int) -> Bool {
     for binding in state.locals.entries() { if binding.value = term { return true; }; };
-    return index.weights.contains(term) || index.constantAt.contains(term);
+    if index.constantAt.contains(term) { return true; };
+    if index.weights.contains(term) = false { return false; };
+    if index.weights.lookup(term, 0) > 0 { return true; };
+    for p in 0..size(state.context.applications) { if get(state.context.applications, p).function = term { return true; }; };
+    return false;
 };
 
 // The MIR bridge reserves -1 through -19 for builtin functions and uses
