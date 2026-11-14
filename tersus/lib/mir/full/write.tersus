@@ -3,7 +3,7 @@ import data::ast::ast { AstNode, AstProgram, AstStatements, AstStatement, printA
 import data::arena::arena { reorderArena };
 import mir::full::full { FullRecord, FullBlock, FullFunction, FullProgram };
 import mir::full::tokens { appendTokens, integerAt, intToken, name, sliceTokens, textAt, tokenLine, word, wordIs };
-import mir::full::records { beforeText, EnvEntry, envStart, envEnd, envEntries, envTokens, mapPayloadLine, payloadSlots };
+import mir::full::records { beforeText, EnvEntry, envStart, envEnd, envEntries, envTokens, mapPayloadLine, payloadSlots, keyOrder };
 
 struct FullOutput { records: List<List<Token>>, data: AstProgram };
 impl Clone for FullOutput { };
@@ -12,21 +12,15 @@ fn emptyRecords() -> List<FullRecord> ~ { return []; };
 fn emptyFunctions() -> List<FullFunction> ~ { return []; };
 fn emptyBlocks() -> List<FullBlock> ~ { return []; };
 fn sortRecords(rows: List<FullRecord>) -> List<FullRecord> ~ {
+    keys = []; for r in &rows { keys = push(keys, clone(r.name)); };
     out = emptyRecords();
-    for r in &rows {
-        next = []; placed = false;
-        for old in &out { if !placed && beforeText(&r.name, &old.name) { next = push(next, clone(r)); placed = true; }; next = push(next, clone(old)); };
-        if !placed { next = push(next, clone(r)); }; out = next;
-    };
+    for i in keyOrder(&keys, false) { if i >= 0 && i < size(rows) { out = push(out, clone(get(&rows, i))); }; };
     return out;
 };
 fn sortFunctions(fns: List<FullFunction>) -> List<FullFunction> ~ {
+    keys = []; for f in &fns { keys = push(keys, textAt(&f.header, 1)); };
     out = emptyFunctions();
-    for f in &fns {
-        next = []; placed = false;
-        for old in &out { if !placed && beforeText(textAt(&f.header, 1), textAt(&old.header, 1)) { next = push(next, clone(f)); placed = true; }; next = push(next, clone(old)); };
-        if !placed { next = push(next, clone(f)); }; out = next;
-    };
+    for i in keyOrder(&keys, false) { if i >= 0 && i < size(fns) { out = push(out, clone(get(&fns, i))); }; };
     return out;
 };
 fn appendRecords(out: List<List<Token>>, rows: &List<FullRecord>) -> List<List<Token>> ~ {
@@ -40,23 +34,18 @@ fn functionLines(out: List<List<Token>>, fun: &FullFunction, main: Bool) -> List
     // Numeric maps cannot use the lexicographic order of their wire keys.
     locals = clone(fun.locals); loops = clone(fun.loops);
     out = appendNumericRecords(out, &locals); out = appendNumericRecords(out, &loops);
-    blocks = emptyBlocks();
-    for b in &fun.blocks {
-        next = []; placed = false;
-        for old in &blocks { if !placed && b.id < old.id { next = push(next, clone(b)); placed = true; }; next = push(next, clone(old)); };
-        if !placed { next = push(next, clone(b)); }; blocks = next;
+    keys = []; for b in &fun.blocks { keys = push(keys, String::fromInt(b.id)); };
+    for i in keyOrder(&keys, true) {
+        if i >= 0 && i < size(fun.blocks) {
+            b = get(fun.blocks, i); out = push(out, push(push([], word("block")), intToken(b.id)));
+            for l in &b.lines { out = push(out, clone(l)); };
+        };
     };
-    for b in &blocks { out = push(out, push(push([], word("block")), intToken(b.id))); for l in &b.lines { out = push(out, clone(l)); }; };
     return push(out, push([], word("end")));
 };
 fn appendNumericRecords(out: List<List<Token>>, rows: &List<FullRecord>) -> List<List<Token>> ~ {
-    ordered = emptyRecords();
-    for r in rows {
-        next = []; placed = false; id = integerAt(&r.tokens, 1).value;
-        for old in &ordered { if !placed && id < integerAt(&old.tokens, 1).value { next = push(next, clone(r)); placed = true; }; next = push(next, clone(old)); };
-        if !placed { next = push(next, clone(r)); }; ordered = next;
-    };
-    for r in &ordered { out = push(out, clone(r.tokens)); };
+    keys = []; for r in rows { keys = push(keys, clone(r.name)); };
+    for i in keyOrder(&keys, true) { if i >= 0 && i < size(rows) { out = push(out, clone(get(rows, i).tokens)); }; };
     return out;
 };
 fn programLines(p: &FullProgram) -> List<List<Token>> ~ {

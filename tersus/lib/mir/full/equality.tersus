@@ -1,7 +1,8 @@
 import data::ast::ast { AstNode, AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstEntry, AstEntries, AstOptNames, AstOptType, AstInterface, AstScheme };
 import data::reader::reader { nodeKind, nodeRefs, nameValue };
 import data::arena::arena { remapNode };
-import data::codec::codec { Type, Size };
+import data::codec::codec { Type, Size, Token, Parsed, typeAt, sizeAt, catStrings };
+import mir::full::tokens { textAt, wordIs, decimalText };
 import mir::full::records { nodeAt };
 
 fn shape(node: &AstNode) -> Int ~ {
@@ -280,7 +281,7 @@ fn builtinValue(nodes: &List<AstNode>, id: Int) -> Int ~ {
     return ((body as AstNode::Body).value as AstBody::BuiltinFunct).b;
 };
 fn sameScalar(a: &AstNode, b: &AstNode) -> Bool ~ {
-    if a is AstNode::Type && b is AstNode::Type { return (a as AstNode::Type).value = (b as AstNode::Type).value; };
+    if a is AstNode::Type && b is AstNode::Type { return sameType((a as AstNode::Type).value, (b as AstNode::Type).value); };
     if a is AstNode::Size && b is AstNode::Size { return (a as AstNode::Size).value = (b as AstNode::Size).value; };
     if a is AstNode::Value && b is AstNode::Value {
         x = (a as AstNode::Value).value; y = (b as AstNode::Value).value;
@@ -303,10 +304,65 @@ fn sameScalar(a: &AstNode, b: &AstNode) -> Bool ~ {
     };
     return true;
 };
+fn aliasInner(t: &Type, box: Bool) -> Parsed<Type> ~ {
+    bad = Parsed<Type> { value: Type::TInt, pos: 0, ok: false };
+    if !box && t is Type::TList { return Parsed<Type> { value: clone(Box::unbox((t as Type::TList).elem)), pos: 0, ok: true }; };
+    if box && t is Type::TBox { return Parsed<Type> { value: clone(Box::unbox((t as Type::TBox).inner)), pos: 0, ok: true }; };
+    if !(t is Type::TNamed) { return bad; };
+    v = t as Type::TNamed; n = "List"; if box { n = "Box"; };
+    if v.base != n || v.argc != 1 || !wordIs(&v.argTokens, 0, "type") || size(v.argTokens) < 2 { return bad; };
+    return typeAt(&v.argTokens, 1);
+};
+fn sameArgs(a: &List<Token>, b: &List<Token>, n: Int) -> Bool ~ {
+    i = 0; j = 0; if n < 0 || n > size(a) || n > size(b) { return false; };
+    for k in 0..n {
+        if i < 0 || j < 0 || i + 1 >= size(a) || j + 1 >= size(b) { return false; };
+        if wordIs(a, i, "type") && wordIs(b, j, "type") {
+            x = typeAt(a, i + 1); y = typeAt(b, j + 1);
+            if !x.ok || !y.ok || !sameType(&x.value, &y.value) { return false; }; i = x.pos; j = y.pos;
+        } else {
+            if !wordIs(a, i, "size") || !wordIs(b, j, "size") { return false; };
+            x = sizeAt(a, i + 1); y = sizeAt(b, j + 1);
+            if !x.ok || !y.ok || x.value != y.value { return false; }; i = x.pos; j = y.pos;
+        };
+    };
+    return i = size(a) && j = size(b);
+};
+fn sameType(a: &Type, b: &Type) -> Bool ~ {
+    x = aliasInner(a, false); y = aliasInner(b, false);
+    if x.ok && y.ok { return sameType(&x.value, &y.value); };
+    x = aliasInner(a, true); y = aliasInner(b, true);
+    if x.ok && y.ok { return sameType(&x.value, &y.value); };
+    if a is Type::TNamed && b is Type::TNamed {
+        l = a as Type::TNamed; r = b as Type::TNamed;
+        return l.base = r.base && l.argc = r.argc && sameArgs(&l.argTokens, &r.argTokens, l.argc);
+    };
+    if a is Type::TArray && b is Type::TArray { l = a as Type::TArray; r = b as Type::TArray; return l.size = r.size && sameType(Box::unbox(l.elem), Box::unbox(r.elem)); };
+    if a is Type::TFn && b is Type::TFn {
+        l = a as Type::TFn; r = b as Type::TFn;
+        if size(l.args) != size(r.args) { return false; };
+        for i in 0..size(l.args) { if i >= size(r.args) || !sameType(get(&l.args, i), get(&r.args, i)) { return false; }; };
+        return sameType(Box::unbox(l.ret), Box::unbox(r.ret));
+    };
+    if a is Type::TForall && b is Type::TForall { l = a as Type::TForall; r = b as Type::TForall; return l.sizes = r.sizes && l.types = r.types && sameType(Box::unbox(l.body), Box::unbox(r.body)); };
+    return sameTypeInner(a, b);
+};
+fn sameTypeInner(a: &Type, b: &Type) -> Bool ~ {
+    if a is Type::TRef && b is Type::TRef { return sameType(Box::unbox((a as Type::TRef).inner), Box::unbox((b as Type::TRef).inner)); };
+    if a is Type::TMutRef && b is Type::TMutRef { return sameType(Box::unbox((a as Type::TMutRef).inner), Box::unbox((b as Type::TMutRef).inner)); };
+    if a is Type::TAddr && b is Type::TAddr { return sameType(Box::unbox((a as Type::TAddr).inner), Box::unbox((b as Type::TAddr).inner)); };
+    if a is Type::TBlock && b is Type::TBlock { return sameType(Box::unbox((a as Type::TBlock).inner), Box::unbox((b as Type::TBlock).inner)); };
+    if a is Type::TUninit && b is Type::TUninit { return sameType(Box::unbox((a as Type::TUninit).inner), Box::unbox((b as Type::TUninit).inner)); };
+    return a = b;
+};
 fn sameAst(a: &List<AstNode>, x: Int, b: &List<AstNode>, y: Int) -> Bool ~ {
     if x < 0 || y < 0 || x >= size(a) || y >= size(b) { return false; };
     left = nodeAt(a, x); right = nodeAt(b, y);
     if left is AstNode::Name && right is AstNode::Name { return nameValue(a, x) = nameValue(b, y); };
+    if left is AstNode::Value && right is AstNode::Value {
+        l = (left as AstNode::Value).value; r = (right as AstNode::Value).value;
+        if l is AstValue::VInt && r is AstValue::VInt { return decimalText(nameValue(a, (l as AstValue::VInt).n)) = decimalText(nameValue(b, (r as AstValue::VInt).n)); };
+    };
     lb = builtinValue(a, x); rb = builtinValue(b, y);
     // Eq Syntax.Value compares a builtin function only by its builtin, not its contracts.
     if lb >= 0 && rb >= 0 { return sameAst(a, lb, b, rb); };

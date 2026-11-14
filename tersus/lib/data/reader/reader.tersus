@@ -1854,6 +1854,14 @@ fn validUtf8(s: &String) -> Bool [{ }] [{ }] {
 };
 
 fn tokenizeStrict(line: &String) -> Parsed<List<Token>> [{ }] [{ }] {
+    return tokenizeStrictNumbers(line, false);
+};
+
+fn tokenizeMir(line: &String) -> Parsed<List<Token>> [{ }] [{ }] {
+    return tokenizeStrictNumbers(line, true);
+};
+
+fn tokenizeStrictNumbers(line: &String, arbitrary: Bool) -> Parsed<List<Token>> [{ }] [{ }] {
     bad = Parsed<List<Token>> { value: [], pos: 0, ok: false };
     ts = tokenize(line);
     if !ts.ok { return bad; };
@@ -1877,8 +1885,13 @@ fn tokenizeStrict(line: &String) -> Parsed<List<Token>> [{ }] [{ }] {
                     j = j + 1;
                 };
                 if (c >= 48 && c <= 57) || c = 45 {
-                    v = parseInt(line.slice(i, j));
-                    if !v.ok { return bad; };
+                    text = line.slice(i, j);
+                    if arbitrary {
+                        if !validDecimal(&text) { return bad; };
+                    } else {
+                        v = parseInt(&text);
+                        if !v.ok { return bad; };
+                    };
                 };
                 i = j;
             };

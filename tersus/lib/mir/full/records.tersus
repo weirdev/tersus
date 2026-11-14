@@ -1,6 +1,6 @@
-import data::codec::codec { Token, Parsed };
+import data::codec::codec { Token, Parsed, parseInt };
 import mir::full::tokens { appendTokens, integerAt, intToken, name, namesEnd, numberAt, operandEnd, quotedAt, sliceTokens, textAt, word, wordIs };
-import data::ast::ast { AstNode, AstStatements, AstStatement, AstValidation, AstValue, AstExpression, AstOptTermination };
+import data::ast::ast { AstNode, AstStatements, AstStatement, AstValidation, AstValidations, AstValue, AstExpression, AstOptTermination };
 
 struct EnvEntry { name: String, value: List<Token> };
 impl Clone for EnvEntry { };
@@ -41,17 +41,50 @@ fn entryAt(entries: &List<EnvEntry>, key: &String) -> Int ~ {
     return 0 - 1;
 };
 fn emptyEntries() -> List<EnvEntry> ~ { return []; };
-fn orderEntries(entries: List<EnvEntry>) -> List<EnvEntry> ~ {
-    out = emptyEntries();
-    for e in &entries {
-        next = [];
-        placed = false;
-        for old in &out {
-            if !placed && beforeText(e.name, old.name) { next = push(next, clone(e)); placed = true; };
-            next = push(next, clone(old));
+fn keyBefore(keys: &List<String>, a: Int, b: Int, numeric: Bool) -> Bool ~ {
+    if a < 0 || b < 0 || a >= size(keys) || b >= size(keys) { return false; };
+    if numeric {
+        x = parseInt(get(keys, a));
+        y = parseInt(get(keys, b));
+        return x.value < y.value;
+    };
+    return beforeText(get(keys, a), get(keys, b));
+};
+fn keyMerge(keys: &List<String>, left: &List<Int>, right: &List<Int>, numeric: Bool) -> List<Int> ~ {
+    out = []; i = 0; j = 0;
+    while i < size(left) || j < size(right) [{ affirm i >= 0; affirm j >= 0; }] ~ {
+        if j >= size(right) { if i < size(left) { out = push(out, get(left, i)); i = i + 1; }; } else {
+            if i >= size(left) { out = push(out, get(right, j)); j = j + 1; } else {
+                if keyBefore(keys, get(right, j), get(left, i), numeric) { out = push(out, get(right, j)); j = j + 1; } else { out = push(out, get(left, i)); i = i + 1; };
+            };
         };
-        if !placed { next = push(next, clone(e)); };
-        out = next;
+    };
+    return out;
+};
+fn keyRange(keys: &List<String>, lo: Int, hi: Int, numeric: Bool) -> List<Int> ~ {
+    if lo < 0 || hi < lo || hi > size(keys) || lo = hi { return []; };
+    if hi - lo = 1 { return push([], lo); };
+    middle = lo + (hi - lo) / 2;
+    return keyMerge(keys, keyRange(keys, lo, middle, numeric), keyRange(keys, middle, hi, numeric), numeric);
+};
+fn keyOrder(keys: &List<String>, numeric: Bool) -> List<Int> ~ { return keyRange(keys, 0, size(keys), numeric); };
+fn orderEntries(entries: List<EnvEntry>) -> List<EnvEntry> ~ {
+    keys = []; for e in &entries { keys = push(keys, clone(e.name)); };
+    out = emptyEntries();
+    for i in keyOrder(&keys, false) { if i >= 0 && i < size(entries) { out = push(out, clone(get(&entries, i))); }; };
+    return out;
+};
+fn mergeEntries(a: &List<EnvEntry>, b: &List<EnvEntry>) -> List<EnvEntry> ~ {
+    out = emptyEntries(); i = 0; j = 0;
+    while i < size(a) || j < size(b) [{ affirm i >= 0; affirm j >= 0; }] ~ {
+        if j >= size(b) { if i < size(a) { out = push(out, clone(get(a, i))); i = i + 1; }; } else {
+            if i >= size(a) { out = push(out, clone(get(b, j))); j = j + 1; } else {
+                x = get(a, i); y = get(b, j);
+                if x.name = y.name { out = push(out, clone(x)); i = i + 1; j = j + 1; } else {
+                    if beforeText(&x.name, &y.name) { out = push(out, clone(x)); i = i + 1; } else { out = push(out, clone(y)); j = j + 1; };
+                };
+            };
+        };
     };
     return out;
 };
@@ -66,7 +99,7 @@ fn beforeText(a: &String, b: &String) -> Bool ~ {
 };
 fn envTokens(entries: &List<EnvEntry>) -> List<Token> ~ {
     out = push(push([], word("none")), intToken(size(entries)));
-    for e in orderEntries(clone(entries)) {
+    for e in entries {
         out = push(out, name(clone(e.name)));
         out = appendTokens(out, &e.value);
     };
@@ -92,14 +125,12 @@ fn expandEnv(ts: &List<Token>, shared: &List<List<EnvEntry>>) -> Parsed<List<Tok
     if p < 0 { return Parsed<List<Token>> { value: clone(ts), pos: 0, ok: true }; };
     end = envEnd(ts, p);
     if end < 0 { return bad; };
-    own = envEntries(ts, p);
+    own = orderEntries(envEntries(ts, p));
     if !uniqueEntries(&own) { return bad; };
     if !wordIs(ts, p, "none") {
         id = integerAt(ts, p);
         if !id.ok || id.value < 0 || id.value >= size(shared) { return bad; };
-        for e in &get(shared, id.value) {
-            if entryAt(&own, &e.name) < 0 { own = push(own, clone(e)); };
-        };
+        own = mergeEntries(&own, &get(shared, id.value));
     };
     return Parsed<List<Token>> { value: replaceEnv(ts, &own), pos: end, ok: true };
 };
@@ -170,6 +201,8 @@ fn terminationPayload(nodes: &List<AstNode>, id: Int) -> Bool ~ {
     if !(expr is AstNode::Expression) || !((expr as AstNode::Expression).value is AstExpression::Val) { return false; };
     value = nodeAt(nodes, ((expr as AstNode::Expression).value as AstExpression::Val).v);
     if !(value is AstNode::Value) || !((value as AstNode::Value).value is AstValue::VBool) || !((value as AstNode::Value).value as AstValue::VBool).b { return false; };
+    invariant = nodeAt(nodes, v.vs); body = nodeAt(nodes, v.xs);
+    if !(invariant is AstNode::Validations) || !((invariant as AstNode::Validations).value is AstValidations::End) || !(body is AstNode::Statements) || !((body as AstNode::Statements).value is AstStatements::End) { return false; };
     term = nodeAt(nodes, v.t);
     return term is AstNode::OptTermination && (term as AstNode::OptTermination).value is AstOptTermination::SomeTermination;
 };

@@ -1,4 +1,5 @@
-import data::codec::codec { Token, Parsed, parseInt, isWord, catStrings, quoteName };
+import data::codec::codec { Token, Parsed, parseInt, isWord, catStrings, quoteName, indexOf, wordAt };
+import mir::reader::reader { binaryWords, listWords };
 import data::reader::reader { validDecimal };
 
 fn textAt(ts: &List<Token>, i: Int) -> String ~ {
@@ -22,6 +23,33 @@ fn numberAt(ts: &List<Token>, i: Int) -> Int ~ {
 fn word(w: String) -> Token ~ { return Token { quoted: false, text: w }; };
 fn name(n: String) -> Token ~ { return Token { quoted: true, text: n }; };
 fn intToken(i: Int) -> Token ~ { return word(String::fromInt(i)); };
+fn decimalText(text: &String) -> String ~ {
+    n = size(text.bytes); at = 0; negative = n > 0 && get(text.bytes, 0) = toByte(45);
+    if negative { at = 1; };
+    while at < n && get(text.bytes, at) = toByte(48) [{ affirm at >= 0; }] ~ { at = at + 1; };
+    if at = n { return "0"; };
+    value = text.slice(at, n); if negative { return catStrings("-", value); }; return value;
+};
+fn normalizeNumbers(ts: List<Token>) -> List<Token> ~ {
+    for i in 0..size(ts) {
+        t = get(&ts, i);
+        if !t.quoted && validDecimal(&t.text) {
+            value = decimalText(&t.text);
+            if value != t.text { ts = set(ts, i, Token { quoted: false, text: value }); };
+        };
+    };
+    return ts;
+};
+fn normalizeTypes(ts: List<Token>) -> List<Token> ~ {
+    out = [];
+    for t in &ts {
+        if !t.quoted && (t.text = "list" || t.text = "box") {
+            n = "List"; if t.text = "box" { n = "Box"; };
+            out = push(push(push(push(out, word("named")), name(n)), intToken(1)), word("type"));
+        } else { out = push(out, clone(t)); };
+    };
+    return out;
+};
 fn sliceTokens(ts: &List<Token>, lo: Int, hi: Int) -> List<Token> ~ {
     out = [];
     if lo < 0 || hi < lo || hi > size(ts) { return out; };
@@ -149,8 +177,17 @@ fn rvalueEnd(ts: &List<Token>, p: Int) -> Int ~ {
     w = textAt(ts, p);
     if quotedAt(ts, p) { return 0 - 1; };
     if w = "use" || w = "makebox" || w = "unbox" || w = "unsize" || w = "clone" || w = "deref" { return operandEnd(ts, p + 1); };
-    if w = "binary" { return operandsEnd(ts, p + 2, 2); };
-    if w = "listop" { return operandsEnd(ts, p + 3, numberAt(ts, p + 2)); };
+    if w = "binary" || w = "listop" {
+        if p + 1 < 0 || p + 1 >= size(ts) { return 0 - 1; };
+        op = wordAt(ts, p + 1);
+        if !op.ok { return 0 - 1; };
+        if w = "binary" {
+            if indexOf(binaryWords(), &op.value) < 0 { return 0 - 1; };
+            return operandsEnd(ts, p + 2, 2);
+        };
+        if indexOf(listWords(), &op.value) < 0 { return 0 - 1; };
+        return operandsEnd(ts, p + 3, numberAt(ts, p + 2));
+    };
     if w = "makelist" { return operandsEnd(ts, p + 2, numberAt(ts, p + 1)); };
     if w = "makedata" {
         if !quotedAt(ts, p + 1) { return 0 - 1; };
