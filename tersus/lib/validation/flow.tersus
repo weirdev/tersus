@@ -1,7 +1,7 @@
 import validation::execution { assumeBooleanFact, assumeRelation, checkNear, contextSizes, entailsIn, executeIndexed, goalInSlices, indexTo, localGoal, maxScopeDepth, quietStep };
 import validation::joins { commonContext, emptyContext, leastTermInUse, linkAppend, linkedItems, mergeArrivals, noLinks };
 import validation::loopInference { inferLoopCandidateGoals, loopMentions };
-import validation::model { Arrival, CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, HullLinks, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StepsRun, SweepOrder, SweepResult, TrailEntry, Trunk, TrunkAnswer, TrunkRun, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
+import validation::model { Arrival, CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, ForallTemplate, HullLinks, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StepsRun, SweepOrder, SweepResult, TrailEntry, Trunk, TrunkAnswer, TrunkRun, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
 import validation::relations { containsValue, emptyIntMap, intAt, minInt };
 import validation::state { assumesForall, countPast, localEntry, localsUndone, stateLocalsBefore, negateRelation, noTemplates, resolveValue };
 import validation::validation { Truncated, clampedStart, factsBetween, indexFacts, noFactIndex, truncatedState, valueNear, withFacts };
@@ -112,13 +112,30 @@ fn templatesEntry() -> TrailEntry {
     return TrailEntry { local: 0, had: false, term: 0, isTemplates: true };
 };
 
+// (these read through a reference: the pinned emitter that owns the validator
+// copies a field taken out of a struct whole when a value is then borrowed
+// from the local it went to)
+fn templatesOf(state: &ExecutionState) -> List<ForallTemplate> {
+    return clone(state.templates);
+};
+
+fn arrivalAt(waiting: &List<Arrival>, position: Int) -> Arrival {
+    if position >= 0 && position < size(waiting) { return clone(get(waiting, position)); };
+    return Arrival { mark: [], suffix: emptyContext(), overlay: emptyIntMap(), ownTemplates: false, templates: noTemplates(), floor: 0 };
+};
+
+fn markAt(marks: &List<List<Int>>, position: Int) -> List<Int> {
+    if position >= 0 && position < size(marks) { return clone(get(marks, position)); };
+    return [];
+};
+
 // The steps run on the trunk, with what they rebind on the trail
 fn runOnTrunk(trunk: Trunk, steps: &List<ExecutionStep>) -> TrunkRun {
     Trunk { state: state, index: index, trail: trail, saved: saved } = trunk;
     trail = stateLocalsBefore(trail, state, steps);
     if assumesForall(steps) {
         trail = push(trail, templatesEntry());
-        saved = push(saved, clone(state.templates));
+        saved = push(saved, templatesOf(state));
     };
     StepsRun { result: result, index: after } = executeIndexed(state, index, steps);
     ExecutionResult { status: status, failedAt: failedAt, state: ran } = result;
@@ -309,8 +326,7 @@ fn stored(work: SweepWork, arrival: Arrival) -> SweepWork {
 };
 
 fn markOf(work: &SweepWork, position: Int) -> List<Int> {
-    if position >= 0 && position < size(work.marks) { return clone(get(work.marks, position)); };
-    return [];
+    return markAt(work.marks, position);
 };
 
 struct TakenArrival { work: SweepWork, arrival: Arrival };
@@ -320,7 +336,7 @@ fn takeArrival(work: SweepWork, position: Int) -> TakenArrival {
     SweepWork { trunk: trunk, base: base, waiting: waiting, marks: marks, live: live, consumed: consumed, pending: pending, exits: exits, dropped: dropped, status: status, block: block, step: step, settled: settled, arrivals: arrivals, merges: merges } = work;
     arrival = arrivalAtTop(trunk);
     if position >= 0 && position < size(waiting) {
-        arrival = clone(get(waiting, position));
+        arrival = arrivalAt(waiting, position);
         waiting = set(waiting, position, Arrival { mark: [], suffix: emptyContext(), overlay: emptyIntMap(), ownTemplates: false, templates: noTemplates(), floor: 0 });
     } else { settled = true; status = 3; };
     consumed = consumed.insert(position);
@@ -344,8 +360,7 @@ fn rewindWork(work: SweepWork, target: &List<Int>) -> SweepWork {
         if consumed.contains(p) {
             cut = scan;
         } else {
-            at = [];
-            if p >= 0 && p < size(marks) { at = clone(get(marks, p)); };
+            at = markAt(marks, p);
             if markAtMost(at, target) { stop = true; } else {
                 if markAtMost(target, at) = false { broken = true; };
                 cut = scan;
@@ -364,8 +379,8 @@ fn rewindWork(work: SweepWork, target: &List<Int>) -> SweepWork {
     for back in 0..size(lifted) {
         p = intAt(lifted, size(lifted) - 1 - back, -1);
         if p >= 0 && p < size(waiting) && p < size(marks) {
-            trunk = rewindTrunk(trunk, get(marks, p));
-            arrival = clone(get(waiting, p));
+            trunk = rewindTrunk(trunk, markAt(marks, p));
+            arrival = arrivalAt(waiting, p);
             waiting = set(waiting, p, rebased(trunk, arrival, target));
             marks = set(marks, p, clone(target));
         };
@@ -958,7 +973,7 @@ fn sweepFinished(work: SweepWork) -> SweepResult {
     SweepWork { trunk: trunk, base: base, waiting: waiting, marks: marks, live: live, consumed: consumed, pending: pending, exits: exits, dropped: dropped, status: status, block: block, step: step, settled: settled, arrivals: arrivals, merges: merges } = work;
     leaving = [];
     for position in exits {
-        if position >= 0 && position < size(waiting) { leaving = push(leaving, clone(get(waiting, position))); };
+        if position >= 0 && position < size(waiting) { leaving = push(leaving, arrivalAt(waiting, position)); };
     };
     return SweepResult { result: ExecutionFlowResult { status: status, block: block, step: step, state: emptyState() }, dropped: dropped, exits: leaving, arrivals: arrivals, merges: merges, trunk: trunk };
 };

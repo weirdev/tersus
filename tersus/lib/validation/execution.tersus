@@ -212,6 +212,13 @@ fn constantNear(state: ExecutionState, index: &FactIndex, value: Int) -> Minted 
     return Minted { state: stateWithConstant(minted, ConstantTerm { id: symbol, kind: 0, value: value }), term: symbol };
 };
 
+// (this and nearState take the state as a parameter for the reason
+// flow.tersus's templatesOf does: no copy of the whole state)
+fn withOffset(state: ExecutionState, result: Int, base: Int, offset: Int) -> ExecutionState {
+    ExecutionState { context: context, locals: locals, templates: templates, floor: floor } = state;
+    return ExecutionState { context: addOffsetFacts(context, result, base, offset), locals: locals, templates: templates, floor: floor };
+};
+
 // Last is translated when the length is known. A nonempty check is still
 // required; unknown lengths remain unsupported by this particular encoding.
 fn lastSequence(initial: ExecutionState, facts: FactIndex, local: Int, list: Int, zero: Int) -> Stepped {
@@ -239,8 +246,7 @@ fn lastSequence(initial: ExecutionState, facts: FactIndex, local: Int, list: Int
         Minted { state: state, term: oneTerm } = constantNear(initial, facts, 1);
         Minted { state: subtracted, term: indexTerm } = mint(state);
         state = stateWithApplication(subtracted, ApplicationTerm { id: indexTerm, function: -2, arguments: push(push([], lengthTerm), oneTerm) });
-        offset = addOffsetFacts(state.context, indexTerm, lengthTerm, -1);
-        state = ExecutionState { context: offset, ..state };
+        state = withOffset(state, indexTerm, lengthTerm, -1);
         Minted { state: read, term: result } = mint(state);
         state = stateWithApplication(read, ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) });
         index = indexTo(facts, state);
@@ -851,7 +857,7 @@ fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int, index: FactI
                     // only to the slice: the goal's own terms can be ones the slice
                     // holds no fact of)
                     floor = state.floor;
-                    near = ExecutionState { context: chainSlice(state.context, index, push(push([], a), b), lastRung(), walk), locals: clone(state.locals), templates: clone(state.templates), floor: floor };
+                    near = nearState(state, index, a, b, walk);
                     ok = entailsGoal(near.context, localGoal(relation, a, b)) || booleanCheck(near.context, relation, a, b);
                     if ok = false && size(near.templates) > 0 {
                         // (each saturation of a large slice is costly: a check it cannot
@@ -874,6 +880,10 @@ fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int, index: FactI
         };
     };
     return stepped(2, i, state, index);
+};
+
+fn nearState(state: &ExecutionState, index: &FactIndex, a: Int, b: Int, walk: GoalSlice) -> ExecutionState {
+    return ExecutionState { context: chainSlice(state.context, index, push(push([], a), b), lastRung(), walk), locals: clone(state.locals), templates: clone(state.templates), floor: state.floor };
 };
 
 // A relation that holds now, and the comparisons a literal on either side of an equality decides
