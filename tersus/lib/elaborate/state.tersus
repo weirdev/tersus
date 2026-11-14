@@ -506,6 +506,10 @@ fn unify(st: St, a: Int, b: Int) -> St ~ {
     if kx = 15 && ky = 15 && numberOf(st, x) = numberOf(st, y) { return St { ok: true, ..st }; };
     if kx = 15 && !occurs(st, numberOf(st, x), y) { return bindVar(st, numberOf(st, x), y); };
     if ky = 15 && !occurs(st, numberOf(st, y), x) { return bindVar(st, numberOf(st, y), x); };
+    if (kx = 12 || ky = 12) && st.inTrait {
+        if kx = 12 && ky = 12 { return St { ok: nameOf(st, x) = nameOf(st, y), ..st }; };
+        return St { ok: true, ..st };
+    };
     if kx = 4 && ky = 4 {
         xs = argsOf(st, x);
         ys = argsOf(st, y);
