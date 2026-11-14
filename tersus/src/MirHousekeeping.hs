@@ -3,6 +3,7 @@ module MirHousekeeping
     ( verifyProgram
     , insertOwnership
     , expandRefWrites
+    , monomorphizeWith
     , ownershipTool
     , Tool (..)
     , eraseGhosts
@@ -59,6 +60,7 @@ import Link (linkPrograms)
 import LlvmRuntime (runtimeSource)
 import Mir
 import MirData (readProgram, writeProgram, writeProgramWithGhosts)
+import MirPass (programData, runPassWith)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (hasLists, lowerLists)
 import MirMono (monomorphize)
@@ -108,6 +110,21 @@ insertOwnership program = unsafePerformIO (ownershipPassWith ownershipTool "owne
 {-# NOINLINE expandRefWrites #-}
 expandRefWrites :: Program -> Result Program String
 expandRefWrites program = unsafePerformIO (ownershipPassWith ownershipTool "expand" program)
+
+monomorphizeWith :: IO Tool -> Program -> IO (Result Program String)
+monomorphizeWith getTool program
+    | not (any generic (Map.elems (progFunctions program))) = pure (Ok program)
+    | otherwise = case programData program of
+        Error e -> pure (Error e)
+        Ok input -> runPassWith nativeTool "the monomorphization tool" ("pass mono\n" ++ input)
+  where
+    generic fn = not (null (fnSizeParams fn) && null (fnTypeParams fn))
+    nativeTool = do
+        tool <- getTool
+        pure $ case tool of
+            ToolFailed e -> Error e
+            ToolInterpreted _ -> Error "monomorphization runs natively only"
+            ToolNative exe -> Ok exe
 
 ownershipTool :: IO Tool
 ownershipTool = either' <$> cachedEmitter

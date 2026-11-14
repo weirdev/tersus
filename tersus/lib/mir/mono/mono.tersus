@@ -1,0 +1,122 @@
+import data::codec::codec { Token };
+import mir::full::full { FullRecord, FullFunction, FullProgram, fullAt, printFull, clearFunctionMetadata };
+import mir::mono::tokens { MonoBinding, monoWord, monoName, monoText, monoIs, monoSlice, monoAppend, monoLookup };
+import mir::mono::functions { MonoKey, MonoRedirect, monoGeneric, monoSection, monoReturn, monoLocal, monoMatch, monoFunctionIndex, monoRedirect, monoInstantiate, monoInstanceName, monoNamedTypes };
+import mir::mono::types { monoProgramNamed, monoFiltered };
+
+struct MonoInstance { key: MonoKey, function: FullFunction };
+impl Clone for MonoInstance { };
+
+fn monoBuilt(done: &List<MonoInstance>, key: &MonoKey) -> Bool [{ }] [{ }] ~ {
+    for instance in done { if instance.key = key { return true; }; };
+    return false;
+};
+
+fn monoBuild(originals: &List<FullFunction>, pending: List<MonoKey>, done: List<MonoInstance>) -> List<MonoInstance> ~ {
+    i = 0;
+    while i < size(pending) [{ affirm i >= 0; affirm i <= size(pending); }] ~ {
+        key = get(pending, i);
+        if !monoBuilt(done, key) {
+            idx = monoFunctionIndex(originals, key.name);
+            if idx >= 0 {
+                redirect = monoRedirect(monoInstantiate(clone(get(originals, idx)), key), originals);
+                done = push(done, MonoInstance { key: clone(key), function: redirect.function });
+                for need in redirect.needs { pending = push(pending, clone(need)); };
+            };
+        };
+        i = i + 1;
+    };
+    return done;
+};
+
+fn monoDropKey(originals: &List<FullFunction>, originalNamed: &List<MonoBinding>, name: &String) -> List<MonoKey> ~ {
+    baseEnd = name.find(toByte(60), 0);
+    template = "<".concat(name.slice(0, baseEnd)).concat(" as Drop>::drop");
+    idx = monoFunctionIndex(originals, template);
+    if idx < 0 { return []; };
+    target = get(originals, idx);
+    params = monoSection(target.header, "params");
+    if size(params) = 0 { return []; };
+    actual = monoLookup(originalNamed, name);
+    if size(actual) = 0 { actual = push(push(push([], monoWord("named")), monoName(clone(name))), monoWord("0")); };
+    bs = monoMatch([], monoLocal(target, get(params, 0)), actual);
+    types = [];
+    for t in monoSection(target.header, "typeparams") {
+        ty = monoLookup(bs, t);
+        if size(ty) = 0 { return []; };
+        types = push(types, ty);
+    };
+    return push([], MonoKey { name: template, types: types, sizes: [] });
+};
+
+fn monoDropName(instance: &MonoInstance) -> FullFunction ~ {
+    f = clone(instance.function);
+    name = instance.key.name;
+    if size(name.bytes) < 15 || name.slice(size(name.bytes) - 15, size(name.bytes)) != " as Drop>::drop" { return f; };
+    params = monoSection(f.header, "params");
+    if size(params) = 0 { return f; };
+    ty = monoLocal(f, get(params, 0));
+    if !monoIs(ty, 0, "named") { return f; };
+    named = monoNamedTypes(ty, []);
+    if size(named) = 0 { return f; };
+    header = monoSlice(f.header, 0, 1);
+    header = push(header, monoName("<".concat(get(named, 0).name).concat(" as Drop>::drop")));
+    header = monoAppend(header, monoSlice(f.header, 2, size(f.header)));
+    return FullFunction { header: header, ..f };
+};
+
+fn monoWithInstances(program: FullProgram, plain: &List<FullFunction>, done: &List<MonoInstance>) -> FullProgram [{ }] [{ }] ~ {
+    fs = clone(plain);
+    for instance in done { fs = push(fs, clone(instance.function)); };
+    return FullProgram { functions: fs, ..program };
+};
+
+fn monomorphize(program: FullProgram) -> FullProgram ~ {
+    anyGeneric = false;
+    for f in &program.functions { if monoGeneric(f) { anyGeneric = true; }; };
+    if !anyGeneric { return program; };
+    program = clearFunctionMetadata(program);
+    originalNamed = monoProgramNamed(program, true);
+    main = monoRedirect(clone(program.entry), program.functions);
+    plain = []; pending = main.needs;
+    for f in &program.functions {
+        if !monoGeneric(f) {
+            redirected = monoRedirect(clone(f), program.functions);
+            plain = push(plain, redirected.function);
+            for need in redirected.needs { pending = push(pending, clone(need)); };
+        };
+    };
+    done = monoBuild(program.functions, pending, []);
+    originals = clone(program.functions);
+    rewritten = FullProgram { entry: main.function, functions: [], ..program };
+    // MirMono discovers implicit drops in at most four rounds; preserve that boundary.
+    round = 0;
+    while round < 4 [{ affirm round >= 0; affirm round <= 4; }] ~ {
+        p = monoFiltered(monoWithInstances(clone(rewritten), plain, done), originalNamed);
+        keys = [];
+        for d in p.types {
+            for key in monoDropKey(originals, originalNamed, d.name) { if !monoBuilt(done, key) { keys = push(keys, clone(key)); }; };
+        };
+        if size(keys) = 0 { round = 4; }
+        else { done = monoBuild(originals, keys, done); round = round + 1; };
+    };
+    functions = plain;
+    for instance in done { functions = push(functions, monoDropName(instance)); };
+    out = FullProgram { functions: functions, ..rewritten };
+    return monoFiltered(out, originalNamed);
+};
+
+fn isMonoRequest(lines: &List<List<Token>>) -> Bool [{ }] [{ }] ~ {
+    if size(lines) = 0 { return false; };
+    first = get(lines, 0);
+    return size(first) = 2 && monoIs(first, 0, "pass") && monoIs(first, 1, "mono");
+};
+
+fn runMono(lines: &List<List<Token>>) -> Bool ~ {
+    input = [];
+    for i in 1..size(lines) { input = push(input, clone(get(lines, i))); };
+    parsed = fullAt(input);
+    if !parsed.ok { "the input is not full MIR version 3\n".printError(); return false; };
+    printFull(monomorphize(parsed.value));
+    return true;
+};

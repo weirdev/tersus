@@ -1,0 +1,131 @@
+import data::codec::codec { Token, isBareLowerName };
+import mir::full::tokens { textAt, wordIs, numberAt, word, name, sliceTokens, appendTokens, typeEnd, sizeEnd, constantEnd, operandEnd };
+
+struct MonoBinding { name: String, tokens: List<Token> };
+impl Clone for MonoBinding { };
+
+fn monoWord(text: String) -> Token ~ { return word(text); };
+fn monoName(text: String) -> Token ~ { return name(text); };
+fn monoText(ts: &List<Token>, i: Int) -> String ~ { return textAt(ts, i); };
+fn monoIs(ts: &List<Token>, i: Int, text: &String) -> Bool ~ { return wordIs(ts, i, text); };
+fn monoCount(ts: &List<Token>, i: Int) -> Int ~ { return numberAt(ts, i); };
+fn monoSlice(ts: &List<Token>, start: Int, end: Int) -> List<Token> ~ { return sliceTokens(ts, start, end); };
+fn monoAppend(a: List<Token>, b: &List<Token>) -> List<Token> ~ { return appendTokens(a, b); };
+fn monoTypeEnd(ts: &List<Token>, p: Int) -> Int ~ { return typeEnd(ts, p); };
+fn monoSizeEnd(ts: &List<Token>, p: Int) -> Int ~ { return sizeEnd(ts, p); };
+fn monoConstantEnd(ts: &List<Token>, p: Int) -> Int ~ { return constantEnd(ts, p); };
+fn monoOperandEnd(ts: &List<Token>, p: Int) -> Int ~ { return operandEnd(ts, p); };
+
+fn monoLookup(bs: &List<MonoBinding>, key: &String) -> List<Token> ~ {
+    for b in bs { if b.name = key { return clone(b.tokens); }; };
+    return [];
+};
+
+fn monoBind(bs: List<MonoBinding>, key: String, tokens: List<Token>) -> List<MonoBinding> ~ {
+    if size(monoLookup(bs, key)) = 0 { bs = push(bs, MonoBinding { name: key, tokens: tokens }); };
+    return bs;
+};
+
+fn monoForallBody(ts: &List<Token>, p: Int) -> Int ~ {
+    ns = monoCount(ts, p + 1);
+    if ns < 0 { return 0 - 1; };
+    nt = monoCount(ts, p + 2 + ns);
+    if nt < 0 || p + 3 + ns + nt >= size(ts) { return 0 - 1; };
+    return p + 3 + ns + nt;
+};
+
+fn monoSizeName(ts: &List<Token>, p: Int) -> String ~ {
+    if monoIs(ts, p, "any") { return "?"; };
+    if monoIs(ts, p, "v") { return "_".concat(monoText(ts, p + 1)); };
+    return monoText(ts, p + 1);
+};
+
+fn monoTypeName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
+    if p < 0 || p >= size(ts) { return ""; };
+    w = monoText(ts, p);
+    if w = "int" { return "Int"; }; if w = "bool" { return "Bool"; }; if w = "byte" { return "Byte"; };
+    if w = "i8" { return "I8"; }; if w = "i16" { return "I16"; }; if w = "i32" { return "I32"; }; if w = "u16" { return "U16"; }; if w = "u32" { return "U32"; };
+    if w = "param" { n = monoText(ts, p + 1); if forInstance { return "'".concat(n); }; return n; };
+    if w = "var" { if forInstance { return "?".concat(monoText(ts, p + 1)); }; return "?"; };
+    if w = "variant" { return monoText(ts, p + 1); };
+    if w = "named" { return monoNamedName(ts, p, forInstance); };
+    if w = "fn" { return monoFnTypeName(ts, p, forInstance); };
+    if w = "forall" { return monoForallName(ts, p, forInstance); };
+    inner = monoTypeName(ts, p + 1, forInstance);
+    if w = "ref" { return "&".concat(inner); }; if w = "mutref" { return "&mut ".concat(inner); };
+    if w = "array" { return "Array<".concat(inner).concat(", ").concat(monoSizeName(ts, monoTypeEnd(ts, p + 1))).concat(">"); };
+    prefix = "";
+    if w = "list" { prefix = "List"; }; if w = "box" { prefix = "Box"; }; if w = "addr" { prefix = "Addr"; }; if w = "block" { prefix = "Block"; }; if w = "uninit" { prefix = "Uninit"; };
+    return prefix.concat("<").concat(inner).concat(">");
+};
+
+fn monoForallName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
+    rendered = monoTypeName(ts, monoForallBody(ts, p), forInstance);
+    if forInstance { return rendered; };
+    ns = monoCount(ts, p + 1); nt = monoCount(ts, p + 2 + ns);
+    names = [];
+    for i in 0..nt { names = push(names, monoText(ts, p + 3 + ns + i)); };
+    for i in 0..ns { names = push(names, monoText(ts, p + 2 + i)); };
+    out = "<";
+    for i in 0..size(names) { if i > 0 { out = out.concat(", "); }; out = out.concat(get(names, i)); };
+    return out.concat(">").concat(rendered);
+};
+
+fn monoNamedName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
+    base = monoText(ts, p + 1);
+    n = monoCount(ts, p + 2);
+    if n <= 0 { if forInstance && isBareLowerName(base) { return "`".concat(base); }; return base; };
+    out = base.concat("<");
+    at = p + 3;
+    for i in 0..n {
+        if i > 0 { out = out.concat(", "); };
+        if monoIs(ts, at, "type") { out = out.concat(monoTypeName(ts, at + 1, true)); at = monoTypeEnd(ts, at + 1); }
+        else { out = out.concat(monoSizeName(ts, at + 1)); at = monoSizeEnd(ts, at + 1); };
+    };
+    return out.concat(">");
+};
+
+fn monoFnTypeName(ts: &List<Token>, p: Int, forInstance: Bool) -> String ~ {
+    out = "fn(";
+    n = monoCount(ts, p + 1);
+    at = p + 2;
+    for i in 0..n { if i > 0 { out = out.concat(", "); }; out = out.concat(monoTypeName(ts, at, forInstance)); at = monoTypeEnd(ts, at); };
+    return out.concat(") -> ").concat(monoTypeName(ts, at, forInstance));
+};
+
+fn monoSubstitute(ts: &List<Token>, sizes: &List<MonoBinding>, types: &List<MonoBinding>) -> List<Token> ~ {
+    out = [];
+    i = 0;
+    while i < size(ts) [{ affirm i >= 0; affirm i <= size(ts); }] ~ {
+        if monoIs(ts, i, "forall") { return monoAppend(out, monoSubstituteForall(ts, i, sizes, types)); };
+        if i + 1 < size(ts) && (monoIs(ts, i, "param") || monoIs(ts, i, "p")) {
+            replacement = monoLookup(types, monoText(ts, i + 1));
+            if monoIs(ts, i, "p") { replacement = monoLookup(sizes, monoText(ts, i + 1)); };
+            if size(replacement) > 0 { out = monoAppend(out, replacement); i = i + 2; }
+            else { out = push(out, clone(get(ts, i))); i = i + 1; };
+        } else { out = push(out, clone(get(ts, i))); i = i + 1; };
+    };
+    return out;
+};
+
+fn monoSubstituteForall(ts: &List<Token>, p: Int, sizes: &List<MonoBinding>, types: &List<MonoBinding>) -> List<Token> ~ {
+    body = monoForallBody(ts, p);
+    if body < 0 { return monoSlice(ts, p, size(ts)); };
+    ns = monoCount(ts, p + 1);
+    ss = []; tt = [];
+    for b in sizes {
+        hidden = false;
+        for i in 0..ns { if monoText(ts, p + 2 + i) = b.name { hidden = true; }; };
+        if !hidden { ss = push(ss, clone(b)); };
+    };
+    nt = monoCount(ts, p + 2 + ns);
+    for b in types {
+        hidden = false;
+        for i in 0..nt { if monoText(ts, p + 3 + ns + i) = b.name { hidden = true; }; };
+        if !hidden { tt = push(tt, clone(b)); };
+    };
+    end = monoTypeEnd(ts, body);
+    out = monoSlice(ts, p, body);
+    out = monoAppend(out, monoSubstitute(monoSlice(ts, body, end), ss, tt));
+    return monoAppend(out, monoSubstitute(monoSlice(ts, end, size(ts)), sizes, types));
+};

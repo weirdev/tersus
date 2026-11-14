@@ -1,0 +1,146 @@
+import data::codec::codec { Token, parseInt };
+import mir::full::full { FullRecord, FullFunction, FullProgram };
+import mir::mono::tokens { MonoBinding, monoWord, monoName, monoText, monoIs, monoCount, monoSlice, monoAppend, monoLookup, monoBind, monoTypeEnd, monoSizeEnd, monoSubstitute };
+import mir::mono::functions { monoNamedTypes, monoReturn };
+
+fn monoRecordIndex(records: &List<FullRecord>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(records); }] ~ {
+    for i in 0..size(records) { if get(records, i).name = name { return i; }; };
+    return 0 - 1;
+};
+
+fn monoFields(ts: &List<Token>, p: Int, count: Int) -> List<MonoBinding> ~ {
+    out = []; at = p;
+    for i in 0..count {
+        end = monoTypeEnd(ts, at + 1);
+        if end < 0 { return out; };
+        out = push(out, MonoBinding { name: monoText(ts, at), tokens: monoSlice(ts, at + 1, end) });
+        at = end;
+    };
+    return out;
+};
+
+fn monoFieldTokens(fields: &List<MonoBinding>) -> List<Token> [{ }] [{ }] ~ {
+    out = push([], monoWord(String::fromInt(size(fields))));
+    for f in fields { out = push(out, monoName(clone(f.name))); out = monoAppend(out, f.tokens); };
+    return out;
+};
+
+fn monoEraseFields(fields: &List<MonoBinding>) -> List<MonoBinding> [{ }] [{ }] ~ {
+    out = [];
+    for f in fields { if !monoIs(f.tokens, 0, "block") { out = push(out, clone(f)); }; };
+    return out;
+};
+
+fn monoEraseDecl(d: FullRecord) -> FullRecord ~ {
+    ts = &d.tokens;
+    if monoIs(ts, 0, "struct") {
+        fields = monoEraseFields(monoFields(ts, 3, monoCount(ts, 2)));
+        return FullRecord { tokens: monoAppend(monoSlice(ts, 0, 2), monoFieldTokens(fields)), ..d };
+    };
+    out = monoSlice(ts, 0, 3); p = 3; n = monoCount(ts, 2);
+    for i in 0..n {
+        fields = monoFields(ts, p + 2, monoCount(ts, p + 1));
+        out = push(out, monoName(monoText(ts, p))); out = monoAppend(out, monoFieldTokens(monoEraseFields(fields)));
+        p = p + 2;
+        for f in fields { p = monoTypeEnd(ts, p + 1); };
+    };
+    return FullRecord { tokens: out, ..d };
+};
+
+fn monoEraseGeneric(g: FullRecord) -> FullRecord ~ {
+    n = monoCount(g.tokens, 2); p = 3 + n;
+    fields = monoFields(g.tokens, p + 1, monoCount(g.tokens, p));
+    return FullRecord { tokens: monoAppend(monoSlice(g.tokens, 0, p), monoFieldTokens(monoEraseFields(fields))), ..g };
+};
+
+fn monoProgramNamed(program: &FullProgram, templates: Bool) -> List<MonoBinding> ~ {
+    out = [];
+    for d in &program.entry.locals { out = monoNamedTypes(d.tokens, out); };
+    for f in &program.functions { for d in &f.locals { out = monoNamedTypes(d.tokens, out); }; };
+    out = monoNamedTypes(monoReturn(program.entry), out);
+    for f in &program.functions { out = monoNamedTypes(monoReturn(f), out); };
+    for d in &program.types { if monoIs(d.tokens, 0, "struct") { out = monoNamedTypes(d.tokens, out); }; };
+    for d in &program.types { if monoIs(d.tokens, 0, "enum") { out = monoNamedTypes(d.tokens, out); }; };
+    if templates { for g in &program.generics { out = monoNamedTypes(g.tokens, out); }; };
+    return out;
+};
+
+fn monoSymbolic(ty: &List<Token>) -> Bool ~ {
+    i = 0;
+    while i < size(ty) [{ affirm i >= 0; affirm i <= size(ty); }] ~ {
+        if monoIs(ty, i, "forall") {
+            end = monoTypeEnd(ty, i);
+            if end <= i || end > size(ty) { return false; };
+            i = end;
+        } else {
+            if monoIs(ty, i, "param") || monoIs(ty, i, "p") { return true; };
+            i = i + 1;
+        };
+    };
+    return false;
+};
+
+fn monoTypeParameter(name: &String) -> Bool [{ }] [{ }] ~ {
+    if size(name.bytes) > 0 { c = toInt(get(name.bytes, 0)); return c >= 65 && c <= 90; };
+    return false;
+};
+
+fn monoTuple(base: &String) -> FullRecord [{ }] [{ }] ~ {
+    bad = FullRecord { name: "", tokens: [] };
+    if size(base.bytes) < 6 || base.slice(0, 5) != "Tuple" { return bad; };
+    n = parseInt(base.slice(5, size(base.bytes)));
+    if !n.ok || n.value < 2 || n.value > 16 || String::fromInt(n.value) != base.slice(5, size(base.bytes)) { return bad; };
+    out = push(push([], monoWord("generic")), monoName(clone(base)));
+    out = push(out, monoWord(String::fromInt(n.value)));
+    for i in 0..n.value { out = push(out, monoName("T".concat(String::fromInt(i)))); };
+    out = push(out, monoWord(String::fromInt(n.value)));
+    for i in 0..n.value { out = push(out, monoName(String::fromInt(i))); out = push(out, monoWord("param")); out = push(out, monoName("T".concat(String::fromInt(i)))); };
+    return FullRecord { name: clone(base), tokens: out };
+};
+
+fn monoInstanceDecl(generics: &List<FullRecord>, named: &MonoBinding) -> FullRecord ~ {
+    bad = FullRecord { name: "", tokens: [] };
+    base = monoText(named.tokens, 1); n = monoCount(named.tokens, 2);
+    gi = monoRecordIndex(generics, base); g = monoTuple(base);
+    if gi >= 0 { g = clone(get(generics, gi)); };
+    if size(g.tokens) = 0 || monoCount(g.tokens, 2) != n { return bad; };
+    sizes = []; types = []; at = 3;
+    for i in 0..n {
+        name = monoText(g.tokens, 3 + i);
+        if monoIs(named.tokens, at, "size") && !monoTypeParameter(name) {
+            end = monoSizeEnd(named.tokens, at + 1);
+            if end < 0 { return bad; };
+            sizes = push(sizes, MonoBinding { name: name, tokens: monoSlice(named.tokens, at + 1, end) }); at = end;
+        } else {
+            if !monoIs(named.tokens, at, "type") || !monoTypeParameter(name) { return bad; };
+            end = monoTypeEnd(named.tokens, at + 1); if end < 0 { return bad; };
+            types = push(types, MonoBinding { name: name, tokens: monoSlice(named.tokens, at + 1, end) }); at = end;
+        };
+    };
+    fp = 3 + n; fields = monoFields(g.tokens, fp + 1, monoCount(g.tokens, fp)); instantiated = [];
+    for f in fields { instantiated = push(instantiated, MonoBinding { name: clone(f.name), tokens: monoSubstitute(f.tokens, sizes, types) }); };
+    out = push(push([], monoWord("struct")), monoName(clone(named.name)));
+    return FullRecord { name: clone(named.name), tokens: monoAppend(out, monoFieldTokens(monoEraseFields(instantiated))) };
+};
+
+fn monoComplete(program: FullProgram) -> FullProgram ~ {
+    named = monoProgramNamed(program, false); generics = []; types = [];
+    for g in program.generics { generics = push(generics, monoEraseGeneric(clone(g))); };
+    for d in program.types { types = push(types, monoEraseDecl(clone(d))); };
+    i = 0;
+    while i < size(named) [{ affirm i >= 0; affirm i <= size(named); }] ~ {
+        item = get(named, i);
+        if monoRecordIndex(types, item.name) < 0 {
+            d = monoInstanceDecl(generics, item);
+            if size(d.tokens) > 0 { named = monoNamedTypes(d.tokens, named); types = push(types, d); };
+        };
+        i = i + 1;
+    };
+    return FullProgram { types: types, generics: generics, ..program };
+};
+
+fn monoFiltered(program: FullProgram, originalNamed: &List<MonoBinding>) -> FullProgram ~ {
+    program = monoComplete(program); kept = [];
+    for d in program.types { ty = monoLookup(originalNamed, d.name); if !monoSymbolic(ty) { kept = push(kept, clone(d)); }; };
+    return FullProgram { types: kept, ..program };
+};

@@ -1,0 +1,281 @@
+import data::codec::codec { Token };
+import mir::full::full { FullRecord, FullBlock, FullFunction };
+import mir::mono::tokens { MonoBinding, monoWord, monoName, monoText, monoIs, monoCount, monoSlice, monoAppend, monoLookup, monoBind, monoTypeEnd, monoSizeEnd, monoOperandEnd, monoConstantEnd, monoTypeName, monoNamedName, monoSubstitute };
+
+struct MonoKey { name: String, types: List<List<Token>>, sizes: List<String> };
+impl Clone for MonoKey { };
+impl Eq for MonoKey { };
+
+struct MonoRedirect { function: FullFunction, needs: List<MonoKey> };
+impl Clone for MonoRedirect { };
+
+fn monoFind(ts: &List<Token>, word: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(ts); }] ~ {
+    for i in 0..size(ts) { if monoIs(ts, i, word) { return i; }; };
+    return 0 - 1;
+};
+
+fn monoSection(ts: &List<Token>, word: &String) -> List<String> [{ }] [{ }] ~ {
+    p = monoFind(ts, word);
+    out = [];
+    if p < 0 { return out; };
+    n = monoCount(ts, p + 1);
+    for i in 0..n { out = push(out, monoText(ts, p + 2 + i)); };
+    return out;
+};
+
+fn monoGeneric(function: &FullFunction) -> Bool [{ }] [{ }] ~ {
+    return size(monoSection(function.header, "sizeparams")) > 0 || size(monoSection(function.header, "typeparams")) > 0;
+};
+
+fn monoReturn(function: &FullFunction) -> List<Token> ~ {
+    p = monoFind(function.header, "returns");
+    if p >= 0 && monoIs(function.header, p + 1, "some") { return monoSlice(function.header, p + 2, monoTypeEnd(function.header, p + 2)); };
+    return [];
+};
+
+fn monoLocal(function: &FullFunction, id: &String) -> List<Token> [{ }] [{ }] ~ {
+    for d in function.locals {
+        if monoText(d.tokens, 1) = id {
+            start = 3;
+            if monoIs(d.tokens, 2, "some") { start = 4; };
+            return monoSlice(d.tokens, start, size(d.tokens));
+        };
+    };
+    return [];
+};
+
+fn monoFunctionIndex(fs: &List<FullFunction>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(fs); }] ~ {
+    for i in 0..size(fs) { if monoText(&get(fs, i).header, 1) = name { return i; }; };
+    return 0 - 1;
+};
+
+fn monoMatch(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> List<MonoBinding> ~ {
+    if size(pat) = 0 || size(actual) = 0 { return bs; };
+    if monoIs(pat, 0, "param") { return monoBind(bs, monoText(pat, 1), clone(actual)); };
+    if monoIs(pat, 0, "ref") || monoIs(pat, 0, "mutref") { return monoMatch(bs, monoSlice(pat, 1, size(pat)), actual); };
+    if monoIs(actual, 0, "ref") || monoIs(actual, 0, "mutref") { return monoMatch(bs, pat, monoSlice(actual, 1, size(actual))); };
+    pw = monoText(pat, 0);
+    aw = monoText(actual, 0);
+    if pw != aw { return bs; };
+    if pw = "box" || pw = "list" || pw = "addr" || pw = "block" || pw = "uninit" || pw = "array" {
+        return monoMatch(bs, monoSlice(pat, 1, monoTypeEnd(pat, 1)), monoSlice(actual, 1, monoTypeEnd(actual, 1)));
+    };
+    if pw = "named" { return monoMatchNamed(bs, pat, actual); };
+    if pw = "fn" { return monoMatchFn(bs, pat, actual); };
+    return bs;
+};
+
+fn monoMatchNamed(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> List<MonoBinding> ~ {
+    n = monoCount(pat, 2);
+    if monoText(pat, 1) != monoText(actual, 1) || n != monoCount(actual, 2) { return bs; };
+    p = 3; a = 3;
+    for i in 0..n {
+        pe = monoSizeEnd(pat, p + 1); ae = monoSizeEnd(actual, a + 1);
+        if monoIs(pat, p, "type") { pe = monoTypeEnd(pat, p + 1); };
+        if monoIs(actual, a, "type") { ae = monoTypeEnd(actual, a + 1); };
+        if pe < 0 || ae < 0 { return bs; };
+        if monoIs(pat, p, "type") && monoIs(actual, a, "type") { bs = monoMatch(bs, monoSlice(pat, p + 1, pe), monoSlice(actual, a + 1, ae)); };
+        p = pe; a = ae;
+    };
+    return bs;
+};
+
+fn monoMatchFn(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> List<MonoBinding> ~ {
+    np = monoCount(pat, 1); na = monoCount(actual, 1);
+    p = 2; a = 2;
+    ps = []; actuals = [];
+    for i in 0..np { end = monoTypeEnd(pat, p); ps = push(ps, monoSlice(pat, p, end)); p = end; };
+    for i in 0..na { end = monoTypeEnd(actual, a); actuals = push(actuals, monoSlice(actual, a, end)); a = end; };
+    bs = monoMatch(bs, monoSlice(pat, p, size(pat)), monoSlice(actual, a, size(actual)));
+    for i in 0..size(ps) { if i < size(actuals) { bs = monoMatch(bs, get(ps, i), get(actuals, i)); }; };
+    return bs;
+};
+
+fn monoConstantType(ts: &List<Token>, p: Int) -> List<Token> ~ {
+    out = [];
+    if monoIs(ts, p, "int") { return push(out, monoWord("int")); };
+    if monoIs(ts, p, "bool") { return push(out, monoWord("bool")); };
+    if monoIs(ts, p, "data") { out = push(out, monoWord("named")); out = push(out, monoName(monoText(ts, p + 1))); return push(out, monoWord("0")); };
+    if monoIs(ts, p, "array") {
+        n = monoCount(ts, p + 1);
+        elem = push([], monoWord("int"));
+        at = p + 2; known = false;
+        for i in 0..n {
+            ty = monoConstantType(ts, at);
+            if !known && size(ty) > 0 { elem = ty; known = true; };
+            at = monoConstantEnd(ts, at);
+        };
+        out = push(out, monoWord("array")); out = monoAppend(out, elem);
+        out = push(out, monoWord("c")); return push(out, monoWord(String::fromInt(n)));
+    };
+    return out;
+};
+
+fn monoArgumentType(function: &FullFunction, arg: &List<Token>) -> List<Token> ~ {
+    if monoIs(arg, 0, "copy") || monoIs(arg, 0, "move") { return monoLocal(function, monoText(arg, 1)); };
+    if monoIs(arg, 0, "const") { return monoConstantType(arg, 1); };
+    return [];
+};
+
+fn monoCallTypes(caller: &FullFunction, target: &FullFunction, args: &List<List<Token>>, dest: &String) -> List<List<Token>> ~ {
+    bs = [];
+    params = monoSection(target.header, "params");
+    for i in 0..size(params) {
+        if i < size(args) { bs = monoMatch(bs, monoLocal(target, get(params, i)), monoArgumentType(caller, get(args, i))); };
+    };
+    bs = monoMatch(bs, monoReturn(target), monoLocal(caller, dest));
+    out = [];
+    for name in monoSection(target.header, "typeparams") {
+        ty = monoLookup(bs, name);
+        if size(ty) = 0 { ty = push(ty, monoWord("int")); };
+        out = push(out, ty);
+    };
+    return out;
+};
+
+fn monoInstanceName(key: &MonoKey) -> String ~ {
+    out = clone(key.name).concat("<");
+    parts = [];
+    for ty in key.types { parts = push(parts, monoTypeName(ty, 0, false)); };
+    for s in key.sizes { parts = push(parts, clone(s)); };
+    for i in 0..size(parts) { if i > 0 { out = out.concat(", "); }; out = out.concat(get(parts, i)); };
+    return out.concat(">");
+};
+
+fn monoRedirect(function: FullFunction, originals: &List<FullFunction>) -> MonoRedirect ~ {
+    blocks = [];
+    needs = [];
+    for b in function.blocks {
+        lines = [];
+        for line in b.lines {
+            result = monoRedirectCall(function, originals, line);
+            for key in result.needs { needs = push(needs, clone(key)); };
+            lines = push(lines, result.line);
+        };
+        blocks = push(blocks, FullBlock { lines: lines, ..b });
+    };
+    return MonoRedirect { function: FullFunction { blocks: blocks, ..function }, needs: needs };
+};
+
+struct MonoCall { line: List<Token>, needs: List<MonoKey> };
+impl Clone for MonoCall { };
+
+fn monoRedirectCall(function: &FullFunction, originals: &List<FullFunction>, line: &List<Token>) -> MonoCall ~ {
+    unchanged = MonoCall { line: clone(line), needs: [] };
+    if !monoIs(line, 0, "call") || !monoIs(line, 1, "const") || !monoIs(line, 2, "fn") { return unchanged; };
+    name = monoText(line, 3);
+    idx = monoFunctionIndex(originals, name);
+    if idx < 0 { return unchanged; };
+    target = get(originals, idx);
+    if !monoGeneric(target) { return unchanged; };
+    count = monoCount(line, 4);
+    ns = size(monoSection(target.header, "sizeparams"));
+    kept = count - ns; if kept < 0 { kept = 0; };
+    args = []; sizes = []; at = 5;
+    for i in 0..count {
+        end = monoOperandEnd(line, at);
+        if end < 0 { return unchanged; };
+        if i < kept { args = push(args, monoSlice(line, at, end)); }
+        else { if !monoIs(line, at, "const") || !monoIs(line, at + 1, "int") { return unchanged; }; sizes = push(sizes, monoText(line, at + 2)); };
+        at = end;
+    };
+    key = MonoKey { name: name, types: monoCallTypes(function, target, args, monoText(line, at)), sizes: sizes };
+    out = push([], monoWord("call")); out = push(out, monoWord("const")); out = push(out, monoWord("fn"));
+    out = push(out, monoName(monoInstanceName(key))); out = push(out, monoWord(String::fromInt(kept)));
+    for arg in args { out = monoAppend(out, arg); };
+    out = monoAppend(out, monoSlice(line, at, size(line)));
+    return MonoCall { line: out, needs: push([], key) };
+};
+
+fn monoSectionTokens(label: String, values: &List<String>, quoted: Bool) -> List<Token> [{ }] [{ }] ~ {
+    out = push([], monoWord(label)); out = push(out, monoWord(String::fromInt(size(values))));
+    for v in values { if quoted { out = push(out, monoName(clone(v))); } else { out = push(out, monoWord(clone(v))); }; };
+    return out;
+};
+
+fn monoKept(values: &List<String>, removed: &List<String>) -> List<String> [{ }] [{ }] ~ {
+    out = [];
+    for v in values { present = false; for r in removed { if v = r { present = true; }; }; if !present { out = push(out, clone(v)); }; };
+    return out;
+};
+
+fn monoInstantiateHeader(function: &FullFunction, key: &MonoKey, removed: &List<String>, sizes: &List<MonoBinding>, types: &List<MonoBinding>) -> List<Token> ~ {
+    out = push([], monoWord(monoText(function.header, 0))); out = push(out, monoName(monoInstanceName(key)));
+    params = monoSection(function.header, "params"); kept = [];
+    n = size(params) - size(monoSection(function.header, "sizeparams"));
+    for i in 0..size(params) { if i < n { kept = push(kept, clone(get(params, i))); }; };
+    out = monoAppend(out, monoSectionTokens("params", kept, false)); out = push(out, monoWord("returns"));
+    ret = monoReturn(function);
+    if size(ret) = 0 { out = push(out, monoWord("none")); }
+    else { out = push(out, monoWord("some")); out = monoAppend(out, monoSubstitute(ret, sizes, types)); };
+    out = monoAppend(out, monoSectionTokens("sizeparams", [], true)); out = monoAppend(out, monoSectionTokens("typeparams", [], true));
+    out = monoAppend(out, monoSectionTokens("borrowed", monoKept(monoSection(function.header, "borrowed"), removed), false));
+    mutBorrowed = monoKept(monoSection(function.header, "mutborrowed"), removed); origins = monoKept(monoSection(function.header, "from"), removed);
+    if size(mutBorrowed) > 0 || size(origins) > 0 { out = monoAppend(out, monoSectionTokens("mutborrowed", mutBorrowed, false)); out = monoAppend(out, monoSectionTokens("from", origins, false)); };
+    return out;
+};
+
+fn monoNamedTypes(ts: &List<Token>, given: &List<MonoBinding>) -> List<MonoBinding> [{ }] [{ affirm size(return) >= size(given); }] ~ {
+    out = clone(given);
+    for i in 0..size(ts) [{ affirm size(out) >= size(given); }] {
+        if monoIs(ts, i, "named") {
+            end = monoTypeEnd(ts, i);
+            if end > i {
+                key = monoNamedName(ts, i, false);
+                value = MonoBinding { name: clone(key), tokens: monoSlice(ts, i, end) };
+                present = false;
+                for j in 0..size(out) { if get(out, j).name = key { out = set(out, j, clone(value)); present = true; }; };
+                if !present { out = push(out, value); };
+            };
+        };
+    };
+    return out;
+};
+
+fn monoRenameLine(ts: &List<Token>, values: &List<MonoBinding>, renames: &List<MonoBinding>) -> List<Token> ~ {
+    out = []; i = 0;
+    while i < size(ts) [{ affirm i >= 0; affirm i <= size(ts); }] ~ {
+        if i + 1 < size(ts) && (monoIs(ts, i, "copy") || monoIs(ts, i, "move")) {
+            value = monoLookup(values, monoText(ts, i + 1));
+            if size(value) > 0 { out = monoAppend(out, value); i = i + 2; }
+            else { out = push(out, clone(get(ts, i))); i = i + 1; };
+        } else {
+            rename = false;
+            if i > 0 && (monoIs(ts, i - 1, "data") || monoIs(ts, i - 1, "makedata") || monoIs(ts, i - 1, "field")) { rename = true; };
+            if i > 1 && monoIs(ts, i - 2, "takefield") { rename = true; };
+            for j in 0..i { if monoIs(ts, j, "readfield") || monoIs(ts, j, "isvariant") || monoIs(ts, j, "asvariant") { if monoOperandEnd(ts, j + 1) = i { rename = true; }; }; };
+            replacement = [];
+            if rename { replacement = monoLookup(renames, monoText(ts, i)); };
+            if size(replacement) > 0 { out = monoAppend(out, replacement); } else { out = push(out, clone(get(ts, i))); };
+            i = i + 1;
+        };
+    };
+    return out;
+};
+
+fn monoInstantiate(function: FullFunction, key: &MonoKey) -> FullFunction ~ {
+    types = []; sizes = []; values = []; removed = [];
+    names = monoSection(function.header, "typeparams");
+    for i in 0..size(names) { if i < size(key.types) { types = push(types, MonoBinding { name: clone(get(names, i)), tokens: clone(get(key.types, i)) }); }; };
+    params = monoSection(function.header, "params"); snames = monoSection(function.header, "sizeparams");
+    kept = size(params) - size(snames); if kept < 0 { kept = 0; };
+    for i in 0..size(params) { if i >= kept { removed = push(removed, clone(get(params, i))); }; };
+    for i in 0..size(key.sizes) {
+        s = get(key.sizes, i);
+        if i < size(snames) { sizes = push(sizes, MonoBinding { name: clone(get(snames, i)), tokens: push(push([], monoWord("c")), monoWord(clone(s))) }); };
+        if i < size(removed) { value = push(push(push([], monoWord("const")), monoWord("int")), monoWord(clone(s))); values = push(values, MonoBinding { name: clone(get(removed, i)), tokens: value }); };
+    };
+    named = monoNamedTypes(monoReturn(function), []);
+    for d in function.locals { named = monoNamedTypes(d.tokens, named); };
+    renames = [];
+    for b in named { renames = push(renames, MonoBinding { name: clone(b.name), tokens: push([], monoName(monoNamedName(monoSubstitute(b.tokens, sizes, types), 0, false))) }); };
+    locals = [];
+    for d in function.locals {
+        id = monoText(d.tokens, 1); keptLocal = true;
+        for r in removed { if r = id { keptLocal = false; }; };
+        if keptLocal { locals = push(locals, FullRecord { name: clone(d.name), tokens: monoSubstitute(d.tokens, sizes, types) }); };
+    };
+    blocks = [];
+    for b in function.blocks { lines = []; for line in b.lines { if !monoIs(line, 0, "ghost") { lines = push(lines, monoRenameLine(line, values, renames)); }; }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
+    return FullFunction { header: monoInstantiateHeader(function, key, removed, sizes, types), locals: locals, blocks: blocks, ..function };
+};
