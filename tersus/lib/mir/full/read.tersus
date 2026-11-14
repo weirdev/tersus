@@ -2,8 +2,8 @@ import data::codec::codec { Token, Parsed };
 import data::reader::reader { parseAstLines };
 import data::ast::ast { AstNode };
 import mir::full::full { FullRecord, FullBlock, FullFunction, FullProgram };
-import mir::full::tokens { argsEnd, integerAt, intsEnd, namesEnd, numberAt, operandsEnd, operandEnd, quotedAt, rvalueEnd, stepsEnd, textAt, tokenLine, typeEnd, word, wordIs };
-import mir::full::records { EnvEntry, envEnd, envEntries, expandEnv, listItems, mapPayloadLine, payloadMatches, payloadSlots, uniqueEntries };
+import mir::full::tokens { argsEnd, integerAt, intsEnd, namesEnd, numberAt, operandsEnd, operandEnd, quotedAt, rvalueEnd, stepsEnd, textAt, tokenLine, typeEnd, word, wordIs, normalizeNumbers, normalizeTypes };
+import mir::full::records { EnvEntry, envEnd, envEntries, expandEnv, listItems, mapPayloadLine, payloadMatches, payloadSlots, uniqueEntries, orderEntries };
 import mir::full::write { mapProgramPayloads };
 
 fn noFunction() -> FullFunction ~ { return FullFunction { header: [], spec: [], env: [], locals: [], loops: [], blocks: [] }; };
@@ -11,7 +11,7 @@ fn noFull() -> FullProgram ~ { return FullProgram { types: [], generics: [], inv
 fn badFull() -> Parsed<FullProgram> ~ { return Parsed<FullProgram> { value: noFull(), pos: 0, ok: false }; };
 fn recordAt(lines: &List<List<Token>>, i: Int) -> List<Token> ~ {
     if i < 0 || i >= size(lines) { return []; };
-    return clone(get(lines, i));
+    return normalizeNumbers(clone(get(lines, i)));
 };
 fn fieldsEnd(ts: &List<Token>, p: Int) -> Int ~ {
     n = numberAt(ts, p);
@@ -117,13 +117,13 @@ fn lineOk(ts: &List<Token>) -> Bool ~ {
 };
 fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry>>) -> Parsed<FullFunction> ~ {
     bad = Parsed<FullFunction> { value: noFunction(), pos: 0, ok: false };
-    header = recordAt(lines, start); spec = recordAt(lines, start + 1); env = recordAt(lines, start + 2);
+    header = normalizeTypes(recordAt(lines, start)); spec = recordAt(lines, start + 1); env = recordAt(lines, start + 2);
     if !headerOk(&header) || !specOk(&spec) || !wordIs(&env, 0, "env") || envEnd(&env, 1) != size(env) { return bad; };
     e = expandEnv(&env, shared); if !e.ok { return bad; };
     fun = FullFunction { header: header, spec: spec, env: e.value, locals: [], loops: [], blocks: [] };
     at = start + 3;
     while wordIs(recordAt(lines, at), 0, "local") ~ {
-        row = recordAt(lines, at); if !localOk(&row) { return bad; };
+        row = normalizeTypes(recordAt(lines, at)); if !localOk(&row) { return bad; };
         fun = FullFunction { locals: push(fun.locals, FullRecord { name: textAt(&row, 1), tokens: row }), ..fun }; at = at + 1;
     };
     while wordIs(recordAt(lines, at), 0, "loop") ~ {
@@ -146,10 +146,15 @@ fn functionAt(lines: &List<List<Token>>, start: Int, shared: &List<List<EnvEntry
         fun = FullFunction { blocks: push(fun.blocks, block), ..fun };
     };
     end = recordAt(lines, at);
-    if !wordIs(&end, 0, "end") || size(end) != 1 || !uniqueRecords(&fun.locals) || !uniqueRecords(&fun.loops) { return bad; };
+    if !wordIs(&end, 0, "end") || size(end) != 1 || !uniqueNumericRecords(&fun.locals) || !uniqueNumericRecords(&fun.loops) { return bad; };
     ids = HashSet::new();
     for b in &fun.blocks { if HashSet::contains(&ids, b.id) { return bad; }; ids = ids.insert(b.id); };
     return Parsed<FullFunction> { value: fun, pos: at + 1, ok: true };
+};
+fn uniqueNumericRecords(rows: &List<FullRecord>) -> Bool ~ {
+    ids = HashSet::new();
+    for row in rows { id = integerAt(&row.tokens, 1); if !id.ok || HashSet::contains(&ids, id.value) { return false; }; ids = ids.insert(id.value); };
+    return true;
 };
 fn uniqueRecords(rows: &List<FullRecord>) -> Bool ~ {
     names = HashSet::new();
@@ -196,7 +201,8 @@ fn payloadsOk(program: &FullProgram, roots: &List<Int>) -> Bool ~ {
 };
 fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     bad = badFull();
-    header = recordAt(lines, 0);
+    if size(lines) = 0 { return bad; };
+    header = clone(get(lines, 0));
     if size(header) != 2 || !wordIs(&header, 0, "tersus-mir") || !wordIs(&header, 1, "3") { return bad; };
     program = noFull();
     at = 1;
@@ -211,8 +217,9 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
             for i in 1..size(row) { env = push(env, clone(get(&row, i))); };
             if envEnd(&env, 0) != size(env) { return bad; };
             entries = envEntries(&env, 0); if !uniqueEntries(&entries) { return bad; };
-            shared = push(shared, entries);
+            shared = push(shared, orderEntries(entries));
         } else {
+            row = normalizeTypes(row);
             if declarationEnd(&row) != size(row) { return bad; };
             r = FullRecord { name: textAt(&row, 1), tokens: row };
             program = addRecord(program, kind, r);
@@ -228,8 +235,9 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     program = FullProgram { entry: fun.value, ..program }; at = fun.pos;
     for i in 0..7 { program = FullProgram { trailer: push(program.trailer, recordAt(lines, at)), ..program }; at = at + 1; };
     if !trailerOk(&program.trailer) { return bad; };
-    data = recordAt(lines, at); count = integerAt(&data, 1);
-    if !wordIs(&data, 0, "data") || size(data) != 2 || !count.ok || count.value < 2 || count.value != size(lines) - at - 1 { return bad; };
+    if at < 0 || at >= size(lines) { return bad; };
+    data = clone(get(lines, at)); count = integerAt(&data, 1);
+    if !wordIs(&data, 0, "data") || size(data) != 2 || !count.ok || textAt(&data, 1) != String::fromInt(count.value) || count.value < 2 || count.value != size(lines) - at - 1 { return bad; };
     astLines = [];
     for i in at + 1..size(lines) { astLines = push(astLines, tokenLine(get(lines, i))); };
     ast = parseAstLines(&astLines);
