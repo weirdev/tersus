@@ -1989,7 +1989,7 @@ affirm size(greeting) = 10;
 affirm get(greeting, 9) = 33;
 ```
 
-The escapes are `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` (a character from U+0000 to U+10FFFF, not a surrogate). A literal cannot run over a line. `String` is a library type, in `lib/string.tersus`: a program that writes a literal or mentions `String` has it imported for it (it imports the prelude, the equality library and the clone library, which it needs), the way it has `Sequence`, and a program that declares a `String` (or any prelude trait, such as `Sequence`) of its own does not get it: a literal then means its own `String`, so one without a `bytes: List<Byte>` field refuses literals. It implements `Sequence<Byte>` and `Growable<Byte>` over its bytes, so `size`, `get`, `getRef`, `set` and `push` work on it with the contracts of the traits (`get` gives a `Byte` and `push` and `set` take one, which is why every byte of a string is known to be from 0 to 255), a function over any `Sequence<Byte>` takes one, and `a.concat(b)` joins two (`b` is borrowed; the size of the result is the sum). Two strings are equal when their bytes are (`impl Eq for String { };`). Nothing looks at the bytes as characters yet.
+The escapes are `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` (a character from U+0000 to U+10FFFF, not a surrogate). A literal cannot run over a line. `String` is a library type, in `lib/string.tersus`: a program that writes a literal or mentions `String` has it imported for it (it imports the prelude, the equality library and the clone library, which it needs), the way it has `Sequence`, and a program that declares a `String` (or any prelude trait, such as `Sequence`, or a trait `Format`, see Format) of its own does not get it: a literal then means its own `String`, so one without a `bytes: List<Byte>` field refuses literals. It implements `Sequence<Byte>` and `Growable<Byte>` over its bytes, so `size`, `get`, `getRef`, `set` and `push` work on it with the contracts of the traits (`get` gives a `Byte` and `push` and `set` take one, which is why every byte of a string is known to be from 0 to 255), a function over any `Sequence<Byte>` takes one, and `a.concat(b)` joins two (`b` is borrowed; the size of the result is the sum). Two strings are equal when their bytes are (`impl Eq for String { };`). Nothing looks at the bytes as characters yet.
 
 `push` promises the size, the new byte at the end and the bytes before it unchanged, and `concat` promises the size of the result, the bytes of the first string at the same indexes (`forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j)`, so `toInt(get("ab".concat("cd"), 0)) = 97` is proved), and the bytes of the second after them (`forall j in 0..size(other.bytes): get(return.bytes, size(self.bytes) + j) = get(other.bytes, j)`), which a proof uses at the element it names (`affirm get(c.bytes, size(a.bytes) + 1) = get(b.bytes, 1);`, since a `forall` is only used at the elements that appear in the proof, and the index `2 + 1` is not the same term as `3`).
 
@@ -2004,7 +2004,50 @@ s.startsWith("ab")             // whether the string starts with the bytes of an
 
 `fromInt` promises at least one byte. `slice` needs `0 <= from <= to <= size(s)` (it is refused otherwise) and promises the size `to - from` and the bytes at the same places (`get(t, j) = get(s, from + j)`). `find` needs `0 <= from <= size(s)` and promises an index from `from` to `size(s)` with none of the bytes before it equal to `b` (`forall j in from..return: get(s, j) != b`). `startsWith` promises nothing about its Bool. See `examples/text.tersus`.
 
-What is not there: contracts about every byte of a result (an invariant that every byte is from 0 to 255, which needs a `forall` in a struct invariant), comparisons other than equality, formatting beyond `fromInt`, and input beyond the standard input: a returned string is printed as the struct, `String { bytes: [104, 105] }`, and `print()` (see Output) is how a string is written as text. A string literal can be written in a proof, where it is the `String` of its bytes: `affirm s = "ab";` says what `s` is, and a function can ask for one in its input contract (`[{ affirm s = "hi"; }]`); it is proved where the validator knows the bytes (a literal, a `push` or `set` of one), not of the result of `concat`, whose bytes are only known through its promises (see below).
+What is not there: contracts about every byte of a result (an invariant that every byte is from 0 to 255, which needs a `forall` in a struct invariant), comparisons other than equality, and input beyond the standard input: a returned string is printed as the struct, `String { bytes: [104, 105] }`, and `print()` (see Output) is how a string is written as text. A string literal can be written in a proof, where it is the `String` of its bytes: `affirm s = "ab";` says what `s` is, and a function can ask for one in its input contract (`[{ affirm s = "hi"; }]`); it is proved where the validator knows the bytes (a literal, a `push` or `set` of one), not of the result of `concat`, whose bytes are only known through its promises (see below).
+
+### Format
+
+```tersus
+line = "x = {}, name = {}, ok = {}\n".format(x, name, ok);   // x, name and ok are lent, so they are still usable
+line.print();
+```
+
+`template.format(args)` is a variadic method of `String` (see Variadic functions): the template with each `{}` replaced by the text of the next argument, whose type implements the trait `Format`. Both are in `lib/string.tersus`:
+
+```tersus
+trait Format {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }];   // appends the text of self to out
+};
+
+impl String {
+    fn format<..T: Format>(self: &Self, args: &..T) -> String [{ }] [{ }];
+    fn formatInto<..T: Format>(self: &Self, out: String, args: &..T) -> String [{ }] [{ }];
+    fn formatPart(self: &Self, out: String, from: Int, toHole: Bool) -> (String, Int) [{ }] [{ }];
+};
+```
+
+`Int` (decimal, with a `-` when it is negative, the least Int too), `Byte` (its number in decimal), `Bool` (`true` or `false`) and `String` (its bytes) implement `Format`.
+
+- **The template is read once, left to right.** `{{` writes `{` and `}}` writes `}`. Any other brace, `{x}` included, is written as it is. Inserted text is not read again: `"{}{}".format("{}", 7)` is `{}7`.
+- **A count that does not match is not an error.** A `{}` with no argument left is written as nothing, and arguments after the last `{}` are not written: `"a{}b{}c".format(1)` is `a1bc`, and `"a{}b".format(1, 2)` is `a1b`. The template is a `String` like any other, known only when the program runs, so nothing checks the count.
+- **`formatInto(out, args)`** formats onto the end of `out` and gives it back, and `format` is `formatInto` on an empty string. A type is made formattable with one method, which can format its parts into the same buffer:
+
+  ```tersus
+  struct Point { x: Int, y: Int };
+  impl Format for Point {
+      fn writeTo(self: &Self, out: String) -> String { return "({}, {})".formatInto(out, self.x, self.y); };
+  };
+  s = "p = {}".format(Point { x: 3, y: 0 - 4 });   // "p = (3, -4)"
+  ```
+
+- **`formatPart` is a helper of `format`**: it appends the text of the template from an index up to the next `{}` and gives the index after it. A compiler library has no private functions, so it is a method of every `String`, but a program has no reason to call it.
+- **No contracts.** None of these functions promises anything about the text, so `s = "ab".format(); affirm size(s) = 2;` is refused. A program that needs facts about the bytes builds the string with `concat`, `push` and `slice`.
+- **`Format` comes with the string library**, which a program gets when it writes a string literal or mentions `String` (see Strings); naming `Format` does not bring it in. A program that names `Format` and does neither is refused with `unknown trait Format` (a `writeTo` names `String` in its signature, so a program with an impl has it). A program that declares a trait `Format` of its own does not get the string library, as one that declares a prelude trait does not: a literal is then refused (`a string literal needs the library String, ...`), and the program's `Format` is its own, for any type. A struct, an enum or a function named `Format` does not do this.
+- **A `writeTo` of a program's own trait on `Int`, `Byte`, `Bool` or `String`** now has the library's beside it, so in a program with strings `x.writeTo(...)` on one of those is refused as ambiguous (`Int::writeTo is ambiguous, several impls define it. Call the one that is meant by its path: <Int as Format>::writeTo(...) or <Int as W>::writeTo(...)`): call it as `W::writeTo(x, ...)`.
+- **Not yet:** impls for lists, arrays and Boxes (with derived impls), options such as a width or a radix, and a `toString` (`"{}".format(x)` is that).
+
+What it costs. The text is built in one buffer: each argument appends to it in place (an Int writes its digits straight into it), with no string of its own, and the buffer grows by doubling. Writing 2,000,000 lines of `"x = {}, y = {}, ok = {}, name = {}\n"` natively takes about 560 ns a line, against about 725 ns for the same line made with `concat` and `String::fromInt`. A string literal is built each time its statement runs, so a template used again and again is better kept in a local (about 385 ns a line). For the validator a call of `format` is one call with no contract to prove. Each number of arguments has one copy of `formatInto`, with two calls and a branch for each argument and no loop (the loop over the template is in `formatPart`, which is validated once as library code), and the copies for one number of arguments share a verdict whatever the types are. Validating a call with 1, 4 or 16 arguments measured under 0.2 s more than a program without one.
 
 ### Output
 

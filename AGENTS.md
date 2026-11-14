@@ -54,7 +54,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     declaring any prelude trait suppresses the prelude and with it `string`,
     `map` and `set`. It imports `clone`. Embedded by `PreludeSource`.
   - `string.tersus`: the struct `String` that a string literal is a value of,
-    imported for a program that writes a string literal or mentions `String`.
+    imported for a program that writes a string literal or mentions `String`
+    and does not declare `String` or a trait `Format`, both of which it defines.
     It imports `prelude`, `eq` and `clone`. Embedded by `PreludeSource`.
   - `map.tersus`: the struct `HashMap` (and its `Entry`), imported for a
     program that mentions `HashMap` (a `HashSet` pulls it in too). It imports

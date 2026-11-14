@@ -24,6 +24,7 @@ testVariadic =
             Error err -> Just ("expected " ++ show needle ++ ", got: " ++ err)
             Ok _ -> Just ("accepted instead of refusing with " ++ show needle)
         rejected = refused
+        writes source text = testAssertEq (runSource Interpret source) (Ok text)
      in TestList
             "testVariadic"
             [ TestList
@@ -226,6 +227,21 @@ testVariadic =
                 , testCase "and its bound is checked at the call" (phase2Rejects variadicPackageUnmet ["total needs T (argument 1", "Mark"])
                 ]
             , TestParallel "native against eval" [TestCase name (sameAsMir name source) | (name, source) <- variadicPrograms]
+            , TestList
+                "String.format"
+                ( [testCase name (writes source text) | (name, source, text) <- formatPrograms]
+                    ++ [ testCase "it promises nothing about the text" (refused "s = \"ab\".format(); affirm size(s) = 2; return 0;" "Could not prove")
+                       , testCase "a program that names Format without String does not have it" (refused "fn f<T: Format>(x: &T) -> Int { return 1; }; return f(1);" "unknown trait Format")
+                       , testCase "a program's own trait Format suppresses the string library" (refused (ownFormat ++ "p = P { }; s = \"{}\".format(p); s.print(); return 0;") "a string literal needs the library String")
+                       , testCase "and String with it" (refused (ownFormat ++ "fn f(s: &String) -> Int { return 0; }; return 0;") "unknown type String")
+                       , testCase "its bound does not take Int from the library's impl" (refused (ownFormat ++ "fn total<T: Format>(x: &T) -> Int { return x.show(); }; return total(3);") "total needs T to implement Format, and Int does not")
+                       , testCase "and with no strings it is the program's own" (runs (ownFormat ++ "impl Format for Int { fn show(self: &Self) -> Int { return self; }; }; fn total<T: Format>(x: &T) -> Int { return x.show(); }; p = P { }; return total(p) * 10 + total(3);") (VInt 43))
+                       , testCase "a struct and a function named Format beside strings" (writes "struct Format { a: Int }; fn Format() -> Int { return 2; }; f = Format { a: 1 }; \"{}\\n\".format(f.a).print(); return Format();" "1\n2")
+                       , testCase "a program's own writeTo on Int beside strings is ambiguous as a method" (refused "trait W { fn writeTo(self: &Self, n: Int) -> Int; }; impl W for Int { fn writeTo(self: &Self, n: Int) -> Int { return self + n; }; }; s = \"a\"; x = 3; return x.writeTo(1);" "Int::writeTo is ambiguous")
+                       , testCase "and is called by its trait's name" (runs "trait W { fn writeTo(self: &Self, n: Int) -> Int; }; impl W for Int { fn writeTo(self: &Self, n: Int) -> Int { return self + n; }; }; s = \"a\"; x = 3; return W::writeTo(x, 1);" (VInt 4))
+                       ]
+                )
+            , TestParallel "String.format, native against eval" [TestCase name (sameAsMir name source) | (name, source, _) <- formatPrograms]
             ]
 
 -- The bounds and parameter types of the one function a source defines
@@ -315,3 +331,26 @@ variadicPrograms =
     , ("the head borrowed while the rest is forwarded by value", eat ++ "fn sz<T>(r: &T) -> Int { return 10; }; fn h<..U>(rest: ..U) -> Int { n = 0; for a in rest { n = n + eat(a); }; return n; }; fn f<..T>(args: ..T) -> Int [{ affirm size(args) >= 1; }] [{ }] { r = &get(args, 0); n = h(slice(args, 1, size(args))); return n + sz(r); }; return f(push([], 1), \"two\", push([], push([], 3)));")
     , ("nested loops and indices", measure ++ "fn grid<..T: Measure>(args: &..T) -> Int { t = 0; for i, a in args { for j in 0..size(args) { if i < j { t = t + a.measure() * get(args, j).measure(); }; }; }; return t; }; return grid(1, 2, 3);")
     ]
+
+-- String.format (LANGUAGE.md, "Format"): each program writes its text and returns a number, which follows it
+formatPrograms :: [(String, String, String)]
+formatPrograms =
+    [ ("a {} with no argument left is written as nothing", "\"a{}b{}c{}\\n\".format(1).print(); return 0;", "a1bc\n0")
+    , ("and with no arguments at all", "\"x{}y\\n\".format().print(); return 0;", "xy\n0")
+    , ("arguments left over are not written", "\"a{}b\\n\".format(1, true, \"x\").print(); \"plain\\n\".format(1, 2).print(); return 0;", "a1b\nplain\n0")
+    , ("{{ and }} write single braces", "\"{{}} {{{}}} }}{{\\n\".format(5).print(); \"{{}}{}\\n\".format().print(); return 0;", "{} {5} }{\n{}\n0")
+    , ("a lone brace and {x} are text", "\"{ } {x} {\\n\".format(1).print(); return 0;", "{ } {x} {\n0")
+    , ("inserted text is not scanned again", "\"{}{}|{}\\n\".format(\"{}\", 7, \"{{\").print(); return 0;", "{}7|{{\n0")
+    , ("the arguments are lent and still usable", "name = \"abc\"; n = 42; s = \"{}={}\\n\".format(name, n); k = s.print(); return size(name) + n;", "abc=42\n45")
+    , ("the least and greatest Int and the digits around a carry", "\"{} {} {} {} {} {} {} {}\\n\".format(0 - 9223372036854775807 - 1, 9223372036854775807, 0, 0 - 1, 0 - 10, 0 - 19, 9, 100).print(); return 0;", "-9223372036854775808 9223372036854775807 0 -1 -10 -19 9 100\n0")
+    , ("Bytes in decimal and Bools", "\"{} {} {} {} {}\\n\".format(toByte(0), toByte(9), toByte(255), true, false).print(); return 0;", "0 9 255 true false\n0")
+    , ("a struct of the program formatted with formatInto", point ++ "p = Point { x: 3, y: 0 - 4 }; \"p = {}, again {}\\n\".format(p, p).print(); return p.x;", "p = (3, -4), again (3, -4)\n3")
+    , ("formatInto appends to a buffer", "s = \"log: \"; s = \"{}+{}=\".formatInto(s, 1, 2); s = \"{}\\n\".formatInto(s, 3); k = s.print(); return 0;", "log: 1+2=3\n0")
+    , ("a pack forwarded into format", "fn show<..T: Format>(args: &..T) -> String { return \"[{}|{}]\\n\".format(args); }; fn rest<..T: Format>(args: &..T) -> String { if size(args) = 0 { return \"none\\n\"; }; return \"rest {} {}\\n\".format(slice(args, 1, size(args))); }; show(1, true).print(); show(\"a\").print(); rest(1, 2, 3).print(); rest().print(); return 0;", "[1|true]\n[a|]\nrest 2 3\nnone\n0")
+    ]
+
+ownFormat :: String
+ownFormat = "trait Format { fn show(self: &Self) -> Int; }; struct P { }; impl Format for P { fn show(self: &Self) -> Int { return 4; }; }; "
+
+point :: String
+point = "struct Point { x: Int, y: Int }; impl Format for Point { fn writeTo(self: &Self, out: String) -> String { return \"({}, {})\".formatInto(out, self.x, self.y); }; }; "

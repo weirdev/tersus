@@ -184,6 +184,7 @@ exampleExpectations =
     , ("examples/strings.tersus", ((ExpectReturn (VInt 980))))
     , ("examples/upper.tersus", ((ExpectReturn (VInt 0))))
     , ("examples/text.tersus", ((ExpectReturn (VInt 504))))
+    , ("examples/format.tersus", ((ExpectReturn (VInt 16003))))
     , ("examples/vec.tersus", ((ExpectReturn (VInt 2491212381))))
     , ("examples/hashmap.tersus", ((ExpectReturn (VInt 218420))))
     , ("examples/spec_functions.tersus", ((ExpectReturn (VInt 25070))))
