@@ -69,8 +69,7 @@ struct St {
     ctors: List<CtorInfo>, fieldsOf: List<FieldsInfo>, types: List<TypeInfo>, generics: List<GenInfo>,
     selfName: String, hasSelf: Bool, selfTy: Type, hasSelfTy: Bool,
     typeParams: List<String>, implParams: List<String>, ownClone: Bool, locate: Bool,
-    err: String, errPos: Int, genLine: Int, genCol: Int, pack: String,
-    pending: List<Int>, minted: List<String>
+    err: String, errPos: Int, genLine: Int, genCol: Int, pack: String
 };
 impl Clone for St { };
 
@@ -80,8 +79,7 @@ fn checkpoint(st: &St) -> Checkpoint ~ {
     saved = St { pos: st.pos, nodes: [], ctors: [], fieldsOf: [], types: [], generics: [],
         selfName: clone(st.selfName), hasSelf: st.hasSelf, selfTy: clone(st.selfTy), hasSelfTy: st.hasSelfTy,
         typeParams: clone(st.typeParams), implParams: clone(st.implParams), ownClone: st.ownClone, locate: st.locate,
-        err: clone(st.err), errPos: st.errPos, genLine: st.genLine, genCol: st.genCol, pack: clone(st.pack),
-        pending: clone(st.pending), minted: clone(st.minted) };
+        err: clone(st.err), errPos: st.errPos, genLine: st.genLine, genCol: st.genCol, pack: clone(st.pack) };
     return Checkpoint { state: saved, nodeCount: size(st.nodes), ctorCount: size(st.ctors), fieldCount: size(st.fieldsOf), typeCount: size(st.types), genericCount: size(st.generics) };
 };
 
@@ -89,7 +87,7 @@ fn restore(st: St, saved: Checkpoint) -> St ~ {
     St { pos: ignoredPos, nodes: nodes, ctors: ctors, fieldsOf: fieldsOf, types: types, generics: generics,
         selfName: ignoredSelf, hasSelf: ignoredHasSelf, selfTy: ignoredSelfType, hasSelfTy: ignoredHasSelfType,
         typeParams: ignoredTypeParams, implParams: ignoredImplParams, ownClone: ignoredClone, locate: ignoredLocate,
-        err: ignoredError, errPos: ignoredErrorPos, genLine: ignoredLine, genCol: ignoredCol, pack: ignoredPack, pending: ignoredPending, minted: ignoredMinted } = st;
+        err: ignoredError, errPos: ignoredErrorPos, genLine: ignoredLine, genCol: ignoredCol, pack: ignoredPack } = st;
     while size(nodes) > saved.nodeCount && size(nodes) > 0 ~ { nodes = pop(nodes); };
     while size(ctors) > saved.ctorCount && size(ctors) > 0 ~ { ctors = pop(ctors); };
     while size(fieldsOf) > saved.fieldCount && size(fieldsOf) > 0 ~ { fieldsOf = pop(fieldsOf); };
@@ -130,7 +128,7 @@ impl Clone for FieldOut { };
 fn newSt() -> St ~ {
     return St { pos: 0, nodes: [], ctors: [], fieldsOf: [], types: [], generics: [],
         selfName: "", hasSelf: false, selfTy: Type::TInt, hasSelfTy: false,
-        typeParams: [], implParams: [], ownClone: false, locate: false, err: "", errPos: 0, genLine: 0, genCol: 0, pack: "", pending: [], minted: [] };
+        typeParams: [], implParams: [], ownClone: false, locate: false, err: "", errPos: 0, genLine: 0, genCol: 0, pack: "" };
 };
 
 fn fail<T>(st: St, v: T, msg: &String) -> Res<T> ~ {
@@ -6238,7 +6236,13 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
 
 fn mintFnTrait(st: St, shape: &FnShape) -> Res<Int> ~ {
     s = st;
-    if indexOfName(&s.minted, &shape.canonical) >= 0 { return ok( s, 0); };
+    for i in 0..size(s.nodes) {
+        nd = nodeAtList(&s.nodes, i);
+        if nd is AstNode::Statement {
+            sv = (nd as AstNode::Statement).value;
+            if sv is AstStatement::TraitDef && nameText(&s, (sv as AstStatement::TraitDef).n) = shape.canonical { return ok( s, 0); };
+        };
+    };
     selfTy = namedTypeOf("Self", []);
     receiver = clone(selfTy);
     if shape.kind = "Fn" { receiver = Type::TRef { inner: Box::new(selfTy) }; };
@@ -6275,9 +6279,7 @@ fn mintFnTrait(st: St, shape: &FnShape) -> Res<Int> ~ {
     s = resultPartsfsState;
     td = stmtNode( s, AstStatement::TraitDef { n: resultPartstnValue, ps: resultPartstpsValue, fs: resultPartsfsValue }); Res { st: resultPartstdState, v: resultPartstdValue, ok: resultPartstdOk } = td;
     if !resultPartstdOk { return Res<Int> { st: resultPartstdState, v: 0, ok: false }; };
-    s = resultPartstdState;
-    s = St { pending: push(s.pending, resultPartstdValue), minted: push(s.minted, clone(shape.canonical)), ..s };
-    return ok( s, resultPartstdValue);
+    return ok( resultPartstdState, resultPartstdValue);
 };
 
 fn oneGenericParam(sourceText: &Input, st: St) -> Res<GenParam> ~ {
@@ -7177,22 +7179,37 @@ fn fileHead(sourceText: &Input, st: St) -> Res<List<String>> ~ {
 
 // One segment of the file the pipeline reads: the last segment is a file, with its import
 // declarations; the libraries in front of it are statement blocks
+fn mintedTraitIds(st: &St) -> List<Int> ~ {
+    out = [];
+    seen = [];
+    for i in 0..size(st.nodes) {
+        nd = nodeAtList(&st.nodes, i);
+        if nd is AstNode::Statement {
+            sv = (nd as AstNode::Statement).value;
+            if sv is AstStatement::TraitDef {
+                nm = nameText(st, (sv as AstStatement::TraitDef).n);
+                if (hasTextPrefix(nm, "Fn$") || hasTextPrefix(nm, "FnMut$") || hasTextPrefix(nm, "FnOnce$")) && indexOfName(&seen, &nm) < 0 { seen = push(seen, nm); out = push(out, i); };
+            };
+        };
+    };
+    return out;
+};
+
 fn parseSegment(sourceText: &Input, state: St, isFile: Bool) -> Res<List<Int>> ~ {
     if !isFile {
         frag = statementBlock(sourceText, state); Res { st: resultPartsfragState, v: resultPartsfragValue, ok: resultPartsfragOk } = frag;
         if !resultPartsfragOk { return Res<List<Int>> { st: resultPartsfragState, v: resultPartsfragValue, ok: false }; };
-        out = clone(resultPartsfragState.pending);
+        out = mintedTraitIds(&resultPartsfragState);
         for x in resultPartsfragValue { out = push(out, x); };
-        return Res<List<Int>> { st: St { pending: [], ..resultPartsfragState }, v: out, ok: true };
+        return Res<List<Int>> { st: resultPartsfragState, v: out, ok: true };
     };
     head = fileHead(sourceText, state); Res { st: resultPartsheadState, v: resultPartsheadValue, ok: resultPartsheadOk } = head;
     if !resultPartsheadOk { return Res<List<Int>> { st: resultPartsheadState, v: [], ok: false }; };
     body = statementBlock(sourceText, resultPartsheadState); Res { st: resultPartsbodyState, v: resultPartsbodyValue, ok: resultPartsbodyOk } = body;
     if !resultPartsbodyOk { return Res<List<Int>> { st: resultPartsbodyState, v: resultPartsbodyValue, ok: resultPartsbodyOk }; };
     bs = resultPartsbodyState;
-    bv = clone(bs.pending);
+    bv = mintedTraitIds(&bs);
     for x in resultPartsbodyValue { bv = push(bv, x); };
-    bs = St { pending: [], ..bs };
     if size(resultPartsheadValue) > 0 {
         bs = skipWs(sourceText, bs);
         if atEnd(sourceText, bs) { return fail( bs, [], catStrings("imports are not linked yet: ", joinComma(resultPartsheadValue))); };
@@ -8153,7 +8170,10 @@ fn fileParseFailed(message: String) -> FileParse ~ {
 };
 
 fn fileParseFinished(input: &Input, state: St, imports: List<FileImport>, body: List<Int>) -> FileParse ~ {
-    if size(state.pending) > 0 { merged = clone(state.pending); for x in body { merged = push(merged, x); }; return fileParseFinished(input, St { pending: [], ..state }, imports, merged); };
+    mintedIds = mintedTraitIds(&state);
+    merged = clone(mintedIds);
+    for x in body { merged = push(merged, x); };
+    body = merged;
     s = skipWs(input, state);
     if !atEnd(input, s) {
         ended = fail(s, 0, "expected the end of the input");
@@ -8344,7 +8364,7 @@ fn runRequest() -> Int ~ {
                         state = endState;
                     } else {
                         state = s;
-                        for x in resultPartsparsedValue { allStatements = push(allStatements, x); };
+                        for x in resultPartsparsedValue { already = false; for y in &allStatements { if y = x { already = true; }; }; if !already { allStatements = push(allStatements, x); }; };
                     };
                 };
             };
