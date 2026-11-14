@@ -2,7 +2,7 @@ import data::codec::codec { Token };
 import mir::full::full { FullRecord, FullFunction, FullProgram, fullAt, printFull, clearFunctionMetadata };
 import mir::full as full;
 import mir::mono::tokens { MonoBinding, monoLookup };
-import mir::mono::functions { MonoKey, MonoRedirect, monoGeneric, monoSection, monoReturn, monoLocal, monoMatch, monoFunctionIndex, monoRedirect, monoInstantiate, monoInstanceName, monoNamedTypes };
+import mir::mono::functions { MonoKey, MonoRedirect, monoGeneric, monoSection, monoReturn, monoLocal, monoMatch, monoFunctionIndex, monoRedirect, monoInstantiate, monoInstanceName, monoNamedTypes, monoKeyCompare };
 import mir::mono::types { monoProgramNamed, monoFiltered };
 
 struct MonoInstance { key: MonoKey, function: FullFunction };
@@ -73,8 +73,24 @@ fn monoWithInstances(program: FullProgram, plain: &List<FullFunction>, done: &Li
 };
 
 fn monoFinalFunctions(plain: &List<FullFunction>, done: &List<MonoInstance>) -> List<FullFunction> ~ {
+    winners = HashMap::new();
+    renamed = [];
+    for i in 0..size(done) {
+        function = monoDropName(get(done, i));
+        name = full::tokens::textAt(function.header, 1);
+        old = HashMap::lookup(&winners, name, 0 - 1);
+        replace = true;
+        if old >= 0 && old < size(done) {
+            if monoKeyCompare(get(done, i).key, get(done, old).key) < 0 { replace = false; };
+        };
+        if replace { winners = winners.insert(clone(name), i); };
+        renamed = push(renamed, function);
+    };
     functions = clone(plain);
-    for instance in done { functions = push(functions, monoDropName(instance)); };
+    for i in 0..size(renamed) {
+        name = full::tokens::textAt(get(renamed, i).header, 1);
+        if HashMap::lookup(&winners, name, 0 - 1) = i { functions = push(functions, clone(get(renamed, i))); };
+    };
     last = HashMap::new();
     for i in 0..size(functions) {
         name = full::tokens::textAt(get(functions, i).header, 1);

@@ -1,7 +1,7 @@
 import data::codec::codec { Token };
 import mir::full::full { FullRecord, FullBlock, FullFunction };
 import mir::full as full;
-import mir::mono::tokens { MonoBinding, monoLookup, monoBind, monoTypeName, monoNamedName, monoSubstitute };
+import mir::mono::tokens { MonoBinding, monoLookup, monoBind, monoTypeName, monoNamedName, monoSubstitute, monoCompareText, monoCompareNames, monoCompareTypeLists };
 
 struct MonoKey { name: String, types: List<List<Token>>, sizes: List<String> };
 impl Clone for MonoKey { };
@@ -141,6 +141,12 @@ fn monoInstanceName(key: &MonoKey) -> String ~ {
     for s in key.sizes { parts = push(parts, clone(s)); };
     for i in 0..size(parts) { if i > 0 { out = out.concat(", "); }; out = out.concat(get(parts, i)); };
     return out.concat(">");
+};
+
+fn monoKeyCompare(a: &MonoKey, b: &MonoKey) -> Int ~ {
+    order = monoCompareText(a.name, b.name); if order != 0 { return order; };
+    order = monoCompareTypeLists(a.types, b.types, false); if order != 0 { return order; };
+    return monoCompareNames(a.sizes, b.sizes, true);
 };
 
 fn monoRedirect(function: FullFunction, originals: &List<FullFunction>) -> MonoRedirect ~ {

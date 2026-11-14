@@ -216,6 +216,21 @@ unicodeArgumentProgram name = genericProgram
     gName = instanceName "G" [ArgType named]
     ownedIdentity = identityFunction{fnBorrowed = [], fnLocals = Map.fromList [(Local 0, LocalDecl (TParam "T") Nothing), (Local 1, LocalDecl (TParam "T") Nothing)]}
 
+collidingTypeVariables :: Program
+collidingTypeVariables = genericProgram
+    { progFunctions = Map.singleton "g" ownedIdentity{fnName = "g"}
+    , progMain = emptyFunction
+        { fnLocals = Map.fromList [(Local 0, LocalDecl TInt Nothing), (Local 1, LocalDecl (TVar 0) Nothing), (Local 2, LocalDecl (TVar 1) Nothing), (Local 3, LocalDecl (TVar 1) Nothing), (Local 4, LocalDecl (TVar 0) Nothing)]
+        , fnBlocks = Map.fromList
+            [ (BlockId 0, BasicBlock [] (Call (Const (CFn "g")) [Copy (Local 2)] (Local 3) (BlockId 1)))
+            , (BlockId 1, BasicBlock [] (Call (Const (CFn "g")) [Copy (Local 1)] (Local 4) (BlockId 2)))
+            , (BlockId 2, BasicBlock [Assign (Local 0) (Use (Const (CInt 1)))] Return)
+            ]
+        }
+    }
+  where
+    ownedIdentity = identityFunction{fnBorrowed = [], fnLocals = Map.fromList [(Local 0, LocalDecl (TParam "T") Nothing), (Local 1, LocalDecl (TParam "T") Nothing)]}
+
 builtinMetadata :: Program -> Program
 builtinMetadata p = p{progInvariants = Map.singleton "Plain" [S.ProofAssert payload]}
   where
@@ -227,6 +242,7 @@ monoFixtures =
     , ("monomorphic Drop is deduplicated with an unrelated generic", plainDropWithGeneric)
     , ("Unicode uppercase type parameters complete declarations", unicodeParameterProgram)
     , ("nested Unicode lowercase types keep canonical backticks", unicodeArgumentProgram "α")
+    , ("structural instance keys win despite reverse discovery order", collidingTypeVariables)
     , ("nested Unicode alphanumeric types keep canonical backticks", unicodeArgumentProgram "α1")
     , ("generic type call strips only function proof metadata", genericProgram)
     , ("arbitrary precision proof values and builtin metadata survive fast path", builtinMetadata metadataProgram)
