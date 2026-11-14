@@ -62,23 +62,29 @@ fn bindIn(scopes: Scopes, name: &String, t: Int) -> Scopes ~ {
 };
 
 fn pushScope(st: St) -> St ~ {
-    scopes = st.scopes;
-    return St { scopes: Scopes { marks: push(scopes.marks, size(scopes.names)), ..scopes }, ..st };
+    return St { scopes: withMark(st.scopes), ..st };
+};
+
+fn withMark(scopes: Scopes) -> Scopes {
+    mark = size(scopes.names);
+    return Scopes { marks: push(scopes.marks, mark), ..scopes };
 };
 
 fn popScope(st: St) -> St ~ {
-    scopes = st.scopes;
-    if size(scopes.marks) = 0 { return St { scopes: scopes, ..st }; };
-    mark = last(scopes.marks);
-    names = [];
-    types = [];
-    i = 0;
-    while i < mark && i < size(scopes.names) && i < size(scopes.types) [{ affirm i >= 0; }] shrinks mark - i {
-        names = push(names, clone(get(scopes.names, i)));
-        types = push(types, get(scopes.types, i));
-        i = i + 1;
-    };
-    return St { scopes: Scopes { names: names, types: types, marks: pop(scopes.marks) }, ..st };
+    return St { scopes: withoutInnermost(st.scopes), ..st };
+};
+
+// Popped down to the mark rather than rebuilt, so a pop costs only the bindings it drops
+fn withoutInnermost(scopes: Scopes) -> Scopes {
+    if size(scopes.marks) = 0 { return scopes; };
+    keep = last(scopes.marks);
+    names = scopes.names;
+    types = scopes.types;
+    if size(names) < keep { keep = size(names); };
+    if size(types) < keep { keep = size(types); };
+    while size(names) > keep && size(names) > 0 shrinks size(names) { names = pop(names); };
+    while size(types) > keep && size(types) > 0 shrinks size(types) { types = pop(types); };
+    return Scopes { names: names, types: types, marks: pop(scopes.marks) };
 };
 
 // The type of the builtin with this index of the table (builtinType for a scheme)

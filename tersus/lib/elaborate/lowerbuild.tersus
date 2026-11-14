@@ -613,16 +613,11 @@ fn leaveScope(ls: LowSt) -> LowSt ~ {
     n = size(ls.bScopeMarks);
     if n <= 1 { return ls; };
     mark = intAt(&ls.bScopeMarks, n - 1);
-    names = [];
-    binds = [];
-    i = 0;
-    for x in &ls.bScopeNames { if i < mark { names = push(names, clone(x)); }; i = i + 1; };
-    i = 0;
-    for x in &ls.bScopeBinds { if i < mark { binds = push(binds, clone(x)); }; i = i + 1; };
-    marks = [];
-    i = 0;
-    for m in &ls.bScopeMarks { if i < n - 1 { marks = push(marks, m); }; i = i + 1; };
-    return LowSt { bScopeNames: names, bScopeBinds: binds, bScopeMarks: marks, ..ls };
+    names = ls.bScopeNames;
+    binds = ls.bScopeBinds;
+    while size(names) > mark && size(names) > 0 shrinks size(names) { names = pop(names); };
+    while size(binds) > mark && size(binds) > 0 shrinks size(binds) { binds = pop(binds); };
+    return LowSt { bScopeNames: names, bScopeBinds: binds, bScopeMarks: pop(ls.bScopeMarks), ..ls };
 };
 
 fn bindName(ls: LowSt, var: String, b: Binding) -> LowSt ~ {
