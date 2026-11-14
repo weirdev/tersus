@@ -15,6 +15,11 @@ struct String {
     bytes: List<Byte>,
 };
 
+// A type whose values can be written as text by String.format: writeTo appends the text of self to out and gives the result
+trait Format {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }];
+};
+
 // (a copy of a String is made where a program writes clone(s))
 impl Clone for String { };
 
@@ -255,6 +260,51 @@ impl String {
         };
         return i;
     };
+
+    // The template with each {} replaced by the text of the next argument; see formatInto
+    fn format<..T: Format>(self: &Self, args: &..T) -> String [{ }] [{ }] {
+        return self.formatInto(String { bytes: [] }, args);
+    };
+
+    // The template formatted onto the end of out: each {} is replaced by the next argument's text, {{ and }} are written as single braces,
+    // a {} with no argument left is written as nothing, and arguments left over are not written. Inserted text is not scanned again.
+    fn formatInto<..T: Format>(self: &Self, out: String, args: &..T) -> String [{ }] [{ }] {
+        at = 0;
+        for a in args {
+            (out, at) = self.formatPart(out, at, true);
+            if at >= 0 { out = a.writeTo(out); };
+        };
+        (out, at) = self.formatPart(out, at, false);
+        return out;
+    };
+
+    // A helper of format: the template's text from the index `from` appended to out, with {{ and }} written as single braces. With toHole it stops
+    // after the next {} and gives the index after it; otherwise each {} is written as nothing. The index is -1 when the template is used up.
+    fn formatPart(self: &Self, out: String, from: Int, toHole: Bool) -> (String, Int) [{ }] [{ }] {
+        n = size(self.bytes);
+        if from < 0 || from > n { return (out, 0 - 1); };
+        bytes = out.bytes;
+        i = from;
+        skip = false;
+        while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+            b = get(self.bytes, i);
+            if skip {
+                skip = false;
+            } else {
+                x = toInt(b);
+                hole = false;
+                if (x = 123 || x = 125) && i + 1 < n {
+                    c = toInt(get(self.bytes, i + 1));
+                    hole = x = 123 && c = 125;
+                    if hole && toHole { return (String { bytes: bytes }, i + 2); };
+                    if hole || c = x { skip = true; };
+                };
+                if !hole { bytes = push(bytes, b); };
+            };
+            i = i + 1;
+        };
+        return (String { bytes: bytes }, 0 - 1);
+    };
 };
 
 impl Sequence<Byte> for String {
@@ -279,4 +329,51 @@ impl Growable<Byte> for String {
     fn push(self: Self, x: Byte) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + 1; affirm get(return.bytes, size(self.bytes)) = x; affirm forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j); }] {
         return Self { bytes: push(self.bytes, x) };
     };
+};
+
+impl Format for Int {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }] {
+        bytes = out.bytes;
+        // Div floors and Mod takes the divisor's sign, so 0 <= r <= 9; the last digit is split off before negating, so the least Int needs no case of its own
+        q = self / 10;
+        r = self % 10;
+        if self < 0 {
+            bytes = push(bytes, toByte(45));
+            if r > 0 { q = q + 1; r = r - 10; };
+            q = 0 - q;
+            r = 0 - r;
+        };
+        if q > 0 {
+            p = 1;
+            while p <= q / 10 [{ affirm p >= 1; affirm q >= 0; }] shrinks q - p {
+                p = p * 10;
+            };
+            while p > 0 [{ affirm p >= 0; affirm q >= 0; }] shrinks p {
+                bytes = push(bytes, toByte(48 + (q / p) % 10));
+                p = p / 10;
+            };
+        };
+        bytes = push(bytes, toByte(48 + r));
+        return String { bytes: bytes };
+    };
+};
+
+impl Format for Byte {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }] { return Format::writeTo(toInt(self), out); };
+};
+
+impl Format for Bool {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }] {
+        bytes = out.bytes;
+        if self {
+            bytes = push(push(push(push(bytes, toByte(116)), toByte(114)), toByte(117)), toByte(101));
+        } else {
+            bytes = push(push(push(push(push(bytes, toByte(102)), toByte(97)), toByte(108)), toByte(115)), toByte(101));
+        };
+        return String { bytes: bytes };
+    };
+};
+
+impl Format for String {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }] { return out.concat(self); };
 };

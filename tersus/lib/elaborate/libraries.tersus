@@ -102,7 +102,7 @@ fn libraryContexts(libs: &List<Lib>, names: &List<String>) -> List<List<String>>
     return out;
 };
 
-struct Probe { declared: List<String>, mentioned: HashSet<String>, literal: Bool };
+struct Probe { declared: List<String>, traits: List<String>, mentioned: HashSet<String>, literal: Bool };
 
 fn interesting(word: &String) -> Bool ~ {
     return word = "String" || word = "HashMap" || word = "HashSet" || word = "Sequence" || word = "Growable" || word = "Clone" || word = "Copy" || word = "Drop" || word = "Deref" || word = "Hash" || word = "hashCombine";
@@ -220,16 +220,20 @@ fn probeNode(p: Probe, nodes: &List<AstNode>, id: Int, lit: Bool) -> Probe ~ {
     return p;
 };
 
+fn declaredNames(nodes: &List<AstNode>, ids: &List<Int>) -> List<String> ~ { return declaredOf(nodes, ids, false); };
+
+fn declaredTraits(nodes: &List<AstNode>, ids: &List<Int>) -> List<String> ~ { return declaredOf(nodes, ids, true); };
+
 // (a type declared inside a function counts)
-fn declaredNames(nodes: &List<AstNode>, ids: &List<Int>) -> List<String> ~ {
+fn declaredOf(nodes: &List<AstNode>, ids: &List<Int>, traitsOnly: Bool) -> List<String> ~ {
     out = [];
     for s in ids {
         stmt = statementOf(nodes, s);
-        if stmt is AstStatement::StructDef { out = push(out, nameText(nodes, (stmt as AstStatement::StructDef).n)); };
-        if stmt is AstStatement::EnumDef { out = push(out, nameText(nodes, (stmt as AstStatement::EnumDef).n)); };
+        if !traitsOnly && stmt is AstStatement::StructDef { out = push(out, nameText(nodes, (stmt as AstStatement::StructDef).n)); };
+        if !traitsOnly && stmt is AstStatement::EnumDef { out = push(out, nameText(nodes, (stmt as AstStatement::EnumDef).n)); };
         if stmt is AstStatement::TraitDef { out = push(out, nameText(nodes, (stmt as AstStatement::TraitDef).n)); };
         for inner in nestedStatements(nodes, &stmt) {
-            for n in declaredNames(nodes, &inner) { out = push(out, clone(n)); };
+            for n in declaredOf(nodes, &inner, traitsOnly) { out = push(out, clone(n)); };
         };
     };
     return out;
@@ -282,7 +286,8 @@ fn declares(declared: &List<String>, name: &String) -> Bool ~ { return indexIn(d
 
 fn librariesFor(p: &Probe) -> List<String> ~ {
     preludeFree = !declares(&p.declared, "Sequence") && !declares(&p.declared, "Growable") && !declares(&p.declared, "Clone") && !declares(&p.declared, "Copy") && !declares(&p.declared, "Drop") && !declares(&p.declared, "Deref") && !declares(&p.declared, "Hash");
-    strings = preludeFree && !declares(&p.declared, "String") && (HashSet::contains(&p.mentioned, "String") || p.literal);
+    // (the string library's trait Format would merge with a program's own by name, so declaring one suppresses the library, as a prelude trait does)
+    strings = preludeFree && !declares(&p.declared, "String") && !declares(&p.traits, "Format") && (HashSet::contains(&p.mentioned, "String") || p.literal);
     sets = preludeFree && !declares(&p.declared, "HashSet") && HashSet::contains(&p.mentioned, "HashSet");
     maps = preludeFree && !declares(&p.declared, "HashMap") && (HashSet::contains(&p.mentioned, "HashMap") || sets);
     prelude = preludeFree && (strings || maps || sets || traitNamed(&p.mentioned));
@@ -399,7 +404,7 @@ fn mentionImported(p: Probe, ifaces: &List<AstProgram>) -> Probe ~ {
 };
 
 fn probeModule(nodes: &List<AstNode>, ids: &List<Int>, ifaces: &List<AstProgram>) -> Probe ~ {
-    p = Probe { declared: declaredNames(nodes, ids), mentioned: HashSet::new(), literal: false };
+    p = Probe { declared: declaredNames(nodes, ids), traits: declaredTraits(nodes, ids), mentioned: HashSet::new(), literal: false };
     for s in ids { p = probeNode(p, nodes, s, true); };
     return mentionImported(p, ifaces);
 };

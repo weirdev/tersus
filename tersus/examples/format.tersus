@@ -1,0 +1,30 @@
+// `template.format(args)` (lib/string.tersus) is the template with each {} replaced by the text of the next argument, whose type implements
+// `Format`. The arguments are lent, so the caller keeps them, and the text is built in one buffer. `{{` and `}}` write single braces, a {} with no
+// argument left writes nothing, and arguments left over are not written. A type is made formattable by one method, `writeTo`, which appends its
+// text to the buffer it is given; `formatInto` formats a template onto the end of a buffer, so a struct writes its fields into the same one.
+
+struct Point { x: Int, y: Int };
+
+impl Format for Point {
+    fn writeTo(self: &Self, out: String) -> String { return "({}, {})".formatInto(out, self.x, self.y); };
+};
+
+// A pack forwarded to format fills its arguments after the ones written before it
+fn row<..T: Format>(id: Int, args: &..T) -> String {
+    return "#{}: {} {}\n".format(id, args);
+};
+
+p = Point { x: 3, y: 0 - 4 };
+name = "caf\u{e9}";
+line = "{} is at {}, visible: {}\n".format(name, p, true);
+written = line.print();
+written = written + "{{}} is a placeholder; a Byte is from {} to {}\n".format(toByte(0), toByte(255)).print();
+written = written + row(1, p, name).print();
+written = written + "too few: [{}, {}]; ".format(1).print();
+written = written + "too many: [{}]\n".format(2, 3).print();
+log = "log:";
+log = " {}".formatInto(log, 0 - 9223372036854775807 - 1);
+log = " {}\n".formatInto(log, false);
+written = written + log.print();
+// the bytes written, and p, which format only borrowed
+return written * 100 + p.x;

@@ -564,7 +564,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     givenDefinitions = unit.definitions;
     givenDefinitionKeys = unit.definitionKeys;
     raw = statementsOf(&program);
-    probe = Probe { declared: [], mentioned: HashSet::new(), literal: false };
+    probe = Probe { declared: [], traits: [], mentioned: HashSet::new(), literal: false };
     if unit.hasCatalog { probe = probeModule(&program.nodes, &raw, &ifaces); };
     prepared = preparedProgram(program, raw, &pkg, &modKey);
     stmts = prepared.stmts;
