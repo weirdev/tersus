@@ -35,6 +35,7 @@ module MirHousekeeping
     , prepareBootstrap
     ) where
 
+import Data.List (isPrefixOf)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar, withMVar)
 import Control.Exception (IOException, bracket, bracket_, evaluate, finally, try)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -809,7 +810,7 @@ mergeFn program originalFn erasedFn =
   where
     ghosts = Set.fromList [l | (l, d) <- Map.toList (fnLocals originalFn), ghostType program (localType d)]
     ghost l = l `Set.member` ghosts
-    scrub = Map.filter (not . ghostOperand)
+    scrub = Map.filterWithKey (\k o -> not ("$opaque " `isPrefixOf` k) && not (ghostOperand o))
     ghostOperand o = case o of
         Copy l -> ghost l
         Move l -> ghost l

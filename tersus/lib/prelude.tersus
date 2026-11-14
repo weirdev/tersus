@@ -27,10 +27,11 @@ trait Growable<E> {
 };
 
 // A list is a sequence that can grow, which it is by these impls: the functions are the ones a list has, so a call of one of them in a
-// body here is the list's own. What they promise is what the trait promises and the frame of each, which is what a caller of a list
-// through a bound relies on (a program that declares Sequence itself has a list implementing it by being a list, as before).
+// body here is the list's own. What they promise is what the trait promises, the frame of each, and that size and get are the list's
+// own: a copy of a function with bounds calls them through the trait and knows only what the trait promises, and a caller that has
+// the list knows the rest (a program that declares Sequence itself has a list implementing it by being a list, as before).
 impl<T: Clone> Sequence<T> for List<T> {
-    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); };
+    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return = size(self); }] { return size(self); };
     fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = get(self, i); }] { return clone(get(self, i)); };
     fn getRef(self: &Self, i: Int) -> &T from self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm *return = get(self, i); }] { return &get(self, i); };
     fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; affirm forall j where j >= 0, j < size(self), j != i: get(return, j) = get(self, j); }] { return set(self, i, x); };
@@ -42,14 +43,14 @@ impl<T> Growable<T> for List<T> {
 
 // An array is a sequence of its elements, by the same kind of impl, and it cannot grow, and a Box of one is too.
 impl<T: Clone, n> Sequence<T> for Array<T, n> {
-    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); };
+    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return = size(self); }] { return size(self); };
     fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = get(self, i); }] { return clone(get(self, i)); };
     fn getRef(self: &Self, i: Int) -> &T from self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm *return = get(self, i); }] { return &get(self, i); };
     fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; affirm forall j where j >= 0, j < size(self), j != i: get(return, j) = get(self, j); }] { return set(self, i, x); };
 };
 
 impl<T: Clone> Sequence<T> for Box<Array<T>> {
-    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); };
+    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return = size(self); }] { return size(self); };
     fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = get(self, i); }] { return clone(get(self, i)); };
     fn getRef(self: &Self, i: Int) -> &T from self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm *return = get(self, i); }] { return &get(self, i); };
     fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; affirm forall j where j >= 0, j < size(self), j != i: get(return, j) = get(self, j); }] { return set(self, i, x); };

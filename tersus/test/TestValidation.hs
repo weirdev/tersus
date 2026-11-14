@@ -22,7 +22,8 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import TestParserFragments
 import Pipeline (compileSource, validateStatements)
-import ValidatorNative (validateCompiled, validateCompiledUncached, validationCacheHits, validationRefusals)
+import SelfHostedMir (validateByTersus)
+import ValidatorNative (prepareTexts, validateCompiled, validateCompiledUncached, validationCacheHits, validationRefusals)
 import StdLib
 import Types
 import Syntax
@@ -438,7 +439,10 @@ testCallsUseContracts =
                 ++ ";"
      in testCaseSeq
             "testCallsUseContracts"
-            [ -- A call with known arguments is not run to learn its result, however short the computation
+            [ -- A check function of an impl is the impl's function to the validator, with the trait's contract: a copy
+              -- knows only that, a concrete caller the impl's contract too (SelfHostedMir.validatorSymbol)
+              checkFunctionBridge
+            , -- A call with known arguments is not run to learn its result, however short the computation
               parseValidateFailProgramHelper (twice 3) "Could not prove: x = 6"
             , parseValidateFailProgramHelper "fn id(n: Int) -> Int [{ }] [{ }] { return n; }; x = id(3); affirm x = 3;" "Could not prove: x = 3"
             , -- The program itself runs, whatever validation knows
@@ -672,6 +676,7 @@ testValidationCache = TestList "testValidationCache"
     , named "changed global assumption" (rejectChanged (identity ++ "assume 1 = 2; affirm 1 = 2; return 0;") (identity ++ "assume 1 = 1; affirm 1 = 2; return 0;"))
     , named "assumptions at the definition" (parity ("assume 1 = 1; " ++ identity ++ "return identity(3);") ("assume 2 = 2; " ++ identity ++ "return identity(3);"))
     , named "mutual recursion hits" (reuse mutual (mutual ++ "affirm 1 = 1;"))
+    , testCase "copies that differ only in the types of opaque values are one text, so one verdict" opaqueCopiesShare
     , named "mutual recursion changed member" (rejectChanged mutual brokenMutual)
     , named "changed function-input reader" (parity "fn value() -> Int { return 0; }; return 0;" "fn value() -> Int { return readByte(); }; return 0;")
     , TestCase "every refused function is reported, the first as validateCompiled reports it" allRefusals
@@ -686,3 +691,68 @@ testValidationCache = TestList "testValidationCache"
     mutual = "fn even(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return true; } else { return odd(n - 1); }; }; fn odd(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return false; } else { return even(n - 1); }; }; return even(4);"
     brokenMutual = "fn even(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return true; } else { return odd(n - 1); }; }; fn odd(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return false; } else { return even(n); }; }; return even(4);"
 
+
+-- Programs as the copy step leaves them, made by hand from programs that call an impl's function: f calls the check
+-- function `M for C::m` of an impl whose contract is stronger than the trait's
+checkFunctionBridge :: TestResult
+checkFunctionBridge = case (lowerSource True relies, lowerSource True relates, lowerSource True promised) of
+    (Ok reliesProgram, Ok relatesProgram, Ok promisedProgram) ->
+        let asCopy = throughCheck reliesProgram
+            related = relatesProgram{M.progMain = toCheck False (M.progMain relatesProgram)}
+            known = promisedProgram{M.progMain = toCheck True (M.progMain promisedProgram)}
+         in refusedIn "f[C]" (validateCompiled asCopy)
+                <> testAssertEq (validateCompiled related) (Ok ())
+                <> testAssertEq (validateCompiled known) (Ok ())
+                <> refusedIn "f[C]" (validateByTersus asCopy)
+                <> testAssertEq (validateByTersus related) (Ok ())
+                <> testAssertEq (validateByTersus known) (Ok ())
+    (Error e, _, _) -> Just e
+    (_, Error e, _) -> Just e
+    (_, _, Error e) -> Just e
+  where
+    impl promise = "struct C { k: Int }; trait M { fn m(self: &Self) -> Int [{ }] [{ }]; }; impl M for C { fn m(self: &Self) -> Int [{ }] [{ " ++ promise ++ " }] { return 3; }; }; "
+    -- (f, made a copy, calls the check function and needs the impl's promise)
+    relies = impl "affirm return >= 0;" ++ "fn f(x: &C) -> Int [{ }] [{ affirm return >= 0; }] { return M::m(x); }; return f(C { k: 1 });"
+    -- (main calls the check function and names the impl's function in a proof: one value)
+    relates = impl "affirm return = 3;" ++ "c = C { k: 1 }; r = M::m(c); affirm r = M::m(c); return r;"
+    -- (main names the check function in a proof too, and knows the impl's promise of it)
+    promised = impl "affirm return = 3;" ++ "c = C { k: 1 }; r = M::m(c); affirm r = M::m(c); affirm M::m(c) = 3; return r;"
+    refusedIn place r = case r of
+        Error e | ("(in " ++ place) `isInfixOf` e -> Nothing
+        other -> Just ("expected a refusal in " ++ place ++ ", got " ++ show other)
+    throughCheck p =
+        let rename n = if n == "f" then "f[C]" else n
+            renameOp o = case o of
+                M.Const (M.CFn n) -> M.Const (M.CFn (rename n))
+                other -> other
+            renamed fn = fn{M.fnName = rename (M.fnName fn), M.fnBlocks = Map.map (\(M.BasicBlock ss term) -> M.BasicBlock (map renameStmt ss) (renameTerm term)) (M.fnBlocks fn)}
+            renameStmt s = case s of
+                M.Ghost env (M.GhostFunction n m b) -> M.Ghost (Map.map renameOp env) (M.GhostFunction (rename n) (rename m) b)
+                M.Ghost env g -> M.Ghost (Map.map renameOp env) g
+                other -> other
+            renameTerm term = case term of
+                M.Call callee args dest next -> M.Call (renameOp callee) args dest next
+                other -> other
+            fs = Map.fromList [(rename (M.fnName fn), renamed fn) | fn <- Map.elems (M.progFunctions p)]
+         in p{M.progFunctions = Map.adjust (toCheck False) "f[C]" fs, M.progMain = renamed (M.progMain p)}
+    -- The calls of the impl's function made calls of its check function, and with proofs, its references in proofs too
+    toCheck proofs fn = fn{M.fnBlocks = Map.map (\(M.BasicBlock ss term) -> M.BasicBlock (map stmt ss) (case term of
+        M.Call callee args dest next -> M.Call (op callee) args dest next
+        other -> other)) (M.fnBlocks fn)}
+      where
+        stmt s = case s of
+            M.Ghost env g@(M.GhostValidation _) | proofs -> M.Ghost (Map.map op env) g
+            other -> other
+        op o = case o of
+            M.Const (M.CFn "<C as M>::m") -> M.Const (M.CFn "M for C::m")
+            other -> other
+
+-- A copy for an array of 2 and one for an array of 3 knew different sizes, before their values were opaque to them
+opaqueCopiesShare :: TestResult
+opaqueCopiesShare = case lowerSource True "fn keep<T: Clone>(x: T) -> T [{ }] [{ affirm return = x; }] { return x; }; a = keep(array(2, 0)); b = keep(array(3, 0)); return 0;" of
+    Error e -> Just e
+    Ok program -> case prepareTexts False program of
+        Error e -> Just e
+        Ok texts -> case (lookup "keep[Array<Int, 2>]" texts, lookup "keep[Array<Int, 3>]" texts) of
+            (Just two, Just three) -> testAssertEq two three
+            _ -> Just ("expected the two copies, got " ++ show (map fst texts))

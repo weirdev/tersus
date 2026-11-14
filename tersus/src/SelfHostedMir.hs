@@ -22,11 +22,20 @@ import StdLibDefs (stdLibValCtx)
 import Syntax
 import Types
 import Utils (Result (..), bindResult, inIntRange)
+import MirCopies (isCopyName, opaqueKey)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool, buildCopy :: Bool }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False
+emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False False
+
+-- The function the validator sees for a name: a check function of an impl, `Tr for O::g`, is its impl's function
+-- `<O as Tr>::g`, since its body is the call of that function with its parameters (traitCheckWrapper); a reference to
+-- either gives one value, and differs only in the contract it brings
+validatorSymbol :: Name -> Name
+validatorSymbol name = case parseImplCheckName name of
+    Just (trait, owner, function) -> "<" ++ owner ++ " as " ++ trait ++ ">::" ++ function
+    Nothing -> name
 
 record :: String -> [(String, MirValue)] -> MirValue
 record = MData
@@ -220,7 +229,7 @@ proofOperand env (FApp (ATerm name) args) b0
         -- (a function that reads the input has no one value to speak of)
         if Set.member callee (buildInputReaders b0) then Nothing else Just ()
         (prefixes, refs, b1) <- foldM evalArg ([], [], b0) args
-        let (function, b2) = namedFunction ("call:" ++ callee) b1
+        let (function, b2) = namedFunction ("call:" ++ validatorSymbol callee) b1
             (i, b3) = fresh b2
             local = negate i - 1
             ref = record "ValueRef::Local" [("local", MInt local)]
@@ -811,7 +820,12 @@ proofCallFacts callee refs result b
             deeper = b{buildInline = buildInline b + 1}
         (required, b1) <- contractSteps (buildRules b) False env (M.specRequires (M.fnSpec fn)) deeper
         (promised, b2) <- contractSteps (buildRules b) True env (ensuresOf (M.fnSpec fn)) b1
-        pure (required ++ promised, b2{buildInline = buildInline b})
+        -- (a check function named outside the body of a copy also brings its impl's contract: a concrete caller may use what
+        -- the impl promises, and a check function proves the trait's contract from it; a copy knows the trait's alone)
+        (implFacts, b3) <- case validatorSymbol callee of
+            impl | impl /= callee, not (buildCopy b), Map.member impl (buildFunctions b) -> proofCallFacts impl refs result b2{buildInline = buildInline b}
+            _ -> pure ([], b2)
+        pure (required ++ promised ++ implFacts, b3{buildInline = buildInline b})
     | otherwise = pure ([], b)
   where
     argOperands = [op | ref <- refs, Just op <- [refOperandOf b ref]]
@@ -1715,7 +1729,7 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
     -- into a local of its own.
     let (exportChunks, b3) = foldl (defineLocal False resultEnv) ([], b3a) (contractDefinitions (M.specRequires (M.fnSpec callee) ++ M.specEnsures (M.fnSpec callee)))
         assumptions = assumptions0 ++ concat (reverse exportChunks)
-    let (function, b4a) = namedFunction ("call:" ++ M.fnName callee) b3
+    let (function, b4a) = namedFunction ("call:" ++ validatorSymbol (M.fnName callee)) b3
     -- A function that reads the input (or calls one that does) gives a new
     -- value at each call: its application carries a tag no other has.
     (tagRefs, b4) <- if Set.member (M.fnName callee) (buildReaders b4a)
@@ -1782,9 +1796,11 @@ sizeParameterSteps assume fn values b0
 -- Facts guaranteed by a value's type are trusted in the same places as in
 -- the reference validator: parameters and values assigned to typed locals.
 typeSteps :: Rules -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> M.Function -> M.Local -> Build -> Maybe ([MirValue], Build)
-typeSteps rules types invariants fn local@(M.Local number) b0 = do
-    decl <- Map.lookup local (M.fnLocals fn)
-    facts (M.localType decl) b0
+typeSteps rules types invariants fn local@(M.Local number) b0
+    | Map.member (opaqueKey local) (M.specEnv (M.fnSpec fn)) = Just ([], b0)
+    | otherwise = do
+        decl <- Map.lookup local (M.fnLocals fn)
+        facts (M.localType decl) b0
   where
     value = record "ValueRef::Local" [("local", MInt (toInteger number))]
     assume relation a b = step "Assume" [("relation", MInt relation), ("left", a), ("right", b)]
@@ -1881,7 +1897,7 @@ exprOperand env expr b0 = case expr of
         | Just (M.Const (M.CFn callee)) <- Map.lookup name env -> do
             if Set.member callee (buildInputReaders b0) then Nothing else Just ()
             (prefixes, refs, b1) <- foldM evalArg ([], [], b0) args
-            let (function, b2) = namedFunction ("call:" ++ callee) b1
+            let (function, b2) = namedFunction ("call:" ++ validatorSymbol callee) b1
                 (i, b3) = fresh b2
                 local = negate i - 1
                 ref = record "ValueRef::Local" [("local", MInt local)]
@@ -2771,7 +2787,7 @@ encodeFunction physical types invariants functions rules allowCalls fn
     -- in every other program, is not one it may use)
     | physical && any logicalContainerUse (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))) = Nothing
     | otherwise = do
-        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
+        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildCopy = isCopyName (M.fnName fn), buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires0, withRequires0) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes
