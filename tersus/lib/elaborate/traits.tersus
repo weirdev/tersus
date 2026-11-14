@@ -103,7 +103,7 @@ fn substSelfAs(st: St, selfName: &String, selfType: Int, t: Int) -> St ~ {
     if x.kind = 4 && rawInstanceName(st, t) = clone(selfName) { return withTy(st, selfType); };
     // (a list and a Box are named types whose parts are looked into; any other named type is left as it is)
     if x.kind = 4 && !isListTy(st, t) && !isBoxTy(st, t) { return withTy(st, t); };
-    if x.kind = 4 || x.kind = 6 || x.kind = 7 || x.kind = 8 || x.kind = 9 || x.kind = 10 || x.kind = 14 {
+    if x.kind = 4 || x.kind = 6 || x.kind = 7 || x.kind = 8 || x.kind = 9 || x.kind = 10 || x.kind = 11 || x.kind = 14 {
         args = [];
         changed = false;
         i = 0;
