@@ -6228,9 +6228,10 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
     tps = fnTraitParams(&s, &tys, resultPartsrtValue);
     canonical = clone(kind);
     i = 0;
-    for t in &tys { canonical = catStrings(canonical, cat3("$", get(names, i), "")); canonical = catStrings(canonical, cat3("=", sanitizeFnName(&renderTypeName(clone(t))), "")); i = i + 1; };
-    canonical = catStrings(canonical, cat3("$to$", sanitizeFnName(&renderTypeName(clone(resultPartsrtValue))), ""));
-    if contractStart >= 0 { canonical = catStrings(canonical, cat3("$c", fnContractHash(&sourceText.text.slice(contractStart, s.pos)), "")); };
+    for t in &tys { renderedTy = renderTypeName(clone(t)); canonical = catStrings(canonical, cat3("$", get(names, i), "")); canonical = catStrings(canonical, cat3("=", sanitizeFnName(&renderedTy), "")); i = i + 1; };
+    renderedRet = renderTypeName(clone(resultPartsrtValue));
+    canonical = catStrings(canonical, cat3("$to$", sanitizeFnName(&renderedRet), ""));
+    if contractStart >= 0 { contractText = sourceText.text.slice(contractStart, s.pos); canonical = catStrings(canonical, cat3("$c", fnContractHash(&contractText), "")); };
     return ok( s, FnShape { kind: kind, names: names, types: tys, ret: resultPartsrtValue, ins: resultPartsinsValue, outs: resultPartsoutsValue, canonical: canonical, traitParams: tps });
 };
 
@@ -6248,7 +6249,9 @@ fn mintFnTrait(st: St, shape: &FnShape) -> Res<Int> ~ {
     if shape.kind = "Fn" { receiver = Type::TRef { inner: Box::new(selfTy) }; };
     if shape.kind = "FnMut" { receiver = Type::TMutRef { inner: Box::new(selfTy) }; };
     allTypes = push([], receiver);
-    for t in &shape.types { allTypes = push(allTypes, clone(t)); };
+    shapeTypes = clone(shape.types);
+    for t in &shapeTypes { allTypes = push(allTypes, clone(t)); };
+    shapeCanonical = clone(shape.canonical);
     shapeIns = clone(shape.ins);
     shapeOuts = clone(shape.outs);
     shapeNames = clone(shape.names);
@@ -6272,7 +6275,7 @@ fn mintFnTrait(st: St, shape: &FnShape) -> Res<Int> ~ {
     tf = emit( s, AstNode::TraitFn { value: AstTraitFn { n: resultPartsnnValue, ps: resultPartspsValue, sig: resultPartssigValue, ins: resultPartsilValue, outs: resultPartsolValue } }); Res { st: resultPartstfState, v: resultPartstfValue, ok: resultPartstfOk } = tf;
     if !resultPartstfOk { return Res<Int> { st: resultPartstfState, v: 0, ok: false }; };
     s = resultPartstfState;
-    tn = putName( s, &shape.canonical); Res { st: resultPartstnState, v: resultPartstnValue, ok: resultPartstnOk } = tn;
+    tn = putName( s, &shapeCanonical); Res { st: resultPartstnState, v: resultPartstnValue, ok: resultPartstnOk } = tn;
     if !resultPartstnOk { return Res<Int> { st: resultPartstnState, v: 0, ok: false }; };
     s = resultPartstnState;
     tps = namesList( s, &shapeParams); Res { st: resultPartstpsState, v: resultPartstpsValue, ok: resultPartstpsOk } = tps;
