@@ -56,9 +56,10 @@ fn sameProgram(a: &FullProgram, b: &FullProgram) -> Bool ~ {
     return sameFunction(&a.entry, &a.arena, &b.entry, &b.arena, &a.shared, &b.shared, common);
 };
 fn externName(n: &String) -> String ~ {
-    if !n.startsWith("extern ") { return clone(n); };
+    if !n.startsWith("extern ") || size(n.bytes) < 7 { return clone(n); };
     at = 7;
     for i in 7..size(n.bytes) { if get(n.bytes, i) = toByte(36) { at = i + 1; }; };
+    if at < 7 || at > size(n.bytes) { return clone(n); };
     return catStrings("extern ", n.slice(at, size(n.bytes)));
 };
 fn renameTokens(ts: List<Token>, renames: &List<EnvEntry>) -> List<Token> ~ {
@@ -154,6 +155,7 @@ fn signatureHeader(fun: &FullFunction) -> List<Token> ~ {
 };
 fn paramTypes(fun: &FullFunction) -> List<List<Token>> ~ {
     out = []; end = intsEnd(&fun.header, 3);
+    if end < 4 { return out; };
     for i in 4..end { key = textAt(&fun.header, i); at = rowIndex(&fun.locals, &key); t = [];
         if at >= 0 && at < size(fun.locals) { row = get(fun.locals, at).tokens; p = 3; if wordIs(&row, 2, "some") { p = 4; }; t = sliceTokens(&row, p, size(row)); };
         out = push(out, t);
@@ -176,7 +178,7 @@ fn mergeFunctions(units: &List<LinkUnit>, mapping: &List<Int>, default: Int, are
             existing = get(&out.functions, i); same = sameFunction(&existing, arena, &fun, arena, shared, shared, true);
             if n.startsWith("extern ") { same = sameExtern(&existing, &fun, arena); };
             if !same || get(&private, i) || privateUnit(unit) {
-                display = clone(n); if n.startsWith("extern ") { display = catStrings("extern fn ", n.slice(7, size(n.bytes))); };
+                display = clone(n); if n.startsWith("extern ") && size(n.bytes) >= 7 { display = catStrings("extern fn ", n.slice(7, size(n.bytes))); };
                 return MergeFns { ok: false, message: collision("function", &display, &get(origins, i), unitName(unit)), ..out };
             };
         } else {

@@ -121,7 +121,12 @@ fn declarationTypes(r: &FullRecord) -> List<String> ~ {
     i = 2; while i < size(ts) [{ affirm i >= 0; }] ~ { if (wordIs(&ts, i, "named") || wordIs(&ts, i, "variant")) && quotedAt(&ts, i + 1) { out = push(out, textAt(&ts, i + 1)); }; i = i + 1; };
     return out;
 };
-fn baseName(n: &String) -> String ~ { i = 0; while i < size(n.bytes) && get(n.bytes, i) != toByte(60) [{ affirm i >= 0; }] ~ { i = i + 1; }; return n.slice(0, i); };
+fn baseName(n: &String) -> String ~ {
+    i = 0;
+    while i < size(n.bytes) && get(n.bytes, i) != toByte(60) [{ affirm i >= 0; }] ~ { i = i + 1; };
+    if i > size(n.bytes) { return clone(n); };
+    return n.slice(0, i);
+};
 fn addNames(set: HashSet<String>, ns: &List<String>) -> HashSet<String> ~ { for n in ns { set = set.insert(clone(n)); }; return set; };
 fn implRefs(p: &FullProgram, ty: &String) -> List<String> ~ {
     prefix = catStrings(catStrings("<", clone(ty)), " as "); base = catStrings(catStrings("<", baseName(ty)), " as "); out = [];

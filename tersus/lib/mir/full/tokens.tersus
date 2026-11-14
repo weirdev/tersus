@@ -27,7 +27,7 @@ fn decimalText(text: &String) -> String ~ {
     n = size(text.bytes); at = 0; negative = n > 0 && get(text.bytes, 0) = toByte(45);
     if negative { at = 1; };
     while at < n && get(text.bytes, at) = toByte(48) [{ affirm at >= 0; }] ~ { at = at + 1; };
-    if at = n { return "0"; };
+    if at >= n { return "0"; };
     value = text.slice(at, n); if negative { return catStrings("-", value); }; return value;
 };
 fn normalizeNumbers(ts: List<Token>) -> List<Token> ~ {
