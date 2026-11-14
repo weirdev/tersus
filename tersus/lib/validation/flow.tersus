@@ -1,6 +1,6 @@
 import validation::execution { assumeBooleanFact, assumeRelation, checkNear, contextSizes, entailsIn, executeIndexed, goalInSlices, indexTo, localGoal, maxScopeDepth, quietStep };
 import validation::joins { commonContext, emptyContext, leastTermInUse, linkAppend, linkedItems, mergeArrivals, noLinks };
-import validation::loopInference { inferLoopCandidateGoals, loopMentions };
+import validation::loopInference { copyPartners, inferLoopCandidateGoals, loopMentions };
 import validation::model { Arrival, CandidateSteps, EqualityFact, ExecutionBlock, ExecutionEnd, ExecutionFlowResult, ExecutionResult, ExecutionState, ExecutionStep, ForallTemplate, HullLinks, InferGoal, IntegerLookup, LoopEntryTerms, LoopFrame, LoopIteration, LoopRound, LoopSplit, LoopTest, StepsRun, SweepOrder, SweepResult, TrailEntry, Trunk, TrunkAnswer, TrunkRun, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef, VariantFact };
 import validation::relations { containsValue, emptyIntMap, intAt, minInt };
 import validation::state { assumesForall, countPast, localEntry, localsUndone, stateLocalsBefore, negateRelation, noTemplates, resolveValue };
@@ -791,8 +791,8 @@ fn testTermsOn(trunk: &Trunk, tests: &List<LoopTest>) -> List<Int> {
     return testTerms(trunk.state, tests);
 };
 
-fn candidatesFor(trunk: &Trunk, havoc: &List<Int>, mentions: &HashSet<Int>) -> List<InferGoal> {
-    return inferLoopCandidateGoals(trunk.state, havoc, mentions);
+fn candidatesFor(trunk: &Trunk, havoc: &List<Int>, mentions: &HashSet<Int>, partners: &HashMap<Int, List<Int>>) -> List<InferGoal> {
+    return inferLoopCandidateGoals(trunk.state, trunk.index, havoc, mentions, partners);
 };
 
 fn trunkFloor(trunk: &Trunk) -> Int {
@@ -869,7 +869,7 @@ fn loopBodyUnreachable(trunk: Trunk, tests: &List<LoopTest>) -> TrunkAnswer {
 // still standing. It leaves the loop with the header state under the failed
 // test, and with each state the body delivered to the loop's own exit (the
 // false edge of a later conjunct of the test), as it was delivered.
-fn loopRound(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &ExecutionBlock, trunk: Trunk, cands: &CandidateSteps, total: Int, measure: Int) -> LoopRound [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
+fn loopRound(blocks: &HashMap<Int, ExecutionBlock>, partners: &HashMap<Int, List<Int>>, frame: &LoopFrame, block: &ExecutionBlock, trunk: Trunk, cands: &CandidateSteps, total: Int, measure: Int) -> LoopRound [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
     id = (*block).id;
     LoopIteration { status: status, step: step, trunk: header, yes: yes, no: no, noFeasible: noFeasible, prior: prior, priorOther: priorOther } = loopIteration(block, trunk, cands);
     if status != 0 { return LoopRound { swept: sweepFailure(status, id, step, header), exits: [] }; };
@@ -885,7 +885,7 @@ fn loopRound(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &E
             // (an empty successful sweep: a body no test lets execution into delivers nothing)
             return LoopRound { swept: SweepResult { result: ExecutionFlowResult { status: 0, block: id, step: -1, state: emptyState() }, dropped: [], exits: [], arrivals: 0, merges: 0, trunk: asked }, exits: exits };
         };
-        SweepResult { result: result, dropped: dropped, exits: bodyExits, arrivals: arrivals, merges: merges, trunk: after } = sweep(blocks, inner, loop.body, restore(asked, yes), total, measure - 1);
+        SweepResult { result: result, dropped: dropped, exits: bodyExits, arrivals: arrivals, merges: merges, trunk: after } = sweep(blocks, partners, inner, loop.body, restore(asked, yes), total, measure - 1);
         if result.status != 0 || size(dropped) > 0 { exits = []; } else {
             for leaving in bodyExits { exits = push(exits, clone(leaving)); };
         };
@@ -898,7 +898,7 @@ fn loopRound(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &E
 // until one drops no candidate, each from the merged state (the trunk is cut
 // back to it). A round that failed for another reason is tried once more with
 // no candidates; running out of rounds refuses.
-fn sweepLoop(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &ExecutionBlock, taken: &List<Int>, work: SweepWork, total: Int, measure: Int) -> SweepWork [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
+fn sweepLoop(blocks: &HashMap<Int, ExecutionBlock>, partners: &HashMap<Int, List<Int>>, frame: &LoopFrame, block: &ExecutionBlock, taken: &List<Int>, work: SweepWork, total: Int, measure: Int) -> SweepWork [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
     id = (*block).id;
     merged = mergeTaken(counted(work, 0, size(taken) - 1), taken);
     if merged.settled { return merged; };
@@ -911,17 +911,17 @@ fn sweepLoop(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, block: &E
         if entryStatus != 0 { return settleAt(withTrunk(looping, checked), entryStatus, id, entryAt); };
         TrunkRun { trunk: before, status: beforeStatus, failedAt: beforeAt } = runOnTrunk(rewindTrunk(checked, entry), (*block).steps);
         if beforeStatus != 0 { return settleAt(withTrunk(looping, before), beforeStatus, id, beforeAt); };
-        trunk = rewindTrunk(before, entry);
+        trunk = extendedTrunk(rewindTrunk(before, entry));
         if measure <= 0 { return settleAt(withTrunk(looping, trunk), 3, id, -1); };
         mentions = loopMentions(blocks, loop.region);
-        inferred = candidatesFor(trunk, loop.havoc, mentions);
+        inferred = candidatesFor(trunk, loop.havoc, mentions, partners);
         survivors = clone(inferred);
         finished = false;
         failed = false;
         failure = ExecutionFlowResult { status: 2, block: id, step: -1, state: emptyState() };
         for attempt in 0..size(inferred) + 2 {
             if finished = false && failed = false {
-                LoopRound { swept: swept, exits: exits } = loopRound(blocks, frame, block, rewindTrunk(trunk, entry), candidateSteps(survivors), total, measure - 1);
+                LoopRound { swept: swept, exits: exits } = loopRound(blocks, partners, frame, block, rewindTrunk(trunk, entry), candidateSteps(survivors), total, measure - 1);
                 SweepResult { result: result, dropped: dropped, exits: none, arrivals: arrivals, merges: merges, trunk: after } = swept;
                 trunk = after;
                 looping = counted(looping, arrivals, merges);
@@ -995,7 +995,7 @@ fn sweepFinished(work: SweepWork) -> SweepResult {
 // `measure` falls by one on each call around sweep, sweepLoop and loopRound.
 // A nested loop is entered under a header no enclosing sweep holds, so the
 // depth is bounded by the blocks; a sweep that would run out refuses.
-fn sweep(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, start: Int, trunk: Trunk, total: Int, measure: Int) -> SweepResult [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
+fn sweep(blocks: &HashMap<Int, ExecutionBlock>, partners: &HashMap<Int, List<Int>>, frame: &LoopFrame, start: Int, trunk: Trunk, total: Int, measure: Int) -> SweepResult [{ affirm total >= 0; affirm measure >= 0; }] [{ }] shrinks measure {
     if activeHeader(frame.header, start) {
         BackEdge { trunk: after, status: status, step: step, dropped: dropped } = sweepBackEdge(trunk, frame);
         return SweepResult { result: ExecutionFlowResult { status: status, block: frame.header, step: step, state: emptyState() }, dropped: dropped, exits: [], arrivals: 1, merges: 0, trunk: after };
@@ -1014,7 +1014,7 @@ fn sweep(blocks: &HashMap<Int, ExecutionBlock>, frame: &LoopFrame, start: Int, t
                 if blocks.contains(id) {
                     block = blocks.lookupRef(id);
                     if (*block).end is ExecutionEnd::Loop {
-                        if measure <= 0 { work = settleAt(work, 3, id, -1); } else { work = sweepLoop(blocks, frame, block, taken, work, total, measure - 1); };
+                        if measure <= 0 { work = settleAt(work, 3, id, -1); } else { work = sweepLoop(blocks, partners, frame, block, taken, work, total, measure - 1); };
                     } else { work = sweepPlain(blocks, frame, block, taken, work); };
                 } else { work = settleAt(work, 3, id, -1); };
             };
@@ -1338,7 +1338,7 @@ fn sweepExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &Execution
     // (the floor a caller states is trusted only as far as the scan bears it
     // out, and an id the blocks name enters the state when its step runs)
     start = ExecutionState { floor: blocksFloor(blocks, minInt(initial.floor, leastTermInUse(initial))), ..clone(initial) };
-    return withFinalState(sweep(executionTable(blocks), outer, entry, Trunk { state: start, index: noFactIndex(), trail: [], saved: [] }, size(blocks), 3 * size(blocks) + 3));
+    return withFinalState(sweep(executionTable(blocks), copyPartners(blocks), outer, entry, Trunk { state: start, index: noFactIndex(), trail: [], saved: [] }, size(blocks), 3 * size(blocks) + 3));
 };
 
 // The verdict with the trunk's state, the state the sweep stopped in

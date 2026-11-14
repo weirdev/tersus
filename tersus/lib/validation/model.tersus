@@ -564,7 +564,8 @@ impl Clone for InferSubject { };
 impl Copy for InferSubject { };
 
 // left/right are entry-evaluation scratch terms, not replayable references.
-// assumes/checks replay through locals and constants from the initial state.
+// assumes/checks replay through locals, the initial state's constants and the
+// sizes of lists it holds, and the temporaries their own steps make.
 struct InferGoal { relation: Int, left: Int, right: Int, assumes: List<ExecutionStep>, checks: List<ExecutionStep> };
 
 impl Clone for InferGoal { };

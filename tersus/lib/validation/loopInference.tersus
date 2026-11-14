@@ -1,12 +1,11 @@
 import validation::context { analyzeContext, unionOf };
 import validation::differences { semanticFacts };
 import validation::evaluation { evalListSize, evalTermValue };
-import validation::execution { executeSteps, maxScopeDepth };
-import validation::joins { constantTermWithValue };
-import validation::model { ExecutionBlock, ExecutionEnd, ExecutionState, ExecutionStep, InferDistance, InferGoal, InferState, InferSubject, IntegerLookup, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef };
-import validation::relations { containsValue, intAt, leastClasses, sameIn, ufFind };
+import validation::execution { executeSteps, lastRung, maxScopeDepth };
+import validation::model { ConstantTerm, ExecutionBlock, ExecutionEnd, ExecutionState, ExecutionStep, FactIndex, InferDistance, InferGoal, InferState, InferSubject, IntegerLookup, ValidatorContext, ValidatorGoal, ValueLookup, ValueRef };
+import validation::relations { containsValue, emptyIntMap, intAt, leastClasses, sameIn, ufFind };
 import validation::state { resolveValue };
-import validation::validation { entailsGoalAnalyzed };
+import validation::validation { entailsGoalAnalyzed, goalSlice };
 
 
 
@@ -18,6 +17,7 @@ fn appendSteps(a: &List<ExecutionStep>, b: &List<ExecutionStep>) -> List<Executi
 
 fn subjectRef(subject: &InferSubject) -> ValueRef {
     if subject.isSize { return ValueRef::Local { local: subject.temp }; };
+    if subject.local < 0 { return ValueRef::Term { term: subject.term }; };
     return ValueRef::Local { local: subject.local };
 };
 
@@ -56,67 +56,165 @@ fn hasSizeOf(context: &ValidatorContext, term: Int) -> Bool {
 
 fn noInferGoals() -> List<InferGoal> { return []; };
 
-// The locals a candidate invariant may relate a changed local to: those the
-// loop reads, and those equal at its entry to a local it changes or to the
-// size of a list it changes (n in s = n - i, with i = n at the entry). Ties
-// through orders or other applications would bring in most of a large
-// function.
-fn loopAnchors(initial: &ExecutionState, havoc: &List<Int>, mentioned: &HashSet<Int>) -> HashSet<Int> {
-    uf = unionOf(initial.context.equalities);
-    constant = HashSet::new();
-    for c in initial.context.constants { constant = constant.insert(ufFind(uf, c.id)); };
-    roots = HashSet::new();
-    for binding in initial.locals.entries() {
-        // (a local that starts at a constant ties nothing: every other local
-        // that starts at 0 would be an anchor of every counter)
-        r = ufFind(uf, binding.value);
-        if containsValue(havoc, binding.key) && constant.contains(r) = false { roots = roots.insert(r); };
-    };
-    // (and so is a local equal to the size of a list the loop changes: i in
-    // size(l) = i, for a loop that sets the elements of l)
-    for app in initial.context.applications {
-        if app.function = -13 && size(app.arguments) = 1 {
-            if roots.contains(ufFind(uf, intAt(app.arguments, 0, 0))) { roots = roots.insert(ufFind(uf, app.id)); };
+// The entry state as inference sees it: the facts a slice walk at the
+// ladder's top rung reaches from the values of the locals the loop changes
+// or reads, those locals' bindings, and the state's floor, so that the terms
+// generation mints are new to the whole state. Every fact is one of the
+// state's, so what the view entails at the entry the state entails; a
+// candidate the view cannot show is lost, as a check the ladder cannot
+// prove is refused.
+fn inferenceView(state: &ExecutionState, index: &FactIndex, havoc: &List<Int>, mentioned: &HashSet<Int>, partners: &HashMap<Int, List<Int>>) -> ExecutionState {
+    locals = emptyIntMap();
+    for local in havoc {
+        locals = viewLocal(state, local, locals);
+        if local >= 0 && partners.contains(local) && state.locals.contains(local) {
+            value = state.locals.lookup(local, 0);
+            for partner in clone(*partners.lookupRef(local)) {
+                if state.locals.lookup(partner, value - 1) = value { locals = viewLocal(state, partner, locals); };
+            };
         };
     };
-    anchors = HashSet::new();
-    for binding in initial.locals.entries() {
-        if mentioned.contains(binding.key) || roots.contains(ufFind(uf, binding.value)) { anchors = anchors.insert(binding.key); };
+    for local in mentioned.elements() { locals = viewLocal(state, local, locals); };
+    seeds = [];
+    seen = HashSet::new();
+    for binding in locals.entries() {
+        if seen.contains(binding.value) = false {
+            seen = seen.insert(binding.value);
+            seeds = push(seeds, binding.value);
+        };
     };
-    return anchors;
+    return ExecutionState { context: goalSlice(state.context, index, seeds, lastRung()).slice, locals: locals, templates: [], floor: state.floor };
 };
 
-fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>, mentioned: &HashSet<Int>) -> List<InferGoal> {
-    work = clone(initial);
+// The locals each local is copied to or from by an assignment of the
+// function (s = k, i = n), at most twelve each. A copy that still holds a
+// changed local's value at a loop's entry is an anchor of the loop's
+// candidates though the loop never reads it.
+fn copyPartners(blocks: &List<ExecutionBlock>) -> HashMap<Int, List<Int>> {
+    partners = HashMap::new();
+    for block in blocks {
+        partners = copiesWithin(block.steps, partners, maxScopeDepth());
+        if block.end is ExecutionEnd::Branch {
+            partners = copiesWithin((block.end as ExecutionEnd::Branch).yesSteps, partners, maxScopeDepth());
+            partners = copiesWithin((block.end as ExecutionEnd::Branch).noSteps, partners, maxScopeDepth());
+        };
+    };
+    return partners;
+};
+
+fn copiesWithin(steps: &List<ExecutionStep>, into: HashMap<Int, List<Int>>, depth: Int) -> HashMap<Int, List<Int>> [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
+    partners = into;
+    for sPosition in 0..size(steps) { partners = stepCopies(get(steps, sPosition), partners, depth); };
+    return partners;
+};
+
+fn stepCopies(step: &ExecutionStep, into: HashMap<Int, List<Int>>, depth: Int) -> HashMap<Int, List<Int>> [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth {
+    if step is ExecutionStep::Assign {
+        assigned = step as ExecutionStep::Assign;
+        if assigned.value is ValueRef::Local {
+            source = (assigned.value as ValueRef::Local).local;
+            return withPartner(withPartner(into, assigned.local, source), source, assigned.local);
+        };
+        return into;
+    };
+    if step is ExecutionStep::Scoped && depth > 0 { return copiesWithin((step as ExecutionStep::Scoped).steps, into, depth - 1); };
+    return into;
+};
+
+fn withPartner(partners: HashMap<Int, List<Int>>, local: Int, partner: Int) -> HashMap<Int, List<Int>> {
+    if local < 0 || partner < 0 || local = partner { return partners; };
+    known = [];
+    if partners.contains(local) { known = clone(*partners.lookupRef(local)); };
+    if size(known) >= 12 || containsValue(known, partner) { return partners; };
+    return partners.insert(local, push(known, partner));
+};
+
+fn viewLocal(state: &ExecutionState, local: Int, locals: HashMap<Int, Int>) -> HashMap<Int, Int> {
+    if local < 0 || locals.contains(local) || state.locals.contains(local) = false { return locals; };
+    return locals.insert(local, state.locals.lookup(local, 0));
+};
+
+// The entry state's constant term of a value, by the index: a candidate is
+// replayed on the entry state, so it may name only that state's terms, never
+// a constant generation recorded in the view. On an index that agrees with
+// the state the position, id, kind and value always match; the checks only
+// keep a disagreeing index from naming another fact.
+fn stateConstant(state: &ExecutionState, index: &FactIndex, value: Int) -> ValueLookup {
+    if index.valueAt.contains(value) = false { return ValueLookup::Missing; };
+    id = index.valueAt.lookup(value, 0);
+    p = index.constantAt.lookup(id, -1);
+    if p < 0 || p >= size(state.context.constants) { return ValueLookup::Missing; };
+    found = get(state.context.constants, p);
+    if found.id != id || found.kind != 0 || found.value != value { return ValueLookup::Missing; };
+    return ValueLookup::Found { term: id };
+};
+
+// The view with the state's own fact for that constant, copied, never made
+fn withConstant(work: ExecutionState, state: &ExecutionState, index: &FactIndex, value: Int) -> ExecutionState {
+    named = stateConstant(state, index, value);
+    if named is ValueLookup::Missing { return work; };
+    id = (named as ValueLookup::Found).term;
+    for c in work.context.constants { if c.id = id { return work; }; };
+    p = index.constantAt.lookup(id, -1);
+    if p < 0 || p >= size(state.context.constants) { return work; };
+    ExecutionState { context: context, locals: locals, templates: templates, floor: floor } = work;
+    return ExecutionState { context: withConstantFact(context, clone(get(state.context.constants, p))), locals: locals, templates: templates, floor: floor };
+};
+
+fn withConstantFact(context: ValidatorContext, fact: ConstantTerm) -> ValidatorContext {
+    ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences } = context;
+    return ValidatorContext { equalities: equalities, applications: applications, constants: push(constants, fact), orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn withTermAnchor(anchors: List<InferSubject>, term: Int) -> List<InferSubject> {
+    for anchor in anchors { if anchor.term = term { return anchors; }; };
+    return push(anchors, InferSubject { local: -1, isSize: false, temp: 0, term: term });
+};
+
+fn inferLoopCandidateGoals(state: &ExecutionState, factIndex: &FactIndex, havoc: &List<Int>, mentioned: &HashSet<Int>, partners: &HashMap<Int, List<Int>>) -> List<InferGoal> {
+    view = inferenceView(state, factIndex, havoc, mentioned, partners);
+    work = clone(view);
     assigned = [];
     anchors = [];
-    index = 0;
-    related = loopAnchors(initial, havoc, mentioned);
-    for binding in initial.locals.entries() {
+    for binding in view.locals.entries() {
         if binding.key >= 0 {
             if containsValue(havoc, binding.key) {
                 if size(assigned) < 8 {
                     assigned = push(assigned, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value });
                 };
             } else {
-                if size(anchors) < 12 && related.contains(binding.key) {
+                if size(anchors) < 12 {
                     anchors = push(anchors, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value });
                 };
             };
         };
     };
+    // (and the size a list the loop changes has on entry, as a term: it keeps
+    // its value when the header gives the locals new ones, as the size of a
+    // list whose elements the loop sets does)
+    classes = unionOf(view.context.equalities);
+    for subjectPosition in 0..size(assigned) {
+        root = ufFind(classes, get(assigned, subjectPosition).term);
+        for app in view.context.applications {
+            if app.function = -13 && size(app.arguments) = 1 && size(anchors) < 12 {
+                if ufFind(classes, intAt(app.arguments, 0, 0)) = root && evalTermValue(view.context, classes, app.id, 6) is IntegerLookup::Missing {
+                    anchors = withTermAnchor(anchors, app.id);
+                };
+            };
+        };
+    };
     goals = noInferGoals();
-    st = InferState { work: work, index: index, candIndex: 0, assigned: assigned, anchors: anchors, goals: goals };
-    st = inferPhase1(st, initial, havoc);
-    st = inferPhase2(st, initial, havoc);
-    st = inferPhase4(st, initial, havoc);
-    st = inferPhase5(st, initial, havoc);
-    st = inferPhase6(st, initial, havoc);
-    st = inferPhase7(st, initial, havoc);
-    st = inferPhase8(st, initial, havoc);
-    st = inferPhase9(st, initial, havoc);
-    st = inferPhase10(st, initial, havoc);
-    st = inferPhase11(st, initial, havoc);
+    st = InferState { work: work, index: 0, candIndex: 0, assigned: assigned, anchors: anchors, goals: goals };
+    st = inferPhase1(st, state, factIndex);
+    st = inferPhase2(st, state, factIndex);
+    st = inferPhase4(st, state, factIndex);
+    st = inferPhase5(st, state, factIndex);
+    st = inferPhase6(st, state, factIndex);
+    st = inferPhase7(st, state, factIndex);
+    st = inferPhase8(st, state, factIndex);
+    st = inferPhase9(st, state, factIndex);
+    st = inferPhase10(st, state, factIndex);
+    st = inferPhase11(st, state, factIndex);
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     analysis = analyzeContext(work.context);
     kept = [];
@@ -130,7 +228,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>, mentione
     return kept;
 };
 
-fn inferPhase1(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase1(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     extraAssigned = [];
     for subjectPosition in 0..size(assigned) {
@@ -152,12 +250,12 @@ fn inferPhase1(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase2(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase2(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     extraAnchors = [];
     for subjectPosition in 0..size(anchors) {
         subject = get(anchors, subjectPosition);
-        if size(anchors) + size(extraAnchors) < 12 && hasSizeOf(work.context, subject.term) {
+        if subject.local >= 0 && size(anchors) + size(extraAnchors) < 12 && hasSizeOf(work.context, subject.term) {
             temp = 0 - 7000000 - index * 4;
             index = index + 1;
             made = executeSteps(clone(work), push([], ExecutionStep::ApplyFresh { local: temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) }));
@@ -174,22 +272,17 @@ fn inferPhase2(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase4(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase4(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for subjPosition in 0..size(assigned) {
         subj = get(assigned, subjPosition);
         kv = evalTermValue(work.context, unionOf(work.context.equalities), subj.term, 6);
         if kv is IntegerLookup::Found {
             k = (kv as IntegerLookup::Found).value;
-            kTerm = 0;
-            kFound = false;
-            for constantPosition in 0..size(initial.context.constants) {
-                constant = get(initial.context.constants, constantPosition);
-                if constant.kind = 0 {
-                    if kFound = false { if constant.value = k { kTerm = constant.id; kFound = true; }; };
-                };
-            };
-            if kFound {
+            work = withConstant(work, state, factIndex, k);
+            kLookup = stateConstant(state, factIndex, k);
+            if kLookup is ValueLookup::Found {
+                kTerm = (kLookup as ValueLookup::Found).term;
                 if size(goals) < 128 {
                     goals = push(goals, InferGoal { relation: 3, left: kTerm, right: subj.term, assumes: appendSteps(subjectSteps(subj), push([], ExecutionStep::Assume { relation: 3, left: ValueRef::Term { term: kTerm }, right: subjectRef(subj) })), checks: appendSteps(subjectSteps(subj), push([], ExecutionStep::Check { relation: 3, left: ValueRef::Term { term: kTerm }, right: subjectRef(subj) })) });
                     goals = push(goals, InferGoal { relation: 3, left: subj.term, right: kTerm, assumes: appendSteps(subjectSteps(subj), push([], ExecutionStep::Assume { relation: 3, left: subjectRef(subj), right: ValueRef::Term { term: kTerm } })), checks: appendSteps(subjectSteps(subj), push([], ExecutionStep::Check { relation: 3, left: subjectRef(subj), right: ValueRef::Term { term: kTerm } })) });
@@ -200,7 +293,7 @@ fn inferPhase4(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase5(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase5(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     inferring = st;
     count = size(inferring.assigned);
     for i in 0..count {
@@ -212,7 +305,7 @@ fn inferPhase5(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
                 k2 = evalTermValue(inferring.work.context, unionOf(inferring.work.context.equalities), s2.term, 6);
                 if k1 is IntegerLookup::Found {
                     if k2 is IntegerLookup::Found {
-                        inferring = inferPairGoal(inferring, initial.context, s1, s2, (k1 as IntegerLookup::Found).value, (k2 as IntegerLookup::Found).value);
+                        inferring = inferPairGoal(inferring, state, factIndex, s1, s2, (k1 as IntegerLookup::Found).value, (k2 as IntegerLookup::Found).value);
                     };
                 };
             };
@@ -223,15 +316,16 @@ fn inferPhase5(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
 
 // The candidate that two subjects, of values v1 and v2 now, stay that far apart: equal, or one the other plus a
 // distance written as a constant or as a sum of ones
-fn inferPairGoal(st: InferState, initialContext: &ValidatorContext, s1: &InferSubject, s2: &InferSubject, v1: Int, v2: Int) -> InferState {
+fn inferPairGoal(st: InferState, state: &ExecutionState, factIndex: &FactIndex, s1: &InferSubject, s2: &InferSubject, v1: Int, v2: Int) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     delta = v1 - v2;
     if delta = 0 {
         goals = push(goals, InferGoal { relation: 0, left: s1.term, right: s2.term, assumes: appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: subjectRef(s2) })), checks: appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: subjectRef(s2) })) });
         return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
     };
-    distance = inferDistance(initialContext, delta, candIndex);
-    if distance.found = false { return inferPairByConstants(InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals }, initialContext, s1, s2, v1, v2); };
+    work = withConstant(withConstant(work, state, factIndex, delta), state, factIndex, 1);
+    distance = inferDistance(state, factIndex, delta, candIndex);
+    if distance.found = false { return inferPairByConstants(InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals }, state, factIndex, s1, s2, v1, v2); };
     lhs = clone(s1);
     rhs = clone(s2);
     if distance.swapped {
@@ -252,8 +346,8 @@ fn inferPairGoal(st: InferState, initialContext: &ValidatorContext, s1: &InferSu
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferDistance(context: &ValidatorContext, delta: Int, candIndex: Int) -> InferDistance {
-    constant = constantTermWithValue(context, delta);
+fn inferDistance(state: &ExecutionState, factIndex: &FactIndex, delta: Int, candIndex: Int) -> InferDistance {
+    constant = stateConstant(state, factIndex, delta);
     if constant is ValueLookup::Found {
         return InferDistance { found: true, swapped: false, steps: [], value: ValueRef::Term { term: (constant as ValueLookup::Found).term } };
     };
@@ -263,7 +357,7 @@ fn inferDistance(context: &ValidatorContext, delta: Int, candIndex: Int) -> Infe
         swapped = true;
         magnitude = 0 - delta;
     };
-    one = constantTermWithValue(context, 1);
+    one = stateConstant(state, factIndex, 1);
     if magnitude < 2 || magnitude > 6 || one is ValueLookup::Missing {
         return InferDistance { found: false, swapped: false, steps: [], value: ValueRef::Term { term: 0 } };
     };
@@ -279,10 +373,11 @@ fn inferDistance(context: &ValidatorContext, delta: Int, candIndex: Int) -> Infe
 };
 
 // The candidate s1 = s2 + (c1 - c2), with c1 and c2 the program's constants for the subjects' values now
-fn inferPairByConstants(st: InferState, initialContext: &ValidatorContext, s1: &InferSubject, s2: &InferSubject, v1: Int, v2: Int) -> InferState {
+fn inferPairByConstants(st: InferState, state: &ExecutionState, factIndex: &FactIndex, s1: &InferSubject, s2: &InferSubject, v1: Int, v2: Int) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
-    c1 = constantTermWithValue(initialContext, v1);
-    c2 = constantTermWithValue(initialContext, v2);
+    work = withConstant(withConstant(work, state, factIndex, v1), state, factIndex, v2);
+    c1 = stateConstant(state, factIndex, v1);
+    c2 = stateConstant(state, factIndex, v2);
     if c1 is ValueLookup::Found {
         if c2 is ValueLookup::Found {
             tempD = 0 - 7200000 - candIndex * 4;
@@ -303,7 +398,7 @@ fn inferPairByConstants(st: InferState, initialContext: &ValidatorContext, s1: &
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase6(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase6(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     // (equalities first: the orders of every pair can fill the candidates up)
     for subjPosition in 0..size(assigned) {
@@ -318,7 +413,7 @@ fn inferPhase6(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase7(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase7(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for subjPosition in 0..size(assigned) {
         subj = get(assigned, subjPosition);
@@ -333,7 +428,7 @@ fn inferPhase7(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase8(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase8(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for i in 0..size(assigned) {
         for j in 0..size(assigned) {
@@ -363,18 +458,13 @@ fn inferPhase8(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
                                     rightTerm = anchor.term;
                                     buildRight = true;
                                     if offset != 0 {
-                                        oTerm = 0;
-                                        oFound = false;
-                                        for constantPosition in 0..size(initial.context.constants) {
-                                            constant = get(initial.context.constants, constantPosition);
-                                            if constant.kind = 0 {
-                                                if oFound = false { if constant.value = offset { oTerm = constant.id; oFound = true; }; };
-                                            };
-                                        };
-                                        if oFound {
+                                        work = withConstant(work, state, factIndex, offset);
+                                        oLookup = stateConstant(state, factIndex, offset);
+                                        if oLookup is ValueLookup::Found {
+                                            oTerm = (oLookup as ValueLookup::Found).term;
                                             tempR = 0 - 7300000 - candIndex * 4;
                                             candIndex = candIndex + 1;
-                                            madeR = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: tempR, function: -1, arguments: push(push([], subjectRef(anchor)), ValueRef::Term { term: oTerm }) }));
+                                            madeR = executeSteps(clone(work), push([], ExecutionStep::ApplyFresh { local: tempR, function: -1, arguments: push(push([], subjectRef(anchor)), ValueRef::Term { term: oTerm }) }));
                                             if madeR.status = 0 {
                                                 work = madeR.state;
                                                 rTerm = resolveValue(work, ValueRef::Local { local: tempR });
@@ -401,7 +491,7 @@ fn inferPhase8(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase9(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase9(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     analysis0 = analyzeContext(work.context);
     trimmed = [];
@@ -416,7 +506,7 @@ fn inferPhase9(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> I
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase10(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase10(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     analysis = analyzeContext(work.context);
     entailedEqs = [];
@@ -453,15 +543,10 @@ fn inferPhase10(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> 
                                 innerSteps = [];
                                 innerRef = subjectRef(anchorSubject);
                                 if k != 0 {
-                                    negConst = 0;
-                                    negFound = false;
-                                    for constantPosition in 0..size(initial.context.constants) {
-                                        constant = get(initial.context.constants, constantPosition);
-                                        if constant.kind = 0 {
-                                            if negFound = false { if constant.value = 0 - k { negConst = constant.id; negFound = true; }; };
-                                        };
-                                    };
-                                    if negFound {
+                                    work = withConstant(work, state, factIndex, 0 - k);
+                                    negLookup = stateConstant(state, factIndex, 0 - k);
+                                    if negLookup is ValueLookup::Found {
+                                        negConst = (negLookup as ValueLookup::Found).term;
                                         innerSteps = push([], ExecutionStep::ApplyFresh { local: tempA, function: -1, arguments: push(push([], subjectRef(anchorSubject)), ValueRef::Term { term: negConst }) });
                                         innerRef = ValueRef::Local { local: tempA };
                                     };
@@ -501,7 +586,7 @@ fn inferPhase10(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> 
     return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
-fn inferPhase11(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+fn inferPhase11(st: InferState, state: &ExecutionState, factIndex: &FactIndex) -> InferState {
     InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for i in 0..size(assigned) {
         for j in 0..size(assigned) {
@@ -514,15 +599,10 @@ fn inferPhase11(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> 
                     if kv2 is IntegerLookup::Found {
                         if size(goals) < 128 {
                             total = (kv1 as IntegerLookup::Found).value + (kv2 as IntegerLookup::Found).value;
-                            sumConst = 0;
-                            sumFound = false;
-                            for constantPosition in 0..size(initial.context.constants) {
-                                constant = get(initial.context.constants, constantPosition);
-                                if constant.kind = 0 {
-                                    if sumFound = false { if constant.value = total { sumConst = constant.id; sumFound = true; }; };
-                                };
-                            };
-                            if sumFound {
+                            work = withConstant(work, state, factIndex, total);
+                            sumLookup = stateConstant(state, factIndex, total);
+                            if sumLookup is ValueLookup::Found {
+                                sumConst = (sumLookup as ValueLookup::Found).term;
                                 temp = 0 - 7100000 - candIndex * 4;
                                 candIndex = candIndex + 1;
                                 made = executeSteps(clone(work), push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
