@@ -16,6 +16,12 @@ extra-source-files:
 - lib/mir/package.tersus
 - lib/mir/reader/reader.tersus
 - lib/mir/support/support.tersus
+- lib/mir/full/full.tersus
+- lib/mir/full/tokens.tersus
+- lib/mir/full/records.tersus
+- lib/mir/full/read.tersus
+- lib/mir/full/write.tersus
+- lib/mir/full/equality.tersus
 - lib/mir/emit/emit.tersus
 - lib/mir/emit/types.tersus
 - lib/mir/emit/values.tersus

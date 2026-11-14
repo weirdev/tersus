@@ -1601,7 +1601,7 @@ fn badAst() -> Parsed<AstProgram> [{ }] [{ }] {
 
 // The kind of the root of each stage of the data: Statements, Elaborated, Interface, or Entries of builtins
 fn rootKindOf(stage: &String) -> Int [{ }] [{ }] {
-    if stage = "parsed" { return 24; };
+    if stage = "parsed" || stage = "mir" { return 24; };
     if stage = "elaborated" { return 35; };
     if stage = "interface" { return 40; };
     if stage = "builtins" { return 37; };
