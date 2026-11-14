@@ -1147,10 +1147,10 @@ selfHostedQueryFamilies program =
                 -- A loop candidate is replayed in a state built from the loop's initial state, so
                 -- every term id it names has to be one of that state's: an id inference minted
                 -- while building the candidate denotes something else, or nothing, where the
-                -- candidate is replayed. The pair helpers take the initial context as a parameter,
+                -- candidate is replayed. The pair helpers look constants up in the entry state, by its index,
                 -- and these calls give them a work context disjoint from it -- which a real work
                 -- context, the initial one plus the scratch terms, never is. That is deliberate:
-                -- it is what makes the parameter, rather than st.work.context, the thing the
+                -- it is what makes the entry state, rather than st.work.context, the thing the
                 -- assertion pins.
                 inferContextOf constantTerms = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 inferSubject local subjectTerm = MData "InferSubject" [("local", MInt local), ("isSize", MBool False), ("temp", MInt 0), ("term", MInt subjectTerm)]
@@ -1165,10 +1165,19 @@ selfHostedQueryFamilies program =
                         Just (MList goals) -> Right (length goals, sort (nub (concatMap replayedTerms goals)))
                         other -> Left ("Inference state without goals: " ++ show other)
                     _ -> Left ("Unexpected inference result: " ++ show result)
+                entryOf constantTerms = floored $ MData "ExecutionState" [("context", inferContextOf constantTerms), ("locals", localsValue [(20, 20), (21, 21)]), ("templates", MList []), ("floor", MInt (-999))]
+                indexOf state = case runNamedFunction program "noFactIndex" [] of
+                    Ok (Just none) -> case runNamedFunction program "indexTo" [none, state] of
+                        Ok (Just index) -> Right index
+                        other -> Left ("Unexpected index: " ++ show other)
+                    other -> Left ("Unexpected index: " ++ show other)
                 checkPairProvenance name workConstants initialConstants expected =
-                    testAssertEq
-                        (inferredGoals (runNamedFunction program name [scratchInferState (map constant workConstants), inferContextOf (map constant initialConstants), inferSubject 20 20, inferSubject 21 21, MInt 7, MInt 4]))
-                        (Right expected)
+                    let entry = entryOf (map constant initialConstants)
+                     in case indexOf entry of
+                            Left err -> Just err
+                            Right index -> testAssertEq
+                                (inferredGoals (runNamedFunction program name [scratchInferState (map constant workConstants), entry, index, inferSubject 20 20, inferSubject 21 21, MInt 7, MInt 4]))
+                                (Right expected)
                 inferredEntryState = floored $ MData "ExecutionState" [("context", MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList (map constant [(1, 0, 0), (2, 0, 1), (3, 0, 3), (4, 0, -1)])), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]), ("locals", localsValue [(1, 3), (2, 4)]), ("templates", MList []), ("floor", MInt (-999))]
                 -- The scans inside the phases are reached through no parameter, so the whole
                 -- inference is run over an entry state of its own: it has to keep candidates,
@@ -1186,11 +1195,35 @@ selfHostedQueryFamilies program =
                             _ -> []
                         _ -> []
                     _ -> []
-                checkInferenceProvenance = case runNamedFunction program "inferLoopCandidateGoals" [inferredEntryState, MList [MInt 1, MInt 2], MData "HashSet" [("map", MData "HashMap" [("buckets", MList [MList []]), ("count", MInt 0)])]] of
+                emptyMap = MData "HashMap" [("buckets", MList [MList []]), ("count", MInt 0)]
+                checkInferenceProvenance = case indexOf inferredEntryState of
+                  Left err -> Just err
+                  Right index -> case runNamedFunction program "inferLoopCandidateGoals" [inferredEntryState, index, MList [MInt 1, MInt 2], MData "HashSet" [("map", emptyMap)], emptyMap] of
                     Ok (Just (MList goals)) ->
                         let outside = [replayed | replayed <- sort (nub (concatMap replayedTerms goals)), replayed `notElem` inferredEntryTerms]
                          in (if null goals then Just "Inference kept no loop candidate" else Nothing)
                                 `orElse` (if null outside then Nothing else Just ("Candidates replay terms the entry state does not name: " ++ show outside ++ ", named: " ++ show inferredEntryTerms))
+                    other -> Just ("Unexpected candidate result: " ++ show other)
+                -- Terms inference mints are below the entry state's floor, not merely below the view's
+                -- terms: the state holds a constant at -1000, below every term the view holds and
+                -- below the least id a scan of the view starts from, and it is the first constant
+                -- of 1, so the lookup for 1 copies it into the view. A mint from a floor taken from
+                -- the view would be -1000 too, giving it a second value (x = z + 2 = 3), and the
+                -- contradiction would keep every candidate, x = y (3 = 7) among them.
+                floorEntryState = MData "ExecutionState" [("context", inferContextOf (map constant [(-1000, 0, 1), (10, 0, 3), (11, 0, 1), (12, 0, 7), (13, 0, 2)])), ("locals", localsValue [(1, 10), (2, 11), (3, 12)]), ("templates", MList []), ("floor", MInt (-2000))]
+                readOnly = MData "HashSet" [("map", MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt 3), ("value", MBool True)]]]), ("count", MInt 1)])]
+                goalSides goal = case goal of
+                    MData "InferGoal" fields -> case (lookup "relation" fields, lookup "left" fields, lookup "right" fields) of
+                        (Just (MInt r), Just (MInt l), Just (MInt t)) -> Just (r, l, t)
+                        _ -> Nothing
+                    _ -> Nothing
+                checkInferenceFloor = case indexOf floorEntryState of
+                  Left err -> Just err
+                  Right index -> case runNamedFunction program "inferLoopCandidateGoals" [floorEntryState, index, MList [MInt 1, MInt 2], readOnly, emptyMap] of
+                    Ok (Just (MList goals)) ->
+                        let sides = map goalSides goals
+                         in (if null goals then Just "Inference kept no loop candidate" else Nothing)
+                                `orElse` (if Just (0, 10, 12) `elem` sides || Just (0, 12, 10) `elem` sides then Just ("A candidate false on entry was kept: " ++ show sides) else Nothing)
                     other -> Just ("Unexpected candidate result: " ++ show other)
                 -- A cache threaded through the goals answers each as a fresh cache does, and
                 -- the classes it keeps are its own context's, made on the first ask.
@@ -1787,6 +1820,7 @@ selfHostedQueryFamilies program =
                       -- state there is no candidate, rather than one naming the work state's)
                       , checkPairProvenance "inferPairGoal" [(900, 0, 7), (901, 0, 4)] [(11, 0, 4)] (0, [])
                       , checkInferenceProvenance
+                      , checkInferenceFloor
                       ])
                 , ("goal slices",
                       [ checkSliceExtension, checkSliceHub, checkSliceArity, checkSliceConstantHub

@@ -287,6 +287,20 @@ testInferredInvariants =
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int { i = 0; while i < n shrinks n - i { i = i + 1; }; affirm i = n; return i; };" "Could not prove: i = n"
             , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { c = clone(a); i = 0; while i < size(a) shrinks size(a) - i { c = push(c, 0); i = i + 1; }; affirm size(c) = size(a); return 0; };" "Could not prove: size(c) = size(a)"
             , parseValidateFailProgramHelper "fn f(a: List<Int>, b: List<Int>) -> Int { c = b; i = 0; while i < size(a) shrinks size(a) - i { c = set(c, 0, 1); i = i + 1; }; return 0; };" "Funct input validation failed"
+            , -- A variable the loop does not read is still compared with one it changes when an assignment copied
+              -- one into the other and both still hold that value on entry (s + i = n with i = n)
+              parseValidProgramHelper "fn g(l: List<Int>) -> Int { n = size(l); i = n; s = 0; while i > 0 shrinks i { i = i - 1; s = s + 1; }; affirm s = n; return s; };"
+            , parseValidProgramHelper "fn g(l: List<Int>) -> Int { n = size(l); i = 0; s = 0; while i < n shrinks n - i { i = i + 1; s = s + 1; }; affirm s = n; return s; };"
+            , -- A list whose elements the loop sets keeps the size it had on entry
+              parseValidProgramHelper "l = []; i = 0; while i < 300 [{ affirm i >= 0; }] shrinks 300 - i { l = push(l, i); i = i + 1; }; k = 0; while k < 300 [{ affirm k >= 0; }] shrinks 300 - k { l = set(l, k, 0); k = k + 1; }; x = get(l, 299);"
+            , -- A candidate the body keeps but that does not hold on entry is not assumed
+              parseValidProgramHelper "fn h(n: Int, k: Int) -> Int [{ affirm n >= 0; }] { s = k; i = 0; while i < n shrinks n - i { s = s + 0; t = k; i = i + 1; }; affirm s = k; return s; };"
+            , parseValidateFailProgramHelper "fn h(n: Int, k: Int) -> Int [{ affirm n >= 0; }] { s = k + 1; i = 0; while i < n shrinks n - i { s = s + 0; t = k; i = i + 1; }; affirm s = k; return s; };" "Could not prove: s = k"
+            , -- A constant the loop's locals do not reach is found by its value
+              parseValidProgramHelper ("fn h(n: Int) -> Int [{ affirm n >= 0; }] { c = 7; " ++ concat ["d" ++ show k ++ " = c + " ++ show k ++ "; " | k <- [0 .. 1099 :: Int]] ++ "a = 2; b = 5; while a < n shrinks n - a { a = a + 1; b = b - 1; }; affirm a + b = 7; return a; };")
+            , -- Inference sees the facts near the loop's locals: a bound that only a term with more facts than the
+              -- top rung admits holds is not found, as an invariant that states it is not proved on entry
+              parseValidateFailProgramHelper ("fn g(l: List<Int>) -> Int { n = size(l); " ++ concat ["b" ++ show k ++ " = n + " ++ show k ++ "; " | k <- [1 .. 1100 :: Int]] ++ "i = n; s = 0; while i > 0 shrinks i { i = i - 1; s = s + 1; }; affirm s = n; return s; };") "Could not prove: s = n"
             ]
 
 -- Loops and recursive functions say why they end, and code that may not end is declared
