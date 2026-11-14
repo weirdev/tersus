@@ -234,8 +234,9 @@ fn parseFull(lines: &List<List<Token>>) -> Parsed<FullProgram> ~ {
     for i in at + 1..size(lines) { astLines = push(astLines, tokenLine(get(lines, i))); };
     ast = parseAstLines(&astLines);
     if !ast.ok || ast.value.stage != "mir" { return bad; };
+    root = ast.value.root;
     program = FullProgram { arena: ast.value.nodes, ..program };
-    roots = listItems(&program.arena, ast.value.root);
+    roots = listItems(&program.arena, root);
     if !payloadsOk(&program, &roots) || !uniqueRecords(&program.types) || !uniqueRecords(&program.generics) || !uniqueRecords(&program.invariants) || !uniqueRecords(&program.bounded) || !uniqueRecords(&program.instances) || !uniqueFunctions(&program.functions) { return bad; };
     return Parsed<FullProgram> { value: mapProgramPayloads(program, &roots), pos: size(lines), ok: true };
 };
