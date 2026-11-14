@@ -2,6 +2,8 @@
 module TestLink (testLink, testLinkNative, linkProbeProgram, probeSource) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.Exception (evaluate)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Native
 import qualified MirHousekeeping as Housekeeping
@@ -10,7 +12,7 @@ import ValidatorNative (validateCompiled)
 import Pipeline (oneMarkerEach)
 import System.Exit (ExitCode(..))
 
-import Data.List (isInfixOf, isPrefixOf)
+import Data.List (isInfixOf, isPrefixOf, nubBy)
 import qualified Data.ByteString.Char8 as B
 import AstData (readMirPayloadBytes, writeMirPayloadLines)
 import qualified Data.Map.Strict as Map
@@ -19,13 +21,15 @@ import DataCodec (quote)
 import qualified Mir as M
 import MirCopies (makeCopies)
 import qualified Compile
+import qualified MirLists
+import MirMoves (finishLowered)
 import MirData (readLowered, writeLowered)
 import qualified MirData
 import MirEval (RunEnv (..), Outcome (..), MirValue (..), runProgramEnv)
 import MirPass (programData)
 import ElaboratorTool (bootstrapLoader)
 import LibPackage (libPackage)
-import PackageCompile (compileModulesUsing, lowerCompiledPackage)
+import PackageCompile (CompiledModule (..), CompiledPackage (..), compileModulesUsing, lowerCompiledPackage)
 import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
 import PreludeSource (toolPackageFiles)
 import qualified LinkOracle as Oracle
@@ -132,6 +136,43 @@ nativeMerge units = case mergeInput units of
                 Error e -> Error ("Validation failed: " ++ e)
                 ok -> ok
 
+nativeMergeBeforeCopies :: [(ModuleId, M.Program)] -> IO (Result M.Program String)
+nativeMergeBeforeCopies units = case mergeInput units of
+    Error e -> pure (Error e)
+    Ok input -> fmap (mapResult M.lowProgram) (nativeFull input)
+
+positiveMerge :: [(ModuleId, M.Program)] -> (M.Program -> TestResult) -> IO TestResult
+positiveMerge units check = do
+    actual <- nativeMergeBeforeCopies units
+    let expected = Oracle.linkProgramsBeforeCopies units
+    pure (firstFailure [inspect expected check, inspect actual check, sameResult expected actual])
+
+retainedGenericUnits :: Result [(ModuleId, M.Program)] String
+retainedGenericUnits = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` \compiled ->
+    let lowerOne modu = mapResult ((,) (compiledModuleId modu)) (compiledLowered modu `bindResult` finishLowered)
+        libraries = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
+    in mapResult (libraries ++) (flatResultMap lowerOne (compiledModules compiled))
+  where
+    snapshot = Snapshot (resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" False
+    source = "struct Holder<T> { value: T }; fn bounded<T: Copy>(x: T) -> T [{ }] [{ affirm true; }] { affirm true; return x; }; fn generic<T>(xs: &List<T>) -> Int { return size(xs); }; xs = [1, 2]; h = Holder { value: xs }; return bounded(generic(&h.value));"
+
+retainedGenericMetadata :: M.Program -> TestResult
+retainedGenericMetadata p = firstFailure
+    [ testAssertTrue (Map.member "Holder" (M.progGenerics p))
+    , testAssertTrue (Map.member "bounded" (M.progBounded p) && Map.member "bounded[Int]" (M.progInstances p))
+    , testAssertTrue ("generic" `elem` calls && "bounded[Int]" `elem` calls)
+    , case (Map.lookup "generic" (M.progFunctions p), Map.lookup "bounded" (M.progFunctions p)) of
+        (Just generic, Just bounded) -> firstFailure
+            [ testAssertEq (M.fnTypeParams generic) ["T"]
+            , testAssertEq (M.fnTypeParams bounded) ["T"]
+            , testAssertTrue (not (null (M.specEnsures (M.fnSpec bounded))))
+            ]
+        _ -> Just "the retained source templates disappeared before copies"
+    , testAssertTrue (not (null [() | f <- M.progMain p : Map.elems (M.progFunctions p), b <- Map.elems (M.fnBlocks f), M.Ghost _ _ <- M.blockStatements b]))
+    ]
+  where
+    calls = [name | block <- Map.elems (M.fnBlocks (M.progMain p)), M.Call (M.Const (M.CFn name)) _ _ _ <- [M.blockTerminator block]]
+
 realInputDifferentials :: IO TestResult
 realInputDifferentials = do
     helpers <- Housekeeping.listLibrary
@@ -139,26 +180,34 @@ realInputDifferentials = do
         (Error e, _) -> pure (Just e)
         (_, Error e) -> pure (Just e)
         (Ok units, Ok prepared) -> do
-            let joined = units ++ [(ModuleId "actual" Nothing, prepared)]
-            mergeResult <- nativeMerge joined
+            captured <- newIORef Nothing
+            let capture inputs = unsafePerformIO (writeIORef captured (Just inputs) >> pure (Oracle.linkPrograms inputs))
+                aligned = Housekeeping.eraseGhosts prepared `bindResult` Housekeeping.expandRefWrites `bindResult` MirLists.lowerListsWith capture (Ok units)
+            helperProgram <- evaluate aligned
+            inputs <- readIORef captured
+            helperResult <- case (helperProgram, inputs) of
+                (Error e, _) -> pure (Just e)
+                (_, Nothing) -> pure (Just "the real native lowering never called its helper linker")
+                (Ok native, Just actualUnits) -> do
+                    compared <- positiveMerge actualUnits (\p -> firstFailure
+                        [ testAssertTrue (Map.member "listNew" (M.progFunctions p))
+                        , testAssertTrue (not (null [() | f <- M.progMain p : Map.elems (M.progFunctions p), b <- Map.elems (M.fnBlocks f), M.Call (M.Const (M.CFn name)) _ _ _ <- [M.blockTerminator b], name `elem` ["listNew", "listPush"]]))
+                        ])
+                    pure (firstFailure
+                        [ testAssertTrue (any (\(m, _) -> m == ModuleId "tersuslib" (Just "lists")) actualUnits)
+                        , testAssertTrue (Map.member "listNew" (M.progFunctions native))
+                        , compared
+                        ])
+            genericResult <- case retainedGenericUnits of
+                Error e -> pure (Just e)
+                Ok inputs' -> positiveMerge inputs' retainedGenericMetadata
             pruneResult <- case programData prepared of Error e -> pure (Error e); Ok text -> nativeFull ("pass link\nprune\n" ++ text)
             envResult <- case programData prepared of Error e -> pure (Error e); Ok text -> nativeFull ("pass link\nenvironments\n" ++ text)
-            let source = "fn bounded<T: Copy>(x: T) -> T { return x; }; fn generic<T>(xs: &Box<Array<T>>) -> Int { return size(xs); }; xs = [1, 2]; return bounded(size(xs));"
-            nativeProgram <- case Compile.lowerSourceUsing bootstrapLoader False True source of
-                Error e -> pure (Error e)
-                Ok p -> do
-                    seed <- cachedSeed
-                    case seed of
-                        Error e -> pure (Error e)
-                        Ok emitter -> Housekeeping.ownedWith emitter p
-            genericResult <- case nativeProgram of
-                Error e -> pure (Just e)
-                Ok p -> sameResult (Oracle.linkPrograms (units ++ [(ModuleId "native" Nothing,p)])) <$> nativeMerge (units ++ [(ModuleId "native" Nothing,p)])
             pure $ firstFailure
-                [ sameResult (Oracle.linkPrograms joined) mergeResult
+                [ helperResult
+                , genericResult
                 , sameResult (Ok (Oracle.pruneProgram prepared)) (mapResult M.lowProgram pruneResult)
                 , sameResult (Ok (Oracle.completeSpecEnvs prepared)) (mapResult M.lowProgram envResult)
-                , genericResult
                 ]
 
 testLinkNative :: Test
@@ -205,6 +254,30 @@ testLinkNative = TestList "testLinkNative"
                             (_, answer, diagnostic) <- Native.runWithInputFull executable input
                             pure (firstFailure [testAssertEq answer "1\n", testAssertEq diagnostic "the input is not the MIR as data\n"])) ["", "\n"]
                         pure (firstFailure (suffix : quotes : legacy))
+       , TestCase "dependency main ghosts follow numeric block order despite wire permutation" $ do
+            let dep = empty{M.progMain = (M.progMain empty){M.fnBlocks = Map.fromList
+                    [(M.BlockId 2, M.BasicBlock [M.Ghost Map.empty (M.GhostPosition 2 1)] M.Return)
+                    ,(M.BlockId 10, M.BasicBlock [M.Ghost Map.empty (M.GhostValidation (S.ProofAssert (S.CTerm (S.VBool True))))] M.Return)]}}
+                units = [(unitA, dep), (unitB, empty)]
+            case (programData dep, programData empty, Oracle.linkProgramsBeforeCopies units `bindResult` programData) of
+                (Ok input, Ok root, Ok expected) -> do
+                    let altered = unlines (reverseFirstBlocks (lines input))
+                        one (ModuleId pkg modu) text = "unit " ++ quote pkg ++ " " ++ maybe "none" (\n -> "some " ++ quote n) modu ++ " " ++ show (length (lines text)) ++ "\n" ++ text
+                        request = "pass link\nmerge 2\n" ++ one unitA altered ++ one unitB root
+                    tool <- nativeLinkTool
+                    case tool of
+                        Error e -> pure (Just e)
+                        Ok executable -> do
+                            (status, out, errors) <- Native.runWithInputFull executable request
+                            pure (firstFailure
+                                [ inspect (readLowered altered) (\back -> testAssertEq (M.lowProgram back) dep)
+                                , testAssertEq status ExitSuccess
+                                , testAssertEq errors ""
+                                , testAssertEq out expected
+                                ])
+                (Error e, _, _) -> pure (Just e)
+                (_, Error e, _) -> pure (Just e)
+                (_, _, Error e) -> pure (Just e)
        , TestCase "native block record order is semantic" $ do
             let f = (function "f" 1){M.fnBlocks = Map.fromList [(M.BlockId 0, M.BasicBlock [] (M.Goto (M.BlockId 1))), (M.BlockId 1, M.BasicBlock [M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 1)))] M.Return)]}
                 p = empty{M.progFunctions = Map.singleton "f" f}

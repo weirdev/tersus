@@ -2,6 +2,7 @@
 
 module MirLists
     ( lowerLists
+    , lowerListsWith
     , hasLists
     ) where
 
@@ -108,9 +109,12 @@ operandsOf rv = case rv of
     Deref o -> [o]
 
 lowerLists :: Result [(ModuleId, Program)] String -> Program -> Result Program String
-lowerLists library program
+lowerLists = lowerListsWith linkPrograms
+
+lowerListsWith :: ([(ModuleId, Program)] -> Result Program String) -> Result [(ModuleId, Program)] String -> Program -> Result Program String
+lowerListsWith linker library program
     | not (hasLists program) = Ok program
-    | otherwise = library `bindResult` \units -> mapResult completeErasedInstances (linkPrograms (selected units ++ [(ModuleId "native" Nothing, completeErasedInstances lowered)]))
+    | otherwise = library `bindResult` \units -> mapResult completeErasedInstances (linker (selected units ++ [(ModuleId "native" Nothing, completeErasedInstances lowered)]))
   where
     wanted = storageModules program
     unusedTypes = [ty | (modu, ty) <- [("lists", "List"), ("box", "Box")], modu `notElem` wanted]

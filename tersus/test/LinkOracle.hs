@@ -2,6 +2,7 @@
 
 module LinkOracle
     ( linkPrograms
+    , linkProgramsBeforeCopies
     , pruneProgram
     , completeSpecEnvs
     ) where
@@ -28,8 +29,14 @@ import Utils (Result (..), bindResult)
 -- identical to the one already linked (a declaration an importing unit
 -- carries seeded from the interface it was lowered against) merges.
 linkPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
-linkPrograms [] = Error "link error: no modules to link"
-linkPrograms units = deduplicateUnits [(modu, normalizeExterns program) | (modu, program) <- units] `bindResult` linkNormalized
+linkPrograms units = linkProgramsBeforeCopies units `bindResult` \program ->
+    case makeCopies (M.completeInstances program) of
+        Error e -> Error ("Validation failed: " ++ e)
+        ok -> ok
+
+linkProgramsBeforeCopies :: [(ModuleId, M.Program)] -> Result M.Program String
+linkProgramsBeforeCopies [] = Error "link error: no modules to link"
+linkProgramsBeforeCopies units = deduplicateUnits [(modu, normalizeExterns program) | (modu, program) <- units] `bindResult` linkNormalized
 
 linkNormalized :: [(ModuleId, M.Program)] -> Result M.Program String
 linkNormalized normalized =
@@ -39,10 +46,7 @@ linkNormalized normalized =
                 mergeAll "invariant" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInvariants program)] `bindResult` \invariants ->
                     mergeAll "function with bounds" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progBounded program)] `bindResult` \bounded ->
                         mergeAll "copy" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInstances program)] `bindResult` \instances ->
-                            -- (a copy the call cannot have is refused as the elaborator refuses a call)
-                            case makeCopies (M.completeInstances (M.Program types functions linkedMain generics invariants bounded instances)) of
-                                Error e -> Error ("Validation failed: " ++ e)
-                                ok -> ok
+                            Ok (M.Program types functions linkedMain generics invariants bounded instances)
   where
     functionEnv = Map.fromList [(name, M.Const (M.CFn name)) | (_, program) <- normalized, name <- Map.keys (M.progFunctions program)]
     rootMain = M.progMain (snd (last normalized))
