@@ -5,7 +5,7 @@ import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nativ
 import elaborate::state { intText };
 import elaborate::lowerstate { PackLoopRec, simpleType, lwMalformed, Swapped, swapBuilder, Binding, GenericRec, LBlock, LDecl, LFn, LoopRec, LowSt, BoundedRec, Rv, Stmt, TDecl, Term, argOf, claim, defaultTy, forNameOf, fromCodecTy, functionType, hasInt, hasText, intAt, isMutRefTy, isRefTy, lfail, lwCat, lwCat3, lwInstanceText, lwKind, lwBaseName, lwSort, lwTextAt, newBuilder, quote, renderTy, lwSizeTokens, lwSp, tyOf, tyText, typeNameOf, unrefTy, Sig };
 import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, tempLocal, validationReadsPack, assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv, forgetRecorded, forgetRefTarget };
-import elaborate::lowerexpr { commonRefTargets, finishInto, lowerCondition, lowerLast, lowerOperand, rvPend };
+import elaborate::lowerexpr { commonRefTargets, finishInto, lentNames, lowerCondition, lowerLast, lowerOperand, rvPend };
 import elaborate::lowerplace { lowerDerefPlace };
 
 // The lowering of a checked module to the MIR: control flow becomes blocks that jump, nested
@@ -616,7 +616,7 @@ fn defineFunction(ls: LowSt, src: &List<AstNode>, var: String, v: Int) -> LowSt 
     };
     Swapped { ls: inner, b: outer } = swapBuilder(ls, newBuilder(clone(name), false, true, sig.rty));
     ls = inner;
-    ls = LowSt { bSizes: clone(sig.sizes), bTypeParams: clone(sig.types), ..ls };
+    ls = LowSt { bSizes: clone(sig.sizes), bTypeParams: clone(sig.types), bLent: lentNames(src, listItems(src, parts.stmts)), ..ls };
     ls = lowerParams(ls, namesOf(src, parts.params), &sig);
     ls = visibleEnv(ls);
     env = ls.id;
@@ -1028,6 +1028,7 @@ fn lowerProgramStatement(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
 
 fn lowerProgram(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
     ls = assignedNames(ls, src, stmts);
+    ls = LowSt { bLent: lentNames(src, stmts), ..ls };
     ls = registerTopLevel(ls, src, stmts);
     for s in stmts { if ls.ok { ls = lowerProgramStatement(ls, src, s); }; };
     if !ls.ok { return ls; };
