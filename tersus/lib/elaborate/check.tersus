@@ -7,7 +7,7 @@ import elaborate::out { emit, emitExpressions, emitName, emitNames, emitProofs, 
 import elaborate::proofs { inferProof, rewriteOldStatements };
 import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName, mentionsVariable };
 import elaborate::refs { declaredOrigin, refsOf, withRefs, derefRoot, derefSteps, exprRefOrigins, expressionPlaces, joinBranchReferences, namedReferences, ownParameterSources, parameterContents, placeSteps, putOrigins, putRefResult, recordAlias, recordOrigins, recordPlaceReferences, resetBranchReferences, resolveRefPlace, resolveRefPlaces, sameReferences, withinWrites, writesTarget, writesText };
-import elaborate::state { FnSig, Generic, Place, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
+import elaborate::state { FnSig, Generic, Place, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, copyState, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
 import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, templateOf };
 
 fn stmtOf(st: &St, s: Int) -> AstStatement ~ {
@@ -642,7 +642,7 @@ fn prepareLoopReferences(st: St, cond: Int, xs: Int) -> St ~ {
     body = listItems(&st.nodes, xs);
     count = 0;
     while count <= 100 [{ affirm count >= 0; }] ~ {
-        working = withRefs(clone(st), clone(known));
+        working = withRefs(copyState(&st), clone(known));
         working = inferExpr(working, cond);
         if working.status != 0 { return working; };
         working = pushScope(working);
