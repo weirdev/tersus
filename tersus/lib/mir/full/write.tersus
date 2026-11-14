@@ -138,13 +138,13 @@ fn emitFull(out: FullOutput) -> Int ~ {
 fn mapFunctionPayloads(fun: FullFunction, map: &List<Int>) -> FullFunction ~ {
     fun = FullFunction { spec: mapPayloadLine(fun.spec, map), ..fun };
     loops = []; blocks = [];
-    for row in &fun.loops { loops = push(loops, FullRecord { tokens: mapPayloadLine(clone(row.tokens), map), ..row }); };
+    for row in &fun.loops { loops = push(loops, FullRecord { name: clone(row.name), tokens: mapPayloadLine(clone(row.tokens), map) }); };
     for b in &fun.blocks { lines = []; for row in &b.lines { lines = push(lines, mapPayloadLine(clone(row), map)); }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
     return FullFunction { loops: loops, blocks: blocks, ..fun };
 };
 fn mapProgramPayloads(p: FullProgram, map: &List<Int>) -> FullProgram ~ {
     invariants = []; functions = []; trailer = [];
-    for row in &p.invariants { invariants = push(invariants, FullRecord { tokens: mapPayloadLine(clone(row.tokens), map), ..row }); };
+    for row in &p.invariants { invariants = push(invariants, FullRecord { name: clone(row.name), tokens: mapPayloadLine(clone(row.tokens), map) }); };
     for fun in &p.functions { functions = push(functions, mapFunctionPayloads(clone(fun), map)); };
     for row in &p.trailer { trailer = push(trailer, mapPayloadLine(clone(row), map)); };
     return FullProgram { invariants: invariants, functions: functions, entry: mapFunctionPayloads(p.entry, map), trailer: trailer, ..p };
