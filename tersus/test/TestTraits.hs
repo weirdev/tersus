@@ -191,6 +191,16 @@ testTraits =
                 , testCase "a bounded marker impl is refused" (parseValidateFailProgramHelper "trait M { }; trait N { }; struct Pair<T> { a: T, b: T }; impl<T: N> M for Pair<T> { }; return 0;" "the bounds of a marker impl are not supported")
                 ]
             , TestList
+                "a copy knows of a call through a bound the trait's contract"
+                [ testCase "a body that needs more than the trait promises is refused in its copy" (parseValidateFailProgramHelper ("struct C { k: Int }; trait M { fn m(self: &Self) -> Int [{ }] [{ }]; }; " ++ "impl M for C { fn m(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 3; }; }; fn f<T: M>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return x.m(); }; return f(C { k: 1 });") "Could not prove: return >= 0 (in f[C])")
+                , testCase "and in the copy of an impl with bounds" (parseValidateFailProgramHelper "struct C { k: Int }; struct P<T> { a: T }; trait M { fn m(self: &Self) -> Int [{ }] [{ }]; }; impl M for C { fn m(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 3; }; }; impl<T: M> M for P<T> { fn m(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return M::m(self.a); }; }; return M::m(P<C> { a: C { k: 1 } });" "Could not prove: return >= 0")
+                , testCase "and a proof in a copy that names the trait's function" (parseValidateFailProgramHelper "struct C { k: Int }; trait M { fn m(self: &Self) -> Int [{ }] [{ }]; }; impl M for C { fn m(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 3; }; }; fn f<T: M>(x: &T) -> Int [{ }] [{ affirm M::m(x) >= 0; }] { return 0; }; return f(C { k: 1 });" "(in f[C])")
+                , testCase "a trait's contract over its own functions is met through them" (parseEvalProgramHelper ("trait S { fn len(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; fn at(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < S::len(self); }] [{ }]; }; struct W { n: Int }; impl S for W { fn len(self: &Self) -> Int [{ }] [{ affirm return = 3; }] { return 3; }; fn at(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < S::len(self); }] [{ }] { return i; }; }; fn atZero<T: S>(x: &T) -> Int [{ affirm S::len(x) >= 1; }] [{ }] { return x.at(0); }; return atZero(W { n: 1 });") (Just (VInt 0)))
+                , testCase "a concrete caller knows the impl's contract of a copy's result" (parseEvalProgramHelper ("struct C { k: Int }; trait M { fn m(self: &Self) -> Int [{ }] [{ }]; }; " ++ "impl M for C { fn m(self: &Self) -> Int [{ }] [{ affirm return = 3; }] { return 3; }; }; fn f<T: M>(x: &T) -> Int [{ }] [{ affirm return = M::m(x); }] { return x.m(); }; c = C { k: 1 }; r = f(c); affirm r = M::m(c); affirm r = 3; affirm M::m(c) > 0; return r;") (Just (VInt 3)))
+                , testCase "an impl call through a type with a list of itself ends" (parseEvalProgramHelper "struct Tree { v: Int, kids: List<Tree> }; impl Clone for Tree { fn clone(self: &Self) -> Self [{ }] [{ }] { return Tree { v: self.v, kids: clone(self.kids) }; }; }; t = Tree { v: 4, kids: push([], Tree { v: 5, kids: [] }) }; u = clone(t); return u.v;" (Just (VInt 4)))
+                , testCase "a check function's body is the call of its impl's function with its parameters" checkFunctionShape
+                ]
+            , TestList
                 "bodies checked against their bounds alone"
                 [ testCase "a body that uses what its bounds give" (bounded "fn twice<T: Show>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return x.show() + Show::show(x); }; return twice(Cell { v: 0 });" 2)
                 , testCase "a method no bound gives is refused where the function is defined" (boundedRejected "fn m<T: Show>(x: &T) -> Int { return x.measure(); }; return 0;" "m calls measure on a T, and no bound of it has a function measure")
@@ -278,3 +288,30 @@ testTraits =
                 , testCase "nor one in a block" (boundedRejected "{ fn inner<U: Size>(u: &U) -> Int { return u.measure(); }; }; return 0;" "a function with bounds on its types can only be defined at the top of the program or in an impl of a type, not in a block or a function")
                 ]
             ]
+
+-- The validator takes a check function `Tr for O::g` as its impl's function (SelfHostedMir.validatorSymbol), which holds
+-- only while its body is the call of that function with its parameters, in order, and returns what it gives
+checkFunctionShape :: TestResult
+checkFunctionShape = case lowerSource True source of
+    Error e -> Just e
+    Ok program ->
+        let checks = [fn | fn <- Map.elems (M.progFunctions program), Just _ <- [parseImplCheckName (M.fnName fn)]]
+         in if length checks < 3 then Just ("expected the check functions, got " ++ show (Map.keys (M.progFunctions program))) else mconcat (map shape checks)
+  where
+    source = "struct C { k: Int }; struct P<T> { a: T }; trait M { fn m(self: &Self, n: Int) -> Int [{ }] [{ }]; fn z(self: &Self) -> Int [{ }] [{ }]; }; impl M for C { fn m(self: &Self, n: Int) -> Int [{ }] [{ }] { return n; }; fn z(self: &Self) -> Int [{ }] [{ }] { return 0; }; }; impl<T: M> M for P<T> { fn m(self: &Self, n: Int) -> Int [{ }] [{ }] { return M::m(self.a, n); }; fn z(self: &Self) -> Int [{ }] [{ }] { return M::z(self.a); }; }; p = P<C> { a: C { k: 1 } }; return M::m(p, 2) + M::z(p);"
+    shape fn = case parseImplCheckName (M.fnName fn) of
+        Just (trait, owner, function) ->
+            let impl = "<" ++ owner ++ " as " ++ trait ++ ">::" ++ function
+                calls = [(callee, args, dest, next) | M.BasicBlock [] (M.Call (M.Const (M.CFn callee)) args dest next) <- [M.fnBlocks fn Map.! M.BlockId 0]]
+             in case calls of
+                    [(callee, args, M.Local 0, next)]
+                        | callee == impl
+                        , map operandLocal args == map Just (M.fnParams fn)
+                        , Just (M.BasicBlock [] M.Return) <- Map.lookup next (M.fnBlocks fn)
+                        , Map.size (M.fnBlocks fn) == 2 -> Nothing
+                    _ -> Just (M.fnName fn ++ " is not the call of " ++ impl ++ ": " ++ show (M.fnBlocks fn))
+        Nothing -> Nothing
+    operandLocal o = case o of
+        M.Copy l -> Just l
+        M.Move l -> Just l
+        _ -> Nothing
