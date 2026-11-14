@@ -20,6 +20,7 @@ module MirHousekeeping
     , toolOwnedProgram
     , emitterOwnedProgram
     , ownedToolWith
+    , ownedWith
     , ownedProgramOf
     , cachedParser
     , parserInput
