@@ -24,7 +24,12 @@ unitOf p = Lowered p Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty
 
 monoDifference :: Program -> Program -> TestResult
 monoDifference expected actual
-    | expected /= actual = Just ("native mono differs:\nexpected " ++ show expected ++ "\nactual " ++ show actual)
+    | expected /= actual = Just ("native mono differs:\n" ++ unlines
+        [ "types expected: " ++ take 500 (show (progTypes expected))
+        , "types actual: " ++ take 500 (show (progTypes actual))
+        , "changed functions: " ++ show (take 6 [name | name <- Set.toList (Map.keysSet (progFunctions expected) `Set.union` Map.keysSet (progFunctions actual)), Map.lookup name (progFunctions expected) /= Map.lookup name (progFunctions actual)])
+        , "main changed: " ++ show (progMain expected /= progMain actual)
+        ])
     | show expected /= show actual = Just "native mono changed retained builtin metadata"
     | writeLowered (unitOf expected) /= writeLowered (unitOf actual) = Just "native mono reserializes differently"
     | otherwise = Nothing
@@ -216,6 +221,37 @@ unicodeArgumentProgram name = genericProgram
     gName = instanceName "G" [ArgType named]
     ownedIdentity = identityFunction{fnBorrowed = [], fnLocals = Map.fromList [(Local 0, LocalDecl (TParam "T") Nothing), (Local 1, LocalDecl (TParam "T") Nothing)]}
 
+listSelectorProgram :: Program
+listSelectorProgram = genericProgram
+    { progGenerics = Map.singleton "List" (["T"], [("addr", TAddr (TParam "T")), ("len", TInt), ("cap", TInt)])
+    , progTypes = Map.fromList
+        [ (instanceName "List" [ArgType (TParam "T")], StructDecl [("addr", TAddr (TParam "T")), ("len", TInt), ("cap", TInt)])
+        , ("List<Int>", StructDecl [("addr", TAddr TInt), ("len", TInt), ("cap", TInt)])
+        ]
+    , progFunctions = Map.singleton "<List as Drop>::drop" dropFn
+    , progMain = emptyFunction{fnLocals = Map.insert (Local 1) (LocalDecl (TNamed "List" [ArgType TInt]) Nothing) (fnLocals emptyFunction)}
+    }
+  where
+    symbolic = TNamed "List" [ArgType (TParam "T")]
+    dropFn = emptyFunction
+        { fnName = "<List as Drop>::drop", fnParams = [Local 1], fnTypeParams = ["T"], fnReturns = Nothing
+        , fnLocals = Map.fromList [(Local 1, LocalDecl symbolic (Just "self")), (Local 2, LocalDecl (TAddr (TParam "T")) Nothing)]
+        , fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 2) (ReadField (Copy (Local 1)) (instanceName "List" [ArgType (TParam "T")]) "addr")] Return)
+        }
+
+nestedGenericArgument :: Type -> Program
+nestedGenericArgument argument = genericProgram
+    { progFunctions = Map.singleton "g" identityFunction
+        { fnName = "g", fnBorrowed = []
+        , fnLocals = Map.fromList [(Local 0, LocalDecl (TParam "T") Nothing), (Local 1, LocalDecl (TParam "T") Nothing)]
+        }
+    , progMain = emptyFunction
+        { fnReturns = Just argument
+        , fnLocals = Map.fromList [(Local 0, LocalDecl argument Nothing), (Local 1, LocalDecl argument Nothing)]
+        , fnBlocks = Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn "g")) [Copy (Local 1)] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)]
+        }
+    }
+
 collidingTypeVariables :: Program
 collidingTypeVariables = genericProgram
     { progFunctions = Map.singleton "g" ownedIdentity{fnName = "g"}
@@ -242,6 +278,11 @@ monoFixtures =
     , ("monomorphic Drop is deduplicated with an unrelated generic", plainDropWithGeneric)
     , ("Unicode uppercase type parameters complete declarations", unicodeParameterProgram)
     , ("nested Unicode lowercase types keep canonical backticks", unicodeArgumentProgram "α")
+    , ("native list helper keeps canonical symbolic declaration and selector keys", listSelectorProgram)
+    , ("named List renders an unresolved type as Pretty does", nestedGenericArgument (TNamed "List" [ArgType (TVar 1)]))
+    , ("named Box renders an unresolved type as Pretty does", nestedGenericArgument (TNamed "Box" [ArgType (TVar 1)]))
+    , ("named List renders a parameter without instance quoting", nestedGenericArgument (TNamed "List" [ArgType (TParam "B")]))
+    , ("named Box retains nested forall in ordinary rendering", nestedGenericArgument (TNamed "Box" [ArgType (TForall [] ["B"] TInt)]))
     , ("structural instance keys win despite reverse discovery order", collidingTypeVariables)
     , ("nested Unicode alphanumeric types keep canonical backticks", unicodeArgumentProgram "α1")
     , ("generic type call strips only function proof metadata", genericProgram)

@@ -1,7 +1,7 @@
 import data::codec::codec { Token };
 import mir::full::full { FullRecord, FullBlock, FullFunction };
 import mir::full as full;
-import mir::mono::tokens { MonoBinding, monoLookup, monoBind, monoTypeName, monoNamedName, monoSubstitute, monoCompareText, monoCompareNames, monoCompareTypeLists };
+import mir::mono::tokens { MonoBinding, monoLookup, monoBind, monoTypeName, monoInstanceTypeName, monoSubstitute, monoCompareText, monoCompareNames, monoCompareTypeLists };
 
 struct MonoKey { name: String, types: List<List<Token>>, sizes: List<String> };
 impl Clone for MonoKey { };
@@ -20,6 +20,7 @@ fn monoSection(ts: &List<Token>, word: &String) -> List<String> [{ }] [{ }] ~ {
     out = [];
     if p < 0 { return out; };
     n = full::tokens::numberAt(ts, p + 1);
+    if n < 0 { return out; };
     for i in 0..n { out = push(out, full::tokens::textAt(ts, p + 2 + i)); };
     return out;
 };
@@ -68,7 +69,7 @@ fn monoMatch(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> 
 
 fn monoMatchNamed(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> List<MonoBinding> ~ {
     n = full::tokens::numberAt(pat, 2);
-    if full::tokens::textAt(pat, 1) != full::tokens::textAt(actual, 1) || n != full::tokens::numberAt(actual, 2) { return bs; };
+    if n < 0 || full::tokens::textAt(pat, 1) != full::tokens::textAt(actual, 1) || n != full::tokens::numberAt(actual, 2) { return bs; };
     p = 3; a = 3;
     for i in 0..n {
         pe = full::tokens::sizeEnd(pat, p + 1); ae = full::tokens::sizeEnd(actual, a + 1);
@@ -83,6 +84,7 @@ fn monoMatchNamed(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>
 
 fn monoMatchFn(bs: List<MonoBinding>, pat: &List<Token>, actual: &List<Token>) -> List<MonoBinding> ~ {
     np = full::tokens::numberAt(pat, 1); na = full::tokens::numberAt(actual, 1);
+    if np < 0 || na < 0 { return bs; };
     p = 2; a = 2;
     ps = []; actuals = [];
     for i in 0..np { end = full::tokens::typeEnd(pat, p); ps = push(ps, full::tokens::sliceTokens(pat, p, end)); p = end; };
@@ -99,6 +101,7 @@ fn monoConstantType(ts: &List<Token>, p: Int) -> List<Token> ~ {
     if full::tokens::wordIs(ts, p, "data") { out = push(out, full::tokens::word("named")); out = push(out, full::tokens::name(full::tokens::textAt(ts, p + 1))); return push(out, full::tokens::word("0")); };
     if full::tokens::wordIs(ts, p, "array") {
         n = full::tokens::numberAt(ts, p + 1);
+        if n < 0 { return out; };
         elem = push([], full::tokens::word("int"));
         at = p + 2; known = false;
         for i in 0..n {
@@ -176,6 +179,7 @@ fn monoRedirectCall(function: &FullFunction, originals: &List<FullFunction>, lin
     target = get(originals, idx);
     if !monoGeneric(target) { return unchanged; };
     count = full::tokens::numberAt(line, 4);
+    if count < 0 { return unchanged; };
     ns = size(monoSection(target.header, "sizeparams"));
     kept = count - ns; if kept < 0 { kept = 0; };
     args = []; sizes = []; at = 5;
@@ -228,10 +232,10 @@ fn monoNamedTypes(ts: &List<Token>, given: &List<MonoBinding>) -> List<MonoBindi
         if full::tokens::wordIs(ts, i, "named") {
             end = full::tokens::typeEnd(ts, i);
             if end > i {
-                key = monoNamedName(ts, i, false);
+                key = monoInstanceTypeName(ts, i);
                 value = MonoBinding { name: clone(key), tokens: full::tokens::sliceTokens(ts, i, end) };
                 present = false;
-                for j in 0..size(out) { if get(out, j).name = key { out = set(out, j, clone(value)); present = true; }; };
+                for j in 0..size(out) [{ affirm size(out) >= size(given); }] { if j >= 0 && j < size(out) { if get(out, j).name = key { out = set(out, j, clone(value)); present = true; }; }; };
                 if !present { out = push(out, value); };
             };
         };
@@ -275,7 +279,7 @@ fn monoInstantiate(function: FullFunction, key: &MonoKey) -> FullFunction ~ {
     named = monoNamedTypes(monoReturn(function), []);
     for d in function.locals { named = monoNamedTypes(d.tokens, named); };
     renames = [];
-    for b in named { renames = push(renames, MonoBinding { name: clone(b.name), tokens: push([], full::tokens::name(monoNamedName(monoSubstitute(b.tokens, sizes, types), 0, false))) }); };
+    for b in named { renames = push(renames, MonoBinding { name: clone(b.name), tokens: push([], full::tokens::name(monoInstanceTypeName(monoSubstitute(b.tokens, sizes, types), 0))) }); };
     locals = [];
     for d in function.locals {
         id = full::tokens::textAt(d.tokens, 1); keptLocal = true;
