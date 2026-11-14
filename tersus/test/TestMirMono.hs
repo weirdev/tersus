@@ -1,7 +1,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 module TestMirMono (testMirMono) where
 
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.Exit (ExitCode (..))
@@ -9,14 +9,14 @@ import System.Exit (ExitCode (..))
 import Compile (lowerSource)
 import Mir
 import MirData (readLowered, writeLowered)
-import MirHousekeeping (Tool (..), monomorphizeWith, ownershipTool, toolProgram, emitterEntry)
+import MirHousekeeping (Tool (..), monomorphizeWith, ownershipTool, toolProgram, emitterEntry, eraseGhosts, nativeProgram)
 import MirMono (monomorphizeForValidation)
 import qualified MirMonoOracle as Oracle
 import Native (runWithInputFull)
 import qualified Syntax as S
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms, unvalidatedPrograms)
-import Types (Arg (..), Size (..), Type (..), BuiltinFunct (..))
+import Types (Arg (..), Size (..), Type (..), BuiltinFunct (..), instanceName)
 import Utils
 
 unitOf :: Program -> Lowered
@@ -29,13 +29,6 @@ monoDifference expected actual
     | writeLowered (unitOf expected) /= writeLowered (unitOf actual) = Just "native mono reserializes differently"
     | otherwise = Nothing
 
-compareMono :: Program -> IO TestResult
-compareMono original = do
-    result <- monomorphizeWith ownershipTool original
-    pure $ case result of
-        Error e -> Just e
-        Ok actual -> monoDifference (Oracle.monomorphize original) actual
-
 compareWire :: Program -> IO TestResult
 compareWire original = case writeLowered (unitOf original) of
     Error e -> pure (Just e)
@@ -45,7 +38,13 @@ compareWire original = case writeLowered (unitOf original) of
             ToolNative exe -> do
                 (code, out, err) <- runWithInputFull exe ("pass mono\n" ++ input)
                 pure $ case (code, err, readLowered out) of
-                    (ExitSuccess, "", Ok unit) -> monoDifference (Oracle.monomorphize original) (lowProgram unit)
+                    (ExitSuccess, "", Ok unit) ->
+                        let expected = Oracle.monomorphize original
+                            semantic = monoDifference expected (lowProgram unit)
+                            bytes = case writeLowered (unitOf expected) of
+                                Error e -> Just e
+                                Ok text -> if text == out then Nothing else Just "native MIR3 stdout differs from the canonical Haskell writer"
+                         in semantic <> bytes
                     _ -> Just ("native full-MIR mono failed: " ++ show code ++ " " ++ err ++ " " ++ take 200 out)
             ToolFailed e -> pure (Just e)
             ToolInterpreted _ -> pure (Just "the full-MIR comparison requires the native emitter")
@@ -53,7 +52,13 @@ compareWire original = case writeLowered (unitOf original) of
 sourceMono :: String -> IO TestResult
 sourceMono source = case lowerSource True source of
     Error e -> pure (Just ("does not lower: " ++ e))
-    Ok p -> compareMono p
+    Ok p -> do
+        raw <- compareWire p
+        case raw of
+            Just e -> pure (Just ("raw MIR: " ++ e))
+            Nothing -> case eraseGhosts p `bindResult` nativeProgram of
+                Error e -> pure (Just ("pre-monomorphization native stage refused: " ++ e))
+                Ok native -> fmap (fmap ("native-stage MIR: " ++)) (compareWire native)
 
 testMirMono :: Test
 testMirMono = TestList "testMirMono"
@@ -84,6 +89,15 @@ testMirMono = TestList "testMirMono"
     , TestCase "the emitter's validated program contains the native mono functions" $ pure $ case toolProgram emitterEntry of
         Error e -> Just e
         Ok p -> testAssertTrue (any ("$mono$" `isInfixOf`) (Map.keys (progFunctions p)))
+    , TestCase "actual emitter refuses a blank-line trailing suffix" $ case writeLowered (unitOf metadataProgram) of
+        Error e -> pure (Just e)
+        Ok text -> refuses ("pass mono\n" ++ text ++ "\nunknown-suffix\n")
+    , TestCase "actual emitter rejects unescaped non-ASCII quoted names" $ case writeLowered (unitOf metadataProgram) of
+        Error e -> pure (Just e)
+        Ok text ->
+            let prefix = "function \"plain\""
+                broken = unlines [if prefix `isPrefixOf` line then "function \"plaín\"" ++ drop (length prefix) line else line | line <- lines text]
+             in refuses ("pass mono\n" ++ broken)
     , TestList "malformed transport" [TestCase label (refuses input) | (label, input) <- refusalFixtures]
     ]
   where
@@ -158,6 +172,50 @@ dropProgram = genericProgram
   where
     dropFn = identityFunction{fnName = "<Holder as Drop>::drop", fnReturns = Nothing, fnBorrowed = [], fnLocals = Map.singleton (Local 1) (LocalDecl (TNamed "Holder" [ArgType (TParam "T")]) (Just "self")), fnBlocks = Map.singleton (BlockId 0) (BasicBlock [] Return)}
 
+plainDropWithGeneric :: Program
+plainDropWithGeneric = metadataProgram
+    { progFunctions = Map.fromList [(fnName dropFn, dropFn), (fnName identityFunction, identityFunction)] }
+  where
+    dropFn = emptyFunction
+        { fnName = "<Plain as Drop>::drop", fnParams = [Local 1], fnReturns = Nothing
+        , fnLocals = Map.singleton (Local 1) (LocalDecl (TNamed "Plain" []) (Just "self"))
+        , fnBlocks = Map.singleton (BlockId 0) (BasicBlock [] Return)
+        }
+
+unicodeParameterProgram :: Program
+unicodeParameterProgram = genericProgram
+    { progGenerics = Map.singleton "Holder" (["É"], [("value", TParam "É")])
+    , progTypes = Map.empty
+    , progFunctions = Map.singleton "makeHolder" makeHolder
+    , progMain = emptyFunction
+        { fnReturns = Just (holder TInt), fnLocals = Map.singleton (Local 0) (LocalDecl (holder TInt) Nothing)
+        , fnBlocks = Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn "makeHolder")) [Const (CInt 7)] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)]
+        }
+    }
+  where
+    holder t = TNamed "Holder" [ArgType t]
+    makeHolder = emptyFunction
+        { fnName = "makeHolder", fnParams = [Local 1], fnTypeParams = ["É"], fnReturns = Just (holder (TParam "É"))
+        , fnLocals = Map.fromList [(Local 0, LocalDecl (holder (TParam "É")) Nothing), (Local 1, LocalDecl (TParam "É") Nothing)]
+        , fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (MakeData (instanceName "Holder" [ArgType (TParam "É")]) [("value", Copy (Local 1))])] Return)
+        }
+
+unicodeArgumentProgram :: String -> Program
+unicodeArgumentProgram name = genericProgram
+    { progGenerics = Map.singleton "G" (["T"], [("value", TParam "T")])
+    , progTypes = Map.fromList [(name, StructDecl []), (gName, StructDecl [("value", named)])]
+    , progFunctions = Map.singleton "identity" ownedIdentity
+    , progMain = emptyFunction
+        { fnReturns = Just gType, fnLocals = Map.fromList [(Local 0, LocalDecl gType Nothing), (Local 1, LocalDecl gType Nothing)]
+        , fnBlocks = Map.fromList [(BlockId 0, BasicBlock [Assign (Local 1) (MakeData gName [("value", Const (CData name []))])] (Call (Const (CFn "identity")) [Copy (Local 1)] (Local 0) (BlockId 1))), (BlockId 1, BasicBlock [] Return)]
+        }
+    }
+  where
+    named = TNamed name []
+    gType = TNamed "G" [ArgType named]
+    gName = instanceName "G" [ArgType named]
+    ownedIdentity = identityFunction{fnBorrowed = [], fnLocals = Map.fromList [(Local 0, LocalDecl (TParam "T") Nothing), (Local 1, LocalDecl (TParam "T") Nothing)]}
+
 builtinMetadata :: Program -> Program
 builtinMetadata p = p{progInvariants = Map.singleton "Plain" [S.ProofAssert payload]}
   where
@@ -166,6 +224,10 @@ builtinMetadata p = p{progInvariants = Map.singleton "Plain" [S.ProofAssert payl
 monoFixtures :: [(String, Program)]
 monoFixtures =
     [ ("no generic retains complete metadata", metadataProgram)
+    , ("monomorphic Drop is deduplicated with an unrelated generic", plainDropWithGeneric)
+    , ("Unicode uppercase type parameters complete declarations", unicodeParameterProgram)
+    , ("nested Unicode lowercase types keep canonical backticks", unicodeArgumentProgram "α")
+    , ("nested Unicode alphanumeric types keep canonical backticks", unicodeArgumentProgram "α1")
     , ("generic type call strips only function proof metadata", genericProgram)
     , ("arbitrary precision proof values and builtin metadata survive fast path", builtinMetadata metadataProgram)
     , ("arbitrary precision proof values and builtin metadata survive instantiation", builtinMetadata genericProgram)

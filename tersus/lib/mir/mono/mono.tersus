@@ -1,6 +1,7 @@
 import data::codec::codec { Token };
 import mir::full::full { FullRecord, FullFunction, FullProgram, fullAt, printFull, clearFunctionMetadata };
-import mir::mono::tokens { MonoBinding, monoWord, monoName, monoText, monoIs, monoSlice, monoAppend, monoLookup };
+import mir::full as full;
+import mir::mono::tokens { MonoBinding, monoLookup };
 import mir::mono::functions { MonoKey, MonoRedirect, monoGeneric, monoSection, monoReturn, monoLocal, monoMatch, monoFunctionIndex, monoRedirect, monoInstantiate, monoInstanceName, monoNamedTypes };
 import mir::mono::types { monoProgramNamed, monoFiltered };
 
@@ -38,7 +39,7 @@ fn monoDropKey(originals: &List<FullFunction>, originalNamed: &List<MonoBinding>
     params = monoSection(target.header, "params");
     if size(params) = 0 { return []; };
     actual = monoLookup(originalNamed, name);
-    if size(actual) = 0 { actual = push(push(push([], monoWord("named")), monoName(clone(name))), monoWord("0")); };
+    if size(actual) = 0 { actual = push(push(push([], full::tokens::word("named")), full::tokens::name(clone(name))), full::tokens::word("0")); };
     bs = monoMatch([], monoLocal(target, get(params, 0)), actual);
     types = [];
     for t in monoSection(target.header, "typeparams") {
@@ -56,12 +57,12 @@ fn monoDropName(instance: &MonoInstance) -> FullFunction ~ {
     params = monoSection(f.header, "params");
     if size(params) = 0 { return f; };
     ty = monoLocal(f, get(params, 0));
-    if !monoIs(ty, 0, "named") { return f; };
+    if !full::tokens::wordIs(ty, 0, "named") { return f; };
     named = monoNamedTypes(ty, []);
     if size(named) = 0 { return f; };
-    header = monoSlice(f.header, 0, 1);
-    header = push(header, monoName("<".concat(get(named, 0).name).concat(" as Drop>::drop")));
-    header = monoAppend(header, monoSlice(f.header, 2, size(f.header)));
+    header = full::tokens::sliceTokens(f.header, 0, 1);
+    header = push(header, full::tokens::name("<".concat(get(named, 0).name).concat(" as Drop>::drop")));
+    header = full::tokens::appendTokens(header, full::tokens::sliceTokens(f.header, 2, size(f.header)));
     return FullFunction { header: header, ..f };
 };
 
@@ -69,6 +70,22 @@ fn monoWithInstances(program: FullProgram, plain: &List<FullFunction>, done: &Li
     fs = clone(plain);
     for instance in done { fs = push(fs, clone(instance.function)); };
     return FullProgram { functions: fs, ..program };
+};
+
+fn monoFinalFunctions(plain: &List<FullFunction>, done: &List<MonoInstance>) -> List<FullFunction> ~ {
+    functions = clone(plain);
+    for instance in done { functions = push(functions, monoDropName(instance)); };
+    last = HashMap::new();
+    for i in 0..size(functions) {
+        name = full::tokens::textAt(get(functions, i).header, 1);
+        last = last.insert(name, i);
+    };
+    kept = [];
+    for i in 0..size(functions) {
+        name = full::tokens::textAt(get(functions, i).header, 1);
+        if HashMap::lookup(&last, name, 0 - 1) = i { kept = push(kept, clone(get(functions, i))); };
+    };
+    return kept;
 };
 
 fn monomorphize(program: FullProgram) -> FullProgram ~ {
@@ -100,16 +117,14 @@ fn monomorphize(program: FullProgram) -> FullProgram ~ {
         if size(keys) = 0 { round = 4; }
         else { done = monoBuild(originals, keys, done); round = round + 1; };
     };
-    functions = plain;
-    for instance in done { functions = push(functions, monoDropName(instance)); };
-    out = FullProgram { functions: functions, ..rewritten };
+    out = FullProgram { functions: monoFinalFunctions(plain, done), ..rewritten };
     return monoFiltered(out, originalNamed);
 };
 
 fn isMonoRequest(lines: &List<List<Token>>) -> Bool [{ }] [{ }] ~ {
     if size(lines) = 0 { return false; };
     first = get(lines, 0);
-    return size(first) = 2 && monoIs(first, 0, "pass") && monoIs(first, 1, "mono");
+    return size(first) = 2 && full::tokens::wordIs(first, 0, "pass") && full::tokens::wordIs(first, 1, "mono");
 };
 
 fn runMono(lines: &List<List<Token>>) -> Bool ~ {
