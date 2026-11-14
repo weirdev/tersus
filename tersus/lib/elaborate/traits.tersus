@@ -5,7 +5,7 @@ import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIn
 import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, isTraitStub, mentionsParameter, refResultFrom, stmtOf };
 import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInfo, hasFunction, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
 import elaborate::exports { pairParts };
-import elaborate::expr { coerceArguments, genericCall, implementsMarker, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
+import elaborate::expr { coerceArguments, genericCall, implementsMarker, inferAll, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
@@ -960,7 +960,7 @@ fn checkBound(st: St, name: &String, sizes: &List<String>, sizeVars: &List<Int>,
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), clone(b.p)), " to implement "), clone(b.n)), ", and the bounds of "), clone(st.current)), " do not say "), render(st, t)), catStrings(": ", clone(b.n))));
     };
     if !st.ok && isPackTypeName(&b.p) { return typeError(st, catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), boundParameterText(&st, &b.p, t)), " to implement "), clone(b.n))); };
-    if !st.ok { return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), clone(b.p)), " to implement "), clone(b.n)), ", and "), render(st, t)), " does not")); };
+    if !st.ok { return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(name), " needs "), clone(b.p)), " to implement "), fnTraitDisplay(&b.n)), ", and "), render(st, t)), " does not")); };
     actual = clone(st.te.types);
     if size(actual) != size(b.ts) {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(render(st, t), " gives "), clone(b.n)), " "), intText(size(actual))), " types, but the bound on "), clone(b.p)), catStrings(catStrings(" of ", clone(name)), " has ")), intText(size(b.ts))));
@@ -2056,6 +2056,44 @@ fn boundAsImpl(st: St, p: &String, pty: Int, tname: &String, args: &List<Int>) -
         if size(fs.froms) > 0 { st = putRefResult(st, bname, clone(fs.params), clone(fs.froms)); };
     };
     return st;
+};
+
+fn isFnTraitName(name: &String) -> Bool ~ {
+    if size(name.bytes) > 3 && name.slice(0, 3) = "Fn$" { return true; };
+    if size(name.bytes) > 6 && name.slice(0, 6) = "FnMut$" { return true; };
+    if size(name.bytes) > 7 && name.slice(0, 7) = "FnOnce$" { return true; };
+    return false;
+};
+
+fn fnTraitDisplay(name: &String) -> String ~ {
+    if !isFnTraitName(name) { return clone(name); };
+    i = 0;
+    while i < size(name.bytes) && get(name.bytes, i) != 36 [{ affirm i >= 0; }] ~ { i = i + 1; };
+    return catStrings(name.slice(0, i), "(...)");
+};
+
+fn fnBoundCall(st: St, funct: Int, fname: &String, args: &List<Int>) -> St ~ {
+    start = clone(st);
+    st = lookupVar(st, fname);
+    if st.status != 0 { return St { ok: false, ..start }; };
+    st = inferExpr(start, funct);
+    if st.status != 0 { return st; };
+    receiver = clone(st.te);
+    st = zonk(st, head(&receiver.types));
+    inner = unrefOf(st, st.ty);
+    x = tyAt(st, inner);
+    if x.kind != 12 { return St { ok: false, ..start }; };
+    owner = parameterOwner(&x.name);
+    traitName = "";
+    for e in HashMap::entries(&st.traitFns) {
+        if isFnTraitName(&e.key) && HashMap::contains(&st.implArgs, pairKey(&e.key, &owner)) && traitFnNamed(st, &e.value, "call") >= 0 { traitName = clone(e.key); };
+    };
+    if size(traitName.bytes) = 0 { return St { ok: false, ..start }; };
+    st = inferAll(st, args);
+    if st.status != 0 { return st; };
+    inferred = push(push([], receiver), clone(st.tes));
+    st = callResolved(st, implFunctionName(&owner, &traitName, "call"), &inferred);
+    return St { ok: true, ..st };
 };
 
 // What a type parameter gives a trait, which only a bound of it says (traitArguments in a body checked against its bounds)
