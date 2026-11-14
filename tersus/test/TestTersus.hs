@@ -30,6 +30,7 @@ import TestPipeline
 import TestNative
 import TestOwnership
 import TestTraits
+import TestClosures
 import TestArrays
 import TestBorrow
 import TestCopies
@@ -191,6 +192,7 @@ originalGroups =
     , testNative
     , testOwnership
     , testTraits
+    , testClosures
     , testArrays
     , testBox
     , testDeref
