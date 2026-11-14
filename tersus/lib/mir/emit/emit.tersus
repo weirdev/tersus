@@ -3,7 +3,8 @@ import mir::emit::values { Gen };
 import mir::emit::functions { emitBody, emitFunction, externDeclaration, failedFn };
 import mir::emit::helpers { cloneFunctions, dropFunctions, printFunctions };
 import mir::support::support { noStrings, showInt, renderType, isAggregate };
-import data::codec::codec { Type };
+import data::codec::codec { Type, Token, Parsed, tokenize, isWord };
+import data::reader::reader { readRecord, readRecords, tokenizeMir };
 import mir::reader::reader { TypeDecl, Function, Program, programAt, readLines };
 import mir::ownership::ownership { isOwnershipRequest, runOwnership };
 import mir::link::link { isLinkRequest, runLink };
@@ -251,8 +252,31 @@ fn outline(program: &Program) -> EmitResult ~ {
 // declarations, the made functions and the entry point, and `bodies` the code of each function. What cannot be read or made is
 // reported on the standard error. An input whose first line is `pass ownership` or `pass expand` asks for that ownership pass
 // instead (lib/mir/ownership), so that the seed of the emitter also has them.
+fn readEmitterInput() -> Parsed<List<List<Token>>> ~ {
+    bad = Parsed<List<List<Token>>> { value: [], pos: 0, ok: false };
+    first = readRecord(); if !first.ok { return bad; };
+    if first.pos = 0 { return Parsed<List<List<Token>>> { value: [], pos: 0, ok: true }; };
+    header = tokenize(&first.value); if !header.ok { return bad; };
+    if size(header.value) = 0 { return Parsed<List<List<Token>>> { value: [], pos: 0, ok: true }; };
+    full = isWord(&header.value, 0, "pass") && (isWord(&header.value, 1, "link") || isWord(&header.value, 1, "mono"));
+    if full {
+        strict = tokenizeMir(&first.value); if !strict.ok { return bad; };
+        records = readRecords(0 - 1); if !records.ok { return bad; };
+        rows = push([], strict.value);
+        for line in &records.value {
+            tokens = tokenizeMir(line); if !tokens.ok { return bad; };
+            rows = push(rows, tokens.value);
+        };
+        return Parsed<List<List<Token>>> { value: rows, pos: 0, ok: true };
+    };
+    legacy = readLines(); if !legacy.ok { return bad; };
+    rows = push([], header.value);
+    for row in &legacy.value { rows = push(rows, clone(row)); };
+    return Parsed<List<List<Token>>> { value: rows, pos: 0, ok: true };
+};
+
 mode = String::arg(0, 100);
-read = readLines();
+read = readEmitterInput();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
     return 1;

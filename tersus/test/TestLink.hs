@@ -6,6 +6,8 @@ import System.IO.Unsafe (unsafePerformIO)
 import qualified Native
 import qualified MirHousekeeping as Housekeeping
 import Seed (cachedSeed, seedHash)
+import ValidatorNative (validateCompiled)
+import Pipeline (oneMarkerEach)
 import System.Exit (ExitCode(..))
 
 import Data.List (isInfixOf, isPrefixOf)
@@ -16,6 +18,7 @@ import qualified Data.Set as Set
 import DataCodec (quote)
 import qualified Mir as M
 import MirCopies (makeCopies)
+import qualified Compile
 import MirData (readLowered, writeLowered)
 import qualified MirData
 import MirEval (RunEnv (..), Outcome (..), MirValue (..), runProgramEnv)
@@ -74,6 +77,38 @@ nativeLinkTool = modifyMVar nativeToolBox $ \cached -> case cached of
                             case ir of Error e -> pure (Error e); Ok llvm -> Native.buildExecutable output llvm
         pure (Just result, result)
 
+{-# NOINLINE actualEmitterBox #-}
+actualEmitterBox :: MVar (Maybe (Result FilePath String))
+actualEmitterBox = unsafePerformIO (newMVar Nothing)
+
+actualEmitterTool :: IO (Result FilePath String)
+actualEmitterTool = modifyMVar actualEmitterBox $ \cached -> case cached of
+    Just tool -> pure (cached, tool)
+    Nothing -> do
+        seed <- cachedSeed
+        result <- case seed of
+            Error e -> pure (Error e)
+            Ok emitter -> do
+                owned <- Housekeeping.ownedToolWith emitter Housekeeping.emitterEntry
+                case owned of
+                    Error e -> pure (Error e)
+                    Ok program -> do
+                        let input = MirData.writeProgram program
+                            key = Housekeeping.ownedContentKey seedHash input []
+                        Native.cachedProgram "emitter" key "the actual Full pass entry" $ \output -> do
+                            ir <- Native.runWithInput emitter input
+                            case ir of Error e -> pure (Error e); Ok text -> Native.buildExecutable output text
+        pure (Just result, result)
+
+actualEntryRefusal :: String -> TestResult -> IO TestResult
+actualEntryRefusal input control = do
+    tool <- actualEmitterTool
+    case tool of
+        Error e -> pure (Just e)
+        Ok executable -> do
+            (_, out, errors) <- Native.runWithInputFull executable input
+            pure $ firstFailure [control, testAssertEq out "1\n", testAssertTrue (not (null errors))]
+
 nativeFull :: String -> IO (Result M.Lowered String)
 nativeFull input = do
     tool <- nativeLinkTool
@@ -97,19 +132,89 @@ nativeMerge units = case mergeInput units of
                 Error e -> Error ("Validation failed: " ++ e)
                 ok -> ok
 
+realInputDifferentials :: IO TestResult
+realInputDifferentials = do
+    helpers <- Housekeeping.listLibrary
+    case (helpers, Housekeeping.toolProgram Housekeeping.mirVerifyEntry) of
+        (Error e, _) -> pure (Just e)
+        (_, Error e) -> pure (Just e)
+        (Ok units, Ok prepared) -> do
+            let joined = units ++ [(ModuleId "actual" Nothing, prepared)]
+            mergeResult <- nativeMerge joined
+            pruneResult <- case programData prepared of Error e -> pure (Error e); Ok text -> nativeFull ("pass link\nprune\n" ++ text)
+            envResult <- case programData prepared of Error e -> pure (Error e); Ok text -> nativeFull ("pass link\nenvironments\n" ++ text)
+            let source = "fn bounded<T: Copy>(x: T) -> T { return x; }; fn generic<T>(xs: &Box<Array<T>>) -> Int { return size(xs); }; xs = [1, 2]; return bounded(size(xs));"
+            nativeProgram <- case Compile.lowerSourceUsing bootstrapLoader False True source of
+                Error e -> pure (Error e)
+                Ok p -> do
+                    seed <- cachedSeed
+                    case seed of
+                        Error e -> pure (Error e)
+                        Ok emitter -> Housekeeping.ownedWith emitter p
+            genericResult <- case nativeProgram of
+                Error e -> pure (Just e)
+                Ok p -> sameResult (Oracle.linkPrograms (units ++ [(ModuleId "native" Nothing,p)])) <$> nativeMerge (units ++ [(ModuleId "native" Nothing,p)])
+            pure $ firstFailure
+                [ sameResult (Oracle.linkPrograms joined) mergeResult
+                , sameResult (Ok (Oracle.pruneProgram prepared)) (mapResult M.lowProgram pruneResult)
+                , sameResult (Ok (Oracle.completeSpecEnvs prepared)) (mapResult M.lowProgram envResult)
+                , genericResult
+                ]
+
 testLinkNative :: Test
 testLinkNative = TestList "testLinkNative"
     ([TestCase label $ sameResult (Oracle.linkPrograms units) <$> nativeMerge units | (label, units) <- linkCases]
-    ++ [ TestCase "full payload native round trip" $ case writeLowered everyRecord of
+    ++ [ TestCase "actual prepared compiler/helper/generic inputs" realInputDifferentials
+       , TestCase "full payload native round trip" $ case writeLowered everyRecord of
             Error e -> pure (Just e)
             Ok input -> do result <- nativeFull input; pure $ inspect result $ \back -> testAssertTrue (everyRecord == back && show everyRecord == show back)
        , TestCase "large distinct shared maps native round trip" $ case writeLowered (asUnit (largeMaps 0)) of
             Error e -> pure (Just e)
-            Ok input -> do result <- nativeFull input; pure $ inspect result $ \back -> testAssertEq (writeLowered back) (Ok input)
+            Ok input -> do
+                tool <- nativeLinkTool
+                case tool of
+                    Error e -> pure (Just e)
+                    Ok executable -> do
+                        (code, out, errors) <- Native.runWithInputFull executable input
+                        pure $ firstFailure [testAssertEq code ExitSuccess, testAssertEq errors "", testAssertEq out input]
        , TestCase "native reachability/environment parity" $ do
             a <- case programData reachable of Error e -> pure (Error e); Ok t -> nativeFull ("pass link\nprune\n" ++ t)
             b <- case programData environments of Error e -> pure (Error e); Ok t -> nativeFull ("pass link\nenvironments\n" ++ t)
-            pure $ firstFailure [sameResult (Ok (Oracle.pruneProgram reachable)) (mapResult M.lowProgram a), sameResult (Ok (Oracle.completeSpecEnvs environments)) (mapResult M.lowProgram b)]
+            pure $ firstFailure [sameResult (Ok (Oracle.pruneProgram reachable)) (mapResult M.lowProgram a), sameResult (Ok (Oracle.completeSpecEnvs environments)) (mapResult M.lowProgram b), inspect (mapResult M.lowProgram b) environmentEffects]
+       , TestCase "native link keeps unused invalid functions until validation" $ case Compile.lowerSourceUsing bootstrapLoader False False "fn unused() -> Int [{ }] [{ affirm false; }] { return 0; }; return 0;" of
+            Error e -> pure (Just e)
+            Ok p -> do
+                merged <- nativeMerge [(ModuleId "unpruned" Nothing,p)]
+                pure $ inspect merged $ \full -> firstFailure
+                    [ testAssertTrue (Map.member "unused" (M.progFunctions full))
+                    , testAssertErrorContains "Could not prove" (validateCompiled (oneMarkerEach full))
+                    ]
+       , TestCase "actual emitter Full entry rejects blank-line garbage and malformed quotes" $ case programData empty of
+            Error e -> pure (Just e)
+            Ok text -> do
+                tool <- actualEmitterTool
+                case tool of
+                    Error e -> pure (Just e)
+                    Ok executable -> do
+                        let request = "pass link\nenvironments\n" ++ text
+                        (status, out, errors) <- Native.runWithInputFull executable request
+                        let control = firstFailure [testAssertEq status ExitSuccess, testAssertEq errors "", testAssertEq out text]
+                        suffix <- actualEntryRefusal (request ++ "\nbogus 0\n") control
+                        quotes <- actualEntryRefusal (replaceText "main \"\"" "main \"\"x" request) control
+                        legacy <- mapM (\input -> do
+                            (_, answer, diagnostic) <- Native.runWithInputFull executable input
+                            pure (firstFailure [testAssertEq answer "1\n", testAssertEq diagnostic "the input is not the MIR as data\n"])) ["", "\n"]
+                        pure (firstFailure (suffix : quotes : legacy))
+       , TestCase "native block record order is semantic" $ do
+            let f = (function "f" 1){M.fnBlocks = Map.fromList [(M.BlockId 0, M.BasicBlock [] (M.Goto (M.BlockId 1))), (M.BlockId 1, M.BasicBlock [M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 1)))] M.Return)]}
+                p = empty{M.progFunctions = Map.singleton "f" f}
+            case programData p of
+                Error e -> pure (Just e)
+                Ok input -> do
+                    let altered = unlines (reverseFirstBlocks (lines input))
+                        one t = "unit \"app\" some \"a\" " ++ show (length (lines t)) ++ "\n" ++ t
+                    result <- nativeFull ("pass link\nmerge 2\n" ++ one input ++ one altered)
+                    pure (sameResult (Oracle.linkPrograms [(unitA,p),(unitA,p)]) (mapResult M.lowProgram result))
        ])
 
 runReference :: String -> Result Outcome String
@@ -219,13 +324,28 @@ externReferences = withMain (program [("extern p$x$puts", 1)])
     , M.Ghost (Map.singleton "alias" (M.Const (M.CFn "extern p$x$puts"))) (M.GhostFunction "extern p$x$puts" "puts" True)
     ] M.Return
 
+environmentEffects :: M.Program -> TestResult
+environmentEffects p = firstFailure
+    [ testAssertTrue (p /= environments)
+    , testAssertEq (M.fnSpec (M.progMain p)) (M.fnSpec (M.progMain environments))
+    , testAssertTrue (all (Map.member "missing") (M.specEnv (M.fnSpec f) : map M.loopEnv (Map.elems (M.specLoops (M.fnSpec f))) ++ ghostEnvs f ++ ghostEnvs (M.progMain p)))
+    , testAssertEq (Map.lookup "f" (head (ghostEnvs (M.progMain p)))) (Just (M.Copy (M.Local 0)))
+    ]
+  where
+    f = M.progFunctions p Map.! "f"
+    ghostEnvs fun = [env | block <- Map.elems (M.fnBlocks fun), M.Ghost env _ <- M.blockStatements block]
+
 environments :: M.Program
-environments = (withMain (program [("f", 1), ("dead", 2)]) [M.Ghost local (M.GhostFunction "f" "f" True)] M.Return)
+environments = (withMain (program [("f", 1), ("missing", 2)]) [M.Ghost local (M.GhostFunction "f" "f" True)] M.Return)
     { M.progMain = root{M.fnSpec = M.emptySpec{M.specEnv = local, M.specLoops = Map.singleton (M.BlockId 0) (M.LoopSpec [] Nothing local (M.BlockId 0))}}
-    , M.progFunctions = Map.singleton "f" (function "f" 1){M.fnSpec = M.emptySpec{M.specEnv = local}}
+    , M.progFunctions = Map.fromList
+        [ ("f", (function "f" 1){M.fnSpec = M.emptySpec{M.specEnv = Map.empty, M.specLoops = Map.singleton (M.BlockId 0) (M.LoopSpec [] Nothing sparse (M.BlockId 0))}, M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Ghost Map.empty (M.GhostValidation (S.ProofAssert (S.CTerm (S.VBool True)))), M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 1)))] M.Return)})
+        , ("missing", function "missing" 2)
+        ]
     }
   where
     local = Map.fromList [("f", M.Copy (M.Local 0)), ("alias", M.Const (M.CFn "f"))]
+    sparse = Map.singleton "local" (M.Copy (M.Local 0))
     root = M.progMain (withMain empty [M.Ghost local (M.GhostFunction "f" "f" True)] M.Return)
 
 reachable :: M.Program
@@ -254,7 +374,7 @@ canonicalRaw :: String -> TestResult
 canonicalRaw input = inspect (readLowered input) $ \expected -> inspect (runReference input) $ \out ->
     inspect (readLowered (outStdout out)) $ \actual -> firstFailure
         [ if expected == actual && show expected == show actual then Nothing else Just "the decoded full unit changed"
-        , testAssertEq (writeLowered actual) (writeLowered expected)
+        , testAssertEq (mapResult (== outStdout out) (writeLowered expected)) (Ok True)
         ]
 
 refuseRaw :: String -> String -> TestResult
@@ -333,6 +453,20 @@ bigSizeUnit :: M.Lowered
 bigSizeUnit = asUnit empty{M.progGenerics = Map.singleton "Packet" (["n"], [("value", TArrayOf TInt (SizeConst (2 ^ (80 :: Int))))]),
     M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 0) (M.LocalDecl (TArrayOf TInt (SizeConst (2 ^ (80 :: Int)))) Nothing)}}
 
+reverseFirstBlocks :: [String] -> [String]
+reverseFirstBlocks rows = before ++ concat (reverse (chunks body)) ++ after
+  where
+    (before, fromBlock) = break (isPrefixOf "block ") rows
+    (body, after) = break (== "end") fromBlock
+    chunks [] = []
+    chunks (header : rest) = let (statements, next) = break (isPrefixOf "block ") rest in (header : statements) : chunks next
+
+blockOrderControl :: TestResult
+blockOrderControl = rawSemanticControl p reverseFirstBlocks
+  where
+    f = (function "f" 1){M.fnBlocks = Map.fromList [(M.BlockId 0, M.BasicBlock [] (M.Goto (M.BlockId 1))), (M.BlockId 1, M.BasicBlock [M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 1)))] M.Return)]}
+    p = empty{M.progFunctions = Map.singleton "f" f}
+
 replaceText :: String -> String -> String -> String
 replaceText old new text
     | null text = []
@@ -373,9 +507,11 @@ testLink = TestList "testLink"
     , testCase "generic metadata survives pruning" (inspect (singlePass "prune" reachable) $ \p -> testAssertEq (M.progGenerics p) (M.progGenerics reachable))
     , testCase "environment completion is exact and idempotent" $ firstFailure
         [ sameResult (Ok (Oracle.completeSpecEnvs environments)) (singlePass "environments" environments)
+        , inspect (singlePass "environments" environments) environmentEffects
         , inspect (singlePass "environments" environments) $ \p -> sameResult (Ok p) (singlePass "environments" p)
         ]
     , testCase "different bodies are a meaningful comparison mutation" $ testAssertTrue (linked [(unitA, program [("f", 1)])] /= linked [(unitA, program [("f", 2)])])
+    , testCase "block record order follows map semantics" blockOrderControl
     , testCase "arbitrary positive and negative runtime/proof integers" $ firstFailure [roundTrip (bigUnit n) | n <- [2 ^ (80 :: Int), 0 - 2 ^ (80 :: Int), 9223372036854775808, 0 - 9223372036854775809]]
     , testCase "arbitrary runtime size constants" (roundTrip bigSizeUnit)
     , testCase "many distinct repeated shared maps stay exact" (roundTrip (asUnit (largeMaps 0)))
