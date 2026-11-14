@@ -1,7 +1,9 @@
 module TestClosures (testClosures) where
 
+import qualified MirEval
 import Syntax
 import TestHarness
+import Utils (Result (..), bindResult)
 
 -- Phase 1 of the closures plan: Fn/FnMut/FnOnce bounds, minted traits, function objects.
 -- Plan: ~/notes/users/wweirather/.claude/plans/tersus-closures-master-plan.md (Phase 1)
@@ -28,4 +30,14 @@ testClosures =
             , testCase "a type with no function impl does not meet an Fn bound" (rejected ("struct Plain { n: Int }; fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; p = Plain { n: 1 }; return apply(&p, 5);") "Fn(...)")
             , testCase "a shape with no result type is a parse error" (pipelineRejected "fn apply<F: Fn(x: Int)>(f: &F, x: Int) -> Int { return x; }; return 0;" "->")
             , testCase "a bound shape that is never called still checks" (valid (adder ++ "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return x; }; return 0;"))
+            , TestCase "a function object across modules" $ do
+                program <-
+                    programFromFiles
+                        "app/main.tersus"
+                        [ ("app/package.tersus", "")
+                        , ("app/main.tersus", "import vendor::apply; struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; a = Adder { n: 10 }; return apply::apply(&a, 5);")
+                        , ("app/vendor/package.tersus", "")
+                        , ("app/vendor/apply/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
+                        ]
+                pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
             ]
