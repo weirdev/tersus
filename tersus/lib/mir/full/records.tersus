@@ -40,8 +40,9 @@ fn entryAt(entries: &List<EnvEntry>, key: &String) -> Int ~ {
     for e in entries { if e.name = key { return i; }; i = i + 1; };
     return 0 - 1;
 };
+fn emptyEntries() -> List<EnvEntry> ~ { return []; };
 fn orderEntries(entries: List<EnvEntry>) -> List<EnvEntry> ~ {
-    out = [];
+    out = emptyEntries();
     for e in &entries {
         next = [];
         placed = false;

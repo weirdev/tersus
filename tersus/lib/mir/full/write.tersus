@@ -8,8 +8,11 @@ import mir::full::records { beforeText, EnvEntry, envStart, envEnd, envEntries, 
 struct FullOutput { records: List<List<Token>>, data: AstProgram };
 impl Clone for FullOutput { };
 
+fn emptyRecords() -> List<FullRecord> ~ { return []; };
+fn emptyFunctions() -> List<FullFunction> ~ { return []; };
+fn emptyBlocks() -> List<FullBlock> ~ { return []; };
 fn sortRecords(rows: List<FullRecord>) -> List<FullRecord> ~ {
-    out = [];
+    out = emptyRecords();
     for r in &rows {
         next = []; placed = false;
         for old in &out { if !placed && beforeText(&r.name, &old.name) { next = push(next, clone(r)); placed = true; }; next = push(next, clone(old)); };
@@ -18,7 +21,7 @@ fn sortRecords(rows: List<FullRecord>) -> List<FullRecord> ~ {
     return out;
 };
 fn sortFunctions(fns: List<FullFunction>) -> List<FullFunction> ~ {
-    out = [];
+    out = emptyFunctions();
     for f in &fns {
         next = []; placed = false;
         for old in &out { if !placed && beforeText(textAt(&f.header, 1), textAt(&old.header, 1)) { next = push(next, clone(f)); placed = true; }; next = push(next, clone(old)); };
@@ -37,7 +40,7 @@ fn functionLines(out: List<List<Token>>, fun: &FullFunction, main: Bool) -> List
     // Numeric maps cannot use the lexicographic order of their wire keys.
     locals = clone(fun.locals); loops = clone(fun.loops);
     out = appendNumericRecords(out, &locals); out = appendNumericRecords(out, &loops);
-    blocks = [];
+    blocks = emptyBlocks();
     for b in &fun.blocks {
         next = []; placed = false;
         for old in &blocks { if !placed && b.id < old.id { next = push(next, clone(b)); placed = true; }; next = push(next, clone(old)); };
@@ -47,7 +50,7 @@ fn functionLines(out: List<List<Token>>, fun: &FullFunction, main: Bool) -> List
     return push(out, push([], word("end")));
 };
 fn appendNumericRecords(out: List<List<Token>>, rows: &List<FullRecord>) -> List<List<Token>> ~ {
-    ordered = [];
+    ordered = emptyRecords();
     for r in rows {
         next = []; placed = false; id = integerAt(&r.tokens, 1).value;
         for old in &ordered { if !placed && id < integerAt(&old.tokens, 1).value { next = push(next, clone(r)); placed = true; }; next = push(next, clone(old)); };
@@ -150,7 +153,7 @@ fn emptyFunctionMetadata(fun: FullFunction, empty: Int) -> FullFunction ~ {
     spec = push(push(push(push(push(push(push([], word("spec")), word("requires")), intToken(empty)), word("ensures")), intToken(empty)), word("termination")), word("none"));
     spec = push(push(push(push(push(push(spec, word("writes")), intToken(0)), word("mutparams")), intToken(0)), word("from")), intToken(0));
     env = push(push(push([], word("env")), word("none")), intToken(0));
-    blocks = [];
+    blocks = emptyBlocks();
     for b in &fun.blocks { lines = []; for row in &b.lines { if !wordIs(row, 0, "ghost") { lines = push(lines, clone(row)); }; }; blocks = push(blocks, FullBlock { lines: lines, ..b }); };
     return FullFunction { spec: spec, env: env, loops: [], blocks: blocks, ..fun };
 };
