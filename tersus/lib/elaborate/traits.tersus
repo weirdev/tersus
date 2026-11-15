@@ -154,6 +154,7 @@ fn rawSame(st: &St, a: Int, b: Int) -> Bool ~ {
 // trait Name<params> { functions }: the functions' types and contracts are checked with Self a type that has no
 // constructors, and with no function of the program in sight (checkTrait)
 fn checkTrait(st: St, name: String, params: List<String>, fns: List<Int>) -> St ~ {
+    if isFnTraitName(&name) && HashSet::contains(&st.traits, &name) && HashMap::lookup(&st.traitParams, &name, []) = params { return St { outs: [], te: TE { node: 0 - 1, types: [] }, ..st }; };
     wasPredeclared = HashSet::contains(&st.predeclared, &name);
     if wasPredeclared { st = St { predeclared: st.predeclared.remove(&name), ..st }; };
     if HashMap::contains(&st.types, &name) || (HashSet::contains(&st.traits, &name) && !wasPredeclared) { return typeError(st, catStrings(clone(name), " is already defined")); };
