@@ -6238,8 +6238,7 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
 
 fn mintFnTrait(st: St, shape: &FnShape) -> Res<Int> ~ {
     s = st;
-    for i in 0..size(s.nodes) {
-        nd = nodeAtList(&s.nodes, i);
+    for nd in &s.nodes {
         if nd is AstNode::Statement {
             sv = (nd as AstNode::Statement).value;
             if sv is AstStatement::TraitDef && nameText(&s, (sv as AstStatement::TraitDef).n) = shape.canonical { return ok( s, 0); };
@@ -7189,8 +7188,8 @@ fn fileHead(sourceText: &Input, st: St) -> Res<List<String>> ~ {
 fn mintedTraitIds(st: &St) -> List<Int> ~ {
     out = [];
     seen = [];
-    for i in 0..size(st.nodes) {
-        nd = nodeAtList(&st.nodes, i);
+    i = 0;
+    for nd in &st.nodes {
         if nd is AstNode::Statement {
             sv = (nd as AstNode::Statement).value;
             if sv is AstStatement::TraitDef {
@@ -7198,6 +7197,7 @@ fn mintedTraitIds(st: &St) -> List<Int> ~ {
                 if (hasTextPrefix(nm, "Fn$") || hasTextPrefix(nm, "FnMut$") || hasTextPrefix(nm, "FnOnce$")) && indexOfName(&seen, &nm) < 0 { seen = push(seen, nm); out = push(out, i); };
             };
         };
+        i = i + 1;
     };
     return out;
 };
