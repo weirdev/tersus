@@ -9,11 +9,12 @@ import TestProgramBinaryChecks (binaryChecks, richProgram)
 import TestProgramBuildIdentity (concreteBuildIdentity)
 import Control.DeepSeq (force)
 import qualified Control.Exception as Exception
-import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, tryPutMVar, yield)
+import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO, killThread, myThreadId, newEmptyMVar, newMVar, putMVar, takeMVar, threadDelay, tryPutMVar, yield)
 import Control.Concurrent.MVar (modifyMVar, readMVar, tryReadMVar)
 import Control.Exception (IOException, MaskingState (..), SomeException, bracket, bracketOnError, displayException, finally, getMaskingState, mask, mask_, throwIO, try)
 import Control.Monad (forever, when, forM)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Maybe (isNothing)
 import Data.Char (isSpace, ord)
 import Numeric (showHex)
@@ -61,7 +62,7 @@ import MirData (forNative, writeProgram)
 import TestHarness
 import Types (Type (..))
 import Utils
-import ValidatorNative (withVerdictLock)
+import ValidatorNative (inParallel, withVerdictLock)
 import qualified ValidatorNative
 
 richSource :: String
@@ -1730,7 +1731,27 @@ testVerdictLocks = TestList "testVerdictLocks"
     , TestCase "processes wait for the same verdict lock" verdictProcesses
     , TestCase "a killed process releases the verdict lock" verdictKilledProcess
     , TestCase "validator build flags isolate the verdict namespace" validatorFlagNamespace
+    , TestCase "parallel checks force their texts before the workers start" parallelChecksForceTextsFirst
     ]
+
+parallelChecksForceTextsFirst :: IO TestResult
+parallelChecksForceTextsFirst = do
+    caller <- myThreadId
+    forcers <- newIORef []
+    results <- inParallel (\text -> pure (Ok (length text))) [recordedText forcers n | n <- [1 .. 64]]
+    seen <- readIORef forcers
+    pure $ firstFailure
+        [ testAssertEq [n | Ok n <- results] [1 .. 64]
+        , testAssertEq (length seen) 64
+        , testAssertTrue (all (== caller) seen)
+        ]
+
+{-# NOINLINE recordedText #-}
+recordedText :: IORef [ThreadId] -> Int -> String
+recordedText forcers n = unsafePerformIO $ do
+    forcer <- myThreadId
+    atomicModifyIORef' forcers (\seen -> (forcer : seen, ()))
+    pure (replicate n 'x')
 
 withWorker :: IO () -> (ThreadId -> MVar (Either SomeException ()) -> IO TestResult) -> IO TestResult
 withWorker action use = bracket start (killThread . fst) (uncurry use)
