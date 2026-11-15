@@ -153,11 +153,13 @@ fn afterSlash(name: &String) -> String ~ {
 fn parseLibrary(libs: LibParse, source: &Source) -> LibParse ~ {
     modu = beforeSlash(&source.name);
     stem = afterSlash(&source.name);
-    sameModule = size(libs.names) > 0 && get(&libs.names, size(libs.names) - 1) = modu;
+    last = size(libs.names) - 1;
+    sameModule = false;
+    if last >= 0 && last < size(libs.deps) && last < size(libs.files) { sameModule = get(&libs.names, last) = modu; };
     prefix = ps::importPrefixText(ps::newSt(), clone(source.text));
     if !prefix.ok { return LibParse { ok: false, msg: prefix.message, ..libs }; };
     deps = [];
-    if sameModule { deps = clone(get(&libs.deps, size(libs.deps) - 1)); };
+    if sameModule && last >= 0 && last < size(libs.deps) { deps = clone(get(&libs.deps, last)); };
     if stdShaped(source) != libs.std { return LibParse { ok: false, msg: catStrings(catStrings("lib module ", source.name), " is not in the shape of the libraries before it"), ..libs }; };
     for imp in &prefix.imports {
         if libs.std && (size(imp.path) < 2 || size(imp.path) > 3 || get(&imp.path, 0) != "std" || imp.hasAlias) {
@@ -166,6 +168,7 @@ fn parseLibrary(libs: LibParse, source: &Source) -> LibParse ~ {
         if !libs.std && (size(imp.path) != 2 || get(&imp.path, 0) != "tersuslib" || imp.hasAlias || imp.hasNames) {
             return LibParse { ok: false, msg: catStrings("compiler library import must name a tersuslib module: ", showImport(imp)), ..libs };
         };
+        if size(imp.path) < 2 { return LibParse { ok: false, msg: catStrings("compiler library import must name a module: ", showImport(imp)), ..libs }; };
         dep = clone(get(&imp.path, 1));
         if dep != modu && indexIn(&deps, &dep) < 0 { deps = push(deps, dep); };
     };
@@ -180,8 +183,7 @@ fn parseLibrary(libs: LibParse, source: &Source) -> LibParse ~ {
     parsed = parseWith(&declared, &source.text);
     if !parsed.ok { return LibParse { ok: false, msg: catStrings(catStrings(catStrings("Parse error in the ", source.name), " library: "), parsed.msg), ..libs }; };
     file = LibFile { stem: stem, imports: clone(prefix.imports), program: parsed.program };
-    if sameModule {
-        last = size(libs.names) - 1;
+    if sameModule && last >= 0 && last < size(libs.deps) && last < size(libs.files) {
         return LibParse { deps: set(clone(libs.deps), last, deps), files: set(clone(libs.files), last, push(clone(get(&libs.files, last)), file)), ..libs };
     };
     return LibParse { names: push(clone(libs.names), modu), deps: push(clone(libs.deps), deps), files: push(clone(libs.files), push([], file)), ..libs };
@@ -239,7 +241,8 @@ fn libPackage(libs: &LibParse) -> Pkg ~ {
             };
             imports = [];
             for imp in &f.imports {
-                target = clone(get(&imp.path, 1));
+                target = "";
+                if size(imp.path) >= 2 { target = clone(get(&imp.path, 1)); };
                 file = "";
                 if size(imp.path) = 3 { file = clone(get(&imp.path, 2)); };
                 level = 0;
