@@ -147,7 +147,9 @@ runWithInput :: FilePath -> String -> IO (Result String String)
 runWithInput exe input = do
     (code, out, err) <- runWithInputFull exe input
     pure $ case code of
-        ExitSuccess -> Ok out
+        ExitSuccess
+            | out == "1\n" && not (null err) -> Error (dropWhileEnd' (== '\n') (decodeUtf8 err))
+            | otherwise -> Ok out
         ExitFailure _ -> Error (dropWhileEnd' (== '\n') (decodeUtf8 err))
   where
     dropWhileEnd' p = reverse . dropWhile p . reverse
