@@ -61,16 +61,16 @@ fn appendTokens(a: List<Token>, b: &List<Token>) -> List<Token> ~ {
     return a;
 };
 fn tokenLine(ts: &List<Token>) -> String ~ {
-    out = "";
+    bytes = [];
     first = true;
     for t in ts {
-        if !first { out = catStrings(out, " "); };
+        if !first { bytes = push(bytes, toByte(32)); };
         first = false;
         text = clone(t.text);
         if t.quoted { text = quoteName(t.text); };
-        out = catStrings(out, text);
+        for b in &text.bytes { bytes = push(bytes, b); };
     };
-    return out;
+    return String { bytes: bytes };
 };
 fn namesEnd(ts: &List<Token>, p: Int) -> Int ~ {
     n = numberAt(ts, p);
