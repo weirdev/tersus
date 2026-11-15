@@ -1,6 +1,6 @@
 {-# LANGUAGE PatternSynonyms #-}
 
-module TestMirEmit (testMirEmit, testMirEmitPrograms) where
+module TestMirEmit (testMirEmit, testMirEmitPrograms, testMirEmitRecords) where
 
 import Control.Concurrent.MVar (MVar, newMVar)
 import Data.List (isInfixOf, isPrefixOf)
@@ -159,6 +159,93 @@ orderedTypeClosure = do
     firstTypeClosureProblem results = case [message | Just message <- results] of
         message : _ -> Just message
         [] -> Nothing
+
+testMirEmitRecords :: Test
+testMirEmitRecords = TestList "testMirEmitRecords" checkedRecords
+
+-- The MIR the host gives the emitter may say each type's checked ownership facts and which declarations native storage
+-- is (MIR.md, "Ownership and storage"); then the facts, not the spelling of a function, say what drops a value
+checkedRecords :: [Test]
+checkedRecords =
+    [ TestCase "facts that name the conventional drop give the IR the names give" $ withRecordData $ \exe text -> do
+        legacy <- runExecutableBytes exe [] text
+        checked <- runExecutableBytes exe [] (withRecords (rows text) text)
+        pure (testAssertEq checked legacy <> emitted legacy)
+    , TestCase "the checked drop function is called whatever its name" $ withRecordData $ \exe text -> do
+        let renamed = replace "\"<V as Drop>::drop\"" "\"app$V$release\"" text
+        checked <- runExecutableBytes exe [] (withRecords (rows renamed) renamed)
+        unchecked <- runExecutableBytes exe [] renamed
+        pure (emitted checked <> testAssertTrue (calls "app$V$release" checked) <> testAssertTrue (not (calls "app$V$release" unchecked)))
+    , TestCase "a checked program without a type's row is refused" $ withRecordData $ \exe text -> do
+        refused <- runExecutableBytes exe [] (withRecords [row | row <- rows text, not ("owned \"V\"" `isPrefixOf` row)] text)
+        pure (testAssertEq refused (ExitSuccess, "1\n", "the input is not the MIR as data\n"))
+    , TestCase "a checked drop that names no function of the program is refused" $ withRecordData $ \exe text -> do
+        refused <- runExecutableBytes exe [] (withRecords (rows (replace "\"<V as Drop>::drop\"" "\"absent\"" text)) text)
+        pure (testAssertEq refused (ExitSuccess, "1\n", "the input is not the MIR as data\n"))
+    , TestCase "storage declarations are those the storage record names" $ withEmitter $ \exe -> do
+        dataOf <- mirDataOf "xs = [1, 2]; ys = push(xs, 3); return size(ys);"
+        case dataOf of
+            Error e -> pure (Just e)
+            Ok text -> do
+                legacy <- runExecutableBytes exe [] text
+                let renamed = replace "<List<" "<app$Seq<" (replace "\"List\"" "\"app$Seq\"" (replace "\"List<" "\"app$Seq<" text))
+                checked <- runExecutableBytes exe [] (storageRecord renamed)
+                unnamed <- runExecutableBytes exe [] renamed
+                let back (code, out, err) = (code, replace "app$Seq" "List" out, err)
+                pure (emitted legacy <> testAssertEq (back checked) legacy <> testAssertTrue (back unnamed /= legacy))
+    , TestCase "a storage list of one address field is refused as it is read" $ storageRefusal
+        (replace "struct \"app$Seq<Int>\" 3 \"addr\" addr int \"len\" int \"cap\" int" "struct \"app$Seq<Int>\" 1 \"addr\" addr int")
+    , TestCase "a storage list whose length is not an Int is refused as it is read" $ storageRefusal
+        (replace "\"len\" int \"cap\" int" "\"len\" byte \"cap\" int")
+    , TestCase "a storage list without its room, which a clone writes, is refused as it is read" $ storageRefusal
+        (replace "struct \"app$Seq<Int>\" 3 \"addr\" addr int \"len\" int \"cap\" int" "struct \"app$Seq<Int>\" 2 \"addr\" addr int \"len\" int")
+    ]
+  where
+    source = "struct V { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl V { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for V { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; v = V::new(3); return v.n;"
+    withRecordData use = withEmitter $ \exe -> do
+        dataOf <- mirDataOf source
+        case dataOf of
+            Error e -> pure (Just e)
+            Ok text -> use exe text
+    -- (the data of a program with a list, its List renamed and given as storage, then the declaration made wrong)
+    storageRefusal broken = withEmitter $ \exe -> do
+        dataOf <- mirDataOf "xs = [1, 2]; ys = push(xs, 3); return size(ys);"
+        case dataOf of
+            Error e -> pure (Just e)
+            Ok text -> do
+                let renamed = replace "<List<" "<app$Seq<" (replace "\"List\"" "\"app$Seq\"" (replace "\"List<" "\"app$Seq<" text))
+                    bad = broken (storageRecord renamed)
+                refused <- runExecutableBytes exe [] bad
+                pure (testAssertTrue (bad /= storageRecord renamed)
+                    <> testAssertEq refused (ExitSuccess, "1\n", "the input is not the MIR as data: the storage list app$Seq<Int> does not have its length and room as Ints after its address\n"))
+    emitted (code, out, err) = testAssertEq (code, err) (ExitSuccess, "") <> testAssertTrue ("@tersus_main" `isInfixOf` out)
+    -- (the drop function of a type calls the type's drop on the value it frees)
+    calls name (_, out, _) = ("call i64 @\"fn." ++ name ++ "\"(ptr %slot)") `isInfixOf` out
+    -- (a row for each declared type: its drop and its clone when the program has the conventional functions of them)
+    rows text =
+        [ unwords (["owned", quoted name] ++ map quoted ([""] ++ pair "Drop" "drop" name ++ pair "Clone" "clone" name ++ ["", ""]))
+        | line <- lines text, Just name <- [declared line] ]
+      where
+        pair trait function name
+            | quoted ("<" ++ name ++ " as " ++ trait ++ ">::" ++ function) `isInfixOf` text = [trait, "<" ++ name ++ " as " ++ trait ++ ">::" ++ function]
+            | name == "V" && trait == "Drop" && "\"app$V$release\"" `isInfixOf` text = [trait, "app$V$release"]
+            | name == "V" && trait == "Drop" && "\"absent\"" `isInfixOf` text = [trait, "absent"]
+            | otherwise = ["", ""]
+    declared :: String -> Maybe String
+    declared line = case break (== ' ') line of
+        (keyword, ' ' : rest) | keyword `elem` ["struct", "enum"], [(name, _)] <- reads rest -> Just name
+        _ -> Nothing
+    quoted name = show name
+    withRecords records text = insertAfterTypes (("ownership " ++ show (length records)) : records) text
+    storageRecord = insertAfterTypes ["storage \"app$Seq\" \"Box\""]
+    insertAfterTypes extra text =
+        let (header : rest) = lines text
+            (types, others) = span (\l -> declared l /= Nothing) rest
+         in unlines (header : types ++ extra ++ others)
+    replace from to text = case text of
+        [] -> []
+        _ | from `isPrefixOf` text -> to ++ replace from to (drop (length from) text)
+        c : more -> c : replace from to more
 
 interpretedIr :: String -> IO TestResult
 interpretedIr source = do

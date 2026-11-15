@@ -302,6 +302,18 @@ fn librariesFor(p: &Probe) -> List<String> ~ {
     return out;
 };
 
+// The selected libraries among those there are: the std shape's one module core holds what the libraries types and clone hold
+fn shapedLibraries(available: &List<String>, chosen: List<String>) -> List<String> ~ {
+    if indexIn(available, "core") < 0 { return chosen; };
+    out = [];
+    for n in &chosen {
+        name = clone(n);
+        if name = "types" || name = "clone" { name = "core"; };
+        if indexIn(&out, &name) < 0 { out = push(out, name); };
+    };
+    return out;
+};
+
 fn traitNamed(said: &HashSet<String>) -> Bool ~ {
     return HashSet::contains(said, "Sequence") || HashSet::contains(said, "Growable") || HashSet::contains(said, "Clone") || HashSet::contains(said, "Copy") || HashSet::contains(said, "Drop") || HashSet::contains(said, "Deref") || HashSet::contains(said, "Hash") || HashSet::contains(said, "hashCombine");
 };
@@ -414,7 +426,13 @@ fn probeModule(nodes: &List<AstNode>, ids: &List<Int>, ifaces: &List<AstProgram>
 // anything was left out.
 struct View { program: AstProgram, changed: Bool };
 
-struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool };
+// (spelled: the libraries are of the std shape, whose names are canonical, so a declaration hides one of its spelling)
+struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool, spelled: Bool };
+
+fn hides(h: &Hide, name: &String) -> Bool ~ {
+    if h.spelled { return HashSet::contains(&h.declared, localName(name)); };
+    return HashSet::contains(&h.declared, name);
+};
 
 fn declaredName(h: &Hide, name: &String) -> Bool ~ {
     if HashSet::contains(&h.declared, name) { return true; };
@@ -443,25 +461,25 @@ fn entryNameOf(nodes: &List<AstNode>, e: Int) -> String ~ {
 enum ViewField { NamedEntries, Constructors, BaseNames, AxiomsAndProofs, Names, Templates, Traits, Impls };
 
 fn keeps(nodes: &List<AstNode>, item: Int, field: &ViewField, h: &Hide) -> Bool ~ {
-    if h.dropOnly { return field is ViewField::Traits && entryNameOf(nodes, item) = "Drop"; };
+    if h.dropOnly { traitName = entryNameOf(nodes, item); return field is ViewField::Traits && localName(&traitName) = "Drop"; };
     if field is ViewField::Impls { return true; };
-    if field is ViewField::NamedEntries || field is ViewField::Traits { name = entryNameOf(nodes, item); return !HashSet::contains(&h.declared, &name); };
+    if field is ViewField::NamedEntries || field is ViewField::Traits { name = entryNameOf(nodes, item); return !hides(h, &name); };
     if field is ViewField::Constructors {
         entry = entryOf(nodes, item);
         if !(entry is AstEntry::CtorEntry) { return true; };
         c = entry as AstEntry::CtorEntry;
         ctor = nameText(nodes, c.n);
         owner = nameText(nodes, c.owner);
-        return !HashSet::contains(&h.declared, &ctor) && !HashSet::contains(&h.declared, &owner);
+        return !hides(h, &ctor) && !hides(h, &owner);
     };
-    if field is ViewField::BaseNames { name = nameText(nodes, item); base = baseNameOf(&name); return !HashSet::contains(&h.declared, &base); };
-    if field is ViewField::Names { name = nameText(nodes, item); return !HashSet::contains(&h.declared, &name); };
+    if field is ViewField::BaseNames { name = nameText(nodes, item); base = baseNameOf(&name); return !hides(h, &base); };
+    if field is ViewField::Names { name = nameText(nodes, item); return !hides(h, &name); };
     if field is ViewField::Templates { name = entryNameOf(nodes, item); return !declaredName(h, &name); };
     stmt = statementOf(nodes, item);
     name = "";
     if stmt is AstStatement::AxiomDef { name = nameText(nodes, (stmt as AstStatement::AxiomDef).n); };
     if stmt is AstStatement::ProofDef { name = nameText(nodes, (stmt as AstStatement::ProofDef).n); };
-    return size(name.bytes) = 0 || !HashSet::contains(&h.declared, &name);
+    return size(name.bytes) = 0 || !hides(h, &name);
 };
 
 struct Kept { nodes: List<AstNode>, head: Int, changed: Bool };

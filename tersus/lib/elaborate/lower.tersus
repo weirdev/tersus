@@ -818,7 +818,7 @@ fn lowerBounded(ls: LowSt, src: &List<AstNode>, bounds: Int, inner: Int, atProgr
         node = nodeIn(src, b);
         if node is AstNode::Bound {
             bv = (node as AstNode::Bound).value;
-            if nameText(src, bv.n) = "Copy" { copyParams = push(copyParams, nameText(src, bv.p)); };
+            if nameText(src, bv.n) = ls.copyName { copyParams = push(copyParams, nameText(src, bv.p)); };
             for t in listItems(src, bv.ts) {
                 tyc = codecTypeAt(src, t);
                 ls = fromCodecTy(ls, &tyc);

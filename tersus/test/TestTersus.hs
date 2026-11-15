@@ -63,6 +63,7 @@ import TestParser
 import TestParserBootstrap
 import TestParserUnicode
 import TestLibModules
+import TestLibraryShapes
 
 main :: IO ()
 main = do
@@ -218,6 +219,8 @@ originalGroups =
     , testDifferential
     , testParity
     , testLibModules
+    , testLibraryShapes
+    , testMirEmitRecords
     , testNativeStorageModules
     , testMirSupport
     ]
