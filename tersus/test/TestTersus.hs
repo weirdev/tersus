@@ -1,3 +1,4 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
 module TestTersus (main, allGroups) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -13,6 +14,11 @@ import System.IO (BufferMode (LineBuffering), hPutStr, hSetBuffering, stderr, st
 import System.Process (CreateProcess (..), proc)
 import System.Posix.Process (ProcessTimes (..), getParentProcessID, getProcessID, getProcessTimes)
 import System.Posix.Unistd (SysVar (..), getSysVar)
+import Foreign.C.Types (CInt (..), CLong)
+import Foreign.Marshal.Alloc (allocaBytes)
+import Foreign.Ptr (Ptr)
+import Foreign.Storable (peekByteOff)
+import System.Info (os)
 
 import TestHarness
 import TestBasics
@@ -97,6 +103,12 @@ main = do
                 ticks <- getSysVar ClockTick
                 let seconds = fromIntegral (sum (map fromEnum [userTime times, systemTime times, childUserTime times, childSystemTime times])) / fromIntegral ticks :: Double
                 putStrLn ("[CPU] " ++ unwords names ++ " " ++ show (fromIntegral (round (seconds * 10) :: Int) / 10 :: Double) ++ "s")
+                -- (the largest resident sets of the group's process and of the processes it waited for, which
+                -- TestScheduling.estimatedPeakMiB has to cover; Linux reports them in KiB)
+                when (os == "linux") $ do
+                    own <- maxResidentKiB 0
+                    children <- maxResidentKiB (-1)
+                    putStrLn ("[PEAK] " ++ unwords names ++ " " ++ show (own `div` 1024) ++ "MiB " ++ show (children `div` 1024) ++ "MiB")
             unless (argumentChild arguments) $ do
                 putStrLn $
                     "Summary: "
@@ -322,3 +334,11 @@ countResults = foldl' count (testSummary 0 0) . lines
         | "[PASS]" `isPrefixOf` line = testSummary (summaryPassed summary + 1) (summaryFailed summary)
         | "[FAIL]" `isPrefixOf` line || "[CRASH]" `isPrefixOf` line = testSummary (summaryPassed summary) (summaryFailed summary + 1)
         | otherwise = summary
+
+foreign import ccall unsafe "getrusage" c_getrusage :: CInt -> Ptr () -> IO CInt
+
+-- ru_maxrss of getrusage(who): it follows the two struct timevals, 16 bytes each on 64-bit Linux
+maxResidentKiB :: CInt -> IO Integer
+maxResidentKiB who = allocaBytes 256 $ \usage -> do
+    status <- c_getrusage who usage
+    if status /= 0 then pure 0 else toInteger <$> (peekByteOff usage 32 :: IO CLong)
