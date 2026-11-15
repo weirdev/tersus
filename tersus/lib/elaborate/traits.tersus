@@ -610,8 +610,9 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
     ex = exprOf(&st, argTE.node);
     if !(ex is AstExpression::Var) { return St { ok: false, ..st }; };
     fnName = nameText(&st.nodes, (ex as AstExpression::Var).n);
-    if scopeLookup(&st, &fnName) >= 0 { return St { ok: false, ..st }; };
     if !HashMap::contains(&st.fns, &fnName) { return St { ok: false, ..st }; };
+    inScopeTy = scopeLookup(&st, &fnName);
+    if inScopeTy >= 0 && (inScopeTy != HashMap::lookup(&st.fns, &fnName, 0 - 1) || size(st.current.bytes) > 0) { return St { ok: false, ..st }; };
     if HashMap::contains(&st.templates, &fnName) { return St { ok: false, ..st }; };
     st = lookupVar(st, &fnName);
     if st.status != 0 { return St { ok: false, status: 0, msg: "", ..st }; };
