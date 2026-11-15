@@ -179,14 +179,15 @@ type Loan = (Place, Bool, Pos)
 -- stParents holds what a local's loans were taken from: the reference a reborrow is made through, the value a reference is read out of,
 -- the values a value holding references was made of, the arguments a result is from. A parent is suspended while the local is live
 -- (REFERENCES.md, Core rules).
-data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place], stFieldLoans :: Map (Local, Variable) [Place], stConst :: Map Local Integer, stFnAlias :: Map Local Name, stParents :: Map Local [Local]}
+-- stThrough holds, for a view read through a reference (`*r`, or a part of such a view), the references it may have been read through.
+data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place], stFieldLoans :: Map (Local, Variable) [Place], stConst :: Map Local Integer, stFnAlias :: Map Local Name, stParents :: Map Local [Local], stThrough :: Map Local (Set Local)}
     deriving (Eq)
 
 emptySt :: St
-emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
+emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
 joinSt :: St -> St -> St
-joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith unionPlaces (stExtraLoans a) (stExtraLoans b)) (Map.unionWith unionPlaces (stFieldLoans a) (stFieldLoans b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stConst a) (stConst b))) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v]) (Map.unionWith unionPlaces (stParents a) (stParents b))
+joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith unionPlaces (stExtraLoans a) (stExtraLoans b)) (Map.unionWith unionPlaces (stFieldLoans a) (stFieldLoans b)) (Map.mapMaybe id (Map.intersectionWith (\x y -> if x == y then Just x else Nothing) (stConst a) (stConst b))) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v]) (Map.unionWith unionPlaces (stParents a) (stParents b)) (Map.unionWith Set.union (stThrough a) (stThrough b))
 
 -- (only what is new is appended, so that joining a state that is already in a join changes nothing: the fixpoint of
 -- checkFunction skips a block whose predecessors' states have not changed)
@@ -194,12 +195,25 @@ unionPlaces :: Eq a => [a] -> [a] -> [a]
 unionPlaces xs ys = xs ++ [y | y <- ys, y `notElem` xs]
 
 sameShape :: St -> St -> Bool
-sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.keysSet (stLoans a) == Map.keysSet (stLoans b) && Map.keysSet (stExtraLoans a) == Map.keysSet (stExtraLoans b) && Map.keysSet (stFieldLoans a) == Map.keysSet (stFieldLoans b) && stParents a == stParents b
+sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.keysSet (stLoans a) == Map.keysSet (stLoans b) && Map.keysSet (stExtraLoans a) == Map.keysSet (stExtraLoans b) && Map.keysSet (stFieldLoans a) == Map.keysSet (stFieldLoans b) && stParents a == stParents b && stThrough a == stThrough b
 
 -- Every loan that freezes a place: a reference's own place, and the other places a result that may be from
--- more than one parameter freezes (a call result: which of them it is is the callee's choice)
+-- more than one parameter freezes (a call result: which of them it is is the callee's choice). A value that
+-- holds an update reference holds an update loan on its place.
 loanEntries :: St -> [(Local, Place, Bool)]
-loanEntries st = [(ref, place, mutable) | (ref, (place, mutable, _)) <- Map.toList (stLoans st)] ++ [(ref, place, False) | (ref, places) <- Map.toList (stExtraLoans st), place <- places]
+loanEntries st = [(ref, place, mutable) | (ref, (place, mutable, _)) <- Map.toList (stLoans st)] ++ [(ref, place, place `elem` carried) | (ref, places) <- Map.toList (stExtraLoans st), let carried = carriedUpdates st ref, place <- places]
+
+-- The places a value that holds references holds an update reference to: those of the update references it was made of,
+-- directly or through the values that hold them
+carriedUpdates :: St -> Local -> [Place]
+carriedUpdates st holder = filter (`elem` Map.findWithDefault [] holder (stExtraLoans st)) (go (Set.singleton holder) (Map.findWithDefault [] holder (stParents st)))
+  where
+    go _ [] = []
+    go seen (l : rest)
+        | l `Set.member` seen = go seen rest
+        | otherwise = case Map.lookup l (stLoans st) of
+            Just (place, mutable, _) -> [place | mutable] ++ go (Set.insert l seen) rest
+            Nothing -> go (Set.insert l seen) (Map.findWithDefault [] l (stParents st) ++ rest)
 
 -- The locals and every local their loans were taken from, at any remove
 ancestorsOrSelf :: St -> [Local] -> Set Local
@@ -261,6 +275,7 @@ data Cx = Cx
     , cxLiveOut :: Map BlockId (Set Local) -- the locals live at the end of a block
     , cxLiveNow :: Set Local -- the locals live after the statement or terminator being checked
     , cxBorrowRefs :: Map Local [Local] -- the reference locals borrowed from each local
+    , cxCallArgs :: Set Local -- the temporaries given to the call that ends the block being checked
     }
 
 -- The locals a statement or a terminator reads, and the local it gives a value
@@ -367,7 +382,7 @@ checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b s
         _ -> Nothing
     lent = Set.fromList (fnBorrowed fn ++ [self | Just (_, self) <- [dropOf]])
     (liveAfter, liveOut) = liveness fn
-    cx = Cx program copies fn lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty (borrowRefsOf fn)
+    cx = Cx program copies fn lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty (borrowRefsOf fn) Set.empty
     -- (a permission given to the function, and not lent, is the function's to use)
     entry = emptySt{stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)])}
     isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)
@@ -388,8 +403,9 @@ checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b s
          in if and [maybe False (sameShape st) (Map.lookup s known) | (s, st) <- joined] then known else fixpoint known' outs' (Set.fromList (map fst joined))
 
 runBlock :: Cx -> BlockId -> St -> BasicBlock -> (St, [String])
-runBlock cx b st0 (BasicBlock stmts term) = (st2, reverse errs1 ++ errs2)
+runBlock cx0 b st0 (BasicBlock stmts term) = (st2, reverse errs1 ++ errs2)
   where
+    cx = cx0{cxCallArgs = Set.fromList [l | Call _ args _ _ <- [term], Just l <- map operandLocal args, localSource cx0 l == Nothing]}
     (st1, pos1, errs1) = foldl' step (st0, Nothing, []) (zip [0 ..] stmts)
     (st2, errs2) = terminator cx{cxLiveNow = Map.findWithDefault Set.empty b (cxLiveOut cx)} pos1 st1 term
     step (st, pos, errs) (i, s) = case s of
@@ -460,8 +476,26 @@ placesOf st l = case Map.lookup l (stViews st) of
     _ -> [(l, [])]
 
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
-assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias', stParents = parents''}, errs ++ lost cx pos st1 d ++ loanErrs ++ readOutErrs ++ readThroughErrs)
+assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias', stParents = parents'', stThrough = through''}, errs ++ lost cx pos st1 d ++ loanErrs ++ readOutErrs ++ readThroughErrs ++ placeReadErrs)
   where
+    through'' = case (view, rv) of
+        ([], _) -> Map.delete d (stThrough base)
+        (_, Deref o) | Just r <- operandLocal o, isReference cx r || r `Set.member` cxLent cx -> Map.insert d (Set.singleton r) (stThrough base)
+        _ -> case Set.unions [rs | (l, _, _) <- accesses rv, Just rs <- [Map.lookup l (stThrough st1)]] of
+            rs | Set.null rs -> Map.delete d (stThrough base)
+               | otherwise -> Map.insert d rs (stThrough base)
+    -- (making a view reads none of it yet, so only a loan of all of it stands against that; the size of a list reads no element)
+    placeReadErrs = case rv of
+        Borrow{} -> []
+        _ -> placeReads cx pos st1 (d : [l | callCopy, l <- Set.toList (cxCallArgs cx)]) [(l, if isProjection rv && Just l == sourceLocal rv then ps ++ [stepOf rv] else ps, isCopy cx l || (null view && not lengthOnly)) | (l, ps, role) <- used, role == Read || isCopy cx l]
+    lengthOnly = case rv of
+        ListOp Length _ -> True
+        _ -> False
+    -- (a Copy part of a value read into a value of its own that is an argument of the call ending the block is read where
+    -- the call is made, so the borrows made for that call do not stand against it: LANGUAGE.md, Lent parameters)
+    callCopy = isCopy cx d && d `Set.member` cxCallArgs cx && case rv of
+        ReadField{} -> True
+        _ -> isProjection rv
     parents'' = case rv of
         Borrow{} -> parentsAre borrowParents
         ReadField o _ field | isReference cx d, Just src <- operandLocal o, Just (_ : _) <- fieldLoansThrough src field -> parentsAre (readOutOf src)
@@ -590,7 +624,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
             ]
         _ -> []
     readThroughErrs = case rv of
-        Deref o | Just r <- operandLocal o, isReference cx r -> suspendedReads cx pos st1 (isCopy cx d) d r
+        Deref o | Just r <- operandLocal o, isReference cx r, isCopy cx d -> suspendedReads cx pos st1 d r
         _ -> []
     -- (the size of the pack of a variadic function is a number in each copy, which reads none of its elements)
     packSize = case rv of
@@ -653,7 +687,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
 -- An assignment through a reference: the root gets a new version, and no other live loan to the place may be
 -- there but those of the reference it goes through and of what that reference was taken from
 updatePlace :: Cx -> Pos -> St -> Local -> [RefStep] -> Rvalue -> (St, [String])
-updatePlace cx pos st0 root steps rv = (define cx st1 root [], errs ++ conflicts)
+updatePlace cx pos st0 root steps rv = (define cx st1 root [], errs ++ placeReads cx pos st1 [] [(l, ps, True) | (l, ps, role) <- accesses rv, role == Read || isCopy cx l] ++ conflicts)
   where
     (st1, errs) = foldl' (access cx pos) (st0, []) (accesses rv ++ [(root, map refStepOf steps, Read)])
     place = resolvePlace cx st1 (root, map refStepOf steps)
@@ -670,23 +704,50 @@ updatePlace cx pos st0 root steps rv = (define cx st1 root [], errs ++ conflicts
         , ref `Set.notMember` ancestorsOrSelf st1 through
         ]
 
--- A read through a reference while a live reborrow of it overlaps what is read: all it is to, or for a view (only a part
--- of which may be read after) a reborrow of all of it. Only a reference made by a borrow here is checked: an assignment
--- through any other is written as one to itself, as one through its reborrow is, so the reborrow seems live wherever either is.
-suspendedReads :: Cx -> Pos -> St -> Bool -> Local -> Local -> [String]
-suspendedReads cx pos st whole except r =
-    [ message cx pos (describe cx lplace ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be read through " ++ describeLocal cx r ++ " while that borrow is live: the borrow ends at the last use of " ++ describeLocal cx ref)
+-- A read of all a reference is to while a live reborrow of it overlaps it. Only a reference made by a borrow here is checked:
+-- an assignment through any other is written as one to itself, as one through its reborrow is, so the reborrow seems live
+-- wherever either is.
+suspendedReads :: Cx -> Pos -> St -> Local -> Local -> [String]
+suspendedReads cx pos st except r =
+    [ suspendedRead cx pos ref lplace r
     | (ref, (lplace, True, _)) <- Map.toList (stLoans st)
     , ref /= r
     , ref /= except
     , ref `Set.member` cxLiveNow cx
-    , r `Set.member` ancestorsOrSelf st (Map.findWithDefault [] ref (stParents st))
+    , descendsFrom cx st ref r
     , overlaps target lplace
-    , whole || length (snd lplace) <= length (snd target)
-    , r `elem` concat (Map.elems (cxBorrowRefs cx))
     ]
   where
     target = maybe (r, []) (\(place, _, _) -> place) (Map.lookup r (stLoans st))
+
+suspendedRead :: Cx -> Pos -> Local -> Place -> Local -> String
+suspendedRead cx pos ref lplace r = message cx pos (describe cx lplace ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be read through " ++ describeLocal cx r ++ " while that borrow is live: the borrow ends at the last use of " ++ describeLocal cx ref)
+
+descendsFrom :: Cx -> St -> Local -> Local -> Bool
+descendsFrom cx st ref r = r `Set.member` ancestorsOrSelf st (Map.findWithDefault [] ref (stParents st)) && r `elem` concat (Map.elems (cxBorrowRefs cx))
+
+-- Reads of places that a live update loan overlaps (REFERENCES.md, Core rules: no independent read of what an update is to):
+-- of an owner, or of a view read through a reference that a live reborrow suspends. A read flagged False makes a view, and
+-- only a loan of all of it counts. A lent parameter is not checked, for the reason suspendedReads gives.
+placeReads :: Cx -> Pos -> St -> [Local] -> [(Local, [Step], Bool)] -> [String]
+placeReads cx pos st except reads = nub
+    [ case throughs of
+        Nothing -> message cx pos (describe cx lplace ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be read while that borrow is live: the borrow ends at the last use of " ++ describeLocal cx ref)
+        Just rs -> suspendedRead cx pos ref lplace (Set.findMin rs)
+    | (l, steps, whole) <- reads
+    , not (isReference cx l) || Map.member l (stThrough st)
+    , let throughs = Map.lookup l (stThrough st)
+    , all (`Set.notMember` cxLent cx) (l : maybe [] Set.toList throughs)
+    , q <- [readPlace cx st (r, ps ++ steps) | (r, ps) <- placesOf st l]
+    , (ref, lplace, True) <- loanEntries st
+    , ref `notElem` except
+    , ref `Set.member` cxLiveNow cx
+    , overlaps q lplace
+    , whole || length (snd lplace) <= length (snd q)
+    , case throughs of
+        Nothing -> ref `Set.notMember` ancestorsOrSelf st [l]
+        Just rs -> all (\r -> ref /= r && descendsFrom cx st ref r) (Set.toList rs)
+    ]
 
 -- The effect of the use of a part of a local
 -- The elements of a pack a call forwards that are outside the bounds of the part forwarded, when those are numbers: the call
@@ -867,11 +928,12 @@ define _ st d view0 =
         , stConst = stConst st
         , stFnAlias = stFnAlias st
         , stParents = stParents st
+        , stThrough = stThrough st
         }
 
 terminator :: Cx -> Pos -> St -> Terminator -> (St, [String])
 terminator cx pos st term = case term of
-    SwitchBool o _ _ -> accessAll [(l, [], Read) | Just l <- [operandLocal o]]
+    SwitchBool o _ _ -> let (st', errs) = accessAll [(l, [], Read) | Just l <- [operandLocal o]] in (st', errs ++ placeReads cx pos st [] [(l, [], True) | Just l <- [operandLocal o]])
     Call callee args dest _ ->
         let lent = lentArguments cx callee (length args)
             mut = mutArguments cx callee (length args)
@@ -914,7 +976,7 @@ terminator cx pos st term = case term of
             windowed = case (refFieldNames cx (typeOf cx dest), resultFromPlaces cx st' callee args) of
                 (fields@(_ : _), places@(_ : _)) -> loaned{stFieldLoans = foldl' (\m f -> Map.insert (dest, f) places m) (Map.filterWithKey (\(root, _) _ -> root /= dest) (stFieldLoans loaned)) fields, stExtraLoans = Map.insert dest places (stExtraLoans loaned)}
                 _ -> loaned
-            readErrs = concat [suspendedReads cx pos st True dest r | Just r <- map operandLocal args, isReference cx r]
+            readErrs = concat [suspendedReads cx pos st dest r | Just r <- map operandLocal args, isReference cx r] ++ placeReads cx pos st [dest] [(l, [], True) | (l, lentArg) <- [(l, True) | Just l <- [operandLocal callee]] ++ argLocals, lentArg || isCopy cx l]
             parented = windowed{stParents = case [l | Just l <- map operandLocal (resultFromArgs cx st' callee args), l /= dest] of
                 [] -> Map.delete dest (stParents windowed)
                 from -> Map.insert dest (nub from) (stParents windowed)}
