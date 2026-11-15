@@ -30,6 +30,9 @@ testClosures =
             , testCase "a type with no function impl does not meet an Fn bound" (rejected ("struct Plain { n: Int }; fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; p = Plain { n: 1 }; return apply(&p, 5);") "Fn(...)")
             , testCase "a shape with no result type is a parse error" (pipelineRejected "fn apply<F: Fn(x: Int)>(f: &F, x: Int) -> Int { return x; }; return 0;" "expected (")
             , testCase "a bound shape that is never called still checks" (valid (adder ++ "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return x; }; return 0;"))
+            , testCase "a named function satisfies an Fn bound" (runs ("fn double(x: Int) -> Int { return x * 2; }; fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; return apply(double, 21);") 42)
+            , testCase "a named function satisfies a shape over a type parameter" (runs ("fn idInt(x: Int) -> Int { return x; }; fn applyAt<T, F: Fn(T) -> T>(f: &F, x: T) -> T { return f(x); }; return applyAt(idInt, 41);") 41)
+            , testCase "a named function whose contract does not meet the bound is refused" (rejected ("fn inc(x: Int) -> Int [{ }] [{ }] { return x + 1; }; fn useIt<F: Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; return useIt(inc, 5);") "does not meet")
             , TestCase "a function object across modules" $ do
                 program <-
                     programFromFiles
