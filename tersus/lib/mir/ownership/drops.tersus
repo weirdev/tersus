@@ -1,7 +1,7 @@
 import data::codec::codec { Type };
 import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, TypeDecl, Variant, Field };
 import mir::support::support { variantsOf, declName };
-import mir::ownership::common { Key, FieldName, Loan, LoanEntry, LocalKinds, whole, fieldKey, stringLess, keyLess, keySetAdd, keySetUnion, intSetHas, intSetAdd, roles, operandLocal, successors, localTypeIn, hasDrop, needsDrop, concatStatements, loanLookup, sortBlocks, noOwnershipLocals, singleton, pair };
+import mir::ownership::common { Key, FieldName, Loan, LoanEntry, LocalKinds, whole, fieldKey, stringLess, keyLess, keySetAdd, keySetUnion, intSetHas, intSetAdd, intSetInsert, roles, operandLocal, successors, localTypeIn, hasDrop, needsDrop, concatStatements, loanLookup, sortBlocks, noOwnershipLocals, singleton, pair };
 import mir::ownership::analysis { loanEntries, loanStatement, blockSpan, localKinds };
 
 enum OwnState { Empty, Owned, MaybeOwned };
@@ -52,7 +52,7 @@ fn ownPartState(parts: &List<OwnPart>, key: &Key) -> OwnState ~ {
     for part in parts { if part.key = key { return clone(part.state); }; };
     return OwnState::Empty;
 };
-// (by value, as loanPut: a part that is replaced in place, or one that is not kept and not there, copies nothing)
+// (by value, as loanPut: a part that is replaced in place, added after the last, or not kept and not there, copies nothing)
 fn ownPartPut(parts: List<OwnPart>, key: Key, state: OwnState) -> List<OwnPart> ~ {
     keep = state != OwnState::Empty || key.kind = 2;
     i = 0;
@@ -60,6 +60,7 @@ fn ownPartPut(parts: List<OwnPart>, key: Key, state: OwnState) -> List<OwnPart> 
     present = i < size(parts) && get(parts, i).key = key;
     if present && keep && i < size(parts) { return set(parts, i, OwnPart { key: key, state: state }); };
     if !present && !keep { return parts; };
+    if !present && i >= size(parts) { return push(parts, OwnPart { key: key, state: state }); };
     out = []; added = false;
     for part in parts {
         if !added && !keyLess(part.key, key) {
@@ -623,7 +624,7 @@ fn dropSortLocals(locals: &List<LocalDecl>) -> List<LocalDecl> ~ {
 fn elaborateDrops(names: &List<FieldName>, p: &Program, fn: &Function, tracked: &List<Int>, locals: List<LocalDecl>, blocks: List<MirBlock>, nextLocal: Int, nextBlock: Int) -> Function ~ {
     ordered = sortBlocks(blocks);
     owned = [];
-    for local in tracked { owned = intSetAdd(owned, local); };
+    for local in tracked { owned = intSetInsert(owned, local); };
     shapes = []; for local in owned { shapes = push(shapes, LocalShape { local: local, shape: dropShape(p, locals, local) }); };
     dc = DropCx { names: clone(names), shapes: shapes };
     entries = ownBlockStates(dc, fn, owned, ordered);

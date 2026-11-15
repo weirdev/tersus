@@ -225,7 +225,7 @@ sharedRecords = ["Res", "ArrayInfo", "Layout", "Simple"]
 sharedFunctions :: [String]
 sharedFunctions =
     [ "noStrings", "showInt", "joinWith", "beforeAngle", "withoutBackticks", "hexUpper", "escaped"
-    , "renderSize", "renderType", "declName", "lookupDecl", "variantNamed", "ownerOf"
+    , "renderSize", "renderType", "declName", "declNamed", "lookupDecl", "variantNamed", "ownerOf"
     , "canonical", "variantsOf", "isEnum", "notArray", "sizedArray"
     , "isSizedArray", "isAggregate", "declaredName", "roundUp", "wordLayout", "simpleLayout"
     ]
@@ -331,6 +331,7 @@ borrowedMetadata (loaded, compiled, program) = firstFailure
         _ -> Just ("missing shared function " ++ symbol)
     | (name, params, result) <-
         [ ("declName", [TRef decl], string)
+        , ("declNamed", [TRef decl, TRef string], TBool)
         , ("lookupDecl", [TRef (list decl), TRef string], TInt)
         , ("renderType", [TRef ty], string)
         , ("renderSize", [TRef (TNamed "data$codec$codec$Size" [])], string)
@@ -356,7 +357,7 @@ directCalls (loaded, compiled, program) = firstFailure
     , testAssertEq (Set.fromList (map supportName ["simpleLayout", "sizedArray", "declaredName", "lookupDecl", "wordLayout", "roundUp"]) `Set.isSubsetOf` calls "layoutOf") True
     , testAssertEq (Set.member (supportName "roundUp") (calls "fieldsLayout")) True
     , testAssertEq (Set.member "layoutOf" (calls "fieldsLayout")) True
-    , testAssertEq (Set.member (supportName "declName") (calls (supportName "lookupDecl"))) True
+    , testAssertEq (Set.member (supportName "declNamed") (calls (supportName "lookupDecl"))) True
     , testAssertEq (Set.member "<String>::concat" (calls (supportName "joinWith"))) True
     , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "joinWith"))) False
     , testAssertEq (Set.member "data$codec$codec$catStrings" (calls (supportName "renderType"))) True

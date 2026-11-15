@@ -132,7 +132,7 @@ impl Clone for Program { };
 
 // The checked ownership facts of a type, or seven empty names
 fn ownershipOf(p: &Program, owner: &String) -> List<String> ~ {
-    for o in &p.meta.owned { if o.owner = clone(owner) { return clone(o.facts); }; };
+    for o in &p.meta.owned { if o.owner = owner { return clone(o.facts); }; };
     return push(push(push(push(push(push(push([], ""), ""), ""), ""), ""), ""), "");
 };
 
@@ -142,7 +142,7 @@ fn factAt(facts: &List<String>, i: Int) -> String [{ }] [{ }] {
 };
 
 fn hasFunction(p: &Program, name: &String) -> Bool [{ }] [{ }] {
-    for f in &p.functions { if f.name = clone(name) { return true; }; };
+    for f in &p.functions { if f.name = name { return true; }; };
     return false;
 };
 
@@ -157,7 +157,8 @@ fn dropOf(p: &Program, owner: &String) -> String ~ {
 // Whether a function is the drop of a type
 fn isDropOf(p: &Program, name: &String) -> Bool ~ {
     if p.meta.checked {
-        for o in &p.meta.owned { if factAt(&o.facts, 2) = clone(name) && size(name.bytes) > 0 { return true; }; };
+        if size(name.bytes) = 0 { return false; };
+        for o in &p.meta.owned { if factAt(&o.facts, 2) = name { return true; }; };
         return false;
     };
     suffix = " as Drop>::drop";
@@ -172,9 +173,9 @@ fn cloneOf(p: &Program, owner: &String) -> String ~ {
 };
 
 // Whether a declaration's name, before its arguments, is that of native storage's List or Box
-fn isStorageList(p: &Program, base: &String) -> Bool ~ { return clone(base) = p.meta.listName; };
+fn isStorageList(p: &Program, base: &String) -> Bool ~ { return base = p.meta.listName; };
 
-fn isStorageBox(p: &Program, base: &String) -> Bool ~ { return clone(base) = p.meta.boxName; };
+fn isStorageBox(p: &Program, base: &String) -> Bool ~ { return base = p.meta.boxName; };
 
 // The words of the binary operations and of the list operations, whose index is the operation
 fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
