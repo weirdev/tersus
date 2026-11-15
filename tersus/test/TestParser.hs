@@ -12,6 +12,7 @@ import qualified Data.Map as Map
 import qualified Compile
 import qualified TersusParser
 import MirHousekeeping (cachedEmitter, validationEntry)
+import Native (availableProcessors)
 import ParsedFile (Decls, ParsedFile, emptyDecls, fileBody, locating)
 import qualified FileParserProtocol as File
 import PreludeSource (elaboratePackageFiles, toolPackageFiles, validationPackageFiles)
@@ -125,14 +126,15 @@ corpusParity batch = do
             ++ [[sample] | sample <- allSources, fst sample `notElem` fixturePaths]
         selected = map fst (concat (batchItems 4 batch units))
         sources = filter ((`elem` selected) . fst) allSources
-    reports <- forM fixtures $ \(entry, members) -> do
+    processors <- availableProcessors
+    reports <- boundedConcurrently processors $ flip map fixtures $ \(entry, members) -> do
         report <- if any ((`elem` members) . fst) sources
             then comparePreparedPackage resolver entry
             else pure ([], Nothing)
         pure [(path, report) | path <- members]
     let prepared = Map.fromList (concat reports)
-    results <- forM sources $ \(path, source) -> do
-        putStrLn ("Native corpus file: " ++ path)
+    mapM_ (putStrLn . ("Native corpus file: " ++) . fst) sources
+    results <- boundedConcurrently processors $ flip map sources $ \(path, source) -> do
         result <- case Modules.discoverEntry resolver path of
             Modules.InPackage _ _ | takeFileName path /= "package.tersus" ->
                 case Map.lookup path prepared of
@@ -172,7 +174,8 @@ comparePreparedPackage resolver path = case Modules.loadFromEntry resolver path 
         case prepared of
             Left e -> pure ([], Just e)
             Right files -> do
-                results <- mapM (\(source, decls) -> pairedWith True [ParserSeed.parseFileNative, TersusParser.parseFileNative] decls source) files
+                processors <- availableProcessors
+                results <- boundedConcurrently processors [pairedWith True [ParserSeed.parseFileNative, TersusParser.parseFileNative] decls source | (source, decls) <- files]
                 pure (map fst files, firstFailure (testAssertTrue (not (null files)) : results))
     Right _ -> pure ([], Just "expected a prepared package")
 

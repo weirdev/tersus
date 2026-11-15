@@ -18,6 +18,7 @@ module TestHarness
     , recordSource
     , forceTestResult
     , runTest
+    , boundedConcurrently
     , testAssertTrue
     , testAssertEq
     , testAssertErrorContains
@@ -225,6 +226,18 @@ runTest prefixes (TestParallel name tests) = do
     summaries <- forM vars (\var -> takeMVar var >>= either (\e -> throwIO (e :: SomeException)) pure)
     putStrLn ""
     pure (foldr combineSummaries (testSummary 0 0) summaries)
+
+-- The actions, at most the given number at once (each of them waits on processes it spawns, so a capability is not what
+-- bounds them), with their results in the order of the list; the first exception is raised again once all are done
+boundedConcurrently :: Int -> [IO a] -> IO [a]
+boundedConcurrently limit actions = do
+    slots <- newQSem (max 1 limit)
+    vars <- forM actions $ \action -> do
+        var <- newEmptyMVar
+        _ <- forkIO (mask (\restore -> try (bracket_ (waitQSem slots) (signalQSem slots) (restore action)) >>= putMVar var))
+        pure var
+    results <- forM vars takeMVar
+    mapM (either (\e -> throwIO (e :: SomeException)) pure) results
 
 testAssertTrue :: Bool -> TestResult
 testAssertTrue True = Nothing
