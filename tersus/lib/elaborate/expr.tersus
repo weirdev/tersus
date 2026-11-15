@@ -284,12 +284,12 @@ fn inferIf(st: St, c: Int, a: Int, b: Int, wanted: Int, returning: Bool, context
     st = simpleTy(st, 2);
     st = expect(st, "condition of if", st.ty, teHead(&cond));
     if st.status != 0 { return st; };
-    before = refsOf(&st);
+    entryRefsHere = refsOf(&st);
     if wanted >= 0 { st = inferExpected(st, clone(context), wanted, a, returning); } else { if hint >= 0 { st = routeReceiver(st, a, hint); } else { st = inferExpr(st, a); }; };
     if st.status != 0 { return st; };
     yes = clone(st.te);
     left = refsOf(&st);
-    st = resetBranchReferences(st, &before);
+    st = resetBranchReferences(st, &entryRefsHere);
     if wanted >= 0 { st = inferExpected(st, context, wanted, b, returning); } else { if hint >= 0 { st = routeReceiver(st, b, hint); } else { st = inferExpr(st, b); }; };
     if st.status != 0 { return st; };
     no = clone(st.te);
@@ -320,7 +320,7 @@ fn inferBlock(st: St, xs: Int, e: Int, wanted: Int, returning: Bool, context: St
     body = listItems(&st.nodes, xs);
     st = checkStatements(st, false, &body);
     if st.status != 0 { return st; };
-    statements = st.te.node;
+    blockStatements = st.te.node;
     bodyTypes = clone(st.te.types);
     if wanted >= 0 { st = inferExpected(st, context, wanted, e, returning); } else { if hint >= 0 { st = routeReceiver(st, e, hint); } else { st = inferExpr(st, e); }; };
     if st.status != 0 { return st; };
@@ -329,7 +329,7 @@ fn inferBlock(st: St, xs: Int, e: Int, wanted: Int, returning: Bool, context: St
     if st.status != 0 { return st; };
     result = clone(st.te);
     st = popScope(st);
-    st = emit(st, AstNode::Expression { value: AstExpression::BlockExpr { xs: statements, e: result.node } });
+    st = emit(st, AstNode::Expression { value: AstExpression::BlockExpr { xs: blockStatements, e: result.node } });
     types = push([], teHead(&result));
     for t in &bodyTypes { types = push(types, t); };
     for t in &result.types { types = push(types, t); };
@@ -1293,12 +1293,12 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
     tuple = isTuple(&base);
     if !tuple { st = ensureInstance(st, ty0); };
     declared = [];
-    declaredNames = [];
+    declaredFields = [];
     if !tuple {
         st = ctorInfo(st, &name);
         if st.status != 0 { return st; };
         declared = clone(st.ctor.types);
-        declaredNames = clone(st.ctor.names);
+        declaredFields = clone(st.ctor.names);
     };
     inferred = [];
     if size(declared) = size(args) {
@@ -1312,7 +1312,7 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
                 st = coerce(st, ty, clone(st.te));
             } else {
                 fieldName = "";
-                if i < size(declaredNames) { fieldName = clone(get(declaredNames, i)); };
+                if i < size(declaredFields) { fieldName = clone(get(declaredFields, i)); };
                 st = inferExpected(st, catStrings(catStrings(catStrings("field ", fieldName), " of "), clone(name)), ty, a, false);
             };
             if st.status != 0 { return st; };
