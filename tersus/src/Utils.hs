@@ -68,3 +68,4 @@ flatResultMap f (a : as) =
 mapResult :: (a -> b) -> Result a e -> Result b e
 mapResult fn (Ok a) = Ok $ fn a
 mapResult _ (Error e) = Error e
+
