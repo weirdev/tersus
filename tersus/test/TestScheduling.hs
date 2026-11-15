@@ -163,9 +163,14 @@ assignShards count names
 isSelfHosted :: String -> Bool
 isSelfHosted = isPrefixOf "testMirSelfHosted:"
 
--- (self-hosted batches are admitted one at a time for memory, so their weights add up like the others')
+-- (self-hosted batches are admitted one at a time for memory, so their weights add up like the others'; a group
+-- estimated at the whole memory budget runs alone, so it holds all four of the runner's workers while it runs)
 shardWeight :: [String] -> Int
-shardWeight = sum . map groupWeight
+shardWeight = sum . map charged
+  where
+    charged name
+        | estimatedPeakMiB name >= memoryBudgetMiB = 4 * groupWeight name
+        | otherwise = groupWeight name
 
 -- The median processor time of each group over recent CI runs, in seconds (its [CPU] line: what its process and the
 -- processes it waited for used; dev/ci_weights.py prints these rows from CI logs). A group that builds one of the
@@ -175,171 +180,191 @@ groupWeight name = maybe 1 id (lookup name measuredWeights)
 
 measuredWeights :: [(String, Int)]
 measuredWeights =
-        [ ("testArrays", 41)
-        , ("testAstData:1/4", 173)
-        , ("testAstData:2/4", 385)
-        , ("testAstData:3/4", 24)
-        , ("testAstData:4/4", 53)
-        , ("testAstReader:1/4", 394)
-        , ("testAstReader:2/4", 72)
-        , ("testAstReader:3/4", 150)
-        , ("testAstReader:4/4", 20)
-        , ("testBootstrap", 1107)
-        , ("testBorrow", 46)
-        , ("testBox", 27)
-        , ("testBuiltinRegistry", 1)
-        , ("testBytes", 7)
-        , ("testCallsAndReturnJoin", 9)
-        , ("testCallsUseContracts", 46)
-        , ("testCfgValidation", 24)
-        , ("testCli", 21)
-        , ("testConnectives", 11)
-        , ("testControlFlow", 18)
-        , ("testCopies", 67)
-        , ("testCrashRegression", 2)
-        , ("testCrlf", 1)
-        , ("testDataCodec", 313)
-        , ("testDeref", 5)
-        , ("testDifferential", 543)
-        , ("testEnumCast", 12)
-        , ("testEnums", 17)
-        , ("testEq", 9)
-        , ("testEqualityByParts", 7)
-        , ("testExamples", 41)
-        , ("testFirstLast", 3)
-        , ("testForLoops", 13)
-        , ("testForallInstantiation", 5)
-        , ("testForallLoops", 4)
-        , ("testForallProof", 7)
-        , ("testForallSyntax", 7)
-        , ("testFrontendBootstrap", 1708)
-        , ("testFunctionCalls", 5)
-        , ("testGenericLists", 11)
-        , ("testGenerics", 27)
-        , ("testGoalSlices", 13)
-        , ("testHashMap", 19)
-        , ("testHashSet", 16)
-        , ("testHaskellParity", 6)
-        , ("testHostValidation:astReader", 40)
-        , ("testHostValidation:elaborator", 639)
-        , ("testHostValidation:emitter", 55)
-        , ("testHostValidation:mirErase", 20)
-        , ("testHostValidation:mirReader", 13)
-        , ("testHostValidation:mirVerify", 26)
-        , ("testHostValidation:parser", 138)
-        , ("testIfJoin", 20)
-        , ("testInferredInvariants", 12)
-        , ("testIntRange", 3)
-        , ("testLibModules", 25)
-        , ("testLinearArithmetic", 16)
-        , ("testListProofs", 9)
-        , ("testLists", 19)
-        , ("testMir", 6)
-        , ("testMirCopies", 1)
-        , ("testMirData", 55)
-        , ("testMirEmit:1/4", 36)
-        , ("testMirEmit:2/4", 197)
-        , ("testMirEmit:3/4", 175)
-        , ("testMirEmit:4/4", 330)
-        , ("testMirEmitPrograms", 358)
-        , ("testMirErase", 166)
-        , ("testMirEvalLists", 5)
-        , ("testMirLowered:1/4", 39)
-        , ("testMirLowered:2/4", 524)
-        , ("testMirLowered:3/4", 138)
-        , ("testMirLowered:4/4", 38)
-        , ("testMirOwnership", 107)
-        , ("testMirReader", 58)
-        , ("testMirSelfHosted:1/4", 111)
-        , ("testMirSelfHosted:2/4", 84)
-        , ("testMirSelfHosted:3/4", 147)
-        , ("testMirSelfHosted:4/4", 101)
-        , ("testMirSupport", 71)
-        , ("testMirVerify:1/4", 218)
-        , ("testMirVerify:2/4", 89)
-        , ("testMirVerify:3/4", 127)
-        , ("testMirVerify:4/4", 44)
-        , ("testMirVerifyPrograms", 83)
-        , ("testModules", 739)
-        , ("testModulo", 9)
-        , ("testMulDivNegative", 5)
-        , ("testNative:1/4", 88)
-        , ("testNative:2/4", 64)
-        , ("testNative:3/4", 63)
-        , ("testNative:4/4", 64)
-        , ("testNativeStorageModules", 222)
-        , ("testOwnership", 75)
-        , ("testOwnershipCodec", 296)
-        , ("testOwnershipInterpreted", 20)
-        , ("testOwnershipMetadata", 1)
-        , ("testParity", 420)
-        , ("testParse", 1)
-        , ("testParseEval", 1)
-        , ("testParseVal", 3)
-        , ("testParseValFail", 1)
-        , ("testParser:1/4", 638)
-        , ("testParser:2/4", 175)
-        , ("testParser:3/4", 588)
-        , ("testParser:4/4", 159)
-        , ("testParserBootstrap:1/2", 1259)
-        , ("testParserBootstrap:2/2", 550)
-        , ("testParserUnicode", 10)
-        , ("testPhase1Cache", 95)
-        , ("testPhase1Packages", 26)
-        , ("testPhase2Packages", 23)
-        , ("testPipeline", 9)
-        , ("testPointers", 37)
-        , ("testPrecedence", 2)
-        , ("testPrettyProofs", 4)
-        , ("testRecursion", 7)
-        , ("testRefinedArithmetic", 8)
-        , ("testScheduling", 52)
-        , ("testSequence", 35)
-        , ("testSharedCache:1/4", 11)
-        , ("testSharedCache:2/4", 8)
-        , ("testSharedCache:3/4", 495)
-        , ("testSharedCache:4/4", 220)
-        , ("testSharedCacheProbe", 1)
-        , ("testSolverCache", 3)
-        , ("testStrings", 52)
-        , ("testStructs", 10)
-        , ("testTermination", 17)
-        , ("testTraits", 64)
-        , ("testTypeCheck", 3)
-        , ("testUserRewriteValidation", 1)
-        , ("testValidateWithExpectedMatch", 1)
-        , ("testValidateWithExpectedMismatch", 1)
-        , ("testValidationCache", 21)
-        , ("testValidationFail", 1)
-        , ("testVariadic", 66)
-        , ("testVerdictLocks", 1)
-        ]
+    [ ("testArrays", 41)
+    , ("testAstData:1/4", 173)
+    , ("testAstData:2/4", 385)
+    , ("testAstData:3/4", 24)
+    , ("testAstData:4/4", 53)
+    , ("testAstReader:1/4", 394)
+    , ("testAstReader:2/4", 72)
+    , ("testAstReader:3/4", 150)
+    , ("testAstReader:4/4", 20)
+    , ("testBootstrap", 1107)
+    , ("testBorrow", 46)
+    , ("testBox", 27)
+    , ("testBuiltinRegistry", 1)
+    , ("testBytes", 7)
+    , ("testCallsAndReturnJoin", 9)
+    , ("testCallsUseContracts", 46)
+    , ("testCfgValidation", 24)
+    , ("testCli", 21)
+    , ("testConnectives", 11)
+    , ("testControlFlow", 18)
+    , ("testCopies", 67)
+    , ("testCrashRegression", 2)
+    , ("testCrlf", 1)
+    , ("testDataCodec", 313)
+    , ("testDeref", 5)
+    , ("testDifferential", 543)
+    , ("testEnumCast", 12)
+    , ("testEnums", 17)
+    , ("testEq", 9)
+    , ("testEqualityByParts", 7)
+    , ("testExamples", 41)
+    , ("testFirstLast", 3)
+    , ("testForLoops", 13)
+    , ("testForallInstantiation", 5)
+    , ("testForallLoops", 4)
+    , ("testForallProof", 7)
+    , ("testForallSyntax", 7)
+    , ("testFrontendBootstrap", 1708)
+    , ("testFunctionCalls", 5)
+    , ("testGenericLists", 11)
+    , ("testGenerics", 27)
+    , ("testGoalSlices", 13)
+    , ("testHashMap", 19)
+    , ("testHashSet", 16)
+    , ("testHaskellParity", 6)
+    , ("testHostValidation:astReader", 40)
+    , ("testHostValidation:elaborator", 639)
+    , ("testHostValidation:emitter", 55)
+    , ("testHostValidation:mirErase", 20)
+    , ("testHostValidation:mirReader", 13)
+    , ("testHostValidation:mirVerify", 26)
+    , ("testHostValidation:parser", 138)
+    , ("testIfJoin", 20)
+    , ("testInferredInvariants", 12)
+    , ("testIntRange", 3)
+    , ("testLibModules", 25)
+    , ("testLinearArithmetic", 16)
+    , ("testListProofs", 9)
+    , ("testLists", 19)
+    , ("testMir", 6)
+    , ("testMirCopies", 1)
+    , ("testMirData", 55)
+    , ("testMirEmit:1/4", 36)
+    , ("testMirEmit:2/4", 197)
+    , ("testMirEmit:3/4", 175)
+    , ("testMirEmit:4/4", 330)
+    , ("testMirEmitPrograms", 358)
+    , ("testMirErase", 166)
+    , ("testMirEvalLists", 5)
+    , ("testMirLowered:1/4", 39)
+    , ("testMirLowered:2/4", 524)
+    , ("testMirLowered:3/4", 138)
+    , ("testMirLowered:4/4", 38)
+    , ("testMirOwnership", 107)
+    , ("testMirReader", 58)
+    , ("testMirSelfHosted:1/4", 111)
+    , ("testMirSelfHosted:2/4", 84)
+    , ("testMirSelfHosted:3/4", 147)
+    , ("testMirSelfHosted:4/4", 101)
+    , ("testMirSupport", 71)
+    , ("testMirVerify:1/4", 218)
+    , ("testMirVerify:2/4", 89)
+    , ("testMirVerify:3/4", 127)
+    , ("testMirVerify:4/4", 44)
+    , ("testMirVerifyPrograms", 83)
+    , ("testModules", 739)
+    , ("testModulo", 9)
+    , ("testMulDivNegative", 5)
+    , ("testNative:1/4", 88)
+    , ("testNative:2/4", 64)
+    , ("testNative:3/4", 63)
+    , ("testNative:4/4", 64)
+    , ("testNativeStorageModules", 222)
+    , ("testOwnership", 75)
+    , ("testOwnershipCodec", 296)
+    , ("testOwnershipInterpreted", 20)
+    , ("testOwnershipMetadata", 1)
+    , ("testParity", 420)
+    , ("testParse", 1)
+    , ("testParseEval", 1)
+    , ("testParseVal", 3)
+    , ("testParseValFail", 1)
+    , ("testParser:1/4", 638)
+    , ("testParser:2/4", 175)
+    , ("testParser:3/4", 588)
+    , ("testParser:4/4", 159)
+    , ("testParserBootstrap:1/2", 1259)
+    , ("testParserBootstrap:2/2", 550)
+    , ("testParserUnicode", 10)
+    , ("testPhase1Cache", 95)
+    , ("testPhase1Packages", 26)
+    , ("testPhase2Packages", 23)
+    , ("testPipeline", 9)
+    , ("testPointers", 37)
+    , ("testPrecedence", 2)
+    , ("testPrettyProofs", 4)
+    , ("testRecursion", 7)
+    , ("testRefinedArithmetic", 8)
+    , ("testScheduling", 52)
+    , ("testSequence", 35)
+    , ("testSharedCache:1/4", 11)
+    , ("testSharedCache:2/4", 8)
+    , ("testSharedCache:3/4", 495)
+    , ("testSharedCache:4/4", 220)
+    , ("testSharedCacheProbe", 1)
+    , ("testSolverCache", 3)
+    , ("testStrings", 52)
+    , ("testStructs", 10)
+    , ("testTermination", 17)
+    , ("testTraits", 64)
+    , ("testTypeCheck", 3)
+    , ("testUserRewriteValidation", 1)
+    , ("testValidateWithExpectedMatch", 1)
+    , ("testValidateWithExpectedMismatch", 1)
+    , ("testValidationCache", 21)
+    , ("testValidationFail", 1)
+    , ("testVariadic", 66)
+    , ("testVerdictLocks", 1)
+    ]
 
--- Peak GHC "total memory in use" per group on the 16 GB CI runner (shard 3 of run 42855380501), rounded up.
--- The budget leaves the OS and runner about 3.6 GiB. Counting only self-hosted and parser groups let a warm
--- cache line up SelfHosted:3, Parser:3, Parity and Native:2 at 15.6 GiB, and the runner was shut down
--- (run 42861235242, twice). These are estimates for admission, not a limit the processes are held to.
--- The host validation groups, measured on the CI runner: the elaborator's reached 10.7 GiB, and a group beside it
--- doing the preparation they share took 3.4 GiB, so the elaborator runs alone, and first.
--- testMirLowered alone at -N1 on a devserver: 8.1 to 10.4 GiB; beside testMirSelfHosted:4/4 and another group it
--- ended a 16 GB runner. Split into four batches, the largest (the elaborator's lowering) reached 2.6 GiB on CI.
--- The largest single processes of the CI runners in November 2026 (one per runner, from /usr/bin/time): about 9.4 GiB
--- where a self-hosted batch ran, 6.1 GiB beside testDifferential, 5.2 GiB beside testMirEmitPrograms and testModules,
--- 6.2 GiB beside testSharedCache:3/4. Admitting those at the default let a self-hosted batch, testDifferential and
--- testMirEmitPrograms run together, and the runner was shut down. The harness now prints each group's own as [PEAK].
+-- The budget leaves the OS and runner of the 16 GB CI machine about 3.6 GiB.
+-- What each group's process reached on CI, from its [PEAK] line with a tenth added (dev/ci_weights.py --peaks prints
+-- these rows); the self-hosted batches share one cached program, about 9.5 GiB loaded, and the host's elaborator
+-- group runs alone. Estimates for admission, not a limit the processes are held to: groups admitted at the 1024 MiB
+-- default that each took 3 to 6 GiB ran together and the runner was shut down.
 estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
     | isSelfHosted name = 9728
-    | name == "testDifferential" = 6144
-    | name `elem` ["testMirEmitPrograms", "testModules", "testSharedCache:3/4"] = 5376
-    | takeWhile (/= ':') name == "testMirLowered" = 4096
     | name == "testHostValidation:elaborator" = memoryBudgetMiB
-    | name == "testHostValidation:parser" = 4096
-    | name == "testHostValidation:mirReader" = 3584
-    | name `elem` ["testHostValidation:astReader", "testHostValidation:mirVerify"] = 2560
-    | name `elem` ["testParser:2/4", "testParser:3/4"] = 6144
-    | name `elem` ["testParity", "testAstData:2/4", "testAstReader:2/4"] = 2560
-    | otherwise = 1024
+    | otherwise = maybe 1024 id (lookup name measuredPeaksMiB)
+
+measuredPeaksMiB :: [(String, Int)]
+measuredPeaksMiB =
+    [ ("testAstData:1/4", 1280)
+    , ("testAstData:2/4", 3584)
+    , ("testAstReader:1/4", 3328)
+    , ("testAstReader:3/4", 3072)
+    , ("testAstReader:4/4", 1536)
+    , ("testDataCodec", 2816)
+    , ("testDifferential", 3584)
+    , ("testFrontendBootstrap", 6912)
+    , ("testHostValidation:emitter", 1536)
+    , ("testHostValidation:parser", 2816)
+    , ("testMirEmit:2/4", 2816)
+    , ("testMirEmit:3/4", 6144)
+    , ("testMirEmit:4/4", 7168)
+    , ("testMirEmitPrograms", 2560)
+    , ("testMirErase", 3072)
+    , ("testMirLowered:2/4", 5888)
+    , ("testMirLowered:3/4", 1280)
+    , ("testMirVerify:1/4", 3328)
+    , ("testMirVerifyPrograms", 1536)
+    , ("testModules", 4096)
+    , ("testNativeStorageModules", 2816)
+    , ("testOwnershipCodec", 2816)
+    , ("testParity", 4096)
+    , ("testParser:1/4", 6144)
+    , ("testParser:2/4", 4864)
+    , ("testParser:3/4", 14080)
+    , ("testParser:4/4", 4352)
+    , ("testParserBootstrap:2/2", 3840)
+    , ("testPhase1Cache", 1280)
+    , ("testSharedCache:3/4", 7168)
+    , ("testSharedCache:4/4", 4096)
+    ]
 
 memoryBudgetMiB :: Int
 memoryBudgetMiB = 12288
@@ -354,12 +379,12 @@ admitGroup budget estimate used queue = case break fits queue of
     fits item = used == 0 || used + estimate item <= budget
 
 -- Longest first: a runner is done when its last group is, so the groups that take minutes start before the short ones.
--- The self-hosted batches are admitted one at a time (estimatedPeakMiB), so they start as the one chain they are.
+-- The self-hosted batches are admitted one at a time (estimatedPeakMiB), so the chain they make starts before anything.
 launchOrder :: (a -> String) -> [a] -> [a]
 launchOrder name = sortBy (comparing (\item -> negate (launchWeight (name item))))
   where
     launchWeight group
-        | isSelfHosted group = sum [weight | (other, weight) <- measuredWeights, isSelfHosted other]
+        | isSelfHosted group = maxBound - 1000000 + groupWeight group
         | otherwise = groupWeight group
 
 groupName :: Test -> String
@@ -677,15 +702,15 @@ testScheduling names batches = TestList "testScheduling"
             [1 .. count]) [1, 3, 7])
     , testCase "the groups running at the shard 3 shutdown are not admitted together; small groups fill in instead" $
         testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity", "testNative:2/4", "testCli"])
-            ["testMirSelfHosted:3/4", "testParity"]
-    , testCase "a group estimated over the budget runs alone, and launch order is longest work first with stable ties" $
+            ["testMirSelfHosted:3/4", "testNative:2/4", "testCli"]
+    , testCase "a group estimated over the budget runs alone, and launch order is the self-hosted chain, then longest work first, with stable ties" $
         testAssertEq
             ( admitGroup 1000 snd 0 [("big", 4000 :: Int), ("small", 10)]
             , admitGroup 1000 snd 4000 [("small", 10 :: Int)]
             , launchOrder id ["testCli", "testMirSelfHosted:3/4", "newA", "testParser:3/4"] )
             ( Just (("big", 4000), [("small", 10)])
             , Nothing
-            , ["testParser:3/4", "testMirSelfHosted:3/4", "testCli", "newA"] )
+            , ["testMirSelfHosted:3/4", "testParser:3/4", "testCli", "newA"] )
     ]
   where
     -- Four workers; a group ends groupWeight time units after it starts.
