@@ -323,9 +323,15 @@ measuredWeights =
 -- doing the preparation they share took 3.4 GiB, so the elaborator runs alone, and first.
 -- testMirLowered alone at -N1 on a devserver: 8.1 to 10.4 GiB; beside testMirSelfHosted:4/4 and another group it
 -- ended a 16 GB runner. Split into four batches, the largest (the elaborator's lowering) reached 2.6 GiB on CI.
+-- The largest single processes of the CI runners in November 2026 (one per runner, from /usr/bin/time): about 9.4 GiB
+-- where a self-hosted batch ran, 6.1 GiB beside testDifferential, 5.2 GiB beside testMirEmitPrograms and testModules,
+-- 6.2 GiB beside testSharedCache:3/4. Admitting those at the default let a self-hosted batch, testDifferential and
+-- testMirEmitPrograms run together, and the runner was shut down. The harness now prints each group's own as [PEAK].
 estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
-    | isSelfHosted name = 7680
+    | isSelfHosted name = 9728
+    | name == "testDifferential" = 6144
+    | name `elem` ["testMirEmitPrograms", "testModules", "testSharedCache:3/4"] = 5376
     | takeWhile (/= ':') name == "testMirLowered" = 4096
     | name == "testHostValidation:elaborator" = memoryBudgetMiB
     | name == "testHostValidation:parser" = 4096
@@ -671,7 +677,7 @@ testScheduling names batches = TestList "testScheduling"
             [1 .. count]) [1, 3, 7])
     , testCase "the groups running at the shard 3 shutdown are not admitted together; small groups fill in instead" $
         testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity", "testNative:2/4", "testCli"])
-            ["testMirSelfHosted:3/4", "testParity", "testNative:2/4", "testCli"]
+            ["testMirSelfHosted:3/4", "testParity"]
     , testCase "a group estimated over the budget runs alone, and launch order is longest work first with stable ties" $
         testAssertEq
             ( admitGroup 1000 snd 0 [("big", 4000 :: Int), ("small", 10)]

@@ -42,7 +42,9 @@ CI uses a 16 MiB GHC nursery and sequential garbage collection (`-qg`), and
 the harness gives each group's process `-qg` too. Each group prints its processor
 time as `[CPU] <group> <s>s` and each case its time after its `[PASS]`/`[FAIL]`
 line; `dev/ci_weights.py` turns the `[CPU]` lines of CI logs into the weights
-that balance the runners. `dev/ci_resources.py` records the runner's CPU
+that balance the runners. `[PEAK] <group> <own>MiB <children>MiB` gives the
+largest resident sets of a group's process and of the processes it waited for,
+which `TestScheduling.estimatedPeakMiB` has to cover. `dev/ci_resources.py` records the runner's CPU
 and memory limits; `/usr/bin/time` records the unchanged test command's resource
 use. `TERSUS_TEST_RTS_STATS=1` adds GHC allocation/GC statistics only to group
 workers, not to command-line or probe processes they launch. These diagnostics
