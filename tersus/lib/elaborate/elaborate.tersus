@@ -7,7 +7,7 @@ import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
 import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, localName, shapedLibraries, definedFunctions, entryOf, implsEq, libIndex, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
 import elaborate::decls { fileDeclarations };
-import elaborate::resolve { Decl, Imp, Line, Maps, PFile, Pkg, countAt, finishPackage, mapsFor, moduleKey, noPackage, readLine, wordIs };
+import elaborate::resolve { Decl, Imp, Line, Maps, PFile, Pkg, countAt, finishPackage, mapsFor, moduleKey, noPackage, readLine, startsWithByte, wordIs };
 import elaborate::rewrite { Prepared, prepareModule };
 import elaborate::out { emit, emitStatements, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
@@ -422,8 +422,6 @@ fn catalogNames(catalog: &Catalog) -> List<String> ~ {
     for l in &catalog.libs { out = push(out, clone(l.name)); };
     return out;
 };
-
-fn startsWithByte(s: &String, c: Int) -> Bool ~ { return size(s.bytes) > 0 && toInt(get(s.bytes, 0)) = c; };
 
 // (a name the file declares or imports, or the owner of an associated name it declares or imports)
 fn spelledHere(m: &Maps, local: &String) -> Bool ~ {

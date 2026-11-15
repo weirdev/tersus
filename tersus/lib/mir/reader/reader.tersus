@@ -136,12 +136,12 @@ fn ownershipOf(p: &Program, owner: &String) -> List<String> ~ {
     return push(push(push(push(push(push(push([], ""), ""), ""), ""), ""), ""), "");
 };
 
-fn factAt(facts: &List<String>, i: Int) -> String ~ {
+fn factAt(facts: &List<String>, i: Int) -> String [{ }] [{ }] {
     if i >= 0 && i < size(facts) { return clone(get(facts, i)); };
     return "";
 };
 
-fn hasFunction(p: &Program, name: &String) -> Bool ~ {
+fn hasFunction(p: &Program, name: &String) -> Bool [{ }] [{ }] {
     for f in &p.functions { if f.name = clone(name) { return true; }; };
     return false;
 };
@@ -894,7 +894,7 @@ fn programFor(lines: &List<List<Token>>, ghosts: Bool, version: &String) -> Pars
         j = j + 1;
         owned = [];
         k = 0;
-        while k < n.value [{ affirm k >= 0; affirm j >= 1; }] shrinks n.value - k {
+        while k < n.value [{ affirm k >= 0; affirm j >= 1; affirm j <= size(lines); }] shrinks n.value - k {
             if j >= size(lines) { return bad; };
             o = ownedAt(get(lines, j));
             if !o.ok { return bad; };
@@ -922,7 +922,7 @@ fn programFor(lines: &List<List<Token>>, ghosts: Bool, version: &String) -> Pars
 // The declarations a storage record names have the layout native storage reads and writes: a List an address, then its
 // length and its room as Ints (the clone of a list reads the length and writes both), and a Box an address. A
 // declaration named for storage is a struct of one of them for each element type. What is wrong with them, or "".
-fn storageProblem(types: &List<TypeDecl>, listName: &String, boxName: &String) -> String ~ {
+fn storageProblem(types: &List<TypeDecl>, listName: &String, boxName: &String) -> String [{ }] [{ }] {
     for d in types {
         name = "";
         fields = [];
@@ -944,6 +944,7 @@ fn storageProblem(types: &List<TypeDecl>, listName: &String, boxName: &String) -
 
 // What is wrong with the storage record of the lines of a program, or "" (the emitter says it when the program does not read)
 fn storageProblemIn(lines: &List<List<Token>>) -> String ~ {
+    if size(lines) < 1 { return ""; };
     types = [];
     j = 1;
     while j < size(lines) && (functionKeyword(lines, j) = "struct" || functionKeyword(lines, j) = "enum") [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
@@ -962,7 +963,7 @@ fn storageProblemIn(lines: &List<List<Token>>) -> String ~ {
 };
 
 // A declaration of the name, or of an instance of it (`List<Int>`)
-fn storageNamed(name: &String, storage: &String) -> Bool ~ {
+fn storageNamed(name: &String, storage: &String) -> Bool [{ }] [{ }] {
     if clone(name) = clone(storage) { return true; };
     n = size(name.bytes);
     k = size(storage.bytes);
@@ -986,7 +987,7 @@ fn ownedAt(ts: &List<Token>) -> Parsed<Owned> [{ }] [{ }] {
 
 // Checked facts are complete: every declared type has its row, once, a provider and its function come together, and the
 // functions they name are the program's
-fn ownershipComplete(p: &Program) -> Bool ~ {
+fn ownershipComplete(p: &Program) -> Bool [{ }] [{ }] {
     if !p.meta.checked { return true; };
     seen = [];
     for o in &p.meta.owned {
