@@ -99,6 +99,19 @@ impl Clone for BoundedRec { };
 struct EnvRec { content: Int, ownPart: String };
 impl Clone for EnvRec { };
 
+// The names the last environment saw: the first len bindings of the scopes with the one each hides (-1 for none),
+// whether each is the innermost of its name and its part of an own part; the innermost binding of each name; the visible
+// locals and functions in the order of their names; and the visible names that hide a function at the top, as of
+// globals version shadowGv
+struct Visible {
+    len: Int, names: List<String>, pieces: List<String>, hides: List<Int>, live: List<Bool>, inner: HashMap<String, Int>,
+    own: List<Int>, fns: List<Int>, shadowed: List<String>, shadowGv: Int
+};
+
+fn noVisible(gv: Int) -> Visible ~ {
+    return Visible { len: 0, names: [], pieces: [], hides: [], live: [], inner: HashMap::new(), own: [], fns: [], shadowed: [], shadowGv: gv };
+};
+
 // The pending last step of an expression: an rvalue, or a call
 struct Pend { isCall: Bool, rv: Rv, callee: Op, args: List<Op> };
 impl Clone for Pend { };
@@ -118,6 +131,7 @@ struct LowSt {
     prereg: HashMap<String, List<String>>, stubs: HashSet<String>,
     pn: List<AstNode>, pbase: Int,
     envs: List<EnvRec>, contents: List<String>, contentKeys: HashMap<String, Int>, contentTexts: HashMap<String, Int>,
+    vis: Visible, visLow: Int, visEnv: Int, visEnvGv: Int,
     std: HashMap<String, Int>,
     bName: String, bIsMain: Bool, bSizes: List<String>, bTypeParams: List<String>, bBorrowed: List<Int>, bMutBorrowed: List<Int>,
     bRefTargets: List<RefTarget>, bHasReturns: Bool, bReturns: Int, bParams: List<Int>, bLocals: List<LDecl>, bNextLocal: Int,
@@ -147,7 +161,7 @@ fn swapBuilder(ls: LowSt, b: Builder) -> Swapped ~ {
         bRefTargets: b.refTargets, bHasReturns: b.hasReturns, bReturns: b.returns, bParams: b.params, bLocals: b.locals,
         bNextLocal: b.nextLocal, bBlocks: b.blocks, bNextBlock: b.nextBlock, bHasOpen: b.hasOpen, bOpenId: b.openId,
         bOpenStmts: b.openStmts, bScopeNames: b.scopeNames, bScopeBinds: b.scopeBinds, bScopeMarks: b.scopeMarks, bLoops: b.loops,
-        bHasPlace: b.hasPlace, bLine: b.line, bCol: b.col, bPackLoops: b.packLoops, ..ls
+        bHasPlace: b.hasPlace, bLine: b.line, bCol: b.col, bPackLoops: b.packLoops, visLow: 0, ..ls
     };
     return Swapped { ls: next, b: old };
 };
@@ -176,7 +190,8 @@ fn newLowSt(pbase: Int) -> LowSt ~ {
         globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
         copies: HashSet::new(), linears: HashSet::new(), externs: HashSet::new(), drops: HashSet::new(),
         prereg: HashMap::new(), stubs: HashSet::new(), pn: [], pbase: pbase,
-        envs: [], contents: [], contentKeys: HashMap::new(), contentTexts: HashMap::new(), std: HashMap::new(),
+        envs: [], contents: [], contentKeys: HashMap::new(), contentTexts: HashMap::new(),
+        vis: noVisible(0), visLow: 0, visEnv: 0 - 1, visEnvGv: 0, std: HashMap::new(),
         bName: "main", bIsMain: true, bSizes: [], bTypeParams: [], bBorrowed: [], bMutBorrowed: [], bRefTargets: [],
         bHasReturns: false, bReturns: 0 - 1, bParams: [], bLocals: [], bNextLocal: 1, bBlocks: [], bNextBlock: 1,
         bHasOpen: true, bOpenId: 0, bOpenStmts: [], bScopeNames: [], bScopeBinds: [], bScopeMarks: push([], 0), bLoops: [],
