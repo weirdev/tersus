@@ -2076,9 +2076,7 @@ fn fnTraitDisplay(name: &String) -> String ~ {
 fn fnBoundCall(st: St, funct: Int, fname: &String, args: &List<Int>) -> St ~ {
     st = lookupVar(st, fname);
     if st.status != 0 { return St { ok: false, status: 0, ..st }; };
-    st = inferExpr(st, funct);
-    if st.status != 0 { return st; };
-    receiver = clone(st.te);
+    receiver = TE { node: funct, types: push([], st.ty) };
     st = zonk(st, head(&receiver.types));
     inner = unrefOf(st, st.ty);
     x = tyAt(st, inner);
