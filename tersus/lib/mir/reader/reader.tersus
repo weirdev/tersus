@@ -109,9 +109,72 @@ struct Function {
 
 impl Clone for Function { };
 
-struct Program { types: List<TypeDecl>, functions: List<Function>, entry: Function };
+// What the host says of a program's types beyond their declarations (MIR.md, "Ownership and storage"): the List and
+// Box declarations that native storage is, and, when checked, each type's checked ownership facts as the elaborator
+// gave them (the seven names of AST_DATA.md's ownership transport: the Copy provider, then the provider and function of
+// Drop, of Clone and of Deref, each empty when the type has none). A program without them is read by the names of the
+// bare protocols (checked false).
+struct Owned { owner: String, facts: List<String> };
+
+impl Clone for Owned { };
+
+struct ProgramMeta { checked: Bool, owned: List<Owned>, listName: String, boxName: String };
+
+impl Clone for ProgramMeta { };
+
+fn noMeta() -> ProgramMeta [{ }] [{ }] {
+    return ProgramMeta { checked: false, owned: [], listName: "List", boxName: "Box" };
+};
+
+struct Program { types: List<TypeDecl>, functions: List<Function>, entry: Function, meta: ProgramMeta };
 
 impl Clone for Program { };
+
+// The checked ownership facts of a type, or seven empty names
+fn ownershipOf(p: &Program, owner: &String) -> List<String> ~ {
+    for o in &p.meta.owned { if o.owner = clone(owner) { return clone(o.facts); }; };
+    return push(push(push(push(push(push(push([], ""), ""), ""), ""), ""), ""), "");
+};
+
+fn factAt(facts: &List<String>, i: Int) -> String ~ {
+    if i >= 0 && i < size(facts) { return clone(get(facts, i)); };
+    return "";
+};
+
+fn hasFunction(p: &Program, name: &String) -> Bool ~ {
+    for f in &p.functions { if f.name = clone(name) { return true; }; };
+    return false;
+};
+
+// The drop of a type, or "": its checked Drop function, or `<T as Drop>::drop` when the program has that
+fn dropOf(p: &Program, owner: &String) -> String ~ {
+    if p.meta.checked { facts = ownershipOf(p, owner); return factAt(&facts, 2); };
+    target = "<".concat(owner).concat(" as Drop>::drop");
+    if hasFunction(p, &target) { return target; };
+    return "";
+};
+
+// Whether a function is the drop of a type
+fn isDropOf(p: &Program, name: &String) -> Bool ~ {
+    if p.meta.checked {
+        for o in &p.meta.owned { if factAt(&o.facts, 2) = clone(name) && size(name.bytes) > 0 { return true; }; };
+        return false;
+    };
+    suffix = " as Drop>::drop";
+    n = size(name.bytes); s = size(suffix.bytes);
+    return n >= s && name.slice(n - s, n) = suffix;
+};
+
+// The checked Clone function of a type, or "" (a program without the facts has none to say)
+fn cloneOf(p: &Program, owner: &String) -> String ~ {
+    if p.meta.checked { facts = ownershipOf(p, owner); return factAt(&facts, 4); };
+    return "";
+};
+
+// Whether a declaration's name, before its arguments, is that of native storage's List or Box
+fn isStorageList(p: &Program, base: &String) -> Bool ~ { return clone(base) = p.meta.listName; };
+
+fn isStorageBox(p: &Program, base: &String) -> Bool ~ { return clone(base) = p.meta.boxName; };
 
 // The words of the binary operations and of the list operations, whose index is the operation
 fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
@@ -785,7 +848,7 @@ fn functionAt(lines: &List<List<Token>>, li: Int, ghosts: Bool) -> Parsed<Functi
 };
 
 fn noProgram() -> Program [{ }] [{ }] {
-    return Program { types: [], functions: [], entry: noFunction() };
+    return Program { types: [], functions: [], entry: noFunction(), meta: noMeta() };
 };
 
 // The program in the lines of a file: `tersus-mir 1`, the types, the functions and `main`
@@ -811,6 +874,36 @@ fn programFor(lines: &List<List<Token>>, ghosts: Bool, version: &String) -> Pars
         types = push(types, d.value);
         j = j + 1;
     };
+    meta = noMeta();
+    if j < size(lines) && functionKeyword(lines, j) = "storage" {
+        ts = get(lines, j);
+        if size(ts) != 3 { return bad; };
+        l = nameAt(ts, 1);
+        b = nameAt(ts, 2);
+        if !l.ok || !b.ok { return bad; };
+        problem = storageProblem(&types, &l.value, &b.value);
+        if size(problem.bytes) > 0 { return bad; };
+        meta = ProgramMeta { listName: l.value, boxName: b.value, ..meta };
+        j = j + 1;
+    };
+    if j < size(lines) && functionKeyword(lines, j) = "ownership" {
+        ts = get(lines, j);
+        if size(ts) != 2 { return bad; };
+        n = intAt(ts, 1);
+        if !n.ok || n.value < 0 || n.value > size(lines) { return bad; };
+        j = j + 1;
+        owned = [];
+        k = 0;
+        while k < n.value [{ affirm k >= 0; affirm j >= 1; }] shrinks n.value - k {
+            if j >= size(lines) { return bad; };
+            o = ownedAt(get(lines, j));
+            if !o.ok { return bad; };
+            owned = push(owned, o.value);
+            j = j + 1;
+            k = k + 1;
+        };
+        meta = ProgramMeta { checked: true, owned: owned, ..meta };
+    };
     functions = [];
     while j < size(lines) && functionKeyword(lines, j) = "function" [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
         f = functionAt(lines, j, ghosts);
@@ -821,7 +914,100 @@ fn programFor(lines: &List<List<Token>>, ghosts: Bool, version: &String) -> Pars
     if j >= size(lines) || functionKeyword(lines, j) != "main" { return bad; };
     m = functionAt(lines, j, ghosts);
     if !m.ok || m.pos != size(lines) { return bad; };
-    return done(Program { types: types, functions: functions, entry: m.value }, m.pos);
+    program = Program { types: types, functions: functions, entry: m.value, meta: meta };
+    if !ownershipComplete(&program) { return bad; };
+    return done(program, m.pos);
+};
+
+// The declarations a storage record names have the layout native storage reads and writes: a List an address, then its
+// length and its room as Ints (the clone of a list reads the length and writes both), and a Box an address. A
+// declaration named for storage is a struct of one of them for each element type. What is wrong with them, or "".
+fn storageProblem(types: &List<TypeDecl>, listName: &String, boxName: &String) -> String ~ {
+    for d in types {
+        name = "";
+        fields = [];
+        isStruct = false;
+        if d is TypeDecl::DStruct { name = clone((d as TypeDecl::DStruct).name); fields = clone((d as TypeDecl::DStruct).fields); isStruct = true; };
+        if d is TypeDecl::DEnum { name = clone((d as TypeDecl::DEnum).name); };
+        isList = storageNamed(&name, listName);
+        isBox = storageNamed(&name, boxName);
+        if isList || isBox {
+            if !isStruct { return "the storage declaration ".concat(&name).concat(" is not a struct"); };
+            if size(fields) < 1 || !(get(&fields, 0).ty is Type::TAddr) { return "the storage declaration ".concat(&name).concat(" does not start with an address"); };
+            if isList && (size(fields) < 3 || !(get(&fields, 1).ty is Type::TInt) || !(get(&fields, 2).ty is Type::TInt)) {
+                return "the storage list ".concat(&name).concat(" does not have its length and room as Ints after its address");
+            };
+        };
+    };
+    return "";
+};
+
+// What is wrong with the storage record of the lines of a program, or "" (the emitter says it when the program does not read)
+fn storageProblemIn(lines: &List<List<Token>>) -> String ~ {
+    types = [];
+    j = 1;
+    while j < size(lines) && (functionKeyword(lines, j) = "struct" || functionKeyword(lines, j) = "enum") [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        d = declAt(get(lines, j));
+        if !d.ok { return ""; };
+        types = push(types, d.value);
+        j = j + 1;
+    };
+    if j >= size(lines) || functionKeyword(lines, j) != "storage" { return ""; };
+    ts = get(lines, j);
+    if size(ts) != 3 { return ""; };
+    l = nameAt(ts, 1);
+    b = nameAt(ts, 2);
+    if !l.ok || !b.ok { return ""; };
+    return storageProblem(&types, &l.value, &b.value);
+};
+
+// A declaration of the name, or of an instance of it (`List<Int>`)
+fn storageNamed(name: &String, storage: &String) -> Bool ~ {
+    if clone(name) = clone(storage) { return true; };
+    n = size(name.bytes);
+    k = size(storage.bytes);
+    return n > k && name.slice(0, k) = clone(storage) && toInt(get(&name.bytes, k)) = 60;
+};
+
+// `owned "T"` and the seven names of its facts
+fn ownedAt(ts: &List<Token>) -> Parsed<Owned> [{ }] [{ }] {
+    bad = failed(Owned { owner: "", facts: [] }, ts);
+    if size(ts) != 9 || !isWord(ts, 0, "owned") { return bad; };
+    owner = nameAt(ts, 1);
+    if !owner.ok { return bad; };
+    facts = [];
+    for i in 2..9 {
+        f = nameAt(ts, i);
+        if !f.ok { return bad; };
+        facts = push(facts, f.value);
+    };
+    return done(Owned { owner: owner.value, facts: facts }, size(ts));
+};
+
+// Checked facts are complete: every declared type has its row, once, a provider and its function come together, and the
+// functions they name are the program's
+fn ownershipComplete(p: &Program) -> Bool ~ {
+    if !p.meta.checked { return true; };
+    seen = [];
+    for o in &p.meta.owned {
+        if indexOf(&seen, &o.owner) >= 0 || size(o.facts) != 7 { return false; };
+        seen = push(seen, clone(o.owner));
+        i = 1;
+        while i < 7 [{ affirm i >= 1; }] shrinks 7 - i {
+            provider = factAt(&o.facts, i);
+            function = factAt(&o.facts, i + 1);
+            if (size(provider.bytes) = 0) != (size(function.bytes) = 0) { return false; };
+            if size(function.bytes) > 0 && !hasFunction(p, &function) { return false; };
+            i = i + 2;
+        };
+    };
+    for d in &p.types {
+        name = "";
+        if d is TypeDecl::DStruct { name = clone((d as TypeDecl::DStruct).name); };
+        if d is TypeDecl::DEnum { name = clone((d as TypeDecl::DEnum).name); };
+        if indexOf(&seen, &name) < 0 { return false; };
+    };
+    return true;
 };
 
 // The lines of the standard input, as tokens, up to the end of the input or the first empty line. A line not longer than lineLimit.

@@ -8,7 +8,7 @@ import elaborate::expr { elementTypeNamed, freshElementType, Folded, argsCountTe
 import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
 import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { callOf };
-import elaborate::state { forwardInProofText, intText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt };
+import elaborate::state { forwardInProofText, intText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt , protocolName };
 import elaborate::traits { builtinSequenceCall, emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof ~ {
@@ -368,7 +368,7 @@ fn inferProofOther(st: St, funct: Int, args: &List<Int>) -> St ~ {
                 };
                 return typeError(st, catStrings(catStrings(catStrings(clone(fname), " is called on a Self, which the trait has no function "), clone(fname)), " for"));
             };
-            if x.kind = 4 && x.name != "List" && x.name != "Box" {
+            if x.kind = 4 && x.name != protocolName(&st, "List") && x.name != protocolName(&st, "Box") {
                 owner = clone(x.name);
                 st = resolveAssociated(st, &owner, &fname);
                 if st.status != 0 { return st; };
@@ -585,7 +585,8 @@ fn derefStepProof(st: St, t0: Int, node: Int) -> St ~ {
     owner = firstText(&st.names);
     argTys = push([], t);
     argNodes = push([], node);
-    st = ghostCall(st, 0 - 1, implFunctionName(&owner, "Deref", "deref"), &argTys, &argNodes);
+    deref = protocolName(&st, "Deref");
+    st = ghostCall(st, 0 - 1, implFunctionName(&owner, &deref, "deref"), &argTys, &argNodes);
     if st.status != 0 { return st; };
     return St { ok: true, ..st };
 };

@@ -106,7 +106,7 @@ impl Clone for Pend { };
 // The lowering's state with the fields of the function being built, threaded by value. ok is false after the first
 // failure, msg says why. ty, op, pend, root and steps are what the last function that makes one gave.
 struct LowSt {
-    ok: Bool, msg: String,
+    ok: Bool, msg: String, listName: String, boxName: String, copyName: String,
     tys: List<LTy>, tyIndex: HashMap<String, Int>, defaulted: HashMap<Int, Int>,
     elab: List<Int>, nextElab: Int,
     stmts: List<Stmt>,
@@ -171,7 +171,7 @@ fn newBuilder(name: String, isMain: Bool, hasReturns: Bool, returns: Int) -> Bui
 
 fn newLowSt(pbase: Int) -> LowSt ~ {
     return LowSt {
-        ok: true, msg: "", tys: [], tyIndex: HashMap::new(), defaulted: HashMap::new(), elab: [], nextElab: 0,
+        ok: true, msg: "", listName: "List", boxName: "Box", copyName: "Copy", tys: [], tyIndex: HashMap::new(), defaulted: HashMap::new(), elab: [], nextElab: 0,
         stmts: [], types: HashMap::new(), functions: HashMap::new(), fnKeys: HashSet::new(), names: HashSet::new().insert("main"),
         globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
         copies: HashSet::new(), linears: HashSet::new(), externs: HashSet::new(), drops: HashSet::new(),
@@ -443,8 +443,8 @@ fn fromCodecTy(ls: LowSt, t: &Type) -> LowSt ~ {
         Type::TByte => { return simpleType(ls, 1); },
         Type::TBool => { return simpleType(ls, 2); },
         Type::TWord { signed: signed, bits: bits } => { return wordType(ls, signed, bits); },
-        Type::TList { elem: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return namedType(ls, "List", push([], ls.ty)); },
-        Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return namedType(ls, "Box", push([], ls.ty)); },
+        Type::TList { elem: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); name = clone(ls.listName); return namedType(ls, name, push([], ls.ty)); },
+        Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); name = clone(ls.boxName); return namedType(ls, name, push([], ls.ty)); },
         Type::TArray { elem: e, size: s } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return arrayType(ls, ls.ty, clone(s)); },
         Type::TFn { args: args, ret: r } => { return fromCodecFn(ls, args, r); },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { return fromCodecNamed(ls, base, argTokens); },
@@ -526,7 +526,7 @@ fn isNamed(ls: &LowSt, t: Int, base: &String) -> Bool ~ {
 
 // What a Box holds (Types.TBox), or -1
 fn boxInner(ls: &LowSt, t: Int) -> Int ~ {
-    if isNamed(ls, t, "Box") { return argOf(ls, t, 0); };
+    if isNamed(ls, t, &ls.boxName) { return argOf(ls, t, 0); };
     return 0 - 1;
 };
 
@@ -601,7 +601,7 @@ fn renderTy(ls: &LowSt, t: Int) -> String ~ {
 
 // (a List and a Box show what they hold as a type; another named type's arguments are written as its instance name writes them)
 fn renderNamed(ls: &LowSt, x: &LTy) -> String ~ {
-    if size(x.args) = 1 && lwKind(ls, intAt(&x.args, 0)) != 20 && (x.name = "List" || x.name = "Box") {
+    if size(x.args) = 1 && lwKind(ls, intAt(&x.args, 0)) != 20 && (x.name = ls.listName || x.name = ls.boxName) {
         return lwCat3(lwCat(clone(x.name), "<"), renderTy(ls, intAt(&x.args, 0)), ">");
     };
     return lwInstanceText(ls, &x.name, &x.args);

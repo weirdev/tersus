@@ -1,10 +1,10 @@
-import mir::emit::types { closeTypes, contextOf, dropSymbol, functionNames, functionSymbol, isExtern, isNumberWord, llvmType, needsDrop, noTypes, printSymbol, resultStruct, slotsOf };
+import mir::emit::types { closeTypes, contextOf, dropSymbol, functionSymbol, storageOf, isExtern, isNumberWord, llvmType, needsDrop, noTypes, printSymbol, resultStruct, slotsOf };
 import mir::emit::values { Gen };
 import mir::emit::functions { emitBody, emitFunction, externDeclaration, failedFn };
 import mir::emit::helpers { cloneFunctions, dropFunctions, printFunctions };
 import mir::support::support { noStrings, showInt, renderType, isAggregate };
 import data::codec::codec { Type };
-import mir::reader::reader { TypeDecl, Function, Program, programAt, readLines };
+import mir::reader::reader { TypeDecl, Function, Program, programAt, readLines, storageProblemIn };
 import mir::ownership::ownership { isOwnershipRequest, runOwnership };
 
 // The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
@@ -80,7 +80,7 @@ fn wrapMain(body: &List<String>) -> List<String> [{ }] [{ }] {
     return out;
 };
 
-fn entryPoint(types: &List<TypeDecl>, fns: &List<String>, main: &Function) -> Entry ~ {
+fn entryPoint(types: &List<TypeDecl>, p: &Program, main: &Function) -> Entry ~ {
     if !main.hasReturn {
         body = noStrings();
         body = push(body, "call void @tersus_main()");
@@ -100,7 +100,7 @@ fn entryPoint(types: &List<TypeDecl>, fns: &List<String>, main: &Function) -> En
         body = push(body, "%w = ptrtoint ptr %out to i64");
         body = push(body, "call void ".then(printSymbol(types, ty)).then("(i64 %w)"));
         body = push(body, "%nl = call i64 @tersus_writeByte(i64 10)");
-        if needsDrop(types, fns, ty) {
+        if needsDrop(types, p, ty) {
             body = push(body, "call void ".then(dropSymbol(types, ty)).then("(ptr %out)"));
         };
         body = push(body, "br label %done");
@@ -206,7 +206,7 @@ fn ir(program: &Program) -> Entry ~ {
     m = emitFunction(cx, true, "@tersus_main", program.entry);
     if !m.ok { return failedEntry(m.error); };
     for t in m.types { roots = push(roots, clone(t)); };
-    e = entryPoint(program.types, functionNames(program), program.entry);
+    e = entryPoint(program.types, program, program.entry);
     if !e.ok { return e; };
     for t in e.types { roots = push(roots, clone(t)); };
     closed = closeTypes(program.types, roots);
@@ -217,9 +217,9 @@ fn ir(program: &Program) -> Entry ~ {
     };
     for l in m.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
-    for l in dropFunctions(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
+    for l in dropFunctions(program.types, program, closed) { lines = push(lines, clone(l)); };
     for l in cloneFunctions(cx, closed) { lines = push(lines, clone(l)); };
-    for l in printFunctions(program.types, closed) { lines = push(lines, clone(l)); };
+    for l in printFunctions(program.types, &cx.storage, closed) { lines = push(lines, clone(l)); };
     for l in e.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     return Entry { ok: true, error: "", lines: lines, types: closed };
@@ -227,7 +227,7 @@ fn ir(program: &Program) -> Entry ~ {
 
 // The IR so far: the declarations, the made functions of the types of the locals and what they contain, and the entry point
 fn outline(program: &Program) -> Entry ~ {
-    entry = entryPoint(program.types, functionNames(program), program.entry);
+    entry = entryPoint(program.types, program, program.entry);
     if !entry.ok { return entry; };
     roots = noTypes();
     for f in program.functions {
@@ -238,9 +238,9 @@ fn outline(program: &Program) -> Entry ~ {
     closed = closeTypes(program.types, roots);
     cx = contextOf(program);
     lines = declarations();
-    for l in dropFunctions(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
+    for l in dropFunctions(program.types, program, closed) { lines = push(lines, clone(l)); };
     for l in cloneFunctions(cx, closed) { lines = push(lines, clone(l)); };
-    for l in printFunctions(program.types, closed) { lines = push(lines, clone(l)); };
+    for l in printFunctions(program.types, &cx.storage, closed) { lines = push(lines, clone(l)); };
     for l in entry.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     return Entry { ok: true, error: "", lines: lines, types: closed };
@@ -261,7 +261,8 @@ if isOwnershipRequest(read.value) {
 } else {
     program = programAt(read.value);
     if !program.ok {
-        "the input is not the MIR as data\n".printError();
+        problem = storageProblemIn(&read.value);
+        if size(problem.bytes) > 0 { "the input is not the MIR as data: ".concat(&problem).concat("\n").printError(); } else { "the input is not the MIR as data\n".printError(); };
         return 1;
     };
     if mode = "bodies" {

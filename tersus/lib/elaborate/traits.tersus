@@ -840,9 +840,11 @@ fn checkBound(st: St, name: &String, sizes: &List<String>, sizeVars: &List<Int>,
 fn callResolved(st: St, name: String, inferred: &List<TE>) -> St ~ {
     if st.status != 0 { return st; };
     // (a drop is called by native code where a value goes out of scope, and by the check of its impl, and by nothing else)
-    suffix = " as Drop>::drop";
-    if size(name.bytes) >= size(suffix.bytes) && name.slice(size(name.bytes) - size(suffix.bytes), size(name.bytes)) = suffix {
-        dropCheck = size(st.current.bytes) >= 9 && st.current.slice(0, 9) = "Drop for ";
+    dropTrait = protocolName(&st, "Drop");
+    suffix = catStrings(catStrings(" as ", &dropTrait), ">::drop");
+    checking = catStrings(&dropTrait, " for ");
+    if size(dropTrait.bytes) > 0 && size(name.bytes) >= size(suffix.bytes) && name.slice(size(name.bytes) - size(suffix.bytes), size(name.bytes)) = suffix {
+        dropCheck = st.current.startsWith(&checking);
         if !dropCheck { return typeError(st, catStrings(clone(name), " is a drop, which is called where a value goes out of scope, and not by the program")); };
     };
     if HashMap::contains(&st.templates, &name) {
@@ -914,7 +916,6 @@ fn ownerOfValue(st: St, function: &String, ty: Int) -> St ~ {
     if isBoxTy(st, t) {
         return typeError(st, catStrings(catStrings(catStrings(catStrings(catStrings(catStrings(clone(function), " is called on a "), render(st, t)), ", which has no functions: call it on the value inside, as in Box::unbox(b)."), clone(function)), "(...)"), ""));
     };
-    if isListTy(st, t) { return St { names: push([], "List"), ..st }; };
     if x.kind = 4 { return St { names: push([], clone(x.name)), ..st }; };
     if x.kind = 0 { return St { names: push([], "Int"), ..st }; };
     if x.kind = 1 { return St { names: push([], "Byte"), ..st }; };
@@ -934,7 +935,7 @@ fn ownerOfValue(st: St, function: &String, ty: Int) -> St ~ {
 fn traitOwner(st: St, function: &String, ty: Int) -> St ~ {
     st = zonk(st, ty);
     if kindOf(st, st.ty) = 6 { return St { names: push([], "Array"), ..st }; };
-    if isBoxTy(st, st.ty) { return St { names: push([], "Box"), ..st }; };
+    if isBoxTy(st, st.ty) { return St { names: push([], clone(tyAt(st, st.ty).name)), ..st }; };
     return ownerOfValue(st, function, ty);
 };
 
@@ -1062,18 +1063,18 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
     args = [];
     fallback = 0 - 1;
     fallbackTraits = [];
-    if isListTy(st, t) { base = "List"; args = push([], nth(&x.args, 0)); fallback = nth(&x.args, 0); fallbackTraits = push(push([], "Sequence"), "Growable"); } else {
+    if isListTy(st, t) { base = clone(x.name); args = push([], nth(&x.args, 0)); fallback = nth(&x.args, 0); fallbackTraits = push(push([], "Sequence"), "Growable"); } else {
         if x.kind = 6 { base = "Array"; args = clone(x.args); fallback = nth(&x.args, 0); fallbackTraits = push([], "Sequence"); } else {
             if isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 {
                 elem = argAt(st, nth(&x.args, 0), 0);
                 st = simpleTy(st, 21);
                 st = arrayTy(st, elem, st.ty);
-                base = "Box";
+                base = clone(x.name);
                 args = push([], st.ty);
                 fallback = elem;
                 fallbackTraits = push([], "Sequence");
             } else {
-                if isBoxTy(st, t) { base = "Box"; args = clone(x.args); } else {
+                if isBoxTy(st, t) { base = clone(x.name); args = clone(x.args); } else {
                     if x.kind = 4 { base = clone(x.name); args = clone(x.args); } else {
                         if x.kind = 5 {
                             st = ctorInfo(st, &x.name);
@@ -1458,7 +1459,7 @@ fn checkImpl(st: St, tname: String, traitArgs: List<Int>, typeName: String, name
     st = selfOf(st, &typeName, selfInput);
     selfName = firstText(&st.names);
     selfType = st.ty;
-    if !(typeName = "List" || typeName = "Box" || typeName = "Array" || typeName = "Int" || typeName = "Byte" || typeName = "Bool" || HashMap::contains(&st.generics, &typeName)) {
+    if !(typeName = "Array" || typeName = "Int" || typeName = "Byte" || typeName = "Bool" || HashMap::contains(&st.generics, &typeName)) {
         st = typeCtors(st, &typeName);
         if st.status != 0 { return st; };
     };
@@ -1927,8 +1928,8 @@ fn builtinSequenceCall(st: &St, tname: &String, function: &String, t: Int) -> Bo
     if !(tname = "Sequence" || tname = "Growable") || HashSet::contains(&st.sequenceTraits, tname) || !HashMap::contains(&st.methods, function) { return false; };
     u = resolve(st, unrefOf(st, resolve(st, t)));
     base = "";
-    if isListTy(st, u) { base = "List"; } else {
-        if kindOf(st, u) = 6 { base = "Array"; } else { if isBoxTy(st, u) && kindOf(st, argAt(st, u, 0)) = 6 { base = "Box"; }; };
+    if isListTy(st, u) { base = clone(tyAt(st, u).name); } else {
+        if kindOf(st, u) = 6 { base = "Array"; } else { if isBoxTy(st, u) && kindOf(st, argAt(st, u, 0)) = 6 { base = clone(tyAt(st, u).name); }; };
     };
     return size(base.bytes) > 0 && !HashSet::contains(&st.impls, pairKey(tname, &base));
 };

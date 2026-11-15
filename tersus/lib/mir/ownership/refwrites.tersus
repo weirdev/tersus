@@ -71,5 +71,5 @@ fn expandFunction(p: &Program, f: &Function) -> Function ~ {
 };
 fn expandRefWrites(p: &Program) -> Program ~ {
     functions = []; for f in p.functions { functions = push(functions, expandFunction(p, f)); };
-    return Program { types: clone(p.types), functions: functions, entry: expandFunction(p, p.entry) };
+    return Program { types: clone(p.types), functions: functions, entry: expandFunction(p, p.entry), meta: clone(p.meta) };
 };

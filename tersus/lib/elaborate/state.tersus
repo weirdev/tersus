@@ -728,8 +728,8 @@ fn render(st: &St, t: Int) -> String ~ {
     if k = 2 { return "Bool"; };
     if k = 3 { return wordName(x.flag, x.n); };
     if k = 4 {
-        if x.name = "List" && size(x.args) = 1 && !isSize(st, nth(&x.args, 0)) { return wrapped("List<", render(st, nth(&x.args, 0)), ">"); };
-        if x.name = "Box" && size(x.args) = 1 && !isSize(st, nth(&x.args, 0)) { return wrapped("Box<", render(st, nth(&x.args, 0)), ">"); };
+        if x.name = protocolName(st, "List") && size(x.args) = 1 && !isSize(st, nth(&x.args, 0)) { return wrapped("List<", render(st, nth(&x.args, 0)), ">"); };
+        if x.name = protocolName(st, "Box") && size(x.args) = 1 && !isSize(st, nth(&x.args, 0)) { return wrapped("Box<", render(st, nth(&x.args, 0)), ">"); };
         return instanceName(st, r);
     };
     if k = 5 { return clone(x.name); };

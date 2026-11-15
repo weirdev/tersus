@@ -106,7 +106,7 @@ fn arrayRead(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, os: &List
     // 0 length, 1 first, 2 last, 3 get, 6 set
     if op = 0 && n = 1 { return arrayLength(g, f, get(os, 0)); };
     if op = 1 && n = 1 {
-        g1 = arrayPtr(g, f, get(os, 0));
+        g1 = arrayPtr(g, cx, f, get(os, 0));
         base = clone(g1.last);
         return loadAt(g1, destType, base);
     };
@@ -115,14 +115,14 @@ fn arrayRead(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, os: &List
         length = clone(g1.last);
         g2 = lastIndex(g1, length);
         index = clone(g2.last);
-        g3 = arrayPtr(g2, f, get(os, 0));
+        g3 = arrayPtr(g2, cx, f, get(os, 0));
         base = clone(g3.last);
         g4 = elementAddress(g3, base, index, bytesIn(cx, destType));
         p = clone(g4.last);
         return loadAt(g4, destType, p);
     };
     if op = 3 && n = 2 {
-        g1 = arrayPtr(g, f, get(os, 0));
+        g1 = arrayPtr(g, cx, f, get(os, 0));
         base = clone(g1.last);
         g2 = operandValue(g1, cx, f, Type::TInt, get(os, 1));
         index = clone(g2.last);
@@ -305,7 +305,7 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
             y = clone(g2.last);
             return ins(g2, "a", "call i64 @tersus_argByte(i64 ".then(x).then(", i64 ").then(y).then(")"));
         };
-        if n > 0 && isArrayOperand(f, get(args, 0)) { return arrayRead(g, cx, f, destType, op, args); };
+        if n > 0 && isArrayOperand(cx, f, get(args, 0)) { return arrayRead(g, cx, f, destType, op, args); };
         return failG(g, "Native code does not support this operation here");
     };
     if rv is Rvalue::ReadField {
@@ -448,7 +448,7 @@ fn freeOld(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int) -> Gen ~ {
 
 // The address of the element at an index of an array (or of a list of native code, whose address is that of its array), the element being the value that is made
 fn elementOf(g: Gen, cx: &Ctx, f: &Function, ty: &Type, container: &Operand, index: &String) -> Gen ~ {
-    g1 = arrayPtr(g, f, container);
+    g1 = arrayPtr(g, cx, f, container);
     base = clone(g1.last);
     return elementAddress(g1, base, index, bytesIn(cx, ty));
 };
@@ -621,7 +621,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
     if rv is Rvalue::AsVariant {
         o = (rv as Rvalue::AsVariant).o;
         held = operandLocalType(f, o);
-        if held.ok && isBoxStruct(held.ty) {
+        if held.ok && isBoxStruct(&cx.storage, held.ty) {
             l = 0;
             if o is Operand::Copy { l = (o as Operand::Copy).local; };
             if o is Operand::Move { l = (o as Operand::Move).local; };
@@ -643,7 +643,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
     };
     // Box::new of an inline array: a Box of an array is a list of native code (MirLists), so the elements move into memory of their own, with
     // as many in use as there is room for
-    if rv is Rvalue::MakeBox && isListStruct(ty) {
+    if rv is Rvalue::MakeBox && isListStruct(&cx.storage, ty) {
         o = (rv as Rvalue::MakeBox).o;
         element = listElement(cx, ty);
         if !element.ok { return failG(g, "a list of native code without its element type"); };
@@ -673,7 +673,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         return emit(g9, "store i64 ".then(showInt(count)).then(", ptr ").then(capacityAddress));
     };
     // Box::unbox of a Box of an array: the elements move out of the memory of the list, which is freed
-    if rv is Rvalue::Unbox && isListStruct(operandLocalType(f, (rv as Rvalue::Unbox).o).ty) {
+    if rv is Rvalue::Unbox && isListStruct(&cx.storage, operandLocalType(f, (rv as Rvalue::Unbox).o).ty) {
         o = (rv as Rvalue::Unbox).o;
         l = 0;
         if o is Operand::Copy { l = (o as Operand::Copy).local; };

@@ -1,17 +1,17 @@
-import mir::emit::types { Ctx, cloneImplName, cloneSymbol, containsName, dropName, dropRangeSymbol, dropSymbol, fieldsLayout, functionSymbol, layoutOf, needsDrop, needsDropIn, printSymbol };
+import mir::emit::types { Ctx, Storage, cloneImplName, cloneSymbol, containsName, dropRangeSymbol, dropSymbol, fieldsLayout, functionSymbol, layoutOf, needsDrop, needsDropIn, printSymbol };
 import mir::support::support { noStrings, showInt, beforeAngle, canonical, variantsOf, isEnum, sizedArray, isAggregate, declaredName, roundUp, simpleLayout };
 import data::codec::codec { Type };
-import mir::reader::reader { Field, Variant, TypeDecl };
+import mir::reader::reader { Field, Variant, TypeDecl, Program, dropOf };
 
 // The lines that free the fields of one variant of a value at %slot, the fields from the byte `start`
-fn dropFieldLines(types: &List<TypeDecl>, fns: &List<String>, variantIndex: Int, fields: &List<Field>, start: Int) -> List<String> ~ {
+fn dropFieldLines(types: &List<TypeDecl>, p: &Program, variantIndex: Int, fields: &List<Field>, start: Int) -> List<String> ~ {
     out = noStrings();
     offset = 0;
     i = 0;
     for f in fields {
         l = layoutOf(types, f.ty);
         offset = roundUp(offset, l.align);
-        if needsDrop(types, fns, f.ty) {
+        if needsDrop(types, p, f.ty) {
             reg = "%df".then(showInt(variantIndex)).then(".").then(showInt(i));
             out = push(out, "    ".then(reg).then(" = getelementptr i8, ptr %slot, i64 ").then(showInt(start + offset)));
             out = push(out, "    call void ".then(dropSymbol(types, f.ty)).then("(ptr ").then(reg).then(")"));
@@ -24,7 +24,7 @@ fn dropFieldLines(types: &List<TypeDecl>, fns: &List<String>, variantIndex: Int,
 
 // The function that frees what a value of the type owns: the drop of the type first when it has one (not when the value
 // was taken apart, which cleared its bytes), then what its fields or its elements own
-fn dropFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> List<String> ~ {
+fn dropFunctionLines(types: &List<TypeDecl>, p: &Program, t: &Type) -> List<String> ~ {
     out = noStrings();
     out = push(out, "define internal void ".then(dropSymbol(types, t)).then("(ptr %slot) {"));
     out = push(out, "entry:");
@@ -58,7 +58,7 @@ fn dropFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Li
     };
     start = 0;
     if isEnumKind { start = roundUp(4, payload); };
-    if containsName(fns, dropName(n.text)) {
+    if size(dropOf(p, n.text).bytes) > 0 {
         size = layoutOf(types, t).size;
         out = push(out, "    br label %zhead");
         out = push(out, "zhead:");
@@ -72,7 +72,7 @@ fn dropFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Li
         out = push(out, "    %znext = add i64 %zi, 1");
         out = push(out, "    br i1 %znz, label %znonzero, label %zhead");
         out = push(out, "znonzero:");
-        out = push(out, "    %dr = call i64 ".then(functionSymbol(dropName(n.text))).then("(ptr %slot)"));
+        out = push(out, "    %dr = call i64 ".then(functionSymbol(dropOf(p, n.text))).then("(ptr %slot)"));
         out = push(out, "    br label %fields");
         out = push(out, "fields:");
     };
@@ -88,7 +88,7 @@ fn dropFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Li
         j = 0;
         for v in variants {
             out = push(out, "v".then(showInt(j)).then(":"));
-            for l in dropFieldLines(types, fns, j, v.fields, start) { out = push(out, clone(l)); };
+            for l in dropFieldLines(types, p, j, v.fields, start) { out = push(out, clone(l)); };
             out = push(out, "    br label %done");
             j = j + 1;
         };
@@ -98,7 +98,7 @@ fn dropFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Li
         return out;
     };
     if size(variants) > 0 {
-        for l in dropFieldLines(types, fns, 0, get(variants, 0).fields, start) { out = push(out, clone(l)); };
+        for l in dropFieldLines(types, p, 0, get(variants, 0).fields, start) { out = push(out, clone(l)); };
     };
     out = push(out, "    ret void");
     out = push(out, "}");
@@ -106,7 +106,7 @@ fn dropFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Li
 };
 
 // The function that frees what each of a run of values of the type owns (Addr::dropRange)
-fn dropRangeFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> List<String> ~ {
+fn dropRangeFunctionLines(types: &List<TypeDecl>, p: &Program, t: &Type) -> List<String> ~ {
     out = noStrings();
     step = layoutOf(types, t).size;
     out = push(out, "define internal void ".then(dropRangeSymbol(types, t)).then("(i64 %base, i64 %count) {"));
@@ -130,12 +130,12 @@ fn dropRangeFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) 
 };
 
 // A drop function for every type that owns something to free, and the run function of each
-fn dropFunctions(types: &List<TypeDecl>, fns: &List<String>, closed: &List<Type>) -> List<String> ~ {
+fn dropFunctions(types: &List<TypeDecl>, p: &Program, closed: &List<Type>) -> List<String> ~ {
     out = noStrings();
     for t in closed {
-        if needsDrop(types, fns, t) && (t is Type::TNamed || sizedArray(t).ok) {
-            for l in dropFunctionLines(types, fns, t) { out = push(out, clone(l)); };
-            for l in dropRangeFunctionLines(types, fns, t) { out = push(out, clone(l)); };
+        if needsDrop(types, p, t) && (t is Type::TNamed || sizedArray(t).ok) {
+            for l in dropFunctionLines(types, p, t) { out = push(out, clone(l)); };
+            for l in dropRangeFunctionLines(types, p, t) { out = push(out, clone(l)); };
             out = push(out, "");
         };
     };
@@ -226,7 +226,7 @@ fn cloneFunctionLines(cx: &Ctx, t: &Type) -> List<String> ~ {
     };
     start = 0;
     if isEnumKind { start = roundUp(4, payload); };
-    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "List" || beforeAngle(n.text) = "Box") {
+    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = cx.storage.listName || beforeAngle(n.text) = cx.storage.boxName) {
         fields = get(variants, 0).fields;
         offset0 = 0;
         lenOffset = 0;
@@ -248,7 +248,7 @@ fn cloneFunctionLines(cx: &Ctx, t: &Type) -> List<String> ~ {
             out = push(out, "    %addrp = getelementptr i8, ptr %from, i64 ".then(showInt(offset0)));
             out = push(out, "    %addr = load i64, ptr %addrp");
             out = push(out, "    %has = icmp ne i64 %addr, 0");
-            if beforeAngle(n.text) = "List" {
+            if beforeAngle(n.text) = cx.storage.listName {
                 step = layoutOf(types, elem).size;
                 out = push(out, "    br i1 %has, label %lalloc, label %done");
                 out = push(out, "lalloc:");
@@ -512,7 +512,7 @@ fn printFieldStart(types: &List<TypeDecl>, variants: &List<Variant>, isEnumKind:
 };
 
 // The function that prints a value of the type
-fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
+fn printFunctionLines(types: &List<TypeDecl>, st: &Storage, t: &Type) -> List<String> ~ {
     out = noStrings();
     out = push(out, "define internal void ".then(printSymbol(types, t)).then("(i64 %w) {"));
     out = push(out, "entry:");
@@ -570,7 +570,7 @@ fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
     enumKind = isEnum(types, n.text);
     start = printFieldStart(types, variants, enumKind);
     out = push(out, "    %slot = inttoptr i64 %w to ptr");
-    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "List" || beforeAngle(n.text) = "Box") {
+    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = st.listName || beforeAngle(n.text) = st.boxName) {
         fields = get(variants, 0).fields;
         offset0 = 0;
         lenOffset = 0;
@@ -589,7 +589,7 @@ fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
             elem = Box::unbox((held as Type::TAddr).inner);
             out = push(out, "    %addrp = getelementptr i8, ptr %slot, i64 ".then(showInt(offset0)));
             out = push(out, "    %addr = load i64, ptr %addrp");
-            if beforeAngle(n.text) = "List" {
+            if beforeAngle(n.text) = st.listName {
                 out = push(out, "    %lenp = getelementptr i8, ptr %slot, i64 ".then(showInt(lenOffset)));
                 out = push(out, "    %count = load i64, ptr %lenp");
                 out = push(out, "    %base = inttoptr i64 %addr to ptr");
@@ -646,10 +646,10 @@ fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
 };
 
 // A print function for every type the program holds a value of
-fn printFunctions(types: &List<TypeDecl>, closed: &List<Type>) -> List<String> ~ {
+fn printFunctions(types: &List<TypeDecl>, st: &Storage, closed: &List<Type>) -> List<String> ~ {
     out = noStrings();
     for t in closed {
-        for l in printFunctionLines(types, t) { out = push(out, clone(l)); };
+        for l in printFunctionLines(types, st, t) { out = push(out, clone(l)); };
         out = push(out, "");
     };
     return out;

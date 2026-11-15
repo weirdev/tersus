@@ -1,6 +1,6 @@
 import mir::support::support { Res, Layout, noStrings, beforeAngle, escaped, renderType, declName, lookupDecl, canonical, variantsOf, sizedArray, isSizedArray, isAggregate, declaredName, roundUp, wordLayout, simpleLayout };
 import data::codec::codec { Size, Type };
-import mir::reader::reader { Field, TypeDecl, Constant, Operand, RefStep, Function, Program };
+import mir::reader::reader { Field, TypeDecl, Constant, Operand, RefStep, Function, Program, cloneOf, dropOf, isStorageList };
 
 impl String {
     fn then(self: Self, other: &String) -> Self [{ }] [{ }] {
@@ -119,22 +119,19 @@ fn containsName(names: &List<String>, n: &String) -> Bool [{ }] [{ }] {
     return false;
 };
 
-// The name of the drop of a struct or an enum (Mir.dropFunction)
-fn dropName(n: &String) -> String [{ }] [{ }] {
-    return "<".then(n).then(" as Drop>::drop");
-};
 
 // Whether a value owns something to free: a Box, or an array, struct or enum that holds one or has a drop (the ownership pass's needsDrop). The names
 // are those of the functions of the program, which have the drop of a type that has one.
-fn needsDrop(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Bool ~ {
+fn needsDrop(types: &List<TypeDecl>, p: &Program, t: &Type) -> Bool ~ {
     if t is Type::TBox { return true; };
-    if t is Type::TArray { return needsDrop(types, fns, Box::unbox((t as Type::TArray).elem)); };
+    if t is Type::TArray { return needsDrop(types, p, Box::unbox((t as Type::TArray).elem)); };
     n = declaredName(types, t);
     if !n.ok { return false; };
     // (the struct that a list is made of owns the memory at its address)
-    if beforeAngle(n.text) = "List" { return true; };
+    base = beforeAngle(n.text);
+    if isStorageList(p, &base) { return true; };
     // (a struct or an enum with a drop has something to do when it is freed, whatever its fields are)
-    if containsName(fns, dropName(n.text)) { return true; };
+    if size(dropOf(p, n.text).bytes) > 0 { return true; };
     i = lookupDecl(types, n.text);
     if i < 0 { return false; };
     d = get(types, i);
@@ -142,13 +139,13 @@ fn needsDrop(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Bool ~ {
     match d {
         TypeDecl::DStruct { name: name, fields: fields } => {
             for f in fields {
-                if needsDrop(types, fns, f.ty) { r = true; };
+                if needsDrop(types, p, f.ty) { r = true; };
             };
         },
         TypeDecl::DEnum { name: name, variants: variants } => {
             for v in variants {
                 for f in v.fields {
-                    if needsDrop(types, fns, f.ty) { r = true; };
+                    if needsDrop(types, p, f.ty) { r = true; };
                 };
             };
         },
@@ -284,7 +281,14 @@ impl Clone for Ctor { };
 
 // The types of the program and the signatures of its functions, and for each type what is asked of it again and again, worked out once: the names, to look one up without
 // copying the declarations, whether a value of it owns something and the words it takes, and the constructors
-struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool>, sizes: List<Int>, aligns: List<Int>, ctors: List<Ctor>, ctorNames: List<String>, clones: List<String>, cloneTys: List<String> };
+// The List and Box declarations native storage is (the host's `storage` record; MIR.md, "Ownership and storage")
+struct Storage { listName: String, boxName: String };
+
+impl Clone for Storage { };
+
+fn storageOf(p: &Program) -> Storage ~ { return Storage { listName: clone(p.meta.listName), boxName: clone(p.meta.boxName) }; };
+
+struct Ctx { storage: Storage, types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool>, sizes: List<Int>, aligns: List<Int>, ctors: List<Ctor>, ctorNames: List<String>, clones: List<String>, cloneTys: List<String> };
 
 impl Clone for Ctx { };
 
@@ -370,7 +374,7 @@ fn contextOf(program: &Program) -> Ctx ~ {
     aligns = noInts2();
     for d in program.types {
         names = push(names, declName(d));
-        drops = push(drops, needsDrop(program.types, fns, Type::TNamed { name: declName(d), base: declName(d), argc: 0, argTokens: [] }));
+        drops = push(drops, needsDrop(program.types, program, Type::TNamed { name: declName(d), base: declName(d), argc: 0, argTokens: [] }));
         l = declLayout(program.types, d);
         sizes = push(sizes, l.size);
         aligns = push(aligns, l.align);
@@ -380,13 +384,21 @@ fn contextOf(program: &Program) -> Ctx ~ {
     for c in ctors { ctorNames = push(ctorNames, clone(c.name)); };
     clones = noStrings();
     cloneTys = noStrings();
-    for s in sigs {
-        if s.hasReturn && size(s.params) > 0 && hasText(s.name, " as Clone>::clone") {
-            clones = push(clones, clone(s.name));
-            cloneTys = push(cloneTys, renderType(canonical(program.types, s.returns)));
+    if program.meta.checked {
+        for d in program.types {
+            callee = cloneOf(program, declName(d));
+            owner = Type::TNamed { name: declName(d), base: declName(d), argc: 0, argTokens: [] };
+            if size(callee.bytes) > 0 { clones = push(clones, callee); cloneTys = push(cloneTys, renderType(canonical(program.types, &owner))); };
+        };
+    } else {
+        for s in sigs {
+            if s.hasReturn && size(s.params) > 0 && hasText(s.name, " as Clone>::clone") {
+                clones = push(clones, clone(s.name));
+                cloneTys = push(cloneTys, renderType(canonical(program.types, s.returns)));
+            };
         };
     };
-    return Ctx { types: clone(program.types), sigs: sigs, names: names, drops: drops, sizes: sizes, aligns: aligns, ctors: ctors, ctorNames: ctorNames, clones: clones, cloneTys: cloneTys };
+    return Ctx { storage: storageOf(program), types: clone(program.types), sigs: sigs, names: names, drops: drops, sizes: sizes, aligns: aligns, ctors: ctors, ctorNames: ctorNames, clones: clones, cloneTys: cloneTys };
 };
 
 // The index of the declaration of a struct or an enum, or -1 (the same as lookupDecl, without copying the declarations)
@@ -510,8 +522,8 @@ fn isArray(t: &Type) -> Bool [{ }] [{ }] {
 
 // A list of native code: the struct List of lib/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
 // starts with
-fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
-    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "List"; };
+fn isListStruct(st: &Storage, t: &Type) -> Bool [{ }] [{ }] {
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = st.listName; };
     return false;
 };
 
@@ -532,8 +544,8 @@ fn listElement(cx: &Ctx, t: &Type) -> Held ~ {
 };
 
 // A Box of native code: the struct Box of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
-fn isBoxStruct(t: &Type) -> Bool [{ }] [{ }] {
-    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "Box"; };
+fn isBoxStruct(st: &Storage, t: &Type) -> Bool [{ }] [{ }] {
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = st.boxName; };
     return false;
 };
 
@@ -706,8 +718,8 @@ fn assignRefType(cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>) -> Ty
         };
         if step is RefStep::Index {
             elem = Held { ok: false, ty: Type::TInt };
-            if isListStruct(ty) { elem = listElement(cx, ty); };
-            if isBoxStruct(ty) { elem = listElement(cx, ty); };
+            if isListStruct(&cx.storage, ty) { elem = listElement(cx, ty); };
+            if isBoxStruct(&cx.storage, ty) { elem = listElement(cx, ty); };
             arr = sizedArray(ty);
             if arr.ok { elem = Held { ok: true, ty: clone(arr.elem) }; };
             if elem.ok { ty = clone(elem.ty); };

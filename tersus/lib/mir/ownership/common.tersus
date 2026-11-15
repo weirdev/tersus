@@ -1,5 +1,5 @@
 import data::codec::codec { Type, Size, Token, Parsed, typeAt };
-import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep, Field, Variant, TypeDecl };
+import mir::reader::reader { dropOf, isDropOf, isStorageBox, isStorageList, Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep, Field, Variant, TypeDecl };
 import mir::support::support { ownerOf, lookupDecl, variantsOf, beforeAngle, declName };
 
 fn noOwnershipBlocks() -> List<MirBlock> { return []; };
@@ -273,16 +273,8 @@ fn freshLocal(r: &mut Rewrite, ty: Type) -> Int ~ {
     (*r).locals = push(clone((*r).locals), LocalDecl { id: n, named: false, name: "", ty: ty });
     return n;
 };
-fn isDropFunction(name: &String) -> Bool ~ {
-    suffix = " as Drop>::drop";
-    n = size(name.bytes); s = size(suffix.bytes);
-    return n >= s && name.slice(n - s, n) = suffix;
-};
-fn hasDrop(p: &Program, name: &String) -> Bool ~ {
-    target = "<".concat(name).concat(" as Drop>::drop");
-    for f in p.functions { if f.name = target { return true; }; };
-    return false;
-};
+fn isDropFunction(p: &Program, name: &String) -> Bool ~ { return isDropOf(p, name); };
+fn hasDrop(p: &Program, name: &String) -> Bool ~ { return size(dropOf(p, name).bytes) > 0; };
 // The type argument of a `named "B" 1 type T` (a List or a Box as the data writes them)
 fn soleTypeArgument(t: &Type) -> Parsed<Type> ~ {
     if t is Type::TNamed {
@@ -296,12 +288,13 @@ fn needsDrop(p: &Program, t: &Type) -> Bool ~ {
     if t is Type::TList { return true; };
     if t is Type::TArray { return needsDrop(p, Box::unbox((t as Type::TArray).elem)); };
     // (the data writes a Box as `named "Box" 1 type T`)
-    if t is Type::TNamed { if (t as Type::TNamed).base = "Box" && (t as Type::TNamed).argc = 1 { return true; }; };
+    if t is Type::TNamed { boxBase = (t as Type::TNamed).base; if isStorageBox(p, &boxBase) && (t as Type::TNamed).argc = 1 { return true; }; };
     name = ""; found = false;
     if t is Type::TNamed { name = clone((t as Type::TNamed).name); found = true; };
     if t is Type::TVariant { owner = ownerOf(p.types, (t as Type::TVariant).name); name = owner.text; found = owner.ok; };
     if !found { return false; };
-    if beforeAngle(name) = "List" || hasDrop(p, name) { return true; };
+    base = beforeAngle(name);
+    if isStorageList(p, &base) || hasDrop(p, name) { return true; };
     for v in variantsOf(p.types, name) { for f in v.fields { if needsDrop(p, f.ty) { return true; }; }; };
     return false;
 };
@@ -327,8 +320,8 @@ fn stepsType(p: &Program, start: &Type, steps: &List<RefStep>) -> Type ~ {
             if ty is Type::TNamed {
                 named = ty as Type::TNamed;
                 argument = soleTypeArgument(ty);
-                if argument.ok && named.base = "List" { result = clone(argument.value); };
-                if argument.ok && named.base = "Box" { boxed = true; inner = clone(argument.value); };
+                if argument.ok && isStorageList(p, &named.base) { result = clone(argument.value); };
+                if argument.ok && isStorageBox(p, &named.base) { boxed = true; inner = clone(argument.value); };
             };
             if boxed {
                 if inner is Type::TArray { result = clone(Box::unbox((inner as Type::TArray).elem)); } else { result = inner; };
