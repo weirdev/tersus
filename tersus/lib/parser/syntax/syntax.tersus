@@ -6229,7 +6229,7 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
     tps = fnTraitParams(&s, &tys, clone(resultPartsrtValue));
     canonical = clone(kind);
     i = 0;
-    for t in &tys { renderedTy = renderTypeName(clone(t)); canonical = catStrings(canonical, cat3("$", get(names, i), "")); canonical = catStrings(canonical, cat3("=", sanitizeFnName(&renderedTy), "")); i = i + 1; };
+    for t in &tys { renderedTy = renderTypeName(clone(t)); canonical = catStrings(canonical, cat3("$", String::fromInt(i), "")); canonical = catStrings(canonical, cat3("=", sanitizeFnName(&renderedTy), "")); i = i + 1; };
     renderedRet = renderTypeName(clone(resultPartsrtValue));
     canonical = catStrings(canonical, cat3("$to$", sanitizeFnName(&renderedRet), ""));
     if contractStart >= 0 { contractText = sourceText.text.slice(contractStart, s.pos); canonical = catStrings(canonical, cat3("$c", fnContractHash(&contractText), "")); };
@@ -6658,7 +6658,7 @@ fn implStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     isBuiltinType = typeName = "List" || typeName = "Box" || typeName = "Array" || typeName = "Int" || typeName = "Byte" || typeName = "Bool";
     if !isBuiltinType && !containsText(typeName, "::") && !hasTypeNamed( s, typeName) { return fail( s, 0, cat3(cat3("impl for ", typeName, ", which is not a struct or enum declared before"), "", "")); };
     // trait parameter checks
-    if hasTrait {
+    if hasTrait && size(fnTraitName.bytes) = 0 {
         tp3 = findGenerics( s, trt);
         if size(tp3) > 0 && !hasFirstArgs {
             joined = joinNames(tp3);
