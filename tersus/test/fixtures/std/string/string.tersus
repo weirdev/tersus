@@ -1,0 +1,379 @@
+import std::core::types { List };
+import std::core::ownership { Clone };
+import std::eq { Eq };
+import std::prelude { Sequence, Growable, Hash, hashCombine };
+
+// The library of strings that a program has when it writes a string literal or mentions `String` and does not declare it itself (see
+// Pipeline.parseSource): it is parsed after lib/prelude.tersus and before the program.
+//
+// A String is a sequence of bytes, the UTF-8 encoding of the text, held as a list of Bytes (so each is known to be between 0 and 255). The literal
+// "caf\u{e9}" is the String { bytes: [99, 97, 102, 195, 169] }, so `size` is the number of bytes and not of characters, `get(s, i)` is
+// the Byte i, and nothing here looks at the bytes as characters. A String is a Sequence<Byte> and Growable<Byte> of its bytes, so it has
+// `size`, `get`, `set` and `push` with the contracts of the traits, and a function on a Sequence<Byte> takes one.
+
+struct String {
+    bytes: List<Byte>,
+};
+
+// A type whose values can be written as text by String.format: writeTo appends the text of self to out and gives the result
+trait Format {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }];
+};
+
+// (a copy of a String is made where a program writes clone(s))
+impl Clone for String { };
+
+// (two strings are equal when their bytes are)
+impl Eq for String { };
+
+impl Hash for String {
+    fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] {
+        h = 23;
+        i = 0;
+        while i < size(self.bytes) [{
+            affirm i >= 0; affirm i <= size(self.bytes);
+            affirm h >= 0; affirm h < 2147483647;
+        }] shrinks size(self.bytes) - i {
+            h = hashCombine(h, toInt(get(self.bytes, i)));
+            i = i + 1;
+        };
+        return h;
+    };
+};
+
+impl String {
+    // The text of a then the text of b: the bytes of a, then the bytes of b
+    fn concat(self: Self, other: &String) -> Self [{ }] [{
+        affirm size(return.bytes) = size(self.bytes) + size(other.bytes);
+        affirm forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j);
+        affirm forall j in 0..size(other.bytes): get(return.bytes, size(self.bytes) + j) = get(other.bytes, j);
+    }] {
+        bytes = self.bytes;
+        i = 0;
+        while i < size(other.bytes) [{
+            affirm i >= 0;
+            affirm i <= size(other.bytes);
+            affirm size(bytes) = size(self.bytes) + i;
+            affirm forall j in 0..size(self.bytes): get(bytes, j) = get(self.bytes, j);
+            affirm forall j in 0..i: get(bytes, size(self.bytes) + j) = get(other.bytes, j);
+        }] shrinks size(other.bytes) - i {
+            bytes = push(bytes, get(other.bytes, i));
+            i = i + 1;
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The next bytes of the standard input, up to the end of the input or `limit` of them. The limit is how a loop that depends on what
+    // is read still ends: it is not an error to reach it, and what is not read is left for the next call.
+    fn read(limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
+        bytes = [];
+        i = 0;
+        while i < limit [{ affirm i >= 0; affirm i <= limit; affirm size(bytes) <= i; }] shrinks limit - i {
+            c = readByte();
+            if c < 0 {
+                i = limit;
+            } else {
+                bytes = push(bytes, toByte(c));
+                i = i + 1;
+            };
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The next line of the standard input without its new line (a byte 10, which is read and dropped), up to the end of the input or `limit`
+    // bytes of the line. When the line is longer, the rest of it is left in the input.
+    fn readLine(limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
+        bytes = [];
+        i = 0;
+        while i < limit [{ affirm i >= 0; affirm i <= limit; affirm size(bytes) <= i; }] shrinks limit - i {
+            c = readByte();
+            if c < 0 {
+                i = limit;
+            } else {
+                if c = 10 {
+                    i = limit;
+                } else {
+                    bytes = push(bytes, toByte(c));
+                    i = i + 1;
+                };
+            };
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The argument i of the program (counting from 0), up to `limit` bytes of it; an argument that there is not is the empty string
+    fn arg(i: Int, limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
+        bytes = [];
+        j = 0;
+        while j < limit [{ affirm j >= 0; affirm j <= limit; affirm size(bytes) <= j; }] shrinks limit - j {
+            c = argByte(i, j);
+            if c < 0 {
+                j = limit;
+            } else {
+                bytes = push(bytes, toByte(c));
+                j = j + 1;
+            };
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The size of the file at `path`, or -1 when there is no such file (or it cannot be read)
+    fn fileSize(path: &String) -> Int [{ }] [{ affirm return >= 0 - 1; }] {
+        i = 0;
+        while i < size(path.bytes) [{ affirm i >= 0; affirm i <= size(path.bytes); }] shrinks size(path.bytes) - i {
+            pathByte(get(path.bytes, i));
+            i = i + 1;
+        };
+        return fileLoad();
+    };
+
+    // The file at `path`, up to `limit` bytes of it: the empty string when there is no such file (see fileSize)
+    fn readFile(path: &String, limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
+        i = 0;
+        while i < size(path.bytes) [{ affirm i >= 0; affirm i <= size(path.bytes); }] shrinks size(path.bytes) - i {
+            pathByte(get(path.bytes, i));
+            i = i + 1;
+        };
+        loaded = fileLoad();
+        bytes = [];
+        j = 0;
+        while j < limit [{ affirm j >= 0; affirm j <= limit; affirm size(bytes) <= j; }] shrinks limit - j {
+            c = fileByte(j);
+            if c < 0 {
+                j = limit;
+            } else {
+                bytes = push(bytes, toByte(c));
+                j = j + 1;
+            };
+        };
+        return Self { bytes: bytes };
+    };
+
+    // Writes the bytes of the string in the file at `path`, which holds only them after (it is made if there is none): 0, or -1 when it cannot be written
+    fn writeFile(self: &Self, path: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return <= 0; }] {
+        i = 0;
+        while i < size(path.bytes) [{ affirm i >= 0; affirm i <= size(path.bytes); }] shrinks size(path.bytes) - i {
+            pathByte(get(path.bytes, i));
+            i = i + 1;
+        };
+        j = 0;
+        while j < size(self.bytes) [{ affirm j >= 0; affirm j <= size(self.bytes); }] shrinks size(self.bytes) - j {
+            storeByte(get(self.bytes, j));
+            j = j + 1;
+        };
+        return fileStore();
+    };
+
+    // The decimal text of an Int: its digits, with a minus sign in front when it is negative ("0" for 0, and "-9223372036854775808" for the least Int, which has
+    // no positive of its own)
+    fn fromInt(n: Int) -> Self [{ }] [{ affirm size(return.bytes) >= 1; }] {
+        if n = 0 - 9223372036854775807 - 1 {
+            return Self { bytes: [45, 57, 50, 50, 51, 51, 55, 50, 48, 51, 54, 56, 53, 52, 55, 55, 53, 56, 48, 56] };
+        };
+        negative = n < 0;
+        m = n;
+        if negative { m = 0 - n; };
+        // the digits, the last first
+        digits = push([], toByte(48 + m % 10));
+        m = m / 10;
+        while m > 0 [{ affirm m >= 0; affirm size(digits) >= 1; }] shrinks m {
+            digits = push(digits, toByte(48 + m % 10));
+            m = m / 10;
+        };
+        bytes = [];
+        if negative { bytes = push(bytes, toByte(45)); };
+        j = size(digits);
+        while j > 0 [{ affirm j >= 0; affirm j <= size(digits); affirm size(bytes) >= size(digits) - j; }] shrinks j {
+            j = j - 1;
+            bytes = push(bytes, get(digits, j));
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The bytes from the index `from` up to (not including) the index `to`
+    fn slice(self: &Self, from: Int, to: Int) -> Self [{ affirm from >= 0; affirm from <= to; affirm to <= size(self.bytes); }] [{
+        affirm size(return.bytes) = to - from;
+        affirm forall j in 0..to - from: get(return.bytes, j) = get(self.bytes, from + j);
+    }] {
+        bytes = [];
+        i = from;
+        while i < to [{
+            affirm i >= from;
+            affirm i <= to;
+            affirm size(bytes) = i - from;
+            affirm forall j in 0..i - from: get(bytes, j) = get(self.bytes, from + j);
+        }] shrinks to - i {
+            // (the element that is pushed is at the index i - from, where the engine looks for from + (i - from))
+            define k = i - from;
+            affirm from + k = i;
+            define v = get(self.bytes, from + k);
+            affirm v = get(self.bytes, i);
+            bytes = push(bytes, get(self.bytes, i));
+            i = i + 1;
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The index of the first byte from the index `from` that is `b`, or the size of the string when there is none (and none of the bytes before it is `b`)
+    fn find(self: &Self, b: Byte, from: Int) -> Int [{ affirm from >= 0; affirm from <= size(self.bytes); }] [{
+        affirm return >= from;
+        affirm return <= size(self.bytes);
+        affirm forall j in from..return: get(self.bytes, j) != b;
+    }] {
+        i = from;
+        while i < size(self.bytes) && get(self.bytes, i) != b [{
+            affirm i >= from;
+            affirm i <= size(self.bytes);
+            affirm forall j in from..i: get(self.bytes, j) != b;
+        }] shrinks size(self.bytes) - i {
+            i = i + 1;
+        };
+        return i;
+    };
+
+    // Whether the string starts with the bytes of `prefix`
+    fn startsWith(self: &Self, prefix: &String) -> Bool [{ }] [{ }] {
+        if size(prefix.bytes) > size(self.bytes) { return false; };
+        i = 0;
+        while i < size(prefix.bytes) && get(self.bytes, i) = get(prefix.bytes, i) [{ affirm i >= 0; affirm i <= size(prefix.bytes); }] shrinks size(prefix.bytes) - i {
+            i = i + 1;
+        };
+        return i = size(prefix.bytes);
+    };
+
+    // Writes the bytes of the string to the standard error, and gives the number of them
+    fn printError(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
+        i = 0;
+        while i < size(self.bytes) [{ affirm i >= 0; affirm i <= size(self.bytes); }] shrinks size(self.bytes) - i {
+            writeError(get(self.bytes, i));
+            i = i + 1;
+        };
+        return i;
+    };
+
+    // Writes the bytes of the string to the standard output, and gives the number of them
+    fn print(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
+        i = 0;
+        while i < size(self.bytes) [{ affirm i >= 0; affirm i <= size(self.bytes); }] shrinks size(self.bytes) - i {
+            writeByte(get(self.bytes, i));
+            i = i + 1;
+        };
+        return i;
+    };
+
+    // The template with each {} replaced by the text of the next argument; see formatInto
+    fn format<..T: Format>(self: &Self, args: &..T) -> String [{ }] [{ }] {
+        return self.formatInto(String { bytes: [] }, args);
+    };
+
+    // The template formatted onto the end of out: each {} is replaced by the next argument's text, {{ and }} are written as single braces,
+    // a {} with no argument left is written as nothing, and arguments left over are not written. Inserted text is not scanned again.
+    fn formatInto<..T: Format>(self: &Self, out: String, args: &..T) -> String [{ }] [{ }] {
+        at = 0;
+        for a in args {
+            (out, at) = self.formatPart(out, at, true);
+            if at >= 0 { out = a.writeTo(out); };
+        };
+        (out, at) = self.formatPart(out, at, false);
+        return out;
+    };
+
+    // A helper of format: the template's text from the index `from` appended to out, with {{ and }} written as single braces. With toHole it stops
+    // after the next {} and gives the index after it; otherwise each {} is written as nothing. The index is -1 when the template is used up.
+    fn formatPart(self: &Self, out: String, from: Int, toHole: Bool) -> (String, Int) [{ }] [{ }] {
+        n = size(self.bytes);
+        if from < 0 || from > n { return (out, 0 - 1); };
+        bytes = out.bytes;
+        i = from;
+        skip = false;
+        while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+            b = get(self.bytes, i);
+            if skip {
+                skip = false;
+            } else {
+                x = toInt(b);
+                hole = false;
+                if (x = 123 || x = 125) && i + 1 < n {
+                    c = toInt(get(self.bytes, i + 1));
+                    hole = x = 123 && c = 125;
+                    if hole && toHole { return (String { bytes: bytes }, i + 2); };
+                    if hole || c = x { skip = true; };
+                };
+                if !hole { bytes = push(bytes, b); };
+            };
+            i = i + 1;
+        };
+        return (String { bytes: bytes }, 0 - 1);
+    };
+};
+
+impl Sequence<Byte> for String {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
+        return size(self.bytes);
+    };
+
+    fn get(self: &Self, i: Int) -> Byte [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm return = get(self.bytes, i); }] {
+        return get(self.bytes, i);
+    };
+
+    fn getRef(self: &Self, i: Int) -> &Byte from self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm *return = get(self.bytes, i); }] {
+        return &get(self.bytes, i);
+    };
+
+    fn set(self: Self, i: Int, x: Byte) -> Self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm size(return.bytes) = size(self.bytes); affirm get(return.bytes, i) = x; }] {
+        return Self { bytes: set(self.bytes, i, x) };
+    };
+};
+
+impl Growable<Byte> for String {
+    fn push(self: Self, x: Byte) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + 1; affirm get(return.bytes, size(self.bytes)) = x; affirm forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j); }] {
+        return Self { bytes: push(self.bytes, x) };
+    };
+};
+
+impl Format for Int {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }] {
+        bytes = out.bytes;
+        // Div floors and Mod takes the divisor's sign, so 0 <= r <= 9; the last digit is split off before negating, so the least Int needs no case of its own
+        q = self / 10;
+        r = self % 10;
+        if self < 0 {
+            bytes = push(bytes, toByte(45));
+            if r > 0 { q = q + 1; r = r - 10; };
+            q = 0 - q;
+            r = 0 - r;
+        };
+        if q > 0 {
+            p = 1;
+            while p <= q / 10 [{ affirm p >= 1; affirm q >= 0; }] shrinks q - p {
+                p = p * 10;
+            };
+            while p > 0 [{ affirm p >= 0; affirm q >= 0; }] shrinks p {
+                bytes = push(bytes, toByte(48 + (q / p) % 10));
+                p = p / 10;
+            };
+        };
+        bytes = push(bytes, toByte(48 + r));
+        return String { bytes: bytes };
+    };
+};
+
+impl Format for Byte {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }] { return Format::writeTo(toInt(self), out); };
+};
+
+impl Format for Bool {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }] {
+        bytes = out.bytes;
+        if self {
+            bytes = push(push(push(push(bytes, toByte(116)), toByte(114)), toByte(117)), toByte(101));
+        } else {
+            bytes = push(push(push(push(push(bytes, toByte(102)), toByte(97)), toByte(108)), toByte(115)), toByte(101));
+        };
+        return String { bytes: bytes };
+    };
+};
+
+impl Format for String {
+    fn writeTo(self: &Self, out: String) -> String [{ }] [{ }] { return out.concat(self); };
+};

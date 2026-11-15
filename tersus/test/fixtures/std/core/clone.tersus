@@ -1,0 +1,47 @@
+import std::core::types { List, Box };
+import std::core::ownership { Clone };
+
+
+// A list is cloned element by element, an array is too (Array::fromList moves the cloned elements in), and a Box is a new
+// Box of the clone of what it holds.
+impl<T: Clone> Clone for List<T> {
+    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] {
+        out = [];
+        i = 0;
+        while i < size(self) [{ affirm i >= 0; affirm i <= size(self); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(self, j); }] shrinks size(self) - i {
+            out = push(out, get(self, i).clone());
+            i = i + 1;
+        };
+        return out;
+    };
+};
+
+impl<T: Clone, n> Clone for Array<T, n> {
+    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] {
+        out = [];
+        i = 0;
+        while i < size(self) [{ affirm i >= 0; affirm i <= size(self); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(self, j); }] shrinks size(self) - i {
+            out = push(out, get(self, i).clone());
+            i = i + 1;
+        };
+        return Array::fromList(out);
+    };
+};
+
+impl<T: Clone> Clone for Box<T> {
+    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] {
+        return Box::new(Box::unbox(self).clone());
+    };
+};
+
+// (a Box of an array of no size is cloned element by element: `clone` on one is a call of this, since the impl for Box
+// above is for a Box of a value with a size, whose clone unboxes it)
+fn cloneBoxedArray<T: Clone>(b: &Box<Array<T>>) -> Box<Array<T>> [{ }] [{ affirm size(return) = size(b); affirm forall j in 0..size(b): get(return, j) = get(b, j); }] {
+    out = [];
+    i = 0;
+    while i < size(b) [{ affirm i >= 0; affirm i <= size(b); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(b, j); }] shrinks size(b) - i {
+        out = push(out, get(b, i).clone());
+        i = i + 1;
+    };
+    return Box::new(Array::fromList(out));
+};

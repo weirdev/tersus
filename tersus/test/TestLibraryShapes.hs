@@ -7,10 +7,11 @@ import qualified Data.Map.Strict as Map
 import Compile (sourceRequest)
 import ElaborateRequest
 import ElaboratorTool (sourceLoader)
-import Modules (librarySources)
+import Modules (Snapshot (..), librarySources, loadRequest)
 import PackageData (resolverFromFiles)
 import TestHarness
-import Types (OwnershipFacts (..), OwnershipTransport (..))
+import Interface (ModuleInterface (..))
+import Types (Arg (..), OwnershipFacts (..), OwnershipTransport (..), Type (..))
 
 -- The compiler libraries in the shape of the ordinary std package (std::module and std::module::file imports, a module of
 -- several files), which the elaborator reads beside the synthetic tersuslib shape the compiler gives it: declarations get
@@ -21,6 +22,9 @@ testLibraryShapes = TestList "testLibraryShapes"
     [ TestCase "std-shape libraries compile under canonical names with owner Drop facts" stdLibraries
     , TestCase "a program is given std-shape libraries by the names it spells" stdProgram
     , TestCase "a program's own declaration still shadows a std-shape library name" stdShadowed
+    , TestCase "the std package's sources write an imported List as the provider it is in struct fields" fullFields
+    , TestCase "programs with strings, maps and sets are given the std package's libraries" fullPrograms
+    , TestCase "a package module's own Clone impl leaves the std libraries' impls visible, and a struct built with list type arguments is its instance" fullPackageClone
     , testCase "libraries of both shapes in one request are refused" mixedShapes
     , testCase "tersuslib-shape libraries keep their bare names" $ case loadLibraries librarySources of
         LoadedLibraries answers Nothing -> testAssertTrue (all (accepted . laResponse) answers)
@@ -151,3 +155,57 @@ mixedShapes :: TestResult
 mixedShapes = case loadLibraries (take 1 librarySources ++ drop 1 stdSources) of
     LoadedLibraries [] (Just message) -> testAssertTrue ("not in the shape of the libraries before it" `isInfixOf` message)
     other -> Just ("mixed shapes were not refused: " ++ take 400 (show other))
+
+-- The sources of the std package (test/fixtures/std, the package's files as the compiler libraries), in the libraries' order
+fullSources :: IO [(String, Bool, String)]
+fullSources = mapM (\(name, native) -> (\text -> (name, native, text)) <$> readFile (pathOf name)) order
+  where
+    order = [("core/ownership", False), ("core/types", False), ("core/clone", False), ("eq", False), ("prelude", False), ("string", False), ("map", False), ("set", False), ("lists", True), ("box", True)]
+    pathOf name = "test/fixtures/std/" ++ (if '/' `elem` name then name else name ++ "/" ++ name) ++ ".tersus"
+
+fullCatalog :: [(String, Bool, String)] -> Either String [LibraryAnswer]
+fullCatalog sources = case loadLibraries sources of
+    LoadedLibraries answers Nothing
+        | all (accepted . laResponse) answers -> Right answers
+        | otherwise -> Left ("a std library was refused: " ++ take 600 (show [(laName a, laResponse a) | a <- answers, not (accepted (laResponse a))]))
+    other -> Left ("the std libraries did not load: " ++ take 600 (show other))
+
+fullFields :: IO TestResult
+fullFields = do
+    sources <- fullSources
+    pure $ case fullCatalog sources of
+        Left e -> Just e
+        Right answers ->
+            let ctor lib name = [fields | LibraryAnswer l _ _ (Accepted (Just iface) _ _) <- answers, l == lib, Just (_, fields) <- [Map.lookup name (ifCtors iface)]]
+                list t = TNamed listRow [ArgType t]
+             in testAssertEq (ctor "string" "std$string$string$String") [[("bytes", list TByte)]]
+                    <> testAssertEq (map (lookup "buckets") (ctor "map" "std$map$map$HashMap<'K, 'V>")) [Just (list (list (TNamed "std$map$map$Entry" [ArgType (TParam "K"), ArgType (TParam "V")])))]
+
+fullPrograms :: IO TestResult
+fullPrograms = do
+    sources <- fullSources
+    pure $ case fullCatalog sources of
+        Left e -> Just e
+        Right answers ->
+            let catalog = [Library name imports iface | LibraryAnswer name imports _ (Accepted (Just iface) _ _) <- answers]
+                load source = sourceLoader ((sourceRequest LoadProgram False False catalog source){lrSources = sources, lrProtocols = Just Map.empty})
+                given source expected = case load source of
+                    LoadedProgram (Accepted _ selected (MirLowered _)) -> testAssertTrue (all (`elem` selected) expected)
+                    other -> Just ("the program was not accepted: " ++ take 600 (show other))
+             in given "s = \"ab\"; t = clone(s); c = \"c\"; u = t.concat(&c); return size(u.bytes);" ["string"]
+                    <> given "m = HashMap::new(); m = m.insert(1, 2); s = HashSet::new(); s = s.insert(3); k = 1; return m.size() + s.size() + m.lookup(&k, 0);" ["map", "set"]
+
+fullPackageClone :: IO TestResult
+fullPackageClone = do
+    sources <- fullSources
+    pure $ case fullCatalog sources of
+        Left e -> Just e
+        Right answers ->
+            let catalog = [Library name imports iface | LibraryAnswer name imports _ (Accepted (Just iface) _ _) <- answers]
+                files = [("app/package.tersus", ""), ("app/main.tersus", "struct T { a: Int };\nimpl Clone for T { };\nstruct W<E> { v: E };\nenum Shape { Ring { xs: List<Int> }, Dot { } };\nfn ringSize(s: Shape) -> Int { if s is Shape::Ring { r = s as Shape::Ring; return size(r.xs); }; return 0; };\nt = clone(T { a: 1 });\ns = \"ab\";\nu = clone(s);\nw = W<List<Int>> { v: [1, 2] };\nreturn size(u.bytes) + t.a + size(w.v);\n")]
+                request = (loadRequest LoadPackage (Snapshot (resolverFromFiles files) "app/main.tersus" False)){lrSources = sources, lrLibraries = catalog, lrProtocols = Just Map.empty}
+             in case sourceLoader request of
+                    LoadedModules modules -> testAssertTrue (not (null modules) && and [case r of Accepted _ _ (MirLowered _) -> True; _ -> False | (_, _, r) <- modules])
+                        <> testAssertEq [take 200 (show r) | (_, _, r) <- modules, case r of Accepted _ _ (MirLowered _) -> False; _ -> True] []
+                        <> testAssertEq [fields | (_, _, Accepted (Just iface) _ _) <- modules, Just (_, fields) <- [Map.lookup "Shape::Ring" (ifCtors iface)]] [[("xs", TNamed listRow [ArgType TInt])]]
+                    other -> Just ("the package did not load: " ++ take 600 (show other))
