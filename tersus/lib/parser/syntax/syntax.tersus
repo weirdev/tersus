@@ -6178,11 +6178,12 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
         while loop ~ {
             save = checkpoint(s);
             v = parseVariable(sourceText, s); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
+            s = resultPartsvState;
             named = false;
             pname = "";
             pty = Type::TInt;
             if resultPartsvOk {
-                after = skipWs(sourceText, resultPartsvState);
+                after = skipWs(sourceText, s);
                 if byteAt(sourceText, after, after.pos) = 58 {
                     named = true;
                     pname = resultPartsvValue;
@@ -6195,7 +6196,7 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
                 };
             };
             if !named {
-                s = restore(resultPartsvState, save);
+                s = restore(s, save);
                 t = typeAnnotation(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
                 if !resultPartstOk { return Res<FnShape> { st: resultPartstState, v: emptyFnShape(), ok: false }; };
                 s = resultPartstState;
@@ -6225,7 +6226,7 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
     outs = optContract(sourceText, s); Res { st: resultPartsoutsState, v: resultPartsoutsValue, ok: resultPartsoutsOk } = outs;
     if !resultPartsoutsOk { return Res<FnShape> { st: resultPartsoutsState, v: emptyFnShape(), ok: false }; };
     s = resultPartsoutsState;
-    tps = fnTraitParams(&s, &tys, resultPartsrtValue);
+    tps = fnTraitParams(&s, &tys, clone(resultPartsrtValue));
     canonical = clone(kind);
     i = 0;
     for t in &tys { renderedTy = renderTypeName(clone(t)); canonical = catStrings(canonical, cat3("$", get(names, i), "")); canonical = catStrings(canonical, cat3("=", sanitizeFnName(&renderedTy), "")); i = i + 1; };
@@ -6244,10 +6245,9 @@ fn mintFnTrait(st: St, shape: &FnShape) -> Res<Int> ~ {
             if sv is AstStatement::TraitDef && nameText(&s, (sv as AstStatement::TraitDef).n) = shape.canonical { return ok( s, 0); };
         };
     };
-    selfTy = namedTypeOf("Self", []);
-    receiver = clone(selfTy);
-    if shape.kind = "Fn" { receiver = Type::TRef { inner: Box::new(selfTy) }; };
-    if shape.kind = "FnMut" { receiver = Type::TMutRef { inner: Box::new(selfTy) }; };
+    receiver = namedTypeOf("Self", []);
+    if shape.kind = "Fn" { receiver = Type::TRef { inner: Box::new(namedTypeOf("Self", [])) }; };
+    if shape.kind = "FnMut" { receiver = Type::TMutRef { inner: Box::new(namedTypeOf("Self", [])) }; };
     allTypes = push([], receiver);
     shapeTypes = clone(shape.types);
     for t in &shapeTypes { allTypes = push(allTypes, clone(t)); };
@@ -6571,8 +6571,7 @@ fn implStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     hasFirstArgs = false;
     fnTraitName = "";
     if isFnKind(&resultPartsfirstValue) && byteAt(sourceText, s, s.pos) = 40 {
-        s = St { typeParams: clone(tpsOnly), ..s };
-        sh = fnShape(sourceText, s, resultPartsfirstValue); Res { st: resultPartsshState, v: resultPartsshValue, ok: resultPartsshOk } = sh;
+        sh = fnShape(sourceText, s, clone(resultPartsfirstValue)); Res { st: resultPartsshState, v: resultPartsshValue, ok: resultPartsshOk } = sh;
         if !resultPartsshOk { return Res<Int> { st: resultPartsshState, v: 0, ok: false }; };
         s = resultPartsshState;
         fnTraitName = clone(resultPartsshValue.canonical);
