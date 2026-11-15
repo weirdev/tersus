@@ -1,11 +1,15 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- The elaborator's request and response (AST_DATA.md, "Elaboration requests"): what a host gives an
 -- elaborator to elaborate one module, and what it gets back (ElaboratorTool runs the elaborator written in Tersus).
 module ElaborateRequest
     ( Elaborator
     , Extraction (..)
-    , Request (..)
+    , Request (Request, RequestData, rqModule, rqPredeclare, rqLibrary, rqExtraction, rqInterfaces, rqDefinitions, rqLibraries, rqStatements, rqProtocols)
     , Library (..)
-    , Response (..)
+    , Response (Accepted, AcceptedData, Refused, RefusedInterface, Unresolved, NotModelled)
+    , acceptedOwnership
+    , transportMatches
+    , loadTransportMatches
     , MirAnswer (..)
     , writeRequest
     , readRequest
@@ -17,7 +21,7 @@ module ElaborateRequest
     , requestHeader
     , responseHeader
     , LoadKind (..)
-    , LoadRequest (..)
+    , LoadRequest (LoadRequest, LoadRequestData, lrKind, lrReserving, lrResolver, lrEntry, lrSources, lrLibraries, lrProtocols)
     , LoadResponse (..)
     , LibraryAnswer (..)
     , Graph (..)
@@ -30,7 +34,7 @@ module ElaborateRequest
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Map as Map
 
-import AstData (readParsedLines, writeParsedLines)
+import AstData (readOwnershipFactsBytes, readParsedLines, writeOwnershipFactsLines, writeParsedLines)
 import BuiltinTable (builtinTableLines)
 import DataCodec (Token (..), quote, strictTokenize)
 import Interface (ModuleInterface (..))
@@ -38,6 +42,7 @@ import InterfaceData (readInterfaceBytes, readInterfaceLines, writeInterfaceLine
 import PackageData (ImportLevel (..), LoadOptions (..), ModuleId (..), Resolver (..))
 import ParsedFile (Import (..))
 import Syntax (Statement)
+import Types (Name, OwnershipTransport, validProtocolProviders)
 import Utils
 
 -- Which interface to return: ordinary modules share one template export policy;
@@ -50,7 +55,7 @@ data Extraction = NoInterface | ModuleInterfaceOf | LibInterfaceOf
 -- give back, the interfaces of the modules it imports, checked defining dependencies, the compiler libraries it
 -- may be given (the elaborator selects among them), the statements as read: one list for each of the module's files
 -- in the package's order, or one for a program.
-data Request = Request
+data Request = RequestData
     { rqModule :: ModuleId
     , rqPredeclare :: Bool
     , rqLibrary :: Bool
@@ -59,8 +64,15 @@ data Request = Request
     , rqDefinitions :: [[ModuleInterface]]
     , rqLibraries :: [Library]
     , rqStatements :: [[Statement]]
+    , rqProtocols :: Maybe (Map.Map Name [Name])
     }
     deriving (Show, Eq)
+
+pattern Request :: ModuleId -> Bool -> Bool -> Extraction -> [ModuleInterface] -> [[ModuleInterface]] -> [Library] -> [[Statement]] -> Request
+pattern Request modu predeclaring library extraction interfaces definitions libraries statements <- RequestData modu predeclaring library extraction interfaces definitions libraries statements _
+  where Request modu predeclaring library extraction interfaces definitions libraries statements = RequestData modu predeclaring library extraction interfaces definitions libraries statements Nothing
+
+{-# COMPLETE Request #-}
 
 data Library = Library
     { libraryName :: String
@@ -70,8 +82,9 @@ data Library = Library
     deriving (Show, Eq)
 
 data Response
-    = -- with the compiler libraries the elaborator selected for the module, and its MIR
-      Accepted (Maybe ModuleInterface) [String] MirAnswer
+    = -- with the compiler libraries the elaborator selected for the module, its MIR, and under version 2 its checked
+      -- ownership facts
+      AcceptedData (Maybe ModuleInterface) [String] MirAnswer (Maybe OwnershipTransport)
     | -- the module does not check
       Refused String
     | -- it checks, but its interface cannot be given (Interface.extractInterface)
@@ -81,6 +94,33 @@ data Response
     | -- the elaborator does not handle the program yet, which is not a verdict on it
       NotModelled String
     deriving (Show)
+
+pattern Accepted :: Maybe ModuleInterface -> [String] -> MirAnswer -> Response
+pattern Accepted iface libraries mir <- AcceptedData iface libraries mir _
+  where Accepted iface libraries mir = AcceptedData iface libraries mir Nothing
+
+{-# COMPLETE Accepted, Refused, RefusedInterface, Unresolved, NotModelled #-}
+
+acceptedOwnership :: Response -> Maybe OwnershipTransport
+acceptedOwnership response = case response of
+    AcceptedData _ _ _ facts -> facts
+    _ -> Nothing
+
+-- An accepted answer to a version 2 request carries its ownership facts, and one to a version 1 request none
+transportMatches :: Bool -> Response -> Result Response String
+transportMatches checked response = case response of
+    AcceptedData _ _ _ facts | checked /= (facts /= Nothing) ->
+        Error (if checked then "ElaborateRequest: a version 2 answer without its ownership facts" else "ElaborateRequest: ownership facts in a version 1 answer")
+    _ -> Ok response
+
+loadTransportMatches :: Bool -> LoadResponse -> Result LoadResponse String
+loadTransportMatches checked loadResponse = case loadResponse of
+    LoadedModules answers -> allMatch [r | (_, _, r) <- answers]
+    LoadedProgram r -> allMatch [r]
+    LoadedLibraries answers _ -> allMatch (map laResponse answers)
+    _ -> Ok loadResponse
+  where
+    allMatch = foldr (\r rest -> transportMatches checked r `bindResult` \_ -> rest) (Ok loadResponse)
 
 -- The `mir` section of an accepted response (AST_DATA.md): the lines of the module's lowered unit (`tersus-mir 3`,
 -- MIR.md), which MirData.readLoweredBytes reads, or the message of the lowering's refusal
@@ -92,6 +132,7 @@ type Elaborator = Request -> Response
 writeRequest :: Request -> Result String String
 writeRequest rq =
     syntax `bindResult` \() ->
+    protocolRecords (rqProtocols rq) `bindResult` \protocols ->
     builtinTableLines `bindResult` \builtins ->
     mapAll linesOf (rqInterfaces rq) `bindResult` \ifaces ->
         mapAll writeDefinition (rqDefinitions rq) `bindResult` \definitions ->
@@ -99,12 +140,13 @@ writeRequest rq =
         mapAll writeParsedLines (rqStatements rq) `bindResult` \asts ->
             Ok $
                 unlines
-                    ( [ requestHeader
+                    ( [ if rqProtocols rq == Nothing then requestHeader else "tersus-elaborate 2"
                       , unwords ["module", quote pkg, maybe "none" quote modu]
                       , "predeclare " ++ boolWord (rqPredeclare rq)
                       , "library " ++ boolWord (rqLibrary rq)
                       , "extract " ++ extractionWord (rqExtraction rq)
-                      , "builtins"
+                      ] ++ protocols ++
+                      [ "builtins"
                       ]
                         ++ block builtins
                         ++ ["interfaces " ++ show (length ifaces)]
@@ -135,7 +177,37 @@ levelWord level = case level of
     LevelSymbol -> "symbol"
 
 readRequest :: String -> Result Request String
-readRequest text = case lines text of
+readRequest text = requestEnvelope (lines text) `bindResult` \(protocols, records) -> readRequestRecords protocols records
+
+protocolRecords :: Maybe (Map.Map Name [Name]) -> Result [String] String
+protocolRecords Nothing = Ok []
+protocolRecords (Just protocols)
+    | any (not . uncurry validProtocolProviders) (Map.toList protocols) = Error "ElaborateRequest: malformed protocol providers"
+    | otherwise = Ok (("protocols " ++ show (Map.size protocols)) : [unwords (["protocol", quote role, show (length providers)] ++ map quote providers) | (role, providers) <- Map.toAscList protocols])
+
+requestEnvelope :: [String] -> Result (Maybe (Map.Map Name [Name]), [String]) String
+requestEnvelope records@(header : _)
+    | header == "tersus-elaborate 1" = Ok (Nothing, records)
+requestEnvelope ("tersus-elaborate 2" : modu : predeclaring : library : extraction : countLine : rest) =
+    wordAfter "protocols" countLine `bindResult` countOf `bindResult` \count -> parseProtocols count rest `bindResult` \(pairs, remaining) ->
+        let protocols = Map.fromList pairs
+         in protocolRecords (Just protocols) `bindResult` \_ ->
+            if and (zipWith (<) (map fst pairs) (drop 1 (map fst pairs)))
+                then Ok (Just protocols, "tersus-elaborate 1" : modu : predeclaring : library : extraction : remaining)
+                else Error "ElaborateRequest: protocol roles out of order or repeated"
+  where
+    parseProtocols 0 remaining = Ok ([], remaining)
+    parseProtocols n (line : remaining) = strictTokenize line `bindResult` \tokens -> case tokens of
+        Word "protocol" : Str role : Word k : names | n > 0 -> countOf k `bindResult` \size ->
+            if length names == size && all (\token -> case token of Str _ -> True; _ -> False) names
+                then parseProtocols (n-1) remaining `bindResult` \(more, after) -> Ok ((role, [name | Str name <- names]) : more, after)
+                else Error "ElaborateRequest: malformed protocol binding"
+        _ -> Error "ElaborateRequest: malformed protocol binding"
+    parseProtocols _ [] = Error "ElaborateRequest: missing protocol binding"
+requestEnvelope _ = Error "ElaborateRequest: not an elaboration request"
+
+readRequestRecords :: Maybe (Map.Map Name [Name]) -> [String] -> Result Request String
+readRequestRecords protocols records = case records of
     "tersus-elaborate 1" : moduleLine : predeclareLine : libraryLine : extractLine : builtinsLine : afterBuiltins ->
         (if builtinsLine == "builtins" then Ok () else Error "ElaborateRequest: expected builtins") `bindResult` \() ->
         moduleOf moduleLine `bindResult` \modu ->
@@ -160,7 +232,7 @@ readRequest text = case lines text of
             if not (null rest'')
                 then Error "ElaborateRequest: records after the module's syntax"
                 else if null astTexts then Error "ElaborateRequest: no syntax"
-                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok (Request modu flag libraryFlag extraction ifaces definitions libraries stmts)
+                else mapAll readParsedLines astTexts `bindResult` \stmts -> Ok ((Request modu flag libraryFlag extraction ifaces definitions libraries stmts){rqProtocols = protocols})
     _ -> Error "ElaborateRequest: not an elaboration request"
   where
     definitionBlocks (line : rest) = wordAfter "definitions" line `bindResult` countOf `bindResult` \count -> contexts count rest
@@ -199,9 +271,10 @@ readRequest text = case lines text of
 
 writeResponse :: Response -> Result String String
 writeResponse response = case response of
-    Accepted iface libraries mir ->
+    AcceptedData iface libraries mir facts ->
         maybe (Ok Nothing) (mapResult Just . writeInterfaceLines) iface `bindResult` \ifaceLines ->
-            Ok (unlines ([responseHeader, "accepted"] ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines ++ mirLines mir ++ librariesLine libraries))
+        maybe (Ok []) (mapResult (\t -> "ownership" : block t) . writeOwnershipFactsLines) facts `bindResult` \factLines ->
+            Ok (unlines ([responseHeader, "accepted"] ++ maybe ["interface none"] (\t -> "interface" : block t) ifaceLines ++ mirLines mir ++ factLines ++ librariesLine libraries))
     Refused message -> Ok (unlines [responseHeader, "refused " ++ quote message])
     RefusedInterface message -> Ok (unlines [responseHeader, "interfaceRefused " ++ quote message])
     Unresolved message -> Ok (unlines [responseHeader, "unresolved " ++ quote message])
@@ -226,10 +299,10 @@ readResponseWith text bytes interface ls = case map text (take 3 ls) of
         _ -> Error "ElaborateRequest: malformed response"
     "tersus-elaborated 1" : "accepted" : _ ->
         case map text (take 1 (drop 2 ls)) of
-            ["interface none"] -> mirOf text bytes (drop 3 ls) `bindResult` \(mir, after) -> librariesOf (map text after) `bindResult` \libraries -> Ok (Accepted Nothing libraries mir)
+            ["interface none"] -> mirFactsOf text bytes (drop 3 ls) `bindResult` \((mir, facts), after) -> librariesOf (map text after) `bindResult` \libraries -> Ok (AcceptedData Nothing libraries mir facts)
             ["interface"] ->
                 blocksWith text 1 (drop 3 ls) `bindResult` \(ifaceTexts, rest'') -> case ifaceTexts of
-                    [ifaceText] -> mirOf text bytes rest'' `bindResult` \(mir, after) -> librariesOf (map text after) `bindResult` \libraries -> interface ifaceText `bindResult` \i -> Ok (Accepted (Just i) libraries mir)
+                    [ifaceText] -> mirFactsOf text bytes rest'' `bindResult` \((mir, facts), after) -> librariesOf (map text after) `bindResult` \libraries -> interface ifaceText `bindResult` \i -> Ok (AcceptedData (Just i) libraries mir facts)
                     _ -> Error "ElaborateRequest: malformed interface"
             _ -> Error "ElaborateRequest: malformed response"
     _ -> Error "ElaborateRequest: not an elaboration response"
@@ -240,6 +313,15 @@ mirLines :: MirAnswer -> [String]
 mirLines mir = case mir of
     MirRefused message -> ["mir refused " ++ quote message]
     MirLowered ls -> ("mir " ++ show (length ls)) : map B.unpack ls
+
+-- The `mir` section and, under version 2, the `ownership` section after it: `ownership`, `data N` and the N lines of the
+-- facts (AstData.readOwnershipFactsBytes)
+mirFactsOf :: (l -> String) -> (l -> B.ByteString) -> [l] -> Result ((MirAnswer, Maybe OwnershipTransport), [l]) String
+mirFactsOf text bytes ls = mirOf text bytes ls `bindResult` \(mir, rest) -> case rest of
+    line : countLine : more | text line == "ownership" -> wordAfter "data" (text countLine) `bindResult` countOf `bindResult` \n ->
+        if length (take n more) /= n then Error "ElaborateRequest: the ownership section ends early" else
+        readOwnershipFactsBytes (map bytes (take n more)) `bindResult` \facts -> Ok ((mir, Just facts), drop n more)
+    _ -> Ok ((mir, Nothing), rest)
 
 mirOf :: (l -> String) -> (l -> B.ByteString) -> [l] -> Result (MirAnswer, [l]) String
 mirOf text bytes ls = case ls of
@@ -333,16 +415,24 @@ responseHeader = "tersus-elaborated 1"
 data LoadKind = LoadGraph | LoadPackage | LoadProgram | LoadParse | LoadEquality | LoadLibraries
     deriving (Show, Eq)
 
--- The entry is a file of the snapshot, read from the filesystem or given as source (standard input, a program's text)
-data LoadRequest = LoadRequest
+-- The entry is a file of the snapshot, read from the filesystem or given as source (standard input, a program's text);
+-- lrProtocols asks for version 2 (checked ownership transport) for every unit the load elaborates, as rqProtocols does
+data LoadRequest = LoadRequestData
     { lrKind :: LoadKind
     , lrReserving :: Bool
     , lrResolver :: Resolver
     , lrEntry :: Maybe (FilePath, Bool)
     , lrSources :: [(String, Bool, String)]
     , lrLibraries :: [Library]
+    , lrProtocols :: Maybe (Map.Map Name [Name])
     }
     deriving (Show, Eq)
+
+pattern LoadRequest :: LoadKind -> Bool -> Resolver -> Maybe (FilePath, Bool) -> [(String, Bool, String)] -> [Library] -> LoadRequest
+pattern LoadRequest kind reserving resolver entry sources libraries <- LoadRequestData kind reserving resolver entry sources libraries _
+  where LoadRequest kind reserving resolver entry sources libraries = LoadRequestData kind reserving resolver entry sources libraries Nothing
+
+{-# COMPLETE LoadRequest #-}
 
 data GraphFile = GraphFile
     { gfName :: String
@@ -408,13 +498,15 @@ loadKindWord kind = case kind of
 
 writeLoadRequest :: LoadRequest -> Result String String
 writeLoadRequest rq =
+    protocolRecords (lrProtocols rq) `bindResult` \protocols ->
     builtinTableLines `bindResult` \builtins ->
     mapAll writeLibrary (lrLibraries rq) `bindResult` \libraries ->
         Ok $ concat
             ( map (++ "\n")
-                ( [ requestHeader
+                ( [ if lrProtocols rq == Nothing then requestHeader else "tersus-elaborate 2"
                   , "load " ++ loadKindWord (lrKind rq)
-                  , "noPrelude " ++ boolWord (noPrelude options)
+                  ] ++ protocols ++
+                  [ "noPrelude " ++ boolWord (noPrelude options)
                   , "reserving " ++ boolWord (lrReserving rq)
                   , unwords (["roots", show (length roots)] ++ concat [[quote name, quote root] | (name, root) <- roots])
                   , "std " ++ maybe "none" quote (installedStdRoot options)
@@ -559,9 +651,9 @@ readLoadResponseBytes kind ls = case ls of
     answerOf :: [B.ByteString] -> Result (Response, [B.ByteString]) String
     answerOf (line : rest) = case text line of
         "accepted" -> case map text (take 1 rest) of
-            ["interface none"] -> mirOf text id (drop 1 rest) `bindResult` \(mir, afterMir) -> withLibraries afterMir `bindResult` \(libs, after') -> Ok (Accepted Nothing libs mir, after')
+            ["interface none"] -> mirFactsOf text id (drop 1 rest) `bindResult` \((mir, facts), afterMir) -> withLibraries afterMir `bindResult` \(libs, after') -> Ok (AcceptedData Nothing libs mir facts, after')
             ["interface"] -> blocksWith text 1 (drop 1 rest) `bindResult` \(ifaces, after') -> case ifaces of
-                [ifaceText] -> mirOf text id after' `bindResult` \(mir, afterMir) -> withLibraries afterMir `bindResult` \(libs, after'') -> readInterfaceBytes ifaceText `bindResult` \i -> Ok (Accepted (Just i) libs mir, after'')
+                [ifaceText] -> mirFactsOf text id after' `bindResult` \((mir, facts), afterMir) -> withLibraries afterMir `bindResult` \(libs, after'') -> readInterfaceBytes ifaceText `bindResult` \i -> Ok (AcceptedData (Just i) libs mir facts, after'')
                 _ -> Error "ElaborateRequest: malformed interface"
             _ -> Error "ElaborateRequest: malformed answer"
         _ -> tokens line `bindResult` \ts -> case ts of

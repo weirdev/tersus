@@ -42,7 +42,7 @@ import Utils
 runElaborator :: FilePath -> Request -> IO (Result Response String)
 runElaborator exe rq = case writeRequest rq of
     Error e -> pure (Error e)
-    Ok text -> runElaboratorText exe text
+    Ok text -> (`bindResult` transportMatches (rqProtocols rq /= Nothing)) <$> runElaboratorText exe text
 
 runElaboratorText :: FilePath -> String -> IO (Result Response String)
 runElaboratorText exe text = (`bindResult` readResponseBytes) <$> runElaboratorRaw exe text
@@ -75,7 +75,7 @@ type Loader = LoadRequest -> LoadResponse
 runLoader :: FilePath -> LoadRequest -> IO (Result LoadResponse String)
 runLoader exe rq = case writeLoadRequest rq of
     Error e -> pure (Error e)
-    Ok text -> (`bindResult` readLoadResponseBytes (lrKind rq)) <$> runElaboratorRaw exe text
+    Ok text -> (`bindResult` (\ls -> readLoadResponseBytes (lrKind rq) ls `bindResult` loadTransportMatches (lrProtocols rq /= Nothing))) <$> runElaboratorRaw exe text
 
 -- A load the executable cannot answer refuses it, with a reason that says the tool failed
 {-# NOINLINE nativeLoader #-}

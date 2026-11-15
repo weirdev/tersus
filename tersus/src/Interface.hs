@@ -42,5 +42,6 @@ data ModuleInterface = ModuleInterface
     , ifExterns :: Set.Set Name
     , ifTemplates :: Map.Map Name Template
     , ifCompanions :: Map.Map Name [Name]
+    , ifOwnershipTransport :: Maybe OwnershipTransport
     }
     deriving (Show, Eq)
