@@ -6262,7 +6262,8 @@ fn mintFnTrait(st: St, shape: &FnShape) -> Res<Int> ~ {
     nn = putName( s, "call"); Res { st: resultPartsnnState, v: resultPartsnnValue, ok: resultPartsnnOk } = nn;
     if !resultPartsnnOk { return Res<Int> { st: resultPartsnnState, v: 0, ok: false }; };
     s = resultPartsnnState;
-    allNames = push(push([], "self"), shapeNames);
+    allNames = push([], "self");
+    for nm in &shapeNames { allNames = push(allNames, clone(nm)); };
     ps = namesList( s, &allNames); Res { st: resultPartspsState, v: resultPartspsValue, ok: resultPartspsOk } = ps;
     if !resultPartspsOk { return Res<Int> { st: resultPartspsState, v: 0, ok: false }; };
     s = resultPartspsState;
