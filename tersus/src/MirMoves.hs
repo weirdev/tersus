@@ -442,7 +442,7 @@ placesOf st l = case Map.lookup l (stViews st) of
     _ -> [(l, [])]
 
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
-assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias'}, errs ++ lost cx pos st1 d ++ loanErrs)
+assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias'}, errs ++ lost cx pos st1 d ++ loanErrs ++ readOutErrs)
   where
     fnAlias' = case rv of
         Use (Const (CFn name)) -> Map.insert d name (stFnAlias base)
@@ -536,6 +536,19 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
             [ message cx pos (describeLocal cx d ++ " cannot be assigned while it is borrowed by " ++ describeLocal cx ref ++ ": the borrow ends at the last use of " ++ describeLocal cx ref)
             | (ref, lplace, _) <- activeLoans, fst lplace == d
             ]
+    -- (an update reference cannot be duplicated: one read out of a value stands in for the value's own until its
+    -- last use, so the same reference cannot be read out of it again before then)
+    readOutErrs = case typeOf cx d of
+        TMutRef _ ->
+            [ message cx pos (describe cx lplace ++ " is borrowed by " ++ describeLocal cx ref ++ ", so another update reference to it cannot be read out of " ++ describe cx q ++ " while that borrow is live: the borrow ends at the last use of " ++ describeLocal cx ref)
+            | (ref, (lplace, True, _)) <- Map.toList (stLoans st1)
+            , ref /= d
+            , ref `Set.member` cxLiveNow cx
+            , Just from <- [Map.lookup ref (stMay st1)]
+            , q <- map (readPlace cx st1) view
+            , any (overlaps q . readPlace cx st1) (Set.toList from)
+            ]
+        _ -> []
     -- (the size of the pack of a variadic function is a number in each copy, which reads none of its elements)
     packSize = case rv of
         ListOp Length [o] | Just l <- operandLocal o, TParam p <- typeOf cx l -> ".." `isPrefixOf` p
