@@ -2091,7 +2091,8 @@ fn fnBoundCall(st: St, funct: Int, fname: &String, args: &List<Int>) -> St ~ {
     if size(traitName.bytes) = 0 { return St { ok: false, ..start }; };
     st = inferAll(st, args);
     if st.status != 0 { return st; };
-    inferred = push(push([], receiver), clone(st.tes));
+    inferred = push([], receiver);
+    for a in &st.tes { inferred = push(inferred, clone(a)); };
     st = callResolved(st, implFunctionName(&owner, &traitName, "call"), &inferred);
     return St { ok: true, ..st };
 };
