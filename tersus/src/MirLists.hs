@@ -117,11 +117,13 @@ lowerLists library program
     selected units = stripDeclaredFromUnits unusedTypes [(modu, unit) | (modu, unit) <- units, modu `elem` map libModuleId wanted]
     lowered =
         program
-            { progTypes = Map.fromList [(renameName (renamesForTypes (programTypes program)) n, renameDecl d) | (n, d) <- Map.toList (progTypes program)]
-            , progFunctions = Map.map (lowerFunction program) (progFunctions program)
-            , progMain = lowerFunction program (progMain program)
+            { progTypes = Map.fromList [(renameName renames n, renameDecl d) | (n, d) <- Map.toList (progTypes program)]
+            , progFunctions = Map.map (lowerFunction renames program) (progFunctions program)
+            , progMain = lowerFunction renames program (progMain program)
             , progGenerics = Map.map (\(params, fields) -> (params, [(f, listType t) | (f, t) <- fields])) (progGenerics program)
             }
+    -- (once for the program: every function renames by it, and it is made of every local of every function)
+    renames = renamesForTypes (programTypes program)
     renameDecl d = case d of
         StructDecl fields -> StructDecl [(f, listType t) | (f, t) <- fields]
         EnumDecl variants -> EnumDecl [(v, [(f, listType t) | (f, t) <- fields]) | (v, fields) <- variants]
@@ -246,8 +248,8 @@ constantType c = case c of
     CData name _ -> Just (if "::" `isInfixOf` name then TVariant name else TNamed name [])
     _ -> Nothing
 
-lowerFunction :: Program -> Function -> Function
-lowerFunction original fn =
+lowerFunction :: Map Name Name -> Program -> Function -> Function
+lowerFunction renames original fn =
     fn
         { fnLocals = Map.mapWithKey (\l d -> d{localType = if Map.member l boxedFromLists then TInt else listType (localType d)}) (stLocals final)
         , fnReturns = fmap listType (fnReturns fn)
@@ -516,7 +518,6 @@ lowerFunction original fn =
         RefField name field -> RefField (renameName renames name) field
         RefIndex o -> RefIndex (renameOperand o)
 
-    renames = renamesForTypes (programTypes original)
     renameOperand o = case o of
         Const c -> Const (renameConstant renames c)
         _ -> o
