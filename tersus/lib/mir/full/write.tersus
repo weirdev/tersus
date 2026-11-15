@@ -4,7 +4,7 @@ import data::arena::arena { reorderArena };
 import mir::full::full { FullRecord, FullBlock, FullFunction, FullProgram };
 import mir::full::tokens { appendTokens, integerAt, intToken, name, sliceTokens, textAt, tokenLine, word, wordIs };
 import mir::full::records { beforeText, EnvEntry, envStart, envEnd, envEntries, envTokens, mapPayloadLine, payloadSlots, keyOrder };
-import mir::full::environments { envBases, emptyEnvOutput, renderEnv, mapEnvReference };
+import mir::full::environments { EnvRendered, envBases, emptyEnvOutput, renderEnv, mapEnvReference };
 
 struct FullOutput { records: List<List<Token>>, data: AstProgram };
 impl Clone for FullOutput { };
@@ -67,7 +67,8 @@ fn rootList(nodes: List<AstNode>, roots: &List<Int>) -> AstProgram ~ {
     return reorderArena(&nodes, tail, "mir");
 };
 fn outputFull(p: &FullProgram) -> FullOutput ~ {
-    lines = programLines(p); bases = envBases(&p.shared); context = emptyEnvOutput();
+    lines = programLines(p); bases = envBases(&p.shared);
+    rendered = EnvRendered { context: emptyEnvOutput(), row: [] };
     records = []; roots = [];
     for row in &lines {
         out = clone(row);
@@ -77,10 +78,10 @@ fn outputFull(p: &FullProgram) -> FullOutput ~ {
                 ordinal = size(roots); roots = push(roots, r.value); out = set(out, slot, intToken(ordinal));
             };
         };
-        rendered = renderEnv(out, &bases, context);
-        records = push(records, rendered.row); context = rendered.context;
+        rendered = renderEnv(out, &bases, rendered.context);
+        records = push(records, rendered.row);
     };
-    return FullOutput { records: insertShared(records, &context.tables), data: rootList(clone(p.arena), &roots) };
+    return FullOutput { records: insertShared(records, &rendered.context.tables), data: rootList(clone(p.arena), &roots) };
 };
 fn insertShared(records: List<List<Token>>, tables: &List<List<Token>>) -> List<List<Token>> ~ {
     out = []; emitted = false;
