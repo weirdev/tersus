@@ -65,12 +65,26 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/tersus
-          # Restore this shard's previous inventory, not another shard's partial bootstrap cache.
-          # Prefer the same image; compatible-image fallback still stays within this shard.
+          # Restore this shard's previous inventory, not another shard's partial bootstrap cache: the newest, whichever
+          # of the fleet's runner images made it (preferring the same image restored an older inventory whenever the
+          # image changed between runs, and its tools were all built again).
           key: emitter-${{ runner.os }}-shard-${{ matrix.shard }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}
           restore-keys: |
-            emitter-${{ runner.os }}-shard-${{ matrix.shard }}-${{ steps.runner-image.outputs.version }}-
             emitter-${{ runner.os }}-shard-${{ matrix.shard }}-
+
+      # The executables built from the pinned seeds (the parser's, the emitter's and the elaborator's F0), which every
+      # runner needs before anything else and which change only with a pin: kept under the pins, so that a runner whose
+      # cache above was made under other pins does not spend minutes of clang on them first. (Their names say what
+      # they are made of, so a stale one is only not used.)
+      - name: Cache the seed executables
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/tersus/seed-*
+            ~/.cache/tersus/parser-seed-*
+            ~/.cache/tersus/frontend-seed-*
+            ~/.cache/tersus/tersus_rt_*
+          key: seeds-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/*.sha256', 'tersus/src/LlvmRuntime.hs') }}
 
       # On master the host runner proves every function itself, so the verdicts it saves, which pull requests start
       # from, were given by master's own code.
