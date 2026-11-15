@@ -38,13 +38,17 @@ identity policy and scoped checks. Test executables use the native cache's exist
 cross-process build lock. Group workers take the next heaviest group from one
 bounded queue; results are still printed in registration order.
 
-CI uses a 16 MiB GHC nursery. `dev/ci_resources.py` records the runner's CPU
+CI uses a 16 MiB GHC nursery and sequential garbage collection (`-qg`), and
+the harness gives each group's process `-qg` too. Each group prints its processor
+time as `[CPU] <group> <s>s` and each case its time after its `[PASS]`/`[FAIL]`
+line; `dev/ci_weights.py` turns the `[CPU]` lines of CI logs into the weights
+that balance the runners. `dev/ci_resources.py` records the runner's CPU
 and memory limits; `/usr/bin/time` records the unchanged test command's resource
 use. `TERSUS_TEST_RTS_STATS=1` adds GHC allocation/GC statistics only to group
 workers, not to command-line or probe processes they launch. These diagnostics
 do not select or skip any test groups.
 
-An eighth CI runner (`host`) runs `testHostValidation`, which validates the
+A tenth CI runner (`host`) runs `testHostValidation`, which validates the
 compiler's own programs in full, one group per program, and fails on any
 function that no longer validates. The verdicts are kept per function under
 the validator's build in `~/.cache/tersus`, which the runner restores and
