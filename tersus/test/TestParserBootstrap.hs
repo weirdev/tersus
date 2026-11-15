@@ -779,19 +779,20 @@ parserBootstrapGroups = case testParserBootstrap of
 testParserBootstrap :: Test
 testParserBootstrap = TestList "testParserBootstrap"
     -- (each in a worker process with a cache home of its own, so they run side by side on the runner's processors)
+    -- (the cold pair, the longest, starts first)
     [ TestParallel "isolated workers"
-        [ bootstrapCase "default whole Pipeline refuses failed native bootstrap" (failureCase "emitter-corrupt" "bootstrap/emitter.sha256")
+        [ TestList "genuine cold pair"
+            [ bootstrapCase "cold process reaches P0 E1 P1 source and package" coldProcess
+            , bootstrapCase "fresh processes reuse every bootstrap cache entry without writes" cacheReuse
+            , bootstrapCase "concurrent empty-cache processes converge" concurrentCold
+            ]
+        , bootstrapCase "default whole Pipeline refuses failed native bootstrap" (failureCase "emitter-corrupt" "bootstrap/emitter.sha256")
+        , bootstrapCase "public emitter bootstrap failures repair before tool and library CAF initialization" emitterRetryStages
         , bootstrapCase "corrupt parser seed is an explicit tool failure" (failureCase "parser-corrupt" "bootstrap/parser.sha256")
         , bootstrapCase "missing parser override is an explicit tool failure" (failureCase "parser-missing" "verify the parser bootstrap seed")
         , bootstrapCase "interpreted parser still requires verified native P0" (failureCase "interpreted-corrupt" "bootstrap/parser.sha256")
         , bootstrapCase "no clang is an explicit P0 tool failure" (failureCase "clang-missing" "Could not run clang")
         , bootstrapCase "retired haskell backend is refused" (failureCase "haskell-refused" "expected native or interpreted")
-        , TestList "genuine cold pair"
-            [ bootstrapCase "cold process reaches P0 E1 P1 source and package" coldProcess
-            , bootstrapCase "fresh processes reuse every bootstrap cache entry without writes" cacheReuse
-            , bootstrapCase "concurrent empty-cache processes converge" concurrentCold
-            ]
-        , bootstrapCase "public emitter bootstrap failures repair before tool and library CAF initialization" emitterRetryStages
         ]
     , bootstrapCase "same-process transient failures repair without stale library or executable caches" retryStages
     , bootstrapCase "bootstrap fingerprints cover the complete compiler library manifest" bootstrapLibraryHash
