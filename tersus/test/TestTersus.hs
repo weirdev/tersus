@@ -11,7 +11,8 @@ import System.Environment (getArgs, getEnvironment, getExecutablePath, lookupEnv
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (BufferMode (LineBuffering), hPutStr, hSetBuffering, stderr, stdout)
 import System.Process (CreateProcess (..), proc)
-import System.Posix.Process (getParentProcessID, getProcessID)
+import System.Posix.Process (ProcessTimes (..), getParentProcessID, getProcessID, getProcessTimes)
+import System.Posix.Unistd (SysVar (..), getSysVar)
 
 import TestHarness
 import TestBasics
@@ -89,6 +90,13 @@ main = do
                 if useWorkerProcesses arguments jobs (length names)
                     then runInParallel jobs names
                     else runInProcess overlap selected
+            when (argumentChild arguments) $ do
+                -- (what the group's process and the processes it waited for used, which the parent's [TIME] does not
+                -- say on a runner shared with other groups; dev/ci_weights.py reads it)
+                times <- getProcessTimes
+                ticks <- getSysVar ClockTick
+                let seconds = fromIntegral (sum (map fromEnum [userTime times, systemTime times, childUserTime times, childSystemTime times])) / fromIntegral ticks :: Double
+                putStrLn ("[CPU] " ++ unwords names ++ " " ++ show (fromIntegral (round (seconds * 10) :: Int) / 10 :: Double) ++ "s")
             unless (argumentChild arguments) $ do
                 putStrLn $
                     "Summary: "
