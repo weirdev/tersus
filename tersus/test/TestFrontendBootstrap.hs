@@ -2,7 +2,7 @@
 -- elaborator as it is now elaborated by F0, and F2 the same elaborated by F1.
 module TestFrontendBootstrap (testFrontendBootstrap) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, evaluate, throwIO, try)
 import Data.Char (isHexDigit)
@@ -17,7 +17,7 @@ import CacheLock (openTempFileCloexec)
 import Differential (Answers, Asked (..), Outcome (..), Unit (..), bootstrapFrontend, compareAnswers, executableCandidate, unitRequests)
 import Compile (sourceRequest)
 import ElaborateRequest (LoadKind (..), LoadResponse (..), Response (..))
-import ElaboratorNative (frontendStage)
+import ElaboratorNative (frontendStage, frontendStageIsSeed)
 import ElaboratorTool (frontendSources, frontendToolFailure, nativeElaborator, nativeLoader)
 import LibPackage (compileLibPackageWith)
 import MirHousekeeping (emitterEntry, toolProgram, toolProgramWith, validationEntry)
@@ -91,22 +91,27 @@ requestsOfTheSeed = modifyMVar seedRequests $ \known -> case known of
         _ <- evaluate (either length length (case requests of Ok r -> Right r; Error e -> Left e))
         pure (Just requests, requests)
 
--- (stage 2 is stage 1's executable when the fixpoint holds, and then there is nothing more to ask it)
+-- (stage 2 is stage 1's executable when the fixpoint holds, and a stage built from the seed's own IR is the seed: then
+-- there is nothing to ask it)
 stageAgrees :: Int -> IO TestResult
 stageAgrees n = do
     asked <- newEmptyMVar
-    _ <- forkIO (try requestsOfTheSeed >>= putMVar asked)
+    asking <- forkIO (try requestsOfTheSeed >>= putMVar asked)
     stage <- frontendStage n
     one <- frontendStage 1
-    requests <- takeMVar asked >>= either (\e -> throwIO (e :: SomeException)) pure
-    case (stage, one, requests) of
-        (Error e, _, _) -> pure (Just ("stage " ++ show n ++ ": " ++ e))
-        (_, Error e, _) -> pure (Just ("stage 1: " ++ e))
-        (_, _, Error e) -> pure (Just ("the requests: " ++ e))
-        (Ok (exe, _), Ok (stageOne, _), Ok answered)
-            | null answered -> pure (Just "no requests")
-            | n > 1 && exe == stageOne -> pure Nothing
-            | otherwise -> firstFailure <$> sequence [agree exe rq reference | (rq, reference) <- answered]
+    seed <- frontendStageIsSeed n
+    case (stage, one) of
+        (Error e, _) -> killThread asking >> pure (Just ("stage " ++ show n ++ ": " ++ e))
+        (_, Error e) -> killThread asking >> pure (Just ("stage 1: " ++ e))
+        (Ok (exe, _), Ok (stageOne, _))
+            | seed || (n > 1 && exe == stageOne) -> killThread asking >> pure Nothing
+            | otherwise -> do
+                requests <- takeMVar asked >>= either (\e -> throwIO (e :: SomeException)) pure
+                case requests of
+                    Error e -> pure (Just ("the requests: " ++ e))
+                    Ok answered
+                        | null answered -> pure (Just "no requests")
+                        | otherwise -> firstFailure <$> sequence [agree exe rq reference | (rq, reference) <- answered]
   where
     agree exe rq reference = do
         answer <- executableCandidate exe rq
@@ -129,8 +134,10 @@ stagesFixpoint = do
 toolsAgree :: IO TestResult
 toolsAgree = do
     one <- frontendStage 1
+    seed <- frontendStageIsSeed 1
     case one of
         Error e -> pure (Just ("stage 1: " ++ e))
+        Ok _ | seed -> pure Nothing
         -- (the compiler libraries stage 1 elaborates, once for every tool)
         Ok (exe, _) -> do
             let libraries = compileLibPackageWith (nativeLoader exe)

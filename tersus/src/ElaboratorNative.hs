@@ -2,14 +2,16 @@
 module ElaboratorNative
     ( frontendStage
     , frontendStageIr
+    , frontendStageIsSeed
     , productionTools
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception (IOException, evaluate, try)
+import qualified Data.ByteString.Char8 as B
 import qualified Data.Map.Strict as Map
 import GHC.IO.Encoding (char8)
-import System.Directory (renameFile)
+import System.Directory (copyFile, renameFile)
 import System.FilePath (takeDirectory, (</>))
 import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hSetEncoding, openFile)
 import System.IO.Unsafe (unsafePerformIO)
@@ -28,7 +30,7 @@ import MirHousekeeping (eraseGhosts)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import Pipeline (ownedModuleProgram)
 import PreludeSource (elaboratePackageFiles)
-import Seed (cachedFrontendSeed, compilerSnapshotHash, frontendSeedHash)
+import Seed (cachedFrontendSeed, compilerSnapshotHash, frontendSeedFile, frontendSeedHash)
 import Utils
 import ValidatorNative (cachedBootstrapEmitter)
 
@@ -80,8 +82,13 @@ makeStage n
     | n <= 0 = mapResult (\exe -> (exe, frontendSeedHash)) <$> cachedFrontendSeed
     | otherwise = do
         before <- frontendStage (n - 1)
+        -- (a stage built from the seed's own IR is the seed, so what it elaborates is what the seed elaborated: stage 1)
+        previousIsSeed <- case before of
+            Ok (exe, _) | n >= 2 -> stageIsSeed exe
+            _ -> pure False
         case before of
             Error e -> pure (Error e)
+            Ok _ | previousIsSeed -> frontendStage 1
             Ok (exe, _) -> case elaboratorProgramWith (nativeLoader exe) of
                 Error e -> pure (Error ("the elaborator elaborated by stage " ++ show (n - 1) ++ ": " ++ e))
                 Ok program -> do
@@ -96,7 +103,9 @@ buildStage program sidecar out = do
     case ir of
         Error e -> pure (Error e)
         Ok text -> do
-            built <- buildExecutable out text
+            -- (the seed's executable is what clang makes of the same IR)
+            seed <- isSeedIr (B.pack text)
+            built <- if seed then cachedFrontendSeed >>= copySeed else buildExecutable out text
             case built of
                 Error e -> pure (Error e)
                 Ok () -> do
@@ -106,6 +115,40 @@ buildStage program sidecar out = do
                     hClose handle
                     renameFile temporary sidecar
                     pure (Ok ())
+  where
+    copySeed (Error e) = pure (Error e)
+    copySeed (Ok exe) = do
+        copied <- try (copyFile exe out) :: IO (Either IOException ())
+        pure (either (\e -> Error ("copying the seed's executable: " ++ show e)) Ok copied)
+
+-- Whether stage n is built from the pinned seed's IR
+frontendStageIsSeed :: Int -> IO Bool
+frontendStageIsSeed n
+    | n <= 0 = pure True
+    | otherwise = do
+        stage <- frontendStage n
+        case stage of
+            Ok (exe, _) -> stageIsSeed exe
+            Error _ -> pure False
+
+stageIsSeed :: FilePath -> IO Bool
+stageIsSeed exe = do
+    ir <- try (B.readFile (exe ++ ".ll")) :: IO (Either IOException B.ByteString)
+    either (const (pure False)) isSeedIr ir
+
+-- The IR is the seed's, the comments of the seed's header aside (the pin is the digest of the file with them)
+isSeedIr :: B.ByteString -> IO Bool
+isSeedIr ir = do
+    file <- frontendSeedFile
+    case file of
+        Error _ -> pure False
+        Ok path -> do
+            seed <- try (B.readFile path) :: IO (Either IOException B.ByteString)
+            pure (either (const False) ((== ir) . withoutHeader) seed)
+  where
+    withoutHeader bytes
+        | B.pack ";" `B.isPrefixOf` bytes = withoutHeader (B.drop 1 (B.dropWhile (/= '\n') bytes))
+        | otherwise = bytes
 
 -- The IR stage n was built from
 frontendStageIr :: Int -> IO (Result String String)
