@@ -398,6 +398,18 @@ end
 
 A type is `int`, `byte`, `bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`, `forall N "n"... N "n"... T`, `param "n"` or `ref T`, and a size is `c N`, `any`, `p "n"` or `v N`. An operand is `copy L`, `move L` or `const C`, and a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. A statement is `assign L RVALUE`, `peek L RVALUE` or `drop L`, and a terminator `goto B`, `switch O B B`, `call O N O... L B`, `return` or `unreachable`. An rvalue is `use O`, `binary OP O O` (`add sub mul div mod eq noteq lt lteq gt gteq`), `listop OP N O...` (the names of the `ListOp`s, as `get`, `newArray` and `writeByte`), `makelist N O...`, `makebox O`, `unbox O`, `unsize O`, `makedata "n" N ("f" O)...`, `readfield O "n" "f"`, `isvariant O "n"`, `asvariant O "n"`, `clone O` or `takefield L "n" "f"`.
 
+### Ownership and storage
+
+After the types, versions 1 and 2 may say what a program's types are beyond their declarations. `storage "L" "B"` names
+the declarations that native storage's list and Box are. `ownership N` and its `N` lines `owned "T" "C" "DP" "DF" "KP"
+"KF" "RP" "RF"` give each type's checked ownership facts, as the elaborator checked them (`AST_DATA.md`, "Ownership
+transport"): the Copy provider, then the provider and function of Drop, of Clone and of Deref, each empty when the
+type has none. With them, the facts say what drops or clones a value, whatever the functions are named; a declared type
+without its row, a provider without its function, or a function the program does not have is refused, and
+`ownership 0` is a checked program whose types have no ownership at all. Without them (the form the compiler writes
+today), a type's drop is `<T as Drop>::drop`, its clone `<T as Clone>::clone`, and native storage the declarations
+named `List` and `Box`. The emitter written in Tersus and its ownership passes read both forms.
+
 ### Version 3: a lowered unit
 
 `MirData.writeLowered` and `MirData.readLowered` (`readLoweredBytes` for the

@@ -344,6 +344,7 @@ test-suite tersus-test
       TestHashMap
       TestHashSet
       TestLibModules
+      TestLibraryShapes
       TestMirCopies
       TestMirData
       TestMirEmit

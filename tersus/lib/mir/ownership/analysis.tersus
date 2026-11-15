@@ -1,5 +1,5 @@
 import data::codec::codec { Type };
-import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep };
+import mir::reader::reader { isStorageBox, isStorageList, Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep };
 import mir::support::support { ownerOf, lookupDecl, variantsOf };
 import mir::ownership::common { Key, FieldName, TypeKind, noTypeKinds, variantKey, soleTypeArgument, Loan, LoanEntry, LoanSlot, LocalKinds, RefSearch, BlockLoans, emptyKeys, BlockLives, Count, Alias, keySetAdd, keySetUnion, loanLookup, loanPut, whole, fieldKey, getLocal, needsDrop, borrowKey, operandLocal, intSetHas, intSetAdd, roles, stmtDef, termDef, successors, forgetLocal, localsOf, singleton, noOwnershipAliases, statementRoles };
 
@@ -11,7 +11,7 @@ fn referenceSearch(p: &Program, t: &Type, seen: List<String>) -> RefSearch ~ {
     if t is Type::TArray { return referenceSearch(p, Box::unbox((t as Type::TArray).elem), seen); };
     if t is Type::TNamed {
         n = t as Type::TNamed;
-        if n.base = "List" || n.base = "Box" { arg = soleTypeArgument(t); if arg.ok { return referenceSearch(p, arg.value, seen); }; };
+        if isStorageList(p, &n.base) || isStorageBox(p, &n.base) { arg = soleTypeArgument(t); if arg.ok { return referenceSearch(p, arg.value, seen); }; };
     };
     name = ""; found = false;
     if t is Type::TNamed { name = clone((t as Type::TNamed).name); found = true; };

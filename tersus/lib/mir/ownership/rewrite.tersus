@@ -337,7 +337,7 @@ fn ownFunction(p: &Program, names: &List<FieldName>, original: &Function) -> Fun
     locals = clone(f.locals); for d in r.locals { locals = push(locals, clone(d)); }; locals = sortLocals(locals);
     owned = [];
     for d in locals {
-        dropped = isDropFunction(f.name) && size(f.params) > 0 && get(f.params, 0) = d.id;
+        dropped = isDropFunction(p, &f.name) && size(f.params) > 0 && get(f.params, 0) = d.id;
         if needsDrop(p, d.ty) && d.id != 0 && !intSetHas(r.aliases, d.id) && !intSetHas(f.borrowed, d.id) && !dropped { owned = intSetAdd(owned, d.id); };
     };
     return elaborateDrops(names, p, f, owned, locals, clone(blocks), r.next, nextBlock(blocks));
@@ -345,5 +345,5 @@ fn ownFunction(p: &Program, names: &List<FieldName>, original: &Function) -> Fun
 fn insertOwnership(p: &Program) -> Program ~ {
     names = fieldNames(p);
     functions = []; for f in p.functions { functions = push(functions, ownFunction(p, names, f)); };
-    return Program { functions: functions, entry: ownFunction(p, names, p.entry), types: clone(p.types) };
+    return Program { functions: functions, entry: ownFunction(p, names, p.entry), types: clone(p.types), meta: clone(p.meta) };
 };

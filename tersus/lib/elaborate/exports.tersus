@@ -4,7 +4,7 @@ import elaborate::check { functionValue, stmtOf };
 import elaborate::core { baseNameOf };
 import elaborate::out { emit, emitName, emitNames, emitStatements, emitType, emitValidations };
 import elaborate::records { fieldCodecTypes, fieldNames, fromCodecs, listItems, nameText, namesText, nativeFn, nodeIn };
-import elaborate::state { CtorInfo, Generic, St, Template, firstText, indexIn, isTypeName, joinWith, notModelled, nth, typeError };
+import elaborate::state { CtorInfo, Generic, St, Template, firstText, indexIn, isTypeName, joinWith, notModelled, nth, typeError , protocolIs };
 import elaborate::traits { optName, sortTexts, textBefore };
 
 // What a module of a package brings to its own checking: its declarations predeclared, so that a definition can name a
@@ -639,9 +639,9 @@ fn copiesOf(st: &St, sc: &Scope, elaborated: &List<Int>) -> List<String> ~ {
     };
     for k in HashSet::elements(&st.impls) {
         p = pairParts(&k);
-        if p.ok && p.before = "Copy" && indexIn(&copies, &p.after) < 0 {
+        if p.ok && protocolIs(st, "Copy", &p.before) && indexIn(&copies, &p.after) < 0 {
             copyHere = inModule(sc, &p.after);
-            if sc.isLib { copyHere = implHere(sc, "Copy", &p.after); };
+            if sc.isLib { copyHere = implHere(sc, &p.before, &p.after); };
             if copyHere { copies = push(copies, clone(p.after)); };
         };
     };

@@ -1,6 +1,6 @@
 import data::arena::arena { remapNode };
 import data::ast::ast { AstBody, AstBuiltin, AstEntry, AstNode, AstProgram, AstScheme, AstValue };
-import data::codec::codec { catStrings };
+import data::codec::codec { Type, catStrings, typeAt };
 import elaborate::records { codecTypeAt, codecTypesAt, fromCodec, fromCodecs, listItems, nameText, nodeIn };
 import elaborate::state { St, Ty, addTy, builtinValueAt, fail, fnTy, freshVar, indexIn, intText, isSize, kindOf, nameOf, notModelled, nth, tyAt, withTy, wordName };
 
@@ -34,9 +34,50 @@ fn builtinOfValue(st: &St, v: Int) -> Int ~ {
     return (b as AstBody::BuiltinFunct).b;
 };
 
+// The table names the language's List and Box as the named types `List` and `Box` with one type argument: they are the
+// list and Box of the language, which the checked storage providers are, whatever the program's names of them
+fn languageStorage(table: &AstProgram) -> AstProgram ~ {
+    nodes = [];
+    for node in &table.nodes {
+        if node is AstNode::Type { nodes = push(nodes, AstNode::Type { value: storageType(clone((node as AstNode::Type).value)) }); } else { nodes = push(nodes, clone(node)); };
+    };
+    return AstProgram { stage: clone(table.stage), nodes: nodes, root: table.root };
+};
+
+fn storageType(t: Type) -> Type ~ {
+    if t is Type::TNamed {
+        n = t as Type::TNamed;
+        if (n.base = "List" || n.base = "Box") && n.argc = 1 && size(n.argTokens) > 1 && !get(&n.argTokens, 0).quoted && get(&n.argTokens, 0).text = "type" {
+            inner = typeAt(&n.argTokens, 1);
+            if inner.ok && inner.pos = size(n.argTokens) {
+                if n.base = "List" { return Type::TList { elem: Box::new(storageType(inner.value)) }; };
+                return Type::TBox { inner: Box::new(storageType(inner.value)) };
+            };
+        };
+        return t;
+    };
+    if t is Type::TList { return Type::TList { elem: Box::new(storageType(Box::unbox(clone((t as Type::TList).elem)))) }; };
+    if t is Type::TArray { a = t as Type::TArray; return Type::TArray { elem: Box::new(storageType(Box::unbox(clone(a.elem)))), size: clone(a.size) }; };
+    if t is Type::TBox { return Type::TBox { inner: Box::new(storageType(Box::unbox(clone((t as Type::TBox).inner)))) }; };
+    if t is Type::TFn {
+        f = t as Type::TFn;
+        out = [];
+        for x in &f.args { out = push(out, storageType(clone(x))); };
+        return Type::TFn { args: out, ret: Box::new(storageType(Box::unbox(clone(f.ret)))) };
+    };
+    if t is Type::TForall { f = t as Type::TForall; return Type::TForall { sizes: clone(f.sizes), types: clone(f.types), body: Box::new(storageType(Box::unbox(clone(f.body)))) }; };
+    if t is Type::TRef { return Type::TRef { inner: Box::new(storageType(Box::unbox(clone((t as Type::TRef).inner)))) }; };
+    if t is Type::TMutRef { return Type::TMutRef { inner: Box::new(storageType(Box::unbox(clone((t as Type::TMutRef).inner)))) }; };
+    if t is Type::TAddr { return Type::TAddr { inner: Box::new(storageType(Box::unbox(clone((t as Type::TAddr).inner)))) }; };
+    if t is Type::TBlock { return Type::TBlock { inner: Box::new(storageType(Box::unbox(clone((t as Type::TBlock).inner)))) }; };
+    if t is Type::TUninit { return Type::TUninit { inner: Box::new(storageType(Box::unbox(clone((t as Type::TUninit).inner)))) }; };
+    return t;
+};
+
 // The builtin table of the request, put into the arena of the program after its own records, with the names a
 // program calls each builtin by, its signature scheme and the record of its value
-fn loadBuiltins(st: St, table: &AstProgram) -> St ~ {
+fn loadBuiltins(st: St, given: &AstProgram) -> St ~ {
+    table = languageStorage(given);
     base = size(st.nodes);
     shift = [];
     for i in 0..size(table.nodes) { shift = push(shift, base + i); };
@@ -52,8 +93,7 @@ fn loadBuiltins(st: St, table: &AstProgram) -> St ~ {
                 index = size(st.builtinValues);
                 key = builtinKey(st, base + be.b);
                 st = St { builtinNames: st.builtinNames.insert(clone(key), index), builtinValues: push(st.builtinValues, base + be.value), builtinKinds: push(st.builtinKinds, clone(key)), ..st };
-                st = loadScheme(st, &table.nodes, be.scheme);
-                st = St { builtinSchemes: push(st.builtinSchemes, st.ty), ..st };
+                st = St { builtinSchemes: push(st.builtinSchemes, base + be.scheme), ..st };
                 for s in listItems(&table.nodes, be.surface) {
                     surface = nodeIn(&table.nodes, s);
                     if surface is AstNode::Entry {
@@ -79,22 +119,23 @@ fn loadBuiltins(st: St, table: &AstProgram) -> St ~ {
 
 // A scheme as a type: a function type with parameters for its type variables, a value error (a type of kind -2
 // with the message as its name), or dynamic (kind -3)
-fn loadScheme(st: St, nodes: &List<AstNode>, id: Int) -> St ~ {
-    node = nodeIn(nodes, id);
+// The type of a builtin's scheme in the arena, made where it is used: the List and Box of the scheme are the checked
+// providers the unit has by then (they are bound after the table is loaded)
+fn builtinSchemeType(st: St, id: Int) -> St ~ {
+    node = nodeIn(&st.nodes, id);
     if !(node is AstNode::Scheme) { return addTy(st, Ty { kind: 0 - 3, name: "", args: [], n: 0, flag: false, sizes: [], types: [] }); };
-    scrutinee = (node as AstNode::Scheme).value;
-    return match scrutinee {
-        AstScheme::SigFn { ts: ts, ret: ret } => schemeFn(st, nodes, ts, ret),
-        AstScheme::SigDynamic => addTy(st, Ty { kind: 0 - 3, name: "", args: [], n: 0, flag: false, sizes: [], types: [] }),
-        AstScheme::SigValueError { n: n } => addTy(st, Ty { kind: 0 - 2, name: nameText(nodes, n), args: [], n: 0, flag: false, sizes: [], types: [] }),
+    scheme = (node as AstNode::Scheme).value;
+    if scheme is AstScheme::SigFn {
+        sig = scheme as AstScheme::SigFn;
+        tycs = codecTypesAt(&st.nodes, sig.ts);
+        tyc = codecTypeAt(&st.nodes, sig.ret);
+        st = fromCodecs(st, &tycs);
+        params = clone(st.te.types);
+        st = fromCodec(st, &tyc);
+        return fnTy(st, params, st.ty);
     };
-};
-
-fn schemeFn(st: St, nodes: &List<AstNode>, ts: Int, ret: Int) -> St ~ {
-    tycs = codecTypesAt(nodes, ts); st = fromCodecs(st, &tycs);
-    params = clone(st.te.types);
-    tyc = codecTypeAt(nodes, ret); st = fromCodec(st, &tyc);
-    return fnTy(st, params, st.ty);
+    if scheme is AstScheme::SigValueError { return addTy(st, Ty { kind: 0 - 2, name: nameText(&st.nodes, (scheme as AstScheme::SigValueError).n), args: [], n: 0, flag: false, sizes: [], types: [] }); };
+    return addTy(st, Ty { kind: 0 - 3, name: "", args: [], n: 0, flag: false, sizes: [], types: [] });
 };
 
 fn builtinIndex(st: &St, key: &String) -> Int ~ {

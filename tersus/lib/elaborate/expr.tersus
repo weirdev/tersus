@@ -1,5 +1,5 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstValue };
-import data::codec::codec { catStrings };
+import data::codec::codec { catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
 import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType, withType };
 import elaborate::check { fnSigOf, mentionsParameter };
@@ -1082,7 +1082,7 @@ fn inferEquality(st: St, funct: Int, negated: Bool, args: &List<Int>) -> St ~ {
         st = traitArguments(st, "Eq", t);
         if st.status != 0 { return st; };
         if !st.ok { return typeError(st, catStrings(render(st, t), " is compared with =, which needs its elements to implement Eq")); };
-        st = callResolved(st, "eqBoxedArrays", &operands);
+        st = callResolved(st, providerHelper(&st, "Eq", "eqBoxedArrays"), &operands);
     } else {
         st = equalityCall(st, t, &operands);
     };
@@ -1259,12 +1259,13 @@ fn cloneCall(st: St, args: &List<Int>) -> St ~ {
     };
     xx = tyAt(st, xtz);
     if isBoxTy(st, xtz) && kindOf(st, nth(&xx.args, 0)) = 6 && kindOf(st, argAt(st, nth(&xx.args, 0), 1)) = 21 {
-        if HashMap::contains(&st.templates, "cloneBoxedArray") || HashMap::contains(&st.fns, "cloneBoxedArray") {
+        helper = providerHelper(&st, "Clone", "cloneBoxedArray");
+        if HashMap::contains(&st.templates, &helper) || HashMap::contains(&st.fns, &helper) {
             params = [];
-            if HashMap::contains(&st.templates, "cloneBoxedArray") {
-                params = HashMap::lookup(&st.templates, "cloneBoxedArray", emptyTemplate()).ptys;
+            if HashMap::contains(&st.templates, &helper) {
+                params = HashMap::lookup(&st.templates, &helper, emptyTemplate()).ptys;
             } else {
-                ft = tyAt(st, HashMap::lookup(&st.fns, "cloneBoxedArray", 0));
+                ft = tyAt(st, HashMap::lookup(&st.fns, &helper, 0));
                 if ft.kind = 13 { ft = tyAt(st, nth(&ft.args, 0)); };
                 if ft.kind = 14 { params = argsOfFn(&ft); };
             };
@@ -1274,9 +1275,10 @@ fn cloneCall(st: St, args: &List<Int>) -> St ~ {
                 input = clone(st.te);
             };
             inputs = push([], input);
-            return callResolved(st, "cloneBoxedArray", &inputs);
+            return callResolved(st, helper, &inputs);
         };
-        return traitCall(st, 0 - 1, "Clone", "clone", args);
+        cloneProvider = protocolName(&st, "Clone");
+        return traitCall(st, 0 - 1, cloneProvider, "clone", args);
     };
     // (a tuple is cloned part by part, as a struct is by its impl)
     if xx.kind = 4 && isTuple(&xx.name) {
@@ -1446,7 +1448,7 @@ fn requireMarker(st: St, marker: String, t: Int) -> St ~ {
     tail = "";
     if kindOf(st, lt) = 12 {
         tail = catStrings(catStrings(catStrings(catStrings(": bound it, as in <", render(st, lt)), ": "), clone(marker)), ">");
-    } else { if marker = "Clone" {
+    } else { if protocolIs(&st, "Clone", &marker) || marker = "Clone" {
         x = tyAt(st, lt);
         owner = render(st, lt);
         if x.kind = 4 { owner = clone(x.name); };
@@ -1630,7 +1632,7 @@ fn ordinary(st: St, funct: Int, functT: TE, ft: Int, args: &List<Int>) -> St ~ {
             fname = HashMap::lookup(&st.methodOf, i, "");
             st = zonk(st, teHeadAt(&inferred0, 0));
             x = tyAt(st, st.ty);
-            if x.kind = 4 && x.name != "List" && x.name != "Box" {
+            if x.kind = 4 && x.name != protocolName(&st, "List") && x.name != protocolName(&st, "Box") {
                 owner = clone(x.name);
                 st = resolveAssociated(st, &owner, &fname);
                 if st.status != 0 { return st; };
@@ -1964,6 +1966,31 @@ fn usesParam(st: &St, scope: &List<String>, t: Int) -> Bool ~ {
     return false;
 };
 
+// The function `local` of the module of the role's provider, which the language calls for a Box of an array of no size:
+// the provider's own package and module, as its canonical name says, declare it (a provider of no package names it bare)
+fn providerHelper(st: &St, role: &String, local: &String) -> String ~ {
+    provider = protocolName(st, role);
+    marks = 0;
+    end = 0 - 1;
+    i = 0;
+    for b in &provider.bytes {
+        if toInt(b) = 36 { marks = marks + 1; if marks = 2 && end < 0 { end = i + 1; }; };
+        i = i + 1;
+    };
+    if end < 0 || end > size(provider.bytes) { return clone(local); };
+    prefix = provider.slice(0, end);
+    for e in st.templates.entries() { if e.key.startsWith(&prefix) && afterLastDollar(&e.key) = clone(local) { return clone(e.key); }; };
+    for e in st.fns.entries() { if e.key.startsWith(&prefix) && afterLastDollar(&e.key) = clone(local) { return clone(e.key); }; };
+    return clone(local);
+};
+
+fn afterLastDollar(name: &String) -> String ~ {
+    start = 0;
+    i = 0;
+    for b in &name.bytes { if toInt(b) = 36 { start = i + 1; }; i = i + 1; };
+    return name.slice(start, size(name.bytes));
+};
+
 // A copy is made of a type that implements Clone (requireClone, implementsMarker)
 fn requireClone(st: St, t: Int) -> St ~ {
     if st.status != 0 { return st; };
@@ -1972,16 +1999,18 @@ fn requireClone(st: St, t: Int) -> St ~ {
 
 fn implementsMarker(st: St, marker: String, t0: Int, depth: Int) -> St ~ {
     if depth > 16 { return St { ok: true, ..st }; };
+    if st.wireVersion && wireOwnershipRole(&marker) { marker = protocolName(&st, &marker); };
+    cloning = protocolIs(&st, "Clone", &marker);
     st = zonk(st, t0);
     t = st.ty;
     x = tyAt(st, t);
     if x.kind <= 3 || x.kind = 14 || x.kind = 15 || x.kind = 7 { return St { ok: true, ..st }; };
     if x.kind = 10 { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
-    if x.kind = 12 && marker = "Clone" { return St { ok: parametersClone(&st, t), ..st }; };
+    if x.kind = 12 && cloning { return St { ok: parametersClone(&st, t), ..st }; };
     if x.kind = 12 { return St { ok: st.defChecking && HashSet::contains(&st.impls, catStrings(catStrings(clone(marker), " "), parameterOwner(&x.name))), ..st }; };
     if x.kind = 6 { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
     if isListTy(st, t) || isBoxTy(st, t) {
-        if marker = "Clone" { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
+        if cloning { return implementsMarker(st, marker, nth(&x.args, 0), depth + 1); };
         return St { ok: false, ..st };
     };
     if x.kind = 8 { return St { ok: false, ..st }; };
@@ -1990,7 +2019,7 @@ fn implementsMarker(st: St, marker: String, t0: Int, depth: Int) -> St ~ {
         if st.ok { return St { ok: false, ..st }; };
         return implementsMarker(st, marker, nth(&x.args, 0), depth + 1);
     };
-    if x.kind = 4 && x.name = "Self" { return St { ok: marker = "Clone", ..st }; };
+    if x.kind = 4 && x.name = "Self" { return St { ok: cloning, ..st }; };
     if x.kind = 4 && isTuple(&x.name) {
         for a in x.args {
             if !isSize(st, a) {
@@ -2013,7 +2042,7 @@ fn declaredMarker(st: St, marker: String, depth: Int, name: String) -> St ~ {
     base = baseNameOf(&name);
     if !HashSet::contains(&st.impls, catStrings(catStrings(marker, " "), clone(base))) { return St { ok: false, ..st }; };
     // (a struct with types is Copy for the types that are, and a Clone one is checked where its impl is)
-    if marker = "Copy" && base != name {
+    if protocolIs(&st, "Copy", &marker) && base != name {
         st = typeCtors(st, &name);
         if st.status != 0 { return st; };
         for c in clone(st.names) {

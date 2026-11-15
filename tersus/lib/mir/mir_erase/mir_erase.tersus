@@ -895,7 +895,7 @@ fn plainProgram(p: &Program) -> Program ~ {
     };
     functions = [];
     for f in p.functions { functions = push(functions, plainFunction(f)); };
-    return Program { types: types, functions: functions, entry: plainFunction(p.entry) };
+    return Program { types: types, functions: functions, entry: plainFunction(p.entry), meta: clone(p.meta) };
 };
 
 fn eraseProgram(p: &Program, indexes: &List<HashMap<Int, LocalInfo>>, entryIndex: &HashMap<Int, LocalInfo>) -> Program ~ {
@@ -906,7 +906,7 @@ fn eraseProgram(p: &Program, indexes: &List<HashMap<Int, LocalInfo>>, entryIndex
         functions = push(functions, eraseFunction(p.types, &get(p.functions, i), &get(indexes, i)));
         i = i + 1;
     };
-    erased = Program { types: types, functions: functions, entry: eraseFunction(p.types, &p.entry, entryIndex) };
+    erased = Program { types: types, functions: functions, entry: eraseFunction(p.types, &p.entry, entryIndex), meta: clone(p.meta) };
     return plainProgram(erased);
 };
 

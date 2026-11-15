@@ -1,5 +1,5 @@
 import data::codec::codec { printInt, printWord, printName, printNames, printInts, newLine, printTypeWith, wordOf };
-import mir::reader::reader { Field, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords };
+import mir::reader::reader { ProgramMeta, Field, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords };
 
 
 // Writing. A token is written with a space before it, and a record starts with its word without one. Every function gives the number of bytes it wrote.
@@ -207,6 +207,20 @@ fn printDecl(d: &TypeDecl, listTokens: Bool) -> Int ~ {
     return n + newLine();
 };
 
+// The records of what the host says of the types, as they were read: nothing for a program read without them
+fn printMeta(meta: &ProgramMeta) -> Int ~ {
+    n = 0;
+    if meta.listName != "List" || meta.boxName != "Box" { n = n + "storage".print() + printName(meta.listName) + printName(meta.boxName) + newLine(); };
+    if !meta.checked { return n; };
+    n = n + "ownership".print() + printInt(size(meta.owned)) + newLine();
+    for o in &meta.owned {
+        n = n + "owned".print() + printName(o.owner);
+        for f in &o.facts { n = n + printName(f); };
+        n = n + newLine();
+    };
+    return n;
+};
+
 fn printProgram(p: &Program) -> Int ~ {
     return printProgramVersion(p, "tersus-mir 1", false);
 };
@@ -226,6 +240,7 @@ fn printProgramVersion(p: &Program, header: &String, listTokens: Bool) -> Int ~ 
     for d in p.types {
         n = n + printDecl(d, listTokens);
     };
+    n = n + printMeta(&p.meta);
     for f in p.functions {
         n = n + printFunction("function", f, listTokens);
     };

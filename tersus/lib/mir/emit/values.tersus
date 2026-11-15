@@ -377,24 +377,24 @@ fn dataBase(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
     lt = localTypeOf(f, l);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
     // (a Box of the library is the address of what it holds, as a Box is: lib/box.tersus; its own field is read from it)
-    if isBoxStruct(lt.ty) && !isBoxStruct(ty) { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
+    if isBoxStruct(&cx.storage, lt.ty) && !isBoxStruct(&cx.storage, ty) { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
     if lt.ty is Type::TRef || lt.ty is Type::TMutRef { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
     return giving(g, slot(l));
 };
 
 // Whether an operand is an array
-fn isArrayOperand(f: &Function, o: &Operand) -> Bool [{ }] [{ }] {
+fn isArrayOperand(cx: &Ctx, f: &Function, o: &Operand) -> Bool [{ }] [{ }] {
     if o is Operand::Const { return (o as Operand::Const).value is Constant::CArray; };
     lt = operandLocalType(f, o);
     if !lt.ok { return false; };
-    if isArray(lt.ty) || isListStruct(lt.ty) { return true; };
-    if lt.ty is Type::TRef { return isListStruct(clone(Box::unbox(clone((lt.ty as Type::TRef).inner)))); };
-    if lt.ty is Type::TMutRef { return isListStruct(clone(Box::unbox(clone((lt.ty as Type::TMutRef).inner)))); };
+    if isArray(lt.ty) || isListStruct(&cx.storage, lt.ty) { return true; };
+    if lt.ty is Type::TRef { return isListStruct(&cx.storage, clone(Box::unbox(clone((lt.ty as Type::TRef).inner)))); };
+    if lt.ty is Type::TMutRef { return isListStruct(&cx.storage, clone(Box::unbox(clone((lt.ty as Type::TMutRef).inner)))); };
     return false;
 };
 
 // The address of the words of an array operand: a local, or a constant that is a global; in `last`
-fn arrayPtr(g: Gen, f: &Function, o: &Operand) -> Gen ~ {
+fn arrayPtr(g: Gen, cx: &Ctx, f: &Function, o: &Operand) -> Gen ~ {
     if o is Operand::Const {
         c = (o as Operand::Const).value;
         if c is Constant::CArray { return constantWords(g, (c as Constant::CArray).items); };
@@ -406,14 +406,14 @@ fn arrayPtr(g: Gen, f: &Function, o: &Operand) -> Gen ~ {
     if o is Operand::Move { l = (o as Operand::Move).local; };
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
     // (a list of native code holds the address of the elements in its first word)
-    if isListStruct(lt.ty) { return ins(g, "a", "load ptr, ptr ".then(slot(l))); };
+    if isListStruct(&cx.storage, lt.ty) { return ins(g, "a", "load ptr, ptr ".then(slot(l))); };
     if lt.ty is Type::TRef || lt.ty is Type::TMutRef {
         g1 = ins(g, "a", "load ptr, ptr ".then(slot(l)));
         at = clone(g1.last);
         inner = Type::TInt;
         if lt.ty is Type::TRef { inner = clone(Box::unbox(clone((lt.ty as Type::TRef).inner))); };
         if lt.ty is Type::TMutRef { inner = clone(Box::unbox(clone((lt.ty as Type::TMutRef).inner))); };
-        if isListStruct(inner) { return ins(g1, "a", "load ptr, ptr ".then(at)); };
+        if isListStruct(&cx.storage, inner) { return ins(g1, "a", "load ptr, ptr ".then(at)); };
         return g1;
     };
     return giving(g, slot(l));
@@ -504,15 +504,15 @@ fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>
         if step is RefStep::Index {
             o = (step as RefStep::Index).o;
             elem = Held { ok: false, ty: Type::TInt };
-            if isListStruct(ty) { elem = listElement(cx, ty); };
-            if isBoxStruct(ty) { elem = listElement(cx, ty); };
+            if isListStruct(&cx.storage, ty) { elem = listElement(cx, ty); };
+            if isBoxStruct(&cx.storage, ty) { elem = listElement(cx, ty); };
             arr = sizedArray(ty);
             if arr.ok { elem = Held { ok: true, ty: clone(arr.elem) }; };
             if !elem.ok { return failG(g1, "A reference to an element of this is not made by native code"); };
             g1 = operandValue(g1, cx, f, Type::TInt, o);
             index = clone(g1.last);
             base = clone(at);
-            if isListStruct(ty) || isBoxStruct(ty) {
+            if isListStruct(&cx.storage, ty) || isBoxStruct(&cx.storage, ty) {
                 g1 = ins(g1, "a", "load ptr, ptr ".then(at));
                 base = clone(g1.last);
             };

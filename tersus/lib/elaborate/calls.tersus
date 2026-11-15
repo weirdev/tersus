@@ -1,6 +1,6 @@
 import data::ast::ast { AstArg, AstBody, AstBuiltin, AstExpression, AstNode, AstValue };
 import data::codec::codec { catStrings };
-import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, schemeType, substitute };
+import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, builtinSchemeType, schemeType, substitute };
 import elaborate::core { baseNameOf, ctorInfo, ctorResultType, ensureInstance, fieldOf, hasColons, isBoxTy, isListTy, unrefOf };
 import elaborate::out { emit, emitBuiltinCall, emitName, emitVal, emitVar };
 import elaborate::records { codecSize, codecTypeAt, fromCodec, functionTypeFrom, listItems, nameText, namesText, nodeIn, sigData };
@@ -90,7 +90,8 @@ fn withoutInnermost(scopes: Scopes) -> Scopes {
 // The type of the builtin with this index of the table (builtinType for a scheme)
 fn builtinIndexType(st: St, index: Int) -> St ~ {
     if index < 0 || index >= size(st.builtinSchemes) { return notModelled(st, "a builtin the table does not have"); };
-    return schemeType(st, get(st.builtinSchemes, index));
+    st = builtinSchemeType(st, get(st.builtinSchemes, index));
+    return schemeType(st, st.ty);
 };
 
 fn builtinRecord(st: &St, b: Int) -> AstBuiltin ~ {
