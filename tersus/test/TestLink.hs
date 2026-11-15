@@ -214,6 +214,23 @@ testLinkNative :: Test
 testLinkNative = TestList "testLinkNative"
     ([TestCase label $ sameResult (Oracle.linkPrograms units) <$> nativeMerge units | (label, units) <- linkCases]
     ++ [ TestCase "actual prepared compiler/helper/generic inputs" realInputDifferentials
+       , TestCase "native pruning matches the oracle on actual owned MIR" $ do
+            seed <- cachedSeed
+            case (seed, Housekeeping.toolProgram Housekeeping.mirVerifyEntry) of
+                (Error e, _) -> pure (Just e)
+                (_, Error e) -> pure (Just e)
+                (Ok emitter, Ok prepared) -> do
+                    owned <- Housekeeping.ownedWith emitter prepared
+                    case owned of
+                        Error e -> pure (Just e)
+                        Ok p -> case programData p of
+                            Error e -> pure (Just e)
+                            Ok text -> do
+                                actual <- nativeFull ("pass link\nprune\n" ++ text)
+                                pure (firstFailure
+                                    [ testAssertTrue (any (isPrefixOf "listNew") (Map.keys (M.progFunctions p)))
+                                    , sameResult (Ok (Oracle.pruneProgram p)) (mapResult M.lowProgram actual)
+                                    ])
        , TestCase "full payload native round trip" $ case writeLowered everyRecord of
             Error e -> pure (Just e)
             Ok input -> do result <- nativeFull input; pure $ inspect result $ \back -> testAssertTrue (everyRecord == back && show everyRecord == show back)
