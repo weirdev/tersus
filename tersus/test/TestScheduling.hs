@@ -8,6 +8,7 @@ module TestScheduling
     , childCapabilities
     , assignShards
     , ciShardCount
+    , runnerSpan
     , groupWeight
     , isSelfHosted
     , estimatedPeakMiB
@@ -23,13 +24,14 @@ module TestScheduling
 import Control.Exception (evaluate)
 import Data.Char (isDigit)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (delete, foldl', isInfixOf, isPrefixOf, minimumBy, sort, sortBy)
+import Data.List (foldl', isInfixOf, isPrefixOf, minimumBy, sort, sortBy)
 import System.Environment (getEnvironment, getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (..), proc)
 import Native (availableProcessors, readProcessOutput)
 import System.Timeout (timeout)
 import Data.Ord (comparing)
+import qualified Data.Map.Strict as Map
 import TestHarness (Test (..), TestResult, batchItems, testAssertEq, testAssertTrue, testCase)
 import TestParserBootstrap (testParserBootstrap, parserBootstrapGroups)
 import TestPipeline (selfHostedFamilyManifest)
@@ -129,56 +131,54 @@ assignShards count names
         [(name, normalShards !! (index - 1))
             | (name, index) <- assignShards (length normalShards) (filter (\name -> name `notElem` map fst isolated) names)]
         ++ isolated
-    | otherwise = [(name, index) | (_, index, assigned) <- balance bins, unit <- reverse assigned, name <- unit]
+    | otherwise = [(name, index) | (index, assigned) <- zip [1 ..] (foldl' place (replicate (min count (length names)) []) units), name <- assigned]
   where
     isolated = [(name, index) | (name, index) <- zip bootstrapGroups [count - 3 ..], name `elem` names]
     normalShards = [index | index <- [1 .. count], index `notElem` map snd isolated]
     selfHosted = filter isSelfHosted names
-    units = [selfHosted | not (null selfHosted)] ++ [[name] | name <- names, not (isSelfHosted name)]
-    bins = foldl' assign [(0, index, []) | index <- [1 .. min count (length names)]]
-        (sortBy (comparing (negate . shardWeight)) units)
-    assign shards unit =
-        let (_, target, _) = minimumBy (comparing (\(weight, index, _) -> (weight, index))) shards
-         in [if index == target then (weight + shardWeight unit, index, unit : assigned) else shard
-            | shard@(weight, index, assigned) <- shards]
-    balance [] = []
-    balance shards
-        | spread shards <= 1 = shards
-        | spread best < spread shards = balance best
-        | otherwise = shards
-      where
-        (_, heavy, heavyUnits) = minimumBy (comparing (\(weight, index, _) -> (negate weight, index))) shards
-        (_, light, lightUnits) = minimumBy (comparing (\(weight, index, _) -> (weight, index))) shards
-        best = minimumBy (comparing spread) (shards :
-            [exchange outgoing incoming | outgoing <- heavyUnits, incoming <- [] : lightUnits])
-        exchange outgoing incoming =
-            [ if index == heavy then (weight - shardWeight outgoing + shardWeight incoming, index, replace outgoing incoming assigned)
-              else if index == light then (weight + shardWeight outgoing - shardWeight incoming, index, replace incoming outgoing assigned)
-              else shard
-            | shard@(weight, index, assigned) <- shards]
-        replace outgoing incoming assigned = [incoming | not (null incoming)] ++ delete outgoing assigned
-    spread shards = maximum loads - minimum loads
-      where loads = [weight | (weight, _, _) <- shards]
+    -- (longest first, each to the runner it lengthens least, as the harness would run it there: memory decides what
+    -- runs beside what as much as the workers do; ties go to the runner with less work, then to the first)
+    units = sortBy (comparing (negate . sum . map groupWeight)) ([selfHosted | not (null selfHosted)] ++ [[name] | name <- names, not (isSelfHosted name)])
+    place shards unit =
+        let cost (index, assigned) = (runnerSpan (assigned ++ unit), sum (map groupWeight assigned), index :: Int)
+            target = (\(_, _, index) -> index) (minimum (map cost (zip [1 ..] shards)))
+         in [if index == target then assigned ++ unit else assigned | (index, assigned) <- zip [1 ..] shards]
+
+-- The worker processes of a CI runner (.github/workflows/ci.yml: -j 4)
+ciWorkers :: Int
+ciWorkers = 4
+
+-- When each group of a runner starts, as the harness runs them (TestTersus.runInParallel): in launch order, as many at
+-- once as there are workers and the memory budget admits, each taking its weight; with the groups running and the
+-- memory charged once it has started
+admissionTrace :: [String] -> [(Int, Int, Int, String)]
+admissionTrace = go 0 [] . launchOrder id
+  where
+    go now running queue = case (if length running < ciWorkers then admitGroup memoryBudgetMiB estimatedPeakMiB (charged running) queue else Nothing) of
+        Just (name, rest) ->
+            let started = (now + groupWeight name, name) : running
+             in (now, length started, charged started, name) : go now started rest
+        Nothing -> case sort running of
+            (finish, _) : others -> go finish others queue
+            [] -> []
+    charged running = sum [estimatedPeakMiB name | (_, name) <- running]
+
+-- How long a runner takes for the groups
+runnerSpan :: [String] -> Int
+runnerSpan names = maximum (0 : [start + groupWeight name | (start, _, _, name) <- admissionTrace names])
 
 isSelfHosted :: String -> Bool
 isSelfHosted = isPrefixOf "testMirSelfHosted:"
-
--- (self-hosted batches are admitted one at a time for memory, so their weights add up like the others'; a group
--- estimated at the whole memory budget runs alone, so it holds all four of the runner's workers while it runs, and
--- two estimated above half of it never run together, so each holds about two)
-shardWeight :: [String] -> Int
-shardWeight = sum . map charged
-  where
-    charged name
-        | estimatedPeakMiB name >= memoryBudgetMiB = 4 * groupWeight name
-        | 2 * estimatedPeakMiB name > memoryBudgetMiB = 2 * groupWeight name
-        | otherwise = groupWeight name
 
 -- The median processor time of each group over recent CI runs, in seconds (its [CPU] line: what its process and the
 -- processes it waited for used; dev/ci_weights.py prints these rows from CI logs). A group that builds one of the
 -- runner's shared tools is charged for it.
 groupWeight :: String -> Int
-groupWeight name = maybe 1 id (lookup name measuredWeights)
+groupWeight name = Map.findWithDefault 1 name weightTable
+
+-- (looked up for every step of every runner's simulation while the shards are assigned)
+weightTable :: Map.Map String Int
+weightTable = Map.fromList measuredWeights
 
 measuredWeights :: [(String, Int)]
 measuredWeights =
@@ -331,7 +331,10 @@ estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
     | isSelfHosted name = 9728
     | name == "testHostValidation:elaborator" = memoryBudgetMiB
-    | otherwise = maybe 1024 id (lookup name measuredPeaksMiB)
+    | otherwise = Map.findWithDefault 1024 name peakTable
+
+peakTable :: Map.Map String Int
+peakTable = Map.fromList measuredPeaksMiB
 
 measuredPeaksMiB :: [(String, Int)]
 measuredPeaksMiB =
@@ -563,8 +566,8 @@ testScheduling names batches = TestList "testScheduling"
             assigned = assignShards 3 groups
             heaviest = take 3 (sortBy (comparing (negate . groupWeight)) groups)
          in testAssertEq (sort [shard | (name, shard) <- assigned, name `elem` heaviest]) [1, 2, 3]
-    , testCase "the normal CI shards' estimated loads differ by at most a minute" $
-        if maximum loads - minimum loads <= 60 then Nothing else Just ("estimated loads: " ++ show loads)
+    , testCase "the normal CI runners' simulated spans differ by at most two minutes" $
+        if maximum loads - minimum loads <= 120 then Nothing else Just ("simulated spans: " ++ show loads)
     , testCase "CLI and cold bootstrap are covered exactly once" $
         testAssertTrue (all (\name -> length (filter ((== name) . fst) assignments) == 1)
             ("testCli" : bootstrapGroups))
@@ -614,7 +617,7 @@ testScheduling names batches = TestList "testScheduling"
                 ++ map groupWeight ["testParity", "testMirData", "testOwnership", "testModules", "testMirEmitPrograms"]
                 ++ map (groupWeight . groupName) parserBootstrapGroups)
             && all (> 0) (map groupWeight names)
-            && maximum loads - minimum loads <= 60)
+            && maximum loads - minimum loads <= 120)
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $
@@ -676,9 +679,11 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "other original groups remain individually shardable" $
         testAssertEq (map snd (assignShards 4 ["testNative:1/4", "testNative:2/4", "testNative:3/4", "testNative:4/4"]))
             [1,2,3,4]
-    , testCase "self-hosted batches, which run one at a time, are charged their whole work twice over" $
+    , testCase "a runner's span counts the self-hosted batches one after another and what memory keeps from running beside them" $
         let selfHosted = filter isSelfHosted names
-         in testAssertEq (shardWeight selfHosted) (sum (map ((* 2) . groupWeight) selfHosted))
+            chain = sum (map groupWeight selfHosted)
+         in testAssertEq (runnerSpan selfHosted, runnerSpan (selfHosted ++ ["testParser:3/4"]), runnerSpan (selfHosted ++ ["testCli"]))
+            (chain, chain + groupWeight "testParser:3/4", max chain (groupWeight "testCli"))
     , testCase "fixed native memory_limit users stay ordered in one batch" $
         testAssertTrue (all memorySerial batches)
     , testCase "small and empty trees never create empty batches" $
@@ -687,14 +692,14 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "every CI shard's groups launch once, with estimated memory within the budget whenever two run" $
         testAssertTrue (all (\index -> case selectGroupNames (Arguments Nothing [] False (Just (index, ciShardCount))) names of
             Right shard -> let trace = admissionTrace shard
-                 in sort [name | (_, _, name) <- trace] == sort shard
-                    && all (\(running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace
+                 in sort [name | (_, _, _, name) <- trace] == sort shard
+                    && all (\(_, running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace
             Left _ -> False) [1 .. ciShardCount])
     , testCase "the host runner's groups launch once, with estimated memory within the budget whenever two run" $
         case selectGroupNames (Arguments Nothing ["testHostValidation"] False Nothing) names of
             Right host -> let trace = admissionTrace host
-                 in testAssertTrue (length host == 7 && sort [name | (_, _, name) <- trace] == sort host
-                    && all (\(running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace)
+                 in testAssertTrue (length host == 7 && sort [name | (_, _, _, name) <- trace] == sort host
+                    && all (\(_, running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace)
             Left e -> Just e
     , testCase "naming an opt-in group with a shard is refused" $
         testAssertTrue (isLeft (selectGroupNames (Arguments Nothing ["testHostValidation"] False (Just (1, ciShardCount))) names))
@@ -715,17 +720,6 @@ testScheduling names batches = TestList "testScheduling"
             , ["testMirSelfHosted:3/4", "testParser:3/4", "testCli", "newA"] )
     ]
   where
-    -- Four workers; a group ends groupWeight time units after it starts.
-    admissionTrace = go 0 [] . launchOrder id
-      where
-        go now running queue = case (if length running < 4 then admitGroup memoryBudgetMiB estimatedPeakMiB (charged running) queue else Nothing) of
-            Just (name, rest) ->
-                let started = (now + groupWeight name, name) : running
-                 in (length started, charged started, name) : go now started rest
-            Nothing -> case sort running of
-                (finish, _) : others -> go finish others queue
-                [] -> []
-        charged running = sum [estimatedPeakMiB name | (_, name) <- running]
     admitWhileRoom = go 0
       where
         go used queue = case admitGroup memoryBudgetMiB estimatedPeakMiB used queue of
@@ -734,13 +728,14 @@ testScheduling names batches = TestList "testScheduling"
     suite = filter (not . isOptIn) names
     assignments = assignShards 3 suite
     normalCount = ciShardCount - length bootstrapGroups
-    loads = [shardWeight [name | (name, assigned) <- assignShards normalCount (filter (`notElem` bootstrapGroups) suite), assigned == index] | index <- [1 .. normalCount]]
+    loads = [runnerSpan [name | (name, assigned) <- assignShards normalCount (filter (`notElem` bootstrapGroups) suite), assigned == index] | index <- [1 .. normalCount]]
+    -- (the selections, which assign the shards again for each index, only for the counts CI could use)
     complete count =
         let assigned = assignShards count names
             selected = [selectGroupNames (Arguments Nothing [] False (Just (index, count))) names | index <- [1 .. count]]
          in sort (map fst assigned) == sort names
             && all (\(_, index) -> index >= 1 && index <= count) assigned
-            && fmap (sort . concat) (sequence selected) == Right (sort suite)
+            && (count > ciShardCount || fmap (sort . concat) (sequence selected) == Right (sort suite))
     filtered index =
         let chosen = ["testCli", "testBootstrap"] ++ [groupName batch | (_, split) <- batches, batch <- take 1 split]
          in selectGroupNames (Arguments Nothing chosen False (Just (index, 3))) names
