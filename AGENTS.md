@@ -253,9 +253,12 @@ Work from `tersus/`.
   `testFrontendBootstrap` builds the elaborator seed F0 and the stages F1 and
   F2 and checks their fixpoint (`REPLACING_HASKELL.md`, "The frontend seed").
   CI reserves one runner for each of these four bootstrap groups; the
-  remaining groups use five runners, with four worker processes per runner,
-  balanced by `TestScheduling.groupWeight`, the median processor time of each
-  group on CI (the harness prints it as `[CPU] <group> <s>s`;
+  remaining groups use five runners, with four worker processes per runner.
+  Each group goes to the runner it lengthens least, by a simulation of how the
+  harness runs a runner's groups (`TestScheduling.runnerSpan`: four workers,
+  the memory budget, longest first), from `TestScheduling.groupWeight`, the
+  median processor time of each group on CI, and `estimatedPeakMiB`, its
+  measured peak memory (the harness prints it as `[CPU] <group> <s>s`;
   `dev/ci_weights.py` prints the rows from CI logs; refresh them when a
   group's time moves).
   `testHostValidation` validates the compiler's own programs (the parser, the
