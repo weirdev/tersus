@@ -6183,11 +6183,11 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
             pname = "";
             pty = Type::TInt;
             if resultPartsvOk {
-                after = skipWs(sourceText, s);
+                after = skipWs(sourceText, probeState(&s));
                 if byteAt(sourceText, after, after.pos) = 58 {
                     named = true;
                     pname = resultPartsvValue;
-                    s = St { pos: after.pos + 1, ..after };
+                    s = St { pos: after.pos + 1, ..s };
                     s = skipWs(sourceText, s);
                     t = typeAnnotation(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
                     if !resultPartstOk { return Res<FnShape> { st: resultPartstState, v: emptyFnShape(), ok: false }; };
