@@ -15,7 +15,7 @@ module Seed
     , cachedFrontendSeed
     ) where
 
-import Control.Exception (IOException, SomeException, evaluate, try)
+import Control.Exception (Exception, IOException, SomeException, evaluate, throwIO, try)
 import Data.Char (isHexDigit)
 import GHC.IO.Encoding (char8)
 import System.Directory (doesFileExist, removeFile, renameFile)
@@ -162,12 +162,23 @@ cachedParserSeed = do
     case present of
         Ok (Just exe) -> pure (Ok exe)
         _ -> do
-            built <- parallelBuilds [buildParserSeed, besides cachedSeed, besides cachedFrontendSeed]
-            pure (head built)
+            -- (a refused parser seed fails what asked for it, so the builds beside it are stopped, not waited for)
+            built <- try (parallelBuilds [buildParserSeed >>= stopOnRefusal, besides cachedSeed, besides cachedFrontendSeed])
+            pure $ case built of
+                Left (SeedRefused e) -> Error e
+                Right results -> head results
   where
     buildParserSeed = cachedProgram "parser-seed" parserSeedHash "the pinned native parser seed" (buildSeed "parser" parserSeedSha256 parserSeedHash "TERSUS_PARSER_SEED_FILE")
+    stopOnRefusal result = case result of
+        Error e -> throwIO (SeedRefused e)
+        ok -> pure ok
     -- (what goes wrong with them is reported when they are asked for themselves)
     besides build = (try build :: IO (Either SomeException (Result FilePath String))) >> pure (Error "unused")
+
+newtype SeedRefused = SeedRefused String
+    deriving Show
+
+instance Exception SeedRefused
 
 -- F0: the elaborator written in Tersus, built from the pinned seed IR (bootstrap/frontend.sha256)
 cachedFrontendSeed :: IO (Result FilePath String)
