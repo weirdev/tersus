@@ -824,7 +824,7 @@ referenceWritePrograms =
     [ ("an owned value replaced through a reference is released", "fn store(xs: &mut List<Int>, ys: List<Int>) -> Int writes(xs) { *xs = ys; return 0; }; a = [7]; b = [9, 10]; store(&mut a, b); return size(a);")
     , ("a view of a place written through a reference keeps its value", "xs = [[7]]; a = get(xs, 0); r = &mut xs; *r = [[9, 10]]; return size(a);")
     , ("a view of a place written through a reborrow keeps its value", "xs = [[7]]; r1 = &mut xs; a = *r1; old = get(a, 0); n = size(old); r2 = &mut *r1; *r2 = [[9, 10]]; return size(old) + n + size(get(xs, 0));")
-    , ("a view of a place written through a reference kept in a Box keeps its value", "xs = [[7]]; r = &mut xs; b = Box::new(r); t = get(xs, 0); r2 = Box::unbox(b); *r2 = [[9]]; return size(t);")
+    , ("a view of a place written through a reference kept in a Box keeps its value", "xs = [[7]]; t = get(xs, 0); r = &mut xs; b = Box::new(r); r2 = Box::unbox(b); *r2 = [[9]]; return size(t);")
     , ("an update parameter reborrowed for another is written through", "fn g(r: &mut List<Int>) -> Int writes(r) { *r = push(clone(*r), 1); return 0; }; fn f(r: &mut List<Int>) -> Int writes(r) { return g(&mut *r); }; xs = [7]; f(&mut xs); return size(xs);")
     , ("an update parameter rebuilt from itself releases what it held", "fn put(xs: &mut List<List<Int>>) -> Int writes(xs) { *xs = push(clone(*xs), [9, 10]); return 0; }; a = [[7], [8]]; put(&mut a); return size(a);")
     ]
