@@ -2534,13 +2534,19 @@ withToolsCacheHome use = do
         (_, Error e) -> pure (Just e)
         (Ok _, Ok dir) -> withCacheHome $ \home -> do
             let cache = home </> "tersus"
+                pass = do
+                    names <- listDirectory cache
+                    before <- mapM (toolIdentity cache) names
+                    result <- use home
+                    afterNames <- filter compiledToolName <$> listDirectory cache
+                    after <- mapM (toolIdentity cache) names
+                    pure (names, before, result, afterNames, after)
             copyCompiledTools dir cache
-            names <- listDirectory cache
-            before <- mapM (toolIdentity cache) names
             entries <- entryFiles home
-            result <- use home
-            afterNames <- filter compiledToolName <$> listDirectory cache
-            after <- mapM (toolIdentity cache) names
+            -- (the copy holds the tools the runner had built when it was taken, which depends on the groups that ran
+            -- before: one it lacked is built by the first pass, and then the second has to find every tool it needs)
+            first@(firstNames, _, _, firstAfter, _) <- pass
+            (names, before, result, afterNames, after) <- if sort firstAfter == sort firstNames then pure first else pass
             pure $ firstFailure
                 [ testAssertEq entries []
                 , testAssertTrue (not (null names) && all (not . isPrefixOf "verdicts-") names)
