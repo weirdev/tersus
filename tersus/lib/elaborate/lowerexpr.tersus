@@ -32,16 +32,7 @@ fn lowerOperandWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ 
 fn varOperand(ls: LowSt, src: &List<AstNode>, name: String, ty: Int) -> LowSt ~ {
     found = lookupBinding(&ls, &name);
     if found.found {
-        if found.b.isLocal {
-            local = found.b.local;
-            if isMutRefTy(&ls, ty) && hasInt(&ls.bMutBorrowed, local) {
-                ls = tempLocal(ls, ty);
-                temp = ls.root;
-                ls = emitAssign(ls, temp, borrowRv(local, [], true));
-                return LowSt { op: copyOp(temp), ty: ty, ..ls };
-            };
-            return LowSt { op: copyOp(local), ty: ty, ..ls };
-        };
+        if found.b.isLocal { return LowSt { op: copyOp(found.b.local), ty: ty, ..ls }; };
         return LowSt { op: fnConst(&found.b.fname), ty: ty, ..ls };
     };
     if HashMap::contains(&ls.globals, &name) {
@@ -265,13 +256,47 @@ fn lowerLastWith(ls: LowSt, src: &List<AstNode>, e: Int, ty: Int) -> LowSt ~ {
         return lowerBuiltin(ls, src, b, &args, ty);
     };
     callee = clone(ls.op);
+    method = false;
+    fx = exprAt(src, funct);
+    if fx is AstExpression::Var { calleeName = nameText(src, (fx as AstExpression::Var).n); method = hasPathSep(&calleeName); };
     ops = [];
+    first = true;
     for a in &args {
-        ls = lowerOperand(ls, src, a);
+        if first && method { ls = lowerReceiver(ls, src, a); } else { ls = lowerOperand(ls, src, a); };
+        first = false;
         if !ls.ok { return ls; };
         ops = push(ops, clone(ls.op));
     };
     return LowSt { pend: Pend { isCall: true, rv: noRv(), callee: callee, args: ops }, ty: ty, ..ls };
+};
+
+fn hasPathSep(name: &String) -> Bool ~ {
+    i = 0;
+    while i + 1 < size(name.bytes) [{ affirm i >= 0; }] shrinks size(name.bytes) - i {
+        if toInt(get(name.bytes, i)) = 58 && toInt(get(name.bytes, i + 1)) = 58 { return true; };
+        i = i + 1;
+    };
+    return false;
+};
+
+// A method receiver lent for updating is given on through a reborrow, as a call writes it; any other bare
+// &mut parameter given to a call is left bare, for the MIR checker to refuse
+fn lowerReceiver(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return lowerOperand(ls, src, e); };
+    ls = claim(ls);
+    if !ls.ok { return ls; };
+    t = ls.ty;
+    x = exprAt(src, e);
+    if !(x is AstExpression::Var) { return lowerOperandWith(ls, src, e, t); };
+    if !isMutRefTy(&ls, t) { return lowerOperandWith(ls, src, e, t); };
+    recvName = nameText(src, (x as AstExpression::Var).n);
+    found = lookupBinding(&ls, &recvName);
+    if !found.found || !found.b.isLocal || !hasInt(&ls.bMutBorrowed, found.b.local) { return lowerOperandWith(ls, src, e, t); };
+    local = found.b.local;
+    ls = tempLocal(ls, t);
+    temp = ls.root;
+    ls = emitAssign(ls, temp, borrowRv(local, [], true));
+    return LowSt { op: copyOp(temp), ty: t, ..ls };
 };
 
 // What is applied: a builtin (ls.id, its record) or what is called (ls.op, with ls.id -1)
