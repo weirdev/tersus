@@ -22,8 +22,7 @@ import InterfaceData
 import Syntax
 import Types
 import TestHarness
-import ElaboratorNative (frontendStage)
-import ElaboratorTool (Loader, nativeElaborator, nativeLoader, runElaboratorText, runLoader)
+import ElaboratorTool (Loader, nativeElaborator, nativeLoader, runElaboratorText, runLoader, sourceElaboratorExecutable)
 import LibPackage (LibPackage (..), compileLibPackageWith)
 import Compile (lowerStatementsWith, parseSource, sourceRequest)
 import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
@@ -96,9 +95,9 @@ testOwnershipCodec = TestList "testOwnershipCodec"
     , TestCase "native version 2 requests refuse malformed explicit provider records" nativeRequestRefusals
     , TestCase "native version 2 loads give checked facts and refuse malformed explicit provider records" nativeLoadRefusals
     , TestCase "native version 2 transport ordering and seven-name arity refusals" nativeTransportRefusals
-    , TestCase "old and transition seed retain exact RQ1 checking and response metadata" nativeLegacyParity
-    , TestCase "transition stage one issues facts for real libraries and next frontend" nativeBootstrapSmoke
-    , TestCase "transition stage one checks eligible and ineligible conditional Clone" nativeDefiningSmoke
+    , TestCase "the seed and the compiler's elaborator retain exact RQ1 checking and response metadata" nativeLegacyParity
+    , TestCase "the compiler's elaborator issues facts for real libraries and next frontend" nativeBootstrapSmoke
+    , TestCase "the compiler's elaborator checks eligible and ineligible conditional Clone" nativeDefiningSmoke
     , TestCase "private defining Clone remains checked without becoming a consumer role" nativePrivateSmoke
     , TestCase "copies of one bounded Clone for different bounded sizes are distinct callees" nativeSizedSmoke
     , TestCase "visible provider ambiguity is refused before deriving capabilities" nativeAmbiguitySmoke
@@ -116,7 +115,7 @@ testOwnershipCodec = TestList "testOwnershipCodec"
     ]
 
 nativeLegacyParity :: IO TestResult
-nativeLegacyParity = withTransition $ \exe -> do
+nativeLegacyParity = withSourceElaborator $ \exe -> do
     old <- cachedFrontendSeed
     case old of
         Error e -> pure (Just e)
@@ -136,10 +135,10 @@ nativeLegacyParity = withTransition $ \exe -> do
 
 nativeBootstrapSmoke :: IO TestResult
 nativeBootstrapSmoke = do
-    built <- frontendStage 1
+    built <- sourceElaboratorExecutable
     pure $ case built of
         Error e -> Just e
-        Ok (exe, _) ->
+        Ok exe ->
             let loader = checkedLoader exe
              in case compileLibPackageWith loader of
                 Error e -> Just e
@@ -155,10 +154,10 @@ nativeBootstrapSmoke = do
 
 nativeDefiningSmoke :: IO TestResult
 nativeDefiningSmoke = do
-    built <- frontendStage 1
+    built <- sourceElaboratorExecutable
     pure $ case built of
         Error e -> Just e
-        Ok (exe, _) ->
+        Ok exe ->
             let facts compiled = Map.unions [transportOwnership t | unit <- Package.compiledModules compiled, Just t <- [Package.compiledOwnership unit]]
                 selected compiled = Map.lookup "vendor$api$api$Vessel<vendor$api$api$Cell>" (facts compiled) >>= ownershipClone
              in case (compileFixture "vendor/main.tersus" (definingFiles "" "") (checkedLoader exe), compileFixture "vendor/main.tersus" (definingFiles "fn dup(v: &Vessel<Cell>) -> Vessel<Cell> { return clone(*v); };" "y = api::dup(&x); ") (checkedLoader exe)) of
@@ -244,7 +243,7 @@ badRequests =
         Ok text -> unlines (concatMap (\line -> if line == "protocols 0" then ("protocols " ++ show (length protocols)) : protocols else [line]) (lines text))
 
 nativeRequestRefusals :: IO TestResult
-nativeRequestRefusals = withTransition $ \exe -> do
+nativeRequestRefusals = withSourceElaborator $ \exe -> do
     valid <- case writeRequest request{rqProtocols = Just Map.empty} of
         Error e -> pure (Just e)
         Ok text -> do
@@ -260,7 +259,7 @@ nativeRequestRefusals = withTransition $ \exe -> do
 
 -- (the same protocol records in a load request, where they follow its kind)
 nativeLoadRefusals :: IO TestResult
-nativeLoadRefusals = withTransition $ \exe -> do
+nativeLoadRefusals = withSourceElaborator $ \exe -> do
     let load = (sourceRequest LoadProgram False False [] "struct Cell { n: Int }; return 0;"){lrProtocols = Just Map.empty}
     valid <- runLoader exe load
     let positive = case valid of
@@ -312,12 +311,12 @@ emptyLibraries = Ok (LibPackage Map.empty Map.empty [] Map.empty)
 compileFixture :: FilePath -> [(FilePath, String)] -> Loader -> Result Package.CompiledPackage String
 compileFixture entry files loader = Package.compileModulesUsing loader emptyLibraries (Snapshot (resolverFromFiles files) entry False)
 
-withTransition :: (FilePath -> IO TestResult) -> IO TestResult
-withTransition use = do
-    built <- frontendStage 1
+withSourceElaborator :: (FilePath -> IO TestResult) -> IO TestResult
+withSourceElaborator use = do
+    built <- sourceElaboratorExecutable
     case built of
         Error e -> pure (Just e)
-        Ok (exe, _) -> use exe
+        Ok exe -> use exe
 
 checkedAnswer :: FilePath -> Elaborator
 checkedAnswer exe rq = nativeElaborator exe rq{rqProtocols = Just Map.empty}
@@ -350,7 +349,7 @@ linkedCallee pkg (_, callee) = case Package.lowerCompiledPackage pkg of
     Error _ -> False
 
 nativePrivateSmoke :: IO TestResult
-nativePrivateSmoke = withTransition $ \exe -> pure $
+nativePrivateSmoke = withSourceElaborator $ \exe -> pure $
     case compileFixture "vendor/main.tersus" (privateFiles "x = api::make(3); return 0;") (checkedLoader exe) of
         Error e -> Just e
         Ok compiled ->
@@ -412,7 +411,7 @@ withoutBounded pkg callee units =
      in [(m, p{M.progBounded = foldr Map.delete (M.progBounded p) generic}) | (m, p) <- units]
 
 nativeSizedSmoke :: IO TestResult
-nativeSizedSmoke = withTransition $ \exe -> pure $
+nativeSizedSmoke = withSourceElaborator $ \exe -> pure $
     case Package.compileModulesUsing (checkedLoader exe) (compileLibPackageWith (checkedLoader exe)) (Snapshot (resolverFromFiles sizedFiles) "sized/main.tersus" False) of
         Error e -> Just e
         Ok compiled ->
@@ -455,7 +454,7 @@ privateFiles main =
     ]
 
 nativeAmbiguitySmoke :: IO TestResult
-nativeAmbiguitySmoke = withTransition $ \exe -> pure $
+nativeAmbiguitySmoke = withSourceElaborator $ \exe -> pure $
     let result = compileFixture "vendor/main.tersus" providerFiles (checkedLoader exe)
      in testAssertErrorContains "conflicting Clone providers" result <>
         testAssertErrorContains "vendor$one$one$Clone" result <>
@@ -469,7 +468,7 @@ nativeAmbiguitySmoke = withTransition $ \exe -> pure $
         ]
 
 nativeStorageRoles :: IO TestResult
-nativeStorageRoles = withTransition $ \exe -> pure $
+nativeStorageRoles = withSourceElaborator $ \exe -> pure $
     let imported = firstFailure
             [ case compileFixture "unrelated/main.tersus" files (if version == 1 then nativeLoader exe else checkedLoader exe) of
                 Error e -> Just e
@@ -506,7 +505,7 @@ nativeStorageRoles = withTransition $ \exe -> pure $
         ]
 
 nativeCloneDrop :: String -> Int -> IO TestResult
-nativeCloneDrop kind version = withTransition $ \exe -> pure $
+nativeCloneDrop kind version = withSourceElaborator $ \exe -> pure $
     let marker = cloneDropFiles "impl Clone for Owned { };" "return 0;"
         body = cloneDropFiles (cloneBody "self.n") "a = Owned::new(3); b = clone(a); return a.n + b.n;"
         invalid = cloneDropFiles (cloneBody "self.n + 1") "return 0;"
