@@ -33,8 +33,8 @@ testFrontendBootstrap =
         [ testCase "the seed pin is a SHA-256 digest" (testAssertTrue (length frontendSeedSha256 == 64 && all isHexDigit frontendSeedSha256))
         , testCase "the pin records the elaborator's sources as they are (a change to them comes with a new seed)" $
             testAssertEq frontendSources (Ok frontendSeedSources)
-        , TestCase "a missing or corrupt seed is refused, and an elaborator that fails refuses the module" refusals
-        -- (each waits for stage 1, which one of them builds, and then they elaborate side by side)
+        -- (each waits for stage 1, which one of them builds, and then they elaborate side by side; stage 1 is built
+        -- first, as the longest step, and the refusals, which change the process's environment, run alone after them)
         , TestParallel "stages"
             [ TestCase "stage 1 answers the requests of the elaborator and the compiler libraries as the seed does" (stageAgrees 1)
             , TestCase "stage 2 answers the requests of the elaborator and the compiler libraries as the seed does" (stageAgrees 2)
@@ -42,6 +42,7 @@ testFrontendBootstrap =
             , TestCase "the host's programs elaborated by stage 1 are the ones the seed gives" toolsAgree
             ]
         , TestCase "the seed and the stages are kept in the cache" kept
+        , TestCase "a missing or corrupt seed is refused, and an elaborator that fails refuses the module" refusals
         ]
 
 -- (with a cache of its own, so that the seed in the shared cache is not what answers)
