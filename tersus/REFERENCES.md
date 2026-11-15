@@ -525,9 +525,13 @@ mid-implementation:
    element, whose index was fixed when the borrow was made), and reading
    through one (`*r`) loads through that address; a reference's LLVM
    type is `ptr` for both `&T` and `&mut T`. The self-hosted bridge
-   (`SelfHostedMir`) handles a borrow of a whole local and a read through a
-   reference at the value level and refuses the rest as outside its subset;
-   the Tersus reader/validator of step 33 does not model references yet.
+   (`SelfHostedMir`) gives a reference the value of its place: a write
+   through one is a new version of the place its chain of borrows starts
+   from; after any new version of a place, the references it follows into
+   it are bound again and whatever else holds a reference to it is made
+   arbitrary. A write through a reference it cannot place (read out of a
+   struct, a list or a Box, or a call result no contract places) makes
+   every place a reference escaped from arbitrary too.
    The MIR-as-data format (`MirData`) carries `mutref`, `borrow`,
    `borrowmut`, `deref` and `assignref` rows, and
    `lib/mir/mir_reader/mir_reader.tersus` reads and prints them (it shares the
