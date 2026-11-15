@@ -60,6 +60,7 @@ testNative =
         , TestParallel "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
         , TestParallel "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestParallel "native storage" [TestCase name (sameAsMir name source) | (name, source) <- nativeStoragePrograms]
+        , TestParallel "Uninit" [TestCase name (sameAsMir name source) | (name, source) <- uninitPrograms]
         , TestParallel "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
@@ -839,6 +840,26 @@ nativeStoragePrograms =
     ]
   where
     owned = "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct Owned { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl Owned { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for Owned { fn clone(self: &Self) -> Self { return Owned::new(self.n); }; }; impl Drop for Owned { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; "
+
+-- An Uninit<T> is a T natively: what one holds, a list literal among them, is made before it is put in
+uninitPrograms :: [(String, String)]
+uninitPrograms =
+    [ ("a list literal, taken", "u = Uninit::new([1, 2, 3]); v = Uninit::take(u); return size(v);")
+    , ("a list literal, viewed and then taken", "u = Uninit::new([1, 2, 3]); x = Uninit::get(u); n = size(x) * 10 + get(x, 1); l = Uninit::take(u); return n * 10 + size(l);")
+    , ("a list literal, taken and returned", "u = Uninit::new([1, 2, 3]); return Uninit::take(u);")
+    , ("an empty list literal", "u = Uninit::new([]); l = Uninit::take(u); l = push(l, 7); return get(l, 0) + size(l);")
+    , ("an empty list literal of structs", "struct P { a: Int }; u = Uninit::new([]); l = Uninit::take(u); l = push(l, P { a: 4 }); return get(l, 0).a;")
+    , ("a literal list of lists", "u = Uninit::new([[1], [2, 3]]); l = Uninit::take(u); return size(get(l, 1)) * 10 + get(get(l, 1), 0);")
+    , ("an Uninit of an Uninit of a list literal", "u = Uninit::new(Uninit::new([1, 2])); v = Uninit::take(u); w = Uninit::take(v); return size(w);")
+    , ("a list literal in a loop", "t = 0; i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { u = Uninit::new([5, 6]); l = Uninit::take(u); t = t + size(l) + get(l, 0); i = i + 1; }; return t;")
+    , ("a list literal in each branch", "x = readByte(); if x < 0 { u = Uninit::new([1, 2]); l = Uninit::take(u); return size(l); } else { u = Uninit::new([1, 2, 3]); l = Uninit::take(u); return size(l); };")
+    , ("a list literal given to a function", "fn f(u: Uninit<List<Int>>) -> Int [{ affirm filled(u) = true; }] [{ }] { l = Uninit::take(u); return size(l); }; return f(Uninit::new([1, 2, 3]));")
+    , ("a list that is built", "u = Uninit::new(push(push([], 1), 2)); l = Uninit::take(u); return size(l);")
+    , ("a struct holding a list literal", "struct S { l: List<Int>, n: Int }; u = Uninit::new(S { l: [7, 8, 9], n: 3 }); s = Uninit::take(u); return size(s.l) * 10 + s.n;")
+    , ("a list of structs", "struct P { a: Int, b: Int }; u = Uninit::new(push(push([], P { a: 1, b: 2 }), P { a: 3, b: 4 })); l = Uninit::take(u); return get(l, 1).a;")
+    , ("a Box", "u = Uninit::new(Box::new(5)); b = Uninit::take(u); return Box::unbox(b);")
+    , ("a String literal", "u = Uninit::new(\"hello\"); x = Uninit::get(u); x.print(); s = Uninit::take(u); s.print(); return 0;")
+    ]
 
 unvalidatedPrograms :: [(String, String)]
 unvalidatedPrograms = functionPrograms
