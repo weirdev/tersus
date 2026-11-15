@@ -2,16 +2,19 @@
 -- elaborator as it is now elaborated by F0, and F2 the same elaborated by F1.
 module TestFrontendBootstrap (testFrontendBootstrap) where
 
-import Control.Exception (bracket)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, bracket, evaluate, throwIO, try)
 import Data.Char (isHexDigit)
-import Data.List (isInfixOf, nub)
+import Data.List (isInfixOf)
 import System.Directory (createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, hPutStr)
+import System.IO.Unsafe (unsafePerformIO)
 
 import CacheLock (openTempFileCloexec)
-import Differential (Asked (..), Outcome (..), Unit (..), bootstrapFrontend, compareAnswers, executableCandidate, unitRequests)
+import Differential (Answers, Asked (..), Outcome (..), Unit (..), bootstrapFrontend, compareAnswers, executableCandidate, unitRequests)
 import Compile (sourceRequest)
 import ElaborateRequest (LoadKind (..), LoadResponse (..), Response (..))
 import ElaboratorNative (frontendStage)
@@ -31,9 +34,13 @@ testFrontendBootstrap =
         , testCase "the pin records the elaborator's sources as they are (a change to them comes with a new seed)" $
             testAssertEq frontendSources (Ok frontendSeedSources)
         , TestCase "a missing or corrupt seed is refused, and an elaborator that fails refuses the module" refusals
-        , TestCase "stages 1 and 2 answer the requests of the elaborator and the compiler libraries as the seed does" stagesAgree
-        , TestCase "stage 2 is stage 1: stage 1 elaborates the elaborator as the seed does" stagesFixpoint
-        , TestCase "the host's programs elaborated by stage 1 are the ones the seed gives" toolsAgree
+        -- (each waits for stage 1, which one of them builds, and then they elaborate side by side)
+        , TestParallel "stages"
+            [ TestCase "stage 1 answers the requests of the elaborator and the compiler libraries as the seed does" (stageAgrees 1)
+            , TestCase "stage 2 answers the requests of the elaborator and the compiler libraries as the seed does" (stageAgrees 2)
+            , TestCase "stage 2 is stage 1: stage 1 elaborates the elaborator as the seed does" stagesFixpoint
+            , TestCase "the host's programs elaborated by stage 1 are the ones the seed gives" toolsAgree
+            ]
         , TestCase "the seed and the stages are kept in the cache" kept
         ]
 
@@ -67,21 +74,38 @@ refusals = withScratch $ \home -> do
             | expected `isInfixOf` e -> Nothing
             | otherwise -> Just (what ++ " was refused for another reason: " ++ e)
 
--- (stage 2 is stage 1's executable when the fixpoint holds, and is asked only when it is not)
-stagesAgree :: IO TestResult
-stagesAgree = do
+-- The requests of the elaborator's own package and of the compiler libraries, with the seed's answers: asked once, while
+-- stage 1 is built
+{-# NOINLINE seedRequests #-}
+seedRequests :: MVar (Maybe (Result [(Asked, Answers)] String))
+seedRequests = unsafePerformIO (newMVar Nothing)
+
+requestsOfTheSeed :: IO (Result [(Asked, Answers)] String)
+requestsOfTheSeed = modifyMVar seedRequests $ \known -> case known of
+    Just requests -> pure (known, requests)
+    Nothing -> do
+        own <- unitRequests bootstrapFrontend (EmbeddedPackage "lib/elaborate/elaborate.tersus")
+        libraries <- unitRequests bootstrapFrontend Libraries
+        let requests = own `bindResult` \a -> mapResult (a ++) libraries
+        _ <- evaluate (either length length (case requests of Ok r -> Right r; Error e -> Left e))
+        pure (Just requests, requests)
+
+-- (stage 2 is stage 1's executable when the fixpoint holds, and then there is nothing more to ask it)
+stageAgrees :: Int -> IO TestResult
+stageAgrees n = do
+    asked <- newEmptyMVar
+    _ <- forkIO (try requestsOfTheSeed >>= putMVar asked)
+    stage <- frontendStage n
     one <- frontendStage 1
-    two <- frontendStage 2
-    own <- unitRequests bootstrapFrontend (EmbeddedPackage "lib/elaborate/elaborate.tersus")
-    libraries <- unitRequests bootstrapFrontend Libraries
-    let requests = own `bindResult` \a -> mapResult (a ++) libraries
-    case (one, two, requests) of
-        (Error e, _, _) -> pure (Just ("stage 1: " ++ e))
-        (_, Error e, _) -> pure (Just ("stage 2: " ++ e))
+    requests <- takeMVar asked >>= either (\e -> throwIO (e :: SomeException)) pure
+    case (stage, one, requests) of
+        (Error e, _, _) -> pure (Just ("stage " ++ show n ++ ": " ++ e))
+        (_, Error e, _) -> pure (Just ("stage 1: " ++ e))
         (_, _, Error e) -> pure (Just ("the requests: " ++ e))
-        (Ok (stageOne, _), Ok (stageTwo, _), Ok answered)
+        (Ok (exe, _), Ok (stageOne, _), Ok answered)
             | null answered -> pure (Just "no requests")
-            | otherwise -> firstFailure <$> sequence [agree exe rq reference | exe <- nub [stageOne, stageTwo], (rq, reference) <- answered]
+            | n > 1 && exe == stageOne -> pure Nothing
+            | otherwise -> firstFailure <$> sequence [agree exe rq reference | (rq, reference) <- answered]
   where
     agree exe rq reference = do
         answer <- executableCandidate exe rq
@@ -107,7 +131,9 @@ toolsAgree = do
     case one of
         Error e -> pure (Just ("stage 1: " ++ e))
         -- (the compiler libraries stage 1 elaborates, once for every tool)
-        Ok (exe, _) -> let libraries = compileLibPackageWith (nativeLoader exe) in pure (firstFailure (map (same exe libraries) entries))
+        Ok (exe, _) -> do
+            let libraries = compileLibPackageWith (nativeLoader exe)
+            firstFailure <$> boundedConcurrently 2 [evaluate (same exe libraries entry) | entry <- entries]
   where
     entries = [emitterEntry, "lib/mir/mir_verify/mir_verify.tersus", "lib/mir/mir_erase/mir_erase.tersus", "lib/parser/parser.tersus", "lib/ast_reader/ast_reader.tersus", validationEntry]
     same exe libraries entry = case (toolProgramWith (nativeLoader exe) libraries entry, toolProgram entry) of
