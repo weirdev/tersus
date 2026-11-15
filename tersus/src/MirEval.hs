@@ -657,7 +657,9 @@ evalRvalue frame rv =
         Borrow root steps _ -> MRef root <$$> mapResults evalStep steps
         Deref o -> operandValue frame o `bindResult` resolveRef frame
         BinaryOp op a b -> operandValue frame a `bindResult` \x -> operandValue frame b `bindResult` \y -> binary op x y
-        ListOp op os -> mapResults (\o -> operandValue frame o `bindResult` resolveRef frame) os `bindResult` listOp op
+        ListOp op os -> mapResults listOperand (zip [0 ..] os) `bindResult` listOp op
+          where
+            listOperand (i, o) = operandValue frame o `bindResult` \v -> if keepsOperand op i then Ok v else resolveRef frame v
         MakeList os -> MList <$$> mapResults (operandValue frame) os
         MakeBox o -> operandValue frame o
         Unbox o -> operandValue frame o
@@ -684,6 +686,19 @@ evalRvalue frame rv =
   where
     f <$$> r = mapResult f r
     evalStep = evalRefStep frame
+
+-- The operands an operation keeps or gives back as they are, an element it stores and what an Uninit holds (which is the
+-- Uninit here): a reference there is the value itself, as in MakeList and MakeBox, and not the place it is to
+keepsOperand :: ListOp -> Int -> Bool
+keepsOperand op i = case op of
+    Push -> i == 1
+    Set -> i == 2
+    NewArray -> i == 1
+    NewBoxed -> i == 1
+    UninitNew -> True
+    UninitGet -> True
+    UninitTake -> True
+    _ -> False
 
 binary :: BinOp -> MirValue -> MirValue -> Result MirValue String
 binary Add (MInt a) (MInt b) = checked (a + b)
