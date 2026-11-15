@@ -703,7 +703,7 @@ a = Adder { n: 10 };
 return apply(&a, 5);    // 15
 ```
 
-The impl is written for the shape, with `call` taking the receiver the kind says (`&Self`, `&mut Self` or `Self`) followed by the shape's parameters, and it is checked against the shape's contracts as any impl is checked against its trait. Closures that capture variables, and named functions given where a function shape is wanted, are later steps: a plain function value (`fn(Int) -> Int`) does not meet a function-shape bound yet.
+The impl is written for the shape, with `call` taking the receiver the kind says (`&Self`, `&mut Self` or `Self`) followed by the shape's parameters, and it is checked against the shape's contracts as any impl is checked against its trait. A named function given where a function shape is wanted is wrapped in a struct with no fields that implements the shape, its `call` calling the function itself, so it meets the bound as a function object does and is checked against the shape's contracts by its own. Closures that capture variables are a later step: a plain function value (`fn(Int) -> Int`) does not meet a function-shape bound yet.
 
 ### Variadic functions
 
