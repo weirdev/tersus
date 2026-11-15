@@ -35,7 +35,7 @@ testClosures =
                     programFromFiles
                         "app/main.tersus"
                         [ ("app/package.tersus", "")
-                        , ("app/main.tersus", "import apply; struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; a = Adder { n: 10 }; return apply::apply(&a, 5);")
+                        , ("app/main.tersus", "import app::apply; struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; a = Adder { n: 10 }; return apply::apply(&a, 5);")
                         , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
                         ]
                 pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
