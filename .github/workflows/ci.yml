@@ -16,12 +16,12 @@ concurrency:
 jobs:
   haskell:
     # (`host` runs testHostValidation; see tersus/README.md)
-    name: ${{ matrix.shard == 'host' && 'Host validation' || format('Haskell build and tests ({0}/7)', matrix.shard) }}
+    name: ${{ matrix.shard == 'host' && 'Host validation' || format('Haskell build and tests ({0}/9)', matrix.shard) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, host]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, host]
     # Keep the failure bound independent of the measured turnaround target.
     timeout-minutes: 60
     defaults:
@@ -98,7 +98,7 @@ jobs:
           python3 dev/ci_resources.py
           # (a host run takes about 20 minutes with no verdicts cached; one that hangs leaves what it was waiting on)
           if [ '${{ matrix.shard }}' = host ]; then (sleep 1800; echo '[HANG DUMP]'; ps -eo pid,ppid,stat,etime,wchan:30,rss,args --forest | grep -v ' \[' | cut -c1-240; for pid in $(pgrep -f tersus); do echo "== $pid"; sudo cat /proc/$pid/stack; ls -l /proc/$pid/fd | cut -c40-; done) & fi
-          /usr/bin/time -v stack test --test-arguments='-j 4 ${{ matrix.shard == 'host' && 'testHostValidation' || format('--shard {0}/7', matrix.shard) }} +RTS -N2 -RTS'
+          /usr/bin/time -v stack test --test-arguments='-j 4 ${{ matrix.shard == 'host' && 'testHostValidation' || format('--shard {0}/9', matrix.shard) }} +RTS -N2 -RTS'
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)

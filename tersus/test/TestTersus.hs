@@ -111,7 +111,7 @@ allGroups = concatMap registered originalGroups
             Nothing -> [original]
 
 batchedGroups :: [(Test, [Test])]
-batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader]]
+batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted, testAstData, testParser, testAstReader, testSharedCache, testMirLowered]]
 
 originalGroups :: [Test]
 originalGroups =
@@ -247,7 +247,9 @@ runInParallel jobs names = do
     parent <- getProcessID
     let isolated = if bootstrapOverlapAllowed False jobs processors names False then show parent else ""
         environment = ("TERSUS_PARSER_BOOTSTRAP_ISOLATED", isolated) : [(key, value) | (key, value) <- inherited, key /= "TERSUS_PARSER_BOOTSTRAP_ISOLATED"]
-        rtsOptions = ["-s" | statistics == Just "1"]
+        share = childCapabilities jobs processors (length names)
+        -- (sequential GC: the parallel collector's threads only spin beside the other groups' processes)
+        rtsOptions = ["-N" ++ show share, "-qg"] ++ ["-s" | statistics == Just "1"]
     putStrLn ("Running " ++ show (length names) ++ " test groups in " ++ show jobs ++ " processes")
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
@@ -265,7 +267,7 @@ runInParallel jobs names = do
                     result <- try $ restore $ do
                         started <- getMonotonicTime
                         putStrLn ("[START] " ++ name)
-                        let arguments = [name, "--child", "+RTS", "-N1"] ++ rtsOptions ++ ["-RTS"]
+                        let arguments = [name, "--child", "+RTS"] ++ rtsOptions ++ ["-RTS"]
                         outcome <- try (readProcessOutput (proc self arguments){env = Just environment} "")
                         finished <- getMonotonicTime
                         putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))

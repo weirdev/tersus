@@ -12,8 +12,9 @@ in Tersus; Haskell retains type checking, lowering and the host bridges.
 ## Tests
 
 `stack test --test-arguments='-j 4'` runs up to four group processes, each
-with one Haskell capability. Native, MIR emitter, MIR verifier and self-hosted
-validator tests are each split into four batches. Original names such as
+with its share of the processors (one Haskell capability when there are more
+groups than processes). Native, MIR emitter, MIR verifier, self-hosted
+validator, shared cache and lowered MIR tests are each split into four batches. Original names such as
 `testNative` select all four; `testNative:2/4` selects just that batch.
 `--shard k/n` intersects these selections with the full-suite shard assignment.
 All original leaf actions and prefix labels are retained. Native memory-limit
