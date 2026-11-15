@@ -24,20 +24,19 @@ testClosures =
             , testCase "an FnMut function object updates through &mut Self" (runs (counter ++ "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; c = Counter { count: 0 }; r = twice(&mut c); return r * 100 + c.count;") 1202)
             , testCase "an FnOnce function object is called by value" (runs ("struct Once { n: Int }; impl FnOnce(x: Int) -> Int for Once { fn call(self: Self, x: Int) -> Int { return x + self.n; }; }; fn useOnce<F: FnOnce(x: Int) -> Int>(f: F, x: Int) -> Int { return f(x); }; o = Once { n: 2 }; return useOnce(o, 40);") 42)
             , testCase "the same shape in two bounds is one trait" (runs (adder ++ "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; fn apply2<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return apply(f, x) + 1; }; a = Adder { n: 10 }; return apply2(&a, 5);") 16)
-            , testCase "a contract in the bound is met by the impl" (runs ("struct Inc { n: Int }; impl Fn(x: Int) -> Int [{ }] [{ affirm return > x; }] for Inc { fn call(self: &Self, x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + 1; }; }; fn useIt<F: Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; i = Inc { n: 0 }; return useIt(&i, 5);") 6)
-            , testCase "a contract in the bound is not met by the impl" (rejected ("struct Bad { n: Int }; impl Fn(x: Int) -> Int [{ }] [{ affirm return > x; }] for Bad { fn call(self: &Self, x: Int) -> Int [{ }] [{ }] { return x; }; }; fn useIt<F: Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; b = Bad { n: 0 }; return useIt(&b, 5);") "does not meet")
+            , testCase "a contract in the bound is met by the impl" (runs ("struct Inc { n: Int }; impl Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] for Inc { fn call(self: &Self, x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + 1; }; }; fn useIt<F: Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; i = Inc { n: 0 }; return useIt(&i, 5);") 6)
+            , testCase "a contract in the bound is not met by the impl" (rejected ("struct Bad { n: Int }; impl Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] for Bad { fn call(self: &Self, x: Int) -> Int [{ }] [{ }] { return x; }; }; return 0;") "does not meet")
             , testCase "an FnMut object does not meet an Fn bound" (rejected (counter ++ "fn apply<F: Fn() -> Int>(f: &F) -> Int { return f(); }; c = Counter { count: 0 }; return apply(&c);") "Fn(...)")
             , testCase "a type with no function impl does not meet an Fn bound" (rejected ("struct Plain { n: Int }; fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; p = Plain { n: 1 }; return apply(&p, 5);") "Fn(...)")
-            , testCase "a shape with no result type is a parse error" (pipelineRejected "fn apply<F: Fn(x: Int)>(f: &F, x: Int) -> Int { return x; }; return 0;" "->")
+            , testCase "a shape with no result type is a parse error" (pipelineRejected "fn apply<F: Fn(x: Int)>(f: &F, x: Int) -> Int { return x; }; return 0;" "expected (")
             , testCase "a bound shape that is never called still checks" (valid (adder ++ "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return x; }; return 0;"))
             , TestCase "a function object across modules" $ do
                 program <-
                     programFromFiles
                         "app/main.tersus"
                         [ ("app/package.tersus", "")
-                        , ("app/main.tersus", "import vendor::apply; struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; a = Adder { n: 10 }; return apply::apply(&a, 5);")
-                        , ("app/vendor/package.tersus", "")
-                        , ("app/vendor/apply/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
+                        , ("app/main.tersus", "import apply; struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; a = Adder { n: 10 }; return apply::apply(&a, 5);")
+                        , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
                         ]
                 pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
             ]
