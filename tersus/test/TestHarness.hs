@@ -77,6 +77,7 @@ import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (IOException, SomeException, bracket, bracket_, bracketOnError, displayException, finally, mask, onException, throwIO, try)
 import Control.Monad (forM, when)
+import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumCapabilities)
 import Data.Char (isHexDigit, isSpace, toLower)
 import Data.List (isInfixOf, isPrefixOf, stripPrefix)
@@ -194,8 +195,10 @@ caseSlots = unsafePerformIO (getNumCapabilities >>= newQSem . max 1)
 
 runTest :: [String] -> Test -> IO TestSummary
 runTest prefixes (TestCase name resultIO) = bracket_ (waitQSem caseSlots) (signalQSem caseSlots) $ do
-    let fullName = unwords (prefixes ++ [name])
+    started <- getMonotonicTime
     resultOrCrash <- try (resultIO >>= \result -> Exception.evaluate (forceTestResult result) >> pure result) :: IO (Either SomeException TestResult)
+    finished <- getMonotonicTime
+    let fullName = unwords (prefixes ++ [name]) ++ " (" ++ show (fromIntegral (round ((finished - started) * 10) :: Int) / 10 :: Double) ++ "s)"
     case resultOrCrash of
         Right Nothing -> do
             putStrLn $ "[PASS] " ++ fullName
