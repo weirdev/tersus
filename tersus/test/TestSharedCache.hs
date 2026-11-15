@@ -2532,29 +2532,28 @@ withToolsCacheHome use = do
     case (warm, original) of
         (Error e, _) -> pure (Just e)
         (_, Error e) -> pure (Just e)
-        (Ok _, Ok dir) -> withCacheHome $ \home -> do
-            let cache = home </> "tersus"
-                pass = do
-                    names <- filter compiledToolName <$> listDirectory cache
-                    before <- mapM (toolIdentity cache) names
-                    result <- use home
-                    afterNames <- filter compiledToolName <$> listDirectory cache
-                    after <- mapM (toolIdentity cache) names
-                    pure (names, before, result, afterNames, after)
-            copyCompiledTools dir cache
-            entries <- entryFiles home
-            -- (the copy holds the tools the runner had built when it was taken, which depends on the groups that ran
-            -- before: one it lacked is built by the first pass, and then the second has to find every tool it needs)
-            first@(firstNames, _, _, firstAfter, _) <- pass
-            (names, before, result, afterNames, after) <- if sort firstAfter == sort firstNames then pure first else pass
-            pure $ firstFailure
+        (Ok _, Ok dir) -> attempt True dir
+  where
+    -- (the copy holds the tools the runner had built when it was taken, which depends on the groups that ran before:
+    -- when the check builds one it lacked, it runs again from nothing in a fresh home, with that tool in the copy)
+    attempt retry source = withCacheHome $ \home -> do
+        let cache = home </> "tersus"
+        copyCompiledTools source cache
+        names <- listDirectory cache
+        before <- mapM (toolIdentity cache) names
+        entries <- entryFiles home
+        result <- use home
+        afterNames <- filter compiledToolName <$> listDirectory cache
+        after <- mapM (toolIdentity cache) names
+        if retry && sort afterNames /= sort names
+            then attempt False cache
+            else pure $ firstFailure
                 [ testAssertEq entries []
                 , testAssertTrue (not (null names) && all (not . isPrefixOf "verdicts-") names)
                 , result
                 , testAssertEq (sort afterNames) (sort names)
                 , testAssertEq after before
                 ]
-  where
     toolIdentity cache name = do
         let path = cache </> name
         digest <- executableDigest path
