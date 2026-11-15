@@ -176,8 +176,14 @@ fn intSetAdd(xs: &List<Int>, x: Int) -> List<Int> ~ {
     if !added { out = push(out, x); };
     return out;
 };
+// (by value: the sets are mostly built in ascending order, and a largest element is pushed in place)
+fn intSetInsert(xs: List<Int>, x: Int) -> List<Int> ~ {
+    if size(xs) = 0 { return push(xs, x); };
+    if last(xs) < x { return push(xs, x); };
+    return intSetAdd(&xs, x);
+};
 fn localsOf(xs: &List<Key>) -> List<Int> ~ {
-    out = []; for k in xs { out = intSetAdd(out, k.local); };
+    out = []; for k in xs { out = intSetInsert(out, k.local); };
     return out;
 };
 fn operandLocal(o: &Operand) -> Int {
@@ -245,7 +251,7 @@ fn successors(t: &Terminator) -> List<Int> {
 };
 // Whether every block of every function has an id that is not negative, there is a block 0, and every jump goes to a block of the function
 fn functionBlocksWellFormed(f: &Function) -> Bool ~ {
-    ids = []; for b in f.blocks { if b.id < 0 { return false; }; ids = intSetAdd(ids, b.id); };
+    ids = []; for b in f.blocks { if b.id < 0 { return false; }; ids = intSetInsert(ids, b.id); };
     if !intSetHas(ids, 0) { return false; };
     for b in f.blocks { for s in successors(b.term) { if !intSetHas(ids, s) { return false; }; }; };
     return true;
@@ -295,7 +301,14 @@ fn needsDrop(p: &Program, t: &Type) -> Bool ~ {
     if !found { return false; };
     base = beforeAngle(name);
     if isStorageList(p, &base) || hasDrop(p, name) { return true; };
-    for v in variantsOf(p.types, name) { for f in v.fields { if needsDrop(p, f.ty) { return true; }; }; };
+    at = lookupDecl(p.types, name);
+    if at < 0 { return false; };
+    return fieldsNeedDrop(p, get(p.types, at));
+};
+// (read where they are, not copied out as variantsOf would)
+fn fieldsNeedDrop(p: &Program, d: &TypeDecl) -> Bool ~ {
+    if d is TypeDecl::DStruct { for f in (d as TypeDecl::DStruct).fields { if needsDrop(p, f.ty) { return true; }; }; return false; };
+    for v in (d as TypeDecl::DEnum).variants { for f in v.fields { if needsDrop(p, f.ty) { return true; }; }; };
     return false;
 };
 fn fieldsOf(p: &Program, ctor: &String) -> List<Field> ~ {
@@ -350,7 +363,7 @@ fn borrowKey(names: &List<FieldName>, root: Int, steps: &List<RefStep>) -> Key ~
 };
 fn noLoan(l: Int) -> Loan { return Loan { local: l, refs: [], view: [], isView: false }; };
 fn loanLookup(loans: &List<Loan>, l: Int) -> Loan ~ { for x in loans { if x.local = l { return clone(x); }; }; return noLoan(l); };
-// (by value: a loan that is replaced in place, or one that is not kept and not there, copies nothing)
+// (by value: a loan that is replaced in place, added after the last, or not kept and not there, copies nothing)
 fn loanPut(loans: List<Loan>, value: Loan) -> List<Loan> ~ {
     keep = size(value.refs) + size(value.view) > 0;
     i = 0;
@@ -358,6 +371,7 @@ fn loanPut(loans: List<Loan>, value: Loan) -> List<Loan> ~ {
     present = i < size(loans) && get(loans, i).local = value.local;
     if present && keep && i < size(loans) { return set(loans, i, value); };
     if !present && !keep { return loans; };
+    if !present && i >= size(loans) { return push(loans, value); };
     out = []; added = false;
     for x in loans {
         if !added && x.local >= value.local { if keep { out = push(out, clone(value)); }; added = true; };
