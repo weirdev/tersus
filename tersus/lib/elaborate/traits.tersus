@@ -598,7 +598,7 @@ fn wrapperValue(st: St, wrapperName: &String, wrapperTy: Int, expected: Int) -> 
         st = emitBuiltinCall(st, key, &borrowArgs);
         borrowNode = st.nid;
         st = wrapTy(st, ek, wrapperTy);
-        return St { ok: true, te: TE { node: borrowNode, types: push([], st.ty) }, ..st };
+        return St { ok: true, te: TE { node: borrowNode, types: push(push([], st.ty), wrapperTy) }, ..st };
     };
     return St { ok: true, te: TE { node: callNode, types: push([], wrapperTy) }, ..st };
 };
