@@ -388,6 +388,8 @@ lowerFunction renames original fn =
                 (Set, TList _, _) -> destTy
                 -- (the list that is popped has the type of the result)
                 (Pop, TList _, _) -> destTy
+                -- (an Uninit of a list is the list natively, so the one it is made with has the type of the result)
+                (UninitNew, TList _, _) -> destTy
                 -- (a constant list that is read from has elements of the type that is read, which an empty one among them does not say)
                 (_, _, Const _) | op `elem` [First, Last, Get] -> TList destTy
                 _ -> operandTy
@@ -416,7 +418,7 @@ lowerFunction renames original fn =
             (Pop, []) -> callTo "listPop" [l] dest
             (Set, [i, x]) -> operandFor element x >>= \x' -> callTo "listSet" [l, i, x'] dest
             (FromList, []) -> emit (Assign dest (ListOp FromList [l]))
-            _ -> emit (Assign dest (ListOp op os))
+            _ -> emit (Assign dest (ListOp op (l : drop 1 os)))
 
     lowerRvalue destTy rv = case rv of
         Use o -> Use <$> operandFor destTy o
