@@ -92,7 +92,9 @@ jobs:
       # It loads examples/ relative to the package directory, so run from tersus/.
       - name: Test
         env:
-          GHCRTS: -A16m
+          # (sequential GC: the compiler's processes are mostly serial, and a parallel collector's threads only spin
+          # beside the other processes of the runner)
+          GHCRTS: -A16m -qg
           TERSUS_TEST_RTS_STATS: '1'
         run: |
           python3 dev/ci_resources.py
