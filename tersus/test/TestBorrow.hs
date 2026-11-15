@@ -161,13 +161,33 @@ testBorrow =
                 , testCase "reborrows of two fields are assigned through while their parent waits" (runs "struct P { a: Int, b: Int }; fn f(c: Int) -> Int { v = P { a: 1, b: 2 }; q = &mut v; p = &mut (*q).a; s = &mut (*q).b; *p = 3; *s = 4; return v.a + v.b; }; return f(1);" (VInt 7))
                 , testCase "a holder assigns through its field twice" (runs "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; *w.r = 1; *w.r = 2; return x; }; return f(1);" (VInt 2))
                 , testCase "a reference read out of a holder is assigned through, then another" (runs "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; q = w.r; *q = 42; p = w.r; *p = 41; return x; }; return f(1);" (VInt 41))
-                , testCase "and out of a list" (valid "fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); p = get(rs, 0); *p = 41; q = get(rs, 0); *q = 42; return x; }; return f(1);")
+                , testCase "and out of a list" (runs "fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); p = get(rs, 0); *p = 41; q = get(rs, 0); *q = 42; return x; }; return f(1);" (VInt 42))
                 , testCase "and out of a Box" (runs "fn f(c: Int) -> Int { x = 1; b = Box::new(&mut x); p = Box::unbox(b); *p = 41; q = Box::unbox(b); *q = 42; return x; }; return f(1);" (VInt 42))
                 , testCase "a holder that was moved assigns through its field twice" (runs "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; w2 = w; *w2.r = 1; *w2.r = 2; return x; }; return f(1);" (VInt 2))
                 , testCase "and one held in another struct" (runs "struct W { r: &mut Int }; struct O { w: W }; fn f(c: Int) -> Int { x = 1; o = O { w: W { r: &mut x } }; *o.w.r = 1; *o.w.r = 2; return x; }; return f(1);" (VInt 2))
                 , testCase "the holder assigns through its field after a reborrow of a reference read out of it" (runs "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; q = w.r; p = &mut *q; *p = 1; *q = 2; *w.r = 3; return x; }; return f(1);" (VInt 3))
                 , testCase "a reborrow of a reference read out of a holder is assigned through twice" (runs "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; q = w.r; p = &mut *q; *p = 2; *p = 1; return x; }; return f(1);" (VInt 1))
                 , testCase "references read out of two fields of a holder are assigned through together" (runs "struct V { a: &mut Int, b: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 2; v = V { a: &mut x, b: &mut y }; p = v.a; q = v.b; *p = 3; *q = 4; return x + y; }; return f(1);" (VInt 7))
+                ]
+            , TestList
+                "a reference read out of a list or an Uninit is to its place"
+                [ testCase "out of a list in a struct" (runs "struct H { rs: List<&mut Int> }; fn f(c: Int) -> Int { x = 1; h = H { rs: push([], &mut x) }; p = get(h.rs, 0); *p = 41; return x; }; return f(1);" (VInt 41))
+                , testCase "out of a list of lists" (runs "fn f(c: Int) -> Int { x = 1; rss = push([], push([], &mut x)); rs = get(rss, 0); p = get(rs, 0); *p = 41; return x; }; return f(1);" (VInt 41))
+                , testCase "out of a list in a Box" (runs "fn f(c: Int) -> Int { x = 1; b = Box::new(push([], &mut x)); rs = Box::unbox(b); p = get(rs, 0); *p = 41; return x; }; return f(1);" (VInt 41))
+                , testCase "out of a Box in a list" (runs "fn f(c: Int) -> Int { x = 1; bs = push([], Box::new(&mut x)); b = get(bs, 0); p = Box::unbox(b); *p = 41; return x; }; return f(1);" (VInt 41))
+                , testCase "one that was set into the list" (runs "fn f(c: Int) -> Int { x = 1; y = 2; rs = push([], &mut x); rs = set(rs, 0, &mut y); p = get(rs, 0); *p = 41; return x * 100 + y; }; return f(1);" (VInt 141))
+                , testCase "one of two in the list" (runs "fn f(c: Int) -> Int { x = 1; y = 2; rs = push(push([], &mut x), &mut y); p = get(rs, 1); *p = 41; q = get(rs, 0); *q = 40; return x + y; }; return f(1);" (VInt 81))
+                , testCase "read, then written" (runs "fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); p = get(rs, 0); y = *p; *p = y + 40; return x; }; return f(1);" (VInt 41))
+                , testCase "to an element of a list" (runs "fn f(c: Int) -> Int { xs = [1, 2]; rs = push([], &mut get(xs, 1)); p = get(rs, 0); *p = 41; return get(xs, 1); }; return f(1);" (VInt 41))
+                , testCase "to a field" (runs "struct P { a: Int, b: Int }; fn f(c: Int) -> Int { v = P { a: 1, b: 2 }; rs = push([], &mut v.b); p = get(rs, 0); *p = 41; return v.b; }; return f(1);" (VInt 41))
+                , testCase "returned by a call" (runs "fn id(r: &mut Int) -> &mut Int from r { return r; }; fn f(c: Int) -> Int { x = 1; rs = push([], id(&mut x)); p = get(rs, 0); *p = 41; return x; }; return f(1);" (VInt 41))
+                , testCase "to an update parameter" (runs "fn g(r: &mut Int) -> Int { rs = push([], &mut r); q = get(rs, 0); *q = 41; return 0; }; fn f(c: Int) -> Int { x = 1; y = g(&mut x); return x + y; }; return f(1);" (VInt 41))
+                , testCase "in a function the list is lent to" (runs "fn g(rs: &List<&mut Int>) -> Int [{ affirm size(rs) > 0; }] [{ }] { q = get(rs, 0); *q = 41; return 0; }; fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); y = g(rs); return x + y; }; return f(1);" (VInt 41))
+                , testCase "in a loop" (runs "fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { p = get(rs, 0); *p = *p + 1; i = i + 1; }; return x; }; return f(1);" (VInt 4))
+                , testCase "in one branch" (runs "fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); if c > 0 { p = get(rs, 0); *p = 41; } else { }; return x; }; return f(1) * 100 + f(0);" (VInt 4101))
+                , testCase "outside a function" (runs "x = 1; rs = push([], &mut x); p = get(rs, 0); *p = 41; return x;" (VInt 41))
+                , testCase "taken out of an Uninit" (runs "fn f(c: Int) -> Int { x = 1; u = Uninit::new(&mut x); p = Uninit::take(u); *p = 41; return x; }; return f(1);" (VInt 41))
+                , testCase "read out of an Uninit" (runs "fn f(c: Int) -> Int { x = 1; u = Uninit::new(&mut x); p = Uninit::get(u); *p = 41; return x; }; return f(1);" (VInt 41))
                 ]
             , TestList
                 "the rest of the plan"
