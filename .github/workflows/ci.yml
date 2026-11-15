@@ -73,18 +73,27 @@ jobs:
             emitter-${{ runner.os }}-shard-${{ matrix.shard }}-
 
       # The executables built from the pinned seeds (the parser's, the emitter's and the elaborator's F0), which every
-      # runner needs before anything else and which change only with a pin: kept under the pins, so that a runner whose
-      # cache above was made under other pins does not spend minutes of clang on them first. (Their names say what
-      # they are made of, so a stale one is only not used.)
-      - name: Cache the seed executables
+      # runner needs before anything else and which change only with their pin: one cache for each, so that a new pin
+      # rebuilds only its own seed, and so that what a cache saves is complete (a runner that built none of a seed saves
+      # nothing under its key, and the next runner that builds it does). (Their names say what they are made of, so a
+      # stale one is only not used.)
+      - name: Cache the emitter seed
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/tersus/seed-*
-            ~/.cache/tersus/parser-seed-*
-            ~/.cache/tersus/frontend-seed-*
-            ~/.cache/tersus/tersus_rt_*
-          key: seeds-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/*.sha256', 'tersus/src/LlvmRuntime.hs') }}
+          path: ~/.cache/tersus/seed-*
+          key: seed-emitter-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/emitter.sha256', 'tersus/src/LlvmRuntime.hs') }}
+
+      - name: Cache the parser seed
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tersus/parser-seed-*
+          key: seed-parser-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/parser.sha256', 'tersus/src/LlvmRuntime.hs') }}
+
+      - name: Cache the elaborator seed
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tersus/frontend-seed-*
+          key: seed-frontend-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/frontend.sha256', 'tersus/src/LlvmRuntime.hs') }}
 
       # On master the host runner proves every function itself, so the verdicts it saves, which pull requests start
       # from, were given by master's own code.
