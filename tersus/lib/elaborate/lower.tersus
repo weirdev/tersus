@@ -224,7 +224,7 @@ fn lowerTypeDef(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
                 vv = (node as AstNode::Variant).value;
                 vname = nameText(src, vv.n);
                 ls = fieldsTokens(ls, src, vv.fs);
-                ls = variantFieldTypes(ls, &name, &vname);
+                ls = variantMemberTypes(ls, &name, &vname);
                 line = lwSp(lwSp(line, quote(&vname)), &ls.name);
                 names = push(names, vname);
             };
@@ -262,7 +262,7 @@ fn structFieldTypes(ls: LowSt, name: &String, withSizes: Bool) -> LowSt ~ {
 
 // What a variant of an enum holds (ls.tyList), by the variant's name and by its name under the enum's, and among
 // everything a value of the enum may hold
-fn variantFieldTypes(ls: LowSt, owner: &String, variant: &String) -> LowSt ~ {
+fn variantMemberTypes(ls: LowSt, owner: &String, variant: &String) -> LowSt ~ {
     tys = clone(ls.tyList);
     whole = HashMap::lookup(&ls.typeFields, owner, []);
     for t in &tys { whole = push(whole, t); };
@@ -337,7 +337,7 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
     ls = newBlock(ls);
     joinB = ls.id;
     ls = lowerCondition(ls, src, cond, thenB, elseB);
-    before = clone(ls.bRefTargets);
+    targetsBefore = clone(ls.bRefTargets);
     ls = openBlock(ls, thenB);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &yes);
@@ -345,7 +345,7 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
     thenOpen = ls.bHasOpen;
     if thenOpen { ls = terminate(ls, gotoTerm(joinB)); };
     afterThen = clone(ls.bRefTargets);
-    ls = LowSt { bRefTargets: clone(before), ..ls };
+    ls = LowSt { bRefTargets: clone(targetsBefore), ..ls };
     ls = openBlock(ls, elseB);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &no);
@@ -354,8 +354,8 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
     if elseOpen { ls = terminate(ls, gotoTerm(joinB)); };
     // (a borrow made in one branch is not what the local holds where the branches meet)
     afterElse = clone(ls.bRefTargets);
-    joined = size(before);
-    ls = LowSt { bRefTargets: before, ..ls };
+    joined = size(targetsBefore);
+    ls = LowSt { bRefTargets: targetsBefore, ..ls };
     ls = forgetRecorded(ls, &afterThen, joined);
     ls = forgetRecorded(ls, &afterElse, joined);
     // (when both branches returned nothing reaches the join)
@@ -384,11 +384,11 @@ fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: 
     ls = LowSt { bLoops: loops, ..ls };
     ls = lowerCondition(ls, src, cond, bodyB, exit);
     ls = openBlock(ls, bodyB);
-    before = clone(ls.bRefTargets);
+    targetsBefore = clone(ls.bRefTargets);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &body);
     ls = leaveScope(ls);
-    common = commonRefTargets(&ls.bRefTargets, &before);
+    common = commonRefTargets(&ls.bRefTargets, &targetsBefore);
     ls = LowSt { bRefTargets: common, ..ls };
     if ls.bHasOpen { ls = terminate(ls, gotoTerm(header)); };
     ls = LowSt { bRefTargets: entry, ..ls };

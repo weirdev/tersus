@@ -2105,8 +2105,8 @@ fn emptyListExpr(st: St) -> Res<Int> ~ {
 
 fn listExpression(sourceText: &Input, st: St) -> Res<Int> ~ {
     saved = checkpoint(st);
-    Res { st: literalState, v: literal, ok: literalOk } = valueNode(sourceText, st);
-    if literalOk { return valExpr(literalState, literal); };
+    Res { st: literalState, v: literal, ok: literalParsed } = valueNode(sourceText, st);
+    if literalParsed { return valExpr(literalState, literal); };
     s = restore(literalState, saved);
     s = skipWs(sourceText, St { pos: s.pos + 1, ..s });
     Res { st: emptyState, v: empty, ok: emptyOk } = emptyListExpr(s);
@@ -2232,7 +2232,7 @@ fn letStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
 };
 
 fn matchExpression(sourceText: &Input, st: St) -> Res<Int> ~ {
-    Res { st: headState, v: head, ok: headOk } = matchHead(sourceText, st);
+    Res { st: headState, v: matchedHead, ok: headOk } = matchHead(sourceText, st);
     if !headOk { return Res<Int> { st: headState, v: 0, ok: false }; };
     s = headState;
     arms = [];
@@ -2249,7 +2249,7 @@ fn matchExpression(sourceText: &Input, st: St) -> Res<Int> ~ {
     if !chainOk { return Res<Int> { st: chainState, v: 0, ok: false }; };
     Res { st: nameState, v: name, ok: nameOk } = putName(chainState, "$match");
     if !nameOk { return Res<Int> { st: nameState, v: 0, ok: false }; };
-    Res { st: letState, v: binding, ok: letOk } = stmtNode(nameState, AstStatement::Let { n: name, e: head.scrutinee });
+    Res { st: letState, v: binding, ok: letOk } = stmtNode(nameState, AstStatement::Let { n: name, e: matchedHead.scrutinee });
     if !letOk { return Res<Int> { st: letState, v: 0, ok: false }; };
     return scopedExpr(letState, push([], binding), chain);
 };
@@ -5533,9 +5533,9 @@ fn assignsNode(st: &St, var: &String, id: Int) -> Bool ~ {
         value = (n as AstNode::Expression).value;
         if value is AstExpression::F {
             call = value as AstExpression::F;
-            head = nodeAt(st, call.f);
-            if head is AstNode::Expression {
-                headValue = (head as AstNode::Expression).value;
+            headNode = nodeAt(st, call.f);
+            if headNode is AstNode::Expression {
+                headValue = (headNode as AstNode::Expression).value;
                 if headValue is AstExpression::Val {
                     if valueBuiltinPrim(st, (headValue as AstExpression::Val).v) = "BorrowMutOf" {
                         args = exprListIds(st, call.xs);

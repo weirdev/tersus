@@ -280,12 +280,12 @@ fn captureExpression(st: St, te: &TE) -> St ~ {
 };
 
 fn copyExpressionOrigins(st: St, source: Int, dest: Int) -> St ~ {
-    before = expressionOriginName(source);
+    sourceOrigin = expressionOriginName(source);
     after = expressionOriginName(dest);
-    i = indexIn(&st.originNames, &before);
+    i = indexIn(&st.originNames, &sourceOrigin);
     if i < 0 || i >= size(st.originRoots) { return st; };
     roots = clone(get(st.originRoots, i));
-    places = aliasesOf(st, &before);
+    places = aliasesOf(st, &sourceOrigin);
     st = putOrigins(st, &after, roots);
     return putAliases(st, &after, &places);
 };
@@ -637,15 +637,15 @@ fn refOriginsOf(st: &St, e: Int) -> Origins ~ {
     c = callOf(st, e);
     if c.ok && c.key = "Ctor" {
         out = [];
-        failed = false;
+        anyFailed = false;
         for a in &c.args {
-            if !failed {
+            if !anyFailed {
                 part = refOriginsOf(st, a);
                 for r in &part.names { out = push(out, clone(r)); };
-                failed = part.failed;
+                anyFailed = part.failed;
             };
         };
-        return Origins { names: out, failed: failed };
+        return Origins { names: out, failed: anyFailed };
     };
     if c.ok && (readsThrough(&c.key) && size(c.args) = 1) { return refOriginsOf(st, nth(&c.args, 0)); };
     return Origins { names: exprOriginCandidates(st, e), failed: false };
@@ -977,7 +977,7 @@ fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
         i = i + 1;
     };
     bounds = reachableOrigins(st, &bounds);
-    before = refsOf(&st);
+    entryRefsHere = refsOf(&st);
     i = 0;
     while i < size(inputs) [{ affirm i >= 0; affirm size(types) = size(inputs); }] ~ {
         input = get(inputs, i);
@@ -988,7 +988,7 @@ fn recordCallFieldOrigins(st: St, value: &TE) -> St ~ {
             targets = clone(st.names);
             st = zonk(st, get(types, i));
             if kindOf(st, st.ty) = 11 { for place in expressionPlaces(st, input.node) { targets = push(targets, clone(place.root)); }; };
-            targets = reachableIn(&before.originNames, &before.originRoots, &targets);
+            targets = reachableIn(&entryRefsHere.originNames, &entryRefsHere.originRoots, &targets);
             if size(targets) = 0 { return typeError(st, "a call that can replace reference fields needs resolved target origin bounds"); };
             for target in &targets {
                 at = indexIn(&st.originNames, target);

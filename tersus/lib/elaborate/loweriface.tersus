@@ -4,7 +4,7 @@ import elaborate::records { codecTypeAt, listItems, nameText, nodeIn, signatureO
 import elaborate::state { intText };
 import elaborate::lowerstate { GenericRec, LBlock, LDecl, LFn, LowSt, TDecl, Term, fromCodecTy, hasText, isMutRefTy, isRefTy, lwBaseName, lwCat, quote, lwSp };
 import elaborate::lowerbuild { emptyBlockPayload, isFunct, namesOf, stmtAt, terminationPayload, valOf, validationsPayload };
-import elaborate::lower { fieldsTokens, setGlobalTy, sigType, structFieldTypes, variantFieldTypes };
+import elaborate::lower { fieldsTokens, setGlobalTy, sigType, structFieldTypes, variantMemberTypes };
 
 // What a module is lowered against: the structs, enums, structs with sizes and
 // invariants of the interfaces it is lowered with (the first interface wins a name; the module's own declarations win
@@ -127,7 +127,7 @@ fn seedType(ls: LowSt, src: &List<AstNode>, name: String, variants: List<String>
     line = lwSp(lwSp("enum", quote(&name)), intText(size(variants)));
     for v in &variants {
         ls = fieldsTokens(ls, src, HashMap::lookup(fieldsOf, v, 0 - 1));
-        ls = variantFieldTypes(ls, &name, v);
+        ls = variantMemberTypes(ls, &name, v);
         line = lwSp(lwSp(line, quote(v)), &ls.name);
     };
     types = ls.types.insert(name, TDecl { isStruct: false, fieldNames: [], fieldTypes: [], variants: variants, line: line });

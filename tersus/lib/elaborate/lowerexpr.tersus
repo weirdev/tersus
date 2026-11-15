@@ -316,7 +316,7 @@ fn lowerIfExpr(ls: LowSt, src: &List<AstNode>, cond: Int, yes: Int, no: Int, ty:
     ls = newBlock(ls);
     joinB = ls.id;
     ls = lowerCondition(ls, src, cond, yesB, noB);
-    before = clone(ls.bRefTargets);
+    targetsBefore = clone(ls.bRefTargets);
     ls = openBlock(ls, yesB);
     ls = lowerLast(ls, src, yes);
     if !ls.ok { return ls; };
@@ -325,7 +325,7 @@ fn lowerIfExpr(ls: LowSt, src: &List<AstNode>, cond: Int, yes: Int, no: Int, ty:
     yesOpen = ls.bHasOpen;
     if yesOpen { ls = terminate(ls, gotoTerm(joinB)); };
     left = clone(ls.bRefTargets);
-    ls = LowSt { bRefTargets: before, ..ls };
+    ls = LowSt { bRefTargets: targetsBefore, ..ls };
     ls = openBlock(ls, noB);
     ls = lowerLast(ls, src, no);
     if !ls.ok { return ls; };
