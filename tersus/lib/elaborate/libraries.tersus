@@ -430,8 +430,15 @@ struct View { program: AstProgram, changed: Bool };
 struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool, spelled: Bool };
 
 fn hides(h: &Hide, name: &String) -> Bool ~ {
-    if h.spelled { return HashSet::contains(&h.declared, localName(name)); };
+    if h.spelled { return HashSet::contains(&h.declared, hideKey(name)); };
     return HashSet::contains(&h.declared, name);
+};
+
+// The name a declaration hides a library's by: a declaration's own spelling, but an impl's function (`<O as T>::f`)
+// by its whole canonical name, which names its impl's type and trait
+fn hideKey(name: &String) -> String ~ {
+    if size(name.bytes) > 0 && toInt(get(name.bytes, 0)) = 60 { return clone(name); };
+    return localName(name);
 };
 
 fn declaredName(h: &Hide, name: &String) -> Bool ~ {

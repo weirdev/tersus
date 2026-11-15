@@ -3,7 +3,7 @@ import data::codec::codec { catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
 import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType, withType };
 import elaborate::check { fnSigOf, mentionsParameter };
-import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureInstance, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
+import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureInstance, hasColons, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
@@ -949,10 +949,22 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
     base = baseNameOf(&name);
     st = ctorArgTypes(st, ctor.args);
     ctorArgs = clone(st.te.types);
-    st = namedTy(st, clone(base), ctorArgs);
+    st = namedTy(st, clone(base), clone(ctorArgs));
     ty0 = st.ty;
+    callee = funct;
     tuple = isTuple(&base);
     if !tuple { st = ensureInstance(st, ty0); };
+    // (a struct built with its type arguments is the instance they make, by its canonical name: the name as written
+    // spells a list or a Box by the language's word, not by the declaration it is)
+    if !tuple && !hasColons(&name) && size(ctorArgs) > 0 {
+        key = instanceName(&st, ty0);
+        if key != name {
+            st = emitCtorValue(st, clone(key), &ctorArgs, &fields);
+            st = emitVal(st, st.nid);
+            callee = st.nid;
+            name = key;
+        };
+    };
     declared = [];
     if !tuple {
         st = ctorInfo(st, &name);
@@ -974,7 +986,7 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
     if st.status != 0 { return st; };
     t = st.ty;
     argNodes = nodesOf(&inferred);
-    st = emitCall(st, funct, &argNodes);
+    st = emitCall(st, callee, &argNodes);
     return typed(st, st.nid, t, &inferred);
 };
 

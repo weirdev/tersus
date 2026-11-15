@@ -5,10 +5,10 @@ import data::reader::reader { parseAstLines, readAstRecords, readRecord, readRec
 import elaborate::builtins { loadBuiltins };
 import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
-import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, localName, shapedLibraries, definedFunctions, entryOf, implsEq, libIndex, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
+import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, hideKey, localName, shapedLibraries, definedFunctions, entryOf, implsEq, libIndex, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
 import elaborate::decls { fileDeclarations };
 import elaborate::resolve { Decl, Imp, Line, Maps, PFile, Pkg, countAt, finishPackage, mapsFor, moduleKey, noPackage, readLine, startsWithByte, wordIs };
-import elaborate::rewrite { Prepared, prepareModule };
+import elaborate::rewrite { Prepared, prepareModule, storageBound };
 import elaborate::out { emit, emitStatements, emitTypes, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
@@ -526,7 +526,7 @@ fn ownDeclarations(nodes: &List<AstNode>, stmts: &List<Int>, inPackage: Bool, sp
     if inPackage { own = topTypeNames(nodes, stmts); } else { own = declaredNames(nodes, stmts); };
     for d in definedFunctions(nodes, stmts) { own = push(own, clone(d)); };
     ownSet = HashSet::new();
-    for o in &own { if spelled { ownSet = ownSet.insert(localName(o)); } else { ownSet = ownSet.insert(clone(o)); }; };
+    for o in &own { if spelled { ownSet = ownSet.insert(hideKey(o)); } else { ownSet = ownSet.insert(clone(o)); }; };
     return Hide { declared: ownSet, own: own, dropOnly: false, spelled: spelled };
 };
 
@@ -741,10 +741,32 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
                 st = extractInterface(st, unit.libExtract, clone(unit.pkgName), clone(unit.modu), unit.hasModule, &stmts, &elaborated);
                 if st.status = 0 && st.wireVersion { st = wireWrapInterface(st, st.nid); };
                 if st.status = 0 { iface = reorderArena(&st.nodes, st.nid, "interface"); };
+                if st.status = 0 && st.wireVersion {
+                    bound = interfaceStorage(&st, iface);
+                    if !bound.ok { st = notModelled(st, "an interface type that is not written whole with its checked List and Box providers"); };
+                    iface = bound.value;
+                };
             };
         };
     };
     return unitAnswer(&st, out, iface, facts, unit.extracting, selected);
+};
+
+// The interface with the language's list and Box written as the module's checked providers (rewrite.storageBound), so
+// that what reads it names the declarations they are
+fn interfaceStorage(st: &St, iface: AstProgram) -> Parsed<AstProgram> ~ {
+    list = protocolName(st, "List");
+    box = protocolName(st, "Box");
+    nodes = [];
+    for node in &iface.nodes {
+        if node is AstNode::Type {
+            t = clone((node as AstNode::Type).value);
+            b = storageBound(&t, &list, &box);
+            if !b.ok { return Parsed<AstProgram> { value: noProgram("interface"), pos: 0, ok: false }; };
+            nodes = push(nodes, AstNode::Type { value: b.value });
+        } else { nodes = push(nodes, clone(node)); };
+    };
+    return Parsed<AstProgram> { value: AstProgram { stage: clone(iface.stage), nodes: nodes, root: iface.root }, pos: 0, ok: true };
 };
 
 fn printAnswer(a: &Answer) -> Int ~ {
