@@ -838,6 +838,12 @@ readProcessID text = case reads text :: [(Integer, String)] of
     [(pid, rest)] | pid > 1 && pid <= toInteger (maxBound :: ProcessID) && all isSpace rest -> Just (fromInteger pid)
     _ -> Nothing
 
+-- (written whole and then named: the parent reads the marker as soon as the name exists)
+writeMarker :: FilePath -> String -> IO ()
+writeMarker path text = do
+    writeFile (path ++ ".partial") text
+    renameFile (path ++ ".partial") path
+
 markerProcessID :: FilePath -> IO ProcessID
 markerProcessID path = do
     text <- readFile path
@@ -1672,7 +1678,7 @@ nativeProbe mode | mode `elem` ["verdict", "verdict-hold", "verdict-wait"] = do
     when (mode == "verdict-wait") (awaitNativeFile (home </> "go"))
     withVerdictLock "lock-probe" "process-lock" $ do
         pid <- getProcessID
-        writeFile (marker ++ ".pid") (show pid)
+        writeMarker (marker ++ ".pid") (show pid)
         writeFile (marker ++ ".entered") ""
         when (mode == "verdict-hold") (threadDelay 600000000)
         pure Nothing
@@ -1696,7 +1702,7 @@ nativeProbe mode = do
             "crash" -> exitImmediately (ExitFailure 23) >> pure (Error "crash returned")
             "hold" -> do
                 pid <- getProcessID
-                writeFile (marker ++ ".pid") (show pid)
+                writeMarker (marker ++ ".pid") (show pid)
                 threadDelay 600000000
                 pure (Error "holder was not killed")
             _ -> do
