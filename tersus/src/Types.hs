@@ -2,8 +2,31 @@
 
 module Types where
 
+import qualified Data.Map.Strict as Map
+
 import Data.Char (isAlphaNum, isDigit, isLower, isUpper)
 import Data.List (intercalate, stripPrefix)
+
+protocolRoles :: [Name]
+protocolRoles = ["Box", "Clone", "Copy", "Deref", "Drop", "Eq", "List"]
+
+validProtocolProviders :: Name -> [Name] -> Bool
+validProtocolProviders role providers = role `elem` protocolRoles && not (null providers) &&
+    all (not . null) providers && and (zipWith (<) providers (drop 1 providers))
+
+data OwnershipFacts = OwnershipFacts
+    { ownershipCopy :: Maybe Name
+    , ownershipDrop :: Maybe (Name, Name)
+    , ownershipClone :: Maybe (Name, Name)
+    , ownershipDeref :: Maybe (Name, Name)
+    }
+    deriving (Show, Eq)
+
+data OwnershipTransport = OwnershipTransport
+    { transportProtocols :: Map.Map Name [Name]
+    , transportOwnership :: Map.Map Name OwnershipFacts
+    }
+    deriving (Show, Eq)
 
 type Variable = String
 type Name = String

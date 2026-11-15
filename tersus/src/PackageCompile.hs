@@ -13,7 +13,9 @@ module PackageCompile
 import Data.List (nubBy)
 import qualified Data.Set as Set
 import qualified Mir as M
-import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..))
+import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..), acceptedOwnership)
+import qualified Data.Map.Strict as Map
+import Types (OwnershipTransport (..))
 import ElaboratorTool (Loader, sourceLoader)
 import Interface (ModuleInterface (..))
 import LibPackage (LibPackage, libCatalog, libPackage, libSelection, stripDeclaredFromUnits)
@@ -31,6 +33,7 @@ data CompiledModule = CompiledModule
     , compiledInterface :: ModuleInterface
     , compiledLibUnits :: [(Mod.ModuleId, M.Program)] -- without what the module declares itself
     , compiledLowered :: Result Lowered String -- the unit the elaborator lowered the module to, or why it did not
+    , compiledOwnership :: Maybe OwnershipTransport -- the checked ownership facts of a version 2 elaboration
     }
     deriving (Show)
 
@@ -73,8 +76,17 @@ compileModulesUsing loader libraries snapshot = case loader ((Mod.loadRequest Lo
             let lowered = lowerAccepted response
                 declared = either' [] (Set.toList . lowDeclared) lowered
                 units = either' [] (`libSelection` selected) libraries
-             in go rest (CompiledModule moduId iface (stripDeclaredFromUnits declared units) lowered : done)
+                facts = acceptedOwnership response
+             in case either' [] (uncoveredTypes facts) lowered of
+                    [] -> go rest (CompiledModule moduId iface (stripDeclaredFromUnits declared units) lowered facts : done)
+                    missing -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": the ownership facts omit the declared types " ++ unwords missing)
         _ -> Error (packageFailure moduId response)
+
+-- The structs and enums a module declares that its checked ownership facts give no row for
+uncoveredTypes :: Maybe OwnershipTransport -> Lowered -> [String]
+uncoveredTypes facts lowered = case facts of
+    Nothing -> []
+    Just transport -> [name | name <- Set.toList (lowDeclared lowered), Map.member name (M.progTypes (lowProgram lowered)) || Map.member name (M.progGenerics (lowProgram lowered)), not (Map.member name (transportOwnership transport))]
 
 packageFailure :: Mod.ModuleId -> Response -> String
 packageFailure moduId response = case response of
