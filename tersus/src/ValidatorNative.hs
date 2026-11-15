@@ -11,7 +11,7 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, validateLibrary, validationCacheHits, withVerdictLock, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
 import Data.List (sortOn)
@@ -112,6 +112,7 @@ validationRefusals program = case prepareTexts False program of
             (_, Error e) -> pure (Error e)
             (Ok key, Ok exe) -> do
                 let distinct = Map.keys (Map.fromList [(text, ()) | (_, text) <- texts])
+                _ <- evaluate (fullyEvaluated key `seq` fullyEvaluated exe)
                 checked <- inParallel (storedOrChecked key (pure (Ok exe))) distinct
                 let byText = Map.fromList (zip distinct checked)
                 pure (Ok [message | (name, text) <- texts, Just outcome <- [Map.lookup text byText], Just message <- [failure name outcome]])
@@ -215,19 +216,29 @@ withVerdictLock namespace text action = do
 inParallel :: (String -> IO (Result a String)) -> [String] -> IO [Result a String]
 inParallel check texts = do
     workers <- availableProcessors
-    queue <- newMVar (sortOn (Down . length . snd) (zip [0 :: Int ..] texts))
+    -- GHC 9.6's runtime can lose the wakeup of a thread blocked on a thunk that other threads force too (GHC #26324),
+    -- so the workers are given a queue with nothing left to evaluate in it.
+    pending <- evaluate (forcedQueue (sortOn (Down . length . snd) (zip [0 :: Int ..] texts)))
+    queue <- newMVar pending
     found <- newMVar Map.empty
-    let next = modifyMVar queue (\pending -> pure (drop 1 pending, take 1 pending))
+    let next = modifyMVar queue $ \items -> pure $ case items of
+            [] -> ([], Nothing)
+            item : rest -> (rest, Just item)
         worker = do
             item <- next
             case item of
-                [] -> pure ()
-                (index, text) : _ -> do
+                Nothing -> pure ()
+                Just (index, text) -> do
                     checked <- check text
                     modifyMVar_ found (pure . Map.insert index checked)
                     worker
     _ <- parallelBuilds (replicate (max 1 workers) worker)
     Map.elems <$> takeMVar found
+  where
+    forcedQueue items = foldr (\(index, text) rest -> index `seq` fullyEvaluated text `seq` rest) () items `seq` items
+
+fullyEvaluated :: String -> ()
+fullyEvaluated = foldr seq ()
 
 checkOne :: IO (Result FilePath String) -> String -> IO (Result (Int, Int, Int) String)
 checkOne exe text = do
