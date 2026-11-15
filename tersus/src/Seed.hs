@@ -13,6 +13,7 @@ module Seed
     , frontendSeedSha256
     , frontendSeedUrl
     , cachedFrontendSeed
+    , frontendSeedFile
     ) where
 
 import Control.Exception (Exception, IOException, SomeException, evaluate, throwIO, try)
@@ -68,20 +69,29 @@ buildSeed name digest hash override output = do
 
 seedText :: String -> String -> String -> String -> IO (Result String String)
 seedText name digest hash variable = do
+    file <- seedFile name digest hash variable
+    case file of
+        Error e -> pure (Error e)
+        Ok path -> readSeedText name path
+
+-- The seed's IR file, verified against its pin: the override, the checkout's copy, or the one fetched into the cache
+seedFile :: String -> String -> String -> String -> IO (Result FilePath String)
+seedFile name digest hash variable = do
     override <- lookupEnv variable
     case override of
-        Just path -> verifiedText name digest path
+        Just path -> verified path
         Nothing -> do
             local <- firstExisting ["bootstrap" </> name ++ ".ll", "tersus" </> "bootstrap" </> name ++ ".ll"]
             case local of
-                Just path -> verifiedText name digest path
-                Nothing -> cachedText
+                Just path -> verified path
+                Nothing -> cachedFile
   where
+    verified path = mapResult (const path) <$> verifyFile name digest path
     firstExisting [] = pure Nothing
     firstExisting (path : rest) = do
         present <- doesFileExist path
         if present then pure (Just path) else firstExisting rest
-    cachedText = do
+    cachedFile = do
         cache <- cacheDirectory
         case cache of
             Error e -> pure (Error e)
@@ -89,12 +99,12 @@ seedText name digest hash variable = do
                 let path = dir </> ((if name == "emitter" then "seed-" else name ++ "-seed-") ++ hash ++ ".ll")
                 present <- doesFileExist path
                 if present
-                    then verifiedText name digest path
+                    then verified path
                     else do
                         fetched <- downloadSeed name digest variable dir path
                         case fetched of
                             Error e -> pure (Error e)
-                            Ok () -> verifiedText name digest path
+                            Ok () -> verified path
 
 downloadSeed :: String -> String -> String -> FilePath -> FilePath -> IO (Result () String)
 downloadSeed name digest variable dir path = do
@@ -111,16 +121,12 @@ downloadSeed name digest variable dir path = do
                 Error e -> removeQuietly partial >> pure (Error e)
                 Ok () -> renameFile partial path >> pure (Ok ())
 
-verifiedText :: String -> String -> FilePath -> IO (Result String String)
-verifiedText name digest path = do
-    verified <- verifyFile name digest path
-    case verified of
-        Error e -> pure (Error e)
-        Ok () -> do
-            read' <- try (readBytes path) :: IO (Either IOException String)
-            pure $ case read' of
-                Left e -> Error ("Could not read the " ++ name ++ " bootstrap seed " ++ path ++ ": " ++ show e)
-                Right text -> Ok text
+readSeedText :: String -> FilePath -> IO (Result String String)
+readSeedText name path = do
+    read' <- try (readBytes path) :: IO (Either IOException String)
+    pure $ case read' of
+        Left e -> Error ("Could not read the " ++ name ++ " bootstrap seed " ++ path ++ ": " ++ show e)
+        Right text -> Ok text
   where
     readBytes p = do
         handle <- openFile p ReadMode
@@ -183,3 +189,7 @@ instance Exception SeedRefused
 -- F0: the elaborator written in Tersus, built from the pinned seed IR (bootstrap/frontend.sha256)
 cachedFrontendSeed :: IO (Result FilePath String)
 cachedFrontendSeed = cachedProgram "frontend-seed" frontendSeedHash "the pinned elaborator seed" (buildSeed "frontend" frontendSeedSha256 frontendSeedHash "TERSUS_FRONTEND_SEED_FILE")
+
+-- The IR F0 is built from
+frontendSeedFile :: IO (Result FilePath String)
+frontendSeedFile = seedFile "frontend" frontendSeedSha256 frontendSeedHash "TERSUS_FRONTEND_SEED_FILE"
