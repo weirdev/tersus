@@ -28,6 +28,7 @@ import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, withMVar)
 import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, mask, mask_, onException, throwIO, try)
 import Control.Monad (forM)
+import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumCapabilities, getNumProcessors, setNumCapabilities)
 import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
@@ -391,13 +392,19 @@ cachedProgramWithArtifacts artifacts kind hash what build = withCachedProgram ki
             (partial, handle) <- openTempFileCloexec dir (kind ++ ".tmp")
             hClose handle
             removeFile partial
+            started <- getMonotonicTime
             (do
                 built <- build partial
                 case built of
                     Error e -> pure (Error e)
                     Ok () -> do
                         ready <- and <$> mapM doesFileExist (map (exe ++) artifacts)
-                        if ready then renameFile partial exe >> pure (Ok exe)
+                        if ready
+                            then do
+                                renameFile partial exe
+                                finished <- getMonotonicTime
+                                hPutStrLn stderr ("Built " ++ what ++ " in " ++ show (round (finished - started) :: Int) ++ "s")
+                                pure (Ok exe)
                             else pure (Error "cached program did not publish its required artifacts"))
                 `finally` removeIfExists partial
 
