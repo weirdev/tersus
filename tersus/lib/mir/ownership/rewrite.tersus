@@ -1,6 +1,6 @@
 import data::codec::codec { Type };
 import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep };
-import mir::ownership::common { Context, Rewrite, Key, FieldName, fieldNames, blockIndex, Alias, Site, UseSite, RoleOperand, Count, getLocal, needsDrop, stepsType, forgetLocal, role, intSetHas, intSetAdd, keySetHas, whole, fieldKey, operandLocal, roles, freshLocal, projectionSource, isProjection, concatStatements, blockIn, nextLocal, nextBlock, isDropFunction, singleton, noOwnershipLocals, localsOf, statementRoles };
+import mir::ownership::common { Context, Rewrite, Key, FieldName, fieldNames, blockIndex, Alias, Site, UseSite, RoleOperand, Count, getLocal, needsDrop, stepsType, forgetLocal, role, intSetHas, intSetAdd, intSetInsert, keySetHas, whole, fieldKey, operandLocal, roles, freshLocal, projectionSource, isProjection, concatStatements, blockIn, nextLocal, nextBlock, isDropFunction, singleton, noOwnershipLocals, localsOf, statementRoles };
 import mir::ownership::analysis { countOf, countAdd, termUses, fuseCasts, definitions, liveness, livesAt, loanStates, reaches };
 import mir::ownership::drops { elaborateDrops };
 
@@ -178,11 +178,11 @@ fn withOperands(rv: &Rvalue, os: &List<Operand>) -> Rvalue ~ {
     return clone(rv);
 };
 fn rewriteOperands(p: &Program, cx: &Context, after: &List<Key>, operands: &List<RoleOperand>, r: &mut Rewrite) -> PreparedOperands ~ {
-    stillLive = localsOf(after); for l in cx.function.borrowed { stillLive = intSetAdd(stillLive, l); };
+    stillLive = localsOf(after); for l in cx.function.borrowed { stillLive = intSetInsert(stillLive, l); };
     readHere = []; counts = [];
     for ro in operands {
         l = operandLocal(ro.operand);
-        if l >= 0 { if !ro.consume { readHere = intSetAdd(readHere, l); } else { if needsDrop(p, getLocal(cx.function, l).ty) { counts = countAdd(counts, l); }; }; };
+        if l >= 0 { if !ro.consume { readHere = intSetInsert(readHere, l); } else { if needsDrop(p, getLocal(cx.function, l).ty) { counts = countAdd(counts, l); }; }; };
     };
     before = []; afters = []; os = [];
     for ro in operands {
@@ -298,7 +298,7 @@ fn rewriteTerminator(p: &Program, cx: &Context, out: &List<Key>, term: &Terminat
 fn borrowRootsOf(f: &Function) -> List<Int> ~ {
     out = [];
     for b in f.blocks { for st in b.stmts {
-        if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::Borrow { out = intSetAdd(out, ((st as Statement::Assign).rv as Rvalue::Borrow).root); };
+        if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::Borrow { out = intSetInsert(out, ((st as Statement::Assign).rv as Rvalue::Borrow).root); };
     }; };
     return out;
 };
@@ -309,7 +309,7 @@ fn contextOf(p: &Program, names: &List<FieldName>, f: &Function) -> Context ~ {
         st = get(b.stmts, i);
         if st is Statement::Assign {
             a = st as Statement::Assign;
-            if isProjection(a.rv) && needsDrop(p, getLocal(f, a.local).ty) { projected = intSetAdd(projected, a.local); };
+            if isProjection(a.rv) && needsDrop(p, getLocal(f, a.local).ty) { projected = intSetInsert(projected, a.local); };
         };
         for ro in statementRoles(st) { l = operandLocal(ro.operand); if l >= 0 { uses = push(uses, UseSite { local: l, block: b.id, index: i, consume: ro.consume }); }; };
     }; };
@@ -338,7 +338,7 @@ fn ownFunction(p: &Program, names: &List<FieldName>, original: &Function) -> Fun
     owned = [];
     for d in locals {
         dropped = isDropFunction(p, &f.name) && size(f.params) > 0 && get(f.params, 0) = d.id;
-        if needsDrop(p, d.ty) && d.id != 0 && !intSetHas(r.aliases, d.id) && !intSetHas(f.borrowed, d.id) && !dropped { owned = intSetAdd(owned, d.id); };
+        if needsDrop(p, d.ty) && d.id != 0 && !intSetHas(r.aliases, d.id) && !intSetHas(f.borrowed, d.id) && !dropped { owned = intSetInsert(owned, d.id); };
     };
     return elaborateDrops(names, p, f, owned, locals, clone(blocks), r.next, nextBlock(blocks));
 };

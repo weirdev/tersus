@@ -114,11 +114,17 @@ fn declName(d: &TypeDecl) -> String [{ }] [{ }] {
     return clone((d as TypeDecl::DEnum).name);
 };
 
+// (compares in place: a lookup runs for every type the passes ask about, and a copy of each name it passes made them slow)
+fn declNamed(d: &TypeDecl, name: &String) -> Bool [{ }] [{ }] {
+    if d is TypeDecl::DStruct { return (d as TypeDecl::DStruct).name = name; };
+    return (d as TypeDecl::DEnum).name = name;
+};
+
 fn lookupDecl(types: &List<TypeDecl>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(types); }] {
     i = 0;
     while i < size(types) [{ affirm i >= 0; affirm i <= size(types); }] shrinks size(types) - i {
         d = &get(types, i);
-        if declName(d) = name { return i; };
+        if declNamed(d, name) { return i; };
         i = i + 1;
     };
     return 0 - 1;
