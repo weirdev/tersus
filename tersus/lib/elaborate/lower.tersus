@@ -567,7 +567,7 @@ fn lowerParams(ls: LowSt, params: List<String>, sig: &Sig) -> LowSt ~ {
         binds = push(binds, localBinding(l, u));
         i = i + 1;
     };
-    return LowSt { bBorrowed: borrowed, bMutBorrowed: mutBorrowed, bParams: locals, bScopeNames: names, bScopeBinds: binds, bScopeMarks: push([], 0), ..ls };
+    return LowSt { bBorrowed: borrowed, bMutBorrowed: mutBorrowed, bParams: locals, bScopeNames: names, bScopeBinds: binds, bScopeMarks: push([], 0), visLow: 0, ..ls };
 };
 
 // The function being built, finished under its name (main under ""): its blocks numbered in the order a walk from the

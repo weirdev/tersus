@@ -3,7 +3,7 @@ import parser::syntax::syntax as ps;
 import data::codec::codec { Size, Token, Type, sizeAt, typeAt, wordAt };
 import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nodeIn };
 import elaborate::state { intText };
-import elaborate::lowerstate { Binding, EnvRec, LBlock, LDecl, LowSt, Op, RefTarget, Rv, Step, Stmt, Term, hasText, intAt, lfail, lwCat, lwCat3, lwSort, lwTextLess, quote, lwSp, tyText };
+import elaborate::lowerstate { Binding, EnvRec, LBlock, LDecl, LowSt, Op, RefTarget, Rv, Step, Stmt, Term, Visible, hasText, intAt, lfail, lwCat, lwCat3, lwSort, lwTextAt, lwTextLess, noVisible, quote, lwSp, tyText };
 
 fn stmtAt(src: &List<AstNode>, i: Int) -> AstStatement ~ {
     node = nodeIn(src, i);
@@ -617,7 +617,9 @@ fn leaveScope(ls: LowSt) -> LowSt ~ {
     binds = ls.bScopeBinds;
     while size(names) > mark && size(names) > 0 shrinks size(names) { names = pop(names); };
     while size(binds) > mark && size(binds) > 0 shrinks size(binds) { binds = pop(binds); };
-    return LowSt { bScopeNames: names, bScopeBinds: binds, bScopeMarks: pop(ls.bScopeMarks), ..ls };
+    low = ls.visLow;
+    if size(names) < low { low = size(names); };
+    return LowSt { bScopeNames: names, bScopeBinds: binds, bScopeMarks: pop(ls.bScopeMarks), visLow: low, ..ls };
 };
 
 fn bindName(ls: LowSt, var: String, b: Binding) -> LowSt ~ {
@@ -669,45 +671,213 @@ fn findRefTarget(ls: &LowSt, l: Int) -> Int ~ {
     return 0 - 1;
 };
 
-// What the names visible here stand for, as a new environment (ls.id): the locals of the
-// scopes, the innermost first, and the functions defined at the top. The functions are a shared part, kept once for
-// each set of them.
+// What the names visible here stand for, as an environment (ls.id): the locals of the scopes and the functions defined
+// at the top. The functions are a shared part, kept once for each set of them. The last environment's names are brought
+// up to date with what the scopes gained and lost since, so an environment costs its changes and the writing of its own
+// part, and one that sees what the last one saw is the last one.
 fn visibleEnv(ls: LowSt) -> LowSt ~ {
-    seen = HashSet::new();
-    ownNames = [];
-    ownTexts = HashMap::new();
-    fnNames = [];
-    fnTexts = HashMap::new();
-    shadowed = [];
-    i = size(ls.bScopeNames) - 1;
-    while i >= 0 [{ affirm i < size(ls.bScopeNames); }] shrinks i + 1 {
-        var = clone(get(ls.bScopeNames, i));
-        if !HashSet::contains(&seen, &var) && i < size(ls.bScopeBinds) {
-            seen = seen.insert(clone(var));
-            b = get(ls.bScopeBinds, i);
-            if HashMap::contains(&ls.globals, &var) { shadowed = push(shadowed, clone(var)); };
-            if b.isLocal {
-                ownNames = push(ownNames, clone(var));
-                ownTexts = ownTexts.insert(clone(var), lwCat("copy ", intText(b.local)));
-            } else {
-                fnNames = push(fnNames, clone(var));
-                fnTexts = fnTexts.insert(clone(var), clone(b.fname));
-            };
-        };
-        i = i - 1;
+    n = size(ls.bScopeNames);
+    if size(ls.bScopeBinds) < n { n = size(ls.bScopeBinds); };
+    gv = ls.globalsVersion;
+    if ls.visEnv >= 0 && ls.vis.len = n && ls.visLow >= n && ls.visEnvGv = gv {
+        last = ls.visEnv;
+        return LowSt { id: last, ..ls };
     };
-    ownText = intText(size(ownNames));
-    for n in lwSort(ownNames) { ownText = lwSp(lwSp(ownText, quote(&n)), HashMap::lookup(&ownTexts, &n, "")); };
-    sortedFns = lwSort(fnNames);
-    key = lwCat(intText(ls.globalsVersion), "|");
-    for s in lwSort(shadowed) { key = lwCat(lwSp(key, quote(&s)), ""); };
-    key = lwCat(key, "|");
-    for s in &sortedFns { key = lwSp(lwSp(key, quote(s)), quote(HashMap::lookup(&fnTexts, s, ""))); };
+    low = ls.visLow;
+    vis = ls.vis;
+    vis = syncVisible(vis, low, &ls.bScopeNames, &ls.bScopeBinds, &ls.globals, gv, n);
+    ownText = ownPartOf(&vis);
+    sortedFns = visibleFns(&vis);
+    fnTexts = fnTargets(&vis, &ls.bScopeBinds);
+    key = sharedKey(&vis, gv, &sortedFns, &fnTexts);
+    seen = HashSet::new();
+    if !HashMap::contains(&ls.contentKeys, &key) { seen = visibleNames(&vis); };
+    ls = LowSt { vis: vis, visLow: n, ..ls };
     ls = sharedContent(ls, key, &seen, &sortedFns, &fnTexts);
     content = ls.id;
     id = size(ls.envs);
     envs = push(ls.envs, EnvRec { content: content, ownPart: ownText });
-    return LowSt { envs: envs, id: id, ..ls };
+    return LowSt { envs: envs, id: id, visEnv: id, visEnvGv: gv, ..ls };
+};
+
+// vis brought to the first n bindings of the scopes, of which the first low are the ones it applied
+fn syncVisible(vis: Visible, low: Int, names: &List<String>, binds: &List<Binding>, globals: &HashMap<String, String>, gv: Int, n: Int) -> Visible ~ {
+    keep = vis.len;
+    if low < keep { keep = low; };
+    if n < keep { keep = n; };
+    if keep <= 0 {
+        vis = noVisible(gv);
+        keep = 0;
+    };
+    Visible { len: len, names: vnames, pieces: pieces, hides: hides, live: live, inner: inner, own: own, fns: fns, shadowed: shadowed, shadowGv: shadowGv } = vis;
+    // (names that came into sight or went out of it, and bindings that may now be visible)
+    changed = [];
+    cand = [];
+    while len > keep ~ {
+        i = len - 1;
+        nm = lwTextAt(&vnames, i);
+        j = intAt(&hides, i);
+        if j >= 0 {
+            inner = inner.insert(nm, j);
+            if j < size(live) { live = set(live, j, true); };
+            if j < keep { cand = push(cand, j); };
+        } else {
+            inner = inner.remove(&nm);
+            changed = push(changed, nm);
+        };
+        if size(vnames) > 0 { vnames = pop(vnames); };
+        if size(pieces) > 0 { pieces = pop(pieces); };
+        if size(hides) > 0 { hides = pop(hides); };
+        if size(live) > 0 { live = pop(live); };
+        len = i;
+    };
+    i = len;
+    while i < n ~ {
+        if i >= 0 && i < size(names) && i < size(binds) {
+            nm = clone(get(names, i));
+            b = get(binds, i);
+            j = HashMap::lookup(&inner, &nm, 0 - 1);
+            if j >= 0 && j < size(live) { live = set(live, j, false); };
+            if j < 0 { changed = push(changed, clone(nm)); };
+            piece = "";
+            if b.isLocal { piece = lwCat(lwSp(lwSp("", quote(&nm)), "copy "), intText(b.local)); };
+            inner = inner.insert(clone(nm), i);
+            vnames = push(vnames, nm);
+            pieces = push(pieces, piece);
+            hides = push(hides, j);
+            live = push(live, true);
+            cand = push(cand, i);
+        };
+        i = i + 1;
+    };
+    newOwn = [];
+    newFns = [];
+    for c in &cand {
+        if c >= 0 && c < size(live) && c < size(binds) {
+            if get(live, c) {
+                if get(binds, c).isLocal { newOwn = push(newOwn, c); } else { newFns = push(newFns, c); };
+            };
+        };
+    };
+    own = mergeByName(liveBelow(own, &live, keep), sortByName(newOwn, &vnames), &vnames);
+    fns = mergeByName(liveBelow(fns, &live, keep), sortByName(newFns, &vnames), &vnames);
+    if shadowGv != gv {
+        shadowed = [];
+        for x in &own { shadowed = withGlobal(shadowed, &vnames, x, globals); };
+        for x in &fns { shadowed = withGlobal(shadowed, &vnames, x, globals); };
+        shadowed = lwSort(shadowed);
+        shadowGv = gv;
+    } else {
+        for c in &changed {
+            shadowed = withoutName(shadowed, c);
+            if HashMap::contains(&inner, c) && HashMap::contains(globals, c) { shadowed = withName(shadowed, c); };
+        };
+    };
+    applied = size(vnames);
+    return Visible { len: applied, names: vnames, pieces: pieces, hides: hides, live: live, inner: inner, own: own, fns: fns, shadowed: shadowed, shadowGv: shadowGv };
+};
+
+fn ownPartOf(vis: &Visible) -> String ~ {
+    text = intText(size(vis.own));
+    for l in &vis.own { if l >= 0 && l < size(vis.pieces) { text = lwCat(text, &get(vis.pieces, l)); }; };
+    return text;
+};
+
+fn visibleFns(vis: &Visible) -> List<String> ~ {
+    out = [];
+    for f in &vis.fns { if f >= 0 && f < size(vis.names) { out = push(out, clone(get(vis.names, f))); }; };
+    return out;
+};
+
+fn fnTargets(vis: &Visible, binds: &List<Binding>) -> HashMap<String, String> ~ {
+    texts = HashMap::new();
+    for f in &vis.fns {
+        if f >= 0 && f < size(vis.names) && f < size(binds) { texts = texts.insert(clone(get(vis.names, f)), clone(get(binds, f).fname)); };
+    };
+    return texts;
+};
+
+fn sharedKey(vis: &Visible, gv: Int, fns: &List<String>, fnTexts: &HashMap<String, String>) -> String ~ {
+    key = lwCat(intText(gv), "|");
+    for s in &vis.shadowed { key = lwSp(key, quote(s)); };
+    key = lwCat(key, "|");
+    for s in fns { key = lwSp(lwSp(key, quote(s)), quote(HashMap::lookup(fnTexts, s, ""))); };
+    return key;
+};
+
+fn visibleNames(vis: &Visible) -> HashSet<String> ~ {
+    seen = HashSet::new();
+    for x in &vis.own { if x >= 0 && x < size(vis.names) { seen = seen.insert(clone(get(vis.names, x))); }; };
+    for x in &vis.fns { if x >= 0 && x < size(vis.names) { seen = seen.insert(clone(get(vis.names, x))); }; };
+    return seen;
+};
+
+fn liveBelow(xs: List<Int>, live: &List<Bool>, keep: Int) -> List<Int> ~ {
+    out = [];
+    for x in &xs {
+        if x >= 0 && x < keep && x < size(live) {
+            if get(live, x) { out = push(out, x); };
+        };
+    };
+    return out;
+};
+
+fn withGlobal(xs: List<String>, names: &List<String>, x: Int, globals: &HashMap<String, String>) -> List<String> ~ {
+    if x < 0 || x >= size(names) { return xs; };
+    if !HashMap::contains(globals, &get(names, x)) { return xs; };
+    return push(xs, clone(get(names, x)));
+};
+
+fn nameLess(names: &List<String>, x: Int, y: Int) -> Bool ~ {
+    if x < 0 || x >= size(names) || y < 0 || y >= size(names) { return false; };
+    return lwTextLess(&get(names, x), &get(names, y));
+};
+
+fn sortByName(xs: List<Int>, names: &List<String>) -> List<Int> ~ {
+    if size(xs) <= 1 { return xs; };
+    half = size(xs) / 2;
+    left = [];
+    right = [];
+    i = 0;
+    for x in &xs {
+        if i < half { left = push(left, x); } else { right = push(right, x); };
+        i = i + 1;
+    };
+    return mergeByName(sortByName(left, names), sortByName(right, names), names);
+};
+
+fn mergeByName(a: List<Int>, b: List<Int>, names: &List<String>) -> List<Int> ~ {
+    out = [];
+    i = 0;
+    j = 0;
+    finished = false;
+    while finished = false ~ {
+        if i < size(a) && j < size(b) {
+            if nameLess(names, get(b, j), get(a, i)) { out = push(out, get(b, j)); j = j + 1; } else { out = push(out, get(a, i)); i = i + 1; };
+        } else {
+            if i < size(a) { out = push(out, get(a, i)); i = i + 1; } else {
+                if j < size(b) { out = push(out, get(b, j)); j = j + 1; } else { finished = true; };
+            };
+        };
+    };
+    return out;
+};
+
+fn withoutName(xs: List<String>, x: &String) -> List<String> ~ {
+    out = [];
+    for y in &xs { if y != x { out = push(out, clone(y)); }; };
+    return out;
+};
+
+fn withName(xs: List<String>, x: &String) -> List<String> ~ {
+    out = [];
+    placed = false;
+    for y in &xs {
+        if !placed && lwTextLess(x, y) { out = push(out, clone(*x)); placed = true; };
+        out = push(out, clone(y));
+    };
+    if !placed { out = push(out, clone(*x)); };
+    return out;
 };
 
 // The shared part of an environment (ls.id, or -1 when it names no function): the functions at the top that no local
