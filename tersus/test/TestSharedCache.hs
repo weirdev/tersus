@@ -2535,7 +2535,7 @@ withToolsCacheHome use = do
         (Ok _, Ok dir) -> withCacheHome $ \home -> do
             let cache = home </> "tersus"
                 pass = do
-                    names <- listDirectory cache
+                    names <- filter compiledToolName <$> listDirectory cache
                     before <- mapM (toolIdentity cache) names
                     result <- use home
                     afterNames <- filter compiledToolName <$> listDirectory cache
