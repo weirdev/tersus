@@ -232,11 +232,13 @@ Work from `tersus/`.
   remains `TERSUS_SEED_FILE`). `AST_DATA.md` describes seed regeneration through
   the exact prepared parser package and its P0/P1/P2 fixpoint.
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`,
-  which runs each registered group in a process of its own with `-N1`;
+  which runs each registered group in a process of its own, with its share
+  of the processors (`-N1` when a runner has more groups than workers);
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
   `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
   `testNative`, `testMirEmit`, `testMirVerify`, `testMirSelfHosted`,
-  `testAstData`, `testParser` and `testAstReader` each
+  `testAstData`, `testParser`, `testAstReader`, `testSharedCache` and
+  `testMirLowered` each
   register four batches named `<original>:1/4` through `<original>:4/4`. The AST/parser corpora partition
   samples without splitting package declaration contexts; all emitter
   helper files share one prepared-parser comparison.
@@ -251,7 +253,10 @@ Work from `tersus/`.
   `testFrontendBootstrap` builds the elaborator seed F0 and the stages F1 and
   F2 and checks their fixpoint (`REPLACING_HASKELL.md`, "The frontend seed").
   CI reserves one runner for each of these four bootstrap groups; the
-  remaining groups use three runners, with four worker processes per runner.
+  remaining groups use five runners, with four worker processes per runner,
+  balanced by `TestScheduling.groupWeight`, the median CI time of each group
+  (`dev/ci_weights.py` prints its rows from CI logs; refresh them when a
+  group's time moves).
   `testHostValidation` validates the compiler's own programs (the parser, the
   AST reader, the MIR reader, checker and eraser, the emitter and the
   elaborator) in full: it registers one group per program

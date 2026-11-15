@@ -5,7 +5,9 @@ module TestScheduling
     , optInGroups
     , isOptIn
     , useWorkerProcesses
+    , childCapabilities
     , assignShards
+    , ciShardCount
     , groupWeight
     , isSelfHosted
     , estimatedPeakMiB
@@ -25,7 +27,7 @@ import Data.List (delete, foldl', isInfixOf, isPrefixOf, minimumBy, sort, sortBy
 import System.Environment (getEnvironment, getExecutablePath)
 import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (..), proc)
-import Native (readProcessOutput)
+import Native (availableProcessors, readProcessOutput)
 import System.Timeout (timeout)
 import Data.Ord (comparing)
 import TestHarness (Test (..), TestResult, batchItems, testAssertEq, testAssertTrue, testCase)
@@ -110,18 +112,27 @@ useWorkerProcesses :: Arguments -> Int -> Int -> Bool
 useWorkerProcesses arguments jobs selectedCount =
     not (argumentChild arguments) && jobs > 1 && selectedCount > 0
 
+-- A child's share of the processors the run may use: a runner left with fewer groups than workers (a bootstrap runner
+-- with its one group) gives each of them the processors the missing workers would have had.
+childCapabilities :: Int -> Int -> Int -> Int
+childCapabilities jobs processors groups = max 1 (min jobs processors `div` max 1 (min jobs groups))
+
+-- The runners of the CI matrix (.github/workflows/ci.yml) besides the host runner
+ciShardCount :: Int
+ciShardCount = 9
+
 assignShards :: Int -> [String] -> [(String, Int)]
 assignShards count names
     | count <= 0 = []
     -- Run 41883710449: sibling compiler tests contended with the private cold bootstrap.
-    | count == 7 && not (null isolated) =
+    | count == ciShardCount && not (null isolated) =
         [(name, normalShards !! (index - 1))
             | (name, index) <- assignShards (length normalShards) (filter (\name -> name `notElem` map fst isolated) names)]
         ++ isolated
     | otherwise = [(name, index) | (_, index, assigned) <- balance bins, unit <- reverse assigned, name <- unit]
   where
-    isolated = [(name, index) | (name, index) <- [("testParserBootstrap:1/2", 4), ("testParserBootstrap:2/2", 5), ("testBootstrap", 6), ("testFrontendBootstrap", 7)], name `elem` names]
-    normalShards = [index | index <- [1 .. 7], index `notElem` map snd isolated]
+    isolated = [(name, index) | (name, index) <- zip bootstrapGroups [count - 3 ..], name `elem` names]
+    normalShards = [index | index <- [1 .. count], index `notElem` map snd isolated]
     selfHosted = filter isSelfHosted names
     units = [selfHosted | not (null selfHosted)] ++ [[name] | name <- names, not (isSelfHosted name)]
     bins = foldl' assign [(0, index, []) | index <- [1 .. min count (length names)]]
@@ -152,140 +163,154 @@ assignShards count names
 isSelfHosted :: String -> Bool
 isSelfHosted = isPrefixOf "testMirSelfHosted:"
 
+-- (self-hosted batches are admitted one at a time for memory, so their weights add up like the others')
 shardWeight :: [String] -> Int
-shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted name)]
-    + case [groupWeight name | name <- names, isSelfHosted name] of
-        [] -> 0
-        work -> maximum work
+shardWeight = sum . map groupWeight
 
--- Measured four-CPU warm-tool work on eb8bb49 (2026-11-05), rounded up; the testAstData, testAstReader and
--- testDifferential batches on the commit that added interface data (2026-11-08); testDifferential
--- after it left the compiler's own packages (one CPU, warm tools, scaled as the earlier batches); testMirLowered
--- from its full-suite time against testParity's, testModules' and testOwnership's (2026-11-12).
--- The native preparation prefix is measured separately; genuine cold A and
--- Bootstrap include their cold work. Unmeasured rows retain run 41978818567.
+-- The median [TIME] of each group over recent CI runs, in seconds (dev/ci_weights.py prints these rows from CI
+-- logs): what a group takes on a four-CPU runner beside three others, waits for the runner's shared tool builds
+-- included. The batches of testSharedCache and testMirLowered are estimates from their cases' times.
 groupWeight :: String -> Int
 groupWeight name = maybe 1 id (lookup name weights)
   where
     weights =
-        [ ("testParse", 1)
-        , ("testParseEval", 1)
-        , ("testValidateWithExpectedMatch", 1)
-        , ("testValidateWithExpectedMismatch", 1)
-        , ("testValidationFail", 1)
-        , ("testValidationCache", 2)
-        , ("testHaskellParity", 1)
-        , ("testUserRewriteValidation", 1)
-        , ("testParseVal", 1)
-        , ("testParseValFail", 1)
-        , ("testCrashRegression", 1)
-        , ("testExamples", 10)
-        , ("testCli", 1)
-        , ("testMir", 1)
-        , ("testMirSelfHosted:1/4", 47)
-        , ("testMirSelfHosted:2/4", 43)
-        , ("testMirSelfHosted:3/4", 79)
-        , ("testMirSelfHosted:4/4", 32)
-        , ("testIntRange", 1)
-        , ("testPipeline", 1)
-        , ("testControlFlow", 2)
-        , ("testLists", 2)
-        , ("testForallSyntax", 1)
-        , ("testForallInstantiation", 1)
-        , ("testForallProof", 1)
-        , ("testGoalSlices", 1)
-        , ("testForallLoops", 2)
-        , ("testPrettyProofs", 1)
-        , ("testMulDivNegative", 1)
-        , ("testCrlf", 1)
-        , ("testEnumCast", 1)
-        , ("testListProofs", 1)
-        , ("testEqualityByParts", 1)
-        , ("testEnums", 2)
-        , ("testStructs", 1)
-        , ("testGenericLists", 1)
-        , ("testTypeCheck", 1)
-        , ("testRecursion", 1)
-        , ("testSolverCache", 1)
-        , ("testTermination", 2)
-        , ("testRefinedArithmetic", 1)
-        , ("testLinearArithmetic", 2)
-        , ("testIfJoin", 1)
-        , ("testModulo", 1)
-        , ("testCallsAndReturnJoin", 1)
-        , ("testForLoops", 2)
-        , ("testInferredInvariants", 3)
-        , ("testCfgValidation", 3)
-        , ("testPrecedence", 1)
-        , ("testFirstLast", 1)
-        , ("testFunctionCalls", 1)
-        , ("testCallsUseContracts", 1)
-        , ("testNative:1/4", 58)
-        , ("testNative:2/4", 55)
-        , ("testNative:3/4", 54)
-        , ("testNative:4/4", 57)
-        , ("testOwnership", 222)
-        , ("testTraits", 4)
-        , ("testArrays", 3)
-        , ("testBox", 2)
-        , ("testDeref", 1)
-        , ("testPointers", 6)
-        , ("testBorrow", 2)
-        , ("testCopies", 5)
-        , ("testGenerics", 2)
-        , ("testVariadic", 30)
-        , ("testSequence", 5)
-        , ("testStrings", 209)
-        , ("testBytes", 1)
-        , ("testConnectives", 1)
-        , ("testMirData", 51)
-        , ("testMirLowered", 220)
-        , ("testMirEvalLists", 1)
-        , ("testMirReader", 58)
-        , ("testMirVerify:1/4", 31)
-        , ("testMirVerify:2/4", 33)
-        , ("testMirVerify:3/4", 67)
-        , ("testMirVerify:4/4", 73)
-        , ("testMirErase", 65)
-        , ("testMirCopies", 1)
-        , ("testMirVerifyPrograms", 49)
-        , ("testMirEmit:1/4", 2)
-        , ("testMirEmit:2/4", 58)
-        , ("testMirEmit:3/4", 5)
-        , ("testMirEmit:4/4", 109)
-        , ("testMirEmitPrograms", 126)
-        , ("testBootstrap", 248)
-        , ("testFrontendBootstrap", 640)
-        , ("testEq", 2)
-        , ("testHashMap", 2)
-        , ("testHashSet", 2)
-        , ("testModules", 172)
-        , ("testDataCodec", 199)
+        [ ("testArrays", 65)
+        , ("testAstData:1/4", 411)
+        , ("testAstData:2/4", 466)
+        , ("testAstData:3/4", 53)
+        , ("testAstData:4/4", 15)
+        , ("testAstReader:1/4", 531)
+        , ("testAstReader:2/4", 192)
+        , ("testAstReader:3/4", 30)
+        , ("testAstReader:4/4", 36)
+        , ("testBootstrap", 799)
+        , ("testBorrow", 60)
+        , ("testBox", 33)
         , ("testBuiltinRegistry", 1)
-        , ("testSharedCache", 190)
-        , ("testVerdictLocks", 1)
+        , ("testBytes", 8)
+        , ("testCallsAndReturnJoin", 11)
+        , ("testCallsUseContracts", 7)
+        , ("testCfgValidation", 30)
+        , ("testCli", 14)
+        , ("testConnectives", 14)
+        , ("testControlFlow", 18)
+        , ("testCopies", 68)
+        , ("testCrashRegression", 3)
+        , ("testCrlf", 1)
+        , ("testDataCodec", 243)
+        , ("testDeref", 6)
+        , ("testDifferential", 271)
+        , ("testEnumCast", 10)
+        , ("testEnums", 15)
+        , ("testEq", 12)
+        , ("testEqualityByParts", 9)
+        , ("testExamples", 44)
+        , ("testFirstLast", 3)
+        , ("testForLoops", 15)
+        , ("testForallInstantiation", 4)
+        , ("testForallLoops", 6)
+        , ("testForallProof", 5)
+        , ("testForallSyntax", 9)
+        , ("testFrontendBootstrap", 1127)
+        , ("testFunctionCalls", 6)
+        , ("testGenericLists", 8)
+        , ("testGenerics", 23)
+        , ("testGoalSlices", 16)
+        , ("testHashMap", 16)
+        , ("testHashSet", 15)
+        , ("testHaskellParity", 7)
+        , ("testHostValidation:astReader", 38)
+        , ("testHostValidation:elaborator", 691)
+        , ("testHostValidation:emitter", 77)
+        , ("testHostValidation:mirErase", 28)
+        , ("testHostValidation:mirReader", 15)
+        , ("testHostValidation:mirVerify", 52)
+        , ("testHostValidation:parser", 147)
+        , ("testIfJoin", 22)
+        , ("testInferredInvariants", 13)
+        , ("testIntRange", 3)
+        , ("testLibModules", 43)
+        , ("testLinearArithmetic", 25)
+        , ("testListProofs", 7)
+        , ("testLists", 23)
+        , ("testMir", 8)
+        , ("testMirCopies", 1)
+        , ("testMirData", 47)
+        , ("testMirEmit:1/4", 68)
+        , ("testMirEmit:2/4", 77)
+        , ("testMirEmit:3/4", 55)
+        , ("testMirEmit:4/4", 261)
+        , ("testMirEmitPrograms", 420)
+        , ("testMirErase", 162)
+        , ("testMirEvalLists", 5)
+        , ("testMirLowered:1/4", 230)
+        , ("testMirLowered:2/4", 230)
+        , ("testMirLowered:3/4", 230)
+        , ("testMirLowered:4/4", 230)
+        , ("testMirOwnership", 59)
+        , ("testMirReader", 71)
+        , ("testMirSelfHosted:1/4", 77)
+        , ("testMirSelfHosted:2/4", 75)
+        , ("testMirSelfHosted:3/4", 135)
+        , ("testMirSelfHosted:4/4", 86)
+        , ("testMirSupport", 87)
+        , ("testMirVerify:1/4", 119)
+        , ("testMirVerify:2/4", 38)
+        , ("testMirVerify:3/4", 93)
+        , ("testMirVerify:4/4", 108)
+        , ("testMirVerifyPrograms", 16)
+        , ("testModules", 683)
+        , ("testModulo", 11)
+        , ("testMulDivNegative", 6)
+        , ("testNative:1/4", 90)
+        , ("testNative:2/4", 85)
+        , ("testNative:3/4", 56)
+        , ("testNative:4/4", 87)
+        , ("testNativeStorageModules", 574)
+        , ("testOwnership", 390)
+        , ("testOwnershipInterpreted", 27)
+        , ("testOwnershipMetadata", 1)
+        , ("testParity", 563)
+        , ("testParse", 1)
+        , ("testParseEval", 1)
+        , ("testParseVal", 3)
+        , ("testParseValFail", 2)
+        , ("testParser:1/4", 195)
+        , ("testParser:2/4", 480)
+        , ("testParser:3/4", 1191)
+        , ("testParser:4/4", 197)
+        , ("testParserBootstrap:1/2", 1196)
+        , ("testParserBootstrap:2/2", 658)
+        , ("testParserUnicode", 15)
+        , ("testPhase1Cache", 109)
+        , ("testPhase1Packages", 22)
+        , ("testPhase2Packages", 23)
+        , ("testPipeline", 6)
+        , ("testPointers", 38)
+        , ("testPrecedence", 2)
+        , ("testPrettyProofs", 4)
+        , ("testRecursion", 6)
+        , ("testRefinedArithmetic", 12)
+        , ("testScheduling", 50)
+        , ("testSequence", 50)
+        , ("testSharedCache:1/4", 290)
+        , ("testSharedCache:2/4", 290)
+        , ("testSharedCache:3/4", 290)
+        , ("testSharedCache:4/4", 290)
         , ("testSharedCacheProbe", 1)
-        , ("testScheduling", 16)
-        , ("testAstData:1/4", 126)
-        , ("testAstData:2/4", 219)
-        , ("testAstData:3/4", 219)
-        , ("testAstData:4/4", 12)
-        , ("testParser:1/4", 62)
-        , ("testParser:2/4", 39)
-        , ("testParser:3/4", 187)
-        , ("testParser:4/4", 203)
-        , ("testParserBootstrap:1/2", 315)
-        , ("testParserBootstrap:2/2", 265)
-        , ("testParserUnicode", 8)
-        , ("testAstReader:1/4", 300)
-        , ("testAstReader:2/4", 220)
-        , ("testAstReader:3/4", 34)
-        , ("testAstReader:4/4", 9)
-        , ("testDifferential", 10)
-        , ("testParity", 170)
-        , ("testLibModules", 5)
-        , ("testNativeStorageModules", 201)
-        , ("testMirSupport", 61)
+        , ("testSolverCache", 3)
+        , ("testStrings", 293)
+        , ("testStructs", 14)
+        , ("testTermination", 18)
+        , ("testTraits", 73)
+        , ("testTypeCheck", 4)
+        , ("testUserRewriteValidation", 2)
+        , ("testValidateWithExpectedMatch", 2)
+        , ("testValidateWithExpectedMismatch", 1)
+        , ("testValidationCache", 18)
+        , ("testValidationFail", 1)
+        , ("testVariadic", 78)
+        , ("testVerdictLocks", 1)
         ]
 
 -- Peak GHC "total memory in use" per group on the 16 GB CI runner (shard 3 of run 42855380501), rounded up.
@@ -299,7 +324,7 @@ groupWeight name = maybe 1 id (lookup name weights)
 estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
     | isSelfHosted name = 7680
-    | name == "testMirLowered" = 10240
+    | takeWhile (/= ':') name == "testMirLowered" = 10240
     | name == "testHostValidation:elaborator" = memoryBudgetMiB
     | name == "testHostValidation:parser" = 4096
     | name == "testHostValidation:mirReader" = 3584
@@ -368,6 +393,8 @@ splitTestGroups count original
         path | "lib/mir/emit/emit.tersus" `elem` path || "lib/mir/mir_reader/mir_reader.tersus" `elem` path -> 30
         path | "the IR of a loop, interpreted" `elem` path || "raw lists and Boxes library" `elem` path -> 30
         path | "MIR loops" `elem` path -> 32
+        path | "corpus" `elem` path && any (`elem` path) ["examples", "lib/elaborate/elaborate.tersus"] -> 60
+        path | any (`elem` path) ["compileFromValidated reuses the exact validated sentinel", "changed embedded source still fails validation independently", "truncated named List declaration is refused natively"] -> 60
         path | "MIR branches" `elem` path -> 16
         path | any (`elem` path) ["MIR contracts", "MIR sequences", "MIR data", "MIR list updates"] -> 8
         path | "interpreted" `elem` path || "pre-erasure, interpreted" `elem` path
@@ -396,7 +423,7 @@ routingProbe arguments capabilities worker summarized = do
                     && starts == (if worker then 1 else 0) && times == starts
                     && passes == expectedPasses
                     && ("Summary:" `isInfixOf` output) == summarized
-                    && (not worker || "using -N1" `isInfixOf` errors)
+                    && (not worker || maybe False (\count -> ("using -N" ++ show count) `isInfixOf` errors) capabilities)
                     then Nothing
                     else Just ("unexpected worker routing: " ++ show (code, output, errors))
 
@@ -430,8 +457,12 @@ testScheduling names batches = TestList "testScheduling"
             && not (useWorkerProcesses (arguments False) 1 1)
             && not (useWorkerProcesses (Arguments Nothing [] False Nothing) 1 1)
             && not (useWorkerProcesses (arguments False) 4 0))
-    , TestCase "explicit parallel single group uses one N1 worker with RTS statistics" $
-        routingProbe ["-j", "4", "testSharedCacheProbe"] (Just 1) True True
+    , TestCase "explicit parallel single group uses one worker with the run's processors and RTS statistics" $ do
+        processors <- availableProcessors
+        routingProbe ["-j", "4", "testSharedCacheProbe"] (Just (min 4 processors)) True True
+    , testCase "children share the run's processors among the groups that run at once" $
+        testAssertEq [childCapabilities 4 4 40, childCapabilities 4 4 1, childCapabilities 4 4 2, childCapabilities 4 96 1, childCapabilities 4 2 1, childCapabilities 1 4 1, childCapabilities 4 4 0]
+            [1, 4, 2, 4, 2, 1, 4]
     , TestCase "default single group retains the parent RTS" $
         routingProbe ["testSharedCacheProbe"] (Just 2) False True
     , TestCase "serial single group retains the parent RTS" $
@@ -444,40 +475,40 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq (length names) (length (unique names))
     , testCase "every group belongs to exactly one shard for every tested count" $
         testAssertTrue (all complete [1 .. length names + 1])
-    , testCase "seven CI shards reserve the last four for the bootstrap groups, one each" $
-        let assigned = assignShards 7 names
-         in testAssertTrue ([name | (name, shard) <- assigned, shard == 7] == ["testFrontendBootstrap"]
-            && [name | (name, shard) <- assigned, shard == 6] == ["testBootstrap"]
-            && [name | (name, shard) <- assigned, shard == 5] == ["testParserBootstrap:2/2"]
-            && [name | (name, shard) <- assigned, shard == 4] == ["testParserBootstrap:1/2"]
+    , testCase "the CI shards reserve the last four for the bootstrap groups, one each" $
+        let assigned = assignShards ciShardCount names
+         in testAssertTrue (and [[name | (name, shard) <- assigned, shard == index] == [group]
+                | (group, index) <- zip bootstrapGroups [ciShardCount - 3 ..]]
             && [(name, shard) | (name, shard) <- assigned, name `notElem` bootstrapGroups]
-                == assignShards 3 (filter (`notElem` bootstrapGroups) names))
-    , testCase "seven-shard isolation retains aliases and filtered bootstrap selection" $
+                == assignShards (ciShardCount - 4) (filter (`notElem` bootstrapGroups) names))
+    , testCase "CI shard isolation retains aliases and filtered bootstrap selection" $
         testAssertTrue (all (\index ->
-            selectGroupNames (Arguments Nothing ["testBootstrap"] False (Just (index, 7))) names
-                == Right ["testBootstrap" | index == 6]
-            && selectGroupNames (Arguments Nothing ["testParserBootstrap"] False (Just (index, 7))) names
-                == Right (["testParserBootstrap:1/2" | index == 4] ++ ["testParserBootstrap:2/2" | index == 5])
-            && selectGroupNames (Arguments Nothing ["testFrontendBootstrap"] False (Just (index, 7))) names
-                == Right ["testFrontendBootstrap" | index == 7]
-            && selectGroupNames (Arguments Nothing ["testNative"] False (Just (index, 7))) names
+            selectGroupNames (Arguments Nothing ["testBootstrap"] False (Just (index, ciShardCount))) names
+                == Right ["testBootstrap" | index == ciShardCount - 1]
+            && selectGroupNames (Arguments Nothing ["testParserBootstrap"] False (Just (index, ciShardCount))) names
+                == Right (["testParserBootstrap:1/2" | index == ciShardCount - 3] ++ ["testParserBootstrap:2/2" | index == ciShardCount - 2])
+            && selectGroupNames (Arguments Nothing ["testFrontendBootstrap"] False (Just (index, ciShardCount))) names
+                == Right ["testFrontendBootstrap" | index == ciShardCount]
+            && selectGroupNames (Arguments Nothing ["testNative"] False (Just (index, ciShardCount))) names
                 == Right [name | name <- names, "testNative:" `isPrefixOf` name,
-                    lookup name (assignShards 7 suite) == Just index]) [1 .. 7])
-    , testCase "bootstrap isolation is limited to seven shards and handles sparse inputs" $
-        testAssertTrue
-            ( assignShards 7 ["testBootstrap"] == [("testBootstrap", 6)]
-              && assignShards 7 ["testParserBootstrap:2/2"] == [("testParserBootstrap:2/2", 5)]
-              && assignShards 7 ["testParserBootstrap:1/2"] == [("testParserBootstrap:1/2", 4)]
-              && assignShards 7 ["testFrontendBootstrap"] == [("testFrontendBootstrap", 7)]
-              && assignShards 7 ["testParserBootstrap:2/2", "newA", "newB", "newC", "newD", "newE"]
-                  == [("newA", 1), ("newB", 2), ("newC", 3), ("newD", 4), ("newE", 6), ("testParserBootstrap:2/2", 5)]
-              && assignShards 7 ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]
-                  == [("testParserBootstrap:1/2", 4), ("testParserBootstrap:2/2", 5), ("testBootstrap", 6)]
-              && assignShards 7 ["newA", "newB"] == [("newA", 1), ("newB", 2)]
+                    lookup name (assignShards ciShardCount suite) == Just index]) [1 .. ciShardCount])
+    , testCase "bootstrap isolation is limited to the CI shard count and handles sparse inputs" $
+        let c = ciShardCount
+         in testAssertTrue
+            ( assignShards c ["testBootstrap"] == [("testBootstrap", c - 1)]
+              && assignShards c ["testParserBootstrap:2/2"] == [("testParserBootstrap:2/2", c - 2)]
+              && assignShards c ["testParserBootstrap:1/2"] == [("testParserBootstrap:1/2", c - 3)]
+              && assignShards c ["testFrontendBootstrap"] == [("testFrontendBootstrap", c)]
+              && assignShards c ["testParserBootstrap:2/2", "newA", "newB", "newC", "newD", "newE", "newF"]
+                  == [("newA", 1), ("newB", 2), ("newC", 3), ("newD", 4), ("newE", 5), ("newF", c - 3), ("testParserBootstrap:2/2", c - 2)]
+              && assignShards c ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]
+                  == [("testParserBootstrap:1/2", c - 3), ("testParserBootstrap:2/2", c - 2), ("testBootstrap", c - 1)]
+              && assignShards c ["newA", "newB"] == [("newA", 1), ("newB", 2)]
               && assignShards 1 ["testBootstrap", "newA"] == [("testBootstrap", 1), ("newA", 1)]
               && sort (map snd (assignShards 2 ["testBootstrap", "newA"])) == [1, 2]
+              && map snd (assignShards 7 ["testFrontendBootstrap"]) == [1]
               && null (assignShards 0 ["testBootstrap"])
-              && null (assignShards 7 []))
+              && null (assignShards c []))
     , testCase "examples and strings remain unbatched to avoid duplicate cold startup" $
         testAssertTrue (all (`elem` names) ["testExamples", "testStrings"]
             && not (any (\name -> "testExamples:" `isPrefixOf` name || "testStrings:" `isPrefixOf` name) names))
@@ -487,9 +518,9 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq (assignShards 2 ["newA", "newB", "newC"]) [("newA", 1), ("newC", 1), ("newB", 2)]
     , testCase "largest measured registered groups are spread before small groups" $
         testAssertEq (assignShards 3 ["testNative:1/4", "testMirVerify:1/4", "testMirEmit:1/4", "testBootstrap"])
-            [("testBootstrap", 1), ("testNative:1/4", 2), ("testMirVerify:1/4", 3), ("testMirEmit:1/4", 3)]
-    , testCase "three shard estimated loads differ by at most one short group" $
-        testAssertTrue (maximum loads - minimum loads <= 11)
+            [("testBootstrap", 1), ("testMirVerify:1/4", 2), ("testNative:1/4", 3), ("testMirEmit:1/4", 3)]
+    , testCase "the normal CI shards' estimated loads differ by at most a minute" $
+        if maximum loads - minimum loads <= 60 then Nothing else Just ("estimated loads: " ++ show loads)
     , testCase "CLI and cold bootstrap are covered exactly once" $
         testAssertTrue (all (\name -> length (filter ((== name) . fst) assignments) == 1)
             ("testCli" : bootstrapGroups))
@@ -524,8 +555,6 @@ testScheduling names batches = TestList "testScheduling"
         testAssertTrue (aliasComplete (testParserBootstrap, parserBootstrapGroups)
             && all (\batch -> selectGroupNames (Arguments Nothing [groupName batch] True Nothing) names
                 == Right [groupName batch]) parserBootstrapGroups)
-    , testCase "parser bootstrap launch weights retain measured cold and warm paired frontiers" $
-        testAssertEq (map (groupWeight . groupName) parserBootstrapGroups) [315,265]
     , testCase "all old leaf paths occur exactly once in the registered batches" $
         testAssertTrue (all (\(original, split) ->
             sort (leafPaths original) == sort (concatMap (map (drop 1) . leafPaths) split)) batches)
@@ -538,26 +567,10 @@ testScheduling names batches = TestList "testScheduling"
     -- the measured values themselves.
     , testCase "batched and measured tail groups retain weights above the unprofiled fallback" $
         testAssertTrue (all (> 1) ([groupWeight (groupName batch) | (_, split) <- batches, batch <- split]
-                ++ map groupWeight ["testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms"]
+                ++ map groupWeight ["testParity", "testMirData", "testOwnership", "testModules", "testMirEmitPrograms"]
                 ++ map (groupWeight . groupName) parserBootstrapGroups)
             && all (> 0) (map groupWeight names)
-            && maximum loads - minimum loads <= 11)
-    , testCase "batch launch weights retain measured warm work without dividing again" $
-        testAssertEq
-            [map (groupWeight . groupName) split | (original, split) <- batches,
-                groupName original `elem` ["testNative", "testMirEmit", "testMirVerify"]]
-            [[58,55,54,57], [2,58,5,109], [31,33,67,73]]
-    , testCase "AST and parser launch weights use actual whole-batch measurements" $
-        testAssertEq
-            [map (groupWeight . groupName) split | (original, split) <- batches,
-                groupName original `elem` ["testAstData", "testParser"]]
-            [[126,219,219,12], [62,39,187,203]]
-    , testCase "AST reader launch weights retain actual whole-batch measurements" $
-        testAssertEq [map (groupWeight . groupName) split | (original, split) <- batches,
-            groupName original == "testAstReader"] [[300,220,34,9]]
-    , testCase "measured tail groups are not launched as unprofiled one-second work" $
-        testAssertEq (map groupWeight ["testAstReader:1/4", "testParity", "testMirData", "testOwnership", "testSharedCache", "testModules", "testMirEmitPrograms", "testParserBootstrap:2/2"])
-            [300,170,51,222,190,172,126,265]
+            && maximum loads - minimum loads <= 60)
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $
@@ -619,20 +632,20 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "other original groups remain individually shardable" $
         testAssertEq (map snd (assignShards 4 ["testNative:1/4", "testNative:2/4", "testNative:3/4", "testNative:4/4"]))
             [1,2,3,4]
-    , testCase "self-hosted cold launch cost is charged once, not per batch" $
+    , testCase "self-hosted batches, which run one at a time, are charged their whole work" $
         let selfHosted = filter isSelfHosted names
-         in testAssertEq (shardWeight selfHosted) (maximum (map groupWeight selfHosted))
+         in testAssertEq (shardWeight selfHosted) (sum (map groupWeight selfHosted))
     , testCase "fixed native memory_limit users stay ordered in one batch" $
         testAssertTrue (all memorySerial batches)
     , testCase "small and empty trees never create empty batches" $
         testAssertTrue (null (splitTestGroups 4 (TestList "empty" []))
             && map groupName (splitTestGroups 4 (testCase "single" Nothing)) == ["single:1/1"])
     , testCase "every CI shard's groups launch once, with estimated memory within the budget whenever two run" $
-        testAssertTrue (all (\index -> case selectGroupNames (Arguments Nothing [] False (Just (index, 7))) names of
+        testAssertTrue (all (\index -> case selectGroupNames (Arguments Nothing [] False (Just (index, ciShardCount))) names of
             Right shard -> let trace = admissionTrace shard
                  in sort [name | (_, _, name) <- trace] == sort shard
                     && all (\(running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace
-            Left _ -> False) [1 .. 7])
+            Left _ -> False) [1 .. ciShardCount])
     , testCase "the host runner's groups launch once, with estimated memory within the budget whenever two run" $
         case selectGroupNames (Arguments Nothing ["testHostValidation"] False Nothing) names of
             Right host -> let trace = admissionTrace host
@@ -640,7 +653,7 @@ testScheduling names batches = TestList "testScheduling"
                     && all (\(running, used, _) -> running < 2 || used <= memoryBudgetMiB) trace)
             Left e -> Just e
     , testCase "naming an opt-in group with a shard is refused" $
-        testAssertTrue (isLeft (selectGroupNames (Arguments Nothing ["testHostValidation"] False (Just (1, 7))) names))
+        testAssertTrue (isLeft (selectGroupNames (Arguments Nothing ["testHostValidation"] False (Just (1, ciShardCount))) names))
     , testCase "opt-in groups take no part in the shard assignment" $
         testAssertTrue (any isOptIn names && all (\count -> all (\index ->
             fmap (any isOptIn) (selectGroupNames (Arguments Nothing [] False (Just (index, count))) names) == Right False)
@@ -676,7 +689,8 @@ testScheduling names batches = TestList "testScheduling"
             Nothing -> []
     suite = filter (not . isOptIn) names
     assignments = assignShards 3 suite
-    loads = [shardWeight [name | (name, assigned) <- assignments, assigned == index] | index <- [1 .. 3]]
+    normalCount = ciShardCount - length bootstrapGroups
+    loads = [shardWeight [name | (name, assigned) <- assignShards normalCount (filter (`notElem` bootstrapGroups) suite), assigned == index] | index <- [1 .. normalCount]]
     complete count =
         let assigned = assignShards count names
             selected = [selectGroupNames (Arguments Nothing [] False (Just (index, count))) names | index <- [1 .. count]]
@@ -706,5 +720,6 @@ testScheduling names batches = TestList "testScheduling"
     isLeft (Left _) = True
     isLeft (Right _) = False
 
+-- (in the order of the last four CI shards they are given)
 bootstrapGroups :: [String]
-bootstrapGroups = ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2", "testFrontendBootstrap"]
+bootstrapGroups = ["testParserBootstrap:1/2", "testParserBootstrap:2/2", "testBootstrap", "testFrontendBootstrap"]
