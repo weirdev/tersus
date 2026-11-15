@@ -164,12 +164,14 @@ isSelfHosted :: String -> Bool
 isSelfHosted = isPrefixOf "testMirSelfHosted:"
 
 -- (self-hosted batches are admitted one at a time for memory, so their weights add up like the others'; a group
--- estimated at the whole memory budget runs alone, so it holds all four of the runner's workers while it runs)
+-- estimated at the whole memory budget runs alone, so it holds all four of the runner's workers while it runs, and
+-- two estimated above half of it never run together, so each holds about two)
 shardWeight :: [String] -> Int
 shardWeight = sum . map charged
   where
     charged name
         | estimatedPeakMiB name >= memoryBudgetMiB = 4 * groupWeight name
+        | 2 * estimatedPeakMiB name > memoryBudgetMiB = 2 * groupWeight name
         | otherwise = groupWeight name
 
 -- The median processor time of each group over recent CI runs, in seconds (its [CPU] line: what its process and the
@@ -674,9 +676,9 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "other original groups remain individually shardable" $
         testAssertEq (map snd (assignShards 4 ["testNative:1/4", "testNative:2/4", "testNative:3/4", "testNative:4/4"]))
             [1,2,3,4]
-    , testCase "self-hosted batches, which run one at a time, are charged their whole work" $
+    , testCase "self-hosted batches, which run one at a time, are charged their whole work twice over" $
         let selfHosted = filter isSelfHosted names
-         in testAssertEq (shardWeight selfHosted) (sum (map groupWeight selfHosted))
+         in testAssertEq (shardWeight selfHosted) (sum (map ((* 2) . groupWeight) selfHosted))
     , testCase "fixed native memory_limit users stay ordered in one batch" $
         testAssertTrue (all memorySerial batches)
     , testCase "small and empty trees never create empty batches" $
