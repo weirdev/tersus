@@ -9,7 +9,7 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
 
-import Bootstrap (compilerSnapshotHash, llvmOfOwned)
+import Bootstrap (compilerSnapshotHash, emitWith, llvmOfOwned)
 import LlvmRuntime (runtimeSource)
 import qualified Modules
 import Native (buildExecutable, cachedProgram)
@@ -47,6 +47,8 @@ testMirEmit =
             [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
         , TestCase "only outline invokes outline, once, without changing mode outputs" outlineDispatch
         , TestCase "mode errors preserve parse-first diagnostics and returned values" refusal
+        , TestCase "an emitter that refuses gives its reason, not IR" refusedEmit
+        , TestCase "llvm, build and run fail with the emitter's reason" refusedIr
         ]
 
 -- The validated programs of the sweep as a group of their own, so the suite's group processes balance: this sweep
@@ -384,10 +386,7 @@ refusal = withEmitter $ \exe -> do
         Ok program -> do
             let valid = writeProgram program
                 main = progMain program
-                unsupported = writeProgram program{progMain = main
-                    { fnReturns = Just (TParam "T")
-                    , fnLocals = Map.adjust (\decl -> decl{localType = TParam "T"}) (Local 0) (fnLocals main)
-                    }}
+                unsupported = writeProgram (unsupportedMain program)
                 modes = [[], ["ir"], ["outline"], ["bodies"], ["nonsense"]]
                 cases = [(args, text, message) | args <- modes, (text, message) <-
                     [("return 1;\n", "the input is not the MIR as data\n")
@@ -406,3 +405,34 @@ refusal = withEmitter $ \exe -> do
                   , testAssertEq defaultError (ExitSuccess, "1\n", "In " ++ fnName main ++ ": Native code does not support T yet\n")
                   , testAssertEq outlineError (ExitSuccess, "1\n", "Native code does not support T yet\n")
                   ] ++ parseFailures )
+
+unsupportedMain :: Program -> Program
+unsupportedMain program = program{progMain = main
+    { fnReturns = Just (TParam "T")
+    , fnLocals = Map.adjust (\decl -> decl{localType = TParam "T"}) (Local 0) (fnLocals main)
+    }}
+  where
+    main = progMain program
+
+refusedEmit :: IO TestResult
+refusedEmit = withEmitter $ \exe -> do
+    owned <- ownedOnce "return 1;"
+    case owned of
+        Error e -> pure (Just e)
+        Ok program -> do
+            ir <- emitWith exe (writeProgram (unsupportedMain program))
+            pure (testAssertEq ir (Error ("In " ++ fnName (progMain program) ++ ": Native code does not support T yet")))
+
+-- (llvm, build and run all write the IR with llvmOfOwned)
+refusedIr :: IO TestResult
+refusedIr = do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else do
+            owned <- ownedOnce "return 1;"
+            case owned of
+                Error e -> pure (Just e)
+                Ok program -> do
+                    ir <- llvmOfOwned (unsupportedMain program)
+                    pure (testAssertEq ir (Error ("Native code failed: In " ++ fnName (progMain program) ++ ": Native code does not support T yet")))

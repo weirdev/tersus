@@ -94,6 +94,7 @@ testOwnershipCodec = TestList "testOwnershipCodec"
         [testCase name (testAssertErrorContains cause (readRequest text)) | (name, cause, text) <- badRequests]
     , TestCase "native version 2 requests refuse malformed explicit provider records" nativeRequestRefusals
     , TestCase "native version 2 loads give checked facts and refuse malformed explicit provider records" nativeLoadRefusals
+    , TestCase "a request the elaborator refuses is an error with its reason" nativeRefusalReason
     , TestCase "native version 2 transport ordering and seven-name arity refusals" nativeTransportRefusals
     , TestCase "the seed and the compiler's elaborator retain exact RQ1 checking and response metadata" nativeLegacyParity
     , TestCase "the compiler's elaborator issues facts for real libraries and next frontend" nativeBootstrapSmoke
@@ -256,6 +257,13 @@ nativeRequestRefusals = withSourceElaborator $ \exe -> do
         pure $ fmap ((name ++ ": ") ++) (testAssertErrorContains cause (readRequest text) <>
             testAssertEq native (ExitSuccess, "1\n", "not an elaboration request\n"))
     pure (valid <> firstFailure results)
+
+nativeRefusalReason :: IO TestResult
+nativeRefusalReason = withSourceElaborator $ \exe -> do
+    answer <- runElaboratorText exe "tersus-elaborate 3\n"
+    pure $ case answer of
+        Error e -> testAssertEq e "not an elaboration request"
+        Ok response -> Just ("the elaborator answered: " ++ take 200 (show response))
 
 -- (the same protocol records in a load request, where they follow its kind)
 nativeLoadRefusals :: IO TestResult

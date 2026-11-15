@@ -23,7 +23,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception (IOException, finally, try)
 import qualified Data.ByteString.Char8 as B
-import Data.List (isInfixOf)
+import Data.List (dropWhileEnd, isInfixOf)
 import System.Exit (ExitCode (..))
 import System.IO (hClose, hSetBinaryMode)
 import System.IO.Unsafe (unsafePerformIO)
@@ -67,7 +67,9 @@ runElaboratorRaw exe text = do
                 pure (code, out, err)
             _ -> pure (ExitFailure 1, B.empty, B.pack "no pipes to the elaborator")
     pure $ case code of
-        ExitSuccess -> Ok (B.lines out)
+        ExitSuccess
+            | out == B.pack "1\n" && not (B.null err) -> Error (dropWhileEnd (== '\n') (take 400 (B.unpack err)))
+            | otherwise -> Ok (B.lines out)
         ExitFailure n -> Error ("exit " ++ show n ++ ": " ++ take 400 (B.unpack err))
 
 type Loader = LoadRequest -> LoadResponse
