@@ -43,6 +43,7 @@ import TestStrings
 import TestBytes
 import TestConnectives
 import TestMirData
+import TestLink
 import TestMirOwnership
 import TestMirMono
 import TestMirEval
@@ -205,6 +206,8 @@ originalGroups =
     , testBytes
     , testConnectives
     , testMirData
+    , testLink
+    , testLinkNative
     , testMirLowered
     , testMirOwnership
     , testMirMono
