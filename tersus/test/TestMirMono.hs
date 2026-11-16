@@ -16,7 +16,7 @@ import Native (runWithInputFull)
 import qualified Syntax as S
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms, unvalidatedPrograms)
-import Types (Arg (..), Size (..), Type (..), BuiltinFunct (..), instanceName)
+import Types (Arg (..), Size (..), Type (..), Signature (..), BuiltinFunct (..), instanceName)
 import Utils
 
 unitOf :: Program -> Lowered
@@ -37,22 +37,25 @@ monoDifference expected actual
 compareWire :: Program -> IO TestResult
 compareWire original = case writeLowered (unitOf original) of
     Error e -> pure (Just e)
-    Ok input -> do
-        tool <- ownershipTool
-        case tool of
-            ToolNative exe -> do
-                (code, out, err) <- runWithInputFull exe ("pass mono\n" ++ input)
-                pure $ case (code, err, readLowered out) of
-                    (ExitSuccess, "", Ok unit) ->
-                        let expected = Oracle.monomorphize original
-                            semantic = monoDifference expected (lowProgram unit)
-                            bytes = case writeLowered (unitOf expected) of
-                                Error e -> Just e
-                                Ok text -> if text == out then Nothing else Just "native MIR3 stdout differs from the canonical Haskell writer"
-                         in semantic <> bytes
-                    _ -> Just ("native full-MIR mono failed: " ++ show code ++ " " ++ err ++ " " ++ take 200 out)
-            ToolFailed e -> pure (Just e)
-            ToolInterpreted _ -> pure (Just "the full-MIR comparison requires the native emitter")
+    Ok input -> compareInput original input
+
+compareInput :: Program -> String -> IO TestResult
+compareInput original input = do
+    tool <- ownershipTool
+    case tool of
+        ToolNative exe -> do
+            (code, out, err) <- runWithInputFull exe ("pass mono\n" ++ input)
+            pure $ case (code, err, readLowered out) of
+                (ExitSuccess, "", Ok unit) ->
+                    let expected = Oracle.monomorphize original
+                        semantic = monoDifference expected (lowProgram unit)
+                        bytes = case writeLowered (unitOf expected) of
+                            Error e -> Just e
+                            Ok text -> if text == out then Nothing else Just "native MIR3 stdout differs from the canonical Haskell writer"
+                     in semantic <> bytes
+                _ -> Just ("native full-MIR mono failed: " ++ show code ++ " " ++ err ++ " " ++ take 200 out)
+        ToolFailed e -> pure (Just e)
+        ToolInterpreted _ -> pure (Just "the full-MIR comparison requires the native emitter")
 
 sourceMono :: (Bool -> String -> Result Program String) -> String -> IO TestResult
 sourceMono lower source = case lower True source of
@@ -106,6 +109,9 @@ testMirMonoUsing lower = TestList "testMirMono"
             let prefix = "function \"plain\""
                 broken = unlines [if prefix `isPrefixOf` line then "function \"plaín\"" ++ drop (length prefix) line else line | line <- lines text]
              in refuses ("pass mono\n" ++ broken)
+    , TestCase "legacy PackLoop metadata emits current canonical MIR3" legacyPackLoop
+    , testCase "the comparator catches omitted pack-loop invariants" $ testAssertTrue
+        (monoDifference (packLoopMetadata True metadataProgram) (packLoopMetadata False metadataProgram) /= Nothing)
     , TestList "malformed transport" [TestCase label (refuses input) | (label, input) <- refusalFixtures]
     ]
   where
@@ -275,9 +281,32 @@ builtinMetadata p = p{progInvariants = Map.singleton "Plain" [S.ProofAssert payl
   where
     payload = S.CTerm (S.VFunct ["x"] [S.ProofAssert (S.CTerm (S.VBool True))] [S.ProofAssert (S.CTerm (S.VBool False))] (S.BuiltinFunct Plus) [S.CTerm (S.VInt (10 ^ (30 :: Int)))])
 
+packLoopMetadata :: Bool -> Program -> Program
+packLoopMetadata invariant program = program{progInvariants = Map.singleton "Plain" [S.ProofAssert payload]}
+  where
+    checks = if invariant then [S.ProofAssert (S.CTerm (S.VBool True))] else []
+    loop = S.PackLoop "i" "a" "args" (S.Val (S.VInt 0)) (S.Val (S.VInt 2)) False checks [S.Return (S.Val (S.VInt 0))]
+    payload = S.CTerm (S.VFunct [] [] [] (S.NativeFunct (Signature [] TInt [] [] [] []) Nothing [loop]) [])
+
+legacyPackLoop :: IO TestResult
+legacyPackLoop = case writeLowered (unitOf (packLoopMetadata False metadataProgram)) of
+    Error e -> pure (Just e)
+    Ok original ->
+        let isLoop fields = length fields == 10 && fields !! 1 == "PackLoop"
+            rows = [(isLoop (words line), line) | line <- lines original]
+            legacy = unlines [if changed then unwords (take 8 (words line) ++ drop 9 (words line)) else line | (changed, line) <- rows]
+         in if length (filter fst rows) /= 1 || legacy == original
+            then pure (Just "the legacy PackLoop control did not remove exactly one invariant field")
+            else case readLowered legacy of
+                Error e -> pure (Just ("the current host rejected the legacy PackLoop record: " ++ e))
+                Ok unit -> compareInput (lowProgram unit) legacy
+
 monoFixtures :: [(String, Program)]
 monoFixtures =
     [ ("no generic retains complete metadata", metadataProgram)
+    , ("no generic retains pack-loop invariant metadata", packLoopMetadata True metadataProgram)
+    , ("generic retains pack-loop invariant metadata", packLoopMetadata True genericProgram)
+    , ("no generic retains empty pack-loop invariant metadata", packLoopMetadata False metadataProgram)
     , ("monomorphic Drop is deduplicated with an unrelated generic", plainDropWithGeneric)
     , ("Unicode uppercase type parameters complete declarations", unicodeParameterProgram)
     , ("nested Unicode lowercase types keep canonical backticks", unicodeArgumentProgram "α")
