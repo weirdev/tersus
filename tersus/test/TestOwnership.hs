@@ -698,7 +698,7 @@ execStatement stmt = do
             -- a value taken apart is cleared, and holds nothing)
             putSlot d (Slot v (if v == VNull then Nothing else Just looks))
         Assign d rv -> do
-            v <- evalRvalue rv
+            v <- assignedValue d rv
             f <- currentFrame
             program <- stProgram <$> getSt
             case Map.lookup d (frameSlots f) of
@@ -715,6 +715,21 @@ execStatement stmt = do
                 VR depth owner prior True _ _ -> writePlaceAt depth owner (prior ++ path) v
                 VR{} -> failM "a place is assigned through a read reference"
                 _ -> failM "a place is assigned through a local that is not a reference"
+
+-- (MirLists makes a constant list of Ints, Bools or Bytes as Box::new of its array: a List over memory of its own that holds the
+-- elements, with as much room as it has elements)
+assignedValue :: Local -> Rvalue -> M Val
+assignedValue d rv = do
+    f <- currentFrame
+    case (rv, localType <$> Map.lookup d (fnLocals (frameFunction f))) of
+        (MakeBox (Const (CArray cs)), Just (TNamed base args)) | isListStruct base -> do
+            vs <- mapM constant cs
+            let n = toInteger (length vs)
+            memory <- alloc (OMem (Map.fromList (zip [0 ..] vs)) n)
+            case memory of
+                VP a -> return (VS (instanceName base args) [("addr", VI (toInteger a * 2 ^ (32 :: Integer))), ("len", VI n), ("cap", VI n)])
+                _ -> failM "an allocation is not on the heap"
+        _ -> evalRvalue rv
 
 -- An assignment to a local of the frame: what it held is freed, and a value that is only looked at cannot be what it is given
 assignLocal :: Program -> Frame -> Local -> Rvalue -> Val -> M ()

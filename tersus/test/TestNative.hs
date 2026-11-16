@@ -61,6 +61,7 @@ testNative =
         , TestParallel "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestParallel "native storage" [TestCase name (sameAsMir name source) | (name, source) <- nativeStoragePrograms]
         , TestParallel "Uninit" [TestCase name (sameAsMir name source) | (name, source) <- uninitPrograms]
+        , TestParallel "constant lists" [TestCase name (sameAsMir name source) | (name, source) <- constantListPrograms]
         , TestParallel "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
@@ -173,6 +174,8 @@ testNativeIr =
             withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.boxNew<P>\"" `isInfixOf` ir))
         , TestCase "a Box of an array is a list of the library" $
             withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.listFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
+        , TestCase "a string literal is copied from a constant array of its bytes" $
+            withIr "s = \"hello\"; return size(s);" (\ir -> testAssertTrue ("private constant [5 x i8] [i8 104, i8 101, i8 108, i8 108, i8 111]" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 5, i64 1)" `isInfixOf` ir))
         , TestCase "a Box is the struct of the library, freed by its drop" $
             withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<Box<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.boxUnbox<Int>\"" `isInfixOf` ir))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" $
@@ -860,6 +863,23 @@ uninitPrograms =
     , ("a Box", "u = Uninit::new(Box::new(5)); b = Uninit::take(u); return Box::unbox(b);")
     , ("a String literal", "u = Uninit::new(\"hello\"); x = Uninit::get(u); x.print(); s = Uninit::take(u); s.print(); return 0;")
     ]
+
+-- A constant list of Ints, Bools or Bytes, the bytes of a string literal among them, is copied from a constant array (MirLists): each run
+-- gets a list of its own with as much room as it has elements, so the first push grows it
+constantListPrograms :: [(String, String)]
+constantListPrograms =
+    [ ("a literal of " ++ show n ++ " bytes", "s = \"" ++ text n ++ "\"; s.print(); s = s.push(toByte(33)); s.print(); return size(s);")
+    | n <- [0, 1, 35, 400]
+    ]
+        ++ [ ("a literal with a character of every UTF-8 length", "s = \"a\\u{e9}\\u{20ac}\\u{1f600}\"; s.print(); s = s.push(toByte(33)); return s;")
+           , ("a literal changed in a loop that runs twice", "i = 0; while i < 2 [{ affirm i >= 0; affirm i <= 2; }] shrinks 2 - i { s = \"ab\"; s = s.push(toByte(33)); s = set(s, 0, toByte(65)); s.print(); i = i + 1; }; return 0;")
+           , ("a constant list of Ints", "l = [5, 9223372036854775807, 0]; l = push(l, 4); return l;")
+           , ("a constant list of Bools", "l = [true, false, true]; l = push(l, false); return l;")
+           , ("a constant list of Bytes", "fn grown(l: List<Byte>) -> List<Byte> { return push(l, toByte(7)); }; return grown([1, 128, 255]);")
+           , ("a constant list of Ints made again each time round a loop", "t = 0; for r in 0..2 { l = [1, 2]; l = push(l, r); l = set(l, 0, 9); t = t * 1000 + get(l, 0) * 100 + size(l) * 10 + get(l, 2); }; return t;")
+           ]
+  where
+    text n = take n (cycle ['a' .. 'z'])
 
 unvalidatedPrograms :: [(String, String)]
 unvalidatedPrograms = functionPrograms

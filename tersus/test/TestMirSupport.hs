@@ -120,7 +120,7 @@ emitterFileLayout (loaded, compiled, program) = firstFailure
     , testAssertEq (length [m | m <- Package.compiledModules compiled, Package.compiledModuleId m == entryId]) 1
     , testAssertEq [name | file <- files, S.Assign name (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]
         [name | file <- files, S.Assign name (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file), '$' `notElem` name]
-    , testAssertEq (length [() | file <- files, S.Assign _ (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]) 155
+    , testAssertEq (length [() | file <- files, S.Assign _ (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]) 156
     , testAssertEq (Set.fromList [name | file <- files, S.StructDef name _ _ _ <- fileBody (Mod.loadedParsed file)])
         (Set.fromList ["Held", "Entry", "Gen", "Sig", "Ctor", "Ctx", "LT", "LTG", "CtorAt", "FnOut", "Storage"])
     , testAssertEq (all (`Map.member` M.progFunctions program) ["ir", "outline", "bodies", "fieldOffset", "operandValue", "emitStatement", "emitFunction", "<String>::then"]) True

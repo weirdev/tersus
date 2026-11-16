@@ -106,7 +106,7 @@ fn arrayRead(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, os: &List
     // 0 length, 1 first, 2 last, 3 get, 6 set
     if op = 0 && n = 1 { return arrayLength(g, f, get(os, 0)); };
     if op = 1 && n = 1 {
-        g1 = arrayPtr(g, cx, f, get(os, 0));
+        g1 = arrayPtr(g, cx, f, destType, get(os, 0));
         base = clone(g1.last);
         return loadAt(g1, destType, base);
     };
@@ -115,14 +115,14 @@ fn arrayRead(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, os: &List
         length = clone(g1.last);
         g2 = lastIndex(g1, length);
         index = clone(g2.last);
-        g3 = arrayPtr(g2, cx, f, get(os, 0));
+        g3 = arrayPtr(g2, cx, f, destType, get(os, 0));
         base = clone(g3.last);
         g4 = elementAddress(g3, base, index, bytesIn(cx, destType));
         p = clone(g4.last);
         return loadAt(g4, destType, p);
     };
     if op = 3 && n = 2 {
-        g1 = arrayPtr(g, cx, f, get(os, 0));
+        g1 = arrayPtr(g, cx, f, destType, get(os, 0));
         base = clone(g1.last);
         g2 = operandValue(g1, cx, f, Type::TInt, get(os, 1));
         index = clone(g2.last);
@@ -448,7 +448,7 @@ fn freeOld(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int) -> Gen ~ {
 
 // The address of the element at an index of an array (or of a list of native code, whose address is that of its array), the element being the value that is made
 fn elementOf(g: Gen, cx: &Ctx, f: &Function, ty: &Type, container: &Operand, index: &String) -> Gen ~ {
-    g1 = arrayPtr(g, cx, f, container);
+    g1 = arrayPtr(g, cx, f, ty, container);
     base = clone(g1.last);
     return elementAddress(g1, base, index, bytesIn(cx, ty));
 };

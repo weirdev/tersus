@@ -96,6 +96,8 @@ testStrings =
                 "validation"
                 [ testCase "a size is known from the literal" (valid "s = \"abc\"; affirm size(s) = 3; return 0;")
                 , testCase "and of a concat and a push" (valid "s = \"ab\".concat(\"c\").push(toByte(1)); affirm size(s) = 4; affirm toInt(get(s, 3)) = 1; return 0;")
+                , testCase "the bytes of a literal are known" (valid "s = \"hi!\"; affirm toInt(get(s, 0)) = 104; affirm toInt(get(s, 2)) = 33; return 0;")
+                , testCase "a wrong byte of a literal is refused" (rejected "s = \"hi\"; affirm toInt(get(s, 1)) = 106; return 0;" "Could not prove")
                 , testCase "an index out of range is refused" (rejected "s = \"ab\"; return get(s, 2);" "Could not prove: i < size(self.bytes)")
                 , testCase "a wrong size is refused" (rejected "s = \"ab\"; affirm size(s) = 3; return 0;" "Could not prove: <String as Sequence>::size(s) = 3")
                 , testCase "the size of a concat is the sum" (rejected "s = \"ab\".concat(\"cd\"); affirm size(s) = 3; return 0;" "Could not prove: <String as Sequence>::size(s) = 3")
