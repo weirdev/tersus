@@ -127,6 +127,9 @@ instance NFData i => NFData (S.Proof i)
 deriving instance Generic S.RwRule
 instance Binary S.RwRule
 instance NFData S.RwRule
+deriving instance Generic T.OwnershipFacts
+instance Binary T.OwnershipFacts
+instance NFData T.OwnershipFacts
 
 codecVersion :: String
 codecVersion = "tersus-test-program binary 1\n"

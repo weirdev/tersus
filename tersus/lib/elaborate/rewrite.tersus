@@ -1,5 +1,5 @@
 import data::ast::ast { AstArg, AstBody, AstBuiltin, AstExpression, AstName, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstStatement, AstTermination, AstValidation, AstValue };
-import data::codec::codec { Size, Token, Type, catStrings, renderSizeForName, renderTypeForName, sizeAt, tokenize, typeAt, wordAt };
+import data::codec::codec { Parsed, Size, Token, Type, catStrings, renderSizeForName, renderTypeForName, sizeAt, tokenize, typeAt, wordAt };
 import elaborate::core { baseNameOf };
 import elaborate::out { quotedName };
 import elaborate::records { listItems, nameText, nodeIn };
@@ -148,6 +148,33 @@ fn sizeTokens(s: &Size) -> String ~ {
 fn wrapText(word: &String, inner: Txt) -> Txt ~ {
     if !inner.ok { return inner; };
     return Txt { text: catStrings(word, &inner.text), ..inner };
+};
+
+// A type with the language's list and Box (`list T`, `box T`) as the named types of the build's checked providers of
+// List and Box, the declarations they are; the words are the type keywords of the data, whose names are quoted
+fn storageBound(t: &Type, list: &String, box: &String) -> Parsed<Type> ~ {
+    // (written as it is: a canonical pass with no locals of its own looks no name up and renames none)
+    m = noMaps();
+    cn = Canon { on: true, locals: HashSet::new(), prefix: "" };
+    params = HashSet::new();
+    unbound = Parsed<Type> { value: clone(t), pos: 0, ok: false };
+    x = typeText(&m, &cn, &params, t);
+    if !x.ok { return unbound; };
+    tokens = tokenize(&x.text);
+    if !tokens.ok { return unbound; };
+    bound = [];
+    for tok in &tokens.value {
+        provider = "";
+        if !tok.quoted && tok.text = "list" { provider = clone(list); };
+        if !tok.quoted && tok.text = "box" { provider = clone(box); };
+        if size(provider.bytes) > 0 {
+            bound = push(push(push(push(bound, Token { quoted: false, text: "named" }), Token { quoted: true, text: provider }), Token { quoted: false, text: "1" }), Token { quoted: false, text: "type" });
+        } else { bound = push(bound, clone(tok)); };
+    };
+    if size(bound) = 0 { return unbound; };
+    parsed = typeAt(&bound, 0);
+    if !parsed.ok || parsed.pos != size(bound) { return unbound; };
+    return parsed;
 };
 
 fn typeText(m: &Maps, cn: &Canon, params: &HashSet<String>, t: &Type) -> Txt ~ {
@@ -844,8 +871,6 @@ fn prepareModule(nodes: List<AstNode>, p: &Pkg, key: &String, roots: &List<Int>)
         i = i + 1;
     };
     ordered = byCategory(&rw.nodes, &all);
-    reserved = reservedHelper(&rw.nodes, &ordered);
-    if size(reserved.bytes) > 0 { return Prepared { nodes: rw.nodes, stmts: [], ok: false, msg: reservedError(&reserved) }; };
     orphan = orphanImpl(&rw.nodes, &ordered, key);
     return Prepared { nodes: rw.nodes, stmts: ordered, ok: size(orphan.bytes) = 0, msg: orphan };
 };
@@ -877,42 +902,6 @@ fn byCategory(nodes: &List<AstNode>, ids: &List<Int>) -> List<Int> ~ {
         for s in ids { if category(nodes, s) = c { out = push(out, s); }; };
     };
     return out;
-};
-
-fn nativeHelperNames() -> List<String> ~ {
-    out = push([], "listNew");
-    out = push(out, "listLen");
-    out = push(out, "listGet");
-    out = push(out, "listFirst");
-    out = push(out, "listLast");
-    out = push(out, "listPop");
-    out = push(out, "listSet");
-    out = push(out, "listPush");
-    out = push(out, "listFilled");
-    out = push(out, "boxNew");
-    return push(out, "boxUnbox");
-};
-
-fn reservedHelper(nodes: &List<AstNode>, ids: &List<Int>) -> String ~ {
-    helpers = nativeHelperNames();
-    for s in ids {
-        stmt = statementOf(nodes, s);
-        name = "";
-        if stmt is AstStatement::Assign && functValue(nodes, (stmt as AstStatement::Assign).e) >= 0 { name = nameText(nodes, (stmt as AstStatement::Assign).n); };
-        if stmt is AstStatement::StructDef { name = nameText(nodes, (stmt as AstStatement::StructDef).n); };
-        if stmt is AstStatement::EnumDef { name = nameText(nodes, (stmt as AstStatement::EnumDef).n); };
-        if stmt is AstStatement::TraitDef { name = nameText(nodes, (stmt as AstStatement::TraitDef).n); };
-        if stmt is AstStatement::BoundedDef {
-            inner = statementOf(nodes, (stmt as AstStatement::BoundedDef).s);
-            if inner is AstStatement::Assign { name = nameText(nodes, (inner as AstStatement::Assign).n); };
-        };
-        for h in &helpers { if name = clone(h) { return name; }; };
-    };
-    return "";
-};
-
-fn reservedError(name: &String) -> String ~ {
-    return catStrings(catStrings("Type error: ", name), " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them");
 };
 
 fn declaredTypeNames(nodes: &List<AstNode>, ids: &List<Int>) -> List<String> ~ {

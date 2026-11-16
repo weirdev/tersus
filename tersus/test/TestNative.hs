@@ -338,7 +338,7 @@ functionPrograms =
     , ("a recursive function through a value", "fn count(n: Int) -> Int shrinks n { if n <= 0 { return 0; }; return 1 + count(n - 1); }; f = count; return f(5);")
     ]
 
--- Strings are the library struct String over a list of bytes (lib/string.tersus), so native code has nothing of its own for them
+-- Strings are the library struct String over a list of bytes (lib/std/string/string.tersus), so native code has nothing of its own for them
 stringPrograms :: [(String, String)]
 stringPrograms =
     [ ("an Int as text", "return String::fromInt(0 - 4072);")

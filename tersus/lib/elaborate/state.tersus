@@ -77,7 +77,7 @@ fn noBoundedParts() -> BoundedParts ~ { return BoundedParts { names: [], values:
 // expression types, references the copies the module names and boundStubs the functions bounds give (all given to the
 // program after it is checked); sequenceTraits holds the library's Sequence and Growable when the module has them, which lists, arrays and Boxes of
 // arrays implement with the builtins;
-// storageCopies is set for the native storage helpers (tersuslib's lists and box), whose clones are the copies native code
+// storageCopies is set for the native storage helpers (std's lists and box), whose clones are the copies native code
 // makes of a value of any type.
 // ty is the result of the last function that makes a type, ok of the last unify, te of the last inference.
 struct St {

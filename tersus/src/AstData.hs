@@ -1564,9 +1564,9 @@ astTypeP = word >>= \w -> case w of
     "i32" -> pure (TWord True 32)
     "u16" -> pure (TWord False 16)
     "u32" -> pure (TWord False 32)
-    "list" -> TList <$> astTypeP
+    "list" -> SyntaxList <$> astTypeP
     "array" -> TArrayOf <$> astTypeP <*> sizeP
-    "box" -> TBox <$> astTypeP
+    "box" -> SyntaxBox <$> astTypeP
     "addr" -> TAddr <$> astTypeP
     "block" -> TBlock <$> astTypeP
     "uninit" -> TUninit <$> astTypeP

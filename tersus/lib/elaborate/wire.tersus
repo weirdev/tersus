@@ -101,34 +101,16 @@ fn wireLocal(name: &String) -> String ~ {
     return name.slice(start, size(name.bytes));
 };
 
-fn wireBindDeclarations(st: St, statements: &List<Int>) -> St ~ {
-    for s in statements {
-        stmt = stmtOf(&st, s);
-        if stmt is AstStatement::TraitDef {
-            name = nameText(&st.nodes, (stmt as AstStatement::TraitDef).n);
-            role = wireLocal(&name);
-            if wireOwnershipRole(&role) {
-                previous = st.wireProtocols.lookup(&role, []);
-                if indexIn(&previous, &name) < 0 { previous = push(previous, clone(name)); };
-                st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
-            };
-        };
-    };
-    return st;
-};
-
-fn wireStorageDeclarations(st: St, statements: &List<Int>) -> St ~ {
-    for s in statements {
-        stmt = stmtOf(&st, s);
-        if stmt is AstStatement::StructDef {
-            name = nameText(&st.nodes, (stmt as AstStatement::StructDef).n);
-            role = wireLocal(&name);
-            if role = "List" || role = "Box" {
-                previous = st.wireProtocols.lookup(&role, []);
-                if indexIn(&previous, &name) < 0 { previous = push(previous, clone(name)); };
-                st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
-            };
-        };
+// The roles a package marker binds to the module's own declarations (elaborate.ownProviders)
+fn wireOwnBindings(st: St, roles: &List<String>, providers: &List<String>) -> St ~ {
+    i = 0;
+    while i < size(roles) && i < size(providers) [{ affirm i >= 0; }] shrinks size(roles) - i {
+        role = clone(get(roles, i));
+        provider = clone(get(providers, i));
+        previous = st.wireProtocols.lookup(&role, []);
+        if indexIn(&previous, &provider) < 0 { previous = push(previous, provider); };
+        st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
+        i = i + 1;
     };
     return st;
 };

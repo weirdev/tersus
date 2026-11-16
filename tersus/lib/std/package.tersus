@@ -1,0 +1,8 @@
+noPrelude = true;
+List = core::types::List;
+Box = core::types::Box;
+Clone = core::ownership::Clone;
+Copy = core::ownership::Copy;
+Drop = core::ownership::Drop;
+Deref = core::ownership::Deref;
+Eq = eq::Eq;

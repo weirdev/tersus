@@ -35,7 +35,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.ByteString.Char8 as B
 
 import Bootstrap (llvmOfOwned)
-import Compile (lowerSourceUsing, lowerStatementsWith, parseWithEqualityUsing)
+import Compile (lowerPartsWith, lowerSourceUsing, lowerStatementsWith, parseWithEqualityPartsUsing, parseWithEqualityUsing)
 import ElaborateRequest
 import ElaboratorTool (Loader, bootstrapElaborator, bootstrapLoader, noVerdict, runElaborator, runLoader, sourceElaborator, sourceLoader)
 import InterfaceData (writeInterface)
@@ -132,9 +132,9 @@ unitRequests frontend unit = do
 unitThrough :: Bool -> Frontend -> Unit -> IO (Result Int String)
 unitThrough deep (Frontend elaborator loader) given = pure given >>= \unit -> case unit of
     SourceFile path -> program <$> readFile path
-    SourceText _ source -> pure $ case parseWithEqualityUsing loader source of
+    SourceText _ source -> pure $ case parseWithEqualityPartsUsing loader source of
         Left e -> Error ("does not parse: " ++ e)
-        Right stmts -> measured (lowerStatementsWith elaborator stmts)
+        Right parts -> measured (lowerPartsWith elaborator parts)
     EmbeddedPackage entry -> pure (package (embeddedFiles entry) entry)
     FilePackage entry -> do
         files <- Mod.snapshotFromFilesystem entry

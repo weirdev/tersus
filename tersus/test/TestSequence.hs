@@ -174,7 +174,7 @@ testSequence =
                         library = lines vecLibrary
                     pure $ if any (\rest -> take (length library) rest == library) (tails code) then Nothing else Just "examples/vec.tersus does not hold vecLibrary"
                 , testCase "a program that mentions Sequence has the trait" (runsAs (counter ++ "return Three { a: 4, n: 2 }.size() + get(Three { a: 4, n: 2 }, 0);") "6")
-                , testCase "a list is a Sequence by the impl in lib/prelude.tersus" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return total(push([], 3));" "1")
+                , testCase "a list is a Sequence by the impl in lib/std/prelude/prelude.tersus" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return total(push([], 3));" "1")
                 , testCase "and a Growable by it" (runsAs "fn add<S: Growable<Int>>(s: S, x: Int) -> S { return push(s, x); }; return size(add(push([], 3), 4));" "2")
                 , testCase "called through the trait by its path" (runsAs "return Sequence::size(push([], 3)) + Sequence::get(push([], 3), 0);" "4")
                 , testCase "an impl for a list is written for it" (runs "trait MySeq<E> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl<T> MySeq<T> for List<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); }; }; fn n<S: MySeq<Int>>(s: &S) -> Int { return size(s); }; return n(push([], 3));" (VInt 1))
@@ -186,9 +186,9 @@ testSequence =
                 , testCase "and on a struct with a size" (runs "struct Packet<n> { cells: Array<Int, n> }; trait Holds<E> { fn hold(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl<n> Holds<Array<Int, n>> for Packet<n> { fn hold(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self.cells); }; }; return Holds::hold(Packet<3> { cells: #[1, 2, 3] });" (VInt 3))
                 , testCase "a trait written for one size of array is not for another" (rejected "trait OfThree { }; impl OfThree for Array<Int, 3> { }; fn f<S: OfThree>(s: &S) -> Int { return 0; }; return f(#[1, 2]);" "needs S to implement OfThree, and Array<Int, 2> does not")
                 , testCase "a trait written for an array of one type is not for another" (rejected "trait OfInts { }; impl OfInts for Array<Int, 3> { }; fn f<S: OfInts>(s: &S) -> Int { return 0; }; return f(#[true, false, true]);" "needs S to implement OfInts, and Array<Bool, 3> does not")
-                , testCase "a Box of an array is a Sequence by the impl in lib/prelude.tersus" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return total(Array::boxed(3, 5)) * 10 + total(#[1, 2]);" "32")
+                , testCase "a Box of an array is a Sequence by the impl in lib/std/prelude/prelude.tersus" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return total(Array::boxed(3, 5)) * 10 + total(#[1, 2]);" "32")
                 , testCase "an impl for an array is written for it" (runs "trait Holds<E> { }; impl<T, n> Holds<Array<T, n>> for Array<T, n> { }; fn g<S: Holds<Array<Int, 3>>>(s: &S) -> Int [{ }] [{ }] { return 2; }; return g(#[1, 2, 3]);" (VInt 2))
-                , testCase "the trait is the one in lib/prelude.tersus" (errorHas (counter ++ "return get(Three { a: 4, n: 2 }, 3);") "Could not prove")
+                , testCase "the trait is the one in lib/std/prelude/prelude.tersus" (errorHas (counter ++ "return get(Three { a: 4, n: 2 }, 3);") "Could not prove")
                 , testCase "a program with a Sequence of its own does not" (runsAs "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" "3")
                 , testCase "the names that native code makes a list of are not a program's" (errorHas "fn listNew() -> Int { return 7; }; return [1];" "listNew is reserved")
                 , testCase "nor is the struct" (errorHas "struct List { x: Int }; return 1;" "List is reserved")

@@ -5,7 +5,7 @@ import Compile (lowerSource)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Mir as M
-import Pipeline (parseSource, parseWithEquality, runStatements, validateStatements)
+import Pipeline (parseSource, parseSourceParts, parseWithEquality, parseWithEqualityParts, runParts, runStatements, validateParts, validateStatements)
 import Types
 import Syntax
 import Solver
@@ -38,14 +38,14 @@ testTraits =
                 , "impl Counter { fn label(self: Self) -> Int { return 3; }; };"
                 ]
         -- (the prelude is put in front of a program by the pipeline, so these programs are read as the command line reads them)
-        runsLib source expected = case parseSource source of
+        runsLib source expected = case parseSourceParts True source of
             Error e -> Just ("Parse failed: " ++ e)
-            Ok stmts -> case runStatements stmts of
+            Ok parts -> case runParts parts of
                 Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt expected))
                 Error e -> Just ("Evaluation failed with error: " ++ e)
-        validLib source = case parseSource source of
+        validLib source = case parseSourceParts True source of
             Error e -> Just ("Parse failed: " ++ e)
-            Ok stmts -> case validateStatements stmts of
+            Ok parts -> case validateParts parts of
                 Ok _ -> Nothing
                 Error e -> Just ("Validation failed with error: " ++ e)
         measure =
@@ -93,9 +93,9 @@ testTraits =
         showSize = "trait Show { fn show(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; trait Size { fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; struct Cell { v: Int }; impl Show for Cell { fn show(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 1; }; }; impl Size for Cell { fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 2; }; }; "
         bounded body expected = parseEvalProgramHelper (showSize ++ body) (Just (VInt expected))
         -- (refused in the program's words: an internal compiler error of a copy is not the refusal asked for)
-        boundedRejected body expected = case parseWithEquality (showSize ++ body) of
+        boundedRejected body expected = case parseWithEqualityParts (showSize ++ body) of
             Left err -> Just ("Parse failed: " ++ err)
-            Right stmts -> case validateStatements stmts of
+            Right parts -> case validateParts parts of
                 Error e | "internal compiler error" `isInfixOf` e -> Just ("an internal compiler error instead of a refusal: " ++ e)
                 _ -> parseValidateFailProgramHelper (showSize ++ body) expected
         compiledRejected source expected = case lowerSource True source of

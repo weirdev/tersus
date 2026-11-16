@@ -3,12 +3,12 @@ import data::codec::codec { catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
 import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType, withType };
 import elaborate::check { fnSigOf, mentionsParameter };
-import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureInstance, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
+import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureInstance, hasColons, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
 import elaborate::state { forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
-import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
+import elaborate::traits { boundAsImpl, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
     return St { te: TE { node: node, types: push([], t) }, ..st };
@@ -949,10 +949,22 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
     base = baseNameOf(&name);
     st = ctorArgTypes(st, ctor.args);
     ctorArgs = clone(st.te.types);
-    st = namedTy(st, clone(base), ctorArgs);
+    st = namedTy(st, clone(base), clone(ctorArgs));
     ty0 = st.ty;
+    callee = funct;
     tuple = isTuple(&base);
     if !tuple { st = ensureInstance(st, ty0); };
+    // (a struct built with its type arguments is the instance they make, by its canonical name: the name as written
+    // spells a list or a Box by the language's word, not by the declaration it is)
+    if !tuple && !hasColons(&name) && size(ctorArgs) > 0 {
+        key = instanceName(&st, ty0);
+        if key != name {
+            st = emitCtorValue(st, clone(key), &ctorArgs, &fields);
+            st = emitVal(st, st.nid);
+            callee = st.nid;
+            name = key;
+        };
+    };
     declared = [];
     if !tuple {
         st = ctorInfo(st, &name);
@@ -974,7 +986,7 @@ fn inferCtor(st: St, funct: Int, ctor: AstBuiltin::Ctor, args: &List<Int>) -> St
     if st.status != 0 { return st; };
     t = st.ty;
     argNodes = nodesOf(&inferred);
-    st = emitCall(st, funct, &argNodes);
+    st = emitCall(st, callee, &argNodes);
     return typed(st, st.nid, t, &inferred);
 };
 
@@ -1099,7 +1111,7 @@ fn inferEquality(st: St, funct: Int, negated: Bool, args: &List<Int>) -> St ~ {
 fn equalityCall(st: St, t: Int, operands: &List<TE>) -> St ~ {
     provider = protocolName(&st, "Eq");
     if !HashSet::contains(&st.traits, &provider) {
-        return typeError(st, catStrings(render(st, t), " is compared with =, which needs the trait Eq of lib/eq.tersus, which a program has unless it declares a trait Eq of its own"));
+        return typeError(st, catStrings(render(st, t), " is compared with =, which needs the trait Eq of lib/std/eq/eq.tersus, which a program has unless it declares a trait Eq of its own"));
     };
     st = traitArguments(st, "Eq", t);
     if st.status != 0 { return st; };
@@ -1176,11 +1188,6 @@ fn traitCall(st: St, funct: Int, path: String, function: String, args: &List<Int
         inferred = clone(st.tes);
         st = primitiveTraitCall(st, &path, &fns, &function, &inferred);
         if st.status != 0 || st.ok { return st; };
-        // (the builtin of that name, called as the program would call it by its name)
-        if size(inferred) > 0 && builtinSequenceCall(&st, &path, &function, teHeadAt(&inferred, 0)) {
-            st = emitVar(st, clone(function));
-            return inferCallRest(st, st.nid, args);
-        };
         ats = typesHeads(&inferred);
         st = ownerThroughTrait(st, &path, &fns, &function, &ats);
         if st.status != 0 { return st; };
@@ -1327,6 +1334,7 @@ fn cloneWrap(st: St, x: TE, xt: Int) -> St ~ {
 // The impl's clone, given a borrow of the value when it takes one (cloneTrait)
 fn cloneTrait(st: St, x: TE) -> St ~ {
     provider = protocolName(&st, "Clone");
+    if size(provider.bytes) = 0 { return typeError(st, "clone requires its checked Clone provider, and none is bound in this build"); };
     if !HashMap::contains(&st.traitFns, &provider) {
         args = push([], x.node);
         return traitCall(st, 0 - 1, provider, "clone", &args);

@@ -13,7 +13,7 @@ module Bootstrap
     ) where
 
 import qualified Mir as M
-import MirData (writeProgram)
+import MirData (writeOwnedProgram)
 import Native (buildExecutable, runWithInput)
 import MirHousekeeping (emitterEntry, ownedToolWith)
 import Pipeline (ownedSource)
@@ -46,7 +46,9 @@ stageOne compiler output = do
     case owned of
         Error e -> pure (Error e)
         Ok program -> do
-            ir <- emitWith compiler (writeProgram program)
+            ir <- case writeOwnedProgram program of
+                Error e -> pure (Error e)
+                Ok text -> emitWith compiler text
             case ir of
                 Error e -> pure (Error e)
                 Ok text -> buildExecutable output text
@@ -73,7 +75,9 @@ llvmOfOwned owned = do
     case exe of
         Error e -> pure (Error e)
         Ok path -> do
-            ir <- emitWith path (writeProgram owned)
+            ir <- case writeOwnedProgram owned of
+                Error e -> pure (Error e)
+                Ok text -> emitWith path text
             pure (either' ir)
   where
     either' (Error e) = Error ("Native code failed: " ++ e)

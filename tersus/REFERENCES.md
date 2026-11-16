@@ -462,7 +462,7 @@ mid-implementation:
   state is one more fact per place in `MirMoves`.
 - **Method receivers are the one implicit borrow.** Trait functions are
   written `fn size(self: &Self)` and called as `x.size()` throughout the
-  library (`lib/prelude.tersus`); making receivers explicit at every call
+  library (`lib/std/prelude/prelude.tersus`); making receivers explicit at every call
   site would rewrite every method call in every program for no safety gain,
   since the receiver's permission is in the signature either way. Explicit
   `&`/`&mut` is required for ordinary arguments; a method call borrows its
@@ -581,7 +581,7 @@ mid-implementation:
 5. **Library and raw-memory integration.** Unify `Block` loans; recheck list
    lowering, drops, partial moves and allocator design. Verify generated library
    MIR too: its current exemption from move checking cannot authorize references
-   (`lowerLibrary` lowers `lib/lists.tersus` and `lib/box.tersus` with the move
+   (`lowerLibrary` lowers `lib/std/lists/lists.tersus` and `lib/std/box/box.tersus` with the move
    check off, so a reference in library code would be unchecked until this is
    closed). Introduce explicit guarded mutation and handle libraries when needed.
    *Partly done (2026-10-30): the move-check exemption is closed — the

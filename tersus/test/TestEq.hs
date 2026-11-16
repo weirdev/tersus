@@ -6,7 +6,7 @@ import Solver
 import TestHarness
 import Utils
 
--- Eq (lib/eq.tersus): `=` and `!=` in code call Eq::eq for every type but the words, `impl Eq for T { };` is the impl that compares
+-- Eq (lib/std/eq/eq.tersus): `=` and `!=` in code call Eq::eq for every type but the words, `impl Eq for T { };` is the impl that compares
 -- the fields, and what eq promises is the validator's equality, so a test of `a = b` tells the validator `a = b` or `a != b`. The
 -- programs are read as the command line reads them, with the libraries the pipeline puts in front of them.
 testEq :: Test

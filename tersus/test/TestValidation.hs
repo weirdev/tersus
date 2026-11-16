@@ -16,7 +16,7 @@ import ElaboratorTool (noVerdict)
 import Control.Exception (MaskingState (..), SomeException, bracket, displayException, evaluate, getMaskingState, try)
 import System.Timeout (timeout)
 import Data.List (isInfixOf)
-import Compile (lowerSource, lowerStatements, parseSource)
+import Compile (lowerParts, lowerSource, lowerStatements, parseSource, parseSourceParts)
 import qualified Mir as M
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -695,9 +695,9 @@ unreachedDefinitions program = program{M.progMain = main'{M.fnBlocks = Map.inser
     stripped = Map.map (\block -> block{M.blockStatements = filter (not . isDefinition) (M.blockStatements block)}) blocks
 
 frontendParity :: String -> TestResult
-frontendParity source = case parseSource source of
+frontendParity source = case parseSourceParts True source of
     Error e -> Just e
-    Ok stmts -> testAssertEq (lowerSource True source) (lowerStatements stmts)
+    Ok parts -> testAssertEq (lowerSource True source) (lowerParts parts)
 
 allRefusals :: IO TestResult
 allRefusals = case (lowerSource True (twoRefused ++ identity ++ "return identity(3);"), lowerSource True (identity ++ "return identity(3);")) of

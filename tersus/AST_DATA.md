@@ -376,13 +376,13 @@ loader used, and a program that does not parse `unparsed "MESSAGE"`. The compile
 (`Pipeline.loadFromEntry`, `PackageCompile.compileModulesUsing`, `Compile.lowerSourceUsing`,
 `LibPackage.compileLibPackageWith`), F0 for its own code and the source elaborator otherwise.
 
-The compiler libraries' sources come in one of two shapes, which the elaborator tells by their imports and names and
-which one request does not mix. In the shape the compiler sends today, each source is a module of the synthetic
-`tersuslib` package that imports others as `tersuslib::name` and keeps its bare names. In the shape of the ordinary std
-package, a source imports `std::module` or `std::module::file` with the names it uses, the files of one module are
-consecutive sources named `module/file`, and the modules are compiled as the package `std` is, under canonical names
-(`std$core$types$List`); a program is then given its selected libraries as imports of the names it spells, which its own
-declarations and imports still shadow, and the libraries `types` and `clone` it would select are the module `core`.
+The compiler libraries' sources are the ordinary std package: a source imports `std::module` or `std::module::file`
+with the names it uses, the files of one module are consecutive sources named `module/file`, and the modules are
+compiled as the package `std` is, under canonical names (`std$core$types$List`); a program is then given its selected
+libraries as imports of the names it spells, which its own declarations and imports still shadow, and the libraries
+`types` and `clone` it would select are the module `core`. The request's std root carries `std/package.tersus`, whose
+bindings give `core` and `eq` their roles. A source in the earlier shape, a module of a synthetic `tersuslib` package
+that imported `tersuslib::name` and kept its bare names (which the elaborator read until the std cutover), is refused.
 
 ## Versioned ownership transport migration
 

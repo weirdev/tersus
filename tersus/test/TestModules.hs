@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module TestModules
     ( testModules
     , testPhase1Packages
@@ -8,6 +9,7 @@ module TestModules
     , phase2Rejects
     ) where
 
+import TestStorage (pattern TList, pattern TBox)
 import Control.Exception (bracket, evaluate, finally, try, SomeException)
 import Control.Monad (when)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)

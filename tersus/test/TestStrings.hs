@@ -6,7 +6,7 @@ import Cli (Command (..), World (..), noWorld, runSource, runSourceFiles, runSou
 import TestHarness
 import Utils
 
--- Strings: a literal is a value of the struct `String` of lib/string.tersus, made of the UTF-8 bytes of its text
+-- Strings: a literal is a value of the struct `String` of lib/std/string/string.tersus, made of the UTF-8 bytes of its text
 testStrings :: Test
 testStrings =
     let runs body expected = testAssertEq (runSource Interpret body) (Ok expected)

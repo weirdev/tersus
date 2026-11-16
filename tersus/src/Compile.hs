@@ -1,7 +1,9 @@
 module Compile
     ( SourceParts, parseSource, parseSourceParts, parseSourcePartsNoPrelude, parseWithEquality, parseWithEqualityUsing
+    , parseWithEqualityParts, parseWithEqualityPartsUsing
     , lowerSource, lowerSourceNoPrelude, lowerSourceUsing
     , lowerStatements, lowerStatementsWith, elaborateStatements, completeSpecEnvs
+    , lowerParts, lowerPartsWith, elaborateParts
     , sourceRequest
     ) where
 
@@ -13,7 +15,7 @@ import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits)
 import Link (linkPrograms, completeSpecEnvs)
 import PackageData (ModuleId (..), LoadOptions (..), Resolver (..), defaultLoadOptions, resolverFromFiles)
 import Syntax (Statement)
-import ElaborateRequest (Elaborator, Extraction (..), Library, LoadKind (..), LoadRequest (..), LoadResponse (..), Request (..), Response (..), acceptedResponse)
+import ElaborateRequest (Elaborator, Extraction (..), Library (..), LoadKind (..), LoadRequest (..), LoadResponse (..), Request (..), Response (..), acceptedResponse)
 import ElaboratorTool (Loader, sourceElaborator, sourceLoader)
 import Modules (librarySources)
 import Utils
@@ -46,8 +48,15 @@ parseWithEquality :: String -> Either String [Statement]
 parseWithEquality = parseWithEqualityUsing sourceLoader
 
 parseWithEqualityUsing :: Loader -> String -> Either String [Statement]
-parseWithEqualityUsing loader source = case loader (sourceRequest LoadEquality False False [] source) of
-    ParsedSource _ library body -> Right (library ++ body)
+parseWithEqualityUsing loader source = (\(_, library, body) -> library ++ body) <$> parseWithEqualityPartsUsing loader source
+
+-- The same program with the libraries it was read with kept apart from it (lowerParts)
+parseWithEqualityParts :: String -> Either String SourceParts
+parseWithEqualityParts = parseWithEqualityPartsUsing sourceLoader
+
+parseWithEqualityPartsUsing :: Loader -> String -> Either String SourceParts
+parseWithEqualityPartsUsing loader source = case loader (sourceRequest LoadEquality False False [] source) of
+    ParsedSource names library body -> Right (names, library, body)
     Unparsed e -> Left e
     NotLoaded e -> Left e
     _ -> Left "internal: the loader did not answer with the program as read"
@@ -64,19 +73,25 @@ lowerSourceUsing loader noPrelude' reserving source = catalog `bindResult` \libr
     Unparsed e -> Error e
     NotLoaded e -> Error e
     LoadedProgram (Unresolved err) -> Error err
-    LoadedProgram response ->
-        stage "Validation failed: " (acceptedResponse response) `bindResult` \_ ->
-            selection (selectedOf response) `bindResult` \units ->
-                stage "Lowering failed: " (lowerAccepted response `bindResult` \lowered -> mapResult ((,) lowered) (finishLowered lowered)) `bindResult` \(lowered, entryProgram) ->
-                    linkPrograms (stripDeclaredFromUnits (ownNames lowered) units ++ [(mainModule, entryProgram)])
+    LoadedProgram response -> stage "Validation failed: " (acceptedResponse response) `bindResult` \_ -> linkSelected response
     _ -> Error "internal: the loader did not answer with the program's elaboration"
   where
-    selectedOf response = case response of
-        Accepted _ selected _ -> selected
-        _ -> []
+    catalog = if noPrelude' then Ok [] else mapResult libCatalog libPackage
+
+-- An accepted elaboration of the entry module lowered and linked with the compiler libraries it selected
+linkSelected :: Response -> Result M.Program String
+linkSelected response =
+    selection (selectedOf response) `bindResult` \units ->
+        stage "Lowering failed: " (lowerAccepted response `bindResult` \lowered -> mapResult ((,) lowered) (finishLowered lowered)) `bindResult` \(lowered, entryProgram) ->
+            linkPrograms (stripDeclaredFromUnits (ownNames lowered) units ++ [(mainModule, entryProgram)])
+  where
     selection [] = Ok []
     selection selected = mapResult (`libSelection` selected) libPackage
-    catalog = if noPrelude' then Ok [] else mapResult libCatalog libPackage
+
+selectedOf :: Response -> [String]
+selectedOf response = case response of
+    Accepted _ selected _ -> selected
+    _ -> []
 
 -- The names a single file declares, wherever it declares them, which the library units linked with it do not declare
 -- again
@@ -99,6 +114,40 @@ elaborateStatements stmts = lowerAccepted (sourceElaborator (statementsRequest s
 
 statementsRequest :: [Statement] -> Request
 statementsRequest stmts = Request mainModule False False NoInterface [] [] [] [stmts]
+
+-- A program read with compiler libraries (its parts, SourceParts): its own statements, elaborated with the checked
+-- interfaces of the libraries it was read with and those they import, and linked with their units, as a program read
+-- from source is. The libraries' statements as read are not given again; the elaborator may select only among those
+-- libraries, and libraries that are not the compiler's are refused.
+lowerParts :: SourceParts -> Result M.Program String
+lowerParts = lowerPartsWith sourceElaborator
+
+lowerPartsWith :: Elaborator -> SourceParts -> Result M.Program String
+lowerPartsWith elaborator parts =
+    partsRequest parts `bindResult` \(admitted, request) ->
+        let response = elaborator request
+         in case [n | n <- selectedOf response, n `notElem` admitted] of
+                [] -> linkSelected response
+                extra -> Error ("internal: the elaborator selected libraries the program was not read with: " ++ unwords extra)
+
+-- The unit the elaborator lowers such a program's own statements to, not finished
+elaborateParts :: SourceParts -> Result M.Lowered String
+elaborateParts parts = partsRequest parts `bindResult` \(_, request) -> lowerAccepted (sourceElaborator request)
+
+partsRequest :: SourceParts -> Result ([String], Request) String
+partsRequest (names, _, body) =
+    libPackage `bindResult` \pkg ->
+        let catalog = libCatalog pkg
+            known = map libraryName catalog
+            importsOf n = concat [libraryImports l | l <- catalog, libraryName l == n]
+            closure seen [] = seen
+            closure seen (n : rest)
+                | n `elem` seen = closure seen rest
+                | otherwise = closure (seen ++ [n]) (importsOf n ++ rest)
+            admitted = closure [] names
+         in case [n | n <- names, n `notElem` known] of
+                [] -> Ok (admitted, Request mainModule False False NoInterface [] [] [l | l <- catalog, libraryName l `elem` admitted] [body])
+                unknown -> Error ("the libraries a program was read with are not the compiler's: " ++ unwords unknown)
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

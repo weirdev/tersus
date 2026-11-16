@@ -81,7 +81,7 @@ corpusUnits = do
         ]
 
 libraryAnswers :: [(String, ([String], [Statement]))]
-libraryAnswers = case bootstrapLoader (LoadRequest LoadLibraries False (Mod.resolverFromFiles []) Nothing Mod.librarySources []) of
+libraryAnswers = case bootstrapLoader Mod.libraryRequest of
     LoadedLibraries answers _ -> [(name, (imports, stmts)) | LibraryAnswer name imports stmts _ <- answers]
     _ -> []
 
@@ -279,10 +279,10 @@ rules = [Refl (head proofs), Eval "x", EvalAll, CheckGtZero (head proofs), Check
 
 types :: [Type]
 types =
-    [ TInt, TByte, TBool, TList TBool, TArrayOf TInt (SizeConst 3), TBox (TArrayOf TByte SizeAny)
-    , TFn [TRef TInt, TMutRef TByte] TBool, TNamed "Packet" [ArgType (TList (TParam "T")), ArgSize (SizeParam "n")]
+    [ TInt, TByte, TBool, SyntaxList TBool, TArrayOf TInt (SizeConst 3), SyntaxBox (TArrayOf TByte SizeAny)
+    , TFn [TRef TInt, TMutRef TByte] TBool, TNamed "Packet" [ArgType (SyntaxList (TParam "T")), ArgSize (SizeParam "n")]
     , TVariant "E::V", TVar 9, TForall ["n"] ["T"] (TNamed "Pair" [ArgType (TParam "T"), ArgSize (SizeVar 7)])
-    , TParam "T", TAddr TByte, TBlock TInt, TUninit (TList TInt), TRef TBool, TMutRef TInt
+    , TParam "T", TAddr TByte, TBlock TInt, TUninit (SyntaxList TInt), TRef TBool, TMutRef TInt
     ] ++ [TWord s b | (s, b) <- [(True, 8), (True, 16), (True, 32), (False, 16), (False, 32)]]
 
 signature :: Signature
