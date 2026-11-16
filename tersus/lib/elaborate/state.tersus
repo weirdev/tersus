@@ -71,6 +71,11 @@ impl Clone for Place { };
 struct Refs { aliasNames: List<String>, aliasPlaces: List<Place>, originNames: List<String>, originRoots: List<List<String>> };
 impl Clone for Refs { };
 
+// A node of the arena that checking replaced in place during a trial round of a loop, as it was before, so that the
+// round can give the arena back as it found it
+struct NodeRewrite { at: Int, was: AstNode };
+impl Clone for NodeRewrite { };
+
 // The functions of an impl with bounds as its checking goes: their names, values, signatures and how the checks against
 // the trait read them, and the functions that make those checks (the trait functions they check, values and names)
 struct BoundedParts { names: List<String>, values: List<Int>, sigs: List<FnSig>, defined: List<Defined>, wrapperOf: List<String>, wrapperValues: List<Int>, wrapperNames: List<String> };
@@ -96,6 +101,8 @@ struct St {
     wireProtocols: HashMap<String, List<String>>,
     wireOwnership: HashMap<String, List<String>>,
     localNames: HashMap<String, Int>,
+    rewrittenNodes: List<NodeRewrite>,
+    trialRound: Bool,
     types: HashMap<String, List<String>>,
     ctors: HashMap<String, CtorInfo>,
     generics: HashMap<String, Generic>,
@@ -208,6 +215,8 @@ fn copyState(st: &St) -> St ~ {
         wireProtocols: clone(st.wireProtocols),
         wireOwnership: clone(st.wireOwnership),
         localNames: clone(st.localNames),
+        rewrittenNodes: clone(st.rewrittenNodes),
+        trialRound: st.trialRound,
         types: clone(st.types),
         ctors: clone(st.ctors),
         generics: clone(st.generics),
