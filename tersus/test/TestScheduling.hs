@@ -269,7 +269,10 @@ measuredWeights =
     , ("testMirVerify:3/4", 71)
     , ("testMirVerify:4/4", 27)
     , ("testMirVerifyPrograms", 263)
-    , ("testModules", 591)
+    , ("testModules:1/4", 255)
+    , ("testModules:2/4", 160)
+    , ("testModules:3/4", 95)
+    , ("testModules:4/4", 70)
     , ("testModulo", 12)
     , ("testMulDivNegative", 7)
     , ("testNative:1/4", 62)
@@ -372,7 +375,10 @@ measuredPeaksMiB =
     , ("testMirVerify:3/4", 2816)
     , ("testMirVerify:4/4", 1280)
     , ("testMirVerifyPrograms", 2304)
-    , ("testModules", 4608)
+    , ("testModules:1/4", 3328)
+    , ("testModules:2/4", 4608)
+    , ("testModules:3/4", 1536)
+    , ("testModules:4/4", 1280)
     , ("testNative:2/4", 2304)
     , ("testNativeStorageModules", 2816)
     , ("testOwnership", 3584)
@@ -452,6 +458,9 @@ splitTestGroups count original
     unitWeight :: Test -> Int
     unitWeight test = case concat (leafPaths test) of
         path | any (`elem` path) ["whole corpus parity", "whole parsed and elaborated source corpus", "whole corpus native round trip", "the text protocol loses nothing over the corpus"] -> 60
+        path | "validator package keeps bare helpers and reference calls never run driver main" `elem` path -> 250
+        path | "late top-level definitions consume expression types once" `elem` path && last path == "0" -> 110
+        path | "native-module-loader" `elem` path && "lib/parser/parser.tersus" `elem` path -> 85
         path | "lib/mir/emit/emit.tersus" `elem` path || "lib/mir/mir_reader/mir_reader.tersus" `elem` path -> 30
         path | "the IR of a loop, interpreted" `elem` path || "raw lists and Boxes library" `elem` path -> 30
         path | "MIR loops" `elem` path -> 32
@@ -632,7 +641,7 @@ testScheduling names batches = TestList "testScheduling"
     -- the measured values themselves.
     , testCase "batched and measured tail groups retain weights above the unprofiled fallback" $
         testAssertTrue (all (> 1) ([groupWeight (groupName batch) | (_, split) <- batches, batch <- split]
-                ++ map groupWeight ["testParity", "testMirData", "testOwnership", "testModules", "testMirEmitPrograms"]
+                ++ map groupWeight ["testParity", "testMirData", "testOwnership", "testMirEmitPrograms"]
                 ++ map (groupWeight . groupName) parserBootstrapGroups)
             && all (> 0) (map groupWeight names)
             && maximum loads - minimum loads <= 120)

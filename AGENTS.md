@@ -237,8 +237,8 @@ Work from `tersus/`.
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
   `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
   `testNative`, `testMirEmit`, `testMirVerify`, `testMirSelfHosted`,
-  `testAstData`, `testParser`, `testAstReader`, `testSharedCache` and
-  `testMirLowered` each
+  `testAstData`, `testParser`, `testAstReader`, `testSharedCache`,
+  `testMirLowered` and `testModules` each
   register four batches named `<original>:1/4` through `<original>:4/4`. The AST/parser corpora partition
   samples without splitting package declaration contexts; all emitter
   helper files share one prepared-parser comparison.
