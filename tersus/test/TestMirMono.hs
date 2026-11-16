@@ -117,14 +117,16 @@ testMirMonoUsing lower = TestList "testMirMono"
     ]
   where
     dropped = Oracle.monomorphize dropProgram
-    refuses input = do
-        tool <- ownershipTool
-        case tool of
-            ToolNative exe -> do
-                (code, out, err) <- runWithInputFull exe input
-                pure (testAssertTrue (code == ExitSuccess && out == "1\n" && not (null err)))
-            ToolFailed e -> pure (Just e)
-            ToolInterpreted _ -> pure (Just "the refusal control requires the native emitter")
+
+refuses :: String -> IO TestResult
+refuses input = do
+    tool <- ownershipTool
+    case tool of
+        ToolNative exe -> do
+            (code, out, err) <- runWithInputFull exe input
+            pure (testAssertTrue (code == ExitSuccess && out == "1\n" && not (null err)))
+        ToolFailed e -> pure (Just e)
+        ToolInterpreted _ -> pure (Just "the refusal control requires the native emitter")
 
 refusalFixtures :: [(String, String)]
 refusalFixtures =
