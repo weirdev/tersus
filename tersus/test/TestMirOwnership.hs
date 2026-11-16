@@ -12,9 +12,9 @@ import Mir
 import MirData (forNative, readProgram, writeProgramWithGhosts)
 import MirEval (MirValue (..), RunEnv (..), Outcome (..), runProgram, runProgramEnv)
 import TestOwnership (runOwned, usesArrays)
-import MirMono (monomorphize, monomorphizeForValidation)
+import MirMono (monomorphizeForValidation)
 import MirLists (lowerLists)
-import MirHousekeeping (Tool (..), eraseGhosts, expandRefWrites, insertOwnership, nativeProgram, ownershipTool, toolProgram, emitterEntry, verifyProgram)
+import MirHousekeeping (Tool (..), eraseGhosts, expandRefWrites, insertOwnership, monomorphizeWith, nativeProgram, ownershipTool, toolProgram, emitterEntry, verifyProgram)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Modules (LoadResult (..), loadFromFilesystem)
 import Native (runWithInputFull)
@@ -31,8 +31,8 @@ restoreRoundTrip program = readProgram (writeProgramWithGhosts (ownershipInput p
 
 testOwnershipMetadata :: Test
 testOwnershipMetadata = TestList "testOwnershipMetadata"
-    [ testCase "generic reference writes are instantiated by the host mono adapter" genericReferenceWrite
-    , testCase "mutable named references instantiate declarations and field selectors" mutableNamedReference
+    [ TestCase "generic reference writes are instantiated by the native mono adapter" genericReferenceWrite
+    , TestCase "mutable named references instantiate declarations and field selectors" mutableNamedReference
     , testCase "mutable named references retain renamed list-lowering field selectors" mutableReferenceListNormalization
     , testCase "all structural types, sizes and function metadata survive transport" (testAssertEq (restoreRoundTrip metadataFixture) (Ok metadataFixture))
     , testCase "the runtime view still intentionally erases host metadata" (testAssertTrue (forNative metadataFixture /= metadataFixture))
@@ -553,8 +553,12 @@ mutableViewFixture = wireEmpty{progFunctions = Map.singleton "view" view, progMa
             ,(BlockId 1, BasicBlock [] Return)]
         }
 
-mutableNamedReference :: TestResult
-mutableNamedReference = checkNamedReference "update<Int>" TInt (monomorphize (namedReferenceFixture (TParam "T") TInt ["T"]))
+mutableNamedReference :: IO TestResult
+mutableNamedReference = do
+    specialized <- monomorphizeWith ownershipTool (namedReferenceFixture (TParam "T") TInt ["T"])
+    pure $ case specialized of
+        Error e -> Just e
+        Ok output -> checkNamedReference "update<Int>" TInt output
 
 mutableReferenceListNormalization :: TestResult
 mutableReferenceListNormalization = case lowerLists (Ok []) (namedReferenceFixture boxed boxed []) of
@@ -595,14 +599,18 @@ namedReferenceFixture parameter actual typeParameters = wireEmpty
         , fnBlocks = Map.singleton (BlockId 0) (BasicBlock [AssignRef (Local 1) [RefField name "n"] (Use (Const (CInt 9)))] Return)
         }
 
-genericReferenceWrite :: TestResult
-genericReferenceWrite = case Map.lookup "update<Int, 2>" (progFunctions (monomorphize input)) of
-    Nothing -> Just "the mono adapter did not instantiate a generic update"
-    Just fn -> firstFailure
-        [ testAssertEq (fnParams fn, fnBorrowed fn, fnMutBorrowed fn, fnFrom fn) ([Local 1], [Local 1], [Local 1], [Local 1])
-        , testAssertEq (localType <$> Map.lookup (Local 1) (fnLocals fn)) (Just (TMutRef (TArrayOf TInt (SizeConst 2))))
-        , testAssertEq (blockStatements (fnBlocks fn Map.! BlockId 0)) [AssignRef (Local 1) [RefIndex (Const (CInt 2))] (Use (Const (CInt 9))), Assign (Local 0) (Use (Const (CInt 0)))]
-        ]
+genericReferenceWrite :: IO TestResult
+genericReferenceWrite = do
+    specialized <- monomorphizeWith ownershipTool input
+    pure $ case specialized of
+        Error e -> Just e
+        Ok output -> case Map.lookup "update<Int, 2>" (progFunctions output) of
+            Nothing -> Just "the mono adapter did not instantiate a generic update"
+            Just fn -> firstFailure
+                [ testAssertEq (fnParams fn, fnBorrowed fn, fnMutBorrowed fn, fnFrom fn) ([Local 1], [Local 1], [Local 1], [Local 1])
+                , testAssertEq (localType <$> Map.lookup (Local 1) (fnLocals fn)) (Just (TMutRef (TArrayOf TInt (SizeConst 2))))
+                , testAssertEq (blockStatements (fnBlocks fn Map.! BlockId 0)) [AssignRef (Local 1) [RefIndex (Const (CInt 2))] (Use (Const (CInt 9))), Assign (Local 0) (Use (Const (CInt 0)))]
+                ]
   where
     generic = (progMain wireEmpty)
         { fnName = "update", fnParams = [Local 1, Local 2], fnReturns = Just TInt, fnTypeParams = ["T"], fnSizeParams = ["n"]

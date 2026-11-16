@@ -33,8 +33,10 @@ Stage 0 runs the ownership passes on every program the host builds for itself
 (the emitter, checker, eraser, parser and validator) and emits the emitter to
 build stage 1. Stage 1 emits the other tools and runs the passes on user
 programs. The fixpoint below makes the two stages own alike.
-The Haskell `MirMono` adapter still specializes programs between list lowering
-and ownership. `MirOwnershipData` retains metadata outside runtime serialization.
+Native `pass mono` specializes programs between list lowering and ownership,
+using the same emitter selected for the build. `MirMono` retains only the
+validation specialization; `MirOwnershipData` retains ownership metadata outside
+runtime serialization.
 
 `TestBootstrap` compares stage-0-owned and stage-1-owned emitter MIR produced
 independently from the same raw source. It then compares both stages' emitted

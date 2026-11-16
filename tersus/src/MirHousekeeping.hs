@@ -63,7 +63,6 @@ import MirData (readProgram, writeProgram, writeProgramWithGhosts)
 import MirPass (programData, runPassWith)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (hasLists, lowerLists)
-import MirMono (monomorphize)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (cachedFrontendSeed, cachedSeed, cachedParserSeed, frontendSeedHash, seedHash, parserSeedHash)
@@ -105,7 +104,11 @@ eraseGhosts program = unsafePerformIO (eraseIO program)
 -- stage 0 owns what the host builds for itself, stage 1 owns everything else; they never run in the executor.
 {-# NOINLINE insertOwnership #-}
 insertOwnership :: Program -> Result Program String
-insertOwnership program = unsafePerformIO (ownershipPassWith ownershipTool "ownership" (monomorphize program))
+insertOwnership program = unsafePerformIO $ do
+    specialized <- monomorphizeWith ownershipTool program
+    case specialized of
+        Error e -> pure (Error e)
+        Ok mono -> ownershipPassWith ownershipTool "ownership" mono
 
 {-# NOINLINE expandRefWrites #-}
 expandRefWrites :: Program -> Result Program String
@@ -168,7 +171,11 @@ ownedWith emitter program = do
     native <- nativeProgramUsing (pure (ToolNative emitter)) listLibrary program
     case native of
         Error e -> pure (Error e)
-        Ok lowered -> ownershipPassWith (pure (ToolNative emitter)) "ownership" (monomorphize lowered)
+        Ok lowered -> do
+            specialized <- monomorphizeWith (pure (ToolNative emitter)) lowered
+            case specialized of
+                Error e -> pure (Error e)
+                Ok mono -> ownershipPassWith (pure (ToolNative emitter)) "ownership" mono
 
 ownedToolWith :: FilePath -> FilePath -> IO (Result Program String)
 ownedToolWith emitter entry = case toolProgram entry of

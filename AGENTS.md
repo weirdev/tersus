@@ -110,7 +110,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     emitter's executable runs them when its input starts with `pass ownership`
     or `pass expand`. `mir/mono/` specializes native generic functions over
     the complete `mir/full/` MIR3 codec; the emitter dispatches `pass mono`.
-    The native switch requires a seed with this dispatcher, while
+    The native seed contains this dispatcher; validation specialization in
     `MirMono.monomorphizeForValidation` retains contracts and ghosts in Haskell.
     The emitter's declaration-only `types.tersus`,
     `values.tersus`, `operations.tersus`, `functions.tersus` and

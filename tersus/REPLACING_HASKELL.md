@@ -136,9 +136,9 @@ validate -> eraseGhosts -> expandRefWrites -> lowerLists
          -> monomorphize -> ownership -> verifyProgram -> emitter
 ```
 
-The host's `insertOwnership` calls `MirMono.monomorphize` before invoking the
-Tersus ownership pass. The reference-write entry point runs earlier; moving
-monomorphization itself remains separate work. Reference-write expansion
+The host's `insertOwnership` invokes native monomorphization before native
+ownership through the selected emitter. The reference-write entry point runs
+earlier. Reference-write expansion
 rebuilds logical fields and sequences before list operations become helper
 calls, while generic function bodies still contain symbolic types and sizes.
 Assignments through reference-typed roots remain reference writes for the
@@ -189,7 +189,8 @@ must also stay within the agreed performance budget against the same-host base.
 `lib/mir/mono/` implements native specialization over the complete MIR3 codec
 in `lib/mir/full/`. Linking and pruning remain in Haskell. The emitter accepts
 `pass mono`; the host adapter is `MirHousekeeping.monomorphizeWith`.
-Production switching awaits a seed containing this entry.
+The matching published seed runs this pass during cold bootstrap. The native
+Haskell binding and finisher are removed; validation specialization is retained.
 
 The pass substitutes types and sizes, builds reachable instances and preserves
 implicit Drop instantiation. Canonical declaration and selector keys are
