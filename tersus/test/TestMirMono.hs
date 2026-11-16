@@ -293,9 +293,9 @@ legacyPackLoop :: IO TestResult
 legacyPackLoop = case writeLowered (unitOf (packLoopMetadata False metadataProgram)) of
     Error e -> pure (Just e)
     Ok original ->
-        let isLoop fields = length fields == 10 && fields !! 1 == "PackLoop"
+        let isLoop fields = length fields == 9 && head fields == "PackLoop"
             rows = [(isLoop (words line), line) | line <- lines original]
-            legacy = unlines [if changed then unwords (take 8 (words line) ++ drop 9 (words line)) else line | (changed, line) <- rows]
+            legacy = unlines [if changed then unwords (take 7 (words line) ++ drop 8 (words line)) else line | (changed, line) <- rows]
          in if length (filter fst rows) /= 1 || legacy == original
             then pure (Just "the legacy PackLoop control did not remove exactly one invariant field")
             else case readLowered legacy of
@@ -306,9 +306,9 @@ negativePackLoop :: IO TestResult
 negativePackLoop = case writeLowered (unitOf (packLoopMetadata False metadataProgram)) of
     Error e -> pure (Just e)
     Ok original ->
-        let isLoop fields = length fields == 10 && fields !! 1 == "PackLoop"
+        let isLoop fields = length fields == 9 && head fields == "PackLoop"
             rows = [(isLoop (words line), line) | line <- lines original]
-            broken = unlines [if changed then unwords (take 8 (words line) ++ ["-1"] ++ drop 9 (words line)) else line | (changed, line) <- rows]
+            broken = unlines [if changed then unwords (take 7 (words line) ++ ["-1"] ++ drop 8 (words line)) else line | (changed, line) <- rows]
          in if length (filter fst rows) /= 1 || broken == original
             then pure (Just "the negative PackLoop control did not change exactly one invariant reference")
             else case readLowered broken of
