@@ -7,7 +7,7 @@ import elaborate::out { emit, emitExpressions, emitName, emitNames, emitProofs, 
 import elaborate::proofs { inferProof, rewriteOldStatements };
 import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName, mentionsVariable };
 import elaborate::refs { declaredOrigin, refsOf, withRefs, derefRoot, derefSteps, exprRefOrigins, expressionPlaces, joinBranchReferences, namedReferences, ownParameterSources, parameterContents, placeSteps, putOrigins, putRefResult, recordAlias, recordOrigins, recordPlaceReferences, resetBranchReferences, resolveRefPlace, resolveRefPlaces, sameReferences, withinWrites, writesTarget, writesText };
-import elaborate::state { FnSig, Generic, Place, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, copyState, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
+import elaborate::state { FnSig, Generic, NodeRewrite, Place, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, copyState, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
 import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, templateOf };
 
 fn stmtOf(st: &St, s: Int) -> AstStatement ~ {
@@ -642,7 +642,15 @@ fn prepareLoopReferences(st: St, cond: Int, xs: Int) -> St ~ {
     body = listItems(&st.nodes, xs);
     count = 0;
     while count <= 100 [{ affirm count >= 0; }] ~ {
+        // (a round lends the node and type arenas, as large as the whole input, to its copy of the state and takes back
+        // what they held before it, instead of copying them)
+        nodeMark = size(st.nodes);
+        tyMark = size(st.tys);
+        arena = st.nodes;
+        types = st.tys;
+        st = St { nodes: [], tys: [], ..st };
         working = withRefs(copyState(&st), clone(known));
+        working = St { nodes: arena, tys: types, rewrittenNodes: [], trialRound: true, ..working };
         working = inferExpr(working, cond);
         if working.status != 0 { return working; };
         working = pushScope(working);
@@ -650,11 +658,34 @@ fn prepareLoopReferences(st: St, cond: Int, xs: Int) -> St ~ {
         if working.status != 0 { return working; };
         working = joinBranchReferences(working, &known);
         next = namedReferences(&working, &entry);
+        rewrites = working.rewrittenNodes;
+        arena = working.nodes;
+        types = working.tys;
+        st = St { nodes: restoreArena(arena, nodeMark, &rewrites), tys: truncateTypes(types, tyMark), ..st };
         if sameReferences(&known, &next) { return withRefs(st, next); };
         known = next;
         count = count + 1;
     };
     return typeError(st, "reference aliases of this loop do not reach a bounded fixed point");
+};
+
+// The node arena as it was at mark: what was added after it dropped, and what was replaced in place put back, the
+// latest replacement undone first
+fn restoreArena(nodes: List<AstNode>, mark: Int, rewrites: &List<NodeRewrite>) -> List<AstNode> ~ {
+    while size(nodes) > mark && size(nodes) > 0 shrinks size(nodes) { nodes = pop(nodes); };
+    i = size(rewrites);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(rewrites); }] shrinks i {
+        i = i - 1;
+        at = get(rewrites, i).at;
+        if at >= 0 && at < size(nodes) { nodes = set(nodes, at, clone(get(rewrites, i).was)); };
+    };
+    return nodes;
+};
+
+// The type arena as it was at mark (types are only ever added to it)
+fn truncateTypes(tys: List<Ty>, mark: Int) -> List<Ty> ~ {
+    while size(tys) > mark && size(tys) > 0 shrinks size(tys) { tys = pop(tys); };
+    return tys;
 };
 
 // The value of a function definition, x = fn ...: the VFunct record with a native body (or -1)

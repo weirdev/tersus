@@ -25,7 +25,7 @@ import elaborate::lowerout { MirOut, lowerUnit, noMir };
 
 fn newState() -> St ~ {
     return St {
-        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0, localNames: HashMap::new(),
+        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0, localNames: HashMap::new(), rewrittenNodes: [], trialRound: false,
         wireVersion: false, wireProtocols: HashMap::new(), wireOwnership: HashMap::new(),
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
         traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), storeCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), references: HashMap::new(), referenceList: [], boundStubs: HashMap::new(), boundStubSigs: [], builtinStubs: HashSet::new(), genericOut: [], genericTypes: [], fns: HashMap::new(), scopes: oneScope(),
