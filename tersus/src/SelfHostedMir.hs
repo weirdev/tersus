@@ -2874,6 +2874,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (literalSteps ++ steps ++ extra)), ("end", ending)], b3)
   where
     alias = aliasingOf types functions fn
+    parentsOfLocals = invariantParents alias types functions fn
     -- A function a call can be made to without knowing which: it needs
     -- nothing of its arguments, changes none of them, returns no reference,
     -- terminates, and is not the function itself or one that reaches it
@@ -3122,21 +3123,21 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 save = step "Assign" [("local", MInt tempLocal), ("value", valueRef)]
             (rootRef, _) <- operand (M.Copy root) b2
             (checkSteps0, _, b2c) <- placeRefOf True rootRef place b2
-            case (Map.member root (aliasBorrows alias), completeTargets root) of
-                -- (a reference the may-places put at one known place, whose chain of borrows the bridge does not
-                -- follow: the write is one of that place, as through a reference it does follow)
-                (False, Just [(owner, path)]) -> do
+            case completeTargets root of
+                -- (a reference the may-places put at one known place: the write is one of that place; the references
+                -- whose chain of borrows passes through it are bound again there, afterChange)
+                Just [(owner, path)] -> do
                     (ownerRef, _) <- operand (M.Copy owner) b2c
                     (updSteps, newOwnerRef, b4) <- updateRefOf ownerRef (path ++ place) tempRef b2c
                     (typeFacts, b5) <- typeSteps rules types invariants fn owner b4
                     (afterSteps, b6) <- afterChangeChecked [] (buildDefined b) True owner b5
                     (refresh, b7) <- refreshViews (buildDefined b) owner b6
                     pure (([save] ++ checkSteps0 ++ updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ afterSteps ++ refresh) : chunks, b7, conditions, penv)
-                (_, known) -> do
+                known -> do
                     let (top, above, placed) = writeTarget alias root
                     (topRef, _) <- operand (M.Copy top) b2c
                     (alternatives, checkedLocals, b3) <- case known of
-                        Just points@(_ : _ : _) | not (Map.member root (aliasBorrows alias)) -> alternativeWrites points place tempRef b2c
+                        Just points@(_ : _ : _) -> alternativeWrites points place tempRef b2c
                         _ -> Just ([], [], b2c)
                     (updSteps, newTopRef, b4) <- updateRefOf topRef (above ++ place) tempRef b3
                     (typeFacts, b5) <- typeSteps rules types invariants fn top b4
@@ -3300,8 +3301,10 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             reach = nub (root : if placed then [] else case completeTargets root of
                 Just points -> map fst points
                 Nothing -> Set.toList (aliasEscaped alias))
-            rebuilt = [holder | ((holder, _), _) <- describedHolders defined reach, holder `notElem` checked]
-        guard (all (\l -> l `elem` checked || l `elem` rebuilt || checkedWhenStale defined reach l) stale)
+            -- (a local in reach, or one whose invariants speak of what one in reach holds, changed itself)
+            affected = nub (reach ++ concatMap (\l -> Set.toList (Map.findWithDefault Set.empty l parentsOfLocals)) reach)
+            rebuilt = [holder | ((holder, _), _) <- describedHolders defined reach, holder `notElem` checked, holder `notElem` affected]
+        guard (all (\l -> l `elem` checked || l `elem` rebuilt || checkedWhenStale defined affected l) stale)
         (rebound, b1) <- rebindThrough defined root b0
         (havocked, b2) <- havocAll defined stale b1
         (held, b3) <- foldM (\(acc, current) owner -> do
@@ -3311,7 +3314,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     -- (a local made arbitrary gets its type's facts back, its invariants included: that is sound only for a value the
     -- change cannot reach, a value whose type has no invariant, or a holder checked again from what it holds a
     -- reference to (holderUpdates))
-    checkedWhenStale defined roots l = not (maybe False (Set.member l) defined) || invariantFree Set.empty (localTypeOf l) || not (mayHoldInto roots l)
+    checkedWhenStale defined roots l = not (maybe False (Set.member l) defined) || invariantFree Set.empty (localTypeOf l) || (l `notElem` roots && not (mayHoldInto roots l))
     mayHoldInto roots l = case aliasCandidates alias of
         Just (targets, members) ->
             let points = Map.findWithDefault [] l targets ++ concat [ps | ((holder, _), ps) <- members, holder == l]
@@ -3339,7 +3342,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             [(owner, Just aliasPath)] | owner == root -> placeRefOf True newRoot aliasPath current
             _ -> freshOf refTy current
         (rebuild, newHolder, afterCheck) <- updateRefOf (localValue holder) path pointee afterRead
-        (deeper, afterDeeper) <- holderUpdates checked defined (holder : seen) holder (localValue holder) afterCheck
+        (deeper, afterDeeper) <- holderUpdates checked defined (holder : seen) holder newHolder afterCheck
         pure (steps ++ reads ++ rebuild ++ [step "Assign" [("local", MInt (localNum holder)), ("value", newHolder)]] ++ deeper, afterDeeper)) ([], b0)
             [entry | entry@((holder, _), _) <- describedHolders defined [root], holder `notElem` checked, holder `notElem` seen]
     -- (an arbitrary value of what a reference of the type is to: only of a type with no invariant)
@@ -3367,7 +3370,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 (ownerRef, _) <- operand (M.Copy owner) current
                 (more, hypothetical, next) <- updateRefOf ownerRef (path ++ place) valueRef current
                 (holderChecks, done) <- holderUpdates [] (buildDefined current) [owner] owner hypothetical next
-                pure (acc ++ more ++ [s' | s' <- holderChecks, not (isAssignStep s')], done)) ([], b0) points
+                pure (acc ++ more ++ [s' | s' <- holderChecks, not (assignsLocal s')], done)) ([], b0) points
             let owners = nub (map fst points)
             pure (checks, owners ++ transitiveHolders (buildDefined b0) owners, after)
         | otherwise = Just ([], [], b0)
@@ -3378,8 +3381,9 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     isIndex step' = case step' of
         M.RefIndex _ -> True
         _ -> False
-    isAssignStep v = case v of
-        MData "ExecutionStep::Assign" _ -> True
+    -- (an assignment of one of the function's own locals; the checks' fresh locals keep theirs)
+    assignsLocal v = case v of
+        MData "ExecutionStep::Assign" fields | Just (MInt n) <- lookup "local" fields -> n >= 0
         _ -> False
     -- (whether no value of the type, through value fields and elements, has an invariant of its own: a type's own clauses,
     -- List and Box included, are checked before its parts, and what its references are to is part of it; a type this
