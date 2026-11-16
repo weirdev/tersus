@@ -116,47 +116,59 @@ corpusParity batch = do
     paths <- corpusPaths
     allSources <- forM paths $ \path -> do source <- readFile path; pure (path, source)
     let resolver = Modules.resolverFromFiles (allSources ++ toolPackageFiles)
-        fixtures =
-            [ (emitterCorpusEntry, emitterCorpusFiles)
-            , (validationEntry, [path | (path, _) <- validationPackageFiles, takeFileName path /= "package.tersus"])
-            , ("lib/elaborate/elaborate.tersus", [path | (path, _) <- elaboratePackageFiles, "lib/elaborate/" `isPrefixOf` path, takeFileName path /= "package.tersus"])
-            ]
-        fixturePaths = concatMap snd fixtures
-        units = [filter ((`elem` members) . fst) allSources | (_, members) <- fixtures]
-            ++ [[sample] | sample <- allSources, fst sample `notElem` fixturePaths]
-        selected = map fst (concat (batchItems 4 batch units))
-        sources = filter ((`elem` selected) . fst) allSources
-    processors <- availableProcessors
-    reports <- boundedConcurrently processors $ flip map fixtures $ \(entry, members) -> do
-        report <- if any ((`elem` members) . fst) sources
-            then comparePreparedPackage resolver entry
-            else pure ([], Nothing)
-        pure [(path, report) | path <- members]
-    let prepared = Map.fromList (concat reports)
-    mapM_ (putStrLn . ("Native corpus file: " ++) . fst) sources
-    results <- boundedConcurrently processors $ flip map sources $ \(path, source) -> do
-        result <- case Modules.discoverEntry resolver path of
-            Modules.InPackage _ _ | takeFileName path /= "package.tersus" ->
-                case Map.lookup path prepared of
-                    Just report -> pure (observedSource source report)
-                    Nothing -> observedSource source <$> comparePreparedPackage resolver path
-            _ -> do
-                ast <- compareSource tersusData source
-                wire <- pairedFile source
-                pure (firstFailure [ast, wire])
-        pure (fmap ((path ++ ": ") ++) result)
-    putStrLn ("Native corpus parity: " ++ show (length sources) ++ " files in batch " ++ show batch ++ "/4, " ++ show (length [e | Just e <- results]) ++ " failures")
-    pure (firstFailure results)
+    case Modules.loadFromEntry resolver emitterCorpusEntry of
+        Left e -> pure (Just e)
+        Right (Modules.PackageResult emitter) -> do
+            let fixtures =
+                    [ (emitterCorpusEntry, emitterCorpusFiles emitter)
+                    , (validationEntry, [path | (path, _) <- validationPackageFiles, takeFileName path /= "package.tersus"])
+                    , ("lib/elaborate/elaborate.tersus", [path | (path, _) <- elaboratePackageFiles, "lib/elaborate/" `isPrefixOf` path, takeFileName path /= "package.tersus"])
+                    ]
+            case corpusUnits fixtures allSources of
+                Left e -> pure (Just e)
+                Right units -> do
+                    let selected = map fst (concat (batchItems 4 batch units))
+                        sources = filter ((`elem` selected) . fst) allSources
+                    processors <- availableProcessors
+                    reports <- forM fixtures $ \(entry, members) -> do
+                        report <- if any ((`elem` members) . fst) sources
+                            then if entry == emitterCorpusEntry
+                                then compareLoadedPackage processors emitter
+                                else comparePreparedPackage processors resolver entry
+                            else pure ([], Nothing)
+                        pure [(path, report) | path <- members]
+                    let prepared = Map.fromList (concat reports)
+                    mapM_ (putStrLn . ("Native corpus file: " ++) . fst) sources
+                    results <- boundedConcurrently processors $ flip map sources $ \(path, source) -> do
+                        result <- case Modules.discoverEntry resolver path of
+                            Modules.InPackage _ _ | takeFileName path /= "package.tersus" ->
+                                case Map.lookup path prepared of
+                                    Just report -> pure (observedSource source report)
+                                    Nothing -> observedSource source <$> comparePreparedPackage 1 resolver path
+                            _ -> do
+                                ast <- compareSource tersusData source
+                                wire <- pairedFile source
+                                pure (firstFailure [ast, wire])
+                        pure (fmap ((path ++ ": ") ++) result)
+                    putStrLn ("Native corpus parity: " ++ show (length sources) ++ " files in batch " ++ show batch ++ "/4, " ++ show (length [e | Just e <- results]) ++ " failures")
+                    pure (firstFailure results)
+        Right _ -> pure (Just "emitter corpus entry did not load as a package")
+
+corpusUnits :: [(FilePath, [FilePath])] -> [(FilePath, String)] -> Either String [[(FilePath, String)]]
+corpusUnits fixtures sources
+    | length members /= Map.size (Map.fromList [(path, ()) | path <- members]) = Left "corpus fixtures overlap"
+    | not (null missing) = Left ("corpus fixture sources are missing: " ++ show missing)
+    | otherwise = Right ([filter ((`elem` paths) . fst) sources | (_, paths) <- fixtures]
+        ++ [[sample] | sample <- sources, fst sample `notElem` members])
+  where
+    members = concatMap snd fixtures
+    missing = filter (`notElem` map fst sources) members
 
 emitterCorpusEntry :: FilePath
 emitterCorpusEntry = "lib/mir/emit/emit.tersus"
 
--- (the emitter's package load reads its own files and every file of the ownership passes and the MIR writer it imports, so one
--- paired load observes all of them)
-emitterCorpusFiles :: [FilePath]
-emitterCorpusFiles = ["lib/mir/emit/" ++ name ++ ".tersus" | name <- ["emit", "types", "values", "operations", "functions", "helpers"]]
-    ++ ["lib/mir/ownership/" ++ name ++ ".tersus" | name <- ["ownership", "analysis", "common", "drops", "refwrites", "rewrite"]]
-    ++ ["lib/mir/writer/writer.tersus"]
+emitterCorpusFiles :: Modules.LoadedPackage -> [FilePath]
+emitterCorpusFiles pkg = [Modules.loadedFilePath file | modu <- Modules.packageModules pkg, file <- Modules.loadedModuleFiles modu]
 
 observedSource :: String -> ([String], TestResult) -> TestResult
 observedSource source (observations, result) = firstFailure
@@ -166,18 +178,20 @@ observedSource source (observations, result) = firstFailure
 
 -- Every file of the package as its load reads it, parsed by P0 and P1 with the declarations the package has
 -- accumulated where it is read; P0 has to read every file
-comparePreparedPackage :: Modules.Resolver -> FilePath -> IO ([String], TestResult)
-comparePreparedPackage resolver path = case Modules.loadFromEntry resolver path of
+comparePreparedPackage :: Int -> Modules.Resolver -> FilePath -> IO ([String], TestResult)
+comparePreparedPackage workers resolver path = case Modules.loadFromEntry resolver path of
     Left e -> pure ([], Just e)
-    Right (Modules.PackageResult pkg) -> do
-        prepared <- packageFileDecls ParserSeed.parseFileNative pkg
-        case prepared of
-            Left e -> pure ([], Just e)
-            Right files -> do
-                processors <- availableProcessors
-                results <- boundedConcurrently processors [pairedWith True [ParserSeed.parseFileNative, TersusParser.parseFileNative] decls source | (source, decls) <- files]
-                pure (map fst files, firstFailure (testAssertTrue (not (null files)) : results))
+    Right (Modules.PackageResult pkg) -> compareLoadedPackage workers pkg
     Right _ -> pure ([], Just "expected a prepared package")
+
+compareLoadedPackage :: Int -> Modules.LoadedPackage -> IO ([String], TestResult)
+compareLoadedPackage workers pkg = do
+    prepared <- packageFileDecls ParserSeed.parseFileNative pkg
+    case prepared of
+        Left e -> pure ([], Just e)
+        Right files -> do
+            results <- boundedConcurrently workers [pairedWith True [ParserSeed.parseFileNative, TersusParser.parseFileNative] decls source | (source, decls) <- files]
+            pure (map fst files, firstFailure (testAssertTrue (not (null files)) : results))
 
 -- Each file of the package with declarations P0 reads it with: the compiler libraries', then those of the modules
 -- before its own, then those of its module's files read before it, round after round as the loader reads them
@@ -226,19 +240,40 @@ pairedWith reading parsers decls source = do
 preparedEmitterHelper :: IO TestResult
 preparedEmitterHelper = do
     let helper = "lib/mir/emit/functions.tersus"
+        mono = "lib/mir/mono/functions.tersus"
+        full = "lib/mir/full/functions.tersus"
+        unused = "lib/mir/unused/unused.tersus"
         source = "fn answer() -> Int [{ }] [{ }] { return 42; };"
-        resolver = Modules.resolverFromFiles
-            [ ("lib/mir/package.tersus", "")
-            , (emitterCorpusEntry, "import mir::emit::functions { answer }; return answer();")
+        sources =
+            [ (emitterCorpusEntry, "import mir::emit::functions { answer }; import mir::mono::functions { copied }; return answer() + copied();")
             , (helper, source)
+            , (mono, "import mir::full::functions { value }; fn copied() -> Int [{ }] [{ }] { return value(); };")
+            , (full, "fn value() -> Int [{ }] [{ }] { return 0; };")
+            , (unused, "fn unseen() -> Int { return 0; };")
             ]
-    report <- comparePreparedPackage resolver emitterCorpusEntry
-    pure $ firstFailure
-        [ testAssertTrue (helper `elem` emitterCorpusFiles)
-        , observedSource source report
-        , testAssertEq (observedSource "fn unseen() -> Int { return 0; };" report)
-            (Just "requested corpus source was not observed by the paired P0/P1 parsers")
-        ]
+        resolver = Modules.resolverFromFiles (("lib/mir/package.tersus", "") : sources)
+    case Modules.loadFromEntry resolver emitterCorpusEntry of
+        Left e -> pure (Just e)
+        Right (Modules.PackageResult pkg) -> do
+            let providers = emitterCorpusFiles pkg
+            case corpusUnits [(emitterCorpusEntry, providers)] sources of
+                Left e -> pure (Just e)
+                Right units -> do
+                    let batches = [concat (batchItems 4 batch units) | batch <- [1..4]]
+                    report <- compareLoadedPackage 1 pkg
+                    pure $ firstFailure
+                        [ testAssertEq (sort providers) (sort [emitterCorpusEntry, helper, mono, full])
+                        , testAssertEq (map (map fst) units) [[emitterCorpusEntry, helper, mono, full], [unused]]
+                        , testAssertEq (sort (map fst (concat batches))) (sort (map fst sources))
+                        , testAssertEq (corpusUnits [(emitterCorpusEntry, providers), (mono, [full])] sources)
+                            (Left "corpus fixtures overlap")
+                        , testAssertEq (corpusUnits [(emitterCorpusEntry, providers)] (filter ((/= full) . fst) sources))
+                            (Left ("corpus fixture sources are missing: " ++ show [full]))
+                        , firstFailure [observedSource text report | (path, text) <- sources, path `elem` [helper, mono, full]]
+                        , testAssertEq (observedSource (snd (last sources)) report)
+                            (Just "requested corpus source was not observed by the paired P0/P1 parsers")
+                        ]
+        Right _ -> pure (Just "emitter helper fixture did not load as a package")
 
 interpretedSmoke :: IO TestResult
 interpretedSmoke = do
