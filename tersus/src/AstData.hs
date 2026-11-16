@@ -475,14 +475,15 @@ putStatement value b0 = case value of
             (r3, b4) = putNames ps b3
             (r4, b5) = putSignature sig b4
          in emit "Instance" [show r0, show r1, show r2, show r3, show r4] b5
-    PackLoop i a p lo hi take' xs ->
+    PackLoop i a p lo hi take' inv xs ->
         let (r0, b1) = putName i b0
             (r1, b2) = putName a b1
             (r2, b3) = putName p b2
             (r3, b4) = putExpression lo b3
             (r4, b5) = putExpression hi b4
-            (r5, b6) = putStatements xs b5
-         in emit "PackLoop" [show r0, show r1, show r2, show r3, show r4, if take' then "true" else "false", show r5] b6
+            (r5, b6) = putValidations inv b5
+            (r6, b7) = putStatements xs b6
+         in emit "PackLoop" [show r0, show r1, show r2, show r3, show r4, if take' then "true" else "false", show r5, show r6] b7
     Mark line col -> emit "Mark" [show line, show col] b0
     CopyDef n ->
         let (r0, b1) = putName n b0
@@ -1182,8 +1183,16 @@ nodeParsers = Map.fromList
         (lo, r3) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         (hi, r4) <- ref nodes (\node -> case node of NExpression payload -> Just payload; _ -> Nothing)
         take' <- boolP
-        (xs, r5) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
-        pure (NStatement (PackLoop i a p lo hi take' xs), [r0, r1, r2, r3, r4, r5])
+        -- (a seed from before invariants on loops over a pack writes the loop with none)
+        left <- remainingP
+        if left >= 2
+            then do
+                (inv, r5) <- ref nodes (\node -> case node of NValidations payload -> Just payload; _ -> Nothing)
+                (xs, r6) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
+                pure (NStatement (PackLoop i a p lo hi take' inv xs), [r0, r1, r2, r3, r4, r5, r6])
+            else do
+                (xs, r5) <- ref nodes (\node -> case node of NStatements payload -> Just payload; _ -> Nothing)
+                pure (NStatement (PackLoop i a p lo hi take' [] xs), [r0, r1, r2, r3, r4, r5])
       )
     , ("Mark", \_ -> do
         line <- int
@@ -1589,6 +1598,9 @@ astArgP = word >>= \w -> case w of
 countP :: P Int
 countP = P $ \ts -> runP int ts `bindResult` \(n, rest) ->
     if n >= 0 && n <= length rest then Ok (n, rest) else Error "AstData: malformed count"
+
+remainingP :: P Int
+remainingP = P $ \ts -> Ok (length ts, ts)
 
 boolP :: P Bool
 boolP = word >>= \w -> case w of

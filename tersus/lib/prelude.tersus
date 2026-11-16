@@ -49,6 +49,13 @@ impl<T: Clone, n> Sequence<T> for Array<T, n> {
     fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; affirm forall j where j >= 0, j < size(self), j != i: get(return, j) = get(self, j); }] { return set(self, i, x); };
 };
 
+// A Box of an array of a size has no impl of Sequence (the one above is for a Box of an array of no size): through a bound
+// its sequence functions are the builtins, which these check against what Sequence promises (get clones, as a read of an
+// element that is not Copy must; Sequence promises nothing of what get gives, so what is checked is the builtin's range)
+fn sizedBoxedSize<T: Clone, n>(self: &Box<Array<T, n>>) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); };
+fn sizedBoxedGet<T: Clone, n>(self: &Box<Array<T, n>>, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ }] { return clone(get(self, i)); };
+fn sizedBoxedSet<T: Clone, n>(self: Box<Array<T, n>>, i: Int, x: T) -> Box<Array<T, n>> [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return set(self, i, x); };
+
 impl<T: Clone> Sequence<T> for Box<Array<T>> {
     fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return = size(self); }] { return size(self); };
     fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = get(self, i); }] { return clone(get(self, i)); };

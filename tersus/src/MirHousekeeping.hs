@@ -37,6 +37,7 @@ module MirHousekeeping
     , prepareBootstrap
     ) where
 
+import MirCopies (withoutGeneric)
 import Data.List (isPrefixOf)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar, withMVar)
 import Control.Exception (IOException, bracket, bracket_, evaluate, finally, try)
@@ -98,7 +99,8 @@ verifyProgram program = unsafePerformIO (verifyIO program)
 -- does not carry put back as the head of this module says. A Block::cast whose slots are not the same size
 -- is refused, with the eraser's reason.
 eraseGhosts :: Program -> Result Program String
-eraseGhosts program = unsafePerformIO (eraseIO program)
+-- (a generic body and a stub are only for the validator, which has run)
+eraseGhosts program = unsafePerformIO (eraseIO (withoutGeneric program))
 
 -- The ownership passes (OWNERSHIP in MIR.md) are run by the emitter's executable (lib/mir/emit/emit.tersus):
 -- stage 0 owns what the host builds for itself, stage 1 owns everything else; they never run in the executor.

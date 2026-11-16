@@ -38,6 +38,7 @@ module Mir
     , fieldOffsets
     , ownerOf
     , successors
+    , operandsOfRvalue
     , renderProgram
     , renderFunction
     , renderStatement

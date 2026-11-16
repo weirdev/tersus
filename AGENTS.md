@@ -241,8 +241,8 @@ Work from `tersus/`.
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
   `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
   `testNative`, `testMirEmit`, `testMirVerify`, `testMirSelfHosted`,
-  `testAstData`, `testParser`, `testAstReader`, `testSharedCache` and
-  `testMirLowered` each
+  `testAstData`, `testParser`, `testAstReader`, `testSharedCache`,
+  `testMirLowered` and `testModules` each
   register four batches named `<original>:1/4` through `<original>:4/4`. The AST/parser corpora partition
   samples without splitting package declaration contexts; all emitter
   helper files share one prepared-parser comparison.
@@ -257,7 +257,7 @@ Work from `tersus/`.
   `testFrontendBootstrap` builds the elaborator seed F0 and the stages F1 and
   F2 and checks their fixpoint (`REPLACING_HASKELL.md`, "The frontend seed").
   CI reserves one runner for each of these four bootstrap groups; the
-  remaining groups use five runners, with four worker processes per runner.
+  remaining groups use six runners, with four worker processes per runner.
   Each group goes to the runner it lengthens least, by a simulation of how the
   harness runs a runner's groups (`TestScheduling.runnerSpan`: four workers,
   the memory budget, longest first), from `TestScheduling.groupWeight`, the

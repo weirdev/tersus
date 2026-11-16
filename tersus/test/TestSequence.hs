@@ -4,6 +4,9 @@ import Data.List (isInfixOf, tails)
 
 import Cli (Command (..), runSource)
 import Pipeline (compileSource)
+import Compile (lowerSource)
+import qualified Data.Map as Map
+import qualified Mir as M
 import Types
 import Syntax
 import TestHarness
@@ -89,7 +92,7 @@ testSequence =
                 "bounded types"
                 [ testCase "one function for a list, an array and a Vec" (runsAs (vecLibrary ++ total ++ "return total(Vec::new(0).push(10).push(20).push(30)) * 10000 + total(push(push([], 3), 4)) * 100 + total(array(3, 5));") "600715")
                 , testCase "its contracts are proved for each type" (compiles (total ++ "fn twice<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ affirm return = get(s, 0) * 2; }] { return get(s, 0) * 2; }; return twice([4]) + twice(array(2, 1));"))
-                , testCase "a copy over a list knows of set only what the trait promises, not the list's frame" (errorHas "fn f<S: Sequence<Int>>(s: S) -> Int [{ affirm size(s) >= 2; }] [{ }] { t = s.set(0, 5); affirm get(t, 1) = get(s, 1); return 0; }; return f([1, 2, 3]);" "(in f[List<Int>])")
+                , testCase "a copy over a list knows of set only what the trait promises, not the list's frame" (errorHas "fn f<S: Sequence<Int>>(s: S) -> Int [{ affirm size(s) >= 2; }] [{ }] { t = s.set(0, 5); affirm get(t, 1) = get(s, 1); return 0; }; return f([1, 2, 3]);" "(in f)")
                 , testCase "and a caller that has the list knows what the copy's contract says of it" (runsAs "fn f<S: Sequence<Int>>(s: S) -> Int [{ affirm size(s) >= 2; }] [{ affirm return = size(s); }] { return s.size(); }; xs = [1, 2, 3]; r = f(xs); affirm r = 3; return r;" "3")
                 , testCase "a Box of an array of a size through a bound: size and get" (runsAs "fn read<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 1; }] [{ }] { return size(s) + get(s, 1); }; b = Box::new(#[1, 2, 3, 4]); return read(b);" "6")
                 , testCase "and set" (runsAs "fn put<S: Sequence<Int>>(s: S) -> S [{ affirm size(s) > 1; }] [{ }] { return s.set(1, 9); }; b = put(Box::new(#[1, 2, 3, 4])); return get(b, 1);" "9")
@@ -124,6 +127,11 @@ testSequence =
                 , testCase "a copy's array of lists is counted in words as an array of lists anywhere" (errorHas "fn f<T: Clone>(x: T) -> Int { a = array(2100, x); return 0; }; return f(push([], 1));" "Validation failed: Type error: f cannot be made as f[List<Int>] for this call: Array<List<Int>, 2100> takes 8400 words")
                 , testCase "and an array of Boxes of arrays of a size, as the reference interpreter runs it" (runsAs "fn f<T: Clone>(x: T) -> Int { a = array(4000, x); return 0; }; return f(Box::new(#[1, 2, 3]));" "0")
                 , testCase "a nested function's type parameter of the outer one's name is its own, for moves" (errorHas "fn outer<T: Copy>(x: T) -> Int { fn inner<T>(y: T) -> List<T> { return push(push([], y), y); }; l = inner([1]); return size(l); }; return outer(3);" "y was moved")
+                , testCase "the prelude's sequence functions of a Box of an array of a size are validated where a copy runs the builtins" (case lowerSource True "fn f<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ }] { return get(s, 0); }; b = Box::new(#[1, 2, 3]); return f(&b);" of
+                    Ok p -> case [n | n <- ["sizedBoxedSize", "sizedBoxedGet", "sizedBoxedSet"], fmap (Map.member "$generic" . M.specEnv . M.fnSpec) (Map.lookup n (M.progFunctions p)) /= Just True] of
+                        [] -> Nothing
+                        missing -> Just ("not kept for the validator: " ++ show missing)
+                    Error e -> Just e)
                 , testCase "and for its copy" (runsAs "fn outer<T: Copy>(x: T) -> Int { fn inner<T>(y: T) -> List<T> { return push([], y); }; l = inner([1]); return size(l); }; return outer(3);" "1")
                 , testCase "a call of itself with a bigger type is refused" (errorHas "fn f<S: Sequence<E> + Clone, E>(s: &S) -> Int ~ { return f(push([], clone(s))); }; return f(push([], 1));" "f calls itself with the types List<List<Int>>, List<Int>")
                 , testCase "and with its own types is not" (runsAs "fn count<S: Sequence<Int>>(s: &S, k: Int) -> Int [{ affirm k >= 0; }] [{ }] shrinks k { if k = 0 { return size(s); }; return count(s, k - 1); }; return count(push([], 4), 3);" "1")

@@ -743,6 +743,6 @@ fn statementTag(s: &AstStatement) -> String ~ {
         AstStatement::DropDef { n: n } => "drop",
         AstStatement::Dissolve { n: n } => "dissolve",
         AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => "instance",
-        AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => "pack loop",
+        AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, inv: inv, xs: xs } => "pack loop",
     };
 };

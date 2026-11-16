@@ -2,15 +2,24 @@
 
 module MirCopies
     ( makeCopies
+    , makeCopiesWith
     , copyName
     , isCopyName
     , opaqueKey
     , boundCallParts
+    , genericKey
+    , coveredKey
+    , isStubName
+    , withoutGeneric
+    , contractSuffix
     ) where
 
+import Data.Char (isDigit)
+import Data.Containers.ListUtils (nubOrd)
 import Data.List (intercalate, isPrefixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Maybe (isJust)
 import qualified Data.Set as Set
 
 import BuiltinRegistry (methodBuiltinByName)
@@ -18,7 +27,7 @@ import Mir
 import MirPacks (Expanded (..), expandPack, isPackName)
 import Pretty (renderType)
 import StdLib (builtinFunct)
-import Syntax (Expression (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof, parseImplCheckName)
+import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof, exprToProof, parseImplCheckName)
 import qualified Types as T
 import Types (Arg (..), BuiltinFunct, Name, Rel (..), Size (..), Type (..), Variable, instanceName, pattern TBox, pattern TList, renderTypeForName, substitute, tupleGeneric, baseNameOf)
 import Utils (Result (..))
@@ -66,22 +75,49 @@ boundCallParts name = do
                 [] -> (reverse acc, [])
 
 makeCopies :: Program -> Result Program String
-makeCopies program
+makeCopies = makeCopiesWith Set.empty
+
+-- With the functions with bounds of the compiler's libraries, which are validated generically only where the program
+-- uses them (every other function with bounds is, where it is defined)
+makeCopiesWith :: Set.Set Name -> Program -> Result Program String
+makeCopiesWith library program
     | Map.null (progBounded program) && Map.null (progInstances program) = Ok program
     | otherwise = case run of
         Left e -> Error e
-        Right (rootsDone, mainDone, made) -> Ok (finish program rootsDone mainDone made)
+        Right (rootsDone, mainDone, made, used) -> Ok (finish program named used rootsDone mainDone made)
   where
     generics = progBounded program
     lifted = Set.fromList (concatMap boundedLifted (Map.elems generics))
     named = Map.fromList [(key, name) | (name, (f, args)) <- Map.toList (progInstances program), Just key <- [concreteKey program f args]]
     roots = [fn | fn <- Map.elems (progFunctions program), fnName fn `Map.notMember` generics, fnName fn `Set.notMember` lifted]
     rootCx = Cx program named [] [] Map.empty "" [] Map.empty Map.empty Map.empty Map.empty
+    -- (a function with bounds is validated generically where it is defined, and one of the libraries where the program uses it:
+    -- a copy of it is made, or a body validated generically names it generically; such a body names the copies its concrete
+    -- references are. The library's justification of the builtins a copy runs for a Box of an array of a size is one where a
+    -- copy has such a Box.)
+    always = Set.fromList [f | f <- Map.keys generics, not (isStubName f), Set.notMember f library]
+    -- (a copy with a Box of an array of a size may run the builtins for it, resolveBound)
+    sizedBoxedUsed made = Set.fromList [f | any (any (sizedBoxed . localType) . Map.elems . fnLocals) [copy | (_, copy, _) <- made], f <- sizedBoxedJustification, Map.member f generics]
+    sizedBoxed t = case t of
+        TBox (TArrayOf _ size) -> size /= SizeAny
+        TRef inner -> sizedBoxed inner
+        TMutRef inner -> sizedBoxed inner
+        _ -> False
+    instanceRefs f = [(g, args) | fn <- bodyAndLifted f, n <- usedNames fn, Nothing <- [boundCallParts n], Just (g, args) <- [Map.lookup n (progInstances program)], Map.member g generics, not (isStubName g)]
+    bodyAndLifted f = [fn | n <- f : maybe [] boundedLifted (Map.lookup f generics), Just fn <- [Map.lookup n (progFunctions program)]]
+    genericNeeds used = [((g, tys, sizes), []) | f <- Set.toList used, (g, args) <- instanceRefs f, Just (_, tys, sizes) <- [concreteKey program g args]]
+    usedClosure used =
+        let more = Set.fromList [g | f <- Set.toList used, (g, args) <- instanceRefs f, Nothing <- [concreteKey program g args]]
+         in if more `Set.isSubsetOf` used then used else usedClosure (Set.union used more)
     run = do
         (rootsDone, needs1) <- transformAll rootCx roots
         (mainDone, needs2) <- transformAll rootCx [progMain program]
-        made <- build program named (needs1 ++ needs2) Map.empty []
-        Right (rootsDone, head mainDone, reverse made)
+        let grow used = do
+                made <- build program named (needs1 ++ needs2 ++ genericNeeds used) Map.empty []
+                let used' = usedClosure (Set.unions [always, sizedBoxedUsed made, Set.fromList [g | (g, _, _) <- made]])
+                if used' == used then Right (made, used) else grow used'
+        (made, used) <- grow (usedClosure always)
+        Right (rootsDone, head mainDone, reverse made, used)
 
 -- What a body is copied with: the program, the names references wrote, the type and bounded size arguments, the lifted
 -- functions' copies, the name of the copy (for messages) and the copies being made around it, with their bigness
@@ -938,14 +974,18 @@ expression cx e = case e of
     Val (VFnRef n) -> proofName cx n >>= \r -> return (either (Val . VFnRef) (Val . builtinFunct) r)
     _ -> return e
 
--- The program with the copies in place of the functions with bounds: each marker of a function with bounds is the
--- markers of its copies, environments name the functions there are, and the tables are empty
-finish :: Program -> [Function] -> Function -> [Made] -> Program
-finish program roots main' made =
+-- The program with the copies in place of the functions with bounds, and the functions with bounds themselves beside
+-- them, generic, which the validator checks once (`$generic`) in place of their copies (`$covered`): the copies are for
+-- native code and for what their callers prove of them. A call through a bound in a generic body is a call of the trait's
+-- stub (`Tr for $Self::g`, which the elaborator writes for each function of each trait), and a reference to a copy for
+-- types that are not known is a reference to the generic callee. Environments name the functions there are, and the
+-- tables are empty.
+finish :: Program -> Map Key Name -> Set.Set Name -> [Function] -> Function -> [Made] -> Program
+finish program named used roots main' made =
     completeInstances
         program
             { progTypes = Map.filterWithKey (\name _ -> not (derived name)) (progTypes program)
-            , progFunctions = Map.map (checkContracts . completeEnvs) functions
+            , progFunctions = Map.map checkContracts (Map.union (Map.map completeEnvs functions) (Map.map completeGeneric generic))
             , progMain = completeEnvs (replaceMarkers main')
             , progBounded = Map.empty
             , progInstances = Map.empty
@@ -956,32 +996,465 @@ finish program roots main' made =
     derived name =
         let base = baseNameOf name
          in base /= name && maybe False (const True) (maybe (tupleGeneric base) Just (Map.lookup base (progGenerics program)))
-    functions = Map.fromList [(fnName f, f) | f <- roots ++ concat [copy : liftedCopies | (_, copy, liftedCopies) <- made]]
-    names = Set.insert (fnName main') (Map.keysSet functions)
-    copyEnv = Map.fromList [(n, Const (CFn n)) | (_, copy, liftedCopies) <- made, n <- map fnName (copy : liftedCopies)]
+    functions = Map.fromList [(fnName f, covered f) | f <- roots ++ concat [copy : liftedCopies | (_, copy, liftedCopies) <- made]]
+    names = Set.unions [Set.singleton (fnName main'), Map.keysSet functions, Map.keysSet generic]
+    copyEnv = Map.fromList [(n, Const (CFn n)) | n <- Set.toList names, n /= fnName main']
     -- (an environment keeps the functions there are: a name a unit gave a copy or a bound, which another unit's lowering
     -- does not have, is not one)
     scrub = Map.filterWithKey (\k o -> Map.notMember k (progInstances program) && case o of Const (CFn n) -> n `Set.member` names; _ -> True)
-    -- (the markers of the functions with bounds go, and each copy is defined where the program starts, wherever the
-    -- function it is of was defined: a program linked from units and the same program lowered whole have the same copies)
-    copyNames = Set.toAscList (Set.fromList [fnName copy | (_, copy, _) <- made])
+    -- (the markers of the functions with bounds that are not kept go, and each copy is defined where the program starts,
+    -- wherever the function it is of was defined: a program linked from units and the same program lowered whole have the
+    -- same copies)
+    -- (the generic bodies' markers go first with the copies', as a library prefix and a whole program put their definitions
+    -- in different places among the program's statements)
+    copyNames = Set.toAscList (Set.fromList ([fnName copy | (_, copy, _) <- made] ++ [n | n <- Map.keys generic, Map.member n (progBounded program) || Map.notMember n (progFunctions program)]))
     replaceMarkers fn = fn{fnBlocks = Map.mapWithKey (\b (BasicBlock stmts term) -> BasicBlock ([Ghost markerEnv (GhostFunction n n True) | b == BlockId 0, n <- copyNames] ++ filter (not . boundedMarker) stmts) term) (fnBlocks fn)}
-    markerEnv = Map.fromList [(n, Const (CFn n)) | n <- Map.keys functions]
+    markerEnv = Map.fromList [(n, Const (CFn n)) | n <- Map.keys functions ++ Map.keys generic]
     boundedMarker s = case s of
         Ghost _ (GhostFunction n _ _) -> Map.member n (progBounded program)
         _ -> False
     -- (the contracts of a check function name the check functions of the same impl, as the trait's contracts name the trait's
     -- functions: a copy that calls one proves what it asks of what it knows of the others)
     checkContracts fn = case parseImplCheckName (fnName fn) of
-        Just (_, owner, _) -> fn{fnSpec = (fnSpec fn){specEnv = Map.map (toCheck owner) (specEnv (fnSpec fn))}}
-        Nothing -> fn
+        Just (_, owner, _) | not (isStubName (fnName fn)) -> fn{fnSpec = (fnSpec fn){specEnv = Map.map (toCheck owner) (specEnv (fnSpec fn))}}
+        _ -> fn
     toCheck owner o = case o of
-        Const (CFn n) | Just c <- companionOf n, Just (_, owner', _) <- parseImplCheckName c, owner' == owner, Map.member c functions -> Const (CFn c)
+        Const (CFn n) | Just c <- companionOf n, Just (_, owner', _) <- parseImplCheckName c, owner' == owner, c `Set.member` names -> Const (CFn c)
         _ -> o
-    completeEnvs fn = fn{fnSpec = completeSpec (fnSpec fn), fnBlocks = Map.map completeBlock (fnBlocks fn)}
+    completeEnvs fn = mapEnvs (\e -> Map.union (scrub e) copyEnv) fn
+    -- The functions with bounds validated generically, with the functions lifted out of them (but those that name what has no
+    -- generic form: a call through a bound of a trait with no stub); and the stubs, which are not validated
+    bounded = progBounded program
+    variadic f = maybe False (any isPackName . fnTypeParams) (Map.lookup f (progFunctions program))
+    lifted = Set.fromList (concatMap boundedLifted (Map.elems bounded))
+    kept = keep (Set.fromList [f | f <- Set.toList used, Map.member f bounded, not (isStubName f), Set.notMember f lifted, Map.member f (progFunctions program)])
+    keep cs =
+        let bad = Set.fromList [f | f <- Set.toList cs, any (refusedRef cs) (concatMap usedNames (bodyAndLifted f))]
+         in if Set.null bad then cs else keep (cs `Set.difference` bad)
+    refusedRef cs n
+        | Just (_, trait, function) <- boundCallParts n = Map.notMember (stubName trait function) (progFunctions program)
+        | otherwise = case Map.lookup n (progInstances program) of
+            Just (g, args) | Nothing <- concreteKey program g args -> not (isStubName g) && Set.notMember g cs && Map.member g bounded
+            _ -> False
+    bodyAndLifted f = [fn | n <- f : maybe [] boundedLifted (Map.lookup f bounded), Just fn <- [Map.lookup n (progFunctions program)]]
+    stubs = [f | f <- Map.keys bounded, isStubName f, Map.member f (progFunctions program)]
+    bodies = [g | f <- Set.toList kept, g <- genericOf f]
+    stubFns = Map.fromList [(f, renameFunction rename fn) | f <- stubs, Just fn <- [Map.lookup f (progFunctions program)]]
+    -- (only the stubs the generic bodies call or name, and those the contracts of those name)
+    stubsUsed = grow (Set.fromList [n | g <- bodies, n <- usedNames g, Map.member n stubFns])
       where
-        completeBlock (BasicBlock stmts term) = BasicBlock (map completeStatement stmts) term
-        completeStatement (Ghost e g) = Ghost (complete e) g
-        completeStatement other = other
-        completeSpec spec = spec{specEnv = complete (specEnv spec), specLoops = Map.map (\loop -> loop{loopEnv = complete (loopEnv loop)}) (specLoops spec)}
-        complete e = Map.union (scrub e) copyEnv
+        grow s = let s' = Set.union s (Set.fromList [n | f <- Set.toList s, Just fn <- [Map.lookup f stubFns], n <- usedNames fn, Map.member n stubFns]) in if s' == s then s else grow s'
+    generic = Map.fromList ([(fnName g, g) | g <- bodies] ++ [(f, fn) | (f, fn) <- Map.toList stubFns, Set.member f stubsUsed] ++ [(n, stub) | any variadic (Set.toList kept), (n, stub) <- [(packSliceName, packSlice), (packConsName, packCons)]])
+    genericOf f = case bodyAndLifted f of
+        body : liftedFns -> let generic0 = marked (maybe id (variadicBody (progFunctions program)) (Map.lookup f bounded) (renameFunction rename body)) in generic0 : map marked (maybe [] pure (packContracts generic0)) ++ [marked (renameFunction rename l){fnTypeParams = nubOrd (fnTypeParams body ++ fnTypeParams l)} | l <- liftedFns]
+        [] -> []
+    marked fn = fn{fnSpec = (fnSpec fn){specEnv = Map.insert genericKey (Const (CInt 0)) (specEnv (fnSpec fn))}}
+    keptCopies = Set.fromList [n | (f, copy, liftedCopies) <- made, Set.member f kept, n <- map fnName (copy : liftedCopies)]
+    covered fn
+        | Set.member (fnName fn) keptCopies = fn{fnSpec = (fnSpec fn){specEnv = Map.insert coveredKey (Const (CInt 0)) (specEnv (fnSpec fn))}}
+        | otherwise = fn
+    rename n
+        | Just (_, trait, function) <- boundCallParts n = stubName trait function
+        | Just (g, args) <- Map.lookup n (progInstances program) = case concreteKey program g args of
+            Just key -> nameOf named key
+            Nothing -> g
+        | otherwise = n
+    -- (a generic body's proofs name the functions there are, as a copy's do: a name an environment gives a copy or a bound
+    -- is the function it stands for, and the environment keeps the functions there are, the stubs and generic bodies included)
+    completeGeneric fn = mapEnvs (\e -> Map.union (Map.filterWithKey (\k o -> not (instanceKey k) && case o of Const (CFn n) -> n `Set.member` names; _ -> True) e) copyEnv) (proofsNamed instanceKey fn)
+    instanceKey k = Map.member k (progInstances program) || isJust (boundCallParts k)
+
+-- The prelude's functions whose bodies are the builtins a copy runs for the library's Sequence on a Box of an array of a
+-- size (resolveBound), with Sequence's contracts
+sizedBoxedJustification :: [Name]
+sizedBoxedJustification = ["sizedBoxedSize", "sizedBoxedGet", "sizedBoxedSet"]
+
+-- The marks of a function the validator checks generically and of a copy it does not check (no name a program writes has `$`)
+genericKey, coveredKey :: Name
+genericKey = "$generic"
+coveredKey = "$covered"
+
+-- `Tr for $Self::g`, the stub the elaborator writes for each function of each trait (traitStub, lib/elaborate/traits.tersus):
+-- a function with bounds whose contracts are the trait's, for any Self that implements it
+stubName :: Name -> Name -> Name
+stubName trait function = trait ++ " for $Self::" ++ function
+
+isStubName :: Name -> Bool
+isStubName name = case parseImplCheckName name of
+    Just (_, "$Self", _) -> True
+    _ -> False
+
+mapEnvs :: (Env -> Env) -> Function -> Function
+mapEnvs f fn = fn{fnSpec = completeSpec (fnSpec fn), fnBlocks = Map.map completeBlock (fnBlocks fn)}
+  where
+    completeBlock (BasicBlock stmts term) = BasicBlock (map completeStatement stmts) term
+    completeStatement (Ghost e g) = Ghost (f e) g
+    completeStatement other = other
+    completeSpec spec = spec{specEnv = f (specEnv spec), specLoops = Map.map (\loop -> loop{loopEnv = f (loopEnv loop)}) (specLoops spec)}
+
+-- The names a function's code and proofs use (not every name its environments hold)
+usedNames :: Function -> [Name]
+usedNames fn = Set.toList (Set.fromList (codeNames ++ proofTargets))
+  where
+    spec = fnSpec fn
+    codeNames = concat [concatMap stmtCode ss ++ termCode t | BasicBlock ss t <- Map.elems (fnBlocks fn)]
+    stmtCode st = case st of
+        Assign _ rv -> [n | Const (CFn n) <- rvalueOperands rv]
+        _ -> []
+    termCode t = case t of
+        Call c args _ _ -> [n | Const (CFn n) <- c : args]
+        _ -> []
+    envs = Map.unions (specEnv spec : map loopEnv (Map.elems (specLoops spec)) ++ [e | BasicBlock ss _ <- Map.elems (fnBlocks fn), Ghost e _ <- ss])
+    proofNames = concatMap validationNames (specRequires spec ++ specEnsures spec ++ concatMap loopInvariant (Map.elems (specLoops spec)) ++ [v | BasicBlock ss _ <- Map.elems (fnBlocks fn), Ghost _ (GhostValidation v) <- ss])
+    validationNames v = case v of
+        ProofAssert p -> termNames p
+        Assume p -> termNames p
+        AssignProofVar _ e -> termNames (exprToProof e)
+        Rewrite (UserRewrite _ ps) -> concatMap termNames ps
+        _ -> []
+    termNames p = case p of
+        ATerm n -> [n]
+        FApp f as -> termNames f ++ concatMap termNames as
+        Forall _ gs b -> concatMap termNames gs ++ termNames b
+        _ -> []
+    proofTargets = [v | n <- proofNames, Just (Const (CFn v)) <- [Map.lookup n envs]]
+
+-- A variadic body as the validator checks it generically (MIR.md, "Copies of variadic functions"): the pack is a list of
+-- its elements, a read of it at a number a `get`, each loop over it a loop whose index stays in its bounds (with the
+-- invariant the program wrote, if any) and whose measure is what is left of them, a forward the call of the generic callee
+-- with the slice `slice(args, lo, hi)` gives, and a function that calls itself through a slice is measured by `size(args)`
+-- when it says nothing. A read of the pack in a validation statement is checked in range, as one in code is.
+variadicBody :: Map Name Function -> BoundedFn -> Function -> Function
+variadicBody functions bounded fn = case [l | l <- fnParams fn, Just d <- [Map.lookup l (fnLocals fn)], TParam q <- [localType d], isPackName q] of
+    [p] -> withPack p
+    _ -> fn
+  where
+    withPack p =
+        let listTy = case localType (fnLocals fn Map.! p) of
+                TParam q -> TList (TParam q)
+                t -> t
+            name = maybe "args" id (localName (fnLocals fn Map.! p))
+            isPack o = case o of
+                Copy x -> x == p
+                Move x -> x == p
+                _ -> False
+            taken = Map.fromList [(packElement pl, packIndex pl) | pl <- boundedPackLoops bounded]
+            asList st = case st of
+                Assign d (Use (Const (CFn "$pack element"))) | Just i <- Map.lookup d taken -> Assign d (ListOp Get [Copy p, Copy i])
+                Assign d (ReadField o "$pack" k) | isPack o -> Assign d (ListOp Get [Copy p, Const (CInt (read k))])
+                Assign d (Borrow r (RefField "$pack" k : steps) m) | r == p -> Assign d (Borrow r (RefIndex (Const (CInt (read k))) : steps) m)
+                _ -> st
+            -- (an element read at a number is written as a field of the pack in a proof, as in code)
+            elementTerm pr = case pr of
+                FApp (CTerm (VFunct _ _ _ (BuiltinFunct (T.Field (Just "$pack") k)) _)) [ATerm a] | a == name, all isDigit k, not (null k) -> FApp (CTerm (builtinFunct T.Get)) [ATerm a, CTerm (VInt (read k))]
+                FApp f as -> FApp (elementTerm f) (map elementTerm as)
+                Forall v gs b -> Forall v (map elementTerm gs) (elementTerm b)
+                _ -> pr
+            elementExpr e = case e of
+                F (Val (VFunct _ _ _ (BuiltinFunct (T.Field (Just "$pack") k)) _)) [Var a] | a == name, all isDigit k, not (null k) -> F (Val (builtinFunct T.Get)) [Var a, Val (VInt (read k))]
+                F f as -> F (elementExpr f) (map elementExpr as)
+                _ -> e
+            elements v = case v of
+                ProofAssert pr -> ProofAssert (elementTerm pr)
+                Assume pr -> Assume (elementTerm pr)
+                AssignProofVar n e -> AssignProofVar n (elementExpr e)
+                Rewrite (UserRewrite n ps) -> Rewrite (UserRewrite n (map elementTerm ps))
+                _ -> v
+            checked st0 = case elementsIn st0 of
+              st -> case st of
+                Ghost e (GhostValidation v) | obligations@(_ : _) <- validationObligations name v -> [Ghost e (GhostValidation (ProofAssert o)) | o <- obligations] ++ [st]
+                _ -> [st]
+            elementsIn st = case st of
+                Ghost e (GhostValidation v) -> Ghost e (GhostValidation (elements v))
+                _ -> st
+            locals0 = Map.adjust (\d -> d{localType = listTy}) p (fnLocals fn)
+            blocks0 = Map.map (\(BasicBlock ss t) -> BasicBlock (concatMap checked (map asList ss)) t) (fnBlocks fn)
+            next0 = (1 + maximum (0 : [i | Local i <- Map.keys locals0]), 1 + maximum (0 : [i | BlockId i <- Map.keys blocks0]))
+            (blocks1, locals1, next1) = foldl forward (blocks0, locals0, next0) (Map.toList blocks0)
+            -- (the plain arguments before the forwarded part that the callee's pack takes go before it in the list)
+            forward (bs, ls, (nl, nb)) (b, BasicBlock ss t) = case t of
+                Call callee@(Const (CFn g)) args d next | (before, pa : lo : hi : after) <- break isPack args ->
+                    let fixed = maybe (length before) packAt (Map.lookup g functions)
+                        (plain, leading) = splitAt fixed before
+                        slice = Local nl
+                        conses = [(Local (nl + 1 + k), BlockId (nb + k)) | k <- [0 .. length leading - 1]]
+                        final = maybe slice fst (lastMaybe conses)
+                        callBlock = BlockId (nb + length leading)
+                        firstNext = maybe callBlock snd (headMaybe conses)
+                        consBlocks = [ (blk, BasicBlock [] (Call (Const (CFn packConsName)) [e, Copy prev] l (maybe callBlock snd (headMaybe rest))))
+                                     | ((l, blk), e, prev, rest) <- zip4' conses (reverse leading) (slice : map fst conses) (drop 1 (tails' conses))
+                                     ]
+                     in ( Map.insert callBlock (BasicBlock [] (Call callee (plain ++ [Copy final] ++ after) d next)) (Map.union (Map.fromList consBlocks) (Map.insert b (BasicBlock ss (Call (Const (CFn packSliceName)) [pa, lo, hi] slice firstNext)) bs))
+                        , Map.union (Map.fromList [(l, LocalDecl listTy Nothing) | l <- slice : map fst conses]) ls
+                        , (nl + 1 + length leading, nb + 1 + length leading)
+                        )
+                _ -> (bs, ls, (nl, nb))
+            packAt callee = length (takeWhile (\l -> not (maybe False isPackParam (Map.lookup l (fnLocals callee)))) (fnParams callee))
+            isPackParam d = case localType d of
+                TParam q -> isPackName q
+                TRef (TParam q) -> isPackName q
+                _ -> False
+            headMaybe xs = case xs of
+                x : _ -> Just x
+                [] -> Nothing
+            lastMaybe xs = headMaybe (reverse xs)
+            tails' xs = case xs of
+                [] -> [[]]
+                _ : rest -> xs : tails' rest
+            zip4' (a : as) (b' : bs') (c : cs) (d' : ds) = (a, b', c, d') : zip4' as bs' cs ds
+            zip4' _ _ _ _ = []
+            -- (a loop over a range of the pack runs no times when hi < lo: its index is bounded by max(lo, hi), worked out
+            -- before the loop, so its bounds hold on entry whatever the pack's size)
+            (blocks2, locals2, tops, _) = foldl topOf (blocks1, locals1, Map.empty, next1) (boundedPackLoops bounded)
+            topOf (bs, ls, ts, (nl, nb)) pl = case [(b, ss) | (b, BasicBlock ss (Goto h)) <- Map.toList bs, h == packHeader pl, b `notElem` packBlocks pl] of
+                [(pre, ss)] ->
+                    let top = Local nl
+                        below = Local (nl + 1)
+                     in ( Map.insert (BlockId (nb + 1)) (BasicBlock [Assign top (Use (Copy (packHi pl)))] (Goto (packHeader pl))) (Map.insert (BlockId nb) (BasicBlock [Assign top (Use (Copy (packLo pl)))] (Goto (packHeader pl))) (Map.insert pre (BasicBlock (ss ++ [Assign below (BinaryOp (Compare Lt) (Copy (packHi pl)) (Copy (packLo pl)))]) (SwitchBool (Copy below) (BlockId nb) (BlockId (nb + 1)))) bs))
+                        , Map.insert below (LocalDecl TBool Nothing) (Map.insert top (LocalDecl TInt Nothing) ls)
+                        , Map.insert (packHeader pl) top ts
+                        , (nl + 2, nb + 2)
+                        )
+                _ -> (bs, ls, ts, (nl, nb))
+            loopOf pl =
+                let env = Map.fromList [("$i", Copy (packIndex pl)), ("$lo", Copy (packLo pl)), ("$hi", Copy (Map.findWithDefault (packHi pl) (packHeader pl) tops))]
+                    bounds = [relation LtEq (ATerm "$lo") (ATerm "$i"), relation LtEq (ATerm "$i") (ATerm "$hi")]
+                    measure = Just (Counting (F (Val (builtinFunct T.Minus)) [Var "$hi", Var "$i"]))
+                 in case Map.lookup (packHeader pl) (specLoops (fnSpec fn)) of
+                        Just written -> written{loopInvariant = bounds ++ loopInvariant written, loopTermination = measure, loopEnv = Map.union env (loopEnv written)}
+                        Nothing -> LoopSpec bounds measure (Map.union env (specEnv (fnSpec fn))) (packBody pl)
+            loops = Map.fromList [(packHeader pl, loopOf pl) | pl <- boundedPackLoops bounded]
+            selfCall = or [n == fnName fn | BasicBlock _ (Call (Const (CFn n)) _ _ _) <- Map.elems blocks2]
+            term = case specTermination (fnSpec fn) of
+                Nothing | selfCall -> Just (Counting (F (Val (builtinFunct T.Size)) [Var name]))
+                other -> other
+            -- (a loop invariant's read of the pack is in range wherever the invariant is checked: each is an invariant too)
+            specElements sp = sp{specRequires = map elements (specRequires sp), specEnsures = map elements (specEnsures sp), specLoops = Map.map (\l -> l{loopInvariant = concatMap (\v -> let v' = elements v in [ProofAssert o | o <- validationObligations name v'] ++ [v']) (loopInvariant l)}) (specLoops sp)}
+         in fn{fnLocals = locals2, fnBlocks = blocks2, fnSpec = specElements ((fnSpec fn){specLoops = Map.union loops (specLoops (fnSpec fn)), specTermination = term})}
+
+-- What a validation statement asks of the pack it reads: each index it reads the pack at is in range, for every value of a
+-- forall's variable the read is under
+validationObligations :: Name -> ValidationStatement -> [VariableProof]
+validationObligations name v = case v of
+    ProofAssert pr -> rangeObligations name pr
+    Assume pr -> rangeObligations name pr
+    AssignProofVar _ e -> rangeObligations name (exprToProof e)
+    Rewrite (UserRewrite _ ps) -> concatMap (rangeObligations name) ps
+    _ -> []
+
+rangeObligations :: Name -> VariableProof -> [VariableProof]
+rangeObligations name pr = case pr of
+    FApp (CTerm (VFunct _ _ _ (BuiltinFunct T.Get) _)) [ATerm a, e] | a == name -> inRange e ++ rangeObligations name e
+    FApp (ATerm "get") [ATerm a, e] | a == name -> inRange e ++ rangeObligations name e
+    FApp f as -> rangeObligations name f ++ concatMap (rangeObligations name) as
+    Forall x gs b -> [if mentions x o then Forall x gs o else o | o <- concatMap (rangeObligations name) gs ++ rangeObligations name b]
+    _ -> []
+  where
+    inRange e = [FApp (CTerm (builtinFunct (T.Rel LtEq))) [CTerm (VInt 0), e], FApp (CTerm (builtinFunct (T.Rel Lt))) [e, sizeTerm (ATerm name)]]
+    mentions x o = case o of
+        BVar y -> x == y
+        FApp f as -> mentions x f || any (mentions x) as
+        Forall y gs b -> y /= x && (any (mentions x) gs || mentions x b)
+        _ -> False
+
+-- A generic variadic body's contracts read the pack in range: a function the validator checks (`f$contract`) with the body's
+-- parameters and its result as one more, which proves each read of an input contract under the input contract before it,
+-- and each read of an output contract under the input contract and the output contract before it
+packContracts :: Function -> Maybe Function
+packContracts fn = case [n | l <- fnParams fn, Just d <- [Map.lookup l (fnLocals fn)], TList (TParam q) <- [localType d], isPackName q, Just n <- [localName d]] of
+    [name] | any (not . null . validationObligations name) (specRequires spec ++ specEnsures spec) ->
+        let result = Local (1 + maximum (0 : [i | Local i <- Map.keys (fnLocals fn)]))
+            resultTy = maybe TInt id (fnReturns fn)
+            env = specEnv spec
+            withResult = Map.insert "return" (Copy result) env
+            (plain, sizes) = splitAt (length (fnParams fn) - length (fnSizeParams fn)) (fnParams fn)
+            params = plain ++ [result] ++ sizes
+            clauses e vs = concat [[Ghost e (GhostValidation (ProofAssert o)) | o <- validationObligations name v] ++ [Ghost e (GhostValidation (assumed v))] | v <- vs]
+            statements = clauses env (specRequires spec) ++ clauses withResult (specEnsures spec) ++ [Assign (Local 0) (Use (Const (CInt 0)))]
+            locals = Map.insert (Local 0) (LocalDecl TInt Nothing) (Map.insert result (LocalDecl resultTy (Just "return")) (Map.filterWithKey (\l _ -> l `elem` fnParams fn) (fnLocals fn)))
+         in Just (Function (fnName fn ++ contractSuffix) params (Just TInt) locals (Map.singleton (BlockId 0) (BasicBlock statements Return)) (fnSizeParams fn) (fnTypeParams fn) (fnBorrowed fn ++ [result]) (fnMutBorrowed fn) [] emptySpec{specEnv = env})
+    _ -> Nothing
+  where
+    spec = fnSpec fn
+    assumed v = case v of
+        ProofAssert p -> Assume p
+        _ -> v
+
+contractSuffix :: String
+contractSuffix = "$contract"
+
+relation :: Rel -> VariableProof -> VariableProof -> ValidationStatement
+relation r a b = ProofAssert (FApp (CTerm (builtinFunct (T.Rel r))) [a, b])
+
+sizeTerm :: VariableProof -> VariableProof
+sizeTerm x = FApp (CTerm (builtinFunct T.Size)) [x]
+
+-- The list of an element before the elements of a list: the plain arguments a forward gives the callee's pack first
+packConsName :: Name
+packConsName = "<$packcons>"
+
+packCons :: Function
+packCons = Function packConsName [Local 1, Local 2] (Just listTy) (Map.fromList [(Local 0, LocalDecl listTy Nothing), (Local 1, LocalDecl (TParam "..A") (Just "x")), (Local 2, LocalDecl listTy (Just "xs"))]) (Map.singleton (BlockId 0) (BasicBlock [] Unreachable)) [] ["..A", "..S"] [Local 1, Local 2] [] [] spec
+  where
+    listTy = TList (TParam "..S")
+    getOf x i = FApp (CTerm (builtinFunct T.Get)) [x, i]
+    spec = emptySpec
+        { specEnsures =
+            [ relation Eq (sizeTerm (ATerm "return")) (FApp (CTerm (builtinFunct T.Plus)) [sizeTerm (ATerm "xs"), CTerm (VInt 1)])
+            , relation Eq (getOf (ATerm "return") (CTerm (VInt 0))) (ATerm "x")
+            , ProofAssert (Forall "k" [FApp (CTerm (builtinFunct (T.Rel GtEq))) [BVar "k", CTerm (VInt 0)], FApp (CTerm (builtinFunct (T.Rel Lt))) [BVar "k", sizeTerm (ATerm "xs")]] (FApp (CTerm (builtinFunct (T.Rel Eq))) [getOf (ATerm "return") (FApp (CTerm (builtinFunct T.Plus)) [BVar "k", CTerm (VInt 1)]), getOf (ATerm "xs") (BVar "k")]))
+            ]
+        , specEnv = Map.fromList [("x", Copy (Local 1)), ("xs", Copy (Local 2))]
+        }
+
+-- `slice(xs, lo, hi)` of a pack a generic variadic body forwards: the elements from lo to hi - 1 (no name a program writes
+-- has `$`)
+packSliceName :: Name
+packSliceName = "<$packslice>"
+
+packSlice :: Function
+packSlice = Function packSliceName [Local 1, Local 2, Local 3] (Just listTy) (Map.fromList [(Local 0, LocalDecl listTy Nothing), (Local 1, LocalDecl listTy (Just "xs")), (Local 2, LocalDecl TInt (Just "lo")), (Local 3, LocalDecl TInt (Just "hi"))]) (Map.singleton (BlockId 0) (BasicBlock [] Unreachable)) [] ["..S"] [Local 1] [] [] spec
+  where
+    listTy = TList (TParam "..S")
+    getOf x i = FApp (CTerm (builtinFunct T.Get)) [x, i]
+    spec = emptySpec
+        { specRequires = [relation LtEq (CTerm (VInt 0)) (ATerm "lo"), relation LtEq (ATerm "lo") (ATerm "hi"), relation LtEq (ATerm "hi") (sizeTerm (ATerm "xs"))]
+        , specEnsures =
+            [ relation Eq (sizeTerm (ATerm "return")) (FApp (CTerm (builtinFunct T.Minus)) [ATerm "hi", ATerm "lo"])
+            , ProofAssert (Forall "k" [FApp (CTerm (builtinFunct (T.Rel GtEq))) [BVar "k", CTerm (VInt 0)], FApp (CTerm (builtinFunct (T.Rel Lt))) [BVar "k", sizeTerm (ATerm "return")]] (FApp (CTerm (builtinFunct (T.Rel Eq))) [getOf (ATerm "return") (BVar "k"), getOf (ATerm "xs") (FApp (CTerm (builtinFunct T.Plus)) [ATerm "lo", BVar "k"])]))
+            ]
+        , specEnv = Map.fromList [("xs", Copy (Local 1)), ("lo", Copy (Local 2)), ("hi", Copy (Local 3))]
+        }
+
+-- A validated program without what only the validator reads: the generic bodies, the stubs and their markers, and the
+-- marks on the copies
+withoutGeneric :: Program -> Program
+withoutGeneric program =
+    completeInstances program{progTypes = Map.filterWithKey (\name _ -> not (derived name)) (progTypes program), progFunctions = Map.map strip kept, progMain = strip (progMain program)}
+  where
+    derived name =
+        let base = baseNameOf name
+         in base /= name && maybe False (const True) (maybe (tupleGeneric base) Just (Map.lookup base (progGenerics program)))
+    validatorOnly fn = Map.member genericKey (specEnv (fnSpec fn)) || isStubName (fnName fn) || fnName fn `elem` [packSliceName, packConsName]
+    kept = Map.filter (not . validatorOnly) (progFunctions program)
+    gone n = Map.member n (progFunctions program) && Map.notMember n kept
+    strip fn = mapEnvs (Map.filterWithKey (\k o -> k /= coveredKey && case o of Const (CFn n) -> not (gone n); _ -> True)) fn{fnBlocks = Map.map block (fnBlocks fn)}
+    block (BasicBlock ss t) = BasicBlock (filter (not . marker) ss) t
+    marker st = case st of
+        Ghost _ (GhostFunction n _ _) -> gone n
+        _ -> False
+
+-- A function whose proofs name, for each name the predicate picks, the function its environment gives it, which the
+-- environment then gives by its own name
+proofsNamed :: (Name -> Bool) -> Function -> Function
+proofsNamed picked fn = fn{fnSpec = spec', fnBlocks = Map.map block (fnBlocks fn)}
+  where
+    spec = fnSpec fn
+    spec' =
+        let e = specEnv spec
+         in spec
+                { specRequires = map (statement e) (specRequires spec)
+                , specEnsures = map (statement e) (specEnsures spec)
+                , specTermination = fmap (termination e) (specTermination spec)
+                , specEnv = extended e (specRequires spec ++ specEnsures spec) (maybe [] terminationExprs (specTermination spec))
+                , specLoops = Map.map (\l -> l{loopInvariant = map (statement (loopEnv l)) (loopInvariant l), loopTermination = fmap (termination (loopEnv l)) (loopTermination l), loopEnv = extended (loopEnv l) (loopInvariant l) (maybe [] terminationExprs (loopTermination l))}) (specLoops spec)
+                }
+    block (BasicBlock ss t) = BasicBlock (map ghost ss) t
+    ghost st = case st of
+        Ghost e (GhostValidation v) -> Ghost (extended e [v] []) (GhostValidation (statement e v))
+        _ -> st
+    target e n
+        | picked n, Just (Const (CFn f)) <- Map.lookup n e = Just f
+        | otherwise = Nothing
+    named e n = maybe n id (target e n)
+    extended e vs es = Map.union e (Map.fromList [(f, Const (CFn f)) | n <- concatMap validationTerms vs ++ concatMap expressionTerms es, Just f <- [target e n]])
+    statement e v = case v of
+        ProofAssert p -> ProofAssert (proofR e p)
+        Assume p -> Assume (proofR e p)
+        AssignProofVar n x -> AssignProofVar n (exprR e x)
+        Rewrite r -> Rewrite (case r of
+            Refl p -> Refl (proofR e p)
+            CheckGtZero p -> CheckGtZero (proofR e p)
+            CheckRel p -> CheckRel (proofR e p)
+            UserRewrite n ps -> UserRewrite n (map (proofR e) ps)
+            _ -> r)
+    proofR e p = case p of
+        ATerm n -> ATerm (named e n)
+        FApp f as -> FApp (proofR e f) (map (proofR e) as)
+        Forall n gs b -> Forall n (map (proofR e) gs) (proofR e b)
+        _ -> p
+    exprR e x = case x of
+        Var n -> Var (named e n)
+        F f as -> F (exprR e f) (map (exprR e) as)
+        Val (VFnRef n) -> Val (VFnRef (named e n))
+        _ -> x
+    termination e t = case t of
+        Shrinks x -> Shrinks (exprR e x)
+        Counting x -> Counting (exprR e x)
+        Parts x -> Parts (exprR e x)
+        Recursing inner -> Recursing (fmap (termination e) inner)
+        MayDiverge -> MayDiverge
+    terminationExprs t = case t of
+        Shrinks x -> [x]
+        Counting x -> [x]
+        Parts x -> [x]
+        Recursing inner -> maybe [] terminationExprs inner
+        MayDiverge -> []
+    validationTerms v = case v of
+        ProofAssert p -> proofTerms p
+        Assume p -> proofTerms p
+        AssignProofVar _ x -> expressionTerms x
+        Rewrite (Refl p) -> proofTerms p
+        Rewrite (CheckGtZero p) -> proofTerms p
+        Rewrite (CheckRel p) -> proofTerms p
+        Rewrite (UserRewrite _ ps) -> concatMap proofTerms ps
+        _ -> []
+    proofTerms p = case p of
+        ATerm n -> [n]
+        FApp f as -> proofTerms f ++ concatMap proofTerms as
+        Forall _ gs b -> concatMap proofTerms gs ++ proofTerms b
+        _ -> []
+    expressionTerms x = case x of
+        Var n -> [n]
+        F f as -> expressionTerms f ++ concatMap expressionTerms as
+        Val (VFnRef n) -> [n]
+        _ -> []
+
+-- A function with its callees, function constants and the functions its environments name made what the rename says
+renameFunction :: (Name -> Name) -> Function -> Function
+renameFunction rn fn = (mapEnvs (Map.map opR) fn){fnBlocks = Map.map block (fnBlocks (mapEnvs (Map.map opR) fn))}
+  where
+    block (BasicBlock ss t) = BasicBlock (map stmt ss) (termR t)
+    stmt st = case st of
+        Assign l rv -> Assign l (rvR rv)
+        Peek l rv -> Peek l (rvR rv)
+        AssignRef r steps rv -> AssignRef r steps (rvR rv)
+        _ -> st
+    termR t = case t of
+        Call c args d n -> Call (opR c) (map opR args) d n
+        SwitchBool o a b -> SwitchBool (opR o) a b
+        _ -> t
+    opR o = case o of
+        Const c -> Const (constR c)
+        _ -> o
+    constR c = case c of
+        CFn n -> CFn (rn n)
+        CData n fs -> CData n [(f, constR v) | (f, v) <- fs]
+        CList cs -> CList (map constR cs)
+        CArray cs -> CArray (map constR cs)
+        _ -> c
+    rvR rv = case rv of
+        Use o -> Use (opR o)
+        BinaryOp b x y -> BinaryOp b (opR x) (opR y)
+        ListOp l os -> ListOp l (map opR os)
+        MakeList os -> MakeList (map opR os)
+        MakeBox o -> MakeBox (opR o)
+        Unbox o -> Unbox (opR o)
+        Unsize o -> Unsize (opR o)
+        MakeData n fs -> MakeData n [(f, opR o) | (f, o) <- fs]
+        ReadField o n f -> ReadField (opR o) n f
+        IsVariant o n -> IsVariant (opR o) n
+        AsVariant o n -> AsVariant (opR o) n
+        CopyOf o -> CopyOf (opR o)
+        Deref o -> Deref (opR o)
+        _ -> rv

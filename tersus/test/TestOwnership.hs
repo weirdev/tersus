@@ -944,7 +944,10 @@ planTests =
         , ("a call with a clone of an argument that is used after it copies the argument", "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(clone(l)) + n(l);", "main", ["clone"], [1])
         , ("a copy of a parameter is one copy", "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);", "f", ["clone"], [1])
         , ("a value that is overwritten is dropped before the assignment", "x = [1]; x = [1, 2]; return size(x);", "main", ["drop _1"], [2])
+        , ("a struct taken apart is not dropped, and the field taken out is", "struct P { a: List<Int>, n: Int }; p = P { a: [1], n: 4 }; P { a: x, n: k } = p; return size(x) + k;", "main", ["peek UninitEmpty", "drop _"], [1, 1])
         ]
+        ++ [ ("the list " ++ helper ++ " takes apart is not dropped after", "l = [1]; l = push(l, 2); l = set(l, 0, 3); l = pop(l); return size(l);", helper ++ "<Int>", ["drop"], [0])
+           | helper <- ["listPush", "listSet", "listPop"] ]
     scopeText t "" = t
     scopeText t scope = functionText scope t
     withOwned source check = either Just check (ownedText source)

@@ -48,6 +48,7 @@ import MirHousekeeping (eraseGhosts, insertOwnership, verifyProgram)
 import qualified MirHousekeeping as Housekeeping
 import MirEval (MirValue, runProgram)
 import ValidatorNative (validateCompiled)
+import MirCopies (withoutGeneric)
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Pretty (renderVarProof)
@@ -88,7 +89,7 @@ assumptionsOfNoPrelude noPrelude source = mapResult (snd . statements Nothing . 
         Block body -> (place, snd (statements place body))
         If c yes no -> (place, expression place c ++ snd (statements place yes) ++ snd (statements place no))
         While c _ _ body -> (place, expression place c ++ snd (statements place body))
-        PackLoop _ _ _ lo hi _ body -> (place, expression place lo ++ expression place hi ++ snd (statements place body))
+        PackLoop _ _ _ lo hi _ _ body -> (place, expression place lo ++ expression place hi ++ snd (statements place body))
         ImplDef _ _ _ _ _ body -> (place, snd (statements place body))
         BoundedDef _ s -> (place, snd (statement place s))
         _ -> (place, [])
@@ -115,7 +116,7 @@ validatedSourceUsing loader noPrelude source =
     lowerSourceUsing loader noPrelude True source `bindResult` \program ->
         checkedLowered program `bindResult` \checked ->
             stage "Validation failed: " (validateCompiled checked) `bindResult` \_ ->
-                Ok checked
+                Ok (withoutGeneric checked)
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
@@ -216,7 +217,7 @@ runStatements stmts =
 compileModulesValidated :: Mod.Snapshot -> Result M.Program String
 compileModulesValidated pkg =
     compileModulesLinked pkg `bindResult` \linked ->
-        stage "Validation failed: " (validateCompiled (oneMarkerEach linked)) `bindResult` \_ -> Ok linked
+        stage "Validation failed: " (validateCompiled (oneMarkerEach linked)) `bindResult` \_ -> Ok (withoutGeneric linked)
 
 -- Linking makes one function of a definition several modules make alike (a
 -- library each module is given, an identical extern), and each module's

@@ -29,7 +29,7 @@ import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar
 import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, mask, mask_, onException, throwIO, try)
 import Control.Monad (forM)
 import GHC.Clock (getMonotonicTime)
-import GHC.Conc (getNumCapabilities, getNumProcessors, setNumCapabilities)
+import GHC.Conc (getNumProcessors)
 import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
@@ -299,27 +299,10 @@ availableProcessors
             b <- number high
             if b >= a then Just (b - a + 1) else Nothing
 
-{-# NOINLINE buildCapabilities #-}
-buildCapabilities :: MVar (Int, Int)
-buildCapabilities = unsafePerformIO (newMVar (0, 0))
-
-acquireBuildCapabilities :: IO ()
-acquireBuildCapabilities = modifyMVar buildCapabilities $ \(users, original) ->
-    if users > 0 then pure ((users + 1, original), ()) else do
-        previous <- getNumCapabilities
-        processors <- availableProcessors
-        setNumCapabilities processors
-        pure ((1, previous), ())
-
-releaseBuildCapabilities :: () -> IO ()
-releaseBuildCapabilities _ = modifyMVar buildCapabilities $ \(users, original) ->
-    if users > 1 then pure ((users - 1, original), ()) else do
-        setNumCapabilities original
-        pure ((0, 0), ())
-
--- Use the allowed CPUs until the last nested or overlapping build region exits.
+-- The capability count stays as the RTS options set it: on GHC 8.10, raising it while another thread waits on a pipe
+-- can kill that thread (GHC #21561).
 parallelBuilds :: [IO a] -> IO [a]
-parallelBuilds actions = bracket acquireBuildCapabilities releaseBuildCapabilities $ \_ -> do
+parallelBuilds actions = do
     completed <- newChan
     let start [] = pure []
         start ((index, action) : rest) = do

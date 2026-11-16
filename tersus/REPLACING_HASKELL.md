@@ -447,14 +447,18 @@ F1 is the elaborator as it is now, its modules and the compiler libraries
 elaborated by F0 and the rest of the build done by the host as for its other
 programs (`ElaboratorNative.frontendStage`); F2 is the same elaborated by F1.
 A stage is kept in the cache under the program its executable is made of, with
-the IR it was built from, so the fixpoint is F2 being F1.
+the IR it was built from, so the fixpoint is F2 being F1. A stage whose IR is
+the seed's (the seed's header comments aside) is the seed: it takes F0's
+executable instead of building its own with clang, and the stage after it is F1,
+as F0's elaboration is what it would give.
 
 `testFrontendBootstrap` checks that the pin records the elaborator's sources as
 they are, that F1 (and F2, when it is another executable) answers every request
 of the elaborator's own build and of the compiler libraries as F0 does, that F2
 is F1, that the host's programs (the emitter, the MIR checker and eraser, the
 parser, the AST reader and the validator) elaborated by F1 are the ones F0
-gives, that a missing or corrupt seed is refused and an elaborator that fails
+gives (when F1 is built from the seed's own IR, F1 is F0 and there is nothing to
+compare), that a missing or corrupt seed is refused and an elaborator that fails
 refuses the module, and that the seed and the stages are kept. CI runs it on a
 runner of its own. `stack run frontend-seed -- emit` makes the same fixpoint
 check and writes F1's IR.

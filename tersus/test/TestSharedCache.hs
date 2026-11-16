@@ -13,7 +13,7 @@ import Control.Concurrent (MVar, ThreadId, forkFinally, forkIOWithUnmask, forkIO
 import Control.Concurrent.MVar (modifyMVar, readMVar, tryReadMVar)
 import Control.Exception (IOException, MaskingState (..), SomeException, bracket, bracketOnError, displayException, finally, getMaskingState, mask, mask_, throwIO, try)
 import Control.Monad (forever, when, forM)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Maybe (isNothing)
 import Data.Char (isSpace, ord)
@@ -28,7 +28,7 @@ import qualified TestMirReader
 import TestNative (runExecutableBytes)
 import qualified Seed
 import qualified TersusParser
-import ElaboratorTool (sourceElaboratorExecutable)
+import ElaboratorTool (runElaboratorRaw, sourceElaboratorExecutable)
 import qualified Modules
 import qualified Compile
 import qualified Pipeline
@@ -366,6 +366,7 @@ testSharedCache =
         (codecCases
         ++ [ TestCase "atomic close-on-exec writes keep published tools executable across spawns" atomicExecutableWrites
            , TestCase "cancelled shared readers release executable writers and restore capabilities" cancelledSharedReaders
+           , TestCase "elaborator calls survive a build region in a process started with one capability" pipeReadersBesideBuilds
            , TestCase "captured process input closes on errors and preserves broken-pipe behavior" capturedInputErrors ]
         ++ singleSourceCases
         ++ map requireParser
@@ -403,7 +404,7 @@ testSharedCache =
         , TestCase "required compiler artifacts gate cached executable publication and reuse" requiredArtifactCache
         , TestCase "reader preparation retains successes and rebuilds evicted executables" readerPreparationCache
         , TestCase "independent native builds overlap and restore capabilities" parallelOverlap
-        , TestCase "nested and overlapping build regions retain one capability lease" parallelCapabilityOverlap
+        , TestCase "nested and overlapping build regions leave the capability count unchanged" parallelCapabilityOverlap
         , TestCase "failed parallel builds cancel siblings and restore capabilities" parallelFailure
         , TestCase "first storage demand retries after parser seed repair" storageRetry
         , TestCase "content-key locators retain verified dependencies across cache homes" contentLocatorIntegrity
@@ -792,7 +793,6 @@ parallelOverlap = do
 parallelCapabilityOverlap :: IO TestResult
 parallelCapabilityOverlap = do
     before <- getNumCapabilities
-    processors <- availableProcessors
     heldA <- newEmptyMVar
     heldB <- newEmptyMVar
     releaseA <- newEmptyMVar
@@ -807,7 +807,7 @@ parallelCapabilityOverlap = do
             putMVar releaseB ()
             b <- workerResult second
             pure (testAssertEq a (Just (Right ())) <> testAssertEq b (Just (Right ()))
-                <> testAssertEq during processors)
+                <> testAssertEq during before)
     afterOverlap <- getNumCapabilities
     nested <- parallelBuilds [parallelBuilds [getMaskingState]]
     afterNested <- getNumCapabilities
@@ -1469,7 +1469,41 @@ probe = do
                 Just directory -> contentRestoreProbe directory
                 Nothing -> case routing of
                     Just "1" -> getNumCapabilities >>= \count -> putStrLn ("[CAPABILITIES] " ++ show count) >> pure Nothing
-                    _ -> cacheProbe
+                    _ -> lookupEnv "TERSUS_PIPE_READER_PROBE" >>= maybe cacheProbe (const pipeReaderProbe)
+
+pipeReadersBesideBuilds :: IO TestResult
+pipeReadersBesideBuilds = do
+    self <- getExecutablePath
+    inherited <- getEnvironment
+    let environment = ("TERSUS_PIPE_READER_PROBE", "1") : [(k, v) | (k, v) <- inherited, k /= "TERSUS_PIPE_READER_PROBE"]
+    outcome <- timeout 60000000 (readProcessOutput (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just environment} "")
+    pure $ case outcome of
+        Just (ExitSuccess, _, _) -> Nothing
+        other -> Just ("the pipe reader probe failed: " ++ show other)
+
+pipeReaderProbe :: IO TestResult
+pipeReaderProbe = do
+    stop <- newIORef False
+    slots <- forM [1 .. 16 :: Int] $ \_ -> do
+        slot <- newEmptyMVar
+        _ <- forkIO ((try (callUntil stop) :: IO (Either SomeException String)) >>= putMVar slot)
+        pure slot
+    threadDelay 200000
+    _ <- parallelBuilds [threadDelay 200000]
+    threadDelay 200000
+    writeIORef stop True
+    answers <- timeout 30000000 (mapM takeMVar slots)
+    pure $ case answers of
+        Nothing -> Just "an elaborator call did not return"
+        Just results -> case [either displayException id result | result <- results, either (const True) (/= "") result] of
+            [] -> Nothing
+            failure : _ -> Just failure
+  where
+    callUntil stop = do
+        answer <- runElaboratorRaw "/bin/cat" "request"
+        if answer /= Ok [BC.pack "request"] then pure (show answer) else do
+            done <- readIORef stop
+            if done then pure "" else callUntil stop
 
 warmStartProbe :: IO TestResult
 warmStartProbe = do
