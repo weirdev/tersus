@@ -4,7 +4,7 @@ import elaborate::loweriface { stubFunction };
 import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nativeFn, nodeIn, signatureOf };
 import elaborate::state { intText };
 import elaborate::lowerstate { PackLoopRec, simpleType, lwMalformed, Swapped, swapBuilder, Binding, GenericRec, LBlock, LDecl, LFn, LoopRec, LowSt, BoundedRec, Rv, Stmt, TDecl, Term, argOf, claim, defaultTy, forNameOf, fromCodecTy, functionType, hasInt, hasText, intAt, isMutRefTy, isRefTy, lfail, lwCat, lwCat3, lwInstanceText, lwKind, lwBaseName, lwSort, lwTextAt, newBuilder, quote, renderTy, lwSizeTokens, lwSp, tyOf, tyText, typeNameOf, unrefTy, Sig };
-import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, tempLocal, validationReadsPack, assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, opText, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv };
+import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, tempLocal, validationReadsPack, assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, forgetRecorded, forgetRefTarget, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, opText, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv };
 import elaborate::lowerexpr { finishInto, lowerCondition, lowerLast, lowerOperand, rvPend };
 import elaborate::lowerplace { lowerDerefPlace };
 
@@ -315,24 +315,35 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
     ls = newBlock(ls);
     joinB = ls.id;
     ls = lowerCondition(ls, src, cond, thenB, elseB);
+    before = clone(ls.bRefTargets);
     ls = openBlock(ls, thenB);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &yes);
     ls = leaveScope(ls);
     thenOpen = ls.bHasOpen;
     if thenOpen { ls = terminate(ls, gotoTerm(joinB)); };
+    afterThen = clone(ls.bRefTargets);
+    ls = LowSt { bRefTargets: clone(before), ..ls };
     ls = openBlock(ls, elseB);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &no);
     ls = leaveScope(ls);
     elseOpen = ls.bHasOpen;
     if elseOpen { ls = terminate(ls, gotoTerm(joinB)); };
+    // (a borrow made in one branch is not what the local holds where the branches meet)
+    afterElse = clone(ls.bRefTargets);
+    joined = size(before);
+    ls = LowSt { bRefTargets: before, ..ls };
+    ls = forgetRecorded(ls, &afterThen, joined);
+    ls = forgetRecorded(ls, &afterElse, joined);
     // (when both branches returned nothing reaches the join)
     if thenOpen || elseOpen { ls = openBlock(ls, joinB); };
     return ls;
 };
 
 fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: List<Int>) -> LowSt ~ {
+    ls = forgetAssigned(ls, src, &body);
+    entry = clone(ls.bRefTargets);
     ls = newBlock(ls);
     header = ls.id;
     ls = newBlock(ls);
@@ -355,7 +366,36 @@ fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: 
     ls = lowerStatements(ls, src, &body);
     ls = leaveScope(ls);
     if ls.bHasOpen { ls = terminate(ls, gotoTerm(header)); };
+    ls = LowSt { bRefTargets: entry, ..ls };
     return openBlock(ls, exit);
+};
+
+// (a local the body of a loop assigns may hold something else at the loop's head and after it)
+fn forgetAssigned(ls: LowSt, src: &List<AstNode>, body: &List<Int>) -> LowSt ~ {
+    for name in assignedIn(src, body, []) {
+        found = lookupBinding(&ls, &name);
+        if found.found && found.b.isLocal { ls = forgetRefTarget(ls, found.b.local); };
+    };
+    return ls;
+};
+
+fn assignedIn(src: &List<AstNode>, stmts: &List<Int>, out: List<String>) -> List<String> ~ {
+    for s in stmts {
+        if nodeIn(src, s) is AstNode::Statement {
+            st = stmtAt(src, s);
+            if st is AstStatement::Assign { out = push(out, nameText(src, (st as AstStatement::Assign).n)); };
+            if st is AstStatement::If {
+                yes = listItems(src, (st as AstStatement::If).a);
+                no = listItems(src, (st as AstStatement::If).b);
+                out = assignedIn(src, &yes, out);
+                out = assignedIn(src, &no, out);
+            };
+            if st is AstStatement::While { inner = listItems(src, (st as AstStatement::While).xs); out = assignedIn(src, &inner, out); };
+            if st is AstStatement::Block { inner = listItems(src, (st as AstStatement::Block).xs); out = assignedIn(src, &inner, out); };
+            if st is AstStatement::PackLoop { inner = listItems(src, (st as AstStatement::PackLoop).xs); out = assignedIn(src, &inner, out); };
+        };
+    };
+    return out;
 };
 
 // A loop over the pack of a variadic function, which no copy keeps: each unrolls it (MirPacks). It is
@@ -396,6 +436,8 @@ fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName:
         takeRv = useRv(copyOp(packLocal));
         ls = emitAssign(ls, taken, &takeRv);
     };
+    ls = forgetAssigned(ls, src, &body);
+    entry = clone(ls.bRefTargets);
     ls = newBlock(ls);
     header = ls.id;
     ls = newBlock(ls);
@@ -452,7 +494,7 @@ fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName:
     elementType = "";
     if lwKind(&ls, elementTy) = 12 { elementType = clone(tyOf(&ls, elementTy).name); };
     loop = PackLoopRec { header: header, body: bodyB, exit: exit, blocks: blocks, locals: locals, index: indexLocal, element: elementLocal, elementType: elementType, lo: loLocal, hi: hiLocal, taken: taken };
-    ls = LowSt { bPackLoops: push(ls.bPackLoops, loop), ..ls };
+    ls = LowSt { bPackLoops: push(ls.bPackLoops, loop), bRefTargets: entry, ..ls };
     return openBlock(ls, exit);
 };
 
