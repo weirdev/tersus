@@ -3353,11 +3353,14 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
         (facts, b2) <- typeSteps rules types invariants fake local b1
         pure (step "Havoc" [("local", MInt (localNum local))] : facts, value, b2)
     -- After a place a reference the bridge cannot place is to gets a new value through it, the references the
-    -- may-places put at one known place of that owner read it again (the others were made arbitrary, staleAfter)
+    -- may-places put at one known place of that owner read it again, and those whose chain of borrows passes through
+    -- one of them are bound again from it (the others were made arbitrary, staleAfter)
     refreshViews defined owner b0 = case aliasCandidates alias of
         Just (targets, _) -> foldM (\(steps, current) (ref, path) -> do
             (more, placeRef, next) <- placeRefOf False (localValue owner) path current
-            pure (steps ++ more ++ [step "Assign" [("local", MInt (localNum ref)), ("value", placeRef)]], next)) ([], b0)
+            -- (and the references whose chain of borrows passes through it)
+            (descendants, after) <- rebindThrough defined ref next
+            pure (steps ++ more ++ [step "Assign" [("local", MInt (localNum ref)), ("value", placeRef)]] ++ descendants, after)) ([], b0)
                 [(ref, path) | (ref, [(o, Just path)]) <- Map.toList targets, o == owner, ref /= owner, Map.notMember ref (aliasBorrows alias), maybe False (Set.member ref) defined]
         Nothing -> Just ([], b0)
     -- A write through a reference that may be to any of several known places is checked as a write of each, all
