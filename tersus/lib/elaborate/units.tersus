@@ -5,7 +5,7 @@ import data::reader::reader { parseAstLines, readRecord };
 import elaborate::decls { Decls, FileDecl, declsFromStatements, emptyDecls, fileDeclarations, locating, textLess };
 import elaborate::elaborate { Answer, Program, Unit, Wire, elaborateUnit, joinBlock, malformed, noProgram, noWire, printAnswerBody, printIntWord, printQuoted, readBlock, readProtocols, withMir };
 import elaborate::libraries { Catalog, Lib, closure, declaredNames, libIndex, libraryContexts, librariesFor, probeModule, readCatalog, seenLibraries, shapedLibraries };
-import elaborate::load { LFile, LS, Loaded, ModId, PMod, PR, RImp, dependenciesOf, emptyMod, layoutNames, soloLayout, stateOfLoad, idLess, loadEntry, modKey, newLS, parseWith, renderPath, resolvedKey, sameId, sortNames, statementsOfProgram };
+import elaborate::load { MarkerBinding, Config, LFile, LS, Loaded, ModId, PMod, PR, RImp, markerConfig, placeBindings, dependenciesOf, emptyMod, layoutNames, soloLayout, stateOfLoad, idLess, loadEntry, modKey, newLS, parseWith, renderPath, resolvedKey, sameId, sortNames, statementsOfProgram };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::resolve { Decl, Imp, Line, PFile, Pkg, finishPackage, moduleKey, noPackage, readLine, textAt, wordIs };
 import elaborate::rewrite { functValue, reservedError, statementOf };
@@ -44,7 +44,7 @@ fn answerLoad(line: &Line, version2: Bool) -> Int ~ {
     if snap.kind = "graph" { return answerGraph(&snap, &libs); };
     if snap.kind = "package" { return answerPackage(&snap, &libs, &table.value, &catalog, &wire); };
     if snap.kind = "program" || snap.kind = "parse" || snap.kind = "equality" { return answerProgram(&snap, &libs, &table.value, &catalog, &wire); };
-    if snap.kind = "libraries" { return answerLibraries(&libs, &table.value, &wire); };
+    if snap.kind = "libraries" { return answerLibraries(&snap, &libs, &table.value, &wire); };
     return malformed();
 };
 
@@ -506,10 +506,13 @@ fn answerPackage(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
         if given { unitCatalog = Catalog { ok: true, libs: clone(catalog.libs) }; };
         definitionPrograms = [];
         for ctx in &defining { definitionPrograms = push(definitionPrograms, programsOf(&t, ctx)); };
+        unitKey = modKey(id);
+        bindingsOwn = ownBindings(&pkg, &unitKey, &id.modu, id.has, &pm.layout.bindings);
         unit = Unit { pkgName: clone(id.pkg), modu: clone(id.modu), hasModule: id.has, predeclaring: true, viewing: false, extracting: true, libExtract: false,
             ifaces: programsOf(&t, &depKeys), ifaceKeys: clone(depKeys), definitions: definitionPrograms, definitionKeys: clone(defining),
             hasCatalog: given, catalog: unitCatalog, pkg: clone(pkg), stdPkg: clone(stdPkg), program: joinedProgram(&ls, &pm.files),
-            wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
+            wireVersion: wire.version, wireProtocols: clone(wire.protocols),
+            bound: pm.layout.bound, ownRoles: bindingsOwn.roles, ownProviders: bindingsOwn.providers, boundMsg: bindingsOwn.msg };
         answer = elaborateUnit(table, unit, &seen);
         if answer.status < 0 { return malformed(); };
         if answer.status != 0 {
@@ -661,7 +664,7 @@ fn answerProgram(snap: &Snap, libs: &LibParse, table: &AstProgram, catalog: &Cat
     unit = Unit { pkgName: "main", modu: "", hasModule: false, predeclaring: false, viewing: false, extracting: false, libExtract: false,
         ifaces: [], ifaceKeys: [], definitions: [], definitionKeys: [], hasCatalog: given, catalog: unitCatalog, pkg: noPackage(), stdPkg: libPackage(libs),
         program: joinBlock(Program { nodes: [], roots: [] }, &source.program),
-        wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
+        wireVersion: wire.version, wireProtocols: clone(wire.protocols), bound: false, ownRoles: [], ownProviders: [], boundMsg: "" };
     seen = HashMap::new();
     answer = elaborateUnit(table, unit, &seen);
     if answer.status < 0 { return malformed(); };
@@ -709,7 +712,7 @@ fn libContextsFor(libs: &LibParse, ifaces: &List<String>, deps: &List<String>) -
     return out;
 };
 
-fn compileLibrary(libs: &LibParse, pkg: &Pkg, table: &AstProgram, t: &Ifaces, done: &List<String>, i: Int, wire: &Wire) -> Answer ~ {
+fn compileLibrary(libs: &LibParse, pkg: &Pkg, table: &AstProgram, t: &Ifaces, done: &List<String>, i: Int, wire: &Wire, marker: &Config) -> Answer ~ {
     name = "";
     if i >= 0 && i < size(libs.names) { name = clone(get(&libs.names, i)); };
     deps = libDepsOf(libs, &name);
@@ -721,20 +724,82 @@ fn compileLibrary(libs: &LibParse, pkg: &Pkg, table: &AstProgram, t: &Ifaces, do
     unit = Unit { pkgName: libPackageName(libs), modu: clone(name), hasModule: true, predeclaring: true, viewing: true, extracting: true, libExtract: true,
         ifaces: programsOf(t, &depKeys), ifaceKeys: depKeys, definitions: definitionPrograms, definitionKeys: contexts,
         hasCatalog: false, catalog: Catalog { ok: true, libs: [] }, pkg: clone(pkg), stdPkg: noPackage(), program: libProgramOf(libs, &name),
-        wireVersion: wire.version, wireProtocols: clone(wire.protocols) };
+        wireVersion: wire.version, wireProtocols: clone(wire.protocols), bound: false, ownRoles: [], ownProviders: [], boundMsg: "" };
+    if marker.bound {
+        libKeyText = moduleKey("std", &name, true);
+        bindingsOwn = ownBindings(pkg, &libKeyText, &name, true, &marker.bindings);
+        unit = Unit { bound: true, ownRoles: bindingsOwn.roles, ownProviders: bindingsOwn.providers, boundMsg: bindingsOwn.msg, ..unit };
+    };
     seen = HashMap::new();
     return elaborateUnit(table, unit, &seen);
 };
 
-fn answerLibraries(libs: &LibParse, table: &AstProgram, wire: &Wire) -> Int ~ {
+// The marker of the package the library sources are the modules of: the package.tersus of the request's std root,
+// when it has one; its bindings give the libraries' own declarations their roles. With no std root the role names
+// do (the libraries the compiler gives now)
+fn libraryMarker(snap: &Snap, libs: &LibParse) -> Config ~ {
+    none = Config { ok: true, msg: "", noPrelude: false, bindings: [], bound: false };
+    if !snap.hasStd { return none; };
+    path = joinPath(&snap.std, "package.tersus");
+    read = readFile(snap, &path);
+    if !read.ok { return Config { ok: false, msg: catStrings("package marker not found: ", &path), ..none }; };
+    config = markerConfig(&path, &read.text);
+    if !config.ok { return config; };
+    rootStems = [];
+    placed = placeBindings(&config.bindings, &libs.names, &rootStems);
+    if size(placed.msg.bytes) > 0 { return Config { ok: false, msg: catStrings(catStrings(catStrings("package configuration: ", showText(&path)), ": "), &placed.msg), ..config }; };
+    return Config { bindings: placed.bindings, ..config };
+};
+
+struct Own { roles: List<String>, providers: List<String>, msg: String };
+
+// The roles a module's own declarations are given by its package's bindings: each binding of the module names one
+// declaration of it, of the kind of its role (a type for List and Box, a trait for the others), by that declaration's
+// canonical name; a binding of the module that names none, or names more than one, is refused
+fn ownBindings(pkg: &Pkg, key: &String, modu: &String, hasModu: Bool, bindings: &List<MarkerBinding>) -> Own ~ {
+    roles = [];
+    providers = [];
+    for b in bindings {
+        if size(b.path) >= 2 {
+            first = clone(get(&b.path, 0));
+            mine = (b.rooted && !hasModu) || (!b.rooted && hasModu && first = clone(modu));
+            if mine {
+                local = clone(get(&b.path, size(b.path) - 1));
+                stem = "";
+                hasStem = false;
+                if b.rooted { stem = clone(first); hasStem = true; } else { if size(b.path) = 3 { stem = clone(get(&b.path, 1)); hasStem = true; }; };
+                kind = 2;
+                if b.role = "List" || b.role = "Box" { kind = 0; };
+                found = [];
+                for d in &pkg.decls {
+                    if d.key = clone(key) && d.local = local && (!hasStem || d.stem = stem) && d.kind = kind && indexIn(&found, &d.canonical) < 0 { found = push(found, clone(d.canonical)); };
+                };
+                shown = joinWith(&b.path, "::");
+                if size(found) = 0 {
+                    what = "trait";
+                    if kind = 0 { what = "type"; };
+                    return Own { roles: [], providers: [], msg: catStrings(catStrings(catStrings(catStrings(catStrings(catStrings("Type error: the package binds ", &b.role), " to "), &shown), ", which is no "), &what), " of the module") };
+                };
+                if size(found) > 1 { return Own { roles: [], providers: [], msg: catStrings(catStrings(catStrings(catStrings("Type error: the package binds ", &b.role), " to "), &shown), ", which names more than one declaration") }; };
+                roles = push(roles, clone(b.role));
+                providers = push(providers, clone(get(&found, 0)));
+            };
+        };
+    };
+    return Own { roles: roles, providers: providers, msg: "" };
+};
+
+fn answerLibraries(snap: &Snap, libs: &LibParse, table: &AstProgram, wire: &Wire) -> Int ~ {
     if !libs.ok { "librariesFailed ".print(); printQuoted(catStrings("the lib package does not parse: ", libs.msg)); "\n".print(); return 0; };
+    marker = libraryMarker(snap, libs);
+    if !marker.ok { "librariesFailed ".print(); printQuoted(&marker.msg); "\n".print(); return 0; };
     t = Ifaces { programs: HashMap::new(), ids: HashMap::new() };
     pkg = libPackage(libs);
     done = [];
     for i in 0..size(libs.names) {
         if i = libs.regular && !libs.nativeOk { "nativesFailed ".print(); printQuoted(&libs.nativeMsg); "\n".print(); return 0; };
         name = clone(get(&libs.names, i));
-        answer = compileLibrary(libs, &pkg, table, &t, &done, i, wire);
+        answer = compileLibrary(libs, &pkg, table, &t, &done, i, wire, &marker);
         if answer.status < 0 { return malformed(); };
         deps = libDepsOf(libs, &name);
         depKeys = [];

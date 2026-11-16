@@ -7,8 +7,9 @@ import qualified Data.Map.Strict as Map
 import Compile (sourceRequest)
 import ElaborateRequest
 import ElaboratorTool (sourceLoader)
-import Modules (Snapshot (..), librarySources, loadRequest)
-import PackageData (resolverFromFiles)
+import Modules (LoadOptions (..), Resolver (..), Snapshot (..), defaultLoadOptions, librarySources, loadRequest)
+import PackageData (ModuleId (..), resolverFromFiles)
+import Utils (Result (..))
 import TestHarness
 import Interface (ModuleInterface (..))
 import Types (Arg (..), OwnershipFacts (..), OwnershipTransport (..), Type (..))
@@ -25,6 +26,36 @@ testLibraryShapes = TestList "testLibraryShapes"
     , TestCase "the std package's sources write an imported List as the provider it is in struct fields" fullFields
     , TestCase "programs with strings, maps and sets are given the std package's libraries" fullPrograms
     , TestCase "a package module's own Clone impl leaves the std libraries' impls visible, and a struct built with list type arguments is its instance" fullPackageClone
+    , TestCase "a std marker's bindings give the libraries their roles" markedLibraries
+    , TestCase "a std marker that binds no Box gives core no Box provider, and Box syntax then has none" unboundBox
+    , testCase "a package binds a trait of any name to a role, and its List and Clone named alike have no role" $
+        case moduleProtocols (bindingPackage "noPrelude = true;\nClone = own::Copyable;\n" "import app::shapes { List, Clone };\nimport app::own { Copyable };\ns = List { n: 3 };\nreturn s.n;") of
+            Left e -> Just e
+            Right byModule -> testAssertEq (lookup "own" byModule) (Just (Map.fromList [("Clone", ["app$own$own$Copyable"])]))
+                <> testAssertEq (fmap (Map.member "List") (lookup "shapes" byModule)) (Just False)
+                <> testAssertEq (fmap (Map.member "Clone") (lookup "shapes" byModule)) (Just False)
+    , testCase "list syntax in a package that binds no List is refused" $
+        refusedWith "List syntax requires its checked provider" (bindingPackage "noPrelude = true;\nClone = own::Copyable;\n" "import app::shapes { List };\nxs = [1, 2];\nreturn size(xs);")
+    , testCase "two bindings of one role, both imported, are refused" $
+        refusedWith "conflicting Clone providers" (bindingPackage "noPrelude = true;\nClone = own::Copyable;\nClone = shapes::Clone;\n" "import app::shapes { List, Clone };\nimport app::own { Copyable };\nreturn 0;")
+    , testCase "a binding that names no declaration of its module is refused" $
+        refusedWith "the package binds Clone to own::Missing, which is no trait of the module" (bindingPackage "noPrelude = true;\nClone = own::Missing;\n" "import app::own { Copyable };\nreturn 0;")
+    , testCase "a binding of no module of the package and an unknown role are refused by the marker" $
+        refusedWith "which is no module of the package" (bindingPackage "noPrelude = true;\nClone = absent::Clone;\n" "return 0;")
+            <> refusedWith "package configuration:" (bindingPackage "noPrelude = true;\nHash = own::Copyable;\n" "return 0;")
+    , testCase "a binding of List to a trait is refused" $
+        refusedWith "the package binds List to own::Copyable, which is no type of the module" (bindingPackage "noPrelude = true;\nList = own::Copyable;\n" "import app::own { Copyable };\nreturn 0;")
+    , TestCase "a std root without a package marker is refused" $ do
+        sources <- fullSources
+        pure $ case sourceLoader (LoadRequestData LoadLibraries False (resolverFromFiles [("installed/std/core/types.tersus", "")]){resolverOptions = defaultLoadOptions{installedStdRoot = Just "installed/std"}} Nothing sources [] (Just Map.empty)) of
+            LoadedLibraries [] (Just message) -> testAssertTrue ("package marker not found: installed/std/package.tersus" `isInfixOf` message)
+            other -> Just ("the std libraries were not refused: " ++ take 400 (show other))
+    , testCase "until the bindings replace them, a package whose marker binds no role keeps the role names (reader stage)" $
+        case moduleProtocols (bindingPackage "noPrelude = true;\n" "import app::shapes { List, Clone };\ns = List { n: 3 };\nreturn s.n;") of
+            Left e -> Just e
+            Right byModule -> testAssertEq (fmap (Map.lookup "Clone") (lookup "shapes" byModule)) (Just (Just ["app$shapes$shapes$Clone"]))
+    , testCase "a marker's bindings are part of the load request" $
+        testAssertTrue (requestText (bindingPackage "noPrelude = true;\nClone = own::Copyable;\n" "return 0;") /= requestText (bindingPackage "noPrelude = true;\nClone = shapes::Clone;\n" "return 0;"))
     , testCase "libraries of both shapes in one request are refused" mixedShapes
     , testCase "tersuslib-shape libraries keep their bare names" $ case loadLibraries librarySources of
         LoadedLibraries answers Nothing -> testAssertTrue (all (accepted . laResponse) answers)
@@ -209,3 +240,70 @@ fullPackageClone = do
                         <> testAssertEq [take 200 (show r) | (_, _, r) <- modules, case r of Accepted _ _ (MirLowered _) -> False; _ -> True] []
                         <> testAssertEq [fields | (_, _, Accepted (Just iface) _ _) <- modules, Just (_, fields) <- [Map.lookup "Shape::Ring" (ifCtors iface)]] [[("xs", TNamed listRow [ArgType TInt])]]
                     other -> Just ("the package did not load: " ++ take 600 (show other))
+
+-- The std package's marker, binding each role to its declaration in core and eq
+stdMarker :: String
+stdMarker = "noPrelude = true;\nList = core::types::List;\nBox = core::types::Box;\nClone = core::ownership::Clone;\nCopy = core::ownership::Copy;\nDrop = core::ownership::Drop;\nDeref = core::ownership::Deref;\nEq = eq::Eq;\n"
+
+loadMarked :: String -> [(String, Bool, String)] -> LoadResponse
+loadMarked marker sources = sourceLoader (LoadRequestData LoadLibraries False (resolverFromFiles [("installed/std/package.tersus", marker)]){resolverOptions = defaultLoadOptions{installedStdRoot = Just "installed/std"}} Nothing sources [] (Just Map.empty))
+
+markedLibraries :: IO TestResult
+markedLibraries = do
+    sources <- fullSources
+    pure $ case (loadMarked stdMarker sources, fullCatalog sources) of
+        (LoadedLibraries answers Nothing, Right legacy) ->
+            let protocols as = [(laName a, fmap transportProtocols (acceptedOwnership (laResponse a))) | a <- as]
+             in testAssertTrue (all (accepted . laResponse) answers)
+                    <> testAssertEq (lookup "core" (protocols answers)) (Just (Just (Map.fromList [(role, [provider]) | (role, provider) <- [("Box", "std$core$types$Box"), ("Clone", "std$core$ownership$Clone"), ("Copy", "std$core$ownership$Copy"), ("Deref", "std$core$ownership$Deref"), ("Drop", "std$core$ownership$Drop"), ("List", "std$core$types$List")]])))
+                    <> testAssertEq (protocols answers) (protocols legacy)
+        (other, _) -> Just ("the marked std libraries did not load: " ++ take 600 (show other))
+
+unboundBox :: IO TestResult
+unboundBox = do
+    sources <- fullSources
+    let marker = unlines [l | l <- lines stdMarker, take 3 l /= "Box"]
+    pure $ case loadMarked marker sources of
+        LoadedLibraries answers _ ->
+            let core = [r | LibraryAnswer "core" _ _ r <- answers]
+             in testAssertTrue (any (\r -> case r of Refused m -> "Box syntax requires its checked provider" `isInfixOf` m; _ -> False) core)
+        other -> Just ("the std libraries did not answer: " ++ take 600 (show other))
+
+-- A noPrelude package app with the marker, a module own with a trait Copyable, a module shapes with a struct List and a
+-- trait Clone, and main
+bindingPackage :: String -> String -> LoadRequest
+bindingPackage marker source = (loadRequest LoadPackage (Snapshot (resolverFromFiles files) "app/main.tersus" False)){lrProtocols = Just Map.empty}
+  where
+    files =
+        [ ("app/package.tersus", marker)
+        , ("app/own/own.tersus", "trait Copyable { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; };")
+        , ("app/shapes/shapes.tersus", "struct List { n: Int };\ntrait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; };")
+        , ("app/main.tersus", source)
+        ]
+
+moduleProtocols :: LoadRequest -> Either String [(String, Map.Map String [String])]
+moduleProtocols request = case sourceLoader request of
+    LoadedModules modules
+        | all (\(_, _, r) -> accepted' r) modules -> Right [(maybe "" id (moduleName m), maybe Map.empty transportProtocols (acceptedOwnership r)) | (m, _, r) <- modules]
+        | otherwise -> Left ("a module was refused: " ++ take 600 (show [r | (_, _, r) <- modules, not (accepted' r)]))
+    other -> Left ("the package did not load: " ++ take 600 (show other))
+  where
+    accepted' r = case r of
+        Accepted _ _ (MirLowered _) -> True
+        _ -> False
+
+refusedWith :: String -> LoadRequest -> TestResult
+refusedWith needle request = case sourceLoader request of
+    LoadedModules modules -> testAssertTrue (any (\(_, _, r) -> refusal r) modules)
+    NotLoaded m -> testAssertTrue (needle `isInfixOf` m)
+    other -> Just ("expected a refusal containing " ++ needle ++ ": " ++ take 600 (show other))
+  where
+    refusal r = case r of
+        Refused m -> needle `isInfixOf` m
+        Unresolved m -> needle `isInfixOf` m
+        _ -> False
+
+requestText :: LoadRequest -> String
+requestText request = case writeLoadRequest request of
+    Ok text -> text
+    Error e -> e

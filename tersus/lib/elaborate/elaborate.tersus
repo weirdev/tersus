@@ -15,7 +15,7 @@ import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope , protocolName };
 import data::codec::codec { wireRoles };
 import data::reader::reader { before };
-import elaborate::wire { wireBindDeclarations, wireComplete, wireEntries, wireLoad, wireOwnerBindings, wireStorageDeclarations, wireValidateBindings, wireWrapInterface };
+import elaborate::wire { wireBindDeclarations, wireComplete, wireOwnBindings, wireEntries, wireLoad, wireOwnerBindings, wireStorageDeclarations, wireValidateBindings, wireWrapInterface };
 import elaborate::traits { argListOf, boundsOf, checkDefinitions, emitInstances };
 import elaborate::units { answerLoad };
 import elaborate::lowerout { MirOut, lowerUnit, noMir };
@@ -569,7 +569,10 @@ struct Unit {
     pkgName: String, modu: String, hasModule: Bool, predeclaring: Bool, viewing: Bool, extracting: Bool, libExtract: Bool,
     ifaces: List<AstProgram>, ifaceKeys: List<String>, definitions: List<List<AstProgram>>, definitionKeys: List<List<String>>,
     hasCatalog: Bool, catalog: Catalog, pkg: Pkg, stdPkg: Pkg, program: Program,
-    wireVersion: Bool, wireProtocols: HashMap<String, List<String>>
+    wireVersion: Bool, wireProtocols: HashMap<String, List<String>>,
+    // (bound: the package marker binds the roles, and ownRoles/ownProviders are its bindings of this module's declarations,
+    // the roles the module provides; boundMsg: why a binding of the module names none of them)
+    bound: Bool, ownRoles: List<String>, ownProviders: List<String>, boundMsg: String
 };
 
 // What a request of version 2 says it is: its explicit protocol providers (AST_DATA.md, "Ownership transport")
@@ -655,6 +658,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         };
     };
     if !prepared.ok { st = unresolvedState(st, prepared.msg); };
+    if prepared.ok && size(unit.boundMsg.bytes) > 0 { st = unresolvedState(st, clone(unit.boundMsg)); };
     st = loadBuiltins(st, table);
     selected = [];
     if unit.hasCatalog && st.status = 0 { selected = shapedLibraries(&available, librariesFor(&probe)); };
@@ -694,8 +698,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     };
     if st.status = 0 {
         if st.wireVersion {
-            st = wireBindDeclarations(st, &stmts);
-            st = wireStorageDeclarations(st, &stmts);
+            st = ownProviders(st, unit.bound, &unit.ownRoles, &unit.ownProviders, &stmts);
             st = wireValidateBindings(st);
         };
         st = gatherSignatures(st, &stmts);
@@ -713,7 +716,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         types = clone(st.te.types);
         st = checkDefinitions(st);
         // (the checked ownership facts select their callees through templateReference, so emitInstances names them too)
-        if st.status = 0 && st.wireVersion { st = wireBindDeclarations(st, &stmts); st = wireComplete(st); };
+        if st.status = 0 && st.wireVersion { st = ownProviders(st, unit.bound, &unit.ownRoles, &unit.ownProviders, &stmts); st = wireComplete(st); };
         // (the program is the Instance records of the copies it names and the functions bounds give, its statements, and
         // the checked bodies of its functions with bounds, whose expression types follow its own)
         st = emitInstances(st);
@@ -767,6 +770,14 @@ fn interfaceStorage(st: &St, iface: AstProgram) -> Parsed<AstProgram> ~ {
         } else { nodes = push(nodes, clone(node)); };
     };
     return Parsed<AstProgram> { value: AstProgram { stage: clone(iface.stage), nodes: nodes, root: iface.root }, pos: 0, ok: true };
+};
+
+// The roles the module's own declarations provide: those its package's marker binds them to, or, in a package whose
+// marker binds none, those their names are (the role-named traits, and the structs List and Box)
+fn ownProviders(st: St, bound: Bool, roles: &List<String>, providers: &List<String>, stmts: &List<Int>) -> St ~ {
+    if bound { return wireOwnBindings(st, roles, providers); };
+    st = wireBindDeclarations(st, stmts);
+    return wireStorageDeclarations(st, stmts);
 };
 
 fn printAnswer(a: &Answer) -> Int ~ {
@@ -889,7 +900,7 @@ fn answerModule(moduleLine: &Line, version2: Bool) -> Int ~ {
     unit = Unit { pkgName: pkgName, modu: modu, hasModule: hasModule, predeclaring: predeclaring, viewing: viewing, extracting: extracting, libExtract: wordIs(&extract, 1, "lib"),
         ifaces: ifaces, ifaceKeys: ifaceKeys, definitions: definitions, definitionKeys: definitionKeys,
         hasCatalog: sections.given, catalog: sections.catalog, pkg: sections.pkg, stdPkg: noPackage(), program: sections.program,
-        wireVersion: wire.version, wireProtocols: wire.protocols };
+        wireVersion: wire.version, wireProtocols: wire.protocols, bound: false, ownRoles: [], ownProviders: [], boundMsg: "" };
     answer = elaborateUnit(&table.value, unit, &seenBlocks);
     if answer.status < 0 { return malformed(); };
     answer = withMir(answer, &loweringIfaces, &table.value);

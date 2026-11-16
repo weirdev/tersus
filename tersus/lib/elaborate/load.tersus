@@ -11,9 +11,14 @@ struct FE { name: String, stem: String, path: String };
 impl Clone for FE { };
 struct ModId { pkg: String, modu: String, has: Bool };
 impl Clone for ModId { };
+// A package marker's binding of a protocol role (List, Box, Clone, Copy, Drop, Deref, Eq) to a declaration of the
+// package: `Role = module::Name;`, `Role = module::file::Name;`, or `Role = file::Name;` for a file at the package's root
+// (rooted). bound: the marker binds roles, so the package's modules provide only the roles it binds.
+struct MarkerBinding { role: String, path: List<String>, rooted: Bool };
+impl Clone for MarkerBinding { };
 struct Layout {
     name: String, root: String, rootFiles: List<FE>, modNames: List<String>, modFiles: List<List<FE>>, modNested: List<List<String>>,
-    noPrelude: Bool, isPackage: Bool
+    noPrelude: Bool, isPackage: Bool, bindings: List<MarkerBinding>, bound: Bool
 };
 impl Clone for Layout { };
 struct LFile { entry: FE, names: List<String>, imports: List<ps::FileImport> };
@@ -33,7 +38,7 @@ struct Loaded {
     root: String, name: String, entryPath: String, entryId: ModId, ls: LS
 };
 struct Collapsed { ok: Bool, entry: FE };
-struct Config { ok: Bool, msg: String, noPrelude: Bool };
+struct Config { ok: Bool, msg: String, noPrelude: Bool, bindings: List<MarkerBinding>, bound: Bool };
 struct LayoutR { ok: Bool, msg: String, layout: Layout };
 struct Found { ok: Bool, text: String };
 struct PR { ok: Bool, msg: String, imports: List<ps::FileImport>, program: AstProgram, decls: Decls };
@@ -196,7 +201,7 @@ fn stemsNamed(entries: &List<FE>, name: &String) -> List<FE> ~ {
 };
 
 fn buildLayout(snap: &Snap, root: &String, noPrelude: Bool) -> LayoutR ~ {
-    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false };
+    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false, bindings: [], bound: false };
     listing = listDir(snap, root);
     if !listing.ok { return LayoutR { ok: false, msg: cat(cat("package directory ", root), " not found"), layout: bad }; };
     config = packageNoPrelude(snap, root);
@@ -225,15 +230,20 @@ fn buildLayout(snap: &Snap, root: &String, noPrelude: Bool) -> LayoutR ~ {
     };
     rootFiles = [];
     for e in tersusFiles(root, &listing.files) { if e.name != "package.tersus" { rootFiles = push(rootFiles, clone(e)); }; };
+    rootStems = [];
+    for e in &rootFiles { rootStems = push(rootStems, clone(e.stem)); };
+    placed = placeBindings(&config.bindings, &sorted, &rootStems);
+    markerPath = joinPath(root, "package.tersus");
+    if size(placed.msg.bytes) > 0 { return LayoutR { ok: false, msg: cat(cat(cat("package configuration: ", showText(&markerPath)), ": "), &placed.msg), layout: bad }; };
     return LayoutR { ok: true, msg: "", layout: Layout { name: pathBaseName(root), root: clone(root), rootFiles: rootFiles, modNames: sorted, modFiles: modFiles,
-        modNested: modNested, noPrelude: config.noPrelude || noPrelude, isPackage: true } };
+        modNested: modNested, noPrelude: config.noPrelude || noPrelude, isPackage: true, bindings: placed.bindings, bound: config.bound } };
 };
 
 // The marker's configuration: blank, or `noPrelude = true;` / `noPrelude = false;`, with line comments
 fn packageNoPrelude(snap: &Snap, root: &String) -> Config ~ {
     marker = joinPath(root, "package.tersus");
     read = readFile(snap, &marker);
-    if !read.ok { return Config { ok: false, msg: cat("package marker not found: ", &marker), noPrelude: false }; };
+    if !read.ok { return Config { ok: false, msg: cat("package marker not found: ", &marker), noPrelude: false, bindings: [], bound: false }; };
     return markerConfig(&marker, &read.text);
 };
 
@@ -650,7 +660,7 @@ fn requestedRoots(snap: &Snap, pkg: &String) -> List<String> ~ {
 fn hasMarker(snap: &Snap, root: &String) -> Bool ~ { return hasFile(snap, joinPath(root, "package.tersus")); };
 
 fn ensureLayout(ls: LS, snap: &Snap, source: &Layout, pkg: &String) -> EnsureR ~ {
-    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false };
+    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false, bindings: [], bound: false };
     if clone(pkg) = reservedPackage() { return EnsureR { ls: ls, ok: false, msg: cat(reservedPackageWhy(), ", which a program does not import by name"), layout: bad }; };
     requested = requestedRoots(snap, pkg);
     sibling = joinPath(dirNameOf(&source.root), pkg);
@@ -995,7 +1005,7 @@ fn findPackageRoot(snap: &Snap, entry: &String) -> Found ~ {
 
 fn soloLayout(entryPath: &String, noPrelude: Bool) -> Layout ~ {
     entry = FE { name: pathBaseName(entryPath), stem: fileStem(entryPath), path: clone(entryPath) };
-    return Layout { name: "", root: dirNameOf(entryPath), rootFiles: push([], entry), modNames: [], modFiles: [], modNested: [], noPrelude: noPrelude, isPackage: false };
+    return Layout { name: "", root: dirNameOf(entryPath), rootFiles: push([], entry), modNames: [], modFiles: [], modNested: [], noPrelude: noPrelude, isPackage: false, bindings: [], bound: false };
 };
 
 fn notLoaded(ls: LS, msg: String) -> Loaded ~ {
@@ -1085,36 +1095,84 @@ fn dependenciesOf(ls: &LS, pm: &PMod) -> List<ModId> ~ {
 // with no space after it, adds that its end was expected
 fn markerConfig(marker: &String, text: &String) -> Config ~ {
     t = skipSpace(Cursor { text: clone(text), pos: 0, line: 1, col: 1 });
-    if !startsAt(&t, "noPrelude") {
-        if atEndOf(&t) { return Config { ok: true, msg: "", noPrelude: false }; };
-        return configError(marker, &t, true, "expecting \"noPrelude\" or end of input");
+    noPrelude = false;
+    prelude = false;
+    bindings = [];
+    while !atEndOf(&t) ~ {
+        start = Cursor { text: clone(t.text), pos: t.pos, line: t.line, col: t.col };
+        word = wordAtCursor(&t);
+        if size(word.bytes) = 0 { return configError(marker, &t, true, "expecting \"noPrelude\", a protocol role or end of input"); };
+        if word = "noPrelude" {
+            if prelude { return configError(marker, &start, false, "noPrelude is given twice"); };
+            prelude = true;
+            t = advance(t, 9);
+            before = t.pos;
+            t = skipSpace(t);
+            glued = t.pos = before;
+            if byteAtCursor(&t) != 61 { return configError(marker, &t, false, afterKeyword(glued, "noPrelude", "\"=\"")); };
+            t = skipSpace(advance(t, 1));
+            value = wordAtCursor(&t);
+            if value != "true" && value != "false" { return configError(marker, &t, false, "expecting \"true\" or \"false\""); };
+            t = advance(t, size(value.bytes));
+            noPrelude = value = "true";
+            t = skipSpace(t);
+            if byteAtCursor(&t) != 59 { return configError(marker, &t, false, "expecting \";\""); };
+        } else {
+            roles = markerRoles();
+            if indexIn(&roles, &word) < 0 { return configError(marker, &start, false, "expecting \"noPrelude\", a protocol role (List, Box, Clone, Copy, Drop, Deref, Eq) or end of input"); };
+            t = skipSpace(advance(t, size(word.bytes)));
+            if byteAtCursor(&t) != 61 { return configError(marker, &t, false, "expecting \"=\""); };
+            t = skipSpace(advance(t, 1));
+            path = [];
+            reading = true;
+            while reading ~ {
+                segment = wordAtCursor(&t);
+                if size(segment.bytes) = 0 { return configError(marker, &t, false, "expecting the name of a module, file or declaration"); };
+                path = push(path, clone(segment));
+                t = advance(t, size(segment.bytes));
+                if byteAtCursor(&t) = 58 && t.pos + 1 < size(t.text.bytes) && toInt(get(&t.text.bytes, t.pos + 1)) = 58 { t = advance(t, 2); } else { reading = false; };
+            };
+            if size(path) < 2 || size(path) > 3 { return configError(marker, &start, false, "a binding names module::Name, module::file::Name or file::Name"); };
+            bindings = push(bindings, MarkerBinding { role: word, path: path, rooted: false });
+            t = skipSpace(t);
+            if byteAtCursor(&t) != 59 { return configError(marker, &t, false, "expecting \";\""); };
+        };
+        t = skipSpace(advance(t, 1));
     };
-    t = advance(t, 9);
-    if identByte(byteAtCursor(&t)) { return keywordRunsOn(marker, t, "noPrelude"); };
-    before = t.pos;
-    t = skipSpace(t);
-    glued = t.pos = before;
-    if byteAtCursor(&t) != 61 { return configError(marker, &t, false, afterKeyword(glued, "noPrelude", "\"=\"")); };
-    t = skipSpace(advance(t, 1));
-    word = "false";
-    if startsAt(&t, "true") { word = "true"; }
-    else if !startsAt(&t, "false") { return configError(marker, &t, false, "expecting \"true\" or \"false\""); };
-    t = advance(t, size(word.bytes));
-    if identByte(byteAtCursor(&t)) { return keywordRunsOn(marker, t, &word); };
-    before = t.pos;
-    t = skipSpace(t);
-    glued = t.pos = before;
-    if byteAtCursor(&t) != 59 { return configError(marker, &t, false, afterKeyword(glued, &word, "\";\"")); };
-    t = skipSpace(advance(t, 1));
-    if !atEndOf(&t) { return configError(marker, &t, true, "expecting end of input"); };
-    return Config { ok: true, msg: "", noPrelude: word = "true" };
+    return Config { ok: true, msg: "", noPrelude: noPrelude, bindings: bindings, bound: size(bindings) > 0 };
 };
 
-// (Parsec reads the character that continues the keyword before refusing it, so the place is after it)
-fn keywordRunsOn(marker: &String, t: Cursor, word: &String) -> Config ~ {
-    c = byteAtCursor(&t);
-    after = advance(t, 1);
-    return configErrorAt(marker, &after, c, true, catStrings(catStrings("expecting end of \"", word), "\""));
+fn markerRoles() -> List<String> ~ { return push(push(push(push(push(push(push([], "List"), "Box"), "Clone"), "Copy"), "Drop"), "Deref"), "Eq"); };
+
+// The identifier at the cursor, or "" (a letter or underscore, then letters, digits, underscores and primes)
+fn wordAtCursor(t: &Cursor) -> String ~ {
+    first = byteAtCursor(t);
+    if !((first >= 65 && first <= 90) || (first >= 97 && first <= 122) || first = 95) { return ""; };
+    out = [];
+    p = t.pos;
+    while p >= 0 && p < size(t.text.bytes) && identByte(toInt(get(&t.text.bytes, p))) [{ affirm p >= 0; }] shrinks size(t.text.bytes) - p {
+        out = push(out, get(&t.text.bytes, p));
+        p = p + 1;
+    };
+    return String { bytes: out };
+};
+
+struct Placed { bindings: List<MarkerBinding>, msg: String };
+
+// The bindings with the module or root file each names: a binding's first name is a module of the package, or, with
+// two names, a file at its root
+fn placeBindings(bindings: &List<MarkerBinding>, modules: &List<String>, rootStems: &List<String>) -> Placed ~ {
+    out = [];
+    for b in bindings {
+        if size(b.path) < 2 { return Placed { bindings: [], msg: "a binding names module::Name, module::file::Name or file::Name" }; };
+        first = clone(get(&b.path, 0));
+        if indexIn(modules, &first) >= 0 { out = push(out, MarkerBinding { rooted: false, ..clone(b) }); } else {
+            if size(b.path) = 2 && indexIn(rootStems, &first) >= 0 { out = push(out, MarkerBinding { rooted: true, ..clone(b) }); } else {
+                return Placed { bindings: [], msg: cat(cat(cat(cat("the binding of ", &b.role), " names "), &first), ", which is no module of the package nor a file at its root") };
+            };
+        };
+    };
+    return Placed { bindings: out, msg: "" };
 };
 
 fn afterKeyword(glued: Bool, word: &String, expected: &String) -> String ~ {
@@ -1188,5 +1246,5 @@ fn configErrorAt(marker: &String, t: &Cursor, c: Int, asCharacter: Bool, expecti
         };
     };
     msg = cat(cat(cat(&msg, "):\nunexpected "), &unexpected), "\n");
-    return Config { ok: false, msg: cat(&msg, expecting), noPrelude: false };
+    return Config { ok: false, msg: cat(&msg, expecting), noPrelude: false, bindings: [], bound: false };
 };

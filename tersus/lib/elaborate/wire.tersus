@@ -117,6 +117,20 @@ fn wireBindDeclarations(st: St, statements: &List<Int>) -> St ~ {
     return st;
 };
 
+// The roles a package marker binds to the module's own declarations (elaborate.ownProviders)
+fn wireOwnBindings(st: St, roles: &List<String>, providers: &List<String>) -> St ~ {
+    i = 0;
+    while i < size(roles) && i < size(providers) [{ affirm i >= 0; }] shrinks size(roles) - i {
+        role = clone(get(roles, i));
+        provider = clone(get(providers, i));
+        previous = st.wireProtocols.lookup(&role, []);
+        if indexIn(&previous, &provider) < 0 { previous = push(previous, provider); };
+        st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
+        i = i + 1;
+    };
+    return st;
+};
+
 fn wireStorageDeclarations(st: St, statements: &List<Int>) -> St ~ {
     for s in statements {
         stmt = stmtOf(&st, s);
