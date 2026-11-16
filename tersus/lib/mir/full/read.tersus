@@ -220,23 +220,18 @@ fn payloadsOk(program: &FullProgram, roots: &List<Int>) -> Bool ~ {
     };
     return seen.size() = size(roots);
 };
-// Legacy PackLoop records omit the invariant; current MIR3 output needs its empty-list node.
+// Legacy PackLoop records omit the invariant; current AST output writes one empty list per loop.
 fn packLoopInvariants(nodes: List<AstNode>) -> List<AstNode> ~ {
-    missing = false; empty = 0 - 1; i = 0;
+    missing = false;
     for node in &nodes {
-        if node is AstNode::Validations {
-            if (node as AstNode::Validations).value is AstValidations::End && empty < 0 { empty = i; };
-        };
         if node is AstNode::Statement {
             statement = (node as AstNode::Statement).value;
             if statement is AstStatement::PackLoop {
                 if (statement as AstStatement::PackLoop).inv = 0 - 1 { missing = true; };
             };
         };
-        i = i + 1;
     };
     if !missing { return nodes; };
-    if empty < 0 { empty = size(nodes); nodes = push(nodes, AstNode::Validations { value: AstValidations::End }); };
     limit = size(nodes);
     for at in 0..limit {
         if at < 0 || at >= size(nodes) { return nodes; };
@@ -246,6 +241,8 @@ fn packLoopInvariants(nodes: List<AstNode>) -> List<AstNode> ~ {
             if statement is AstStatement::PackLoop {
                 loop = statement as AstStatement::PackLoop;
                 if loop.inv = 0 - 1 {
+                    empty = size(nodes);
+                    nodes = push(nodes, AstNode::Validations { value: AstValidations::End });
                     nodes = set(nodes, at, AstNode::Statement { value: AstStatement::PackLoop { i: loop.i, a: loop.a, p: loop.p, lo: loop.lo, hi: loop.hi, take: loop.take, inv: empty, xs: loop.xs } });
                 };
             };
