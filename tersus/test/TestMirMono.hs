@@ -1,5 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
-module TestMirMono (testMirMono) where
+module TestMirMono (testMirMono, testMirMonoUsing) where
 
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
@@ -54,8 +54,8 @@ compareWire original = case writeLowered (unitOf original) of
             ToolFailed e -> pure (Just e)
             ToolInterpreted _ -> pure (Just "the full-MIR comparison requires the native emitter")
 
-sourceMono :: String -> IO TestResult
-sourceMono source = case lowerSource True source of
+sourceMono :: (Bool -> String -> Result Program String) -> String -> IO TestResult
+sourceMono lower source = case lower True source of
     Error e -> pure (Just ("does not lower: " ++ e))
     Ok p -> do
         raw <- compareWire p
@@ -66,9 +66,12 @@ sourceMono source = case lowerSource True source of
                 Ok native -> fmap (fmap ("native-stage MIR: " ++)) (compareWire native)
 
 testMirMono :: Test
-testMirMono = TestList "testMirMono"
-    [ TestList "source corpus" [TestCase label (sourceMono source) | (label, source) <- validatedPrograms ++ unvalidatedPrograms]
-    , TestList "examples" [TestCase path (readFile path >>= sourceMono) | path <- nativeExamples]
+testMirMono = testMirMonoUsing lowerSource
+
+testMirMonoUsing :: (Bool -> String -> Result Program String) -> Test
+testMirMonoUsing lower = TestList "testMirMono"
+    [ TestList "source corpus" [TestCase label (sourceMono lower source) | (label, source) <- validatedPrograms ++ unvalidatedPrograms]
+    , TestList "examples" [TestCase path (readFile path >>= sourceMono lower) | path <- nativeExamples]
     , TestList "complete metadata and substitution" [TestCase label (compareWire p) | (label, p) <- monoFixtures]
     , TestList "validation adapter retains contracts and ghosts"
         [ testCase label (monoDifference (Oracle.monomorphizeForValidation p) (monomorphizeForValidation p)) | (label, p) <- monoFixtures ]
