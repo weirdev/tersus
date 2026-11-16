@@ -11,8 +11,10 @@ module MirCopies
     , coveredKey
     , isStubName
     , withoutGeneric
+    , contractSuffix
     ) where
 
+import Data.Char (isDigit)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (intercalate, isPrefixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
@@ -25,7 +27,7 @@ import Mir
 import MirPacks (Expanded (..), expandPack, isPackName)
 import Pretty (renderType)
 import StdLib (builtinFunct)
-import Syntax (Expression (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof, exprToProof, parseImplCheckName)
+import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof, exprToProof, parseImplCheckName)
 import qualified Types as T
 import Types (Arg (..), BuiltinFunct, Name, Rel (..), Size (..), Type (..), Variable, instanceName, pattern TBox, pattern TList, renderTypeForName, substitute, tupleGeneric, baseNameOf)
 import Utils (Result (..))
@@ -1020,12 +1022,12 @@ finish program named used roots main' made =
         Const (CFn n) | Just c <- companionOf n, Just (_, owner', _) <- parseImplCheckName c, owner' == owner, c `Set.member` names -> Const (CFn c)
         _ -> o
     completeEnvs fn = mapEnvs (\e -> Map.union (scrub e) copyEnv) fn
-    -- The functions with bounds validated generically: every one but the variadic ones (whose copies are validated) and
-    -- those that name one of those generically, with the functions lifted out of them; and the stubs, which are not validated
+    -- The functions with bounds validated generically, with the functions lifted out of them (but those that name what has no
+    -- generic form: a call through a bound of a trait with no stub); and the stubs, which are not validated
     bounded = progBounded program
     variadic f = maybe False (any isPackName . fnTypeParams) (Map.lookup f (progFunctions program))
     lifted = Set.fromList (concatMap boundedLifted (Map.elems bounded))
-    kept = keep (Set.fromList [f | f <- Set.toList used, Map.member f bounded, not (isStubName f), not (variadic f), Set.notMember f lifted, Map.member f (progFunctions program)])
+    kept = keep (Set.fromList [f | f <- Set.toList used, Map.member f bounded, not (isStubName f), Set.notMember f lifted, Map.member f (progFunctions program)])
     keep cs =
         let bad = Set.fromList [f | f <- Set.toList cs, any (refusedRef cs) (concatMap usedNames (bodyAndLifted f))]
          in if Set.null bad then cs else keep (cs `Set.difference` bad)
@@ -1042,9 +1044,9 @@ finish program named used roots main' made =
     stubsUsed = grow (Set.fromList [n | g <- bodies, n <- usedNames g, Map.member n stubFns])
       where
         grow s = let s' = Set.union s (Set.fromList [n | f <- Set.toList s, Just fn <- [Map.lookup f stubFns], n <- usedNames fn, Map.member n stubFns]) in if s' == s then s else grow s'
-    generic = Map.fromList ([(fnName g, g) | g <- bodies] ++ [(f, fn) | (f, fn) <- Map.toList stubFns, Set.member f stubsUsed])
+    generic = Map.fromList ([(fnName g, g) | g <- bodies] ++ [(f, fn) | (f, fn) <- Map.toList stubFns, Set.member f stubsUsed] ++ [(n, stub) | any variadic (Set.toList kept), (n, stub) <- [(packSliceName, packSlice), (packConsName, packCons)]])
     genericOf f = case bodyAndLifted f of
-        body : liftedFns -> marked (renameFunction rename body) : [marked (renameFunction rename l){fnTypeParams = nubOrd (fnTypeParams body ++ fnTypeParams l)} | l <- liftedFns]
+        body : liftedFns -> let generic0 = marked (maybe id (variadicBody (progFunctions program)) (Map.lookup f bounded) (renameFunction rename body)) in generic0 : map marked (maybe [] pure (packContracts generic0)) ++ [marked (renameFunction rename l){fnTypeParams = nubOrd (fnTypeParams body ++ fnTypeParams l)} | l <- liftedFns]
         [] -> []
     marked fn = fn{fnSpec = (fnSpec fn){specEnv = Map.insert genericKey (Const (CInt 0)) (specEnv (fnSpec fn))}}
     keptCopies = Set.fromList [n | (f, copy, liftedCopies) <- made, Set.member f kept, n <- map fnName (copy : liftedCopies)]
@@ -1117,6 +1119,213 @@ usedNames fn = Set.toList (Set.fromList (codeNames ++ proofTargets))
         _ -> []
     proofTargets = [v | n <- proofNames, Just (Const (CFn v)) <- [Map.lookup n envs]]
 
+-- A variadic body as the validator checks it generically (MIR.md, "Copies of variadic functions"): the pack is a list of
+-- its elements, a read of it at a number a `get`, each loop over it a loop whose index stays in its bounds (with the
+-- invariant the program wrote, if any) and whose measure is what is left of them, a forward the call of the generic callee
+-- with the slice `slice(args, lo, hi)` gives, and a function that calls itself through a slice is measured by `size(args)`
+-- when it says nothing. A read of the pack in a validation statement is checked in range, as one in code is.
+variadicBody :: Map Name Function -> BoundedFn -> Function -> Function
+variadicBody functions bounded fn = case [l | l <- fnParams fn, Just d <- [Map.lookup l (fnLocals fn)], TParam q <- [localType d], isPackName q] of
+    [p] -> withPack p
+    _ -> fn
+  where
+    withPack p =
+        let listTy = case localType (fnLocals fn Map.! p) of
+                TParam q -> TList (TParam q)
+                t -> t
+            name = maybe "args" id (localName (fnLocals fn Map.! p))
+            isPack o = case o of
+                Copy x -> x == p
+                Move x -> x == p
+                _ -> False
+            taken = Map.fromList [(packElement pl, packIndex pl) | pl <- boundedPackLoops bounded]
+            asList st = case st of
+                Assign d (Use (Const (CFn "$pack element"))) | Just i <- Map.lookup d taken -> Assign d (ListOp Get [Copy p, Copy i])
+                Assign d (ReadField o "$pack" k) | isPack o -> Assign d (ListOp Get [Copy p, Const (CInt (read k))])
+                Assign d (Borrow r (RefField "$pack" k : steps) m) | r == p -> Assign d (Borrow r (RefIndex (Const (CInt (read k))) : steps) m)
+                _ -> st
+            -- (an element read at a number is written as a field of the pack in a proof, as in code)
+            elementTerm pr = case pr of
+                FApp (CTerm (VFunct _ _ _ (BuiltinFunct (T.Field (Just "$pack") k)) _)) [ATerm a] | a == name, all isDigit k, not (null k) -> FApp (CTerm (builtinFunct T.Get)) [ATerm a, CTerm (VInt (read k))]
+                FApp f as -> FApp (elementTerm f) (map elementTerm as)
+                Forall v gs b -> Forall v (map elementTerm gs) (elementTerm b)
+                _ -> pr
+            elementExpr e = case e of
+                F (Val (VFunct _ _ _ (BuiltinFunct (T.Field (Just "$pack") k)) _)) [Var a] | a == name, all isDigit k, not (null k) -> F (Val (builtinFunct T.Get)) [Var a, Val (VInt (read k))]
+                F f as -> F (elementExpr f) (map elementExpr as)
+                _ -> e
+            elements v = case v of
+                ProofAssert pr -> ProofAssert (elementTerm pr)
+                Assume pr -> Assume (elementTerm pr)
+                AssignProofVar n e -> AssignProofVar n (elementExpr e)
+                Rewrite (UserRewrite n ps) -> Rewrite (UserRewrite n (map elementTerm ps))
+                _ -> v
+            checked st0 = case elementsIn st0 of
+              st -> case st of
+                Ghost e (GhostValidation v) | obligations@(_ : _) <- validationObligations name v -> [Ghost e (GhostValidation (ProofAssert o)) | o <- obligations] ++ [st]
+                _ -> [st]
+            elementsIn st = case st of
+                Ghost e (GhostValidation v) -> Ghost e (GhostValidation (elements v))
+                _ -> st
+            locals0 = Map.adjust (\d -> d{localType = listTy}) p (fnLocals fn)
+            blocks0 = Map.map (\(BasicBlock ss t) -> BasicBlock (concatMap checked (map asList ss)) t) (fnBlocks fn)
+            next0 = (1 + maximum (0 : [i | Local i <- Map.keys locals0]), 1 + maximum (0 : [i | BlockId i <- Map.keys blocks0]))
+            (blocks1, locals1, next1) = foldl forward (blocks0, locals0, next0) (Map.toList blocks0)
+            -- (the plain arguments before the forwarded part that the callee's pack takes go before it in the list)
+            forward (bs, ls, (nl, nb)) (b, BasicBlock ss t) = case t of
+                Call callee@(Const (CFn g)) args d next | (before, pa : lo : hi : after) <- break isPack args ->
+                    let fixed = maybe (length before) packAt (Map.lookup g functions)
+                        (plain, leading) = splitAt fixed before
+                        slice = Local nl
+                        conses = [(Local (nl + 1 + k), BlockId (nb + k)) | k <- [0 .. length leading - 1]]
+                        final = maybe slice fst (lastMaybe conses)
+                        callBlock = BlockId (nb + length leading)
+                        firstNext = maybe callBlock snd (headMaybe conses)
+                        consBlocks = [ (blk, BasicBlock [] (Call (Const (CFn packConsName)) [e, Copy prev] l (maybe callBlock snd (headMaybe rest))))
+                                     | ((l, blk), e, prev, rest) <- zip4' conses (reverse leading) (slice : map fst conses) (drop 1 (tails' conses))
+                                     ]
+                     in ( Map.insert callBlock (BasicBlock [] (Call callee (plain ++ [Copy final] ++ after) d next)) (Map.union (Map.fromList consBlocks) (Map.insert b (BasicBlock ss (Call (Const (CFn packSliceName)) [pa, lo, hi] slice firstNext)) bs))
+                        , Map.union (Map.fromList [(l, LocalDecl listTy Nothing) | l <- slice : map fst conses]) ls
+                        , (nl + 1 + length leading, nb + 1 + length leading)
+                        )
+                _ -> (bs, ls, (nl, nb))
+            packAt callee = length (takeWhile (\l -> not (maybe False isPackParam (Map.lookup l (fnLocals callee)))) (fnParams callee))
+            isPackParam d = case localType d of
+                TParam q -> isPackName q
+                TRef (TParam q) -> isPackName q
+                _ -> False
+            headMaybe xs = case xs of
+                x : _ -> Just x
+                [] -> Nothing
+            lastMaybe xs = headMaybe (reverse xs)
+            tails' xs = case xs of
+                [] -> [[]]
+                _ : rest -> xs : tails' rest
+            zip4' (a : as) (b' : bs') (c : cs) (d' : ds) = (a, b', c, d') : zip4' as bs' cs ds
+            zip4' _ _ _ _ = []
+            -- (a loop over a range of the pack runs no times when hi < lo: its index is bounded by max(lo, hi), worked out
+            -- before the loop, so its bounds hold on entry whatever the pack's size)
+            (blocks2, locals2, tops, _) = foldl topOf (blocks1, locals1, Map.empty, next1) (boundedPackLoops bounded)
+            topOf (bs, ls, ts, (nl, nb)) pl = case [(b, ss) | (b, BasicBlock ss (Goto h)) <- Map.toList bs, h == packHeader pl, b `notElem` packBlocks pl] of
+                [(pre, ss)] ->
+                    let top = Local nl
+                        below = Local (nl + 1)
+                     in ( Map.insert (BlockId (nb + 1)) (BasicBlock [Assign top (Use (Copy (packHi pl)))] (Goto (packHeader pl))) (Map.insert (BlockId nb) (BasicBlock [Assign top (Use (Copy (packLo pl)))] (Goto (packHeader pl))) (Map.insert pre (BasicBlock (ss ++ [Assign below (BinaryOp (Compare Lt) (Copy (packHi pl)) (Copy (packLo pl)))]) (SwitchBool (Copy below) (BlockId nb) (BlockId (nb + 1)))) bs))
+                        , Map.insert below (LocalDecl TBool Nothing) (Map.insert top (LocalDecl TInt Nothing) ls)
+                        , Map.insert (packHeader pl) top ts
+                        , (nl + 2, nb + 2)
+                        )
+                _ -> (bs, ls, ts, (nl, nb))
+            loopOf pl =
+                let env = Map.fromList [("$i", Copy (packIndex pl)), ("$lo", Copy (packLo pl)), ("$hi", Copy (Map.findWithDefault (packHi pl) (packHeader pl) tops))]
+                    bounds = [relation LtEq (ATerm "$lo") (ATerm "$i"), relation LtEq (ATerm "$i") (ATerm "$hi")]
+                    measure = Just (Counting (F (Val (builtinFunct T.Minus)) [Var "$hi", Var "$i"]))
+                 in case Map.lookup (packHeader pl) (specLoops (fnSpec fn)) of
+                        Just written -> written{loopInvariant = bounds ++ loopInvariant written, loopTermination = measure, loopEnv = Map.union env (loopEnv written)}
+                        Nothing -> LoopSpec bounds measure (Map.union env (specEnv (fnSpec fn))) (packBody pl)
+            loops = Map.fromList [(packHeader pl, loopOf pl) | pl <- boundedPackLoops bounded]
+            selfCall = or [n == fnName fn | BasicBlock _ (Call (Const (CFn n)) _ _ _) <- Map.elems blocks2]
+            term = case specTermination (fnSpec fn) of
+                Nothing | selfCall -> Just (Counting (F (Val (builtinFunct T.Size)) [Var name]))
+                other -> other
+            -- (a loop invariant's read of the pack is in range wherever the invariant is checked: each is an invariant too)
+            specElements sp = sp{specRequires = map elements (specRequires sp), specEnsures = map elements (specEnsures sp), specLoops = Map.map (\l -> l{loopInvariant = concatMap (\v -> let v' = elements v in [ProofAssert o | o <- validationObligations name v'] ++ [v']) (loopInvariant l)}) (specLoops sp)}
+         in fn{fnLocals = locals2, fnBlocks = blocks2, fnSpec = specElements ((fnSpec fn){specLoops = Map.union loops (specLoops (fnSpec fn)), specTermination = term})}
+
+-- What a validation statement asks of the pack it reads: each index it reads the pack at is in range, for every value of a
+-- forall's variable the read is under
+validationObligations :: Name -> ValidationStatement -> [VariableProof]
+validationObligations name v = case v of
+    ProofAssert pr -> rangeObligations name pr
+    Assume pr -> rangeObligations name pr
+    AssignProofVar _ e -> rangeObligations name (exprToProof e)
+    Rewrite (UserRewrite _ ps) -> concatMap (rangeObligations name) ps
+    _ -> []
+
+rangeObligations :: Name -> VariableProof -> [VariableProof]
+rangeObligations name pr = case pr of
+    FApp (CTerm (VFunct _ _ _ (BuiltinFunct T.Get) _)) [ATerm a, e] | a == name -> inRange e ++ rangeObligations name e
+    FApp (ATerm "get") [ATerm a, e] | a == name -> inRange e ++ rangeObligations name e
+    FApp f as -> rangeObligations name f ++ concatMap (rangeObligations name) as
+    Forall x gs b -> [if mentions x o then Forall x gs o else o | o <- concatMap (rangeObligations name) gs ++ rangeObligations name b]
+    _ -> []
+  where
+    inRange e = [FApp (CTerm (builtinFunct (T.Rel LtEq))) [CTerm (VInt 0), e], FApp (CTerm (builtinFunct (T.Rel Lt))) [e, sizeTerm (ATerm name)]]
+    mentions x o = case o of
+        BVar y -> x == y
+        FApp f as -> mentions x f || any (mentions x) as
+        Forall y gs b -> y /= x && (any (mentions x) gs || mentions x b)
+        _ -> False
+
+-- A generic variadic body's contracts read the pack in range: a function the validator checks (`f$contract`) with the body's
+-- parameters and its result as one more, which proves each read of an input contract under the input contract before it,
+-- and each read of an output contract under the input contract and the output contract before it
+packContracts :: Function -> Maybe Function
+packContracts fn = case [n | l <- fnParams fn, Just d <- [Map.lookup l (fnLocals fn)], TList (TParam q) <- [localType d], isPackName q, Just n <- [localName d]] of
+    [name] | any (not . null . validationObligations name) (specRequires spec ++ specEnsures spec) ->
+        let result = Local (1 + maximum (0 : [i | Local i <- Map.keys (fnLocals fn)]))
+            resultTy = maybe TInt id (fnReturns fn)
+            env = specEnv spec
+            withResult = Map.insert "return" (Copy result) env
+            (plain, sizes) = splitAt (length (fnParams fn) - length (fnSizeParams fn)) (fnParams fn)
+            params = plain ++ [result] ++ sizes
+            clauses e vs = concat [[Ghost e (GhostValidation (ProofAssert o)) | o <- validationObligations name v] ++ [Ghost e (GhostValidation (assumed v))] | v <- vs]
+            statements = clauses env (specRequires spec) ++ clauses withResult (specEnsures spec) ++ [Assign (Local 0) (Use (Const (CInt 0)))]
+            locals = Map.insert (Local 0) (LocalDecl TInt Nothing) (Map.insert result (LocalDecl resultTy (Just "return")) (Map.filterWithKey (\l _ -> l `elem` fnParams fn) (fnLocals fn)))
+         in Just (Function (fnName fn ++ contractSuffix) params (Just TInt) locals (Map.singleton (BlockId 0) (BasicBlock statements Return)) (fnSizeParams fn) (fnTypeParams fn) (fnBorrowed fn ++ [result]) (fnMutBorrowed fn) [] emptySpec{specEnv = env})
+    _ -> Nothing
+  where
+    spec = fnSpec fn
+    assumed v = case v of
+        ProofAssert p -> Assume p
+        _ -> v
+
+contractSuffix :: String
+contractSuffix = "$contract"
+
+relation :: Rel -> VariableProof -> VariableProof -> ValidationStatement
+relation r a b = ProofAssert (FApp (CTerm (builtinFunct (T.Rel r))) [a, b])
+
+sizeTerm :: VariableProof -> VariableProof
+sizeTerm x = FApp (CTerm (builtinFunct T.Size)) [x]
+
+-- The list of an element before the elements of a list: the plain arguments a forward gives the callee's pack first
+packConsName :: Name
+packConsName = "<$packcons>"
+
+packCons :: Function
+packCons = Function packConsName [Local 1, Local 2] (Just listTy) (Map.fromList [(Local 0, LocalDecl listTy Nothing), (Local 1, LocalDecl (TParam "..A") (Just "x")), (Local 2, LocalDecl listTy (Just "xs"))]) (Map.singleton (BlockId 0) (BasicBlock [] Unreachable)) [] ["..A", "..S"] [Local 1, Local 2] [] [] spec
+  where
+    listTy = TList (TParam "..S")
+    getOf x i = FApp (CTerm (builtinFunct T.Get)) [x, i]
+    spec = emptySpec
+        { specEnsures =
+            [ relation Eq (sizeTerm (ATerm "return")) (FApp (CTerm (builtinFunct T.Plus)) [sizeTerm (ATerm "xs"), CTerm (VInt 1)])
+            , relation Eq (getOf (ATerm "return") (CTerm (VInt 0))) (ATerm "x")
+            , ProofAssert (Forall "k" [FApp (CTerm (builtinFunct (T.Rel GtEq))) [BVar "k", CTerm (VInt 0)], FApp (CTerm (builtinFunct (T.Rel Lt))) [BVar "k", sizeTerm (ATerm "xs")]] (FApp (CTerm (builtinFunct (T.Rel Eq))) [getOf (ATerm "return") (FApp (CTerm (builtinFunct T.Plus)) [BVar "k", CTerm (VInt 1)]), getOf (ATerm "xs") (BVar "k")]))
+            ]
+        , specEnv = Map.fromList [("x", Copy (Local 1)), ("xs", Copy (Local 2))]
+        }
+
+-- `slice(xs, lo, hi)` of a pack a generic variadic body forwards: the elements from lo to hi - 1 (no name a program writes
+-- has `$`)
+packSliceName :: Name
+packSliceName = "<$packslice>"
+
+packSlice :: Function
+packSlice = Function packSliceName [Local 1, Local 2, Local 3] (Just listTy) (Map.fromList [(Local 0, LocalDecl listTy Nothing), (Local 1, LocalDecl listTy (Just "xs")), (Local 2, LocalDecl TInt (Just "lo")), (Local 3, LocalDecl TInt (Just "hi"))]) (Map.singleton (BlockId 0) (BasicBlock [] Unreachable)) [] ["..S"] [Local 1] [] [] spec
+  where
+    listTy = TList (TParam "..S")
+    getOf x i = FApp (CTerm (builtinFunct T.Get)) [x, i]
+    spec = emptySpec
+        { specRequires = [relation LtEq (CTerm (VInt 0)) (ATerm "lo"), relation LtEq (ATerm "lo") (ATerm "hi"), relation LtEq (ATerm "hi") (sizeTerm (ATerm "xs"))]
+        , specEnsures =
+            [ relation Eq (sizeTerm (ATerm "return")) (FApp (CTerm (builtinFunct T.Minus)) [ATerm "hi", ATerm "lo"])
+            , ProofAssert (Forall "k" [FApp (CTerm (builtinFunct (T.Rel GtEq))) [BVar "k", CTerm (VInt 0)], FApp (CTerm (builtinFunct (T.Rel Lt))) [BVar "k", sizeTerm (ATerm "return")]] (FApp (CTerm (builtinFunct (T.Rel Eq))) [getOf (ATerm "return") (BVar "k"), getOf (ATerm "xs") (FApp (CTerm (builtinFunct T.Plus)) [ATerm "lo", BVar "k"])]))
+            ]
+        , specEnv = Map.fromList [("xs", Copy (Local 1)), ("lo", Copy (Local 2)), ("hi", Copy (Local 3))]
+        }
+
 -- A validated program without what only the validator reads: the generic bodies, the stubs and their markers, and the
 -- marks on the copies
 withoutGeneric :: Program -> Program
@@ -1126,7 +1335,7 @@ withoutGeneric program =
     derived name =
         let base = baseNameOf name
          in base /= name && maybe False (const True) (maybe (tupleGeneric base) Just (Map.lookup base (progGenerics program)))
-    validatorOnly fn = Map.member genericKey (specEnv (fnSpec fn)) || isStubName (fnName fn)
+    validatorOnly fn = Map.member genericKey (specEnv (fnSpec fn)) || isStubName (fnName fn) || fnName fn `elem` [packSliceName, packConsName]
     kept = Map.filter (not . validatorOnly) (progFunctions program)
     gone n = Map.member n (progFunctions program) && Map.notMember n kept
     strip fn = mapEnvs (Map.filterWithKey (\k o -> k /= coveredKey && case o of Const (CFn n) -> not (gone n); _ -> True)) fn{fnBlocks = Map.map block (fnBlocks fn)}

@@ -5,7 +5,7 @@ import elaborate::core { checkFieldType, checkFinite, checkType, declareTypeWith
 import elaborate::expr { derefExpr, freshElementType, inferExpr, packIndexFolds };
 import elaborate::out { emit, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations };
 import elaborate::proofs { inferProof, rewriteOldStatements };
-import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
+import elaborate::records { codecTypeAt, codecTypesAt, exprOf, mentionsVariable, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { derefRoot, exprRefOrigins, placeSteps, putRefResult, recordAlias, recordOrigins, resolveRefPlace, withinWrites, writesTarget, writesText };
 import elaborate::state { FnSig, Generic, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
 import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, templateOf };
@@ -118,7 +118,7 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
         AstStatement::ImplDef { traitName: tn, args: args, n: n, ty: ty, bs: bs, xs: xs } => { return fail(st, "Type error: an impl can only be written at the top of the program"); },
         AstStatement::BoundedDef { bs: bs, s: inner } => { return fail(st, "Type error: a function with bounds on its types cannot be written in a block"); },
         AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { return fail(st, "Type error: an instance record is written by the elaborator, not by a program"); },
-        AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => { return checkStatementPackLoop(st, i, a, p, lo, hi, take, xs); },
+        AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, inv: inv, xs: xs } => { return checkStatementPackLoop(st, i, a, p, lo, hi, take, inv, xs); },
     };
     return st;
 };
@@ -873,7 +873,7 @@ fn checkAssignDeref(st: St, lhs: Int, value: Int) -> St ~ {
 
 // A loop over the pack of the enclosing variadic function, which each copy unrolls: its bounds are fixed in each copy, its
 // index is an Int that indexes the pack, and its element has a type of its own, which get(args, i) on its index shares
-fn checkStatementPackLoop(st: St, i: Int, a: Int, p: Int, lo: Int, hi: Int, take: Bool, xs: Int) -> St ~ {
+fn checkStatementPackLoop(st: St, i: Int, a: Int, p: Int, lo: Int, hi: Int, take: Bool, inv: Int, xs: Int) -> St ~ {
     packName = nameText(&st.nodes, p);
     if size(st.pack.bytes) = 0 || packName != st.pack { return typeError(st, "a loop over a pack is only written in a function with a pack"); };
     if !packIndexFolds(&st, lo) || !packIndexFolds(&st, hi) {
@@ -900,6 +900,15 @@ fn checkStatementPackLoop(st: St, i: Int, a: Int, p: Int, lo: Int, hi: Int, take
     elementTy = st.ty;
     st = assignVar(st, &indexName, intTy);
     if st.status != 0 { return st; };
+    if inv >= 0 && !elementName.startsWith("$") && mentionsVariable(&st.nodes, inv, &elementName) {
+        return typeError(st, catStrings(catStrings(catStrings("the invariant of a loop over ", clone(st.pack)), catStrings(" cannot name its element ", clone(elementName))), catStrings(catStrings(catStrings(": the invariant holds where each iteration starts, before the element is bound; name the index with for i, ", clone(elementName)), catStrings(" in ", clone(st.pack))), catStrings(catStrings(" and read it as get(", clone(st.pack)), ", i)"))));
+    };
+    // (the invariant holds where each iteration starts, before its element: what it defines is only its own)
+    beforeInvariant = clone(st.scopes);
+    st = checkValidations(st, inv);
+    if st.status != 0 { return st; };
+    invariant = st.nid;
+    st = St { scopes: beforeInvariant, ..st };
     outerReadOnly = clone(st.readOnly);
     outerIndexNames = clone(st.packIndexNames);
     outerIndexTypes = clone(st.packIndexTypes);
@@ -933,7 +942,7 @@ fn checkStatementPackLoop(st: St, i: Int, a: Int, p: Int, lo: Int, hi: Int, take
     pNode = st.nid;
     // (a loop over a lent pack reads its elements, however it is written)
     takes = take && !st.packLent;
-    st = emit(st, AstNode::Statement { value: AstStatement::PackLoop { i: iNode, a: aNode, p: pNode, lo: loTE.node, hi: hiTE.node, take: takes, xs: body.node } });
+    st = emit(st, AstNode::Statement { value: AstStatement::PackLoop { i: iNode, a: aNode, p: pNode, lo: loTE.node, hi: hiTE.node, take: takes, inv: invariant, xs: body.node } });
     types = push([], elementTy);
     for t in &loTE.types { types = push(types, t); };
     for t in &hiTE.types { types = push(types, t); };

@@ -211,7 +211,7 @@ fn lwRefKinds(node: &AstNode) -> List<Int> ~ {
                 AstStatement::DropDef { n: n } => { refs = push(refs, 1); },
                 AstStatement::Dissolve { n: n } => { refs = push(refs, 1); },
                 AstStatement::Instance { n: n, f: f, args: args, ps: ps, sig: sig } => { refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 32); refs = push(refs, 22); refs = push(refs, 12); },
-                AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, xs: xs } => { refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 6); refs = push(refs, 6); refs = push(refs, 24); },
+                AstStatement::PackLoop { i: i, a: a, p: p, lo: lo, hi: hi, take: take, inv: inv, xs: xs } => { refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 1); refs = push(refs, 6); refs = push(refs, 6); refs = push(refs, 26); refs = push(refs, 24); },
             };
         },
         AstNode::Signature { value: v } => { refs = push(refs, 31); refs = push(refs, 2); refs = push(refs, 22); refs = push(refs, 22); refs = push(refs, 22); refs = push(refs, 22); },

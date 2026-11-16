@@ -264,7 +264,7 @@ fn lowerControl(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
     };
     if stmt is AstStatement::PackLoop {
         pl = stmt as AstStatement::PackLoop;
-        return lowerPackLoop(ls, src, nameText(src, pl.i), nameText(src, pl.a), nameText(src, pl.p), pl.lo, pl.hi, pl.take, listItems(src, pl.xs));
+        return lowerPackLoop(ls, src, nameText(src, pl.i), nameText(src, pl.a), nameText(src, pl.p), pl.lo, pl.hi, pl.take, pl.inv, listItems(src, pl.xs));
     };
     // (the checker takes a trait apart and hands an impl back as the functions it defines)
     if stmt is AstStatement::TraitDef { return lfail(ls, "A trait reached the lowering"); };
@@ -359,9 +359,9 @@ fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: 
 };
 
 // A loop over the pack of a variadic function, which no copy keeps: each unrolls it (MirPacks). It is
-// a counting loop with no LoopSpec; its element is an element of the pack read at the index, or, for a loop that takes the
+// a counting loop with the invariant the program writes, if any, as its LoopSpec; its element is an element of the pack read at the index, or, for a loop that takes the
 // elements, a fresh value after the pack is moved before the loop.
-fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName: String, packName: String, lo: Int, hi: Int, take: Bool, body: List<Int>) -> LowSt ~ {
+fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName: String, packName: String, lo: Int, hi: Int, take: Bool, inv: Int, body: List<Int>) -> LowSt ~ {
     ls = claim(ls);
     elementTy = ls.ty;
     ls = lowerOperand(ls, src, lo);
@@ -404,6 +404,14 @@ fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName:
     exit = ls.id;
     ls = terminate(ls, gotoTerm(header));
     ls = openBlock(ls, header);
+    // (an invariant the program writes is the loop's, which a generic body is validated with and a copy unrolls away)
+    if size(listItems(src, inv)) > 0 {
+        ls = visibleEnv(ls);
+        env = ls.id;
+        ls = validationsPayload(ls, src, inv);
+        invPayload = ls.id;
+        ls = LowSt { bLoops: push(ls.bLoops, LoopRec { header: header, body: bodyB, inv: invPayload, term: 0 - 1, env: env }), ..ls };
+    };
     ls = simpleType(ls, 2);
     boolTy = ls.ty;
     ls = tempLocal(ls, boolTy);
