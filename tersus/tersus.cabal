@@ -42,6 +42,10 @@ extra-source-files:
     lib/mir/emit/helpers.tersus
     lib/mir/mir_reader/mir_reader.tersus
     lib/mir/writer/writer.tersus
+    lib/mir/mono/mono.tersus
+    lib/mir/mono/tokens.tersus
+    lib/mir/mono/functions.tersus
+    lib/mir/mono/types.tersus
     lib/mir/ownership/ownership.tersus
     lib/mir/ownership/common.tersus
     lib/mir/ownership/analysis.tersus
@@ -323,6 +327,7 @@ test-suite tersus-test
   other-modules:
       Differential
       LinkOracle
+      MirMonoOracle
       TestArrays
       TestAstData
       TestBasics
@@ -353,6 +358,7 @@ test-suite tersus-test
       TestMirEmit
       TestMirErase
       TestMirEval
+      TestMirMono
       TestMirOwnership
       TestMirReader
       TestMirSupport

@@ -60,7 +60,8 @@ monoWith finish completeTypes program
     withInstances p =
         let complete = completeTypes p
          in complete{progTypes = Map.filterWithKey (\name _ -> not (symbolic name)) (progTypes complete)}
-    symbolic name = maybe False mentionsParameter (Map.lookup name (namedTypesByName program))
+    symbolic name = maybe False mentionsParameter (Map.lookup name namedTypes)
+    namedTypes = namedTypesByName program
     -- (what the validator was told names functions that are not there any more; nothing after it needs it)
     unspecified f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
     isGhost s = case s of
@@ -85,7 +86,7 @@ monoWith finish completeTypes program
             p : _ -> Just p
             [] -> Nothing
         selfTy <- localType <$> Map.lookup self (fnLocals f)
-        let bindings = match selfTy (namedTypeOf program n)
+        let bindings = match selfTy (Map.findWithDefault (TNamed n []) n namedTypes)
         tys <- mapM (`lookup` bindings) (fnTypeParams f)
         Just (name, tys, [])
     dropName (name, _, _) f
@@ -275,6 +276,3 @@ namedTypesByName program = Map.fromList [(instanceName b a, TNamed b a) | ty <- 
         TFn as r -> concatMap subs (r : as)
         TForall _ _ u -> subs u
         _ -> []
-
-namedTypeOf :: Program -> Name -> Type
-namedTypeOf program name = Map.findWithDefault (TNamed name []) name (namedTypesByName program)
