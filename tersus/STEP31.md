@@ -23,7 +23,9 @@ The codec, reader and phase-neutral support remain separate ordinary dependencie
 The emitter imports the ownership dispatcher in `lib/mir/ownership/`.
 MIR v1 input still produces LLVM IR; `pass expand` or `pass ownership` followed
 by MIR v2 produces the transformed MIR v2. `pass mono` reads and writes the
-complete MIR3 codec in `lib/mir/full/`. Linking remains in Haskell.
+complete MIR3 codec in `lib/mir/full/`. `pass link` uses the same codec for
+module merging, environment completion and pruning through `lib/mir/link/`.
+The host keeps only pinned-seed transport and the deferred copies stage.
 The historical slices below describe the original implementation.
 
 ## Bootstrap and seed regeneration
