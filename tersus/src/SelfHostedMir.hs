@@ -22,12 +22,12 @@ import StdLibDefs (stdLibValCtx)
 import Syntax
 import Types
 import Utils (Result (..), bindResult, inIntRange)
-import MirCopies (isCopyName, opaqueKey)
+import MirCopies (coveredKey, genericKey, isCopyName, isStubName, opaqueKey)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool, buildCopy :: Bool }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool, buildCopy :: Bool, buildGeneric :: Bool }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False False
+emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False False False
 
 -- The function the validator sees for a name: a check function of an impl, `Tr for O::g`, is its impl's function
 -- `<O as Tr>::g`, since its body is the call of that function with its parameters (traitCheckWrapper); a reference to
@@ -222,7 +222,8 @@ proofOperand env (FApp (ATerm name) args) b0
     | Just (M.Const (M.CFn named)) <- Map.lookup name env = do
         -- (a generic function named in a proof is the copy of it the program
         -- has, when it has one: monomorphisation renamed the calls, not the proofs)
-        callee <- case [n | n <- Map.keys (buildFunctions b0), takeWhile (/= '<') n == named, '<' `elem` n, '<' `notElem` named] of
+        -- (a body validated generically names the generic function itself)
+        callee <- if buildGeneric b0 then Just named else case [n | n <- Map.keys (buildFunctions b0), takeWhile (/= '<') n == named, '<' `elem` n, '<' `notElem` named] of
             [single] -> Just single
             [] -> Just named
             _ -> if Map.member named (buildFunctions b0) then Just named else Nothing
@@ -246,7 +247,7 @@ proofOperand env (FApp (ATerm name) args) b0
 -- its full name (<HM>::sz): the one the name is the source name of.
 proofOperand env (FApp (ATerm name) args) b
     | Map.notMember name env
-    , [full] <- [key | (key, M.Const (M.CFn _)) <- Map.toList env, sourceNameOf key == name] =
+    , [full] <- [key | (key, M.Const (M.CFn f)) <- Map.toList env, sourceNameOf key == name, not (isStubName f)] =
         proofOperand env (FApp (ATerm full) args) b
   where
     sourceNameOf key = case break (== ':') (reverse key) of
@@ -2787,7 +2788,7 @@ encodeFunction physical types invariants functions rules allowCalls fn
     -- in every other program, is not one it may use)
     | physical && any logicalContainerUse (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))) = Nothing
     | otherwise = do
-        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildCopy = isCopyName (M.fnName fn), buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
+        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildCopy = isCopyName (M.fnName fn), buildGeneric = Map.member genericKey (M.specEnv (M.fnSpec fn)), buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires0, withRequires0) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes
@@ -2963,22 +2964,26 @@ encodeMono physical program
             types = M.progTypes program
         rules' <- maybe (Left "an axiom or proof rule") Right (collectRules program)
         let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction physical types invariants functions rules' True fn)
-        -- A function with type parameters is a template: it is checked
-        -- only where a call decides its types, as its instances in the
-        -- program (the reference does the same). The one exception is a
-        -- function that checks an impl against its trait (the elaborator
-        -- writes it beside the impl, and nothing calls it): it is
-        -- checked as written, or a weaker impl would pass.
+        -- A function with type parameters is a template, checked where a
+        -- call decides its types; a function with bounds the copy step
+        -- kept generic (`$generic`), a check function among them, is
+        -- checked as written, and its copies are not (validated).
         -- (a builtin used as a value, builtin::first, is a function whose body is
         -- the builtin: every call of it is checked as the builtin's, so it is not
         -- checked as a function with no contract)
-        checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), physical || null (M.fnTypeParams fn) || isJust (parseImplCheckName (M.fnName fn))]
+        checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), validated fn]
         main <- encodeOne (M.progMain program)
         let ruleEntries = [("rule " ++ name, v) | entry@(name, _) <- Map.toList rules', Just v <- [encodeRule rules' entry]]
         pure (checked ++ ruleEntries ++ [main])
   where
     allFunctions = M.progMain program : Map.elems (M.progFunctions program)
     externFunction fn = "extern " `isPrefixOf` M.fnName fn
+    -- (a function with bounds is checked once, generically, and its copies are not; a trait's stub is the trait's contract,
+    -- which the trait's impls are checked against, and is not checked itself)
+    validated fn
+        | isStubName (M.fnName fn) = False
+        | Map.member coveredKey (M.specEnv (M.fnSpec fn)) = False
+        | otherwise = physical || null (M.fnTypeParams fn) || isJust (parseImplCheckName (M.fnName fn)) || Map.member genericKey (M.specEnv (M.fnSpec fn))
     unsupportedFunction fn = any (unsupportedType . M.localType) (Map.elems (M.fnLocals fn)) || maybe False unsupportedType (M.fnReturns fn)
     unsupportedDecl (M.StructDecl fields) = any (unsupportedType . snd) fields
     unsupportedDecl (M.EnumDecl variants) = any (any (unsupportedType . snd) . snd) variants

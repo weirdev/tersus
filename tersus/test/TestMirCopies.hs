@@ -21,17 +21,17 @@ testMirCopies =
     TestList
         "testMirCopies"
         [ testCase "a program with no functions with bounds is unchanged" (testAssertEq (makeCopies plain) (Ok plain))
-        , testCase "a copy has the types put in and the function with bounds is dropped" substituted
+        , testCase "a copy has the types put in, and the function with bounds is kept generic for the validator" substituted
         , testCase "a bounded size is a constant in the copy and stays a parameter" boundedSize
         , testCase "a struct instance the body builds is named for the copy's types" structNamed
         , testCase "two references to one copy make it once" deduplicated
-        , testCase "a lifted function is copied with its function" liftedCopied
+        , testCase "a lifted function is copied with its function, and kept generic with it" liftedCopied
         , testCase "references in calls, proofs and environments name the copies" referencesRenamed
         , testCaseNamedSeq "calls through a bound" resolutionRows
         , testCase "the check of an impl function is copied with it" companionCopied
         , testCase "a copy for a bigger type at each call is refused" growthRefused
         , testCase "an array a copy makes too big for a frame is the call's refusal" frameRefused
-        , testCase "the marker of a function with bounds goes, and its copies are defined where the program starts" markersReplaced
+        , testCase "the marker of a function with bounds stays, and its copies are defined where the program starts" markersReplaced
         , testCase "a variadic copy has a parameter for each argument, lent with the pack, and size(args) is their number" packParameters
         , testCase "a copy for no arguments has no parameters" emptyPack
         , testCase "get(args, k) is the parameter at k, in blocks and environments" literalElement
@@ -94,7 +94,9 @@ substituted :: TestResult
 substituted = withCopies (program [ident] (mainCalling [] [("ident[Int]", TInt)]) [("ident", BoundedFn [] [] [] [])] [("ident[Int]", ("ident", [ArgType TInt]))]) $ \out ->
     case Map.lookup "ident[Int]" (progFunctions out) of
         Just copy
-            | Map.member "ident" (progFunctions out) -> Just "the function with bounds is still there"
+            | fmap fnTypeParams (Map.lookup "ident" (progFunctions out)) /= Just ["T"] -> Just "the function with bounds is not kept generic"
+            | fmap (Map.member "$generic" . specEnv . fnSpec) (Map.lookup "ident" (progFunctions out)) /= Just True -> Just "the function with bounds is not validated"
+            | not (Map.member "$covered" (specEnv (fnSpec copy))) -> Just "the copy is validated"
             | fnTypeParams copy /= [] -> Just "the copy has type parameters"
             | map localType (Map.elems (fnLocals copy)) /= [TInt, TInt] -> Just ("the copy's locals are " ++ show (Map.elems (fnLocals copy)))
             | not (Map.null (progBounded out) && Map.null (progInstances out)) -> Just "the tables were kept"
@@ -141,7 +143,7 @@ liftedCopied :: TestResult
 liftedCopied = withCopies (program [outer, inner] (mainCalling [] [("outer[Int]", TInt)]) [("outer", BoundedFn [] [] ["outer::inner"] [])] [("outer[Int]", ("outer", [ArgType TInt]))]) $ \out ->
     case (Map.lookup "outer[Int]" (progFunctions out), Map.lookup "outer[Int]::inner" (progFunctions out)) of
         (Just copy, Just innerCopy)
-            | Map.member "outer::inner" (progFunctions out) -> Just "the lifted function with type parameters is still there"
+            | fmap (Map.member "$generic" . specEnv . fnSpec) (Map.lookup "outer::inner" (progFunctions out)) /= Just True -> Just "the lifted function is not kept generic beside its copy"
             | (blockTerminator <$> Map.lookup (BlockId 0) (fnBlocks copy)) /= Just (Call (Const (CFn "outer[Int]::inner")) [Copy (Local 1)] (Local 0) (BlockId 1)) -> Just "the call of the lifted function is not of its copy"
             | (localType <$> Map.lookup (Local 1) (fnLocals innerCopy)) /= Just TInt -> Just "the lifted copy has no types put in"
             | otherwise -> Nothing
@@ -290,7 +292,7 @@ frameRefused = testAssertErrorContains "Type error: big cannot be made as big[Ar
 markersReplaced :: TestResult
 markersReplaced = withCopies (program [ident] (mainCalling [Ghost Map.empty (GhostFunction "ident" "ident" True)] [("ident[Int]", TInt), ("ident[Bool]", TBool)]) [("ident", BoundedFn [] [] [] [])] [("ident[Int]", ("ident", [ArgType TInt])), ("ident[Bool]", ("ident", [ArgType TBool]))]) $ \out ->
     let markers = [n | BasicBlock stmts _ <- Map.elems (fnBlocks (progMain out)), Ghost _ (GhostFunction n _ _) <- stmts]
-     in if markers == ["ident[Bool]", "ident[Int]"] then Nothing else Just ("markers: " ++ show markers)
+     in if markers == ["ident", "ident[Bool]", "ident[Int]"] then Nothing else Just ("markers: " ++ show markers)
 
 -- A variadic function as lowering writes it (lowerPackLoop in lib/elaborate/lower.tersus): the pack is its parameter _1 of type ..T, lent
 variadic :: String -> Type -> Map.Map BlockId BasicBlock -> [(Type, Maybe String)] -> Function

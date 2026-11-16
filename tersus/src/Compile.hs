@@ -5,11 +5,12 @@ module Compile
     , sourceRequest
     ) where
 
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Lowering (finishProgram, lowerAccepted)
+import Lowering (finishProgram, finishProgramWith, lowerAccepted)
 import MirMoves (finishLowered)
-import LibPackage (libCatalog, libPackage, libSelection, stripDeclaredFromUnits)
+import LibPackage (libCatalog, libPackage, libSelection, libraryBoundedNames, stripDeclaredFromUnits)
 import Link (linkPrograms, completeSpecEnvs)
 import PackageData (ModuleId (..), LoadOptions (..), Resolver (..), defaultLoadOptions, resolverFromFiles)
 import Syntax (Statement)
@@ -91,7 +92,7 @@ lowerStatements = lowerStatementsWith sourceElaborator
 
 -- A program as given, with no libraries in front of it
 lowerStatementsWith :: Elaborator -> [Statement] -> Result M.Program String
-lowerStatementsWith elaborator stmts = lowerAccepted (elaborator (statementsRequest stmts)) `bindResult` finishProgram
+lowerStatementsWith elaborator stmts = lowerAccepted (elaborator (statementsRequest stmts)) `bindResult` finishProgramWith (libraryBoundedNames (length stmts))
 
 -- The unit the elaborator lowers a program given as statements to, not finished
 elaborateStatements :: [Statement] -> Result M.Lowered String

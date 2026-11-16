@@ -363,6 +363,11 @@ fn sizeConst(st: St, n: Int) -> St ~ {
     return addTy(st, Ty { kind: 20, name: "", args: [], n: n, flag: false, sizes: [], types: [] });
 };
 
+// (in a trait's stub, as in the trait, a value of one of the trait's own type parameters is not one a bound tells of)
+fn stubTraitParameter(st: &St, name: &String) -> Bool ~ {
+    return st.inTrait && clone(name) != "Self";
+};
+
 fn freshVar(st: St) -> St ~ {
     n = st.next;
     st = St { next: n + 1, ..st };

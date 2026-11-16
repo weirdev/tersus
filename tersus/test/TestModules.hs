@@ -8,6 +8,7 @@ module TestModules
     , phase2Rejects
     ) where
 
+import MirCopies (withoutGeneric)
 import Control.Exception (bracket, evaluate, finally, try, SomeException)
 import Control.Monad (when)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
@@ -1746,13 +1747,13 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                          in foldr (<>) Nothing
                             [ case reference of
                                 Error e -> Just e
-                                Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
+                                Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions (withoutGeneric raw)))
                             , case replay of
                                 Error e -> Just e
-                                Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions raw))
+                                Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions (withoutGeneric raw)))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
                             , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
-                            , testAssertEq (validatorMetadataFingerprint raw) "05a2659b3b7707ea"
+                            , testAssertEq (validatorMetadataFingerprint raw) "852501f00476b1f8"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
@@ -1760,8 +1761,8 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Just fn -> let env = M.specEnv (M.fnSpec fn) in
                                     all (`Map.member` env) (Map.keys (M.progFunctions raw)) && not (Map.member "countParsed" env))
                                 ["containsValue", "commonContext", "driverReadAll"])
-                            , testAssertEq (Map.size (M.progFunctions raw)) 1017
-                            , testAssertEq (Map.keys (M.progFunctions checker)) (Map.keys (M.progFunctions raw))
+                            , testAssertEq (Map.size (M.progFunctions raw)) 1051
+                            , testAssertEq (Map.keys (M.progFunctions checker)) (Map.keys (M.progFunctions (withoutGeneric raw)))
                             , testAssertTrue (all (`Map.member` M.progFunctions raw) declared)
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) declared)
                             , testAssertTrue (all (\n -> Map.member n (M.progTypes raw) || Map.member n (M.progGenerics raw)) typeNames)

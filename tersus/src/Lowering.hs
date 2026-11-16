@@ -1,11 +1,13 @@
 -- Where every production lowering starts: the unit the elaborator lowered a module it accepted to (Mir.Lowered), read
 -- from its answer, which MirMoves.finishLowered finishes
-module Lowering (lowerAccepted, finishProgram) where
+module Lowering (lowerAccepted, finishProgram, finishProgramWith) where
 
 import ElaborateRequest (MirAnswer (..), Response (..), acceptedResponse)
 import ElaboratorTool (toolFailurePrefix)
+import qualified Data.Set as Set
 import Mir (Lowered, Program)
-import MirCopies (makeCopies)
+import MirCopies (makeCopies, makeCopiesWith)
+import Types (Name)
 import MirData (readLoweredBytes)
 import MirMoves (finishLowered)
 import Utils
@@ -24,3 +26,8 @@ lowerAccepted response = acceptedResponse response `bindResult` \accepted -> cas
 -- finished; a module's are made when the program it is part of is linked (Link)
 finishProgram :: Lowered -> Result Program String
 finishProgram lowered = finishLowered lowered `bindResult` makeCopies
+
+-- The same for a program given with the compiler's libraries among its statements: their functions with bounds are
+-- validated where the program uses them (MirCopies.makeCopiesWith)
+finishProgramWith :: Set.Set Name -> Lowered -> Result Program String
+finishProgramWith library lowered = finishLowered lowered `bindResult` makeCopiesWith library
