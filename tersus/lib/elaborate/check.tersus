@@ -159,6 +159,17 @@ fn checkStatementLet(st: St, n: Int, e: Int) -> St ~ {
     return St { te: TE { node: st.nid, types: texpr.types }, ..st };
 };
 
+// Whether a function is a trait's stub, `Tr for $Self::f` (traitStub)
+fn isTraitStub(name: &String) -> Bool ~ {
+    marker = " for $Self::";
+    i = 0;
+    while i + size(marker.bytes) <= size(name.bytes) [{ affirm i >= 0; }] ~ {
+        if name.slice(i, i + size(marker.bytes)) = marker { return true; };
+        i = i + 1;
+    };
+    return false;
+};
+
 fn checkStatementReturn(st: St, s: Int, e: Int) -> St ~ {
     st = inferExpr(st, e);
     if st.status != 0 { return st; };
@@ -182,7 +193,8 @@ fn checkStatementReturn(st: St, s: Int, e: Int) -> St ~ {
         texpr = clone(st.te);
         st = expect(st, "returned value", rty, head(&texpr.types));
         if st.status != 0 { return st; };
-        if size(st.resultFrom) > 0 {
+        // (a trait's stub, traitStub, returns what the call through its bound does, and is never run)
+        if size(st.resultFrom) > 0 && !isTraitStub(&st.current) {
             st = exprRefOrigins(st, e);
             if st.status != 0 { return st; };
             allFrom = size(st.names) > 0;

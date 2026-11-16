@@ -8,7 +8,7 @@ import elaborate::expr { elementTypeNamed, freshElementType, Folded, argsCountTe
 import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
 import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { callOf };
-import elaborate::state { forwardInProofText, intText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt , protocolName };
+import elaborate::state { stubTraitParameter, forwardInProofText, intText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt , protocolName };
 import elaborate::traits { builtinSequenceCall, emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof ~ {
@@ -374,7 +374,7 @@ fn inferProofOther(st: St, funct: Int, args: &List<Int>) -> St ~ {
                 if st.status != 0 { return st; };
                 return ghostCall(st, 0 - 1, firstText(&st.names), &argTys, &argNodes);
             };
-            if x.kind = 12 && st.defChecking {
+            if x.kind = 12 && st.defChecking && !stubTraitParameter(&st, &x.name) {
                 powner = parameterOwner(&x.name);
                 st = resolveAssociated(st, &powner, &fname);
                 if st.status != 0 { return st; };

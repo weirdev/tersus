@@ -15,7 +15,8 @@ import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, killThread, newEmpt
 import ElaboratorTool (noVerdict)
 import Control.Exception (MaskingState (..), SomeException, bracket, displayException, evaluate, getMaskingState, try)
 import System.Timeout (timeout)
-import Data.List (isInfixOf)
+import Data.Char (isDigit)
+import Data.List (isInfixOf, stripPrefix)
 import Compile (lowerSource, lowerStatements, parseSource)
 import qualified Mir as M
 import qualified Data.Map as Map
@@ -697,7 +698,20 @@ unreachedDefinitions program = program{M.progMain = main'{M.fnBlocks = Map.inser
 frontendParity :: String -> TestResult
 frontendParity source = case parseSource source of
     Error e -> Just e
-    Ok stmts -> testAssertEq (lowerSource True source) (lowerStatements stmts)
+    Ok stmts -> testAssertEq (mapResult freshSizesInOrder (lowerSource True source)) (mapResult freshSizesInOrder (lowerStatements stmts))
+
+-- (the generic bodies kept for the validator have sizes the elaboration made fresh, numbered by when each run made them)
+freshSizesInOrder :: M.Program -> String
+freshSizesInOrder program = go [] (show program)
+  where
+    go seen text = case text of
+        [] -> []
+        _ | Just rest <- stripPrefix "SizeVar " text, (digits@(_ : _), after) <- span isDigit rest -> let (k, seen') = number seen digits in "SizeVar " ++ show k ++ go seen' after
+        _ | Just rest <- stripPrefix ", _" text, (digits@(_ : _), after@('>' : _)) <- span isDigit rest -> let (k, seen') = number seen digits in ", _" ++ show k ++ go seen' after
+        c : rest -> c : go seen rest
+    number seen digits = case lookup digits seen of
+        Just k -> (k, seen)
+        Nothing -> (length seen, seen ++ [(digits, length seen)])
 
 allRefusals :: IO TestResult
 allRefusals = case (lowerSource True (twoRefused ++ identity ++ "return identity(3);"), lowerSource True (identity ++ "return identity(3);")) of
@@ -776,7 +790,7 @@ testValidationCache = TestList "testValidationCache"
     , named "changed global assumption" (rejectChanged (identity ++ "assume 1 = 2; affirm 1 = 2; return 0;") (identity ++ "assume 1 = 1; affirm 1 = 2; return 0;"))
     , named "assumptions at the definition" (parity ("assume 1 = 1; " ++ identity ++ "return identity(3);") ("assume 2 = 2; " ++ identity ++ "return identity(3);"))
     , named "mutual recursion hits" (reuse mutual (mutual ++ "affirm 1 = 1;"))
-    , testCase "copies that differ only in the types of opaque values are one text, so one verdict" opaqueCopiesShare
+    , testCase "a function with bounds is validated once, generically, and its copies are not" opaqueCopiesShare
     , named "mutual recursion changed member" (rejectChanged mutual brokenMutual)
     , named "changed function-input reader" (parity "fn value() -> Int { return 0; }; return 0;" "fn value() -> Int { return readByte(); }; return 0;")
     , TestCase "every refused function is reported, the first as validateCompiled reports it" allRefusals
@@ -853,6 +867,7 @@ opaqueCopiesShare = case lowerSource True "fn keep<T: Clone>(x: T) -> T [{ }] [{
     Error e -> Just e
     Ok program -> case prepareTexts False program of
         Error e -> Just e
-        Ok texts -> case (lookup "keep[Array<Int, 2>]" texts, lookup "keep[Array<Int, 3>]" texts) of
-            (Just two, Just three) -> testAssertEq two three
-            _ -> Just ("expected the two copies, got " ++ show (map fst texts))
+        Ok texts
+            | "keep" `notElem` map fst texts -> Just ("the function with bounds is not validated: " ++ show (map fst texts))
+            | any (`elem` map fst texts) ["keep[Array<Int, 2>]", "keep[Array<Int, 3>]"] -> Just ("a copy is validated: " ++ show (map fst texts))
+            | otherwise -> Nothing

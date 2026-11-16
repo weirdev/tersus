@@ -1,15 +1,15 @@
-import data::ast::ast { AstArg, AstArgs, AstBody, AstBounds, AstBuiltin, AstExpression, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
+import data::ast::ast { AstArg, AstArgs, AstBody, AstBound, AstBounds, AstBuiltin, AstExpression, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
 import data::codec::codec { Size, catStrings, wireOwnershipRole };
-import elaborate::builtins { substitute };
+import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, substitute };
 import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, scopeLookup, sizeArgument, teHead };
-import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, mentionsParameter, refResultFrom, stmtOf };
+import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, isTraitStub, mentionsParameter, refResultFrom, stmtOf };
 import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInfo, hasFunction, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
 import elaborate::exports { pairParts };
 import elaborate::expr { coerceArguments, genericCall, implementsMarker, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
+import elaborate::state { stubTraitParameter, indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -201,13 +201,158 @@ fn checkTrait(st: St, name: String, params: List<String>, fns: List<Int>) -> St 
             refFroms = push(refFroms, froms);
         };
     };
+    stubFns = clone(fns);
+    stubParams = clone(params);
     st = St { fns: outerFns, ret: outerRet, scopes: outerScopes, sizeScope: outerSizes, typeScope: outerTypes, types: st.types.remove("Self"), traits: st.traits.insert(clone(name)), traitFns: st.traitFns.insert(clone(name), fns), traitParams: st.traitParams.insert(clone(name), params), traitSelf: [], inTrait: false, ..st };
     i = 0;
     while i < size(refNames) && i < size(refParams) && i < size(refFroms) [{ affirm i >= 0; }] ~ {
         st = putRefResult(st, clone(get(refNames, i)), clone(get(refParams, i)), clone(get(refFroms, i)));
         i = i + 1;
     };
+    for f in &stubFns {
+        st = traitStub(st, &name, &stubParams, f);
+        if st.status != 0 { return st; };
+    };
     return St { outs: [], te: TE { node: 0 - 1, types: [] }, ..st };
+};
+
+// The names a trait function's contracts call or read (contractNames)
+fn contractNames(st: &St, list: Int, out: List<String>) -> List<String> ~ {
+    for v in listItems(&st.nodes, list) {
+        node = nodeIn(&st.nodes, v);
+        if node is AstNode::Validation {
+            x = (node as AstNode::Validation).value;
+            if x is AstValidation::ProofAssert { out = proofTermNames(st, (x as AstValidation::ProofAssert).p, out); };
+            if x is AstValidation::Assume { out = proofTermNames(st, (x as AstValidation::Assume).p, out); };
+            if x is AstValidation::AssignProofVar { out = exprTermNames(st, (x as AstValidation::AssignProofVar).e, out); };
+        };
+    };
+    return out;
+};
+
+fn proofTermNames(st: &St, p: Int, out: List<String>) -> List<String> ~ {
+    node = nodeIn(&st.nodes, p);
+    if !(node is AstNode::Proof) { return out; };
+    pr = (node as AstNode::Proof).value;
+    if pr is AstProof::ATerm { return push(out, nameText(&st.nodes, (pr as AstProof::ATerm).n)); };
+    if pr is AstProof::CTerm { return builtinMethodName(st, (pr as AstProof::CTerm).v, out); };
+    if pr is AstProof::FApp {
+        out = proofTermNames(st, (pr as AstProof::FApp).f, out);
+        for a in listItems(&st.nodes, (pr as AstProof::FApp).xs) { out = proofTermNames(st, a, out); };
+    };
+    if pr is AstProof::Forall {
+        for g in listItems(&st.nodes, (pr as AstProof::Forall).gs) { out = proofTermNames(st, g, out); };
+        out = proofTermNames(st, (pr as AstProof::Forall).b, out);
+    };
+    return out;
+};
+
+fn exprTermNames(st: &St, e: Int, out: List<String>) -> List<String> ~ {
+    node = nodeIn(&st.nodes, e);
+    if !(node is AstNode::Expression) { return out; };
+    x = (node as AstNode::Expression).value;
+    if x is AstExpression::Var { return push(out, nameText(&st.nodes, (x as AstExpression::Var).n)); };
+    if x is AstExpression::Val { return builtinMethodName(st, (x as AstExpression::Val).v, out); };
+    if x is AstExpression::F {
+        out = exprTermNames(st, (x as AstExpression::F).f, out);
+        for a in listItems(&st.nodes, (x as AstExpression::F).xs) { out = exprTermNames(st, a, out); };
+    };
+    return out;
+};
+
+// (a builtin such as size or get, written in a contract, is the trait function of its name on a value of Self)
+fn builtinMethodName(st: &St, v: Int, out: List<String>) -> List<String> ~ {
+    b = builtinOfValue(st, v);
+    if b < 0 { return out; };
+    key = builtinKey(st, b);
+    i = builtinIndex(st, &key);
+    if HashMap::contains(&st.methodOf, i) { return push(out, HashMap::lookup(&st.methodOf, i, "")); };
+    return out;
+};
+
+// The trait's contract of one of its functions as a function with bounds, `Tr for $Self::f`, for any Self that implements the
+// trait: its body is the call through the bound, and it is never validated or run. A call through a bound in a function
+// with bounds knows what this one promises (the copy step and the validator's SelfHostedMir), and the traits whose functions
+// its contracts call are bounds of it too.
+fn traitStub(st: St, tname: &String, tparams: &List<String>, f: Int) -> St ~ {
+    tf = traitFnOf(&st, f);
+    fname = nameText(&st.nodes, tf.n);
+    params = namesText(&st.nodes, tf.ps);
+    st = emitNames(st, &params);
+    paramsNode = st.nid;
+    st = emit(st, AstNode::OptTermination { value: AstOptTermination::NoTermination });
+    termNode = st.nid;
+    selfOwner = parameterOwner("Self");
+    st = emitVar(st, implFunctionName(&selfOwner, tname, &fname));
+    functNode = st.nid;
+    argNodes = [];
+    for p in &params {
+        st = emitVar(st, clone(p));
+        argNodes = push(argNodes, st.nid);
+    };
+    st = emitCall(st, functNode, &argNodes);
+    st = emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
+    bodyStmts = push([], st.nid);
+    st = emitStatements(st, &bodyStmts);
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: tf.sig, term: termNode, stmts: st.nid } });
+    bodyNode = st.nid;
+    noProofs = [];
+    st = emitProofs(st, &noProofs);
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: paramsNode, ins: tf.ins, outs: tf.outs, body: bodyNode, exports: st.nid } });
+    valueNode = st.nid;
+    st = addTy(st, Ty { kind: 12, name: "Self", args: [], n: 0, flag: false, sizes: [], types: [] });
+    selfTy = st.ty;
+    targs = [];
+    for q in tparams {
+        st = addTy(st, Ty { kind: 12, name: clone(q), args: [], n: 0, flag: false, sizes: [], types: [] });
+        targs = push(targs, st.ty);
+    };
+    st = fnSigOf(st, tf.ps, tf.sig);
+    fs = clone(st.fnSig);
+    ptys = [];
+    for q in &fs.ptys { st = substTraitArgs(st, tparams, &targs, q); st = substSelfAs(st, "Self", selfTy, st.ty); ptys = push(ptys, st.ty); };
+    st = substTraitArgs(st, tparams, &targs, fs.rty);
+    st = substSelfAs(st, "Self", selfTy, st.ty);
+    rty = st.ty;
+    // (a trait whose functions the contracts call, by a name the trait has no function of, is a bound too, when it has the
+    // trait's parameters or none)
+    bounds = push([], BoundInfo { p: "Self", n: clone(tname), ts: clone(targs) });
+    mentioned = contractNames(&st, tf.outs, contractNames(&st, tf.ins, []));
+    own = [];
+    for g in HashMap::lookup(&st.traitFns, tname, []) { own = push(own, traitFnName(&st, g)); };
+    keys = [];
+    for e in HashMap::entries(&st.traitFns) { keys = push(keys, clone(e.key)); };
+    for k in sortTexts(keys) {
+        if k != clone(tname) {
+            otherParams = HashMap::lookup(&st.traitParams, &k, []);
+            uses = false;
+            for g in HashMap::lookup(&st.traitFns, &k, []) {
+                gname = traitFnName(&st, g);
+                if indexIn(&mentioned, &gname) >= 0 && indexIn(&own, &gname) < 0 { uses = true; };
+            };
+            if uses && size(otherParams) = 0 { bounds = push(bounds, BoundInfo { p: "Self", n: clone(k), ts: [] }); };
+            if uses && size(otherParams) > 0 && size(otherParams) = size(tparams) { bounds = push(bounds, BoundInfo { p: "Self", n: clone(k), ts: clone(targs) }); };
+        };
+    };
+    boundIds = [];
+    for b in &bounds {
+        st = emitName(st, "Self");
+        pNode = st.nid;
+        st = emitName(st, clone(b.n));
+        nNode = st.nid;
+        st = emitTypes(st, &b.ts);
+        st = emit(st, AstNode::Bound { value: AstBound { p: pNode, n: nNode, ts: st.nid } });
+        boundIds = push(boundIds, st.nid);
+    };
+    st = boundsListNode(st, push([], boundIds));
+    boundsNode = st.nid;
+    types = push([], "Self");
+    for q in tparams { types = push(types, clone(q)); };
+    for q in &fs.types { types = push(types, clone(q)); };
+    stubSig = FnSig { params: clone(fs.params), ptys: ptys, rty: rty, sizes: clone(fs.sizes), types: types, writes: clone(fs.writes), froms: clone(fs.froms) };
+    tm = templateOf(&st, valueNode, &bounds, boundsNode, &stubSig, tf.sig);
+    stubName = catStrings(catStrings(catStrings(clone(tname), " for $Self::"), ""), fname);
+    return declareTemplate(st, stubName, bounds, tm);
 };
 
 fn boundsOf(st: St, id: Int) -> St ~ {
@@ -927,7 +1072,7 @@ fn ownerOfValue(st: St, function: &String, ty: Int) -> St ~ {
         return St { names: push([], owner), ..st };
     };
     if x.kind = 15 { return typeError(st, catStrings(catStrings("the type of the value whose function ", clone(function)), " is called is not known yet; annotate it")); };
-    if x.kind = 12 && st.defChecking { return St { names: push([], parameterOwner(&x.name)), ..st }; };
+    if x.kind = 12 && st.defChecking && !stubTraitParameter(&st, &x.name) { return St { names: push([], parameterOwner(&x.name)), ..st }; };
     return typeError(st, catStrings(catStrings(catStrings(clone(function), " is called on a "), render(st, t)), ", which has no functions"));
 };
 
@@ -1057,7 +1202,7 @@ fn traitArgumentsOf(st: St, tname: String, t: Int) -> St ~ {
         st = traitArguments(st, "Eq", argAt(st, nth(&x.args, 0), 0));
         return gives(st, st.ok, []);
     };
-    if x.kind = 12 && st.defChecking { return parameterTraitArguments(st, &tname, &x.name); };
+    if x.kind = 12 && st.defChecking && !stubTraitParameter(&st, &x.name) { return parameterTraitArguments(st, &tname, &x.name); };
     arity = size(HashMap::lookup(&st.traitParams, &tname, []));
     base = "";
     args = [];
@@ -1852,7 +1997,11 @@ fn checkDefinition(st: St, name: &String) -> St ~ {
     st = St { packBounds: packBounds, ..st };
     writes = namesText(&st.nodes, signatureOf(&st.nodes, tm.sigNode).ws);
     fs = FnSig { params: clone(tm.params), ptys: clone(tm.ptys), rty: tm.rty, sizes: clone(tm.sizes), types: clone(tm.types), writes: writes, froms: clone(tm.from) };
+    // (a trait's stub is checked as the trait's functions are, whose contracts may be over the trait's type parameters)
+    stub = isTraitStub(name);
+    if stub { st = St { inTrait: true, ..st }; };
     st = checkFunction(st, name, clone(fs), tm.ins, tm.outs, tm.term, tm.body);
+    if stub { st = St { inTrait: false, ..st }; };
     if st.status != 0 { return st; };
     parts = clone(st.outs);
     bodyTypes = clone(st.te.types);

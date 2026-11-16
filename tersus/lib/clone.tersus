@@ -46,7 +46,7 @@ impl<T: Clone> Clone for Box<T> {
 
 // (a Box of an array of no size is cloned element by element: `clone` on one is a call of this, since the impl for Box
 // above is for a Box of a value with a size, whose clone unboxes it)
-fn cloneBoxedArray<T: Clone>(b: &Box<Array<T>>) -> Box<Array<T>> [{ }] [{ affirm size(return) = size(b); affirm forall j in 0..size(b): get(return, j) = get(b, j); }] {
+fn cloneBoxedArray<T: Clone>(b: &Box<Array<T>>) -> Box<Array<T>> [{ }] [{ affirm size(return) = size(b); affirm forall j in 0..size(b): get(return, j) = get(b, j); affirm return = b; }] {
     out = [];
     i = 0;
     while i < size(b) [{ affirm i >= 0; affirm i <= size(b); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(b, j); }] shrinks size(b) - i {

@@ -9,9 +9,10 @@ module LibPackage
     , libSelection
     , libCatalog
     , stripDeclaredFromUnits
+    , libraryBoundedNames
     ) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, tryReadMVar)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.IO.Unsafe (unsafePerformIO)
@@ -105,6 +106,23 @@ bootstrapLibraries = unsafePerformIO $ modifyMVar libraryCache $ \cached -> case
 
 libPackage :: Result LibPackage String
 libPackage = fst bootstrapLibraries
+
+-- The functions with bounds of the compiler's libraries, for a program given as statements that may carry them among
+-- its own (Compile.lowerStatementsWith). It does not take the cache's lock: while the libraries are being made (the
+-- cache is taken, by this thread through a loader that lowers statements, or by another) there are none, and every
+-- function with bounds is the program's own. Otherwise reading them makes them, or waits for another thread to finish
+-- evaluating them. The argument, which it ignores, keeps each use its own (a program's statements).
+{-# NOINLINE libraryBoundedNames #-}
+libraryBoundedNames :: Int -> Set.Set String
+libraryBoundedNames for = for `seq` unsafePerformIO (do
+    state <- tryReadMVar libraryCache
+    pure $ case state of
+        Nothing -> Set.empty
+        Just Nothing -> names libPackage
+        Just (Just (libraries, _)) -> names libraries)
+  where
+    names (Ok pkg) = Set.fromList [name | (_, program) <- libSelection pkg libModuleNames, name <- Map.keys (M.progBounded program)]
+    names (Error _) = Set.empty
 
 nativeStorageUnits :: Result NativeUnits String
 nativeStorageUnits = snd bootstrapLibraries
