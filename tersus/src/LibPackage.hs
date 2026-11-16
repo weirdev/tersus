@@ -12,6 +12,7 @@ module LibPackage
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.IO.Unsafe (unsafePerformIO)
@@ -22,19 +23,19 @@ import Interface (ModuleInterface (..))
 import qualified Mir as M
 import Lowering (lowerAccepted)
 import MirMoves (finishLowered)
-import Modules (librarySources)
-import PackageData (ModuleId (..), renderModuleId, resolverFromFiles)
-import PreludeSource (libModules, nativeStorageModules)
+import Modules (libraryRequest)
+import PackageData (ModuleId (..), renderModuleId)
+import PreludeSource (libModuleOf, libModules, nativeStorageModules)
 import Utils (Result (..), bindResult)
 
--- The implicit libraries and native storage helpers share one compiler-owned package, read and elaborated by the
--- loader written in Tersus in one load; the host lowers them. Native units never enter user-facing selection.
+-- The implicit libraries and native storage helpers are the modules of the std package (lib/std), read and elaborated by
+-- the loader written in Tersus in one load; the host lowers them. Native units never enter user-facing selection.
 
 libModuleNames :: [String]
-libModuleNames = [name | (name, _, _) <- libModules, name `notElem` nativeStorageModules]
+libModuleNames = nub [libModuleOf name | (name, _, _) <- libModules, libModuleOf name `notElem` nativeStorageModules]
 
 libModuleId :: String -> ModuleId
-libModuleId name = ModuleId "tersuslib" (Just name)
+libModuleId name = ModuleId "std" (Just name)
 
 data LibPackage = LibPackage
     { libInterfaces :: Map.Map String ModuleInterface
@@ -49,7 +50,7 @@ type NativeUnits = [(ModuleId, ModuleInterface, M.Program)]
 -- Every library and native helper, lowered: the libraries in order, then the helpers, each against the interfaces of
 -- the libraries it imports. A helper that fails fails the helpers alone.
 compiledLibraries :: Loader -> (Result LibPackage String, Result NativeUnits String)
-compiledLibraries loader = case loader (LoadRequest LoadLibraries False (resolverFromFiles []) Nothing librarySources []) of
+compiledLibraries loader = case loader libraryRequest of
     LoadedLibraries answers failure -> go answers (LibPackage Map.empty Map.empty [] Map.empty) [] failure
     NotLoaded e -> (Error e, Error e)
     _ -> let e = "internal: the loader did not answer with the compiler libraries" in (Error e, Error e)

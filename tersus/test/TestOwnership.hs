@@ -20,7 +20,8 @@ import TestParserFragments (parseStatementBlock)
 import Pipeline
 import TestCopies (boxedClonePrograms)
 import TestNative (lentPartPrograms, nativeExamples, referenceWritePrograms, unvalidatedPrograms, validatedPrograms)
-import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, instanceName)
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import Utils
 
@@ -775,7 +776,7 @@ callFunction program fn args = do
     case stFrames s' of
         f : rest -> do
             -- (the value a drop is given is not freed by it: its fields are freed after it)
-            let dropped l = isDropFunction (fnName fn) && take 1 (fnParams fn) == [l]
+            let dropped l = isDropFunction program (fnName fn) && take 1 (fnParams fn) == [l]
                 leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), v /= VNull, l /= Local 0, localHeap program f l, not (dropped l)]
             if null leftover
                 then putSt s'{stFrames = rest}

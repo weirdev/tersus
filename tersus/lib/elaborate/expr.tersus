@@ -8,7 +8,7 @@ import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, em
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
 import elaborate::state { forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
-import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
+import elaborate::traits { boundAsImpl, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
     return St { te: TE { node: node, types: push([], t) }, ..st };
@@ -1111,7 +1111,7 @@ fn inferEquality(st: St, funct: Int, negated: Bool, args: &List<Int>) -> St ~ {
 fn equalityCall(st: St, t: Int, operands: &List<TE>) -> St ~ {
     provider = protocolName(&st, "Eq");
     if !HashSet::contains(&st.traits, &provider) {
-        return typeError(st, catStrings(render(st, t), " is compared with =, which needs the trait Eq of lib/eq.tersus, which a program has unless it declares a trait Eq of its own"));
+        return typeError(st, catStrings(render(st, t), " is compared with =, which needs the trait Eq of lib/std/eq/eq.tersus, which a program has unless it declares a trait Eq of its own"));
     };
     st = traitArguments(st, "Eq", t);
     if st.status != 0 { return st; };
@@ -1188,11 +1188,6 @@ fn traitCall(st: St, funct: Int, path: String, function: String, args: &List<Int
         inferred = clone(st.tes);
         st = primitiveTraitCall(st, &path, &fns, &function, &inferred);
         if st.status != 0 || st.ok { return st; };
-        // (the builtin of that name, called as the program would call it by its name)
-        if size(inferred) > 0 && builtinSequenceCall(&st, &path, &function, teHeadAt(&inferred, 0)) {
-            st = emitVar(st, clone(function));
-            return inferCallRest(st, st.nid, args);
-        };
         ats = typesHeads(&inferred);
         st = ownerThroughTrait(st, &path, &fns, &function, &ats);
         if st.status != 0 { return st; };
@@ -1339,6 +1334,7 @@ fn cloneWrap(st: St, x: TE, xt: Int) -> St ~ {
 // The impl's clone, given a borrow of the value when it takes one (cloneTrait)
 fn cloneTrait(st: St, x: TE) -> St ~ {
     provider = protocolName(&st, "Clone");
+    if size(provider.bytes) = 0 { return typeError(st, "clone requires its checked Clone provider, and none is bound in this build"); };
     if !HashMap::contains(&st.traitFns, &provider) {
         args = push([], x.node);
         return traitCall(st, 0 - 1, provider, "clone", &args);

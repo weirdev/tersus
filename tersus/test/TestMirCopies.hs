@@ -9,7 +9,8 @@ import Mir
 import MirCopies (opaqueKey, makeCopies)
 import Syntax (Proof (..), ValidationStatement (..), Value (..))
 import TestHarness
-import Types (Arg (..), BuiltinFunct (..), Rel (..), Size (..), Type (..), pattern TBox, pattern TList)
+import Types (Arg (..), BuiltinFunct (..), Rel (..), Size (..), Type (..))
+import TestStorage (pattern TList, pattern TBox, stdProtocols)
 import StdLib (builtinFunct)
 import Utils
 
@@ -76,7 +77,7 @@ mainCalling ghosts calls =
             ++ [BasicBlock [] Return]
 
 program :: [Function] -> Function -> [(String, BoundedFn)] -> [(String, (String, [Arg]))] -> Program
-program fns main' bounded instances = Program Map.empty (Map.fromList [(fnName f, f) | f <- fns]) main' Map.empty Map.empty (Map.fromList bounded) (Map.fromList instances)
+program fns main' bounded instances = Program Map.empty (Map.fromList [(fnName f, f) | f <- fns]) main' Map.empty Map.empty (Map.fromList bounded) (Map.fromList instances) stdProtocols Nothing
 
 plain :: Program
 plain = program [function "f" [(TInt, "x")] TInt [] (blockOf [Assign (Local 0) (Use (Copy (Local 1)))] Return)] (mainCalling [] [("f", TInt)]) [] []

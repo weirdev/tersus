@@ -13,12 +13,12 @@ struct ModId { pkg: String, modu: String, has: Bool };
 impl Clone for ModId { };
 // A package marker's binding of a protocol role (List, Box, Clone, Copy, Drop, Deref, Eq) to a declaration of the
 // package: `Role = module::Name;`, `Role = module::file::Name;`, or `Role = file::Name;` for a file at the package's root
-// (rooted). bound: the marker binds roles, so the package's modules provide only the roles it binds.
+// (rooted). A module provides exactly the roles its package's marker binds to its declarations.
 struct MarkerBinding { role: String, path: List<String>, rooted: Bool };
 impl Clone for MarkerBinding { };
 struct Layout {
     name: String, root: String, rootFiles: List<FE>, modNames: List<String>, modFiles: List<List<FE>>, modNested: List<List<String>>,
-    noPrelude: Bool, isPackage: Bool, bindings: List<MarkerBinding>, bound: Bool
+    noPrelude: Bool, isPackage: Bool, bindings: List<MarkerBinding>
 };
 impl Clone for Layout { };
 struct LFile { entry: FE, names: List<String>, imports: List<ps::FileImport> };
@@ -38,7 +38,7 @@ struct Loaded {
     root: String, name: String, entryPath: String, entryId: ModId, ls: LS
 };
 struct Collapsed { ok: Bool, entry: FE };
-struct Config { ok: Bool, msg: String, noPrelude: Bool, bindings: List<MarkerBinding>, bound: Bool };
+struct Config { ok: Bool, msg: String, noPrelude: Bool, bindings: List<MarkerBinding> };
 struct LayoutR { ok: Bool, msg: String, layout: Layout };
 struct Found { ok: Bool, text: String };
 struct PR { ok: Bool, msg: String, imports: List<ps::FileImport>, program: AstProgram, decls: Decls };
@@ -201,7 +201,7 @@ fn stemsNamed(entries: &List<FE>, name: &String) -> List<FE> ~ {
 };
 
 fn buildLayout(snap: &Snap, root: &String, noPrelude: Bool) -> LayoutR ~ {
-    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false, bindings: [], bound: false };
+    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false, bindings: [] };
     listing = listDir(snap, root);
     if !listing.ok { return LayoutR { ok: false, msg: cat(cat("package directory ", root), " not found"), layout: bad }; };
     config = packageNoPrelude(snap, root);
@@ -236,14 +236,14 @@ fn buildLayout(snap: &Snap, root: &String, noPrelude: Bool) -> LayoutR ~ {
     markerPath = joinPath(root, "package.tersus");
     if size(placed.msg.bytes) > 0 { return LayoutR { ok: false, msg: cat(cat(cat("package configuration: ", showText(&markerPath)), ": "), &placed.msg), layout: bad }; };
     return LayoutR { ok: true, msg: "", layout: Layout { name: pathBaseName(root), root: clone(root), rootFiles: rootFiles, modNames: sorted, modFiles: modFiles,
-        modNested: modNested, noPrelude: config.noPrelude || noPrelude, isPackage: true, bindings: placed.bindings, bound: config.bound } };
+        modNested: modNested, noPrelude: config.noPrelude || noPrelude, isPackage: true, bindings: placed.bindings } };
 };
 
 // The marker's configuration: blank, or `noPrelude = true;` / `noPrelude = false;`, with line comments
 fn packageNoPrelude(snap: &Snap, root: &String) -> Config ~ {
     marker = joinPath(root, "package.tersus");
     read = readFile(snap, &marker);
-    if !read.ok { return Config { ok: false, msg: cat("package marker not found: ", &marker), noPrelude: false, bindings: [], bound: false }; };
+    if !read.ok { return Config { ok: false, msg: cat("package marker not found: ", &marker), noPrelude: false, bindings: [] }; };
     return markerConfig(&marker, &read.text);
 };
 
@@ -660,8 +660,7 @@ fn requestedRoots(snap: &Snap, pkg: &String) -> List<String> ~ {
 fn hasMarker(snap: &Snap, root: &String) -> Bool ~ { return hasFile(snap, joinPath(root, "package.tersus")); };
 
 fn ensureLayout(ls: LS, snap: &Snap, source: &Layout, pkg: &String) -> EnsureR ~ {
-    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false, bindings: [], bound: false };
-    if clone(pkg) = reservedPackage() { return EnsureR { ls: ls, ok: false, msg: cat(reservedPackageWhy(), ", which a program does not import by name"), layout: bad }; };
+    bad = Layout { name: "", root: "", rootFiles: [], modNames: [], modFiles: [], modNested: [], noPrelude: false, isPackage: false, bindings: [] };
     requested = requestedRoots(snap, pkg);
     sibling = joinPath(dirNameOf(&source.root), pkg);
     eligible = clone(requested);
@@ -1005,7 +1004,7 @@ fn findPackageRoot(snap: &Snap, entry: &String) -> Found ~ {
 
 fn soloLayout(entryPath: &String, noPrelude: Bool) -> Layout ~ {
     entry = FE { name: pathBaseName(entryPath), stem: fileStem(entryPath), path: clone(entryPath) };
-    return Layout { name: "", root: dirNameOf(entryPath), rootFiles: push([], entry), modNames: [], modFiles: [], modNested: [], noPrelude: noPrelude, isPackage: false, bindings: [], bound: false };
+    return Layout { name: "", root: dirNameOf(entryPath), rootFiles: push([], entry), modNames: [], modFiles: [], modNested: [], noPrelude: noPrelude, isPackage: false, bindings: [] };
 };
 
 fn notLoaded(ls: LS, msg: String) -> Loaded ~ {
@@ -1035,24 +1034,11 @@ fn loadEntry(ls: LS, snap: &Snap) -> Loaded ~ {
     return Loaded { standalone: true, standaloneProgram: parsed.program, entryPath: entryPath, ok: true, ..base };
 };
 
-// The package the compiler libraries are compiled as (LibPackage). The elaborator treats some of its modules as the
-// libraries they are, so no package a program loads may have its name.
-fn reservedPackage() -> String ~ { return "tersuslib"; };
-
-fn reservedPackageWhy() -> String ~ { return cat(cat("the package name ", reservedPackage()), " is reserved for the compiler libraries"); };
-
 fn loadLayout(ls: LS, snap: &Snap, entryPath: &String, layout: &Layout) -> Loaded ~ {
     entryDir = dirNameOf(entryPath);
     has = entryDir != layout.root;
     name = "";
     if has { name = pathBaseName(&entryDir); };
-    spoofed = packageRootOf(snap, reservedPackage());
-    if spoofed.ok {
-        return notLoaded(ls, cat(cat(cat(cat(cat("--package-root ", reservedPackage()), "="), &spoofed.text), ": "), reservedPackageWhy()));
-    };
-    if layout.isPackage && layout.name = reservedPackage() {
-        return notLoaded(ls, cat(cat(cat(cat(cat("package ", &layout.root), ": "), reservedPackageWhy()), ", so a package directory cannot be named "), reservedPackage()));
-    };
     if has && dirNameOf(&entryDir) != layout.root {
         return notLoaded(ls, cat(cat(cat(cat("entry file ", entryPath), " is in a directory nested below module level under package "), &layout.name), "; deeper nesting is not a module"));
     };
@@ -1139,7 +1125,7 @@ fn markerConfig(marker: &String, text: &String) -> Config ~ {
         };
         t = skipSpace(advance(t, 1));
     };
-    return Config { ok: true, msg: "", noPrelude: noPrelude, bindings: bindings, bound: size(bindings) > 0 };
+    return Config { ok: true, msg: "", noPrelude: noPrelude, bindings: bindings };
 };
 
 fn markerRoles() -> List<String> ~ { return push(push(push(push(push(push(push([], "List"), "Box"), "Clone"), "Copy"), "Drop"), "Deref"), "Eq"); };
@@ -1246,5 +1232,5 @@ fn configErrorAt(marker: &String, t: &Cursor, c: Int, asCharacter: Bool, expecti
         };
     };
     msg = cat(cat(cat(&msg, "):\nunexpected "), &unexpected), "\n");
-    return Config { ok: false, msg: cat(&msg, expecting), noPrelude: false, bindings: [], bound: false };
+    return Config { ok: false, msg: cat(&msg, expecting), noPrelude: false, bindings: [] };
 };

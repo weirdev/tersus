@@ -78,12 +78,11 @@ fn closure(libs: &List<Lib>, names: &List<String>) -> List<String> ~ {
     return done;
 };
 
-// (the list and Box types only when selected themselves, as LibPackage.libSelection links them)
 fn seenLibraries(libs: &List<Lib>, names: &List<String>) -> List<String> ~ {
     all = closure(libs, names);
     out = [];
     for l in libs {
-        if indexIn(&all, &l.name) >= 0 && (l.name != "types" || indexIn(names, "types") >= 0) { out = push(out, clone(l.name)); };
+        if indexIn(&all, &l.name) >= 0 { out = push(out, clone(l.name)); };
     };
     return out;
 };
@@ -292,25 +291,12 @@ fn librariesFor(p: &Probe) -> List<String> ~ {
     maps = preludeFree && !declares(&p.declared, "HashMap") && (HashSet::contains(&p.mentioned, "HashMap") || sets);
     prelude = preludeFree && (strings || maps || sets || traitNamed(&p.mentioned));
     out = [];
-    if !declares(&p.declared, "List") && !declares(&p.declared, "Box") { out = push(out, "types"); };
-    if !declares(&p.declared, "Clone") { out = push(out, "clone"); };
+    if !(declares(&p.declared, "List") && declares(&p.declared, "Box") && declares(&p.declared, "Clone")) { out = push(out, "core"); };
     if !declares(&p.declared, "Eq") { out = push(out, "eq"); };
     if prelude { out = push(out, "prelude"); };
     if strings { out = push(out, "string"); };
     if maps { out = push(out, "map"); };
     if sets { out = push(out, "set"); };
-    return out;
-};
-
-// The selected libraries among those there are: the std shape's one module core holds what the libraries types and clone hold
-fn shapedLibraries(available: &List<String>, chosen: List<String>) -> List<String> ~ {
-    if indexIn(available, "core") < 0 { return chosen; };
-    out = [];
-    for n in &chosen {
-        name = clone(n);
-        if name = "types" || name = "clone" { name = "core"; };
-        if indexIn(&out, &name) < 0 { out = push(out, name); };
-    };
     return out;
 };
 
@@ -426,12 +412,11 @@ fn probeModule(nodes: &List<AstNode>, ids: &List<Int>, ifaces: &List<AstProgram>
 // anything was left out.
 struct View { program: AstProgram, changed: Bool };
 
-// (spelled: the libraries are of the std shape, whose names are canonical, so a declaration hides one of its spelling)
-struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool, spelled: Bool };
+// (the libraries' names are canonical, so a declaration hides the library declaration of its spelling)
+struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool };
 
 fn hides(h: &Hide, name: &String) -> Bool ~ {
-    if h.spelled { return HashSet::contains(&h.declared, hideKey(name)); };
-    return HashSet::contains(&h.declared, name);
+    return HashSet::contains(&h.declared, hideKey(name));
 };
 
 // The name a declaration hides a library's by: a declaration's own spelling, but an impl's function (`<O as T>::f`)

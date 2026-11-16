@@ -2,6 +2,7 @@
 
 module MirCopies
     ( makeCopies
+    , makeCopiesWith
     , copyName
     , isCopyName
     , opaqueKey
@@ -20,8 +21,9 @@ import Pretty (renderType)
 import StdLib (builtinFunct)
 import Syntax (Expression (..), Proof (..), RwRule (..), Termination (..), ValidationStatement (..), Value (..), VariableProof, parseImplCheckName)
 import qualified Types as T
-import Types (Arg (..), BuiltinFunct, Name, Rel (..), Size (..), Type (..), Variable, instanceName, pattern TBox, pattern TList, renderTypeForName, substitute, tupleGeneric, baseNameOf)
+import Types (Arg (..), BuiltinFunct, Name, Rel (..), Size (..), Storage, Type (..), Variable, boxContent, instanceName, listElement, renderTypeForName, substitute, tupleGeneric, baseNameOf)
 import Utils (Result (..))
+import Data.Maybe (isNothing)
 
 -- The copy step (MIR.md, "Copies of functions with bounds"). A function with bounds is checked once against its bounds,
 -- lowered once with its type parameters, and checked for moves once; the program names each copy it calls (`f[Int]`,
@@ -66,7 +68,14 @@ boundCallParts name = do
                 [] -> (reverse acc, [])
 
 makeCopies :: Program -> Result Program String
-makeCopies program
+makeCopies program = makeCopiesWith (Just (Map.keysSet (progTypes program))) program
+
+-- With the types given, the copies those types' checked facts name are made too, whether or not a call names them: the
+-- ownership passes and the emitter take a type's drop, clone and deref from its facts, so the owned program must have
+-- them (Link gives the types the program keeps). A program that is only validated (the native storage, checked as the
+-- physical structs) is copied without
+makeCopiesWith :: Maybe (Set.Set Name) -> Program -> Result Program String
+makeCopiesWith recording program
     | Map.null (progBounded program) && Map.null (progInstances program) = Ok program
     | otherwise = case run of
         Left e -> Error e
@@ -77,10 +86,23 @@ makeCopies program
     named = Map.fromList [(key, name) | (name, (f, args)) <- Map.toList (progInstances program), Just key <- [concreteKey program f args]]
     roots = [fn | fn <- Map.elems (progFunctions program), fnName fn `Map.notMember` generics, fnName fn `Set.notMember` lifted]
     rootCx = Cx program named [] [] Map.empty "" [] Map.empty Map.empty Map.empty Map.empty
+    recorded =
+        [ (key, [])
+        | Just owners <- [recording]
+        , Just facts <- [progOwnership program]
+        , (owner, f) <- Map.toList facts
+        , Set.member owner owners && Map.member owner (progTypes program)
+        , Just (_, callee) <- [T.ownershipDrop f, T.ownershipClone f, T.ownershipDeref f]
+        , Map.notMember callee (progFunctions program)
+        , Just (g, args) <- [Map.lookup callee (progInstances program)]
+        , Map.member g (progBounded program) && Map.member g (progFunctions program)
+        , Just key@(_, tys, _) <- [concreteKey program g args]
+        , all groundType tys
+        ]
     run = do
         (rootsDone, needs1) <- transformAll rootCx roots
         (mainDone, needs2) <- transformAll rootCx [progMain program]
-        made <- build program named (needs1 ++ needs2) Map.empty []
+        made <- build program named (needs1 ++ needs2 ++ recorded) Map.empty []
         Right (rootsDone, head mainDone, reverse made)
 
 -- What a body is copied with: the program, the names references wrote, the type and bounded size arguments, the lifted
@@ -188,8 +210,6 @@ concreteKey _ f args =
 mentionsParam :: Type -> Bool
 mentionsParam ty = case ty of
     TParam _ -> True
-    TList t -> mentionsParam t
-    TBox t -> mentionsParam t
     TAddr t -> mentionsParam t
     TBlock t -> mentionsParam t
     TUninit t -> mentionsParam t
@@ -200,6 +220,29 @@ mentionsParam ty = case ty of
     TNamed _ args -> or [mentionsParam t | ArgType t <- args]
     TForall _ _ t -> mentionsParam t
     _ -> False
+
+-- A type with no type or size parameter and no unsolved variable anywhere in it (a fact's target is made only for one)
+groundType :: Type -> Bool
+groundType ty = case ty of
+    TParam _ -> False
+    TVar _ -> False
+    TForall{} -> False
+    TArrayOf t s -> groundType t && groundSize s
+    TNamed _ args -> all groundArg args
+    TFn args ret -> all groundType (ret : args)
+    TAddr t -> groundType t
+    TBlock t -> groundType t
+    TUninit t -> groundType t
+    TRef t -> groundType t
+    TMutRef t -> groundType t
+    _ -> True
+  where
+    groundArg (ArgType t) = groundType t
+    groundArg (ArgSize s) = groundSize s
+    groundSize s = case s of
+        SizeParam _ -> False
+        SizeVar _ -> False
+        _ -> True
 
 -- How big a type is, for the growth refusal
 typeBigness :: Type -> Int
@@ -236,7 +279,7 @@ frameRefusal program f name generic copy =
 -- a struct (a list and a Box are structs) the words of its fields, and an enum its tag and its widest variant
 typeWords :: Program -> Type -> Integer
 typeWords program ty = case ty of
-    TNamed "Box" [ArgType (TArrayOf _ SizeAny)] -> 2
+    _ | Just (TArrayOf _ SizeAny) <- boxContent (progStorage program) ty -> 2
     TArrayOf t (SizeConst n) -> n * typeWords program t
     TNamed base args -> declared (instanceName base args)
     TVariant v | Just owner <- ownerOf program v -> declared owner
@@ -311,7 +354,7 @@ transformFunction cx0 fn = do
             TParam p -> types (TParam p) /= TParam p
             TRef inner -> filled inner
             TMutRef inner -> filled inner
-            TBox inner -> filled inner
+            _ | Just inner <- boxContent (progStorage (cxProgram cx)) ty -> filled inner
             _ -> False
         opaque = if null (cxCopy cx) then [] else [l | (l, d) <- Map.toList (fnLocals fn), filled (localType d)]
         spec'' = (fnSpec fn'){specEnv = Map.union (Map.fromList [(opaqueKey l, Copy l) | l <- opaque]) (specEnv (fnSpec fn'))}
@@ -424,27 +467,28 @@ copyNamed cx key = do
 -- Sequence or Growable of the program's own by being one)
 resolveBound :: Cx -> Map Local Integer -> Function -> Bool -> Name -> Name -> Type -> [Operand] -> Maybe Local -> C Target
 resolveBound cx constants fn library trait function t args dest
-    | trait == "Clone", function == "clone" = traitClone cx constants fn t args dest
-    | trait == "Eq", function == "eq", word t = return (Inline InlineEq)
-    | trait == "Eq", function == "eq", Just e <- unsizedBoxed t, Map.member "eqBoxedArrays" (progBounded (cxProgram cx)) = (\n -> Named n []) <$> withBoundsCopy cx "eqBoxedArrays" [e]
+    | roleIs program "Clone" trait, function == "clone" = traitClone cx constants fn t args dest
+    | roleIs program "Eq" trait, function == "eq", word t = return (Inline InlineEq)
+    | roleIs program "Eq" trait, function == "eq", Just e <- unsizedBoxed storage t, Just helper <- providerHelper program "Eq" "eqBoxedArrays" = (\n -> Named n []) <$> withBoundsCopy cx helper [e]
     | library, Just builtin <- sequenceBuiltin, sizedBoxedArray t = return builtin
-    | Just owner <- ownerOfType (cxProgram cx) t, let callee = implName owner, Map.member callee (progFunctions (cxProgram cx)) = checkOrSize callee >>= \check -> calling cx constants fn (Just t) check args dest
-    | Just builtin <- sequenceBuiltin, trait `elem` ["Sequence", "Growable"] = return builtin
+    | Just owner <- ownerOfType program t, let callee = implName owner, Map.member callee (progFunctions program) = checkOrSize callee >>= \check -> calling cx constants fn (Just t) check args dest
     | otherwise = failC ("internal compiler error: " ++ trait ++ "::" ++ function ++ " is called on a " ++ renderType t ++ " in " ++ cxCopy cx ++ ", which has no impl of it")
   where
+    program = cxProgram cx
+    storage = progStorage program
     implName owner = "<" ++ owner ++ " as " ++ trait ++ ">::" ++ function
     -- (the library's size and get of a list, an array and a Box of an array stay their impls', which are the builtins: the
     -- trait's contracts of those impls are written with the builtin size and get, so a copy relates what it knows of a call
     -- of set or push through the trait to what it knows of size and get)
     checkOrSize callee
-        | library, function `elem` ["size", "get"], sequenceType t = return callee
+        | library, function `elem` ["size", "get"], sequenceType storage t = return callee
         | otherwise = checkOf cx callee
     -- (the prelude's impl for a Box of an array is for one of no size: a Box of an array of a size has no impl, and its
     -- sequence functions are the builtins, which give a copy more than the trait promises)
-    sizedBoxedArray ty = case unref ty of
-        TBox (TArrayOf _ size) -> size /= SizeAny
+    sizedBoxedArray ty = case boxContent storage (unref ty) of
+        Just (TArrayOf _ size) -> size /= SizeAny
         _ -> False
-    sequenceBuiltin = case (methodBuiltinByName function, sequenceType t) of
+    sequenceBuiltin = case (methodBuiltinByName function, sequenceType storage t) of
         (Just b, True) | Just op <- listOpOf b -> Just (Inline (InlineBuiltin b op))
         _ -> Nothing
     word ty = case unref ty of
@@ -463,15 +507,29 @@ cloneTarget cx constants fn t args dest
     | ownCopy (unref t) = return (Inline InlineCopy)
     | otherwise = traitClone cx constants fn t args dest
 
--- Clone::clone of a value of a type: a Box of an array of no size is cloned by the library's cloneBoxedArray when the
--- program has it, a tuple is copied as it is, and any other type by its impl of Clone when it has one
+-- Clone::clone of a value of a type: a Box of an array of no size is cloned by the Clone provider's cloneBoxedArray, a
+-- tuple and a word are copied as they are, and any other type by the clone its checked ownership facts select; a type
+-- without one has no clone
 traitClone :: Cx -> Map Local Integer -> Function -> Type -> [Operand] -> Maybe Local -> C Target
 traitClone cx constants fn t args dest = case unref t of
-    ty | Just e <- unsizedBoxed ty, Map.member "cloneBoxedArray" (progBounded (cxProgram cx)) -> (\n -> Named n []) <$> withBoundsCopy cx "cloneBoxedArray" [e]
+    ty | Just e <- unsizedBoxed (progStorage program) ty, Just helper <- providerHelper program "Clone" "cloneBoxedArray" -> (\n -> Named n []) <$> withBoundsCopy cx helper [e]
     TNamed base _ | Just _ <- tupleGeneric base -> return (Inline InlineCopy)
-    ty -> case ownerOfType (cxProgram cx) ty of
-        Just owner | let callee = "<" ++ owner ++ " as Clone>::clone", Map.member callee (progFunctions (cxProgram cx)) -> checkOf cx callee >>= \check -> calling cx constants fn (Just t) check args dest
-        _ -> return (Inline InlineCopy)
+    ty | ownCopy ty -> return (Inline InlineCopy)
+    ty -> case factOwner program ty >>= cloneFunction program of
+        Just callee
+            | Map.member callee (progInstances program) -> target cx constants fn callee args dest
+            | otherwise -> checkOf cx callee >>= \check -> calling cx constants fn (Just t) check args dest
+        Nothing -> failC ("internal compiler error: a copy of " ++ cxCopy cx ++ " clones a " ++ renderType ty ++ ", which has no checked Clone")
+  where
+    program = cxProgram cx
+
+-- A helper function with bounds of the module of a role's checked provider (the elaborator's providerHelper)
+providerHelper :: Program -> Name -> Name -> Maybe Name
+providerHelper program role local = do
+    provider <- Map.lookup role (progProtocols program)
+    let prefix = reverse (dropWhile (/= '$') (reverse provider))
+        name = prefix ++ local
+    if Map.member name (progBounded program) then Just name else Nothing
 
 -- The check function of an impl's function, `Tr for O::g`, which a copy calls through a bound: it has the trait's contracts,
 -- so a copy knows of the call what the bound promises and nothing the impl promises more (the validator takes it as the
@@ -481,11 +539,11 @@ checkOf cx callee = case companionOf callee of
     Just check | Map.member check (progFunctions (cxProgram cx)) -> return check
     _ -> failC ("internal compiler error: " ++ callee ++ " has no check function, which a call through a bound in " ++ cxCopy cx ++ " calls")
 
-sequenceType :: Type -> Bool
-sequenceType ty = case unref ty of
-    TList _ -> True
+sequenceType :: Storage -> Type -> Bool
+sequenceType storage ty = case unref ty of
     TArrayOf _ _ -> True
-    TBox (TArrayOf _ _) -> True
+    t | Just _ <- listElement storage t -> True
+    t | Just TArrayOf{} <- boxContent storage t -> True
     _ -> False
 
 ownCopy :: Type -> Bool
@@ -541,12 +599,17 @@ withBoundsCopy cx f tys
     | Map.member f (progBounded (cxProgram cx)) = copyNamed cx (f, tys, [])
     | otherwise = failC ("internal compiler error: " ++ f ++ ", which a copy of " ++ cxCopy cx ++ " calls, is not a function with bounds of the program")
 
+-- The type or instance a value's checked ownership facts are of
+factOwner :: Program -> Type -> Maybe Name
+factOwner program ty = case unref ty of
+    TNamed base args -> Just (instanceName base args)
+    TVariant v -> ownerOf program v
+    _ -> Nothing
+
 -- The type whose impls a function of a value of the type is of (the elaborator's traitOwner)
 ownerOfType :: Program -> Type -> Maybe Name
 ownerOfType program ty = case unref ty of
     TArrayOf _ _ -> Just "Array"
-    TBox _ -> Just "Box"
-    TList _ -> Just "List"
     TNamed base _ -> Just base
     TVariant v -> ownerOf program v
     TInt -> Just "Int"
@@ -560,9 +623,9 @@ unref ty = case ty of
     TMutRef t -> t
     _ -> ty
 
-unsizedBoxed :: Type -> Maybe Type
-unsizedBoxed ty = case unref ty of
-    TBox (TArrayOf e SizeAny) -> Just e
+unsizedBoxed :: Storage -> Type -> Maybe Type
+unsizedBoxed storage ty = case boxContent storage (unref ty) of
+    Just (TArrayOf e SizeAny) -> Just e
     _ -> Nothing
 
 listOpOf :: BuiltinFunct -> Maybe ListOp
@@ -651,20 +714,19 @@ transformBlock cx constants fn here (BasicBlock stmts term) = go here [] stmts [
     borrows r s = case s of
         Assign d (Borrow _ _ _) -> d == r
         _ -> False
-    boxedValue ty = case ty of
-        TNamed "Box" [ArgType (TArrayOf _ _)] -> True
+    storage = progStorage (cxProgram cx)
+    boxedValue ty = case boxContent storage ty of
+        Just TArrayOf{} -> True
         _ -> False
     byValue t = case unref t of
-        ty | Just _ <- unsizedBoxed ty -> False
+        ty | Just _ <- unsizedBoxed storage ty -> False
         TNamed base _ | Just _ <- tupleGeneric base -> True
-        ty -> case ownerOfType (cxProgram cx) ty of
-            Just owner -> Map.notMember ("<" ++ owner ++ " as Clone>::clone") (progFunctions (cxProgram cx))
-            Nothing -> True
+        ty -> isNothing (factOwner (cxProgram cx) ty >>= cloneFunction (cxProgram cx))
     -- (the value at a place, read: what a Box holds, a field, an element)
     placeRead root rootTy steps = case (rootTy, steps) of
         (TRef _, _) -> return Nothing
         (TMutRef _, _) -> return Nothing
-        (TNamed "Box" [ArgType payload], []) -> do
+        (_, []) | Just payload <- boxContent storage rootTy -> do
             tmp <- newTemp payload
             return (Just ([Assign tmp (Unbox (Copy root))], Copy tmp))
         (_, []) -> return (Just ([], Copy root))
@@ -679,9 +741,9 @@ transformBlock cx constants fn here (BasicBlock stmts term) = go here [] stmts [
             walk (Copy tmp) ft rest (acc' ++ [Assign tmp (ReadField cur owner f)])
         _ -> return Nothing
     elementOf ty = case ty of
-        TList e -> Just e
         TArrayOf e _ -> Just e
-        TNamed "Box" [ArgType (TArrayOf e _)] -> Just e
+        _ | Just e <- listElement storage ty -> Just e
+        _ | Just (TArrayOf e _) <- boxContent storage ty -> Just e
         _ -> Nothing
     fieldOf owner f = case Map.lookup owner (progTypes (cxProgram cx)) of
         Just (StructDecl fields) -> lookup f fields
@@ -910,7 +972,7 @@ proofName cx n
     , function `elem` ["size", "get"]
     , Map.lookup n (progInstances (cxProgram cx)) == Just (libraryBuiltin, [])
     , Just t <- lookup p (cxTypes cx)
-    , sequenceType t
+    , sequenceType (progStorage (cxProgram cx)) t
     , Just b <- methodBuiltinByName function = return (Right b)
     | Map.member n (progInstances (cxProgram cx)) || Map.member n (cxLifted cx) || isBound = do
         t <- target cx Map.empty noFunction n [] Nothing

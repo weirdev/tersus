@@ -2,21 +2,24 @@
 
 module Link
     ( linkPrograms
+    , linkValidatedPrograms
     , pruneProgram
     , completeSpecEnvs
     ) where
 
 import Data.List (isPrefixOf)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import PreludeSource (nativeStorageModules)
 import qualified Mir as M
 import PackageData (ModuleId (..), renderModuleId)
-import MirCopies (makeCopies)
+import MirCopies (isCopyName, makeCopiesWith)
+import MirMono (namedTypesByName)
 import qualified Syntax
 import Syntax (Proof (..), ValidationStatement (..), VariableProof, Value (..))
-import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, baseNameOf)
+import Types (Arg (..), Name, OwnershipFacts (..), Type (..), baseNameOf)
 import Utils (Result (..), bindResult)
 
 -- Units are merged under the names their declarations were lowered with
@@ -28,25 +31,53 @@ import Utils (Result (..), bindResult)
 -- identical to the one already linked (a declaration an importing unit
 -- carries seeded from the interface it was lowered against) merges.
 linkPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
-linkPrograms [] = Error "link error: no modules to link"
-linkPrograms units = deduplicateUnits [(modu, normalizeExterns program) | (modu, program) <- units] `bindResult` linkNormalized
+linkPrograms = linkWith True
 
-linkNormalized :: [(ModuleId, M.Program)] -> Result M.Program String
-linkNormalized normalized =
+-- The units linked as a program that is validated and not owned or emitted itself (the native storage): its types'
+-- facts are not made into copies no call names (MirCopies.makeCopiesWith)
+linkValidatedPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
+linkValidatedPrograms = linkWith False
+
+linkWith :: Bool -> [(ModuleId, M.Program)] -> Result M.Program String
+linkWith _ [] = Error "link error: no modules to link"
+linkWith recording units = deduplicateUnits [(modu, normalizeExterns program) | (modu, program) <- units] `bindResult` linkNormalized recording
+
+linkNormalized :: Bool -> [(ModuleId, M.Program)] -> Result M.Program String
+linkNormalized recording normalized =
     mergeAll "type" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progTypes program)] `bindResult` \types ->
         mergeFunctions functionEnv normalized `bindResult` \functions ->
             mergeAll "generic struct" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progGenerics program)] `bindResult` \generics ->
                 mergeAll "invariant" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInvariants program)] `bindResult` \invariants ->
                     mergeAll "function with bounds" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progBounded program)] `bindResult` \bounded ->
                         mergeAll "copy" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInstances program)] `bindResult` \instances ->
+                        mergeAll "provider" [(modu, role, provider) | (modu, program) <- normalized, (role, provider) <- Map.toList (M.progProtocols program)] `bindResult` \protocols ->
+                        mergeOwnership normalized `bindResult` \ownership ->
                             -- (a copy the call cannot have is refused as the elaborator refuses a call)
-                            case makeCopies (M.completeInstances (M.Program types functions linkedMain generics invariants bounded instances)) of
+                            let linked = M.completeInstances (M.Program types functions linkedMain generics invariants bounded instances protocols ownership)
+                                -- (the facts' functions are made for the types the program keeps once the copies its calls
+                                -- name are made, not for every instance a library declares)
+                                kept p = let pruned = pruneProgram p in Set.union (Map.keysSet (M.progTypes pruned)) (Map.keysSet (namedTypesByName pruned))
+                                -- (a function a fact names can keep more types, whose facts' functions are made in turn)
+                                withFacts owners = makeCopiesWith (Just owners) linked `bindResult` \p ->
+                                    if kept p `Set.isSubsetOf` owners then Ok p else withFacts (Set.union owners (kept p))
+                                copied = makeCopiesWith Nothing linked `bindResult` \plain ->
+                                    if recording then withFacts (kept plain) else Ok plain
+                             in case copied of
                                 Error e -> Error ("Validation failed: " ++ e)
                                 ok -> ok
   where
     functionEnv = Map.fromList [(name, M.Const (M.CFn name)) | (_, program) <- normalized, name <- Map.keys (M.progFunctions program)]
     rootMain = M.progMain (snd (last normalized))
     linkedMain = (completeFunctionEnvs functionEnv (prependGhosts (concatMap unitGhosts (init normalized)) rootMain)){M.fnSpec = M.fnSpec rootMain}
+
+-- The units' checked ownership facts as one table: units with them agree on every type they share; a unit without them
+-- (data written without its facts) makes the build's absent
+mergeOwnership :: [(ModuleId, M.Program)] -> Result (Maybe (Map.Map Name OwnershipFacts)) String
+mergeOwnership units = case mapM (M.progOwnership . snd) units of
+    Nothing
+        | any (isJust . M.progOwnership . snd) units -> Error "link error: some modules have checked ownership facts and others do not"
+        | otherwise -> Ok Nothing
+    Just tables -> mergeAll "ownership facts of a type" [(modu, name, facts) | ((modu, _), table) <- zip units tables, (name, facts) <- Map.toList table] `bindResult` (Ok . Just)
 
 deduplicateUnits :: [(ModuleId, M.Program)] -> Result [(ModuleId, M.Program)] String
 deduplicateUnits = go Map.empty []
@@ -128,7 +159,7 @@ mergeFunctions functionEnv units = go Map.empty Map.empty [(modu, completeFuncti
 compatibleOrigin :: ModuleId -> ModuleId -> Bool
 compatibleOrigin a b = not (private a || private b)
   where
-    private (ModuleId "tersuslib" (Just name)) = name `elem` nativeStorageModules
+    private (ModuleId "std" (Just name)) = name `elem` nativeStorageModules
     private _ = False
 
 externLocal :: Name -> Maybe Name
@@ -225,11 +256,14 @@ pruneProgram program =
         typesFromFns = Set.unions (map (typeRefsOfFunction program) keptFnList)
         typesFromTypes = Set.unions [declTypeRefs decl | name <- Set.toList types, Just decl <- [Map.lookup name (M.progTypes program)]]
         typesNext = Set.unions [types, typesFromFns, typesFromTypes]
+    -- (a kept type keeps its impls, its base's impls that are not copies, and the functions its checked facts name: a copy
+    -- of a base's impl for another instance is kept by what calls it, or by that instance's facts)
     implFunctions ty =
-        let dropFn = maybe Set.empty Set.singleton (M.dropFunction program ty)
+        let recorded = Set.fromList [f | Just facts <- [M.factsOf program ty], Just (_, f) <- [ownershipDrop facts, ownershipClone facts, ownershipDeref facts]]
+            dropFn = maybe Set.empty Set.singleton (M.dropFunction program ty)
             impls = Set.fromList [name | name <- Map.keys (M.progFunctions program), ("<" ++ ty ++ " as ") `isPrefixOf` name]
-            baseImpls = Set.fromList [name | name <- Map.keys (M.progFunctions program), ("<" ++ baseOf ty ++ " as ") `isPrefixOf` name]
-         in Set.unions [dropFn, impls, baseImpls]
+            baseImpls = Set.fromList [name | name <- Map.keys (M.progFunctions program), ("<" ++ baseOf ty ++ " as ") `isPrefixOf` name, not (isCopyName name)]
+         in Set.unions [recorded, dropFn, impls, baseImpls]
     declTypeRefs decl = case decl of
         M.StructDecl fields -> Set.unions (map (typeNames . snd) fields)
         M.EnumDecl variants -> Set.unions [typeNames ty | (_, fields) <- variants, (_, ty) <- fields]
@@ -346,9 +380,7 @@ typeNames :: Type -> Set.Set Name
 typeNames ty = case ty of
     TNamed name args -> Set.singleton name <> foldMap argNames args
     TVariant name -> Set.singleton name
-    TList inner -> typeNames inner
     TArrayOf inner _ -> typeNames inner
-    TBox inner -> typeNames inner
     TAddr inner -> typeNames inner
     TBlock inner -> typeNames inner
     TUninit inner -> typeNames inner

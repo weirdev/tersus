@@ -1,25 +1,27 @@
-{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module MirLists
     ( lowerLists
     , hasLists
+    , ownerSourceId
     ) where
 
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, listToMaybe)
 
-import PreludeSource (nativeStorageModules)
+import PreludeSource (nativeStorageModules, nativeHelperName)
 import Link (linkPrograms)
 import LibPackage (libModuleId, stripDeclaredFromUnits)
 import PackageData (ModuleId (..))
 import Utils (Result (..), bindResult, mapResult)
 import Mir
-import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, instanceName, mentionsParameter)
+import Types (Arg (..), Name, Storage (..), Type (..), boxContent, instanceName, listElement, listOf, mentionsParameter)
 
 -- A list is checked, validated and run by the executor as a list. Native code has no list: a `List<T>` is the struct `List<T>` of
--- lib/lists.tersus (the elements in an array on the heap, and how many are in use), and this makes the program that is validated the
+-- lib/std/lists/lists.tersus (the elements in an array on the heap, and how many are in use), and this makes the program that is validated the
 -- program with those. It runs after the validator, so the proofs about lists are the proofs of lists, and before ownership, which then
 -- sees an ordinary struct that owns a Box of an array.
 --
@@ -28,7 +30,7 @@ import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, instanceNa
 -- `listPush` for each element. A comparison of lists stays as it is: native code compares a `List` as a list (the elements in use,
 -- not the room that is left), and prints it as one.
 
--- A Box is lowered the same way (step 29): a `Box<T>` whose T is not an array is the struct `Box<T>` of lib/box.tersus, one filled slot at
+-- A Box is lowered the same way (step 29): a `Box<T>` whose T is not an array is the struct `Box<T>` of lib/std/box/box.tersus, one filled slot at
 -- an address that its drop frees, and `Box::new(x)` and `Box::unbox(b)` are calls of `boxNew` and `boxUnbox`. A field read, a test of a
 -- variant or a cast through a Box stays one through the `Box`, which native code reads at its address as it read a Box (the address is
 -- the struct's only word), so a `match` still takes the fields out of a Box that is not used again.
@@ -48,10 +50,11 @@ storageModules program =
     [name | name <- nativeStorageModules, name `elem` concatMap storageTypes (programTypes program) || name == "lists" && any hasListConstant functions]
   where
     functions = progMain program : Map.elems (progFunctions program)
+    st = progStorage program
     storageTypes ty = case ty of
-        TList t -> "lists" : storageTypes t
-        TBox (TArrayOf t _) -> "lists" : storageTypes t
-        TBox t -> "box" : storageTypes t
+        (listElement st -> Just t) -> "lists" : storageTypes t
+        (boxContent st -> Just (TArrayOf t _)) -> "lists" : storageTypes t
+        (boxContent st -> Just t) -> "box" : storageTypes t
         TArrayOf t _ -> storageTypes t
         TAddr t -> storageTypes t
         TUninit t -> storageTypes t
@@ -107,49 +110,61 @@ operandsOf rv = case rv of
     Borrow _ steps _ -> [o | RefIndex o <- steps]
     Deref o -> [o]
 
+-- The unit of core's List and Box drops as the native storage program has them before the erasure, which the erased
+-- ones are told to be by (lowerLists)
+ownerSourceId :: ModuleId
+ownerSourceId = ModuleId "native" (Just "storage-drops")
+
 lowerLists :: Result [(ModuleId, Program)] String -> Program -> Result Program String
 lowerLists library program
     | not (hasLists program) = Ok program
-    | otherwise = library `bindResult` \units -> mapResult completeErasedInstances (linkPrograms (selected units ++ [(ModuleId "native" Nothing, completeErasedInstances lowered)]))
+    | otherwise = library `bindResult` \units -> mapResult completeErasedInstances (linkPrograms (selected units ++ owned units ++ [(ModuleId "native" Nothing, completeErasedInstances (lowered units))]))
   where
+    -- (the drops of a list and a Box are their owning module's, core's, and native code has them as the native storage
+    -- does: physical, without their ghosts. A function of the program is taken in that form only where it is that very
+    -- function, as core's unit has it before the erasure or after it; any other stays the program's own)
+    ownerId = libModuleId "core"
+    sources units = Map.unions [progFunctions unit | (modu, unit) <- units, modu == ownerSourceId]
+    same units name erasedFn = case (Map.lookup name (progFunctions program), Map.lookup name (sources units)) of
+        (Just own, Just original) -> body own == body original || body own == body erasedFn
+        _ -> False
+    body f = (fnParams f, fnReturns f, fnTypeParams f, fnSizeParams f, fnLocals f, fnBlocks f)
+    owned units = [(modu, unit{progFunctions = Map.filterWithKey (same units) (progFunctions unit)}) | (modu, unit) <- units, modu == ownerId]
+    ownedNames units = Set.unions [Map.keysSet (progFunctions unit) | (_, unit) <- owned units]
     wanted = storageModules program
-    unusedTypes = [ty | (modu, ty) <- [("lists", "List"), ("box", "Box")], modu `notElem` wanted]
+    st = progStorage program
+    unusedTypes = [ty | (modu, ty) <- [("lists", storageList st), ("box", storageBox st)], modu `notElem` wanted]
     selected units = stripDeclaredFromUnits unusedTypes [(modu, unit) | (modu, unit) <- units, modu `elem` map libModuleId wanted]
-    lowered =
+    lowered units =
         program
             { progTypes = Map.fromList [(renameName renames n, renameDecl d) | (n, d) <- Map.toList (progTypes program)]
-            , progFunctions = Map.map (lowerFunction renames program) (progFunctions program)
+            , progFunctions = Map.map (lowerFunction renames program) (Map.withoutKeys (progFunctions program) (ownedNames units))
             , progMain = lowerFunction renames program (progMain program)
-            , progGenerics = Map.map (\(params, fields) -> (params, [(f, listType t) | (f, t) <- fields])) (progGenerics program)
+            , progGenerics = Map.map (\(params, fields) -> (params, [(f, listType st t) | (f, t) <- fields])) (progGenerics program)
             }
     -- (once for the program: every function renames by it, and it is made of every local of every function)
-    renames = renamesForTypes (programTypes program)
+    renames = renamesForTypes st (programTypes program)
     renameDecl d = case d of
-        StructDecl fields -> StructDecl [(f, listType t) | (f, t) <- fields]
-        EnumDecl variants -> EnumDecl [(v, [(f, listType t) | (f, t) <- fields]) | (v, fields) <- variants]
+        StructDecl fields -> StructDecl [(f, listType st t) | (f, t) <- fields]
+        EnumDecl variants -> EnumDecl [(v, [(f, listType st t) | (f, t) <- fields]) | (v, fields) <- variants]
 
--- The type that a list or a Box is: the struct of the library, with the type of the elements
-listType :: Type -> Type
-listType ty = case ty of
-    TList t -> TNamed "List" [ArgType (listType t)]
-    TArrayOf t size -> TArrayOf (listType t) size
-    TBox (TArrayOf t _) -> TNamed "List" [ArgType (listType t)]
-    TBox t -> boxStruct t
-    TAddr t -> TAddr (listType t)
-    TUninit t -> TUninit (listType t)
-    TRef t -> TRef (listType t)
-    TMutRef t -> TMutRef (listType t)
-    TFn args ret -> TFn (map listType args) (listType ret)
-    TNamed base args -> TNamed base (map renameArg args)
+-- The type that a list or a Box is natively: a list and a Box are the structs they are declared as, with the types of
+-- their parts made native, and a Box of an array is a list of its elements
+listType :: Storage -> Type -> Type
+listType st ty = case ty of
+    TArrayOf t size -> TArrayOf (listType st t) size
+    (boxContent st -> Just (TArrayOf t _)) -> listOf st (listType st t)
+    TAddr t -> TAddr (listType st t)
+    TUninit t -> TUninit (listType st t)
+    TRef t -> TRef (listType st t)
+    TMutRef t -> TMutRef (listType st t)
+    TFn args ret -> TFn (map (listType st) args) (listType st ret)
+    TNamed base args -> TNamed base (map (renameArg st) args)
     _ -> ty
 
--- The struct that a Box of the type is
-boxStruct :: Type -> Type
-boxStruct t = TNamed "Box" [ArgType (listType t)]
-
-renameArg :: Arg -> Arg
-renameArg (ArgType t) = ArgType (listType t)
-renameArg other = other
+renameArg :: Storage -> Arg -> Arg
+renameArg st (ArgType t) = ArgType (listType st t)
+renameArg _ other = other
 
 isArrayType :: Type -> Bool
 isArrayType t = case t of
@@ -161,14 +176,12 @@ renameName :: Map Name Name -> Name -> Name
 renameName renames name = Map.findWithDefault name name renames
 
 -- The rendered names that list lowering renames, built structurally from the types of a program
-renamesForTypes :: [Type] -> Map Name Name
-renamesForTypes tys = Map.fromList [(instanceName base args, instanceName base (map renameArg args)) | ty <- tys, (base, args) <- namedSubs ty]
+renamesForTypes :: Storage -> [Type] -> Map Name Name
+renamesForTypes st tys = Map.fromList [(instanceName base args, instanceName base (map (renameArg st) args)) | ty <- tys, (base, args) <- namedSubs ty]
   where
     namedSubs ty = case ty of
         TNamed base args -> (base, args) : concat [namedSubs u | ArgType u <- args]
-        TList u -> namedSubs u
         TArrayOf u _ -> namedSubs u
-        TBox u -> namedSubs u
         TAddr u -> namedSubs u
         TUninit u -> namedSubs u
         TRef u -> namedSubs u
@@ -192,6 +205,7 @@ data St = St
     , stDone :: [(BlockId, BasicBlock)]
     , stCurrent :: BlockId
     , stStatements :: [Statement] -- (backwards)
+    , stStorage :: Storage
     }
 
 newtype M a = M {runM :: St -> (a, St)}
@@ -222,12 +236,12 @@ newTemp ty = do
     modifySt (\s' -> s'{stLocals = Map.insert l (LocalDecl ty Nothing) (stLocals s'), stNextLocal = stNextLocal s' + 1})
     return l
 
--- Ends the block being built with a call of a function of the library, and goes on in a block that follows it
+-- Ends the block being built with a call of a function of the native storage helpers, and goes on in a block that follows it
 callTo :: Name -> [Operand] -> Local -> M ()
 callTo name args dest = do
     s <- getSt
     let next = BlockId (stNextBlock s)
-        block = BasicBlock (reverse (stStatements s)) (Call (Const (CFn name)) args dest next)
+        block = BasicBlock (reverse (stStatements s)) (Call (Const (CFn (nativeHelperName name))) args dest next)
     modifySt (\s' -> s'{stDone = (stCurrent s', block) : stDone s', stNextBlock = stNextBlock s' + 1, stCurrent = next, stStatements = []})
 
 localTypeOf :: Local -> M (Maybe Type)
@@ -237,26 +251,27 @@ operandType :: Operand -> M (Maybe Type)
 operandType o = case o of
     Copy l -> localTypeOf l
     Move l -> localTypeOf l
-    Const c -> return (constantType c)
+    Const c -> (\s -> constantType (stStorage s) c) <$> getSt
 
 -- The type of a constant, where it says it (a list that has an element has the type of the elements)
-constantType :: Constant -> Maybe Type
-constantType c = case c of
+constantType :: Storage -> Constant -> Maybe Type
+constantType st c = case c of
     CInt _ -> Just TInt
     CBool _ -> Just TBool
-    CList cs -> Just (TList (fromMaybe TInt (listToMaybe [t | x <- cs, Just t <- [constantType x]])))
+    CList cs -> Just (listOf st (fromMaybe TInt (listToMaybe [t | x <- cs, Just t <- [constantType st x]])))
     CData name _ -> Just (if "::" `isInfixOf` name then TVariant name else TNamed name [])
     _ -> Nothing
 
 lowerFunction :: Map Name Name -> Program -> Function -> Function
 lowerFunction renames original fn =
     fn
-        { fnLocals = Map.mapWithKey (\l d -> d{localType = if Map.member l boxedFromLists then TInt else listType (localType d)}) (stLocals final)
-        , fnReturns = fmap listType (fnReturns fn)
+        { fnLocals = Map.mapWithKey (\l d -> d{localType = if Map.member l boxedFromLists then TInt else listType st (localType d)}) (stLocals final)
+        , fnReturns = fmap (listType st) (fnReturns fn)
         , fnBlocks = Map.fromList (stDone final)
         , fnSpec = emptySpec
         }
   where
+    st = progStorage original
     -- (a Box of an array made from a list is the list itself, as a Box of an array is a List: the elements are
     -- already in their own memory, and making an inline array of them first would need a size the type does not give)
     boxedFromLists =
@@ -266,7 +281,7 @@ lowerFunction renames original fn =
             , useCount l == 1
             , Assign dest (MakeBox o) <- allStatements
             , operandLocal o == Just l
-            , Just (TBox TArrayOf{}) <- [localType <$> Map.lookup dest (fnLocals fn)]
+            , Just ((boxContent st -> Just TArrayOf{})) <- [localType <$> Map.lookup dest (fnLocals fn)]
             ]
     allStatements = [s | BasicBlock ss _ <- Map.elems (fnBlocks fn), s <- ss]
     allOperands = concatMap statementOperands allStatements ++ concatMap terminatorOperands [t | BasicBlock _ t <- Map.elems (fnBlocks fn)]
@@ -293,6 +308,7 @@ lowerFunction renames original fn =
             , stDone = []
             , stCurrent = BlockId 0
             , stStatements = []
+            , stStorage = st
             }
     lowerBlock (b, BasicBlock stmts term) = do
         modifySt (\s -> s{stCurrent = b, stStatements = []})
@@ -310,9 +326,9 @@ lowerFunction renames original fn =
             let inner ty = case ty of TRef t -> t; TMutRef t -> t; t -> t
                 stepType _ (RefField ctor field) = fromMaybe TInt (lookup field (fieldTypesOf ctor))
                 stepType ty (RefIndex _) = case inner ty of
-                    TList t -> t
+                    (listElement st -> Just t) -> t
                     TArrayOf t _ -> t
-                    TBox (TArrayOf t _) -> t
+                    (boxContent st -> Just (TArrayOf t _)) -> t
                     _ -> TInt
                 targetTy = foldl stepType (inner rootTy) steps
             value <- case rv of
@@ -333,11 +349,11 @@ lowerFunction renames original fn =
             Unbox o -> heldIn o
             _ -> return Nothing
         case (rv, boxed) of
-            (ListOp NewBoxed [n, x], _) | TBox (TArrayOf element _) <- destTy -> operandFor element x >>= \x' -> callTo "listFilled" [n, x'] dest
-            (ListOp NewEmptyBoxed [], _) | TBox TArrayOf{} <- destTy -> callTo "listNew" [] dest
+            (ListOp NewBoxed [n, x], _) | (boxContent st -> Just (TArrayOf element _)) <- destTy -> operandFor element x >>= \x' -> callTo "listFilled" [n, x'] dest
+            (ListOp NewEmptyBoxed [], _) | (boxContent st -> Just TArrayOf{}) <- destTy -> callTo "listNew" [] dest
             (Unsize o, _) -> emit (Assign dest (Use (renameOperand o)))
             (MakeBox o, _) | Just l <- operandLocal o, Just src <- Map.lookup l boxedFromLists -> emit (Assign dest (Use src))
-            (MakeBox o, _) | TBox held <- destTy, not (isArrayType held) -> operandFor held o >>= \o' -> callTo "boxNew" [o'] dest
+            (MakeBox o, _) | (boxContent st -> Just held) <- destTy, not (isArrayType held) -> operandFor held o >>= \o' -> callTo "boxNew" [o'] dest
             (Unbox o, Just _) -> callTo "boxUnbox" [renameOperand o] dest
             _ -> lowerOther dest destTy rv
 
@@ -345,7 +361,7 @@ lowerFunction renames original fn =
     heldIn o = do
         ty <- operandType o
         return $ case ty of
-            Just (TBox held) | not (isArrayType held) -> Just held
+            Just ((boxContent st -> Just held)) | not (isArrayType held) -> Just held
             _ -> Nothing
 
     lowerOther dest destTy rv =
@@ -355,7 +371,7 @@ lowerFunction renames original fn =
                 if isList then listCall dest destTy op os else rewritten dest destTy rv
             MakeList os -> do
                 let element = case destTy of
-                        TList t -> t
+                        (listElement st -> Just t) -> t
                         _ -> TInt
                 callTo "listNew" [] dest
                 mapM_ (\o -> operandFor element o >>= \o' -> callTo "listPush" [Copy dest, o'] dest) os
@@ -369,40 +385,40 @@ lowerFunction renames original fn =
         ty <- operandType o
         return $ case (o, ty) of
             (Const (CList _), _) -> True
-            (_, Just (TList _)) -> True
-            (_, Just (TRef (TList _))) -> True
-            (_, Just (TMutRef (TList _))) -> True
+            (_, Just ((listElement st -> Just _))) -> True
+            (_, Just (TRef ((listElement st -> Just _)))) -> True
+            (_, Just (TMutRef ((listElement st -> Just _)))) -> True
             -- (a Box of an array is a list of native code)
-            (_, Just (TBox TArrayOf{})) -> True
+            (_, Just ((boxContent st -> Just TArrayOf{}))) -> True
             _ -> False
 
     listCall dest destTy op os = do
-        operandTy0 <- maybe (TList TInt) id <$> operandType (head os)
+        operandTy0 <- maybe (listOf st TInt) id <$> operandType (head os)
         let operandTy = case operandTy0 of
                 TRef inner -> inner
                 TMutRef inner -> inner
                 other -> other
         -- (a list that is pushed to or set is the list that results, which says the type of a constant that is empty)
         let listTy = case (op, destTy, head os) of
-                (Push, TList _, _) -> destTy
-                (Set, TList _, _) -> destTy
+                (Push, (listElement st -> Just _), _) -> destTy
+                (Set, (listElement st -> Just _), _) -> destTy
                 -- (the list that is popped has the type of the result)
-                (Pop, TList _, _) -> destTy
+                (Pop, (listElement st -> Just _), _) -> destTy
                 -- (an Uninit of a list is the list natively, so the one it is made with has the type of the result)
-                (UninitNew, TList _, _) -> destTy
+                (UninitNew, (listElement st -> Just _), _) -> destTy
                 -- (a constant list that is read from has elements of the type that is read, which an empty one among them does not say)
-                (_, _, Const _) | op `elem` [First, Last, Get] -> TList destTy
+                (_, _, Const _) | op `elem` [First, Last, Get] -> listOf st destTy
                 _ -> operandTy
             element = case listTy of
-                TList t -> t
-                TBox (TArrayOf t _) -> t
+                (listElement st -> Just t) -> t
+                (boxContent st -> Just (TArrayOf t _)) -> t
                 _ -> case destTy of
-                    TList t -> t
+                    (listElement st -> Just t) -> t
                     _ -> TInt
         l <- operandFor listTy (head os)
-        let struct = case listType listTy of
+        let struct = case listType st listTy of
                 TNamed base args -> instanceName base args
-                _ -> "List"
+                other -> instanceName (storageList st) [ArgType other]
         case (op, drop 1 os) of
             -- (an element is read from the list where it is: a part that is only read is not copied)
             (Length, []) -> emit (Assign dest (ReadField l struct "len"))
@@ -435,13 +451,13 @@ lowerFunction renames original fn =
             let element = case (destTy, addressTy) of
                     (_, Just (TAddr t)) -> t
                     (TArrayOf t _, _) -> t
-                    (TBox (TArrayOf t _), _) -> t
+                    ((boxContent st -> Just (TArrayOf t _)), _) -> t
                     _ -> TInt
             -- (the element that an array is made of, or that is put in it, has the type of the elements of the array)
             let isElement i = (i == (1 :: Int) && op `elem` [NewArray, NewBoxed]) || (i == 2 && op `elem` [Set, AddrWrite])
             os' <- mapM (\(i, o) -> operandFor (if isElement i then element else TInt) o) (zip [0 ..] os)
             return (ListOp op os')
-        MakeBox o -> MakeBox <$> operandFor (case destTy of TBox t -> t; t -> t) o
+        MakeBox o -> MakeBox <$> operandFor (case destTy of (boxContent st -> Just t) -> t; t -> t) o
         Unbox o -> return (Unbox (renameOperand o))
         Unsize o -> return (Unsize (renameOperand o))
         MakeData name fs -> do
@@ -463,17 +479,17 @@ lowerFunction renames original fn =
     nativeBorrowSteps ty steps wanted = case ty of
         TRef inner -> nativeBorrowSteps inner steps wanted
         TMutRef inner -> nativeBorrowSteps inner steps wanted
-        TBox inner | RefField ctor _ : _ <- steps,
-            ctor /= instanceName "Box" [ArgType inner] ->
+        (boxContent st -> Just inner) | RefField ctor _ : _ <- steps,
+            ctor /= instanceName (storageBox st) [ArgType inner] ->
                 RefIndex (Const (CInt 0)) : nativeBorrowSteps inner steps wanted
         _ -> case steps of
-            [] -> [RefIndex (Const (CInt 0)) | TBox inner <- [ty], inner == wanted]
+            [] -> [RefIndex (Const (CInt 0)) | Just inner <- [boxContent st ty], inner == wanted]
             RefField ctor field : rest -> renameBorrowStep (RefField ctor field) :
                 nativeBorrowSteps (fromMaybe TInt (lookup field (fieldTypesOf ctor))) rest wanted
             RefIndex index : rest -> RefIndex (renameOperand index) : nativeBorrowSteps (case ty of
-                TList inner -> inner
+                (listElement st -> Just inner) -> inner
                 TArrayOf inner _ -> inner
-                TBox (TArrayOf inner _) -> inner
+                (boxContent st -> Just (TArrayOf inner _)) -> inner
                 _ -> TInt) rest wanted
     unref (TRef ty) = ty
     unref (TMutRef ty) = ty
@@ -501,8 +517,8 @@ lowerFunction renames original fn =
     sameFunction callee = callee == Const (CFn (fnName fn))
     unknown t = case t of
         TVar _ -> True
-        TList e -> unknown e
-        TBox e -> unknown e
+        (listElement st -> Just e) -> unknown e
+        (boxContent st -> Just e) -> unknown e
         TAddr e -> unknown e
         TUninit e -> unknown e
         TArrayOf e _ -> unknown e
@@ -538,10 +554,10 @@ lowerFunction renames original fn =
     materialize ty c = case c of
         CList cs -> do
             let listTy = case ty of
-                    TList e | not (unknown e) -> ty
-                    _ -> fromMaybe (TList TInt) (constantType c)
+                    (listElement st -> Just e) | not (unknown e) -> ty
+                    _ -> fromMaybe (listOf st TInt) (constantType st c)
                 element = case listTy of
-                    TList t -> t
+                    (listElement st -> Just t) -> t
                     _ -> TInt
             temp <- newTemp listTy
             callTo "listNew" [] temp

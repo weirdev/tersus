@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module TestPipeline
     ( testExamples
     , testHostValidation
@@ -12,6 +13,7 @@ module TestPipeline
     , exampleExpectations
     ) where
 
+import TestStorage (pattern TList, pattern TBox)
 import Control.Exception (IOException, bracket, evaluate, finally, try)
 import Data.List (isInfixOf, nub, sort, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)

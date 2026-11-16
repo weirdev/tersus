@@ -24,7 +24,8 @@ import qualified PackageCompile as Package
 import PreludeSource (elaboratePackageFiles, libModules, toolPackageFiles, validationPackageFiles)
 import qualified Syntax as S
 import Pipeline (ownedSource, loadFromFilesystem)
-import Types (Arg (..), Size (..), Type (..), pattern TList, pattern TBox)
+import Types (Arg (..), Size (..), Type (..))
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)
 import TestVariadic (variadicPrograms)
@@ -355,7 +356,7 @@ packageLowerings files entry =
 
 -- As LibPackage takes each library's unit; every library answers
 libraryLowerings :: Result [UnitLowering] String
-libraryLowerings = case bootstrapLoader (LoadRequest LoadLibraries False (Mod.resolverFromFiles []) Nothing Mod.librarySources []) of
+libraryLowerings = case bootstrapLoader Mod.libraryRequest of
     LoadedLibraries answers Nothing
         | sort [label | LibraryAnswer label _ _ _ <- answers] == sort [label | (label, _, _) <- libModules] -> libraries answers
         | otherwise -> Error "the libraries that answered are not PreludeSource.libModules"

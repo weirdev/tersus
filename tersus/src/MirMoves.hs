@@ -21,7 +21,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Mir
-import Types (Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
+import Types (Name, Type (..), Variable, baseNameOf, boxContent, instanceName, listElement, tupleGeneric)
 import Utils (Result (..))
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
@@ -120,8 +120,8 @@ ownsHeap :: Program -> Type -> Bool
 ownsHeap program = go Set.empty
   where
     go seen ty = case ty of
-        TList _ -> True
-        TBox _ -> True
+        _ | Just _ <- listElement (progStorage program) ty -> True
+        _ | Just _ <- boxContent (progStorage program) ty -> True
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
         TNamed base args | Set.member (instanceName base args) seen -> False
@@ -140,8 +140,8 @@ holdsReference program = go Set.empty
     go seen ty = case ty of
         TRef _ -> True
         TMutRef _ -> True
-        TList t -> go seen t
-        TBox t -> go seen t
+        _ | Just t <- listElement (progStorage program) ty -> go seen t
+        _ | Just t <- boxContent (progStorage program) ty -> go seen t
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
         TNamed base args | Set.member (instanceName base args) seen -> False
@@ -237,8 +237,8 @@ linearParts linear drops program = go (0 :: Int)
             TBlock _ -> [[]]
             -- (a list and a Box are structs of the prelude, but no value of one holds a permission: an element may
             -- not be one, so there is no linear part inside one for this pass to follow)
-            TList _ -> []
-            TBox _ -> []
+            _ | Just _ <- listElement (progStorage program) ty -> []
+            _ | Just _ <- boxContent (progStorage program) ty -> []
             TNamed base _ | base `Set.member` drops -> []
             TVariant v | Just n <- ownerOf program v, baseNameOf n `Set.member` drops -> []
             -- (an Uninit of a value that owns something is linear: what it holds is freed only by taking it out)
@@ -375,17 +375,16 @@ parameterCopy p = "$param " ++ p
 checkFunction :: Set Name -> Set Name -> Set Name -> Program -> Function -> [String]
 checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
   where
-    -- (the drop of a type, `<T as Drop>::drop`, is given the value to free: it only reads what native code frees after it (its fields), and
+    -- (the checked drop of a type is given the value to free: it only reads what native code frees after it (its fields), and
     -- it has to use the permissions the value holds, which nothing else will)
-    dropOf = case (implOwner (fnName fn), fnParams fn) of
-        (Just owner, self : _) | " as Drop>::drop" `isSuffixOf'` fnName fn -> Just (owner, self)
+    dropOf = case (dropOwner program (fnName fn), fnParams fn) of
+        (Just owner, self : _) -> Just (baseNameOf owner, self)
         _ -> Nothing
     lent = Set.fromList (fnBorrowed fn ++ [self | Just (_, self) <- [dropOf]])
     (liveAfter, liveOut) = liveness fn
     cx = Cx program copies fn lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty (borrowRefsOf fn) Set.empty
     -- (a permission given to the function, and not lent, is the function's to use)
     entry = emptySt{stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)])}
-    isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)
     -- The fixpoint goes in rounds: each round joins every reached block's state with what its predecessors' states lead
     -- to (in the order of the predecessors), and the first round that changes no block's shape ends it. It keeps rounds,
     -- rather than joining as it goes, because a join keeps the record of the move that reaches it first, and a message

@@ -3,6 +3,7 @@
 module MirMono
     ( monomorphize
     , monomorphizeForValidation
+    , namedTypesByName
     ) where
 
 import Data.List (intercalate)
@@ -12,7 +13,7 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
+import Types (Arg (..), Name, OwnershipFacts (..), Size (..), Type (..), Variable, instanceName, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -25,14 +26,14 @@ import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox,
 -- that one has replaced, so the copies there are to make are those that the program reaches, and there are finitely many (a size is
 -- never worked out from others). A program with no function of the kind is returned as it is.
 monomorphize :: Program -> Program
-monomorphize = monoWith unspecifiedFunction completeErasedInstances
+monomorphize = monoWith True unspecifiedFunction completeErasedInstances
 
 -- The copies a call decides, with the contracts and ghost statements
 -- kept: what a validator is given, since it checks the copies by the
 -- contracts the template declares (native code is given the copies
 -- with them stripped, by monomorphize).
 monomorphizeForValidation :: Program -> Program
-monomorphizeForValidation = monoWith id completeInstances
+monomorphizeForValidation = monoWith False id completeInstances
 
 -- A function with its contracts and ghost statements stripped, as
 -- native code is given a copy
@@ -45,21 +46,27 @@ unspecifiedFunction f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock s
 
 -- (native code is given its structs without their permissions, which the
 -- validator reads)
-monoWith :: (Function -> Function) -> (Program -> Program) -> Program -> Program
-monoWith finish completeTypes program
+monoWith :: Bool -> (Function -> Function) -> (Program -> Program) -> Program -> Program
+monoWith native finish completeTypes program
     | not (any generic (Map.elems (progFunctions program))) = program
     | otherwise =
         withInstances
             program
                 { progFunctions = Map.fromList [(fnName f, f) | f <- map finish (plain' ++ Map.elems instances)]
                 , progMain = finish main'
+                , progOwnership = ownership
                 }
   where
     -- (the structs with sizes that the copies mention are declared, and those that only a function with sizes mentioned, whose sizes
     -- were names, are not there any more)
+    -- (and in native code, which runs after the validator, an instance no value of which the program holds, as no local
+    -- (a parameter is one), result or field mentions it, is not declared: it has no values to free or copy, so its facts
+    -- would name a drop copy nothing makes; the validator is given every instance its proofs may name)
     withInstances p =
         let complete = completeTypes p
-         in complete{progTypes = Map.filterWithKey (\name _ -> not (symbolic name)) (progTypes complete)}
+            held = namedTypesByName complete
+            kept name = not (symbolic name) && (not native || '<' `notElem` name || Map.member name held)
+         in complete{progTypes = Map.filterWithKey (\name _ -> kept name) (progTypes complete)}
     symbolic name = maybe False mentionsParameter (Map.lookup name namedTypes)
     -- (once: it is made of every local of every function, and every type name and drop asks it)
     namedTypes = namedTypesByName program
@@ -72,17 +79,20 @@ monoWith finish completeTypes program
     (main', mainNeeds) = redirect program (progMain program)
     redirected = [redirect program f | f <- Map.elems (progFunctions program), not (generic f)]
     plain' = map fst redirected
-    -- (the drop of a struct with types is made for each instance of the struct that the program has, and named for it, `<Vec<Int> as Drop>::drop`:
-    -- native code calls it where a value of that instance is freed, which no call in the program says)
-    instances = Map.mapWithKey dropName (withDrops (build program (mainNeeds ++ concatMap snd redirected) Map.empty) (4 :: Int))
-    withDrops done k =
+    -- (the drop of a struct with types is the copy of its checked drop for each instance of the struct that the program has:
+    -- native code calls it where a value of that instance is freed, which no call in the program says; the instance's
+    -- facts then name the copy)
+    (instances, dropKeys) = withDrops (build program (mainNeeds ++ concatMap snd redirected) Map.empty) Map.empty (4 :: Int)
+    withDrops done owners k =
         let p = withInstances program{progFunctions = Map.fromList [(fnName f, f) | f <- plain' ++ Map.elems done], progMain = main'}
-            keys = [key | n <- Map.keys (progTypes p), not (symbolic n), Just key <- [dropKey n], Map.notMember key done]
-         in if null keys || k <= 0 then done else withDrops (build program keys done) (k - 1)
+            found = [(n, key) | n <- Map.keys (progTypes p), not (symbolic n), Map.notMember n owners, Just key <- [dropKey n]]
+            owners' = foldr (uncurry Map.insert) owners found
+            keys = [key | (_, key) <- found, Map.notMember key done]
+         in if null found || k <= 0 then (done, owners') else withDrops (build program keys done) owners' (k - 1)
     dropKey n = do
-        base <- Just (takeWhile (/= '<') n)
-        let name = "<" ++ base ++ " as Drop>::drop"
+        (_, name) <- factsOf program n >>= ownershipDrop
         f <- Map.lookup name (progFunctions program)
+        if not (generic f) then Nothing else Just ()
         self <- case fnParams f of
             p : _ -> Just p
             [] -> Nothing
@@ -90,9 +100,7 @@ monoWith finish completeTypes program
         let bindings = match selfTy (Map.findWithDefault (TNamed n []) n namedTypes)
         tys <- mapM (`lookup` bindings) (fnTypeParams f)
         Just (name, tys, [])
-    dropName (name, _, _) f
-        | isDropFunction name, self : _ <- fnParams f, Just (TNamed base args) <- localType <$> Map.lookup self (fnLocals f) = f{fnName = "<" ++ instanceName base args ++ " as Drop>::drop"}
-        | otherwise = f
+    ownership = fmap (\facts -> Map.foldrWithKey (\n (name, tys, sizes) -> Map.adjust (\f -> f{ownershipDrop = fmap (\(provider, _) -> (provider, fnInstanceName name tys sizes)) (ownershipDrop f)}) n) facts dropKeys) (progOwnership program)
 
 -- The copies to make, with those that the copies need
 -- (the types and the sizes that a copy is for)
@@ -140,9 +148,7 @@ instantiate fn tys sizes =
         renames = Map.fromList [(instanceName b a, case types (TNamed b a) of TNamed b' a' -> instanceName b' a'; _ -> instanceName b a) | ty <- map localType (Map.elems (fnLocals fn)) ++ maybe [] (: []) (fnReturns fn), (b, a) <- namedSubs ty]
         namedSubs ty = case ty of
             TNamed b a -> (b, a) : concat [namedSubs u | ArgType u <- a]
-            TList u -> namedSubs u
             TArrayOf u _ -> namedSubs u
-            TBox u -> namedSubs u
             TAddr u -> namedSubs u
             TBlock u -> namedSubs u
             TUninit u -> namedSubs u
@@ -240,7 +246,6 @@ typeArguments caller target args dest = [fromMaybe TInt (lookup t found) | t <- 
 match :: Type -> Type -> [(Variable, Type)]
 match pat actual = case (pat, actual) of
     (TParam name, a) -> [(name, a)]
-    (TBox p, TBox a) -> match p a
     (TAddr p, TAddr a) -> match p a
     (TUninit p, TUninit a) -> match p a
     (TBlock p, TBlock a) -> match p a
@@ -266,9 +271,7 @@ namedTypesByName program = Map.fromList [(instanceName b a, TNamed b a) | ty <- 
     allTypes = [localType d | f <- progMain program : Map.elems (progFunctions program), d <- Map.elems (fnLocals f)] ++ [ty | f <- progMain program : Map.elems (progFunctions program), Just ty <- [fnReturns f]] ++ [ty | StructDecl fields <- Map.elems (progTypes program), (_, ty) <- fields] ++ [ty | EnumDecl variants <- Map.elems (progTypes program), (_, fields) <- variants, (_, ty) <- fields] ++ [ty | (_, fields) <- Map.elems (progGenerics program), (_, ty) <- fields]
     subs ty = case ty of
         TNamed b a -> (b, a) : concat [subs u | ArgType u <- a]
-        TList u -> subs u
         TArrayOf u _ -> subs u
-        TBox u -> subs u
         TAddr u -> subs u
         TBlock u -> subs u
         TUninit u -> subs u

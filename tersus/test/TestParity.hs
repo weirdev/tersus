@@ -377,9 +377,7 @@ unsupportedType t = case t of
     TWord{} -> True
     TAddr{} -> True
     TBlock{} -> True
-    TList element -> unsupportedType element
     TArrayOf element _ -> unsupportedType element
-    TBox element -> unsupportedType element
     TFn args result -> any unsupportedType (result : args)
     TForall _ _ element -> unsupportedType element
     TUninit element -> unsupportedType element
