@@ -47,6 +47,8 @@ fn shape(node: &AstNode) -> Int ~ {
     if node is AstNode::OptType { return 3800 + shapeOptType((node as AstNode::OptType).value); };
     if node is AstNode::Interface { return 3900 + shapeInterface((node as AstNode::Interface).value); };
     if node is AstNode::Scheme { return 4000 + shapeScheme((node as AstNode::Scheme).value); };
+    if node is AstNode::OwnershipFacts { return 4100; };
+    if node is AstNode::OwnershipInterface { return 4200; };
     return 0 - 1;
 };
 
