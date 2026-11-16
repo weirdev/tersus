@@ -109,6 +109,7 @@ testMirMonoUsing lower = TestList "testMirMono"
             let prefix = "function \"plain\""
                 broken = unlines [if prefix `isPrefixOf` line then "function \"plaín\"" ++ drop (length prefix) line else line | line <- lines text]
              in refuses ("pass mono\n" ++ broken)
+    , TestCase "current PackLoop rejects a negative invariant reference" negativePackLoop
     , TestCase "legacy PackLoop metadata emits current canonical MIR3" legacyPackLoop
     , testCase "the comparator catches omitted pack-loop invariants" $ testAssertTrue
         (monoDifference (packLoopMetadata True metadataProgram) (packLoopMetadata False metadataProgram) /= Nothing)
@@ -300,6 +301,19 @@ legacyPackLoop = case writeLowered (unitOf (packLoopMetadata False metadataProgr
             else case readLowered legacy of
                 Error e -> pure (Just ("the current host rejected the legacy PackLoop record: " ++ e))
                 Ok unit -> compareInput (lowProgram unit) legacy
+
+negativePackLoop :: IO TestResult
+negativePackLoop = case writeLowered (unitOf (packLoopMetadata False metadataProgram)) of
+    Error e -> pure (Just e)
+    Ok original ->
+        let isLoop fields = length fields == 10 && fields !! 1 == "PackLoop"
+            rows = [(isLoop (words line), line) | line <- lines original]
+            broken = unlines [if changed then unwords (take 8 (words line) ++ ["-1"] ++ drop 9 (words line)) else line | (changed, line) <- rows]
+         in if length (filter fst rows) /= 1 || broken == original
+            then pure (Just "the negative PackLoop control did not change exactly one invariant reference")
+            else case readLowered broken of
+                Ok _ -> pure (Just "the current host admitted a negative PackLoop invariant reference")
+                Error _ -> refuses ("pass mono\n" ++ broken)
 
 monoFixtures :: [(String, Program)]
 monoFixtures =
