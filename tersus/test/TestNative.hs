@@ -28,8 +28,9 @@ import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess)
 import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Mir as M
-import MirEval (renderMirValue, runProgram)
+import MirEval (MirValue (MInt), renderMirValue, runProgram)
 import Compile (lowerStatements)
+import qualified Compile
 import MirHousekeeping (insertOwnership, verifyProgram)
 import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared)
 import TestParserFragments (parseStatementBlock)
@@ -66,6 +67,7 @@ testNative =
         , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
         , TestParallel "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
+        , TestParallel "references given two places" [TestCase name (sameValueUnvalidated name source value) | (name, source, value) <- twoPlacePrograms]
         , TestParallel "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestParallel "references" [TestCase name (sameAsMir name source) | (name, source) <- referencePrograms]
         , TestParallel "boxed Clone" [TestCase name (sameAsMir name source) | (name, source, _, _) <- boxedClonePrograms]
@@ -829,6 +831,15 @@ referenceWritePrograms =
     , ("a view of a place written through a reborrow keeps its value", "xs = [[7]]; r1 = &mut xs; a = *r1; old = get(a, 0); n = size(old); r2 = &mut *r1; *r2 = [[9, 10]]; return size(old) + n + size(get(xs, 0));")
     , ("a view of a place written through a reference kept in a Box keeps its value", "xs = [[7]]; t = get(xs, 0); r = &mut xs; b = Box::new(r); r2 = Box::unbox(b); *r2 = [[9]]; return size(t);")
     , ("an update parameter reborrowed for another is written through", "fn g(r: &mut List<Int>) -> Int writes(r) { *r = push(clone(*r), 1); return 0; }; fn f(r: &mut List<Int>) -> Int writes(r) { return g(&mut *r); }; xs = [7]; f(&mut xs); return size(xs);")
+    , ("a reborrow of a reference held in a field is written through", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; p = &mut *w.r; *p = 5; return x; }; return f(1);")
+    , ("a reborrow of a reference read out of a field is written through", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; q = w.r; p = &mut *q; *p = 5; return x; }; return f(1);")
+    , ("a reborrow of an update parameter is written through", "fn g(n: &mut Int) -> Int writes(n) { p = &mut *n; *p = 5; return 0; }; x = 1; g(&mut x); return x;")
+    , ("a reference given something other than a borrow: a reference given a read-out after a borrow writes through the read-out", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; p = &mut x; *p = 2; p = w.r; *p = 5; return x * 10 + y; }; return f(1);")
+    , ("a reference given something other than a borrow: in a loop", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; p = &mut x; i = 0; while i < 2 [{ affirm i >= 0; affirm i <= 2; }] shrinks 2 - i { *p = i + 2; p = w.r; i = i + 1; }; return x * 10 + y; }; return f(1);")
+    , ("a reference given something other than a borrow: in one branch", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; p = &mut x; *p = 2; if c > 0 { p = w.r; } else { }; *p = 5; return x * 10 + y; }; return f(1) * 100 + f(0);")
+    , ("a reference given something other than a borrow: a borrow made in one branch is not what it holds after the branches meet", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; p = w.r; if c > 0 { p = &mut x; } else { }; *p = 5; return x * 10 + y; }; return f(1) * 100 + f(0);")
+    , ("a reference given something other than a borrow: nor in the other branch", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; p = w.r; if c > 0 { } else { p = &mut x; }; *p = 5; return x * 10 + y; }; return f(1) * 100 + f(0);")
+    , ("a reference given something other than a borrow: a reborrow given a read-out after it was written through", "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; y = 1; w = W { r: &mut y }; q = &mut x; p = &mut *q; *p = 2; p = w.r; *p = 5; return x * 10 + y; }; return f(1);")
     , ("an update parameter rebuilt from itself releases what it held", "fn put(xs: &mut List<List<Int>>) -> Int writes(xs) { *xs = push(clone(*xs), [9, 10]); return 0; }; a = [[7], [8]]; put(&mut a); return size(a);")
     ]
 
@@ -880,6 +891,31 @@ constantListPrograms =
            ]
   where
     text n = take n (cycle ['a' .. 'z'])
+
+-- References given a borrow and then another place, which the validator does not follow (one reference, one place)
+twoPlacePrograms :: [(String, String, Integer)]
+twoPlacePrograms =
+    [ ("a reference given a call result after a borrow writes through the result", "fn idm(n: &mut Int) -> &mut Int from n [{ }] [{ }] { return &mut *n; }; fn f(c: Int) -> Int { x = 1; y = 1; p = &mut x; *p = 2; p = idm(&mut y); *p = 5; return x * 10 + y; }; return f(1);", 25)
+    , ("or given another reference", "fn f(c: Int) -> Int { x = 1; y = 1; p = &mut x; *p = 2; q = &mut y; p = q; *p = 5; return x * 10 + y; }; return f(1);", 25)
+    , ("a reborrow of an update parameter given a reborrow of another", "fn g(n: &mut Int, m: &mut Int) -> Int [{ }] [{ }] { p = &mut *n; *p = 2; p = &mut *m; *p = 5; return 0; }; fn f(c: Int) -> Int { x = 1; y = 1; k = g(&mut x, &mut y); return x * 10 + y; }; return f(1);", 25)
+    ]
+
+-- The value of a program lowered as a program is (by the elaborator built from the current sources), move checked and
+-- not validated, and native code's agreement with it
+sameValueUnvalidated :: String -> String -> Integer -> IO TestResult
+sameValueUnvalidated name source value = case Compile.lowerSource True source of
+    Error e -> pure (Just e)
+    Ok program -> case runProgram program of
+        Ok (Just (MInt n)) | n == value -> do
+            available <- clangAvailable
+            if not available
+                then pure Nothing
+                else do
+                    ir <- emitUnvalidated program
+                    case ir of
+                        Error e -> pure (Just e)
+                        Ok text -> buildAndRun "" [] ("twoplaces_" ++ map safeChar name) name text (ExitSuccess, show value ++ "\n", "")
+        other -> pure (Just ("expected " ++ show value ++ ", got " ++ show other))
 
 unvalidatedPrograms :: [(String, String)]
 unvalidatedPrograms = functionPrograms

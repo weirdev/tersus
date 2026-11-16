@@ -662,6 +662,26 @@ fn setGlobal(ls: LowSt, var: String, name: String) -> LowSt ~ {
     return LowSt { globals: globals, globalsVersion: version, ..ls };
 };
 
+// A local given anything but a borrow is no longer to the place its last borrow was of
+fn forgetRefTarget(ls: LowSt, l: Int) -> LowSt ~ {
+    i = findRefTarget(&ls, l);
+    if i < 0 || i >= size(ls.bRefTargets) { return ls; };
+    if get(ls.bRefTargets, i).root < 0 { return ls; };
+    targets = push(ls.bRefTargets, RefTarget { local: l, root: 0 - 1, steps: [] });
+    return LowSt { bRefTargets: targets, ..ls };
+};
+
+// Forgets the places of the locals recorded from position `from` of `recorded` on
+fn forgetRecorded(ls: LowSt, recorded: &List<RefTarget>, from: Int) -> LowSt ~ {
+    if from < 0 { return ls; };
+    i = from;
+    while i < size(recorded) [{ affirm i >= 0; }] shrinks size(recorded) - i {
+        ls = forgetRefTarget(ls, get(recorded, i).local);
+        i = i + 1;
+    };
+    return ls;
+};
+
 fn findRefTarget(ls: &LowSt, l: Int) -> Int ~ {
     i = size(ls.bRefTargets) - 1;
     while i >= 0 [{ affirm i < size(ls.bRefTargets); }] shrinks i + 1 {

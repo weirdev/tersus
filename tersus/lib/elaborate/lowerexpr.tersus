@@ -2,7 +2,7 @@ import data::ast::ast { AstExpression, AstNode, AstValue };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::state { intText };
 import elaborate::lowerstate { lwMalformed, Swapped, swapBuilder, Builder, LowSt, Op, Pend, RefTarget, Rv, Step, Term, argOf, boxInner, claim, fnType, forNameOf, hasInt, hasText, intAt, isMutRefTy, isTupleBase, lfail, lwBaseName, lwCat, lwCat3, lwHasByte, lwInstanceText, lwKind, lwTextAt, newBuilder, noOp, noRv, quote, lwSp, tupleParts, tyOf, typeNameOf };
-import elaborate::lowerbuild { Bi, packLocalOf, packReadMark, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, fnConst, gotoTerm, isPrim, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valueAt, varNameOf };
+import elaborate::lowerbuild { Bi, packLocalOf, packReadMark, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, forgetRefTarget, fnConst, gotoTerm, isPrim, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valueAt, varNameOf };
 import elaborate::lower { buildFunction };
 import elaborate::lowerplace { fieldCtor, lowerPlace };
 
@@ -386,11 +386,12 @@ fn lowerConditionWith(ls: LowSt, src: &List<AstNode>, cond: Int, ty: Int, yes: I
 fn finishInto(ls: LowSt, dest: Int, pend: Pend) -> LowSt ~ {
     if !pend.isCall {
         ls = emitAssign(ls, dest, &pend.rv);
-        if pend.rv.k != 3 { return ls; };
+        if pend.rv.k != 3 { return forgetRefTarget(ls, dest); };
         targets = push(ls.bRefTargets, RefTarget { local: dest, root: pend.rv.root, steps: clone(pend.rv.steps) });
         return LowSt { bRefTargets: targets, ..ls };
     };
     if !ls.bHasOpen { return ls; };
+    ls = forgetRefTarget(ls, dest);
     ls = newBlock(ls);
     next = ls.id;
     text = lwSp(lwSp(lwSp(opText(&pend.callee), intText(size(pend.args))), argsText(&pend.args)), intText(dest));
