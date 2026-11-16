@@ -140,6 +140,16 @@ fn ownConsume(tracked: &List<Int>, parts: List<OwnPart>, moved: &List<Int>) -> L
     for local in moved { out = ownSetState(tracked, ownClearFields(out, local), whole(local), OwnState::Empty); };
     return out;
 };
+// The local a statement leaves holding nothing, or -1: a drop, or a value taken apart (the erasure makes `dissolve L` this
+// clearing of L's bytes, and dropping cleared bytes would only test them for zero)
+fn emptiedLocal(st: &Statement) -> Int ~ {
+    if st is Statement::Drop { return (st as Statement::Drop).local; };
+    if st is Statement::Peek {
+        p = st as Statement::Peek;
+        if p.rv is Rvalue::ListOp && (p.rv as Rvalue::ListOp).op = 35 && size((p.rv as Rvalue::ListOp).args) = 0 { return p.local; };
+    };
+    return 0 - 1;
+};
 fn ownTransferStatement(dc: &DropCx, tracked: &List<Int>, parts: List<OwnPart>, st: &Statement) -> List<OwnPart> ~ {
     consumed = ownConsume(tracked, parts, dropStatementMoved(st));
     if st is Statement::Assign {
@@ -150,10 +160,8 @@ fn ownTransferStatement(dc: &DropCx, tracked: &List<Int>, parts: List<OwnPart>, 
         };
         return ownSetState(tracked, ownClearFields(consumed, assign.local), whole(assign.local), OwnState::Owned);
     };
-    if st is Statement::Drop {
-        local = (st as Statement::Drop).local;
-        return ownSetState(tracked, ownClearFields(consumed, local), whole(local), OwnState::Empty);
-    };
+    emptied = emptiedLocal(st);
+    if emptied >= 0 { return ownSetState(tracked, ownClearFields(consumed, emptied), whole(emptied), OwnState::Empty); };
     return consumed;
 };
 fn ownTransferTerminator(tracked: &List<Int>, parts: List<OwnPart>, term: &Terminator) -> List<OwnPart> ~ {
@@ -377,7 +385,8 @@ fn dropWithStatementFlags(dc: &DropCx, flags: &List<DropFlag>, st: &Statement) -
     out = concatStatements(out, dropFlagClears(flags, dropStatementMoved(st)));
     out = concatStatements(out, dropTakeClear(dc, flags, st));
     if st is Statement::Assign { out = concatStatements(out, dropFlagsOf(flags, (st as Statement::Assign).local, true)); };
-    if st is Statement::Drop { out = concatStatements(out, dropFlagsOf(flags, (st as Statement::Drop).local, false)); };
+    emptied = emptiedLocal(st);
+    if emptied >= 0 { out = concatStatements(out, dropFlagsOf(flags, emptied, false)); };
     return out;
 };
 // The build is passed by value, so that adding a block moves the list rather than copying it through a reference

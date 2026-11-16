@@ -348,7 +348,7 @@ Native code frees what a program makes and changes lists in place, so `MirHousek
 | reads the value: `size`, `==`, `is`, the list of a `get` | nothing |
 | takes it: `y = x`, the list and the element of `push`/`set`, a field of a list or struct that is made, an argument of a call, `_0` | `Move x` when it is not used again (`x` is left holding nothing), and otherwise a `CopyOf` of it |
 
-A local is dropped before an assignment or call overwrites a value it still owns, and remaining owned values are dropped at return. Ownership tracks whole values and partial fields across control-flow joins and uses flags where cleanup is conditional. A parameter declared with `&` or `&mut` borrows its referent; a consuming argument transfers the value it owns. If the caller still needs an owning value, it supplies a clone.
+A local is dropped before an assignment or call overwrites a value it still owns, and remaining owned values are dropped at return. A value taken apart by a destructuring assignment (its `dissolve L`, which the erasure makes a clearing of `L`'s bytes) owns nothing after it and is not dropped, as after a move; `listPush`, `listSet` and `listPop` take their list apart this way on every call. Ownership tracks whole values and partial fields across control-flow joins and uses flags where cleanup is conditional. A parameter declared with `&` or `&mut` borrows its referent; a consuming argument transfers the value it owns. If the caller still needs an owning value, it supplies a clone.
 
 **A part of a value** (`get`, `first`, `last`, a field) is part of what contains it:
 
