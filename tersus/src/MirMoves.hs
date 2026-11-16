@@ -530,8 +530,8 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
     -- (the references a reborrow was taken through, which lending it to a call does not conflict with)
     reborrowed' = case (borrowPlace, rv) of
         (Just _, _) | not (null borrowChain) -> Map.insert d (nub (borrowChain ++ concat [Map.findWithDefault [] link (stReborrowedThrough st1) | link <- borrowChain])) (stReborrowedThrough base)
-        (Nothing, Use operand) | isReference ty, Just src <- operandLocal operand, Just chain <- Map.lookup src (stReborrowedThrough st1) -> Map.insert d chain (stReborrowedThrough base)
-        (Nothing, CopyOf operand) | isReference ty, Just src <- operandLocal operand, Just chain <- Map.lookup src (stReborrowedThrough st1) -> Map.insert d chain (stReborrowedThrough base)
+        (Nothing, Use operand) | isRefType ty, Just src <- operandLocal operand, Just chain <- Map.lookup src (stReborrowedThrough st1) -> Map.insert d chain (stReborrowedThrough base)
+        (Nothing, CopyOf operand) | isRefType ty, Just src <- operandLocal operand, Just chain <- Map.lookup src (stReborrowedThrough st1) -> Map.insert d chain (stReborrowedThrough base)
         _ -> stReborrowedThrough base
     through'' = case (view, rv) of
         ([], _) -> Map.delete d (stThrough base)
@@ -598,7 +598,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
             let made = [(f, loansOf l) | (f, o) <- fields, Just l <- [operandLocal o], not (null (loansOf l))]
              in (loans', if null made then Map.delete d (stExtraLoans base) else Map.insert d (concatMap snd made) (stExtraLoans base), foldl' (\m (f, places) -> Map.insert (d, f) places m) clearedFields made)
         ReadField o _ field
-            | isReference (typeOf cx d), Just src <- operandLocal o, Just places <- fieldLoansThrough src field ->
+            | isRefType (typeOf cx d), Just src <- operandLocal o, Just places <- fieldLoansThrough src field ->
                 case places of
                     place : more -> (Map.insert d (place, case typeOf cx d of TMutRef _ -> True; _ -> False, pos) (stLoans base), if null more then Map.delete d (stExtraLoans base) else Map.insert d more (stExtraLoans base), clearedFields)
                     [] -> (loans', Map.delete d (stExtraLoans base), clearedFields)
@@ -629,12 +629,12 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
                 let carried = concat [loansOf l | Just l <- map operandLocal [x]] ++ concat [Map.findWithDefault [] l (stExtraLoans st1) | Just l <- [operandLocal xs]]
                  in (loans', if null carried then Map.delete d (stExtraLoans base) else Map.insert d carried (stExtraLoans base), clearedFields)
         ListOp op args
-            | op `elem` [Get, First, Last], isReference (typeOf cx d), srcOp : _ <- args, Just src <- operandLocal srcOp, (place : more) <- Map.findWithDefault [] src (stExtraLoans st1) ->
+            | op `elem` [Get, First, Last], isRefType (typeOf cx d), srcOp : _ <- args, Just src <- operandLocal srcOp, (place : more) <- Map.findWithDefault [] src (stExtraLoans st1) ->
                 (Map.insert d (place, case typeOf cx d of TMutRef _ -> True; _ -> False, pos) (stLoans base), if null more then Map.delete d (stExtraLoans base) else Map.insert d more (stExtraLoans base), clearedFields)
         ListOp op args
             | op `elem` [Get, First, Last], referenceContents cx ty, srcOp : _ <- args, Just src <- operandLocal srcOp, places@(_ : _) <- Map.findWithDefault [] src (stExtraLoans st1) ->
                 (loans', Map.insert d places (stExtraLoans base), foldl' (\out field -> Map.insert (d, field) places out) clearedFields (refFieldNames cx ty))
-        Borrow root steps _ | isReference (typeOf cx root) ->
+        Borrow root steps _ | isRefType (typeOf cx root) ->
             let primary = fmap (\(place, _, _) -> place) (Map.lookup d loans')
                 copied = [resolvePlace cx st1 (owner, prefix ++ map (refStepConst (stConst st1)) steps) | (owner, prefix) <- Map.findWithDefault [] root (stExtraLoans st1)]
                 alternatives = filter (\place -> Just place /= primary) (nub copied)
@@ -667,15 +667,15 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
     loans' = case borrowPlace of
         Just (place, mutable) -> Map.insert d (place, mutable, pos) (stLoans base)
         Nothing -> case rv of
-            Use operand | isReference ty, Just src <- operandLocal operand -> copyLoan src
-            CopyOf operand | isReference ty, Just src <- operandLocal operand -> copyLoan src
+            Use operand | isRefType ty, Just src <- operandLocal operand -> copyLoan src
+            CopyOf operand | isRefType ty, Just src <- operandLocal operand -> copyLoan src
             _ -> Map.delete d (stLoans base)
     copyLoan src = case Map.lookup src (stLoans st1) of
         Just (target, _, at) -> Map.insert d (target, case ty of TMutRef{} -> True; _ -> False, at) (stLoans base)
         Nothing -> Map.delete d (stLoans base)
-    isReference TRef{} = True
-    isReference TMutRef{} = True
-    isReference _ = False
+    isRefType TRef{} = True
+    isRefType TMutRef{} = True
+    isRefType _ = False
     activeLoans = [(ref, place, lmut) | (ref, place, lmut) <- loanEntries cx st1, ref `Set.member` cxLiveNow cx, ref /= d]
     loanErrs = case borrowPlace of
         Just (place, mutable) ->
@@ -846,7 +846,7 @@ placeReads cx pos st except reads = nub
     , not (isReference cx l) || Map.member l (stThrough st)
     , let throughs = Map.lookup l (stThrough st)
     , q <- [readPlace cx st (r, ps ++ steps) | (r, ps) <- placesOf st l]
-    , (ref, lplace, True) <- loanEntries st
+    , (ref, lplace, True) <- loanEntries cx st
     , ref `notElem` except
     , ref `Set.member` cxLiveNow cx
     , overlaps q lplace
