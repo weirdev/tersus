@@ -25,8 +25,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   its importers), `src/LibPackage.hs` (the
   compiler libraries compiled once as a synthetic `tersuslib` package, one
   module per lib file, from the `PreludeSource` texts) and `src/Link.hs`
-  (merging the lowered modules into one program and pruning what the entry
-  program does not reach); `src/ElaborateRequest.hs` is the elaborator's requests and responses: a load of
+  (transporting the lowered modules to the native linker in `lib/mir/link/`,
+  which merges units, completes environments and prunes unreachable definitions); `src/ElaborateRequest.hs` is the elaborator's requests and responses: a load of
   a program, a package or the compiler libraries, and one module given as
   statements (`AST_DATA.md`), and `src/ElaboratorTool.hs` the executables that
   answer them (`bootstrapLoader`, the seed F0, for the compiler's own code;
@@ -112,6 +112,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     the complete `mir/full/` MIR3 codec; the emitter dispatches `pass mono`.
     The native seed contains this dispatcher; validation specialization in
     `MirMono.monomorphizeForValidation` retains contracts and ghosts in Haskell.
+    `mir/link/` uses the same complete MIR3 codec for `pass link`; the Haskell
+    `Link` wrapper uses the pinned emitter seed to avoid cycling through stage 1.
+    `TestLink` checks its canonical output against the frozen `LinkOracle`.
     The emitter's declaration-only `types.tersus`,
     `values.tersus`, `operations.tersus`, `functions.tersus` and
     `helpers.tersus` files are siblings of `emit.tersus` in one `mir::emit`
