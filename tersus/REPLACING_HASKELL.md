@@ -27,6 +27,16 @@ They are separate from the source count. Reproduce current counts from
 
 ## Implemented replacements
 
+### Linking
+
+`lib/mir/link/` implements unit deduplication, declaration and extern merging,
+environment completion and reachability pruning over the shared full-MIR3
+codec. The Haskell wrapper retains transport through the pinned emitter seed,
+the pure empty-unit refusal and the existing deferred copies stage. Complete
+specifications and proof metadata remain available for validation; native
+pruning processes each stable function/type edge source once. `TestLink`
+compares full metadata and canonical bytes with the test-only Haskell oracle.
+
 - **LLVM emission:** `lib/mir/emit/` is the production emitter.
   `LlvmEmit.hs` is deleted. Bootstrap uses the release asset pinned by
   `bootstrap/emitter.sha256`.
@@ -187,7 +197,7 @@ must also stay within the agreed performance budget against the same-host base.
 ### 1. Native monomorphization
 
 `lib/mir/mono/` implements native specialization over the complete MIR3 codec
-in `lib/mir/full/`. Linking and pruning remain in Haskell. The emitter accepts
+in `lib/mir/full/`. Linking and pruning use `lib/mir/link/`. The emitter accepts
 `pass mono`; the host adapter is `MirHousekeeping.monomorphizeWith`.
 The matching published seed runs this pass during cold bootstrap. The native
 Haskell binding and finisher are removed; validation specialization is retained.
