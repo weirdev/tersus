@@ -2047,7 +2047,7 @@ impl String {
 - **A `writeTo` of a program's own trait on `Int`, `Byte`, `Bool` or `String`** now has the library's beside it, so in a program with strings `x.writeTo(...)` on one of those is refused as ambiguous (`Int::writeTo is ambiguous, several impls define it. Call the one that is meant by its path: <Int as Format>::writeTo(...) or <Int as W>::writeTo(...)`): call it as `W::writeTo(x, ...)`.
 - **Not yet:** impls for lists, arrays and Boxes (with derived impls), options such as a width or a radix, and a `toString` (`"{}".format(x)` is that).
 
-What it costs. The text is built in one buffer: each argument appends to it in place (an Int writes its digits straight into it), with no string of its own, and the buffer grows by doubling. Writing 2,000,000 lines of `"x = {}, y = {}, ok = {}, name = {}\n"` natively takes about 560 ns a line, against about 725 ns for the same line made with `concat` and `String::fromInt`. A string literal is built each time its statement runs, so a template used again and again is better kept in a local (about 385 ns a line). For the validator a call of `format` is one call with no contract to prove. Each number of arguments has one copy of `formatInto`, with two calls and a branch for each argument and no loop (the loop over the template is in `formatPart`, which is validated once as library code), and the copies for one number of arguments share a verdict whatever the types are. Validating a call with 1, 4 or 16 arguments measured under 0.2 s more than a program without one.
+What it costs. The text is built in one buffer: each argument appends to it in place (an Int writes its digits straight into it), with no string of its own, and the buffer grows by doubling. Writing 2,000,000 lines of `"x = {}, y = {}, ok = {}, name = {}\n"` natively takes about 180 ns a line, against about 160 ns for the same line made with `concat` and `String::fromInt`. A string literal is made each time its statement runs, by one allocation and one copy of its bytes, so keeping a template used again and again in a local saves little (about 170 ns a line). For the validator a call of `format` is one call with no contract to prove. Each number of arguments has one copy of `formatInto`, with two calls and a branch for each argument and no loop (the loop over the template is in `formatPart`, which is validated once as library code), and the copies for one number of arguments share a verdict whatever the types are. Validating a call with 1, 4 or 16 arguments measured under 0.2 s more than a program without one.
 
 ### Output
 
@@ -2138,7 +2138,9 @@ use the compiler-owned unit contract described in [MIR.md](MIR.md).
 
 - **List operations.** `size` reads `len`; `get`, `first` and `last` read the
   element in place. Construction, push, set and pop call `listNew`,
-  `listPush`, `listSet` and `listPop`. Set and pop drop the removed element;
+  `listPush`, `listSet` and `listPop`, except that a non-empty literal of
+  numbers, Booleans or bytes (a string literal's among them) is copied from a
+  constant array into an allocation of its own size. Set and pop drop the removed element;
   a full push grows the allocation with `Addr::resize`. The List Drop impl
   frees its live elements and allocation. Clones have independent storage.
 - **Box operations.** A scalar `Box<T>` has one runtime field, `addr`;

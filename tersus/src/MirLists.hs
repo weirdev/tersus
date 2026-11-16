@@ -25,7 +25,8 @@ import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, instanceNa
 --
 -- Each operation on a list becomes a call of the function of the library (a call ends a block, so a block with one is cut there), each
 -- `List<T>` in a type becomes `List<T>`, and a list written as a constant (`[1, 2]`) is made by a call of `listNew` and one of
--- `listPush` for each element. A comparison of lists stays as it is: native code compares a `List` as a list (the elements in use,
+-- `listPush` for each element; a non-empty one of Ints, Bools or Bytes (the bytes of a string literal) is made as `Box::new(#[1, 2])`
+-- is, a constant array copied into memory of its own. A comparison of lists stays as it is: native code compares a `List` as a list (the elements in use,
 -- not the room that is left), and prints it as one.
 
 -- A Box is lowered the same way (step 29): a `Box<T>` whose T is not an array is the struct `Box<T>` of lib/box.tersus, one filled slot at
@@ -544,8 +545,11 @@ lowerFunction renames original fn =
                     TList t -> t
                     _ -> TInt
             temp <- newTemp listTy
-            callTo "listNew" [] temp
-            mapM_ (\x -> operandFor element (Const x) >>= \x' -> callTo "listPush" [Copy temp, x'] temp) cs
+            if not (null cs) && element `elem` [TInt, TBool, TByte] && all scalar cs
+                then emit (Assign temp (MakeBox (Const (CArray cs))))
+                else do
+                    callTo "listNew" [] temp
+                    mapM_ (\x -> operandFor element (Const x) >>= \x' -> callTo "listPush" [Copy temp, x'] temp) cs
             return (Copy temp)
         CData name fs -> do
             let fieldTypes = fieldTypesOf name
@@ -554,6 +558,10 @@ lowerFunction renames original fn =
             emit (Assign temp (MakeData (renameName renames name) fs'))
             return (Copy temp)
         _ -> return (Const (renameConstant renames c))
+    scalar c = case c of
+        CInt _ -> True
+        CBool _ -> True
+        _ -> False
 
 firstJust :: [Maybe a] -> Maybe a
 firstJust xs = listToMaybe [x | Just x <- xs]
