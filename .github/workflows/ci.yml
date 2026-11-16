@@ -127,13 +127,14 @@ jobs:
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)
+      # (on the runner of testParserBootstrap:2/2, which has the most time to spare)
       - name: Check an example through the CLI
-        if: ${{ matrix.shard == 1 }}
+        if: ${{ matrix.shard == 8 }}
         run: stack run tersus-exe -- run examples/frame_facts.tersus
 
       # The command line itself (the tests call its parts): the emitter in Tersus writes the IR
       - name: Check the emitter in Tersus through the CLI
-        if: ${{ matrix.shard == 1 }}
+        if: ${{ matrix.shard == 8 }}
         run: stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/tersus.ll"
 
       # A function's verdict is kept under the build of the validator that gave it, and a run uses one build, so the
