@@ -1,6 +1,6 @@
 import data::ast::ast { AstExpression, AstNode };
 import elaborate::records { listItems, nameText, nodeIn };
-import elaborate::lowerstate { lwMalformed, LowSt, Op, Step, Stmt, TDecl, boxInner, claim, hasInt, intAt, isMutRefTy, isRefTy, isTupleBase, lfail, lwCat, lwCat3, lwInstanceText, lwKind, noOp, quote, simpleType, lwSp, tyOf, unrefTy, wrapType };
+import elaborate::lowerstate { lwMalformed, LDecl, LowSt, Op, Step, Stmt, TDecl, boxInner, claim, hasInt, intAt, isMutRefTy, isRefTy, isTupleBase, lfail, lwCat, lwCat3, lwInstanceText, lwKind, noOp, quote, simpleType, lwSp, tyOf, unrefTy, wrapType };
 import elaborate::lowerbuild { Bi, biOf, borrowRv, builtinOfExpr, cloneVariantPayload, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, ghostStmt, isPrim, lookupBinding, singleEnv, tempLocal, useRv, varNameOf };
 import elaborate::lowerexpr { lowerOperand };
 
@@ -54,10 +54,22 @@ fn lowerPlace(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
     if form.kind = 4 {
         ls = claim(ls);
         t = ls.ty;
+        // (a reference held in a part of a value is read out first: the place is what it is to, not the part holding it)
+        if !lwIsVar(src, form.sub) && nextIsRef(&ls) {
+            ls = lowerRefRoot(ls, src, form.sub);
+            if !ls.ok { return ls; };
+            held = ls.root;
+            return placeResult(ls, held, [], t);
+        };
         ls = lowerPlace(ls, src, form.sub);
         return LowSt { ty: t, ..ls };
     };
     return operandPlace(ls, src, e);
+};
+
+fn nextIsRef(ls: &LowSt) -> Bool ~ {
+    if ls.nextElab < 0 || ls.nextElab >= size(ls.elab) { return false; };
+    return isRefTy(ls, get(ls.elab, ls.nextElab));
 };
 
 fn varPlace(ls: LowSt, name: &String) -> LowSt ~ {
@@ -217,12 +229,20 @@ fn lwDerefRoot(ls: LowSt, src: &List<AstNode>, inner: Int) -> LowSt ~ {
     if hasInt(&ls.bMutBorrowed, l) { return placeResult(ls, l, [], t); };
     if !isRefTy(&ls, bty) { return lfail(ls, lwCat3("Lowering failed: ", &name, " is not a reference")); };
     i = findRefTarget(ls, l);
-    if i >= 0 && i < size(ls.bRefTargets) {
+    if i >= 0 && i < size(ls.bRefTargets) && get(ls.bRefTargets, i).root >= 0 {
         target = clone(get(ls.bRefTargets, i));
+        // (a reborrow of a reference is written through as itself, so that the MIR tells it from a write through its parent)
+        rt = declaredTy(&ls.bLocals, target.root);
+        if hasInt(&ls.bMutBorrowed, target.root) || (rt >= 0 && isRefTy(&ls, rt)) { return placeResult(ls, l, [], t); };
         return placeResult(ls, target.root, target.steps, t);
     };
     if isMutRefTy(&ls, bty) { return placeResult(ls, l, [], t); };
     return lfail(ls, lwCat3("Lowering failed: the place that ", &name, " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter"));
+};
+
+fn declaredTy(locals: &List<LDecl>, l: Int) -> Int ~ {
+    if l < 0 || l >= size(locals) || !get(locals, l).present { return 0 - 1; };
+    return get(locals, l).ty;
 };
 
 // The constructor that a struct type has, or the variant a value is known to be (ls.name)

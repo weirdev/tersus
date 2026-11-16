@@ -532,6 +532,10 @@ mid-implementation:
    arbitrary. A write through a reference it cannot place (read out of a
    struct, a list or a Box, or a call result no contract places) makes
    every place a reference escaped from arbitrary too.
+   Lowering writes through a reborrow of a reference or of an update
+   parameter as through the reborrow itself, so the move check suspends
+   the parent of every reborrow while it is live, whatever made the parent:
+   a borrow here, an update parameter, a read-out or a call result.
    The MIR-as-data format (`MirData`) carries `mutref`, `borrow`,
    `borrowmut`, `deref` and `assignref` rows, and
    `lib/mir/mir_reader/mir_reader.tersus` reads and prints them (it shares the

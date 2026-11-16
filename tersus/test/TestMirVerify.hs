@@ -46,6 +46,7 @@ testMirVerify =
             , TestCase "a call of a function that is not there" (interpreted goodSource unknownCall False)
             , TestCase "an unknown constructor reports its name" (interpretedWithMessage (Just "there is no constructor MissingCtor") constructorSource unknownConstructor False)
             , TestCase "a missing jump target reports its block" (interpretedWithMessage (Just "jumps to bb999999, which is not there") goodSource missingTarget False)
+            , TestCase "a value written where a reference is held is refused" (interpretedWithMessage (Just "a value that is not a reference is written where a reference is held") holderRefSource (holderWrite (Const (CInt 5))) False)
             , TestCase "an array with the same size parameter is accepted" (interpreted sizedSource id True)
             , TestCase "a named type that starts with a builtin's name is accepted" (interpreted integerSource id True)
             , TestCase "an instance with another array size is refused" (interpreted holderSource wrongHolderArg False)
@@ -536,6 +537,16 @@ unknownConstructor program = program{progMain = main{fnBlocks = Map.map block (f
     statement (Assign dest (MakeData "ProbeCtor" fields)) = Assign dest (MakeData "MissingCtor" fields)
     statement (Peek dest (MakeData "ProbeCtor" fields)) = Peek dest (MakeData "MissingCtor" fields)
     statement other = other
+
+holderRefSource :: String
+holderRefSource = "struct W { r: &mut Int }; x = 1; w = W { r: &mut x }; return x;"
+
+-- (lowering once wrote `*w.r = v` for a reborrow of w.r as a write of v into the field itself)
+holderWrite :: Operand -> Program -> Program
+holderWrite value program = program{progMain = main{fnBlocks = Map.adjust block (BlockId 0) (fnBlocks main)}}
+  where
+    main = progMain program
+    block basic = basic{blockStatements = blockStatements basic ++ [AssignRef w [RefField "W" "r"] (Use value) | Just w <- [localNamed main "w"]]}
 
 missingTarget :: Program -> Program
 missingTarget program = program{progMain = main{fnBlocks = Map.map block (fnBlocks main)}}
