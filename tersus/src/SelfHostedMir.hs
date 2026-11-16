@@ -2035,6 +2035,12 @@ fnValueLocals alias f = Map.fromList [(d, n) | (d, _) <- fnAssignments, Just n <
             [M.Copy src] -> resolve (Set.insert d seen) src
             _ -> Nothing
 
+localValue :: M.Local -> MirValue
+localValue local = record "ValueRef::Local" [("local", MInt (localNum local))]
+
+temporary :: Build -> (M.Local, MirValue, Build)
+temporary b = let (i, next) = fresh b; local = M.Local (fromInteger (negate i - 1)) in (local, localValue local, next)
+
 operandLocal :: M.Operand -> Maybe M.Local
 operandLocal (M.Copy local) = Just local
 operandLocal (M.Move local) = Just local
@@ -2456,10 +2462,16 @@ validationLiveness types functions fn = liveness fn{M.fnBlocks = Map.mapWithKey 
 -- A reference the bridge cannot place (one read out of a struct, a list or a
 -- Box, or a call result no contract places) may be to any place a reference
 -- escaped from into something the bridge does not follow.
--- (a function some reference of which is lent more than one place is outside the bridge's subset: its writes are not
--- checked against each place yet)
+-- (a function some reference of which is lent more than one place is in the bridge's subset only when every such
+-- reference may be to known places only: a write through it is checked as a write of each, alternativeWrites)
 modelled :: Aliasing -> Bool
-modelled alias = Set.null (aliasJoined alias)
+modelled alias = all known (Set.toList (aliasJoined alias))
+  where
+    known r = case aliasCandidates alias of
+        Just (targets, _) -> case Map.findWithDefault [] r targets of
+            points@(_ : _) -> all (isJust . snd) points
+            [] -> False
+        Nothing -> False
 
 data Aliasing = Aliasing
     { aliasBorrows :: Map.Map M.Local (M.Local, [M.RefStep]) -- the references to one place wherever they are assigned
@@ -3109,10 +3121,12 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 save = step "Assign" [("local", MInt tempLocal), ("value", valueRef)]
             (rootRef, _) <- operand (M.Copy root) b2
             (topRef, _) <- operand (M.Copy top) b2
-            (checkSteps, _, b3) <- placeRefOf True rootRef place b2
+            (checkSteps0, _, b2c) <- placeRefOf True rootRef place b2
+            (alternatives, checkedOwners, b3) <- alternativeWrites root place tempRef b2c
+            let checkSteps = checkSteps0 ++ alternatives
             (updSteps, newTopRef, b4) <- updateRefOf topRef (above ++ place) tempRef b3
             (typeFacts, b5) <- typeSteps rules types invariants fn top b4
-            (afterSteps, b6) <- afterChange (buildDefined b) placed top b5
+            (afterSteps, b6) <- afterChangeChecked checkedOwners (buildDefined b) placed top b5
             (rootFacts, b7) <- if root == top then Just ([], b6) else typeSteps rules types invariants fn root b6
             pure (([save] ++ checkSteps ++ updSteps ++ [step "Assign" [("local", MInt (localNumber top)), ("value", newTopRef)]] ++ typeFacts ++ afterSteps ++ rootFacts) : chunks, b7, conditions, penv)
         M.AssignRef _ _ _ -> Nothing
@@ -3264,10 +3278,93 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     -- again, and what that version makes out of date becomes arbitrary.
     -- (`defined` is what every path has assigned here: a reference bound
     -- before its borrow would read locals not assigned yet)
-    afterChange defined placed root b0 = do
+    afterChange = afterChangeChecked []
+    afterChangeChecked checked defined placed root b0 = do
+        let stale = staleAfter alias placed root
+            reach = root : if placed then [] else case aliasCandidates alias of
+                Just (targets, _) | Map.member root targets -> nub (map fst (Map.findWithDefault [] root targets))
+                _ -> Set.toList (aliasEscaped alias)
+        guard (all (\l -> l `elem` checked || checkedWhenStale defined reach l) stale)
         (rebound, b1) <- rebindThrough defined root b0
-        (stale, b2) <- havocAll defined (staleAfter alias placed root) b1
-        pure (rebound ++ stale, b2)
+        (havocked, b2) <- havocAll defined stale b1
+        (held, b3) <- holderUpdates defined root (localValue root) b2
+        pure (rebound ++ havocked ++ held, b3)
+    -- (a local made arbitrary gets its type's facts back, its invariants included: that is sound only for a value the
+    -- change cannot reach, or one whose invariant is checked again from what it holds a reference to, holderUpdates)
+    checkedWhenStale defined roots l = not (maybe False (Set.member l) defined) || invariantFree Set.empty (localTypeOf l) || not (mayHoldInto roots l) || any (\((holder, _), _) -> holder == l) (describedHolders defined roots)
+    mayHoldInto roots l = case aliasCandidates alias of
+        Just (targets, members) ->
+            let points = Map.findWithDefault [] l targets ++ concat [ps | ((holder, _), ps) <- members, holder == l]
+                described = Map.member l targets || any (\((holder, _), _) -> holder == l) members
+             in not described || any (\(owner, _) -> owner `elem` roots) points
+        Nothing -> True
+    -- The holders the may-places describe as holding a reference into one of these locals
+    describedHolders defined roots = case aliasCandidates alias of
+        Just (_, members) -> [entry | entry@((holder, _), points) <- members, holder `notElem` roots, maybe True (Set.member holder) defined, any ((`elem` roots) . fst) points]
+        Nothing -> []
+    -- Each such holder is rebuilt around the new value of what it holds a reference to, and its type's invariants are
+    -- checked of the rebuilt holder; a holder that may hold one of several places forgets that field instead
+    holderUpdates defined root newRoot b0 = foldM (\(steps, current) ((holder, path), points) -> do
+        leaves <- localReferenceLeaves types fn holder
+        refTy <- case leaves of [(_, ty)] -> Just ty; _ -> Nothing
+        case points of
+            [(owner, alias')] | owner == root -> do
+                (reads, pointee, afterRead) <- case alias' of
+                    Just aliasPath -> placeRefOf True newRoot aliasPath current
+                    Nothing -> freshOf refTy current
+                (rebuild, newHolder, afterCheck) <- updateRefOf (localValue holder) path pointee afterRead
+                pure (steps ++ reads ++ rebuild ++ [step "Assign" [("local", MInt (localNum holder)), ("value", newHolder)]], afterCheck)
+            _ -> do
+                (reads, pointee, afterRead) <- freshOf refTy current
+                (rebuild, newHolder, afterCheck) <- updateRefOf (localValue holder) path pointee afterRead
+                pure (steps ++ reads ++ rebuild ++ [step "Assign" [("local", MInt (localNum holder)), ("value", newHolder)]], afterCheck)) ([], b0) (describedHolders defined [root])
+    -- A write through a reference lent one of several places is checked as a write of each of them, all from the state
+    -- before it: the invariants of the types on the way and of the holders that hold a reference into each. Only the
+    -- checks are kept; the write itself is the one through the reference, whose places are then made arbitrary
+    -- (afterChange). A place the may-places do not know, or one at an index, gets no check here: such a write is refused
+    -- unless nothing it may reach has an invariant (checkedWhenStale).
+    alternativeWrites root place valueRef b0
+        | Set.member root (aliasJoined alias), Just (targets, _) <- aliasCandidates alias, points@(_ : _) <- Map.findWithDefault [] root targets, Just known <- mapM (\(owner, path) -> (,) owner <$> path) points, all (not . any isIndex . (++ place) . snd) known =
+            do
+                (checks, after) <- foldM (\(acc, current) (owner, path) -> do
+                    (ownerRef, _) <- operand (M.Copy owner) current
+                    (more, hypothetical, next) <- updateRefOf ownerRef (path ++ place) valueRef current
+                    (holderChecks, done) <- holderUpdates (buildDefined current) owner hypothetical next
+                    pure (acc ++ more ++ [s' | s' <- holderChecks, not (isAssignStep s')], done)) ([], b0) known
+                let owners = nub (map fst known)
+                pure (checks, owners ++ [holder | ((holder, _), _) <- describedHolders (buildDefined b0) owners], after)
+        | otherwise = Just ([], [], b0)
+    isIndex step' = case step' of
+        M.RefIndex _ -> True
+        _ -> False
+    isAssignStep v = case v of
+        MData "ExecutionStep::Assign" _ -> True
+        _ -> False
+    -- (an arbitrary value of what a reference of the type is to, with that type's facts)
+    freshOf refTy b = do
+        let (local, value, b1) = temporary b
+            fake = fn{M.fnLocals = Map.insert local (M.LocalDecl (unref refTy) Nothing) (M.fnLocals fn)}
+        (facts, b2) <- typeSteps rules types invariants fake local b1
+        pure (step "Havoc" [("local", MInt (localNum local))] : facts, value, b2)
+    -- (whether no value of the type, through value fields and elements, has an invariant of its own: a type's own clauses,
+    -- List and Box included, are checked before its parts, and what its references are to is part of it; a type this
+    -- cannot tell answers no; an instance met again on the way has been examined already)
+    invariantFree seen ty = case ty of
+        TInt -> True
+        TByte -> True
+        TBool -> True
+        TWord _ _ -> True
+        TRef inner -> invariantFree seen inner
+        TMutRef inner -> invariantFree seen inner
+        TFn _ _ -> True
+        TArrayOf element _ -> invariantFree seen element
+        TUninit element -> invariantFree seen element
+        _ | Set.member ty seen -> True
+        TNamed base _ | not (null (Map.findWithDefault [] base invariants) && null (Map.findWithDefault [] (baseNameOf base) invariants)) -> False
+        TList element -> invariantFree (Set.insert ty seen) element
+        TBox element -> invariantFree (Set.insert ty seen) element
+        TNamed _ _ -> maybe False (all (invariantFree (Set.insert ty seen) . snd) . snd) (fieldsOf types ty)
+        _ -> False
     rebindThrough defined root b0 = foldM bindView ([], b0) [view | view@(ref, _, _) <- viewsThrough alias root, maybe True (Set.member ref) defined]
     bindView (steps, b) (ref, top, placeSteps) = do
         (more, placeRef, b') <- placeRefOf False (localRef (localNumber top)) placeSteps b
