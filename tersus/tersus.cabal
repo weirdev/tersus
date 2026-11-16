@@ -29,11 +29,7 @@ extra-source-files:
     lib/mir/full/records.tersus
     lib/mir/full/read.tersus
     lib/mir/full/write.tersus
-    lib/mir/full/equality.tersus
     lib/mir/full/environments.tersus
-    lib/mir/link/link.tersus
-    lib/mir/link/merge.tersus
-    lib/mir/link/prune.tersus
     lib/mir/emit/emit.tersus
     lib/mir/emit/types.tersus
     lib/mir/emit/values.tersus
@@ -326,7 +322,6 @@ test-suite tersus-test
   main-is: TestTersus.hs
   other-modules:
       Differential
-      LinkOracle
       MirMonoOracle
       TestArrays
       TestAstData
@@ -352,7 +347,6 @@ test-suite tersus-test
       TestHashSet
       TestLibModules
       TestLibraryShapes
-      TestLink
       TestMirCopies
       TestMirData
       TestMirEmit

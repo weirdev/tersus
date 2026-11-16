@@ -41,8 +41,8 @@ productionTools = mapResult (const ()) <$> cachedBootstrapEmitter
 -- erased as the host makes its own programs
 elaboratorProgramWith :: Loader -> Result M.Program String
 elaboratorProgramWith loader =
-    compileModulesUsing loader (compileLibPackageWith loader) (Mod.Snapshot (Mod.resolverFromFiles elaboratePackageFiles) "lib/elaborate/elaborate.tersus" False)
-        `bindResult` lowerCompiledPackage `bindResult` eraseGhosts `bindResult` pruneProgram
+    mapResult pruneProgram (compileModulesUsing loader (compileLibPackageWith loader) (Mod.Snapshot (Mod.resolverFromFiles elaboratePackageFiles) "lib/elaborate/elaborate.tersus" False)
+        `bindResult` lowerCompiledPackage `bindResult` eraseGhosts)
 
 irOf :: Result M.Program String -> IO (Result String String)
 irOf program = case program `bindResult` ownedModuleProgram of

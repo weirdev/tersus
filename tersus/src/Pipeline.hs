@@ -243,18 +243,18 @@ oneMarkerEach program =
 -- A package of the compiler's own programs as the host builds it: linked,
 -- its ghosts erased, not validated (see MirHousekeeping.toolProgram)
 compileModulesBootstrap :: Mod.Snapshot -> Result M.Program String
-compileModulesBootstrap pkg = compileModulesLinked pkg `bindResult` eraseGhosts `bindResult` pruneProgram
+compileModulesBootstrap pkg = mapResult pruneProgram (compileModulesLinked pkg `bindResult` eraseGhosts)
 
 -- compileModulesBootstrap with the package's modules and the compiler libraries elaborated by the given loader
 compileModulesBootstrapWith :: Loader -> Mod.Snapshot -> Result M.Program String
 compileModulesBootstrapWith loader pkg =
-    compileModulesUsing loader (compileLibPackageWith loader) pkg `bindResult` lowerCompiledPackage `bindResult` eraseGhosts `bindResult` pruneProgram
+    mapResult pruneProgram (compileModulesUsing loader (compileLibPackageWith loader) pkg `bindResult` lowerCompiledPackage `bindResult` eraseGhosts)
 
 compileModulesToProgram :: Mod.Snapshot -> Result M.Program String
 compileModulesToProgram pkg = compileModulesValidated pkg `bindResult` erasedModuleProgram
 
 erasedModuleProgram :: M.Program -> Result M.Program String
-erasedModuleProgram program = eraseGhosts program `bindResult` pruneProgram
+erasedModuleProgram = mapResult pruneProgram . eraseGhosts
 
 compileModulesToOwned :: Mod.Snapshot -> Result M.Program String
 compileModulesToOwned pkg = compileModulesToProgram pkg `bindResult` ownedModuleProgram
@@ -264,7 +264,7 @@ ownedModuleProgram program =
     if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
         then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
         else nativeProgram program `bindResult` insertOwnership `bindResult` \owned ->
-            stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> pruneProgram owned
+            stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok (pruneProgram owned)
   where
     unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)
     hasUnsizedRef ty = case ty of

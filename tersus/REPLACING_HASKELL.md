@@ -62,14 +62,6 @@ They are separate from the source count. Reproduce current counts from
   program and module, resolves a package module's names and selects the
   compiler libraries it is given. `TypeCheck`, `TypeCheckCore` and
   `ModuleResolve` are deleted; production runs the pinned seed F0.
-- **Linking:** `lib/mir/link/` merges lowered units, prunes unreachable
-  definitions and completes linked ghost environments over complete
-  `tersus-mir 3` data (`lib/mir/full/`). `Link.hs` is the request transport
-  to the pinned emitter seed, which dispatches `pass link`, and refuses an
-  empty list of units before any tool runs; stage 1
-  cannot run it, because stage 1 is made from linked programs. The copy step
-  (`MirCopies`) still runs in Haskell on the merged program. The former
-  Haskell linker remains only as the test oracle `test/LinkOracle.hs`.
 
 The validator keeps changing independently. PR #169 is on the survey base;
 its loop-state anchors and closure reuse reduce work unrelated to a loop's
@@ -194,14 +186,24 @@ must also stay within the agreed performance budget against the same-host base.
 
 ### 1. Native monomorphization
 
-Replace `MirMono.monomorphize` after the ownership gates pass. (`MirCopies`, the copy
-step of functions with bounds, runs before it at link time and makes copies the
-same way, from MIR; MIR.md, "The copy step".) Its baseline is
-276 lines, but it needs a data
-contract for generic type templates and type/size substitution, reachable
-instances, and implicit Drop instantiation. `monomorphizeForValidation` preserves
-contracts and serves `SelfHostedMir`; moving the native path does not authorize
-stripping that validation metadata or deleting the validation path.
+`lib/mir/mono/` implements native specialization over the complete MIR3 codec
+in `lib/mir/full/`. Linking and pruning remain in Haskell. The emitter accepts
+`pass mono`; the host adapter is `MirHousekeeping.monomorphizeWith`.
+Production switching awaits a seed containing this entry.
+
+The pass substitutes types and sizes, builds reachable instances and preserves
+implicit Drop instantiation. Canonical declaration and selector keys are
+separate from ordinary function-argument rendering, and final-name collisions
+retain the Haskell structural-key precedence. The no-generic path preserves
+all proof metadata; otherwise only function specifications and ghosts are
+removed before completing erased declarations.
+
+`TestMirMono` checks canonical raw output, raw and actual pre-native-stage
+corpus inputs, metadata, refusals and mutation controls. The current
+`testHostValidation:emitter` group validates its functions.
+`monomorphizeForValidation` and its shared helpers, cached named-type map,
+contracts and ghost environments stay in Haskell. `MirCopies` still runs
+before native specialization at link time.
 
 ### 2. Elaboration and the package frontend
 
@@ -211,10 +213,9 @@ this is not a second parser rewrite. Keep occurrence typing and declaration
 ordering explicit (`AST_DATA.md`).
 
 Package loading and linking are also compiler work, not incidental CLI glue:
-`Modules`, `Interface`, `LibPackage` and `PackageCompile` load the module
-graph and compile interfaces and library units, and `Link` hands the units to
-the linker written in Tersus, which rejects collisions and retains reachable
-implementations; canonical names and library selection are
+`Modules`, `Interface`, `LibPackage`, `PackageCompile` and `Link` load the
+module graph, compile interfaces and library units, reject collisions, and
+retain reachable implementations; canonical names and library selection are
 the elaborator's ("Package resolution" below). Include the rest in the eventual
 frontend replacement instead of leaving it out of the roadmap.
 
@@ -560,7 +561,7 @@ to follow them; `PackageData` holds the graph types the compiler and the tests
 read; `PackageCompile` sends the request, assembles the modules the answer
 gives and finishes the units it lowered them to; `LibPackage` keeps the compiled
 libraries, selection and catalog, filled from the `libraries` answer, because
-the host assembles the units `Link` sends to the linker; `TersusParser`, `ParserSeed` and `FileParserProtocol` run
+`Link` links in Haskell; `TersusParser`, `ParserSeed` and `FileParserProtocol` run
 P1 and P0 for the parser's own tests, its fixpoint, `dev/parser-seed` and
 `StdLibDefs` (they stay in the library, which the tests and the seed drivers
 link). The module request's `package` section is gone on both sides. The CLI
@@ -608,10 +609,8 @@ Done. The elaborator answers every module it accepts with the module's MIR, and
 `MirLower` and the `Elaborated` handoff are deleted. What runs after lowering
 did not change: in Haskell, `MirData`'s reader of the unit,
 `MirMoves.finishLowered` (instances completed, moves checked, positions and
-stubs taken out), `MirCopies`, `MirLists` and monomorphization; then the
-validator, ownership and the emitter, which are Tersus programs the host runs.
-Linking, between `finishLowered` and the copy step, has since moved to Tersus
-too (Implemented replacements). Four phases, one PR each:
+stubs taken out), `MirCopies`, `Link`, `MirLists` and monomorphization; then the
+validator, ownership and the emitter, which are Tersus programs the host runs. Four phases, one PR each:
 
 1. Contract and seam (done). `MirLower.lowerRaw` gives the raw unit
    (`Mir.Lowered`), `MirMoves.finishLowered` finishes it with the code that

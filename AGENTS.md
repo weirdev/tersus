@@ -25,8 +25,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   its importers), `src/LibPackage.hs` (the
   compiler libraries compiled once as a synthetic `tersuslib` package, one
   module per lib file, from the `PreludeSource` texts) and `src/Link.hs`
-  (which sends the lowered modules to the linker written in Tersus,
-  `lib/mir/link/`, to merge into one program and prune what the entry
+  (merging the lowered modules into one program and pruning what the entry
   program does not reach); `src/ElaborateRequest.hs` is the elaborator's requests and responses: a load of
   a program, a package or the compiler libraries, and one module given as
   statements (`AST_DATA.md`), and `src/ElaboratorTool.hs` the executables that
@@ -109,9 +108,11 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     data (`MirHousekeeping`); they are the production path.
     `mir/ownership/` holds the ownership and reference-write passes; the
     emitter's executable runs them when its input starts with `pass ownership`
-    or `pass expand`. `mir/link/` is the linker, over the complete MIR codec
-    of `mir/full/`; the emitter's executable runs it for `pass link`, always
-    from the pinned seed (`Link`). The emitter's declaration-only `types.tersus`,
+    or `pass expand`. `mir/mono/` specializes native generic functions over
+    the complete `mir/full/` MIR3 codec; the emitter dispatches `pass mono`.
+    The native switch requires a seed with this dispatcher, while
+    `MirMono.monomorphizeForValidation` retains contracts and ghosts in Haskell.
+    The emitter's declaration-only `types.tersus`,
     `values.tersus`, `operations.tersus`, `functions.tersus` and
     `helpers.tersus` files are siblings of `emit.tersus` in one `mir::emit`
     module; only `emit.tersus` runs. `data/` holds the shared token, type and
@@ -141,8 +142,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`,
   `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`,
   `TestCopies`, `TestEq`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
-  `TestConnectives`, `TestMirData`, `TestLink` (the linker written in Tersus
-  against the former Haskell linker, `test/LinkOracle.hs`), `TestMirReader`, `TestMirVerify`,
+  `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
   `TestMirEmit`, `TestBootstrap`, `TestFrontendBootstrap`, `TestParity`, `TestAstData`, `TestDifferential`
   (the request recorder of `test/Differential.hs`, which also compares another
   elaborator with the compiler's) and `TestElaborate` (the opt-in mutation

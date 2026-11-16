@@ -20,13 +20,11 @@ and `values/helpers -> types`. This graph has no cross-file call cycle;
 self-recursive routines stay with their helpers. All files remain one build unit
 so emitter names stay bare and the single foreign `String.then` stays module-local.
 The codec, reader and phase-neutral support remain separate ordinary dependencies.
-The emitter imports the ownership dispatcher in `lib/mir/ownership/` and the
-link dispatcher in `lib/mir/link/`. MIR v1 input still produces LLVM IR;
-`pass expand` or `pass ownership` followed by MIR v2 produces the transformed
-MIR v2, and `pass link` over version 3 data links (MIR.md, The mir package).
-The emitter seed includes these dispatchers so ownership and linking also run
-natively during cold builds. The historical
-slices below describe the original implementation.
+The emitter imports the ownership dispatcher in `lib/mir/ownership/`.
+MIR v1 input still produces LLVM IR; `pass expand` or `pass ownership` followed
+by MIR v2 produces the transformed MIR v2. `pass mono` reads and writes the
+complete MIR3 codec in `lib/mir/full/`. Linking remains in Haskell.
+The historical slices below describe the original implementation.
 
 ## Bootstrap and seed regeneration
 
