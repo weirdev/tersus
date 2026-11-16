@@ -729,6 +729,16 @@ fn constantFits(p: &Program, funcs: &FunctionIndex, wanted: &Type, c: &Constant)
     return r;
 };
 
+fn isReferenceType(t: &Type) -> Bool ~ { return t is Type::TRef || t is Type::TMutRef; };
+
+// (native code and the reference interpreter replace the reference a part holds, so only a reference may be written there)
+fn writesNonReference(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, rv: &Rvalue) -> Bool ~ {
+    t = noTy();
+    if rv is Rvalue::Use { t = operandTy(p, funcs, f, locals, (rv as Rvalue::Use).o); };
+    if rv is Rvalue::Copy { t = operandTy(p, funcs, f, locals, (rv as Rvalue::Copy).o); };
+    return t.ok && !isReferenceType(t.ty) && !(t.ty is Type::TParam);
+};
+
 fn operandTy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, o: &Operand) -> TyRes [{ }] [{ }] {
     r = noTy();
     match o {
@@ -1282,6 +1292,15 @@ fn ctorFields(p: &Program, ctor: &String) -> List<Field> ~ {
 };
 
 fn placeWhy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, root: Int, steps: &List<RefStep>) -> TyRes ~ {
+    return placeTy(p, f, locals, root, steps, true);
+};
+
+// The type of the part a place's last step reaches, before what a reference there is to is taken for it
+fn heldTy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, root: Int, steps: &List<RefStep>) -> TyRes ~ {
+    return placeTy(p, f, locals, root, steps, false);
+};
+
+fn placeTy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, root: Int, steps: &List<RefStep>, throughLast: Bool) -> TyRes ~ {
     lt = localTy(f, locals, root);
     if !lt.ok { return noTy(); };
     ty = lt.ty;
@@ -1318,8 +1337,10 @@ fn placeWhy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, root: Int, st
                 if boxed && ty is Type::TArray { ty = Box::unbox((ty as Type::TArray).elem); };
             } else { return noTy(); };
         };
-        if ty is Type::TRef { ty = Box::unbox((ty as Type::TRef).inner); };
-        if ty is Type::TMutRef { ty = Box::unbox((ty as Type::TMutRef).inner); };
+        if throughLast || i + 1 < size(steps) {
+            if ty is Type::TRef { ty = Box::unbox((ty as Type::TRef).inner); };
+            if ty is Type::TMutRef { ty = Box::unbox((ty as Type::TMutRef).inner); };
+        };
         i = i + 1;
     };
     return TyRes { ok: true, ty: ty };
@@ -1762,7 +1783,14 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &FunctionIndex, 
             match st {
                 Statement::Assign { local: dl, rv: rv } => { dst = localTy(f, locals, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
                 Statement::Peek { local: dl, rv: rv } => { dst = localTy(f, locals, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
-                Statement::AssignRef { local: dl, steps: steps, rv: rv } => { dst = placeWhy(p, f, locals, dl, steps); if dst.ok { for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
+                Statement::AssignRef { local: dl, steps: steps, rv: rv } => {
+                    dst = placeWhy(p, f, locals, dl, steps);
+                    if dst.ok {
+                        for w in rvalueWhy(p, funcs, f, locals, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); };
+                        held = heldTy(p, f, locals, dl, steps);
+                        if size(steps) > 0 && held.ok && isReferenceType(held.ty) && writesNonReference(p, funcs, f, locals, rv) { out = push(out, clone(bp).then("is ill typed: a value that is not a reference is written where a reference is held")); };
+                    };
+                },
                 Statement::Drop { local: dl } => { },
                 Statement::Ghost => { },
                 Statement::Dissolve { local: dl } => { },

@@ -40,6 +40,7 @@ import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
 import Compile (elaborateStatements, lowerStatements)
+import qualified Compile
 import ElaborateRequest (LoadRequest (..), LoadResponse (..))
 import PackageData (Resolver (..))
 import ElaboratorTool (Loader, sourceLoader)
@@ -449,6 +450,12 @@ lowerSource source = case parseStatementBlock source of
         Error e -> Left e
         Ok program -> Right program
 
+-- (lowered as a program is, by the elaborator built from the current sources when they are not the seed's)
+withSourceMir :: String -> (M.Program -> TestResult) -> TestResult
+withSourceMir source check = case Compile.lowerSource True source of
+    Error e -> Just e
+    Ok program -> check program
+
 withMir :: String -> (M.Program -> TestResult) -> TestResult
 withMir source check = either Just check (lowerSource source)
 
@@ -549,6 +556,15 @@ testMirStructure =
         , -- A cast is an operation of the MIR that gives the value the variant's type
           withMir "enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; return a.r;" $ \p ->
             testAssertEq ([M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "a"], "_1 as S::A" `isInfixOf` M.renderProgram p) ([TVariant "S::A"], True)
+        , -- A write through a reborrow of a reference goes through the reborrow, and one through the reference through the reference
+          withSourceMir "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; q = w.r; p = &mut *q; *p = 2; *q = 1; return x; }; return f(1);" $ \p ->
+            testAssertEq (map (`isInfixOf` M.renderProgram p) ["_6 = &mut _5;", "_6 := const 2;", "_5 := const 1;"]) [True, True, True]
+        , -- A write through a borrow of an owner is a write of the owner
+          withSourceMir "fn f(c: Int) -> Int { x = 1; q = &mut x; *q = 2; return x; }; return f(1);" $ \p ->
+            testAssertTrue ("_2 := const 2;" `isInfixOf` M.renderProgram p)
+        , -- A reborrow of a reference held in a field is made of the reference read out of it, not of the field
+          withSourceMir "struct W { r: &mut Int }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; p = &mut *w.r; *p = 5; return x; }; return f(1);" $ \p ->
+            testAssertEq (map (`isInfixOf` M.renderProgram p) ["_5 = (_4 as W).r;", "_6 = &mut _5;", "_6 := const 5;", "_4.r"]) [True, True, True, False]
         , -- A function whose name is assigned is a local that holds it; one that is not is called by name
           withMir "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; h = f; h = g; return f(1) + h(2);" $ \p ->
             let fn = mainFunction p
