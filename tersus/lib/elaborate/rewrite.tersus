@@ -577,6 +577,8 @@ fn rwControl(rw: Rw, stmt: &AstStatement) -> Rw ~ {
         rw = rwExpr(rw, a.hi);
         rw = bind(rw, nameText(&rw.nodes, a.i));
         bound = clone(rw.bound);
+        rw = rwValidations(rw, a.inv);
+        rw = Rw { bound: clone(bound), ..rw };
         rw = bind(rw, nameText(&rw.nodes, a.a));
         rw = rwStatements(rw, a.xs);
         return Rw { bound: bound, ..rw };

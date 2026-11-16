@@ -1,4 +1,4 @@
-import data::ast::ast { AstBody, AstExpression, AstName, AstNode, AstSignature, AstValue };
+import data::ast::ast { AstBody, AstExpression, AstName, AstNode, AstProof, AstSignature, AstValue };
 import data::codec::codec { Size, Type, sizeAt, typeAt, wordAt };
 import data::reader::reader { nameValue, nodeKind, nodeRefs };
 import elaborate::state { St, TE, Ty, addTy, arrayTy, boxTy, fnTy, listTy, namedTy, notModelled, nth, simpleTy, sizeConst, wordTy, wrapTy };
@@ -208,4 +208,24 @@ fn nativeFn(nodes: &List<AstNode>, v: Int) -> NativeFn ~ {
     if !(b is AstBody::NativeFunct) { return none; };
     nf = b as AstBody::NativeFunct;
     return NativeFn { ok: true, ps: f.ps, ins: f.ins, outs: f.outs, body: f.body, exports: f.exports, sig: nf.sig, term: nf.term, stmts: nf.stmts };
+};
+
+// Whether a variable of this name is read anywhere under a node (as an expression or a proof term)
+fn mentionsVariable(nodes: &List<AstNode>, root: Int, name: &String) -> Bool ~ {
+    todo = push([], root);
+    while size(todo) > 0 [{ }] ~ {
+        n = last(todo);
+        todo = pop(todo);
+        node = nodeIn(nodes, n);
+        if node is AstNode::Expression {
+            ex = clone((node as AstNode::Expression).value);
+            if ex is AstExpression::Var { if nameText(nodes, (ex as AstExpression::Var).n) = clone(name) { return true; }; };
+        };
+        if node is AstNode::Proof {
+            pr = clone((node as AstNode::Proof).value);
+            if pr is AstProof::ATerm { if nameText(nodes, (pr as AstProof::ATerm).n) = clone(name) { return true; }; };
+        };
+        for r in nodeRefs(&node) { if r >= 0 && r < n { todo = push(todo, r); }; };
+    };
+    return false;
 };

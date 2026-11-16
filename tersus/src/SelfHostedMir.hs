@@ -1714,10 +1714,10 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
                 Parts e -> Just e
                 _ -> Nothing
             (steps, callRef, b') <- exprOperand env expr b2
-            let chk = if isParts then step "CheckWithin" [("inner", callRef), ("outer", callerRef)] else check 2 callRef callerRef
+            let chk = withNote ("the measure of " ++ M.fnName callee ++ " (its shrinks) is smaller at this call") (if isParts then step "CheckWithin" [("inner", callRef), ("outer", callerRef)] else check 2 callRef callerRef)
             pure (steps ++ [chk], b')
-        (_, True, Nothing) -> impossible b2
-        (_, _, Just MayDiverge) | not (mayDivergeFn caller) -> impossible b2
+        (_, True, Nothing) -> noted ("a shrinks clause of " ++ M.fnName callee ++ ", which calls itself (directly or through another function) and says nothing shrinks") (impossible b2)
+        (_, _, Just MayDiverge) | not (mayDivergeFn caller) -> noted ("that " ++ M.fnName callee ++ " ends: it may diverge, and " ++ M.fnName caller ++ " may not") (impossible b2)
         _ -> pure ([], b2)
     let postEnv = foldl (\e (name, postLocal, snapLocal) -> Map.insert name (M.Copy postLocal) (Map.insert ("$old " ++ name) (M.Copy snapLocal) e)) env [(name, post, snap) | (name, post, snap) <- postLocals]
         resultEnv = Map.insert "return" (M.Copy (M.Local dest)) postEnv
@@ -1757,6 +1757,7 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
     impossible b = do
         (zero, b') <- operand (M.Const (M.CInt 0)) b
         pure ([check 2 zero zero], b')
+    noted text = fmap (\(steps, b') -> (map (withNote text) steps, b'))
     params = M.fnParams callee
     callerSizeParams = drop (length (M.fnParams caller) - length (M.fnSizeParams caller)) (M.fnParams caller)
     validSizeArg (M.Const (M.CInt _)) = True
@@ -3201,10 +3202,17 @@ obligationNote physical program name blockId stepIndex = do
     blockList <- listItems blocks
     MData _ fields <- find (\b -> case b of MData _ fs -> lookup "id" fs == Just (MInt (toInteger blockId)); _ -> False) blockList
     steps <- listItems =<< lookup "steps" fields
-    if stepIndex >= 0 && stepIndex < length steps then Just () else Nothing
-    MData _ stepFields <- Just (steps !! stepIndex)
-    MFn text <- lookup "note" stepFields
-    pure text
+    -- (a loop's header reports a failed check of its invariant or its measure by the check's place in the loop's checks)
+    case lookup "end" fields of
+        Just (MData "ExecutionEnd::Loop" loopFields) | Just (MList checks) <- lookup "checks" loopFields, stepIndex >= 0, stepIndex < length checks ->
+            Just (case checks !! stepIndex of
+                MData _ checkFields | Just (MFn text) <- lookup "note" checkFields -> "the invariant " ++ text ++ " of the loop at block " ++ show blockId
+                _ -> "that the measure of the loop at block " ++ show blockId ++ " (its shrinks) is not negative and smaller after each iteration")
+        _ -> do
+            if stepIndex >= 0 && stepIndex < length steps then Just () else Nothing
+            MData _ stepFields <- Just (steps !! stepIndex)
+            MFn text <- lookup "note" stepFields
+            pure text
   where
     listItems (MList items) = Just items
     listItems _ = Nothing

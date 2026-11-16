@@ -64,6 +64,8 @@ expandPack bounded pack n fn0 = do
                 , fnBorrowed = spread (fnBorrowed fn0)
                 , fnLocals = Map.union decls (fnLocals fn0)
                 , fnTypeParams = filter (/= pack) (fnTypeParams fn0)
+                  -- (an invariant written on a loop over the pack is the generic body's: a copy unrolls the loop)
+                , fnSpec = (fnSpec fn0){specLoops = foldr (Map.delete . packHeader) (specLoops (fnSpec fn0)) (boundedPackLoops bounded)}
                 }
         nextBlock = 1 + maximum (0 : [i | BlockId i <- Map.keys (fnBlocks fn1)])
     st <- unrollAll x (XS fn1 (next0 + fromInteger n) nextBlock Map.empty Map.empty (boundedPackLoops bounded))

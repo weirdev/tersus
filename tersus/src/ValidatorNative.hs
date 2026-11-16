@@ -14,7 +14,7 @@
 module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
-import Data.List (sortOn)
+import Data.List (isSuffixOf, sortOn)
 import Data.Char (isSpace)
 import Data.Ord (Down (..))
 import Control.Exception (IOException, bracket, evaluate, try)
@@ -90,13 +90,17 @@ refusalMessage :: Bool -> M.Program -> String -> (Int, Int, Int) -> String
 refusalMessage physical program name (status, block, step) = case status of
     1 -> case (obligationNote physical program name block step, parseImplCheckName name) of
         (Just note, Just (trait, owner, function)) -> "impl " ++ trait ++ " for " ++ owner ++ ": " ++ function ++ " does not meet what " ++ trait ++ " declares: could not prove " ++ note
-        (Just note, Nothing) -> "Could not prove: " ++ note ++ " (in " ++ name ++ ")"
-        _ -> "Could not prove: an obligation could not be proved by the Tersus validator (in " ++ name ++ ", block " ++ show block ++ ", step " ++ show step ++ ")"
+        (Just note, Nothing) -> "Could not prove: " ++ note ++ " (in " ++ shown ++ ")"
+        _ -> "Could not prove: an obligation could not be proved by the Tersus validator (in " ++ shown ++ ", block " ++ show block ++ ", step " ++ show step ++ ")"
     2 -> unmodeledMessage ("an operation in " ++ name ++ ", block " ++ show block)
     3 -> unmodeledMessage ("the control flow of " ++ name)
     _ -> unmodeledMessage ("a loop of " ++ name ++ " at block " ++ show block)
   where
     unmodeledMessage what = "the program uses a feature the Tersus validator does not model yet: " ++ what
+    -- (MirCopies.packContracts: the reads of the pack in a variadic function's contracts)
+    shown
+        | "$contract" `isSuffixOf` name = "the contracts of " ++ take (length name - length "$contract") name
+        | otherwise = name
 
 -- Every function of a program checked, not only those before the first refused (as validateCompiled checks them),
 -- with the verdicts validateCompiled keeps on disk: what each function refused, or that the validator could not

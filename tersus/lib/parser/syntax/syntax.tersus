@@ -4336,7 +4336,7 @@ fn linearStatements(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
             AstStatement::ImplDef { traitName: a, args: b, n: c, ty: d, bs: e, xs: f } => { isStruct = false; },
             AstStatement::BoundedDef { bs: a, s: b } => { isStruct = false; },
             AstStatement::Instance { n: a, f: b, args: c, ps: d, sig: e } => { isStruct = false; },
-            AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, xs: g } => { isStruct = false; },
+            AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, inv: h, xs: g } => { isStruct = false; },
             AstStatement::Mark { line: a, col: b } => { isStruct = false; },
             AstStatement::CopyDef { n: a } => { isStruct = false; },
             AstStatement::LinearDef { n: a } => { isStruct = false; },
@@ -5258,7 +5258,7 @@ fn assignsVar(st: &St, var: &String, stmts: &List<Int>) -> Bool ~ {
                 AstStatement::ImplDef { traitName: a, args: b, n: c, ty: d, bs: e, xs: f } => { found = false; },
                 AstStatement::BoundedDef { bs: a, s: b } => { found = false; },
                 AstStatement::Instance { n: a, f: b, args: c, ps: d, sig: e } => { found = false; },
-                AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, xs: g } => { found = nameText( st, a) = var || nameText( st, b) = var || assignsVar( st, var, statementsListIds( st, g)); },
+                AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, inv: h, xs: g } => { found = nameText( st, a) = var || nameText( st, b) = var || assignsVar( st, var, statementsListIds( st, g)); },
                 AstStatement::Mark { line: a, col: b } => { found = false; },
                 AstStatement::CopyDef { n: a } => { found = false; },
                 AstStatement::LinearDef { n: a } => { found = false; },
@@ -5390,7 +5390,6 @@ fn forStatement(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
 // A loop over the pack of the enclosing function, which each copy of it unrolls: its record keeps the index, the element and the bounds
 fn packLoop(st: St, place: &String, first: &String, second: &String, hasSecond: Bool, hasEnd: Bool, pack: &String, takes: Bool, start: Int, endExpr: Int, inv: &List<Int>, body: &List<Int>) -> Res<List<Int>> ~ {
     s = st;
-    if size(inv) > 0 { return fail( s, [], "a loop over a pack is unrolled: it has no invariant"); };
     indexName = catStrings("$index ", place);
     elementName = catStrings("$element ", place);
     if hasEnd { indexName = clone(first); }
@@ -5421,10 +5420,13 @@ fn packLoop(st: St, place: &String, first: &String, second: &String, hasSecond: 
     pName = putName( s, pack); Res { st: resultPartspNameState, v: resultPartspNameValue, ok: resultPartspNameOk } = pName;
     if !resultPartspNameOk { return Res<List<Int>> { st: resultPartspNameState, v: [], ok: false }; };
     s = resultPartspNameState;
+    vs = validationsList( s, inv); Res { st: resultPartsvsState, v: resultPartsvsValue, ok: resultPartsvsOk } = vs;
+    if !resultPartsvsOk { return Res<List<Int>> { st: resultPartsvsState, v: [], ok: false }; };
+    s = resultPartsvsState;
     xs = statementsList( s, body); Res { st: resultPartsxsState, v: resultPartsxsValue, ok: resultPartsxsOk } = xs;
     if !resultPartsxsOk { return Res<List<Int>> { st: resultPartsxsState, v: [], ok: false }; };
     s = resultPartsxsState;
-    node = stmtNode( s, AstStatement::PackLoop { i: resultPartsiNameValue, a: resultPartsaNameValue, p: resultPartspNameValue, lo: lo, hi: hi, take: takes, xs: resultPartsxsValue }); Res { st: resultPartsnodeState, v: resultPartsnodeValue, ok: resultPartsnodeOk } = node;
+    node = stmtNode( s, AstStatement::PackLoop { i: resultPartsiNameValue, a: resultPartsaNameValue, p: resultPartspNameValue, lo: lo, hi: hi, take: takes, inv: resultPartsvsValue, xs: resultPartsxsValue }); Res { st: resultPartsnodeState, v: resultPartsnodeValue, ok: resultPartsnodeOk } = node;
     if !resultPartsnodeOk { return Res<List<Int>> { st: resultPartsnodeState, v: [], ok: false }; };
     return ok( resultPartsnodeState, push([], resultPartsnodeValue));
 };
@@ -6632,7 +6634,7 @@ fn statementAssignParts(st: &St, id: Int) -> List<Int> ~ {
             AstStatement::ImplDef { traitName: a, args: b, n: c, ty: d, bs: e, xs: f } => { out = []; },
             AstStatement::BoundedDef { bs: a, s: b } => { out = []; },
             AstStatement::Instance { n: a, f: b, args: c, ps: d, sig: e } => { out = []; },
-            AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, xs: g } => { out = []; },
+            AstStatement::PackLoop { i: a, a: b, p: c, lo: d, hi: e, take: f, inv: h, xs: g } => { out = []; },
             AstStatement::Mark { line: a, col: b } => { out = []; },
             AstStatement::CopyDef { n: a } => { out = []; },
             AstStatement::LinearDef { n: a } => { out = []; },

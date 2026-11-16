@@ -174,11 +174,13 @@ caller's pack among its type arguments (`g['..T]`), and its signature has the
 parameters `rest` (of the pack type, `ref` when the callee's pack is lent),
 `rest lo` and `rest hi` in place of the callee's pack (MIR.md, "Copies of
 variadic functions").
-`PackLoop INDEX ELEMENT PACK LO HI TAKE STATEMENTS` (parser and response) is a
-loop over the pack, which each copy unrolls: the index runs from `LO` to
-`HI - 1`, the element is the argument at the index (the parser names the one
-the program does not, `$index LINE:COL` or `$element LINE:COL`; a range loop
-names no element and reads none), and `TAKE` is `true` for `for a in args`.
+`PackLoop INDEX ELEMENT PACK LO HI TAKE VALIDATIONS STATEMENTS` (parser and
+response) is a loop over the pack, which each copy unrolls: the index runs from
+`LO` to `HI - 1`, the element is the argument at the index (the parser names the
+one the program does not, `$index LINE:COL` or `$element LINE:COL`; a range loop
+names no element and reads none), `TAKE` is `true` for `for a in args`, and
+`VALIDATIONS` is the invariant the program writes (`for a in args [{ ... }]`),
+which holds where each iteration starts, before its element.
 The parser writes it whatever the pack's passing, which it does not know;
 the elaborator keeps it `true` only for a pack taken by value, whose loop
 takes the elements, and writes `false` for a lent pack. In an elaborated program its first expression type is the element's.
