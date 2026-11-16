@@ -121,7 +121,7 @@ childCapabilities jobs processors groups = max 1 (min jobs processors `div` max 
 
 -- The runners of the CI matrix (.github/workflows/ci.yml) besides the host runner
 ciShardCount :: Int
-ciShardCount = 9
+ciShardCount = 10
 
 assignShards :: Int -> [String] -> [(String, Int)]
 assignShards count names
@@ -562,8 +562,8 @@ testScheduling names batches = TestList "testScheduling"
               && assignShards c ["testParserBootstrap:2/2"] == [("testParserBootstrap:2/2", c - 2)]
               && assignShards c ["testParserBootstrap:1/2"] == [("testParserBootstrap:1/2", c - 3)]
               && assignShards c ["testFrontendBootstrap"] == [("testFrontendBootstrap", c)]
-              && assignShards c ["testParserBootstrap:2/2", "newA", "newB", "newC", "newD", "newE", "newF"]
-                  == [("newA", 1), ("newB", 2), ("newC", 3), ("newD", 4), ("newE", 5), ("newF", c - 3), ("testParserBootstrap:2/2", c - 2)]
+              && assignShards c ["testParserBootstrap:2/2", "newA", "newB", "newC", "newD", "newE", "newF", "newG"]
+                  == [("newA", 1), ("newB", 2), ("newC", 3), ("newD", 4), ("newE", 5), ("newF", 6), ("newG", c - 3), ("testParserBootstrap:2/2", c - 2)]
               && assignShards c ["testBootstrap", "testParserBootstrap:1/2", "testParserBootstrap:2/2"]
                   == [("testParserBootstrap:1/2", c - 3), ("testParserBootstrap:2/2", c - 2), ("testBootstrap", c - 1)]
               && assignShards c ["newA", "newB"] == [("newA", 1), ("newB", 2)]
