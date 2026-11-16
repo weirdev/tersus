@@ -1680,8 +1680,59 @@ builtinCall name args (M.Local dest) b0 = case (name, args) of
 -- A direct call uses only contracts of bodies checked separately. Snapshot
 -- arguments before writing the result, and decline callees that reassign a
 -- parameter: their postconditions can refer to its final value.
-directCall :: Rules -> M.Function -> M.Function -> [M.Operand] -> M.Local -> Maybe (Bool, MirValue) -> Bool -> Build -> Maybe ([MirValue], [(Name, MirValue)], Build)
-directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = do
+readPlace :: Bool -> MirValue -> [M.RefStep] -> Build -> Maybe ([MirValue], MirValue, Build)
+readPlace checked ref path b0 = case path of
+    [] -> pure ([], ref, b0)
+    M.RefField _ field : rest -> do
+        let (function, b1) = namedFunction ("field:" ++ field) b0
+            (local, value, b2) = temporary b1
+        (more, result, b3) <- readPlace checked value rest b2
+        pure (step "ApplyFresh" [("local", MInt (localNum local)), ("function", MInt function), ("arguments", MList [ref])] : more, result, b3)
+    M.RefIndex index : rest -> do
+        (indexRef, b1) <- operand index b0
+        let (local, value, b2) = temporary b1
+        (prefix, b3) <- if checked then getSteps (localNum local) ref indexRef b2 else pure ([step "ApplyFresh" [("local", MInt (localNum local)), ("function", MInt (-14)), ("arguments", MList [ref, indexRef])]], b2)
+        (more, result, b4) <- readPlace checked value rest b3
+        pure (prefix ++ more, result, b4)
+
+-- A value with the value at a place of it replaced: each value rebuilt on the way has its type's invariants
+-- checked, or, in assume mode, assumed
+replacePlace :: Bool -> Rules -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> MirValue -> [M.RefStep] -> MirValue -> Build -> Maybe ([MirValue], MirValue, Build)
+replacePlace assumeMode rules types invariants rootRef path valueRef b0 = case path of
+    [] -> pure ([], valueRef, b0)
+    M.RefField ctor field : rest -> do
+        let (guards, bGuard) = ([], b0)
+        (s1, inner, b1) <- readPlace False rootRef [M.RefField ctor field] bGuard
+        (s2, changed, b2) <- replacePlace assumeMode rules types invariants inner rest valueRef b1
+        (_, fields) <- fieldsOf types (TNamed ctor []) <|> fieldsOf types (TVariant ctor)
+        (s3, refs, b3) <- foldM (\(acc, refs, b) (f, _) -> if f == field then pure (acc, refs ++ [changed], b) else do
+            (more, ref, next) <- readPlace False rootRef [M.RefField ctor f] b
+            pure (acc ++ more, refs ++ [ref], next)) ([], [], b2) fields
+        let (constructor, b4) = namedFunction ("ctor:" ++ ctor) b3
+            (local, newRef, b5) = temporary b4
+            create = step "ApplyFresh" [("local", MInt (localNum local)), ("function", MInt constructor), ("arguments", MList refs)]
+            register (ids, b) (f, _) = let (fid, next) = namedFunction ("field:" ++ f) b in (ids ++ [fid], next)
+            (fieldIds, b6) = foldl register ([], b5) fields
+            b7 = b6{ctorFields = nub ([(constructor, fid, toInteger idx) | (idx, fid) <- zip [0 ..] fieldIds] ++ ctorFields b6)}
+        (projections, b8) <- foldM (\(acc, b) ((f, _), original) -> do
+            (more, ref, next) <- readPlace False newRef [M.RefField ctor f] b
+            pure (acc ++ more ++ [step "Assume" [("relation", MInt 0), ("left", ref), ("right", original)]], next)) ([], b7) (zip fields refs)
+        let (tag, bTag) = ([], b8)
+            clauses = Map.findWithDefault [] (baseNameOf ctor) invariants
+        (checks, b9) <- if null clauses then pure ([], bTag) else do
+            pairs <- mapM (\((field, _), ref) -> do op <- refOperandOf bTag ref; pure (field, op)) (zip fields refs)
+            contractSteps rules assumeMode (Map.fromList pairs) clauses bTag
+        pure (guards ++ s1 ++ s2 ++ s3 ++ [create] ++ projections ++ tag ++ checks, newRef, b9)
+    M.RefIndex index : rest -> do
+        (indexRef, b1) <- operand index b0
+        (s1, inner, b2) <- readPlace False rootRef [M.RefIndex index] b1
+        (s2, changed, b3) <- replacePlace assumeMode rules types invariants inner rest valueRef b2
+        let (local, newRef, b4) = temporary b3
+        (s3, b5) <- setSteps (localNum local) rootRef indexRef changed b4
+        pure (s1 ++ s2 ++ s3, newRef, b5)
+
+directCall :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Rules -> M.Function -> M.Function -> [M.Operand] -> M.Local -> Maybe (Bool, MirValue) -> Bool -> Build -> Maybe ([MirValue], [(Name, MirValue)], [(Name, [M.RefStep], MirValue, MirValue)], Build)
+directCall types invariants rules caller callee args (M.Local dest) termInfo recursiveCall b0 = do
     if length args == length params then Just () else Nothing
     if all validSizeArg (drop (length args - length (M.fnSizeParams callee)) args) then Just () else Nothing
     let calleeStmts = concatMap M.blockStatements (Map.elems (M.fnBlocks callee))
@@ -1700,15 +1751,23 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
             Just (TRef _) | all (`elem` map fst paramNameLocals) froms -> Just ()
             _ -> Nothing
     case M.fnReturns callee of Just _ -> Just (); Nothing -> Nothing
+    -- (a parameter given a value that holds an update reference in a field: what the callee writes there is the
+    -- one thing it can change of it; see heldParams)
+    held <- heldParams types (buildFunctions b0) callee
+    guard (all (\param -> param `notElem` M.fnMutBorrowed callee || maybe False (not . any (\(_, ty) -> case ty of TMutRef{} -> True; _ -> False)) (M.localType <$> Map.lookup param (M.fnLocals callee) >>= referenceLeaves types . unref)) params)
     (snapshots, b1) <- foldM snapshot ([], b0) args
-    (postSteps, postLocals, b1') <- foldM (addPost snapshots) ([], [], b1) (zip params args)
+    (postSteps, postLocals, b1'') <- foldM (addPost snapshots) ([], [], b1) (zip params args)
+    (heldSteps, heldLocals, b1') <- foldM (heldPost snapshots) ([], [], b1'') held
     let bindings = Map.fromList (zip params [local | (local, _) <- snapshots])
         remap (M.Copy local) = M.Copy <$> Map.lookup local bindings
         remap constant@(M.Const _) = Just constant
         remap _ = Nothing
         env = Map.mapMaybe remap (M.specEnv (M.fnSpec callee))
     (sizeChecks, withSizes) <- sizeParameterSteps False callee (map fst snapshots) b1'
-    (checks, b2) <- contractSteps rules False env (M.specRequires (M.fnSpec callee)) withSizes
+    (checks, b2c) <- contractSteps rules False env (M.specRequires (M.fnSpec callee)) withSizes
+    let (definitionChunks, b2) = if null held then ([], b2c) else
+            foldl (defineLocal False env) ([], b2c) (contractDefinitions (M.specRequires (M.fnSpec callee)))
+        definitionSteps = concat (reverse definitionChunks)
     (variantSteps, b2') <- case (termInfo, recursiveCall, M.specTermination (M.fnSpec callee)) of
         (Just (isParts, callerRef), True, Just term) -> do
             expr <- case term of
@@ -1721,13 +1780,16 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
         (_, True, Nothing) -> noted ("a shrinks clause of " ++ M.fnName callee ++ ", which calls itself (directly or through another function) and says nothing shrinks") (impossible b2)
         (_, _, Just MayDiverge) | not (mayDivergeFn caller) -> noted ("that " ++ M.fnName callee ++ " ends: it may diverge, and " ++ M.fnName caller ++ " may not") (impossible b2)
         _ -> pure ([], b2)
-    let postEnv = foldl (\e (name, postLocal, snapLocal) -> Map.insert name (M.Copy postLocal) (Map.insert ("$old " ++ name) (M.Copy snapLocal) e)) env [(name, post, snap) | (name, post, snap) <- postLocals]
-        resultEnv = Map.insert "return" (M.Copy (M.Local dest)) postEnv
-    (assumptions0, b3a) <- contractSteps rules True resultEnv (ensuresOf (M.fnSpec callee)) b2'
+    let declaredPostEnv = foldl (\e (name, postLocal, snapLocal) -> Map.insert name (M.Copy postLocal) (Map.insert ("$old " ++ name) (M.Copy snapLocal) e)) env [(name, post, snap) | (name, post, snap) <- postLocals]
+        postEnv = foldl (\e (name, holder, _, _) -> Map.insert name (M.Copy holder) e) declaredPostEnv heldLocals
+        resultEnv = Map.insert "return" (M.Copy (M.Local dest)) (if null held then postEnv else Map.union postEnv (buildExports b2'))
+        outputClauses = if null held then ensuresOf (M.fnSpec callee) else M.specEnsures (M.fnSpec callee)
+    (assumptions0, b3a) <- contractSteps rules True resultEnv outputClauses b2'
     -- What the callee's contracts define (define s = size(lst);) is the
     -- caller's to name after the call: each is computed here, at the call,
     -- into a local of its own.
-    let (exportChunks, b3) = foldl (defineLocal False resultEnv) ([], b3a) (contractDefinitions (M.specRequires (M.fnSpec callee) ++ M.specEnsures (M.fnSpec callee)))
+    let exports = if null held then M.specRequires (M.fnSpec callee) ++ M.specEnsures (M.fnSpec callee) else M.specEnsures (M.fnSpec callee)
+        (exportChunks, b3) = foldl (defineLocal False resultEnv) ([], b3a) (contractDefinitions exports)
         assumptions = assumptions0 ++ concat (reverse exportChunks)
     let (function, b4a) = namedFunction ("call:" ++ validatorSymbol (M.fnName callee)) b3
     -- A function that reads the input (or calls one that does) gives a new
@@ -1741,11 +1803,29 @@ directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = d
     let argumentRefs = [record "ValueRef::Local" [("local", MInt (toInteger n))] | (M.Local n, _) <- snapshots] ++ tagRefs
         applyResult = step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList argumentRefs)]
         result = case M.specFrom (M.fnSpec callee) of
-            [from] | Just (_, postLocal, _snapLocal) <- find (\(name, _, _) -> name == from) postLocals -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum postLocal)))])]
-            [from] | Just snapLocal <- lookup from (zip (map fst paramNameLocals) [local | (local, _) <- snapshots]) -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum snapLocal)))])]
+            [from] | identityFrom from, Just (_, postLocal, _snapLocal) <- find (\(name, _, _) -> name == from) postLocals -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum postLocal)))])]
+            [from] | identityFrom from, Just snapLocal <- lookup from (zip (map fst paramNameLocals) [local | (local, _) <- snapshots]) -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum snapLocal)))])]
             _ -> applyResult
-    pure ([save | (_, save) <- snapshots] ++ postSteps ++ sizeChecks ++ checks ++ variantSteps ++ [result] ++ assumptions, [(name, record "ValueRef::Local" [("local", MInt (toInteger (localNum post)))]) | (name, post, _) <- postLocals], b4)
+    pure ([save | (_, save) <- snapshots] ++ postSteps ++ sizeChecks ++ checks ++ definitionSteps ++ variantSteps ++ heldSteps ++ [result] ++ assumptions, [(name, record "ValueRef::Local" [("local", MInt (toInteger (localNum post)))]) | (name, post, _) <- postLocals], [(name, path, value, localValue holder) | (name, holder, path, value) <- heldLocals], b4)
   where
+    -- (a result under one parameter is that parameter's referent only when it has its type; a result that is a part
+    -- of it is placed by the caller's may-places, which know the part)
+    identityFrom name = case (M.fnReturns callee, lookup name paramNameLocals >>= (\local -> M.localType <$> Map.lookup local (M.fnLocals callee))) of
+        (Just result, Just source) -> unref result == unref source
+        _ -> False
+    -- (what the callee leaves in a held parameter's field: an arbitrary value of its type, which the callee's output
+    -- contract speaks of; the holder after the call is the one given with that value there)
+    heldPost snaps (steps, entries, b) (param, [(path, refTy)]) = do
+        name <- lookup param [(p', n) | (n, p') <- paramNameLocals]
+        snap <- lookup param (zip params (map fst snaps))
+        let (valueLocal, value, b1) = temporary b
+            fake = callee{M.fnLocals = Map.insert valueLocal (M.LocalDecl (unref refTy) Nothing) (M.fnLocals callee)}
+        (facts, b2) <- typeSteps rules types invariants fake valueLocal b1
+        (rebuild, post, b3) <- rebuildHeld (localValue snap) path value b2
+        let (postLocal, _, b4) = temporary b3
+        pure (steps ++ [step "Havoc" [("local", MInt (localNum valueLocal))]] ++ facts ++ rebuild ++ [step "Assign" [("local", MInt (localNum postLocal)), ("value", post)]], entries ++ [(name, postLocal, path, value)], b4)
+    heldPost _ _ _ = Nothing
+    rebuildHeld = replacePlace True rules types invariants
     paramNameLocals = [(n, p) | p <- params, Just d <- [Map.lookup p (M.fnLocals callee)], Just n <- [M.localName d]]
     addPost snaps (steps, posts, b) (param, _) = case [name | (name, p) <- paramNameLocals, p == param] of
         [name] | name `elem` M.specMutParams (M.fnSpec callee) -> do
@@ -2065,6 +2145,7 @@ borrowsAgreed functions fn = loop (Map.empty, Set.empty)
         , [from] <- [M.specFrom (M.fnSpec callee)]
         , Just idx <- [lookup from (zip (paramNamesOf callee) [0 ..])]
         , idx < length args
+        , identityResult callee idx
         , M.Copy src <- [args !! idx]
         ]
     loop state@(known, conflicted) =
@@ -2073,6 +2154,13 @@ borrowsAgreed functions fn = loop (Map.empty, Set.empty)
             known' = Map.fromList [(d, place) | (d, [place]) <- Map.toList places, Set.notMember d conflicted']
             next = (known', conflicted')
          in if next == state then state else loop next
+
+-- (a result under a parameter is that parameter's referent itself only when it has its type: one that is a part of
+-- it is placed by the may-places, candidatePlaces)
+identityResult :: M.Function -> Int -> Bool
+identityResult callee idx = case (M.fnReturns callee, drop idx (M.fnParams callee)) of
+    (Just result, param : _) | Just decl <- Map.lookup param (M.fnLocals callee) -> unref result == unref (M.localType decl)
+    _ -> False
 
 paramNamesOf :: M.Function -> [Variable]
 paramNamesOf f = [n | p <- M.fnParams f, Just d <- [Map.lookup p (M.fnLocals f)], Just n <- [M.localName d]]
@@ -2508,6 +2596,7 @@ aliasingOf types functions fn = alias
         , [from] <- M.specFrom (M.fnSpec callee)
         , Just idx <- lookup from (zip (paramNamesOf callee) [0 ..])
         , idx < length args
+        , identityResult callee idx
         , M.Copy src <- args !! idx = Just (Just src)
     callSource _ = Nothing
     prune m =
@@ -2764,12 +2853,12 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                     Just n -> Just n
                     Nothing -> Map.lookup local (fnValueLocals alias fn)
                 _ -> Nothing
-            (callSteps, posts, b2) <- case Map.lookup name functions of
-                Just callee -> directCall rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+            (callSteps, posts, heldPosts, b2) <- case Map.lookup name functions of
+                Just callee -> directCall types invariants rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
                 _ -> do
                     (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
-                    pure (cs, [], bb)
-            if null posts && null (heldStale functions alias calleeOp args) then Just () else Nothing
+                    pure (cs, [], [], bb)
+            if null posts && null heldPosts && null (heldStale functions alias calleeOp args) then Just () else Nothing
             (left, b3) <- operand (let (_, a, _) = compare in a) b2
             (right, b4) <- operand (let (_, _, c) = compare in c) b3
             let (r, _, _) = compare
@@ -2855,20 +2944,30 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                     Just n -> Just n
                     Nothing -> Map.lookup local (fnValueLocals alias fn)
                 _ -> Nothing
-            (callSteps, posts, b') <- case Map.lookup name functions of
-                Just callee | not ("builtin::" `isPrefixOf` name) -> directCall rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+            (callSteps, posts, heldPosts, b') <- case Map.lookup name functions of
+                Just callee | not ("builtin::" `isPrefixOf` name) -> directCall types invariants rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
                 _ -> do
                     (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
-                    pure (cs, [], bb)
-            -- (a call in a function with a reference lent more than one place is not checked against each yet)
-            guard (Set.null (aliasJoined alias))
+                    pure (cs, [], [], bb)
+            guard (modelled alias)
             (mutSteps, b'') <- case Map.lookup name functions of
                 Just callee -> foldM (versionArg endDefined callee posts) ([], b') (zip (M.fnParams callee) args)
                 _ -> pure ([], b')
-            (heldSteps, bh) <- havocAll endDefined (filter (/= dest) (heldStale functions alias calleeOp args)) b''
+            (heldWrites, written, bw) <- case Map.lookup name functions of
+                Just callee -> foldM (heldArg endDefined callee args) ([], [], b'') heldPosts
+                _ -> pure ([], [], b'')
+            -- (what the call may change through references held in what it is given becomes arbitrary; where the
+            -- function has a reference lent more than one place, or the call writes a held field, a local given its
+            -- type's facts back has to be one the change cannot break)
+            let stale = filter (/= dest) (heldStale functions alias calleeOp args)
+                guarded = not (Set.null (aliasJoined alias)) || not (null heldPosts)
+            guard (not guarded || all (\l -> l `elem` written || checkedWhenStale endDefined (Set.toList (aliasEscaped alias) ++ written) l) stale)
+            (heldSteps, bh) <- havocAll endDefined (filter (`notElem` written) stale) bw
             (typeFacts, b''') <- typeSteps rules types invariants fn dest bh
             (destSteps, bd) <- afterChange endDefined True dest b'''
-            Just (callSteps ++ mutSteps ++ heldSteps ++ typeFacts ++ destSteps, jump target, bd)
+            -- (a result the may-places put at one known place of what it is from reads that place after the call)
+            (fromSteps, bf) <- resultPlace endDefined dest bd
+            Just (callSteps ++ mutSteps ++ heldWrites ++ heldSteps ++ typeFacts ++ destSteps ++ fromSteps, jump target, bf)
         _ -> Nothing
     let (literalSteps, b3) = literalFacts (steps ++ extra ++ [ending]) b2
     pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (literalSteps ++ steps ++ extra)), ("end", ending)], b3)
@@ -3123,27 +3222,8 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 save = step "Assign" [("local", MInt tempLocal), ("value", valueRef)]
             (rootRef, _) <- operand (M.Copy root) b2
             (checkSteps0, _, b2c) <- placeRefOf True rootRef place b2
-            case completeTargets root of
-                -- (a reference the may-places put at one known place: the write is one of that place; the references
-                -- whose chain of borrows passes through it are bound again there, afterChange)
-                Just [(owner, path)] -> do
-                    (ownerRef, _) <- operand (M.Copy owner) b2c
-                    (updSteps, newOwnerRef, b4) <- updateRefOf ownerRef (path ++ place) tempRef b2c
-                    (typeFacts, b5) <- typeSteps rules types invariants fn owner b4
-                    (afterSteps, b6) <- afterChangeChecked [] (buildDefined b) True owner b5
-                    (refresh, b7) <- refreshViews (buildDefined b) owner b6
-                    pure (([save] ++ checkSteps0 ++ updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ afterSteps ++ refresh) : chunks, b7, conditions, penv)
-                known -> do
-                    let (top, above, placed) = writeTarget alias root
-                    (topRef, _) <- operand (M.Copy top) b2c
-                    (alternatives, checkedLocals, b3) <- case known of
-                        Just points@(_ : _ : _) -> alternativeWrites points place tempRef b2c
-                        _ -> Just ([], [], b2c)
-                    (updSteps, newTopRef, b4) <- updateRefOf topRef (above ++ place) tempRef b3
-                    (typeFacts, b5) <- typeSteps rules types invariants fn top b4
-                    (afterSteps, b6) <- afterChangeChecked checkedLocals (buildDefined b) placed top b5
-                    (rootFacts, b7) <- if root == top then Just ([], b6) else typeSteps rules types invariants fn root b6
-                    pure (([save] ++ checkSteps0 ++ alternatives ++ updSteps ++ [step "Assign" [("local", MInt (localNumber top)), ("value", newTopRef)]] ++ typeFacts ++ afterSteps ++ rootFacts) : chunks, b7, conditions, penv)
+            (writeSteps, b7) <- writeVia (buildDefined b) root place tempRef b2c
+            pure (([save] ++ checkSteps0 ++ writeSteps) : chunks, b7, conditions, penv)
         M.AssignRef _ _ _ -> Nothing
         M.Assign dest (M.MakeData name fields) -> do
             let base = baseNameOf name
@@ -3281,14 +3361,61 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
         [name] -> case lookup name posts of
             Nothing -> pure (steps, b)
             Just postRef -> do
-                (top, placeSteps, placed) <- case arg of
-                    M.Copy l -> Just (writeTarget alias l)
-                    M.Move l -> Just (writeTarget alias l)
-                    _ -> Nothing
-                (updSteps, newTopRef, b1) <- updateRefOf (localRef (localNumber top)) placeSteps postRef b
-                (afterSteps, b2) <- afterChange defined placed top b1
-                pure (steps ++ updSteps ++ [step "Assign" [("local", MInt (localNumber top)), ("value", newTopRef)]] ++ afterSteps, b2)
+                local <- operandLocal arg
+                (writeSteps, b2) <- writeVia defined local [] postRef b
+                pure (steps ++ writeSteps, b2)
         _ -> pure (steps, b)
+    -- After a call, the place a held parameter's update reference is to (a field of a value given to it) has the
+    -- value the callee's contract gives it there: a write of each place the may-places say that field may be to,
+    -- which have to be known
+    heldArg defined callee args (steps, checkedOwners, b) (name, path, value, holderPost) = do
+        param <- lookup name [(n, p') | p' <- M.fnParams callee, Just d <- [Map.lookup p' (M.fnLocals callee)], Just n <- [M.localName d]]
+        holder <- lookup param (zip (M.fnParams callee) args) >>= operandLocal
+        (_, members) <- aliasCandidates alias
+        points <- mapM (\(owner, p') -> (,) owner <$> p') (memberLookup (holder, path) members)
+        (writeSteps, owners, b1) <- case points of
+            [(owner, p')] -> do
+                (ownerRef, _) <- operand (M.Copy owner) b
+                (updSteps, newOwnerRef, bu) <- updateRefOf ownerRef p' value b
+                (typeFacts, bt) <- typeSteps rules types invariants fn owner bu
+                (afterSteps, ba) <- afterChangeChecked [] defined True owner bt
+                (refresh, br) <- refreshViews defined owner ba
+                pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ afterSteps ++ refresh, [owner], br)
+            _ : _ : _ -> do
+                (alternatives, checked, bc) <- alternativeWrites points [] value b
+                (havocked, bh) <- havocAll defined (nub (map fst points)) bc
+                (afterSteps, ba) <- foldM (\(acc, current) owner -> do
+                    (more, next) <- afterChangeChecked checked defined True owner current
+                    pure (acc ++ more, next)) ([], bh) (nub (map fst points))
+                pure (alternatives ++ havocked ++ afterSteps, checked, ba)
+            [] -> Nothing
+        -- (the holder given is the holder the callee's contract describes after the call)
+        pure (steps ++ writeSteps ++ [step "Assign" [("local", MInt (localNumber holder)), ("value", holderPost)]], checkedOwners ++ owners ++ [holder], b1)
+    -- A write of a value, already saved, through a reference at a place of what it is to: a write of the one known
+    -- place the may-places put it at, of each of several known places (checked from the same state), or, otherwise,
+    -- of the place its chain of borrows starts from. The references into what changed are bound again and what the
+    -- change makes out of date becomes arbitrary (afterChange).
+    writeVia defined root place valueRef b0 = case completeTargets root of
+        -- (a reference the may-places put at one known place: the write is one of that place; the references whose
+        -- chain of borrows passes through it are bound again there, afterChange)
+        Just [(owner, path)] -> do
+            (ownerRef, _) <- operand (M.Copy owner) b0
+            (updSteps, newOwnerRef, b4) <- updateRefOf ownerRef (path ++ place) valueRef b0
+            (typeFacts, b5) <- typeSteps rules types invariants fn owner b4
+            (afterSteps, b6) <- afterChangeChecked [] defined True owner b5
+            (refresh, b7) <- refreshViews defined owner b6
+            pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ afterSteps ++ refresh, b7)
+        known -> do
+            let (top, above, placed) = writeTarget alias root
+            (topRef, _) <- operand (M.Copy top) b0
+            (alternatives, checkedLocals, b3) <- case known of
+                Just points@(_ : _ : _) -> alternativeWrites points place valueRef b0
+                _ -> Just ([], [], b0)
+            (updSteps, newTopRef, b4) <- updateRefOf topRef (above ++ place) valueRef b3
+            (typeFacts, b5) <- typeSteps rules types invariants fn top b4
+            (afterSteps, b6) <- afterChangeChecked checkedLocals defined placed top b5
+            (rootFacts, b7) <- if root == top then Just ([], b6) else typeSteps rules types invariants fn root b6
+            pure (alternatives ++ updSteps ++ [step "Assign" [("local", MInt (localNumber top)), ("value", newTopRef)]] ++ typeFacts ++ afterSteps ++ rootFacts, b7)
     -- After a local gets a new version, the references into it are bound
     -- again, and what that version makes out of date becomes arbitrary.
     -- (`defined` is what every path has assigned here: a reference bound
@@ -3352,6 +3479,12 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             fake = fn{M.fnLocals = Map.insert local (M.LocalDecl (unref refTy) Nothing) (M.fnLocals fn)}
         (facts, b2) <- typeSteps rules types invariants fake local b1
         pure (step "Havoc" [("local", MInt (localNum local))] : facts, value, b2)
+    resultPlace defined dest b0 = case (Map.member dest (aliasBorrows alias), completeTargets dest) of
+        (False, Just [(owner, path)]) | maybe False (Set.member owner) defined -> do
+            (more, placeRef, b1) <- placeRefOf True (localValue owner) path b0
+            (descendants, b2) <- rebindThrough defined dest b1
+            pure (more ++ [step "Assign" [("local", MInt (localNum dest)), ("value", placeRef)]] ++ descendants, b2)
+        _ -> Just ([], b0)
     -- After a place a reference the bridge cannot place is to gets a new value through it, the references the
     -- may-places put at one known place of that owner read it again, and those whose chain of borrows passes through
     -- one of them are bound again from it (the others were made arbitrary, staleAfter)
