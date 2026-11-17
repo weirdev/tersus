@@ -26,10 +26,10 @@ import Types
 import Utils (Result (..), bindResult, inIntRange)
 import MirCopies (coveredKey, genericKey, isCopyName, isStubName, opaqueKey)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool, buildCopy :: Bool, buildGeneric :: Bool }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool, buildCopy :: Bool, buildGeneric :: Bool, buildLive :: Maybe (Set.Set M.Local) }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False False False
+emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False False False Nothing
 
 -- The function the validator sees for a name: a check function of an impl, `Tr for O::g`, is its impl's function
 -- `<O as Tr>::g`, since its body is the call of that function with its parameters (traitCheckWrapper); a reference to
@@ -2807,8 +2807,13 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     let b0 = b0'{buildDefined = Just (Map.findWithDefault Set.empty blockId (definitelyAssigned alias fn))}
         -- (whatever form an assignment has, the references into the local
         -- assigned are bound again; a call's destination likewise, at the call)
-        addTracked acc s = do
-            (st0, bb0, c, pe) <- add acc s
+        addTracked (steps0, state0, c0, pe0) (index, s) = do
+            -- (the locals a later statement, contract or invariant may still observe: what is not observed again
+            -- gets no facts back when it is made arbitrary, and no holder check when what it holds changes)
+            let liveNow = case drop index (Map.findWithDefault [] blockId liveAfterStatements) of
+                    after : _ -> after
+                    [] -> Map.findWithDefault Set.empty blockId liveAtEnd
+            (st0, bb0, c, pe) <- add (steps0, state0{buildLive = Just liveNow}, c0, pe0) s
             let assignedLocal = case s of
                     M.Assign d _ -> Just d
                     M.Peek d _ -> Just d
@@ -2824,10 +2829,10 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                     M.AssignRef r _ _ -> Set.singleton (fst (resolveRef (aliasBorrows alias) r))
                     _ -> Set.empty
             pure (st, bb{buildDefined = fmap (Set.union assigned) (buildDefined bb)}, c, pe)
-    (chunks, b1d, conditions, _) <- foldM addTracked ([], b0, Map.empty, Map.empty) stmts
+    (chunks, b1d, conditions, _) <- foldM addTracked ([], b0, Map.empty, Map.empty) (zip [0 ..] stmts)
     let steps = concat (reverse chunks)
         endDefined = buildDefined b1d
-    let b1 = b1d{buildDefined = Nothing}
+    let b1 = b1d{buildDefined = Nothing, buildLive = Just (Map.findWithDefault Set.empty blockId liveAtEnd)}
     (extra, ending, b2) <- case (Map.lookup blockId (M.specLoops (M.fnSpec fn)), end) of
         (Just spec, M.SwitchBool (M.Copy local) yes no) -> do
             resolution <- case Map.lookup local conditions of
@@ -2987,6 +2992,16 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
   where
     alias = aliasingOf types functions fn
     parentsOfLocals = invariantParents alias types functions fn
+    (liveAfterStatements, liveAtEnd) = validationLiveness types functions fn
+    -- (a local observed again: one live here, or what a live reference or holder may be to)
+    observed b l = case buildLive b of
+        Nothing -> True
+        Just live -> Set.member l (closeLive live)
+    closeLive live = case aliasCandidates alias of
+        Just (targets, members) ->
+            let next = live `Set.union` Set.fromList ([owner | (ref, points) <- Map.toList targets, Set.member ref live, (owner, _) <- points] ++ [owner | ((holder, _), points) <- members, Set.member holder live, (owner, _) <- points] ++ [top | ref <- Set.toList live, let (top, _) = resolveRef (aliasBorrows alias) ref])
+             in if next == live then live else closeLive next
+        Nothing -> live `Set.union` Set.fromList [top | ref <- Set.toList live, let (top, _) = resolveRef (aliasBorrows alias) ref]
     -- A function a call can be made to without knowing which: it needs
     -- nothing of its arguments, changes none of them, returns no reference,
     -- terminates, and is not the function itself or one that reaches it
@@ -3068,8 +3083,12 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 [ v
                 | member <- Set.toList region
                 , Just (M.BasicBlock blockStmts term) <- [Map.lookup member (M.fnBlocks fn)]
-                , v <- [d | M.Assign d _ <- blockStmts] ++ [fst (resolveRef (aliasBorrows alias) r) | M.AssignRef r _ _ <- blockStmts] ++ (case term of M.Call _ args d _ -> d : [fst (resolveRef (aliasBorrows alias) l) | M.Copy l <- args] ++ [fst (resolveRef (aliasBorrows alias) l) | M.Move l <- args]; _ -> [])
+                , v <- [d | M.Assign d _ <- blockStmts] ++ [fst (resolveRef (aliasBorrows alias) r) | M.AssignRef r _ _ <- blockStmts] ++ (case term of M.Call calleeOp args d _ -> d : [fst (resolveRef (aliasBorrows alias) l) | (arg, isHeld) <- zip args (heldArgs calleeOp), not isHeld, Just l <- [operandLocal arg]]; _ -> [])
                 ]
+            -- (a value given for a held parameter changes only at its held field, which the call writes (heldArg))
+            heldArgs calleeOp = case calleeOp of
+                M.Const (M.CFn name) | Just callee <- Map.lookup name functions, Just held <- heldParams types functions callee -> [p' `elem` map fst held | p' <- M.fnParams callee] ++ repeat False
+                _ -> repeat False
             heldOnly = [l | l <- assigned, keepsShape l, not (Set.member l direct), Set.member l loopDefined]
             havocked = filter (`notElem` heldOnly) assigned
         (genVariant, withCondition') <- case M.loopTermination spec of
@@ -3450,7 +3469,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             -- (a local in reach, or one whose invariants speak of what one in reach holds, changed itself)
             affected = nub (reach ++ concatMap (\l -> Set.toList (Map.findWithDefault Set.empty l parentsOfLocals)) reach)
             rebuilt = [holder | ((holder, _), _) <- describedHolders defined reach, holder `notElem` checked, holder `notElem` affected]
-        guard (all (\l -> l `elem` checked || l `elem` rebuilt || checkedWhenStale defined affected l) stale)
+        guard (all (\l -> l `elem` checked || l `elem` rebuilt || not (observed b0 l) || checkedWhenStale defined affected l) stale)
         (rebound, b1) <- rebindThrough defined root b0
         (havocked, b2) <- havocAll defined stale b1
         (held, b3) <- foldM (\(acc, current) owner -> do
@@ -3492,7 +3511,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
         -- (and the references whose chain of borrows passes through the rebuilt holder read it again)
         (views, afterViews) <- rebindThrough defined holder afterDeeper
         pure (steps ++ reads ++ rebuild ++ [step "Assign" [("local", MInt (localNum holder)), ("value", newHolder)]] ++ deeper ++ views, afterViews)) ([], b0)
-            [entry | entry@((holder, _), _) <- describedHolders defined [root], holder `notElem` checked, holder `notElem` seen]
+            [entry | entry@((holder, _), _) <- describedHolders defined [root], holder `notElem` checked, holder `notElem` seen, observed b0 holder]
     -- (an arbitrary value of what a reference of the type is to: only of a type with no invariant)
     freshOf refTy b = do
         guard (invariantFree Set.empty (unref refTy))
@@ -3583,7 +3602,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             oldLocal = negate i - 1
             save = step "Assign" [("local", MInt oldLocal), ("value", localRef (localNumber l))]
         (kept, b2) <- if keepsShape l then shapeKept l (localRef oldLocal) b1 else Just ([], b1)
-        (facts, b3) <- typeSteps rules types invariants fn l b2
+        (facts, b3) <- if observed b l then typeSteps rules types invariants fn l b2 else Just ([], b2)
         (rebound, b4) <- rebindThrough defined l b3
         pure (steps ++ [save, step "Havoc" [("local", MInt (localNumber l))]] ++ kept ++ facts ++ rebound, b4)
     localTypeOf l = maybe TInt M.localType (Map.lookup l (M.fnLocals fn))
