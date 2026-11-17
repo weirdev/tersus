@@ -1,6 +1,11 @@
 module TestMirMonoOwnership (testMirMonoOwnership, testMirMonoOwnershipUsing) where
 
 import Data.Char (isSpace)
+import Control.Exception (bracket)
+import Data.IORef (newIORef, modifyIORef', readIORef)
+import System.Directory (getTemporaryDirectory, removeFile, getPermissions, setPermissions, Permissions(..))
+import System.FilePath ((</>))
+import System.IO (openTempFile, hClose)
 import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -80,6 +85,53 @@ unwritableMetadata p = p{progMain=(progMain p){fnSpec=(fnSpec (progMain p)){spec
   where
     payload = S.CTerm (S.VFunct [] [] [] (S.NativeFunct (Signature [] (TArrayOf TInt (SizeConst (10 ^ (30 :: Int)))) [] [] [] []) Nothing []) [])
 
+withReplies :: (String, String, Int) -> (String, String, Int) -> IO TestResult
+withReplies mono owned = case writeLowered (unit metadataProgram) of
+    Error e -> pure (Just e)
+    Ok validMono -> do
+        directory <- getTemporaryDirectory
+        bracket (openTempFile directory "tersus-fused-replies") cleanup $ \(script,handle) -> do
+            hClose handle
+            let responses = [("mono",mono),("ownership",owned),("mono-ownership",combined)]
+                combined = if first mono == validMono then (first mono ++ first owned, second owned, third owned) else mono
+                branch (selector,(_,_,status)) = "'pass " ++ selector ++ "') cat '" ++ script ++ "." ++ selector ++ ".out'; cat '" ++ script ++ "." ++ selector ++ ".err' >&2; exit " ++ show status ++ ";;\n"
+            mapM_ (\(selector,(out,err,_)) -> writeFile (script ++ "." ++ selector ++ ".out") out >> writeFile (script ++ "." ++ selector ++ ".err") err) responses
+            writeFile script ("#!/bin/sh\nIFS= read -r header\ncat >/dev/null\ncase \"$header\" in\n" ++ concatMap branch responses ++ "*) exit 99;;\nesac\n")
+            permissions <- getPermissions script
+            setPermissions script permissions{executable=True}
+            count <- newIORef (0 :: Int)
+            let getter = modifyIORef' count (+1) >> pure (ToolNative script)
+            expected <- staged getter genericProgram
+            stagedCount <- readIORef count
+            modifyIORef' count (const 0)
+            actual <- monomorphizeOwnershipWith getter genericProgram
+            fusedCount <- readIORef count
+            pure (testAssertEq actual expected <> testAssertEq stagedCount (if first mono == validMono then 2 else 1) <> testAssertEq fusedCount 1)
+  where
+    first (a,_,_) = a
+    second (_,b,_) = b
+    third (_,_,c) = c
+    cleanup (script,_) = mapM_ removeFile (script : [script ++ "." ++ selector ++ "." ++ stream | selector <- ["mono","ownership","mono-ownership"], stream <- ["out","err"]])
+
+replyControls :: [Test]
+replyControls = case writeLowered (unit metadataProgram) of
+    Error e -> [testCase "reply fixture serializes" (Just e)]
+    Ok mono ->
+        let owned = writeProgramWithGhosts (ownershipInput metadataProgram)
+            success = (mono,"",0)
+            cases =
+                [("one selected native tool acquisition",success,(owned,"",0))
+                ,("Mono refusal",("1\n","mono-refusal\n",0),(owned,"",0))
+                ,("Mono native exit",("","mono-exit\n",7),(owned,"",0))
+                ,("ownership refusal after complete Mono",success,("1\n","owner-refusal\n",0))
+                ,("ownership native exit after complete Mono",success,("","owner-exit\n",7))
+                ,("ownership stderr after complete Mono",success,(owned,"owner-reported\n",0))
+                ,("a complete Mono receipt alone is not success",success,("","",0))
+                ,("trailing ownership records are refused",success,(owned ++ "unexpected-record\n","",0))
+                ,("truncated Mono payload is refused",("tersus-mir 3\ndata 9\n","",0),(owned,"",0))
+                ]
+         in [TestCase label (withReplies a b) | (label,a,b) <- cases]
+
 testMirMonoOwnership :: Test
 testMirMonoOwnership = testMirMonoOwnershipUsing ownershipTool
 
@@ -103,6 +155,7 @@ testMirMonoOwnershipUsing tool = TestList "testMirMonoOwnership"
     , TestCase "failed generic tool has no fallback" (compareAdapters (pure (ToolFailed "fused-tool-failure")) genericProgram)
     , TestCase "interpreted generic tool has no fallback" (compareAdapters (pure (ToolInterpreted metadataProgram)) genericProgram)
     , TestCase "an ownership refusal after Mono remains a refusal" (compareAdapters tool negativeBlocks)
+    , TestList "adapter partial receipts and errors" replyControls
     , TestList "malformed full requests" [TestCase label (compareRefusal input) | (label,input) <- malformed]
     ]
   where

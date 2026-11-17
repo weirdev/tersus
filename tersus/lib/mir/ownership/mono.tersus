@@ -34,6 +34,7 @@ fn ownershipRows(receipt: &FullOutput) -> List<List<Token>> ~ {
 };
 
 fn runMonoOwnership(lines: &List<List<Token>>) -> Bool ~ {
+    if size(lines) < 1 { return false; };
     input = [];
     for i in 1..size(lines) { input = push(input, clone(get(lines, i))); };
     parsed = fullAt(&input);
