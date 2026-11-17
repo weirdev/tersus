@@ -1,0 +1,34 @@
+// Closures: an anonymous function that captures the variables its body uses.
+// A read of an Int is copied in, a read of a list is borrowed, an update
+// borrows for updating, and `move` takes the value itself. A closure is
+// given to a generic function through an Fn, FnMut or FnOnce bound, which
+// says how it may be called, and called directly where it is made.
+
+fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };
+
+fn twice<F: FnMut() -> Int>(f: &mut F) -> Int {
+    a = f();
+    b = f();
+    return a * 10 + b;
+};
+
+// the values the closures below work on
+base = 100;
+factor = 3;
+xs = push(push([], 1), 2);
+
+// types left out are taken from the bound the closure fills
+scaled = apply(fn(x) => x * factor, 7);
+
+// a closure that updates what it captured, called through FnMut
+count = 0;
+counter = fn() -> Int { count = count + 1; return count; };
+ticks = twice(&mut counter);
+
+// a closure whose capture-only contract is proved here and used in its body
+step = fn(x: Int) -> Int [{ affirm base > 0; }] [{ affirm return > x; }] => x + base;
+
+// a moved capture: the list goes into the closure, which gives it back once
+owned = move fn() -> List<Int> => xs;
+taken = owned();
+return scaled * 1000000 + ticks * 10000 + step(1) * 100 + size(taken) * 10 + count;

@@ -424,6 +424,12 @@ testBorrow =
                 , testCase "the same element" (rejected "fn f(a: &mut List<Int>, b: &List<Int>) -> Int writes(a) { *a = [7, 7, 7, 7]; return size(b); }; xs = [[1, 2, 3], [5]]; return f(&mut get(xs, 0), get(xs, 0));" "xs[0] is lent to this call and lent to it for updating too")
                 , testCase "an element at an index that is not known" (rejected "fn f(a: &mut List<Int>, b: &List<Int>) -> Int writes(a) { *a = [7, 7, 7, 7]; return size(b); }; fn g(xs: List<List<Int>>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(xs); affirm size(xs) > 1; }] [{ }] { return f(&mut get(xs, 1), get(xs, i)); }; return g([[1, 2, 3], [5]], 0);" "is lent to this call, and xs[1] is lent to it for updating")
                 ]
+            , TestList
+                "closure captures"
+                [ testCase "a variable a closure borrows for reading cannot be assigned while the closure is live" (rejected "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); xs = push(xs, 3); return f();") "cannot be assigned while it is borrowed")
+                , testCase "a variable a closure borrows for updating cannot be read while the closure is live" (rejected "count = 0; f = fn() -> Int { count = count + 1; return count; }; a = count; b = f(); return a + b;") "cannot be read while that borrow is live")
+                , testCase "a borrowed capture can be used again after the closure's last use" (runs "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); a = f(); xs = push(xs, 3); return a * 10 + size(xs);") (VInt 23))
+                ]
             ]
 
 -- (every type has its declaration once a program is lowered, so this one is taken out of the lowered program)

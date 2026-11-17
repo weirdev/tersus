@@ -21,6 +21,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | --- | --- | --- |
 | `basics.tersus` | Integer lists, `size`/`first`/`last`, arithmetic, and a nested block that updates an outer variable | returns `6` |
 | `functions.tersus` | `fn` definitions, multiple arguments, and a function that calls `first`/`last` under an input contract | returns `21` |
+| `closures.tersus` | Closures: captures copied, borrowed and moved (`move fn`), an updating closure through an `FnMut` bound, types taken from the bound, a capture-only contract proved at creation, and a closure called directly | returns `21130122` |
 | `booleans.tersus` | `true`/`false` literals and relations such as `x < 6` producing booleans | returns `true` |
 | `proofs.tersus` | `affirm`, `define`, and the `eval`, `eqToGtZero`, and `eqToLtPlus1` rewrites | validates |
 | `rewrites.tersus` | The primitive `refl` and `evalAll` rewrites | validates |
