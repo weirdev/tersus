@@ -1223,7 +1223,9 @@ fn closureStructValue(st: St, structName: &String, structTy: Int, structArgs: &L
             st = emitBuiltinCall(st, clone(key), &oneArg);
             borrowNode = st.nid;
             st = wrapTy(st, ek, structTy);
-            return St { ok: true, te: TE { node: borrowNode, types: push(push([], st.ty), structTy) }, ..st };
+            borrowTypes = push([], st.ty);
+            for ty in &valueTE.types { borrowTypes = push(borrowTypes, ty); };
+            return St { ok: true, te: TE { node: borrowNode, types: borrowTypes }, ..st };
         };
     };
     return St { ok: true, te: valueTE, ..st };
