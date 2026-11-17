@@ -29,6 +29,10 @@ testStdGraph = TestList "testStdGraph"
             Right program ->
                 let cloneOf owner = fmap (fmap fst . ownershipClone) (Map.lookup owner =<< M.progOwnership program)
                  in testAssertEq (cloneOf "app$util$util$Bag<Int>", cloneOf "app$util$util$Plain<Int>") (Just (Just "std$core$ownership$Clone"), Just Nothing)
+    , testCase "a generic function's copy at a type only an unused function gives it keeps none of that copy's facts' functions" $
+        case programOf (defaultLoadOptions, []) [("app/package.tersus", ""), ("app/main.tersus", "struct S { n: Int };\nimpl Clone for S { };\nfn keep<T>(x: T) -> List<T> { return push([], x); };\nfn unused() -> Int { k = keep(S { n: 1 }); return size(k); };\nk = keep(1);\nreturn size(k);")] of
+            Left e -> Just ("the package did not compile: " ++ e)
+            Right program -> testAssertEq [name | name <- Map.keys (M.progFunctions program), "clone[S]" `isInfixOf` name] []
     , testCase "a program's own Eq is its build's Eq, not std's" $
         runs [("app/package.tersus", "Eq = main::Eq;"), ("app/main.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; struct P { a: Int }; impl Eq for P { }; p = P { a: 1 }; if p = p { return 1; }; return 0;")] "1"
             <> providerIs [("app/package.tersus", "Eq = main::Eq;"), ("app/main.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; struct P { a: Int }; impl Eq for P { }; p = P { a: 1 }; if p = p { return 1; }; return 0;")] "Eq" "Eq"

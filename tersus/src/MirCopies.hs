@@ -12,6 +12,7 @@ module MirCopies
     , isStubName
     , withoutGeneric
     , groundType
+    , libraryBuiltin
     , contractSuffix
     ) where
 

@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Types where
 
@@ -249,6 +250,24 @@ listOf s t = TNamed (storageList s) [ArgType t]
 
 boxOf :: Storage -> Type -> Type
 boxOf s t = TNamed (storageBox s) [ArgType t]
+
+-- The type that a list or a Box is natively: a list and a Box are the structs they are declared as, with the types of
+-- their parts made native, and a Box of an array is a list of its elements
+listType :: Storage -> Type -> Type
+listType st ty = case ty of
+    TArrayOf t size -> TArrayOf (listType st t) size
+    (boxContent st -> Just (TArrayOf t _)) -> listOf st (listType st t)
+    TAddr t -> TAddr (listType st t)
+    TUninit t -> TUninit (listType st t)
+    TRef t -> TRef (listType st t)
+    TMutRef t -> TMutRef (listType st t)
+    TFn args ret -> TFn (map (listType st) args) (listType st ret)
+    TNamed base args -> TNamed base (map (renameArg st) args)
+    _ -> ty
+
+renameArg :: Storage -> Arg -> Arg
+renameArg st (ArgType t) = ArgType (listType st t)
+renameArg _ other = other
 
 -- The language's list and Box as the builtin table and the AST data spell them (`List<T>`, `Box<T>`), which the
 -- elaborator binds to the checked providers; not a type of a program

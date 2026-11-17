@@ -1,6 +1,6 @@
 import data::ast::ast { AstBody, AstExpression, AstNode, AstOptTermination, AstRule, AstSignature, AstStatement, AstTermination, AstValidation, AstValue };
 import data::codec::codec { catStrings };
-import elaborate::calls { assignVar, bindIn, bindInner, coerce, head, lookupVar, popScope, pushScope, scopeLookup, teHead, withType };
+import elaborate::calls { assignVar, bindIn, bindInner, bodyFunction, coerce, head, lookupVar, popScope, pushScope, scopeLookup, teHead, withType };
 import elaborate::core { checkFieldType, checkFinite, checkType, declareTypeWith, holdsRef, isBoxTy, isListTy, readField, registerCtors, unrefOf };
 import elaborate::expr { derefExpr, freshElementType, inferExpr, packIndexFolds };
 import elaborate::out { emit, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations };
@@ -494,6 +494,7 @@ fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: In
     outerSizes = clone(st.sizeScope);
     outerTypes = clone(st.typeScope);
     outerCurrent = clone(st.current);
+    bodyStart = size(st.tys);
     st = St { sizeScope: clone(sizes), typeScope: clone(types), current: clone(name), ..st };
     distinct = true;
     i = 0;
@@ -613,6 +614,10 @@ fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: In
     st = checkStatements(st, false, &bodyStmts);
     if st.status != 0 { return st; };
     bodyTE = clone(st.te);
+    // (a function in another's body is known by its name only there: its range is kept apart from the unit's functions')
+    if size(sizes) + size(types) > 0 {
+        if st.templates.contains(name) || !bodyFunction(&st, name) { st = St { genericBodies: st.genericBodies.insert(clone(name), push(push([], bodyStart), size(st.tys))), ..st }; } else { st = St { genericNested: push(push(clone(st.genericNested), bodyStart), size(st.tys)), ..st }; };
+    };
     st = St { sizeScope: outerSizes, typeScope: outerTypes, current: outerCurrent, ret: outerRet, scopes: outerScopes, readOnly: outerReadOnly, mutParams: outerMut, writes: outerWrites, aliasNames: outerAliasNames, aliasPlaces: outerAliasPlaces, resultFrom: outerResultFrom, params: outerParams, originNames: outerOriginNames, originRoots: outerOriginRoots, pack: outerPack, packType: outerPackType, packLent: outerPackLent, packIndexNames: outerPackIndexNames, packIndexTypes: outerPackIndexTypes, packElements: outerPackElements, packElementTexts: outerPackElementTexts, ..st };
     return St { outs: push(push(push(push([], insNode), outsNode), termNode), bodyTE.node), te: bodyTE, names: from, ..st };
 };

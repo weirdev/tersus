@@ -1,13 +1,13 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBuiltin, AstExpression, AstNode, AstOptName, AstValue };
 import data::codec::codec { catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue };
-import elaborate::calls { scopeLookup, argContext, argsOfFn, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType, withType };
+import elaborate::calls { scopeLookup, argContext, argsOfFn, bodyFunction, builtinHead, builtinIndexType, builtinRecord, checkCall, coerce, ctorArgTypes, emitIntValue, head, headKey, inScope, instantiateGenerics, intLiteral, keyType, lookupVar, sizeArgument, teHead, valueType, withType };
 import elaborate::check { fnSigOf, mentionsParameter };
 import elaborate::core { arrayOk, baseNameOf, checkConstruct, ctorInfo, ensureInstance, hasColons, hasFunction, holdsGhost, isBoxTy, isListTy, isTuple, literalOk, ownsHeap, readField, tupleType, typeCtors, unrefOf };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { exprOf, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, checkCallWrites, placeForm, placeRoot, refResultIndex };
-import elaborate::state { stubTraitParameter, forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
+import elaborate::state { GenericCall, stubTraitParameter, forwardInProofText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, productFits, unclonedParameter, render, resolve, simpleTy, sizeConst, teHeadAt, tyAt, typeError, undoTry, unify, withTy, wrapTy, zonk };
 import elaborate::traits { boundAsImpl, callResolved, emptyTemplate, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
@@ -1898,6 +1898,8 @@ fn genericCall(st: St, name: String, names: &List<String>, types: &List<String>,
     st = instantiateGenerics(st, names, types, inner);
     instantiated = st.ty;
     vars = clone(st.te.types);
+    // (a function in a body is known by its name there, which is not the unit's function of that name)
+    if !bodyFunction(&st, &name) { st = St { genericCalls: push(st.genericCalls, GenericCall { caller: clone(st.current), callee: clone(name), sizeNames: clone(names), typeNames: clone(types), vars: clone(vars) }), ..st }; };
     x = tyAt(st, instantiated);
     if x.kind != 14 { return typeError(st, catStrings(name, " is not a function")); };
     pts = argsOfFn(&x);

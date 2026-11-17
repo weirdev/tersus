@@ -1,7 +1,7 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBound, AstBounds, AstBuiltin, AstExpression, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
 import data::codec::codec { Size, catStrings, wireOwnershipRole };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, substitute };
-import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, scopeLookup, sizeArgument, teHead };
+import elaborate::calls { argsOfFn, bindIn, bindInner, bodyFunction, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, scopeLookup, sizeArgument, teHead };
 import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, isTraitStub, mentionsParameter, refResultFrom, stmtOf };
 import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInfo, hasFunction, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
 import elaborate::exports { pairParts };
@@ -10,7 +10,7 @@ import elaborate::out { emit, emitCall, emitExpressions, emitName, emitNames, em
 import elaborate::records { codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::wire { wireTemplateFacts };
-import elaborate::state { stubTraitParameter, indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
+import elaborate::state { GenericCall, stubTraitParameter, indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk };
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
     node = nodeIn(&st.nodes, id);
@@ -526,6 +526,7 @@ fn templateCall(st: St, name: String, tm0: Template, inferred: &List<TE>) -> St 
     st = instantiateGenerics(st, &tm.sizes, &tm.types, st.ty);
     instantiated = st.ty;
     vars = clone(st.te.types);
+    if !bodyFunction(&st, &name) { st = St { genericCalls: push(st.genericCalls, GenericCall { caller: clone(st.current), callee: clone(name), sizeNames: clone(tm.sizes), typeNames: clone(tm.types), vars: clone(vars) }), ..st }; };
     sizeVars = [];
     typeVars = [];
     i = 0;
@@ -1190,7 +1191,10 @@ fn traitArguments(st: St, tname: String, t: Int) -> St ~ {
 
 fn unsizedBoxedArray(st: &St, t: Int) -> Bool ~ {
     x = tyAt(st, t);
-    return isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6 && kindOf(st, argAt(st, nth(&x.args, 0), 1)) = 21;
+    // (an array size no use decided is lowered as any size: defaultNamed)
+    if !(isBoxTy(st, t) && kindOf(st, nth(&x.args, 0)) = 6) { return false; };
+    k = kindOf(st, argAt(st, nth(&x.args, 0), 1));
+    return k = 21 || k = 23;
 };
 
 fn hasCloneHelper(st: &St) -> Bool ~ {

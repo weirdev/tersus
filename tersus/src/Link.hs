@@ -16,12 +16,12 @@ import qualified Data.Set as Set
 import PreludeSource (nativeStorageModules)
 import qualified Mir as M
 import PackageData (ModuleId (..), renderModuleId)
-import MirCopies (groundType, isCopyName, makeCopiesWith)
-import MirMono (namedTypesByName)
+import MirCopies (groundType, isCopyName, libraryBuiltin, makeCopiesWith)
+import MirMono (instantiate, namedTypesByName, redirect)
 import qualified Syntax
 import Syntax (Proof (..), ValidationStatement (..), VariableProof, Value (..))
-import Types (Arg (..), Name, OwnershipFacts (..), Storage (..), Type (..), baseNameOf, instanceName)
-import Utils (Result (..), bindResult)
+import Types (Arg (..), Name, OwnershipFacts (..), Size (..), Storage (..), Type (..), baseNameOf, instanceName, listType)
+import Utils (Result (..), bindResult, flatResultMap)
 
 -- Units are merged under the names their declarations were lowered with
 -- (compiler-library units and the entry module keep bare names, the rest
@@ -61,11 +61,20 @@ linkNormalized library recording normalized =
                         mergeAll "copy" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInstances program)] `bindResult` \instances ->
                         mergeAll "provider" [(modu, role, provider) | (modu, program) <- normalized, (role, provider) <- Map.toList (M.progProtocols program)] `bindResult` \protocols ->
                         mergeOwnership normalized `bindResult` \ownership ->
+                        -- (an Instance record of a function without bounds is a frame of it: the types a copy of it is made at, which
+                        -- the elaborator found through the calls that reach it; the host's monomorphisation makes the copy)
+                        let copyRecord (g, args) = Map.member g bounded || (g == libraryBuiltin && null args)
+                            frames = [record | record <- Map.elems instances, not (copyRecord record)]
+                         in flatResultMap (frameKey functions) frames `bindResult` \frameKeys ->
                             -- (a copy the call cannot have is refused as the elaborator refuses a call)
-                            let linked = M.completeInstances (M.Program types functions linkedMain generics invariants bounded instances protocols ownership)
+                            let linked = M.completeInstances (M.Program types functions linkedMain generics invariants bounded (Map.filter copyRecord instances) protocols ownership)
+                                storage = M.progStorage linked
+                                -- (the frames the calls of the functions the program keeps reach, and the calls of those frames' copies in
+                                -- turn, keep the types a copy holds: a frame no kept call reaches keeps none)
+                                framesKept p = Set.unions [Set.union (typeNames t) (instancesIn t) | key <- Set.toList (framesReached (Set.fromList frameKeys) p), held <- frameTypes p key, t <- [held, listType storage held]]
                                 -- (the facts' functions are made for the types the program keeps once the copies its calls
                                 -- name are made, not for every instance a library declares)
-                                kept p = Set.union (snd (reachable p)) (Map.keysSet (namedTypesByName (pruneProgram p)))
+                                kept p = Set.unions [snd (reachable p), Map.keysSet (namedTypesByName (pruneProgram p)), framesKept p]
                                 -- (a function a fact names can keep more types, whose facts' functions are made in turn)
                                 withFacts owners = makeCopiesWith library (Just owners) linked `bindResult` \p ->
                                     if kept p `Set.isSubsetOf` owners then Ok p else withFacts (Set.union owners (kept p))
@@ -78,6 +87,35 @@ linkNormalized library recording normalized =
     functionEnv = Map.fromList [(name, M.Const (M.CFn name)) | (_, program) <- normalized, name <- Map.keys (M.progFunctions program)]
     rootMain = M.progMain (snd (last normalized))
     linkedMain = (completeFunctionEnvs functionEnv (prependGhosts (concatMap unitGhosts (init normalized)) rootMain)){M.fnSpec = M.fnSpec rootMain}
+
+-- The copy a frame names, of a function without bounds at types and sizes that are all known; any other is refused
+frameKey :: Map.Map Name M.Function -> (Name, [Arg]) -> Result (Name, [Type], [Integer]) String
+frameKey functions (g, args) = case Map.lookup g functions of
+    Just f
+        | length tys == length (M.fnTypeParams f) && length sizes == length (M.fnSizeParams f) && length tys + length sizes == length args && all groundType tys ->
+            Ok (g, tys, sizes)
+    _ -> Error ("link error: an instance of " ++ g ++ " that is no copy of a function with bounds nor a frame of the function")
+  where
+    tys = [t | ArgType t <- args]
+    sizes = [k | ArgSize (SizeConst k) <- args]
+
+-- The frames the calls of the functions the program keeps reach, through the calls of each frame's copy in turn
+framesReached :: Set.Set (Name, [Type], [Integer]) -> M.Program -> Set.Set (Name, [Type], [Integer])
+framesReached supplied p = go [key | fn <- M.progMain p : keptPlain, key <- snd (redirect p fn), Set.member key supplied] Set.empty
+  where
+    keptPlain = [fn | name <- Set.toList (fst (reachable p)), Just fn <- [Map.lookup name (M.progFunctions p)], null (M.fnTypeParams fn), null (M.fnSizeParams fn)]
+    go [] seen = seen
+    go (key@(g, tys, sizes) : rest) seen
+        | Set.member key seen = go rest seen
+        | otherwise = case Map.lookup g (M.progFunctions p) of
+            Just f -> go ([next | next <- snd (redirect p (instantiate f tys sizes)), Set.member next supplied] ++ rest) (Set.insert key seen)
+            Nothing -> go rest (Set.insert key seen)
+
+-- The types a frame's copy holds
+frameTypes :: M.Program -> (Name, [Type], [Integer]) -> [Type]
+frameTypes p (g, tys, sizes) = case Map.lookup g (M.progFunctions p) of
+    Just f -> let copy = instantiate f tys sizes in [M.localType d | d <- Map.elems (M.fnLocals copy)] ++ maybe [] pure (M.fnReturns copy)
+    Nothing -> []
 
 -- The units' checked ownership facts as one table: units with them agree on every type they share; a unit without them
 -- (data written without its facts) makes the build's absent
@@ -269,9 +307,9 @@ reachable program = fixpoint (functionRefs program (M.progMain program)) (typeRe
         fnsNext = Set.union fns (Set.intersection (Map.keysSet (M.progFunctions program)) (Set.unions [fromFns, fromTypes, invariantRefs]))
         typesFromFns = Set.unions (map (typeRefsOfFunction program) keptFnList)
         typesFromTypes = Set.unions [declTypeRefs decl | name <- Set.toList types, Just decl <- [Map.lookup name (M.progTypes program)]]
-        -- (a Box of an array is a list of its elements in native code, MirLists)
+        -- (a Box of an array is a list of its elements in native code, wherever it is: listType)
         keptNamed = namedTypesByName program{M.progFunctions = Map.fromList [(M.fnName fn, fn) | fn <- keptFnList], M.progTypes = Map.filterWithKey (\name _ -> Set.member name types) (M.progTypes program), M.progGenerics = Map.empty}
-        typesFromStorage = Set.fromList (concat [[storageList storage, instanceName (storageList storage) [ArgType e]] | TNamed b [ArgType (TArrayOf e _)] <- Map.elems keptNamed, b == storageBox storage])
+        typesFromStorage = Set.unions [Set.union (typeNames image) (instancesIn image) | ty <- Map.elems keptNamed, let image = listType storage ty, image /= ty]
         typesNext = Set.unions [types, typesFromFns, typesFromTypes, typesFromStorage]
     -- (a kept type keeps its impls, its base's impls that are not copies, and the functions its checked facts name: a copy
     -- of a base's impl for another instance is kept by what calls it, or by that instance's facts)
@@ -425,6 +463,15 @@ typeRefsOfFunction program fn =
 argNames :: Arg -> Set.Set Name
 argNames (ArgType inner) = typeNames inner
 argNames _ = Set.empty
+
+-- The rendered names of the instances a type is made of
+instancesIn :: Type -> Set.Set Name
+instancesIn ty = case ty of
+    TNamed name args -> Set.insert (instanceName name args) (Set.unions [instancesIn u | ArgType u <- args])
+    TArrayOf inner _ -> instancesIn inner
+    TRef inner -> instancesIn inner
+    TMutRef inner -> instancesIn inner
+    _ -> Set.empty
 
 typeNames :: Type -> Set.Set Name
 typeNames ty = case ty of

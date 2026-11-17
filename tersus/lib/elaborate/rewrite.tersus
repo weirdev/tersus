@@ -483,6 +483,42 @@ fn namedString(m: &Maps, params: &HashSet<String>, name: &String) -> Txt ~ {
     return txt(catStrings(&t.name, &rest), t.name != base);
 };
 
+// A type written with its arguments, `T<A, B<C>>`, each named as its own type is
+fn namedWithArgs(m: &Maps, params: &HashSet<String>, name: &String) -> Txt ~ {
+    at = indexOfByte(name, 60);
+    if at < 0 || at > size(name.bytes) { return namedString(m, params, name); };
+    base = name.slice(0, at);
+    t = lookupTypeTarget(m, params, &base);
+    if !t.ok { return txtFail(t.msg); };
+    rest = name.slice(at, size(name.bytes));
+    n = size(rest.bytes);
+    if n < 2 || get(rest.bytes, n - 1) != toByte(62) { return txt(catStrings(&t.name, &rest), t.name != base); };
+    parts = [];
+    depth = 0;
+    start = 1;
+    i = 1;
+    while i < n - 1 [{ affirm i >= 1; }] shrinks n - 1 - i {
+        b = get(rest.bytes, i);
+        if b = toByte(60) { depth = depth + 1; };
+        if b = toByte(62) { depth = depth - 1; };
+        if b = toByte(44) && depth = 0 { parts = push(parts, rest.slice(start, i)); start = i + 1; };
+        i = i + 1;
+    };
+    parts = push(parts, rest.slice(start, n - 1));
+    out = [];
+    changed = t.name != base;
+    for part in &parts {
+        from = 0;
+        while from < size(part.bytes) && get(part.bytes, from) = toByte(32) [{ affirm from >= 0; }] shrinks size(part.bytes) - from { from = from + 1; };
+        word = part.slice(from, size(part.bytes));
+        a = namedWithArgs(m, params, &word);
+        if !a.ok { return a; };
+        if a.changed { changed = true; };
+        out = push(out, clone(a.text));
+    };
+    return txt(catStrings(catStrings(clone(t.name), "<"), catStrings(joinWith(&out, ", "), ">")), changed);
+};
+
 fn rwDeclaration(rw: Rw, stmt: &AstStatement) -> Rw ~ {
     params = clone(rw.params);
     bound = clone(rw.bound);
@@ -652,7 +688,12 @@ fn rwBuiltin(rw: Rw, b: Int) -> Rw ~ {
     if v is AstBuiltin::Ctor { return rwCtorBuiltin(rw, b); };
     if v is AstBuiltin::FieldBuiltin {
         owner = nodeIn(&rw.nodes, (v as AstBuiltin::FieldBuiltin).owner);
-        if owner is AstNode::OptName && (owner as AstNode::OptName).value is AstOptName::SomeName { return rwNamedAt(rw, ((owner as AstNode::OptName).value as AstOptName::SomeName).n); };
+        // (the owner of an update's field reads is the type written for the update, its arguments as named as it is)
+        if owner is AstNode::OptName && (owner as AstNode::OptName).value is AstOptName::SomeName {
+            n = ((owner as AstNode::OptName).value as AstOptName::SomeName).n;
+            name = nameText(&rw.nodes, n);
+            return setTxtAt(rw, n, namedWithArgs(&rw.m, &rw.params, &name));
+        };
         return rw;
     };
     if v is AstBuiltin::Is { return rwCtorAt(rw, (v as AstBuiltin::Is).n); };

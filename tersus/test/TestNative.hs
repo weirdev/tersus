@@ -171,13 +171,13 @@ testNativeIr =
         , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" $
             withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i32 1, ptr" `isInfixOf` ir && "icmp eq i32" `isInfixOf` ir))
         , TestCase "a Box takes room on the heap for what it holds" $
-            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.boxNew<P>\"" `isInfixOf` ir))
+            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.std$box$box$boxNew<P>\"" `isInfixOf` ir))
         , TestCase "a Box of an array is a list of the library" $
             withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.std$lists$lists$listFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
         , TestCase "a string literal is copied from a constant array of its bytes" $
             withIr "s = \"hello\"; return size(s);" (\ir -> testAssertTrue ("private constant [5 x i8] [i8 104, i8 101, i8 108, i8 108, i8 111]" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 5, i64 1)" `isInfixOf` ir))
         , TestCase "a Box is the struct of the library, freed by its drop" $
-            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<Box<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.boxUnbox<Int>\"" `isInfixOf` ir))
+            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<std$core$types$Box as std$core$ownership$Drop>::drop<Int>\"" `isInfixOf` ir && "@\"fn.std$box$box$boxUnbox<Int>\"" `isInfixOf` ir))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" $
             withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "@tersus_writeByte(i64 195)" `isInfixOf` ir && "@tersus_writeByte(i64 169)" `isInfixOf` ir))
         , TestCase "a letter of four bytes" $
@@ -642,7 +642,7 @@ arrayPrograms =
     , ("a type and a size together", "fn fill<T: Clone, n>(a: &Array<T, n>, x: T) -> Array<T, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] { return set(clone(a), 0, x); }; l = fill(array(3, push([], 1)), push(push([], 7), 8)); b = fill(#[true, true], false); return l;")
     , ("a bounded type parameter that is a list", "fn same<T: Eq>(a: T, b: T) -> Bool { return a = b; }; return same(push([], 1), push([], 1));")
     , ("a nested function with a type parameter of the outer one's name", "fn outer<T: Copy>(x: T) -> Int { fn inner<T>(y: T) -> List<T> { return push([], y); }; l = inner([1]); return size(l); }; return outer(3);")
-    , ("the element replace takes out of a list in a copy, with a Clone of the program's own", "trait Clone { fn clone(self: &Self) -> Self; }; struct P { v: Int }; impl Clone for P { fn clone(self: &Self) -> P { return P { v: self.v + 10 }; }; }; fn r<T: Clone>(l: List<T>, x: T) -> T [{ affirm size(l) = 1; }] [{ }] { p = replace(l, 0, x); return p.1; }; return r(push([], P { v: 1 }), P { v: 2 }).v;")
+    , ("the element replace takes out of a list in a copy, with a Clone of the program's own", "struct P { v: Int }; impl Clone for P { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { writeByte(toByte(67)); return P { v: self.v }; }; }; fn r<T: Clone>(l: List<T>, x: T) -> T [{ affirm size(l) = 1; }] [{ }] { p = replace(l, 0, x); return p.1; }; return r(push([], P { v: 1 }), P { v: 2 }).v;")
     , ("a word compared through a bound, in a set", "s = HashSet::new().insert(3).insert(4).insert(3); return s.size();")
     , ("a Box of an array compared and cloned through bounds", "fn same<T: Eq>(a: &T, b: &T) -> Bool { return a = b; }; fn dup<T: Clone>(a: &T) -> T { return Clone::clone(a); }; a = Array::boxed(3, 7); b = dup(a); return same(a, b);")
     , ("a word and a struct with a written Clone cloned through a bound", "struct C { v: Int }; impl Clone for C { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { return C { v: self.v }; }; }; fn dup<T: Clone>(a: &T) -> T { return a.clone(); }; return dup(4) + dup(C { v: 1 }).v;")
@@ -850,6 +850,8 @@ nativeStoragePrograms =
     [ ("permission-owning copies in nested Box/List storage, each freed by its own drop", owned ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Owned::new(3); y = x.copyOf(); xs = push([], wrap(y)); xs = pop(xs); return x.n + size(xs);")
     , ("permission-owning copies in a list, one of them replaced", owned ++ "x = Owned::new(4); xs = push(push([], x.copyOf()), x.copyOf()); xs = set(xs, 1, Owned::new(5)); return get(xs, 0).n + get(xs, 1).n + x.n;")
     , ("nested Box/List storage of a type with its own Clone", payload ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Payload::new(3); y = clone(x); y = Payload { data: push(y.data, 7), n: y.n }; xs = push([], wrap(y)); xs = pop(xs); return size(x.data) * 10 + size(xs);")
+    , ("a list made by a generic function of what another generic function gives it", "fn keep<T>(x: T) -> List<T> { return push([], x); }; fn g<U>(u: U) -> Int { k = keep(u); return size(k); }; return g(push([], 1));")
+    , ("and of a value that is not Clone, which it only moves", "struct S { n: Int }; fn keep<T>(x: T) -> List<T> { return push([], x); }; fn g<U>(u: U) -> Int { k = keep(u); return size(k); }; return g(S { n: 1 });")
     , ("array-backed storage of a type with its own Clone", payload ++ "x = Payload::new(4); xs = Array::boxed(2, x); xs = set(xs, 1, Payload::new(5)); return get(xs, 0).n + get(xs, 1).n;")
     ]
   where

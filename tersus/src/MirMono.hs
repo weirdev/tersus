@@ -4,6 +4,8 @@ module MirMono
     ( monomorphize
     , monomorphizeForValidation
     , namedTypesByName
+    , instantiate
+    , redirect
     ) where
 
 import Data.List (intercalate)
@@ -79,28 +81,39 @@ monoWith native finish completeTypes program
     (main', mainNeeds) = redirect program (progMain program)
     redirected = [redirect program f | f <- Map.elems (progFunctions program), not (generic f)]
     plain' = map fst redirected
-    -- (the drop of a struct with types is the copy of its checked drop for each instance of the struct that the program has:
-    -- native code calls it where a value of that instance is freed, which no call in the program says; the instance's
-    -- facts then name the copy)
-    (instances, dropKeys) = withDrops (build program (mainNeeds ++ concatMap snd redirected) Map.empty) Map.empty (4 :: Int)
-    withDrops done owners k =
+    -- (the drop, clone and deref of a struct with types or sizes are the copies of its checked ones for each instance of the
+    -- struct that the program has: native code calls a drop where a value of that instance is freed, which no call in the
+    -- program says; the instance's facts then name the copies)
+    (instances, roleKeys) = withRoles (build program (mainNeeds ++ concatMap snd redirected) Map.empty) Map.empty (4 :: Int)
+    withRoles done owners k =
         let p = withInstances program{progFunctions = Map.fromList [(fnName f, f) | f <- plain' ++ Map.elems done], progMain = main'}
-            found = [(n, key) | n <- Map.keys (progTypes p), not (symbolic n), Map.notMember n owners, Just key <- [dropKey n]]
+            held = namedTypesByName p
+            found = [((n, role), key) | n <- Map.keys (progTypes p), not (symbolic n), (role, (get, _)) <- zip [0 :: Int ..] roles, Map.notMember (n, role) owners, Just key <- [roleKey held get n]]
             owners' = foldr (uncurry Map.insert) owners found
             keys = [key | (_, key) <- found, Map.notMember key done]
-         in if null found || k <= 0 then (done, owners') else withDrops (build program keys done) owners' (k - 1)
-    dropKey n = do
-        (_, name) <- factsOf program n >>= ownershipDrop
+         in if null found || k <= 0 then (done, owners') else withRoles (build program keys done) owners' (k - 1)
+    roles =
+        [ (ownershipDrop, \v f -> f{ownershipDrop = v})
+        , (ownershipClone, \v f -> f{ownershipClone = v})
+        , (ownershipDeref, \v f -> f{ownershipDeref = v})
+        ]
+    -- (an instance a copy made in an earlier round holds has its type there, not in the program)
+    roleKey held get n = do
+        (_, name) <- factsOf program n >>= get
         f <- Map.lookup name (progFunctions program)
         if not (generic f) then Nothing else Just ()
         self <- case fnParams f of
             p : _ -> Just p
             [] -> Nothing
         selfTy <- localType <$> Map.lookup self (fnLocals f)
-        let bindings = match selfTy (Map.findWithDefault (TNamed n []) n namedTypes)
-        tys <- mapM (`lookup` bindings) (fnTypeParams f)
-        Just (name, tys, [])
-    ownership = fmap (\facts -> Map.foldrWithKey (\n (name, tys, sizes) -> Map.adjust (\f -> f{ownershipDrop = fmap (\(provider, _) -> (provider, fnInstanceName name tys sizes)) (ownershipDrop f)}) n) facts dropKeys) (progOwnership program)
+        let owner = Map.findWithDefault (Map.findWithDefault (TNamed n []) n namedTypes) n held
+        tys <- mapM (`lookup` match selfTy owner) (fnTypeParams f)
+        sizes <- mapM (`lookup` matchSizes selfTy owner) (fnSizeParams f)
+        Just (name, tys, sizes)
+    ownership = fmap (\facts -> Map.foldrWithKey retarget facts roleKeys) (progOwnership program)
+    retarget (n, role) (name, tys, sizes) =
+        let (get, set) = roles !! role
+         in Map.adjust (\f -> set (fmap (\(provider, _) -> (provider, fnInstanceName name tys sizes)) (get f)) f) n
 
 -- The copies to make, with those that the copies need
 -- (the types and the sizes that a copy is for)
@@ -260,6 +273,23 @@ match pat actual = case (pat, actual) of
     _ -> []
 
 -- What the type parameters are, given what an instance of a struct is given
+-- The sizes a type with size parameters is given in an actual type
+matchSizes :: Type -> Type -> [(Variable, Integer)]
+matchSizes pat actual = case (pat, actual) of
+    (TRef p, a) -> matchSizes p a
+    (p, TRef a) -> matchSizes p a
+    (TMutRef p, a) -> matchSizes p a
+    (p, TMutRef a) -> matchSizes p a
+    (TArrayOf p (SizeParam n), TArrayOf a (SizeConst k)) -> (n, k) : matchSizes p a
+    (TArrayOf p _, TArrayOf a _) -> matchSizes p a
+    (TNamed bp ps, TNamed ba as)
+        | bp == ba, length ps == length as -> concat (zipWith argSizes ps as)
+    _ -> []
+  where
+    argSizes (ArgSize (SizeParam n)) (ArgSize (SizeConst k)) = [(n, k)]
+    argSizes (ArgType p) (ArgType a) = matchSizes p a
+    argSizes _ _ = []
+
 matchArg :: Arg -> Arg -> [(Variable, Type)]
 matchArg (ArgType p) (ArgType a) = match p a
 matchArg _ _ = []

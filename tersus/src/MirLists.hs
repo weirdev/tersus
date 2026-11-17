@@ -14,11 +14,12 @@ import Data.Maybe (fromMaybe, listToMaybe)
 
 import PreludeSource (nativeStorageModules, nativeHelperName)
 import Link (linkWithLibraries)
+import MirMono (namedTypesByName)
 import LibPackage (libModuleId, stripDeclaredFromUnits)
 import PackageData (ModuleId (..))
 import Utils (Result (..), bindResult, mapResult)
 import Mir
-import Types (Arg (..), Name, Storage (..), Type (..), boxContent, instanceName, listElement, listOf, mentionsParameter)
+import Types (Arg (..), Name, Storage (..), Type (..), boxContent, instanceName, listElement, listOf, listType, mentionsParameter, renameArg)
 
 -- A list is checked, validated and run by the executor as a list. Native code has no list: a `List<T>` is the struct `List<T>` of
 -- lib/std/lists/lists.tersus (the elements in an array on the heap, and how many are in use), and this makes the program that is validated the
@@ -138,34 +139,19 @@ lowerLists library program
     selected units = stripDeclaredFromUnits unusedTypes [(modu, unit) | (modu, unit) <- units, modu `elem` map libModuleId wanted]
     lowered units =
         program
-            { progTypes = Map.fromList [(renameName renames n, renameDecl d) | (n, d) <- Map.toList (progTypes program)]
+            { progTypes = Map.fromList [(renameName renames n, renameDecl d) | (n, d) <- Map.toList (progTypes program), Set.notMember n boxedArrays]
             , progFunctions = Map.map (lowerFunction renames program) (Map.withoutKeys (progFunctions program) (ownedNames units))
             , progMain = lowerFunction renames program (progMain program)
             , progGenerics = Map.map (\(params, fields) -> (params, [(f, listType st t) | (f, t) <- fields])) (progGenerics program)
             }
+    -- (a Box of an array is held as a list of its elements, so no value is of the Box's own instance, whose size may be
+    -- one no use decided)
+    boxedArrays = Map.keysSet (Map.filter (\ty -> case boxContent st ty of Just TArrayOf{} -> True; _ -> False) (namedTypesByName program))
     -- (once for the program: every function renames by it, and it is made of every local of every function)
     renames = renamesForTypes st (programTypes program)
     renameDecl d = case d of
         StructDecl fields -> StructDecl [(f, listType st t) | (f, t) <- fields]
         EnumDecl variants -> EnumDecl [(v, [(f, listType st t) | (f, t) <- fields]) | (v, fields) <- variants]
-
--- The type that a list or a Box is natively: a list and a Box are the structs they are declared as, with the types of
--- their parts made native, and a Box of an array is a list of its elements
-listType :: Storage -> Type -> Type
-listType st ty = case ty of
-    TArrayOf t size -> TArrayOf (listType st t) size
-    (boxContent st -> Just (TArrayOf t _)) -> listOf st (listType st t)
-    TAddr t -> TAddr (listType st t)
-    TUninit t -> TUninit (listType st t)
-    TRef t -> TRef (listType st t)
-    TMutRef t -> TMutRef (listType st t)
-    TFn args ret -> TFn (map (listType st) args) (listType st ret)
-    TNamed base args -> TNamed base (map (renameArg st) args)
-    _ -> ty
-
-renameArg :: Storage -> Arg -> Arg
-renameArg st (ArgType t) = ArgType (listType st t)
-renameArg _ other = other
 
 isArrayType :: Type -> Bool
 isArrayType t = case t of

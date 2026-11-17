@@ -61,6 +61,15 @@ impl Clone for FnSig { };
 struct Reference { f: String, types: List<Int>, sizes: List<Int>, sig: FnSig };
 impl Clone for Reference { };
 
+// A call of a generic function: where it is, what it calls, and the unknowns its sizes and types are (wireInstantiations)
+struct GenericCall { caller: String, callee: String, sizeNames: List<String>, typeNames: List<String>, vars: List<Int> };
+impl Clone for GenericCall { };
+
+// The functions on the way to a frame of a generic function, their type parameters, and the types the frame's function
+// is given in each one's parameters (wireInstantiations)
+struct Way { functions: List<String>, params: List<List<String>>, given: List<List<Int>> };
+impl Clone for Way { };
+
 // A place as the root it starts from and its steps: a field's name, or "" for an element
 struct Place { ok: Bool, root: String, steps: List<String> };
 impl Clone for Place { };
@@ -90,7 +99,12 @@ struct St {
     wireProtocols: HashMap<String, List<String>>,
     wireOwnership: HashMap<String, List<String>>,
     templateFacts: List<String>,
+    ordinaryFrames: List<String>,
     ownTypes: HashSet<String>,
+    genericCalls: List<GenericCall>,
+    genericBodies: HashMap<String, List<Int>>,
+    genericNested: List<Int>,
+    way: Way,
     types: HashMap<String, List<String>>,
     ctors: HashMap<String, CtorInfo>,
     generics: HashMap<String, Generic>,

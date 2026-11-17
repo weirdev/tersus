@@ -17,7 +17,7 @@ fn noMir(msg: String) -> MirOut ~ { return MirOut { ok: false, msg: msg, lines: 
 
 // The lowering of an accepted module (its elaborated program, out) against the interfaces it is lowered with, in their
 // order
-fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, storage: &List<String>, templateFacts: &List<String>) -> MirOut ~ {
+fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, storage: &List<String>, templateFacts: &List<String>, ordinaryFrames: &List<String>) -> MirOut ~ {
     problem = arenasProblem(out, ifaces, table);
     if size(problem.bytes) > 0 { return noMir(lwCat("Lowering: ", &problem)); };
     src = joinArena(out, ifaces, table);
@@ -46,6 +46,13 @@ fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, st
         if !(stmt is AstStatement::StructDef) && !(stmt is AstStatement::EnumDef) && !(stmt is AstStatement::TraitDef) { nested = lwDeclaredNames(&src.nodes, push([], s), nested); };
     };
     assumes = assumesIn(&src.nodes, &stmts, []);
+    // (the types a generic function is copied at, through the calls that reach it: the copier keeps their facts' functions)
+    i = 0;
+    while i + 1 < size(ordinaryFrames) [{ affirm i >= 0; }] shrinks size(ordinaryFrames) - i {
+        frame = clone(get(ordinaryFrames, i));
+        if !ls.instances.contains(&frame) { ls = LowSt { instances: ls.instances.insert(frame, clone(get(ordinaryFrames, i + 1))), ..ls }; };
+        i = i + 2;
+    };
     return writeLowered(ls, &src, setTexts(&declared), setTexts(&nested), assumes, templateFacts);
 };
 
