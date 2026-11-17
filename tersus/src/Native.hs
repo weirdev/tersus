@@ -9,6 +9,8 @@ module Native
     , spawnShared
     , withSpawnedProcess
     , readProcessOutput
+    , withPipeReader
+    , ReaderFailure (..)
     , runProcessWithInputFull
     , validSignalTarget
     , parallelBuilds
@@ -23,10 +25,10 @@ module Native
     , raiseStack
     ) where
 
-import Control.Concurrent (forkIO, forkIOWithUnmask, killThread)
+import Control.Concurrent (forkIOWithUnmask, killThread)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar, withMVar)
-import Control.Exception (IOException, SomeException, bracket, bracketOnError, evaluate, finally, mask, mask_, onException, throwIO, try)
+import Control.Exception (Exception (..), IOException, SomeException, bracket, bracketOnError, evaluate, finally, mask, mask_, onException, throwIO, try)
 import Control.Monad (forM)
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumProcessors)
@@ -35,7 +37,7 @@ import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileEx
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (Handle, IOMode (..), hClose, hGetContents, hIsTerminalDevice, hPutStr, hPutStrLn, hSetEncoding, openFile, stderr, stdin)
-import System.IO.Error (isDoesNotExistError, isResourceVanishedError)
+import System.IO.Error (ioeGetLocation, ioeSetLocation, isDoesNotExistError, isResourceVanishedError)
 import System.Environment (getEnvironment)
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
 import System.Posix.Types (ProcessID)
@@ -45,7 +47,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
 
 import qualified Data.Map.Strict as Map
-import System.Process (CreateProcess (..), ProcessHandle, StdStream (..), cleanupProcess, createProcess, getPid, proc, waitForProcess)
+import System.Process (CmdSpec (..), CreateProcess (..), ProcessHandle, StdStream (..), cleanupProcess, createProcess, getPid, proc, waitForProcess)
 
 import CacheLock (openLockHandle, openTempFileCloexec, withSpawnShared)
 import Hash (fingerprint)
@@ -209,8 +211,8 @@ readProcessOutput command input =
             (Just toChild, Just fromChild, Just errors, process) -> do
                 out <- hGetContents fromChild
                 err <- hGetContents errors
-                withForkWait (() <$ evaluate (length out)) $ \waitOut ->
-                    withForkWait (() <$ evaluate (length err)) $ \waitErr -> do
+                withPipeReader ("reading the standard output of " ++ program) fromChild (() <$ evaluate (length out)) $ \waitOut ->
+                    withPipeReader ("reading the standard error of " ++ program) errors (() <$ evaluate (length err)) $ \waitErr -> do
                         wrote <- try (hPutStr toChild input `finally` hClose toChild) :: IO (Either IOException ())
                         case wrote of
                             Left e | not (isResourceVanishedError e) -> throwIO e
@@ -222,14 +224,36 @@ readProcessOutput command input =
                 code <- waitForProcess process
                 pure (code, out, err)
             _ -> ioError (userError "the process did not give its pipes")
+  where
+    program = case cmdspec command of
+        RawCommand exe _ -> exe
+        ShellCommand line -> line
 
-withForkWait :: IO () -> (IO () -> IO a) -> IO a
-withForkWait action use = do
+data ReaderFailure = ReaderFailure String SomeException
+
+instance Show ReaderFailure where
+    show (ReaderFailure what e) = what ++ " failed: " ++ displayException e
+
+instance Exception ReaderFailure
+
+-- The reader's thread leaves a result however it ends, so a wait never blocks on a reader that died (as they did under
+-- GHC #21561). One that fails closes its pipe, so that a child still writing to it gets EPIPE rather than blocking,
+-- and a wait on its other stream ends.
+withPipeReader :: String -> Handle -> IO a -> (IO a -> IO b) -> IO b
+withPipeReader what handle action use = do
     slot <- newEmptyMVar
     mask $ \restore -> do
-        thread <- forkIO (try (restore action) >>= putMVar slot)
-        let joined = takeMVar slot >>= either (\e -> throwIO (e :: SomeException)) pure
+        thread <- forkIOWithUnmask $ \unmask ->
+            try (unmask action `onException` (try (hClose handle) :: IO (Either IOException ()))) >>= putMVar slot
+        let joined = takeMVar slot >>= either (throwIO . readerFailure what) pure
         restore (use joined) `onException` killThread thread
+
+-- (an IOException stays one, so that callers that handle a child's IO errors still do; anything else, an asynchronous
+-- exception included, is wrapped, so that a waiter does not take the reader's death for its own cancellation)
+readerFailure :: String -> SomeException -> SomeException
+readerFailure what e = case fromException e of
+    Just io -> toException (ioeSetLocation io (what ++ ": " ++ ioeGetLocation (io :: IOException)))
+    Nothing -> toException (ReaderFailure what e)
 
 waitOwnedProcess :: CreateProcess -> IO ExitCode
 waitOwnedProcess command = mask $ \restore ->

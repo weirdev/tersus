@@ -333,6 +333,7 @@ test-suite tersus-test
       TestBox
       TestBuiltinRegistry
       TestBytes
+      TestClosures
       TestConnectives
       TestControl
       TestCopies

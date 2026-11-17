@@ -117,7 +117,9 @@ struct ParamOut { names: List<String>, types: List<Type> };
 impl Clone for ParamOut { };
 struct OneParam { name: String, ty: Type };
 impl Clone for OneParam { };
-struct GenParam { name: String, boundTraits: List<String>, boundArgs: List<List<Type>> };
+struct FnShape { kind: String, names: List<String>, types: List<Type>, ret: Type, ins: List<Int>, outs: List<Int>, canonical: String, traitParams: List<String> };
+impl Clone for FnShape { };
+struct GenParam { name: String, boundTraits: List<String>, boundArgs: List<List<Type>>, boundShapes: List<FnShape> };
 impl Clone for GenParam { };
 struct FieldOut { name: String, ty: Type };
 impl Clone for FieldOut { };
@@ -163,6 +165,11 @@ fn typeAtOr(xs: &List<Type>, i: Int) -> Type ~ {
 
 fn typesAtOr(xs: &List<List<Type>>, i: Int) -> List<Type> ~ {
     if i < 0 || i >= size(xs) { return []; };
+    return clone(get(xs, i));
+};
+
+fn shapeAtOr(xs: &List<FnShape>, i: Int) -> FnShape ~ {
+    if i < 0 || i >= size(xs) { return emptyFnShape(); };
     return clone(get(xs, i));
 };
 
@@ -6107,8 +6114,227 @@ fn genericParamList(sourceText: &Input, st: St) -> Res<List<GenParam>> ~ {
     return ok( s, out);
 };
 
+fn isFnKind(name: &String) -> Bool ~ { return name = "Fn" || name = "FnMut" || name = "FnOnce"; };
+
+fn emptyFnShape() -> FnShape ~ { return FnShape { kind: "", names: [], types: [], ret: Type::TInt, ins: [], outs: [], canonical: "", traitParams: [] }; };
+
+fn sanitizeFnName(s: &String) -> String ~ {
+    out = [];
+    for i in 0..size(s.bytes) { b = toInt(get(&s.bytes, i)); if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) { out = push(out, b); } else { out = push(out, 95); }; };
+    return bytesToString(out);
+};
+
+fn fnContractHash(text: &String) -> String ~ {
+    h = 5381;
+    inString = false;
+    escaped = false;
+    for i in 0..size(text.bytes) {
+        b = toInt(get(&text.bytes, i));
+        include = true;
+        if escaped { escaped = false; } else {
+            if inString && b = 92 { escaped = true; } else {
+                if b = 34 { inString = !inString; } else {
+                    if !inString && (b = 32 || b = 9 || b = 10 || b = 13) { include = false; };
+                };
+            };
+        };
+        if include { h = (h * 33 + b) % 1000000007; };
+    };
+    return String::fromInt(h);
+};
+
+fn collectTokenParams(ts: &List<Token>, acc: List<String>) -> List<String> ~ {
+    out = clone(acc);
+    for i in 0..size(ts) {
+        if i + 1 < size(ts) {
+            tok = get(ts, i);
+            if !tok.quoted && tok.text = "param" {
+                n = clone(get(ts, i + 1).text);
+                if indexOfName(&out, &n) < 0 { out = push(out, n); };
+            };
+        };
+    };
+    return out;
+};
+
+fn canonicalTypeName(t: Type, params: &List<String>) -> String ~ {
+    toks = typeTokensOf(t);
+    out = "";
+    i = 0;
+    while i < size(toks) [{ affirm i >= 0; affirm i <= size(toks); }] shrinks size(toks) - i {
+        tok = get(toks, i);
+        if !tok.quoted && tok.text = "param" && i + 1 < size(toks) {
+            pname = clone(get(toks, i + 1).text);
+            at = indexOfName(params, &pname);
+            out = catStrings(out, "_P");
+            if at >= 0 { out = catStrings(out, String::fromInt(at)); } else { out = catStrings(out, pname); };
+            i = i + 2;
+        } else {
+            if tok.quoted { out = catStrings(out, "_Q"); } else { out = catStrings(out, "_W"); };
+            out = catStrings(out, clone(tok.text));
+            i = i + 1;
+        };
+    };
+    return sanitizeFnName(&out);
+};
+
+fn collectTypeParams(t: Type, acc: List<String>) -> List<String> ~ {
+    out = clone(acc);
+    match t {
+        Type::TParam { name: n } => { if indexOfName(&out, &n) < 0 { out = push(out, clone(n)); }; },
+        Type::TList { elem: e } => { out = collectTypeParams(Box::unbox(e), out); },
+        Type::TBox { inner: e } => { out = collectTypeParams(Box::unbox(e), out); },
+        Type::TRef { inner: e } => { out = collectTypeParams(Box::unbox(e), out); },
+        Type::TMutRef { inner: e } => { out = collectTypeParams(Box::unbox(e), out); },
+        Type::TAddr { inner: e } => { out = collectTypeParams(Box::unbox(e), out); },
+        Type::TBlock { inner: e } => { out = collectTypeParams(Box::unbox(e), out); },
+        Type::TUninit { inner: e } => { out = collectTypeParams(Box::unbox(e), out); },
+        Type::TArray { elem: e, size: s } => { out = collectTypeParams(Box::unbox(e), out); },
+        Type::TFn { args: a, ret: r } => { for x in a { out = collectTypeParams(clone(x), out); }; out = collectTypeParams(Box::unbox(r), out); },
+        Type::TForall { sizes: a, types: b, body: c } => { out = collectTypeParams(Box::unbox(c), out); },
+        Type::TInt => { },
+        Type::TByte => { },
+        Type::TBool => { },
+        Type::TWord { signed: a, bits: b } => { },
+        Type::TNamed { name: n, base: b, argc: c, argTokens: ts } => { out = collectTokenParams(&ts, out); },
+        Type::TVariant { name: n } => { },
+        Type::TVar { n: n } => { },
+    };
+    return out;
+};
+
+fn fnTraitParams(st: &St, types: &List<Type>, ret: Type) -> List<String> ~ {
+    out = [];
+    for t in types { out = collectTypeParams(clone(t), out); };
+    out = collectTypeParams(clone(ret), out);
+    return out;
+};
+
+fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
+    s = skipWs(sourceText, st);
+    if byteAt(sourceText, s, s.pos) != 40 { return fail( s, emptyFnShape(), cat3(kind, " takes a shape in parentheses, as in ", "Fn(x: Int) -> Int")); };
+    s = St { pos: s.pos + 1, ..s };
+    s = skipWs(sourceText, s);
+    names = [];
+    tys = [];
+    if byteAt(sourceText, s, s.pos) != 41 {
+        loop = true;
+        while loop ~ {
+            save = checkpoint(s);
+            v = parseVariable(sourceText, s); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
+            s = resultPartsvState;
+            named = false;
+            pname = "";
+            pty = Type::TInt;
+            if resultPartsvOk {
+                after = skipWs(sourceText, probeState(&s));
+                if byteAt(sourceText, after, after.pos) = 58 {
+                    named = true;
+                    pname = resultPartsvValue;
+                    s = St { pos: after.pos + 1, ..s };
+                    s = skipWs(sourceText, s);
+                    t = typeAnnotation(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
+                    if !resultPartstOk { return Res<FnShape> { st: resultPartstState, v: emptyFnShape(), ok: false }; };
+                    s = resultPartstState;
+                    pty = resultPartstValue;
+                };
+            };
+            if !named {
+                s = restore(s, save);
+                t = typeAnnotation(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
+                if !resultPartstOk { return Res<FnShape> { st: resultPartstState, v: emptyFnShape(), ok: false }; };
+                s = resultPartstState;
+                pname = catStrings("arg", String::fromInt(size(names)));
+                pty = resultPartstValue;
+            };
+            names = push(names, pname);
+            tys = push(tys, pty);
+            s = skipWs(sourceText, s);
+            if byteAt(sourceText, s, s.pos) = 44 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); } else { loop = false; };
+        };
+    };
+    if byteAt(sourceText, s, s.pos) != 41 { return fail( s, emptyFnShape(), "expected ) in a function shape"); };
+    s = St { pos: s.pos + 1, ..s };
+    s = skipWs(sourceText, s);
+    if !peekIs(sourceText, s, "->") { return fail( s, emptyFnShape(), cat3(kind, " shape writes its result after ->, as in ", "Fn(x: Int) -> Int")); };
+    s = St { pos: s.pos + 2, ..s };
+    s = skipWs(sourceText, s);
+    rt = typeAnnotation(sourceText, s); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
+    if !resultPartsrtOk { return Res<FnShape> { st: resultPartsrtState, v: emptyFnShape(), ok: false }; };
+    s = skipWs(sourceText, resultPartsrtState);
+    contractStart = 0 - 1;
+    if byteAt(sourceText, s, s.pos) = 91 { contractStart = s.pos; };
+    ins = optContract(sourceText, s); Res { st: resultPartsinsState, v: resultPartsinsValue, ok: resultPartsinsOk } = ins;
+    if !resultPartsinsOk { return Res<FnShape> { st: resultPartsinsState, v: emptyFnShape(), ok: false }; };
+    s = resultPartsinsState;
+    outs = optContract(sourceText, s); Res { st: resultPartsoutsState, v: resultPartsoutsValue, ok: resultPartsoutsOk } = outs;
+    if !resultPartsoutsOk { return Res<FnShape> { st: resultPartsoutsState, v: emptyFnShape(), ok: false }; };
+    s = resultPartsoutsState;
+    tps = fnTraitParams(&s, &tys, clone(resultPartsrtValue));
+    canonical = clone(kind);
+    i = 0;
+    for t in &tys { renderedTy = canonicalTypeName(clone(t), &tps); canonical = catStrings(canonical, cat3("$", String::fromInt(i), "")); canonical = catStrings(canonical, cat3("=", renderedTy, "")); i = i + 1; };
+    renderedRet = canonicalTypeName(clone(resultPartsrtValue), &tps);
+    canonical = catStrings(canonical, cat3("$to$", renderedRet, ""));
+    if contractStart >= 0 { contractText = srcSlice(sourceText, s, contractStart, s.pos); canonical = catStrings(canonical, cat3("$c", fnContractHash(&contractText), "")); };
+    return ok( s, FnShape { kind: kind, names: names, types: tys, ret: resultPartsrtValue, ins: resultPartsinsValue, outs: resultPartsoutsValue, canonical: canonical, traitParams: tps });
+};
+
+fn mintFnTrait(st: St, shape: &FnShape) -> Res<Int> ~ {
+    s = st;
+    for nd in &s.nodes {
+        if nd is AstNode::Statement {
+            sv = (nd as AstNode::Statement).value;
+            if sv is AstStatement::TraitDef && nameText(&s, (sv as AstStatement::TraitDef).n) = shape.canonical { return ok( s, 0); };
+        };
+    };
+    receiver = namedTypeOf("Self", []);
+    if shape.kind = "Fn" { receiver = Type::TRef { inner: Box::new(namedTypeOf("Self", [])) }; };
+    if shape.kind = "FnMut" { receiver = Type::TMutRef { inner: Box::new(namedTypeOf("Self", [])) }; };
+    allTypes = push([], receiver);
+    shapeTypes = clone(shape.types);
+    for t in &shapeTypes { allTypes = push(allTypes, clone(t)); };
+    shapeCanonical = clone(shape.canonical);
+    shapeIns = clone(shape.ins);
+    shapeOuts = clone(shape.outs);
+    shapeNames = clone(shape.names);
+    shapeParams = clone(shape.traitParams);
+    sig = signatureNode( s, &allTypes, clone(shape.ret), [], [], [], []); Res { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk } = sig;
+    if !resultPartssigOk { return Res<Int> { st: resultPartssigState, v: 0, ok: false }; };
+    s = resultPartssigState;
+    nn = putName( s, "call"); Res { st: resultPartsnnState, v: resultPartsnnValue, ok: resultPartsnnOk } = nn;
+    if !resultPartsnnOk { return Res<Int> { st: resultPartsnnState, v: 0, ok: false }; };
+    s = resultPartsnnState;
+    allNames = push([], "self");
+    for nm in &shapeNames { allNames = push(allNames, clone(nm)); };
+    ps = namesList( s, &allNames); Res { st: resultPartspsState, v: resultPartspsValue, ok: resultPartspsOk } = ps;
+    if !resultPartspsOk { return Res<Int> { st: resultPartspsState, v: 0, ok: false }; };
+    s = resultPartspsState;
+    il = validationsList( s, &shapeIns); Res { st: resultPartsilState, v: resultPartsilValue, ok: resultPartsilOk } = il;
+    if !resultPartsilOk { return Res<Int> { st: resultPartsilState, v: 0, ok: false }; };
+    s = resultPartsilState;
+    ol = validationsList( s, &shapeOuts); Res { st: resultPartsolState, v: resultPartsolValue, ok: resultPartsolOk } = ol;
+    if !resultPartsolOk { return Res<Int> { st: resultPartsolState, v: 0, ok: false }; };
+    s = resultPartsolState;
+    tf = emit( s, AstNode::TraitFn { value: AstTraitFn { n: resultPartsnnValue, ps: resultPartspsValue, sig: resultPartssigValue, ins: resultPartsilValue, outs: resultPartsolValue } }); Res { st: resultPartstfState, v: resultPartstfValue, ok: resultPartstfOk } = tf;
+    if !resultPartstfOk { return Res<Int> { st: resultPartstfState, v: 0, ok: false }; };
+    s = resultPartstfState;
+    tn = putName( s, &shapeCanonical); Res { st: resultPartstnState, v: resultPartstnValue, ok: resultPartstnOk } = tn;
+    if !resultPartstnOk { return Res<Int> { st: resultPartstnState, v: 0, ok: false }; };
+    s = resultPartstnState;
+    tps = namesList( s, &shapeParams); Res { st: resultPartstpsState, v: resultPartstpsValue, ok: resultPartstpsOk } = tps;
+    if !resultPartstpsOk { return Res<Int> { st: resultPartstpsState, v: 0, ok: false }; };
+    s = resultPartstpsState;
+    fs = traitFnsList( s, push([], resultPartstfValue)); Res { st: resultPartsfsState, v: resultPartsfsValue, ok: resultPartsfsOk } = fs;
+    if !resultPartsfsOk { return Res<Int> { st: resultPartsfsState, v: 0, ok: false }; };
+    s = resultPartsfsState;
+    td = stmtNode( s, AstStatement::TraitDef { n: resultPartstnValue, ps: resultPartstpsValue, fs: resultPartsfsValue }); Res { st: resultPartstdState, v: resultPartstdValue, ok: resultPartstdOk } = td;
+    if !resultPartstdOk { return Res<Int> { st: resultPartstdState, v: 0, ok: false }; };
+    return ok( resultPartstdState, resultPartstdValue);
+};
+
 fn oneGenericParam(sourceText: &Input, st: St) -> Res<GenParam> ~ {
-    empty = GenParam { name: "", boundTraits: [], boundArgs: [] };
+    empty = GenParam { name: "", boundTraits: [], boundArgs: [], boundShapes: [] };
     dots = peekIs(sourceText, &st, "..");
     startPos = st.pos;
     if dots { startPos = st.pos + 2; };
@@ -6119,6 +6345,7 @@ fn oneGenericParam(sourceText: &Input, st: St) -> Res<GenParam> ~ {
     s = skipWs(sourceText, resultPartsvState);
     traits = [];
     argss = [];
+    shapes = [];
     if byteAt(sourceText, s, s.pos) = 58 {
         s = St { pos: s.pos + 1, ..s };
         s = skipWs(sourceText, s);
@@ -6127,6 +6354,17 @@ fn oneGenericParam(sourceText: &Input, st: St) -> Res<GenParam> ~ {
             t = qualifiedName(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
             if !resultPartstOk { return Res<GenParam> { st: resultPartstState, v: empty, ok: false }; };
             s = skipWs(sourceText, resultPartstState);
+            if isFnKind(&resultPartstValue) && byteAt(sourceText, s, s.pos) = 40 {
+                sh = fnShape(sourceText, s, resultPartstValue); Res { st: resultPartsshState, v: resultPartsshValue, ok: resultPartsshOk } = sh;
+                if !resultPartsshOk { return Res<GenParam> { st: resultPartsshState, v: empty, ok: false }; };
+                s = resultPartsshState;
+                traits = push(traits, clone(resultPartsshValue.canonical));
+                targs = [];
+                for tp in &resultPartsshValue.traitParams { targs = push(targs, Type::TParam { name: clone(tp) }); };
+                argss = push(argss, targs);
+                shapes = push(shapes, resultPartsshValue);
+                if byteAt(sourceText, s, s.pos) = 43 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); } else { loop = false; };
+            } else {
             args = [];
             if byteAt(sourceText, s, s.pos) = 60 {
                 s = St { pos: s.pos + 1, ..s };
@@ -6146,10 +6384,12 @@ fn oneGenericParam(sourceText: &Input, st: St) -> Res<GenParam> ~ {
             };
             traits = push(traits, resultPartstValue);
             argss = push(argss, args);
+            shapes = push(shapes, emptyFnShape());
             if byteAt(sourceText, s, s.pos) = 43 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); } else { loop = false; };
+            };
         };
     };
-    return ok( s, GenParam { name: resultPartsvValue, boundTraits: traits, boundArgs: argss });
+    return ok( s, GenParam { name: resultPartsvValue, boundTraits: traits, boundArgs: argss, boundShapes: shapes });
 };
 
 fn boundsNodes(st: St, gps: &List<GenParam>) -> Res<List<Int>> ~ {
@@ -6158,6 +6398,12 @@ fn boundsNodes(st: St, gps: &List<GenParam>) -> Res<List<Int>> ~ {
     for gp in &gps {
         i = 0;
         for tr in gp.boundTraits {
+            sh = shapeAtOr(&gp.boundShapes, i);
+            if size(sh.canonical.bytes) > 0 {
+                m = mintFnTrait( s, &sh); Res { st: resultPartsmState, v: resultPartsmValue, ok: resultPartsmOk } = m;
+                if !resultPartsmOk { return Res<List<Int>> { st: resultPartsmState, v: [], ok: false }; };
+                s = resultPartsmState;
+            };
             pn = putName( s, &gp.name); Res { st: resultPartspnState, v: resultPartspnValue, ok: resultPartspnOk } = pn;
             if !resultPartspnOk { return Res<List<Int>> { st: resultPartspnState, v: [], ok: false }; };
             s = resultPartspnState;
@@ -6366,6 +6612,18 @@ fn implStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = skipWs(sourceText, resultPartsfirstState);
     firstArgs = [];
     hasFirstArgs = false;
+    fnTraitName = "";
+    if isFnKind(&resultPartsfirstValue) && byteAt(sourceText, s, s.pos) = 40 {
+        sh = fnShape(sourceText, s, clone(resultPartsfirstValue)); Res { st: resultPartsshState, v: resultPartsshValue, ok: resultPartsshOk } = sh;
+        if !resultPartsshOk { return Res<Int> { st: resultPartsshState, v: 0, ok: false }; };
+        s = resultPartsshState;
+        fnTraitName = clone(resultPartsshValue.canonical);
+        for tp in &resultPartsshValue.traitParams { firstArgs = push(firstArgs, ArgV { isSize: false, size: Size::SAny, ty: Type::TParam { name: clone(tp) } }); };
+        if size(firstArgs) > 0 { hasFirstArgs = true; };
+        m = mintFnTrait( s, &resultPartsshValue); Res { st: resultPartsmState, v: resultPartsmValue, ok: resultPartsmOk } = m;
+        if !resultPartsmOk { return Res<Int> { st: resultPartsmState, v: 0, ok: false }; };
+        s = resultPartsmState;
+    };
     fp = findGenerics( s, resultPartsfirstValue);
     if size(fp) > 0 && hasGenericArguments(sourceText, s, fp) {
         g = genericArguments(sourceText, skipWs(sourceText, s), fp); Res { st: resultPartsgState, v: resultPartsgValue, ok: resultPartsgOk } = g;
@@ -6384,6 +6642,7 @@ fn implStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
         t = qualifiedName(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
         if !resultPartstOk { return Res<Int> { st: resultPartstState, v: 0, ok: false }; };
         trt = resultPartsfirstValue;
+        if size(fnTraitName.bytes) > 0 { trt = clone(fnTraitName); };
         hasTrait = true;
         traitArgs = firstArgs;
         typeName = resultPartstValue;
@@ -6443,7 +6702,7 @@ fn implStatement(sourceText: &Input, st: St) -> Res<Int> ~ {
     isBuiltinType = typeName = "List" || typeName = "Box" || typeName = "Array" || typeName = "Int" || typeName = "Byte" || typeName = "Bool";
     if !isBuiltinType && !containsText(typeName, "::") && !hasTypeNamed( s, typeName) { return fail( s, 0, cat3(cat3("impl for ", typeName, ", which is not a struct or enum declared before"), "", "")); };
     // trait parameter checks
-    if hasTrait {
+    if hasTrait && size(fnTraitName.bytes) = 0 {
         tp3 = findGenerics( s, trt);
         if size(tp3) > 0 && !hasFirstArgs {
             joined = joinNames(tp3);
@@ -6578,6 +6837,12 @@ fn boundsNodesList(st: St, gps: &List<GenParam>) -> Res<List<Int>> ~ {
     for gp in &gps {
         i = 0;
         for tr in gp.boundTraits {
+            sh = shapeAtOr(&gp.boundShapes, i);
+            if size(sh.canonical.bytes) > 0 {
+                m = mintFnTrait( s, &sh); Res { st: resultPartsmState, v: resultPartsmValue, ok: resultPartsmOk } = m;
+                if !resultPartsmOk { return Res<List<Int>> { st: resultPartsmState, v: [], ok: false }; };
+                s = resultPartsmState;
+            };
             pn = putName( s, &gp.name); Res { st: resultPartspnState, v: resultPartspnValue, ok: resultPartspnOk } = pn;
             if !resultPartspnOk { return Res<List<Int>> { st: resultPartspnState, v: [], ok: false }; };
             s = resultPartspnState;
@@ -6964,14 +7229,54 @@ fn fileHead(sourceText: &Input, st: St) -> Res<List<String>> ~ {
 
 // One segment of the file the pipeline reads: the last segment is a file, with its import
 // declarations; the libraries in front of it are statement blocks
+fn mintedTraitIds(st: &St) -> List<Int> ~ {
+    out = [];
+    seen = [];
+    i = 0;
+    for nd in &st.nodes {
+        if nd is AstNode::Statement {
+            sv = (nd as AstNode::Statement).value;
+            if sv is AstStatement::TraitDef {
+                nm = nameText(st, (sv as AstStatement::TraitDef).n);
+                if (hasTextPrefix(nm, "Fn$") || hasTextPrefix(nm, "FnMut$") || hasTextPrefix(nm, "FnOnce$")) && indexOfName(&seen, &nm) < 0 { seen = push(seen, nm); out = push(out, i); };
+            };
+        };
+        i = i + 1;
+    };
+    return out;
+};
+
+fn withMintedTraits(st: &St, body: &List<Int>) -> List<Int> ~ {
+    minted = mintedTraitIds(st);
+    out = [];
+    i = 0;
+    for stmt in body {
+        while i < size(minted) && get(minted, i) < stmt [{ affirm i >= 0; affirm i <= size(minted); }] shrinks size(minted) - i {
+            out = push(out, get(minted, i));
+            i = i + 1;
+        };
+        out = push(out, stmt);
+    };
+    while i < size(minted) [{ affirm i >= 0; affirm i <= size(minted); }] shrinks size(minted) - i {
+        out = push(out, get(minted, i));
+        i = i + 1;
+    };
+    return out;
+};
+
 fn parseSegment(sourceText: &Input, state: St, isFile: Bool) -> Res<List<Int>> ~ {
-    if !isFile { return statementBlock(sourceText, state); };
+    if !isFile {
+        frag = statementBlock(sourceText, state); Res { st: resultPartsfragState, v: resultPartsfragValue, ok: resultPartsfragOk } = frag;
+        if !resultPartsfragOk { return Res<List<Int>> { st: resultPartsfragState, v: resultPartsfragValue, ok: false }; };
+        out = withMintedTraits(&resultPartsfragState, &resultPartsfragValue);
+        return Res<List<Int>> { st: resultPartsfragState, v: out, ok: true };
+    };
     head = fileHead(sourceText, state); Res { st: resultPartsheadState, v: resultPartsheadValue, ok: resultPartsheadOk } = head;
     if !resultPartsheadOk { return Res<List<Int>> { st: resultPartsheadState, v: [], ok: false }; };
     body = statementBlock(sourceText, resultPartsheadState); Res { st: resultPartsbodyState, v: resultPartsbodyValue, ok: resultPartsbodyOk } = body;
     if !resultPartsbodyOk { return Res<List<Int>> { st: resultPartsbodyState, v: resultPartsbodyValue, ok: resultPartsbodyOk }; };
-    bv = resultPartsbodyValue;
     bs = resultPartsbodyState;
+    bv = withMintedTraits(&bs, &resultPartsbodyValue);
     if size(resultPartsheadValue) > 0 {
         bs = skipWs(sourceText, bs);
         if atEnd(sourceText, bs) { return fail( bs, [], catStrings("imports are not linked yet: ", joinComma(resultPartsheadValue))); };
@@ -7932,6 +8237,7 @@ fn fileParseFailed(message: String) -> FileParse ~ {
 };
 
 fn fileParseFinished(input: &Input, state: St, imports: List<FileImport>, body: List<Int>) -> FileParse ~ {
+    body = withMintedTraits(&state, &body);
     s = skipWs(input, state);
     if !atEnd(input, s) {
         ended = fail(s, 0, "expected the end of the input");
@@ -8122,7 +8428,7 @@ fn runRequest() -> Int ~ {
                         state = endState;
                     } else {
                         state = s;
-                        for x in resultPartsparsedValue { allStatements = push(allStatements, x); };
+                        for x in resultPartsparsedValue { already = false; for y in &allStatements { if y = x { already = true; }; }; if !already { allStatements = push(allStatements, x); }; };
                     };
                 };
             };

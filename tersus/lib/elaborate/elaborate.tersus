@@ -718,8 +718,17 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         // the checked bodies of its functions with bounds, whose expression types follow its own)
         st = emitInstances(st);
         all = clone(st.outs);
+        // (a type a wrapped named function gives is declared before the program's own statements, as a written
+        // struct is: after them the main block is closed and lowering would not register it)
+        for g in &st.genericOut {
+            gstmt = stmtOf(st, g);
+            if gstmt is AstStatement::StructDef || gstmt is AstStatement::EnumDef { all = push(all, g); };
+        };
         for item in listItems(&st.nodes, statementsNode) { all = push(all, item); };
-        for g in &st.genericOut { all = push(all, g); };
+        for g in &st.genericOut {
+            gstmt = stmtOf(st, g);
+            if !(gstmt is AstStatement::StructDef) && !(gstmt is AstStatement::EnumDef) { all = push(all, g); };
+        };
         for t in &st.genericTypes { types = push(types, t); };
         st = emitStatements(st, &all);
         programNode = st.nid;
