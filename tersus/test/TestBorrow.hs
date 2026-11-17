@@ -426,9 +426,9 @@ testBorrow =
                 ]
             , TestList
                 "closure captures"
-                [ testCase "a variable a closure borrows for reading cannot be assigned while the closure is live" (rejected "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); xs = push(xs, 3); return f();") "cannot be assigned while it is borrowed")
-                , testCase "a variable a closure borrows for updating cannot be read while the closure is live" (rejected "count = 0; f = fn() -> Int { count = count + 1; return count; }; a = count; b = f(); return a + b;") "cannot be read while that borrow is live")
-                , testCase "a borrowed capture can be used again after the closure's last use" (runs "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); a = f(); xs = push(xs, 3); return a * 10 + size(xs);") (VInt 23))
+                [ testCase "a variable a closure borrows for reading cannot be assigned while the closure is live" (rejected "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); xs = push(xs, 3); return f();" "cannot be assigned while it is borrowed")
+                , testCase "a variable a closure borrows for updating cannot be read while the closure is live" (rejected "count = 0; f = fn() -> Int { count = count + 1; return count; }; a = count; b = f(); return a + b;" "cannot be read while that borrow is live")
+                , testCase "a borrowed capture can be used again after the closure's last use" (runs "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); a = f(); xs = push(xs, 3); return a * 10 + size(xs);" (VInt 23))
                 ]
             ]
 

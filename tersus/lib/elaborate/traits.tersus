@@ -672,7 +672,7 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
         };
         st = substSelfAs(st, &wrapperName, wrapperTy, callFs.rty);
         st = substTraitArgs(st, &traitParams, &traitArgs, st.ty);
-        wrapperFs = FnSig { params: wrapperParams, ptys: wrapperPtys, rty: st.ty, sizes: [], types: [], writes: [], froms: [] };
+        wrapperFs = FnSig { params: wrapperParams, ptys: clone(wrapperPtys), rty: st.ty, sizes: [], types: [], writes: [], froms: [] };
         outerOuts = clone(st.outs);
         outerTe = clone(st.te);
         outerTes = clone(st.tes);
@@ -1265,7 +1265,7 @@ fn makeClosureImpl(st: St, structName: &String, b: &BoundInfo, givenArgs: &List<
     };
     st = substSelfAs(st, structName, structTy, callFs.rty);
     st = substTraitArgs(st, &traitParams, &traitArgs, st.ty);
-    wrapperFs = FnSig { params: wrapperParams, ptys: wrapperPtys, rty: st.ty, sizes: [], types: [], writes: [], froms: [] };
+    wrapperFs = FnSig { params: wrapperParams, ptys: clone(wrapperPtys), rty: st.ty, sizes: [], types: [], writes: [], froms: [] };
     // the receiver the body takes, from the one the trait gives
     bodyKind = kindOf(&st, nth(&bodyFs.ptys, 0));
     implKind = kindOf(&st, nth(&wrapperPtys, 0));
@@ -1418,7 +1418,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
     for r in &insRoots { allRoots = push(allRoots, r); };
     for r in &outsRoots { allRoots = push(allRoots, r); };
     ids = closureNodes(&st, &allRoots);
-    boundNames = closureBoundNames(st, &ids, &fs.params);
+    boundNames = closureBoundNames(clone(st), &ids, &fs.params);
     capNames = [];
     for id in ids {
         nm = closureNodeName(&st, id);
@@ -1444,7 +1444,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
         st = zonk(st, scopeLookup(&st, nm));
         capTy = st.ty;
         updated = closureCapUpdated(&st, &ids, nm);
-        moved = closureCapMoved(st, &ids, nm);
+        moved = closureCapMoved(clone(st), &ids, nm);
         st = holdsGhost(st, capTy);
         lin = st.ok;
         if lin { anyLinear = true; };
@@ -1488,7 +1488,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
         else { st = addTy(st, Ty { kind: 12, name: clone(p), args: [], n: 0, flag: false, sizes: [], types: [] }); };
         structArgs = push(structArgs, st.ty);
     };
-    st = namedTy(st, clone(structName), structArgs);
+    st = namedTy(st, clone(structName), clone(structArgs));
     structTy = st.ty;
     // capture-only input clauses are the struct invariant
     invIds = [];
@@ -1557,7 +1557,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
             for c in caps { st = implementsMarker(st, "Clone", c.field, 0); if !st.ok { canClone = false; }; };
         };
         if canClone && HashSet::contains(&st.traits, "Clone") {
-            savedSt = st;
+            savedSt = clone(st);
             st = emitName(st, "Clone");
             cloneNameNode = st.nid;
             st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: cloneNameNode } });
@@ -1583,7 +1583,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
                 canCopy = true;
                 for c in caps { st = implementsMarker(st, "Copy", c.field, 0); if !st.ok { canCopy = false; }; };
                 if canCopy && HashSet::contains(&st.traits, "Copy") {
-                    savedSt2 = st;
+                    savedSt2 = clone(st);
                     st = emitName(st, "Copy");
                     copyNameNode = st.nid;
                     st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: copyNameNode } });
