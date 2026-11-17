@@ -12,7 +12,7 @@ module TestNative
     ) where
 
 import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
@@ -32,7 +32,7 @@ import MirEval (MirValue (MInt), renderMirValue, runProgram)
 import Compile (lowerStatements)
 import qualified Compile
 import MirHousekeeping (insertOwnership, verifyProgram)
-import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared)
+import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared, withPipeReader)
 import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
 import Pipeline
@@ -1213,14 +1213,14 @@ runProcessBytes directory exe args input = do
             `finally` setFileSystemEncoding savedFs
     mapM_ (`hSetEncoding` char8) [hin, hout, herr]
     _ <- forkIO (hPutStr hin input >> hClose hin)
-    written <- newEmptyMVar
-    reported <- newEmptyMVar
-    _ <- forkIO (hGetContents hout >>= \out -> length out `seq` putMVar written out)
-    _ <- forkIO (hGetContents herr >>= \err -> length err `seq` putMVar reported err)
-    code <- waitForProcess process
-    out <- takeMVar written
-    err <- takeMVar reported
-    pure (code, decodeUtf8 out, decodeUtf8 err)
+    withPipeReader ("reading the standard output of " ++ exe) hout (readAll hout) $ \written ->
+        withPipeReader ("reading the standard error of " ++ exe) herr (readAll herr) $ \reported -> do
+            out <- written
+            err <- reported
+            code <- waitForProcess process
+            pure (code, decodeUtf8 out, decodeUtf8 err)
+  where
+    readAll handle = hGetContents handle >>= \contents -> length contents `seq` pure contents
 
 valgrindAvailable :: IO Bool
 valgrindAvailable = probeOnce valgrindProbe "valgrind"

@@ -28,7 +28,7 @@ import qualified TestMirReader
 import TestNative (runExecutableBytes)
 import qualified Seed
 import qualified TersusParser
-import ElaboratorTool (runElaboratorRaw, sourceElaboratorExecutable)
+import ElaboratorTool (runElaboratorRaw, runElaboratorReading, sourceElaboratorExecutable)
 import qualified Modules
 import qualified Compile
 import qualified Pipeline
@@ -56,7 +56,7 @@ import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
-import Native (availableProcessors, cacheDirectory, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresentWithArtifacts, parallelBuilds, readProcessOutput, runCommandWithInputFull, runExecutable, runWithInputFull, spawnShared, stopOwnedProcess, validSignalTarget, withSpawnedProcess)
+import Native (ReaderFailure (..), availableProcessors, cacheDirectory, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresentWithArtifacts, parallelBuilds, readProcessOutput, runCommandWithInputFull, runExecutable, runWithInputFull, spawnShared, stopOwnedProcess, validSignalTarget, withSpawnedProcess)
 import qualified MirEval
 import MirData (forNative, writeProgram)
 import TestHarness
@@ -367,6 +367,9 @@ testSharedCache =
         ++ [ TestCase "atomic close-on-exec writes keep published tools executable across spawns" atomicExecutableWrites
            , TestCase "cancelled shared readers release executable writers and restore capabilities" cancelledSharedReaders
            , TestCase "elaborator calls survive a build region in a process started with one capability" pipeReadersBesideBuilds
+           , TestCase "failed elaborator pipe readers name the stream and the cause" failedPipeReaders
+           , TestCase "a failed reader closes its pipe, so a child writing past the pipe buffer cannot hang the call" failedReadersOfFullPipes
+           , TestCase "a cancelled elaborator call stops its pipe readers and stays cancelled" cancelledPipeReaders
            , TestCase "captured process input closes on errors and preserves broken-pipe behavior" capturedInputErrors ]
         ++ singleSourceCases
         ++ map requireParser
@@ -1504,6 +1507,80 @@ pipeReaderProbe = do
         if answer /= Ok [BC.pack "request"] then pure (show answer) else do
             done <- readIORef stop
             if done then pure "" else callUntil stop
+
+-- A reader that dies used to leave its caller waiting on an MVar nothing would fill ("thread blocked indefinitely in an
+-- MVar operation"), as the readers GHC #21561 killed did.
+failedPipeReaders :: IO TestResult
+failedPipeReaders = do
+    thrown <- answer failOnEmpty
+    killed <- answer (\_ -> myThreadId >>= killThread >> pure BC.empty)
+    unreadable <- answer (\_ -> ioError (userError "unreadable stream"))
+    pure $ firstFailure
+        [ readerFailed thrown "reading the standard error of the elaborator /bin/cat failed: Ix{Int}.index: Index (1) out of range ((0,0))"
+        , readerFailed killed "reading the standard output of the elaborator /bin/cat failed: thread killed"
+        , case unreadable of
+            Left e | Just io <- Exception.fromException e
+                , "reading the standard output of the elaborator /bin/cat" `isInfixOf` show (io :: IOException)
+                , "unreadable stream" `isInfixOf` show io -> Nothing
+            other -> Just ("an IO error of a reader was not rethrown as a named IOException: " ++ shownAnswer other)
+        ]
+  where
+    answer reader = try (timeout 10000000 (runElaboratorReading reader "/bin/cat" "request"))
+    -- (cat leaves standard error empty, so only its reader fails)
+    failOnEmpty handle = BC.hGetContents handle >>= \bytes ->
+        if BC.null bytes then Exception.throwIO (Exception.ErrorCall "Ix{Int}.index: Index (1) out of range ((0,0))") else pure bytes
+
+-- A child that writes more than a pipe holds to the stream of a reader that failed would block, and with it the wait on
+-- its other stream, unless the failed reader closes its pipe.
+failedReadersOfFullPipes :: IO TestResult
+failedReadersOfFullPipes = do
+    errorsFull <- answer "head -c 1000000 /dev/zero >&2; echo out"
+    outputFull <- answer "head -c 1000000 /dev/zero; echo err >&2"
+    undecodable <- try (timeout 10000000 (readProcessOutput (proc "/bin/sh" ["-c", "printf '\\377' >&2; head -c 1000000 /dev/zero >&2; echo out"]) ""))
+    pure $ firstFailure
+        [ readerFailed errorsFull "reading the standard error of the elaborator /bin/sh failed: a zero byte"
+        , readerFailed outputFull "reading the standard output of the elaborator /bin/sh failed: a zero byte"
+        , case undecodable of
+            Left e | Just io <- Exception.fromException e, "reading the standard error of /bin/sh" `isInfixOf` show (io :: IOException) -> Nothing
+            Left e -> Just ("an undecodable standard error failed with " ++ displayException e)
+            Right Nothing -> Just "readProcessOutput gave no answer in 10s"
+            Right (Just result) -> Just ("an undecodable standard error was read as " ++ show result)
+        ]
+  where
+    -- (sh reads the script from its standard input, where the elaborator's request goes)
+    answer script = try (timeout 10000000 (runElaboratorReading refuseZeros "/bin/sh" script))
+    refuseZeros handle = BC.hGet handle 1 >>= \first ->
+        if first == BC.pack "\0" then Exception.throwIO (Exception.ErrorCall "a zero byte") else (first <>) <$> BC.hGetContents handle
+
+readerFailed :: Either SomeException (Maybe (Result [BC.ByteString] String)) -> String -> TestResult
+readerFailed outcome expected = case outcome of
+    Left e | Just failure@(ReaderFailure _ _) <- Exception.fromException e, show failure == expected -> Nothing
+    other -> Just ("expected the failure " ++ show expected ++ ", got " ++ shownAnswer other)
+
+shownAnswer :: Either SomeException (Maybe (Result [BC.ByteString] String)) -> String
+shownAnswer (Left e) = displayException e
+shownAnswer (Right Nothing) = "no answer in 10s"
+shownAnswer (Right (Just result)) = show result
+
+cancelledPipeReaders :: IO TestResult
+cancelledPipeReaders = do
+    started <- newEmptyMVar
+    stopped <- newEmptyMVar
+    let blockedReader _ = (putMVar started () >> forever (threadDelay 1000000) >> pure BC.empty) `Exception.onException` putMVar stopped ()
+    withWorker (() <$ runElaboratorReading blockedReader "/bin/cat" "request") $ \caller done -> do
+        readers <- timeout 10000000 (takeMVar started >> takeMVar started)
+        killThread caller
+        outcome <- timeout 10000000 (takeMVar done)
+        cancelled <- timeout 10000000 (takeMVar stopped >> takeMVar stopped)
+        pure $ firstFailure
+            [ testAssertEq readers (Just ())
+            , case outcome of
+                Just (Left e) | Exception.fromException e == Just Exception.ThreadKilled -> Nothing
+                Just (Left e) -> Just ("the cancelled call ended with " ++ displayException e ++ ", not ThreadKilled")
+                Just (Right ()) -> Just "the cancelled call returned"
+                Nothing -> Just "the cancelled call did not end"
+            , if cancelled == Just () then Nothing else Just "the pipe readers outlived the cancelled call"
+            ]
 
 warmStartProbe :: IO TestResult
 warmStartProbe = do
