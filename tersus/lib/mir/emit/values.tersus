@@ -219,27 +219,25 @@ fn flattenConstant(ws: List<String>, c: &Constant) -> List<String> ~ {
     return out;
 };
 
-// Whether a constant is, or has in it, a Bool
-fn hasBool(c: &Constant) -> Bool ~ {
-    if c is Constant::CBool { return true; };
-    if c is Constant::CArray {
-        for x in (c as Constant::CArray).items {
-            if hasBool(x) { return true; };
-        };
-    };
-    return false;
+// The type of what is innermost in an array of arrays, or the type itself
+fn innermostElement(t: &Type) -> Type ~ {
+    if t is Type::TArray { return innermostElement(Box::unbox((t as Type::TArray).elem)); };
+    return clone(t);
 };
 
-// The words of a constant array as a global that the code only reads: its name in `last`
-fn constantWords(g: Gen, cs: &List<Constant>) -> Gen ~ {
+// The element type of an array type, or the type itself
+fn arrayElement(t: &Type) -> Type ~ {
+    if t is Type::TArray { return clone(Box::unbox(clone((t as Type::TArray).elem))); };
+    return clone(t);
+};
+
+// The words of a constant array of elements of a type as a global that the code only reads: its name in `last`
+fn constantWords(g: Gen, elementTy: &Type, cs: &List<Constant>) -> Gen ~ {
     k = global("const.", clone(g.owner).then("#").then(showInt(g.count)));
     ws = noStrings();
     for c in cs { ws = flattenConstant(ws, c); };
-    // (an array literal is of Ints, which are 8 bytes, or of Bools, which are 1)
-    element = "i64";
-    for c in cs {
-        if hasBool(c) { element = "i8"; };
-    };
+    inner = innermostElement(elementTy);
+    element = memoryType(&inner);
     body = "zeroinitializer";
     if size(ws) > 0 {
         parts = noStrings();
@@ -260,7 +258,8 @@ fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen 
     if c is Constant::CFn { return emit(g, "store ptr ".then(functionSymbol((c as Constant::CFn).name)).then(", ptr ").then(at)); };
     if c is Constant::CList { return failG(g, "Native code has no list constant: ".then(renderType(ty))); };
     if c is Constant::CArray {
-        g1 = constantWords(g, (c as Constant::CArray).items);
+        elementTy = arrayElement(ty);
+        g1 = constantWords(g, &elementTy, (c as Constant::CArray).items);
         from = clone(g1.last);
         return copyWords(g1, at, from, bytesIn(cx, ty));
     };
@@ -290,7 +289,10 @@ fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen 
 // A constant that is held inline: an array literal is a global, and a struct or an enum is built in room of its own each time it is wanted (it can hold a list, which is
 // made then); its address in `last`
 fn constantAggregate(g: Gen, cx: &Ctx, ty: &Type, c: &Constant) -> Gen ~ {
-    if c is Constant::CArray { return constantWords(g, (c as Constant::CArray).items); };
+    if c is Constant::CArray {
+        elementTy = arrayElement(ty);
+        return constantWords(g, &elementTy, (c as Constant::CArray).items);
+    };
     g1 = entryTemp(g, slotsIn(cx, ty));
     room = clone(g1.last);
     g2 = writeConstant(g1, cx, ty, room, c);
@@ -393,11 +395,11 @@ fn isArrayOperand(cx: &Ctx, f: &Function, o: &Operand) -> Bool [{ }] [{ }] {
     return false;
 };
 
-// The address of the words of an array operand: a local, or a constant that is a global; in `last`
-fn arrayPtr(g: Gen, cx: &Ctx, f: &Function, o: &Operand) -> Gen ~ {
+// The address of the words of an array operand of elements of a type: a local, or a constant that is a global; in `last`
+fn arrayPtr(g: Gen, cx: &Ctx, f: &Function, elementTy: &Type, o: &Operand) -> Gen ~ {
     if o is Operand::Const {
         c = (o as Operand::Const).value;
-        if c is Constant::CArray { return constantWords(g, (c as Constant::CArray).items); };
+        if c is Constant::CArray { return constantWords(g, elementTy, (c as Constant::CArray).items); };
         return failG(g, "Not an array");
     };
     lt = operandLocalType(f, o);
