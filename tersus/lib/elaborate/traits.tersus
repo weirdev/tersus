@@ -872,7 +872,7 @@ fn closureHasVar(st: &St, ids: &List<Int>, name: &String) -> Bool ~ {
 };
 
 // The names a body binds itself: its lets, its new locals, its loops and its nested functions
-fn closureBoundNames(st: St, ids: &List<Int>, params: &List<String>) -> List<String> ~ {
+fn closureBoundNames(st: &St, ids: &List<Int>, params: &List<String>) -> List<String> ~ {
     out = clone(params);
     for id in ids {
         node = nodeIn(&st.nodes, id);
@@ -932,7 +932,7 @@ fn closureCapUpdated(st: &St, ids: &List<Int>, name: &String) -> Bool ~ {
 };
 
 // Whether the body moves the capture: returns it, assigns it to a local, or gives it to a by-value parameter
-fn closureCapMoved(st: St, ids: &List<Int>, name: &String) -> Bool ~ {
+fn closureCapMoved(st: &St, ids: &List<Int>, name: &String) -> Bool ~ {
     for id in ids {
         node = nodeIn(&st.nodes, id);
         if node is AstNode::Statement {
@@ -1418,7 +1418,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
     for r in &insRoots { allRoots = push(allRoots, r); };
     for r in &outsRoots { allRoots = push(allRoots, r); };
     ids = closureNodes(&st, &allRoots);
-    boundNames = closureBoundNames(clone(st), &ids, &fs.params);
+    boundNames = closureBoundNames(&st, &ids, &fs.params);
     capNames = [];
     for id in ids {
         nm = closureNodeName(&st, id);
@@ -1444,7 +1444,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
         st = zonk(st, scopeLookup(&st, nm));
         capTy = st.ty;
         updated = closureCapUpdated(&st, &ids, nm);
-        moved = closureCapMoved(clone(st), &ids, nm);
+        moved = closureCapMoved(&st, &ids, nm);
         st = holdsGhost(st, capTy);
         lin = st.ok;
         if lin { anyLinear = true; };
@@ -1557,7 +1557,6 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
             for c in caps { st = implementsMarker(st, "Clone", c.field, 0); if !st.ok { canClone = false; }; };
         };
         if canClone && HashSet::contains(&st.traits, "Clone") {
-            savedSt = clone(st);
             st = emitName(st, "Clone");
             cloneNameNode = st.nid;
             st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: cloneNameNode } });
@@ -1574,7 +1573,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
             st = emitStatements(st, &noStmts);
             st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: cloneTraitNode, args: cloneArgsNode, n: cloneImplName, ty: cloneImplTy, bs: cloneBs, xs: st.nid } });
             st = checkItem(st, true, st.nid);
-            if st.status != 0 { st = savedSt; } else {
+            if st.status != 0 { return st; } else {
                 genOut2 = clone(st.genericOut);
                 genTypes2 = clone(st.genericTypes);
                 for o in &st.outs { genOut2 = push(genOut2, o); };
@@ -1583,7 +1582,6 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
                 canCopy = true;
                 for c in caps { st = implementsMarker(st, "Copy", c.field, 0); if !st.ok { canCopy = false; }; };
                 if canCopy && HashSet::contains(&st.traits, "Copy") {
-                    savedSt2 = clone(st);
                     st = emitName(st, "Copy");
                     copyNameNode = st.nid;
                     st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: copyNameNode } });
@@ -1600,7 +1598,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
             st = emitStatements(st, &noStmts);
                     st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: copyTraitNode, args: copyArgsNode, n: copyImplName, ty: copyImplTy, bs: copyBs, xs: st.nid } });
                     st = checkItem(st, true, st.nid);
-                    if st.status != 0 { st = savedSt2; } else {
+                    if st.status != 0 { return st; } else {
                         genOut3 = clone(st.genericOut);
                         genTypes3 = clone(st.genericTypes);
                         for o in &st.outs { genOut3 = push(genOut3, o); };
