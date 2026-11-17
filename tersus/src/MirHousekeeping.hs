@@ -10,6 +10,12 @@ module MirHousekeeping
     , storageProgram
     , nativeStorage
     , cachedEmitter
+    , cachedSourceEmitter
+    , emitterConstruction
+    , emitterIdentity
+    , cachedEmitterContentKeyFor
+    , prepareValidatorFor
+    , cachedUncheckedValidatorFrom
     , listLibrary
     , nativeProgram
     , nativeProgramWith
@@ -66,11 +72,15 @@ import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (hasLists, lowerLists)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
-import Seed (cachedFrontendSeed, cachedSeed, cachedParserSeed, frontendSeedHash, seedHash, parserSeedHash)
+import Seed (emitterSeedFile, seedSha256, frontendSeedSha256, parserSeedSha256,
+    cachedFrontendSeed, cachedSeed, cachedParserSeed, frontendSeedHash, seedHash, parserSeedHash)
+import EmitterProvenance (constructionIdentity, matchesConstruction, workingSourcesMatch)
+import BuiltinTable (builtinTableText)
 import Compile (lowerSource)
 import Modules (ModuleId, Snapshot (..), resolverFromFiles)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage)
-import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, boxSource, listsSource, mirPackageFiles, parserPackageFiles, toolPackageFiles, validationPackageFiles)
+import PreludeSource (emitterSourceFiles, emitterSeedConstruction, frontendSeedSources,
+    compilerSourceHash, libPackageFiles, stdlibSource, boxSource, listsSource, mirPackageFiles, parserPackageFiles, toolPackageFiles, validationPackageFiles)
 import Types (Type (..))
 import Utils
 
@@ -342,20 +352,25 @@ interpretedTool = toolProgram
 -- An executable of a program written in Tersus, in the cache: made by the stage 1 emitter if it is not there
 cachedTool :: String -> FilePath -> IO (Result FilePath String)
 cachedTool kind entry = do
-    key <- derivedKey entry (toolProgram entry) []
-    case key of
+    selected <- emitterIdentity
+    case selected of
         Error e -> pure (Error e)
-        Ok identity -> do
-            existing <- cachedProgramIfPresent kind identity
-            case existing of
+        Ok producer -> do
+            key <- cachedEmitterContentKeyFor producer entry [] [(entry, [])] $
+                fmap (mapResult (\(identity, _, _) -> identity)) (preparedDerivedFor producer entry (toolProgram entry) [])
+            case key of
                 Error e -> pure (Error e)
-                Ok (Just exe) -> pure (Ok exe)
-                Ok Nothing -> do
-                    prepared <- preparedDerived entry (toolProgram entry) []
-                    case prepared of
+                Ok identity -> do
+                    existing <- cachedProgramIfPresent kind identity
+                    case existing of
                         Error e -> pure (Error e)
-                        Ok (actual, _, input) -> cachedProgram kind actual "the housekeeping written in Tersus"
-                            (\output -> buildPrepared [] output input)
+                        Ok (Just exe) -> pure (Ok exe)
+                        Ok Nothing -> do
+                            prepared <- preparedDerivedFor producer entry (toolProgram entry) []
+                            case prepared of
+                                Error e -> pure (Error e)
+                                Ok (actual, _, input) -> cachedProgram kind actual "the housekeeping written in Tersus"
+                                    (\output -> buildPreparedFor producer [] output input)
 
 cachedParser :: IO (Result FilePath String)
 cachedParser = do
@@ -366,37 +381,43 @@ cachedParser = do
 
 cachedParserExe :: IO (Result FilePath String)
 cachedParserExe = do
-    key <- parserKey
-    case key of
+    selected <- emitterIdentity
+    case selected of
         Error e -> pure (Error e)
-        Ok identity -> do
-            existing <- cachedProgramIfPresentWithArtifacts [".ll"] "tersus-parser" identity
-            case existing of
+        Ok producer -> do
+            let entry = "lib/parser/parser.tersus"
+            key <- cachedEmitterContentKeyFor producer entry [] [(entry, [])] $
+                fmap (mapResult (\(identity, _, _) -> identity)) (preparedDerivedFor producer entry (toolProgram entry) [])
+            case key of
                 Error e -> pure (Error e)
-                Ok (Just exe) -> pure (Ok exe)
-                Ok Nothing -> do
-                    prepared <- preparedDerived "lib/parser/parser.tersus" (toolProgram "lib/parser/parser.tersus") []
-                    case prepared of
+                Ok identity -> do
+                    existing <- cachedProgramIfPresentWithArtifacts [".ll"] "tersus-parser" identity
+                    case existing of
                         Error e -> pure (Error e)
-                        Ok (actual, _, input) -> cachedProgramWithArtifacts [".ll"] "tersus-parser" actual "the parser written in Tersus" $ \output -> do
-                            emitter <- cachedEmitterExe
-                            case emitter of
+                        Ok (Just exe) -> pure (Ok exe)
+                        Ok Nothing -> do
+                            prepared <- preparedDerivedFor producer entry (toolProgram entry) []
+                            case prepared of
                                 Error e -> pure (Error e)
-                                Ok exe -> do
-                                    emitted <- runWithInput exe input
-                                    case emitted of
+                                Ok (actual, _, input) -> cachedProgramWithArtifacts [".ll"] "tersus-parser" actual "the parser written in Tersus" $ \output -> do
+                                    emitter <- emitterForIdentity producer
+                                    case emitter of
                                         Error e -> pure (Error e)
-                                        Ok ir -> do
-                                            built <- buildExecutable output ir
-                                            case built of
+                                        Ok exe -> do
+                                            emitted <- runWithInput exe input
+                                            case emitted of
                                                 Error e -> pure (Error e)
-                                                Ok () -> do
-                                                    let path = takeDirectory output </> ("tersus-parser-" ++ actual ++ ".ll")
-                                                    withExecutableTempFile (takeDirectory output) "parser-ir.tmp" $ \(temporary, handle) -> do
-                                                        hPutStr handle ir
-                                                        hClose handle
-                                                        renameFile temporary path
-                                                    pure (Ok ())
+                                                Ok ir -> do
+                                                    built <- buildExecutable output ir
+                                                    case built of
+                                                        Error e -> pure (Error e)
+                                                        Ok () -> do
+                                                            let path = takeDirectory output </> ("tersus-parser-" ++ actual ++ ".ll")
+                                                            withExecutableTempFile (takeDirectory output) "parser-ir.tmp" $ \(temporary, handle) -> do
+                                                                hPutStr handle ir
+                                                                hClose handle
+                                                                renameFile temporary path
+                                                            pure (Ok ())
 
 parserInput :: IO (Result String String)
 parserInput = do
@@ -423,25 +444,40 @@ cachedUncheckedValidator = do
 
 cachedUncheckedValidatorExe :: IO (Result FilePath String)
 cachedUncheckedValidatorExe = do
-    key <- derivedKey "validator" (toolProgram validationEntry) ["-O2"]
-    case key of
+    selected <- emitterIdentity
+    case selected of
         Error e -> pure (Error e)
-        Ok identity -> do
-            existing <- cachedProgramIfPresent "validator-unchecked" identity
-            case existing of
+        Ok producer -> do
+            key <- cachedEmitterContentKeyFor producer "validator" ["-O2"] [("validator", [])] $
+                fmap (mapResult (\(identity, _, _) -> identity)) (prepareValidatorFor producer)
+            case key of
                 Error e -> pure (Error e)
-                Ok (Just exe) -> pure (Ok exe)
-                Ok Nothing -> do
-                    prepared <- prepareValidator
-                    case prepared of
+                Ok identity -> do
+                    existing <- cachedProgramIfPresent "validator-unchecked" identity
+                    case existing of
                         Error e -> pure (Error e)
-                        Ok (actual, _, input) -> cachedProgram "validator-unchecked" actual "the validator written in Tersus"
-                            (\output -> buildPrepared ["-O2"] output input)
+                        Ok (Just exe) -> pure (Ok exe)
+                        Ok Nothing -> do
+                            prepared <- prepareValidatorFor producer
+                            case prepared of
+                                Error e -> pure (Error e)
+                                Ok (actual, _, input) -> cachedUncheckedValidatorFrom producer actual input
 
 {-# NOINLINE preparationSnapshot #-}
 preparationSnapshot :: String
-preparationSnapshot = fingerprint [show (compilerSourceHash, seedHash, parserSeedHash,
-    toolPackageFiles, libPackageFiles, stdlibSource, validationPackageFiles, runtimeSource, frontendSeedHash)]
+preparationSnapshot = fingerprint preparationInputs
+
+preparationInputs :: [String]
+preparationInputs = [show (emitterSourceFiles, seedSha256, parserSeedSha256, frontendSeedSha256, frontendSeedSources, runtimeSource)]
+
+emitterConstruction :: IO (Result (Maybe String) String)
+emitterConstruction = pure capturedEmitterConstruction
+
+{-# NOINLINE capturedEmitterConstruction #-}
+capturedEmitterConstruction :: Result (Maybe String) String
+capturedEmitterConstruction = case builtinTableText of
+    Error e -> Error e
+    Ok table -> unsafePerformIO (constructionIdentity (table : preparationInputs))
 
 preparedInputPath :: FilePath -> FilePath -> [String] -> FilePath
 preparedInputPath dir entry flags = dir </> ("prepared-" ++ fingerprint [show (preparationSnapshot, entry, flags)])
@@ -592,31 +628,58 @@ prepareEmitterInput :: IO (Result (Program, String) String)
 prepareEmitterInput = prepareProgram emitterEntry (toolProgram emitterEntry)
 
 derivedKey :: FilePath -> Result Program String -> [String] -> IO (Result String String)
-derivedKey entry raw flags = cachedContentKey entry flags [(emitterEntry, []), (entry, [])] $
-    fmap (mapResult (\(key, _, _) -> key)) (preparedDerived entry raw flags)
+derivedKey entry raw flags = do
+    selected <- emitterIdentity
+    case selected of
+        Error e -> pure (Error e)
+        Ok identity -> cachedEmitterContentKeyFor identity entry flags [(entry, [])] $
+            fmap (mapResult (\(key, _, _) -> key)) (preparedDerivedFor identity entry raw flags)
+
+cachedEmitterContentKeyFor :: (Bool, String, FilePath) -> FilePath -> [String] -> [(FilePath, [String])] -> IO (Result String String) -> IO (Result String String)
+cachedEmitterContentKeyFor (pinned, producer, _) entry flags dependencies make =
+    cachedContentKey entry (flags ++ ["emitter-producer=" ++ producer])
+        (if pinned then dependencies else (emitterEntry, []) : dependencies) make
 
 preparedDerived :: FilePath -> Result Program String -> [String] -> IO (Result (String, Program, String) String)
 preparedDerived entry raw flags = do
-    parts <- parallelBuilds [prepareEmitterInput, prepareProgram entry raw]
-    case parts of
-        [Ok (_, emitterInput), Ok (program, input)] -> do
-            producer <- preparedContentKey emitterEntry seedHash emitterInput []
+    selected <- emitterIdentity
+    case selected of Error e -> pure (Error e); Ok identity -> preparedDerivedFor identity entry raw flags
+
+preparedDerivedFor :: (Bool, String, FilePath) -> FilePath -> Result Program String -> [String] -> IO (Result (String, Program, String) String)
+preparedDerivedFor (_, producer, _) entry raw flags = do
+    prepared <- prepareProgram entry raw
+    case prepared of
+        Error e -> pure (Error e)
+        Ok (program, input) -> do
             key <- preparedContentKey entry producer input flags
             pure (Ok (key, program, input))
-        [Error e, _] -> pure (Error e)
-        [_, Error e] -> pure (Error e)
-        _ -> pure (Error "incomplete native input preparation")
 
 emitterKey :: IO (Result String String)
-emitterKey = do
+emitterKey = mapResult (\(_, key, _) -> key) <$> emitterIdentity
+
+emitterIdentity :: IO (Result (Bool, String, FilePath) String)
+emitterIdentity = do
     ready <- prepareBootstrap
     case ready of
         Error e -> pure (Error e)
-        Ok () -> cachedContentKey emitterEntry [] [(emitterEntry, [])] $ do
-            prepared <- prepareEmitterInput
-            case prepared of
+        Ok () -> do
+            construction <- emitterConstruction
+            sourceMatches <- if matchesConstruction construction emitterSeedConstruction
+                then workingSourcesMatch emitterSourceFiles else pure False
+            directory <- cacheDirectory
+            case directory of
                 Error e -> pure (Error e)
-                Ok (_, input) -> Ok <$> preparedContentKey emitterEntry seedHash input []
+                Ok dir | sourceMatches -> do
+                    verified <- emitterSeedFile
+                    pure (mapResult (const (True, seedHash, dir)) verified)
+                Ok dir -> mapResult (\key -> (False, key, dir)) <$> sourceEmitterKey
+
+sourceEmitterKey :: IO (Result String String)
+sourceEmitterKey = cachedContentKey emitterEntry [] [(emitterEntry, [])] $ do
+    prepared <- prepareEmitterInput
+    case prepared of
+        Error e -> pure (Error e)
+        Ok (_, input) -> Ok <$> preparedContentKey emitterEntry seedHash input []
 
 parserKey :: IO (Result String String)
 parserKey = do
@@ -630,10 +693,17 @@ validationEntry = "lib/validation/driver.tersus"
 
 prepareValidator :: IO (Result (String, Program, String) String)
 prepareValidator = do
-    ready <- prepareBootstrap
-    case ready of
-        Error e -> pure (Error e)
-        Ok () -> preparedDerived "validator" (toolProgram validationEntry) ["-O2"]
+    selected <- emitterIdentity
+    case selected of Error e -> pure (Error e); Ok producer -> prepareValidatorFor producer
+
+prepareValidatorFor :: (Bool, String, FilePath) -> IO (Result (String, Program, String) String)
+prepareValidatorFor producer = preparedDerivedFor producer "validator" (toolProgram validationEntry) ["-O2"]
+
+cachedUncheckedValidatorFrom :: (Bool, String, FilePath) -> String -> String -> IO (Result FilePath String)
+cachedUncheckedValidatorFrom producer@(_, identity, _) key input
+    | ownedContentKey identity input ["-O2"] /= key = pure (Error "unchecked validator producer changed during preparation")
+    | otherwise = cachedProgram "validator-unchecked" key "the validator written in Tersus"
+        (\output -> buildPreparedFor producer ["-O2"] output input)
 
 -- Stage 1 (the emitter as it is now) in the cache: stage 0 expands, owns and emits the emitter's source (prepareProgram,
 -- with no erasure first), so the prepared inputs of every host tool are made by stage 0 alone and concurrently; stage 1
@@ -649,33 +719,53 @@ cachedEmitter = do
 
 cachedEmitterExe :: IO (Result FilePath String)
 cachedEmitterExe = do
-    key <- emitterKey
-    case key of
+    selected <- emitterIdentity
+    case selected of
         Error e -> pure (Error e)
-        Ok identity -> do
-            existing <- cachedProgramIfPresent "emitter" identity
-            case existing of
-                Error e -> pure (Error e)
-                Ok (Just exe) -> pure (Ok exe)
-                Ok Nothing -> do
-                    prepared <- prepareEmitterInput
-                    case prepared of
-                        Error e -> pure (Error e)
-                        Ok (_, input) -> do
-                            actual <- preparedContentKey emitterEntry seedHash input []
-                            cachedProgram "emitter" actual "the emitter written in Tersus" $ \output -> do
-                                zero <- cachedSeed
-                                case zero of
-                                    Error e -> pure (Error e)
-                                    Ok compiler -> do
-                                        ir <- runWithInput compiler input
-                                        case ir of
-                                            Error e -> pure (Error e)
-                                            Ok text -> buildExecutable output text
+        Ok identity -> emitterForIdentity identity
 
-buildPrepared :: [String] -> FilePath -> String -> IO (Result () String)
-buildPrepared flags output input = do
-    emitter <- cachedEmitterExe
+emitterForIdentity :: (Bool, String, FilePath) -> IO (Result FilePath String)
+emitterForIdentity (pinned, identity, directory) = do
+    current <- cacheDirectory
+    if current /= Ok directory then pure (Error "emitter cache directory changed during operation") else
+        if pinned then cachedSeed else buildSourceEmitter identity
+
+cachedSourceEmitter :: IO (Result FilePath String)
+cachedSourceEmitter = do
+    tools <- housekeepingTools
+    case (checkerOf tools, eraserOf tools) of
+        (ToolFailed e, _) -> pure (Error e)
+        (_, ToolFailed e) -> pure (Error e)
+        _ -> do
+            source <- sourceEmitterKey
+            case source of Error e -> pure (Error e); Ok identity -> buildSourceEmitter identity
+
+buildSourceEmitter :: String -> IO (Result FilePath String)
+buildSourceEmitter identity = do
+    existing <- cachedProgramIfPresent "emitter" identity
+    case existing of
+        Error e -> pure (Error e)
+        Ok (Just exe) -> pure (Ok exe)
+        Ok Nothing -> do
+            prepared <- prepareEmitterInput
+            case prepared of
+                Error e -> pure (Error e)
+                Ok (_, input) -> do
+                    actual <- preparedContentKey emitterEntry seedHash input []
+                    if identity /= actual then pure (Error "source emitter input changed during preparation") else
+                        cachedProgram "emitter" actual "the emitter written in Tersus" $ \output -> do
+                            zero <- cachedSeed
+                            case zero of
+                                Error e -> pure (Error e)
+                                Ok compiler -> do
+                                    ir <- runWithInput compiler input
+                                    case ir of
+                                        Error e -> pure (Error e)
+                                        Ok text -> buildExecutable output text
+
+buildPreparedFor :: (Bool, String, FilePath) -> [String] -> FilePath -> String -> IO (Result () String)
+buildPreparedFor identity flags output input = do
+    emitter <- emitterForIdentity identity
     case emitter of
         Error e -> pure (Error e)
         Ok exe -> do
@@ -768,8 +858,11 @@ nativeProgramUsing tool library program = do
                         units <- library
                         pure (lowerLists units written)
 
+{-# NOINLINE emitterOwnedProgram #-}
 emitterOwnedProgram :: Result Program String
-emitterOwnedProgram = toolOwnedProgram emitterEntry
+emitterOwnedProgram = unsafePerformIO $ do
+    emitter <- cachedSourceEmitter
+    case emitter of Error e -> pure (Error e); Ok exe -> ownedToolWith exe emitterEntry
 
 -- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus): its
 -- units as native code is linked with them, and the program they link to.

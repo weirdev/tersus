@@ -11,7 +11,7 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
 import Data.List (isSuffixOf, sortOn)
@@ -32,7 +32,9 @@ import qualified Mir as M
 import CacheLock (copyFileCloexec, openLockHandle, openTempFileCloexec)
 import Hash (fingerprint)
 import MirEval (MirValue (..))
-import MirHousekeeping (cachedEmitter, cachedUncheckedValidator, nativeStorage, prepareBootstrap, prepareValidator, cachedPreparedInput, cachedContentKey, emitterEntry)
+import MirHousekeeping (cachedEmitter, cachedSourceEmitter, cachedUncheckedValidatorFrom,
+    emitterIdentity, cachedEmitterContentKeyFor, prepareValidatorFor, nativeStorage, prepareBootstrap,
+    cachedPreparedInput, cachedContentKey, emitterEntry)
 import Native (cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, availableProcessors, parallelBuilds, runCommandWithInputFull, raiseStack)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
 import Syntax (parseImplCheckName)
@@ -307,16 +309,25 @@ cachedBootstrapEmitter = do
                 [_, Error e] -> Error e
                 _ -> Error "incomplete checked bootstrap"
 
+cachedBootstrapSourceEmitter :: IO (Result FilePath String)
+cachedBootstrapSourceEmitter = do
+    results <- parallelBuilds [cachedSourceEmitter, validatorExecutable]
+    pure $ case results of
+        [Ok emitter, Ok _] -> Ok emitter
+        [Error e, _] -> Error e
+        [_, Error e] -> Error e
+        _ -> Error "incomplete checked source bootstrap"
+
 -- The compiled validator in the cache. It is built from its source without
 -- being validated (no validator is there yet: uncheckedValidator), and then
 -- it validates what it is made of: the native storage library its lists and
 -- Boxes are built with, and its own source; only a validator that has done
 -- so is used.
-type PreparedCertificate = (String, M.Program, [(String, String)], M.Program, [(String, String)])
+type PreparedCertificate = (String, String, FilePath, FilePath, M.Program, [(String, String)], M.Program, [(String, String)])
 
 {-# NOINLINE certificateCache #-}
-certificateCache :: MVar (Maybe PreparedCertificate)
-certificateCache = unsafePerformIO (newMVar Nothing)
+certificateCache :: MVar (Map.Map (FilePath, String) PreparedCertificate)
+certificateCache = unsafePerformIO (newMVar Map.empty)
 
 certificateKey :: String -> [String] -> [String] -> String
 certificateKey unchecked library own = fingerprint [show
@@ -324,28 +335,37 @@ certificateKey unchecked library own = fingerprint [show
 
 prepareCertificate :: IO (Result PreparedCertificate String)
 prepareCertificate = do
-    prepared <- prepareValidator
+    selected <- emitterIdentity
+    case selected of Error e -> pure (Error e); Ok producer -> prepareCertificateFor producer
+
+prepareCertificateFor :: (Bool, String, FilePath) -> IO (Result PreparedCertificate String)
+prepareCertificateFor producer@(_, _, directory) = do
+    prepared <- prepareValidatorFor producer
     case prepared of
         Error e -> pure (Error e)
-        Ok (unchecked, own, _) -> modifyMVar certificateCache $ \made -> case made of
-            Just ready -> pure (made, Ok ready)
-            Nothing -> do
-                stored <- cachedPreparedInput "validator-selfcheck" [] validChecks $ pure $ case nativeStorage of
-                    Error e -> Error ("the native storage library: " ++ e)
-                    Ok (_, library) -> case (prepareTexts True library, prepareTexts False own) of
-                        (Error e, _) -> Error ("the native storage library: " ++ e)
-                        (_, Error e) -> Error ("its own source: " ++ e)
-                        (Ok a, Ok b) -> Ok (show (a, b))
-                case stored of
-                    Error e -> pure (Nothing, Error e)
-                    Ok text -> case readChecks text of
-                        Nothing -> pure (Nothing, Error "invalid prepared self-check transport")
-                        Just (libraryTexts, ownTexts) -> do
-                            let library = case nativeStorage of Ok (_, value) -> value; Error e -> error e
-                                key = certificateKey unchecked (map snd libraryTexts) (map snd ownTexts)
-                                ready = (key, library, libraryTexts, own, ownTexts)
-                            _ <- evaluate (length key)
-                            pure (Just ready, Ok ready)
+        Ok (unchecked, own, input) -> do
+            executable <- cachedUncheckedValidatorFrom producer unchecked input
+            case executable of
+                Error e -> pure (Error e)
+                Ok exe -> modifyMVar certificateCache $ \made -> case Map.lookup (directory, unchecked) made of
+                    Just ready@(_, _, _, previousExe, _, _, _, _) | previousExe == exe -> pure (made, Ok ready)
+                    _ -> do
+                        stored <- cachedPreparedInput "validator-selfcheck" [] validChecks $ pure $ case nativeStorage of
+                            Error e -> Error ("the native storage library: " ++ e)
+                            Ok (_, library) -> case (prepareTexts True library, prepareTexts False own) of
+                                (Error e, _) -> Error ("the native storage library: " ++ e)
+                                (_, Error e) -> Error ("its own source: " ++ e)
+                                (Ok a, Ok b) -> Ok (show (a, b))
+                        case stored of
+                            Error e -> pure (made, Error e)
+                            Ok text -> case readChecks text of
+                                Nothing -> pure (made, Error "invalid prepared self-check transport")
+                                Just (libraryTexts, ownTexts) -> do
+                                    let library = case nativeStorage of Ok (_, value) -> value; Error e -> error e
+                                        key = certificateKey unchecked (map snd libraryTexts) (map snd ownTexts)
+                                        ready = (key, unchecked, directory, exe, library, libraryTexts, own, ownTexts)
+                                    _ <- evaluate (length key)
+                                    pure (Map.insert (directory, unchecked) ready made, Ok ready)
   where
     readChecks text = case reads text of
         [(inputs, rest)] | all isSpace rest -> Just inputs
@@ -356,12 +376,12 @@ prepareCertificate = do
 
 validatorKey :: IO (Result String String)
 validatorKey = do
-    ready <- prepareBootstrap
-    case ready of
+    selected <- emitterIdentity
+    case selected of
         Error e -> pure (Error e)
-        Ok () -> cachedContentKey "validator-checked" ["-O2"]
-            [(emitterEntry, []), ("validator", []), ("validator-selfcheck", [])] $
-                fmap (mapResult (\(key, _, _, _, _) -> key)) prepareCertificate
+        Ok producer -> cachedEmitterContentKeyFor producer "validator-checked" ["-O2"]
+            [("validator", []), ("validator-selfcheck", [])] $
+                fmap (mapResult (\(key, _, _, _, _, _, _, _) -> key)) (prepareCertificateFor producer)
 
 validatorExecutable :: IO (Result FilePath String)
 validatorExecutable = do
@@ -380,12 +400,12 @@ buildCheckedValidator = do
     prepared <- prepareCertificate
     case prepared of
         Error e -> pure (Error e)
-        Ok (key, library, libraryTexts, own, ownTexts) ->
+        Ok (key, unchecked, directory, exe, library, libraryTexts, own, ownTexts) ->
             cachedProgram "validator" key "the validator written in Tersus, checked" $ \output -> do
-                unchecked <- uncheckedValidator
-                case unchecked of
-                    Error e -> pure (Error e)
-                    Ok exe -> do
+                current <- cacheDirectory
+                if current /= Ok directory || certificateKey unchecked (map snd libraryTexts) (map snd ownTexts) /= key
+                    then pure (Error "validator certificate producer changed before validation")
+                    else do
                         storage <- validateTexts (pure (Ok exe)) True False library libraryTexts
                         checked <- case storage of
                             Error e -> pure (Error ("the native storage library: " ++ e))
@@ -396,12 +416,10 @@ buildCheckedValidator = do
                                     Ok () -> Ok ()
                         case checked of
                             Error e -> pure (Error ("the validator written in Tersus does not validate " ++ e))
-                            Ok () -> copyFileCloexec exe output >> pure (Ok ())
-
--- The validator built by the emitter in the cache from the validator and its
--- driver, not yet validated
-uncheckedValidator :: IO (Result FilePath String)
-uncheckedValidator = cachedUncheckedValidator
+                            Ok () -> do
+                                still <- cacheDirectory
+                                if still /= Ok directory then pure (Error "validator cache directory changed before publication")
+                                    else copyFileCloexec exe output >> pure (Ok ())
 
 -- The verdicts are kept on disk too, so that each function is validated once
 -- for a build of the validator however many processes ask: a file per

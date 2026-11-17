@@ -53,6 +53,7 @@ import TestMirCopies
 import TestMirEmit
 import TestMirSupport
 import TestBootstrap
+import TestEmitterProvenance
 import TestEq
 import TestHashMap
 import TestHashSet
@@ -219,6 +220,7 @@ originalGroups =
     , testMirEmit
     , testMirEmitPrograms
     , testBootstrap
+    , testEmitterProvenance
     , testEq
     , testHashMap
     , testHashSet

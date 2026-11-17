@@ -21,6 +21,9 @@ module PreludeSource
     , toolPackageFiles
     , stdlibSource
     , compilerSourceHash
+    , compilerSourceFiles
+    , emitterSourceFiles
+    , emitterSeedConstruction
     , validationPackageFiles
     , seedSha256
     , parserSeedSha256
@@ -32,19 +35,32 @@ import Data.List (isSuffixOf, sort)
 import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import System.Directory (listDirectory)
+import System.FilePath (takeFileName)
 
 compilerSourceHash :: String
-compilerSourceHash =
+compilerSourceHash = fingerprint (concatMap (\(path, contents) -> [takeFileName path, contents]) compilerSourceFiles)
+
+compilerSourceFiles :: [(FilePath, String)]
+compilerSourceFiles =
     $( do
         addDependentFile "tersus.cabal"
-        files <- runIO (sort . filter (\file -> any (`isSuffixOf` file) [".hs", ".hsc"]) <$> listDirectory "src")
+        files <- runIO (sort . filter (\file -> any (`isSuffixOf` file) [".hs", ".hsc", ".hs-boot"]) <$> listDirectory "src")
         inputs <- mapM (\file -> do
             let path = "src/" ++ file
             addDependentFile path
             contents <- runIO (readFile path)
-            pure [file, contents]) files
-        lift (fingerprint (concat inputs))
+            pure (path, contents)) files
+        lift inputs
      )
+
+emitterSourceFiles :: [(FilePath, String)]
+emitterSourceFiles = compilerSourceFiles ++ toolPackageFiles ++ validationPackageFiles ++ elaboratePackageFiles
+    ++ [("lib/" ++ name ++ ".tersus", text) | (name, _, text) <- libModules]
+    ++ [("lib/stdlib.tersus", stdlibSource)]
+    ++ $(do
+        let paths = ["dev/emitter-seed/Main.hs", "package.yaml", "tersus.cabal"]
+        files <- mapM (\path -> do addDependentFile path; body <- runIO (readFile path); pure (path, body)) paths
+        lift files)
 
 libModules :: [(String, String, String)]
 libModules =
@@ -218,6 +234,12 @@ seedSha256 =
         contents <- runIO (readFile "bootstrap/emitter.sha256")
         lift (head (words contents))
      )
+
+emitterSeedConstruction :: String
+emitterSeedConstruction = $(do
+    addDependentFile "bootstrap/emitter.sha256"
+    contents <- runIO (readFile "bootstrap/emitter.sha256")
+    lift (concat (take 1 (drop 1 (words contents)))))
 
 parserSeedSha256 :: String
 parserSeedSha256 =

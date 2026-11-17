@@ -49,6 +49,7 @@ import System.Process (CreateProcess (..), ProcessHandle, StdStream (..), cleanu
 
 import CacheLock (openLockHandle, openTempFileCloexec, withSpawnShared)
 import Hash (fingerprint)
+import EmitterProvenance (emitterBuildInputs)
 import LlvmRuntime (runtimeSource)
 import Utils
 
@@ -91,7 +92,7 @@ runtimeObject flags = do
     case cache of
         Error e -> return (Error e)
         Ok dir -> do
-            let object = dir </> ("tersus_rt_" ++ fingerprint (runtimeSource : flags) ++ ".o")
+            let object = dir </> ("tersus_rt_" ++ fingerprint (runtimeSource : flags ++ emitterBuildInputs) ++ ".o")
             present <- doesFileExist object
             if present
                 then return (Ok object)

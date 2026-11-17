@@ -2,6 +2,7 @@ module Seed
     ( seedHash
     , seedSha256
     , seedUrl
+    , emitterSeedFile
     , compilerSnapshotHash
     , stageZero
     , cachedSeed
@@ -28,6 +29,7 @@ import System.Process (proc)
 
 import CacheLock (openTempFileCloexec)
 import Hash (fingerprint)
+import EmitterProvenance (emitterBuildInputs)
 import LlvmRuntime (runtimeSource)
 import Native (buildExecutable, cachedProgram, cachedProgramIfPresent, cacheDirectory, parallelBuilds, readProcessOutput)
 import PreludeSource (compilerSourceHash, frontendSeedSha256, libPackageFiles, mirPackageFiles, seedSha256, parserSeedSha256, stdlibSource)
@@ -46,16 +48,19 @@ assetUrl :: String -> String -> String
 assetUrl name digest = "https://github.com/weirdev/tersus/releases/download/bootstrap-" ++ take 12 digest ++ "/" ++ name ++ ".ll"
 
 seedHash :: String
-seedHash = fingerprint [seedSha256, runtimeSource]
+seedHash = fingerprint ([seedSha256, runtimeSource] ++ emitterBuildInputs)
 
 parserSeedHash :: String
-parserSeedHash = fingerprint [parserSeedSha256, runtimeSource]
+parserSeedHash = fingerprint ([parserSeedSha256, runtimeSource] ++ emitterBuildInputs)
 
 frontendSeedHash :: String
-frontendSeedHash = fingerprint [frontendSeedSha256, runtimeSource]
+frontendSeedHash = fingerprint ([frontendSeedSha256, runtimeSource] ++ emitterBuildInputs)
 
 compilerSnapshotHash :: String
 compilerSnapshotHash = fingerprint ([seedHash, parserSeedHash, frontendSeedHash] ++ concatMap (\(path, contents) -> [path, contents]) (mirPackageFiles ++ libPackageFiles) ++ [stdlibSource, compilerSourceHash])
+
+emitterSeedFile :: IO (Result FilePath String)
+emitterSeedFile = seedFile "emitter" seedSha256 seedHash "TERSUS_SEED_FILE"
 
 stageZero :: FilePath -> IO (Result () String)
 stageZero = buildSeed "emitter" seedSha256 seedHash "TERSUS_SEED_FILE"

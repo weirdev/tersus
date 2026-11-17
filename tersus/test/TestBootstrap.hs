@@ -127,7 +127,7 @@ bootstrap = do
             case built0 of
                 Error e -> pure (Just ("stage 0: " ++ e))
                 Ok zero -> do
-                    built1 <- cachedEmitter
+                    built1 <- cachedSourceEmitter
                     case built1 of
                         Error e -> pure (Just ("stage 1: " ++ e))
                         Ok one -> do
@@ -145,12 +145,14 @@ bootstrap = do
     -- (the pipeline's owned emitter is stage 1's: its ownership tool is the stage 1 executable, which is checked first)
     sameEmitter zero one = do
         fromZero <- ownedToolWith zero emitterEntry
+        current <- cachedEmitter
         tool <- ownershipTool
-        case tool of
-            ToolNative path | path /= one -> pure ["the pipeline's ownership tool is not stage 1: " ++ path]
-            ToolNative _ -> compareOwned fromZero
-            ToolFailed e -> pure ["the pipeline's ownership tool: " ++ e]
-            ToolInterpreted _ -> pure ["the pipeline's ownership tool is interpreted, not stage 1"]
+        case (current, tool) of
+            (Ok expected, ToolNative path) | path /= expected -> pure ["the pipeline's ownership tool is not the selected current emitter: " ++ path]
+            (Ok _, ToolNative _) -> compareOwned fromZero
+            (Error e, _) -> pure ["the selected current emitter: " ++ e]
+            (_, ToolFailed e) -> pure ["the pipeline's ownership tool: " ++ e]
+            (_, ToolInterpreted _) -> pure ["the pipeline's ownership tool is interpreted, not native"]
       where
         compareOwned fromZero = case (fromZero, emitterOwnedProgram) of
             (Error e, _) -> pure ["stage 0 owning the emitter: " ++ e]
@@ -196,7 +198,7 @@ cache zero one = do
                     names <- sort <$> listDirectory directory
                     before <- mapM (getModificationTime . (directory </>)) names
                     reusedZero <- cachedSeed
-                    reusedOne <- cachedEmitter
+                    reusedOne <- cachedSourceEmitter
                     ir <- tersusLlvm source
                     expected <- case ownedSource source of
                         Error e -> pure (Error e)

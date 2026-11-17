@@ -134,6 +134,7 @@ library
       Elaboration
       ElaboratorNative
       ElaboratorTool
+      EmitterProvenance
       FileParserProtocol
       Hash
       Interface
@@ -339,6 +340,7 @@ test-suite tersus-test
       TestDeref
       TestDifferential
       TestElaborate
+      TestEmitterProvenance
       TestEq
       TestFrontendBootstrap
       TestGenerics
