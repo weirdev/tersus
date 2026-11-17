@@ -1260,8 +1260,10 @@ fn derefTarget(st: St, t0: Int) -> St ~ {
     };
     st = traitArguments(st, "Deref", t);
     if st.status != 0 { return st; };
-    if st.ok && size(st.te.types) = 1 {
-        target = get(st.te.types, 0);
+    // (the list is read once, so that its length and its element are of one value)
+    types = clone(st.te.types);
+    if st.ok && size(types) = 1 {
+        target = get(types, 0);
         return St { ok: true, ty: target, ..st };
     };
     return St { ok: false, ..st };
