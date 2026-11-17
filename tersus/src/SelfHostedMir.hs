@@ -3449,9 +3449,11 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
              in not described || any (\(owner, _) -> owner `elem` roots) points
         Nothing -> True
     -- The places a reference may be to, when the may-places know all of them and the path to each
+    -- (a place at an index is left to the chain of borrows: master's bridge keeps of a list only its size when an
+    -- element of it may change)
     completeTargets ref = case aliasCandidates alias of
         Just (targets, _) -> case Map.findWithDefault [] ref targets of
-            points@(_ : _) -> mapM (\(owner, path) -> (,) owner <$> path) points
+            points@(_ : _) -> mapM (\(owner, path) -> (,) owner <$> (path >>= \steps -> if any isIndex steps then Nothing else Just steps)) points
             [] -> Nothing
         Nothing -> Nothing
     -- The holders the may-places describe as holding a reference into one of these locals
