@@ -1349,6 +1349,89 @@ fn makeClosureImplForType(st: St, b: &BoundInfo, t: Int) -> St ~ {
     return makeClosureImpl(st, &x.name, b, &noArgs, &noReason);
 };
 
+
+// The derived Clone of a closure struct: a clone function that clones each captured field
+fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<ClosureCap>, term: Int) -> St ~ {
+    cloneTrait = protocolName(&st, "Clone");
+    if HashSet::contains(&st.impls, pairKey(&cloneTrait, structName)) { return St { ok: true, ..st }; };
+    traitFnsList = HashMap::lookup(&st.traitFns, &cloneTrait, []);
+    tfAt = traitFnNamed(&st, &traitFnsList, "clone");
+    if tfAt < 0 { return St { ok: false, ..st }; };
+    tf = traitFnOf(&st, tfAt);
+    sx = tyAt(&st, structTy);
+    structArgs = clone(sx.args);
+    sizeParams = [];
+    typeParams = [];
+    for a in &structArgs { ax = tyAt(&st, a); if ax.kind = 22 { sizeParams = push(sizeParams, clone(ax.name)); } else if ax.kind = 12 { typeParams = push(typeParams, clone(ax.name)); }; };
+    fieldExprs = [];
+    fieldNames = [];
+    for c in caps {
+        st = emitVar(st, "self");
+        selfNode = st.nid;
+        st = emitFieldValue(st, "", clone(c.name));
+        st = emitVal(st, st.nid);
+        fv = st.nid;
+        oneArg = push([], selfNode);
+        st = emitCall(st, fv, &oneArg);
+        readNode = st.nid;
+        exprNode = readNode;
+        fk = kindOf(&st, c.field);
+        if fk != 10 && fk != 11 {
+            st = emitVar(st, "clone");
+            cargs = push([], readNode);
+            st = emitCall(st, st.nid, &cargs);
+            exprNode = st.nid;
+        };
+        fieldExprs = push(fieldExprs, exprNode);
+        fieldNames = push(fieldNames, clone(c.name));
+    };
+    st = emitCtorValue(st, clone(structName), &structArgs, &fieldNames);
+    st = emitVal(st, st.nid);
+    st = emitCall(st, st.nid, &fieldExprs);
+    st = emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
+    bodyStmts = push([], st.nid);
+    st = emitStatements(st, &bodyStmts);
+    bodyNode = st.nid;
+    st = wrapTy(st, 10, structTy);
+    cloneFs = FnSig { params: push([], "self"), ptys: push([], st.ty), rty: structTy, sizes: sizeParams, types: typeParams, writes: [], froms: [] };
+    st = emitSignature(st, &cloneFs);
+    sigNode = st.nid;
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: term, stmts: bodyNode } });
+    fnBody = st.nid;
+    st = emitNames(st, &cloneFs.params);
+    fnParams = st.nid;
+    noProofs = [];
+    st = emitProofs(st, &noProofs);
+    fnExports = st.nid;
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: fnParams, ins: tf.ins, outs: tf.outs, body: fnBody, exports: fnExports } });
+    fnValue = st.nid;
+    st = emitVal(st, fnValue);
+    fnExpr = st.nid;
+    st = emitName(st, implFunctionName(structName, &cloneTrait, "clone"));
+    fnNameNode = st.nid;
+    st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: fnNameNode, e: fnExpr } });
+    fnStmt = st.nid;
+    implFns = push([], fnStmt);
+    st = emitStatements(st, &implFns);
+    implFnsNode = st.nid;
+    st = emitName(st, clone(cloneTrait));
+    traitNameNode = st.nid;
+    st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: traitNameNode } });
+    traitNode = st.nid;
+    st = emit(st, AstNode::Args { value: AstArgs::End });
+    implArgsNode = st.nid;
+    st = emitName(st, clone(structName));
+    implName = st.nid;
+    st = emitType(st, structTy);
+    implTy = st.nid;
+    st = emit(st, AstNode::Bounds { value: AstBounds::End });
+    st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: traitNode, args: implArgsNode, n: implName, ty: implTy, bs: st.nid, xs: implFnsNode } });
+    implStmt = st.nid;
+    st = closureAbsorb(st, implStmt);
+    if st.status != 0 { return st; };
+    return St { ok: true, ..st };
+};
+
 // A closure expression becomes its struct, its body function and, for a bound, its impl; st.te the closure value
 fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: &List<Int>, expected: Int) -> St ~ {
     rec = nativeFn(&st.nodes, v);
@@ -1557,28 +1640,9 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
             for c in caps { st = implementsMarker(st, "Clone", c.field, 0); if !st.ok { canClone = false; }; };
         };
         if canClone && HashSet::contains(&st.traits, "Clone") {
-            st = emitName(st, "Clone");
-            cloneNameNode = st.nid;
-            st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: cloneNameNode } });
-            cloneTraitNode = st.nid;
-            st = emit(st, AstNode::Args { value: AstArgs::End });
-            cloneArgsNode = st.nid;
-            st = emitName(st, clone(structName));
-            cloneImplName = st.nid;
-            st = emitType(st, structTy);
-            cloneImplTy = st.nid;
-            st = emit(st, AstNode::Bounds { value: AstBounds::End });
-            cloneBs = st.nid;
-            noStmts = [];
-            st = emitStatements(st, &noStmts);
-            st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: cloneTraitNode, args: cloneArgsNode, n: cloneImplName, ty: cloneImplTy, bs: cloneBs, xs: st.nid } });
-            st = checkItem(st, true, st.nid);
-            if st.status != 0 { return st; } else {
-                genOut2 = clone(st.genericOut);
-                genTypes2 = clone(st.genericTypes);
-                for o in &st.outs { genOut2 = push(genOut2, o); };
-                for ty in &st.te.types { genTypes2 = push(genTypes2, ty); };
-                st = St { genericOut: genOut2, genericTypes: genTypes2, ..st };
+            st = makeClosureCloneImpl(st, &structName, structTy, &caps, rec.term);
+            if st.status != 0 { return st; };
+            if st.ok {
                 canCopy = true;
                 for c in caps { st = implementsMarker(st, "Copy", c.field, 0); if !st.ok { canCopy = false; }; };
                 if canCopy && HashSet::contains(&st.traits, "Copy") {
@@ -1595,16 +1659,11 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
                     st = emit(st, AstNode::Bounds { value: AstBounds::End });
                     copyBs = st.nid;
                     noStmts = [];
-            st = emitStatements(st, &noStmts);
+                    st = emitStatements(st, &noStmts);
                     st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: copyTraitNode, args: copyArgsNode, n: copyImplName, ty: copyImplTy, bs: copyBs, xs: st.nid } });
-                    st = checkItem(st, true, st.nid);
-                    if st.status != 0 { return st; } else {
-                        genOut3 = clone(st.genericOut);
-                        genTypes3 = clone(st.genericTypes);
-                        for o in &st.outs { genOut3 = push(genOut3, o); };
-                        for ty in &st.te.types { genTypes3 = push(genTypes3, ty); };
-                        st = St { genericOut: genOut3, genericTypes: genTypes3, ..st };
-                    };
+                    copyStmt = st.nid;
+                    st = closureAbsorb(st, copyStmt);
+                    if st.status != 0 { return st; };
                 };
             };
         };
