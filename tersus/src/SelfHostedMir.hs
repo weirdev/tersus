@@ -1812,9 +1812,9 @@ directCall types invariants rules caller callee args (M.Local dest) termInfo rec
   where
     -- (a result under one parameter is that parameter's referent only when it has its type; a result that is a part
     -- of it is placed by the caller's may-places, which know the part)
-    identityFrom name = case (M.fnReturns callee, lookup name paramNameLocals >>= (\local -> M.localType <$> Map.lookup local (M.fnLocals callee))) of
-        (Just result, Just source) -> unref result == unref source
-        _ -> False
+    identityFrom name = case lookup name paramNameLocals >>= (\local -> lookup local (zip params [0 ..])) of
+        Just idx -> identityResult callee idx
+        Nothing -> False
     -- (what the callee leaves in a held parameter's field: an arbitrary value of its type, which the callee's output
     -- contract speaks of; the holder after the call is the one given with that value there)
     heldPost snaps (steps, entries, b) (param, [(path, refTy)]) = do
@@ -2157,11 +2157,11 @@ borrowsAgreed functions fn = loop (Map.empty, Set.empty)
             next = (known', conflicted')
          in if next == state then state else loop next
 
--- (a result under a parameter is that parameter's referent itself only when it has its type: one that is a part of
--- it is placed by the may-places, candidatePlaces)
+-- (a result under a parameter is that parameter's referent itself only when the callee's checked origins are that
+-- parameter alone and the result has its type: one that is a part of it is placed by the may-places, candidatePlaces)
 identityResult :: M.Function -> Int -> Bool
 identityResult callee idx = case (M.fnReturns callee, drop idx (M.fnParams callee)) of
-    (Just result, param : _) | Just decl <- Map.lookup param (M.fnLocals callee) -> unref result == unref (M.localType decl)
+    (Just result, param : _) | Just decl <- Map.lookup param (M.fnLocals callee) -> M.fnFrom callee == [param] && unref result == unref (M.localType decl)
     _ -> False
 
 paramNamesOf :: M.Function -> [Variable]
@@ -3381,10 +3381,11 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             [(owner, p')] -> do
                 (ownerRef, _) <- operand (M.Copy owner) b
                 (updSteps, newOwnerRef, bu) <- updateRefOf ownerRef p' value b
-                (typeFacts, bt) <- typeSteps rules types invariants fn owner bu
+                (typeFacts, bt0) <- typeSteps rules types invariants fn owner bu
+                (forget, bt) <- forgetElements defined holder p' owner bt0
                 (afterSteps, ba) <- afterChangeChecked [] defined True owner bt
                 (refresh, br) <- refreshViews defined owner ba
-                pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ afterSteps ++ refresh, [owner], br)
+                pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ forget ++ afterSteps ++ refresh, [owner], br)
             _ : _ : _ -> do
                 (alternatives, checked, bc) <- alternativeWrites points [] value b
                 (havocked, bh) <- havocAll defined (nub (map fst points)) bc
@@ -3406,9 +3407,10 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             (ownerRef, _) <- operand (M.Copy owner) b0
             (updSteps, newOwnerRef, b4) <- updateRefOf ownerRef (path ++ place) valueRef b0
             (typeFacts, b5) <- typeSteps rules types invariants fn owner b4
-            (afterSteps, b6) <- afterChangeChecked [] defined True owner b5
+            (forget, b5') <- forgetElements defined root (path ++ place) owner b5
+            (afterSteps, b6) <- afterChangeChecked [] defined True owner b5'
             (refresh, b7) <- refreshViews defined owner b6
-            pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ afterSteps ++ refresh, b7)
+            pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ forget ++ afterSteps ++ refresh, b7)
         known -> do
             let (top, above, placed) = writeTarget alias root
             (topRef, _) <- operand (M.Copy top) b0
@@ -3453,11 +3455,9 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
              in not described || any (\(owner, _) -> owner `elem` roots) points
         Nothing -> True
     -- The places a reference may be to, when the may-places know all of them and the path to each
-    -- (a place at an index is left to the chain of borrows: master's bridge keeps of a list only its size when an
-    -- element of it may change)
     completeTargets ref = case aliasCandidates alias of
         Just (targets, _) -> case Map.findWithDefault [] ref targets of
-            points@(_ : _) -> mapM (\(owner, path) -> (,) owner <$> (path >>= \steps -> if any isIndex steps then Nothing else Just steps)) points
+            points@(_ : _) -> mapM (\(owner, path) -> (,) owner <$> path) points
             [] -> Nothing
         Nothing -> Nothing
     -- The holders the may-places describe as holding a reference into one of these locals
@@ -3502,12 +3502,18 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             pure (steps ++ more ++ [step "Assign" [("local", MInt (localNum ref)), ("value", placeRef)]] ++ descendants, after)) ([], b0)
                 [(ref, path) | (ref, [(o, Just path)]) <- Map.toList targets, o == owner, ref /= owner, Map.notMember ref (aliasBorrows alias), maybe False (Set.member ref) defined]
         Nothing -> Just ([], b0)
+    -- (a write at an index of a place the chain of borrows does not reach keeps, as master's bridge does, only the
+    -- shape of what was lent: the other elements' values are not known afterwards; the write itself was checked)
+    forgetElements defined root path owner b0
+        | any isIndex path && Map.notMember root (aliasBorrows alias) = havocOne defined ([], b0) owner
+        | otherwise = Just ([], b0)
     -- A write through a reference that may be to any of several known places is checked as a write of each, all
     -- from the state before it: the invariants of the types on the way and of the holders of a reference into each
     -- (and theirs). Only the checks are kept; the write itself is the one through the reference, whose places are
     -- then made arbitrary with their type's facts, which these checks justify (afterChange).
-    alternativeWrites points place valueRef b0
-        | all (not . any isIndex . (++ place) . snd) points = do
+    -- (a place at an index among several is not checked here: such a write is not modelled)
+    alternativeWrites points place valueRef b0 = do
+            guard (all (not . any isIndex . (++ place) . snd) points)
             (checks, after) <- foldM (\(acc, current) (owner, path) -> do
                 (ownerRef, _) <- operand (M.Copy owner) current
                 (more, hypothetical, next) <- updateRefOf ownerRef (path ++ place) valueRef current
@@ -3515,7 +3521,6 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 pure (acc ++ more ++ [s' | s' <- holderChecks, not (assignsLocal s')], done)) ([], b0) points
             let owners = nub (map fst points)
             pure (checks, owners ++ transitiveHolders (buildDefined b0) owners, after)
-        | otherwise = Just ([], [], b0)
     transitiveHolders defined roots = go [] roots
       where
         go seen [] = seen
