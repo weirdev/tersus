@@ -1795,11 +1795,6 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
             fs = FnSig { rty: solvedRty, ..fs };
         };
     };
-    if hasBound {
-        st = makeClosureImpl(st, &structName, &b, traitArgTys, &reason);
-        if st.status != 0 { return st; };
-        if !st.ok { return typeError(st, catStrings(catStrings(catStrings(clone(st.current), " gives a closure that does not meet "), fnTraitDisplay(&b.n)), "")); };
-    };
     return closureStructValue(st, &structName, structTy, &structArgs, &caps, expected, hasBound);
 };
 
