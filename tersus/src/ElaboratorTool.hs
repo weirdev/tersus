@@ -4,6 +4,7 @@ module ElaboratorTool
     ( runElaborator
     , runElaboratorText
     , runElaboratorRaw
+    , runElaboratorReading
     , nativeElaborator
     , frontendToolFailure
     , toolFailurePrefix
@@ -19,13 +20,12 @@ module ElaboratorTool
     , sourceLoader
     ) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception (IOException, finally, try)
 import qualified Data.ByteString.Char8 as B
 import Data.List (dropWhileEnd, isInfixOf)
 import System.Exit (ExitCode (..))
-import System.IO (hClose, hSetBinaryMode)
+import System.IO (Handle, hClose, hSetBinaryMode)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess, withCreateProcess)
 
@@ -33,7 +33,7 @@ import BuiltinTable (builtinTableText)
 import ElaborateRequest
 import {-# SOURCE #-} ElaboratorNative (frontendStage, productionTools)
 import Hash (fingerprint)
-import Native (raiseStack)
+import Native (raiseStack, withPipeReader)
 import PreludeSource (elaboratePackageFiles, frontendSeedSources)
 import qualified ParserSeed
 import Seed (cachedFrontendSeed, cachedParserSeed)
@@ -49,22 +49,24 @@ runElaboratorText exe text = (`bindResult` readResponseBytes) <$> runElaboratorR
 
 -- The executable on the request, and the lines of its response
 runElaboratorRaw :: FilePath -> String -> IO (Result [B.ByteString] String)
-runElaboratorRaw exe text = do
+runElaboratorRaw = runElaboratorReading B.hGetContents
+
+-- (the tests read the streams with readers that fail)
+runElaboratorReading :: (Handle -> IO B.ByteString) -> FilePath -> String -> IO (Result [B.ByteString] String)
+runElaboratorReading readStream exe text = do
     -- (the elaborator recurses over the nesting of expressions, deeper than a default stack allows for a deep one;
     -- the data is ASCII, so it is passed as bytes rather than through the locale's decoding of a String)
     (code, out, err) <- withCreateProcess (proc "/bin/sh" ["-c", raiseStack, exe]){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe} $
         \hin' hout' herr' ph -> case (hin', hout', herr') of
             (Just hin, Just hout, Just herr) -> do
                 mapM_ (`hSetBinaryMode` True) [hin, hout, herr]
-                outVar <- newEmptyMVar
-                errVar <- newEmptyMVar
-                _ <- forkIO (B.hGetContents hout >>= putMVar outVar)
-                _ <- forkIO (B.hGetContents herr >>= putMVar errVar)
-                _ <- try (B.hPut hin (B.pack text) `finally` hClose hin) :: IO (Either IOException ())
-                out <- takeMVar outVar
-                err <- takeMVar errVar
-                code <- waitForProcess ph
-                pure (code, out, err)
+                withPipeReader ("reading the standard output of the elaborator " ++ exe) hout (readStream hout) $ \waitOut ->
+                    withPipeReader ("reading the standard error of the elaborator " ++ exe) herr (readStream herr) $ \waitErr -> do
+                        _ <- try (B.hPut hin (B.pack text) `finally` hClose hin) :: IO (Either IOException ())
+                        out <- waitOut
+                        err <- waitErr
+                        code <- waitForProcess ph
+                        pure (code, out, err)
             _ -> pure (ExitFailure 1, B.empty, B.pack "no pipes to the elaborator")
     pure $ case code of
         ExitSuccess
