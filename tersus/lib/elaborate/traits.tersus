@@ -664,7 +664,7 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
         for p in &namedFs.params { wrapperParams = push(wrapperParams, clone(p)); };
         wrapperPtys = [];
         i = 0;
-        while i < size(callFs.ptys) [{ affirm i >= 0; affirm i < size(callFs.ptys); }] shrinks size(callFs.ptys) - i {
+        while i < size(callFs.ptys) [{ affirm i >= 0; affirm i <= size(callFs.ptys); }] shrinks size(callFs.ptys) - i {
             st = substSelfAs(st, &wrapperName, wrapperTy, get(callFs.ptys, i));
             st = substTraitArgs(st, &traitParams, &traitArgs, st.ty);
             wrapperPtys = push(wrapperPtys, st.ty);
