@@ -2,7 +2,9 @@
 
 module MirData
     ( writeProgram
+    , writeOwnedProgram
     , writeProgramWithGhosts
+    , writeOwnedProgramWithGhosts
     , readProgram
     , forNative
     , writeLowered
@@ -20,7 +22,7 @@ import qualified Data.Set as Set
 import AstData (readMirPayloadBytes, writeMirPayloadLines)
 import Mir
 import qualified Syntax as S
-import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
+import Types (Arg (..), Name, OwnershipFacts (..), Rel (..), Size (..), Storage (..), Type (..), Variable, tupleGeneric)
 import Utils
 
 -- The MIR of a program as text that a program can read (`tersus mir --data`): what native code is made from, and nothing else. It is the
@@ -77,10 +79,19 @@ forNative program =
 -- Writing
 
 writeProgram :: Program -> String
-writeProgram program =
+writeProgram program = writeProgramWith (storageLines (forNative program)) program
+
+-- The program with its storage declarations and checked ownership facts, for the stages that decide ownership from
+-- them (the ownership passes and the emitter); the checker and the erasure, which decide none, are given the program alone
+writeOwnedProgram :: Program -> Result String String
+writeOwnedProgram program = mapResult (\meta -> writeProgramWith meta program) (metaLines (forNative program))
+
+writeProgramWith :: [String] -> Program -> String
+writeProgramWith meta program =
     unlines
         ( "tersus-mir 1"
             : concatMap typeLines (Map.toList (progTypes native))
+            ++ meta
             ++ concatMap (functionLines "function") (Map.elems (progFunctions native))
             ++ functionLines "main" (progMain native)
         )
@@ -89,13 +100,53 @@ writeProgram program =
 
 -- The program before its ghosts are erased, as version 2 of the data (see the note at the head of this module)
 writeProgramWithGhosts :: Program -> String
-writeProgramWithGhosts program =
+writeProgramWithGhosts program = writeGhostsWith (storageLines program) program
+
+writeOwnedProgramWithGhosts :: Program -> Result String String
+writeOwnedProgramWithGhosts program = mapResult (\meta -> writeGhostsWith meta program) (metaLines program)
+
+writeGhostsWith :: [String] -> Program -> String
+writeGhostsWith meta program =
     unlines
         ( "tersus-mir 2"
             : concatMap typeLines (Map.toList (progTypes program))
+            ++ meta
             ++ concatMap (functionLinesWith statementTextWithGhosts "function") (Map.elems (progFunctions program))
             ++ functionLinesWith statementTextWithGhosts "main" (progMain program)
         )
+
+-- The storage record alone, for the stages that check the program's list and Box operations against the declarations they
+-- are and decide no ownership (the checker and the erasure)
+storageLines :: Program -> [String]
+storageLines program
+    | null (storageList storage) && null (storageBox storage) = []
+    | otherwise = [unwords ["storage", quote (storageList storage), quote (storageBox storage)]]
+  where
+    storage = progStorage program
+
+-- The records of each declared type's checked facts, as they are: a declared type with no facts is refused, as is a
+-- fact whose function the program does not have. A tuple is the struct the language declares for its parts, which no
+-- impl is of, so it has none of the roles
+metaLines :: Program -> Result [String] String
+metaLines program = case progOwnership program of
+    Nothing -> Ok []
+    Just facts ->
+        mapResult
+            (\rows -> unwords ["storage", quote (storageList storage), quote (storageBox storage)] : ("ownership " ++ show (length rows)) : rows)
+            (flatResultMap (\n -> mapResult (\fields -> unwords ("owned" : quote n : map quote fields)) (row n (Map.lookup n facts))) (Map.keys (progTypes program)))
+  where
+    storage = progStorage program
+    row n Nothing
+        | Just _ <- tupleGeneric (takeWhile (/= '<') n) = Ok (replicate 7 "")
+        | otherwise = Error ("Type error: " ++ n ++ " has no checked ownership facts")
+    row n (Just f) =
+        target n "Drop" (ownershipDrop f) `bindResult` \d ->
+            target n "Clone" (ownershipClone f) `bindResult` \c ->
+                mapResult (\r -> [maybe "" id (ownershipCopy f)] ++ d ++ c ++ r) (target n "Deref" (ownershipDeref f))
+    target _ _ Nothing = Ok ["", ""]
+    target n role (Just (p, f))
+        | Map.member f (progFunctions program) = Ok [p, f]
+        | otherwise = Error ("Type error: the checked " ++ role ++ " of " ++ n ++ " is " ++ f ++ ", which the program does not have")
 
 typeLines :: (Name, TypeDecl) -> [String]
 typeLines (name, StructDecl fields) = [unwords (["struct", quote name, show (length fields)] ++ concatMap fieldTokens fields)]
@@ -365,23 +416,47 @@ readProgram text = case lines text of
     "tersus-mir 2" : rest -> readRecords rest
     _ -> Error "not the MIR as data: the first line should be tersus-mir 1 or 2"
   where
-    readRecords rest = flatResultMap tokenize (filter (not . null) rest) `bindResult` \records -> fileFrom records ([], [], Nothing)
+    readRecords rest = flatResultMap tokenize (filter (not . null) rest) `bindResult` \records -> fileFrom records ([], [], Nothing) `bindResult` \p -> metaFrom records p
 
 -- The records of the file, with the types, the functions and the main that were read (last first)
 fileFrom :: [[Token]] -> ([(Name, TypeDecl)], [Function], Maybe Function) -> Result Program String
 fileFrom [] (types, fns, Just mainFn) =
     unique "type" (map fst types) `bindResult` \_ ->
         unique "function" (map fnName fns) `bindResult` \_ ->
-            Ok (Program (Map.fromList (reverse types)) (Map.fromList [(fnName f, f) | f <- reverse fns]) mainFn Map.empty Map.empty Map.empty Map.empty)
+            Ok (Program (Map.fromList (reverse types)) (Map.fromList [(fnName f, f) | f <- reverse fns]) mainFn Map.empty Map.empty Map.empty Map.empty Map.empty Nothing)
 fileFrom [] _ = Error "the program has no main"
 fileFrom (record : rest) (types, fns, mainFn) = case record of
     Word "struct" : ts -> parseLine structP ts `bindResult` \d -> fileFrom rest (d : types, fns, mainFn)
     Word "enum" : ts -> parseLine enumP ts `bindResult` \d -> fileFrom rest (d : types, fns, mainFn)
     Word "function" : ts -> functionFrom ts rest `bindResult` \(f, rest') -> fileFrom rest' (types, f : fns, mainFn)
+    Word w : _ | w `elem` ["storage", "ownership", "owned"] -> fileFrom rest (types, fns, mainFn)
     Word "main" : ts
         | Nothing <- mainFn -> functionFrom ts rest `bindResult` \(f, rest') -> fileFrom rest' (types, fns, Just f)
         | otherwise -> Error "the program has two mains"
     _ -> Error ("not a record of the MIR: " ++ show (take 1 record))
+
+-- The storage and ownership records of the data (metaLines), read back: a storage list and Box, and a row of seven names
+-- for each declared type, each provider with its function
+metaFrom :: [[Token]] -> Program -> Result Program String
+metaFrom records program = case [r | r@(Word w : _) <- records, w `elem` ["storage", "ownership", "owned"]] of
+    [] -> Ok program
+    [[Word "storage", Str l, Str b]] -> Ok program{progProtocols = Map.fromList [(role, p) | (role, p) <- [("List", l), ("Box", b)], not (null p)]}
+    [Word "storage", Str l, Str b] : [Word "ownership", Word n] : owned
+        | [(count, "")] <- reads n, count == length owned, count == Map.size (progTypes program) ->
+            mapM rowOf owned `orFail` \rows ->
+                if map fst rows /= Map.keys (progTypes program)
+                    then Error "the ownership rows are not one for each declared type, in order"
+                    else Ok program{progProtocols = Map.fromList [(role, p) | (role, p) <- [("List", l), ("Box", b)], not (null p)], progOwnership = Just (Map.fromList rows)}
+    _ -> Error "the storage and ownership records are not a storage record, an ownership count and that many rows"
+  where
+    rowOf record = case record of
+        [Word "owned", Str owner, Str copy, Str dp, Str df, Str cp, Str cf, Str rp, Str rf]
+            | all paired [(dp, df), (cp, cf), (rp, rf)] -> Just (owner, OwnershipFacts (opt copy) (pairOf dp df) (pairOf cp cf) (pairOf rp rf))
+        _ -> Nothing
+    paired (p, f) = null p == null f
+    opt x = if null x then Nothing else Just x
+    pairOf p f = if null p then Nothing else Just (p, f)
+    orFail m k = maybe (Error "an ownership row is not an owner and seven names, each provider with its function") k m
 
 structP :: P (Name, TypeDecl)
 structP = (,) <$> name <*> (StructDecl <$> fieldsP)
@@ -466,6 +541,7 @@ loweredLines lowered = do
             ++ map genericLine (Map.toList (progGenerics program))
             ++ invariants
             ++ map boundedLine (Map.toList (progBounded program))
+            ++ concatMap boundedFactsLines (Map.toList (progBounded program))
             ++ map instanceLine (Map.toList (progInstances program))
             ++ map (sharedLine . fst) (sortOn snd (Map.toList shared))
             ++ concat functions
@@ -484,7 +560,9 @@ loweredLines lowered = do
     shared = sharedEnvironments program
     namesLine w names = unwords (w : namesTokens (Set.toList names))
     genericLine (n, (sizes, fields)) = unwords (["generic", quote n] ++ namesTokens sizes ++ [show (length fields)] ++ concatMap fieldTokens fields)
-    boundedLine (n, BoundedFn sizes copy lifted loops) = unwords (["bounded", quote n] ++ namesTokens sizes ++ namesTokens copy ++ namesTokens lifted ++ [show (length loops)] ++ concatMap packLoopTokens loops)
+    boundedLine (n, BoundedFn sizes copy lifted loops _) = unwords (["bounded", quote n] ++ namesTokens sizes ++ namesTokens copy ++ namesTokens lifted ++ [show (length loops)] ++ concatMap packLoopTokens loops)
+    boundedFactsLines (n, bounded) = [unwords (["boundedfacts", quote n] ++ typeTokens owner ++ map quote (factNames facts)) | (owner, facts) <- boundedFacts bounded]
+    factNames (OwnershipFacts c d k r) = [maybe "" id c] ++ concatMap (maybe ["", ""] (\(p, f) -> [p, f])) [d, k, r]
     packLoopTokens (PackLoop h b x bs ls i e et lo hi taken) =
         [blockText h, blockText b, blockText x, show (length bs)] ++ map blockText bs ++ [show (length ls)] ++ map localText ls
             ++ [localText i, localText e, quote et, localText lo, localText hi, maybe "none" localText taken]
@@ -640,7 +718,9 @@ loweredFrom payloads records0 =
     recordsWhile typeRecord records0 `bindResult` \(types, r1) ->
         recordsWhile genericRecord r1 `bindResult` \(generics, r2) ->
             recordsWhile invariantRecord r2 `bindResult` \(invariants, r2') ->
-                recordsWhile boundedRecord r2' `bindResult` \(bounded, r2'') ->
+                recordsWhile boundedRecord r2' `bindResult` \(bounded0, r2a) ->
+                recordsWhile boundedFactsRecord r2a `bindResult` \(boundedFactRows, r2'') ->
+                withBoundedFacts bounded0 boundedFactRows `bindResult` \bounded ->
                 recordsWhile instanceRecord r2'' `bindResult` \(instances, r3) ->
                 recordsWhile sharedRecord r3 `bindResult` \(shared, r3') ->
                 let tables = Tables payloads (Map.fromList (zip [0 ..] shared)) in
@@ -656,7 +736,7 @@ loweredFrom payloads records0 =
                                             payloadUses (map snd invariants ++ fnUses ++ mainUses ++ assumeUses) `bindResult` \_ ->
                                                 Ok
                                                     Lowered
-                                                        { lowProgram = Program (Map.fromList types) (Map.fromList [(fnName f, f) | f <- fns]) mainFn (Map.fromList generics) (Map.fromList (map fst invariants)) (Map.fromList bounded) (Map.fromList instances)
+                                                        { lowProgram = Program (Map.fromList types) (Map.fromList [(fnName f, f) | f <- fns]) mainFn (Map.fromList generics) (Map.fromList (map fst invariants)) (Map.fromList bounded) (Map.fromList instances) Map.empty Nothing
                                                         , lowCopies = copies
                                                         , lowLinear = linear
                                                         , lowDrops = drops
@@ -677,8 +757,20 @@ loweredFrom payloads records0 =
         Word "invariant" : ts -> Just (parseLine ((\n (vs, i) -> ((n, vs), i)) <$> name <*> payloadP (Tables payloads Map.empty) "a list of validation statements" validationsOf) ts)
         _ -> Nothing
     boundedRecord record = case record of
-        Word "bounded" : ts -> Just (parseLine ((\n sizes copy lifted loops -> (n, BoundedFn sizes copy lifted loops)) <$> name <*> namesP <*> namesP <*> namesP <*> (itemCount >>= \k -> replicateM k packLoopP)) ts)
+        Word "bounded" : ts -> Just (parseLine ((\n sizes copy lifted loops -> (n, BoundedFn sizes copy lifted loops [])) <$> name <*> namesP <*> namesP <*> namesP <*> (itemCount >>= \k -> replicateM k packLoopP)) ts)
         _ -> Nothing
+    boundedFactsRecord record = case record of
+        Word "boundedfacts" : ts -> Just (parseLine ((,,) <$> name <*> typeP <*> replicateM 7 name) ts `bindResult` \(n, owner, names) -> case names of
+            [c, dp, df, kp, kf, rp, rf] | all (\(x, y) -> null x == null y) [(dp, df), (kp, kf), (rp, rf)] -> Ok (n, (owner, OwnershipFacts (nonEmpty c) (pair dp df) (pair kp kf) (pair rp rf)))
+            _ -> Error "a boundedfacts record is not a function with bounds, a type and seven names, each provider with its function")
+        _ -> Nothing
+    nonEmpty t = if null t then Nothing else Just t
+    pair p f = if null p then Nothing else Just (p, f)
+    -- (each row is of a function with bounds the unit has, once for each type it names)
+    withBoundedFacts bounded rows = case [n | (n, _) <- rows, n `notElem` map fst bounded] of
+        n : _ -> Error ("the facts of the types of " ++ n ++ ", which is not a function with bounds of the unit")
+        [] -> unique "boundedfacts" [n ++ " " ++ unwords (typeTokens owner) | (n, (owner, _)) <- rows] `bindResult` \_ ->
+            Ok [(n, b{boundedFacts = [row | (m, row) <- rows, m == n]}) | (n, b) <- bounded]
     instanceRecord record = case record of
         Word "instance" : ts -> Just (parseLine ((\n generic args -> (n, (generic, args))) <$> name <*> name <*> (itemCount >>= \k -> replicateM k argP)) ts)
         _ -> Nothing

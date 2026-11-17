@@ -24,10 +24,10 @@ import Types
 import Utils (Result (..), bindResult, inIntRange)
 import MirCopies (coveredKey, genericKey, isCopyName, isStubName, opaqueKey)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool, buildCopy :: Bool, buildGeneric :: Bool }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool, buildCopy :: Bool, buildGeneric :: Bool, buildStorage :: Storage }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False False False
+emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False False False noStorage
 
 -- The function the validator sees for a name: a check function of an impl, `Tr for O::g`, is its impl's function
 -- `<O as Tr>::g`, since its body is the call of that function with its parameters (traitCheckWrapper); a reference to
@@ -1811,14 +1811,14 @@ typeSteps rules types invariants fn local@(M.Local number) b0
     -- (a value lent is a value of its type, with the facts of its type)
     facts (TRef inner) b = facts inner b
     -- (in the library a list and a Box are the structs they are made of)
-    facts ty@(TNamed base _) b | buildPhysical b, base `elem` ["List", "Box"] = structFacts ty b
-    facts (TBox (TArrayOf _ (SizeConst size))) b = sized size b
+    facts ty@(TNamed base _) b | buildPhysical b, base `elem` [storageList (buildStorage b), storageBox (buildStorage b)] = structFacts ty b
+    facts ty b | Just (TArrayOf _ (SizeConst size)) <- boxContent (buildStorage b) ty = sized size b
     facts (TArrayOf _ (SizeParam name)) b = sizedByParam name b
-    facts (TBox (TArrayOf _ (SizeParam name))) b = sizedByParam name b
-    facts (TBox inner) b = facts inner b
+    facts ty b | Just (TArrayOf _ (SizeParam name)) <- boxContent (buildStorage b) ty = sizedByParam name b
+    facts ty b | Just inner <- boxContent (buildStorage b) ty = facts inner b
     -- (a list has a size: the term is made, so what is inferred of a loop
     -- can speak of it; nothing is assumed of it here)
-    facts (TList _) b = do
+    facts ty b | Just _ <- listElement (buildStorage b) ty = do
         let (i, b1) = fresh b
             localId = negate i - 1
         pure ([step "ApplyFresh" [("local", MInt localId), ("function", MInt (-13)), ("arguments", MList [value])]], b1)
@@ -2898,7 +2898,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
         | any null paths = Just ([], b)
         | otherwise = case t of
             TArrayOf _ _ -> equalUnder (-13) old new b
-            TNamed "List" _ -> equalUnder (-13) old new b
+            list | Just _ <- listElement (buildStorage b) list -> equalUnder (-13) old new b
             TNamed name _ | Just (M.StructDecl fields) <- Map.lookup name types -> foldM keepField ([], b) [(f, ft) | (f, ft) <- fields, not (holdsRef types ft)]
             _ -> Just ([], b)
       where
@@ -3057,8 +3057,8 @@ genericClauses rules assumeMode env0 clauses b0 next0 = do
         (more, b') <- contractSteps rules True env [ProofAssert proof] b
         pure (more : chunks, b', env, next)
 
-encodeFunction :: Bool -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
-encodeFunction physical types invariants functions rules allowCalls fn
+encodeFunction :: Bool -> Storage -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
+encodeFunction physical storage types invariants functions rules allowCalls fn
     | any (\(M.Local n) -> n < 0) (Map.keys (M.fnLocals fn)) = Nothing
     | length (M.fnParams fn) /= length (nub (M.fnParams fn)) = Nothing
     | M.Local 0 `elem` M.fnParams fn = Nothing
@@ -3073,7 +3073,7 @@ encodeFunction physical types invariants functions rules allowCalls fn
     -- in every other program, is not one it may use)
     | physical && any logicalContainerUse (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))) = Nothing
     | otherwise = do
-        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildCopy = isCopyName (M.fnName fn), buildGeneric = Map.member genericKey (M.specEnv (M.fnSpec fn)), buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
+        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildStorage = storage, buildCopy = isCopyName (M.fnName fn), buildGeneric = Map.member genericKey (M.specEnv (M.fnSpec fn)), buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty Map.empty Map.empty Map.empty Nothing), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires0, withRequires0) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes
@@ -3129,7 +3129,7 @@ encodeFunction physical types invariants functions rules allowCalls fn
     containerConstant _ = False
     -- (a field or a variant of what a Box holds, read through the Box)
     throughContainer (M.Copy l) owner = case M.localType <$> Map.lookup l (M.fnLocals fn) of
-        Just (TNamed base _) | base `elem` ["List", "Box"] -> baseNameOf owner /= base
+        Just (TNamed base _) | base `elem` [storageList storage, storageBox storage] -> baseNameOf owner /= base
         _ -> False
     throughContainer (M.Move l) owner = throughContainer (M.Copy l) owner
     throughContainer _ _ = False
@@ -3181,7 +3181,7 @@ withoutNotes v = case v of
 encode :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
 encode = encodeAs False
 
--- The native storage library (lib/lists.tersus and lib/box.tersus, linked):
+-- The native storage library (lib/std/lists/lists.tersus and lib/std/box/box.tersus, linked):
 -- a List and a Box are the structs they are made of, with their invariants,
 -- and its functions, all generic, are checked as written, for any type
 -- (nothing is known of a value of a type parameter, so what is proved holds
@@ -3255,7 +3255,7 @@ encodeMono physical program
             invariants = M.progInvariants program
             types = M.progTypes program
         rules' <- maybe (Left "an axiom or proof rule") Right (collectRules program)
-        let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction physical types invariants functions rules' True fn)
+        let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction physical (M.progStorage program) types invariants functions rules' True fn)
         -- A function with type parameters is a template, checked where a
         -- call decides its types; a function with bounds the copy step
         -- kept generic (`$generic`), a check function among them, is
@@ -3279,13 +3279,13 @@ encodeMono physical program
     unsupportedFunction fn = any (unsupportedType . M.localType) (Map.elems (M.fnLocals fn)) || maybe False unsupportedType (M.fnReturns fn)
     unsupportedDecl (M.StructDecl fields) = any (unsupportedType . snd) fields
     unsupportedDecl (M.EnumDecl variants) = any (any (unsupportedType . snd) . snd) variants
+    storage = M.progStorage program
     unsupportedType t = case t of
         TWord{} -> False
         TAddr{} -> False
         TBlock{} -> False
-        TList element -> unsupportedType element
         TArrayOf element _ -> unsupportedType element
-        TBox element -> unsupportedType element
+        TNamed _ args | Just element <- listElement storage t <|> boxContent storage t, length args == 1 -> unsupportedType element
         TFn args result -> any unsupportedType args || unsupportedType result
         TForall _ _ element -> unsupportedType element
         TUninit element -> unsupportedType element
@@ -3325,7 +3325,7 @@ encodeMono physical program
 -- a field of the payload with the same name says nothing of it
 fieldKey :: Build -> Maybe Name -> Variable -> String
 fieldKey b (Just owner) field
-    | not (buildPhysical b), baseNameOf owner == "Box" && field `elem` ["addr", "blk"] = "field:Box." ++ field
+    | not (buildPhysical b), baseNameOf owner == storageBox (buildStorage b) && field `elem` ["addr", "blk"] = "field:Box." ++ field
 fieldKey _ _ field = "field:" ++ field
 
 -- The bridge models source containers; their canonical native layouts are not proof facts.
@@ -3337,11 +3337,13 @@ sourceContainerView program = program
     }
   where
     keep name _ = baseNameOf name `Set.notMember` layouts
+    storage = M.progStorage program
     layouts = Set.fromList
         [ name
-        | name <- ["List", "Box"]
+        | name <- [storageList storage, storageBox storage]
+        , not (null name)
         , Ok pkg <- [libPackage]
-        , Just types <- [Map.lookup "types" (libPrograms pkg)]
+        , Just types <- [Map.lookup "core" (libPrograms pkg)]
         , Just generic <- [Map.lookup name (M.progGenerics types)]
         , Just invariant <- [Map.lookup name (M.progInvariants types)]
         , Map.lookup name (M.progGenerics program) == Just generic

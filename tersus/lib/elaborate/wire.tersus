@@ -2,11 +2,12 @@ import data::ast::ast { AstEntries, AstEntry, AstInterface, AstNode, AstStatemen
 import data::codec::codec { catStrings, wireOwnershipRole };
 import data::reader::reader { entryKey, transportNames };
 import elaborate::check { stmtOf, mentionsParameter };
-import elaborate::core { baseNameOf };
-import elaborate::out { emit, emitName, emitNames };
+import elaborate::core { baseNameOf, isBoxTy };
+import elaborate::out { emit, emitName, emitNames, typeTokenText };
 import elaborate::records { listItems, nameText, nodeIn };
-import elaborate::state { St, TE, Ty, addTy, firstText, indexIn, joinWith, kindOf, namedTy, notModelled, rawInstanceName, protocolName, resolve, tyAt, typeError, zonk };
-import elaborate::traits { emptyTemplate, implFunctionName, pairKey, sortTexts, templateCall, traitArguments, unknownIn };
+import elaborate::state { beginTry, endTry, undoTry, St, TE, Ty, addTy, argAt, firstText, indexIn, joinWith, kindOf, listTy, namedTy, notModelled, nth, rawInstanceName, protocolIs, protocolName, resolve, simpleTy, tyAt, typeError, zonk };
+import elaborate::expr { providerHelper };
+import elaborate::traits { emptyTemplate, hasCloneHelper, implFunctionName, pairKey, sortTexts, templateCall, traitArguments, unknownIn, unsizedBoxedArray };
 
 fn wireLoad(st: St, iface: &AstProgram, root: &AstNode, collectBindings: Bool) -> St ~ {
     if !(root is AstNode::OwnershipInterface) { return notModelled(st, "version 2 requires checked interface ownership transport"); };
@@ -101,34 +102,16 @@ fn wireLocal(name: &String) -> String ~ {
     return name.slice(start, size(name.bytes));
 };
 
-fn wireBindDeclarations(st: St, statements: &List<Int>) -> St ~ {
-    for s in statements {
-        stmt = stmtOf(&st, s);
-        if stmt is AstStatement::TraitDef {
-            name = nameText(&st.nodes, (stmt as AstStatement::TraitDef).n);
-            role = wireLocal(&name);
-            if wireOwnershipRole(&role) {
-                previous = st.wireProtocols.lookup(&role, []);
-                if indexIn(&previous, &name) < 0 { previous = push(previous, clone(name)); };
-                st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
-            };
-        };
-    };
-    return st;
-};
-
-fn wireStorageDeclarations(st: St, statements: &List<Int>) -> St ~ {
-    for s in statements {
-        stmt = stmtOf(&st, s);
-        if stmt is AstStatement::StructDef {
-            name = nameText(&st.nodes, (stmt as AstStatement::StructDef).n);
-            role = wireLocal(&name);
-            if role = "List" || role = "Box" {
-                previous = st.wireProtocols.lookup(&role, []);
-                if indexIn(&previous, &name) < 0 { previous = push(previous, clone(name)); };
-                st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
-            };
-        };
+// The roles a package marker binds to the module's own declarations (elaborate.ownProviders)
+fn wireOwnBindings(st: St, roles: &List<String>, providers: &List<String>) -> St ~ {
+    i = 0;
+    while i < size(roles) && i < size(providers) [{ affirm i >= 0; }] shrinks size(roles) - i {
+        role = clone(get(roles, i));
+        provider = clone(get(providers, i));
+        previous = st.wireProtocols.lookup(&role, []);
+        if indexIn(&previous, &provider) < 0 { previous = push(previous, provider); };
+        st = St { wireProtocols: st.wireProtocols.insert(role, sortTexts(previous)), ..st };
+        i = i + 1;
     };
     return st;
 };
@@ -152,11 +135,14 @@ fn wireBaseFacts(st: &St, owner: &String) -> List<String> [{ }] [{ affirm size(r
     return facts;
 };
 
-fn wireSelect(st: St, t: Int, provider: &String, function: &String) -> St ~ {
-    if size(function.bytes) = 0 { return St { names: push(push([], ""), ""), ..st }; };
-    hasTemplate = st.templates.contains(function);
-    tm = st.templates.lookup(function, emptyTemplate());
-    if !hasTemplate && !st.fns.contains(function) { return notModelled(st, catStrings("the checked ownership target is absent: ", function)); };
+fn wireSelect(st: St, t: Int, provider: &String, function0: &String) -> St ~ {
+    if size(function0.bytes) = 0 { return St { names: push(push([], ""), ""), ..st }; };
+    // (the clone of a Box of an array of no size is the Clone provider's cloneBoxedArray, traitArgumentsOf)
+    function = clone(function0);
+    if protocolIs(&st, "Clone", provider) && unsizedBoxedArray(&st, t) && hasCloneHelper(&st) { function = providerHelper(&st, "Clone", "cloneBoxedArray"); };
+    hasTemplate = st.templates.contains(&function);
+    tm = st.templates.lookup(&function, emptyTemplate());
+    if !hasTemplate && !st.fns.contains(&function) { return notModelled(st, catStrings("the checked ownership target is absent: ", &function)); };
     st = traitArguments(st, clone(provider), t);
     if st.status != 0 { return st; };
     selected = "";
@@ -172,9 +158,16 @@ fn wireSelect(st: St, t: Int, provider: &String, function: &String) -> St ~ {
             node = st.nid;
             st = emit(st, AstNode::Expression { value: AstExpression::Var { n: node } });
             args = push([], TE { node: st.nid, types: push([], argument) });
+            // (an impl the bound admits may still not be made for the type, as one of a list of functions, whose element a
+            // type parameter cannot be: the type has no such fact)
+            next = st.next;
+            st = beginTry(st);
             st = templateCall(st, clone(function), tm, &args);
-            if st.status != 0 { return st; };
-            selected = firstText(&st.names);
+            if st.status = 1 { st = undoTry(st, next); selected = ""; } else {
+                st = endTry(st);
+                if st.status != 0 { return st; };
+                selected = firstText(&st.names);
+            };
         };
     };
     if size(selected.bytes) = 0 { return St { names: push(push([], ""), ""), ..st }; };
@@ -192,11 +185,33 @@ fn wireFactRoles(st: St, copyProvider: String, dropProvider: String, cloneProvid
     return St { wireProtocols: roles, ..st };
 };
 
+// (a size no use decided is kept by the lowering as it is, which the type's facts can name)
 fn wireDeferred(st: &St, t: Int) -> Bool ~ {
     ty = tyAt(st, resolve(st, t));
-    if ty.kind = 12 || ty.kind = 15 || ty.kind = 22 || ty.kind = 23 { return true; };
+    if ty.kind = 12 || ty.kind = 15 || ty.kind = 22 { return true; };
     for a in &ty.args { if wireDeferred(st, a) { return true; }; };
     return false;
+};
+
+fn wireGenericIn(st: &St, t: Int) -> Bool ~ {
+    ty = tyAt(st, resolve(st, t));
+    if ty.kind = 12 || ty.kind = 22 { return true; };
+    for a in &ty.args { if wireGenericIn(st, a) { return true; }; };
+    return false;
+};
+
+// The type with each unknown in it an Int, as the lowering makes it (lowerstate.defaultTy)
+fn wireDefaulted(st: St, t: Int) -> St ~ {
+    r = resolve(&st, t);
+    ty = tyAt(&st, r);
+    if ty.kind = 15 { return simpleTy(st, 0); };
+    if size(ty.args) = 0 { return St { ty: r, ..st }; };
+    args = [];
+    for a in &ty.args {
+        st = wireDefaulted(st, a);
+        args = push(args, st.ty);
+    };
+    return addTy(st, Ty { args: args, ..ty });
 };
 
 fn wireComplete(st: St) -> St ~ {
@@ -220,37 +235,105 @@ fn wireComplete(st: St) -> St ~ {
         st = zonk(st, i);
         t = st.ty;
         ty = tyAt(&st, t);
-        if ty.kind = 4 && !wireDeferred(&st, t) {
+        // (an unknown is lowered as an Int, so the type lowered is that one; and a Box of an array is a list of its
+        // elements in native code, so that list has facts too)
+        if ty.kind = 4 && wireDeferred(&st, t) && !wireGenericIn(&st, t) {
+            st = wireDefaulted(st, t);
+            t = st.ty;
+            ty = tyAt(&st, t);
+        };
+        if ty.kind = 4 && !wireDeferred(&st, t) && isBoxTy(&st, t) && size(ty.args) = 1 && kindOf(&st, nth(&ty.args, 0)) = 6 && size(protocolName(&st, "List").bytes) > 0 {
+            st = listTy(st, argAt(&st, nth(&ty.args, 0), 0));
+        };
+        // (the facts are of declared types: the language's own, an array among them, have none)
+        if ty.kind = 4 && !wireDeferred(&st, t) && wireDeclared(&st, &ty.name) {
             owner = rawInstanceName(&st, t);
             if !seen.contains(&owner) && !checked.contains(&owner) {
                 seen = seen.insert(clone(owner));
-                facts = st.wireOwnership.lookup(&ty.name, wireBaseFacts(&st, &ty.name));
-                if size(facts) != 7 { return notModelled(st, "ownership facts must have seven names"); };
-                callerRoles = clone(st.wireProtocols);
-                st = wireFactRoles(st, clone(get(facts, 0)), clone(get(facts, 1)), clone(get(facts, 3)), clone(get(facts, 5)));
-                copyProvider = get(facts, 0);
-                if size(copyProvider.bytes) > 0 {
-                    st = traitArguments(st, clone(copyProvider), t);
-                    if st.status != 0 { return st; };
-                    if !st.ok { copyProvider = ""; };
-                };
-                facts = set(facts, 0, clone(copyProvider));
-                for slot in 0..3 [{ affirm size(facts) = 7; }] {
-                    provider = get(facts, 1 + 2 * slot);
-                    function = get(facts, 2 + 2 * slot);
-                    st = wireSelect(st, t, &provider, &function);
-                    if st.status != 0 { return st; };
-                    selected = clone(st.names);
-                    if size(selected) != 2 { return notModelled(st, "ownership selection did not return a provider and callee"); };
-                    facts = set(facts, 1 + 2 * slot, clone(get(selected, 0)));
-                    facts = set(facts, 2 + 2 * slot, clone(get(selected, 1)));
-                };
-                st = St { wireProtocols: callerRoles, wireOwnership: st.wireOwnership.insert(owner, facts), ..st };
+                st = wireFactsOf(st, t);
+                if st.status != 0 { return st; };
+                st = St { wireOwnership: st.wireOwnership.insert(owner, clone(st.names)), ..st };
             };
         };
         i = i + 1;
     };
     return St { te: original, ..st };
+};
+
+// The checked facts of a type (st.names, seven names), each role selected as its declaration's candidate impl gives it;
+// st.ok is whether every role with a candidate impl was selected
+fn wireFactsOf(st: St, t: Int) -> St ~ {
+    ty = tyAt(&st, t);
+    facts = st.wireOwnership.lookup(&ty.name, wireBaseFacts(&st, &ty.name));
+    if size(facts) != 7 { return notModelled(st, "ownership facts must have seven names"); };
+    callerRoles = clone(st.wireProtocols);
+    st = wireFactRoles(st, clone(get(facts, 0)), clone(get(facts, 1)), clone(get(facts, 3)), clone(get(facts, 5)));
+    complete = true;
+    copyProvider = get(facts, 0);
+    if size(copyProvider.bytes) > 0 {
+        st = traitArguments(st, clone(copyProvider), t);
+        if st.status != 0 { return st; };
+        if !st.ok { copyProvider = ""; complete = false; };
+    };
+    facts = set(facts, 0, clone(copyProvider));
+    for slot in 0..3 [{ affirm size(facts) = 7; }] {
+        provider = get(facts, 1 + 2 * slot);
+        function = get(facts, 2 + 2 * slot);
+        st = wireSelect(st, t, &provider, &function);
+        if st.status != 0 { return st; };
+        selected = clone(st.names);
+        if size(selected) != 2 { return notModelled(st, "ownership selection did not return a provider and callee"); };
+        if size(function.bytes) > 0 && size(get(selected, 1).bytes) = 0 { complete = false; };
+        facts = set(facts, 1 + 2 * slot, clone(get(selected, 0)));
+        facts = set(facts, 2 + 2 * slot, clone(get(selected, 1)));
+    };
+    return St { wireProtocols: callerRoles, names: facts, ok: complete, ..st };
+};
+
+// The facts, under a function with bounds' own bounds, of the types its checked body has that name its type
+// parameters: a copy of it has those types with its type arguments in place (MirCopies). A row is kept only when each
+// of its roles is decided there; one whose impl the bounds cannot show is left out, and a copy that needs it is refused.
+fn wireTemplateFacts(st: St, template: &String, types: &List<Int>) -> St ~ {
+    te = clone(st.te);
+    names = clone(st.names);
+    ok = st.ok;
+    for t0 in types {
+        st = zonk(st, t0);
+        t = st.ty;
+        ty = tyAt(&st, t);
+        // (an impl of a role is in the role's module or in the owner's, so the owner's facts are whole only from the module
+        // that declares it: its checked row, or this unit's own declaration)
+        if ty.kind = 4 && wireGenericIn(&st, t) && !wireUnknownIn(&st, t) && (st.wireOwnership.contains(&ty.name) || st.ownTypes.contains(&ty.name)) {
+            owner = typeTokenText(&st, t);
+            known = false;
+            i = 0;
+            while i + 9 <= size(st.templateFacts) [{ affirm i >= 0; }] shrinks size(st.templateFacts) - i {
+                if get(st.templateFacts, i) = clone(template) && get(st.templateFacts, i + 1) = clone(owner) { known = true; };
+                i = i + 9;
+            };
+            if !known {
+                st = wireFactsOf(st, t);
+                if st.status != 0 { return st; };
+                if st.ok {
+                    row = push(push([], clone(template)), owner);
+                    for f in &st.names { row = push(row, clone(f)); };
+                    out = clone(st.templateFacts);
+                    for f in &row { out = push(out, clone(f)); };
+                    st = St { templateFacts: out, ..st };
+                };
+            };
+        };
+    };
+    return St { te: te, names: names, ok: ok, ..st };
+};
+
+fn wireDeclared(st: &St, name: &String) -> Bool ~ { return st.types.contains(name) || st.generics.contains(name); };
+
+fn wireUnknownIn(st: &St, t: Int) -> Bool ~ {
+    ty = tyAt(st, resolve(st, t));
+    if ty.kind = 15 { return true; };
+    for a in &ty.args { if wireUnknownIn(st, a) { return true; }; };
+    return false;
 };
 
 fn wireEntries(st: St, values: &HashMap<String, List<String>>) -> St ~ {

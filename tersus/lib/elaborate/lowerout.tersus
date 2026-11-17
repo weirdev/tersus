@@ -17,7 +17,7 @@ fn noMir(msg: String) -> MirOut ~ { return MirOut { ok: false, msg: msg, lines: 
 
 // The lowering of an accepted module (its elaborated program, out) against the interfaces it is lowered with, in their
 // order
-fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, storage: &List<String>) -> MirOut ~ {
+fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, storage: &List<String>, templateFacts: &List<String>) -> MirOut ~ {
     problem = arenasProblem(out, ifaces, table);
     if size(problem.bytes) > 0 { return noMir(lwCat("Lowering: ", &problem)); };
     src = joinArena(out, ifaces, table);
@@ -46,7 +46,7 @@ fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, st
         if !(stmt is AstStatement::StructDef) && !(stmt is AstStatement::EnumDef) && !(stmt is AstStatement::TraitDef) { nested = lwDeclaredNames(&src.nodes, push([], s), nested); };
     };
     assumes = assumesIn(&src.nodes, &stmts, []);
-    return writeLowered(ls, &src, setTexts(&declared), setTexts(&nested), assumes);
+    return writeLowered(ls, &src, setTexts(&declared), setTexts(&nested), assumes, templateFacts);
 };
 
 // Why the arenas the lowering reads (the elaborated program, the interfaces and the builtin table, each on its own before
@@ -451,7 +451,7 @@ fn noteFunction(shared: SharedEnvs, ls: &LowSt, f: &LFn) -> SharedEnvs ~ {
     return shared;
 };
 
-fn writeLowered(ls: LowSt, src: &Src, declared: List<String>, nested: List<String>, assumes: List<Int>) -> MirOut ~ {
+fn writeLowered(ls: LowSt, src: &Src, declared: List<String>, nested: List<String>, assumes: List<Int>, templateFacts: &List<String>) -> MirOut ~ {
     names = functionNames(&ls);
     all = push(clone(names), "");
     shared = sharedOf(&ls, &all);
@@ -467,6 +467,19 @@ fn writeLowered(ls: LowSt, src: &Src, declared: List<String>, nested: List<Strin
         line = lwSp(lwSp(lwSp(lwSp(lwSp("bounded", quote(&n)), countedNames(&b.sizes)), countedNames(&b.copyParams)), countedNames(&b.lifted)), intText(size(b.packLoops)));
         for l in &b.packLoops { line = lwSp(line, packLoopText(l)); };
         o = outLine(o, line);
+    };
+    // (the checked facts of the types a function with bounds' body has that name its type parameters, each row complete under its bounds)
+    i = 0;
+    while i + 9 <= size(templateFacts) [{ affirm i >= 0; }] shrinks size(templateFacts) - i {
+        name = get(templateFacts, i);
+        owner = get(templateFacts, i + 1);
+        line = lwCat(lwSp("boundedfacts", quote(&name)), &owner);
+        for k in 2..9 {
+            v = get(templateFacts, i + k);
+            line = lwSp(line, quote(&v));
+        };
+        o = outLine(o, line);
+        i = i + 9;
     };
     for n in lwSort(instanceKeys(&ls)) { o = outLine(o, lwSp(lwSp("instance", quote(&n)), HashMap::lookup(&ls.instances, &n, noText()))); };
     for c in &shared.order { o = outLine(o, sharedLine(&ls, c)); };

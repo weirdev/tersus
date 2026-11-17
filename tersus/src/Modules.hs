@@ -18,6 +18,8 @@ module Modules
     , loadRequest
     , graphResult
     , librarySources
+    , libraryRequest
+    , libraryRequestOf
     ) where
 
 import Control.Monad (filterM, forM_, when)
@@ -35,7 +37,7 @@ import ElaboratorTool (Loader, bootstrapLoader)
 import PackageData
 import ParsedFile (Import (..), ParsedFile (..))
 import qualified ParserSeed
-import PreludeSource (libModules, nativeStorageModules)
+import PreludeSource (libModules, nativeStorageModules, stdPackageSource)
 
 -- The host's side of loading: it captures the snapshot of what a load reads (the files and directories, as the loader
 -- written in Tersus asks for them; lib/elaborate/load.tersus), and the loader answers with the module graph
@@ -368,6 +370,16 @@ entryModuleOf (Snapshot resolver rawEntry source) = case findPackageRoot resolve
 
 librarySources :: [(String, Bool, String)]
 librarySources = [(name, name `elem` nativeStorageModules, text) | (name, _, text) <- libModules]
+
+-- The request for the compiler libraries: their sources, with the std package's marker at the request's std root, whose
+-- bindings give core and eq their roles
+libraryRequest :: LoadRequest
+libraryRequest = libraryRequestOf librarySources
+
+libraryRequestOf :: [(String, Bool, String)] -> LoadRequest
+libraryRequestOf sources = LoadRequest LoadLibraries False marker Nothing sources []
+  where
+    marker = (resolverFromFiles [("std/package.tersus", stdPackageSource)]){resolverOptions = defaultLoadOptions{installedStdRoot = Just "std"}}
 
 graphResult :: Snapshot -> Loader -> Either String LoadResult
 graphResult snapshot loader = case loader (loadRequest LoadGraph snapshot) of

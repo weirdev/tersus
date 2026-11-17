@@ -1,4 +1,4 @@
-// Text helpers (lib/string.tersus) and the connectives `&&`, `||` and `!`. `String::fromInt(n)` is the decimal text of an Int, `s.find(b, from)` the index of the first
+// Text helpers (lib/std/string/string.tersus) and the connectives `&&`, `||` and `!`. `String::fromInt(n)` is the decimal text of an Int, `s.find(b, from)` the index of the first
 // Byte b at or after an index (the size of the string when there is none), `s.slice(from, to)` the bytes between two indexes and `s.startsWith(prefix)` whether it starts
 // with another string. `a && b` does not evaluate b when a is false, and the validator knows a when it checks b: the slices below are in range because the test
 // that `=` was found came first.

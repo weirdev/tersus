@@ -23,7 +23,8 @@ import qualified Syntax as S
 import TestHarness
 import TestNative (nativeExamples, nativeMirCase, unvalidatedPrograms, validatedPrograms)
 import Pipeline (compileSource)
-import Types (Arg (..), Size (..), Type (..), pattern TBox, pattern TList, instanceName)
+import Types (Arg (..), Size (..), Type (..), instanceName)
+import TestStorage (pattern TList, pattern TBox)
 import Utils
 
 restoreRoundTrip :: Program -> Result Program String
@@ -674,6 +675,8 @@ metadataFixture = Program
     , progInvariants = Map.singleton "Packet" [S.AssignProofVar "invariant" (S.Val (S.VBool True))]
     , progBounded = Map.empty
     , progInstances = Map.empty
+    , progProtocols = Map.empty
+    , progOwnership = Nothing
     , progFunctions = Map.singleton "symbolic" symbolic
     , progMain = mainFn
     }
@@ -711,7 +714,7 @@ ownershipFixture = metadataFixture
     cloneFn = dropFn{fnName = "<Plain as Clone>::clone", fnReturns = Just (TNamed "Plain" []), fnLocals = Map.insert (Local 0) (LocalDecl (TNamed "Plain" []) Nothing) (fnLocals dropFn), fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (Use (Copy (Local 1)))] Return)}
 
 wireEmpty :: Program
-wireEmpty = Program Map.empty Map.empty (Function "main" [] Nothing Map.empty (Map.singleton (BlockId 0) (BasicBlock [] Return)) [] [] [] [] [] emptySpec) Map.empty Map.empty Map.empty Map.empty
+wireEmpty = Program Map.empty Map.empty (Function "main" [] Nothing Map.empty (Map.singleton (BlockId 0) (BasicBlock [] Return)) [] [] [] [] [] emptySpec) Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
 
 wireMain :: Statement -> Program
 wireMain statement = wireEmpty{progMain = (progMain wireEmpty){fnBlocks = Map.singleton (BlockId 0) (BasicBlock [statement] Return)}}

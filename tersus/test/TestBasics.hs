@@ -12,7 +12,7 @@ module TestBasics
 
 import TestParserFragments
 import MirEval (fromMirValue)
-import Pipeline (parseWithEquality, runStatements, validateStatements)
+import Pipeline (parseWithEquality, parseWithEqualityParts, runParts, runStatements, validateParts, validateStatements)
 import StdLib
 import Types
 import Syntax
@@ -347,10 +347,10 @@ argPassingSource =
 
 testArgPassingByValue :: TestResult
 testArgPassingByValue =
-    case parseWithEquality argPassingSource of
+    case parseWithEqualityParts argPassingSource of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts ->
-            case (validateStatements stmts, runStatements stmts) of
+        Right parts ->
+            case (validateParts parts, runParts parts) of
                 (Error e, _) -> Just $ "Validation failed with error: " ++ e
                 (_, Error e) -> Just $ "Evaluation failed with error: " ++ e
                 (Ok _, Ok ret) -> testAssertEq (fmap fromMirValue ret) (Just (VInt 3))

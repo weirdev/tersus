@@ -29,11 +29,9 @@ import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Mir as M
 import MirEval (MirValue (MInt), renderMirValue, runProgram)
-import Compile (lowerStatements)
 import qualified Compile
 import MirHousekeeping (insertOwnership, verifyProgram)
 import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared)
-import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
 import Pipeline
 import TestHarness
@@ -175,7 +173,7 @@ testNativeIr =
         , TestCase "a Box takes room on the heap for what it holds" $
             withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.boxNew<P>\"" `isInfixOf` ir))
         , TestCase "a Box of an array is a list of the library" $
-            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.listFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
+            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.std$lists$lists$listFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
         , TestCase "a string literal is copied from a constant array of its bytes" $
             withIr "s = \"hello\"; return size(s);" (\ir -> testAssertTrue ("private constant [5 x i8] [i8 104, i8 101, i8 108, i8 108, i8 111]" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 5, i64 1)" `isInfixOf` ir))
         , TestCase "a Box is the struct of the library, freed by its drop" $
@@ -343,7 +341,7 @@ functionPrograms =
     , ("a recursive function through a value", "fn count(n: Int) -> Int shrinks n { if n <= 0 { return 0; }; return 1 + count(n - 1); }; f = count; return f(5);")
     ]
 
--- Strings are the library struct String over a list of bytes (lib/string.tersus), so native code has nothing of its own for them
+-- Strings are the library struct String over a list of bytes (lib/std/string/string.tersus), so native code has nothing of its own for them
 stringPrograms :: [(String, String)]
 stringPrograms =
     [ ("an Int as text", "return String::fromInt(0 - 4072);")
@@ -752,9 +750,9 @@ vecPrograms =
     , ("of structs that own a list", "struct P { n: Int, xs: List<Int> }; impl Clone for P { }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);")
     , ("in a struct", "struct Bag { items: Vec<Int>, tag: Int }; b = Bag { items: Vec::new(0).push(4), tag: 2 }; return b.tag + size(b.items);")
     , ("in a list", "l = push(push([], Vec::new(0).push(1)), Vec::new(5)); return size(l);")
-    , ("one function for a Vec, a List and an Array", total ++ "return total(Vec::new(0).push(10).push(20).push(30)) * 10000 + total(push(push([], 3), 4)) * 100 + total(array(3, 5));")
-    , ("for sequences of lists", "fn lens<S: Sequence<List<Int>>>(s: &S) -> Int [{ }] [{ }] { n = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { n = n + size(get(s, i)); i = i + 1; }; return n; }; v = Vec::new(push([], 0)).push(push(push([], 4), 5)); l = push(push([], push([], 1)), push(push([], 2), 3)); return lens(v) * 10 + lens(l);")
-    , ("for a sequence that grows", "fn add<S: Sequence<Int> + Growable<Int>>(s: S, x: Int) -> S [{ }] [{ affirm size(return) = size(s) + 1; }] { return push(s, x); }; v = add(add(Vec::new(0), 4), 5); l = add(add([], 6), 7); return size(v) * 10 + size(l) + v.get(1) + get(l, 1);")
+    , ("one function for Vecs of the program's own Sequence", total ++ "return total(Vec::new(0).push(10).push(20).push(30)) * 100 + total(Vec::new(0).push(7));")
+    , ("for sequences of lists", "fn lens<S: Sequence<List<Int>>>(s: &S) -> Int [{ }] [{ }] { n = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { n = n + size(get(s, i)); i = i + 1; }; return n; }; v = Vec::new(push([], 0)).push(push(push([], 4), 5)); l = push(push([], push([], 1)), push(push([], 2), 3)); return lens(v);")
+    , ("for a sequence that grows", "fn add<S: Sequence<Int> + Growable<Int>>(s: S, x: Int) -> S [{ }] [{ affirm size(return) = size(s) + 1; }] { return push(s, x); }; v = add(add(Vec::new(0), 4), 5); return size(v) * 10 + v.get(1);")
     , ("made and dropped in a loop", "t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { v = Vec::new(push([], i)).push(push([], i)).push(push([], 7)); t = t + size(v); i = i + 1; }; return t;")
     ]
   where
@@ -849,11 +847,16 @@ validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dat
 
 nativeStoragePrograms :: [(String, String)]
 nativeStoragePrograms =
-    [ ("nested Box/List Clone+Drop storage", owned ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Owned::new(3); y = clone(x); xs = push([], wrap(y)); xs = pop(xs); return x.n + size(xs);")
-    , ("array-backed Clone+Drop storage", owned ++ "x = Owned::new(4); xs = Array::boxed(2, x); xs = set(xs, 1, Owned::new(5)); return get(xs, 0).n + get(xs, 1).n;")
+    [ ("permission-owning copies in nested Box/List storage, each freed by its own drop", owned ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Owned::new(3); y = x.copyOf(); xs = push([], wrap(y)); xs = pop(xs); return x.n + size(xs);")
+    , ("permission-owning copies in a list, one of them replaced", owned ++ "x = Owned::new(4); xs = push(push([], x.copyOf()), x.copyOf()); xs = set(xs, 1, Owned::new(5)); return get(xs, 0).n + get(xs, 1).n + x.n;")
+    , ("nested Box/List storage of a type with its own Clone", payload ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Payload::new(3); y = clone(x); y = Payload { data: push(y.data, 7), n: y.n }; xs = push([], wrap(y)); xs = pop(xs); return size(x.data) * 10 + size(xs);")
+    , ("array-backed storage of a type with its own Clone", payload ++ "x = Payload::new(4); xs = Array::boxed(2, x); xs = set(xs, 1, Payload::new(5)); return get(xs, 0).n + get(xs, 1).n;")
     ]
   where
-    owned = "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct Owned { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl Owned { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for Owned { fn clone(self: &Self) -> Self { return Owned::new(self.n); }; }; impl Drop for Owned { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; "
+    -- (a value that holds the permission to its memory: its copy is fresh memory, and std's Drop of it frees that)
+    owned = "struct Owned { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl Owned { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; fn copyOf(self: &Self) -> Self { return Owned::new(self.n); }; }; impl Drop for Owned { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; "
+    -- (std's Clone: the clone holds storage of its own, equal to the original's)
+    payload = "struct Payload { data: List<Int>, n: Int }; impl Payload { fn new(n: Int) -> Self { return Self { data: push([], n), n: n }; }; }; impl Clone for Payload { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { return Payload { data: clone(self.data), n: self.n }; }; }; "
 
 -- An Uninit<T> is a T natively: what one holds, a list literal among them, is made before it is put in
 uninitPrograms :: [(String, String)]
@@ -1274,9 +1277,9 @@ emitUnvalidated program = case nativeProgram program `bindResult` insertOwnershi
         Ok () -> llvmOfOwned owned
 
 lowerSource :: String -> Either String M.Program
-lowerSource source = case parseStatementBlock source of
-    Left err -> Left ("Parse failed: " ++ show err)
-    Right stmts -> case lowerStatements stmts of
+lowerSource source = case Compile.parseSourceParts True source of
+    Error err -> Left ("Parse failed: " ++ err)
+    Ok parts -> case Compile.lowerParts parts of
         Error e -> Left e
         Ok program -> Right program
 

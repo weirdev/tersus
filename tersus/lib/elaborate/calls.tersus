@@ -111,6 +111,7 @@ fn builtinType(st: St, b: Int) -> St ~ {
             st = namedTy(st, baseNameOf(&name), clone(st.te.types));
             ty0 = st.ty;
             if !hasColons(&name) { st = ensureInstance(st, ty0); };
+            if !hasColons(&name) && size(listItems(&st.nodes, args)) > 0 { name = instanceName(&st, ty0); };
             st = ctorInfo(st, &name);
             if st.status != 0 { return st; };
             declared = clone(st.ctor);

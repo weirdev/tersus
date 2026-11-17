@@ -19,7 +19,7 @@ import Types (OwnershipTransport (..))
 import ElaboratorTool (Loader, sourceLoader)
 import Interface (ModuleInterface (..))
 import LibPackage (LibPackage, libCatalog, libPackage, libSelection, stripDeclaredFromUnits)
-import Link (linkPrograms)
+import Link (linkWithLibraries)
 import qualified Modules as Mod
 import Lowering (lowerAccepted)
 import Mir (Lowered (..))
@@ -108,7 +108,7 @@ lowerCompiledPackage :: CompiledPackage -> Result M.Program String
 lowerCompiledPackage compiled =
     let lowerOne modu = mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (compiledLowered modu `bindResult` finishLowered))
         libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
-     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
+     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkWithLibraries libUnits units
 
 -- (a module's assumes are in the unit it was lowered to: one that did not lower has no list of them to give)
 assumptionsOfPackage :: CompiledPackage -> Result [String] String

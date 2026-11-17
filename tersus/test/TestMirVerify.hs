@@ -11,11 +11,11 @@ import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (insertOwnership, verifyProgram, toolProgram)
-import Compile (lowerStatements)
-import TestParserFragments (parseStatementBlock)
+import Compile (lowerParts, parseSourceParts)
 import Pipeline (compileSource, nativeProgram)
 import MirHousekeeping (storageProgram)
-import Types (Type (..), pattern TList, pattern TBox)
+import Types (Type (..))
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, unvalidatedPrograms, validatedPrograms)
@@ -382,9 +382,9 @@ functionCases =
   where
     sourceData name = case lookup name unvalidatedPrograms of
         Nothing -> Error ("no function program named " ++ name)
-        Just source -> case parseStatementBlock source of
-            Left e -> Error (show e)
-            Right stmts -> mapResult writeProgram (lowerStatements stmts `bindResult` nativeProgram `bindResult` insertOwnership)
+        Just source -> case parseSourceParts True source of
+            Error e -> Error e
+            Ok parts -> mapResult writeProgram (lowerParts parts `bindResult` nativeProgram `bindResult` insertOwnership)
     ordinary = ("fn(Int) -> Int", "fn 1 int int")
     borrowedArg = ("fn(&List<Int>) -> Int", "fn 1 ref list int int")
     namedArg = ("fn(Integer) -> Int", "fn 1 named \"Integer\" 0 int")
