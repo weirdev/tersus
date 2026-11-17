@@ -636,7 +636,7 @@ fn wrapNamedFnArg(st: St, tm: &Template, b: &BoundInfo, expected: Int, argTE: TE
     argNames = [];
     argVals = [];
     j = 1;
-    while j < size(callFs.ptys) [{ affirm j >= 1; affirm j < size(callFs.ptys); affirm j - 1 < size(namedFs.ptys); }] shrinks size(callFs.ptys) - j {
+    while j < size(callFs.ptys) [{ affirm j >= 1; affirm j <= size(callFs.ptys); affirm j - 1 <= size(namedFs.ptys); }] shrinks size(callFs.ptys) - j {
         st = matchTraitArg(st, &traitParams, get(callFs.ptys, j), get(namedFs.ptys, j - 1), argNames, argVals);
         if !st.ok { return St { ok: false, status: 0, msg: "", ..st }; };
         argNames = clone(st.names);
@@ -760,7 +760,7 @@ fn wrapNamedArgs(st: St, tm: &Template, pts: &List<Int>, inferred: &List<TE>) ->
         if isFnTraitName(&b.n) && !isPackTypeName(&b.p) {
             found = 0 - 1;
             i = 0;
-            while i < size(tm.ptys) && i < size(args) [{ affirm i >= 0; affirm i < size(tm.ptys); affirm i < size(args); }] shrinks size(tm.ptys) - i {
+            while i < size(tm.ptys) && i < size(args) [{ affirm i >= 0; affirm i <= size(tm.ptys); affirm i <= size(args); }] shrinks size(tm.ptys) - i {
                 st = zonk(st, get(tm.ptys, i));
                 u = unrefOf(st, st.ty);
                 if kindOf(st, u) = 12 && tyAt(st, u).name = clone(b.p) { found = i; };
