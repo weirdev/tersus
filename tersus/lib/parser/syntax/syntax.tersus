@@ -2447,7 +2447,7 @@ fn nonInfixExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
     if keywordAt(sourceText, s, "move") {
         save = checkpoint(s);
         mk = eatKeyword(sourceText, s, "move"); Res { st: resultPartsmkState, v: resultPartsmkValue, ok: resultPartsmkOk } = mk;
-        afterMove = skipWs(sourceText, resultPartsmkState);
+        afterMove = skipWs(sourceText, clone(resultPartsmkState));
         if keywordAt(sourceText, afterMove, "fn") {
             ce = closureExpr(sourceText, afterMove, true); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
             if !resultPartsceOk { return Res<Int> { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk }; };

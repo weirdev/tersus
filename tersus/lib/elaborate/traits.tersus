@@ -1701,9 +1701,12 @@ fn synthesizeClosureArgs(st: St, tm: &Template, sizeVars: &List<Int>, typeVars: 
             inner = unrefOf(&st, pt);
             found = BoundInfo { p: "", n: "", ts: [] };
             hasB = false;
-            ix = tyAt(&st, inner);
-            if ix.kind = 12 {
-                for bb in &tm.bounds { if bb.p = ix.name && isFnTraitName(&bb.n) { found = clone(bb); hasB = true; }; };
+            if i < size(tm.ptys) {
+                tmInner = unrefOf(&st, nth(&tm.ptys, i));
+                ix = tyAt(&st, tmInner);
+                if ix.kind = 12 {
+                    for bb in &tm.bounds { if bb.p = ix.name && isFnTraitName(&bb.n) { found = clone(bb); hasB = true; }; };
+                };
             };
             traitArgTys = [];
             if hasB {
@@ -1725,6 +1728,12 @@ fn synthesizeClosureArgs(st: St, tm: &Template, sizeVars: &List<Int>, typeVars: 
                 if st.status != 0 { return st; };
                 out = set(out, i, clone(st.te));
             };
+            made = clone(get(out, i));
+            structTy2 = head(&made.types);
+            if size(made.types) >= 2 && (kindOf(&st, nth(&made.types, 0)) = 10 || kindOf(&st, nth(&made.types, 0)) = 11) { structTy2 = nth(&made.types, 1); };
+            st = zonk(st, inner);
+            st = unify(st, st.ty, structTy2);
+            if !st.ok { return typeError(st, "a closure that does not meet the type of its parameter"); };
         };
         i = i + 1;
     };
