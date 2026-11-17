@@ -914,14 +914,15 @@ fn closureCapUpdated(st: &St, ids: &List<Int>, name: &String) -> Bool ~ {
             };
             if stmt is AstStatement::AssignDeref {
                 d = stmt as AstStatement::AssignDeref;
-                if closureHasVar(st, &closureNodes(st, &push([], d.a)), name) { return true; };
+                lhsRoots = push([], d.a);
+                if closureHasVar(st, &closureNodes(st, &lhsRoots), name) { return true; };
             };
         };
         if node is AstNode::Expression {
             ex = (node as AstNode::Expression).value;
             if ex is AstExpression::F && closureHeadKey(st, id) = "BorrowMutOf" {
                 args = listItems(&st.nodes, (ex as AstExpression::F).xs);
-                if size(args) > 0 && closureHasVar(st, &closureNodes(st, &push([], nth(&args, 0))), name) { return true; };
+                if size(args) > 0 { argRoots = push([], nth(&args, 0)); if closureHasVar(st, &closureNodes(st, &argRoots), name) { return true; }; };
             };
         };
     };
@@ -1035,8 +1036,8 @@ fn closureCaptureExpr(st: St, cap: &ClosureCap, place: Bool) -> St ~ {
     fieldNode = st.nid;
     fk = kindOf(&st, cap.field);
     ck = kindOf(&st, cap.ty);
-    if !place && fk != ck && (fk = 10 || fk = 11) { return emitBuiltinCall(st, "DerefOf", &push([], fieldNode)); };
-    if place && fk = 11 && ck != 11 { return emitBuiltinCall(st, "DerefOf", &push([], fieldNode)); };
+    if !place && fk != ck && (fk = 10 || fk = 11) { oneArg = push([], fieldNode); return emitBuiltinCall(st, "DerefOf", &oneArg); };
+    if place && fk = 11 && ck != 11 { oneArg = push([], fieldNode); return emitBuiltinCall(st, "DerefOf", &oneArg); };
     return St { nid: fieldNode, ..st };
 };
 
@@ -1156,11 +1157,13 @@ fn closureStructValue(st: St, structName: &String, structTy: Int, structArgs: &L
         ck = kindOf(&st, c.ty);
         if fk = 10 && ck != 10 {
             st = emitVar(st, clone(c.name));
-            st = emitBuiltinCall(st, "BorrowOf", &push([], st.nid));
+            oneArg = push([], st.nid);
+            st = emitBuiltinCall(st, "BorrowOf", &oneArg);
             fieldExprs = push(fieldExprs, st.nid);
         } else if fk = 11 && ck != 11 {
             st = emitVar(st, clone(c.name));
-            st = emitBuiltinCall(st, "BorrowMutOf", &push([], st.nid));
+            oneArg = push([], st.nid);
+            st = emitBuiltinCall(st, "BorrowMutOf", &oneArg);
             fieldExprs = push(fieldExprs, st.nid);
         } else {
             st = emitVar(st, clone(c.name));
@@ -1182,7 +1185,8 @@ fn closureStructValue(st: St, structName: &String, structTy: Int, structArgs: &L
         if ek = 10 || ek = 11 {
             key = "BorrowOf";
             if ek = 11 { key = "BorrowMutOf"; };
-            st = emitBuiltinCall(st, clone(key), &push([], valueTE.node));
+            oneArg = push([], valueTE.node);
+            st = emitBuiltinCall(st, clone(key), &oneArg);
             borrowNode = st.nid;
             st = wrapTy(st, ek, structTy);
             return St { ok: true, te: TE { node: borrowNode, types: push(push([], st.ty), structTy) }, ..st };
@@ -1267,15 +1271,19 @@ fn makeClosureImpl(st: St, structName: &String, b: &BoundInfo, givenArgs: &List<
     selfNode = st.nid;
     recvNode = selfNode;
     if bodyKind = 10 && implKind = 11 {
-        st = emitBuiltinCall(st, "DerefOf", &push([], selfNode));
-        st = emitBuiltinCall(st, "BorrowOf", &push([], st.nid));
+        oneArg = push([], selfNode);
+        st = emitBuiltinCall(st, "DerefOf", &oneArg);
+        oneArg2 = push([], st.nid);
+        st = emitBuiltinCall(st, "BorrowOf", &oneArg2);
         recvNode = st.nid;
     } else if bodyKind = 10 && implKind != 10 {
-        st = emitBuiltinCall(st, "BorrowOf", &push([], selfNode));
+        oneArg = push([], selfNode);
+        st = emitBuiltinCall(st, "BorrowOf", &oneArg);
         recvNode = st.nid;
     } else if bodyKind = 11 && implKind != 11 {
         if implKind = 10 { return St { ok: false, ..st }; };
-        st = emitBuiltinCall(st, "BorrowMutOf", &push([], selfNode));
+        oneArg = push([], selfNode);
+        st = emitBuiltinCall(st, "BorrowMutOf", &oneArg);
         recvNode = st.nid;
     } else if bodyKind != 10 && bodyKind != 11 && implKind != bodyKind {
         return St { ok: false, ..st };
@@ -1489,7 +1497,8 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
         isAssert = false;
         if vnode is AstNode::Validation && (vnode as AstNode::Validation).value is AstValidation::ProofAssert { isAssert = true; };
         if isAssert {
-            for id2 in closureNodes(&st, &push([], vid)) {
+            oneRoot = push([], vid);
+            for id2 in closureNodes(&st, &oneRoot) {
                 nm2 = closureNodeName(&st, id2);
                 if size(nm2.bytes) > 0 && indexIn(&capNames, &nm2) < 0 && nm2 != "return" { onlyCaps = false; };
             };

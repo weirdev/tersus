@@ -2010,10 +2010,12 @@ fn generalCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
                 recvKind = kindOf(st, nth(&bx.args, 0));
                 recvNode = functT.node;
                 if recvKind = 10 {
-                    st = emitBuiltinCall(st, "BorrowOf", &push([], recvNode));
+                    oneArg = push([], recvNode);
+                    st = emitBuiltinCall(st, "BorrowOf", &oneArg);
                     recvNode = st.nid;
                 } else if recvKind = 11 {
-                    st = emitBuiltinCall(st, "BorrowMutOf", &push([], recvNode));
+                    oneArg = push([], recvNode);
+                    st = emitBuiltinCall(st, "BorrowMutOf", &oneArg);
                     recvNode = st.nid;
                 };
                 callArgs = push([], recvNode);
