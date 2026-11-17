@@ -810,7 +810,7 @@ updatePlace cx pos st0 root steps rv = (updated, errs ++ placeReads cx pos st1 [
         , ref `Set.member` cxLiveNow cx
         , overlaps place lplace
         , ref `Set.notMember` ancestorsOrSelf st1 through
-        , not (ref == root && lmut && contains lplace place || mutableHolderLoan cx st1 (fromMaybe ref via) place)
+        , not (ref == root && lmut && contains lplace place || maybe False (\holder -> mutableHolderLoan cx st1 holder place) via)
         ]
     contains (owner, prefix) (target, path) = owner == target && prefix `isPrefixOf` path
 

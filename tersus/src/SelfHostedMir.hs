@@ -1758,9 +1758,6 @@ directCall types invariants rules caller callee args (M.Local dest) termInfo rec
     -- (a parameter given a value that holds an update reference in a field: what the callee writes there is the
     -- one thing it can change of it; see heldParams)
     held <- heldParams types (buildFunctions b0) callee
-    -- (an update parameter whose type shows an update reference in it is outside the subset; one whose type this
-    -- cannot see into is the caller's to make stale, heldStale)
-    guard (all (\param -> param `notElem` M.fnMutBorrowed callee || maybe True (not . any (\(_, ty) -> case ty of TMutRef{} -> True; _ -> False)) (M.localType <$> Map.lookup param (M.fnLocals callee) >>= referenceLeaves types . unref)) params)
     (snapshots, b1) <- foldM snapshot ([], b0) args
     (postSteps, postLocals, b1'') <- foldM (addPost snapshots) ([], [], b1) (zip params args)
     (heldSteps, heldLocals, b1') <- foldM (heldPost snapshots) ([], [], b1'') held
