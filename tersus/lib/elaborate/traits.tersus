@@ -1027,8 +1027,8 @@ fn closureKindWord(rank: Int) -> String ~ {
     return "FnOnce";
 };
 
-// A field read of self for a capture, dereferenced when the field is the borrow of the capture
-fn closureCaptureExpr(st: St, cap: &ClosureCap, place: Bool) -> St ~ {
+// A field read of self for a capture, dereferenced when the field is the borrow of the capture; raw is the field itself
+fn closureCaptureExpr(st: St, cap: &ClosureCap, raw: Bool) -> St ~ {
     st = emitVar(st, "self");
     selfNode = st.nid;
     st = emitFieldValue(st, "", clone(cap.name));
@@ -1038,8 +1038,7 @@ fn closureCaptureExpr(st: St, cap: &ClosureCap, place: Bool) -> St ~ {
     fieldNode = st.nid;
     fk = kindOf(&st, cap.field);
     ck = kindOf(&st, cap.ty);
-    if !place && fk != ck && (fk = 10 || fk = 11) { oneArg = push([], fieldNode); return emitBuiltinCall(st, "DerefOf", &oneArg); };
-    if place && fk = 11 && ck != 11 { oneArg = push([], fieldNode); return emitBuiltinCall(st, "DerefOf", &oneArg); };
+    if !raw && fk != ck && (fk = 10 || fk = 11) { oneArg = push([], fieldNode); return emitBuiltinCall(st, "DerefOf", &oneArg); };
     return St { nid: fieldNode, ..st };
 };
 
@@ -1070,7 +1069,7 @@ fn closureCaptureProof(st: St, cap: &ClosureCap, structName: &String) -> St ~ {
 };
 
 // Rewrite the captures of a body in place: a read of a capture is a field of self, an assignment to one is through it
-fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName: &String) -> St ~ {
+fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName: &String, structArgs: &List<Int>, recvKind: Int) -> St ~ {
     ids = closureNodes(&st, roots);
     for id in ids {
         node = nodeIn(&st.nodes, id);
@@ -1086,8 +1085,41 @@ fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName
                     isFnDef = nativeFn(&st.nodes, closureValueOf(&st, a.e)).ok && !isClosureValue(&st, closureValueOf(&st, a.e));
                     if !isFnDef {
                         cap = nthCap(caps, ci);
-                        st = closureCaptureExpr(st, &cap, true);
-                        st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::AssignDeref { a: st.nid, b: a.e } }), ..st };
+                        fk = kindOf(&st, cap.field);
+                        ck = kindOf(&st, cap.ty);
+                        if fk = 11 && ck != 11 {
+                            st = closureCaptureExpr(st, &cap, true);
+                            oneArg = push([], st.nid);
+                            st = emitBuiltinCall(st, "DerefOf", &oneArg);
+                            st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::AssignDeref { a: st.nid, b: a.e } }), ..st };
+                        } else if recvKind = 11 {
+                            st = emitVar(st, "self");
+                            selfNode = st.nid;
+                            oneArg = push([], selfNode);
+                            st = emitBuiltinCall(st, "DerefOf", &oneArg);
+                            derefNode = st.nid;
+                            st = emitFieldValue(st, "", clone(cap.name));
+                            st = emitVal(st, st.nid);
+                            fv = st.nid;
+                            args1 = push([], derefNode);
+                            st = emitCall(st, fv, &args1);
+                            st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::AssignDeref { a: st.nid, b: a.e } }), ..st };
+                        } else {
+                            ctorArgs = [];
+                            ctorNames = [];
+                            j = 0;
+                            for c2 in caps {
+                                ctorNames = push(ctorNames, clone(c2.name));
+                                if c2.name = anm { ctorArgs = push(ctorArgs, a.e); } else { cap2 = nthCap(caps, j); st = closureCaptureExpr(st, &cap2, false); ctorArgs = push(ctorArgs, st.nid); };
+                                j = j + 1;
+                            };
+                            st = emitCtorValue(st, clone(structName), structArgs, &ctorNames);
+                            st = emitVal(st, st.nid);
+                            st = emitCall(st, st.nid, &ctorArgs);
+                            callNode = st.nid;
+                            st = emitName(st, "self");
+                            st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::Assign { n: st.nid, e: callNode } }), ..st };
+                        };
                         node = nodeIn(&st.nodes, id);
                     };
                 };
@@ -1376,7 +1408,7 @@ fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<
         readNode = st.nid;
         exprNode = readNode;
         fk = kindOf(&st, c.field);
-        if fk != 10 && fk != 11 {
+        if fk != 11 {
             st = emitVar(st, "clone");
             cargs = push([], readNode);
             st = emitCall(st, st.nid, &cargs);
@@ -1683,7 +1715,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
     rewriteRoots = clone(bodyRoots);
     for r in &restIns { rewriteRoots = push(rewriteRoots, r); };
     for r in &outsRoots { rewriteRoots = push(rewriteRoots, r); };
-    st = closureRewrite(st, &rewriteRoots, &caps, &structName);
+    st = closureRewrite(st, &rewriteRoots, &caps, &structName, &structArgs, kindOf(&st, receiverTy));
     if st.status != 0 { return st; };
     bodyName = catStrings(clone(structName), "$body");
     st = emitSignature(st, &bodyFs);
