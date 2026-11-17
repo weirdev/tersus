@@ -45,6 +45,7 @@ import TestConnectives
 import TestMirData
 import TestMirOwnership
 import TestMirMono
+import TestMirMonoOwnership
 import TestMirEval
 import TestMirReader
 import TestMirVerify
@@ -209,6 +210,7 @@ originalGroups =
     , testMirLowered
     , testMirOwnership
     , testMirMono
+    , testMirMonoOwnership
     , testOwnershipMetadata
     , testOwnershipInterpreted
     , testMirEvalLists
