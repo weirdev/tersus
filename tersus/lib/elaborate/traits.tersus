@@ -916,14 +916,15 @@ fn closureCapUpdated(st: &St, ids: &List<Int>, name: &String) -> Bool ~ {
             if stmt is AstStatement::AssignDeref {
                 d = stmt as AstStatement::AssignDeref;
                 lhsRoots = push([], d.a);
-                if closureHasVar(st, &closureNodes(st, &lhsRoots), name) { return true; };
+                lhsIds = closureNodes(st, &lhsRoots);
+                if closureHasVar(st, &lhsIds, name) { return true; };
             };
         };
         if node is AstNode::Expression {
             ex = (node as AstNode::Expression).value;
             if ex is AstExpression::F && closureHeadKey(st, id) = "BorrowMutOf" {
                 args = listItems(&st.nodes, (ex as AstExpression::F).xs);
-                if size(args) > 0 { argRoots = push([], nth(&args, 0)); if closureHasVar(st, &closureNodes(st, &argRoots), name) { return true; }; };
+                if size(args) > 0 { argRoots = push([], nth(&args, 0)); argIds = closureNodes(st, &argRoots); if closureHasVar(st, &argIds, name) { return true; }; };
             };
         };
     };
