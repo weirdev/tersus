@@ -199,6 +199,7 @@ mirPackageFiles = dataPackageFiles ++
                 , "lib/mir/mono/functions.tersus"
                 , "lib/mir/mono/types.tersus"
                 , "lib/mir/ownership/ownership.tersus"
+                , "lib/mir/ownership/mono.tersus"
                 , "lib/mir/ownership/common.tersus"
                 , "lib/mir/ownership/analysis.tersus"
                 , "lib/mir/ownership/rewrite.tersus"
