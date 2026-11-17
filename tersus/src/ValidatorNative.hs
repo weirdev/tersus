@@ -33,8 +33,8 @@ import CacheLock (copyFileCloexec, openLockHandle, openTempFileCloexec)
 import Hash (fingerprint)
 import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, cachedSourceEmitter, cachedUncheckedValidatorFrom,
-    emitterIdentity, cachedEmitterContentKeyFor, prepareValidatorFor, nativeStorage, prepareBootstrap,
-    cachedPreparedInput, cachedContentKey, emitterEntry)
+    emitterIdentity, guardEmitterDirectory, cachedEmitterContentKeyFor, prepareValidatorFor, nativeStorage, prepareBootstrap,
+    cachedPreparedInput)
 import Native (cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, availableProcessors, parallelBuilds, runCommandWithInputFull, raiseStack)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
 import Syntax (parseImplCheckName)
@@ -333,13 +333,8 @@ certificateKey :: String -> [String] -> [String] -> String
 certificateKey unchecked library own = fingerprint [show
     (unchecked, map ("1\n" ++) library, map ("1\n" ++) own)]
 
-prepareCertificate :: IO (Result PreparedCertificate String)
-prepareCertificate = do
-    selected <- emitterIdentity
-    case selected of Error e -> pure (Error e); Ok producer -> prepareCertificateFor producer
-
 prepareCertificateFor :: (Bool, String, FilePath) -> IO (Result PreparedCertificate String)
-prepareCertificateFor producer@(_, _, directory) = do
+prepareCertificateFor producer@(_, _, directory) = guardEmitterDirectory producer $ do
     prepared <- prepareValidatorFor producer
     case prepared of
         Error e -> pure (Error e)
@@ -379,25 +374,32 @@ validatorKey = do
     selected <- emitterIdentity
     case selected of
         Error e -> pure (Error e)
-        Ok producer -> cachedEmitterContentKeyFor producer "validator-checked" ["-O2"]
-            [("validator", []), ("validator-selfcheck", [])] $
-                fmap (mapResult (\(key, _, _, _, _, _, _, _) -> key)) (prepareCertificateFor producer)
+        Ok producer -> validatorKeyFor producer
+
+validatorKeyFor :: (Bool, String, FilePath) -> IO (Result String String)
+validatorKeyFor producer = cachedEmitterContentKeyFor producer "validator-checked" ["-O2"]
+    [("validator", []), ("validator-selfcheck", [])] $
+        fmap (mapResult (\(key, _, _, _, _, _, _, _) -> key)) (prepareCertificateFor producer)
 
 validatorExecutable :: IO (Result FilePath String)
 validatorExecutable = do
-    key <- validatorKey
-    case key of
+    selected <- emitterIdentity
+    case selected of
         Error e -> pure (Error e)
-        Ok identity -> do
-            existing <- cachedProgramIfPresent "validator" identity
-            case existing of
+        Ok producer -> guardEmitterDirectory producer $ do
+            key <- validatorKeyFor producer
+            case key of
                 Error e -> pure (Error e)
-                Ok (Just exe) -> pure (Ok exe)
-                Ok Nothing -> buildCheckedValidator
+                Ok identity -> do
+                    existing <- cachedProgramIfPresent "validator" identity
+                    case existing of
+                        Error e -> pure (Error e)
+                        Ok (Just exe) -> pure (Ok exe)
+                        Ok Nothing -> buildCheckedValidatorFor producer
 
-buildCheckedValidator :: IO (Result FilePath String)
-buildCheckedValidator = do
-    prepared <- prepareCertificate
+buildCheckedValidatorFor :: (Bool, String, FilePath) -> IO (Result FilePath String)
+buildCheckedValidatorFor producer = guardEmitterDirectory producer $ do
+    prepared <- prepareCertificateFor producer
     case prepared of
         Error e -> pure (Error e)
         Ok (key, unchecked, directory, exe, library, libraryTexts, own, ownTexts) ->

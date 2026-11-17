@@ -356,6 +356,7 @@ test-suite tersus-test
       TestMirErase
       TestMirEval
       TestMirMono
+      TestMirMonoOwnership
       TestMirOwnership
       TestMirReader
       TestMirSupport

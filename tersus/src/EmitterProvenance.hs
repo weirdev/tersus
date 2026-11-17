@@ -1,9 +1,9 @@
 {-# LANGUAGE TemplateHaskell #-}
-module EmitterProvenance (approvedEmitterBuild, emitterBuildDescription, emitterBuildInputs, constructionIdentity, matchesConstruction, workingSourcesMatch) where
+module EmitterProvenance (approvedEmitterBuild, emitterBuildDescription, emitterBuildInputs, constructionIdentity, matchesConstruction, workingSourcesMatch, checkEmitterOutputs) where
 
 import Control.Exception (IOException, evaluate, try)
 import Data.Char (isHexDigit, toLower)
-import Data.List (sort, isSuffixOf)
+import Data.List (nub, sort, isSuffixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Char8 as B
 import Data.Version (showVersion)
@@ -58,8 +58,8 @@ matchesConstruction _ _ = False
 -- current files and module listings must still match that captured input.
 workingSourcesMatch :: [(FilePath, String)] -> IO Bool
 workingSourcesMatch captured = do
-    package <- Directory.doesFileExist "package.yaml"
-    repository <- Directory.doesFileExist "tersus/package.yaml"
+    package <- sourceTreePresent "."
+    repository <- sourceTreePresent "tersus"
     case (package, repository) of
         (False, False) -> pure True
         _ -> do
@@ -67,6 +67,11 @@ workingSourcesMatch captured = do
             observed <- try (compareSources root) :: IO (Either IOException Bool)
             pure (either (const False) id observed)
   where
+    sourceTreePresent root = do
+        anchors <- mapM (Directory.doesFileExist . (root </>))
+            ["package.yaml", "tersus.cabal", "lib/mir/package.tersus", "lib/elaborate/package.tersus"]
+        source <- Directory.doesDirectoryExist (root </> "src")
+        pure (source || or anchors)
     files = Map.toAscList (Map.fromList captured)
     compareSources root = do
         same <- mapM (\(path, expected) -> do
@@ -84,3 +89,16 @@ workingSourcesMatch captured = do
         -- The root lib files are selected individually by the compiler library
         -- authority, not all executable examples beside them.
         pure (directory == "lib" || sort (filter relevant actual) == sort expected)
+
+checkEmitterOutputs :: [FilePath] -> [FilePath] -> IO (Result () String)
+checkEmitterOutputs inputs outputs = do
+    paths <- try (do
+        protected <- mapM Directory.canonicalizePath inputs
+        destinations <- mapM Directory.canonicalizePath outputs
+        pure (protected, destinations)) :: IO (Either IOException ([FilePath], [FilePath]))
+    pure $ case paths of
+        Left e -> Error ("could not resolve emitter output paths: " ++ show e)
+        Right (protected, destinations)
+            | length (nub destinations) /= length destinations -> Error "emitter output and construction association must be distinct"
+            | any (`elem` protected) destinations -> Error "emitter output aliases a source, pin or seed input"
+            | otherwise -> Ok ()

@@ -24,6 +24,7 @@ module PreludeSource
     , compilerSourceFiles
     , emitterSourceFiles
     , emitterSeedConstruction
+    , emitterConstructionOf
     , validationPackageFiles
     , seedSha256
     , parserSeedSha256
@@ -228,19 +229,22 @@ validationPackageFiles =
      )
 
 -- The SHA-256 pinned in bootstrap/emitter.sha256: the seed IR itself is a GitHub release asset (see Bootstrap), so only this digest is kept in the repository
-seedSha256 :: String
-seedSha256 =
-    $( do
-        addDependentFile "bootstrap/emitter.sha256"
-        contents <- runIO (readFile "bootstrap/emitter.sha256")
-        lift (head (words contents))
-     )
-
-emitterSeedConstruction :: String
-emitterSeedConstruction = $(do
+emitterSeedPin :: String
+emitterSeedPin = $(do
     addDependentFile "bootstrap/emitter.sha256"
     contents <- runIO (readFile "bootstrap/emitter.sha256")
-    lift (concat (take 1 (drop 1 (words contents)))))
+    lift contents)
+
+seedSha256 :: String
+seedSha256 = head (words emitterSeedPin)
+
+emitterSeedConstruction :: String
+emitterSeedConstruction = emitterConstructionOf emitterSeedPin
+
+emitterConstructionOf :: String -> String
+emitterConstructionOf record = case words record of
+    [_, construction] -> construction
+    _ -> ""
 
 parserSeedSha256 :: String
 parserSeedSha256 =

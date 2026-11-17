@@ -1,12 +1,12 @@
 module Main (main) where
 
-import System.Directory (canonicalizePath, doesFileExist)
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
 import Bootstrap (cachedSourceEmitter, cachedSeed, emitWith, seedSha256)
-import EmitterProvenance (workingSourcesMatch)
+import EmitterProvenance (workingSourcesMatch, checkEmitterOutputs)
+import Seed (emitterSeedFile)
 import PreludeSource (emitterSourceFiles)
 import MirData (writeProgram)
 import MirHousekeeping (emitterConstruction, emitterEntry, emitterOwnedProgram, ownedToolWith)
@@ -32,6 +32,9 @@ main = do
             construction <- case before of
                 Ok (Just identity) | current -> pure identity
                 _ -> fail "certification needs an approved actual build and unchanged source"
+            inputs <- emitterInputs
+            preflight <- checkEmitterOutputs inputs [output, association]
+            case preflight of Error e -> fail e; Ok () -> pure ()
             result <- regenerate
             ir <- case result of Error e -> fail e; Ok text -> pure text
             (status, digest, _) <- readProcessWithExitCode "sha256sum" [] ir
@@ -42,12 +45,10 @@ main = do
                 else if before /= after || not unchanged
                     then fail "emitter construction changed during certification"
                     else do
-                        pinExists <- doesFileExist association
-                        livePin <- canonicalizePath "bootstrap/emitter.sha256"
-                        target <- canonicalizePath association
-                        if pinExists && livePin == target then fail "write the construction association to a separate candidate file" else do
-                            written output (Ok ir)
-                            writeFile association (seedSha256 ++ " " ++ construction ++ "\n")
+                        finalPaths <- checkEmitterOutputs inputs [output, association]
+                        case finalPaths of Error e -> fail e; Ok () -> pure ()
+                        writeFile output ir
+                        writeFile association (seedSha256 ++ " " ++ construction ++ "\n")
         _ -> fail "usage: emitter-seed advance <output.ll> | emit <output.ll> | certify <output.ll> <candidate.pin>"
 
 regenerate :: IO (Result String String)
@@ -79,8 +80,12 @@ regenerate = do
 written :: FilePath -> Result String String -> IO ()
 written _ (Error e) = fail e
 written output (Ok text) = do
-    seed <- lookupEnv "TERSUS_SEED_FILE"
-    same <- case seed of
-        Just path -> (&&) <$> doesFileExist output <*> ((==) <$> canonicalizePath path <*> canonicalizePath output)
-        Nothing -> pure False
-    if same then fail "the output is $TERSUS_SEED_FILE: write the new seed to another file" else writeFile output text
+    inputs <- emitterInputs
+    checked <- checkEmitterOutputs inputs [output]
+    case checked of Error e -> fail e; Ok () -> writeFile output text
+
+emitterInputs :: IO [FilePath]
+emitterInputs = do
+    verified <- emitterSeedFile
+    seed <- case verified of Error e -> fail e; Ok path -> pure path
+    pure (seed : ["bootstrap/emitter.sha256", "bootstrap/frontend.sha256", "bootstrap/parser.sha256"] ++ map fst emitterSourceFiles)

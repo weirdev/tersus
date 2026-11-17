@@ -15,6 +15,7 @@ module MirHousekeeping
     , emitterConstruction
     , emitterIdentity
     , cachedEmitterContentKeyFor
+    , guardEmitterDirectory
     , prepareValidatorFor
     , cachedUncheckedValidatorFrom
     , listLibrary
@@ -74,14 +75,14 @@ import MirLists (hasLists, lowerLists)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (buildExecutable, buildExecutableWith, cacheDirectory, cacheLock, cachedProgram, cachedProgramWithArtifacts, cachedProgramIfPresent, cachedProgramIfPresentWithArtifacts, parallelBuilds, runWithInput, runWithInputFull)
 import Seed (emitterSeedFile, seedSha256, frontendSeedSha256, parserSeedSha256,
-    cachedFrontendSeed, cachedSeed, cachedParserSeed, frontendSeedHash, seedHash, parserSeedHash)
+    cachedFrontendSeed, cachedSeed, cachedParserSeed, seedHash)
 import EmitterProvenance (constructionIdentity, matchesConstruction, workingSourcesMatch)
 import BuiltinTable (builtinTableText)
 import Compile (lowerSource)
 import Modules (ModuleId, Snapshot (..), resolverFromFiles)
 import PackageCompile (compileModulesUsing, lowerCompiledPackage)
 import PreludeSource (emitterSourceFiles, emitterSeedConstruction, frontendSeedSources,
-    compilerSourceHash, libPackageFiles, stdlibSource, boxSource, listsSource, mirPackageFiles, parserPackageFiles, toolPackageFiles, validationPackageFiles)
+    boxSource, listsSource, toolPackageFiles, validationPackageFiles)
 import Types (Type (..))
 import Utils
 
@@ -360,7 +361,7 @@ cachedTool kind entry = do
     selected <- emitterIdentity
     case selected of
         Error e -> pure (Error e)
-        Ok producer -> do
+        Ok producer -> guardEmitterDirectory producer $ do
             key <- cachedEmitterContentKeyFor producer entry [] [(entry, [])] $
                 fmap (mapResult (\(identity, _, _) -> identity)) (preparedDerivedFor producer entry (toolProgram entry) [])
             case key of
@@ -389,7 +390,7 @@ cachedParserExe = do
     selected <- emitterIdentity
     case selected of
         Error e -> pure (Error e)
-        Ok producer -> do
+        Ok producer -> guardEmitterDirectory producer $ do
             let entry = "lib/parser/parser.tersus"
             key <- cachedEmitterContentKeyFor producer entry [] [(entry, [])] $
                 fmap (mapResult (\(identity, _, _) -> identity)) (preparedDerivedFor producer entry (toolProgram entry) [])
@@ -452,7 +453,7 @@ cachedUncheckedValidatorExe = do
     selected <- emitterIdentity
     case selected of
         Error e -> pure (Error e)
-        Ok producer -> do
+        Ok producer -> guardEmitterDirectory producer $ do
             key <- cachedEmitterContentKeyFor producer "validator" ["-O2"] [("validator", [])] $
                 fmap (mapResult (\(identity, _, _) -> identity)) (prepareValidatorFor producer)
             case key of
@@ -640,18 +641,27 @@ derivedKey entry raw flags = do
         Ok identity -> cachedEmitterContentKeyFor identity entry flags [(entry, [])] $
             fmap (mapResult (\(key, _, _) -> key)) (preparedDerivedFor identity entry raw flags)
 
-cachedEmitterContentKeyFor :: (Bool, String, FilePath) -> FilePath -> [String] -> [(FilePath, [String])] -> IO (Result String String) -> IO (Result String String)
-cachedEmitterContentKeyFor (pinned, producer, _) entry flags dependencies make =
-    cachedContentKey entry (flags ++ ["emitter-producer=" ++ producer])
-        (if pinned then dependencies else (emitterEntry, []) : dependencies) make
+guardEmitterDirectory :: (Bool, String, FilePath) -> IO (Result a String) -> IO (Result a String)
+guardEmitterDirectory (_, _, directory) action = do
+    before <- cacheDirectory
+    case before of
+        Error e -> pure (Error e)
+        Ok actual | actual /= directory -> pure (Error "emitter cache directory changed during operation")
+        Ok _ -> do
+            result <- action
+            after <- cacheDirectory
+            pure $ case after of
+                Error e -> Error e
+                Ok actual | actual == directory -> result
+                          | otherwise -> Error "emitter cache directory changed during operation"
 
-preparedDerived :: FilePath -> Result Program String -> [String] -> IO (Result (String, Program, String) String)
-preparedDerived entry raw flags = do
-    selected <- emitterIdentity
-    case selected of Error e -> pure (Error e); Ok identity -> preparedDerivedFor identity entry raw flags
+cachedEmitterContentKeyFor :: (Bool, String, FilePath) -> FilePath -> [String] -> [(FilePath, [String])] -> IO (Result String String) -> IO (Result String String)
+cachedEmitterContentKeyFor selected@(pinned, producer, _) entry flags dependencies make =
+    guardEmitterDirectory selected $ cachedContentKey entry (flags ++ ["emitter-producer=" ++ producer])
+        (if pinned then dependencies else (emitterEntry, []) : dependencies) (guardEmitterDirectory selected make)
 
 preparedDerivedFor :: (Bool, String, FilePath) -> FilePath -> Result Program String -> [String] -> IO (Result (String, Program, String) String)
-preparedDerivedFor (_, producer, _) entry raw flags = do
+preparedDerivedFor selected@(_, producer, _) entry raw flags = guardEmitterDirectory selected $ do
     prepared <- prepareProgram entry raw
     case prepared of
         Error e -> pure (Error e)
@@ -675,9 +685,11 @@ emitterIdentity = do
             case directory of
                 Error e -> pure (Error e)
                 Ok dir | sourceMatches -> do
-                    verified <- emitterSeedFile
+                    verified <- guardEmitterDirectory (True, seedHash, dir) emitterSeedFile
                     pure (mapResult (const (True, seedHash, dir)) verified)
-                Ok dir -> mapResult (\key -> (False, key, dir)) <$> sourceEmitterKey
+                Ok dir -> do
+                    source <- guardEmitterDirectory (False, "source", dir) sourceEmitterKey
+                    pure (mapResult (\key -> (False, key, dir)) source)
 
 sourceEmitterKey :: IO (Result String String)
 sourceEmitterKey = cachedContentKey emitterEntry [] [(emitterEntry, [])] $ do
@@ -707,7 +719,7 @@ prepareValidatorFor producer = preparedDerivedFor producer "validator" (toolProg
 cachedUncheckedValidatorFrom :: (Bool, String, FilePath) -> String -> String -> IO (Result FilePath String)
 cachedUncheckedValidatorFrom producer@(_, identity, _) key input
     | ownedContentKey identity input ["-O2"] /= key = pure (Error "unchecked validator producer changed during preparation")
-    | otherwise = cachedProgram "validator-unchecked" key "the validator written in Tersus"
+    | otherwise = guardEmitterDirectory producer $ cachedProgram "validator-unchecked" key "the validator written in Tersus"
         (\output -> buildPreparedFor producer ["-O2"] output input)
 
 -- Stage 1 (the emitter as it is now) in the cache: stage 0 expands, owns and emits the emitter's source (prepareProgram,
@@ -730,10 +742,8 @@ cachedEmitterExe = do
         Ok identity -> emitterForIdentity identity
 
 emitterForIdentity :: (Bool, String, FilePath) -> IO (Result FilePath String)
-emitterForIdentity (pinned, identity, directory) = do
-    current <- cacheDirectory
-    if current /= Ok directory then pure (Error "emitter cache directory changed during operation") else
-        if pinned then cachedSeed else buildSourceEmitter identity
+emitterForIdentity selected@(pinned, identity, _) = guardEmitterDirectory selected $
+    if pinned then cachedSeed else buildSourceEmitter identity
 
 cachedSourceEmitter :: IO (Result FilePath String)
 cachedSourceEmitter = do
@@ -769,7 +779,7 @@ buildSourceEmitter identity = do
                                         Ok text -> buildExecutable output text
 
 buildPreparedFor :: (Bool, String, FilePath) -> [String] -> FilePath -> String -> IO (Result () String)
-buildPreparedFor identity flags output input = do
+buildPreparedFor identity flags output input = guardEmitterDirectory identity $ do
     emitter <- emitterForIdentity identity
     case emitter of
         Error e -> pure (Error e)
@@ -828,9 +838,16 @@ toolProgramWith loader libraries entry = compileModulesUsing loader libraries (S
 -- the library, owned by the production ownership tool (stage 1); the bootstrap owns these with stage 0 instead
 -- (ownedWith), and the bootstrap fixpoint makes the two the same.
 toolOwnedProgram :: FilePath -> Result Program String
-toolOwnedProgram entry =
-    toolProgram entry `bindResult` \program ->
-        nativeProgram program `bindResult` insertOwnership
+toolOwnedProgram entry = unsafePerformIO (toolOwnedProgramUsing ownershipTool entry)
+
+toolOwnedProgramUsing :: IO Tool -> FilePath -> IO (Result Program String)
+toolOwnedProgramUsing tool entry = case toolProgram entry of
+    Error e -> pure (Error e)
+    Ok program -> do
+        native <- nativeProgramUsing tool listLibrary program
+        case native of
+            Error e -> pure (Error e)
+            Ok ready -> monomorphizeOwnershipWith tool ready
 
 -- The same for a single source the host compiles itself (the validator, with
 -- its driver): lowered, not validated, with the lists of the library.
@@ -865,9 +882,11 @@ nativeProgramUsing tool library program = do
 
 {-# NOINLINE emitterOwnedProgram #-}
 emitterOwnedProgram :: Result Program String
-emitterOwnedProgram = unsafePerformIO $ do
-    emitter <- cachedSourceEmitter
-    case emitter of Error e -> pure (Error e); Ok exe -> ownedToolWith exe emitterEntry
+emitterOwnedProgram = unsafePerformIO (toolOwnedProgramUsing sourceTool emitterEntry)
+  where
+    sourceTool = do
+        emitter <- cachedSourceEmitter
+        pure $ case emitter of Error e -> ToolFailed e; Ok exe -> ToolNative exe
 
 -- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus): its
 -- units as native code is linked with them, and the program they link to.
