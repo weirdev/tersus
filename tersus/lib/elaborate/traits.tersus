@@ -1410,7 +1410,7 @@ fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<
         readNode = st.nid;
         exprNode = readNode;
         fk = kindOf(&st, c.field);
-        if fk != 11 {
+        if fk != 10 && fk != 11 {
             st = emitVar(st, "clone");
             cargs = push([], readNode);
             st = emitCall(st, st.nid, &cargs);
