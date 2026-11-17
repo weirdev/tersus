@@ -2439,6 +2439,23 @@ fn nonInfixExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
         if !resultPartspeOk { return Res<Int> { st: resultPartspeState, v: resultPartspeValue, ok: resultPartspeOk }; };
         return withFieldsExpr(sourceText, resultPartspeState, resultPartspeValue);
     };
+    if keywordAt(sourceText, s, "fn") {
+        ce = closureExpr(sourceText, s, false); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
+        if !resultPartsceOk { return Res<Int> { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk }; };
+        return withFieldsExpr(sourceText, resultPartsceState, resultPartsceValue);
+    };
+    if keywordAt(sourceText, s, "move") {
+        save = checkpoint(s);
+        mk = eatKeyword(sourceText, s, "move"); Res { st: resultPartsmkState, v: resultPartsmkValue, ok: resultPartsmkOk } = mk;
+        afterMove = skipWs(sourceText, resultPartsmkState);
+        if keywordAt(sourceText, afterMove, "fn") {
+            ce = closureExpr(sourceText, afterMove, true); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
+            if !resultPartsceOk { return Res<Int> { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk }; };
+            return withFieldsExpr(sourceText, resultPartsceState, resultPartsceValue);
+        };
+        s = restore(resultPartsmkState, save);
+        c = byteAt(sourceText, s, s.pos);
+    };
     // struct literal / call / variable, string handled above, value (number, bool, list)
     if isDigitCp(c) || c = 45 || c = 91 || keywordAt(sourceText, s, "true") || keywordAt(sourceText, s, "false") {
         v = valueNode(sourceText, s); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
@@ -6825,6 +6842,125 @@ fn functAssignFull(st: St, name: &String, h: HeaderOut, termNode: Int, body: &Li
     nn = putName( s, name); Res { st: resultPartsnnState, v: resultPartsnnValue, ok: resultPartsnnOk } = nn;
     if !resultPartsnnOk { return Res<Int> { st: resultPartsnnState, v: resultPartsnnValue, ok: resultPartsnnOk }; };
     return stmtNode( resultPartsnnState, AstStatement::Assign { n: resultPartsnnValue, e: resultPartsveValue });
+};
+
+fn closureOneParameter(sourceText: &Input, st: St) -> Res<OneParam> ~ {
+    s = skipWs(sourceText, st);
+    v = parseVariable(sourceText, s); Res { st: resultPartsvState, v: resultPartsvValue, ok: resultPartsvOk } = v;
+    if !resultPartsvOk { return Res<OneParam> { st: resultPartsvState, v: OneParam { name: "", ty: Type::TInt }, ok: false }; };
+    s = skipWs(sourceText, resultPartsvState);
+    if byteAt(sourceText, s, s.pos) != 58 { return ok( s, OneParam { name: resultPartsvValue, ty: Type::TVar { n: s.pos } }); };
+    s = St { pos: s.pos + 1, ..s };
+    s = skipWs(sourceText, s);
+    t = typeAnnotation(sourceText, s); Res { st: resultPartstState, v: resultPartstValue, ok: resultPartstOk } = t;
+    if !resultPartstOk { return Res<OneParam> { st: resultPartstState, v: OneParam { name: "", ty: Type::TInt }, ok: false }; };
+    return ok( resultPartstState, OneParam { name: resultPartsvValue, ty: resultPartstValue });
+};
+
+fn closureParameters(sourceText: &Input, st: St) -> Res<ParamOut> ~ {
+    s = st;
+    s = St { pos: s.pos + 1, ..s };
+    s = skipWs(sourceText, s);
+    names = [];
+    tys = [];
+    if byteAt(sourceText, s, s.pos) != 41 {
+        loop = true;
+        while loop ~ {
+            p = closureOneParameter(sourceText, s); Res { st: resultPartspState, v: resultPartspValue, ok: resultPartspOk } = p;
+            if !resultPartspOk { return Res<ParamOut> { st: resultPartspState, v: ParamOut { names: [], types: [] }, ok: false }; };
+            s = resultPartspState;
+            names = push(names, clone(resultPartspValue.name));
+            tys = push(tys, resultPartspValue.ty);
+            s = skipWs(sourceText, s);
+            if byteAt(sourceText, s, s.pos) = 44 { s = St { pos: s.pos + 1, ..s }; s = skipWs(sourceText, s); } else { loop = false; };
+        };
+    };
+    if byteAt(sourceText, s, s.pos) != 41 { return fail( s, ParamOut { names: [], types: [] }, "expected )"); };
+    s = St { pos: s.pos + 1, ..s };
+    s = skipWs(sourceText, s);
+    return ok( s, ParamOut { names: names, types: tys });
+};
+
+fn closureValue(st: St, names: &List<String>, types: &List<Type>, ret: Type, ins: &List<Int>, outs: &List<Int>, termNode: Int, body: &List<Int>, isMove: Bool) -> Res<Int> ~ {
+    empty = [];
+    sig = signatureNode( st, types, ret, &empty, &empty, &empty, &empty); Res { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk } = sig;
+    if !resultPartssigOk { return Res<Int> { st: resultPartssigState, v: resultPartssigValue, ok: resultPartssigOk }; };
+    s = resultPartssigState;
+    stmts = statementsList( s, body); Res { st: resultPartsstmtsState, v: resultPartsstmtsValue, ok: resultPartsstmtsOk } = stmts;
+    if !resultPartsstmtsOk { return Res<Int> { st: resultPartsstmtsState, v: resultPartsstmtsValue, ok: resultPartsstmtsOk }; };
+    s = resultPartsstmtsState;
+    bodyNode = emit( s, AstNode::Body { value: AstBody::NativeFunct { sig: resultPartssigValue, term: termNode, stmts: resultPartsstmtsValue } }); Res { st: resultPartsbodyNodeState, v: resultPartsbodyNodeValue, ok: resultPartsbodyNodeOk } = bodyNode;
+    if !resultPartsbodyNodeOk { return Res<Int> { st: resultPartsbodyNodeState, v: resultPartsbodyNodeValue, ok: resultPartsbodyNodeOk }; };
+    s = resultPartsbodyNodeState;
+    ps = namesList( s, names); Res { st: resultPartspsState, v: resultPartspsValue, ok: resultPartspsOk } = ps;
+    if !resultPartspsOk { return Res<Int> { st: resultPartspsState, v: resultPartspsValue, ok: resultPartspsOk }; };
+    s = resultPartspsState;
+    insL = validationsList( s, ins); Res { st: resultPartsinsLState, v: resultPartsinsLValue, ok: resultPartsinsLOk } = insL;
+    if !resultPartsinsLOk { return Res<Int> { st: resultPartsinsLState, v: resultPartsinsLValue, ok: resultPartsinsLOk }; };
+    s = resultPartsinsLState;
+    outsL = validationsList( s, outs); Res { st: resultPartsoutsLState, v: resultPartsoutsLValue, ok: resultPartsoutsLOk } = outsL;
+    if !resultPartsoutsLOk { return Res<Int> { st: resultPartsoutsLState, v: resultPartsoutsLValue, ok: resultPartsoutsLOk }; };
+    s = resultPartsoutsLState;
+    if isMove {
+        mn = putName( s, "$move"); Res { st: resultPartsmnState, v: resultPartsmnValue, ok: resultPartsmnOk } = mn;
+        if !resultPartsmnOk { return Res<Int> { st: resultPartsmnState, v: resultPartsmnValue, ok: resultPartsmnOk }; };
+        s = resultPartsmnState;
+        mp = emit( s, AstNode::Proof { value: AstProof::BVar { n: resultPartsmnValue } }); Res { st: resultPartsmpState, v: resultPartsmpValue, ok: resultPartsmpOk } = mp;
+        if !resultPartsmpOk { return Res<Int> { st: resultPartsmpState, v: resultPartsmpValue, ok: resultPartsmpOk }; };
+        s = resultPartsmpState;
+        marker = push([], resultPartsmpValue);
+        ex = proofsList( s, &marker); Res { st: resultPartsexState, v: resultPartsexValue, ok: resultPartsexOk } = ex;
+        if !resultPartsexOk { return Res<Int> { st: resultPartsexState, v: resultPartsexValue, ok: resultPartsexOk }; };
+        s = resultPartsexState;
+    } else {
+        ex = emptyProofs( s); Res { st: resultPartsexState, v: resultPartsexValue, ok: resultPartsexOk } = ex;
+        if !resultPartsexOk { return Res<Int> { st: resultPartsexState, v: resultPartsexValue, ok: resultPartsexOk }; };
+        s = resultPartsexState;
+    };
+    vf = emit( s, AstNode::Value { value: AstValue::VFunct { ps: resultPartspsValue, ins: resultPartsinsLValue, outs: resultPartsoutsLValue, body: resultPartsbodyNodeValue, exports: resultPartsexValue } }); Res { st: resultPartsvfState, v: resultPartsvfValue, ok: resultPartsvfOk } = vf;
+    if !resultPartsvfOk { return Res<Int> { st: resultPartsvfState, v: resultPartsvfValue, ok: resultPartsvfOk }; };
+    return valExpr( resultPartsvfState, resultPartsvfValue);
+};
+
+fn closureExpr(sourceText: &Input, st: St, isMove: Bool) -> Res<Int> ~ {
+    k = eatKeyword(sourceText, st, "fn"); Res { st: resultPartskState, v: resultPartskValue, ok: resultPartskOk } = k;
+    s = skipWs(sourceText, resultPartskState);
+    if byteAt(sourceText, s, s.pos) != 40 { return fail( s, 0, "expected ("); };
+    ps = closureParameters(sourceText, s); Res { st: resultPartspsState, v: resultPartspsValue, ok: resultPartspsOk } = ps;
+    if !resultPartspsOk { return Res<Int> { st: resultPartspsState, v: 0, ok: false }; };
+    s = resultPartspsState;
+    ret = Type::TVar { n: s.pos };
+    if peekIs(sourceText, s, "->") {
+        s = St { pos: s.pos + 2, ..s };
+        s = skipWs(sourceText, s);
+        rt = typeAnnotation(sourceText, s); Res { st: resultPartsrtState, v: resultPartsrtValue, ok: resultPartsrtOk } = rt;
+        if !resultPartsrtOk { return Res<Int> { st: resultPartsrtState, v: 0, ok: false }; };
+        s = resultPartsrtState;
+        ret = resultPartsrtValue;
+    };
+    ins = optContract(sourceText, s); Res { st: resultPartsinsState, v: resultPartsinsValue, ok: resultPartsinsOk } = ins;
+    if !resultPartsinsOk { return Res<Int> { st: resultPartsinsState, v: 0, ok: false }; };
+    s = resultPartsinsState;
+    outs = optContract(sourceText, s); Res { st: resultPartsoutsState, v: resultPartsoutsValue, ok: resultPartsoutsOk } = outs;
+    if !resultPartsoutsOk { return Res<Int> { st: resultPartsoutsState, v: 0, ok: false }; };
+    s = resultPartsoutsState;
+    term = emit( s, AstNode::OptTermination { value: AstOptTermination::NoTermination }); Res { st: resultPartstermState, v: resultPartstermValue, ok: resultPartstermOk } = term;
+    if !resultPartstermOk { return Res<Int> { st: resultPartstermState, v: resultPartstermValue, ok: resultPartstermOk }; };
+    s = resultPartstermState;
+    if peekIs(sourceText, s, "=>") {
+        s = St { pos: s.pos + 2, ..s };
+        s = skipWs(sourceText, s);
+        e = expression(sourceText, s); Res { st: resultPartseState, v: resultPartseValue, ok: resultPartseOk } = e;
+        if !resultPartseOk { return Res<Int> { st: resultPartseState, v: 0, ok: false }; };
+        s = resultPartseState;
+        r = stmtNode( s, AstStatement::Return { e: resultPartseValue }); Res { st: resultPartsrState, v: resultPartsrValue, ok: resultPartsrOk } = r;
+        if !resultPartsrOk { return Res<Int> { st: resultPartsrState, v: 0, ok: false }; };
+        body = push([], resultPartsrValue);
+        return closureValue( resultPartsrState, &resultPartspsValue.names, &resultPartspsValue.types, ret, &resultPartsinsValue, &resultPartsoutsValue, resultPartstermValue, &body, isMove);
+    };
+    body = curlyBlock(sourceText, s); Res { st: resultPartsbodyState, v: resultPartsbodyValue, ok: resultPartsbodyOk } = body;
+    if !resultPartsbodyOk { return Res<Int> { st: resultPartsbodyState, v: 0, ok: false }; };
+    return closureValue( resultPartsbodyState, &resultPartspsValue.names, &resultPartspsValue.types, ret, &resultPartsinsValue, &resultPartsoutsValue, resultPartstermValue, &resultPartsbodyValue, isMove);
 };
 
 fn scanGenericNames(sourceText: &Input, st: &St) -> List<String> ~ {
