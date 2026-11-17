@@ -75,7 +75,7 @@ testClosures =
                         programFromFiles
                             "app/main.tersus"
                             [ ("app/package.tersus", "")
-                            , ("app/main.tersus", "import app::apply; n = 10; f = fn(x) => x + n; return apply::apply(f, 5);")
+                            , ("app/main.tersus", "import app::apply; n = 10; return apply::apply(fn(x) => x + n, 5);")
                             , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
                             ]
                     pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
