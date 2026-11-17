@@ -1,15 +1,16 @@
-import data::ast::ast { AstArg, AstArgs, AstBody, AstBound, AstBounds, AstBuiltin, AstExpression, AstFields, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
+import data::ast::ast { AstArg, AstArgs, AstBody, AstBound, AstBounds, AstBuiltin, AstExpression, AstField, AstFields, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
 import data::codec::codec { Size, catStrings, wireOwnershipRole };
-import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, substitute };
+import data::reader::reader { nodeRefs };
+import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, builtinValueOf, substitute };
 import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, scopeLookup, sizeArgument, teHead };
 import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkItem, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, isTraitStub, mentionsParameter, refResultFrom, stmtOf };
 import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInfo, hasFunction, holdsGhost, isBoxTy, isListTy, typeCtors, unrefOf };
 import elaborate::exports { pairParts };
-import elaborate::expr { coerceArguments, genericCall, implementsMarker, inferAll, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
+import elaborate::expr { coerceArguments, emitCtorValue, emitFieldValue, genericCall, implementsMarker, inferAll, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
 import elaborate::records { NativeFn, codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { fromsOf, putRefResult, refResultIndex, traitResultFrom };
-import elaborate::state { indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, zonk, protocolName, protocolIs, stubTraitParameter };
+import elaborate::state { indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, wrapTy, zonk, stubTraitParameter };
 
 
 fn traitFnOf(st: &St, id: Int) -> AstTraitFn ~ {
@@ -776,6 +777,960 @@ fn wrapNamedArgs(st: St, tm: &Template, pts: &List<Int>, inferred: &List<TE>) ->
     return St { tes: args, ..st };
 };
 
+// ---- closure expressions: a closure value the parser writes (a VFunct with a $closure marker in its exports) becomes
+// a struct of its captures, a body function of that struct, and an impl of a minted Fn trait per bound it meets
+
+struct ClosureCap { name: String, ty: Int, field: Int, updated: Bool, moved: Bool, linear: Bool };
+impl Clone for ClosureCap { };
+
+fn closureMarker(st: &St, exports: Int, marker: &String) -> Bool ~ {
+    for p in listItems(&st.nodes, exports) {
+        node = nodeIn(&st.nodes, p);
+        if node is AstNode::Proof {
+            pr = (node as AstNode::Proof).value;
+            if pr is AstProof::BVar && nameText(&st.nodes, (pr as AstProof::BVar).n) = clone(marker) { return true; };
+        };
+    };
+    return false;
+};
+
+fn isClosureValue(st: &St, v: Int) -> Bool ~ {
+    rec = nativeFn(&st.nodes, v);
+    if !rec.ok { return false; };
+    return closureMarker(st, rec.exports, "$closure");
+};
+
+fn isClosureExpr(st: &St, e: Int) -> Bool ~ {
+    ex = exprOf(st, e);
+    if !(ex is AstExpression::Val) { return false; };
+    return isClosureValue(st, (ex as AstExpression::Val).v);
+};
+
+fn closureValueOf(st: &St, e: Int) -> Int ~ {
+    ex = exprOf(st, e);
+    if ex is AstExpression::Val { return (ex as AstExpression::Val).v; };
+    return 0 - 1;
+};
+
+// The arena nodes under roots, not descending into a nested function value (a nested function captures nothing)
+fn closureNodes(st: &St, roots: &List<Int>) -> List<Int> ~ {
+    out = [];
+    todo = clone(roots);
+    while size(todo) > 0 ~ {
+        n = last(todo);
+        todo = pop(todo);
+        out = push(out, n);
+        if n >= 0 && n < size(st.nodes) {
+            node = nodeIn(&st.nodes, n);
+            nested = false;
+            if node is AstNode::Value && (node as AstNode::Value).value is AstValue::VFunct { nested = true; };
+            if !nested { for r in nodeRefs(&node) { if r >= 0 && r < n { todo = push(todo, r); }; }; };
+        };
+    };
+    return out;
+};
+
+fn closureParent(st: &St, ids: &List<Int>, id: Int) -> Int ~ {
+    for n in ids {
+        if n >= 0 && n < size(st.nodes) {
+            for r in nodeRefs(&nodeIn(&st.nodes, n)) { if r = id { return n; }; };
+        };
+    };
+    return 0 - 1;
+};
+
+fn closureNodeName(st: &St, id: Int) -> String ~ {
+    node = nodeIn(&st.nodes, id);
+    if node is AstNode::Expression {
+        ex = (node as AstNode::Expression).value;
+        if ex is AstExpression::Var { return nameText(&st.nodes, (ex as AstExpression::Var).n); };
+    };
+    if node is AstNode::Proof {
+        pr = (node as AstNode::Proof).value;
+        if pr is AstProof::ATerm { return nameText(&st.nodes, (pr as AstProof::ATerm).n); };
+        if pr is AstProof::BVar { return nameText(&st.nodes, (pr as AstProof::BVar).n); };
+    };
+    return "";
+};
+
+fn closureHeadKey(st: &St, e: Int) -> String ~ {
+    ex = exprOf(st, e);
+    if !(ex is AstExpression::F) { return ""; };
+    f = (ex as AstExpression::F).f;
+    fex = exprOf(st, f);
+    if fex is AstExpression::Val {
+        b = builtinOfValue(st, (fex as AstExpression::Val).v);
+        if b >= 0 { return builtinKey(st, b); };
+    };
+    if fex is AstExpression::Var { return nameText(&st.nodes, (fex as AstExpression::Var).n); };
+    return "";
+};
+
+fn closureHasVar(st: &St, ids: &List<Int>, name: &String) -> Bool ~ {
+    for id in ids { if closureNodeName(st, id) = clone(name) { return true; }; };
+    return false;
+};
+
+// The names a body binds itself: its lets, its new locals, its loops and its nested functions
+fn closureBoundNames(st: St, ids: &List<Int>, params: &List<String>) -> List<String> ~ {
+    out = clone(params);
+    for id in ids {
+        node = nodeIn(&st.nodes, id);
+        if node is AstNode::Statement {
+            stmt = (node as AstNode::Statement).value;
+            if stmt is AstStatement::Let { nm = nameText(&st.nodes, (stmt as AstStatement::Let).n); if indexIn(&out, &nm) < 0 { out = push(out, nm); }; };
+            if stmt is AstStatement::Assign {
+                a = stmt as AstStatement::Assign;
+                nm = nameText(&st.nodes, a.n);
+                if scopeLookup(&st, &nm) < 0 && indexIn(&out, &nm) < 0 { out = push(out, nm); };
+            };
+            if stmt is AstStatement::PackLoop {
+                pl = stmt as AstStatement::PackLoop;
+                nm = nameText(&st.nodes, pl.i); if indexIn(&out, &nm) < 0 { out = push(out, nm); };
+                nm2 = nameText(&st.nodes, pl.a); if indexIn(&out, &nm2) < 0 { out = push(out, nm2); };
+            };
+        };
+        if node is AstNode::Proof {
+            pr = (node as AstNode::Proof).value;
+            if pr is AstProof::Forall { nm = nameText(&st.nodes, (pr as AstProof::Forall).n); if indexIn(&out, &nm) < 0 { out = push(out, nm); }; };
+        };
+        if node is AstNode::Validation {
+            va = (node as AstNode::Validation).value;
+            if va is AstValidation::AssignProofVar { nm = nameText(&st.nodes, (va as AstValidation::AssignProofVar).n); if indexIn(&out, &nm) < 0 { out = push(out, nm); }; };
+        };
+    };
+    return out;
+};
+
+fn closureCapUpdated(st: &St, ids: &List<Int>, name: &String) -> Bool ~ {
+    for id in ids {
+        node = nodeIn(&st.nodes, id);
+        if node is AstNode::Statement {
+            stmt = (node as AstNode::Statement).value;
+            if stmt is AstStatement::Assign {
+                a = stmt as AstStatement::Assign;
+                if nameText(&st.nodes, a.n) = clone(name) {
+                    if nativeFn(&st.nodes, closureValueOf(st, a.e)).ok && !isClosureValue(st, closureValueOf(st, a.e)) { } else { return true; };
+                };
+            };
+            if stmt is AstStatement::AssignDeref {
+                d = stmt as AstStatement::AssignDeref;
+                if closureHasVar(st, &closureNodes(st, &push([], d.a)), name) { return true; };
+            };
+        };
+        if node is AstNode::Expression {
+            ex = (node as AstNode::Expression).value;
+            if ex is AstExpression::F && closureHeadKey(st, id) = "BorrowMutOf" {
+                args = listItems(&st.nodes, (ex as AstExpression::F).xs);
+                if size(args) > 0 && closureHasVar(st, &closureNodes(st, &push([], nth(&args, 0))), name) { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+// Whether the body moves the capture: returns it, assigns it to a local, or gives it to a by-value parameter
+fn closureCapMoved(st: St, ids: &List<Int>, name: &String) -> Bool ~ {
+    for id in ids {
+        node = nodeIn(&st.nodes, id);
+        if node is AstNode::Statement {
+            stmt = (node as AstNode::Statement).value;
+            if stmt is AstStatement::Return { if isVar(&st, (stmt as AstStatement::Return).e) && varName(&st, (stmt as AstStatement::Return).e) = clone(name) { return true; }; };
+            if stmt is AstStatement::Let { if isVar(&st, (stmt as AstStatement::Let).e) && varName(&st, (stmt as AstStatement::Let).e) = clone(name) { return true; }; };
+            if stmt is AstStatement::Assign {
+                a = stmt as AstStatement::Assign;
+                if isVar(&st, a.e) && varName(&st, a.e) = clone(name) && nameText(&st.nodes, a.n) != clone(name) { return true; };
+            };
+        };
+        if node is AstNode::Expression {
+            ex = (node as AstNode::Expression).value;
+            if ex is AstExpression::F {
+                call = ex as AstExpression::F;
+                key = closureHeadKey(&st, id);
+                args = listItems(&st.nodes, call.xs);
+                ai = 0;
+                for a in args {
+                    if isVar(&st, a) && varName(&st, a) = clone(name) {
+                        if key = "Ctor" { return true; };
+                        fex = exprOf(&st, call.f);
+                        if fex is AstExpression::Var {
+                            fname = nameText(&st.nodes, (fex as AstExpression::Var).n);
+                            if HashMap::contains(&st.templates, &fname) {
+                                tm = HashMap::lookup(&st.templates, &fname, emptyTemplate());
+                                if ai < size(tm.ptys) && kindOf(&st, get(tm.ptys, ai)) != 10 && kindOf(&st, get(tm.ptys, ai)) != 11 { return true; };
+                            } else if HashMap::contains(&st.fns, &fname) {
+                                ft = HashMap::lookup(&st.fns, &fname, 0 - 1);
+                                fx = tyAt(&st, ft);
+                                if fx.kind = 14 && ai < size(fx.args) - 1 && kindOf(&st, get(fx.args, ai)) != 10 && kindOf(&st, get(fx.args, ai)) != 11 { return true; };
+                            };
+                        };
+                    };
+                    ai = ai + 1;
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn closureHasUnknown(st: &St, t: Int) -> Bool ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 15 { return true; };
+    for a in &x.args { if closureHasUnknown(st, a) { return true; }; };
+    return false;
+};
+
+fn closureForeignParam(st: &St, t: Int, scope: &List<String>) -> String ~ {
+    x = tyAt(st, resolve(st, t));
+    if x.kind = 12 && indexIn(scope, &x.name) < 0 { return clone(x.name); };
+    if x.kind = 22 && indexIn(scope, &x.name) < 0 { return clone(x.name); };
+    for a in &x.args {
+        f = closureForeignParam(st, a, scope);
+        if size(f.bytes) > 0 { return f; };
+    };
+    return "";
+};
+
+fn closureTypeParamsOf(st: &St, tys: &List<Int>) -> List<String> ~ {
+    out = [];
+    for p in &st.sizeScope { for t in tys { if closureMentions(st, t, p) && indexIn(&out, p) < 0 { out = push(out, clone(p)); }; }; };
+    for p in &st.typeScope { if indexIn(&out, p) < 0 { for t in tys { if closureMentions(st, t, p) { out = push(out, clone(p)); }; }; }; };
+    return out;
+};
+
+fn closureMentions(st: &St, t: Int, name: &String) -> Bool ~ {
+    x = tyAt(st, resolve(st, t));
+    if (x.kind = 12 || x.kind = 22) && x.name = clone(name) { return true; };
+    for a in &x.args { if closureMentions(st, a, name) { return true; }; };
+    return false;
+};
+
+fn closureKindRank(st: &St, bodyFs: &FnSig) -> Int ~ {
+    if size(bodyFs.ptys) = 0 { return 2; };
+    k = kindOf(st, nth(&bodyFs.ptys, 0));
+    if k = 10 { return 0; };
+    if k = 11 { return 1; };
+    return 2;
+};
+
+fn closureBoundRank(name: &String) -> Int ~ {
+    if size(name.bytes) > 6 && name.slice(0, 6) = "FnMut$" { return 1; };
+    if size(name.bytes) > 7 && name.slice(0, 7) = "FnOnce$" { return 2; };
+    return 0;
+};
+
+fn closureKindWord(rank: Int) -> String ~ {
+    if rank = 0 { return "Fn"; };
+    if rank = 1 { return "FnMut"; };
+    return "FnOnce";
+};
+
+// A field read of self for a capture, dereferenced when the field is the borrow of the capture
+fn closureCaptureExpr(st: St, cap: &ClosureCap, place: Bool) -> St ~ {
+    st = emitVar(st, "self");
+    selfNode = st.nid;
+    st = emitFieldValue(st, "", clone(cap.name));
+    st = emitVal(st, st.nid);
+    args1 = push([], selfNode);
+    st = emitCall(st, st.nid, &args1);
+    fieldNode = st.nid;
+    fk = kindOf(&st, cap.field);
+    ck = kindOf(&st, cap.ty);
+    if !place && fk != ck && (fk = 10 || fk = 11) { return emitBuiltinCall(st, "DerefOf", &push([], fieldNode)); };
+    if place && fk = 11 && ck != 11 { return emitBuiltinCall(st, "DerefOf", &push([], fieldNode)); };
+    return St { nid: fieldNode, ..st };
+};
+
+fn closureCaptureProof(st: St, cap: &ClosureCap, structName: &String) -> St ~ {
+    st = emitName(st, "self");
+    st = emit(st, AstNode::Proof { value: AstProof::ATerm { n: st.nid } });
+    selfProof = st.nid;
+    st = emitFieldValue(st, clone(structName), clone(cap.name));
+    valueNode = st.nid;
+    st = emit(st, AstNode::Proof { value: AstProof::CTerm { v: valueNode } });
+    fProof = st.nid;
+    args1 = push([], selfProof);
+    st = emitProofs(st, &args1);
+    st = emit(st, AstNode::Proof { value: AstProof::FApp { f: fProof, xs: st.nid } });
+    fieldProof = st.nid;
+    fk = kindOf(&st, cap.field);
+    ck = kindOf(&st, cap.ty);
+    if fk != ck && (fk = 10 || fk = 11) {
+        dv = builtinValueOf(&st, "DerefOf");
+        if dv < 0 { return st; };
+        st = emit(st, AstNode::Proof { value: AstProof::CTerm { v: dv } });
+        dProof = st.nid;
+        args2 = push([], fieldProof);
+        st = emitProofs(st, &args2);
+        return emit(st, AstNode::Proof { value: AstProof::FApp { f: dProof, xs: st.nid } });
+    };
+    return St { nid: fieldProof, ..st };
+};
+
+// Rewrite the captures of a body in place: a read of a capture is a field of self, an assignment to one is through it
+fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName: &String) -> St ~ {
+    ids = closureNodes(&st, roots);
+    for id in ids {
+        node = nodeIn(&st.nodes, id);
+        if node is AstNode::Statement {
+            stmt = (node as AstNode::Statement).value;
+            if stmt is AstStatement::Assign {
+                a = stmt as AstStatement::Assign;
+                anm = nameText(&st.nodes, a.n);
+                ci = 0 - 1;
+                i = 0;
+                for c in caps { if c.name = anm { ci = i; }; i = i + 1; };
+                if ci >= 0 {
+                    isFnDef = nativeFn(&st.nodes, closureValueOf(&st, a.e)).ok && !isClosureValue(&st, closureValueOf(&st, a.e));
+                    if !isFnDef {
+                        cap = nthCap(caps, ci);
+                        st = closureCaptureExpr(st, &cap, true);
+                        st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::AssignDeref { a: st.nid, b: a.e } }), ..st };
+                        node = nodeIn(&st.nodes, id);
+                    };
+                };
+            };
+        };
+        node = nodeIn(&st.nodes, id);
+        if node is AstNode::Expression {
+            ex = (node as AstNode::Expression).value;
+            if ex is AstExpression::Var {
+                nm = nameText(&st.nodes, (ex as AstExpression::Var).n);
+                ci = 0 - 1;
+                i = 0;
+                for c in caps { if c.name = nm { ci = i; }; i = i + 1; };
+                if ci >= 0 {
+                    cap = nthCap(caps, ci);
+                    parent = closureParent(&st, &ids, id);
+                    derefParent = false;
+                    if parent >= 0 && closureHeadKey(&st, parent) = "DerefOf" { derefParent = true; };
+                    st = closureCaptureExpr(st, &cap, derefParent);
+                    newNode = nodeIn(&st.nodes, st.nid);
+                    st = St { nodes: set(st.nodes, id, newNode), ..st };
+                };
+            };
+        };
+        node = nodeIn(&st.nodes, id);
+        if node is AstNode::Proof {
+            nm = closureNodeName(&st, id);
+            if size(nm.bytes) > 0 {
+                ci = 0 - 1;
+                i = 0;
+                for c in caps { if c.name = nm { ci = i; }; i = i + 1; };
+                if ci >= 0 {
+                    cap = nthCap(caps, ci);
+                    st = closureCaptureProof(st, &cap, structName);
+                    newNode = nodeIn(&st.nodes, st.nid);
+                    st = St { nodes: set(st.nodes, id, newNode), ..st };
+                };
+            };
+        };
+    };
+    return st;
+};
+
+fn nthCap(caps: &List<ClosureCap>, i: Int) -> ClosureCap ~ {
+    if i < 0 || i >= size(caps) { return ClosureCap { name: "", ty: 0 - 1, field: 0 - 1, updated: false, moved: false, linear: false }; };
+    return clone(get(caps, i));
+};
+
+// Check a synthesized declaration and keep what it adds, restoring the expression state around it
+fn closureAbsorb(st: St, stmt: Int) -> St ~ {
+    outerOuts = clone(st.outs);
+    outerTe = clone(st.te);
+    outerTes = clone(st.tes);
+    outerCurrent = clone(st.current);
+    outerNames = clone(st.names);
+    st = checkItem(st, true, stmt);
+    if st.status != 0 { return st; };
+    genOut = clone(st.genericOut);
+    genTypes = clone(st.genericTypes);
+    for o in &st.outs { genOut = push(genOut, o); };
+    for ty in &st.te.types { genTypes = push(genTypes, ty); };
+    return St { genericOut: genOut, genericTypes: genTypes, outs: outerOuts, te: outerTe, tes: outerTes, current: outerCurrent, names: outerNames, ..st };
+};
+
+fn closureStructValue(st: St, structName: &String, structTy: Int, structArgs: &List<Int>, caps: &List<ClosureCap>, expected: Int, hasBound: Bool) -> St ~ {
+    fieldExprs = [];
+    for c in caps {
+        fk = kindOf(&st, c.field);
+        ck = kindOf(&st, c.ty);
+        if fk = 10 && ck != 10 {
+            st = emitVar(st, clone(c.name));
+            st = emitBuiltinCall(st, "BorrowOf", &push([], st.nid));
+            fieldExprs = push(fieldExprs, st.nid);
+        } else if fk = 11 && ck != 11 {
+            st = emitVar(st, clone(c.name));
+            st = emitBuiltinCall(st, "BorrowMutOf", &push([], st.nid));
+            fieldExprs = push(fieldExprs, st.nid);
+        } else {
+            st = emitVar(st, clone(c.name));
+            fieldExprs = push(fieldExprs, st.nid);
+        };
+    };
+    names = [];
+    for c in caps { names = push(names, clone(c.name)); };
+    st = emitCtorValue(st, clone(structName), structArgs, &names);
+    st = emitVal(st, st.nid);
+    st = emitCall(st, st.nid, &fieldExprs);
+    callNode = st.nid;
+    st = inferExpr(st, callNode);
+    if st.status != 0 { return st; };
+    valueTE = clone(st.te);
+    if hasBound {
+        st = zonk(st, expected);
+        ek = kindOf(&st, st.ty);
+        if ek = 10 || ek = 11 {
+            key = "BorrowOf";
+            if ek = 11 { key = "BorrowMutOf"; };
+            st = emitBuiltinCall(st, clone(key), &push([], valueTE.node));
+            borrowNode = st.nid;
+            st = wrapTy(st, ek, structTy);
+            return St { ok: true, te: TE { node: borrowNode, types: push(push([], st.ty), structTy) }, ..st };
+        };
+    };
+    return St { ok: true, te: valueTE, ..st };
+};
+
+// The impl of a minted Fn trait for a closure struct, its call delegating to the closure's body function
+fn makeClosureImpl(st: St, structName: &String, b: &BoundInfo, givenArgs: &List<Int>, reason: &String) -> St ~ {
+    if HashSet::contains(&st.impls, pairKey(&b.n, structName)) { return St { ok: true, ..st }; };
+    bodyName = catStrings(clone(structName), "$body");
+    if !HashMap::contains(&st.fns, &bodyName) { return St { ok: false, ..st }; };
+    rec = namedFnRecord(&st, &bodyName);
+    if !rec.ok { return St { ok: false, ..st }; };
+    st = fnSigOf(st, rec.ps, rec.sig);
+    if st.status != 0 { return St { ok: false, status: 0, msg: "", ..st }; };
+    bodyFs = clone(st.fnSig);
+    traitFnsList = HashMap::lookup(&st.traitFns, &b.n, []);
+    tfAt = traitFnNamed(&st, &traitFnsList, "call");
+    if tfAt < 0 { return St { ok: false, ..st }; };
+    tf = traitFnOf(&st, tfAt);
+    traitParams = HashMap::lookup(&st.traitParams, &b.n, []);
+    st = fnSigOf(st, tf.ps, tf.sig);
+    if st.status != 0 { return St { ok: false, status: 0, msg: "", ..st }; };
+    callFs = clone(st.fnSig);
+    if size(bodyFs.ptys) != size(callFs.ptys) { return St { ok: false, ..st }; };
+    closureRank = closureKindRank(&st, &bodyFs);
+    boundRank = closureBoundRank(&b.n);
+    if boundRank < closureRank {
+        want = fnTraitDisplay(&b.n);
+        if size(reason.bytes) > 0 {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings("this closure ", clone(reason)), ", so it is "), closureKindWord(closureRank)), catStrings(catStrings(" and cannot be given where ", want), " is wanted")));
+        };
+        return typeError(st, catStrings(catStrings(catStrings(catStrings("this closure is ", closureKindWord(closureRank)), " and cannot be given where "), want), " is wanted"));
+    };
+    traitArgs = clone(givenArgs);
+    if size(traitArgs) = 0 {
+        argNames = [];
+        argVals = [];
+        i = 1;
+        while i < size(callFs.ptys) [{ affirm i >= 1; }] shrinks size(callFs.ptys) - i {
+            st = matchTraitArg(st, &traitParams, get(callFs.ptys, i), get(bodyFs.ptys, i), argNames, argVals);
+            if !st.ok { return St { ok: false, status: 0, msg: "", ..st }; };
+            argNames = clone(st.names);
+            argVals = typesHeads(&st.tes);
+            i = i + 1;
+        };
+        st = matchTraitArg(st, &traitParams, callFs.rty, bodyFs.rty, argNames, argVals);
+        if !st.ok { return St { ok: false, status: 0, msg: "", ..st }; };
+        argNames = clone(st.names);
+        argVals = typesHeads(&st.tes);
+        for p in &traitParams {
+            at = indexIn(&argNames, p);
+            if at < 0 || at >= size(argVals) { return St { ok: false, ..st }; };
+            traitArgs = push(traitArgs, get(argVals, at));
+        };
+    };
+    if size(traitArgs) > 0 {
+        zonkedArgs = [];
+        for t in &traitArgs { st = zonk(st, t); zonkedArgs = push(zonkedArgs, st.ty); };
+        traitArgs = zonkedArgs;
+    };
+    st = zonk(st, nth(&bodyFs.ptys, 0));
+    structTy = unrefOf(&st, st.ty);
+    wrapperParams = clone(callFs.params);
+    wrapperPtys = [];
+    i = 0;
+    while i < size(callFs.ptys) [{ affirm i >= 0; }] shrinks size(callFs.ptys) - i {
+        st = substSelfAs(st, structName, structTy, get(callFs.ptys, i));
+        st = substTraitArgs(st, &traitParams, &traitArgs, st.ty);
+        wrapperPtys = push(wrapperPtys, st.ty);
+        i = i + 1;
+    };
+    st = substSelfAs(st, structName, structTy, callFs.rty);
+    st = substTraitArgs(st, &traitParams, &traitArgs, st.ty);
+    wrapperFs = FnSig { params: wrapperParams, ptys: wrapperPtys, rty: st.ty, sizes: [], types: [], writes: [], froms: [] };
+    // the receiver the body takes, from the one the trait gives
+    bodyKind = kindOf(&st, nth(&bodyFs.ptys, 0));
+    implKind = kindOf(&st, nth(&wrapperPtys, 0));
+    st = emitVar(st, "self");
+    selfNode = st.nid;
+    recvNode = selfNode;
+    if bodyKind = 10 && implKind = 11 {
+        st = emitBuiltinCall(st, "DerefOf", &push([], selfNode));
+        st = emitBuiltinCall(st, "BorrowOf", &push([], st.nid));
+        recvNode = st.nid;
+    } else if bodyKind = 10 && implKind != 10 {
+        st = emitBuiltinCall(st, "BorrowOf", &push([], selfNode));
+        recvNode = st.nid;
+    } else if bodyKind = 11 && implKind != 11 {
+        if implKind = 10 { return St { ok: false, ..st }; };
+        st = emitBuiltinCall(st, "BorrowMutOf", &push([], selfNode));
+        recvNode = st.nid;
+    } else if bodyKind != 10 && bodyKind != 11 && implKind != bodyKind {
+        return St { ok: false, ..st };
+    };
+    callArgs = push([], recvNode);
+    i = 1;
+    while i < size(callFs.params) [{ affirm i >= 1; }] shrinks size(callFs.params) - i {
+        st = emitVar(st, clone(get(callFs.params, i)));
+        callArgs = push(callArgs, st.nid);
+        i = i + 1;
+    };
+    st = emitVar(st, clone(bodyName));
+    st = emitCall(st, st.nid, &callArgs);
+    st = emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
+    bodyStmts = push([], st.nid);
+    st = emitStatements(st, &bodyStmts);
+    bodyNode = st.nid;
+    st = emitSignature(st, &wrapperFs);
+    sigNode = st.nid;
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: sigNode, term: rec.term, stmts: bodyNode } });
+    fnBody = st.nid;
+    st = emitNames(st, &wrapperFs.params);
+    fnParams = st.nid;
+    noProofs = [];
+    st = emitProofs(st, &noProofs);
+    fnExports = st.nid;
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: fnParams, ins: rec.ins, outs: rec.outs, body: fnBody, exports: fnExports } });
+    fnValue = st.nid;
+    st = emitVal(st, fnValue);
+    fnExpr = st.nid;
+    st = emitName(st, implFunctionName(structName, &b.n, "call"));
+    fnNameNode = st.nid;
+    st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: fnNameNode, e: fnExpr } });
+    fnStmt = st.nid;
+    implFns = push([], fnStmt);
+    st = emitStatements(st, &implFns);
+    implFnsNode = st.nid;
+    st = emitName(st, clone(b.n));
+    traitNameNode = st.nid;
+    st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: traitNameNode } });
+    traitNode = st.nid;
+    st = emitTraitArgs(st, &traitArgs);
+    implArgsNode = st.nid;
+    st = emitName(st, clone(structName));
+    implName = st.nid;
+    st = emitType(st, structTy);
+    implTy = st.nid;
+    st = emit(st, AstNode::Bounds { value: AstBounds::End });
+    st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: traitNode, args: implArgsNode, n: implName, ty: implTy, bs: st.nid, xs: implFnsNode } });
+    implStmt = st.nid;
+    st = closureAbsorb(st, implStmt);
+    if st.status != 0 { return st; };
+    return St { ok: true, ..st };
+};
+
+fn makeClosureImplForType(st: St, b: &BoundInfo, t: Int) -> St ~ {
+    x = tyAt(&st, t);
+    if x.kind != 4 { return St { ok: false, ..st }; };
+    noArgs = [];
+    noReason = "";
+    return makeClosureImpl(st, &x.name, b, &noArgs, &noReason);
+};
+
+// A closure expression becomes its struct, its body function and, for a bound, its impl; st.te the closure value
+fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: &List<Int>, expected: Int) -> St ~ {
+    rec = nativeFn(&st.nodes, v);
+    if !rec.ok { return notModelled(st, "a closure the data does not give"); };
+    isMove = closureMarker(&st, rec.exports, "$move");
+    st = fnSigOf(st, rec.ps, rec.sig);
+    if st.status != 0 { return st; };
+    fs0 = clone(st.fnSig);
+    callFs = FnSig { params: [], ptys: [], rty: 0 - 1, sizes: [], types: [], writes: [], froms: [] };
+    traitParams = [];
+    if hasBound {
+        traitFnsList = HashMap::lookup(&st.traitFns, &b.n, []);
+        tfAt = traitFnNamed(&st, &traitFnsList, "call");
+        if tfAt < 0 { return typeError(st, catStrings("unknown trait ", clone(b.n))); };
+        tf = traitFnOf(&st, tfAt);
+        traitParams = HashMap::lookup(&st.traitParams, &b.n, []);
+        st = fnSigOf(st, tf.ps, tf.sig);
+        if st.status != 0 { return st; };
+        callFs = clone(st.fnSig);
+        if size(callFs.ptys) != size(fs0.ptys) + 1 {
+            return typeError(st, catStrings(catStrings(catStrings(catStrings("this closure takes ", intText(size(fs0.ptys))), " arguments, but "), fnTraitDisplay(&b.n)), catStrings(" takes ", intText(size(callFs.ptys) - 1))));
+        };
+    };
+    // the parameter and result types the bound gives, where the closure leaves them out
+    ptys = [];
+    i = 0;
+    for p in &fs0.params {
+        t = nth(&fs0.ptys, i);
+        if kindOf(&st, t) = 15 && hasBound {
+            ct = nth(&callFs.ptys, i + 1);
+            if size(traitArgTys) > 0 { st = substTraitArgs(st, &traitParams, traitArgTys, ct); ct = st.ty; };
+            ptys = push(ptys, ct);
+        } else { ptys = push(ptys, t); };
+        i = i + 1;
+    };
+    rty = fs0.rty;
+    rtyFromBody = false;
+    if kindOf(&st, rty) = 15 && hasBound {
+        ct = callFs.rty;
+        if size(traitArgTys) > 0 { st = substTraitArgs(st, &traitParams, traitArgTys, ct); ct = st.ty; };
+        rty = ct;
+        if closureHasUnknown(&st, rty) { rtyFromBody = true; };
+    };
+    if !hasBound {
+        i = 0;
+        for p in &fs0.params {
+            if closureHasUnknown(&st, nth(&ptys, i)) { return typeError(st, catStrings(catStrings("write the type of ", clone(p)), ": nothing here says what this closure takes")); };
+            i = i + 1;
+        };
+        if closureHasUnknown(&st, rty) { return typeError(st, "write the result type: nothing here says what this closure returns"); };
+    } else {
+        i = 0;
+        for p in &fs0.params {
+            t = nth(&ptys, i);
+            if closureHasUnknown(&st, t) { return typeError(st, catStrings(catStrings("write the type of ", clone(p)), ": nothing here says what this closure takes")); };
+            foreign = closureForeignParam(&st, t, &st.typeScope);
+            if size(foreign.bytes) > 0 { return typeError(st, catStrings(catStrings("write the type of ", clone(p)), ": nothing here says what this closure takes")); };
+            i = i + 1;
+        };
+    };
+    fs = FnSig { params: clone(fs0.params), ptys: clone(ptys), rty: rty, sizes: [], types: [], writes: [], froms: [] };
+    // captures: the free variables of the body that are locals or parameters of the enclosing function
+    bodyRoots = listItems(&st.nodes, rec.stmts);
+    insRoots = listItems(&st.nodes, rec.ins);
+    outsRoots = listItems(&st.nodes, rec.outs);
+    allRoots = clone(bodyRoots);
+    for r in &insRoots { allRoots = push(allRoots, r); };
+    for r in &outsRoots { allRoots = push(allRoots, r); };
+    ids = closureNodes(&st, &allRoots);
+    boundNames = closureBoundNames(st, &ids, &fs.params);
+    capNames = [];
+    for id in ids {
+        nm = closureNodeName(&st, id);
+        if size(nm.bytes) > 0 && indexIn(&boundNames, &nm) < 0 && indexIn(&capNames, &nm) < 0 && scopeLookup(&st, &nm) >= 0 && nm != "self" && nm != "return" && !nm.startsWith("$old ") { capNames = push(capNames, nm); };
+    };
+    // an assignment to an enclosing local is a capture too, though no variable expression reads it first
+    for id in ids {
+        node = nodeIn(&st.nodes, id);
+        if node is AstNode::Statement {
+            stmt = (node as AstNode::Statement).value;
+            if stmt is AstStatement::Assign {
+                a = stmt as AstStatement::Assign;
+                nm = nameText(&st.nodes, a.n);
+                if indexIn(&boundNames, &nm) < 0 && indexIn(&capNames, &nm) < 0 && scopeLookup(&st, &nm) >= 0 { capNames = push(capNames, nm); };
+            };
+        };
+    };
+    caps = [];
+    anyLinear = false;
+    anyUpdated = false;
+    reason = "";
+    for nm in &capNames {
+        st = zonk(st, scopeLookup(&st, nm));
+        capTy = st.ty;
+        updated = closureCapUpdated(&st, &ids, nm);
+        moved = closureCapMoved(st, &ids, nm);
+        st = holdsGhost(st, capTy);
+        linear = st.ok;
+        if linear { anyLinear = true; };
+        st = implementsMarker(st, "Copy", capTy, 0);
+        isCopy = st.ok;
+        field = capTy;
+        ck = kindOf(&st, capTy);
+        if isMove { field = capTy; }
+        else if updated { if ck != 10 && ck != 11 { st = wrapTy(st, 11, capTy); field = st.ty; }; }
+        else if moved { field = capTy; }
+        else if isCopy { field = capTy; }
+        else if ck != 10 && ck != 11 { st = wrapTy(st, 10, capTy); field = st.ty; };
+        if updated { anyUpdated = true; if size(reason.bytes) = 0 { reason = catStrings("updates ", clone(nm)); }; };
+        if moved && field = capTy && !isCopy && size(reason.bytes) = 0 { reason = catStrings("moves ", catStrings(clone(nm), " out")); };
+        caps = push(caps, ClosureCap { name: clone(nm), ty: capTy, field: field, updated: updated, moved: moved, linear: linear });
+    };
+    rank = 0;
+    if anyLinear { rank = 2; };
+    for c in caps { if c.moved && c.field = c.ty { st = implementsMarker(st, "Copy", c.ty, 0); if !st.ok { rank = 2; }; }; };
+    if rank < 2 && anyUpdated { rank = 1; };
+    if hasBound {
+        boundRank = closureBoundRank(&b.n);
+        if boundRank < rank {
+            want = fnTraitDisplay(&b.n);
+            if size(reason.bytes) > 0 {
+                return typeError(st, catStrings(catStrings(catStrings(catStrings("this closure ", reason), ", so it is "), closureKindWord(rank)), catStrings(catStrings(" and cannot be given where ", want), " is wanted")));
+            };
+            return typeError(st, catStrings(catStrings(catStrings(catStrings("this closure is ", closureKindWord(rank)), " and cannot be given where "), want), " is wanted"));
+        };
+    };
+    // the closure struct, generic over the enclosing parameters its captures and signature use
+    structName = catStrings(catStrings(clone(st.current), "$closure$"), intText(v));
+    if size(st.current.bytes) = 0 { structName = catStrings("$closure$", intText(v)); };
+    usedTys = clone(ptys);
+    usedTys = push(usedTys, rty);
+    for c in caps { usedTys = push(usedTys, c.field); };
+    genericParams = closureTypeParamsOf(&st, &usedTys);
+    structArgs = [];
+    for p in &genericParams {
+        if indexIn(&st.sizeScope, p) >= 0 { st = addTy(st, Ty { kind: 22, name: clone(p), args: [], n: 0, flag: false, sizes: [], types: [] }); }
+        else { st = addTy(st, Ty { kind: 12, name: clone(p), args: [], n: 0, flag: false, sizes: [], types: [] }); };
+        structArgs = push(structArgs, st.ty);
+    };
+    st = namedTy(st, clone(structName), structArgs);
+    structTy = st.ty;
+    // capture-only input clauses are the struct invariant
+    invIds = [];
+    restIns = [];
+    for vid in &insRoots {
+        onlyCaps = true;
+        vnode = nodeIn(&st.nodes, vid);
+        isAssert = false;
+        if vnode is AstNode::Validation && (vnode as AstNode::Validation).value is AstValidation::ProofAssert { isAssert = true; };
+        if isAssert {
+            for id2 in closureNodes(&st, &push([], vid)) {
+                nm2 = closureNodeName(&st, id2);
+                if size(nm2.bytes) > 0 && indexIn(&capNames, &nm2) < 0 && nm2 != "return" { onlyCaps = false; };
+            };
+            if onlyCaps && size(capNames) > 0 { invIds = push(invIds, vid); } else { restIns = push(restIns, vid); };
+        } else { restIns = push(restIns, vid); };
+    };
+    outerOuts = clone(st.outs);
+    outerTe = clone(st.te);
+    outerTes = clone(st.tes);
+    outerCurrent = clone(st.current);
+    outerNames = clone(st.names);
+    st = emitName(st, clone(structName));
+    structNameNode = st.nid;
+    st = emitNames(st, &genericParams);
+    structPs = st.nid;
+    fieldIds = [];
+    for c in caps {
+        st = emitName(st, clone(c.name));
+        fnameNode = st.nid;
+        st = emitType(st, c.field);
+        st = emit(st, AstNode::Field { value: AstField { n: fnameNode, ty: st.nid } });
+        fieldIds = push(fieldIds, st.nid);
+    };
+    st = emit(st, AstNode::Fields { value: AstFields::End });
+    fieldsTail = st.nid;
+    fi = size(fieldIds) - 1;
+    while fi >= 0 [{ affirm fi + 1 >= 0; }] shrinks fi + 1 {
+        st = emit(st, AstNode::Fields { value: AstFields::Cons { head: get(fieldIds, fi), tail: fieldsTail } });
+        fieldsTail = st.nid;
+        fi = fi - 1;
+    };
+    st = emitValidations(st, &invIds);
+    st = emit(st, AstNode::Statement { value: AstStatement::StructDef { n: structNameNode, ps: structPs, fs: fieldsTail, vs: st.nid } });
+    structStmt = st.nid;
+    genOut = clone(st.genericOut);
+    genTypes = clone(st.genericTypes);
+    st = checkItem(st, true, structStmt);
+    if st.status != 0 { return st; };
+    for o in &st.outs { genOut = push(genOut, o); };
+    for ty in &st.te.types { genTypes = push(genTypes, ty); };
+    st = St { genericOut: genOut, genericTypes: genTypes, ..st };
+    if anyLinear {
+        st = St { linearTypes: st.linearTypes.insert(clone(structName)), ..st };
+        st = emitName(st, clone(structName));
+        st = emit(st, AstNode::Statement { value: AstStatement::LinearDef { n: st.nid } });
+        genOut = clone(st.genericOut);
+        genOut = push(genOut, st.nid);
+        st = St { genericOut: genOut, ..st };
+    } else {
+        // derived Clone, then Copy, where every capture allows it
+        canClone = true;
+        for c in caps { if kindOf(&st, c.field) = 11 { canClone = false; }; };
+        if canClone {
+            for c in caps { st = implementsMarker(st, "Clone", c.field, 0); if !st.ok { canClone = false; }; };
+        };
+        if canClone && HashSet::contains(&st.traits, "Clone") {
+            savedSt = st;
+            st = emitName(st, "Clone");
+            cloneNameNode = st.nid;
+            st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: cloneNameNode } });
+            cloneTraitNode = st.nid;
+            st = emit(st, AstNode::Args { value: AstArgs::End });
+            cloneArgsNode = st.nid;
+            st = emitName(st, clone(structName));
+            cloneImplName = st.nid;
+            st = emitType(st, structTy);
+            cloneImplTy = st.nid;
+            st = emit(st, AstNode::Bounds { value: AstBounds::End });
+            cloneBs = st.nid;
+            st = emitStatements(st, &[]);
+            st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: cloneTraitNode, args: cloneArgsNode, n: cloneImplName, ty: cloneImplTy, bs: cloneBs, xs: st.nid } });
+            st = checkItem(st, true, st.nid);
+            if st.status != 0 { st = savedSt; } else {
+                genOut2 = clone(st.genericOut);
+                genTypes2 = clone(st.genericTypes);
+                for o in &st.outs { genOut2 = push(genOut2, o); };
+                for ty in &st.te.types { genTypes2 = push(genTypes2, ty); };
+                st = St { genericOut: genOut2, genericTypes: genTypes2, ..st };
+                canCopy = true;
+                for c in caps { st = implementsMarker(st, "Copy", c.field, 0); if !st.ok { canCopy = false; }; };
+                if canCopy && HashSet::contains(&st.traits, "Copy") {
+                    savedSt2 = st;
+                    st = emitName(st, "Copy");
+                    copyNameNode = st.nid;
+                    st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: copyNameNode } });
+                    copyTraitNode = st.nid;
+                    st = emit(st, AstNode::Args { value: AstArgs::End });
+                    copyArgsNode = st.nid;
+                    st = emitName(st, clone(structName));
+                    copyImplName = st.nid;
+                    st = emitType(st, structTy);
+                    copyImplTy = st.nid;
+                    st = emit(st, AstNode::Bounds { value: AstBounds::End });
+                    copyBs = st.nid;
+                    st = emitStatements(st, &[]);
+                    st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: copyTraitNode, args: copyArgsNode, n: copyImplName, ty: copyImplTy, bs: copyBs, xs: st.nid } });
+                    st = checkItem(st, true, st.nid);
+                    if st.status != 0 { st = savedSt2; } else {
+                        genOut3 = clone(st.genericOut);
+                        genTypes3 = clone(st.genericTypes);
+                        for o in &st.outs { genOut3 = push(genOut3, o); };
+                        for ty in &st.te.types { genTypes3 = push(genTypes3, ty); };
+                        st = St { genericOut: genOut3, genericTypes: genTypes3, ..st };
+                    };
+                };
+            };
+        };
+    };
+    st = St { outs: outerOuts, te: outerTe, tes: outerTes, current: outerCurrent, names: outerNames, ..st };
+    // the body function: self and the closure's parameters, the captures as fields of self
+    if rank = 0 { st = wrapTy(st, 10, structTy); } else if rank = 1 { st = wrapTy(st, 11, structTy); } else { st = withTy(st, structTy); };
+    receiverTy = st.ty;
+    bodyParams = push([], "self");
+    for p in &fs.params { bodyParams = push(bodyParams, clone(p)); };
+    bodyPtys = push([], receiverTy);
+    for t in &ptys { bodyPtys = push(bodyPtys, t); };
+    sizeParams = [];
+    typeParams = [];
+    for p in &genericParams { if indexIn(&st.sizeScope, p) >= 0 { sizeParams = push(sizeParams, clone(p)); } else { typeParams = push(typeParams, clone(p)); }; };
+    bodyFs = FnSig { params: bodyParams, ptys: bodyPtys, rty: rty, sizes: sizeParams, types: typeParams, writes: [], froms: [] };
+    rewriteRoots = clone(bodyRoots);
+    for r in &restIns { rewriteRoots = push(rewriteRoots, r); };
+    for r in &outsRoots { rewriteRoots = push(rewriteRoots, r); };
+    st = closureRewrite(st, &rewriteRoots, &caps, &structName);
+    if st.status != 0 { return st; };
+    bodyName = catStrings(clone(structName), "$body");
+    st = emitSignature(st, &bodyFs);
+    bodySig = st.nid;
+    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: bodySig, term: rec.term, stmts: rec.stmts } });
+    bodyBody = st.nid;
+    st = emitNames(st, &bodyFs.params);
+    bodyPs = st.nid;
+    st = emitValidations(st, &restIns);
+    bodyIns = st.nid;
+    noProofs = [];
+    st = emitProofs(st, &noProofs);
+    bodyExports = st.nid;
+    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: bodyPs, ins: bodyIns, outs: rec.outs, body: bodyBody, exports: bodyExports } });
+    bodyValue = st.nid;
+    st = emitVal(st, bodyValue);
+    bodyExpr = st.nid;
+    st = emitName(st, clone(bodyName));
+    bodyNameNode = st.nid;
+    st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: bodyNameNode, e: bodyExpr } });
+    bodyStmt = st.nid;
+    outerOuts2 = clone(st.outs);
+    outerTe2 = clone(st.te);
+    outerTes2 = clone(st.tes);
+    outerCurrent2 = clone(st.current);
+    outerNames2 = clone(st.names);
+    st = checkItem(st, true, bodyStmt);
+    if st.status != 0 { return st; };
+    checkedAssign = st.te.node;
+    checkerFs = clone(st.fnSig);
+    genOut4 = clone(st.genericOut);
+    genTypes4 = clone(st.genericTypes);
+    for o in &st.outs { genOut4 = push(genOut4, o); };
+    for ty in &st.te.types { genTypes4 = push(genTypes4, ty); };
+    st = St { genericOut: genOut4, genericTypes: genTypes4, outs: outerOuts2, te: outerTe2, tes: outerTes2, current: outerCurrent2, names: outerNames2, ..st };
+    // a result taken from the body is written back into the checked signature
+    needsPatch = rtyFromBody;
+    for t in &checkerFs.ptys { if closureHasUnknown(&st, t) { needsPatch = true; }; };
+    if needsPatch {
+        st = zonk(st, checkerFs.rty);
+        solvedRty = st.ty;
+        if kindOf(&st, solvedRty) != 15 {
+            checkedStmt = stmtOf(&st, checkedAssign);
+            checkedValue = 0 - 1;
+            if checkedStmt is AstStatement::Assign { checkedValue = closureValueOf(&st, (checkedStmt as AstStatement::Assign).e); };
+            checkedRec = nativeFn(&st.nodes, checkedValue);
+            if checkedRec.ok {
+                sig = signatureOf(&st.nodes, checkedRec.sig);
+                zonkedPtys = [];
+                for t in &checkerFs.ptys { st = zonk(st, t); zonkedPtys = push(zonkedPtys, st.ty); };
+                st = emitTypes(st, &zonkedPtys);
+                newTs = st.nid;
+                st = emitType(st, solvedRty);
+                newRet = st.nid;
+                st = emit(st, AstNode::Signature { value: AstSignature { ts: newTs, ret: newRet, ss: sig.ss, ps: sig.ps, ws: sig.ws, fs: sig.fs } });
+                bodyNode2 = nodeIn(&st.nodes, checkedRec.body);
+                if bodyNode2 is AstNode::Body && (bodyNode2 as AstNode::Body).value is AstBody::NativeFunct {
+                    nf = (bodyNode2 as AstNode::Body).value as AstBody::NativeFunct;
+                    st = St { nodes: set(st.nodes, checkedRec.body, AstNode::Body { value: AstBody::NativeFunct { sig: st.nid, term: nf.term, stmts: nf.stmts } }), ..st };
+                };
+            };
+            fs = FnSig { rty: solvedRty, ..fs };
+        };
+    };
+    if hasBound {
+        st = makeClosureImpl(st, &structName, &b, traitArgTys, &reason);
+        if st.status != 0 { return st; };
+        if !st.ok { return typeError(st, catStrings(catStrings(catStrings(clone(st.current), " gives a closure that does not meet "), fnTraitDisplay(&b.n)), "")); };
+    };
+    return closureStructValue(st, &structName, structTy, &structArgs, &caps, expected, hasBound);
+};
+
+// Closure arguments of a call of a function with bounds, checked after its other arguments: their types come from
+// the bound's shape, with the call's types as the other arguments worked them out
+fn synthesizeClosureArgs(st: St, tm: &Template, sizeVars: &List<Int>, typeVars: &List<Int>, pts: &List<Int>, args: &List<TE>) -> St ~ {
+    out = clone(args);
+    i = 0;
+    for a in args {
+        if size(a.types) = 0 {
+            v = closureValueOf(&st, a.node);
+            if v < 0 { return typeError(st, "a closure argument the data does not give"); };
+            st = zonk(st, nth(&pts, i));
+            pt = st.ty;
+            inner = unrefOf(&st, pt);
+            found = BoundInfo { p: "", n: "", ts: [] };
+            hasB = false;
+            ix = tyAt(&st, inner);
+            if ix.kind = 12 {
+                for bb in &tm.bounds { if bb.p = ix.name && isFnTraitName(&bb.n) { found = clone(bb); hasB = true; }; };
+            };
+            traitArgTys = [];
+            if hasB {
+                traitParams2 = HashMap::lookup(&st.traitParams, &found.n, []);
+                j = 0;
+                for tp in &traitParams2 {
+                    if j < size(found.ts) {
+                        st = substitute(st, nth(&found.ts, j), &tm.sizes, sizeVars, &tm.types, typeVars);
+                        st = zonk(st, st.ty);
+                        traitArgTys = push(traitArgTys, st.ty);
+                    };
+                    j = j + 1;
+                };
+                st = synthesizeClosure(st, v, true, found, &traitArgTys, pt);
+                if st.status != 0 { return st; };
+                out = set(out, i, clone(st.te));
+            } else {
+                st = synthesizeClosure(st, v, false, found, &traitArgTys, pt);
+                if st.status != 0 { return st; };
+                out = set(out, i, clone(st.te));
+            };
+        };
+        i = i + 1;
+    };
+    return St { tes: out, ..st };
+};
+
 // A call of a function with bounds: the types of the arguments give the function's types and each meets its bounds, and
 // the call names the copy of the function for them (templateReference), which the copy step makes (MirCopies): the call
 // is checked against the function's signature and bounds alone. st.te: the call.
@@ -837,6 +1792,9 @@ fn templateCall(st: St, name: String, tm0: Template, inferred: &List<TE>) -> St 
     if st.status != 0 { return st; };
     givenArgs = clone(st.tes);
     st = templateArguments(st, &name, &pts, &givenArgs);
+    if st.status != 0 { return st; };
+    args = clone(st.tes);
+    st = synthesizeClosureArgs(st, &tm, &sizeVars, &typeVars, &pts, &args);
     if st.status != 0 { return st; };
     args = clone(st.tes);
     st = templateBounds(st, &name, &tm, &sizeVars, &typeVars);
@@ -1013,6 +1971,7 @@ fn templateArguments(st: St, name: &String, pts: &List<Int>, inferred: &List<TE>
     i = 0;
     while i < size(pts) && i < size(inferred) [{ affirm i >= 0; }] ~ {
         what = catStrings(catStrings(catStrings("argument ", intText(i + 1)), " of "), clone(name));
+        if size(get(inferred, i).types) = 0 { args = push(args, clone(get(inferred, i))); i = i + 1; } else {
         st = zonk(st, get(pts, i));
         ptz = st.ty;
         st = coerce(st, unrefOf(st, ptz), clone(get(inferred, i)));
@@ -1035,6 +1994,7 @@ fn templateArguments(st: St, name: &String, pts: &List<Int>, inferred: &List<TE>
         if st.status != 0 { return st; };
         args = push(args, arg);
         i = i + 1;
+        };
     };
     return St { tes: args, ..st };
 };
@@ -1247,6 +2207,14 @@ fn templateSizeArguments(st: St, name: &String, tm: &Template, sizeVars: &List<I
 fn checkBound(st: St, name: &String, sizes: &List<String>, sizeVars: &List<Int>, types: &List<String>, typeVars: &List<Int>, b: &BoundInfo, t: Int) -> St ~ {
     st = traitArguments(st, clone(b.n), t);
     if st.status != 0 { return st; };
+    if !st.ok && isFnTraitName(&b.n) && kindOf(&st, t) = 4 {
+        st = makeClosureImplForType(st, b, t);
+        if st.status != 0 { return st; };
+        if st.ok {
+            st = traitArguments(st, clone(b.n), t);
+            if st.status != 0 { return st; };
+        };
+    };
     if !st.ok && st.defChecking && kindOf(st, t) = 12 && size(st.forwardRep.bytes) > 0 && tyAt(st, t).name = st.forwardRep {
         hash = indexOfByteIn(&b.p, 35);
         calleePack = clone(b.p);
