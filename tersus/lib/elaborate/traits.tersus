@@ -1675,7 +1675,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
     } else {
         // derived Clone, then Copy, where every capture allows it
         canClone = true;
-        for c in caps { if kindOf(&st, c.field) = 11 { canClone = false; }; };
+        for c in caps { fk0 = kindOf(&st, c.field); if fk0 = 10 || fk0 = 11 { canClone = false; }; };
         if canClone {
             for c in caps { st = implementsMarker(st, "Clone", c.field, 0); if !st.ok { canClone = false; }; };
         };
