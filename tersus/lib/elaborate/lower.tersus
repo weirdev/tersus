@@ -5,7 +5,7 @@ import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nativ
 import elaborate::state { intText };
 import elaborate::lowerstate { PackLoopRec, simpleType, lwMalformed, Swapped, swapBuilder, Binding, GenericRec, LBlock, LDecl, LFn, LoopRec, LowSt, BoundedRec, Rv, Stmt, TDecl, Term, argOf, claim, defaultTy, forNameOf, fromCodecTy, functionType, hasInt, hasText, intAt, isMutRefTy, isRefTy, lfail, lwCat, lwCat3, lwInstanceText, lwKind, lwBaseName, lwSort, lwTextAt, newBuilder, quote, renderTy, lwSizeTokens, lwSp, tyOf, tyText, typeNameOf, unrefTy, Sig };
 import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, tempLocal, validationReadsPack, assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv, forgetRecorded, forgetRefTarget };
-import elaborate::lowerexpr { commonRefTargets, finishInto, lentNames, lowerCondition, lowerLast, lowerOperand, rvPend };
+import elaborate::lowerexpr { finishInto, lentNames, lowerCondition, lowerLast, lowerOperand, rvPend };
 import elaborate::lowerplace { lowerDerefPlace };
 
 // The lowering of a checked module to the MIR: control flow becomes blocks that jump, nested
@@ -364,7 +364,7 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
 };
 
 fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: List<Int>) -> LowSt ~ {
-    ls = forgetAssigned(ls, src, &body);
+    ls = forgetAssigned(ls, src, cond, &body);
     entry = clone(ls.bRefTargets);
     ls = newBlock(ls);
     header = ls.id;
@@ -384,43 +384,24 @@ fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: 
     ls = LowSt { bLoops: loops, ..ls };
     ls = lowerCondition(ls, src, cond, bodyB, exit);
     ls = openBlock(ls, bodyB);
-    targetsBefore = clone(ls.bRefTargets);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &body);
     ls = leaveScope(ls);
-    common = commonRefTargets(&ls.bRefTargets, &targetsBefore);
-    ls = LowSt { bRefTargets: common, ..ls };
     if ls.bHasOpen { ls = terminate(ls, gotoTerm(header)); };
     ls = LowSt { bRefTargets: entry, ..ls };
     return openBlock(ls, exit);
 };
 
-// (a local the body of a loop assigns may hold something else at the loop's head and after it)
-fn forgetAssigned(ls: LowSt, src: &List<AstNode>, body: &List<Int>) -> LowSt ~ {
-    for name in assignedIn(src, body, []) {
+// (a local the body or the condition of a loop assigns, a statement's or an expression's, may hold something else at
+// the loop's head and after it)
+fn forgetAssigned(ls: LowSt, src: &List<AstNode>, cond: Int, body: &List<Int>) -> LowSt ~ {
+    start = [];
+    if cond >= 0 { start = expressionNamesAssigned(src, cond, true, []); };
+    for name in statementNamesAssigned(src, body, true, start) {
         found = lookupBinding(&ls, &name);
         if found.found && found.b.isLocal { ls = forgetRefTarget(ls, found.b.local); };
     };
     return ls;
-};
-
-fn assignedIn(src: &List<AstNode>, stmts: &List<Int>, out: List<String>) -> List<String> ~ {
-    for s in stmts {
-        if nodeIn(src, s) is AstNode::Statement {
-            st = stmtAt(src, s);
-            if st is AstStatement::Assign { out = push(out, nameText(src, (st as AstStatement::Assign).n)); };
-            if st is AstStatement::If {
-                yes = listItems(src, (st as AstStatement::If).a);
-                no = listItems(src, (st as AstStatement::If).b);
-                out = assignedIn(src, &yes, out);
-                out = assignedIn(src, &no, out);
-            };
-            if st is AstStatement::While { inner = listItems(src, (st as AstStatement::While).xs); out = assignedIn(src, &inner, out); };
-            if st is AstStatement::Block { inner = listItems(src, (st as AstStatement::Block).xs); out = assignedIn(src, &inner, out); };
-            if st is AstStatement::PackLoop { inner = listItems(src, (st as AstStatement::PackLoop).xs); out = assignedIn(src, &inner, out); };
-        };
-    };
-    return out;
 };
 
 // A loop over the pack of a variadic function, which no copy keeps: each unrolls it (MirPacks). It is
@@ -461,7 +442,7 @@ fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName:
         takeRv = useRv(copyOp(packLocal));
         ls = emitAssign(ls, taken, &takeRv);
     };
-    ls = forgetAssigned(ls, src, &body);
+    ls = forgetAssigned(ls, src, 0 - 1, &body);
     entry = clone(ls.bRefTargets);
     ls = newBlock(ls);
     header = ls.id;

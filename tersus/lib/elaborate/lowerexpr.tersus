@@ -2,7 +2,7 @@ import data::ast::ast { AstExpression, AstNode, AstStatement, AstValue };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::state { intText };
 import elaborate::lowerstate { lwMalformed, Swapped, swapBuilder, Builder, LowSt, Op, Pend, RefTarget, Rv, Step, Term, argOf, boxInner, claim, fnType, forNameOf, hasInt, hasText, intAt, isRefTy, isTupleBase, lfail, lwBaseName, lwCat, lwCat3, lwHasByte, lwInstanceText, lwKind, lwTextAt, newBuilder, noOp, noRv, quote, lwSp, tupleParts, tyOf, typeNameOf, unrefTy, wrapType, isMutRefTy };
-import elaborate::lowerbuild { Bi, packLocalOf, packReadMark, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, definedFunction, emitAssign, emitStmt, exprAt, enterScope, findRefTarget, fnConst, gotoTerm, isFunct, isPrim, leaveScope, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, stepsText, stmtAt, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valOf, valueAt, varNameOf, forgetRefTarget };
+import elaborate::lowerbuild { Bi, forgetRecorded, packLocalOf, packReadMark, assignStmt, biOf, binaryRv, borrowRv, builtinOfExpr, connectiveOf, constOp, copyOp, definedFunction, emitAssign, emitStmt, exprAt, enterScope, findRefTarget, fnConst, gotoTerm, isFunct, isPrim, leaveScope, listRv, lookupBinding, lwBuiltinOfValue, lwShow, makeDataRv, newBlock, newLocal, opText, openBlock, opsText, pairRvOf, readFieldRv, returnTerm, stepsText, stmtAt, tempLocal, terminate, textRv, unaryRv, uniqueName, useRv, valOf, valueAt, varNameOf, forgetRefTarget };
 import elaborate::lower { buildFunction, definedParamTypes, lowerStatements, skipExpr };
 import elaborate::lowerplace { fieldCtor, lowerPlace };
 
@@ -304,8 +304,8 @@ fn lowerBlockExpr(ls: LowSt, src: &List<AstNode>, xs: Int, result: Int, ty: Int)
     return LowSt { pend: rvPend(useRv(copyOp(dest))), ty: ty, ..ls };
 };
 
-// An if that gives a value: each branch gives it to the same fresh local, and the references whose places the two
-// branches leave alike keep them after the join
+// An if that gives a value: each branch gives it to the same fresh local, and a reference either branch gave a place
+// is not known to be to any place after the join
 fn lowerIfExpr(ls: LowSt, src: &List<AstNode>, cond: Int, yes: Int, no: Int, ty: Int) -> LowSt ~ {
     ls = tempLocal(ls, ty);
     result = ls.root;
@@ -324,8 +324,8 @@ fn lowerIfExpr(ls: LowSt, src: &List<AstNode>, cond: Int, yes: Int, no: Int, ty:
     ls = finishInto(ls, result, pend);
     yesOpen = ls.bHasOpen;
     if yesOpen { ls = terminate(ls, gotoTerm(joinB)); };
-    left = clone(ls.bRefTargets);
-    ls = LowSt { bRefTargets: targetsBefore, ..ls };
+    afterYes = clone(ls.bRefTargets);
+    ls = LowSt { bRefTargets: clone(targetsBefore), ..ls };
     ls = openBlock(ls, noB);
     ls = lowerLast(ls, src, no);
     if !ls.ok { return ls; };
@@ -333,29 +333,14 @@ fn lowerIfExpr(ls: LowSt, src: &List<AstNode>, cond: Int, yes: Int, no: Int, ty:
     ls = finishInto(ls, result, pend);
     noOpen = ls.bHasOpen;
     if noOpen { ls = terminate(ls, gotoTerm(joinB)); };
-    common = commonRefTargets(&left, &ls.bRefTargets);
-    ls = LowSt { bRefTargets: common, ..ls };
+    // (a borrow made in one branch is not what the local holds where the branches meet)
+    afterNo = clone(ls.bRefTargets);
+    joined = size(targetsBefore);
+    ls = LowSt { bRefTargets: targetsBefore, ..ls };
+    ls = forgetRecorded(ls, &afterYes, joined);
+    ls = forgetRecorded(ls, &afterNo, joined);
     if yesOpen || noOpen { ls = openBlock(ls, joinB); };
     return LowSt { pend: rvPend(useRv(copyOp(result))), ty: ty, ..ls };
-};
-
-// The places two branches both leave each reference local at
-fn commonRefTargets(left: &List<RefTarget>, right: &List<RefTarget>) -> List<RefTarget> ~ {
-    out = [];
-    for l in left {
-        for r in right {
-            if l.local = r.local && l.root = r.root && stepsText(&l.steps) = stepsText(&r.steps) { out = push(out, clone(l)); };
-        };
-    };
-    return out;
-};
-
-// The place a reference local is to after an assignment: one, or none
-fn setRefTarget(ls: LowSt, dest: Int, known: Bool, root: Int, steps: List<Step>) -> LowSt ~ {
-    targets = [];
-    for t in &ls.bRefTargets { if t.local != dest { targets = push(targets, clone(t)); }; };
-    if known { targets = push(targets, RefTarget { local: dest, root: root, steps: steps }); };
-    return LowSt { bRefTargets: targets, ..ls };
 };
 
 fn hasPathSep(name: &String) -> Bool ~ {
@@ -963,7 +948,7 @@ fn mayChange(ls: &LowSt, src: &List<AstNode>, e: Int, rest: &List<Int>) -> Bool 
     if found.found && found.b.isLocal && hasInt(&ls.bMutBorrowed, found.b.local) { return true; };
     if hasText(&ls.bLent, &var) { return true; };
     assigned = [];
-    for r in rest { assigned = assignedIn(src, r, assigned); };
+    for r in rest { assigned = assignedInExpression(src, r, assigned); };
     return hasText(&assigned, &var);
 };
 
@@ -1030,25 +1015,25 @@ fn lowerOperands(ls: LowSt, src: &List<AstNode>, references: &List<Int>, args: &
 // ---- names an expression or statements assign, lend or name ----
 
 // The variables an expression assigns or binds again
-fn assignedIn(src: &List<AstNode>, e: Int, out: List<String>) -> List<String> ~ {
+fn assignedInExpression(src: &List<AstNode>, e: Int, out: List<String>) -> List<String> ~ {
     if !(nodeIn(src, e) is AstNode::Expression) { return out; };
     x = exprAt(src, e);
     if x is AstExpression::F {
         call = x as AstExpression::F;
-        out = assignedIn(src, call.f, out);
-        for a in listItems(src, call.xs) { out = assignedIn(src, a, out); };
+        out = assignedInExpression(src, call.f, out);
+        for a in listItems(src, call.xs) { out = assignedInExpression(src, a, out); };
         return out;
     };
     if x is AstExpression::IfExpr {
         branch = x as AstExpression::IfExpr;
-        return assignedIn(src, branch.b, assignedIn(src, branch.a, assignedIn(src, branch.c, out)));
+        return assignedInExpression(src, branch.b, assignedInExpression(src, branch.a, assignedInExpression(src, branch.c, out)));
     };
     if x is AstExpression::BlockExpr {
         block = x as AstExpression::BlockExpr;
         for s in listItems(src, block.xs) { out = statementAssigned(src, s, out); };
-        return assignedIn(src, block.e, out);
+        return assignedInExpression(src, block.e, out);
     };
-    if x is AstExpression::Ascribed { return assignedIn(src, (x as AstExpression::Ascribed).e, out); };
+    if x is AstExpression::Ascribed { return assignedInExpression(src, (x as AstExpression::Ascribed).e, out); };
     return out;
 };
 
@@ -1058,31 +1043,31 @@ fn statementAssigned(src: &List<AstNode>, s: Int, out: List<String>) -> List<Str
     if stmt is AstStatement::Assign {
         a = stmt as AstStatement::Assign;
         if isFunctionValue(src, a.e) { return out; };
-        return assignedIn(src, a.e, push(out, nameText(src, a.n)));
+        return assignedInExpression(src, a.e, push(out, nameText(src, a.n)));
     };
     if stmt is AstStatement::Let {
         l = stmt as AstStatement::Let;
-        return assignedIn(src, l.e, push(out, nameText(src, l.n)));
+        return assignedInExpression(src, l.e, push(out, nameText(src, l.n)));
     };
     if stmt is AstStatement::AssignDeref {
         d = stmt as AstStatement::AssignDeref;
-        return assignedIn(src, d.b, assignedIn(src, d.a, namesIn(src, d.a, out)));
+        return assignedInExpression(src, d.b, assignedInExpression(src, d.a, namesIn(src, d.a, out)));
     };
-    if stmt is AstStatement::Return { return assignedIn(src, (stmt as AstStatement::Return).e, out); };
+    if stmt is AstStatement::Return { return assignedInExpression(src, (stmt as AstStatement::Return).e, out); };
     if stmt is AstStatement::Block {
         for inner in listItems(src, (stmt as AstStatement::Block).xs) { out = statementAssigned(src, inner, out); };
         return out;
     };
     if stmt is AstStatement::If {
         branch = stmt as AstStatement::If;
-        out = assignedIn(src, branch.e, out);
+        out = assignedInExpression(src, branch.e, out);
         for inner in listItems(src, branch.a) { out = statementAssigned(src, inner, out); };
         for inner in listItems(src, branch.b) { out = statementAssigned(src, inner, out); };
         return out;
     };
     if stmt is AstStatement::While {
         w = stmt as AstStatement::While;
-        out = assignedIn(src, w.e, out);
+        out = assignedInExpression(src, w.e, out);
         for inner in listItems(src, w.xs) { out = statementAssigned(src, inner, out); };
         return out;
     };
