@@ -329,6 +329,16 @@ sets. Original block IDs are retained so loop specifications keep valid
 references. Uncalled Drop/Clone implementations are not pruned at this boundary.
 `forNative` still removes proof metadata only for emitter data.
 
+`monomorphizeOwnershipWith` fuses adjacent Mono and ownership calls only when
+functions are generic. Its `pass mono-ownership` request carries strict MIR3;
+the native entry specializes it and feeds the existing ownership reader token
+records without another text round trip. It returns the specialized MIR3 and
+owned MIR2 receipts, both consumed by the host, so `restoreOwnership` remains
+the metadata authority. A program without generic functions still uses the
+original MIR2 ownership request and need not serialize its proof AST as MIR3.
+The separate `pass mono` and `pass ownership` entries remain available for
+staged comparisons. Expansion and list lowering stay before both passes.
+
 The emitter executable includes the ownership request dispatcher. The pinned
 stage-0 seed runs reference-write expansion and ownership on every program the
 host builds for itself (the emitter, checker, eraser, parser and validator) and
