@@ -618,10 +618,10 @@ testValidateWhile =
             )
         , -- and the loop proves no more than it should: not a wrong result, not a bound that fails on exit
           proofRefused "return = n + 1 (in count)" (callLoopWith "affirm i <= n;" "n + 1" "while !done(i, n)" ++ "return count(3);")
-        , -- (a loop invariant is checked at the loop, its second check here; the refusal names that check, not its text)
-          proofRefused loopCheck2 (callLoopWith "affirm i < n;" "n" "while !done(i, n)" ++ "return count(3);")
+        , -- (a loop invariant is checked at the loop, its second check here; the refusal names that invariant)
+          proofRefused "the invariant i < n of the loop at block 1 (in count)" (callLoopWith "affirm i < n;" "n" "while !done(i, n)" ++ "return count(3);")
         , -- a Boolean with nothing said of it gives the body nothing
-          proofRefused loopCheck2 (callLoopWith "affirm i <= n;" "n" "while flag(i, n)" ++ "return count(3);")
+          proofRefused "the invariant i <= n of the loop at block 1 (in count)" (callLoopWith "affirm i <= n;" "n" "while flag(i, n)" ++ "return count(3);")
         , -- and what the test gave is of i as it was tested, not as the body changes it
           proofRefused "i < n (in count)" (callLoopFunctions ++ "fn count(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { i = 0; while more(i, n) [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; affirm i < n; }; return i; }; return count(3);")
         ]
@@ -637,7 +637,6 @@ testValidateWhile =
                     | noVerdict e || any (`isInfixOf` e) ["does not model yet", "internal compiler error", "Internal error"] -> Just ("No verdict: " ++ e)
                     | ("Could not prove: " ++ obligation) `isInfixOf` e -> Nothing
                     | otherwise -> Just ("Expected Could not prove: " ++ obligation ++ ", got: " ++ e)
-    loopCheck2 = "an obligation could not be proved by the Tersus validator (in count, block 1, step 1)"
     callLoopFunctions =
         "fn done(i: Int, n: Int) -> Bool [{ }] [{ affirm return = (i >= n); }] { return i >= n; };\
         \fn more(i: Int, n: Int) -> Bool [{ }] [{ affirm return = (i < n); }] { return i < n; };\
