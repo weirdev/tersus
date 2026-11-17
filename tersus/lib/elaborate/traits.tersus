@@ -832,7 +832,8 @@ fn closureNodes(st: &St, roots: &List<Int>) -> List<Int> ~ {
 fn closureParent(st: &St, ids: &List<Int>, id: Int) -> Int ~ {
     for n in ids {
         if n >= 0 && n < size(st.nodes) {
-            for r in childRefs(&nodeIn(&st.nodes, n)) { if r = id { return n; }; };
+            parentNode = nodeIn(&st.nodes, n);
+            for r in childRefs(&parentNode) { if r = id { return n; }; };
         };
     };
     return 0 - 1;
@@ -1568,7 +1569,8 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
             cloneImplTy = st.nid;
             st = emit(st, AstNode::Bounds { value: AstBounds::End });
             cloneBs = st.nid;
-            st = emitStatements(st, &[]);
+            noStmts = [];
+            st = emitStatements(st, &noStmts);
             st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: cloneTraitNode, args: cloneArgsNode, n: cloneImplName, ty: cloneImplTy, bs: cloneBs, xs: st.nid } });
             st = checkItem(st, true, st.nid);
             if st.status != 0 { st = savedSt; } else {
@@ -1593,7 +1595,8 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
                     copyImplTy = st.nid;
                     st = emit(st, AstNode::Bounds { value: AstBounds::End });
                     copyBs = st.nid;
-                    st = emitStatements(st, &[]);
+                    noStmts = [];
+            st = emitStatements(st, &noStmts);
                     st = emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: copyTraitNode, args: copyArgsNode, n: copyImplName, ty: copyImplTy, bs: copyBs, xs: st.nid } });
                     st = checkItem(st, true, st.nid);
                     if st.status != 0 { st = savedSt2; } else {
