@@ -1443,7 +1443,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
         isCopy = st.ok;
         field = capTy;
         ck = kindOf(&st, capTy);
-        if isMove { field = capTy; }
+        if isMove || linear { field = capTy; }
         else if updated { if ck != 10 && ck != 11 { st = wrapTy(st, 11, capTy); field = st.ty; }; }
         else if moved { field = capTy; }
         else if isCopy { field = capTy; }
