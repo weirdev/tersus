@@ -1093,7 +1093,7 @@ fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName
                                 st = closureCaptureExpr(st, &cap, true);
                                 oneArg = push([], st.nid);
                                 st = emitBuiltinCall(st, "DerefOf", &oneArg);
-                                st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::AssignDeref { a: st.nid, b: a.e } }), ..st };
+                                if id >= 0 && id < size(st.nodes) { st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::AssignDeref { a: st.nid, b: a.e } }), ..st }; };
                             } else if recvKind = 11 {
                                 st = emitVar(st, "self");
                                 selfNode = st.nid;
@@ -1105,7 +1105,7 @@ fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName
                                 fv = st.nid;
                                 args1 = push([], derefNode);
                                 st = emitCall(st, fv, &args1);
-                                st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::AssignDeref { a: st.nid, b: a.e } }), ..st };
+                                if id >= 0 && id < size(st.nodes) { st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::AssignDeref { a: st.nid, b: a.e } }), ..st }; };
                             } else {
                                 ctorArgs = [];
                                 ctorNames = [];
@@ -1120,7 +1120,7 @@ fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName
                                 st = emitCall(st, st.nid, &ctorArgs);
                                 callNode = st.nid;
                                 st = emitName(st, "self");
-                                st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::Assign { n: st.nid, e: callNode } }), ..st };
+                                if id >= 0 && id < size(st.nodes) { st = St { nodes: set(st.nodes, id, AstNode::Statement { value: AstStatement::Assign { n: st.nid, e: callNode } }), ..st }; };
                             };
                             node = nodeIn(&st.nodes, id);
                         };
@@ -1142,7 +1142,7 @@ fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName
                         if parent >= 0 && closureHeadKey(&st, parent) = "DerefOf" { derefParent = true; };
                         st = closureCaptureExpr(st, &cap, derefParent);
                         newNode = nodeIn(&st.nodes, st.nid);
-                        st = St { nodes: set(st.nodes, id, newNode), ..st };
+                        if id >= 0 && id < size(st.nodes) { st = St { nodes: set(st.nodes, id, newNode), ..st }; };
                     };
                 };
             };
@@ -1157,7 +1157,7 @@ fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName
                         cap = nthCap(caps, ci);
                         st = closureCaptureProof(st, &cap, structName);
                         newNode = nodeIn(&st.nodes, st.nid);
-                        st = St { nodes: set(st.nodes, id, newNode), ..st };
+                        if id >= 0 && id < size(st.nodes) { st = St { nodes: set(st.nodes, id, newNode), ..st }; };
                     };
                 };
             };
