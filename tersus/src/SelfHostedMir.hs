@@ -8,7 +8,7 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.List (find, isInfixOf, isPrefixOf, nub, sortOn)
 import FieldPaths (fieldPaths)
 import MirMoves (liveness)
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe, isNothing)
 import Control.Applicative ((<|>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -1813,7 +1813,7 @@ directCall types invariants rules caller callee args (M.Local dest) termInfo rec
     -- (a result under one parameter is that parameter's referent only when it has its type; a result that is a part
     -- of it is placed by the caller's may-places, which know the part)
     identityFrom name = case lookup name paramNameLocals >>= (\local -> lookup local (zip params [0 ..])) of
-        Just idx -> identityResult callee idx
+        Just idx -> identityResult types callee idx
         Nothing -> False
     -- (what the callee leaves in a held parameter's field: an arbitrary value of its type, which the callee's output
     -- contract speaks of; the holder after the call is the one given with that value there)
@@ -2133,8 +2133,8 @@ operandLocal _ = Nothing
 -- reference from one of its arguments. A local lent two different places, and
 -- what is copied from it, gets none here (the may-places, candidatePlaces,
 -- describe it), and is listed apart.
-borrowsAgreed :: Map.Map Name M.Function -> M.Function -> (Map.Map M.Local (M.Local, [M.RefStep]), Set.Set M.Local)
-borrowsAgreed functions fn = loop (Map.empty, Set.empty)
+borrowsAgreed :: Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> M.Function -> (Map.Map M.Local (M.Local, [M.RefStep]), Set.Set M.Local)
+borrowsAgreed types functions fn = loop (Map.empty, Set.empty)
   where
     stmts = concatMap M.blockStatements (Map.elems (M.fnBlocks fn))
     terms = map M.blockTerminator (Map.elems (M.fnBlocks fn))
@@ -2147,7 +2147,7 @@ borrowsAgreed functions fn = loop (Map.empty, Set.empty)
         , [from] <- [M.specFrom (M.fnSpec callee)]
         , Just idx <- [lookup from (zip (paramNamesOf callee) [0 ..])]
         , idx < length args
-        , identityResult callee idx
+        , identityResult types callee idx
         , M.Copy src <- [args !! idx]
         ]
     loop state@(known, conflicted) =
@@ -2158,10 +2158,12 @@ borrowsAgreed functions fn = loop (Map.empty, Set.empty)
          in if next == state then state else loop next
 
 -- (a result under a parameter is that parameter's referent itself only when the callee's checked origins are that
--- parameter alone and the result has its type: one that is a part of it is placed by the may-places, candidatePlaces)
-identityResult :: M.Function -> Int -> Bool
-identityResult callee idx = case (M.fnReturns callee, drop idx (M.fnParams callee)) of
-    (Just result, param : _) | Just decl <- Map.lookup param (M.fnLocals callee) -> M.fnFrom callee == [param] && unref result == unref (M.localType decl)
+-- parameter alone and the parameter's type has, completely, exactly one place of the result's type, the whole of it;
+-- a result that may be a part of it is placed by the may-places, candidatePlaces, or not at all)
+identityResult :: Map.Map Name M.TypeDecl -> M.Function -> Int -> Bool
+identityResult types callee idx = case (M.fnReturns callee, drop idx (M.fnParams callee)) of
+    (Just result, param : _) | Just decl <- Map.lookup param (M.fnLocals callee) ->
+        M.fnFrom callee == [param] && fieldPaths True types (unref result) (unref (M.localType decl)) == Just [[]]
     _ -> False
 
 paramNamesOf :: M.Function -> [Variable]
@@ -2255,12 +2257,15 @@ heldParams types functions fn = do
     pure held
   where
     blocks = Map.elems (M.fnBlocks fn)
-    -- (a parameter of a type this cannot see into is not held: what a call does through it is the caller's to make
-    -- stale, heldStale)
+    -- (a parameter is a reference, of a type whose places holding references are all known, or of one this cannot
+    -- see into or does not support: only the second can be held; what a call does through the third the caller makes
+    -- stale, as for any value given that may hold a reference, callStale)
     one param = do
         ty <- M.localType <$> Map.lookup param (M.fnLocals fn)
-        let leaves = if referenceType ty then [] else fromMaybe [] (referenceLeaves types ty)
-        pure (param, leaves)
+        pure (param, case (referenceType ty, referenceLeaves types ty) of
+            (True, _) -> []
+            (False, Just leaves) -> leaves
+            (False, Nothing) -> [])
     assigned param = any (\blk -> any (\st -> case st of M.Assign d _ -> d == param; M.Peek d _ -> d == param; _ -> False) (M.blockStatements blk) || case M.blockTerminator blk of M.Call _ _ d _ -> d == param; _ -> False) blocks
     mutatesSlots blk = any slotWrite (M.blockStatements blk) || case M.blockTerminator blk of
         M.Call (M.Const (M.CFn name)) _ _ _ -> case Map.lookup name functions of
@@ -2586,7 +2591,7 @@ aliasingOf types functions fn = alias
     stmts = concatMap M.blockStatements (Map.elems blocks)
     terms = map M.blockTerminator (Map.elems blocks)
     locals = Map.toList (M.fnLocals fn)
-    (agreed, joined) = borrowsAgreed functions fn
+    (agreed, joined) = borrowsAgreed types functions fn
     tracked = prune agreed
     -- (a reference also assigned something borrowsOf does not follow may be to another place)
     sources = Map.fromListWith (++) ([(d, [assignedFrom rv]) | M.Assign d rv <- stmts] ++ [(d, [Nothing]) | M.Peek d _ <- stmts] ++ [(d, [callSource t]) | t@(M.Call _ _ d _) <- terms])
@@ -2600,7 +2605,7 @@ aliasingOf types functions fn = alias
         , [from] <- M.specFrom (M.fnSpec callee)
         , Just idx <- lookup from (zip (paramNamesOf callee) [0 ..])
         , idx < length args
-        , identityResult callee idx
+        , identityResult types callee idx
         , M.Copy src <- args !! idx = Just (Just src)
     callSource _ = Nothing
     prune m =
@@ -2862,7 +2867,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 _ -> do
                     (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
                     pure (cs, [], [], bb)
-            if null posts && null heldPosts && null (heldStale functions alias calleeOp args) then Just () else Nothing
+            if null posts && null heldPosts && null (callStale calleeOp args) then Just () else Nothing
             (left, b3) <- operand (let (_, a, _) = compare in a) b2
             (right, b4) <- operand (let (_, _, c) = compare in c) b3
             let (r, _, _) = compare
@@ -2937,7 +2942,9 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                     (r, bb') <- operand a bb
                     pure (rs ++ [r], bb')) ([], b1) args
                 let _ = argRefs
-                (heldSteps, b2') <- havocAll endDefined (filter (/= dest) (heldStale functions alias (M.Copy local) args)) b2
+                let stale = filter (/= dest) (callStale (M.Copy local) args)
+                guard (all (checkedWhenStale endDefined (Set.toList (aliasEscaped alias))) stale)
+                (heldSteps, b2') <- havocAll endDefined stale b2
                 (typeFacts, b3) <- typeSteps rules types invariants fn dest b2'
                 (destSteps, b4) <- afterChange endDefined True dest b3
                 Just (heldSteps ++ [step "Havoc" [("local", MInt (toInteger (localNum dest)))]] ++ typeFacts ++ destSteps, jump target, b4)
@@ -2960,12 +2967,10 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             (heldWrites, written, bw) <- case Map.lookup name functions of
                 Just callee -> foldM (heldArg endDefined callee args) ([], [], b'') heldPosts
                 _ -> pure ([], [], b'')
-            -- (what the call may change through references held in what it is given becomes arbitrary; where the
-            -- function has a reference lent more than one place, or the call writes a held field, a local given its
-            -- type's facts back has to be one the change cannot break)
-            let stale = filter (/= dest) (heldStale functions alias calleeOp args)
-                guarded = not (Set.null (aliasJoined alias)) || not (null heldPosts)
-            guard (not guarded || all (\l -> l `elem` written || checkedWhenStale endDefined (Set.toList (aliasEscaped alias) ++ written) l) stale)
+            -- (what the call may change through references held in what it is given becomes arbitrary, and a local
+            -- given its type's facts back has to be one the change cannot break)
+            let stale = filter (/= dest) (callStale calleeOp args)
+            guard (all (\l -> l `elem` written || checkedWhenStale endDefined (Set.toList (aliasEscaped alias) ++ written) l) stale)
             (heldSteps, bh) <- havocAll endDefined (filter (`notElem` written) stale) bw
             (typeFacts, b''') <- typeSteps rules types invariants fn dest bh
             (destSteps, bd) <- afterChange endDefined True dest b'''
@@ -3485,6 +3490,15 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             fake = fn{M.fnLocals = Map.insert local (M.LocalDecl (unref refTy) Nothing) (M.fnLocals fn)}
         (facts, b2) <- typeSteps rules types invariants fake local b1
         pure (step "Havoc" [("local", MInt (localNum local))] : facts, value, b2)
+    -- What a call may change through what it is given: master's heldStale, and, when a value given may hold a
+    -- reference this cannot see into (a type parameter, a type it does not describe), every place a reference
+    -- escaped from and whatever holds a reference the bridge cannot place
+    callStale calleeOp args =
+        let opaque = any (\arg -> maybe False (\l -> maybe False (\ty -> typeContainsReferences types (unref ty) && isNothing (referenceLeaves types (unref ty))) (M.localType <$> Map.lookup l (M.fnLocals fn))) (operandLocal arg)) args
+            builtin = case calleeOp of
+                M.Const (M.CFn name) -> "builtin::" `isPrefixOf` name
+                _ -> False
+         in nub (heldStale functions alias calleeOp args ++ if opaque && not builtin then Set.toList (Set.union (aliasEscaped alias) (aliasUnplaced alias)) else [])
     resultPlace defined dest b0 = case (Map.member dest (aliasBorrows alias), completeTargets dest) of
         (False, Just [(owner, path)]) | maybe False (Set.member owner) defined -> do
             (more, placeRef, b1) <- placeRefOf True (localValue owner) path b0
