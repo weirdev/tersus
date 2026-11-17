@@ -23,6 +23,12 @@ testStdGraph :: Test
 testStdGraph = TestList "testStdGraph"
     [ testCase "the compiler libraries are package std, the List and Box drops are core's" coreFacts
     , testCase "a library source in the tersuslib shape is refused" tersuslibRefused
+    , testCase "a generic type's derived Clone reaches its instances in another module and the copies of a function with bounds" $
+        case programOf (defaultLoadOptions, []) [("app/package.tersus", ""), ("app/util/util.tersus", "struct Bag<K> { xs: List<K> };\nimpl<K> Clone for Bag<K> { };\nstruct Plain<K> { xs: List<K> };"), ("app/main.tersus", "import app::util { Bag, Plain };\nfn twice<K: Clone>(b: &Bag<K>) -> Int { c = clone(b); return size(c.xs) * 2; };\nb = Bag { xs: [1, 2] };\np = Plain { xs: [3] };\nreturn twice(&b) + size(p.xs);")] of
+            Left e -> Just ("the package did not compile: " ++ e)
+            Right program ->
+                let cloneOf owner = fmap (fmap fst . ownershipClone) (Map.lookup owner =<< M.progOwnership program)
+                 in testAssertEq (cloneOf "app$util$util$Bag<Int>", cloneOf "app$util$util$Plain<Int>") (Just (Just "std$core$ownership$Clone"), Just Nothing)
     , testCase "a program's own Eq is its build's Eq, not std's" $
         runs [("app/package.tersus", "Eq = main::Eq;"), ("app/main.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; struct P { a: Int }; impl Eq for P { }; p = P { a: 1 }; if p = p { return 1; }; return 0;")] "1"
             <> providerIs [("app/package.tersus", "Eq = main::Eq;"), ("app/main.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; struct P { a: Int }; impl Eq for P { }; p = P { a: 1 }; if p = p { return 1; }; return 0;")] "Eq" "Eq"

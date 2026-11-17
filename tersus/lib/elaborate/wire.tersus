@@ -246,7 +246,8 @@ fn wireComplete(st: St) -> St ~ {
             st = listTy(st, argAt(&st, nth(&ty.args, 0), 0));
         };
         // (the facts are of declared types: the language's own, an array among them, have none)
-        if ty.kind = 4 && !wireDeferred(&st, t) && wireDeclared(&st, &ty.name) {
+        // (a generic's name alone is its declaration, whose row is its candidate impls, not an instance's selection)
+        if ty.kind = 4 && !wireDeferred(&st, t) && wireDeclared(&st, &ty.name) && !(size(ty.args) = 0 && st.generics.contains(&ty.name)) {
             owner = rawInstanceName(&st, t);
             if !seen.contains(&owner) && !checked.contains(&owner) {
                 seen = seen.insert(clone(owner));
