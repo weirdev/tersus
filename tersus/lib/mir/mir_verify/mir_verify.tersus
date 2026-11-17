@@ -1409,7 +1409,13 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
             mb = boxInnerOf(p, d);
             if mb.ok {
                 held = mb.ty;
-                if !fits(p, funcs, f, locals, held, o) { out = expectedWhy(p, f, locals, held, o); };
+                // (boxing an array whose size no use decided hides the size, as an unsize does)
+                hidden = false;
+                if held is Type::TArray && (held as Type::TArray).size is Size::SAny {
+                    ot = operandTy(p, funcs, f, locals, o);
+                    if ot.ok && ot.ty is Type::TArray && (ot.ty as Type::TArray).size is Size::SVar && sub(p, Box::unbox((held as Type::TArray).elem), Box::unbox((ot.ty as Type::TArray).elem)) { hidden = true; };
+                };
+                if !hidden && !fits(p, funcs, f, locals, held, o) { out = expectedWhy(p, f, locals, held, o); };
             } else if d is Type::TNamed && namedList(p, (d as Type::TNamed).name) {
                 iargs = instanceArgs((d as Type::TNamed).name);
                 ot = operandTy(p, funcs, f, locals, o);
@@ -1455,7 +1461,8 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
                 if de is Type::TArray && oe is Type::TArray {
                     dsz = (de as Type::TArray).size;
                     osz = (oe as Type::TArray).size;
-                    if dsz is Size::SAny && !(osz is Size::SAny) && sub(p, Box::unbox((de as Type::TArray).elem), Box::unbox((oe as Type::TArray).elem)) { okUn = true; };
+                    // (a Box made of an array whose size no use decided is already of any size: MakeBox)
+                    if dsz is Size::SAny && (!(osz is Size::SAny) || typeEq(&de, &oe)) && sub(p, Box::unbox((de as Type::TArray).elem), Box::unbox((oe as Type::TArray).elem)) { okUn = true; };
                 };
             };
             if !okUn { out = one("unsize needs a Box of an array, and a result that is a Box of an array of any size"); };
