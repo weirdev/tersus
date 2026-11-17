@@ -1397,6 +1397,8 @@ fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<
     for a in &structArgs { ax = tyAt(&st, a); if ax.kind = 22 { sizeParams = push(sizeParams, clone(ax.name)); } else if ax.kind = 12 { typeParams = push(typeParams, clone(ax.name)); }; };
     fieldExprs = [];
     cloneFieldNames = [];
+    bodyStmts = [];
+    j = 0;
     for c in caps {
         st = emitVar(st, "self");
         selfNode = st.nid;
@@ -1414,14 +1416,20 @@ fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<
             st = emitCall(st, st.nid, &cargs);
             exprNode = st.nid;
         };
-        fieldExprs = push(fieldExprs, exprNode);
+        vname = catStrings("v", intText(j));
+        st = emitName(st, clone(vname));
+        st = emit(st, AstNode::Statement { value: AstStatement::Let { n: st.nid, e: exprNode } });
+        bodyStmts = push(bodyStmts, st.nid);
+        st = emitVar(st, clone(vname));
+        fieldExprs = push(fieldExprs, st.nid);
         cloneFieldNames = push(cloneFieldNames, clone(c.name));
+        j = j + 1;
     };
     st = emitCtorValue(st, clone(structName), &structArgs, &cloneFieldNames);
     st = emitVal(st, st.nid);
     st = emitCall(st, st.nid, &fieldExprs);
     st = emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
-    bodyStmts = push([], st.nid);
+    bodyStmts = push(bodyStmts, st.nid);
     st = emitStatements(st, &bodyStmts);
     bodyNode = st.nid;
     st = wrapTy(st, 10, structTy);
