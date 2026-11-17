@@ -592,8 +592,12 @@ reassignedParams types functions fn =
     , Just name <- [M.localName d]
     , name `notElem` M.specMutParams (M.fnSpec fn)
     , Set.member p changed
+    -- (a held parameter, never assigned, changes only through its update reference: its contract speaks of what
+    -- that reference is to after the call, which the caller sees; see heldParams)
+    , p `notElem` held
     ]
   where
+    held = map fst (fromMaybe [] (heldParams types functions fn))
     alias = aliasingOf types functions fn
     changed = Set.fromList (concatMap (changedBy alias) statements ++ concat [dest : staleAfter alias True dest | M.Call _ _ dest _ <- terminators] ++ concat (Map.elems (aliasCallChanges alias)))
     statements = concatMap M.blockStatements (Map.elems (M.fnBlocks fn))
@@ -3485,7 +3489,9 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             _ -> freshOf refTy current
         (rebuild, newHolder, afterCheck) <- updateRefOf (localValue holder) path pointee afterRead
         (deeper, afterDeeper) <- holderUpdates checked defined (holder : seen) holder newHolder afterCheck
-        pure (steps ++ reads ++ rebuild ++ [step "Assign" [("local", MInt (localNum holder)), ("value", newHolder)]] ++ deeper, afterDeeper)) ([], b0)
+        -- (and the references whose chain of borrows passes through the rebuilt holder read it again)
+        (views, afterViews) <- rebindThrough defined holder afterDeeper
+        pure (steps ++ reads ++ rebuild ++ [step "Assign" [("local", MInt (localNum holder)), ("value", newHolder)]] ++ deeper ++ views, afterViews)) ([], b0)
             [entry | entry@((holder, _), _) <- describedHolders defined [root], holder `notElem` checked, holder `notElem` seen]
     -- (an arbitrary value of what a reference of the type is to: only of a type with no invariant)
     freshOf refTy b = do
