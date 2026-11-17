@@ -94,7 +94,7 @@ fn insertShared(records: List<List<Token>>, tables: &List<List<Token>>) -> List<
     };
     return out;
 };
-fn emitFull(out: FullOutput) -> Int ~ {
+fn emitFull(out: &FullOutput) -> Int ~ {
     n = 0;
     for row in &out.records { n = n + tokenLine(row).print(); writeByte(toByte(10)); n = n + 1; };
     n = n + "data ".print() + String::fromInt(size(out.data.nodes) + 2).print(); writeByte(toByte(10));
