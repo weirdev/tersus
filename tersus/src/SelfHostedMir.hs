@@ -1754,7 +1754,9 @@ directCall types invariants rules caller callee args (M.Local dest) termInfo rec
     -- (a parameter given a value that holds an update reference in a field: what the callee writes there is the
     -- one thing it can change of it; see heldParams)
     held <- heldParams types (buildFunctions b0) callee
-    guard (all (\param -> param `notElem` M.fnMutBorrowed callee || maybe False (not . any (\(_, ty) -> case ty of TMutRef{} -> True; _ -> False)) (M.localType <$> Map.lookup param (M.fnLocals callee) >>= referenceLeaves types . unref)) params)
+    -- (an update parameter whose type shows an update reference in it is outside the subset; one whose type this
+    -- cannot see into is the caller's to make stale, heldStale)
+    guard (all (\param -> param `notElem` M.fnMutBorrowed callee || maybe True (not . any (\(_, ty) -> case ty of TMutRef{} -> True; _ -> False)) (M.localType <$> Map.lookup param (M.fnLocals callee) >>= referenceLeaves types . unref)) params)
     (snapshots, b1) <- foldM snapshot ([], b0) args
     (postSteps, postLocals, b1'') <- foldM (addPost snapshots) ([], [], b1) (zip params args)
     (heldSteps, heldLocals, b1') <- foldM (heldPost snapshots) ([], [], b1'') held
@@ -2253,9 +2255,11 @@ heldParams types functions fn = do
     pure held
   where
     blocks = Map.elems (M.fnBlocks fn)
+    -- (a parameter of a type this cannot see into is not held: what a call does through it is the caller's to make
+    -- stale, heldStale)
     one param = do
         ty <- M.localType <$> Map.lookup param (M.fnLocals fn)
-        leaves <- if referenceType ty then pure [] else referenceLeaves types ty
+        let leaves = if referenceType ty then [] else fromMaybe [] (referenceLeaves types ty)
         pure (param, leaves)
     assigned param = any (\blk -> any (\st -> case st of M.Assign d _ -> d == param; M.Peek d _ -> d == param; _ -> False) (M.blockStatements blk) || case M.blockTerminator blk of M.Call _ _ d _ -> d == param; _ -> False) blocks
     mutatesSlots blk = any slotWrite (M.blockStatements blk) || case M.blockTerminator blk of
