@@ -63,19 +63,22 @@ compareAdapters tool p = do
 compareRaw :: IO Tool -> Program -> IO TestResult
 compareRaw tool p = case writeLowered (unit p) of
     Error e -> pure (Just e)
-    Ok input -> do
-        selected <- tool
-        case selected of
-            ToolNative exe -> do
-                mono@(code,monoOut,monoErrors) <- runWithInputFull exe ("pass mono\n" ++ input)
-                fused <- runWithInputFull exe ("pass mono-ownership\n" ++ input)
-                case (code,monoErrors,readLowered monoOut) of
-                    (ExitSuccess,"",Ok value) -> do
-                        (ownedCode,ownedOut,ownedErrors) <- runWithInputFull exe ("pass ownership\n" ++ writeProgramWithGhosts (ownershipInput (lowProgram value)))
-                        pure (testAssertEq fused (ownedCode,monoOut ++ ownedOut,ownedErrors))
-                    _ -> pure (testAssertEq fused mono)
-            ToolFailed e -> pure (Just e)
-            _ -> pure (Just "raw fusion controls require a native emitter")
+    Ok input -> compareRawInput tool input
+
+compareRawInput :: IO Tool -> String -> IO TestResult
+compareRawInput tool input = do
+    selected <- tool
+    case selected of
+        ToolNative exe -> do
+            mono@(code,monoOut,monoErrors) <- runWithInputFull exe ("pass mono\n" ++ input)
+            fused <- runWithInputFull exe ("pass mono-ownership\n" ++ input)
+            case (code,monoErrors,readLowered monoOut) of
+                (ExitSuccess,"",Ok value) -> do
+                    (ownedCode,ownedOut,ownedErrors) <- runWithInputFull exe ("pass ownership\n" ++ writeProgramWithGhosts (ownershipInput (lowProgram value)))
+                    pure (testAssertEq fused (ownedCode,monoOut ++ ownedOut,ownedErrors))
+                _ -> pure (testAssertEq fused mono)
+        ToolFailed e -> pure (Just e)
+        _ -> pure (Just "raw fusion controls require a native emitter")
 
 unit :: Program -> Lowered
 unit p = Lowered p Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty []
@@ -158,6 +161,10 @@ testMirMonoOwnershipUsing tool = TestList "testMirMonoOwnership"
     , TestCase "failed generic tool has no fallback" (compareAdapters (pure (ToolFailed "fused-tool-failure")) genericProgram)
     , TestCase "interpreted generic tool has no fallback" (compareAdapters (pure (ToolInterpreted metadataProgram)) genericProgram)
     , TestCase "an ownership refusal after Mono remains a refusal" (compareAdapters tool negativeBlocks)
+    , TestCase "legacy PackLoop input keeps both canonical staged receipts" (compareRawInput tool legacyPackInput)
+    , TestCase "the fused full reader rejects a trailing blank-line suffix" $ case writeLowered (unit metadataProgram) of
+        Error e -> pure (Just e)
+        Ok input -> compareRefusal (input ++ "\nunknown-suffix\n")
     , TestList "adapter partial receipts and errors" replyControls
     , TestList "malformed full requests" [TestCase label (compareRefusal input) | (label,input) <- malformed]
     ]
