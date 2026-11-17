@@ -1352,9 +1352,9 @@ fn makeClosureImplForType(st: St, b: &BoundInfo, t: Int) -> St ~ {
 
 // The derived Clone of a closure struct: a clone function that clones each captured field
 fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<ClosureCap>, term: Int) -> St ~ {
-    cloneTrait = protocolName(&st, "Clone");
-    if HashSet::contains(&st.impls, pairKey(&cloneTrait, structName)) { return St { ok: true, ..st }; };
-    traitFnsList = HashMap::lookup(&st.traitFns, &cloneTrait, []);
+    cloneTraitName = protocolName(&st, "Clone");
+    if HashSet::contains(&st.impls, pairKey(&cloneTraitName, structName)) { return St { ok: true, ..st }; };
+    traitFnsList = HashMap::lookup(&st.traitFns, &cloneTraitName, []);
     tfAt = traitFnNamed(&st, &traitFnsList, "clone");
     if tfAt < 0 { return St { ok: false, ..st }; };
     tf = traitFnOf(&st, tfAt);
@@ -1407,14 +1407,14 @@ fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<
     fnValue = st.nid;
     st = emitVal(st, fnValue);
     fnExpr = st.nid;
-    st = emitName(st, implFunctionName(structName, &cloneTrait, "clone"));
+    st = emitName(st, implFunctionName(structName, &cloneTraitName, "clone"));
     fnNameNode = st.nid;
     st = emit(st, AstNode::Statement { value: AstStatement::Assign { n: fnNameNode, e: fnExpr } });
     fnStmt = st.nid;
     implFns = push([], fnStmt);
     st = emitStatements(st, &implFns);
     implFnsNode = st.nid;
-    st = emitName(st, clone(cloneTrait));
+    st = emitName(st, clone(cloneTraitName));
     traitNameNode = st.nid;
     st = emit(st, AstNode::OptName { value: AstOptName::SomeName { n: traitNameNode } });
     traitNode = st.nid;
