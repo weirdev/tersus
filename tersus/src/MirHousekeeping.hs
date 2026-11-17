@@ -471,7 +471,7 @@ cachedUncheckedValidatorExe = do
 
 {-# NOINLINE preparationSnapshot #-}
 preparationSnapshot :: String
-preparationSnapshot = fingerprint preparationInputs
+preparationSnapshot = fingerprint (seedHash : preparationInputs)
 
 preparationInputs :: [String]
 preparationInputs = [show (emitterSourceFiles, seedSha256, parserSeedSha256, frontendSeedSha256, frontendSeedSources, runtimeSource)]
