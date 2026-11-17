@@ -46,4 +46,38 @@ testClosures =
                         , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
                         ]
                 pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
+            , TestList
+                "closures"
+                [ testCase "a closure reads a Copy capture, copied at creation" (runs "n = 10; f = fn(x: Int) -> Int => x + n; return f(5);") 15)
+                , testCase "a copied capture does not see a later update" (runs "n = 1; f = fn(x: Int) -> Int => x + n; n = 100; return f(1);") 2)
+                , testCase "a closure borrows a read-only list capture" (runs "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); return f() * 10 + size(xs);") 22)
+                , testCase "a closure that updates a capture is called directly" (runs "count = 0; f = fn() -> Int { count = count + 1; return count; }; a = f(); b = f(); return a * 100 + b * 10 + count;") 122)
+                , testCase "an updating closure through an FnMut bound" (runs "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return twice(&mut c) * 100 + count;") 1202)
+                , testCase "a read-only closure meets an FnMut bound" (runs "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; n = 1; c = fn() -> Int => n; return twice(&mut c);") 11)
+                , testCase "types are inferred from the bound" (runs "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; return apply(fn(x) => x * 2, 21);") 42)
+                , testCase "a type is inferred from the other arguments and the result" (runs "fn applyAt<T, F: Fn(T) -> T>(f: &F, x: T) -> T { return f(x); }; return applyAt(fn(x) => x, 41);") 41)
+                , testCase "a closure argument is checked after the other arguments" (runs "fn apply2<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; return apply2(fn(x) => x + 1, 41);") 42)
+                , testCase "an expression body and a block body agree" (runs "f = fn(x: Int) -> Int => x + 1; g = fn(x: Int) -> Int { return x + 1; }; return f(10) * 100 + g(10);") 1111)
+                , testCase "a missing parameter type with no bound is an error" (rejected "f = fn(x) => x; return 0;") "write the type of x: nothing here says what this closure takes")
+                , testCase "an updating closure does not meet an Fn bound" (rejected "fn apply<F: Fn() -> Int>(f: &F) -> Int { return f(); }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return apply(&c);") "is FnMut and cannot be given where Fn(...) is wanted")
+                , testCase "an updating closure given directly does not meet an Fn bound" (rejected "fn apply<F: Fn() -> Int>(f: &F) -> Int { return f(); }; count = 0; return apply(fn() -> Int { count = count + 1; return count; });") "updates count, so it is FnMut")
+                , testCase "a closure moves a captured list out, as FnOnce" (runs "fn useOnce<F: FnOnce() -> List<Int>>(f: F) -> Int { ys = f(); return size(ys); }; xs = push(push([], 1), 2); f = fn() -> List<Int> => xs; return useOnce(f);") 2)
+                , testCase "a moving closure does not meet an Fn bound" (rejected "fn apply<F: Fn() -> List<Int>>(f: &F) -> Int { ys = f(); return size(ys); }; xs = push([], 1); return apply(fn() -> List<Int> => xs);") "moves xs out, so it is FnOnce")
+                , testCase "move captures by value, and an update changes the closure's own copy" (runs "n = 1; f = move fn() -> Int { n = n + 1; return n; }; a = f(); return a * 10 + n;") 21)
+                , testCase "move captures a list by value" (runs "xs = push(push([], 1), 2); f = move fn() -> Int => size(xs); return f();") 2)
+                , testCase "a capture-only clause is the closure's invariant" (runs "n = 5; step = fn(x: Int) -> Int [{ affirm n > 0; }] [{ affirm return > x; }] => x + n; return step(1);") 6)
+                , testCase "the invariant is proved where the closure is made" (rejected "n = 0 - 5; step = fn(x: Int) -> Int [{ affirm n > 0; }] [{ affirm return > x; }] => x + n; return step(1);") "Could not prove")
+                , testCase "a closure meets two bounds with two impls over one body" (runs "fn asFn<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; fn asOnce<F: FnOnce(x: Int) -> Int>(f: F, x: Int) -> Int { return f(x); }; f = fn(x: Int) -> Int => x + 1; return asFn(&f, 10) * 100 + asOnce(f, 10);") 1111)
+                , testCase "a borrowed capture goes through a bound" (runs "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; xs = push(push([], 1), 2); f = fn(x: Int) -> Int => x + size(xs); return apply(&f, 10);") 12)
+                , testCase "a closure over a type parameter of the enclosing function" (runs "fn countOf<T>(xs: &List<T>, n: Int) -> Int { f = fn() -> Int => size(xs) + n; return f(); }; return countOf(push(push([], 1), 2), 10);") 12)
+                , TestCase "a closure across modules" $ do
+                    program <-
+                        programFromFiles
+                            "app/main.tersus"
+                            [ ("app/package.tersus", "")
+                            , ("app/main.tersus", "import app::apply; n = 10; f = fn(x) => x + n; return apply::apply(f, 5);")
+                            , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
+                            ]
+                    pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
+                ]
             ]

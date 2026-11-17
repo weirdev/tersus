@@ -703,7 +703,28 @@ a = Adder { n: 10 };
 return apply(&a, 5);    // 15
 ```
 
-The impl is written for the shape, with `call` taking the receiver the kind says (`&Self`, `&mut Self` or `Self`) followed by the shape's parameters, and it is checked against the shape's contracts as any impl is checked against its trait. A named function given where a function shape is wanted is wrapped in a struct with no fields that implements the shape, its `call` calling the function itself, so it meets the bound as a function object does and is checked against the shape's contracts by its own. Closures that capture variables are a later step: a plain function value (`fn(Int) -> Int`) does not meet a function-shape bound yet.
+The impl is written for the shape, with `call` taking the receiver the kind says (`&Self`, `&mut Self` or `Self`) followed by the shape's parameters, and it is checked against the shape's contracts as any impl is checked against its trait. A named function given where a function shape is wanted is wrapped in a struct with no fields that implements the shape, its `call` calling the function itself, so it meets the bound as a function object does and is checked against the shape's contracts by its own. A plain function value (`fn(Int) -> Int`) does not meet a function-shape bound yet.
+
+### Closures
+
+A closure is an anonymous function written where a value is wanted, which captures the variables of the enclosing function that its body uses:
+
+```tersus
+fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };
+fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; };
+n = 10;
+plusN = fn(x: Int) -> Int => x + n;
+count = 0;
+counter = fn() -> Int { count = count + 1; return count; };
+return apply(&plusN, 5) * 100 + twice(&mut counter);    // 1512
+```
+
+- **Syntax.** `fn(params) [contracts] { body }`, or `fn(params) [contracts] => expr` for `{ return expr; }`. `move fn(...)` captures every variable by value. A closure has no name and no `shrinks` clause; a nested `fn name(...)` declaration captures nothing, as before.
+- **Captures.** Each variable the body uses is captured by how it is used: read only and `Copy`, it is copied in at creation (so a later update of the variable is not seen by the closure); read only and not `Copy`, it is borrowed (`&T`); assigned, borrowed for updating or given to a `&mut` parameter, it is borrowed for updating (`&mut T`); moved (given to a by-value parameter, returned, put in a value), it is taken by value. With `move`, every capture is by value: `Copy` values are copied and others moved, and an update then changes the closure's own copy. Borrowed captures are reference fields of the closure's struct, so the usual loan rules apply while the closure is live: a variable it borrows for updating cannot be used by the enclosing function, and one it borrows for reading cannot be updated or moved.
+- **Kinds.** A closure that only reads its captures meets `Fn`, `FnMut` and `FnOnce` bounds; one that updates them meets `FnMut` and `FnOnce`; one that moves a captured value out meets only `FnOnce`. A mismatch is refused at the argument: `this closure updates count, so it is FnMut and cannot be given where Fn(...) is wanted`. A capture that is linear, or holds a permission, makes the closure linear and callable once, so it meets only `FnOnce` bounds.
+- **Types left out.** A parameter's type, and the result type, may be left out where the closure fills a parameter bounded by a function shape: they are taken from the shape, with the call's type parameters first worked out from its other arguments. Where nothing gives them they are written, and a missing one is refused: `write the type of x: nothing here says what this closure takes`.
+- **Contracts.** A clause of the closure's input contract that mentions only captured variables, not its parameters, is proved where the closure is made and assumed in its body (it is the closure struct's invariant, so for an `FnMut` closure it must hold again after each call). Clauses about parameters are checked against the bound's contract where the closure is given, as for a function object.
+- **Calling directly.** A closure held in a local is called as `f(args)`, with the receiver its kind says. The closure's struct is `Clone` when every capture is `Clone` and none is borrowed for updating, and `Copy` when every capture is `Copy`, so the same closure can be given to two calls.
 
 ### Variadic functions
 
@@ -2298,7 +2319,7 @@ return a;                             // [[1], [2, 3], [1]]
 - Drops (see Drops): only a type that holds a permission has one. The ownership pass drops a local only where the flow of the program leaves it holding a value, under a flag local where the paths differ, so a value that was moved out is not dropped; and the drop of a value whose bytes are all 0 (a part of it was taken out) is not run either.
 - Branching expressions and value blocks are runtime code, not proof terms; a `define` or termination measure cannot contain their control flow. Pattern alternatives, field shorthand and wildcard/default arms are not supported.
 - No block comments; only `//` line comments.
-- Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call itself and the other functions defined at the top of the program, and a function name can be defined only once.
+- The body of a named function is evaluated with its argument bindings, the standard library, and the top-level functions defined before them. It does not capture other variables (a closure expression does: see Closures), a function can call itself and the other functions defined at the top of the program, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums, and for a list, a Box, an array, `Int`, `Byte` and `Bool`, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
 - The CLI has no REPL. A standalone file, or `-` on standard input, can import configured external roots; without root inputs it remains one source-only program. A file inside a package (see Modules) is compiled with the modules it imports and linked into one program, and every command (`check`, `eval`, `mir`, `owned`, `llvm`, `build`, `run`, `assumptions`) works on that linked program.
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
