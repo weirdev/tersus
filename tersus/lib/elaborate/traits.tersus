@@ -1529,7 +1529,9 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
     if !hasBound {
         i = 0;
         while i < size(fs0.params) && i < size(ptys) [{ affirm i >= 0; }] shrinks size(fs0.params) - i {
-            p = nth(&fs0.params, i);
+            p = "";
+            j = 0;
+            for q in &fs0.params { if j = i { p = clone(q); }; j = j + 1; };
             t = nth(&ptys, i);
             if closureHasUnknown(&st, t) || size(closureForeignParam(&st, t, &st.typeScope).bytes) > 0 { return typeError(st, catStrings(catStrings("write the type of ", clone(p)), ": nothing here says what this closure takes")); };
             i = i + 1;
@@ -1538,7 +1540,9 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
     } else {
         i = 0;
         while i < size(fs0.params) && i < size(ptys) [{ affirm i >= 0; }] shrinks size(fs0.params) - i {
-            p = nth(&fs0.params, i);
+            p = "";
+            j = 0;
+            for q in &fs0.params { if j = i { p = clone(q); }; j = j + 1; };
             t = nth(&ptys, i);
             if closureHasUnknown(&st, t) { return typeError(st, catStrings(catStrings("write the type of ", clone(p)), ": nothing here says what this closure takes")); };
             foreign = closureForeignParam(&st, t, &st.typeScope);
