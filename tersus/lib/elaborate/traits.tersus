@@ -1,6 +1,5 @@
 import data::ast::ast { AstArg, AstArgs, AstBody, AstBound, AstBounds, AstBuiltin, AstExpression, AstField, AstFields, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstTraitFn, AstTypes, AstValidation, AstValue, AstValueField, AstValueFields, AstValues };
 import data::codec::codec { Size, catStrings, wireOwnershipRole };
-import data::reader::reader { nodeRefs };
 import elaborate::builtins { builtinIndex, builtinKey, builtinOfValue, builtinValueOf, substitute };
 import elaborate::calls { argsOfFn, bindIn, bindInner, checkCall, coerce, emitIntValue, head, instantiateGenerics, lookupVar, scopeLookup, sizeArgument, teHead };
 import elaborate::check { checkFunction, checkFunctionDef, checkFunctionWith, checkItem, checkStatement, checkValidations, fnSigOf, fnTypeOf, functionValue, isTraitStub, mentionsParameter, refResultFrom, stmtOf };
@@ -8,7 +7,7 @@ import elaborate::core { baseNameOf, checkType, concatFront, concatInts, ctorInf
 import elaborate::exports { pairParts };
 import elaborate::expr { coerceArguments, emitCtorValue, emitFieldValue, genericCall, implementsMarker, inferAll, inferExpr, nodesOf, packArgument, packSize, primitiveEq, typed, typesHeads };
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations, emitVar };
-import elaborate::records { NativeFn, codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
+import elaborate::records { NativeFn, childRefs, codecSize, codecSizeAt, codecTypeAt, codecTypesAt, exprOf, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
 import elaborate::refs { fromsOf, putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { indexOfByteIn, isPackTypeName, teHeadAt, BoundInfo, BoundedParts, Defined, FnSig, Generic, ImplArgs, St, TE, Template, Ty, addTy, argAt, arrayTy, builtinValueAt, expect, fail, firstText, fnTy, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, nameOf, namedTy, noBoundedParts, notModelled, nth, oneScope, ownedParameter, parameterOwner, parametersClone, protocolName, protocolIs, rawInstanceName, Reference, render, resolve, sameTy, simpleTy, sizeText, tyAt, typeError, typeNameText, typesChanged, unify, withTy, wrapTy, zonk, stubTraitParameter };
 
@@ -824,7 +823,7 @@ fn closureNodes(st: &St, roots: &List<Int>) -> List<Int> ~ {
             node = nodeIn(&st.nodes, n);
             nested = false;
             if node is AstNode::Value && (node as AstNode::Value).value is AstValue::VFunct { nested = true; };
-            if !nested { for r in nodeRefs(&node) { if r >= 0 && r < n { todo = push(todo, r); }; }; };
+            if !nested { for r in childRefs(&node) { if r >= 0 && r < n { todo = push(todo, r); }; }; };
         };
     };
     return out;
@@ -833,7 +832,7 @@ fn closureNodes(st: &St, roots: &List<Int>) -> List<Int> ~ {
 fn closureParent(st: &St, ids: &List<Int>, id: Int) -> Int ~ {
     for n in ids {
         if n >= 0 && n < size(st.nodes) {
-            for r in nodeRefs(&nodeIn(&st.nodes, n)) { if r = id { return n; }; };
+            for r in childRefs(&nodeIn(&st.nodes, n)) { if r = id { return n; }; };
         };
     };
     return 0 - 1;
