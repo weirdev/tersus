@@ -2993,6 +2993,17 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     alias = aliasingOf types functions fn
     parentsOfLocals = invariantParents alias types functions fn
     (liveAfterStatements, liveAtEnd) = validationLiveness types functions fn
+    -- (an operation that writes or gives through a reference observes, whatever is live after it, that reference,
+    -- every place it may be to, the holders of a reference into those, and the values whose invariants speak of any
+    -- of them: its own invariant checks cannot be skipped because none of these is used again)
+    requiring local b =
+        let owners = case aliasCandidates alias of
+                Just (targets, _) -> map fst (Map.findWithDefault [] local targets)
+                Nothing -> []
+            holders = [holder | ((holder, _), _) <- describedHolders Nothing (local : owners)]
+            parentsOf l = Set.toList (Map.findWithDefault Set.empty l parentsOfLocals)
+            required = Set.fromList (local : owners ++ holders ++ concatMap parentsOf (local : owners ++ holders))
+         in b{buildLive = fmap (Set.union required) (buildLive b)}
     -- (a local observed again: one live here, or what a live reference or holder may be to)
     observed b l = case buildLive b of
         Nothing -> True
@@ -3254,7 +3265,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 save = step "Assign" [("local", MInt tempLocal), ("value", valueRef)]
             (rootRef, _) <- operand (M.Copy root) b2
             (checkSteps0, _, b2c) <- placeRefOf True rootRef place b2
-            (writeSteps, b7) <- writeVia (buildDefined b) root place tempRef b2c
+            (writeSteps, b7) <- writeVia (buildDefined b) root place tempRef (requiring root b2c)
             pure (([save] ++ checkSteps0 ++ writeSteps) : chunks, b7, conditions, penv)
         M.AssignRef _ _ _ -> Nothing
         M.Assign dest (M.MakeData name fields) -> do
@@ -3395,7 +3406,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             Nothing -> pure (steps, b)
             Just postRef -> do
                 local <- operandLocal arg
-                (writeSteps, b2) <- writeVia defined local [] postRef b
+                (writeSteps, b2) <- writeVia defined local [] postRef (requiring local b)
                 pure (steps ++ writeSteps, b2)
         _ -> pure (steps, b)
     -- After a call, the place a held parameter's update reference is to (a field of a value given to it) has the
@@ -3406,17 +3417,18 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
         holder <- lookup param (zip (M.fnParams callee) args) >>= operandLocal
         (_, members) <- aliasCandidates alias
         points <- mapM (\(owner, p') -> (,) owner <$> p') (memberLookup (holder, path) members)
+        let bIn = requiring holder b
         (writeSteps, owners, b1) <- case points of
             [(owner, p')] -> do
-                (ownerRef, _) <- operand (M.Copy owner) b
-                (updSteps, newOwnerRef, bu) <- updateRefOf ownerRef p' value b
+                (ownerRef, _) <- operand (M.Copy owner) bIn
+                (updSteps, newOwnerRef, bu) <- updateRefOf ownerRef p' value bIn
                 (typeFacts, bt0) <- typeSteps rules types invariants fn owner bu
                 (forget, bt) <- forgetElements defined holder p' owner bt0
                 (afterSteps, ba) <- afterChangeChecked [] defined True owner bt
                 (refresh, br) <- refreshViews defined owner ba
                 pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ forget ++ afterSteps ++ refresh, [owner], br)
             _ : _ : _ -> do
-                (alternatives, checked, bc) <- alternativeWrites False points [] value b
+                (alternatives, checked, bc) <- alternativeWrites False points [] value bIn
                 (havocked, bh) <- havocAll defined (nub (map fst points)) bc
                 (afterSteps, ba) <- foldM (\(acc, current) owner -> do
                     (more, next) <- afterChangeChecked checked defined True owner current
