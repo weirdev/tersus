@@ -16,7 +16,7 @@ import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, 
 import data::codec::codec { wireRoles };
 import data::reader::reader { before };
 import elaborate::wire { wireBindDeclarations, wireComplete, wireEntries, wireLoad, wireOwnerBindings, wireStorageDeclarations, wireValidateBindings, wireWrapInterface };
-import elaborate::traits { argListOf, boundsOf, checkDefinitions, emitInstances };
+import elaborate::traits { argListOf, boundsOf, checkDefinitions, emitInstances, isClosureValue };
 import elaborate::units { answerLoad };
 import elaborate::lowerout { MirOut, lowerUnit, noMir };
 
@@ -335,7 +335,7 @@ fn gatherSignatures(st: St, stmts: &List<Int>) -> St ~ {
             a = stmt as AstStatement::Assign;
             v = functionValue(st, a.e);
             name = nameText(&st.nodes, a.n);
-            if v >= 0 && !HashMap::contains(&st.stdNames, &name) && !HashMap::contains(&st.ghostNames, &name) {
+            if v >= 0 && !isClosureValue(&st, v) && !HashMap::contains(&st.stdNames, &name) && !HashMap::contains(&st.ghostNames, &name) {
                 value = nativeFn(&st.nodes, v);
                 sd = sigData(&st.nodes, value.sig); st = functionTypeFrom(st, &sd);
                 gathered = gathered.insert(name, st.ty);

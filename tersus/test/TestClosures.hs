@@ -58,7 +58,7 @@ testClosures =
                 , testCase "a type is inferred from the other arguments and the result" (runs "fn applyAt<T, F: Fn(T) -> T>(f: &F, x: T) -> T { return f(x); }; return applyAt(fn(x) => x, 41);" 41)
                 , testCase "a closure argument is checked after the other arguments" (runs "fn apply2<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; return apply2(fn(x) => x + 1, 41);" 42)
                 , testCase "an expression body and a block body agree" (runs "f = fn(x: Int) -> Int => x + 1; g = fn(x: Int) -> Int { return x + 1; }; return f(10) * 100 + g(10);" 1111)
-                , testCase "a missing parameter type with no bound is an error" (rejected "f = fn(x) => x; return 0;" "write the type of x: nothing here says what this closure takes")
+                , testCase "a missing parameter type with no bound is an error" (rejected "f = fn(x) -> Int => x; return 0;" "write the type of x: nothing here says what this closure takes")
                 , testCase "an updating closure does not meet an Fn bound" (rejected "fn apply<F: Fn() -> Int>(f: &F) -> Int { return f(); }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return apply(&c);" "is FnMut and cannot be given where Fn(...) is wanted")
                 , testCase "an updating closure given directly does not meet an Fn bound" (rejected "fn apply<F: Fn() -> Int>(f: &F) -> Int { return f(); }; count = 0; return apply(fn() -> Int { count = count + 1; return count; });" "updates count, so it is FnMut")
                 , testCase "a closure moves a captured list out, as FnOnce" (runs "fn useOnce<F: FnOnce() -> List<Int>>(f: F) -> Int { ys = f(); return size(ys); }; xs = push(push([], 1), 2); f = fn() -> List<Int> => xs; return useOnce(f);" 2)
