@@ -3315,12 +3315,13 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             (s2, newInner, b2) <- updateRefOf innerRef rest valueRef b1
             fields <- case Map.lookup ctor types of
                 Just (M.StructDecl fs) -> Just (map fst fs)
-                Just (M.EnumDecl variants) -> case [fs | (vname, fs) <- variants, vname == ctor || snd (break (== ':') ctor) == vname || ctor == vname] of
+                Just (M.EnumDecl variants) -> case [fs | (vname, fs) <- variants, vname == ctor || dropWhile (== ':') (snd (break (== ':') ctor)) == vname || ctor == vname] of
                     fs : _ -> Just (map fst fs)
                     [] -> Nothing
                 Nothing -> case [map fst fs | (ename, M.EnumDecl variants) <- Map.toList types, (vname, fs) <- variants, ename ++ "::" ++ vname == ctor] of
                     fs : _ -> Just fs
-                    [] -> Nothing
+                    -- (a variant named as its family's, the way fieldsOf finds it)
+                    [] -> map fst . snd <$> fieldsOf types (TVariant ctor)
             (s3, argRefs, b3) <- foldM (fieldArg rootRef newInner field) ([], [], b2) fields
             let (constructor, b4) = namedFunction ("ctor:" ++ ctor) b3
                 (i, b5) = fresh b4
@@ -3392,7 +3393,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
                 (refresh, br) <- refreshViews defined owner ba
                 pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ forget ++ afterSteps ++ refresh, [owner], br)
             _ : _ : _ -> do
-                (alternatives, checked, bc) <- alternativeWrites points [] value b
+                (alternatives, checked, bc) <- alternativeWrites False points [] value b
                 (havocked, bh) <- havocAll defined (nub (map fst points)) bc
                 (afterSteps, ba) <- foldM (\(acc, current) owner -> do
                     (more, next) <- afterChangeChecked checked defined True owner current
@@ -3408,19 +3409,22 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     writeVia defined root place valueRef b0 = case completeTargets root of
         -- (a reference the may-places put at one known place: the write is one of that place; the references whose
         -- chain of borrows passes through it are bound again there, afterChange)
-        Just [(owner, path)] -> do
+        Just [(owner, path)] | not (any isIndex (path ++ place) && Map.notMember root (aliasBorrows alias)) -> do
             (ownerRef, _) <- operand (M.Copy owner) b0
             (updSteps, newOwnerRef, b4) <- updateRefOf ownerRef (path ++ place) valueRef b0
             (typeFacts, b5) <- typeSteps rules types invariants fn owner b4
-            (forget, b5') <- forgetElements defined root (path ++ place) owner b5
-            (afterSteps, b6) <- afterChangeChecked [] defined True owner b5'
+            (afterSteps, b6) <- afterChangeChecked [] defined True owner b5
             (refresh, b7) <- refreshViews defined owner b6
-            pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ forget ++ afterSteps ++ refresh, b7)
+            pure (updSteps ++ [step "Assign" [("local", MInt (localNumber owner)), ("value", newOwnerRef)]] ++ typeFacts ++ afterSteps ++ refresh, b7)
+        -- (otherwise the write is through the reference, of the place its chain of borrows starts from; the places it
+        -- may be to are checked as written, one at an index included, and then made arbitrary, as master's bridge
+        -- keeps of a list only its size when an element of it may change)
         known -> do
             let (top, above, placed) = writeTarget alias root
             (topRef, _) <- operand (M.Copy top) b0
             (alternatives, checkedLocals, b3) <- case known of
-                Just points@(_ : _ : _) -> alternativeWrites points place valueRef b0
+                Just points@(_ : _ : _) -> alternativeWrites False points place valueRef b0
+                Just points@[_] -> alternativeWrites True points place valueRef b0
                 _ -> Just ([], [], b0)
             (updSteps, newTopRef, b4) <- updateRefOf topRef (above ++ place) valueRef b3
             (typeFacts, b5) <- typeSteps rules types invariants fn top b4
@@ -3490,15 +3494,9 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
             fake = fn{M.fnLocals = Map.insert local (M.LocalDecl (unref refTy) Nothing) (M.fnLocals fn)}
         (facts, b2) <- typeSteps rules types invariants fake local b1
         pure (step "Havoc" [("local", MInt (localNum local))] : facts, value, b2)
-    -- What a call may change through what it is given: master's heldStale, and, when a value given may hold a
-    -- reference this cannot see into (a type parameter, a type it does not describe), every place a reference
-    -- escaped from and whatever holds a reference the bridge cannot place
-    callStale calleeOp args =
-        let opaque = any (\arg -> maybe False (\l -> maybe False (\ty -> typeContainsReferences types (unref ty) && isNothing (referenceLeaves types (unref ty))) (M.localType <$> Map.lookup l (M.fnLocals fn))) (operandLocal arg)) args
-            builtin = case calleeOp of
-                M.Const (M.CFn name) -> "builtin::" `isPrefixOf` name
-                _ -> False
-         in nub (heldStale functions alias calleeOp args ++ if opaque && not builtin then Set.toList (Set.union (aliasEscaped alias) (aliasUnplaced alias)) else [])
+    -- What a call may change through what it is given (master's heldStale: a value given that holds an update
+    -- reference; a type parameter is taken, as in master's generic validation, to hold none)
+    callStale calleeOp args = heldStale functions alias calleeOp args
     resultPlace defined dest b0 = case (Map.member dest (aliasBorrows alias), completeTargets dest) of
         (False, Just [(owner, path)]) | maybe False (Set.member owner) defined -> do
             (more, placeRef, b1) <- placeRefOf True (localValue owner) path b0
@@ -3526,8 +3524,8 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     -- (and theirs). Only the checks are kept; the write itself is the one through the reference, whose places are
     -- then made arbitrary with their type's facts, which these checks justify (afterChange).
     -- (a place at an index among several is not checked here: such a write is not modelled)
-    alternativeWrites points place valueRef b0 = do
-            guard (all (not . any isIndex . (++ place) . snd) points)
+    alternativeWrites indexed points place valueRef b0 = do
+            guard (indexed || all (not . any isIndex . (++ place) . snd) points)
             (checks, after) <- foldM (\(acc, current) (owner, path) -> do
                 (ownerRef, _) <- operand (M.Copy owner) current
                 (more, hypothetical, next) <- updateRefOf ownerRef (path ++ place) valueRef current
@@ -3563,7 +3561,10 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
         TNamed base _ | not (null (Map.findWithDefault [] base invariants) && null (Map.findWithDefault [] (baseNameOf base) invariants)) -> False
         TList element -> invariantFree (Set.insert ty seen) element
         TBox element -> invariantFree (Set.insert ty seen) element
+        TNamed base args | Just (M.EnumDecl variants) <- Map.lookup (instanceName base args) types <|> Map.lookup base types -> all (all (invariantFree (Set.insert ty seen) . snd) . snd) variants
         TNamed _ _ -> maybe False (all (invariantFree (Set.insert ty seen) . snd) . snd) (fieldsOf types ty)
+        -- (a variant has its family's clauses and its own fields)
+        TVariant name | let family = takeWhile (/= ':') name, null (Map.findWithDefault [] family invariants) && null (Map.findWithDefault [] (baseNameOf family) invariants) -> maybe False (all (invariantFree (Set.insert ty seen) . snd) . snd) (fieldsOf types ty)
         _ -> False
     rebindThrough defined root b0 = foldM bindView ([], b0) [view | view@(ref, _, _) <- viewsThrough alias root, maybe True (Set.member ref) defined]
     bindView (steps, b) (ref, top, placeSteps) = do
