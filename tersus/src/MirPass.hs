@@ -41,15 +41,19 @@ runMonoOwnershipPassWith tool input = do
                         | trim out == "1" -> Error (trimEnd (decodeUtf8 errors))
                         | not (null (trim errors)) -> Error ("the monomorphization tool reported: " ++ trimEnd (decodeUtf8 errors))
                         | otherwise -> stage "the monomorphization tool wrote unreadable MIR3: " (mapResult lowProgram (readLowered out)) `bindResult` \_ -> Error "the ownership tool did not write MIR version 2"
-                Just (mono, owned) ->
-                    stage "the monomorphization tool wrote unreadable MIR3: " (mapResult lowProgram (readLowered mono)) `bindResult` \original ->
-                        case code of
-                            ExitFailure n -> Error ("the ownership tool exited with " ++ show n ++ ": " ++ trimEnd errors)
-                            ExitSuccess
-                                | trim owned == "1" -> Error ("the ownership tool refused ownership: " ++ trimEnd errors)
-                                | not (null (trim errors)) -> Error ("the ownership tool reported: " ++ trimEnd errors)
-                                | take 1 (lines owned) /= ["tersus-mir 2"] -> Error "the ownership tool did not write MIR version 2"
-                                | otherwise -> stage "the ownership tool wrote unreadable MIR: " (readProgram owned) `bindResult` restoreOwnership original
+                Just (mono, owned) -> case mapResult lowProgram (readLowered mono) of
+                    Error e -> case code of
+                        ExitFailure n -> Error ("the monomorphization tool exited with " ++ show n ++ ": " ++ trimEnd (decodeUtf8 errors))
+                        ExitSuccess
+                            | not (null (trim errors)) -> Error ("the monomorphization tool reported: " ++ trimEnd (decodeUtf8 errors))
+                            | otherwise -> Error ("the monomorphization tool wrote unreadable MIR3: " ++ e)
+                    Ok original -> case code of
+                        ExitFailure n -> Error ("the ownership tool exited with " ++ show n ++ ": " ++ trimEnd errors)
+                        ExitSuccess
+                            | trim owned == "1" -> Error ("the ownership tool refused ownership: " ++ trimEnd errors)
+                            | not (null (trim errors)) -> Error ("the ownership tool reported: " ++ trimEnd errors)
+                            | take 1 (lines owned) /= ["tersus-mir 2"] -> Error "the ownership tool did not write MIR version 2"
+                            | otherwise -> stage "the ownership tool wrote unreadable MIR: " (readProgram owned) `bindResult` restoreOwnership original
 
 monoReceipt :: String -> Maybe (String, String)
 monoReceipt out = case break (isPrefixOf "data ") (lines out) of

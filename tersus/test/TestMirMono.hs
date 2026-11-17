@@ -1,5 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
-module TestMirMono (testMirMono, testMirMonoUsing, monoFixtures, metadataProgram, genericProgram) where
+module TestMirMono (testMirMono, testMirMonoUsing, monoFixtures, metadataProgram, genericProgram, legacyPackInput) where
 
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map

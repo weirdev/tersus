@@ -18,7 +18,7 @@ import Native (runWithInputFull)
 import qualified Syntax as S
 import Types (Type(..), Size(..), Signature(..))
 import TestHarness
-import TestMirMono (monoFixtures, metadataProgram, genericProgram)
+import TestMirMono (monoFixtures, metadataProgram, genericProgram, legacyPackInput)
 import Utils
 
 trim :: String -> String
@@ -129,6 +129,9 @@ replyControls = case writeLowered (unit metadataProgram) of
                 ,("a complete Mono receipt alone is not success",success,("","",0))
                 ,("trailing ownership records are refused",success,(owned ++ "unexpected-record\n","",0))
                 ,("truncated Mono payload is refused",("tersus-mir 3\ndata 9\n","",0),(owned,"",0))
+                ,("invalid complete Mono preserves native exit",("tersus-mir 3\ndata 2\ntersus-ast 1 mir\nroot 0\n","mono-exit\n",7),(owned,"",0))
+                ,("invalid complete Mono preserves stderr precedence",("tersus-mir 3\ndata 2\ntersus-ast 1 mir\nroot 0\n","mono-reported\n",0),(owned,"",0))
+                ,("invalid complete Mono preserves decoder error",("tersus-mir 3\ndata 2\ntersus-ast 1 mir\nroot 0\n","",0),(owned,"",0))
                 ]
          in [TestCase label (withReplies a b) | (label,a,b) <- cases]
 
