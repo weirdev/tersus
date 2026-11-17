@@ -8,7 +8,7 @@ import elaborate::proofs { inferProof, rewriteOldStatements };
 import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName, mentionsVariable };
 import elaborate::refs { declaredOrigin, refsOf, withRefs, derefRoot, derefSteps, exprRefOrigins, expressionPlaces, joinBranchReferences, namedReferences, ownParameterSources, parameterContents, placeSteps, putOrigins, putRefResult, recordAlias, recordOrigins, recordPlaceReferences, resetBranchReferences, resolveRefPlace, resolveRefPlaces, sameReferences, withinWrites, writesTarget, writesText };
 import elaborate::state { FnSig, Generic, NodeRewrite, Place, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, copyState, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
-import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, templateOf };
+import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, isClosureExpr, templateOf };
 
 fn stmtOf(st: &St, s: Int) -> AstStatement ~ {
     node = nodeIn(&st.nodes, s);
@@ -423,8 +423,10 @@ fn checkStatement(st: St, top: Bool, s: Int) -> St ~ {
 
 fn checkStatementAssign(st: St, top: Bool, n: Int, e: Int) -> St ~ {
     name = nameText(&st.nodes, n);
-    v = functionValue(st, e);
-    if v >= 0 { return checkFunctionDef(st, top, name, n, v); };
+    if !isClosureExpr(&st, e) {
+        v = functionValue(st, e);
+        if v >= 0 { return checkFunctionDef(st, top, name, n, v); };
+    };
     st = notSize(st, &name);
     st = inferExpr(st, e);
     if st.status != 0 { return st; };

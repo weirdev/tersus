@@ -7,8 +7,8 @@ import elaborate::core { arrayOk, baseNameOf, checkConstruct, checkType, ctorInf
 import elaborate::out { emit, emitBuiltinCall, emitCall, emitName, emitNames, emitProofs, emitType, emitVal, emitValidations, emitVar };
 import elaborate::records { codecTypeAt, exprOf, fromCodec, isVar, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { Call, callOf, captureExpression, checkCallWrites, copyExpressionOrigins, joinBranchReferences, placeForm, placeRoot, recordCallFieldOrigins, refResultIndex, resetBranchReferences, refsOf };
-import elaborate::state { forwardInProofText, NodeRewrite, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, maxInt, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, render, resolve, sameTy, simpleTy, sizeConst, teHeadAt, tyAt, typeError, unclonedParameter, undoTry, unify, withTy, wrapTy, zonk, protocolName, protocolIs, stubTraitParameter };
-import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, fnBoundCall, implFunctionName, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
+import elaborate::state { forwardInProofText, BoundInfo, NodeRewrite, St, TE, Ty, addTy, argAt, arrayTy, beginTry, boxTy, builtinKindAt, builtinValueAt, endTry, expect, fail, firstText, fnTy, freshSize, freshVar, indexIn, instanceName, intText, isSize, joinWith, kindOf, listTy, maxInt, namedTy, notModelled, nth, ownedParameter, parameterOwner, parametersClone, productFits, render, resolve, sameTy, simpleTy, sizeConst, teHeadAt, tyAt, typeError, unclonedParameter, undoTry, unify, withTy, wrapTy, zonk, protocolName, protocolIs, stubTraitParameter };
+import elaborate::traits { boundAsImpl, builtinSequenceCall, callResolved, emptyTemplate, fnBoundCall, implFunctionName, isClosureExpr, isClosureValue, ownerOfValue, ownerThroughTrait, primitiveTraitCall, resolveAssociated, synthesizeClosure, templateCall, traitArguments, traitFnNamed, traitFnOf, traitOwner };
 
 fn leaf(st: St, t: Int, node: Int) -> St ~ {
     return St { te: TE { node: node, types: push([], t) }, ..st };
@@ -396,6 +396,11 @@ fn branchType(st: St, a: Int, b: Int) -> St ~ {
 };
 
 fn inferValueExpr(st: St, e: Int, v: Int) -> St ~ {
+    if isClosureValue(&st, v) {
+        noBound = BoundInfo { p: "", n: "", ts: [] };
+        noArgs = [];
+        return synthesizeClosure(st, v, false, noBound, &noArgs, 0 - 1);
+    };
     st = valueType(st, v);
     return leaf(st, st.ty, e);
 };
@@ -1940,9 +1945,16 @@ fn general(st: St, funct: Int, args: &List<Int>) -> St ~ {
         name = nameText(&st.nodes, (fex as AstExpression::Var).n);
         if HashMap::contains(&st.templates, &name) && !inScope(st, &name) {
             tm = HashMap::lookup(&st.templates, &name, emptyTemplate());
-            st = inferAll(st, args);
-            if st.status != 0 { return st; };
-            inferred = clone(st.tes);
+            // (a closure argument is checked after the others, against the shape its bound gives)
+            inferred = [];
+            for a in args {
+                if isClosureExpr(&st, a) { inferred = push(inferred, TE { node: a, types: [] }); }
+                else {
+                    st = inferExpr(st, a);
+                    if st.status != 0 { return st; };
+                    inferred = push(inferred, clone(st.te));
+                };
+            };
             st = templateCall(st, name, tm, &inferred);
             return refResultKnown(st, funct);
         };
@@ -1989,6 +2001,29 @@ fn generalCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
     };
     st = zonk(st, ft);
     ftz = tyAt(st, st.ty);
+    if ftz.kind = 4 {
+        bodyName = catStrings(clone(ftz.name), "$body");
+        if HashMap::contains(&st.fns, &bodyName) {
+            bodyTy = HashMap::lookup(&st.fns, &bodyName, 0 - 1);
+            bx = tyAt(st, bodyTy);
+            if bx.kind = 14 && size(bx.args) > 0 {
+                recvKind = kindOf(st, nth(&bx.args, 0));
+                recvNode = functT.node;
+                if recvKind = 10 {
+                    st = emitBuiltinCall(st, "BorrowOf", &push([], recvNode));
+                    recvNode = st.nid;
+                } else if recvKind = 11 {
+                    st = emitBuiltinCall(st, "BorrowMutOf", &push([], recvNode));
+                    recvNode = st.nid;
+                };
+                callArgs = push([], recvNode);
+                for a in args { callArgs = push(callArgs, a); };
+                st = emitVar(st, clone(bodyName));
+                st = emitCall(st, st.nid, &callArgs);
+                return inferExpr(st, st.nid);
+            };
+        };
+    };
     if ftz.kind = 13 {
         st = inferAll(st, args);
         if st.status != 0 { return st; };
