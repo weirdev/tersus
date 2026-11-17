@@ -7246,12 +7246,29 @@ fn mintedTraitIds(st: &St) -> List<Int> ~ {
     return out;
 };
 
+fn withMintedTraits(st: &St, body: &List<Int>) -> List<Int> ~ {
+    minted = mintedTraitIds(st);
+    out = [];
+    i = 0;
+    for stmt in body {
+        while i < size(minted) && get(minted, i) < stmt [{ affirm i >= 0; affirm i <= size(minted); }] shrinks size(minted) - i {
+            out = push(out, get(minted, i));
+            i = i + 1;
+        };
+        out = push(out, stmt);
+    };
+    while i < size(minted) [{ affirm i >= 0; affirm i <= size(minted); }] shrinks size(minted) - i {
+        out = push(out, get(minted, i));
+        i = i + 1;
+    };
+    return out;
+};
+
 fn parseSegment(sourceText: &Input, state: St, isFile: Bool) -> Res<List<Int>> ~ {
     if !isFile {
         frag = statementBlock(sourceText, state); Res { st: resultPartsfragState, v: resultPartsfragValue, ok: resultPartsfragOk } = frag;
         if !resultPartsfragOk { return Res<List<Int>> { st: resultPartsfragState, v: resultPartsfragValue, ok: false }; };
-        out = mintedTraitIds(&resultPartsfragState);
-        for x in resultPartsfragValue { out = push(out, x); };
+        out = withMintedTraits(&resultPartsfragState, &resultPartsfragValue);
         return Res<List<Int>> { st: resultPartsfragState, v: out, ok: true };
     };
     head = fileHead(sourceText, state); Res { st: resultPartsheadState, v: resultPartsheadValue, ok: resultPartsheadOk } = head;
@@ -7259,8 +7276,7 @@ fn parseSegment(sourceText: &Input, state: St, isFile: Bool) -> Res<List<Int>> ~
     body = statementBlock(sourceText, resultPartsheadState); Res { st: resultPartsbodyState, v: resultPartsbodyValue, ok: resultPartsbodyOk } = body;
     if !resultPartsbodyOk { return Res<List<Int>> { st: resultPartsbodyState, v: resultPartsbodyValue, ok: resultPartsbodyOk }; };
     bs = resultPartsbodyState;
-    bv = mintedTraitIds(&bs);
-    for x in resultPartsbodyValue { bv = push(bv, x); };
+    bv = withMintedTraits(&bs, &resultPartsbodyValue);
     if size(resultPartsheadValue) > 0 {
         bs = skipWs(sourceText, bs);
         if atEnd(sourceText, bs) { return fail( bs, [], catStrings("imports are not linked yet: ", joinComma(resultPartsheadValue))); };
@@ -8221,10 +8237,7 @@ fn fileParseFailed(message: String) -> FileParse ~ {
 };
 
 fn fileParseFinished(input: &Input, state: St, imports: List<FileImport>, body: List<Int>) -> FileParse ~ {
-    mintedIds = mintedTraitIds(&state);
-    merged = clone(mintedIds);
-    for x in body { merged = push(merged, x); };
-    body = merged;
+    body = withMintedTraits(&state, &body);
     s = skipWs(input, state);
     if !atEnd(input, s) {
         ended = fail(s, 0, "expected the end of the input");
