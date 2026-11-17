@@ -2001,29 +2001,41 @@ fn generalCall(st: St, funct: Int, args: &List<Int>) -> St ~ {
     };
     st = zonk(st, ft);
     ftz = tyAt(st, st.ty);
-    if ftz.kind = 4 {
-        bodyName = catStrings(clone(ftz.name), "$body");
+    innerTy = unrefOf(st, st.ty);
+    innerX = tyAt(st, innerTy);
+    if innerX.kind = 4 {
+        bodyName = catStrings(clone(innerX.name), "$body");
+        recvKind = 0 - 1;
         if HashMap::contains(&st.fns, &bodyName) {
             bodyTy = HashMap::lookup(&st.fns, &bodyName, 0 - 1);
             bx = tyAt(st, bodyTy);
-            if bx.kind = 14 && size(bx.args) > 0 {
-                recvKind = kindOf(st, nth(&bx.args, 0));
-                recvNode = functT.node;
-                if recvKind = 10 {
-                    oneArg = push([], recvNode);
-                    st = emitBuiltinCall(st, "BorrowOf", &oneArg);
-                    recvNode = st.nid;
-                } else if recvKind = 11 {
-                    oneArg = push([], recvNode);
-                    st = emitBuiltinCall(st, "BorrowMutOf", &oneArg);
-                    recvNode = st.nid;
-                };
-                callArgs = push([], recvNode);
-                for a in args { callArgs = push(callArgs, a); };
-                st = emitVar(st, clone(bodyName));
-                st = emitCall(st, st.nid, &callArgs);
-                return inferExpr(st, st.nid);
+            if bx.kind = 13 && size(bx.args) > 0 { bx = tyAt(st, nth(&bx.args, 0)); };
+            if bx.kind = 14 && size(bx.args) > 0 { recvKind = kindOf(st, nth(&bx.args, 0)); };
+        } else if HashMap::contains(&st.templates, &bodyName) {
+            tm = HashMap::lookup(&st.templates, &bodyName, emptyTemplate());
+            if size(tm.ptys) > 0 { recvKind = kindOf(st, nth(&tm.ptys, 0)); };
+        };
+        if recvKind >= 0 {
+            recvNode = functT.node;
+            if recvKind = ftz.kind { recvNode = functT.node; }
+            else if recvKind = 10 {
+                oneArg = push([], recvNode);
+                st = emitBuiltinCall(st, "BorrowOf", &oneArg);
+                recvNode = st.nid;
+            } else if recvKind = 11 {
+                oneArg = push([], recvNode);
+                st = emitBuiltinCall(st, "BorrowMutOf", &oneArg);
+                recvNode = st.nid;
+            } else {
+                oneArg = push([], recvNode);
+                st = emitBuiltinCall(st, "DerefOf", &oneArg);
+                recvNode = st.nid;
             };
+            callArgs = push([], recvNode);
+            for a in args { callArgs = push(callArgs, a); };
+            st = emitVar(st, clone(bodyName));
+            st = emitCall(st, st.nid, &callArgs);
+            return inferExpr(st, st.nid);
         };
     };
     if ftz.kind = 13 {
