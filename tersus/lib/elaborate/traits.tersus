@@ -1304,7 +1304,13 @@ fn makeClosureImpl(st: St, structName: &String, b: &BoundInfo, givenArgs: &List<
     st = emitVar(st, "self");
     selfNode = st.nid;
     recvNode = selfNode;
-    if bodyKind = 10 && implKind = 11 {
+    if bodyKind = 11 && implKind = 11 {
+        oneArg = push([], selfNode);
+        st = emitBuiltinCall(st, "DerefOf", &oneArg);
+        oneArg2 = push([], st.nid);
+        st = emitBuiltinCall(st, "BorrowMutOf", &oneArg2);
+        recvNode = st.nid;
+    } else if bodyKind = 10 && implKind = 11 {
         oneArg = push([], selfNode);
         st = emitBuiltinCall(st, "DerefOf", &oneArg);
         oneArg2 = push([], st.nid);
