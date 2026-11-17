@@ -4,6 +4,7 @@ module MirHousekeeping
     , insertOwnership
     , expandRefWrites
     , monomorphizeWith
+    , monomorphizeOwnershipWith
     , ownershipTool
     , Tool (..)
     , eraseGhosts
@@ -67,7 +68,7 @@ import Link (linkPrograms)
 import LlvmRuntime (runtimeSource)
 import Mir
 import MirData (readProgram, writeProgram, writeProgramWithGhosts)
-import MirPass (programData, runPassWith)
+import MirPass (programData, runPassWith, runMonoOwnershipPassWith)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (hasLists, lowerLists)
 import MirOwnershipData (ownershipInput, restoreOwnership)
@@ -116,11 +117,7 @@ eraseGhosts program = unsafePerformIO (eraseIO (withoutGeneric program))
 -- stage 0 owns what the host builds for itself, stage 1 owns everything else; they never run in the executor.
 {-# NOINLINE insertOwnership #-}
 insertOwnership :: Program -> Result Program String
-insertOwnership program = unsafePerformIO $ do
-    specialized <- monomorphizeWith ownershipTool program
-    case specialized of
-        Error e -> pure (Error e)
-        Ok mono -> ownershipPassWith ownershipTool "ownership" mono
+insertOwnership program = unsafePerformIO (monomorphizeOwnershipWith ownershipTool program)
 
 {-# NOINLINE expandRefWrites #-}
 expandRefWrites :: Program -> Result Program String
@@ -128,18 +125,30 @@ expandRefWrites program = unsafePerformIO (ownershipPassWith ownershipTool "expa
 
 monomorphizeWith :: IO Tool -> Program -> IO (Result Program String)
 monomorphizeWith getTool program
-    | not (any generic (Map.elems (progFunctions program))) = pure (Ok program)
+    | not (hasGenericFunctions program) = pure (Ok program)
     | otherwise = case programData program of
         Error e -> pure (Error e)
-        Ok input -> runPassWith nativeTool "the monomorphization tool" ("pass mono\n" ++ input)
+        Ok input -> runPassWith (monoNativeTool getTool) "the monomorphization tool" ("pass mono\n" ++ input)
+
+monomorphizeOwnershipWith :: IO Tool -> Program -> IO (Result Program String)
+monomorphizeOwnershipWith getTool program
+    | not (hasGenericFunctions program) = ownershipPassWith getTool "ownership" program
+    | otherwise = case programData program of
+        Error e -> pure (Error e)
+        Ok input -> runMonoOwnershipPassWith (monoNativeTool getTool) ("pass mono-ownership\n" ++ input)
+
+hasGenericFunctions :: Program -> Bool
+hasGenericFunctions = any generic . Map.elems . progFunctions
   where
     generic fn = not (null (fnSizeParams fn) && null (fnTypeParams fn))
-    nativeTool = do
-        tool <- getTool
-        pure $ case tool of
-            ToolFailed e -> Error e
-            ToolInterpreted _ -> Error "monomorphization runs natively only"
-            ToolNative exe -> Ok exe
+
+monoNativeTool :: IO Tool -> IO (Result FilePath String)
+monoNativeTool getTool = do
+    tool <- getTool
+    pure $ case tool of
+        ToolFailed e -> Error e
+        ToolInterpreted _ -> Error "monomorphization runs natively only"
+        ToolNative exe -> Ok exe
 
 ownershipTool :: IO Tool
 ownershipTool = either' <$> cachedEmitter
@@ -183,11 +192,7 @@ ownedWith emitter program = do
     native <- nativeProgramUsing (pure (ToolNative emitter)) listLibrary program
     case native of
         Error e -> pure (Error e)
-        Ok lowered -> do
-            specialized <- monomorphizeWith (pure (ToolNative emitter)) lowered
-            case specialized of
-                Error e -> pure (Error e)
-                Ok mono -> ownershipPassWith (pure (ToolNative emitter)) "ownership" mono
+        Ok lowered -> monomorphizeOwnershipWith (pure (ToolNative emitter)) lowered
 
 ownedToolWith :: FilePath -> FilePath -> IO (Result Program String)
 ownedToolWith emitter entry = case toolProgram entry of

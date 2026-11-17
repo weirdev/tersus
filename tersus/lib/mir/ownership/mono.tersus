@@ -1,0 +1,56 @@
+import data::codec::codec { Token };
+import mir::full::full { fullAt };
+import mir::full::tokens { word, wordIs, intToken };
+import mir::full::write { FullOutput, outputFull, emitFull };
+import mir::mono::mono { monomorphize };
+import mir::reader::reader { ghostProgramAt };
+import mir::writer::writer { printProgramWithGhosts };
+import mir::ownership::rewrite { insertOwnership };
+import mir::ownership::common { blocksWellFormed };
+
+fn isMonoOwnershipRequest(lines: &List<List<Token>>) -> Bool ~ {
+    if size(lines) = 0 { return false; };
+    header = get(lines, 0);
+    return size(header) = 2 && wordIs(&header, 0, "pass") && wordIs(&header, 1, "mono-ownership");
+};
+
+fn ownershipRows(receipt: &FullOutput) -> List<List<Token>> ~ {
+    rows = push([], push(push([], word("tersus-mir")), word("2")));
+    active = false;
+    ghost = 0;
+    for row in &receipt.records {
+        if wordIs(row, 0, "function") || wordIs(row, 0, "main") { active = true; };
+        keep = wordIs(row, 0, "struct") || wordIs(row, 0, "enum");
+        if active && !wordIs(row, 0, "spec") && !wordIs(row, 0, "env") && !wordIs(row, 0, "loop") { keep = true; };
+        if keep {
+            if wordIs(row, 0, "ghost") {
+                rows = push(rows, push(push([], word("ghost")), intToken(ghost)));
+                ghost = ghost + 1;
+            } else { rows = push(rows, clone(row)); };
+        };
+        if wordIs(row, 0, "end") { active = false; };
+    };
+    return rows;
+};
+
+fn runMonoOwnership(lines: &List<List<Token>>) -> Bool ~ {
+    input = [];
+    for i in 1..size(lines) { input = push(input, clone(get(lines, i))); };
+    parsed = fullAt(&input);
+    if !parsed.ok { "the input is not full MIR version 3\n".printError(); return false; };
+    specialized = monomorphize(parsed.value);
+    receipt = outputFull(&specialized);
+    emitFull(&receipt);
+    runtime = ghostProgramAt(ownershipRows(&receipt));
+    if !runtime.ok {
+        "the ownership input is not the MIR as data\n".printError();
+        return false;
+    };
+    if !blocksWellFormed(&runtime.value) {
+        "the ownership input has a negative block id, no block 0, or a jump to a block that is not there\n".printError();
+        return false;
+    };
+    owned = insertOwnership(runtime.value);
+    printProgramWithGhosts(&owned);
+    return true;
+};
