@@ -6126,8 +6126,56 @@ fn sanitizeFnName(s: &String) -> String ~ {
 
 fn fnContractHash(text: &String) -> String ~ {
     h = 5381;
-    for i in 0..size(text.bytes) { b = toInt(get(&text.bytes, i)); if b != 32 && b != 9 && b != 10 && b != 13 { h = (h * 33 + b) % 1000000007; }; };
+    inString = false;
+    escaped = false;
+    for i in 0..size(text.bytes) {
+        b = toInt(get(&text.bytes, i));
+        include = true;
+        if escaped { escaped = false; } else {
+            if inString && b = 92 { escaped = true; } else {
+                if b = 34 { inString = !inString; } else {
+                    if !inString && (b = 32 || b = 9 || b = 10 || b = 13) { include = false; };
+                };
+            };
+        };
+        if include { h = (h * 33 + b) % 1000000007; };
+    };
     return String::fromInt(h);
+};
+
+fn collectTokenParams(ts: &List<Token>, acc: List<String>) -> List<String> ~ {
+    out = clone(acc);
+    for i in 0..size(ts) {
+        if i + 1 < size(ts) {
+            tok = get(ts, i);
+            if !tok.quoted && tok.text = "param" {
+                n = clone(get(ts, i + 1).text);
+                if indexOfName(&out, &n) < 0 { out = push(out, n); };
+            };
+        };
+    };
+    return out;
+};
+
+fn canonicalTypeName(t: Type, params: &List<String>) -> String ~ {
+    toks = typeTokensOf(t);
+    out = "";
+    i = 0;
+    while i < size(toks) [{ affirm i >= 0; affirm i <= size(toks); }] shrinks size(toks) - i {
+        tok = get(toks, i);
+        if !tok.quoted && tok.text = "param" && i + 1 < size(toks) {
+            pname = clone(get(toks, i + 1).text);
+            at = indexOfName(params, &pname);
+            out = catStrings(out, "_P");
+            if at >= 0 { out = catStrings(out, String::fromInt(at)); } else { out = catStrings(out, pname); };
+            i = i + 2;
+        } else {
+            if tok.quoted { out = catStrings(out, "_Q"); } else { out = catStrings(out, "_W"); };
+            out = catStrings(out, clone(tok.text));
+            i = i + 1;
+        };
+    };
+    return sanitizeFnName(&out);
 };
 
 fn collectTypeParams(t: Type, acc: List<String>) -> List<String> ~ {
@@ -6148,7 +6196,7 @@ fn collectTypeParams(t: Type, acc: List<String>) -> List<String> ~ {
         Type::TByte => { },
         Type::TBool => { },
         Type::TWord { signed: a, bits: b } => { },
-        Type::TNamed { name: n, base: b, argc: c, argTokens: ts } => { },
+        Type::TNamed { name: n, base: b, argc: c, argTokens: ts } => { out = collectTokenParams(&ts, out); },
         Type::TVariant { name: n } => { },
         Type::TVar { n: n } => { },
     };
@@ -6159,10 +6207,6 @@ fn fnTraitParams(st: &St, types: &List<Type>, ret: Type) -> List<String> ~ {
     out = [];
     for t in types { out = collectTypeParams(clone(t), out); };
     out = collectTypeParams(clone(ret), out);
-    rendered = "";
-    for t in types { rendered = catStrings(rendered, renderTypeName(clone(t))); };
-    rendered = catStrings(rendered, renderTypeName(clone(ret)));
-    for cand in &st.typeParams { if indexOfName(&out, cand) < 0 && containsText(&rendered, cand) { out = push(out, clone(cand)); }; };
     return out;
 };
 
@@ -6229,10 +6273,10 @@ fn fnShape(sourceText: &Input, st: St, kind: String) -> Res<FnShape> ~ {
     tps = fnTraitParams(&s, &tys, clone(resultPartsrtValue));
     canonical = clone(kind);
     i = 0;
-    for t in &tys { renderedTy = renderTypeName(clone(t)); canonical = catStrings(canonical, cat3("$", String::fromInt(i), "")); canonical = catStrings(canonical, cat3("=", sanitizeFnName(&renderedTy), "")); i = i + 1; };
-    renderedRet = renderTypeName(clone(resultPartsrtValue));
-    canonical = catStrings(canonical, cat3("$to$", sanitizeFnName(&renderedRet), ""));
-    if contractStart >= 0 { contractText = sourceText.text.slice(contractStart, s.pos); canonical = catStrings(canonical, cat3("$c", fnContractHash(&contractText), "")); };
+    for t in &tys { renderedTy = canonicalTypeName(clone(t), &tps); canonical = catStrings(canonical, cat3("$", String::fromInt(i), "")); canonical = catStrings(canonical, cat3("=", renderedTy, "")); i = i + 1; };
+    renderedRet = canonicalTypeName(clone(resultPartsrtValue), &tps);
+    canonical = catStrings(canonical, cat3("$to$", renderedRet, ""));
+    if contractStart >= 0 { contractText = srcSlice(sourceText, s, contractStart, s.pos); canonical = catStrings(canonical, cat3("$c", fnContractHash(&contractText), "")); };
     return ok( s, FnShape { kind: kind, names: names, types: tys, ret: resultPartsrtValue, ins: resultPartsinsValue, outs: resultPartsoutsValue, canonical: canonical, traitParams: tps });
 };
 
