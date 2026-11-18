@@ -23,7 +23,7 @@ import qualified AstData
 import qualified Bootstrap
 import qualified Compile
 import qualified FileParserProtocol as File
-import MirData (writeProgram)
+import MirData (writeOwnedProgram)
 import MirEval (runProgram, MirValue (..))
 import Modules (LoadResult (..), resolverFromFiles)
 import qualified Modules
@@ -661,9 +661,9 @@ parserFixpointRecipe = inPrimedWorker "fixpoint" [] $ do
                 Just e -> pure (Just ("P0/P1 prepared current files differ: " ++ e))
                 Nothing -> case ownPackage pkg of
                     Error e -> pure (Just e)
-                    Ok owned | writeProgram owned /= actualInput -> pure (Just "P0/P1 current checking/lowering/MIR differs")
+                    Ok owned | owned /= actualInput -> pure (Just "P0/P1 current checking/lowering/MIR differs")
                     Ok owned -> do
-                        regenerated <- Bootstrap.emitWith exe (writeProgram owned)
+                        regenerated <- Bootstrap.emitWith exe owned
                         case regenerated of
                             Error e -> pure (Just e)
                             Ok ir | encodeUtf8 ir /= encodeUtf8 currentIr -> pure (Just "regenerated current P1/P2 IR differs")
@@ -679,8 +679,9 @@ parserFixpointRecipe = inPrimedWorker "fixpoint" [] $ do
         (_, _, _, Error e, _) -> pure (Just e)
         (_, _, _, _, Left e) -> pure (Just e)
   where
+    -- (written as the prepared input is, with the checked ownership facts of the program)
     ownPackage pkg = PackageCompile.compileModulesLinked (Modules.packageSnapshot pkg) `bindResult` \program ->
-        Housekeeping.nativeProgram program `bindResult` insertOwnership
+        Housekeeping.nativeProgram program `bindResult` insertOwnership `bindResult` writeOwnedProgram
 
 overlapControls :: IO TestResult
 overlapControls = do
