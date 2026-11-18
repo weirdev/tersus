@@ -2440,18 +2440,27 @@ fn nonInfixExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
         return withFieldsExpr(sourceText, resultPartspeState, resultPartspeValue);
     };
     if keywordAt(sourceText, s, "fn") {
-        ce = closureExpr(sourceText, s, false); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
-        if !resultPartsceOk { return Res<Int> { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk }; };
-        return withFieldsExpr(sourceText, resultPartsceState, resultPartsceValue);
+        fk = eatKeyword(sourceText, s, "fn"); Res { st: resultPartsfkState, v: resultPartsfkValue, ok: resultPartsfkOk } = fk;
+        afterFn = skipWs(sourceText, clone(resultPartsfkState));
+        if byteAt(sourceText, afterFn, afterFn.pos) = 40 {
+            fnSave = checkpoint(s);
+            ce = closureExpr(sourceText, s, false); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
+            if resultPartsceOk { return withFieldsExpr(sourceText, resultPartsceState, resultPartsceValue); };
+            s = restore(resultPartsceState, fnSave);
+            c = byteAt(sourceText, s, s.pos);
+        };
     };
     if keywordAt(sourceText, s, "move") {
         save = checkpoint(s);
         mk = eatKeyword(sourceText, s, "move"); Res { st: resultPartsmkState, v: resultPartsmkValue, ok: resultPartsmkOk } = mk;
         afterMove = skipWs(sourceText, clone(resultPartsmkState));
         if keywordAt(sourceText, afterMove, "fn") {
-            ce = closureExpr(sourceText, afterMove, true); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
-            if !resultPartsceOk { return Res<Int> { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk }; };
-            return withFieldsExpr(sourceText, resultPartsceState, resultPartsceValue);
+            fk2 = eatKeyword(sourceText, afterMove, "fn"); Res { st: resultPartsfk2State, v: resultPartsfk2Value, ok: resultPartsfk2Ok } = fk2;
+            afterFn2 = skipWs(sourceText, clone(resultPartsfk2State));
+            if byteAt(sourceText, afterFn2, afterFn2.pos) = 40 {
+                ce = closureExpr(sourceText, afterMove, true); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
+                if resultPartsceOk { return withFieldsExpr(sourceText, resultPartsceState, resultPartsceValue); };
+            };
         };
         s = restore(resultPartsmkState, save);
         c = byteAt(sourceText, s, s.pos);
