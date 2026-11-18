@@ -8,7 +8,7 @@ import elaborate::proofs { inferProof, rewriteOldStatements };
 import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName, mentionsVariable };
 import elaborate::refs { declaredOrigin, refsOf, withRefs, derefRoot, derefSteps, exprRefOrigins, expressionPlaces, joinBranchReferences, namedReferences, ownParameterSources, parameterContents, placeSteps, putOrigins, putRefResult, recordAlias, recordOrigins, recordPlaceReferences, resetBranchReferences, resolveRefPlace, resolveRefPlaces, sameReferences, withinWrites, writesTarget, writesText };
 import elaborate::state { FnSig, Generic, NodeRewrite, Place, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, copyState, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
-import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, isClosureExpr, templateOf };
+import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, isClosureExpr, isClosureValue, templateOf };
 
 fn stmtOf(st: &St, s: Int) -> AstStatement ~ {
     node = nodeIn(&st.nodes, s);
@@ -186,6 +186,22 @@ fn scopeExpression(st: St, e: Int) -> St ~ {
             if bodyNode is AstNode::Body && (bodyNode as AstNode::Body).value is AstBody::NativeFunct {
                 body = (bodyNode as AstNode::Body).value as AstBody::NativeFunct;
                 outer = clone(st.localNames);
+                if isClosureValue(&st, v) {
+                    inner = clone(st.localNames);
+                    for pn in listItems(&st.nodes, value.ps) { inner = inner.remove(&nameText(&st.nodes, pn)); };
+                    st = St { localNames: inner, ..st };
+                    st = scopeValidations(st, value.ins);
+                    scopedIns = st.nid;
+                    st = scopeValidations(st, value.outs);
+                    scopedOuts = st.nid;
+                    stmts = listItems(&st.nodes, body.stmts);
+                    st = localScopes(st, &stmts);
+                    scopedStmts = st.nid;
+                    st = St { localNames: outer, ..st };
+                    st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: body.sig, term: body.term, stmts: scopedStmts } });
+                    st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: value.ps, ins: scopedIns, outs: scopedOuts, body: st.nid, exports: value.exports } });
+                    return emitVal(st, st.nid);
+                };
                 st = St { localNames: HashMap::new(), ..st };
                 stmts = listItems(&st.nodes, body.stmts);
                 st = localScopes(st, &stmts);
