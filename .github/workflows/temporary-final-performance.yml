@@ -1,0 +1,41 @@
+name: Temporary frozen FIRST plus SECOND performance pair
+
+on:
+  push:
+    branches: [temporary-final-ci-performance-123b6df7]
+
+permissions:
+  contents: read
+
+jobs:
+  matched-pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Cache the normal Stack toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.stack
+          key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}-final-pair
+          restore-keys: |
+            stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}-
+            stack-${{ runner.os }}-
+      - name: Provide the runner's linker
+        run: command -v ld.gold || sudo ln -s "$(command -v ld.bfd)" /usr/local/bin/ld.gold
+      - name: One matched normal Stack cold and full-suite pair
+        run: python3 .github/temporary_final_pair.py
+      - name: Retain terminal pair evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: frozen-b1-edf5-final-performance
+          path: |
+            ${{ runner.temp }}/tersus-final-pair/result.json
+            ${{ runner.temp }}/tersus-final-pair/*.stdout
+            ${{ runner.temp }}/tersus-final-pair/*.stderr
+            ${{ runner.temp }}/tersus-final-pair/*.time.json
+            ${{ runner.temp }}/tersus-final-pair/final-certified.pin
+          if-no-files-found: error
