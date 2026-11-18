@@ -1,5 +1,6 @@
 module TestParser (testParser, libraryDecls, packageFileDecls, pairedWith) where
 
+import Control.Exception (evaluate)
 import Control.Monad (foldM, forM)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (doesDirectoryExist, listDirectory)
@@ -230,7 +231,10 @@ pairedFile source = case libraryDecls of
 pairedWith :: Bool -> [Decls -> String -> IO (Either String (ParsedFile, Decls))] -> Decls -> String -> IO TestResult
 pairedWith reading parsers decls source = do
     answers <- mapM (\parse -> parse decls source) parsers
-    pure $ firstFailure ([Just ("the first parser refuses a corpus file: " ++ e) | reading, Left e : _ <- [answers]] ++ [same a b | (a, b) <- zip answers (drop 1 answers)])
+    let result = firstFailure ([Just ("the first parser refuses a corpus file: " ++ e) | reading, Left e : _ <- [answers]] ++ [same a b | (a, b) <- zip answers (drop 1 answers)])
+    -- Release both ASTs and declaration replies before admitting another pair.
+    _ <- evaluate (forceTestResult result)
+    pure result
   where
     same (Right (a, da)) (Right (b, db)) = testAssertEq a b <> testAssertEq (File.writeParsedFile a da) (File.writeParsedFile b db)
     same (Left a) (Left b) | not (ParserSeed.toolFailure a || ParserSeed.toolFailure b) = Nothing
