@@ -1,4 +1,4 @@
-{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- Where a value of one type can be inside a value of another, by the declared types alone: the one authority the move
 -- check (MirMoves) and the validator's bridge (SelfHostedMir) use to tell the place a result under `from` is to, and the
@@ -8,15 +8,15 @@ module FieldPaths (fieldPaths, mayBe) where
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Mir (TypeDecl (..))
-import Types (Name, Type (..), Variable, baseNameOf, instanceName, pattern TBox, pattern TList)
+import Types (Name, Storage, Type (..), Variable, baseNameOf, boxContent, instanceName, listElement)
 
 -- Every path of struct fields (struct, field) from a value of type `ty` to a part whose type may be `target`, or Nothing
 -- when that list cannot be known to be complete: a type that is not resolved, an instance met again on the way, or an
 -- element (of a List, Box, Array or Uninit) or an enum's variant that may hold a `target`. With `throughReferences`, a
 -- reference whose referent may be or hold a `target` also makes it incomplete (what it is to can be such a place too,
 -- outside the value); without, a reference is a word that is not a `target` place.
-fieldPaths :: Bool -> Map.Map Name TypeDecl -> Type -> Type -> Maybe [[(Name, Variable)]]
-fieldPaths throughReferences types target = go Set.empty
+fieldPaths :: Storage -> Bool -> Map.Map Name TypeDecl -> Type -> Type -> Maybe [[(Name, Variable)]]
+fieldPaths storage throughReferences types target = go Set.empty
   where
     go seen ty
         | mayBe types ty target = ([] :) <$> inside seen ty
@@ -32,8 +32,8 @@ fieldPaths throughReferences types target = go Set.empty
         TArrayOf element _ -> sealed seen element
         TUninit element -> sealed seen element
         _ | ty `Set.member` seen -> Nothing
-        TList element -> sealed (Set.insert ty seen) element
-        TBox element -> sealed (Set.insert ty seen) element
+        (listElement storage -> Just element) -> sealed (Set.insert ty seen) element
+        (boxContent storage -> Just element) -> sealed (Set.insert ty seen) element
         TNamed base args -> case Map.lookup (instanceName base args) types of
             Just (StructDecl fields) -> concat <$> mapM (\(field, fieldTy) -> map ((instanceName base args, field) :) <$> go (Set.insert ty seen) fieldTy) fields
             Just (EnumDecl variants) -> sealedAll (Set.insert ty seen) (concatMap snd variants)

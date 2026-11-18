@@ -37,7 +37,7 @@ import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (nativeStorage, storageProgram)
 import Utils (Result (..), bindResult, flatResultMap, mapResult)
 
--- The compiler libraries (lib/eq.tersus and the rest) compiled as modules
+-- The compiler libraries (lib/std/eq/eq.tersus and the rest) compiled as modules
 -- of the synthetic lib package: the package loads, each library checks
 -- against the interfaces of the libraries it imports, and the interfaces
 -- carry what an importer needs under the libraries' bare names.
@@ -189,7 +189,7 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     [ testCase "snapshot uses the embedded helper texts without concatenating bodies" $
         testAssertEq (map (\path -> lookup path libPackageFiles) ["tersuslib/lists/lists.tersus", "tersuslib/box/box.tersus"]) [Just listsSource, Just boxSource]
     , testCase "native imports are the compiled dependency graph" $
-        case bootstrapLoader (LoadRequest LoadLibraries False (Modules.resolverFromFiles []) Nothing Modules.librarySources []) of
+        case bootstrapLoader Modules.libraryRequest of
             LoadedLibraries answers Nothing -> testAssertEq [(name, imports) | LibraryAnswer name imports _ _ <- answers, name `elem` ["lists", "box"]] [("lists", ["types", "prelude"]), ("box", ["types", "prelude"])]
             other -> Just ("the compiler libraries did not load: " ++ take 300 (show other))
     , testCase "user-library compilation excludes native modules" $ case libPackage of

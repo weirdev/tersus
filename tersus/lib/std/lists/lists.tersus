@@ -11,8 +11,7 @@
 // The runtime and the emitter know this struct by its name and its fields, which have to stay as they are: `addr` first (an element is read
 // from a list at the address that is its first field), then `len`, then `cap`; the runtime prints, compares and copies a List as a list of
 // its first `len` elements. It is freed by its drop, at the end.
-import tersuslib::types;
-import tersuslib::prelude;
+import std::core::types { List };
 
 fn listNew<T>() -> List<T> [{ }] [{ affirm return.len = 0; }] {
     (a, b) = Addr::alloc(0);
@@ -57,13 +56,6 @@ fn listPush<T>(l: List<T>, x: T) -> List<T> [{ }] [{ affirm return.len = l.len +
         return List<T> { addr: a, len: n + 1, cap: cap, blk: Addr::write(a, n, x, b) };
     };
     return List<T> { addr: p, len: n + 1, cap: c, blk: Addr::write(p, n, x, k) };
-};
-
-// A list that goes out of scope drops the elements in use, and frees its memory
-impl<T> Drop for List<T> {
-    fn drop(self: Self) -> Int {
-        return Addr::free(self.addr, Addr::dropRange(self.addr, 0, self.len, self.blk));
-    };
 };
 
 // Array::boxed(n, x): n copies of x, in memory of its own (a Box of an array is a list of native code, with as many elements as room)

@@ -159,9 +159,9 @@ testBorrow =
                 , testCase "a struct can hold a value that holds references" (runs "struct Window { first: &Int, last: &Int }; struct Outer { w: Window, n: Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; o = Outer { w: w, n: 1 }; f = o.w.first; return *f + o.n;" (VInt 11))
                 , testCase "a value that holds references can be given to a function" (runs "struct Window { first: &Int, last: &Int }; fn total(w: Window) -> Int { f = w.first; return *f; }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; return total(w);" (VInt 10))
                 , testCase "and put in a list" (runs "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; ws = push([], w); w0 = get(ws, 0); f = w0.first; return *f + size(ws);" (VInt 11))
-                , testCase "a holder of a shared reference is Clone" (runs "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); return *t.r;" (VInt 1))
-                , testCase "a cloned shared reference holder keeps its loan" (rejected "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); x = 2; return *t.r;" "cannot be assigned while it is borrowed")
-                , testCase "a holder cannot clone its update reference" (rejected "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct S { r: &mut Int }; impl Clone for S { }; x = 1; s = S { r: &mut x }; t = clone(s); return 0;" "lent")
+                , testCase "a holder of a shared reference is Clone" (runs "struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); return *t.r;" (VInt 1))
+                , testCase "a cloned shared reference holder keeps its loan" (rejected "struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); x = 2; return *t.r;" "cannot be assigned while it is borrowed")
+                , testCase "a holder cannot clone its update reference" (rejected "struct S { r: &mut Int }; impl Clone for S { }; x = 1; s = S { r: &mut x }; t = clone(s); return 0;" "lent")
                 , testCase "a holder made in the function is returned from what its fields are from" (runs "struct S { r: &Int }; fn f(x: &Int) -> S from x { s = S { r: &x }; return s; }; x = 3; w = f(x); g = w.r; return *g;" (VInt 3))
                 , testCase "an ordinary field is not an origin" (runs "struct S { r: &Int, n: Int }; fn f(x: &Int) -> S from x { n = 1; return S { r: &x, n: n }; }; x = 3; w = f(x); g = w.r; return *g + w.n;" (VInt 4))
                 ]
@@ -558,7 +558,7 @@ rootedWriteCases = TestList "writes rooted at the reference written through"
     five = M.Use (M.Const (M.CInt 5))
     borrowX = [set 1 (M.Use (M.Const (M.CInt 0))), set 3 (M.Borrow (l 1) [] True)]
     decls = Map.fromList [(l n, M.LocalDecl ty (Just name)) | (n, ty, name) <- [(1, TInt, "x"), (3, TMutRef TInt, "q"), (4, TMutRef TInt, "p"), (6, TInt, "v")]]
-    check ss = checkMoves Set.empty Set.empty Set.empty (M.Program Map.empty Map.empty (M.Function "writes" [] Nothing decls (Map.fromList [(M.BlockId 0, M.BasicBlock ss M.Unreachable)]) [] [] [] [] [] M.emptySpec) Map.empty Map.empty Map.empty Map.empty)
+    check ss = checkMoves Set.empty Set.empty Set.empty (M.Program Map.empty Map.empty (M.Function "writes" [] Nothing decls (Map.fromList [(M.BlockId 0, M.BasicBlock ss M.Unreachable)]) [] [] [] [] [] M.emptySpec) Map.empty Map.empty Map.empty Map.empty Map.empty Nothing)
     requireError msg es = if any (isInfixOf msg) es then Nothing else Just ("Expected " ++ show msg ++ "; got " ++ show es)
     rootOfWrite source name = case parseStatementBlock source of
         Left err -> Just ("Parse error: " ++ err)

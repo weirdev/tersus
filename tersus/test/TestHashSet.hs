@@ -6,10 +6,10 @@ import Solver
 import TestHarness
 import Utils
 
--- HashSet: a set of keys in lib/set.tersus, made of a HashMap to Bool. The programs are read as the command
+-- HashSet: a set of keys in lib/std/set/set.tersus, made of a HashMap to Bool. The programs are read as the command
 -- line reads them (the set and map libraries are put in front by the pipeline, and the programs are validated
 -- as they run), so membership is asserted by running it: that an inserted key is found is true when a set runs,
--- and these tests say so, but no contract of the library lets a caller prove it (see lib/set.tersus).
+-- and these tests say so, but no contract of the library lets a caller prove it (see lib/std/set/set.tersus).
 testHashSet :: Test
 testHashSet =
     TestList

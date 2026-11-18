@@ -2,16 +2,19 @@ module MirPass (programData, runPassWith, runMonoOwnershipPassWith) where
 
 import Data.Char (isSpace)
 import Data.List (isPrefixOf)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.Exit (ExitCode (..))
-import Mir (Lowered (..), Program)
-import MirData (readLowered, readProgram, writeLowered)
+import Mir (Lowered (..), Program (..))
+import MirData (readCheckedLowered, readProgram, writeCheckedLowered)
+import Types (OwnershipFacts (..), tupleGeneric)
 import MirOwnershipData (restoreOwnership)
 import Native (runWithInputFull)
 import Utils
 
+-- The program as the native passes are given it, with its checked providers and facts (MirData.writeCheckedLowered)
 programData :: Program -> Result String String
-programData program = writeLowered (Lowered program Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty [])
+programData program = writeCheckedLowered (Lowered program Set.empty Set.empty Set.empty Set.empty Set.empty Set.empty [])
 
 runPassWith :: IO (Result FilePath String) -> String -> String -> IO (Result Program String)
 runPassWith tool label input = do
@@ -25,7 +28,7 @@ runPassWith tool label input = do
                 ExitSuccess
                     | trim out == "1" -> Error (trimEnd (decodeUtf8 errors))
                     | not (null (trim errors)) -> Error (label ++ " reported: " ++ trimEnd (decodeUtf8 errors))
-                    | otherwise -> stage (label ++ " wrote unreadable MIR3: ") (mapResult lowProgram (readLowered out))
+                    | otherwise -> stage (label ++ " wrote unreadable MIR3: ") (mapResult lowProgram (readCheckedLowered out))
 
 runMonoOwnershipPassWith :: IO (Result FilePath String) -> String -> IO (Result Program String)
 runMonoOwnershipPassWith tool input = do
@@ -40,8 +43,8 @@ runMonoOwnershipPassWith tool input = do
                     ExitSuccess
                         | trim out == "1" -> Error (trimEnd (decodeUtf8 errors))
                         | not (null (trim errors)) -> Error ("the monomorphization tool reported: " ++ trimEnd (decodeUtf8 errors))
-                        | otherwise -> stage "the monomorphization tool wrote unreadable MIR3: " (mapResult lowProgram (readLowered out)) `bindResult` \_ -> Error "the ownership tool did not write MIR version 2"
-                Just (mono, owned) -> case mapResult lowProgram (readLowered mono) of
+                        | otherwise -> stage "the monomorphization tool wrote unreadable MIR3: " (mapResult lowProgram (readCheckedLowered out)) `bindResult` \_ -> Error "the ownership tool did not write MIR version 2"
+                Just (mono, owned) -> case mapResult lowProgram (readCheckedLowered mono) of
                     Error e -> case code of
                         ExitFailure n -> Error ("the monomorphization tool exited with " ++ show n ++ ": " ++ trimEnd (decodeUtf8 errors))
                         ExitSuccess
@@ -53,7 +56,8 @@ runMonoOwnershipPassWith tool input = do
                             | trim owned == "1" -> Error ("the ownership tool refused ownership: " ++ trimEnd errors)
                             | not (null (trim errors)) -> Error ("the ownership tool reported: " ++ trimEnd errors)
                             | take 1 (lines owned) /= ["tersus-mir 2"] -> Error "the ownership tool did not write MIR version 2"
-                            | otherwise -> stage "the ownership tool wrote unreadable MIR: " (readProgram owned) `bindResult` restoreOwnership original
+                            | otherwise -> stage "the ownership tool wrote unreadable MIR: " (readProgram owned) `bindResult` \output ->
+                                agreeing original output `bindResult` \_ -> restoreOwnership original output
 
 monoReceipt :: String -> Maybe (String, String)
 monoReceipt out = case break (isPrefixOf "data ") (lines out) of
@@ -76,3 +80,23 @@ trimEnd = reverse . dropWhile (== '\n') . reverse
 stage :: String -> Result a String -> Result a String
 stage prefix (Error e) = Error (prefix ++ e)
 stage _ ok = ok
+
+-- The owned program's checked facts are the receipt's for the types the receipt declares (its facts of other types are carried for
+-- what follows, and the owned program declares none of them): each declared type has the receipt's row, as it is, or, for a
+-- tuple the receipt has no row of, none; and its storage is the receipt's
+agreeing :: Program -> Program -> Result () String
+agreeing receipt owned = case (progOwnership receipt, progOwnership owned) of
+    (Nothing, Nothing) -> Ok ()
+    (Just facts, Just rows)
+        | Map.lookup "List" (progProtocols owned) /= Map.lookup "List" (progProtocols receipt) || Map.lookup "Box" (progProtocols owned) /= Map.lookup "Box" (progProtocols receipt) ->
+            Error "the ownership tool wrote another storage than its receipt has"
+        | Map.keysSet rows /= declared -> Error "the ownership tool wrote checked facts of other types than its receipt declares"
+        | not (all (agrees facts rows) (Set.toList declared)) -> Error "the ownership tool wrote other checked facts than its receipt has"
+        | otherwise -> Ok ()
+    _ -> Error "the ownership tool and its receipt disagree on whether the program has checked facts"
+  where
+    declared = Map.keysSet (progTypes receipt)
+    agrees facts rows owner = case (Map.lookup owner facts, Map.lookup owner rows) of
+        (Just expected, Just row) -> row == expected
+        (Nothing, Just row) -> tupleGeneric (takeWhile (/= '<') owner) /= Nothing && row == OwnershipFacts Nothing Nothing Nothing Nothing
+        _ -> False

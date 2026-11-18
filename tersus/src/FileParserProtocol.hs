@@ -176,9 +176,9 @@ listP parser = do
 
 safeTypeP :: P Type
 safeTypeP = word >>= \tag -> case tag of
-    "list" -> TList <$> safeTypeP
+    "list" -> SyntaxList <$> safeTypeP
     "array" -> TArrayOf <$> safeTypeP <*> safeSizeP
-    "box" -> TBox <$> safeTypeP
+    "box" -> SyntaxBox <$> safeTypeP
     "addr" -> TAddr <$> safeTypeP
     "uninit" -> TUninit <$> safeTypeP
     "block" -> TBlock <$> safeTypeP

@@ -4,6 +4,10 @@ module TestNative
     , nativeExamples
     , validatedPrograms
     , unvalidatedPrograms
+    , ownRoleEntry
+    , ownRoleFiles
+    , ownRolePrograms
+    , freshClone
     , referenceWritePrograms
     , lentPartPrograms
     , nativeMirCase
@@ -30,7 +34,6 @@ import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Mir as M
 import MirEval (MirValue (MInt), renderMirValue, runProgram)
-import Compile (lowerStatements)
 import qualified Compile
 import MirHousekeeping (insertOwnership, verifyProgram)
 import Native (buildExecutableFast, readProcessOutput, runExecutable, spawnShared, withPipeReader)
@@ -68,6 +71,7 @@ testNative =
         , TestParallel "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
         , TestParallel "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestParallel "native storage" [TestCase name (sameAsMir name source) | (name, source) <- nativeStoragePrograms]
+        , TestParallel "own roles" [TestCase name (sameAsMirPackage name files) | (name, files) <- ownRolePrograms]
         , TestParallel "Uninit" [TestCase name (sameAsMir name source) | (name, source) <- uninitPrograms]
         , TestParallel "constant lists" [TestCase name (sameAsMir name source) | (name, source) <- constantListPrograms]
         , TestParallel "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
@@ -182,13 +186,13 @@ testNativeIr =
         , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" $
             withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i32 1, ptr" `isInfixOf` ir && "icmp eq i32" `isInfixOf` ir))
         , TestCase "a Box takes room on the heap for what it holds" $
-            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.boxNew<P>\"" `isInfixOf` ir))
+            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.std$box$box$boxNew<P>\"" `isInfixOf` ir))
         , TestCase "a Box of an array is a list of the library" $
-            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.listFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
+            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.std$lists$lists$listFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
         , TestCase "a string literal is copied from a constant array of its bytes" $
             withIr "s = \"hello\"; return size(s);" (\ir -> testAssertTrue ("private constant [5 x i8] [i8 104, i8 101, i8 108, i8 108, i8 111]" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 5, i64 1)" `isInfixOf` ir))
         , TestCase "a Box is the struct of the library, freed by its drop" $
-            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<Box<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.boxUnbox<Int>\"" `isInfixOf` ir))
+            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<std$core$types$Box as std$core$ownership$Drop>::drop<Int>\"" `isInfixOf` ir && "@\"fn.std$box$box$boxUnbox<Int>\"" `isInfixOf` ir))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" $
             withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "@tersus_writeByte(i64 195)" `isInfixOf` ir && "@tersus_writeByte(i64 169)" `isInfixOf` ir))
         , TestCase "a letter of four bytes" $
@@ -370,8 +374,48 @@ lookPrograms =
     , ("a look at an instance with a Clone and no value with a drop", nestedDrops ++ dropWrapperW ++ "struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; " ++ "fn f(w: W<V<Int>>, w2: W<V<Int>>) -> Int { v = w.x; w = w2; return v.n + v.x; }; return f(W::new(V { x: 1, n: 3 }), W::new(V { x: 2, n: 4 }));")
     , ("a look at a value with a drop nine Boxes deep", nestedDrops ++ dropWrapperW ++ "struct D { b: Box<Box<Box<Box<Box<Box<Box<Box<Box<H>>>>>>>>>, n: Int }; fn f(w: W<D>, c: Bool) -> Int { v = w.x; t = 0; if c { t = v.n; }; return t + v.n; }; return f(W::new(D { b: Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(H::new()))))))))), n: 2 }), true);")
     , ("a look lent at a value with a drop nine lists deep", nestedDrops ++ dropWrapperW ++ "struct D { b: List<List<List<List<List<List<List<List<List<H>>>>>>>>>, n: Int }; fn g(d: &D) -> Int { return d.n; }; fn f(w: W<D>, c: Bool) -> Int { v = w.x; t = 0; if c { t = g(v); }; return t + g(v); }; return f(W::new(D { b: [], n: 2 }), true);")
-    , ("a look at a value with a drop and a Clone of its own is a copy", "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct C { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl C { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for C { fn clone(self: &Self) -> Self { return C::new(self.n); }; }; impl Drop for C { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; struct D { c: C, n: Int }; " ++ "fn f(d: D, d2: D) -> Int { c = d.c; d = d2; return c.n + d.n; }; return f(D { c: C::new(3), n: 1 }, D { c: C::new(4), n: 2 });")
     ]
+
+-- A value with a drop and a Clone of its own that makes a value of its own (std's Clone gives the value itself, which a fresh
+-- allocation is not): its package binds its own Clone and Drop, and its own List, which the filled ghost of the invariant is
+-- typed with; nothing at run time is a list
+ownRoleFiles :: String -> [(FilePath, String)]
+ownRoleFiles body =
+    [ ("app/package.tersus", "noPrelude = true;\nList = storage::List;\nClone = own::Clone;\nDrop = own::Drop;\n")
+    , ("app/own/own.tersus", "trait Clone { fn clone(self: &Self) -> Self; };\ntrait Drop { fn drop(self: Self) -> Int; };\n")
+    , ("app/storage/storage.tersus", "struct List<T> { addr: Addr<T>, len: Int, cap: Int, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len; affirm len >= 0; affirm len <= cap; affirm forall j in 0..len: filled(blk, j) = true; affirm forall j in len..cap: filled(blk, j) = false; }];\n")
+    , (ownRoleEntry, "import app::own { Clone, Drop };\nimport app::storage { List };\n" ++ body)
+    ]
+
+ownRoleEntry :: FilePath
+ownRoleEntry = "app/main.tersus"
+
+-- C, whose Clone allocates a value of its own and whose drop frees it
+freshClone :: String
+freshClone = "struct C { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl C { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for C { fn clone(self: &Self) -> Self { return C::new(self.n); }; }; impl Drop for C { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; "
+
+ownRolePrograms :: [(String, [(FilePath, String)])]
+ownRolePrograms = [("a look at a value with a drop and a Clone of its own is a copy", ownRoleFiles (freshClone ++ "struct D { c: C, n: Int }; " ++ "fn f(d: D, d2: D) -> Int { c = d.c; d = d2; return c.n + d.n; }; return f(D { c: C::new(3), n: 1 }, D { c: C::new(4), n: 2 });"))]
+
+-- A package program, validated, built and run with the runtime's memory checks (and under valgrind when it is named in valgrindCases), has
+-- to print what the executor prints
+sameAsMirPackage :: String -> [(FilePath, String)] -> IO TestResult
+sameAsMirPackage name files = do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else do
+            compiled <- programFromFiles ownRoleEntry files
+            case compiled of
+                Error e -> pure (Just ("Does not compile: " ++ e))
+                Ok program -> do
+                    ir <- emitUnvalidated program
+                    case ir of
+                        Error e -> pure (Just e)
+                        Ok text -> buildAndRun "" [] (map safeChar name) name text (expected (runProgramIn noWorld program))
+  where
+    expected (Ok ((output, errors), _)) = (ExitSuccess, if null output then "" else output ++ "\n", errors)
+    expected (Error e) = (ExitFailure 1, "", e ++ "\n")
 
 -- L has a drop and holds a list and a Box of H, which has one
 dropHolderL :: String
@@ -431,7 +475,7 @@ functionPrograms =
     , ("a recursive function through a value", "fn count(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { if n <= 0 { return 0; }; return 1 + count(n - 1); }; let f: fn(x: Int) -> Int [{ affirm x >= 0; }] = count; return f(5);")
     ]
 
--- Strings are the library struct String over a list of bytes (lib/string.tersus), so native code has nothing of its own for them
+-- Strings are the library struct String over a list of bytes (lib/std/string/string.tersus), so native code has nothing of its own for them
 stringPrograms :: [(String, String)]
 stringPrograms =
     [ ("an Int as text", "return String::fromInt(0 - 4072);")
@@ -732,7 +776,7 @@ arrayPrograms =
     , ("a type and a size together", "fn fill<T: Clone, n>(a: &Array<T, n>, x: T) -> Array<T, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] { return set(clone(a), 0, x); }; l = fill(array(3, push([], 1)), push(push([], 7), 8)); b = fill(#[true, true], false); return l;")
     , ("a bounded type parameter that is a list", "fn same<T: Eq>(a: T, b: T) -> Bool { return a = b; }; return same(push([], 1), push([], 1));")
     , ("a nested function with a type parameter of the outer one's name", "fn outer<T: Copy>(x: T) -> Int { fn inner<T>(y: T) -> List<T> { return push([], y); }; l = inner([1]); return size(l); }; return outer(3);")
-    , ("the element replace takes out of a list in a copy, with a Clone of the program's own", "trait Clone { fn clone(self: &Self) -> Self; }; struct P { v: Int }; impl Clone for P { fn clone(self: &Self) -> P { return P { v: self.v + 10 }; }; }; fn r<T: Clone>(l: List<T>, x: T) -> T [{ affirm size(l) = 1; }] [{ }] { p = replace(l, 0, x); return p.1; }; return r(push([], P { v: 1 }), P { v: 2 }).v;")
+    , ("the element replace takes out of a list in a copy, with a Clone of the program's own", "struct P { v: Int }; impl Clone for P { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { writeByte(toByte(67)); return P { v: self.v }; }; }; fn r<T: Clone>(l: List<T>, x: T) -> T [{ affirm size(l) = 1; }] [{ }] { p = replace(l, 0, x); return p.1; }; return r(push([], P { v: 1 }), P { v: 2 }).v;")
     , ("a word compared through a bound, in a set", "s = HashSet::new().insert(3).insert(4).insert(3); return s.size();")
     , ("a Box of an array compared and cloned through bounds", "fn same<T: Eq>(a: &T, b: &T) -> Bool { return a = b; }; fn dup<T: Clone>(a: &T) -> T { return Clone::clone(a); }; a = Array::boxed(3, 7); b = dup(a); return same(a, b);")
     , ("a word and a struct with a written Clone cloned through a bound", "struct C { v: Int }; impl Clone for C { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { return C { v: self.v }; }; }; fn dup<T: Clone>(a: &T) -> T { return a.clone(); }; return dup(4) + dup(C { v: 1 }).v;")
@@ -840,9 +884,9 @@ vecPrograms =
     , ("of structs that own a list", "struct P { n: Int, xs: List<Int> }; impl Clone for P { }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);")
     , ("in a struct", "struct Bag { items: Vec<Int>, tag: Int }; b = Bag { items: Vec::new(0).push(4), tag: 2 }; return b.tag + size(b.items);")
     , ("in a list", "l = push(push([], Vec::new(0).push(1)), Vec::new(5)); return size(l);")
-    , ("one function for a Vec, a List and an Array", total ++ "return total(Vec::new(0).push(10).push(20).push(30)) * 10000 + total(push(push([], 3), 4)) * 100 + total(array(3, 5));")
-    , ("for sequences of lists", "fn lens<S: Sequence<List<Int>>>(s: &S) -> Int [{ }] [{ }] { n = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { n = n + size(get(s, i)); i = i + 1; }; return n; }; v = Vec::new(push([], 0)).push(push(push([], 4), 5)); l = push(push([], push([], 1)), push(push([], 2), 3)); return lens(v) * 10 + lens(l);")
-    , ("for a sequence that grows", "fn add<S: Sequence<Int> + Growable<Int>>(s: S, x: Int) -> S [{ }] [{ affirm size(return) = size(s) + 1; }] { return push(s, x); }; v = add(add(Vec::new(0), 4), 5); l = add(add([], 6), 7); return size(v) * 10 + size(l) + v.get(1) + get(l, 1);")
+    , ("one function for Vecs of the program's own Sequence", total ++ "return total(Vec::new(0).push(10).push(20).push(30)) * 100 + total(Vec::new(0).push(7));")
+    , ("for sequences of lists", "fn lens<S: Sequence<List<Int>>>(s: &S) -> Int [{ }] [{ }] { n = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { n = n + size(get(s, i)); i = i + 1; }; return n; }; v = Vec::new(push([], 0)).push(push(push([], 4), 5)); l = push(push([], push([], 1)), push(push([], 2), 3)); return lens(v);")
+    , ("for a sequence that grows", "fn add<S: Sequence<Int> + Growable<Int>>(s: S, x: Int) -> S [{ }] [{ affirm size(return) = size(s) + 1; }] { return push(s, x); }; v = add(add(Vec::new(0), 4), 5); return size(v) * 10 + v.get(1);")
     , ("made and dropped in a loop", "t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { v = Vec::new(push([], i)).push(push([], i)).push(push([], 7)); t = t + size(v); i = i + 1; }; return t;")
     ]
   where
@@ -967,11 +1011,18 @@ validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dat
 
 nativeStoragePrograms :: [(String, String)]
 nativeStoragePrograms =
-    [ ("nested Box/List Clone+Drop storage", owned ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Owned::new(3); y = clone(x); xs = push([], wrap(y)); xs = pop(xs); return x.n + size(xs);")
-    , ("array-backed Clone+Drop storage", owned ++ "x = Owned::new(4); xs = Array::boxed(2, x); xs = set(xs, 1, Owned::new(5)); return get(xs, 0).n + get(xs, 1).n;")
+    [ ("permission-owning copies in nested Box/List storage, each freed by its own drop", owned ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Owned::new(3); y = x.copyOf(); xs = push([], wrap(y)); xs = pop(xs); return x.n + size(xs);")
+    , ("permission-owning copies in a list, one of them replaced", owned ++ "x = Owned::new(4); xs = push(push([], x.copyOf()), x.copyOf()); xs = set(xs, 1, Owned::new(5)); return get(xs, 0).n + get(xs, 1).n + x.n;")
+    , ("nested Box/List storage of a type with its own Clone", payload ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Payload::new(3); y = clone(x); y = Payload { data: push(y.data, 7), n: y.n }; xs = push([], wrap(y)); xs = pop(xs); return size(x.data) * 10 + size(xs);")
+    , ("a list made by a generic function of what another generic function gives it", "fn keep<T>(x: T) -> List<T> { return push([], x); }; fn g<U>(u: U) -> Int { k = keep(u); return size(k); }; return g(push([], 1));")
+    , ("and of a value that is not Clone, which it only moves", "struct S { n: Int }; fn keep<T>(x: T) -> List<T> { return push([], x); }; fn g<U>(u: U) -> Int { k = keep(u); return size(k); }; return g(S { n: 1 });")
+    , ("array-backed storage of a type with its own Clone", payload ++ "x = Payload::new(4); xs = Array::boxed(2, x); xs = set(xs, 1, Payload::new(5)); return get(xs, 0).n + get(xs, 1).n;")
     ]
   where
-    owned = "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct Owned { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl Owned { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for Owned { fn clone(self: &Self) -> Self { return Owned::new(self.n); }; }; impl Drop for Owned { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; "
+    -- (a value that holds the permission to its memory: its copy is fresh memory, and std's Drop of it frees that)
+    owned = "struct Owned { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl Owned { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; fn copyOf(self: &Self) -> Self { return Owned::new(self.n); }; }; impl Drop for Owned { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; "
+    -- (std's Clone: the clone holds storage of its own, equal to the original's)
+    payload = "struct Payload { data: List<Int>, n: Int }; impl Payload { fn new(n: Int) -> Self { return Self { data: push([], n), n: n }; }; }; impl Clone for Payload { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { return Payload { data: clone(self.data), n: self.n }; }; }; "
 
 -- An Uninit<T> is a T natively: what one holds, a list literal among them, is made before it is put in
 uninitPrograms :: [(String, String)]
@@ -1194,7 +1245,7 @@ valgrindCases =
     , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
     , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
     , "an element borrowed for updating is written through", "a Box's payload is written through a reborrow of it"
-    ] ++ map fst partialTakePrograms ++ map fst takenApartPrograms ++ map fst lookPrograms ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms ++ map fst lentPartPrograms
+    ] ++ map fst partialTakePrograms ++ map fst takenApartPrograms ++ map fst lookPrograms ++ map fst ownRolePrograms ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms ++ map fst lentPartPrograms
 
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to
@@ -1393,9 +1444,9 @@ emitUnvalidated program = case nativeProgram program `bindResult` insertOwnershi
         Ok () -> llvmOfOwned owned
 
 lowerSource :: String -> Either String M.Program
-lowerSource source = case parseStatementBlock source of
-    Left err -> Left ("Parse failed: " ++ show err)
-    Right stmts -> case lowerStatements stmts of
+lowerSource source = case Compile.parseSourceParts True source of
+    Error err -> Left ("Parse failed: " ++ err)
+    Ok parts -> case Compile.lowerParts parts of
         Error e -> Left e
         Ok program -> Right program
 

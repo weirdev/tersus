@@ -1,7 +1,7 @@
-import tersuslib::types;
-import tersuslib::prelude;
-import tersuslib::eq;
-import tersuslib::clone;
+import std::core::types { List };
+import std::core::ownership { Clone };
+import std::eq { Eq };
+import std::prelude { Sequence, Growable, Hash, hashCombine };
 
 // The library of strings that a program has when it writes a string literal or mentions `String` and does not declare it itself (see
 // Pipeline.parseSource): it is parsed after lib/prelude.tersus and before the program.

@@ -201,12 +201,12 @@ elaboratorChecks = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles files) e
         | otherwise = l
     types =
         [ TNamed "item" []
-        , TList (TParam "T")
+        , SyntaxList (TParam "T")
         , TFn [TNamed "item" []] TInt
         , TArrayOf (TNamed "Pair" [ArgType TInt, ArgSize (SizeConst 3)]) (SizeParam "n")
-        , TBox (TNamed "caf\233" [])
+        , SyntaxBox (TNamed "caf\233" [])
         , TForall ["n"] ["T"] (TFn [TParam "T"] (TArrayOf TInt (SizeParam "n")))
-        , TNamed "Map" [ArgType (TList (TWord True 8)), ArgSize SizeAny, ArgSize (SizeConst (-2))]
+        , TNamed "Map" [ArgType (SyntaxList (TWord True 8)), ArgSize SizeAny, ArgSize (SizeConst (-2))]
         , TRef (TMutRef (TVar (-3)))
         , TVariant "Some"
         ]
@@ -236,7 +236,8 @@ elaboratorChecks = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles files) e
         , "    nodes = push(push(push([], AstNode::Name { value: AstName::End }), AstNode::Value { value: AstValue::VBool { b: true } }), AstNode::Values { value: AstValues::End });"
         , "    nodes = push(push(push(nodes, AstNode::Statements { value: AstStatements::End }), AstNode::Types { value: AstTypes::End }), AstNode::Elaborated { value: AstElaborated { statements: 3, types: 4 } });"
         , "    storage = push(push(push([], \"List\"), \"Box\"), \"Copy\");"
-        , "    m = lowerUnit(arenaOf(\"elaborated\", nodes, 5), &ifaces, arenaOf(\"builtins\", push([], AstNode::Entries { value: AstEntries::End }), 0), &storage, \"differential\");"
+        , "    noFacts = []; noFrames = [];"
+        , "    m = lowerUnit(arenaOf(\"elaborated\", nodes, 5), &ifaces, arenaOf(\"builtins\", push([], AstNode::Entries { value: AstEntries::End }), 0), &storage, \"differential\", &noFacts, &noFrames);"
         , "    if m.ok { return wordsLine(\"lowered\"); };"
         , "    return wordsLine(clone(m.msg));"
         , "};"
