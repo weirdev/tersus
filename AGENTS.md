@@ -250,6 +250,9 @@ Work from `tersus/`.
   `testParserBootstrap:2/2` for repair and fixpoint checks from independent
   private copies of the runner's ordinary tool cache. Ordinary preparation
   is counted in the latter group and never credited to the cold pair.
+  `testParity` registers `testParity:validation` (the compiled and the
+  interpreted validator compared over the corpus) and `testParity:mirReader`
+  (the Tersus MIR reader's round trips), which build none of the same programs.
   `testFrontendBootstrap` builds the elaborator seed F0 and the stages F1 and
   F2 and checks their fixpoint (`REPLACING_HASKELL.md`, "The frontend seed").
   CI reserves one runner for each of these four bootstrap groups; the

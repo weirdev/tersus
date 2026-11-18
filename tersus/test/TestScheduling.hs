@@ -284,7 +284,8 @@ measuredWeights =
     , ("testOwnershipCodec", 232)
     , ("testOwnershipInterpreted", 26)
     , ("testOwnershipMetadata", 1)
-    , ("testParity", 318)
+    , ("testParity:mirReader", 366)
+    , ("testParity:validation", 535)
     , ("testParse", 1)
     , ("testParseEval", 1)
     , ("testParseVal", 3)
@@ -381,7 +382,8 @@ measuredPeaksMiB =
     , ("testNativeStorageModules", 2816)
     , ("testOwnership", 3584)
     , ("testOwnershipCodec", 2816)
-    , ("testParity", 4864)
+    , ("testParity:mirReader", 1280)
+    , ("testParity:validation", 1792)
     , ("testParser:1/4", 6144)
     , ("testParser:2/4", 8448)
     , ("testParser:3/4", 14336)
@@ -639,7 +641,7 @@ testScheduling names batches = TestList "testScheduling"
     -- the measured values themselves.
     , testCase "batched and measured tail groups retain weights above the unprofiled fallback" $
         testAssertTrue (all (> 1) ([groupWeight (groupName batch) | (_, split) <- batches, batch <- split]
-                ++ map groupWeight ["testParity", "testMirData", "testOwnership", "testMirEmitPrograms"]
+                ++ map groupWeight ["testParity:validation", "testParity:mirReader", "testMirData", "testOwnership", "testMirEmitPrograms"]
                 ++ map (groupWeight . groupName) parserBootstrapGroups)
             && all (> 0) (map groupWeight names)
             && maximum loads - minimum loads <= 120)
@@ -733,8 +735,8 @@ testScheduling names batches = TestList "testScheduling"
             fmap (any isOptIn) (selectGroupNames (Arguments Nothing [] False (Just (index, count))) names) == Right False)
             [1 .. count]) [1, 3, 7])
     , testCase "the groups running at the shard 3 shutdown are not admitted together; a smaller group fills in instead" $
-        testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity", "testNative:2/4", "testCli"])
-            ["testMirSelfHosted:3/4", "testNative:2/4"]
+        testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity:validation", "testNative:2/4", "testCli"])
+            ["testMirSelfHosted:3/4", "testParity:validation"]
     , testCase "a group estimated over the budget runs alone, and launch order is the self-hosted chain, then longest work first, with stable ties" $
         testAssertEq
             ( admitGroup 1000 snd 0 [("big", 4000 :: Int), ("small", 10)]
