@@ -24,7 +24,7 @@ import Types
 import TestHarness
 import ElaboratorTool (Loader, nativeElaborator, nativeLoader, runElaboratorText, runLoader, sourceElaboratorExecutable)
 import LibPackage (LibPackage (..), compileLibPackageWith)
-import Compile (lowerStatementsWith, parseSource, sourceRequest)
+import Compile (lowerPartsWith, lowerStatementsWith, parseSource, parseSourceParts, sourceRequest)
 import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
 import qualified PackageCompile as Package
 import qualified Mir as M
@@ -529,7 +529,7 @@ nativeCloneDrop kind version = withSourceElaborator $ \exe -> pure $
         answer rq = (if version == 1 then nativeElaborator exe else checkedAnswer exe) rq{rqStatements = map (map emptyMarker) (rqStatements rq)}
         program files = case lookup "owned/main.tersus" files of
             Nothing -> Error "the fixture has no main file"
-            Just text -> mapResult (const ()) (parseSource text `bindResult` lowerStatementsWith answer)
+            Just text -> mapResult (const ()) (parseSourceParts True text `bindResult` lowerPartsWith answer)
         compile files = if kind == "empty-marker" then program files else packaged files
         control = if kind == "empty-marker" then markerTrait (cloneDropFiles "" "return 0;") else cloneDropFiles "" "return 0;"
         setup = case compile control of Error e -> Just ("complete Clone/Drop control did not type check: " ++ e); Ok _ -> Nothing

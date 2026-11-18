@@ -6,7 +6,7 @@ import ElaboratorTool (noVerdict)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Mir as M
-import Pipeline (parseSource, parseWithEquality, runStatements, validateStatements)
+import Pipeline (parseSource, parseSourceParts, parseWithEquality, parseWithEqualityParts, runParts, runStatements, validateParts, validateStatements)
 import Types
 import Syntax
 import Solver
@@ -18,8 +18,7 @@ testTraits :: Test
 testTraits =
     let types =
             unlines
-                [ "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; trait Copy { };"
-                , "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
+                [ "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
                 , "struct Counter { value: Int };"
                 , "impl Clone for Shape { }; impl Copy for Shape { };"
                 , "impl Clone for Counter { }; impl Copy for Counter { };"
@@ -39,14 +38,14 @@ testTraits =
                 , "impl Counter { fn label(self: Self) -> Int { return 3; }; };"
                 ]
         -- (the prelude is put in front of a program by the pipeline, so these programs are read as the command line reads them)
-        runsLib source expected = case parseSource source of
+        runsLib source expected = case parseSourceParts True source of
             Error e -> Just ("Parse failed: " ++ e)
-            Ok stmts -> case runStatements stmts of
+            Ok parts -> case runParts parts of
                 Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt expected))
                 Error e -> Just ("Evaluation failed with error: " ++ e)
-        validLib source = case parseSource source of
+        validLib source = case parseSourceParts True source of
             Error e -> Just ("Parse failed: " ++ e)
-            Ok stmts -> case validateStatements stmts of
+            Ok parts -> case validateParts parts of
                 Ok _ -> Nothing
                 Error e -> Just ("Validation failed with error: " ++ e)
         measure =
@@ -68,7 +67,6 @@ testTraits =
             , ("two functions of one name", "impl Counter { fn a() -> Int { return 1; }; }; impl Counter { fn a() -> Int { return 2; }; };", "does not model yet: two functions with one name")
             , ("a type does not implement the trait", (measure ++ "return Measure::sides(Counter { value: 1 });"), "Counter does not implement Measure")
             , ("no function of the type", "x = Counter { value: 1 }.nothing();", "Counter::nothing is not defined before this call")
-            , ("a function of the type is defined later", "c = Counter { value: 1 }; x = c.later(); impl Counter { fn later(self: Self) -> Int { return 1; }; };", "Counter::later is not defined before this call")
             , ("wrong argument", "impl Counter { fn plus(self: Self, by: Int) -> Int { return by; }; }; x = Counter { value: 1 }.plus(true);", "argument 2 of <Counter>::plus: expected Int, got Bool")
             , ("wrong number of arguments", "impl Counter { fn plus(self: Self, by: Int) -> Int { return by; }; }; x = Counter { value: 1 }.plus();", "<Counter>::plus takes 2 arguments, got 1")
             , ("a method of an integer", "x = 5; y = x.double();", "Int::double is not defined before this call")
@@ -94,15 +92,15 @@ testTraits =
         showSize = "trait Show { fn show(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; trait Size { fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; struct Cell { v: Int }; impl Show for Cell { fn show(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 1; }; }; impl Size for Cell { fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return 2; }; }; "
         bounded body expected = parseEvalProgramHelper (showSize ++ body) (Just (VInt expected))
         -- (refused in the program's words: an internal compiler error of a copy is not the refusal asked for)
-        boundedRejected body expected = case parseWithEquality (showSize ++ body) of
+        boundedRejected body expected = case parseWithEqualityParts (showSize ++ body) of
             Left err -> Just ("Parse failed: " ++ err)
-            Right stmts -> case validateStatements stmts of
+            Right parts -> case validateParts parts of
                 Error e | "internal compiler error" `isInfixOf` e -> Just ("an internal compiler error instead of a refusal: " ++ e)
                 _ -> parseValidateFailProgramHelper (showSize ++ body) expected
         -- (the checker's own refusal: an elaborator that failed as a tool, or an internal error, is not it)
-        checkerRefuses source expected = case parseWithEquality source of
+        checkerRefuses source expected = case parseWithEqualityParts source of
             Left err -> Just ("Parse failed: " ++ err)
-            Right stmts -> case runStatements stmts of
+            Right parts -> case runParts parts of
                 Ok value -> Just ("accepted, giving " ++ show (fmap fromMirValue value))
                 Error e
                     | noVerdict e || "internal compiler error" `isInfixOf` e -> Just ("no refusal by the checker: " ++ e)
@@ -160,6 +158,8 @@ testTraits =
                   testCase "the trait picks the function" (runs (conflict ++ "c = Counter { value: 0 }; return Name::label(c) * 100 + Code::label(c) * 10;") 120)
                 , testCase "a path names the impl in full" (runs (conflict ++ "c = Counter { value: 0 }; return <Counter as Name>::label(c) + <Counter as Code>::label(c) * 10 + <Counter>::label(c) * 100;") 321)
                 , testCase "a function with no Self argument is named in full" (runs (conflict ++ "return <Counter as Name>::make().value + <Counter as Code>::make().value;") 30)
+                , -- (a program is elaborated as a module is, whose impls are declared before its statements are checked)
+                  testCase "a function of the type written after its call is the type's" (runs "c = Counter { value: 1 }; x = c.later(); impl Counter { fn later(self: Self) -> Int { return 1; }; }; return x;" 1)
                 , testCase "a method call is ambiguous" (rejected (conflict ++ "c = Counter { value: 0 }; x = c.label();") "Counter::label is ambiguous")
                 , testCase "a call by the type is ambiguous, and the type's own function is a path too" (rejectedBoth (conflict ++ "x = Counter::label(Counter { value: 0 });") "Counter::label is ambiguous" "<Counter>::label(...)")
                 , testCase "the error lists the paths" (rejected (conflict ++ "x = Counter::make();") "<Counter as Name>::make(...) or <Counter as Code>::make(...)")
@@ -275,10 +275,10 @@ testTraits =
                         names -> Just ("the program has " ++ show names)
                     Error e -> Just e)
                 , testCase "a call with a type that holds a permission is refused where it is made" (boundedRejected "struct H { a: Addr<Int>, ghost b: Block<Int> }; trait Mark { }; impl Mark for H { }; fn f<T: Mark>(x: &T) -> Int { return 0; }; fn g(h: &H) -> Int { return f(h); }; return 0;" "the type T of f would be H, which holds a permission, and a type parameter is not one")
-                , testCase "clone(x) of a word copies it, whatever the program's own trait Clone says" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Int { fn clone(self: &Self) -> Int { return *self + 1; }; }; fn c<T: Clone>(x: T) -> T { return clone(x); }; return c(5) * 10 + clone(5);" (Just (VInt 55)))
-                , testCase "and so does x.clone()" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Int { fn clone(self: &Self) -> Int { return *self + 1; }; }; fn c<T: Clone>(x: T) -> T { return x.clone(); }; y = 5; return c(5) * 10 + y.clone();" (Just (VInt 55)))
+                , testCase "clone(x) of a word copies it, whatever the program's own trait Clone says" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Int { fn clone(self: &Self) -> Int { return *self + 1; }; }; y = 5; return clone(y) * 10 + <Int as Clone>::clone(&y);" (Just (VInt 56)))
+                , testCase "and a bound on the program's own trait Clone is not the clone that clone(x) calls" (parseValidateFailProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Int { fn clone(self: &Self) -> Int { return *self + 1; }; }; fn c<T: Clone>(x: T) -> T { return clone(x); }; return c(5);" "c clones a T, and its bounds do not say T: Clone")
                 , testCase "and Clone::clone is the impl's, as for the type itself" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Int { fn clone(self: &Self) -> Int { return *self + 1; }; }; fn c<T: Clone>(x: T) -> T { return Clone::clone(x); }; y = 5; return c(5) * 10 + Clone::clone(y);" (Just (VInt 66)))
-                , testCase "a Box of an array of no size is cloned by the program's own Clone when the library's is not there" (parseEvalProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Box<Array<Int>> { fn clone(self: &Self) -> Box<Array<Int>> { return Array::boxed(1, 9); }; }; fn c<T: Clone>(x: &T) -> T { return x.clone(); }; b = Array::boxed(2, 7); d = c(b); e = b.clone(); return size(d) * 10 + size(e);" (Just (VInt 11)))
+                , testCase "nor for a Box of an array of no size, which the program's own Clone has an impl for" (parseValidateFailProgramHelper "trait Clone { fn clone(self: &Self) -> Self; }; impl Clone for Box<Array<Int>> { fn clone(self: &Self) -> Box<Array<Int>> { return Array::boxed(1, 9); }; }; fn c<T: Clone>(x: &T) -> T { return x.clone(); }; b = Array::boxed(2, 7); d = c(b); return size(d);" "c clones a T, and its bounds do not say T: Clone")
                 , testCase "a copy with an array of structs too big for a frame is the call's refusal" (parseValidateFailProgramHelper "struct P { a: Int, b: Int, c: Int }; impl Clone for P { }; fn f<T: Clone>(x: T) -> Int { a = array(3000, x); return 0; }; return f(P { a: 1, b: 2, c: 3 });" "f cannot be made as f[P] for this call: Array<P, 3000> takes 9000 words")
                 , testCase "and of tuples" (parseValidateFailProgramHelper "fn f<T: Clone>(x: T) -> Int { a = array(3000, (x, 1)); return 0; }; return f(#[1, 2, 3]);" "f cannot be made as f[Array<Int, 3>] for this call")
                 , testCase "a copy's refusal is a refusal of the program, as the elaborator's is" (case lowerSource True "fn grow<T: Eq>(x: T, n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return grow(push([], x), n - 1); }; return grow(1, 2);" of

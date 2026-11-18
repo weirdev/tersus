@@ -242,8 +242,8 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         at = clone(g1.last);
         return loadAt(g1, destType, at);
     };
-    // (native code has no Box: a Box is made into a struct of lib/box.tersus or lib/lists.tersus first, see MirLists)
-    if rv is Rvalue::MakeBox || rv is Rvalue::Unbox { return failG(g, "Native code has no Box: a Box is made into the struct of lib/box.tersus first (see MirLists)"); };
+    // (native code has no Box: a Box is made into a struct of lib/std/box/box.tersus or lib/std/lists/lists.tersus first, see MirLists)
+    if rv is Rvalue::MakeBox || rv is Rvalue::Unbox { return failG(g, "Native code has no Box: a Box is made into the struct of lib/std/box/box.tersus first (see MirLists)"); };
     if rv is Rvalue::BinaryOp {
         op = (rv as Rvalue::BinaryOp).op;
         a = (rv as Rvalue::BinaryOp).a;
@@ -256,7 +256,7 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         y = clone(g2.last);
         return binary(g2, cx, op, ty, x, y);
     };
-    if rv is Rvalue::MakeList { return failG(g, "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"); };
+    if rv is Rvalue::MakeList { return failG(g, "Native code has no list: a list is made into the struct of lib/std/lists/lists.tersus first (see MirLists)"); };
     if rv is Rvalue::ListOp {
         op = (rv as Rvalue::ListOp).op;
         args = (rv as Rvalue::ListOp).args;

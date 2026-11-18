@@ -14,7 +14,7 @@ import TestParserFragments
 import Data.List (isInfixOf)
 import ElaboratorTool (noVerdict)
 import MirEval (fromMirValue)
-import Pipeline (parseWithEquality, runStatements, validateStatements)
+import Pipeline (parseWithEquality, parseWithEqualityParts, runParts, runStatements, validateParts, validateStatements)
 import StdLib
 import Types
 import Syntax
@@ -349,10 +349,10 @@ argPassingSource =
 
 testArgPassingByValue :: TestResult
 testArgPassingByValue =
-    case parseWithEquality argPassingSource of
+    case parseWithEqualityParts argPassingSource of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts ->
-            case (validateStatements stmts, runStatements stmts) of
+        Right parts ->
+            case (validateParts parts, runParts parts) of
                 (Error e, _) -> Just $ "Validation failed with error: " ++ e
                 (_, Error e) -> Just $ "Evaluation failed with error: " ++ e
                 (Ok _, Ok ret) -> testAssertEq (fmap fromMirValue ret) (Just (VInt 3))
@@ -629,9 +629,9 @@ testValidateWhile =
     -- (the validator could not prove exactly this obligation: not a parse, type, tool or internal failure, nor a part
     -- it does not model, nor another obligation)
     proofRefused obligation source =
-        case parseWithEquality source of
+        case parseWithEqualityParts source of
             Left err -> Just ("Parse failed: " ++ err)
-            Right stmts -> case validateStatements stmts of
+            Right parts -> case validateParts parts of
                 Ok _ -> Just "Validation passed when it should have failed"
                 Error e
                     | noVerdict e || any (`isInfixOf` e) ["does not model yet", "internal compiler error", "Internal error"] -> Just ("No verdict: " ++ e)
