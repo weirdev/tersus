@@ -28,7 +28,16 @@ record = {'baseline': BASE, 'final': FINAL, 'mode': MODE, 'status': 'running', '
           'maxrss_scope': 'GNU time: largest process, not simultaneous process-tree sum',
           'tree_rss_scope': 'existing ci_resources.py samples: summed RSS includes shared pages'}
 resources = out / 'ci_resources.py'
-resources.write_bytes(subprocess.check_output(['git', 'show', FINAL + ':tersus/dev/ci_resources.py']))
+resource_source = subprocess.check_output(['git', 'show', FINAL + ':tersus/dev/ci_resources.py']).decode()
+resource_original_sha256 = hashlib.sha256(resource_source.encode()).hexdigest()
+resource_handler = '        nonlocal cancelled\n        cancelled = signum\n'
+if resource_source.count(resource_handler) != 1:
+    raise RuntimeError('unrecognized resource observer cancellation handler')
+resource_source = resource_source.replace(resource_handler,
+    '        nonlocal cancelled\n        if cancelled is not None:\n            return\n        cancelled = signum\n', 1)
+resources.write_text(resource_source)
+record['resource_observer_qualification'] = {'change': 'one-shot cancellation in temporary copy; repeated TERM cannot interrupt owned-child cleanup',
+    'original_sha256': resource_original_sha256, 'temporary_sha256': hashlib.sha256(resource_source.encode()).hexdigest()}
 
 def save():
     (out / 'result.json').write_text(json.dumps(record, indent=2) + '\n')
@@ -138,7 +147,26 @@ def accept_generation(side):
     check_source(side, 'generated-inputs-frozen')
 
 
+class Terminated(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__('controller received signal ' + str(signum))
+
+
+pending_signal = None
+deferring_signal = False
+
+
+def on_signal(signum, _frame):
+    global pending_signal
+    if pending_signal is None:
+        pending_signal = signum
+        if not deferring_signal:
+            raise Terminated(signum)
+
+
 def run(label, argv, cwd, env, bound=1800):
+    global deferring_signal
     entry = {'label': label, 'argv': argv, 'cwd': str(cwd),
              'environment': {key: env.get(key) for key in ['XDG_CACHE_HOME', 'TMPDIR', 'GHCRTS',
                  'TERSUS_TEST_RTS_STATS', 'TERSUS_SEED_FILE', 'TERSUS_FRONTEND_SEED_FILE',
@@ -155,21 +183,57 @@ def run(label, argv, cwd, env, bound=1800):
                '-f', '{"wall_s":%e,"user_s":%U,"sys_s":%S,"maxrss_largest_process_kib":%M,"exit":%x}',
                '-o', str(out / (label + '.time.json')), 'taskset', '-c', ','.join(map(str, cpus))] + argv
     start = time.monotonic()
-    with (out / (label + '.stdout')).open('wb') as stdout, (out / (label + '.stderr')).open('wb') as stderr:
-        child = subprocess.Popen(command, cwd=cwd, env=env, stdout=stdout, stderr=stderr, start_new_session=True)
-        try:
-            code = child.wait(timeout=left + 40)
-        except BaseException:
-            os.killpg(child.pid, signal.SIGTERM)
+    primary_error = None
+    child, code = None, None
+    entry['bound_s'] = left
+    print('[PAIR_START] ' + json.dumps({'label': label, 'argv': argv, 'bound_s': left,
+          'started_utc': entry['started_utc']}), flush=True)
+    try:
+        with (out / (label + '.stdout')).open('wb') as stdout, (out / (label + '.stderr')).open('wb') as stderr:
+            deferring_signal = True
+            try:
+                child = subprocess.Popen(command, cwd=cwd, env=env, stdout=stdout, stderr=stderr, start_new_session=True)
+                entry.update(owned_child_pid=child.pid, owned_child_pgid=child.pid)
+            finally:
+                deferring_signal = False
+            save()
+            print('[PAIR_CHILD] ' + json.dumps({'label': label, 'owned_child_pid': child.pid}), flush=True)
+            if pending_signal is not None:
+                raise Terminated(pending_signal)
+            try:
+                code = child.wait(timeout=left + 40)
+            finally:
+                deferring_signal = True
+    except BaseException as error:
+        deferring_signal = True
+        primary_error = error
+        entry['primary_error'] = str(error)
+        entry['interrupted'] = True
+        if pending_signal is not None:
+            entry['controller_signal'] = pending_signal
+        save()
+        if child is not None:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 child.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
-            raise
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired as cleanup_error:
+                    entry['cleanup_error'] = str(cleanup_error)
+            code = child.returncode
     entry.update(exit=code, elapsed_controller_s=time.monotonic() - start,
                  ended_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
     save()
+    print('[PAIR_COMMAND_END] ' + json.dumps({'label': label, 'exit': code,
+          'elapsed_s': entry['elapsed_controller_s'], 'primary_error': entry.get('primary_error')}), flush=True)
     for side, (package, _, _) in sides.items():
         if package == cwd:
             source_snapshot(side, label + '-command-exit')
@@ -182,14 +246,26 @@ def run(label, argv, cwd, env, bound=1800):
         except (StopIteration, ValueError) as error:
             entry['metrics_error'] = str(error)
     sampled = []
-    for line in (out / (label + '.stderr')).read_text().splitlines():
+    stderr_path = out / (label + '.stderr')
+    for line in stderr_path.read_text(errors='replace').splitlines() if stderr_path.exists() else []:
         if line.startswith('[CI_RESOURCE] '):
-            sampled.append(json.loads(line[len('[CI_RESOURCE] '):]))
+            try:
+                sampled.append(json.loads(line[len('[CI_RESOURCE] '):]))
+            except ValueError as error:
+                entry.setdefault('resource_diagnostics_errors', []).append(str(error))
     trees = [sample.get('process_tree', {}) for sample in sampled]
     entry['sampled_process_tree_peak_rss_kib'] = max((tree.get('rss_sum_kib', 0) for tree in trees), default=0)
     entry['sampled_process_tree_max_processes'] = max((tree.get('count', 0) for tree in trees), default=0)
     entry['resource_start_finish'] = [sample for sample in sampled if sample.get('phase') in ['start', 'finish']]
     save()
+    print('[PAIR_STATUS] ' + json.dumps({'label': label, 'exit': code, 'time': entry.get('time'),
+          'metrics_error': entry.get('metrics_error'), 'controller_signal': pending_signal,
+          'primary_error': entry.get('primary_error')}), flush=True)
+    deferring_signal = False
+    if primary_error is not None:
+        raise primary_error
+    if pending_signal is not None:
+        raise Terminated(pending_signal)
     if code:
         raise RuntimeError(label + ' failed or timed out, exit ' + str(code))
     if 'time' not in entry:
@@ -214,6 +290,7 @@ def memory_ready(phase):
     if len(cpus) < 2 or mem_kib < 12 * 1024 * 1024:
         raise RuntimeError(phase + ': runner cannot safely fit the unchanged suite; need >=2 CPUs and >=12 GiB available memory')
 
+signal_handlers = {sig: signal.signal(sig, on_signal) for sig in [signal.SIGTERM, signal.SIGINT]}
 try:
     if MODE not in ['preparation-only', 'measure']:
         raise RuntimeError('unknown pair mode: ' + MODE)
@@ -341,7 +418,13 @@ try:
         sys.exit(1)
 except Exception as error:
     record.update(status='failed', error=str(error))
+    if isinstance(error, Terminated):
+        record['controller_signal'] = error.signum
     save()
+    print('[PAIR_FAILED] ' + json.dumps({'error': str(error), 'signal': record.get('controller_signal'),
+          'active_command': record['commands'][-1] if record['commands'] else None}), flush=True)
+    if isinstance(error, Terminated):
+        sys.exit(128 + error.signum)
     raise
 finally:
     final_snapshots = [source_snapshot(side, 'all-exits') for side in sides]
