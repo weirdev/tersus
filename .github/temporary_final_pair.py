@@ -15,6 +15,7 @@ BASE = 'b1b837744410437694bd5b4f1002aed97ecb8bda'
 FINAL = 'cda67a0f977b45124d08d4ebaba6877f514bde5a'
 MODE = os.environ.get('TERSUS_PAIR_MODE', 'preparation-only')
 sides = {}
+BASE_CABAL_GENERATED_SHA256 = '94d48cb8eed32119a744d543bbe604eec1591f2aacf3db7d66a44d91fdaf1ce2'
 repo = Path.cwd()
 out = Path(os.environ['RUNNER_TEMP']) / 'tersus-final-pair'
 out.mkdir()
@@ -60,7 +61,18 @@ def source_snapshot(side, phase):
         pin = 'tersus/bootstrap/emitter.sha256'
         verified = record[side].get('verified_gen_pin_sha256')
         permitted = side == 'final' and verified and manifest.get(pin, {}).get('sha256') == verified
-        evidence['violations'] = [path for path in changed if path != pin or not permitted]
+        allowed = {pin} if permitted else set()
+        cabal = 'tersus/tersus.cabal'
+        if side == 'baseline' and manifest.get(cabal, {}).get('sha256') == BASE_CABAL_GENERATED_SHA256:
+            allowed.add(cabal)
+            evidence['baseline_qualification'] = 'b1 plus exact normal hpack test-suite TestClosures discovery, already imported and executed'
+        evidence['violations'] = [path for path in changed if path not in allowed]
+        frozen = record[side].get('frozen_input_hashes')
+        if frozen is not None:
+            evidence['frozen_input_drift'] = [path for path in sorted(set(frozen) | set(manifest))
+                                             if frozen.get(path) != manifest.get(path)]
+            evidence['violations'] = sorted(set(evidence['violations']) | set(evidence['frozen_input_drift']))
+        evidence['manifest_file'] = prefix + '.tracked-hashes.json'
     except Exception as error:
         evidence['inspection_errors'].append(str(error))
     save()
@@ -209,6 +221,15 @@ try:
                 raise RuntimeError('metadata-only GEN pin changed actual common-library profile/construction')
             record['final']['measured_pin'] = fields
         check_source(side, 'after-preparation')
+        if side == 'baseline':
+            cabal_digest = hashlib.sha256((root / 'tersus.cabal').read_bytes()).hexdigest()
+            if cabal_digest != BASE_CABAL_GENERATED_SHA256:
+                raise RuntimeError('baseline normal build did not reproduce the exact qualified Cabal metadata')
+            record[side]['baseline_qualification'] = {'base_revision': BASE,
+                'generated_cabal_sha256': cabal_digest,
+                'change': 'test-suite other-modules adds already imported/executed TestClosures only'}
+        snapshot = record[side]['source_snapshots'][-1]
+        record[side]['frozen_input_hashes'] = json.loads((out / snapshot['manifest_file']).read_text())
         record[side]['preparation_cache'] = inventory(prep)
         side_env.update(XDG_CACHE_HOME=str(measured), TMPDIR=str(temporary))
         if list(measured.iterdir()) or list(temporary.iterdir()):
