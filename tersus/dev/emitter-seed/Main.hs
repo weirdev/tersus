@@ -5,7 +5,7 @@ import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
 import Bootstrap (cachedSourceEmitter, cachedSeed, emitWith, seedSha256)
-import EmitterProvenance (workingSourcesMatch, checkEmitterOutputs)
+import EmitterProvenance (ordinaryBuildProfile, emitterBuildDescription, workingSourcesMatch, checkEmitterOutputs)
 import Seed (emitterSeedFile)
 import PreludeSource (emitterSourceFiles)
 import MirData (writeProgram)
@@ -16,6 +16,10 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
+        ["profile"] -> do
+            print ordinaryBuildProfile
+            print emitterBuildDescription
+            emitterConstruction >>= print
         ["advance", output] -> do
             one <- cachedSourceEmitter
             case one of
@@ -49,7 +53,7 @@ main = do
                         case finalPaths of Error e -> fail e; Ok () -> pure ()
                         writeFile output ir
                         writeFile association (seedSha256 ++ " " ++ construction ++ "\n")
-        _ -> fail "usage: emitter-seed advance <output.ll> | emit <output.ll> | certify <output.ll> <candidate.pin>"
+        _ -> fail "usage: emitter-seed profile | advance <output.ll> | emit <output.ll> | certify <output.ll> <candidate.pin>"
 
 regenerate :: IO (Result String String)
 regenerate = do
