@@ -25,15 +25,20 @@ jobs:
             stack-${{ runner.os }}-
       - name: Provide the runner's linker
         run: command -v ld.gold || sudo ln -s "$(command -v ld.bfd)" /usr/local/bin/ld.gold
-      - name: One matched normal Stack cold and full-suite pair
+      - name: Diagnose frozen-source preparation without measuring
+        env:
+          TERSUS_PAIR_MODE: preparation-only
         run: python3 .github/temporary_final_pair.py
       - name: Retain terminal pair evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: frozen-b1-corrected-final-performance
+          name: frozen-b1-current-preparation-diagnosis
           path: |
             ${{ runner.temp }}/tersus-final-pair/result.json
+            ${{ runner.temp }}/tersus-final-pair/*.name-status
+            ${{ runner.temp }}/tersus-final-pair/*.patch
+            ${{ runner.temp }}/tersus-final-pair/*.tracked-hashes.json
             ${{ runner.temp }}/tersus-final-pair/*.stdout
             ${{ runner.temp }}/tersus-final-pair/*.stderr
             ${{ runner.temp }}/tersus-final-pair/*.time.json

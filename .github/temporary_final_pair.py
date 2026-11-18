@@ -12,13 +12,15 @@ import sys
 import time
 
 BASE = 'b1b837744410437694bd5b4f1002aed97ecb8bda'
-FINAL = '4923e34b51516c84f8ad8a62062f1f656bb414af'
+FINAL = 'cda67a0f977b45124d08d4ebaba6877f514bde5a'
+MODE = os.environ.get('TERSUS_PAIR_MODE', 'preparation-only')
+sides = {}
 repo = Path.cwd()
 out = Path(os.environ['RUNNER_TEMP']) / 'tersus-final-pair'
 out.mkdir()
 cpus = sorted(os.sched_getaffinity(0))[:4]
 deadline = time.monotonic() + 19800
-record = {'baseline': BASE, 'final': FINAL, 'status': 'running', 'cpu_lane': cpus,
+record = {'baseline': BASE, 'final': FINAL, 'mode': MODE, 'status': 'running', 'cpu_lane': cpus,
           'suite_workers': 4, 'suite_parent_rts': '-N2', 'commands': [],
           'cold_cache_policy': 'empty per version; no preparation entries copied',
           'suite_cache_policy': 'each version reuses only its own measured cold cache',
@@ -30,6 +32,45 @@ resources.write_bytes(subprocess.check_output(['git', 'show', FINAL + ':tersus/d
 
 def save():
     (out / 'result.json').write_text(json.dumps(record, indent=2) + '\n')
+
+def source_snapshot(side, phase):
+    root = sides[side][0].parent
+    revision = record[side]['revision']
+    prefix = side + '-' + phase
+    evidence = {'phase': phase, 'revision': revision, 'inspection_errors': []}
+    record[side].setdefault('source_snapshots', []).append(evidence)
+    try:
+        def git(*args):
+            return subprocess.check_output(['git', *args], cwd=root)
+        (out / (prefix + '.name-status')).write_bytes(git('diff', '--name-status', revision, '--'))
+        (out / (prefix + '.patch')).write_bytes(git('diff', '--binary', revision, '--'))
+        changed = git('diff', '--name-only', '-z', revision, '--').decode().split('\0')
+        changed = [path for path in changed if path]
+        evidence['changed_paths'] = changed
+        files = git('ls-files', '-z').decode().split('\0')
+        manifest = {}
+        for path in filter(None, files):
+            try:
+                contents = (root / path).read_bytes()
+                manifest[path] = {'bytes': len(contents), 'sha256': hashlib.sha256(contents).hexdigest()}
+            except OSError as error:
+                manifest[path] = {'error': str(error)}
+                evidence['inspection_errors'].append(path + ': ' + str(error))
+        (out / (prefix + '.tracked-hashes.json')).write_text(json.dumps(manifest, indent=2) + '\n')
+        pin = 'tersus/bootstrap/emitter.sha256'
+        verified = record[side].get('verified_gen_pin_sha256')
+        permitted = side == 'final' and verified and manifest.get(pin, {}).get('sha256') == verified
+        evidence['violations'] = [path for path in changed if path != pin or not permitted]
+    except Exception as error:
+        evidence['inspection_errors'].append(str(error))
+    save()
+    return evidence
+
+def check_source(side, phase):
+    evidence = source_snapshot(side, phase)
+    if evidence.get('violations') or evidence['inspection_errors']:
+        raise RuntimeError(side + ' source drift at ' + phase + ': ' + str(evidence))
+
 
 def run(label, argv, cwd, env, bound=1800):
     entry = {'label': label, 'argv': argv, 'cwd': str(cwd),
@@ -62,6 +103,10 @@ def run(label, argv, cwd, env, bound=1800):
             raise
     entry.update(exit=code, elapsed_controller_s=time.monotonic() - start,
                  ended_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    save()
+    for side, (package, _, _) in sides.items():
+        if package == cwd:
+            source_snapshot(side, label + '-command-exit')
     metrics = out / (label + '.time.json')
     if metrics.exists():
         raw_metrics = metrics.read_text()
@@ -104,6 +149,8 @@ def memory_ready(phase):
         raise RuntimeError(phase + ': runner cannot safely fit the unchanged suite; need >=2 CPUs and >=12 GiB available memory')
 
 try:
+    if MODE not in ['preparation-only', 'measure']:
+        raise RuntimeError('unknown pair mode: ' + MODE)
     observer = runpy.run_path(str(resources), run_name='pair_resource_observer')
     memory_ready('before-setup')
     if subprocess.check_output(['git', 'merge-base', BASE, FINAL], text=True).strip() != BASE:
@@ -117,7 +164,6 @@ try:
     record['actual_ghc_version'] = version
     if version != '9.6.5':
         raise RuntimeError('normal Stack resolver did not select GHC 9.6.5')
-    sides = {}
     for side, revision in [('baseline', BASE), ('final', FINAL)]:
         work = out / side
         subprocess.run(['git', 'worktree', 'add', '--detach', str(work), revision], check=True)
@@ -128,6 +174,9 @@ try:
         for directory in [prep, measured, temporary, out / (side + '-preparation-tmp')]:
             directory.mkdir()
         side_env = dict(env, XDG_CACHE_HOME=str(prep), TMPDIR=str(out / (side + '-preparation-tmp')))
+        sides[side] = (root, side_env, measured)
+        record[side] = {'revision': revision, 'tree': subprocess.check_output(['git', 'rev-parse', revision + '^{tree}'], text=True).strip()}
+        check_source(side, 'checkout')
         seeds = {}
         for stage in ['emitter', 'frontend', 'parser']:
             pin = (root / ('bootstrap/' + stage + '.sha256')).read_text().split()
@@ -141,8 +190,9 @@ try:
                 raise RuntimeError(side + ' ' + stage + ' seed digest mismatch')
             side_env['TERSUS_' + ('SEED_FILE' if stage == 'emitter' else stage.upper() + '_SEED_FILE')] = str(asset)
             seeds[stage] = {'pin': pin, 'bytes': asset.stat().st_size, 'sha256': digest}
-        record[side] = {'revision': revision, 'tree': subprocess.check_output(['git', 'rev-parse', revision + '^{tree}'], text=True).strip(), 'seeds': seeds}
+        record[side]['seeds'] = seeds
         run(side + '-build', ['stack', 'build', '--test', '--no-run-tests'], root, side_env, 2400)
+        check_source(side, 'after-build')
         if side == 'final':
             run('final-profile-before', ['stack', 'run', 'emitter-seed', '--', 'profile'], root, side_env)
             certified = out / 'final-certified.pin'
@@ -150,24 +200,35 @@ try:
             fields = certified.read_text().split()
             if len(fields) != 2 or fields[0] != seeds['emitter']['sha256']:
                 raise RuntimeError('normal GEN did not certify the final published seed')
+            record[side]['verified_gen_pin_sha256'] = hashlib.sha256(certified.read_bytes()).hexdigest()
             (root / 'bootstrap/emitter.sha256').write_bytes(certified.read_bytes())
+            check_source(side, 'after-GEN-pin')
             run('final-metadata-build', ['stack', 'build', '--test', '--no-run-tests'], root, side_env, 1200)
             run('final-profile-after', ['stack', 'run', 'emitter-seed', '--', 'profile'], root, side_env)
             if (out / 'final-profile-before.stdout').read_bytes() != (out / 'final-profile-after.stdout').read_bytes():
                 raise RuntimeError('metadata-only GEN pin changed actual common-library profile/construction')
             record['final']['measured_pin'] = fields
+        check_source(side, 'after-preparation')
         record[side]['preparation_cache'] = inventory(prep)
         side_env.update(XDG_CACHE_HOME=str(measured), TMPDIR=str(temporary))
         if list(measured.iterdir()) or list(temporary.iterdir()):
             raise RuntimeError('measured cold cache or temporary directory is not empty')
         sides[side] = (root, side_env, measured)
         save()
+    for side in sides:
+        check_source(side, 'before-measurement')
+    if MODE == 'preparation-only':
+        record['status'] = 'preparation_clean'
+        save()
+        print('Preparation clean for both frozen inputs; no cold or suite was run')
+        sys.exit(0)
     for side in ['baseline', 'final']:
         root, side_env, cache = sides[side]
         revision = record[side]['revision']
         record[side]['cold_cache_before'] = inventory(cache)
         memory_ready(side + '-before-cold')
         run(side + '-cold', ['stack', 'run', 'tersus-exe', '--', 'llvm', 'examples/basics.tersus', '+RTS', '-qg', '-RTS'], root, side_env, 1800)
+        check_source(side, 'after-cold')
         record[side]['cold_cache_after'] = inventory(cache)
         emitters = [x['name'] for x in record[side]['cold_cache_after'] if x['name'].startswith('emitter-')]
         record[side]['source_emitter_cache_entries'] = emitters
@@ -182,17 +243,13 @@ try:
             raise RuntimeError('final ordinary CLI did not use the genuine known published route without SOURCE emitter preparation')
         memory_ready(side + '-before-suite')
         run(side + '-suite', ['stack', 'test', '--test-arguments=-j 4 +RTS -N2 -qg -RTS'], root, side_env, 6600)
+        check_source(side, 'after-suite')
         text = (out / (side + '-suite.stdout')).read_text() + (out / (side + '-suite.stderr')).read_text()
         summaries = re.findall(r'Summary:\s*(\d+) passed,\s*(\d+) failed', text)
         if not summaries or int(summaries[-1][0]) == 0 or int(summaries[-1][1]) != 0 or '[CRASH]' in text or '[FAIL]' in text:
             raise RuntimeError(side + ' suite has missing or failed test results')
         record[side]['suite_summary'] = list(map(int, summaries[-1]))
         record[side]['suite_cache_after'] = inventory(cache)
-        changed = subprocess.check_output(['git', 'diff', '--name-only', revision], cwd=root, text=True).splitlines()
-        allowed = {'tersus/bootstrap/emitter.sha256'} if side == 'final' else set()
-        if any(path not in allowed for path in changed):
-            raise RuntimeError(side + ' captured source changed beyond the final GEN association')
-        record[side]['source_changes_after'] = changed
         save()
     metrics = {x['label']: x['time'] for x in record['commands'] if 'time' in x}
     record['wall_ratios'] = {phase: metrics['final-' + phase]['wall_s'] / metrics['baseline-' + phase]['wall_s'] for phase in ['cold', 'suite']}
@@ -206,3 +263,10 @@ except Exception as error:
     record.update(status='failed', error=str(error))
     save()
     raise
+finally:
+    final_snapshots = [source_snapshot(side, 'all-exits') for side in sides]
+    if any(s.get('violations') or s['inspection_errors'] for s in final_snapshots):
+        if record['status'] in ['passed', 'preparation_clean']:
+            record.update(status='failed', error='source drift or incomplete inspection on exit')
+            save()
+            raise RuntimeError(record['error'])
