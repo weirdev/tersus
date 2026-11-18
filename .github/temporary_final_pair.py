@@ -12,7 +12,7 @@ import sys
 import time
 
 BASE = 'b1b837744410437694bd5b4f1002aed97ecb8bda'
-FINAL = 'edf5abf1dfe565a2e53fd12560753ef7b14026da'
+FINAL = '4923e34b51516c84f8ad8a62062f1f656bb414af'
 repo = Path.cwd()
 out = Path(os.environ['RUNNER_TEMP']) / 'tersus-final-pair'
 out.mkdir()

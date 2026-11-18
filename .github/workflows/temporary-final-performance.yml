@@ -31,7 +31,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: frozen-b1-edf5-final-performance
+          name: frozen-b1-corrected-final-performance
           path: |
             ${{ runner.temp }}/tersus-final-pair/result.json
             ${{ runner.temp }}/tersus-final-pair/*.stdout
