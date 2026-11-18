@@ -33,6 +33,10 @@ def save():
 
 def run(label, argv, cwd, env, bound=1800):
     entry = {'label': label, 'argv': argv, 'cwd': str(cwd),
+             'environment': {key: env.get(key) for key in ['XDG_CACHE_HOME', 'TMPDIR', 'GHCRTS',
+                 'TERSUS_TEST_RTS_STATS', 'TERSUS_SEED_FILE', 'TERSUS_FRONTEND_SEED_FILE',
+                 'TERSUS_PARSER_SEED_FILE', 'TERSUS_TEST_APPROVED_BUILD_IDENTITY', 'TERSUS_EMITTER_BUILD_MANIFEST']},
+             'profile_record': str(out / 'final-profile-after.stdout') if label.startswith('final-') else 'baseline unchanged ordinary build',
              'started_utc': datetime.datetime.now(datetime.timezone.utc).isoformat()}
     record['commands'].append(entry)
     save()
@@ -79,18 +83,22 @@ def inventory(cache):
     return ([{'name': p.name, 'bytes': p.stat().st_size if p.is_file() else None}
              for p in sorted(root.iterdir())] if root.exists() else [])
 
-try:
+def memory_ready(phase):
     mem_kib = int(re.search(r'^MemAvailable:\s+(\d+)', Path('/proc/meminfo').read_text(), re.M).group(1))
-    record['initial_memavailable_kib'] = mem_kib
-    observer = runpy.run_path(str(resources), run_name='pair_resource_observer')
     group = observer['cgroup_directory']()
     memory_max = observer['read'](group / 'memory.max') if group else None
     memory_current = observer['read'](group / 'memory.current') if group else None
-    record['initial_cgroup_memory'] = {'path': str(group), 'max': memory_max, 'current': memory_current}
     if memory_max and memory_max.isdigit() and memory_current and memory_current.isdigit():
         mem_kib = min(mem_kib, (int(memory_max) - int(memory_current)) // 1024)
+    record.setdefault('memory_checks', []).append({'phase': phase, 'available_kib': mem_kib,
+        'cgroup_path': str(group), 'max': memory_max, 'current': memory_current})
+    save()
     if len(cpus) < 2 or mem_kib < 12 * 1024 * 1024:
-        raise RuntimeError('runner cannot safely fit the unchanged suite: need >=2 CPUs and >=12 GiB initial available memory')
+        raise RuntimeError(phase + ': runner cannot safely fit the unchanged suite; need >=2 CPUs and >=12 GiB available memory')
+
+try:
+    observer = runpy.run_path(str(resources), run_name='pair_resource_observer')
+    memory_ready('before-setup')
     if subprocess.check_output(['git', 'merge-base', BASE, FINAL], text=True).strip() != BASE:
         raise RuntimeError('frozen baseline is not the final merge-base')
     env = dict(os.environ)
@@ -149,13 +157,23 @@ try:
         save()
     for side in ['baseline', 'final']:
         root, side_env, cache = sides[side]
+        revision = record[side]['revision']
         record[side]['cold_cache_before'] = inventory(cache)
+        memory_ready(side + '-before-cold')
         run(side + '-cold', ['stack', 'run', 'tersus-exe', '--', 'llvm', 'examples/basics.tersus'], root, side_env, 1800)
         record[side]['cold_cache_after'] = inventory(cache)
         emitters = [x['name'] for x in record[side]['cold_cache_after'] if x['name'].startswith('emitter-')]
         record[side]['source_emitter_cache_entries'] = emitters
-        if side == 'final' and (emitters or not any(x['name'].startswith('seed-') for x in record[side]['cold_cache_after'])):
+        prepared_emit_results = []
+        for entry in record[side]['cold_cache_after']:
+            if entry['name'].startswith('prepared-') and not entry['name'].endswith('.lock'):
+                with (cache / 'tersus' / entry['name']).open('rb') as payload:
+                    if any(re.match(rb'struct "[^"]*EmitResult" ', line) for line in payload):
+                        prepared_emit_results.append(entry['name'])
+        record[side]['prepared_emitter_payloads'] = prepared_emit_results
+        if side == 'final' and (emitters or prepared_emit_results or not any(x['name'].startswith('seed-') for x in record[side]['cold_cache_after'])):
             raise RuntimeError('final ordinary CLI did not use the genuine known published route without SOURCE emitter preparation')
+        memory_ready(side + '-before-suite')
         run(side + '-suite', ['stack', 'test', '--test-arguments=-j 4 +RTS -N2 -RTS'], root, side_env, 6600)
         text = (out / (side + '-suite.stdout')).read_text() + (out / (side + '-suite.stderr')).read_text()
         summaries = re.findall(r'Summary:\s*(\d+) passed,\s*(\d+) failed', text)
