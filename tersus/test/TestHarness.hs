@@ -109,7 +109,7 @@ import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromF
 import qualified Modules
 import qualified Pipeline
 import ElaboratorTool (sourceLoader)
-import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseWithEquality, runStatements, validateStatements)
+import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, ownedOfProgram, parseSource, parseSourceParts, parseWithEquality, parseWithEqualityParts, runParts, runStatements, validateParts, validateStatements)
 import Types
 import Syntax
 import Solver
@@ -168,11 +168,11 @@ parseFailsWithHelper source expected =
 -- Dual stage: a program must both validate and evaluate to the expected value.
 parseValidateEvalProgramHelper :: String -> Maybe Value -> TestResult
 parseValidateEvalProgramHelper source expected = withProgram source $
-    case parseWithEquality source of
+    case parseWithEqualityParts source of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts -> case validateStatements stmts of
+        Right parts -> case validateParts parts of
             Error e -> Just $ "Validation failed with error: " ++ e
-            Ok _ -> case runStatements stmts of
+            Ok _ -> case runParts parts of
                 Ok result -> testAssertEq (fmap fromMirValue result) expected
                 Error e -> Just $ "Evaluation failed with error: " ++ e
 batchItems :: Int -> Int -> [a] -> [a]
@@ -326,23 +326,23 @@ parseValFailStmtHelper stmtStr =
 -- Control flow tests. A program runs on the MIR once it type checks; nothing here validates it.
 parseEvalProgramHelper :: String -> Maybe Value -> TestResult
 parseEvalProgramHelper source expected = withProgram source $
-    case parseWithEquality source of
+    case parseWithEqualityParts source of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts -> case runStatements stmts of
+        Right parts -> case runParts parts of
             Ok result -> testAssertEq (fmap fromMirValue result) expected
             Error e -> Just $ "Evaluation failed with error: " ++ e
 
 parseEvalProgramFailHelper :: String -> String -> TestResult
 parseEvalProgramFailHelper source expectedError = withProgram source $
-    case parseWithEquality source of
+    case parseWithEqualityParts source of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts -> testAssertErrorContains expectedError (runStatements stmts)
+        Right parts -> testAssertErrorContains expectedError (runParts parts)
 
 parseValidProgramHelper :: String -> TestResult
 parseValidProgramHelper source = withProgram source $
-    case parseWithEquality source of
+    case parseWithEqualityParts source of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts -> case validateStatements stmts of
+        Right parts -> case validateParts parts of
             Ok _ -> Nothing
             Error e -> Just $ "Validation failed with error: " ++ e
 
@@ -351,9 +351,9 @@ parseValidProgramHelper source = withProgram source $
 -- in the old validator's words).
 parseValidateFailProgramHelper :: String -> String -> TestResult
 parseValidateFailProgramHelper source expectedError = withProgram source $
-    case parseWithEquality source of
+    case parseWithEqualityParts source of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts -> case validateStatements stmts of
+        Right parts -> case validateParts parts of
             Ok _ -> Just "Validation passed when it should have failed"
             result@(Error _) -> testAssertErrorContains expectedError result
 
@@ -363,23 +363,23 @@ parseValidateFailProgramHelper source expectedError = withProgram source $
 -- substring, on a parse failure directly and on a validation failure via
 -- testAssertErrorContains (as parseValidateFailProgramHelper does).
 pipelineRuns :: String -> Value -> TestResult
-pipelineRuns source expected = case parseSource source of
+pipelineRuns source expected = case parseSourceParts True source of
     Error e -> Just ("Parse failed: " ++ e)
-    Ok stmts -> case runStatements stmts of
+    Ok parts -> case runParts parts of
         Ok result -> testAssertEq (fmap fromMirValue result) (Just expected)
         Error e -> Just ("Evaluation failed with error: " ++ e)
 
 pipelineValid :: String -> TestResult
-pipelineValid source = case parseSource source of
+pipelineValid source = case parseSourceParts True source of
     Error e -> Just ("Parse failed: " ++ e)
-    Ok stmts -> case validateStatements stmts of
+    Ok parts -> case validateParts parts of
         Ok _ -> Nothing
         Error e -> Just ("Validation failed with error: " ++ e)
 
 pipelineRejected :: String -> String -> TestResult
-pipelineRejected source expected = case parseSource source of
+pipelineRejected source expected = case parseSourceParts True source of
     Error e -> if expected `isInfixOf` e then Nothing else Just ("Expected failure containing: " ++ show expected ++ "\nGot: " ++ e)
-    Ok stmts -> testAssertErrorContains expected (validateStatements stmts)
+    Ok parts -> testAssertErrorContains expected (validateParts parts)
 
 -- A failure says which program it was about (the start of it)
 withProgram :: String -> TestResult -> TestResult

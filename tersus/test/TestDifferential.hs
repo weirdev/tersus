@@ -195,12 +195,12 @@ elaboratorChecks = pure $ case Mod.loadFromEntry (Mod.resolverFromFiles files) e
         | otherwise = l
     types =
         [ TNamed "item" []
-        , TList (TParam "T")
+        , SyntaxList (TParam "T")
         , TFn [TNamed "item" []] TInt
         , TArrayOf (TNamed "Pair" [ArgType TInt, ArgSize (SizeConst 3)]) (SizeParam "n")
-        , TBox (TNamed "caf\233" [])
+        , SyntaxBox (TNamed "caf\233" [])
         , TForall ["n"] ["T"] (TFn [TParam "T"] (TArrayOf TInt (SizeParam "n")))
-        , TNamed "Map" [ArgType (TList (TWord True 8)), ArgSize SizeAny, ArgSize (SizeConst (-2))]
+        , TNamed "Map" [ArgType (SyntaxList (TWord True 8)), ArgSize SizeAny, ArgSize (SizeConst (-2))]
         , TRef (TMutRef (TVar (-3)))
         , TVariant "Some"
         ]

@@ -378,7 +378,7 @@ fn dataBase(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
     if o is Operand::Move { l = (o as Operand::Move).local; };
     lt = localTypeOf(f, l);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
-    // (a Box of the library is the address of what it holds, as a Box is: lib/box.tersus; its own field is read from it)
+    // (a Box of the library is the address of what it holds, as a Box is: lib/std/box/box.tersus; its own field is read from it)
     if isBoxStruct(&cx.storage, lt.ty) && !isBoxStruct(&cx.storage, ty) { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
     if lt.ty is Type::TRef || lt.ty is Type::TMutRef { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
     return giving(g, slot(l));

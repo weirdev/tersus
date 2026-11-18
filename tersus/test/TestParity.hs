@@ -27,7 +27,7 @@ import TestHarness
 import TestMirReader (sameText)
 import TestNative (validatedPrograms)
 import TestPipeline (exampleExpectations)
-import Compile (lowerStatements)
+import Compile (lowerParts, lowerStatements, parseSourceParts)
 import Types
 import Utils
 
@@ -101,7 +101,7 @@ sourceContainerCapabilities = TestList "logical container layouts"
              in testAssertEq (Map.lookup "List" (M.progGenerics (sourceContainerView custom))) (Just (["T"], [("item", TParam "T")])))
     ]
   where
-    lower source = parseSource source `bindResult` lowerStatements
+    lower source = parseSourceParts True source `bindResult` lowerParts
     eligible source expected = case lower source of
         Error e -> Just e
         Ok program -> testAssertEq (unsupportedReason program == Nothing) expected
@@ -302,7 +302,7 @@ validationTimeoutMicros :: Int
 validationTimeoutMicros = 10000000
 
 lower :: String -> Result M.Program String
-lower source = parseSource source `bindResult` lowerStatements
+lower source = parseSourceParts True source `bindResult` lowerParts
 
 readerCase :: ParityCase -> IO TestResult
 readerCase parityCase = do
@@ -377,9 +377,7 @@ unsupportedType t = case t of
     TWord{} -> True
     TAddr{} -> True
     TBlock{} -> True
-    TList element -> unsupportedType element
     TArrayOf element _ -> unsupportedType element
-    TBox element -> unsupportedType element
     TFn args result -> any unsupportedType (result : args)
     TForall _ _ element -> unsupportedType element
     TUninit element -> unsupportedType element

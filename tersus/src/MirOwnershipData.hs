@@ -37,6 +37,8 @@ restoreOwnership original output
                     , progMain = mainFn
                     , progGenerics = progGenerics original
                     , progInvariants = progInvariants original
+                    , progProtocols = progProtocols original
+                    , progOwnership = progOwnership original
                     }
   where
     numbered = ownershipInput original

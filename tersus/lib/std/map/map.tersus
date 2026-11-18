@@ -1,14 +1,14 @@
-import tersuslib::types;
-import tersuslib::prelude;
-import tersuslib::eq;
-import tersuslib::clone;
+import std::core::types { List };
+import std::core::ownership { Clone };
+import std::eq { Eq };
+import std::prelude { Hash };
 
 // The library a program has when it mentions `HashMap` and does not declare it itself (see Pipeline.parseSource): it is parsed
 // before the program, after the prelude and the string library, so the program's line numbers are its own.
 //
 // A HashMap<K, V> is the entries with one key in buckets chosen by the hash of the key: `hash(k) % size(buckets)` is the bucket,
-// and the entries of a bucket are scanned with `=` on their keys, so a key type needs an impl of Hash (lib/prelude.tersus) and
-// one of Eq (lib/eq.tersus). A map is a value like a list: insert and remove give a new map, lookup and fetch clone the value
+// and the entries of a bucket are scanned with `=` on their keys, so a key type needs an impl of Hash (lib/std/prelude/prelude.tersus) and
+// one of Eq (lib/std/eq/eq.tersus). A map is a value like a list: insert and remove give a new map, lookup and fetch clone the value
 // out, and the map owns its entries, which insert clones when it spreads them and remove when it rebuilds a bucket, so
 // inserting, removing and the reads that clone need Clone key and value types; contains, lookupRef and entryRef do not. lookupRef and entryRef instead read a value or an entry where it is, as a reference from
 // the map, and entries() clones every entry out where entryRef(n) gives the nth one by reference. When the count reaches four
