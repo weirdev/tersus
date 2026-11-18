@@ -1,9 +1,15 @@
 module TestBorrow (testBorrow) where
 
 import Data.List (intercalate)
+import qualified Data.Map.Strict as Map
 
+import Compile (elaborateStatements)
+import qualified Mir as M
+import MirMoves (finishLowered)
 import Syntax
 import TestHarness
+import TestParserFragments (parseStatementBlock)
+import Utils (Result (..))
 
 -- &T: a parameter that the function only reads. A call lends the value, so it is not copied for the call and the caller keeps it; in
 -- the function the parameter is its type, which it cannot assign.
@@ -11,6 +17,8 @@ testBorrow :: Test
 testBorrow =
     let runs body expected = parseEvalProgramHelper body (Just expected)
         valid = parseValidProgramHelper
+        checks body expected = parseValidateEvalProgramHelper body (Just (VInt expected))
+        holder = "struct H { r: &mut Int }; fn put(h: &mut H, r: &mut Int) -> Int { *h = H { r: &mut *r }; return 0; }; "
         rejected = parseValidateFailProgramHelper
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
@@ -298,8 +306,32 @@ testBorrow =
                 , testCase "or read through it" (rejected "struct W { r: &mut Int }; struct V { a: Int, b: Int }; fn put(h: &mut W, r: &mut V) -> Int { *h = W { r: &mut (*r).a }; return 0; }; fn f(c: Int) -> Int { v = V { a: 1, b: 2 }; y = 0; q = &mut v; h = W { r: &mut y }; k = put(&mut h, &mut *q); z = (*q).a; *h.r = 7; return z * 10 + v.a; }; return f(1);" "Move error: in f: v is borrowed by h, so it cannot be read through q while that borrow is live: the borrow ends at the last use of h")
                 , testCase "a call stores a reborrow of what a reference in the reborrow is to" (rejected "struct W { r: &mut Int }; struct V2 { r2: &mut Int }; fn put(h: &mut W, r: &mut V2) -> Int { *h = W { r: &mut *(*r).r2 }; return 0; }; fn f(c: Int) -> Int { x = 1; y = 0; v2 = V2 { r2: &mut x }; q = &mut v2; h = W { r: &mut y }; k = put(&mut h, &mut *q); *(*q).r2 = 2; *h.r = 1; return x; }; return f(1);" "Move error: in f: v2 is borrowed by h, so it cannot be read through q while that borrow is live: the borrow ends at the last use of h")
                 , testCase "the holder is dead before the reference is used" (runs "struct H { r: &mut Int }; struct N { h: H }; struct L { rs: List<&mut Int> }; struct B { b: Box<&mut Int> }; struct HS { r: &Int }; struct NS { h: HS }; struct LS { rs: List<&Int> }; struct BS { b: Box<&Int> }; struct HB { r: &mut Bool }; struct HSB { r: &Bool }; fn put(h: &mut H, r: &mut Int) -> Int { *h = H { r: &mut *r }; return 0; }; fn f(c: Int) -> Int { x = 1; y = 0; v = 0; q = &mut x; h = H { r: &mut y }; k = put(&mut h, &mut *q); *h.r = 1; *q = 2; return x; }; return f(1);" (VInt 2))
-                , testCase "the holder has no slot the reborrow fits" (valid "struct H { r: &mut Int }; struct N { h: H }; struct L { rs: List<&mut Int> }; struct B { b: Box<&mut Int> }; struct HS { r: &Int }; struct NS { h: HS }; struct LS { rs: List<&Int> }; struct BS { b: Box<&Int> }; struct HB { r: &mut Bool }; struct HSB { r: &Bool }; fn put(h: &mut HB, r: &mut Int) -> Int { return 0; }; fn f(c: Int) -> Int { x = 1; b = true; q = &mut x; h = HB { r: &mut b }; k = put(&mut h, &mut *q); *q = 2; *h.r = false; return x; }; return f(1);")
-                , testCase "nor one a shared reborrow fits" (valid "struct H { r: &mut Int }; struct N { h: H }; struct L { rs: List<&mut Int> }; struct B { b: Box<&mut Int> }; struct HS { r: &Int }; struct NS { h: HS }; struct LS { rs: List<&Int> }; struct BS { b: Box<&Int> }; struct HB { r: &mut Bool }; struct HSB { r: &Bool }; fn put(h: &mut HSB, r: &Int) -> Int { return 0; }; fn f(c: Int) -> Int { x = 1; b = true; q = &mut x; h = HSB { r: &b }; k = put(&mut h, &*q); *q = 2; z = h.r; t = *z; return x; }; return f(1);")
+                , testCase "a holder lent for updating is tied to the reborrow whatever its slots" (rejected "struct H { r: &mut Int }; struct N { h: H }; struct L { rs: List<&mut Int> }; struct B { b: Box<&mut Int> }; struct HS { r: &Int }; struct NS { h: HS }; struct LS { rs: List<&Int> }; struct BS { b: Box<&Int> }; struct HB { r: &mut Bool }; struct HSB { r: &Bool }; fn put(h: &mut HB, r: &mut Int) -> Int { return 0; }; fn f(c: Int) -> Int { x = 1; b = true; q = &mut x; h = HB { r: &mut b }; k = put(&mut h, &mut *q); *q = 2; *h.r = false; return x; }; return f(1);" "Move error: in f: x is borrowed by h, so it cannot be changed through another reference while that borrow is live: the borrow ends at the last use of h")
+                , testCase "and to a shared reborrow" (rejected "struct H { r: &mut Int }; struct N { h: H }; struct L { rs: List<&mut Int> }; struct B { b: Box<&mut Int> }; struct HS { r: &Int }; struct NS { h: HS }; struct LS { rs: List<&Int> }; struct BS { b: Box<&Int> }; struct HB { r: &mut Bool }; struct HSB { r: &Bool }; fn put(h: &mut HSB, r: &Int) -> Int { return 0; }; fn f(c: Int) -> Int { x = 1; b = true; q = &mut x; h = HSB { r: &b }; k = put(&mut h, &*q); *q = 2; z = h.r; t = *z; return x; }; return f(1);" "Move error: in f: x is borrowed by h, so it cannot be changed through another reference while that borrow is live: the borrow ends at the last use of h")
+                ]
+            , TestList
+                "a call may store any reference it is given into a holder it reaches"
+                [ testCase "a borrow is stored into a holder lent for updating, which is live while the borrowed place is read" (rejected (holder ++ "fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; k = put(&mut h, &mut x); v = x; *h.r = 7; return v * 10 + x; }; return f(1);") "Move error: in f: x is borrowed by h, so it cannot be read while that borrow is live: the borrow ends at the last use of h")
+                , testCase "the holder is either place the update argument may be" (rejected (holder ++ "fn f(c: Bool) -> Int { x = 1; y = 0; y2 = 0; h1 = H { r: &mut y }; h2 = H { r: &mut y2 }; r = if c { &mut h1 } else { &mut h2 }; k = put(&mut *r, &mut x); v = x; *h1.r = 7; return v * 10 + x; }; return f(true);") "Move error: in f: x is borrowed by h1, so it cannot be read while that borrow is live: the borrow ends at the last use of h1")
+                , testCase "or the other" (rejected (holder ++ "fn f(c: Bool) -> Int { x = 1; y = 0; y2 = 0; h1 = H { r: &mut y }; h2 = H { r: &mut y2 }; r = if c { &mut h1 } else { &mut h2 }; k = put(&mut *r, &mut x); v = x; *h2.r = 7; return v * 10 + x; }; return f(false);") "Move error: in f: x is borrowed by h2, so it cannot be read while that borrow is live: the borrow ends at the last use of h2")
+                , testCase "a holder reached through a reference that an update argument holds" (rejected "struct H { r: &mut Int }; struct Wr { c: &mut H, n: Int }; fn put(w: &mut Wr, r: &mut Int) -> Int { p = (*w).c; *p = H { r: &mut *r }; return 0; }; fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; w = Wr { c: &mut h, n: 0 }; k = put(&mut w, &mut x); v = x; *h.r = 7; return v * 10 + x; }; return f(1);" "Move error: in f: x is borrowed by h, so it cannot be read while that borrow is live: the borrow ends at the last use of h")
+                , testCase "or that an argument given by value holds" (rejected "struct H { r: &mut Int }; struct Wb { c: &mut H }; fn put(w: Wb, r: &mut Int) -> Int { *w.c = H { r: &mut *r }; return 0; }; fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; k = put(Wb { c: &mut h }, &mut x); v = x; *h.r = 7; return v * 10 + x; }; return f(1);" "Move error: in f: x is borrowed by h, so it cannot be read while that borrow is live: the borrow ends at the last use of h")
+                , testCase "and is tied to the other references that argument holds" (rejected "struct H { r: &mut Int }; struct W2 { c: &mut H, d: &mut Int }; fn put(w: W2) -> Int { *w.c = H { r: &mut *w.d }; return 0; }; fn f(c: Int) -> Int { z = 1; y = 0; h = H { r: &mut y }; k = put(W2 { c: &mut h, d: &mut z }); v = z; *h.r = 7; return v * 10 + z; }; return f(1);" "Move error: in f: z is borrowed by h, so it cannot be read while that borrow is live: the borrow ends at the last use of h")
+                , testCase "a generic call stores a borrow into a holder of a reference type" (rejected "struct Holder<T> { v: T, n: Int }; fn put<T>(c: &mut Holder<T>, x: T) -> Int { (*c).v = x; return 0; }; fn f(k: Int) -> Int { x = 1; y = 0; c = Holder<&mut Int> { v: &mut y, n: 0 }; z = put(&mut c, &mut x); x = 2; p = c.v; *p = 7; return x; }; return f(1);" "Move error: in f: x cannot be assigned while it is borrowed by c: the borrow ends at the last use of c")
+                , testCase "or a shared borrow" (rejected "struct Holder<T> { v: T, n: Int }; fn put<T>(c: &mut Holder<T>, x: T) -> Int { (*c).v = x; return 0; }; fn f(k: Int) -> Int { y = 1; c = Holder<&Int> { v: &y, n: 0 }; z = 2; n = put(&mut c, &z); z = 3; q = c.v; return *q; }; return f(0);" "Move error: in f: z cannot be assigned while it is borrowed by c: the borrow ends at the last use of c")
+                , testCase "and a generic method stores it into its receiver" (rejected "struct Bag<U> { n: Int, last: List<U> }; impl<U> Bag<U> { fn put(self: &mut Self, u: U) -> Int { (*self).last = push([], u); return 0; }; }; fn f(k: Int) -> Int { x = 1; b = Bag<&Int> { n: 0, last: [] }; z = Bag::put(&mut b, &x); x = 2; t = 0; if size(b.last) > 0 { q = get(b.last, 0); t = *q; } else { }; return t + x; }; return f(1);" "Move error: in f: x cannot be assigned while it is borrowed by b: the borrow ends at the last use of b")
+                , testCase "the holder is dead before the borrowed place is used" (checks (holder ++ "fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; k = put(&mut h, &mut x); *h.r = 7; return x; }; return f(1);") 7)
+                , testCase "and when it is reached through an update argument" (checks "struct H { r: &mut Int }; struct Wr { c: &mut H, n: Int }; fn put(w: &mut Wr, r: &mut Int) -> Int { p = (*w).c; *p = H { r: &mut *r }; return 0; }; fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; w = Wr { c: &mut h, n: 0 }; k = put(&mut w, &mut x); *h.r = 7; return x; }; return f(1);" 7)
+                , testCase "or through an argument given by value" (checks "struct H { r: &mut Int }; struct Wb { c: &mut H }; fn put(w: Wb, r: &mut Int) -> Int { *w.c = H { r: &mut *r }; return 0; }; fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; k = put(Wb { c: &mut h }, &mut x); *h.r = 7; return x; }; return f(1);" 7)
+                , testCase "a holder lent as a part of a local is that local, read after the call" (checks "struct HS { r: &Int }; struct NS { h: HS, n: Int }; fn put(h: &mut HS, r: &Int) -> Int { *h = HS { r: &r }; return 0; }; fn f(c: Int) -> Int { x = 2; y = 1; m = NS { h: HS { r: &y }, n: 3 }; k = put(&mut m.h, &x); z = m.h.r; return *z; }; return f(1);" 2)
+                , testCase "a holder reached through a lent argument is not tied" (checks "struct H { r: &mut Int }; struct Wb { c: &mut H }; fn rd(w: &Wb, x: &mut Int) -> Int { return *x; }; fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; w = Wb { c: &mut h }; k = rd(w, &mut x); v = x; *h.r = 1; return v * 10 + y; }; return f(1);" 11)
+                , testCase "a holder that is stored into can be moved" (checks (holder ++ "fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; k = put(&mut h, &mut x); g = h; *g.r = 4; return x; }; return f(1);") 4)
+                , testCase "and so can one reached through an argument given by value" (checks "struct H { r: &mut Int }; struct Wb { c: &mut H }; fn put(w: Wb, r: &mut Int) -> Int { *w.c = H { r: &mut *r }; return 0; }; fn f(c: Int) -> Int { x = 1; y = 0; h = H { r: &mut y }; k = put(Wb { c: &mut h }, &mut x); g = h; *g.r = 4; return x; }; return f(1);" 4)
+                , testCase "a value with a function in it holds no reference" (checks "fn dbl(n: Int) -> Int { return n * 2; }; struct Acc { f: fn(Int) -> Int, total: Int }; fn add(a: &mut Acc, x: &mut Int) -> Int { (*a).total = (*a).total + *x; return 0; }; fn f(k: Int) -> Int { y = 3; a = Acc { f: dbl, total: 1 }; n = add(&mut a, &mut y); v = y; n2 = add(&mut a, &mut y); return a.total + 0 * v; }; return f(0);" 7)
+                , testCase "so the borrow it is updated with can end" (checks "fn dbl(n: Int) -> Int { return n * 2; }; struct Acc { f: fn(Int) -> Int, total: Int }; fn add(a: &mut Acc, x: &Int) -> Int { (*a).total = (*a).total + *x; return 0; }; fn f(k: Int) -> Int { y = 3; a = Acc { f: dbl, total: 1 }; n = add(&mut a, &y); y = 4; n2 = add(&mut a, &y); return a.total; }; return f(0);" 8)
+                , testCase "a holder of a type that holds no reference is not tied" (checks "struct Holder<T> { v: T, n: Int }; fn bump<T>(c: &mut Holder<T>, x: &Int) -> Int { (*c).n = (*c).n + *x; return 0; }; fn f(k: Int) -> Int { y = 3; c = Holder<Int> { v: 0, n: 1 }; n = bump(&mut c, &y); y = 5; return c.n; }; return f(0);" 4)
+                , testCase "nor is a holder of a type parameter in its own generic body" (checks "struct Holder<T> { v: T, n: Int }; fn bump<T>(c: &mut Holder<T>, x: &Int) -> Int { (*c).n = (*c).n + *x; return 0; }; fn twice<T>(c: &mut Holder<T>) -> Int { y = 1; n = bump(&mut *c, &y); y = 2; n2 = bump(&mut *c, &y); return (*c).n; }; fn f(k: Int) -> Int { c = Holder<Int> { v: 0, n: 1 }; return twice(&mut c); }; return f(0);" 4)
+                , testCase "a holder of a type with no declaration may hold a reference" undeclaredHolder
                 ]
             , TestList
                 "the rest of the plan"
@@ -393,3 +425,16 @@ testBorrow =
                 , testCase "an element at an index that is not known" (rejected "fn f(a: &mut List<Int>, b: &List<Int>) -> Int writes(a) { *a = [7, 7, 7, 7]; return size(b); }; fn g(xs: List<List<Int>>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(xs); affirm size(xs) > 1; }] [{ }] { return f(&mut get(xs, 1), get(xs, i)); }; return g([[1, 2, 3], [5]], 0);" "is lent to this call, and xs[1] is lent to it for updating")
                 ]
             ]
+
+-- (every type has its declaration once a program is lowered, so this one is taken out of the lowered program)
+undeclaredHolder :: TestResult
+undeclaredHolder = case parseStatementBlock source of
+    Left err -> Just ("Parse error: " ++ err)
+    Right stmts -> case elaborateStatements stmts of
+        Error e -> Just e
+        Ok lowered -> case finishLowered lowered of
+            Error e -> Just ("Refused with the declaration: " ++ e)
+            Ok _ -> testAssertErrorContains "Move error: in f: x is borrowed by h, so it cannot be read while that borrow is live" (finishLowered (withoutDeclaration lowered))
+  where
+    source = "struct HB { n: Int }; fn put(h: &mut HB, r: &mut Int) -> Int { return 0; }; fn f(c: Int) -> Int { x = 1; h = HB { n: 0 }; k = put(&mut h, &mut x); v = x; return v + h.n; }; return f(1);"
+    withoutDeclaration lowered = lowered{M.lowProgram = (M.lowProgram lowered){M.progTypes = Map.delete "HB" (M.progTypes (M.lowProgram lowered))}}
