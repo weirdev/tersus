@@ -11,7 +11,7 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
 import Data.List (isSuffixOf, sortOn)
@@ -106,27 +106,54 @@ refusalMessage physical program name (status, block, step) = case status of
 
 -- Every function of a program checked, not only those before the first refused (as validateCompiled checks them),
 -- with the verdicts validateCompiled keeps on disk: what each function refused, or that the validator could not
--- check it, in the program's order
+-- check it, in the program's order.
+--
+-- A function's data is far larger as the text the validator reads than as the
+-- MIR it is made from, so the texts are made and checked a batch at a time
+-- rather than all at once (the elaborator's held about 15 GiB on a machine
+-- with 16). Every function is still checked under the same verdicts and
+-- namespace; one whose text another batch has checked is a verdict read back.
 validationRefusals :: M.Program -> IO (Result [String] String)
-validationRefusals program = case prepareTexts False program of
-    Error e -> pure (Error e)
-    Ok texts -> do
+validationRefusals program = case encode program of
+    Left what -> pure (Error ("the program uses a feature the Tersus validator does not model yet: " ++ what))
+    Right functions -> do
         namespace <- validatorKey
         built <- validatorExecutable
+        workers <- availableProcessors
         case (namespace, built) of
             (Error e, _) -> pure (Error e)
             (_, Error e) -> pure (Error e)
             (Ok key, Ok exe) -> do
-                let distinct = Map.keys (Map.fromList [(text, ()) | (_, text) <- texts])
                 _ <- evaluate (fullyEvaluated key `seq` fullyEvaluated exe)
-                checked <- inParallel (storedOrChecked key (pure (Ok exe))) distinct
-                let byText = Map.fromList (zip distinct checked)
-                pure (Ok [message | (name, text) <- texts, Just outcome <- [Map.lookup text byText], Just message <- [failure name outcome]])
+                inBatches (2 * max 1 workers) (batch key exe) functions
   where
+    batch key exe items = case mapM (\(name, f) -> fmap ((,) name) (serializeFunction f)) items of
+        Left e -> pure (Error e)
+        Right texts -> do
+            let distinct = Map.keys (Map.fromList [(text, ()) | (_, text) <- texts])
+            checked <- inParallel (storedOrChecked key (pure (Ok exe))) distinct
+            let byText = Map.fromList (zip distinct checked)
+            pure (Ok [message | (name, text) <- texts, Just outcome <- [Map.lookup text byText], Just message <- [failure name outcome]])
     failure name (Error e) = Just ("the compiled validator could not check " ++ name ++ ": " ++ e)
     failure name (Ok verdict@(status, _, _))
         | status /= 0 = Just (refusalMessage False program name verdict)
         | otherwise = Nothing
+
+-- Work done a batch at a time, in order, and what the batches answer joined.
+-- A batch's answer is made before the next one starts: it is what the batch
+-- holds that the size bounds, and a lazy answer would hold it all the same.
+inBatches :: Int -> ([a] -> IO (Result [String] String)) -> [a] -> IO (Result [String] String)
+inBatches size work items = go items []
+  where
+    go [] done = pure (Ok (concat (reverse done)))
+    go remaining done = case splitAt (max 1 size) remaining of
+        (taken, rest) -> do
+            answered <- work taken
+            case answered of
+                Error e -> pure (Error e)
+                Ok found -> do
+                    _ <- evaluate (foldr (seq . fullyEvaluated) () found)
+                    go rest (found : done)
 
 -- The verdicts already known, by the text of a function's data, and how
 -- many times one has been used

@@ -62,7 +62,7 @@ import MirData (forNative, writeProgram)
 import TestHarness
 import Types (Type (..))
 import Utils
-import ValidatorNative (inParallel, withVerdictLock)
+import ValidatorNative (inBatches, inParallel, withVerdictLock)
 import qualified ValidatorNative
 
 richSource :: String
@@ -1843,6 +1843,7 @@ testVerdictLocks = TestList "testVerdictLocks"
     , TestCase "a killed process releases the verdict lock" verdictKilledProcess
     , TestCase "validator build flags isolate the verdict namespace" validatorFlagNamespace
     , TestCase "parallel checks force their texts before the workers start" parallelChecksForceTextsFirst
+    , TestCase "work is admitted a bounded batch at a time, in order" boundedBatches
     ]
 
 parallelChecksForceTextsFirst :: IO TestResult
@@ -1856,6 +1857,36 @@ parallelChecksForceTextsFirst = do
         , testAssertEq (length seen) 64
         , testAssertTrue (all (== caller) seen)
         ]
+
+-- What the validator's own batches rest on: no more than the size at once,
+-- each batch's answer made before the next one starts (a lazy answer would
+-- hold the batch's texts to the end), the answers in order, and a batch that
+-- fails the answer with none after it run.
+boundedBatches :: IO TestResult
+boundedBatches = do
+    events <- newIORef []
+    answered <- inBatches 3 (\items -> do
+        atomicModifyIORef' events (\seen -> (("work " ++ show (length items)) : seen, ()))
+        pure (Ok [recordedAnswer events item | item <- items])) [1 .. 10 :: Int]
+    seen <- reverse <$> readIORef events
+    attempted <- newIORef (0 :: Int)
+    refused <- inBatches 3 (\items -> do
+        atomicModifyIORef' attempted (\count -> (count + 1, ()))
+        pure (if 7 `elem` items then Error "refused" else Ok (map show items))) [1 .. 10 :: Int]
+    tried <- readIORef attempted
+    pure $ firstFailure
+        [ testAssertEq answered (Ok (map show [1 .. 10 :: Int]))
+        , testAssertEq seen (concat [["work " ++ show (length batch)] ++ ["forced " ++ show item | item <- batch]
+            | batch <- [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10 :: Int]]])
+        , testAssertEq refused (Error "refused" :: Result [String] String)
+        , testAssertEq tried 3
+        ]
+
+{-# NOINLINE recordedAnswer #-}
+recordedAnswer :: IORef [String] -> Int -> String
+recordedAnswer events item = unsafePerformIO $ do
+    atomicModifyIORef' events (\seen -> (("forced " ++ show item) : seen, ()))
+    pure (show item)
 
 {-# NOINLINE recordedText #-}
 recordedText :: IORef [ThreadId] -> Int -> String
