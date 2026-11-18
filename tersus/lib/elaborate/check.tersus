@@ -188,7 +188,7 @@ fn scopeExpression(st: St, e: Int) -> St ~ {
                 outer = clone(st.localNames);
                 if isClosureValue(&st, v) {
                     inner = clone(st.localNames);
-                    for pn in listItems(&st.nodes, value.ps) { inner = inner.remove(&nameText(&st.nodes, pn)); };
+                    for pn in listItems(&st.nodes, value.ps) { pname = nameText(&st.nodes, pn); inner = inner.remove(&pname); };
                     st = St { localNames: inner, ..st };
                     st = scopeValidations(st, value.ins);
                     scopedIns = st.nid;
