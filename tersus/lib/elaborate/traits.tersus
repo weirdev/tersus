@@ -1623,8 +1623,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
         };
     };
     // the closure struct, generic over the enclosing parameters its captures and signature use
-    structName = catStrings(catStrings(clone(st.current), "$closure$"), intText(v));
-    if size(st.current.bytes) = 0 { structName = catStrings("$closure$", intText(v)); };
+    structName = catStrings("$closure$", intText(v));
     usedTys = clone(ptys);
     usedTys = push(usedTys, rty);
     for c in caps { usedTys = push(usedTys, c.field); };
