@@ -1262,21 +1262,23 @@ terminator cx pos st term = case term of
             parented = windowed{stParents = case [l | Just l <- map operandLocal (resultFromArgs cx st' callee args), l /= dest] of
                 [] -> Map.delete dest (stParents windowed)
                 from -> Map.insert dest (nub from) (stParents windowed)}
-            -- (a call may store a reborrow it is given, or one of a part of it or of what a reference in it is to, into a reference
-            -- slot of a value it is lent for updating whose type that could be, so that value holds the reborrow's places afterwards
-            -- and is its child, as a result from the reborrow is; other references a call may store are not followed yet)
-            given = [(r, refTo, maybe [] (\(place, _, _) -> [place]) (Map.lookup r (stLoans st)) ++ Map.findWithDefault [] r (stExtraLoans st)) | Just r <- map operandLocal args, Just refTo <- [refTarget (typeOf cx r)], Map.member r (stParents st)]
-            refTarget ty = case ty of
-                TMutRef u -> Just (u, True)
-                TRef u -> Just (u, False)
-                _ -> Nothing
-            fits (u, m) (slotTo, slotMut) = (m || not slotMut) && (isParam slotTo || any (\v -> v == slotTo || isParam v) (typesWithin (cxProgram cx) u))
-            isParam ty = case ty of
-                TParam _ -> True
-                _ -> False
-            storing = [(holder, map fst3 from, concatMap thd3 from) | (a, True) <- zip args mut, Just l <- [operandLocal a], TMutRef t <- [typeOf cx l], let slots = writableSlots (cxProgram cx) t, holder <- nub (map fst (argPlaces l)), holder /= dest, let from = [g | g@(r, refTo, places) <- given, r /= l, r /= holder, not (null places), any (fits refTo) slots], not (null from)]
-            fst3 (a, _, _) = a
-            thd3 (_, _, c) = c
+            -- (a call may store any reference it is given into a holder it reaches: the referent of an update argument, or what
+            -- a reference held by an argument given by value or for updating is to. Such a holder becomes a child of every other
+            -- argument with loans and holds their places, except the update argument it is lent through and a borrow of all of it)
+            loansOf l = maybe [] (\(place, _, _) -> [place]) (Map.lookup l (stLoans st)) ++ Map.findWithDefault [] l (stExtraLoans st)
+            given = [(l, places) | Just l <- map operandLocal args, let places = loansOf l, not (null places)]
+            mayHold = mayHoldReference (cxProgram cx)
+            updateHolders = [(l, nub (map fst (argPlaces l))) | (a, True) <- zip args mut, Just l <- [operandLocal a], TMutRef t <- [typeOf cx l], mayHold t]
+            heldBy = concat [loansOf holder | (_, hs) <- updateHolders, holder <- hs] ++ concat [loansOf l | (a, False, False) <- zip3 args lent mut, Just l <- [operandLocal a], case typeOf cx l of TRef _ -> False; _ -> True]
+            reached = go Set.empty (map fst heldBy)
+              where
+                go _ [] = []
+                go seen (r : rest)
+                    | Set.member r seen = go seen rest
+                    | mayHold (typeOf cx r) = r : go (Set.insert r seen) (rest ++ map fst (loansOf r))
+                    | otherwise = go (Set.insert r seen) rest
+            holders = nub ([(holder, Just l) | (l, hs) <- updateHolders, holder <- hs] ++ [(holder, Nothing) | holder <- reached])
+            storing = [(holder, map fst from, concatMap snd from) | (holder, through) <- holders, holder /= dest, let from = [(r, places) | (r, rPlaces) <- given, r /= holder, Just r /= through, let places = filter (/= (holder, [])) rPlaces, not (null places)], not (null from)]
             stored = foldl' (\acc (holder, from, places) -> acc{stParents = Map.insertWith (flip unionPlaces) holder from (stParents acc), stExtraLoans = Map.insertWith (flip unionPlaces) holder places (stExtraLoans acc), stFieldLoans = Map.mapWithKey (\(root, _) ps -> if root == holder then unionPlaces ps places else ps) (stFieldLoans acc)}) parented storing
             -- (a result that is one known place of what it is from is that place, of the state the call left)
             exactResult = case typeOf cx dest of
@@ -1293,47 +1295,36 @@ terminator cx pos st term = case term of
   where
     accessAll as = foldl' (access cx pos) (st, []) as
 
--- The reference slots of a value of the type that a function given it for updating can write, with what each is to and
--- whether it is an update reference: through its fields, elements and Boxes, and through the update references it holds
-writableSlots :: Program -> Type -> [(Type, Bool)]
-writableSlots program = go Set.empty
+-- Whether a value of the type may hold a reference: yes for a type the checker cannot see into (no declaration, an
+-- unsolved type variable); no for a type parameter in its own generic body, which holds no reference to that body's
+-- places, and for a function value, which captures nothing yet
+mayHoldReference :: Program -> Type -> Bool
+mayHoldReference program = go Set.empty
   where
     go seen ty = case ty of
-        TRef u -> [(u, False)]
-        TMutRef u -> (u, True) : go seen u
+        TRef _ -> True
+        TMutRef _ -> True
+        TVar _ -> True
         TList t -> go seen t
         TBox t -> go seen t
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
-        TNamed base args | Set.member (instanceName base args) seen -> []
+        TBlock t -> go seen t
+        TNamed base args | Set.member (instanceName base args) seen -> False
         TNamed base args -> declared (Set.insert (instanceName base args) seen) (instanceName base args)
-        TVariant v -> maybe [] (declared seen) (ownerOf program v)
-        _ -> []
+        TVariant v -> maybe True (declared seen) (ownerOf program v)
+        TParam _ -> False
+        TFn _ _ -> False
+        TForall _ _ _ -> False
+        TAddr _ -> False
+        TInt -> False
+        TByte -> False
+        TBool -> False
+        TWord _ _ -> False
     declared seen n = case Map.lookup n (progTypes program) of
-        Just (StructDecl fields) -> concatMap (go seen . snd) fields
-        Just (EnumDecl variants) -> concatMap (go seen . snd) (concatMap snd variants)
-        Nothing -> []
-
--- The types of the places a reference to a value of the type reaches: the value, its parts (fields, elements, Box contents)
--- and what the references in it are to, at any depth
-typesWithin :: Program -> Type -> [Type]
-typesWithin program = go Set.empty
-  where
-    go seen ty = ty : case ty of
-        TRef u -> go seen u
-        TMutRef u -> go seen u
-        TList t -> go seen t
-        TBox t -> go seen t
-        TArrayOf t _ -> go seen t
-        TUninit t -> go seen t
-        TNamed base args | Set.member (instanceName base args) seen -> []
-        TNamed base args -> declared (Set.insert (instanceName base args) seen) (instanceName base args)
-        TVariant v -> maybe [] (declared seen) (ownerOf program v)
-        _ -> []
-    declared seen n = case Map.lookup n (progTypes program) of
-        Just (StructDecl fields) -> concatMap (go seen . snd) fields
-        Just (EnumDecl variants) -> concatMap (go seen . snd) (concatMap snd variants)
-        Nothing -> []
+        Just (StructDecl fields) -> any (go seen . snd) fields
+        Just (EnumDecl variants) -> any (go seen . snd) (concatMap snd variants)
+        Nothing -> True
 
 -- Which of the arguments of a call are lent: the parameters that the function declares as such, or the ones that the type of a function value marks
 lentArguments :: Cx -> Operand -> Int -> [Bool]
