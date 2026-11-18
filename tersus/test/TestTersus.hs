@@ -130,6 +130,7 @@ allGroups = concatMap registered originalGroups
     registered original
         | groupName original == "testParserBootstrap" = parserBootstrapGroups
         | groupName original == "testHostValidation" = hostValidationGroups
+        | groupName original == "testParity" = parityGroups
         | otherwise = case lookup (groupName original) [(groupName tree, split) | (tree, split) <- batchedGroups] of
             Just split -> split
             Nothing -> [original]

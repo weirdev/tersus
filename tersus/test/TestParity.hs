@@ -1,5 +1,6 @@
 module TestParity
     ( testParity
+    , parityGroups
     , parityCases
     , ParityCase (..)
     , unsupportedReason
@@ -17,7 +18,7 @@ import Cli (World (..), noWorld, runProgramIn)
 import qualified Mir as M
 import MirData (forNative, readProgram, writeProgram)
 import ValidatorNative (validateCompiled)
-import MirHousekeeping (eraseGhosts, storageProgram, validationEntry)
+import MirHousekeeping (eraseGhosts, storageProgram, toolProgram, validationEntry)
 import Compile (lowerSource)
 import Pipeline (parseSource)
 import SelfHostedMir (validateMirSubset, sourceContainerView, verdictProved)
@@ -63,17 +64,27 @@ bump :: (Tally -> Tally) -> IO ()
 bump f = modifyMVar parityTally (\t -> pure (f t, ()))
 
 testParity :: Test
-testParity =
-    TestList
-        "testParity"
+testParity = TestList "testParity" parityGroups
+
+-- (the validator's cases and the MIR reader's build none of the same programs, so neither group repeats the other's setup)
+parityGroups :: [Test]
+parityGroups =
+    [ TestList "testParity:validation"
         [ sourceContainerCapabilities
-        , -- (the cases are timed, and the first validation of a process may build
-          -- the compiled validator, which is not what they time)
-          TestCase "the compiled validator is built" (pure (either Just (const Nothing) (resultEither (lower "return 0;" `bindResult` validateCompiled))))
+        , validatorBuilt
         , TestParallel "validation" [TestCase (parityName c) (validationCase c) | c <- parityCases]
-        , TestParallel "mirReader" [TestCase (parityName c) (readerCase c) | c <- readerCases]
-        , TestCase "corpus summary" summaryCase
+        , TestCase "validation summary" validationSummary
         ]
+    , TestList "testParity:mirReader"
+        [ validatorBuilt
+        , TestParallel "mirReader" [TestCase (parityName c) (readerCase c) | c <- readerCases]
+        , TestCase "mirReader summary" readerSummary
+        ]
+    ]
+  where
+    -- (the cases are timed, and the first validation of a process may build
+    -- the compiled validator, which is not what they time)
+    validatorBuilt = TestCase "the compiled validator is built" (pure (either Just (const Nothing) (resultEither (lower "return 0;" `bindResult` validateCompiled))))
 
 sourceContainerCapabilities :: Test
 sourceContainerCapabilities = TestList "logical container layouts"
@@ -171,8 +182,8 @@ approvedReaderNames =
     , "program unbox"
     ]
 
-summaryCase :: IO TestResult
-summaryCase = do
+validationSummary :: IO TestResult
+validationSummary = do
     tally <- modifyMVar parityTally (\t -> pure (t, t))
     putStrLn $
         "parity corpus: "
@@ -185,7 +196,19 @@ summaryCase = do
             ++ show (tallyNotMir tally)
             ++ " not lowered to MIR, "
             ++ show (length (tallyTimedOut tally))
-            ++ " timed out in the self-hosted validator, "
+            ++ " timed out in the self-hosted validator"
+    mapM_ (\(reason, n) -> putStrLn ("parity skipped, " ++ show n ++ ": " ++ reason)) (Map.toList (tallySkipReasons tally))
+    mapM_ (\name -> putStrLn ("parity timed out in the self-hosted validator: " ++ name)) (tallyTimedOut tally)
+    pure $
+        if tallyExercised tally == 0
+            then Just "the parity corpus exercised no program through the self-hosted validator"
+            else Nothing
+
+readerSummary :: IO TestResult
+readerSummary = do
+    tally <- modifyMVar parityTally (\t -> pure (t, t))
+    putStrLn $
+        "parity corpus: "
             ++ show (tallyReader tally)
             ++ " read back through the Tersus MIR reader (every "
             ++ show readerEvery
@@ -194,27 +217,16 @@ summaryCase = do
             ++ " of those not compiled programs, "
             ++ show (length (tallyReaderTimedOut tally))
             ++ " of those timed out in the reader"
-    mapM_ (\(reason, n) -> putStrLn ("parity skipped, " ++ show n ++ ": " ++ reason)) (Map.toList (tallySkipReasons tally))
-    mapM_ (\name -> putStrLn ("parity timed out in the self-hosted validator: " ++ name)) (tallyTimedOut tally)
     mapM_ (\name -> putStrLn ("parity timed out in the Tersus MIR reader: " ++ name)) (tallyReaderTimedOut tally)
     pure $
-        if tallyExercised tally == 0
-            then Just "the parity corpus exercised no program through the self-hosted validator"
+        if tallyReader tally == 0
+            then Just "the parity corpus read no program back through the Tersus MIR reader"
             else Nothing
 
--- The self-hosted validator, lowered once for this group. It is not validated
--- again here: validating it with the reference validator costs more than
--- every case below together.
-{-# NOINLINE checkerResult #-}
-checkerResult :: MVar (Maybe (Result M.Program String))
-checkerResult = unsafePerformIO (newMVar Nothing)
-
-checkerProgram :: IO (Result M.Program String)
-checkerProgram = modifyMVar checkerResult $ \cached -> case cached of
-    Just result -> pure (cached, result)
-    Nothing -> do
-        result <- bootstrapFromFile validationEntry
-        pure (Just result, result)
+-- Not validated again (that costs more than every case below together), and not read back from the shared test
+-- cache (bootstrapFromFile): that copy shares none of its names, and takes about ten times the memory.
+checkerProgram :: Result M.Program String
+checkerProgram = toolProgram validationEntry `bindResult` eraseGhosts
 
 {-# NOINLINE loweredPrograms #-}
 loweredPrograms :: MVar (Map.Map String (Result M.Program String))
@@ -255,8 +267,7 @@ validationCase :: ParityCase -> IO TestResult
 validationCase parityCase = do
     bump (\t -> t{tallyTotal = tallyTotal t + 1})
     source <- paritySource parityCase
-    checkerResult' <- checkerProgram
-    case checkerResult' of
+    case checkerProgram of
         Error e -> pure (Just (parityName parityCase ++ ": the Tersus validator does not compile: " ++ e))
         Ok checker -> do
             lowered <- lowerOnce source

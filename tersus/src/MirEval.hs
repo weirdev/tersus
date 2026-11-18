@@ -233,12 +233,16 @@ instance Functor E where
 
 instance Applicative E where
     pure a = E (\_ s -> Ok (a, none, s))
-    E f <*> E g = E (\env s -> f env s `bindResult` \(h, o1, s') -> mapResult (\(a, o2, s'') -> (h a, together o1 o2, s'')) (g env s'))
+    E f <*> E g = E (\env s -> f env s `bindResult` \(h, o1, s') -> g env s' `bindResult` \(a, o2, s'') -> let o = together o1 o2 in o `seq` Ok (h a, o, s''))
 
 instance Monad E where
-    E g >>= f = E (\env s -> g env s `bindResult` \(a, o1, s') -> runE (f a) env s' `bindResult` \(b, o2, s'') -> Ok (b, together o1 o2, s''))
+    E g >>= f = E (\env s -> g env s `bindResult` \(a, o1, s') -> runE (f a) env s' `bindResult` \(b, o2, s'') -> let o = together o1 o2 in o `seq` Ok (b, o, s''))
 
+-- (forced at every bind: left lazy, it is a thunk per step the program takes, which nothing reads until the program
+-- ends, so the heap grows with the length of the run)
 together :: Written -> Written -> Written
+together ("", "") o = o
+together o ("", "") = o
 together (out1, err1) (out2, err2) = (out1 ++ out2, err1 ++ err2)
 
 failE :: String -> E a
