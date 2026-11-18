@@ -1,4 +1,4 @@
-module TestClosures (testClosures) where
+module TestClosures (testClosures, closureAdder, closureCounter, closureModuleFiles) where
 
 import qualified MirEval
 import Syntax
@@ -9,8 +9,8 @@ import Utils (Result (..), bindResult)
 -- Plan: ~/notes/users/wweirather/.claude/plans/tersus-closures-master-plan.md (Phase 1)
 testClosures :: Test
 testClosures =
-    let adder = "struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; "
-        counter = "struct Counter { count: Int }; impl FnMut() -> Int for Counter { fn call(self: &mut Self) -> Int { (*self).count = (*self).count + 1; return (*self).count; }; }; "
+    let adder = closureAdder
+        counter = closureCounter
         runs src expected = parseEvalProgramHelper src (Just (VInt expected))
         valid src = parseValidProgramHelper src
         rejected src expected = parseValidateFailProgramHelper src expected
@@ -41,9 +41,19 @@ testClosures =
                 program <-
                     programFromFiles
                         "app/main.tersus"
-                        [ ("app/package.tersus", "")
-                        , ("app/main.tersus", "import app::apply; struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; a = Adder { n: 10 }; return apply::apply(&a, 5);")
-                        , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
-                        ]
+                        closureModuleFiles
                 pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
             ]
+
+closureAdder :: String
+closureAdder = "struct Adder { n: Int }; impl Fn(x: Int) -> Int for Adder { fn call(self: &Self, x: Int) -> Int { return x + self.n; }; }; "
+
+closureCounter :: String
+closureCounter = "struct Counter { count: Int }; impl FnMut() -> Int for Counter { fn call(self: &mut Self) -> Int { (*self).count = (*self).count + 1; return (*self).count; }; }; "
+
+closureModuleFiles :: [(FilePath, String)]
+closureModuleFiles =
+    [ ("app/package.tersus", "")
+    , ("app/main.tersus", "import app::apply; " ++ closureAdder ++ "a = Adder { n: 10 }; return apply::apply(&a, 5);")
+    , ("app/apply.tersus", "fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")
+    ]

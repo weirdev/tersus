@@ -1,4 +1,4 @@
-module TestMirMonoOwnership (testMirMonoOwnership, testMirMonoOwnershipUsing) where
+module TestMirMonoOwnership (testMirMonoOwnership, testMirMonoOwnershipUsing, testMirMonoOwnershipFnShapesUsing) where
 
 import Data.Char (isSpace)
 import Control.Exception (bracket)
@@ -11,7 +11,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.Exit (ExitCode(..))
 import Mir
-import MirData (readLowered, readProgram, writeProgramWithGhosts, writeLowered)
+import MirData (readLowered, readProgram, writeProgram, writeProgramWithGhosts, writeLowered)
 import MirHousekeeping (Tool(..), ownershipTool, monomorphizeWith, monomorphizeOwnershipWith)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (runWithInputFull)
@@ -19,6 +19,16 @@ import qualified Syntax as S
 import Types (Type(..), Size(..), Signature(..))
 import TestHarness
 import TestMirMono (monoFixtures, metadataProgram, genericProgram, legacyPackInput)
+import TestClosures (closureAdder, closureCounter, closureModuleFiles)
+import Compile (lowerSourceUsing)
+import ElaboratorTool (Loader, bootstrapLoader)
+import qualified PackageCompile as Package
+import qualified Modules as Mod
+import MirLists (lowerLists)
+import MirHousekeeping (listLibrary)
+import qualified MirEval
+import Native (runWithInput, buildExecutableWith)
+import Hash (fingerprint)
 import Utils
 
 trim :: String -> String
@@ -36,20 +46,23 @@ staged getTool p = do
     mono <- monomorphizeWith getTool p
     case mono of
         Error e -> pure (Error e)
-        Ok original -> do
-            selected <- getTool
-            case selected of
-                ToolFailed e -> pure (Error e)
-                ToolInterpreted _ -> pure (Error "the ownership passes run natively only")
-                ToolNative exe -> do
-                    (code,out,errors) <- runWithInputFull exe ("pass ownership\n" ++ writeProgramWithGhosts (ownershipInput original))
-                    pure $ case code of
-                        ExitFailure n -> Error ("the ownership tool exited with " ++ show n ++ ": " ++ trimEnd errors)
-                        ExitSuccess
-                            | trim out == "1" -> Error ("the ownership tool refused ownership: " ++ trimEnd errors)
-                            | not (null (trim errors)) -> Error ("the ownership tool reported: " ++ trimEnd errors)
-                            | take 1 (lines out) /= ["tersus-mir 2"] -> Error "the ownership tool did not write MIR version 2"
-                            | otherwise -> stage "the ownership tool wrote unreadable MIR: " (readProgram out) `bindResult` restoreOwnership original
+        Ok original -> stagedOwnership getTool "ownership" original
+
+stagedOwnership :: IO Tool -> String -> Program -> IO (Result Program String)
+stagedOwnership getTool pass original = do
+    selected <- getTool
+    case selected of
+        ToolFailed e -> pure (Error e)
+        ToolInterpreted _ -> pure (Error "the ownership passes run natively only")
+        ToolNative exe -> do
+            (code,out,errors) <- runWithInputFull exe ("pass " ++ pass ++ "\n" ++ writeProgramWithGhosts (ownershipInput original))
+            pure $ case code of
+                ExitFailure n -> Error ("the ownership tool exited with " ++ show n ++ ": " ++ trimEnd errors)
+                ExitSuccess
+                    | trim out == "1" -> Error ("the ownership tool refused " ++ pass ++ ": " ++ trimEnd errors)
+                    | not (null (trim errors)) -> Error ("the ownership tool reported: " ++ trimEnd errors)
+                    | take 1 (lines out) /= ["tersus-mir 2"] -> Error "the ownership tool did not write MIR version 2"
+                    | otherwise -> stage "the ownership tool wrote unreadable MIR: " (readProgram out) `bindResult` restoreOwnership original
 
 compareAdapters :: IO Tool -> Program -> IO TestResult
 compareAdapters tool p = do
@@ -138,12 +151,77 @@ replyControls = case writeLowered (unit metadataProgram) of
                 ]
          in [TestCase label (withReplies a b) | (label,a,b) <- cases]
 
+testMirMonoOwnershipFnShapesUsing :: Loader -> IO Tool -> Test
+testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusion"
+    [ TestCase "borrowed Fn contract, zero-field object and named wrapper" $ checked "fn-contract" 12 (lower fnContract)
+    , TestCase "FnMut preserves updates through the borrowed receiver" $ checked "fn-mut" 1202 (lower (closureCounter ++ "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; c = Counter { count: 0 }; r = twice(&mut c); return r * 100 + c.count;"))
+    , TestCase "FnOnce consumes the receiver and owning argument" $ checked "fn-once" 5 (lower fnOnce)
+    , TestCase "Fn shape bound and object cross module boundaries" $ checked "fn-modules" 15 package
+    ]
+  where
+    lower = lowerSourceUsing loader False True
+    package = Package.compileModulesWith loader (Mod.Snapshot (Mod.resolverFromFiles moduleFiles) "app/main.tersus" False) `bindResult` Package.lowerCompiledPackage
+    moduleFiles = [(path,case path of
+        "app/main.tersus" -> "import app::apply; import app::provider; fn hold<F>(f: &F) -> &F from f [{ }] [{ }] { return f; }; a = provider::Adder { n: 10 }; return apply::apply(hold(&a), 5);"
+        "app/apply.tersus" -> source
+        _ -> source) | (path,source) <- closureModuleFiles]
+        ++ [("app/provider/provider.tersus", closureAdder)]
+    fnContract = "struct Inc { }; impl Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] for Inc { fn call(self: &Self, x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + 1; }; }; fn inc(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return x + 1; }; fn useIt<F: Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; i = Inc { }; return useIt(&i, 5) + useIt(inc, 5);"
+    fnOnce = "struct Once { xs: List<Int> }; impl FnOnce(x: List<Int>) -> Int for Once { fn call(self: Self, x: List<Int>) -> Int { return size(self.xs) + size(x); }; }; fn useOnce<F: FnOnce(x: List<Int>) -> Int>(f: F, x: List<Int>) -> Int { return f(x); }; o = Once { xs: [1, 2] }; return useOnce(o, [3, 4, 5]);"
+    checked label wanted lowered = case lowered of
+        Error e -> pure (Just (label ++ " lowering: " ++ e))
+        Ok p -> do
+            let generics program = [fnName fn | fn <- Map.elems (progFunctions program), not (null (fnTypeParams fn) && null (fnSizeParams fn))]
+            if null (generics p) then pure (Just (label ++ " does not retain generic functions before withoutGeneric")) else do
+                expanded <- stagedOwnership tool "expand" p
+                library <- listLibrary
+                case expanded `bindResult` \value -> lowerLists library value of
+                    Error e -> pure (Just (label ++ " native preparation: " ++ e))
+                    Ok native -> if null (generics native) then pure (Just (label ++ " native preparation dropped every generic template")) else do
+                        count <- newIORef (0 :: Int)
+                        let getter = modifyIORef' count (+1) >> tool
+                        expected <- staged getter native
+                        stagedCount <- readIORef count
+                        modifyIORef' count (const 0)
+                        actual <- monomorphizeOwnershipWith getter native
+                        fusedCount <- readIORef count
+                        raw <- compareRaw tool native
+                        case (expected, actual) of
+                            (Ok reference, Ok fused) -> do
+                                emitted <- execute label fused
+                                putStrLn ("[FN_FUSION_ROUTE] " ++ label ++ " lowered=" ++ show (generics p) ++ " native=" ++ show (generics native) ++ " acquisitions=" ++ show (stagedCount,fusedCount) ++ " wire=" ++ show (wireHash native))
+                                pure (testAssertEq (stagedCount,fusedCount) (2,1)
+                                    <> testAssertEq (show fused) (show reference)
+                                    <> testAssertEq (writeLowered (unit fused)) (writeLowered (unit reference))
+                                    <> raw <> testAssertEq (MirEval.runProgram p) (Ok (Just (MirEval.MInt wanted)))
+                                    <> testAssertEq emitted (Ok (ExitSuccess,show wanted ++ "\n","")))
+                            _ -> pure (Just (label ++ " staged/fused failure: " ++ show (expected,actual)))
+    wireHash program = mapResult (fingerprint . pure) (writeLowered (unit program))
+    execute label program = do
+        selected <- tool
+        case selected of
+            ToolNative exe -> do
+                ir <- runWithInput exe (writeProgram program)
+                case ir of
+                    Error e -> pure (Error e)
+                    Ok text -> do
+                        directory <- getTemporaryDirectory
+                        bracket (openTempFile directory ("tersus-" ++ label)) (\(path,_) -> removeFile path) $ \(path,handle) -> do
+                            hClose handle
+                            made <- buildExecutableWith [] path text
+                            case made of
+                                Error e -> pure (Error e)
+                                Ok _ -> Ok <$> runWithInputFull path ""
+            ToolFailed e -> pure (Error e)
+            ToolInterpreted _ -> pure (Error "Fn native output requires a native emitter")
+
 testMirMonoOwnership :: Test
 testMirMonoOwnership = testMirMonoOwnershipUsing ownershipTool
 
 testMirMonoOwnershipUsing :: IO Tool -> Test
 testMirMonoOwnershipUsing tool = TestList "testMirMonoOwnership"
-    [ TestList "staged versus fused metadata and substitution" [TestCase label (compareAdapters tool p) | (label,p) <- monoFixtures]
+    [ testMirMonoOwnershipFnShapesUsing bootstrapLoader tool
+    , TestList "staged versus fused metadata and substitution" [TestCase label (compareAdapters tool p) | (label,p) <- monoFixtures]
     , TestList "raw existing codec receipts" [TestCase label (compareRaw tool p) | (label,p) <- monoFixtures]
     , TestCase "no generic keeps the ownership MIR2 writability domain" $ do
         let p = unwritableMetadata metadataProgram
