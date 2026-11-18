@@ -132,6 +132,32 @@ jobs:
         if: ${{ matrix.shard == 8 }}
         run: stack run tersus-exe -- run examples/frame_facts.tersus
 
+      - name: Verify ordinary build emitter association
+        if: ${{ matrix.shard == 8 }}
+        run: |
+          set -euo pipefail
+          original="$RUNNER_TEMP/emitter-original.pin"
+          cp bootstrap/emitter.sha256 "$original"
+          trap 'cp "$original" bootstrap/emitter.sha256' EXIT
+          unset TERSUS_TEST_APPROVED_BUILD_IDENTITY TERSUS_EMITTER_BUILD_MANIFEST
+          export XDG_CACHE_HOME="$RUNNER_TEMP/emitter-gen"
+          stack run emitter-seed -- certify "$RUNNER_TEMP/emitter-certified.ll" "$RUNNER_TEMP/emitter-certified.pin"
+          cp "$RUNNER_TEMP/emitter-certified.pin" bootstrap/emitter.sha256
+          stack build --test --no-run-tests
+          XDG_CACHE_HOME="$RUNNER_TEMP/emitter-known" stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/emitter-known.ll"
+          test -n "$(compgen -G "$RUNNER_TEMP/emitter-known/tersus/seed-*")"
+          test -z "$(compgen -G "$RUNNER_TEMP/emitter-known/tersus/emitter-*")"
+          stack run emitter-seed -- emit "$RUNNER_TEMP/emitter-forced-source.ll"
+          cmp "$RUNNER_TEMP/emitter-certified.ll" "$RUNNER_TEMP/emitter-forced-source.ll"
+          test -n "$(compgen -G "$RUNNER_TEMP/emitter-gen/tersus/emitter-*")"
+          printf '%s %064d\n' "$(cut -d' ' -f1 bootstrap/emitter.sha256)" 0 > bootstrap/emitter.sha256
+          stack build --test --no-run-tests
+          XDG_CACHE_HOME="$RUNNER_TEMP/emitter-mismatch" stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/emitter-mismatch.ll"
+          test -n "$(compgen -G "$RUNNER_TEMP/emitter-mismatch/tersus/emitter-*")"
+          cmp "$RUNNER_TEMP/emitter-known.ll" "$RUNNER_TEMP/emitter-mismatch.ll"
+          cp "$original" bootstrap/emitter.sha256
+          stack build --test --no-run-tests
+
       # The command line itself (the tests call its parts): the emitter in Tersus writes the IR
       - name: Check the emitter in Tersus through the CLI
         if: ${{ matrix.shard == 8 }}
