@@ -77,6 +77,9 @@ fn shapeExpression(v: &AstExpression) -> Int ~ {
     if v is AstExpression::Val { return 0; };
     if v is AstExpression::Var { return 1; };
     if v is AstExpression::F { return 2; };
+    if v is AstExpression::IfExpr { return 3; };
+    if v is AstExpression::BlockExpr { return 4; };
+    if v is AstExpression::Ascribed { return 5; };
     return 0 - 1;
 };
 fn shapeTermination(v: &AstTermination) -> Int ~ {

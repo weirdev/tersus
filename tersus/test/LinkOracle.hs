@@ -267,6 +267,23 @@ functionRefs program fn =
         Syntax.Var name -> [name]
         Syntax.F f args -> exprRefs f ++ concatMap exprRefs args
         Syntax.Val (VFnRef name) -> [name]
+        Syntax.IfExpr c yes no -> concatMap exprRefs [c, yes, no]
+        Syntax.BlockExpr body result -> concatMap blockStatementRefs body ++ exprRefs result
+        -- An ascription's type is read at, not evaluated, so only its expression refers to functions.
+        Syntax.Ascribed inner _ -> exprRefs inner
+        _ -> []
+    blockStatementRefs stmt = case stmt of
+        Syntax.Assign _ e -> exprRefs e
+        Syntax.AssignDeref place e -> exprRefs place ++ exprRefs e
+        Syntax.Let _ e -> exprRefs e
+        Syntax.Return e -> exprRefs e
+        Syntax.ValidationStatement vs -> validationRefs vs
+        Syntax.Block body -> concatMap blockStatementRefs body
+        Syntax.If c yes no -> exprRefs c ++ concatMap blockStatementRefs (yes ++ no)
+        Syntax.While c invariant _ body -> exprRefs c ++ concatMap validationRefs invariant ++ concatMap blockStatementRefs body
+        Syntax.PackLoop _ _ _ lo hi _ invariant body -> exprRefs lo ++ exprRefs hi ++ concatMap validationRefs invariant ++ concatMap blockStatementRefs body
+        Syntax.AxiomDef _ _ ins outs -> concatMap validationRefs (ins ++ outs)
+        Syntax.ProofDef _ _ ins outs body -> concatMap validationRefs (ins ++ outs ++ body)
         _ -> []
     ruleRefs rule = case rule of
         Syntax.UserRewrite _ args -> concatMap proofTermNames args
