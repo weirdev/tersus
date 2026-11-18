@@ -1,9 +1,10 @@
 import data::ast::ast { AstBody, AstBuiltin, AstEntry, AstExpression, AstNames, AstNode, AstArg, AstOptName, AstOptTermination, AstProgram, AstProof, AstRule, AstStatement, AstStatements, AstTermination, AstValidation, AstValue, AstEntries, AstInterface };
 import data::codec::codec { Size, Token, Type, catStrings, sizeAt, typeAt, wordAt };
-import data::reader::reader { nameValue, nodeKind, nodeRefs, readRecords };
+import data::reader::reader { nameValue, nodeKind, nodeRefs, parseAstLines, readRecords };
 import elaborate::core { baseNameOf };
+import elaborate::decls { traitFnNames };
 import elaborate::records { listItems, nameText, nodeIn };
-import elaborate::resolve { Line, countAt, quotedAt, readLine, textAt, textAtIndex, wordIs };
+import elaborate::resolve { Decl, Line, PFile, Pkg, countAt, moduleKey, noPackage, quotedAt, readLine, startsWithByte, textAt, textAtIndex, withOwners, withPotentials, wordIs };
 import elaborate::rewrite { functValue, statementOf };
 import elaborate::state { indexIn, intText };
 
@@ -78,12 +79,11 @@ fn closure(libs: &List<Lib>, names: &List<String>) -> List<String> ~ {
     return done;
 };
 
-// (the list and Box types only when selected themselves, as LibPackage.libSelection links them)
 fn seenLibraries(libs: &List<Lib>, names: &List<String>) -> List<String> ~ {
     all = closure(libs, names);
     out = [];
     for l in libs {
-        if indexIn(&all, &l.name) >= 0 && (l.name != "types" || indexIn(names, "types") >= 0) { out = push(out, clone(l.name)); };
+        if indexIn(&all, &l.name) >= 0 { out = push(out, clone(l.name)); };
     };
     return out;
 };
@@ -297,26 +297,13 @@ fn librariesFor(p: &Probe) -> List<String> ~ {
     maps = preludeFree && !declares(&p.declared, "HashMap") && (HashSet::contains(&p.mentioned, "HashMap") || sets);
     prelude = preludeFree && (strings || maps || sets || traitNamed(&p.mentioned));
     out = [];
-    if !declares(&p.declared, "List") && !declares(&p.declared, "Box") { out = push(out, "types"); };
-    if !declares(&p.declared, "Clone") { out = push(out, "clone"); };
+    if !(declares(&p.declared, "List") && declares(&p.declared, "Box") && declares(&p.declared, "Clone")) { out = push(out, "core"); };
     if !declares(&p.declared, "Eq") { out = push(out, "eq"); };
     if prelude { out = push(out, "prelude"); };
     if strings { out = push(out, "string"); };
     if maps { out = push(out, "map"); };
     if sets { out = push(out, "set"); };
     if !declares(&p.declared, "Thread") && HashSet::contains(&p.mentioned, "Thread") { out = push(out, "thread"); };
-    return out;
-};
-
-// The selected libraries among those there are: the std shape's one module core holds what the libraries types and clone hold
-fn shapedLibraries(available: &List<String>, chosen: List<String>) -> List<String> ~ {
-    if indexIn(available, "core") < 0 { return chosen; };
-    out = [];
-    for n in &chosen {
-        name = clone(n);
-        if name = "types" || name = "clone" { name = "core"; };
-        if indexIn(&out, &name) < 0 { out = push(out, name); };
-    };
     return out;
 };
 
@@ -421,7 +408,7 @@ fn interfaceNames(iface: &AstProgram, typeName: &String) -> Bool ~ {
 fn mentionImported(p: Probe, ifaces: &List<AstProgram>) -> Probe ~ {
     for name in push(push(push(push([], "String"), "HashMap"), "HashSet"), "Thread") {
         for iface in ifaces {
-            if interfaceNames(iface, &name) { p = mentionRaw(p, &name); };
+            if interfaceNames(iface, &name) || (name = "Thread" && interfaceNames(iface, "std$thread$thread$Thread")) { p = mentionRaw(p, &name); };
         };
     };
     return p;
@@ -438,12 +425,18 @@ fn probeModule(nodes: &List<AstNode>, ids: &List<Int>, ifaces: &List<AstProgram>
 // anything was left out.
 struct View { program: AstProgram, changed: Bool };
 
-// (spelled: the libraries are of the std shape, whose names are canonical, so a declaration hides one of its spelling)
-struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool, spelled: Bool };
+// (the libraries' names are canonical, so a declaration hides the library declaration of its spelling)
+struct Hide { declared: HashSet<String>, own: List<String>, dropOnly: Bool };
 
 fn hides(h: &Hide, name: &String) -> Bool ~ {
-    if h.spelled { return HashSet::contains(&h.declared, localName(name)); };
-    return HashSet::contains(&h.declared, name);
+    return HashSet::contains(&h.declared, hideKey(name));
+};
+
+// The name a declaration hides a library's by: a declaration's own spelling, but an impl's function (`<O as T>::f`)
+// by its whole canonical name, which names its impl's type and trait
+fn hideKey(name: &String) -> String ~ {
+    if size(name.bytes) > 0 && toInt(get(name.bytes, 0)) = 60 { return clone(name); };
+    return localName(name);
 };
 
 fn declaredName(h: &Hide, name: &String) -> Bool ~ {
@@ -525,6 +518,47 @@ fn listCons(listKind: Int, item: Int, tail: Int) -> AstNode ~ {
     if listKind = 2 { return AstNode::Statements { value: AstStatements::Cons { head: item, tail: tail } }; };
     return AstNode::Entries { value: AstEntries::Cons { head: item, tail: tail } };
 };
+
+// The std package as a module's given libraries declare it: a file of each library's module, and the declarations its
+// checked interface gives, by their canonical names (a library's impl functions are owned as the package's own are,
+// withOwners), so that a module given them is prepared with imports of the names it spells (withLibraryImports) as a
+// program read with the libraries' sources is
+fn catalogPackage(catalog: &Catalog) -> Pkg ~ {
+    files = [];
+    decls = [];
+    seen = HashSet::new();
+    for lib in &catalog.libs {
+        parsed = parseAstLines(&lib.lines);
+        if !parsed.ok { return Pkg { ok: false, ..noPackage() }; };
+        iface = parsed.value;
+        v = interfaceOf(&iface);
+        key = moduleKey("std", &lib.name, true);
+        owned = catalogPrefix(&lib.name);
+        fi = size(files);
+        files = push(files, PFile { key: clone(key), pkg: "std", modu: clone(lib.name), hasModu: true, stem: clone(lib.name), name: "", imports: [], entry: false, collapsed: false, prefix: "" });
+        lists = push(push(push(push(push(push([], v.types), v.generics), v.ctors), v.traits), v.functions), v.templates);
+        kinds = push(push(push(push(push(push([], 0), 0), 1), 2), 3), 3);
+        for k in 0..6 {
+            for e in listItems(&iface.nodes, get(&lists, k)) {
+                canonical = entryNameOf(&iface.nodes, e);
+                local = clone(canonical);
+                if !startsWithByte(&canonical, 60) { local = localName(&canonical); };
+                fns = [];
+                entry = entryOf(&iface.nodes, e);
+                if entry is AstEntry::TraitEntry { fns = traitFnNames(&iface.nodes, (entry as AstEntry::TraitEntry).fs); };
+                // (an interface also lists what it uses of the libraries it imports, which are declared where they are owned)
+                if size(canonical.bytes) > 0 && !seen.contains(&canonical) && (startsWithByte(&canonical, 60) || canonical.startsWith(&owned)) {
+                    seen = seen.insert(clone(canonical));
+                    decls = push(decls, Decl { kind: get(&kinds, k), local: local, fns: fns, file: fi, canonical: canonical, key: clone(key), pkg: "std", modu: clone(lib.name), hasModu: true,
+                        stem: clone(lib.name), collapsed: false, owner: 0 - 1 });
+                };
+            };
+        };
+    };
+    return withPotentials(withOwners(Pkg { ok: true, present: true, entry: "", files: files, decls: decls, potentialTypes: HashMap::new(), potentialFns: HashMap::new() }));
+};
+
+fn catalogPrefix(name: &String) -> String ~ { return catStrings(catStrings("std$", clone(name)), "$"); };
 
 fn viewOf(iface: &AstProgram, h: &Hide) -> View ~ {
     v = interfaceOf(iface);

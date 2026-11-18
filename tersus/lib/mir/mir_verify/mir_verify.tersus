@@ -15,7 +15,7 @@ import data::codec::codec { Size, Type, quoted, parseInt, wordOf };
 // over the owned MIR go through again before native code is made of a program (MirVerify.verifyProgram
 // in Haskell, which has to agree with this on every program the format can carry).
 
-import mir::reader::reader { Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, listWords, programAt, readLines };
+import mir::reader::reader { Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, isStorageBox, isStorageList, listWords, programAt, readLines };
 
 
 // ---- the emitter ----
@@ -373,9 +373,20 @@ fn typeWordPrefix(text: &String, word: &String) -> Bool [{ }] [{ }] {
 
 // The element of a list type, in either of its spellings: the list shape, and the named struct List of the
 // prelude that a list is in the data now
-fn listElemOf(t: &Type) -> TyRes ~ {
+// Whether an instance name is of the program's List or Box (its storage record, MIR.md)
+fn namedList(p: &Program, name: &String) -> Bool ~ {
+    base = beforeAngle(name);
+    return isStorageList(p, &base);
+};
+
+fn namedBox(p: &Program, name: &String) -> Bool ~ {
+    base = beforeAngle(name);
+    return isStorageBox(p, &base);
+};
+
+fn listElemOf(p: &Program, t: &Type) -> TyRes ~ {
     if t is Type::TList { return TyRes { ok: true, ty: clone(Box::unbox((t as Type::TList).elem)) }; };
-    if t is Type::TNamed && beforeAngle((t as Type::TNamed).name) = "List" {
+    if t is Type::TNamed && namedList(p, (t as Type::TNamed).name) {
         args = instanceArgs((t as Type::TNamed).name);
         if size(args) = 1 { return textType(get(args, 0)); };
     };
@@ -383,18 +394,18 @@ fn listElemOf(t: &Type) -> TyRes ~ {
 };
 
 // The type a Box holds, in either of its spellings
-fn boxInnerOf(t: &Type) -> TyRes ~ {
+fn boxInnerOf(p: &Program, t: &Type) -> TyRes ~ {
     if t is Type::TBox { return TyRes { ok: true, ty: clone(Box::unbox((t as Type::TBox).inner)) }; };
-    if t is Type::TNamed && beforeAngle((t as Type::TNamed).name) = "Box" {
+    if t is Type::TNamed && namedBox(p, (t as Type::TNamed).name) {
         args = instanceArgs((t as Type::TNamed).name);
         if size(args) = 1 { return textType(get(args, 0)); };
     };
     return noTy();
 };
 
-fn isListTy(t: &Type) -> Bool [{ }] [{ }] {
+fn isListTy(p: &Program, t: &Type) -> Bool ~ {
     if t is Type::TList { return true; };
-    return t is Type::TNamed && beforeAngle((t as Type::TNamed).name) = "List";
+    return t is Type::TNamed && namedList(p, (t as Type::TNamed).name);
 };
 
 // A name as an instance writes it: a lower-case name is quoted with a backtick there (`List<`point>`), which
@@ -541,25 +552,25 @@ fn subType(p: &Program, wanted: &Type, actual: &Type, strict: Bool) -> Bool ~ {
     // written against and the shape of the value it is read from are two spellings of one type)
     if wanted is Type::TNamed && actual is Type::TList {
         wa = instanceArgs((wanted as Type::TNamed).name);
-        if beforeAngle((wanted as Type::TNamed).name) != "List" || size(wa) != 1 { return false; };
+        if !namedList(p, (wanted as Type::TNamed).name) || size(wa) != 1 { return false; };
         et = textType(get(wa, 0));
         return et.ok && sub(p, et.ty, Box::unbox((actual as Type::TList).elem));
     };
     if wanted is Type::TList && actual is Type::TNamed {
         aa = instanceArgs((actual as Type::TNamed).name);
-        if beforeAngle((actual as Type::TNamed).name) != "List" || size(aa) != 1 { return false; };
+        if !namedList(p, (actual as Type::TNamed).name) || size(aa) != 1 { return false; };
         et = textType(get(aa, 0));
         return et.ok && sub(p, Box::unbox((wanted as Type::TList).elem), et.ty);
     };
     if wanted is Type::TBox && actual is Type::TNamed {
         aa = instanceArgs((actual as Type::TNamed).name);
-        if beforeAngle((actual as Type::TNamed).name) != "Box" || size(aa) != 1 { return false; };
+        if !namedBox(p, (actual as Type::TNamed).name) || size(aa) != 1 { return false; };
         et = textType(get(aa, 0));
         return et.ok && sub(p, Box::unbox((wanted as Type::TBox).inner), et.ty);
     };
     if wanted is Type::TNamed && actual is Type::TBox {
         wa = instanceArgs((wanted as Type::TNamed).name);
-        if beforeAngle((wanted as Type::TNamed).name) != "Box" || size(wa) != 1 { return false; };
+        if !namedBox(p, (wanted as Type::TNamed).name) || size(wa) != 1 { return false; };
         et = textType(get(wa, 0));
         return et.ok && sub(p, et.ty, Box::unbox((actual as Type::TBox).inner));
     };
@@ -697,7 +708,7 @@ fn constantFits(p: &Program, funcs: &FunctionIndex, wanted: &Type, c: &Constant)
         },
         Constant::CBool { b: b } => { r = wanted is Type::TBool; },
         Constant::CList { items: items } => {
-            le = listElemOf(wanted);
+            le = listElemOf(p, wanted);
             if le.ok {
                 e = le.ty;
                 r = true;
@@ -904,14 +915,14 @@ fn sequenceFits(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashM
         if t is Type::TRef { t = Box::unbox(clone((t as Type::TRef).inner)); };
         if t is Type::TMutRef { t = Box::unbox(clone((t as Type::TMutRef).inner)); };
         if t is Type::TArray && sub(p, e, Box::unbox((t as Type::TArray).elem)) { return true; };
-        bt = boxInnerOf(t);
+        bt = boxInnerOf(p, t);
         if bt.ok {
             inner = bt.ty;
             if inner is Type::TArray && sub(p, e, Box::unbox((inner as Type::TArray).elem)) { return true; };
         };
         if t is Type::TNamed {
             name = (t as Type::TNamed).name;
-            if beforeAngle(name) = "List" {
+            if namedList(p, name) {
                 args = instanceArgs(name);
                 if size(args) = 1 {
                     et = textAt(args, 0);
@@ -941,8 +952,8 @@ fn listLike(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<I
         inner = clone(t);
         if t is Type::TRef { inner = Box::unbox(clone((t as Type::TRef).inner)); };
         if t is Type::TMutRef { inner = Box::unbox(clone((t as Type::TMutRef).inner)); };
-        bi = boxInnerOf(inner);
-        return isListTy(inner) || inner is Type::TArray || (bi.ok && bi.ty is Type::TArray);
+        bi = boxInnerOf(p, inner);
+        return isListTy(p, inner) || inner is Type::TArray || (bi.ok && bi.ty is Type::TArray);
     };
     r = false;
     match o {
@@ -1118,10 +1129,10 @@ fn listOpWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
         if isSetOp { wantN = 3; };
         if n != wantN { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
         elem = noTy();
-        le2 = listElemOf(d);
+        le2 = listElemOf(p, d);
         if le2.ok { elem = le2; };
         if !elem.ok && d is Type::TArray && isSetOp { elem = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TArray).elem)) }; };
-        db4 = boxInnerOf(d);
+        db4 = boxInnerOf(p, d);
         if !elem.ok && db4.ok && isSetOp {
             inner = db4.ty;
             if inner is Type::TArray { elem = TyRes { ok: true, ty: clone(Box::unbox((inner as Type::TArray).elem)) }; };
@@ -1163,7 +1174,7 @@ fn listOpWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
     };
     if op = 8 {
         if n != 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        db = boxInnerOf(d);
+        db = boxInnerOf(p, d);
         if db.ok {
             inner = db.ty;
             if inner is Type::TArray && (inner as Type::TArray).size is Size::SAny {
@@ -1177,7 +1188,7 @@ fn listOpWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
     };
     if op = 9 {
         if n != 0 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        db9 = boxInnerOf(d);
+        db9 = boxInnerOf(p, d);
         if db9.ok {
             inner = db9.ty;
             if inner is Type::TArray && (inner as Type::TArray).size is Size::SAny { return []; };
@@ -1271,7 +1282,7 @@ fn valueOf(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<In
     if !ot.ok { return false; };
     t = ot.ty;
     if t is Type::TBox { return sub(p, Type::TNamed { name: clone(typeName), base: clone(typeName), argc: 0, argTokens: [] }, Box::unbox((t as Type::TBox).inner)); };
-    if t is Type::TNamed && beforeAngle((t as Type::TNamed).name) = "Box" {
+    if t is Type::TNamed && namedBox(p, (t as Type::TNamed).name) {
         iargs = instanceArgs((t as Type::TNamed).name);
         if size(iargs) = 1 {
             et = textAt(iargs, 0);
@@ -1327,7 +1338,7 @@ fn placeTy(p: &Program, f: &Function, locals: &HashMap<Int, Int>, root: Int, ste
             else if ty is Type::TArray { ty = Box::unbox((ty as Type::TArray).elem); }
             else if ty is Type::TNamed {
                 // Native containers declare the exact slot type in addr, including nested Boxes.
-                boxed = beforeAngle((ty as Type::TNamed).name) = "Box";
+                boxed = namedBox(p, (ty as Type::TNamed).name);
                 fields = ctorFields(p, (ty as Type::TNamed).name);
                 found = false;
                 for fd in fields {
@@ -1392,18 +1403,24 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
             out = listOpWhy(p, funcs, f, locals, d, op, args, false);
         },
         Rvalue::MakeList { items: items } => {
-            mle = listElemOf(d);
+            mle = listElemOf(p, d);
             if mle.ok {
                 e = mle.ty;
                 for o in items { if !fits(p, funcs, f, locals, e, o) { out = push(out, renderOperand(p, f, locals, o).then(" is not ").then(renderType(clone(e)))); }; };
             } else { out = one("the result is ".then(renderType(d)).then(", not a list")); };
         },
         Rvalue::MakeBox { o: o } => {
-            mb = boxInnerOf(d);
+            mb = boxInnerOf(p, d);
             if mb.ok {
                 held = mb.ty;
-                if !fits(p, funcs, f, locals, held, o) { out = expectedWhy(p, f, locals, held, o); };
-            } else if d is Type::TNamed && beforeAngle((d as Type::TNamed).name) = "List" {
+                // (boxing an array whose size no use decided hides the size, as an unsize does)
+                hidden = false;
+                if held is Type::TArray && (held as Type::TArray).size is Size::SAny {
+                    ot = operandTy(p, funcs, f, locals, o);
+                    if ot.ok && ot.ty is Type::TArray && (ot.ty as Type::TArray).size is Size::SVar && sub(p, Box::unbox((held as Type::TArray).elem), Box::unbox((ot.ty as Type::TArray).elem)) { hidden = true; };
+                };
+                if !hidden && !fits(p, funcs, f, locals, held, o) { out = expectedWhy(p, f, locals, held, o); };
+            } else if d is Type::TNamed && namedList(p, (d as Type::TNamed).name) {
                 iargs = instanceArgs((d as Type::TNamed).name);
                 ot = operandTy(p, funcs, f, locals, o);
                 okBox = false;
@@ -1420,13 +1437,13 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
         Rvalue::Unbox { o: o } => {
             ot = operandTy(p, funcs, f, locals, o);
             matched = false;
-            ub = boxInnerOf(ot.ty);
+            ub = boxInnerOf(p, ot.ty);
             if ot.ok && ub.ok {
                 held = ub.ty;
                 if !sub(p, d, held) { out = one("the result is ".then(renderType(d)).then(", not ").then(renderType(held))); };
                 matched = true;
             };
-            if !matched && ot.ok && ot.ty is Type::TNamed && beforeAngle((ot.ty as Type::TNamed).name) = "List" {
+            if !matched && ot.ok && ot.ty is Type::TNamed && namedList(p, (ot.ty as Type::TNamed).name) {
                 iargs = instanceArgs((ot.ty as Type::TNamed).name);
                 if size(iargs) = 1 {
                     et = textAt(iargs, 0);
@@ -1440,15 +1457,16 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
         Rvalue::Unsize { o: o } => {
             ot = operandTy(p, funcs, f, locals, o);
             okUn = false;
-            dbu = boxInnerOf(d);
-            obu = boxInnerOf(ot.ty);
+            dbu = boxInnerOf(p, d);
+            obu = boxInnerOf(p, ot.ty);
             if dbu.ok && ot.ok && obu.ok {
                 de = dbu.ty;
                 oe = obu.ty;
                 if de is Type::TArray && oe is Type::TArray {
                     dsz = (de as Type::TArray).size;
                     osz = (oe as Type::TArray).size;
-                    if dsz is Size::SAny && !(osz is Size::SAny) && sub(p, Box::unbox((de as Type::TArray).elem), Box::unbox((oe as Type::TArray).elem)) { okUn = true; };
+                    // (a Box made of an array whose size no use decided is already of any size: MakeBox)
+                    if dsz is Size::SAny && (!(osz is Size::SAny) || typeEq(&de, &oe)) && sub(p, Box::unbox((de as Type::TArray).elem), Box::unbox((oe as Type::TArray).elem)) { okUn = true; };
                 };
             };
             if !okUn { out = one("unsize needs a Box of an array, and a result that is a Box of an array of any size"); };
@@ -1512,7 +1530,7 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
         },
         Rvalue::Borrow { root: root, steps: steps, mutable: m } => {
             pt = placeWhy(p, f, locals, root, steps);
-            held = boxInnerOf(pt.ty);
+            held = boxInnerOf(p, pt.ty);
             wanted = noTy();
             if d is Type::TRef { wanted = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TRef).inner)) }; };
             if d is Type::TMutRef { wanted = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TMutRef).inner)) }; };
@@ -1555,7 +1573,7 @@ fn rvalueWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<
     return out;
 };
 
-fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
+fn substSizes(p: &Program, t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
     r = clone(t);
     match t {
         Type::TArray { elem: e, size: s } => {
@@ -1570,19 +1588,19 @@ fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
                     i = i + 1;
                 };
             };
-            r = Type::TArray { elem: Box::new(substSizes(Box::unbox(e), names, sizes)), size: ns };
+            r = Type::TArray { elem: Box::new(substSizes(p, Box::unbox(e), names, sizes)), size: ns };
         },
-        Type::TList { elem: e } => { r = Type::TList { elem: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
-        Type::TBox { inner: e } => { r = Type::TBox { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
-        Type::TAddr { inner: e } => { r = Type::TAddr { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
-        Type::TRef { inner: e } => { r = Type::TRef { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
-        Type::TMutRef { inner: e } => { r = Type::TMutRef { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
-        Type::TBlock { inner: e } => { r = Type::TBlock { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
-        Type::TUninit { inner: e } => { r = Type::TUninit { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
+        Type::TList { elem: e } => { r = Type::TList { elem: Box::new(substSizes(p, Box::unbox(e), names, sizes)) }; },
+        Type::TBox { inner: e } => { r = Type::TBox { inner: Box::new(substSizes(p, Box::unbox(e), names, sizes)) }; },
+        Type::TAddr { inner: e } => { r = Type::TAddr { inner: Box::new(substSizes(p, Box::unbox(e), names, sizes)) }; },
+        Type::TRef { inner: e } => { r = Type::TRef { inner: Box::new(substSizes(p, Box::unbox(e), names, sizes)) }; },
+        Type::TMutRef { inner: e } => { r = Type::TMutRef { inner: Box::new(substSizes(p, Box::unbox(e), names, sizes)) }; },
+        Type::TBlock { inner: e } => { r = Type::TBlock { inner: Box::new(substSizes(p, Box::unbox(e), names, sizes)) }; },
+        Type::TUninit { inner: e } => { r = Type::TUninit { inner: Box::new(substSizes(p, Box::unbox(e), names, sizes)) }; },
         Type::TFn { args: args, ret: ret } => {
             na = [];
-            for a in args { na = push(na, substSizes(a, names, sizes)); };
-            r = Type::TFn { args: na, ret: Box::new(substSizes(Box::unbox(ret), names, sizes)) };
+            for a in args { na = push(na, substSizes(p, a, names, sizes)); };
+            r = Type::TFn { args: na, ret: Box::new(substSizes(p, Box::unbox(ret), names, sizes)) };
         },
         Type::TFnContract { args: args, ret: ret, contract: contract } => {
             na = [];
@@ -1590,16 +1608,16 @@ fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
             r = Type::TFnContract { args: na, ret: Box::new(substSizes(Box::unbox(ret), names, sizes)), contract: clone(contract) };
         },
         Type::TForall { sizes: sizes2, types: types, body: body } => {
-            r = Type::TForall { sizes: clone(sizes2), types: clone(types), body: Box::new(substSizes(Box::unbox(body), names, sizes)) };
+            r = Type::TForall { sizes: clone(sizes2), types: clone(types), body: Box::new(substSizes(p, Box::unbox(body), names, sizes)) };
         },
         Type::TInt => { },
         Type::TByte => { },
         Type::TBool => { },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
-            listElem = listElemOf(t);
-            boxInner = boxInnerOf(t);
-            if listElem.ok { r = Type::TList { elem: Box::new(substSizes(listElem.ty, names, sizes)) }; }
-            else if boxInner.ok { r = Type::TBox { inner: Box::new(substSizes(boxInner.ty, names, sizes)) }; };
+            listElem = listElemOf(p, t);
+            boxInner = boxInnerOf(p, t);
+            if listElem.ok { r = Type::TList { elem: Box::new(substSizes(p, listElem.ty, names, sizes)) }; }
+            else if boxInner.ok { r = Type::TBox { inner: Box::new(substSizes(p, boxInner.ty, names, sizes)) }; };
         },
         Type::TVariant { name: name } => { },
         Type::TVar { n: n } => { },
@@ -1625,7 +1643,7 @@ fn sizeOfOperand(f: &Function, locals: &HashMap<Int, Int>, o: &Operand) -> Size 
     return r;
 };
 
-fn fnTypeAfterSizes(f: &Function, locals: &HashMap<Int, Int>, t: &Type, args: &List<Operand>) -> TyRes ~ {
+fn fnTypeAfterSizes(p: &Program, f: &Function, locals: &HashMap<Int, Int>, t: &Type, args: &List<Operand>) -> TyRes ~ {
     if t is Type::TForall {
         sizes = (t as Type::TForall).sizes;
         body = Box::unbox((t as Type::TForall).body);
@@ -1636,7 +1654,7 @@ fn fnTypeAfterSizes(f: &Function, locals: &HashMap<Int, Int>, t: &Type, args: &L
             given = push(given, sizeOfOperand(f, locals, get(args, i)));
             i = i + 1;
         };
-        return TyRes { ok: true, ty: substSizes(body, sizes, given) };
+        return TyRes { ok: true, ty: substSizes(p, body, sizes, given) };
     };
     return TyRes { ok: true, ty: clone(t) };
 };
@@ -1654,7 +1672,7 @@ fn callArgFits(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMa
 fn callWhy(p: &Program, funcs: &FunctionIndex, f: &Function, locals: &HashMap<Int, Int>, callee: &Operand, args: &List<Operand>, dest: Int) -> List<String> ~ {
     ct = operandTy(p, funcs, f, locals, callee);
     if !ct.ok { return one("the callee is not a function"); };
-    ctt = fnTypeAfterSizes(f, locals, ct.ty, args);
+    ctt = fnTypeAfterSizes(p, f, locals, ct.ty, args);
     if !ctt.ok { return one("the callee is not a function"); };
     t = ctt.ty;
     if !(t is Type::TFn) { return one("the callee is not a function"); };

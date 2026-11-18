@@ -7,12 +7,14 @@ maintainer:          "weirdev@outlook.com"
 copyright:           "2024"
 
 extra-source-files:
-- lib/types.tersus
-- lib/lists.tersus
-- lib/prelude.tersus
-- lib/eq.tersus
-- lib/clone.tersus
-- lib/string.tersus
+- lib/std/package.tersus
+- lib/std/core/ownership.tersus
+- lib/std/core/types.tersus
+- lib/std/lists/lists.tersus
+- lib/std/prelude/prelude.tersus
+- lib/std/eq/eq.tersus
+- lib/std/core/clone.tersus
+- lib/std/string/string.tersus
 - lib/mir/package.tersus
 - lib/mir/reader/reader.tersus
 - lib/mir/support/support.tersus
@@ -109,10 +111,10 @@ extra-source-files:
 - lib/validation/state.tersus
 - lib/validation/validation.tersus
 - lib/stdlib.tersus
-- lib/box.tersus
-- lib/map.tersus
-- lib/set.tersus
-- lib/thread.tersus
+- lib/std/box/box.tersus
+- lib/std/map/map.tersus
+- lib/std/set/set.tersus
+- lib/std/thread/thread.tersus
 
 # Metadata used when publishing your package
 # synopsis:            Short description of your package

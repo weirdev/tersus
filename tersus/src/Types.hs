@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Types where
 
@@ -22,7 +23,7 @@ data OwnershipFacts = OwnershipFacts
     , ownershipClone :: Maybe (Name, Name)
     , ownershipDeref :: Maybe (Name, Name)
     }
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data OwnershipTransport = OwnershipTransport
     { transportProtocols :: Map.Map Name [Name]
@@ -246,15 +247,60 @@ data Size = SizeConst Integer | SizeAny | SizeParam Name | SizeVar Int
 data Arg = ArgSize Size | ArgType Type
     deriving (Show, Eq, Ord, Read)
 
--- A list and a Box are structs of the prelude (`lib/prelude.tersus`), declared like any other struct with a type
--- parameter, so their types are named instances and a use whose element type is not known yet carries that unknown
--- in its argument, to be decided by inference like the argument of any other struct. These patterns are how the
--- rest of the compiler speaks of them; the operations on them and their proof facts are not part of the type.
-pattern TList :: Type -> Type
-pattern TList t = TNamed "List" [ArgType t]
+-- A list and a Box are structs declared like any other struct with a type parameter, so their types are named instances
+-- (TNamed of the declaration's canonical name). Which declarations a build's lists and Boxes are is the build's checked
+-- storage binding: the List and Box providers its ownership transport names, one of each per build. The binding says
+-- which declarations the language's list and Box operations are on, and nothing else (no Copy, Drop or Clone).
+data Storage = Storage { storageList :: Name, storageBox :: Name }
+    deriving (Show, Eq, Ord, Read)
 
-pattern TBox :: Type -> Type
-pattern TBox t = TNamed "Box" [ArgType t]
+-- A build with no list and no Box
+noStorage :: Storage
+noStorage = Storage "" ""
+
+-- The element type of a list of the binding, or of nothing else
+listElement :: Storage -> Type -> Maybe Type
+listElement s ty = case ty of
+    TNamed base [ArgType t] | not (null (storageList s)), base == storageList s -> Just t
+    _ -> Nothing
+
+-- What a Box of the binding holds
+boxContent :: Storage -> Type -> Maybe Type
+boxContent s ty = case ty of
+    TNamed base [ArgType t] | not (null (storageBox s)), base == storageBox s -> Just t
+    _ -> Nothing
+
+listOf :: Storage -> Type -> Type
+listOf s t = TNamed (storageList s) [ArgType t]
+
+boxOf :: Storage -> Type -> Type
+boxOf s t = TNamed (storageBox s) [ArgType t]
+
+-- The type that a list or a Box is natively: a list and a Box are the structs they are declared as, with the types of
+-- their parts made native, and a Box of an array is a list of its elements
+listType :: Storage -> Type -> Type
+listType st ty = case ty of
+    TArrayOf t size -> TArrayOf (listType st t) size
+    (boxContent st -> Just (TArrayOf t _)) -> listOf st (listType st t)
+    TAddr t -> TAddr (listType st t)
+    TUninit t -> TUninit (listType st t)
+    TRef t -> TRef (listType st t)
+    TMutRef t -> TMutRef (listType st t)
+    TFn args ret -> TFn (map (listType st) args) (listType st ret)
+    TNamed base args -> TNamed base (map (renameArg st) args)
+    _ -> ty
+
+renameArg :: Storage -> Arg -> Arg
+renameArg st (ArgType t) = ArgType (listType st t)
+renameArg _ other = other
+
+-- The language's list and Box as the builtin table and the AST data spell them (`List<T>`, `Box<T>`), which the
+-- elaborator binds to the checked providers; not a type of a program
+pattern SyntaxList :: Type -> Type
+pattern SyntaxList t = TNamed "List" [ArgType t]
+
+pattern SyntaxBox :: Type -> Type
+pattern SyntaxBox t = TNamed "Box" [ArgType t]
 
 -- A parameter that starts with a capital letter is a type, and any other is a size
 isTypeName :: Variable -> Bool
@@ -287,8 +333,6 @@ renderTypeForName ty = case ty of
     TByte -> "Byte"
     TBool -> "Bool"
     TWord signed bits -> wordName signed bits
-    TList t -> "List<" ++ renderTypeForName t ++ ">"
-    TBox t -> "Box<" ++ renderTypeForName t ++ ">"
     TAddr t -> "Addr<" ++ renderTypeForName t ++ ">"
     TBlock t -> "Block<" ++ renderTypeForName t ++ ">"
     TUninit t -> "Uninit<" ++ renderTypeForName t ++ ">"
@@ -370,8 +414,6 @@ instanceFields params args fields
 mentionsParameter :: Type -> Bool
 mentionsParameter ty = case ty of
     TParam _ -> True
-    TList t -> mentionsParameter t
-    TBox t -> mentionsParameter t
     TAddr t -> mentionsParameter t
     TBlock t -> mentionsParameter t
     TUninit t -> mentionsParameter t
@@ -397,9 +439,7 @@ substitute :: [(Variable, Size)] -> [(Variable, Type)] -> Type -> Type
 substitute sizes types = go
   where
     go ty = case ty of
-        TList t -> TList (go t)
         TArrayOf t size -> TArrayOf (go t) (sized size)
-        TBox t -> TBox (go t)
         TAddr t -> TAddr (go t)
         TBlock t -> TBlock (go t)
         TUninit t -> TUninit (go t)
@@ -438,12 +478,6 @@ wordRange signed bits = if signed then (negate (2 ^ (bits - 1)), 2 ^ (bits - 1))
 -- An array of a size that is a constant, which is every array there can be in a program that runs
 pattern TArray :: Type -> Integer -> Type
 pattern TArray t n = TArrayOf t (SizeConst n)
-
--- Logical Boxes alias payload values, so their storage projections need a distinct proof symbol.
-namedField :: Name -> Variable -> BuiltinFunct
-namedField name field
-    | baseNameOf name == "Box" && field `elem` ["addr", "blk"] = Field (Just name) field
-    | otherwise = Field Nothing field
 
 -- The declared parameter types and return type of a user function, its size parameters, which are the last parameters (of type Int),
 -- given by the call and not written in it, and its type parameters, which a call gives too

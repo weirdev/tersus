@@ -78,7 +78,7 @@ import TestParser
 import TestParserBootstrap
 import TestParserUnicode
 import TestLibModules
-import TestLibraryShapes
+import TestStdGraph (testStdGraph)
 
 main :: IO ()
 main = do
@@ -257,7 +257,7 @@ originalGroups =
     , testDifferential
     , testParity
     , testLibModules
-    , testLibraryShapes
+    , testStdGraph
     , testMirEmitRecords
     , testNativeStorageModules
     , testMirSupport

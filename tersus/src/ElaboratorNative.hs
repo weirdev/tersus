@@ -21,7 +21,7 @@ import CacheLock (openTempFileCloexec)
 import ElaboratorTool (Loader, nativeLoader)
 import Hash (fingerprint)
 import qualified Mir as M
-import MirData (writeProgram)
+import MirData (writeOwnedProgram)
 import qualified Modules as Mod
 import Native (buildExecutable, cacheDirectory, cachedProgramWithArtifacts)
 import LibPackage (compileLibPackageWith)
@@ -91,8 +91,10 @@ makeStage n
             Ok _ | previousIsSeed -> frontendStage 1
             Ok (exe, _) -> case elaboratorProgramWith (nativeLoader exe) of
                 Error e -> pure (Error ("the elaborator elaborated by stage " ++ show (n - 1) ++ ": " ++ e))
-                Ok program -> do
-                    let hash = fingerprint ["frontend", writeProgram program, compilerSnapshotHash]
+                Ok program -> case writeOwnedProgram program of
+                  Error e -> pure (Error ("the elaborator elaborated by stage " ++ show (n - 1) ++ ": " ++ e))
+                  Ok owned -> do
+                    let hash = fingerprint ["frontend", owned, compilerSnapshotHash]
                     built <- cachedProgramWithArtifacts [".ll"] "frontend" hash "the elaborator written in Tersus" $ \output ->
                         buildStage program (takeDirectory output </> ("frontend-" ++ hash ++ ".ll")) output
                     pure (mapResult (\path -> (path, hash)) built)

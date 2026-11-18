@@ -1,5 +1,5 @@
 import data::ast::ast { AstArg, AstBody, AstBuiltin, AstExpression, AstName, AstNode, AstOptName, AstOptTermination, AstProof, AstRule, AstStatement, AstTermination, AstValidation, AstValue };
-import data::codec::codec { Size, Token, Type, catStrings, renderSizeForName, renderTypeForName, sizeAt, tokenize, typeAt, wordAt };
+import data::codec::codec { Parsed, Size, Token, Type, catStrings, renderSizeForName, renderTypeForName, sizeAt, tokenize, typeAt, wordAt };
 import elaborate::core { baseNameOf };
 import elaborate::out { quotedName };
 import elaborate::records { listItems, nameText, nodeIn };
@@ -148,6 +148,33 @@ fn sizeTokens(s: &Size) -> String ~ {
 fn wrapText(word: &String, inner: Txt) -> Txt ~ {
     if !inner.ok { return inner; };
     return Txt { text: catStrings(word, &inner.text), ..inner };
+};
+
+// A type with the language's list and Box (`list T`, `box T`) as the named types of the build's checked providers of
+// List and Box, the declarations they are; the words are the type keywords of the data, whose names are quoted
+fn storageBound(t: &Type, list: &String, box: &String) -> Parsed<Type> ~ {
+    // (written as it is: a canonical pass with no locals of its own looks no name up and renames none)
+    m = noMaps();
+    cn = Canon { on: true, locals: HashSet::new(), prefix: "" };
+    params = HashSet::new();
+    unbound = Parsed<Type> { value: clone(t), pos: 0, ok: false };
+    x = typeText(&m, &cn, &params, t);
+    if !x.ok { return unbound; };
+    tokens = tokenize(&x.text);
+    if !tokens.ok { return unbound; };
+    bound = [];
+    for tok in &tokens.value {
+        provider = "";
+        if !tok.quoted && tok.text = "list" { provider = clone(list); };
+        if !tok.quoted && tok.text = "box" { provider = clone(box); };
+        if size(provider.bytes) > 0 {
+            bound = push(push(push(push(bound, Token { quoted: false, text: "named" }), Token { quoted: true, text: provider }), Token { quoted: false, text: "1" }), Token { quoted: false, text: "type" });
+        } else { bound = push(bound, clone(tok)); };
+    };
+    if size(bound) = 0 { return unbound; };
+    parsed = typeAt(&bound, 0);
+    if !parsed.ok || parsed.pos != size(bound) { return unbound; };
+    return parsed;
 };
 
 fn typeText(m: &Maps, cn: &Canon, params: &HashSet<String>, t: &Type) -> Txt ~ {
@@ -457,6 +484,42 @@ fn namedString(m: &Maps, params: &HashSet<String>, name: &String) -> Txt ~ {
     return txt(catStrings(&t.name, &rest), t.name != base);
 };
 
+// A type written with its arguments, `T<A, B<C>>`, each named as its own type is
+fn namedWithArgs(m: &Maps, params: &HashSet<String>, name: &String) -> Txt ~ {
+    at = indexOfByte(name, 60);
+    if at < 0 || at > size(name.bytes) { return namedString(m, params, name); };
+    base = name.slice(0, at);
+    t = lookupTypeTarget(m, params, &base);
+    if !t.ok { return txtFail(t.msg); };
+    rest = name.slice(at, size(name.bytes));
+    n = size(rest.bytes);
+    if n < 2 || get(rest.bytes, n - 1) != toByte(62) { return txt(catStrings(&t.name, &rest), t.name != base); };
+    parts = [];
+    depth = 0;
+    start = 1;
+    i = 1;
+    while i < n - 1 [{ affirm i >= 1; }] shrinks n - 1 - i {
+        b = get(rest.bytes, i);
+        if b = toByte(60) { depth = depth + 1; };
+        if b = toByte(62) { depth = depth - 1; };
+        if b = toByte(44) && depth = 0 { parts = push(parts, rest.slice(start, i)); start = i + 1; };
+        i = i + 1;
+    };
+    parts = push(parts, rest.slice(start, n - 1));
+    out = [];
+    changed = t.name != base;
+    for part in &parts {
+        from = 0;
+        while from < size(part.bytes) && get(part.bytes, from) = toByte(32) [{ affirm from >= 0; }] shrinks size(part.bytes) - from { from = from + 1; };
+        word = part.slice(from, size(part.bytes));
+        a = namedWithArgs(m, params, &word);
+        if !a.ok { return a; };
+        if a.changed { changed = true; };
+        out = push(out, clone(a.text));
+    };
+    return txt(catStrings(catStrings(clone(t.name), "<"), catStrings(joinWith(&out, ", "), ">")), changed);
+};
+
 fn rwDeclaration(rw: Rw, stmt: &AstStatement) -> Rw ~ {
     params = clone(rw.params);
     bound = clone(rw.bound);
@@ -626,7 +689,12 @@ fn rwBuiltin(rw: Rw, b: Int) -> Rw ~ {
     if v is AstBuiltin::Ctor { return rwCtorBuiltin(rw, b); };
     if v is AstBuiltin::FieldBuiltin {
         owner = nodeIn(&rw.nodes, (v as AstBuiltin::FieldBuiltin).owner);
-        if owner is AstNode::OptName && (owner as AstNode::OptName).value is AstOptName::SomeName { return rwNamedAt(rw, ((owner as AstNode::OptName).value as AstOptName::SomeName).n); };
+        // (the owner of an update's field reads is the type written for the update, its arguments as named as it is)
+        if owner is AstNode::OptName && (owner as AstNode::OptName).value is AstOptName::SomeName {
+            n = ((owner as AstNode::OptName).value as AstOptName::SomeName).n;
+            name = nameText(&rw.nodes, n);
+            return setTxtAt(rw, n, namedWithArgs(&rw.m, &rw.params, &name));
+        };
         return rw;
     };
     if v is AstBuiltin::Is { return rwCtorAt(rw, (v as AstBuiltin::Is).n); };
@@ -866,8 +934,6 @@ fn prepareModule(nodes: List<AstNode>, p: &Pkg, key: &String, roots: &List<Int>)
         i = i + 1;
     };
     ordered = byCategory(&rw.nodes, &all);
-    reserved = reservedHelper(&rw.nodes, &ordered);
-    if size(reserved.bytes) > 0 { return Prepared { nodes: rw.nodes, stmts: [], ok: false, msg: reservedError(&reserved) }; };
     orphan = orphanImpl(&rw.nodes, &ordered, key);
     return Prepared { nodes: rw.nodes, stmts: ordered, ok: size(orphan.bytes) = 0, msg: orphan };
 };
@@ -899,42 +965,6 @@ fn byCategory(nodes: &List<AstNode>, ids: &List<Int>) -> List<Int> ~ {
         for s in ids { if category(nodes, s) = c { out = push(out, s); }; };
     };
     return out;
-};
-
-fn nativeHelperNames() -> List<String> ~ {
-    out = push([], "listNew");
-    out = push(out, "listLen");
-    out = push(out, "listGet");
-    out = push(out, "listFirst");
-    out = push(out, "listLast");
-    out = push(out, "listPop");
-    out = push(out, "listSet");
-    out = push(out, "listPush");
-    out = push(out, "listFilled");
-    out = push(out, "boxNew");
-    return push(out, "boxUnbox");
-};
-
-fn reservedHelper(nodes: &List<AstNode>, ids: &List<Int>) -> String ~ {
-    helpers = nativeHelperNames();
-    for s in ids {
-        stmt = statementOf(nodes, s);
-        name = "";
-        if stmt is AstStatement::Assign && functValue(nodes, (stmt as AstStatement::Assign).e) >= 0 { name = nameText(nodes, (stmt as AstStatement::Assign).n); };
-        if stmt is AstStatement::StructDef { name = nameText(nodes, (stmt as AstStatement::StructDef).n); };
-        if stmt is AstStatement::EnumDef { name = nameText(nodes, (stmt as AstStatement::EnumDef).n); };
-        if stmt is AstStatement::TraitDef { name = nameText(nodes, (stmt as AstStatement::TraitDef).n); };
-        if stmt is AstStatement::BoundedDef {
-            inner = statementOf(nodes, (stmt as AstStatement::BoundedDef).s);
-            if inner is AstStatement::Assign { name = nameText(nodes, (inner as AstStatement::Assign).n); };
-        };
-        for h in &helpers { if name = clone(h) { return name; }; };
-    };
-    return "";
-};
-
-fn reservedError(name: &String) -> String ~ {
-    return catStrings(catStrings("Type error: ", name), " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them");
 };
 
 fn declaredTypeNames(nodes: &List<AstNode>, ids: &List<Int>) -> List<String> ~ {

@@ -142,9 +142,9 @@ typeP = word >>= \w -> case w of
     "u16" -> pure (TWord False 16)
     "u32" -> pure (TWord False 32)
     "bool" -> pure TBool
-    "list" -> TList <$> typeP
+    "list" -> SyntaxList <$> typeP
     "array" -> TArrayOf <$> typeP <*> sizeP
-    "box" -> TBox <$> typeP
+    "box" -> SyntaxBox <$> typeP
     "addr" -> TAddr <$> typeP
     "uninit" -> TUninit <$> typeP
     "block" -> TBlock <$> typeP

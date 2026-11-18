@@ -33,7 +33,7 @@ import System.IO
 import System.IO.Unsafe (unsafePerformIO)
 
 import Mir (Program, renderProgram)
-import MirData (writeProgram, writeProgramWithGhosts)
+import MirData (writeOwnedProgram, writeProgramWithGhosts)
 import Modules (Snapshot)
 import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
 import Pipeline
@@ -166,7 +166,7 @@ runSourceFilesNoPrelude noPrelude world command source = case command of
     Interpret -> compiled `bindResult` runProgramIn world
     Mir -> output renderProgram compiled
     Owned -> output renderProgram owned
-    MirText -> output writeProgram owned
+    MirText -> owned `bindResult` writeOwnedProgram `bindResult` \text -> Ok ((text, ""), [])
     GhostText -> output writeProgramWithGhosts (validatedSourceNoPrelude noPrelude source)
     Assumptions -> output (\found -> if null found then "No assumptions" else intercalate "\n" found) (assumptionsOfNoPrelude noPrelude source)
     _ -> Error "not a command that is run on its own"
@@ -189,7 +189,7 @@ runPackageFiles _ Check pkg = mapResult (\_ -> (("OK", ""), [])) (compileModules
 runPackageFiles world Interpret pkg = compileModulesToProgram pkg `bindResult` runProgramIn world
 runPackageFiles _ Mir pkg = mapResult (\program -> ((renderProgram program, ""), [])) (compileModulesToProgram pkg)
 runPackageFiles _ Owned pkg = mapResult (\program -> ((renderProgram program, ""), [])) (compileModulesToOwned pkg)
-runPackageFiles _ MirText pkg = mapResult (\program -> ((writeProgram program, ""), [])) (compileModulesToOwned pkg)
+runPackageFiles _ MirText pkg = compileModulesToOwned pkg `bindResult` writeOwnedProgram `bindResult` \text -> Ok ((text, ""), [])
 runPackageFiles _ GhostText pkg = mapResult (\program -> ((writeProgramWithGhosts program, ""), [])) (compileModulesValidated pkg)
 runPackageFiles _ Assumptions pkg = case compileModules pkg of
     Error err -> Error err
