@@ -3,6 +3,7 @@
 module TestMirVerify (testMirVerify, testMirVerifyPrograms) where
 
 import Data.List (isInfixOf)
+import ElaboratorTool (noVerdict)
 import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
@@ -17,6 +18,7 @@ import Pipeline (compileSource, nativeProgram)
 import MirHousekeeping (storageProgram)
 import Types (Type (..), pattern TList, pattern TBox)
 import TestHarness
+import TestHeldReferences (forwardedUpdateSource)
 import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, unvalidatedPrograms, validatedPrograms)
 import Utils
@@ -64,17 +66,26 @@ testMirVerify =
             [TestCase name (rawInterpreted expected input) | (name, input, expected) <- callCases]
         , TestList "local IDs, interpreted"
             [TestCase name (localExact input expected errors) | (name, input, expected, errors) <- localCases]
-        , TestList "a lent parameter given on bare is refused"
+        , testCase "a forwarded update parameter has an explicit reborrow" (case compileSource forwardedUpdateSource of
+            Error e -> Just e
+            Ok program -> case Map.lookup "f" (progFunctions program) of
+                Nothing -> Just "the forwarding function is missing"
+                Just fn ->
+                    let blocks = Map.elems (fnBlocks fn)
+                        borrows = [(dest, root) | block <- blocks, Assign dest (Borrow root [] True) <- blockStatements block]
+                        passed dest = any (\block -> case blockTerminator block of Call _ [arg] _ _ -> arg `elem` [Copy dest, Move dest]; _ -> False) blocks
+                     in testAssertTrue (any (\(dest, root) -> root `elem` fnMutBorrowed fn && passed dest) borrows))
+        , TestList "overlapping call arguments are refused"
             [ testCase name (case compileSource source of
-                Error e | all (`isInfixOf` e) reason -> Nothing
+                Error e | noVerdict e -> Just ("the elaborator gave no verdict: " ++ e)
+                Error e | all (`isInfixOf` e) reason && not ("does not model yet" `isInfixOf` e) -> Nothing
                 Error e -> Just ("refused for another reason: " ++ e)
-                Ok _ -> Just "accepted: a parameter lent to a function is given on only through an explicit reborrow")
+                Ok _ -> Just "accepted overlapping call arguments that include an update borrow")
             | (name, reason, source) <-
-                [ ("to an update parameter", notMut, "fn g(r: &mut List<Int>) -> Int writes(r) { *r = push(clone(*r), 1); return 0; }; fn f(r: &mut List<Int>) -> Int writes(r) { return g(r); }; xs = [7]; f(&mut xs); return size(xs);")
-                , ("to two update parameters", notMut, "fn g2(a: &mut List<Int>, b: &mut List<Int>) -> Int writes(a, b) { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g2(r, r); }; xs = [7]; return f(&mut xs);")
-                , ("to an update and a read parameter", notMut, "fn g3(a: &mut List<Int>, b: &List<Int>) -> Int writes(a) { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g3(r, r); }; xs = [7]; return f(&mut xs);")
+                [ ("to two update parameters", overlapUpdate, "fn g2(a: &mut List<Int>, b: &mut List<Int>) -> Int writes(a, b) { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g2(r, r); }; xs = [7]; return f(&mut xs);")
+                , ("to an update and a read parameter", overlapUpdate, "fn g3(a: &mut List<Int>, b: &List<Int>) -> Int writes(a) { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g3(r, r); }; xs = [7]; return f(&mut xs);")
                 , ("beside a read reborrow of it", ["r is lent to this call and lent to it for updating too"], "fn g3(a: &mut List<Int>, b: &List<Int>) -> Int writes(a) { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g3(r, &*r); }; xs = [7]; return f(&mut xs);")
-                , ("to a callee whose contract would then be false", notMut, "fn g2(a: &mut List<Int>, b: &mut List<Int>) -> Int writes(a, b) [{ }] [{ affirm size(*a) = old(size(*a)) + 1; affirm size(*b) = old(size(*b)); }] { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g2(r, r); }; xs = [7]; return f(&mut xs);")
+                , ("to a callee whose contract would then be false", overlapUpdate, "fn g2(a: &mut List<Int>, b: &mut List<Int>) -> Int writes(a, b) [{ }] [{ affirm size(*a) = old(size(*a)) + 1; affirm size(*b) = old(size(*b)); }] { *a = push(clone(*a), 1); return size(*b); }; fn f(r: &mut List<Int>) -> Int writes(r) { return g2(r, r); }; xs = [7]; return f(&mut xs);")
                 ]
             ]
         , TestCase "local IDs, natively" localNative
@@ -697,7 +708,7 @@ nativeCheck name source = withVerifier $ \exe -> do
                         | (expected && not accepted) || (not expected && not refusedIt)
                         ]
 
--- (what the MIR checker says of a parameter lent for updating given on bare; a read reborrow beside it is refused
--- earlier, by the move check, as a read of what the call updates)
-notMut :: [String]
-notMut = ["Lowering produced a malformed program", "is not &mut"]
+-- (what the move check says of a call that lends a place for updating and also gives it, or a part of it, to another
+-- parameter; a read reborrow beside it is refused as a read of what the call updates)
+overlapUpdate :: [String]
+overlapUpdate = ["Move error:", "for updating"]

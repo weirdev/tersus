@@ -3,7 +3,7 @@ import data::ast::ast { AstElaborated, AstEntry, AstNode, AstOptName, AstProgram
 import data::codec::codec { Parsed, Token, Type, catStrings, done, intAt, tokenize };
 import data::reader::reader { parseAstLines, readAstRecords, readRecord, readRecords };
 import elaborate::builtins { loadBuiltins };
-import elaborate::check { checkStatements, fnSigOf, functionValue, stmtOf };
+import elaborate::check { checkStatements, fnSigOf, functionValue, localScopes, stmtOf };
 import elaborate::exports { checkOwnFinite, extractInterface, predeclareOwn };
 import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, localName, shapedLibraries, definedFunctions, entryOf, implsEq, libIndex, librariesFor, needsDropTrait, ownEq, probeModule, readCatalog, sameEq, seenLibraries, topTypeNames, viewOf };
 import elaborate::decls { fileDeclarations };
@@ -25,10 +25,10 @@ import elaborate::lowerout { MirOut, lowerUnit, noMir };
 
 fn newState() -> St ~ {
     return St {
-        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0,
+        nodes: [], tys: [], subst: HashMap::new(), sizeSubst: HashMap::new(), next: 0, localNames: HashMap::new(), rewrittenNodes: [], trialRound: false,
         wireVersion: false, wireProtocols: HashMap::new(), wireOwnership: HashMap::new(),
         types: HashMap::new(), ctors: HashMap::new(), generics: HashMap::new(), linearTypes: HashSet::new(), drops: HashSet::new(),
-        traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), references: HashMap::new(), referenceList: [], boundStubs: HashMap::new(), boundStubSigs: [], builtinStubs: HashSet::new(), genericOut: [], genericTypes: [], fns: HashMap::new(), scopes: oneScope(),
+        traits: HashSet::new(), traitFns: HashMap::new(), traitParams: HashMap::new(), traitSelf: [], inTrait: false, assoc: HashMap::new(), implArgs: HashMap::new(), implBounds: HashMap::new(), implBoundsNodes: HashMap::new(), ownerViews: [], logging: false, implDefined: [], ghostCache: HashMap::new(), refCache: HashMap::new(), storeCache: HashMap::new(), boundedParts: noBoundedParts(), big: [], undo: [], sizeUndo: [], templates: HashMap::new(), references: HashMap::new(), referenceList: [], boundStubs: HashMap::new(), boundStubSigs: [], builtinStubs: HashSet::new(), genericOut: [], genericTypes: [], fns: HashMap::new(), scopes: oneScope(),
         ret: 0 - 1, programReturn: 0 - 1, sizeScope: [], typeScope: [], readOnly: [], mutParams: [], writes: [], aliasNames: [], aliasPlaces: [], originNames: [], originRoots: [], refResultNames: [], refResultParams: [], refResultFroms: [], resultFrom: [], params: [], current: "", inGhost: false,
         predeclared: HashSet::new(), impls: HashSet::new(), builtinNames: HashMap::new(), builtinValues: [], builtinSchemes: [],
         builtinKinds: [], stdNames: HashMap::new(), pointer: HashMap::new(), ghostNames: HashMap::new(), methods: HashMap::new(),
@@ -132,7 +132,7 @@ fn loadInterface(st: St, iface: &AstProgram, base: Int, collectBindings: Bool) -
             if !HashMap::contains(&st.ctors, &name) {
                 tycs = fieldCodecTypes(nodes, ce.fs); st = fromCodecs(st, &tycs);
                 fieldTypes = clone(st.te.types);
-                st = St { ctors: st.ctors.insert(name, CtorInfo { owner: nameText(nodes, ce.owner), names: fieldNames(nodes, ce.fs), types: fieldTypes }), ..st };
+                st = St { ctors: st.ctors.insert(name, CtorInfo { owner: nameText(nodes, ce.owner), names: fieldNames(nodes, ce.fs), types: fieldTypes }), storeCache: HashMap::new(), ..st };
             };
         };
     };
@@ -144,7 +144,7 @@ fn loadInterface(st: St, iface: &AstProgram, base: Int, collectBindings: Bool) -
             if !HashMap::contains(&st.generics, &name) {
                 tycs = fieldCodecTypes(nodes, ge.fs); st = fromCodecs(st, &tycs);
                 fieldTypes = clone(st.te.types);
-                st = St { generics: st.generics.insert(name, Generic { params: namesText(nodes, ge.ps), names: fieldNames(nodes, ge.fs), types: fieldTypes }), ..st };
+                st = St { generics: st.generics.insert(name, Generic { params: namesText(nodes, ge.ps), names: fieldNames(nodes, ge.fs), types: fieldTypes }), storeCache: HashMap::new(), ..st };
             };
         };
     };
@@ -316,7 +316,7 @@ fn contextFacts(st: St, iface: &AstProgram, base: Int) -> St ~ {
     for e in HashMap::entries(&st.implArgs) { if canonicalName(&e.key) && !HashMap::contains(&implArgs, &e.key) { implArgs = implArgs.insert(clone(e.key), clone(e.value)); }; };
     for e in HashMap::entries(&st.implBounds) { if canonicalName(&e.key) && !HashMap::contains(&implBounds, &e.key) { implBounds = implBounds.insert(clone(e.key), clone(e.value)); }; };
     for e in HashMap::entries(&st.implBoundsNodes) { if canonicalName(&e.key) && !HashMap::contains(&implBoundsNodes, &e.key) { implBoundsNodes = implBoundsNodes.insert(clone(e.key), e.value); }; };
-    return St { wireProtocols: wireProtocols, types: types, ctors: ctors, generics: generics, linearTypes: linearTypes, drops: drops, traits: traits, traitFns: traitFns, traitParams: traitParams, assoc: assoc, impls: impls, implArgs: implArgs, implBounds: implBounds, implBoundsNodes: implBoundsNodes, templates: templates, fns: fns, refResultNames: refResultNames, refResultParams: refResultParams, refResultFroms: refResultFroms, ownerViews: ownerViews, sequenceTraits: sequenceTraits, ..st };
+    return St { wireProtocols: wireProtocols, types: types, ctors: ctors, generics: generics, storeCache: HashMap::new(), linearTypes: linearTypes, drops: drops, traits: traits, traitFns: traitFns, traitParams: traitParams, assoc: assoc, impls: impls, implArgs: implArgs, implBounds: implBounds, implBoundsNodes: implBoundsNodes, templates: templates, fns: fns, refResultNames: refResultNames, refResultParams: refResultParams, refResultFroms: refResultFroms, ownerViews: ownerViews, sequenceTraits: sequenceTraits, ..st };
 };
 
 fn canonicalName(name: &String) -> Bool ~ {
@@ -655,6 +655,9 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
         };
     };
     if !prepared.ok { st = unresolvedState(st, prepared.msg); };
+    st = localScopes(st, &stmts);
+    scopedStmts = listItems(&st.nodes, st.nid);
+    st = St { localNames: HashMap::new(), ..st };
     st = loadBuiltins(st, table);
     selected = [];
     if unit.hasCatalog && st.status = 0 { selected = shapedLibraries(&available, librariesFor(&probe)); };
@@ -703,7 +706,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
             st = predeclareOwn(st, &stmts);
             st = checkOwnFinite(st, &stmts);
         };
-        if st.status = 0 { st = checkStatements(st, true, &stmts); };
+        if st.status = 0 { st = checkStatements(st, true, &scopedStmts); };
     };
     out = noProgram("elaborated");
     iface = noProgram("interface");

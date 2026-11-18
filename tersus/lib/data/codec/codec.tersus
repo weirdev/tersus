@@ -218,11 +218,11 @@ fn catStrings(a: &String, b: &String) -> String [{ }] [{ }] {
 };
 
 fn renderSizeForName(s: &Size) -> String [{ }] [{ }] {
-    return match s {
-        Size::SConst { n: n } => String::fromInt(n),
-        Size::SAny => "?",
-        Size::SParam { name: name } => clone(name),
-        Size::SVar { n: n } => catStrings("_", String::fromInt(n)),
+    match s {
+        Size::SConst { n: n } => { return String::fromInt(n); },
+        Size::SAny => { return "?"; },
+        Size::SParam { name: name } => { return clone(name); },
+        Size::SVar { n: n } => { return catStrings("_", String::fromInt(n)); },
     };
 };
 
@@ -492,11 +492,11 @@ fn newLine() -> Int [{ }] [{ }] {
 };
 
 fn printSize(s: &Size) -> Int [{ }] [{ }] {
-    return match s {
-        Size::SConst { n: n } => " c".print() + printInt(n),
-        Size::SAny => " any".print(),
-        Size::SParam { name: name } => " p".print() + printName(name),
-        Size::SVar { n: n } => " v".print() + printInt(n),
+    match s {
+        Size::SConst { n: n } => { return " c".print() + printInt(n); },
+        Size::SAny => { return " any".print(); },
+        Size::SParam { name: name } => { return " p".print() + printName(name); },
+        Size::SVar { n: n } => { return " v".print() + printInt(n); },
     };
 };
 

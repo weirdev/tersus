@@ -307,6 +307,8 @@ values =
 fixtures :: [Statement]
 fixtures =
     [ Assign "x" (Val (VInt 1)), AssignDeref (Var "p") (Val (VInt 2)), Let "y" (Var "x"), Return (F (Var "f") [Var "x"])
+    , Return (IfExpr (Val (VBool True)) (BlockExpr [Let "branch" (Val (VInt 3))] (Var "branch")) (Val (VInt 4)))
+    , Let "typed" (Ascribed (Val (VList [])) (TList TInt))
     , StructDef "Packet" ["T", "n"] [("field", t) | t <- types] validations
     , EnumDef "E" [("E::V", [("field", TInt)]), ("E::Empty", [])]
     , AxiomDef "axiom" ["x"] validations validations, ProofDef "proof" ["x"] validations validations validations

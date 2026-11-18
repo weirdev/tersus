@@ -370,16 +370,21 @@ runBlock program fn block frame =
                             -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
                             -- the same place in this frame. References to the callee's own places cannot be returned,
                             -- which the checker has already refused.)
-                            result' <- liftE $ case f of
-                                MFn name | Just callee <- Map.lookup name (progFunctions program) -> rebaseRefs program callee calleeFrame args frame' result
-                                _ -> Ok result
-                            let finalParams = case f of
-                                    MFn name | Just callee <- Map.lookup name (progFunctions program) -> [Map.findWithDefault MEmpty p calleeFrame | p <- fnParams callee]
-                                    _ -> []
-                            frame'' <- liftE (writeBack program frame' f args finalParams)
+                            -- (every value that goes back to the caller, the result, an update parameter's final value
+                            -- and a given place's final value, can hold references the callee made to its own parameters
+                            -- or to the places it was given: each is rebased onto the caller's places, against the frame
+                            -- before the call, before anything is written)
                             let invSynth = Map.fromList [(s, r) | (r, s) <- Map.toList synthMap]
-                                result2 = rewriteRefRoots invSynth result'
-                            frame3 <- liftE (foldl (\acc (root, synth) -> acc `bindResult` \fr -> case Map.lookup synth calleeFrame of Just v -> writePlace fr root [] (rewriteRefRoots invSynth v); Nothing -> Ok fr) (Ok frame'') (Map.toList synthMap))
+                                outgoing v = case f of
+                                    MFn name | Just callee <- Map.lookup name (progFunctions program) -> mapResult (rewriteRefRoots invSynth) (rebaseRefs program callee calleeFrame args frame' v)
+                                    _ -> Ok (rewriteRefRoots invSynth v)
+                            result2 <- liftE (outgoing result)
+                            finalParams <- liftE $ case f of
+                                MFn name | Just callee <- Map.lookup name (progFunctions program) -> mapResults (\p -> outgoing (Map.findWithDefault MEmpty p calleeFrame)) (fnParams callee)
+                                _ -> Ok []
+                            synthValues <- liftE (mapResults (\(root, synth) -> mapResult (\v -> (root, v)) (traverseMaybe outgoing (Map.lookup synth calleeFrame))) (Map.toList synthMap))
+                            frame'' <- liftE (writeBack program frame' f args finalParams)
+                            frame3 <- liftE (foldl (\acc (root, mv) -> acc `bindResult` \fr -> case mv of Just v -> writePlace fr root [] v; Nothing -> Ok fr) (Ok frame'') synthValues)
                             runBlock program fn next (Map.insert dest result2 frame3)
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
@@ -523,6 +528,10 @@ refRootClosure frame args = go [] (concatMap refRoots args)
     go seen (r : rest)
         | r `elem` seen = go seen rest
         | otherwise = go (seen ++ [r]) (rest ++ maybe [] (refRoots . normaliseRefs frame) (Map.lookup r frame))
+
+traverseMaybe :: (a -> Result b e) -> Maybe a -> Result (Maybe b) e
+traverseMaybe _ Nothing = Ok Nothing
+traverseMaybe g (Just x) = mapResult Just (g x)
 
 rewriteRefRoots :: Map Local Local -> MirValue -> MirValue
 rewriteRefRoots m value | Map.null m = value

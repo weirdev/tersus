@@ -2,6 +2,7 @@ module TestTraits (testTraits) where
 
 import MirEval (fromMirValue)
 import Compile (lowerSource)
+import ElaboratorTool (noVerdict)
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Mir as M
@@ -98,6 +99,15 @@ testTraits =
             Right stmts -> case validateStatements stmts of
                 Error e | "internal compiler error" `isInfixOf` e -> Just ("an internal compiler error instead of a refusal: " ++ e)
                 _ -> parseValidateFailProgramHelper (showSize ++ body) expected
+        -- (the checker's own refusal: an elaborator that failed as a tool, or an internal error, is not it)
+        checkerRefuses source expected = case parseWithEquality source of
+            Left err -> Just ("Parse failed: " ++ err)
+            Right stmts -> case runStatements stmts of
+                Ok value -> Just ("accepted, giving " ++ show (fmap fromMirValue value))
+                Error e
+                    | noVerdict e || "internal compiler error" `isInfixOf` e -> Just ("no refusal by the checker: " ++ e)
+                    | expected `isInfixOf` e -> Nothing
+                    | otherwise -> Just ("expected " ++ show expected ++ ", got: " ++ e)
         compiledRejected source expected = case lowerSource True source of
             Ok _ -> Just ("accepted: " ++ source)
             Error e -> if take (length expected) e == expected then Nothing else Just ("expected an error starting " ++ show expected ++ ", got: " ++ e)
@@ -230,6 +240,8 @@ testTraits =
                 , testCase "a function of a bounded impl is checked against the impl's bounds" (boundedRejected "struct M<K, V> { x: K, y: V }; impl<K: Show, V> M<K, V> { fn h(self: &Self) -> Int { return Size::measure(self.y); }; }; return 0;" "calls Size::measure on a V, and its bounds do not say V: Size")
                 , testCase "a function of a bounded trait impl is too" (boundedRejected "struct Pair<T> { a: T, b: T }; impl<T: Show> Size for Pair<T> { fn measure(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.a.measure(); }; }; return 0;" "calls measure on a T, and no bound of it has a function measure")
                 , testCase "a body calls a function defined after it" (bounded "fn f<T: Show>(x: &T) -> Int { return later(1); }; fn user() -> Int { return f(Cell { v: 0 }); }; fn later(n: Int) -> Int { return n; }; return user();" 1)
+                , testCase "a loop in a bounded body calls a bound's method in every round" (bounded "fn sum<T: Show>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { total = 0; i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; affirm total >= 0; }] shrinks 3 - i { total = total + x.show(); i = i + 1; }; return total; }; return sum(Cell { v: 0 }) + sum(Cell { v: 1 });" 6)
+                , testCase "a bounded function first called in a loop is checked against its bounds there" (bounded "fn one<T: Show>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return x.show(); }; total = 0; i = 0; while i < 2 [{ affirm i >= 0; affirm i <= 2; affirm total >= 0; }] shrinks 2 - i { total = total + one(Cell { v: 0 }); i = i + 1; }; return total;" 2)
                 , testCase "a bound of several traits meets a callee's bound of one" (bounded "fn f<T: Show>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return x.show(); }; fn g<T: Show + Size>(x: &T) -> Int [{ }] [{ affirm return >= 0; }] { return f(x) + x.measure(); }; return g(Cell { v: 0 });" 3)
                 , testCase "a function of a bounded trait impl returns a reference from self" (parseValidProgramHelper "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W<T> { x: T }; impl<T: Clone> R<T> for W<T> { fn first(self: &Self) -> &T from self { return &self.x; }; }; return 0;")
                 , testCase "a trait function can take self lent for updating" (parseEvalProgramHelper "trait FnMut0<R> { fn callMut(self: &mut Self) -> R [{ }] [{ }]; }; struct Counter { count: Int }; impl FnMut0<Int> for Counter { fn callMut(self: &mut Self) -> Int [{ }] [{ }] { (*self).count = (*self).count + 1; return (*self).count; }; }; fn callTwice<F: FnMut0<Int>>(f: &mut F) -> Int [{ }] [{ }] { a = f.callMut(); b = f.callMut(); return a * 10 + b; }; c = Counter { count: 0 }; r = callTwice(&mut c); return r * 100 + c.count;" (Just (VInt 1202)))
@@ -252,6 +264,9 @@ testTraits =
                 , testCase "whatever its function's type" (parseEvalProgramHelper "trait Sequence { fn get(self: &Self, i: Int) -> Bool; }; impl Sequence for List<Int> { fn get(self: &Self, i: Int) -> Bool { return true; }; }; fn f<S: Sequence>(s: &S) -> Bool { return get(s, 0); }; if f(push([], 1)) { return 1; }; return 0;" (Just (VInt 1)))
                 , testCase "and a program's own Growable" (parseEvalProgramHelper "trait Growable { fn push(self: Self, x: Int) -> Bool; }; impl Growable for List<Int> { fn push(self: Self, x: Int) -> Bool { return true; }; }; fn f<S: Growable>(s: S) -> Bool { return push(s, 3); }; if f(push([], 1)) { return 1; }; return 0;" (Just (VInt 1)))
                 , testCase "a reference returned onward by a bound's method" (parseEvalProgramHelper "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T) -> &Int from x { return x.first(); }; w = W { x: 3 }; r = pick(w); return *r;" (Just (VInt 3)))
+                , testCase "and by the trait's function called by its path" (parseEvalProgramHelper "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T) -> &Int from x { return R::first(x); }; w = W { x: 3 }; r = pick(w); return *r;" (Just (VInt 3)))
+                , testCase "and through a local" (parseEvalProgramHelper "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T) -> &Int from x { y = x.first(); return y; }; w = W { x: 3 }; r = pick(w); return *r;" (Just (VInt 3)))
+                , testCase "a reference a bound's method returns from another parameter is refused" (checkerRefuses "trait R<E> { fn first(self: &Self) -> &E from self; }; struct W { x: Int }; impl R<Int> for W { fn first(self: &Self) -> &Int from self { return &self.x; }; }; fn pick<T: R<Int>>(x: &T, y: &T) -> &Int from x { return y.first(); }; w = W { x: 3 }; v = W { x: 4 }; r = pick(w, v); return *r;" "the value returned is not a reference from x, which the signature names: return a reference to a place of one of them (in pick)")
                 , testCase "a function of a bounded impl calls another of it" (bounded "struct Pair<T> { a: T, b: T }; impl<T: Show> Pair<T> { fn both(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.a.show() + self.one(); }; fn one(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.b.show(); }; }; return Pair<Cell> { a: Cell { v: 0 }, b: Cell { v: 0 } }.both();" 2)
                 , testCase "and one that is not Copy is moved once, whatever the types a call gives" (parseValidateFailProgramHelper "fn twice<T: Clone>(x: T) -> Int { a = push([], x); b = push(a, x); return size(b); }; return 0;" "Move error: in twice")
                 , testCase "a function with bounds that nothing calls has no copy, only its generic body for the validator" (case lowerSource True "fn unused<T: Eq>(x: T) -> Bool { return x = x; }; return 0;" of

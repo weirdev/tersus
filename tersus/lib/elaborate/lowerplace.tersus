@@ -2,7 +2,7 @@ import data::ast::ast { AstExpression, AstNode };
 import elaborate::records { listItems, nameText, nodeIn };
 import elaborate::lowerstate { lwMalformed, LDecl, LowSt, Op, Step, Stmt, TDecl, boxInner, claim, hasInt, intAt, isMutRefTy, isRefTy, isTupleBase, lfail, lwCat, lwCat3, lwInstanceText, lwKind, noOp, quote, simpleType, lwSp, tyOf, unrefTy, wrapType };
 import elaborate::lowerbuild { Bi, biOf, borrowRv, builtinOfExpr, cloneVariantPayload, copyOp, emitAssign, emitStmt, exprAt, findRefTarget, ghostStmt, isPrim, lookupBinding, singleEnv, tempLocal, useRv, varNameOf };
-import elaborate::lowerexpr { lowerOperand };
+import elaborate::lowerexpr { captureOperand, exprEffects, lowerOperand };
 
 // A place as the local it starts from (ls.root), the steps from there (ls.steps) and its type (ls.ty). Each
 // expression of the place takes the type the elaborator gave it, in the order it gave them.
@@ -52,6 +52,7 @@ fn lowerPlace(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
     if form.kind = 2 { return castPlace(ls, src, &form); };
     if form.kind = 3 { return indexPlace(ls, src, &form); };
     if form.kind = 4 {
+        // (a place through a reference starts at the reference: its loans are what it is to)
         ls = claim(ls);
         t = ls.ty;
         // (a reference held in a part of a value is read out first: the place is what it is to, not the part holding it)
@@ -124,14 +125,32 @@ fn indexPlace(ls: LowSt, src: &List<AstNode>, form: &PlaceForm) -> LowSt ~ {
     elementTy = ls.ty;
     ls = lowerPlace(ls, src, form.sub);
     if !ls.ok { return ls; };
-    root = ls.root;
     steps = clone(ls.steps);
+    base = ls.root;
+    ls = capturePlaceRoot(ls, src, base, form.index);
+    root = ls.root;
     ls = lowerOperand(ls, src, form.index);
     if !ls.ok { return ls; };
     o = clone(ls.op);
     ls = captureIndex(ls, o);
     captured = clone(ls.op);
     return placeResult(ls, root, push(steps, indexStep(captured)), elementTy);
+};
+
+// A reference the place starts from, copied before an index that can change it (ls.root)
+fn capturePlaceRoot(ls: LowSt, src: &List<AstNode>, root: Int, later: Int) -> LowSt ~ {
+    ls = exprEffects(ls, src, later);
+    if ls.yes && root >= 0 && root < size(ls.bLocals) {
+        d = clone(get(ls.bLocals, root));
+        if d.present && isRefTy(&ls, d.ty) {
+            ls = captureOperand(ls, 0 - 1, copyOp(root), d.ty);
+            if ls.op.k = 0 {
+                stable = ls.op.l;
+                return LowSt { root: stable, ..ls };
+            };
+        };
+    };
+    return LowSt { root: root, ..ls };
 };
 
 fn captureIndex(ls: LowSt, o: Op) -> LowSt ~ {
@@ -199,8 +218,10 @@ fn lowerDerefPlace(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
         elementTy = ls.ty;
         ls = lowerDerefPlace(ls, src, form.sub);
         if !ls.ok { return ls; };
-        root = ls.root;
         steps = clone(ls.steps);
+        base = ls.root;
+    ls = capturePlaceRoot(ls, src, base, form.index);
+        root = ls.root;
         ls = lowerOperand(ls, src, form.index);
         if !ls.ok { return ls; };
         o = clone(ls.op);

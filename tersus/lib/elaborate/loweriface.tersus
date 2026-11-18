@@ -4,7 +4,7 @@ import elaborate::records { codecTypeAt, listItems, nameText, nodeIn, signatureO
 import elaborate::state { intText };
 import elaborate::lowerstate { GenericRec, LBlock, LDecl, LFn, LowSt, TDecl, Term, fromCodecTy, hasText, isMutRefTy, isRefTy, lwBaseName, lwCat, quote, lwSp };
 import elaborate::lowerbuild { emptyBlockPayload, isFunct, namesOf, stmtAt, terminationPayload, valOf, validationsPayload };
-import elaborate::lower { fieldsTokens };
+import elaborate::lower { fieldsTokens, setGlobalTy, sigType, structFieldTypes, variantMemberTypes };
 
 // What a module is lowered against: the structs, enums, structs with sizes and
 // invariants of the interfaces it is lowered with (the first interface wins a name; the module's own declarations win
@@ -119,6 +119,7 @@ fn seedTypes(ls: LowSt, src: &List<AstNode>, types: Int, ctors: Int, generics: I
 fn seedType(ls: LowSt, src: &List<AstNode>, name: String, variants: List<String>, fieldsOf: &HashMap<String, Int>) -> LowSt ~ {
     if size(variants) = 1 && get(variants, 0) = clone(name) {
         ls = fieldsTokens(ls, src, HashMap::lookup(fieldsOf, &name, 0 - 1));
+        ls = structFieldTypes(ls, &name, false);
         line = lwSp(lwSp("struct", quote(&name)), &ls.name);
         types = ls.types.insert(name, TDecl { isStruct: true, fieldNames: [], fieldTypes: [], variants: [], line: line });
         return LowSt { types: types, ..ls };
@@ -126,6 +127,7 @@ fn seedType(ls: LowSt, src: &List<AstNode>, name: String, variants: List<String>
     line = lwSp(lwSp("enum", quote(&name)), intText(size(variants)));
     for v in &variants {
         ls = fieldsTokens(ls, src, HashMap::lookup(fieldsOf, v, 0 - 1));
+        ls = variantMemberTypes(ls, &name, v);
         line = lwSp(lwSp(line, quote(v)), &ls.name);
     };
     types = ls.types.insert(name, TDecl { isStruct: false, fieldNames: [], fieldTypes: [], variants: variants, line: line });
@@ -143,6 +145,7 @@ fn seedGenerics(ls: LowSt, src: &List<AstNode>, generics: Int, own: &HashSet<Str
                 line = lwSp(lwCat("generic ", quote(&name)), intText(size(sizes)));
                 for s in &sizes { line = lwSp(line, quote(s)); };
                 ls = fieldsTokens(ls, src, ge.fs);
+                ls = structFieldTypes(ls, &name, true);
                 g = ls.generics.insert(name, GenericRec { line: lwSp(line, &ls.name) });
                 ls = LowSt { generics: g, ..ls };
             };
@@ -189,6 +192,9 @@ fn seedStubs(ls: LowSt, src: &List<AstNode>, functions: Int, externs: List<Strin
                 mirName = clone(name);
                 if hasText(&externs, &name) { mirName = lwCat("extern ", &name); };
                 ls = stubFunction(ls, src, clone(mirName), fe.ps, fe.sig, fe.ins, fe.outs, fe.term);
+                ls = sigType(ls, src, fe.sig);
+                stubTy = ls.ty;
+                ls = setGlobalTy(ls, clone(name), stubTy);
                 globals = ls.globals.insert(name, clone(mirName));
                 stubs = ls.stubs.insert(clone(mirName));
                 names = ls.names.insert(mirName);

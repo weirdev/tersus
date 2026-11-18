@@ -90,6 +90,55 @@ fn assumeBooleanFact(context: ValidatorContext, index: &FactIndex, left: Int, ri
     return state;
 };
 
+// A loop test of a value against a Boolean literal, = or !=: as an edge of an if on that value gives
+// (assumeBooleanFact), the comparison it was computed from holds or fails. The literal and the comparison are read from
+// the state below the facts (source, with its index), and what they decide is added to the facts.
+fn assumeBooleanTest(source: &ValidatorContext, index: &FactIndex, facts: ValidatorContext, relation: Int, left: Int, right: Int) -> ValidatorContext {
+    if relation != 0 && relation != 1 { return facts; };
+    terms = [];
+    truths = [];
+    leftAt = index.constantAt.lookup(left, -1);
+    if leftAt >= 0 && leftAt < size(source.constants) {
+        if get(source.constants, leftAt).kind = 1 && get(source.constants, leftAt).id = left { terms = push(terms, right); truths = push(truths, (get(source.constants, leftAt).value = 1) = (relation = 0)); };
+    };
+    rightAt = index.constantAt.lookup(right, -1);
+    if rightAt >= 0 && rightAt < size(source.constants) {
+        if get(source.constants, rightAt).kind = 1 && get(source.constants, rightAt).id = right { terms = push(terms, left); truths = push(truths, (get(source.constants, rightAt).value = 1) = (relation = 0)); };
+    };
+    state = facts;
+    for k in 0..size(terms) {
+        made = nearApplications(source, index, get(terms, k));
+        truth = boolAt(truths, k, false);
+        for app in made.applications {
+            if made.terms.contains(app.id) {
+                if size(app.arguments) = 2 {
+                    a = get(app.arguments, 0);
+                    b = get(app.arguments, 1);
+                    if app.function = -6 {
+                        if truth { state = assumeRelation(state, 0, a, b); } else { state = assumeRelation(state, 1, a, b); };
+                    };
+                    if app.function = -7 {
+                        if truth { state = assumeRelation(state, 1, a, b); } else { state = assumeRelation(state, 0, a, b); };
+                    };
+                    if app.function = -8 {
+                        if truth { state = assumeRelation(state, 2, a, b); } else { state = assumeRelation(state, 3, b, a); };
+                    };
+                    if app.function = -9 {
+                        if truth { state = assumeRelation(state, 3, a, b); } else { state = assumeRelation(state, 2, b, a); };
+                    };
+                    if app.function = -10 {
+                        if truth { state = assumeRelation(state, 2, b, a); } else { state = assumeRelation(state, 3, a, b); };
+                    };
+                    if app.function = -11 {
+                        if truth { state = assumeRelation(state, 3, b, a); } else { state = assumeRelation(state, 2, a, b); };
+                    };
+                };
+            };
+        };
+    };
+    return state;
+};
+
 // (the state is borrowed whole: a field passed with other arguments that are
 // computed is passed as a copy of it)
 fn valueOf(state: &ExecutionState, index: &FactIndex, term: Int) -> IntegerLookup {

@@ -51,8 +51,8 @@ import ValidatorNative (validateCompiled)
 import MirCopies (withoutGeneric)
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
-import Pretty (renderVarProof)
-import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
+import Pretty (renderVarProof, renderExpression)
+import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
 import Types (Size (..), Type (..))
 import Utils
 
@@ -83,6 +83,7 @@ assumptionsOfNoPrelude noPrelude source = mapResult (snd . statements Nothing . 
         AxiomDef name args _ _ -> (place, [at place ("axiom " ++ name ++ "(" ++ commas args ++ ")")])
         ExternDef name -> (place, [at place ("extern fn " ++ name)])
         Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> (place, snd (statements place body))
+        AssignDeref lhs rhs -> (place, expression place lhs ++ expression place rhs)
         Assign _ e -> (place, expression place e)
         Let _ e -> (place, expression place e)
         Return e -> (place, expression place e)
@@ -94,8 +95,11 @@ assumptionsOfNoPrelude noPrelude source = mapResult (snd . statements Nothing . 
         BoundedDef _ s -> (place, snd (statement place s))
         _ -> (place, [])
     expression place e = case e of
-        F (Var "Block::assume") args -> at place (renderVarProof (exprToProof e)) : concatMap (expression place) args
+        F (Var "Block::assume") args -> at place (renderExpression e) : concatMap (expression place) args
         F f args -> concatMap (expression place) (f : args)
+        IfExpr c yes no -> concatMap (expression place) [c, yes, no]
+        BlockExpr body result -> snd (statements place body) ++ expression place result
+        Ascribed inner _ -> expression place inner
         _ -> []
     at place text = maybe "in a library: " (\(line, column) -> "line " ++ show line ++ ":" ++ show column ++ ": ") place ++ text
     commas = foldr1' (\a b -> a ++ ", " ++ b)

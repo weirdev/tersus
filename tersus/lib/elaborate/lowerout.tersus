@@ -4,7 +4,7 @@ import data::reader::reader { entriesAre, entriesAscending, namesAscending, node
 import elaborate::records { codecTypeAt, listItems, nameText, nodeIn };
 import elaborate::state { intText };
 import elaborate::lowerstate { BoundedRec, PackLoopRec, GenericRec, EnvRec, LBlock, LDecl, LFn, LoopRec, LowSt, Stmt, TDecl, Term, fromCodecTy, intAt, lwCat, lwSort, newLowSt, quote, setTexts, lwSp, tyText };
-import elaborate::lowerbuild { bodyOf, definedFunction, isFunct, statementsList, stmtAt, valOf };
+import elaborate::lowerbuild { addNode, biOf, bodyOf, builtinOfExpr, definedFunction, exprAt, isFunct, isPrim, statementsList, stmtAt, valOf };
 import elaborate::lower { functionNames, lowerProgram };
 import elaborate::lowerplace { noDecl };
 import elaborate::loweriface { Src, joinArena, seedBuiltins, seedModule };
@@ -149,6 +149,9 @@ fn lwRefKinds(node: &AstNode) -> List<Int> ~ {
                 AstExpression::Val { v: v } => { refs = push(refs, 4); },
                 AstExpression::Var { n: n } => { refs = push(refs, 1); },
                 AstExpression::F { f: f, xs: xs } => { refs = push(refs, 6); refs = push(refs, 25); },
+                AstExpression::IfExpr { c: c, a: a, b: b } => { refs = push(refs, 6); refs = push(refs, 6); refs = push(refs, 6); },
+                AstExpression::BlockExpr { xs: xs, e: e } => { refs = push(refs, 24); refs = push(refs, 6); },
+                AstExpression::Ascribed { e: e, ty: ty } => { refs = push(refs, 6); refs = push(refs, 2); },
             };
         },
         AstNode::Termination { value: v } => {
@@ -368,7 +371,8 @@ fn lwDefinedNames(src: &List<AstNode>, stmts: &List<Int>, out: HashSet<String>) 
     return out;
 };
 
-// Every assume of the statements, in order, dead code included (as their ValidationStatement records)
+// Every assume of the statements, in order, dead code included (as their ValidationStatement records), and every
+// Block::assume call among them
 fn assumesIn(src: &List<AstNode>, stmts: &List<Int>, out: List<Int>) -> List<Int> ~ {
     for s in stmts {
         stmt = stmtAt(src, s);
@@ -377,10 +381,64 @@ fn assumesIn(src: &List<AstNode>, stmts: &List<Int>, out: List<Int>) -> List<Int
             if v is AstNode::Validation && (v as AstNode::Validation).value is AstValidation::Assume { out = push(out, s); };
         };
         f = definedFunction(src, clone(stmt));
-        if f >= 0 { out = assumesIn(src, bodyOf(src, f), out); };
+        if f >= 0 { out = assumesIn(src, bodyOf(src, f), out); } else {
+            for e in statementExpressions(&stmt) { out = assumesInExpression(src, e, out); };
+        };
         if !(stmt is AstStatement::TraitDef) { for inner in innerStatements(src, &stmt) { out = assumesIn(src, push([], inner), out); }; };
     };
     return out;
+};
+
+// (an assume inside an expression's block, a function value or a branch of an if expression)
+fn assumesInExpression(src: &List<AstNode>, e: Int, out: List<Int>) -> List<Int> ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return out; };
+    x = exprAt(src, e);
+    if x is AstExpression::Val {
+        v = (x as AstExpression::Val).v;
+        return assumesIn(src, bodyOf(src, v), out);
+    };
+    if x is AstExpression::F {
+        call = x as AstExpression::F;
+        // (a Block::assume is trusted too: it is listed as the call, never as a proof; it is -1 - e)
+        if isBlockAssume(src, call.f) {
+            out = push(out, 0 - 1 - e);
+        } else {
+            out = assumesInExpression(src, call.f, out);
+        };
+        for a in listItems(src, call.xs) { out = assumesInExpression(src, a, out); };
+        return out;
+    };
+    if x is AstExpression::IfExpr {
+        branch = x as AstExpression::IfExpr;
+        return assumesInExpression(src, branch.b, assumesInExpression(src, branch.a, assumesInExpression(src, branch.c, out)));
+    };
+    if x is AstExpression::BlockExpr {
+        block = x as AstExpression::BlockExpr;
+        return assumesInExpression(src, block.e, assumesIn(src, listItems(src, block.xs), out));
+    };
+    if x is AstExpression::Ascribed { return assumesInExpression(src, (x as AstExpression::Ascribed).e, out); };
+    return out;
+};
+
+fn isBlockAssume(src: &List<AstNode>, f: Int) -> Bool ~ {
+    b = builtinOfExpr(src, f);
+    if b >= 0 {
+        bi = biOf(src, b);
+        return isPrim(&bi, "BlockAssume");
+    };
+    x = exprAt(src, f);
+    return x is AstExpression::Var && nameText(src, (x as AstExpression::Var).n) = "Block::assume";
+};
+
+// The expressions a statement evaluates itself, not those of the statements it holds
+fn statementExpressions(stmt: &AstStatement) -> List<Int> ~ {
+    if stmt is AstStatement::Assign { return push([], (stmt as AstStatement::Assign).e); };
+    if stmt is AstStatement::Let { return push([], (stmt as AstStatement::Let).e); };
+    if stmt is AstStatement::AssignDeref { return push(push([], (stmt as AstStatement::AssignDeref).a), (stmt as AstStatement::AssignDeref).b); };
+    if stmt is AstStatement::Return { return push([], (stmt as AstStatement::Return).e); };
+    if stmt is AstStatement::If { return push([], (stmt as AstStatement::If).e); };
+    if stmt is AstStatement::While { return push([], (stmt as AstStatement::While).e); };
+    return [];
 };
 
 struct Out { lines: List<String>, payloads: List<Int>, bad: Bool };
@@ -482,7 +540,13 @@ fn writeLowered(ls: LowSt, src: &Src, declared: List<String>, nested: List<Strin
     text = lwSp("assumes", intText(size(assumes)));
     for a in &assumes {
         text = lwSp(text, nextPayload(&o));
-        o = payloadRef(o, a);
+        if a >= 0 {
+            o = payloadRef(o, a);
+        } else {
+            // (a trusted call's payload is a Return of it, the statement record that holds one expression)
+            ls = addNode(ls, AstNode::Statement { value: AstStatement::Return { e: 0 - 1 - a } });
+            o = payloadRef(o, ls.id);
+        };
     };
     o = outLine(o, text);
     if o.bad { return noMir("Lowering: a block holds a statement the function does not"); };

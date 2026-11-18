@@ -1,0 +1,25 @@
+enum Item { Number { value: Int }, Text { value: String } };
+
+fn label(item: &Item) -> String {
+    return match item {
+        Item::Number { value: n } => String::fromInt(n),
+        Item::Text { value: text } => clone(text),
+    };
+};
+
+fn firstOr(items: &List<Int>, fallback: Int) -> Int {
+    return if size(items) > 0 { first(items) } else { fallback };
+};
+
+let names: List<String> = [];
+let number = Item::Number { value: 7 };
+let text = Item::Text { value: "hi" };
+names = [label(number), label(text), if true { "ok" } else { "unused" }];
+
+let value = if let Item::Number { value: n } = number { n } else { 0 };
+{
+    let value: Bool = false;
+    affirm value = false;
+};
+affirm value = 7;
+return value + size(names) + firstOr([value, value + 1], 0);

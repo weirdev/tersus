@@ -43,10 +43,10 @@ fn printConstant(c: &Constant) -> Int ~ {
 };
 
 fn printOperand(o: &Operand) -> Int ~ {
-    return match o {
-        Operand::Copy { local: l } => " copy".print() + printInt(l),
-        Operand::Move { local: l } => " move".print() + printInt(l),
-        Operand::Const { value: c } => " const".print() + printConstant(c),
+    match o {
+        Operand::Copy { local: l } => { return " copy".print() + printInt(l); },
+        Operand::Move { local: l } => { return " move".print() + printInt(l); },
+        Operand::Const { value: c } => { return " const".print() + printConstant(c); },
     };
 };
 

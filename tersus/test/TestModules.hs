@@ -860,6 +860,22 @@ testModuleLinkRoot =
         , ("app/main.tersus", rootSource)
         ]
 
+-- A function called before its definition is found at the top even when another function's body has a local of its name
+testModuleForwardCall :: Test
+testModuleForwardCall =
+    testCaseSeq
+        "module-forward-call"
+        [ expectRuns (files "dn") "app/main.tersus" "4"
+        , expectRuns (files "other") "app/main.tersus" "4"
+        ]
+  where
+    files local =
+        [ ("app/package.tersus", "")
+        , ("app/lib.tersus", "fn twice(x: Int) -> Int [{ }] [{ }] { return dn(x) + dn(x); }; fn dn(x: Int) -> Int [{ }] [{ }] { return x; };")
+        , ("app/other.tersus", "fn f() -> Int [{ }] [{ }] { " ++ local ++ " = 2; return " ++ local ++ "; };")
+        , ("app/main.tersus", "import app::lib { twice }; import app::other { f }; return twice(1) + f();")
+        ]
+
 testModuleLinkExtern :: Test
 testModuleLinkExtern =
     testCaseSeq
@@ -1753,7 +1769,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Ok cached -> testAssertEq (Map.keys (M.progFunctions cached)) (Map.keys (M.progFunctions (withoutGeneric raw)))
                             , case refused of Error _ -> Nothing; Ok _ -> Just "changed same-path validator bypassed validation"
                             , testAssertEq (length markers) (Map.size (Map.fromList [(marker, ()) | marker <- markers]))
-                            , testAssertEq (validatorMetadataFingerprint raw) "852501f00476b1f8"
+                            , testAssertEq (validatorMetadataFingerprint raw) "aff4429945c3fa57"
                             , testAssertEq (validatorMetadataFingerprint (Compile.completeSpecEnvs raw)) (validatorMetadataFingerprint raw)
                             , testAssertTrue (all ((/= validatorMetadataFingerprint raw) . validatorMetadataFingerprint) (metadataMutations raw))
                             , testAssertTrue (all (\name -> case Map.lookup name (M.progFunctions raw) of
@@ -1761,7 +1777,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                                 Just fn -> let env = M.specEnv (M.fnSpec fn) in
                                     all (`Map.member` env) (Map.keys (M.progFunctions raw)) && not (Map.member "countParsed" env))
                                 ["containsValue", "commonContext", "driverReadAll"])
-                            , testAssertEq (Map.size (M.progFunctions raw)) 1051
+                            , testAssertEq (Map.size (M.progFunctions raw)) 1052
                             , testAssertEq (Map.keys (M.progFunctions checker)) (Map.keys (M.progFunctions (withoutGeneric raw)))
                             , testAssertTrue (all (`Map.member` M.progFunctions raw) declared)
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) declared)
@@ -1774,7 +1790,7 @@ testValidatorPackage = TestCase "validator package keeps bare helpers and refere
                             , testAssertEq [loadedFileStem file | file <- files, "JoinedFact" `elem` loadedDeclNames file] ["joins"]
                             , testAssertEq [loadedFileStem file | file <- files, "commonFacts" `elem` loadedDeclNames file] ["joins"]
                             , testAssertEq [loadedFileStem file | file <- files, "commonContext" `elem` loadedDeclNames file] ["joins"]
-                            , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 627
+                            , testAssertEq (sum [definitions stmt | file <- files, stmt <- fileBody (loadedParsed file)]) 628
                             , testAssertTrue (all (`Map.member` M.progFunctions checker) ["validateExecution", "noTemplates", "commonContext", "driverReadAll"])
                             , testAssertTrue (all (not . isInfixOf "validation$") (Map.keys (M.progFunctions checker)))
                             , testAssertEq (runNamedFunction trapped "noTemplates" []) (Ok (Just (MList [])))
@@ -2218,7 +2234,9 @@ phase2Rejects files needles = case phase2Load files of
         Error err -> check err
         Ok _ -> Just ("accepted instead of refusing " ++ show needles)
   where
-    check err = foldr (<>) Nothing [if needle `isInfixOf` err then Nothing else Just ("expected " ++ show needle ++ ", got: " ++ err) | needle <- needles]
+    check err
+        | noVerdict err = Just ("the elaborator gave no verdict: " ++ err)
+        | otherwise = foldr (<>) Nothing [if needle `isInfixOf` err then Nothing else Just ("expected " ++ show needle ++ ", got: " ++ err) | needle <- needles]
 
 phase2Identity :: String
 phase2Identity = "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { return x; };"
@@ -2403,6 +2421,11 @@ testPhase2Packages = TestList "testPhase2Packages"
     , testCase "inner function size parameters shadow outer size specialization" $ phase2CheckedShadow (phase2SizedReturnFiles "fn f<n>(a: &Array<Int, n>) -> Array<Int, n> { return array(n, 2); }; b = #[1, 2, 3, 4]; c = f(b); return array(n, size(c));" "return get(make(p, a), 0) + 38;")
     , testCase "inner local values shadow outer size specialization" $ phase2CheckedShadow (phase2SizedReturnFiles "fn f(x: Int) -> Int { n = 5; return n; }; return array(n, f(0));" "return get(make(p, a), 0) + 37;")
     , testCase "size-specialized array returns refuse a different concrete size" $ phase2Rejects (phase2SizedReturnFiles "return array(4, 1);" "return size(make(p, a));") ["in module vendor::api", "returned value:", "expected Array<Int, n>", "got Array<Int, 4>"]
+    , testCase "an imported bounded template specializes its size inside if and block expressions" $ phase2Runs (phase2SizedReturnFiles "return if n > 0 { let b: Array<Int, n> = array(n, 1); b } else { array(n, 2) };" "return size(make(p, a)) + 39;") 42
+    , testCase "a block-local let of the size parameter's name hides it only inside the block" $ phase2Runs (phase2SizedReturnFiles "m = { let n = 5; n }; return array(n, m);" "return get(make(p, a), 0) + 37;") 42
+    , testCase "a typed let in a block expression takes the instance type of a bound method's result" $ phase2Runs (phase2SizedReturnFiles "return { let b: Array<Int, n> = x.feed(); b };" "return get(make(p, a), 1) + 40;") 42
+    , testCase "a nested annotation in a block expression is checked against the bound where the template is defined" $ phase2Rejects (phase2SizedReturnFiles "return { let b: Array<Bool, n> = x.feed(); array(n, 1) };" "return size(make(p, a));") ["in module vendor::api", "Type error", "expected Array<Bool, n>", "got Array<Int, n>"]
+    , testCase "a constructor annotation of an if expression is checked where the template is defined" $ phase2Rejects (phase2SizedReturnFiles "let it: Item = if n > 0 { array(n, 1) } else { array(n, 2) }; return array(n, 1);" "return size(make(p, a));") ["in module vendor::api", "Type error", "expected vendor$api$api$Item", "got Array<Int, n>"]
     , testCase "repeated aliases and cross-module uses link one canonical instance" phase2Dedup
     , testCase "ghost-bearing cross-module templates deduplicate without losing proof context" $
         phase2DedupWith "trait Mark { }; impl Mark for Int { }; fn value<T: Mark>(x: T) -> T { affirm 1 = 1; return x; };"
@@ -2528,7 +2551,7 @@ phase2RoundTrip = case phase2Load phase2Private of
         Ok decoded -> testAssertEq decoded (compiledInterface modu)
 
 testModules :: Test
-testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testSnapshotToolFailure, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
+testModules = TestList "testModules" [testModuleLateDeclarations, testValidatorPackage, testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testSnapshotToolFailure, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleForwardCall, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
 
 -- The names a file declares at its top: types, variants, traits, functions (in impls too), axioms and proofs
 declarationNames :: [Statement] -> [Name]

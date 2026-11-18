@@ -217,6 +217,7 @@ fn payloadMatches(ts: &List<Token>, p: Int, nodes: &List<AstNode>, id: Int) -> B
     if (wordIs(ts, 0, "spec") && p = 6) || (wordIs(ts, 0, "loop") && p = 7) { return terminationPayload(nodes, id); };
     stmt = statementAt(nodes, id);
     if wordIs(ts, 0, "assumes") {
+        if stmt is AstStatement::Return { return true; };
         if !(stmt is AstStatement::ValidationStatement) { return false; };
         node = nodeAt(nodes, (stmt as AstStatement::ValidationStatement).v);
         return node is AstNode::Validation && (node as AstNode::Validation).value is AstValidation::Assume;

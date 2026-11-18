@@ -65,6 +65,17 @@ impl Clone for Reference { };
 struct Place { ok: Bool, root: String, steps: List<String> };
 impl Clone for Place { };
 
+// The reference facts a branch, a loop body or a call starts from: where each reference may point and the roots each
+// value may borrow from. They are saved and restored apart from the rest of the state, whose node arena is as large as
+// the whole input.
+struct Refs { aliasNames: List<String>, aliasPlaces: List<Place>, originNames: List<String>, originRoots: List<List<String>> };
+impl Clone for Refs { };
+
+// A node of the arena that checking replaced in place during a trial round of a loop, as it was before, so that the
+// round can give the arena back as it found it
+struct NodeRewrite { at: Int, was: AstNode };
+impl Clone for NodeRewrite { };
+
 // The functions of an impl with bounds as its checking goes: their names, values, signatures and how the checks against
 // the trait read them, and the functions that make those checks (the trait functions they check, values and names)
 struct BoundedParts { names: List<String>, values: List<Int>, sigs: List<FnSig>, defined: List<Defined>, wrapperOf: List<String>, wrapperValues: List<Int>, wrapperNames: List<String> };
@@ -89,6 +100,9 @@ struct St {
     wireVersion: Bool,
     wireProtocols: HashMap<String, List<String>>,
     wireOwnership: HashMap<String, List<String>>,
+    localNames: HashMap<String, Int>,
+    rewrittenNodes: List<NodeRewrite>,
+    trialRound: Bool,
     types: HashMap<String, List<String>>,
     ctors: HashMap<String, CtorInfo>,
     generics: HashMap<String, Generic>,
@@ -108,6 +122,7 @@ struct St {
     implDefined: List<Defined>,
     ghostCache: HashMap<String, Bool>,
     refCache: HashMap<String, Bool>,
+    storeCache: HashMap<String, Bool>,
     boundedParts: BoundedParts,
     big: List<Int>,
     undo: List<Int>,
@@ -186,6 +201,121 @@ struct St {
     forwardRep: String,
     status: Int,
     msg: String
+};
+// A copy of the checker state for a loop's speculative round. It is not St's Clone: that clone has to prove
+// `return = self` over every field at once, which no goal slice holds
+fn copyState(st: &St) -> St ~ {
+    return St {
+        nodes: clone(st.nodes),
+        tys: clone(st.tys),
+        subst: clone(st.subst),
+        sizeSubst: clone(st.sizeSubst),
+        next: clone(st.next),
+        wireVersion: clone(st.wireVersion),
+        wireProtocols: clone(st.wireProtocols),
+        wireOwnership: clone(st.wireOwnership),
+        localNames: clone(st.localNames),
+        rewrittenNodes: clone(st.rewrittenNodes),
+        trialRound: st.trialRound,
+        types: clone(st.types),
+        ctors: clone(st.ctors),
+        generics: clone(st.generics),
+        linearTypes: clone(st.linearTypes),
+        drops: clone(st.drops),
+        traits: clone(st.traits),
+        traitFns: clone(st.traitFns),
+        traitParams: clone(st.traitParams),
+        traitSelf: clone(st.traitSelf),
+        inTrait: clone(st.inTrait),
+        assoc: clone(st.assoc),
+        implArgs: clone(st.implArgs),
+        implBounds: clone(st.implBounds),
+        implBoundsNodes: clone(st.implBoundsNodes),
+        ownerViews: clone(st.ownerViews),
+        logging: clone(st.logging),
+        implDefined: clone(st.implDefined),
+        ghostCache: clone(st.ghostCache),
+        refCache: clone(st.refCache),
+        storeCache: clone(st.storeCache),
+        boundedParts: clone(st.boundedParts),
+        big: clone(st.big),
+        undo: clone(st.undo),
+        sizeUndo: clone(st.sizeUndo),
+        templates: clone(st.templates),
+        references: clone(st.references),
+        referenceList: clone(st.referenceList),
+        boundStubs: clone(st.boundStubs),
+        boundStubSigs: clone(st.boundStubSigs),
+        builtinStubs: clone(st.builtinStubs),
+        genericOut: clone(st.genericOut),
+        genericTypes: clone(st.genericTypes),
+        fns: clone(st.fns),
+        scopes: clone(st.scopes),
+        ret: clone(st.ret),
+        programReturn: clone(st.programReturn),
+        sizeScope: clone(st.sizeScope),
+        typeScope: clone(st.typeScope),
+        readOnly: clone(st.readOnly),
+        mutParams: clone(st.mutParams),
+        writes: clone(st.writes),
+        aliasNames: clone(st.aliasNames),
+        aliasPlaces: clone(st.aliasPlaces),
+        originNames: clone(st.originNames),
+        originRoots: clone(st.originRoots),
+        refResultNames: clone(st.refResultNames),
+        refResultParams: clone(st.refResultParams),
+        refResultFroms: clone(st.refResultFroms),
+        resultFrom: clone(st.resultFrom),
+        params: clone(st.params),
+        current: clone(st.current),
+        inGhost: clone(st.inGhost),
+        predeclared: clone(st.predeclared),
+        impls: clone(st.impls),
+        builtinNames: clone(st.builtinNames),
+        builtinValues: clone(st.builtinValues),
+        builtinSchemes: clone(st.builtinSchemes),
+        builtinKinds: clone(st.builtinKinds),
+        stdNames: clone(st.stdNames),
+        pointer: clone(st.pointer),
+        ghostNames: clone(st.ghostNames),
+        methods: clone(st.methods),
+        methodOf: clone(st.methodOf),
+        ty: clone(st.ty),
+        ok: clone(st.ok),
+        te: clone(st.te),
+        tes: clone(st.tes),
+        outs: clone(st.outs),
+        nid: clone(st.nid),
+        n: clone(st.n),
+        gen: clone(st.gen),
+        ctor: clone(st.ctor),
+        names: clone(st.names),
+        fnSig: clone(st.fnSig),
+        boundsOut: clone(st.boundsOut),
+        sigNode: clone(st.sigNode),
+        seen: clone(st.seen),
+        defQueue: clone(st.defQueue),
+        defChecking: clone(st.defChecking),
+        sequenceTraits: clone(st.sequenceTraits),
+        storageCopies: clone(st.storageCopies),
+        pack: clone(st.pack),
+        packType: clone(st.packType),
+        packLent: clone(st.packLent),
+        packBounds: clone(st.packBounds),
+        packIndexNames: clone(st.packIndexNames),
+        packIndexTypes: clone(st.packIndexTypes),
+        packElements: clone(st.packElements),
+        packElementTexts: clone(st.packElementTexts),
+        packCounter: clone(st.packCounter),
+        packCallOffset: clone(st.packCallOffset),
+        forwardNode: clone(st.forwardNode),
+        forwardUsed: clone(st.forwardUsed),
+        forwardLo: clone(st.forwardLo),
+        forwardHi: clone(st.forwardHi),
+        forwardRep: clone(st.forwardRep),
+        status: clone(st.status),
+        msg: clone(st.msg)
+    };
 };
 
 // A pack of types of a variadic function (`..T`) and its elements' types (`..T#0`, `..T@1`) keep the dots, which no other
@@ -288,7 +418,7 @@ fn teHeadAt(xs: &List<TE>, i: Int) -> Int ~ {
 };
 
 // What holdsGhost and holdsRef found no longer holds once a type, its constructors, a linear type or a drop is declared
-fn typesChanged(st: St) -> St ~ { return St { ghostCache: HashMap::new(), refCache: HashMap::new(), ..st }; };
+fn typesChanged(st: St) -> St ~ { return St { ghostCache: HashMap::new(), refCache: HashMap::new(), storeCache: HashMap::new(), ..st }; };
 
 fn firstText(xs: &List<String>) -> String ~ {
     if size(xs) = 0 { return ""; };
@@ -460,7 +590,7 @@ fn occurs(st: &St, v: Int, t: Int) -> Bool ~ {
 
 fn bindVar(st: St, n: Int, t: Int) -> St ~ {
     if st.logging { st = St { undo: push(st.undo, n), ..st }; };
-    return St { subst: st.subst.insert(n, t), ok: true, ..st };
+    return St { subst: st.subst.insert(n, t), storeCache: HashMap::new(), ok: true, ..st };
 };
 
 fn unifySize(st: St, a: Int, b: Int) -> St ~ {
@@ -472,12 +602,12 @@ fn unifySize(st: St, a: Int, b: Int) -> St ~ {
     if kx = 23 {
         nx = numberOf(st, x);
         if st.logging { st = St { sizeUndo: push(st.sizeUndo, nx), ..st }; };
-        return St { sizeSubst: st.sizeSubst.insert(nx, y), ok: true, ..st };
+        return St { sizeSubst: st.sizeSubst.insert(nx, y), storeCache: HashMap::new(), ok: true, ..st };
     };
     if ky = 23 {
         ny = numberOf(st, y);
         if st.logging { st = St { sizeUndo: push(st.sizeUndo, ny), ..st }; };
-        return St { sizeSubst: st.sizeSubst.insert(ny, x), ok: true, ..st };
+        return St { sizeSubst: st.sizeSubst.insert(ny, x), storeCache: HashMap::new(), ok: true, ..st };
     };
     same = sameTy(st, x, y);
     return St { ok: same, ..st };
@@ -794,7 +924,7 @@ fn undoTry(st: St, next: Int) -> St ~ {
     for n in &st.undo { subst = subst.remove(n); };
     sizes = st.sizeSubst;
     for n in &st.sizeUndo { sizes = sizes.remove(n); };
-    return St { subst: subst, sizeSubst: sizes, next: next, status: 0, msg: "", logging: false, undo: [], sizeUndo: [], ..st };
+    return St { subst: subst, sizeSubst: sizes, next: next, status: 0, msg: "", logging: false, undo: [], sizeUndo: [], storeCache: HashMap::new(), ..st };
 };
 
 fn endTry(st: St) -> St ~ { return St { logging: false, undo: [], sizeUndo: [], ..st }; };

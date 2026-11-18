@@ -187,7 +187,7 @@ fn localsOf(xs: &List<Key>) -> List<Int> ~ {
     return out;
 };
 fn operandLocal(o: &Operand) -> Int {
-    return match o { Operand::Copy { local: l } => l, Operand::Move { local: l } => l, Operand::Const { value: c } => 0 - 1 };
+    match o { Operand::Copy { local: l } => { return l; }, Operand::Move { local: l } => { return l; }, Operand::Const { value: c } => { return 0 - 1; } };
 };
 fn role(o: Operand, consume: Bool) -> RoleOperand { return RoleOperand { operand: o, consume: consume }; };
 fn roles(rv: &Rvalue) -> List<RoleOperand> ~ {

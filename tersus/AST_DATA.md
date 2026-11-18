@@ -228,6 +228,8 @@ reads. `lib/data/builtins.ast`
 is the table; `testAstData` checks that it is still `BuiltinTable`'s, and
 `stack run frontend-seed -- builtins lib/data/builtins.ast` writes it again.
 
+The expression tags also include `IfExpr CONDITION THEN ELSE`, `BlockExpr STATEMENTS RESULT` and `Ascribed EXPRESSION TYPE`. Conditional results remain syntax until CFG lowering; a block keeps its statements, lexical bindings and final result. An annotation is checked and erased during elaboration. The compiler's own code does not use these three tags (or `let`) yet: it is parsed by the pinned parser seed and elaborated by the pinned seed F0, which do not read them, so its text keeps to statement `match` and plain assignments until a seed that reads them is pinned. `Let NAME EXPRESSION` is both an explicit local declaration and the binding form used for patterns. The strict single-use and kind checks apply to every new child reference. Per-yield reference provenance is checker metadata, not another wire node; it is consumed during checking and the resulting syntax/type stream remains the lowering boundary.
+
 `Type TYPE` and `Size SIZE` use the exact MIR recursive codecs and Tersus
 `Type`/`Size` enums, including the MIR `TNamed`'s preserved argument tokens.
 The builtin's `Arg` is structural even when its type contains such a named
@@ -445,8 +447,10 @@ snapshot so its Unicode predicates match the serving Haskell compiler.
 `lib/mir/mir_reader/mir_reader.tersus`) for the whole language. It builds the arena of
 this document directly and writes `tersus-ast 1 parsed` for it, byte for byte
 as `AstData.writeParsed` writes the decoded syntax,
-including every desugaring (a `match` becomes an `if` chain of `Is` and
-`Project`, a `for` becomes a `while`, struct literals become `Ctor`
+including every desugaring (a statement `match` becomes an `if` chain of `Is` and
+`Project`; an expression `match` keeps scoped bindings and a yielding `IfExpr`
+chain, and `if let` uses the same projections in its success branch; a `for`
+becomes a `while`, struct literals become `Ctor`
 applications, a standard `Eq` or `Clone` impl is written out, and so on).
 Generated Eq/Clone text consumes owned field and variant accumulators; the
 shared `catStrings` helper still borrows both arguments.

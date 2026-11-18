@@ -24,6 +24,8 @@ testMirEvalLists = TestList "testMirEvalLists" $
     , testCase "distinct references returned through nested calls keep their order" returnedReferences
     , runs "concrete generic fields keep reference roots across a call" "struct Wrap<T> { value: T }; fn read(w: &Wrap<&Int>) -> Int { r = w.value; return *r; }; x = 21; w = Wrap<&Int> { value: &x }; return read(w);" (Eval.MInt 21)
     , runs "a recursive enum still finds references after its recursive edge" "enum Node { Next { child: Box<Node> }, Ref { value: &Int } }; fn read(node: Node) -> Int { if node is Node::Ref { r = (node as Node::Ref).value; return *r; }; return 0; }; x = 31; node = Node::Ref { value: &x }; return read(node);" (Eval.MInt 31)
+    , runs "a reference a call stores through a given reference names the caller's place" "struct H { p: &Int }; struct W { r: &mut H }; fn f(w: W, b: &Int) -> Int { *w.r = H { p: &b }; return 0; }; a = 1; b = 2; c = 3; h = H { p: &a }; x = f(W { r: &mut h }, b); y = f(W { r: &mut h }, c); return *h.p;" (Eval.MInt 3)
+    , runs "a list reference a call stores through a given reference names the caller's place" "struct H { p: &List<Int> }; struct W { r: &mut H }; fn f(w: W, b: &List<Int>) -> Int { *w.r = H { p: &b }; return 0; }; a = [1]; b = [2]; c = [3, 4]; h = H { p: &a }; x = f(W { r: &mut h }, b); y = f(W { r: &mut h }, c); return size(*h.p);" (Eval.MInt 2)
     , runs "repeated array elements have independent updates" "xs = array(3, [1, 2]); ys = set(xs, 1, [9]); return size(get(ys, 0)) * 100 + first(get(ys, 1)) * 10 + size(get(ys, 2));" (Eval.MInt 292)
     ]
     ++ [ fails name source expected

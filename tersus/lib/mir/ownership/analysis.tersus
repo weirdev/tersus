@@ -85,6 +85,23 @@ fn placeOf(f: &Function, names: &List<FieldName>, loans: &List<Loan>, o: &Operan
     l = operandLocal(o); if l < 0 { return []; }; return borrowRoots(f, names, loans, l, steps);
 };
 fn loanStatement(f: &Function, kinds: &LocalKinds, loans: List<Loan>, st: &Statement) -> List<Loan> ~ {
+    if st is Statement::AssignRef {
+        a = st as Statement::AssignRef;
+        incoming = [];
+        for ro in roles(a.rv) {
+            source = operandLocal(ro.operand);
+            if source >= 0 { incoming = keySetUnion(incoming, loanLookup(loans, source).refs); };
+        };
+        if size(incoming) = 0 { return loans; };
+        destinations = borrowRoots(f, kinds.names, loans, a.local, a.steps);
+        for key in destinations {
+            if intSetHas(kinds.references, key.local) {
+                old = loanLookup(loans, key.local);
+                loans = loanPut(loans, Loan { refs: keySetUnion(old.refs, incoming), ..old });
+            };
+        };
+        return loans;
+    };
     if st is Statement::Assign { return loanRvalue(f, kinds, loans, (st as Statement::Assign).local, (st as Statement::Assign).rv, false); };
     if st is Statement::Peek { return loanRvalue(f, kinds, loans, (st as Statement::Peek).local, (st as Statement::Peek).rv, true); };
     return loans;

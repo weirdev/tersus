@@ -25,9 +25,9 @@ fn predeclareOwn(st: St, stmts: &List<Int>) -> St ~ {
                 fieldTypes = clone(st.te.types);
                 names = fieldNames(&st.nodes, fs);
                 if size(params) = 0 {
-                    st = St { types: st.types.insert(clone(name), push([], clone(name))), ctors: st.ctors.insert(clone(name), CtorInfo { owner: clone(name), names: names, types: fieldTypes }), ..st };
+                    st = St { types: st.types.insert(clone(name), push([], clone(name))), ctors: st.ctors.insert(clone(name), CtorInfo { owner: clone(name), names: names, types: fieldTypes }), storeCache: HashMap::new(), ..st };
                 } else {
-                    st = St { generics: st.generics.insert(clone(name), Generic { params: params, names: names, types: fieldTypes }), ..st };
+                    st = St { generics: st.generics.insert(clone(name), Generic { params: params, names: names, types: fieldTypes }), storeCache: HashMap::new(), ..st };
                 };
                 st = St { predeclared: st.predeclared.insert(name), ..st };
         };
@@ -55,7 +55,7 @@ fn predeclareOwn(st: St, stmts: &List<Int>) -> St ~ {
                     variantName = nameText(&st.nodes, variant.n);
                     names = fieldNames(&st.nodes, variant.fs);
                     types = clone(st.te.types);
-                    st = St { ctors: st.ctors.insert(variantName, CtorInfo { owner: clone(name), names: names, types: types }), ..st };
+                    st = St { ctors: st.ctors.insert(variantName, CtorInfo { owner: clone(name), names: names, types: types }), storeCache: HashMap::new(), ..st };
                     k = k - 1;
                 };
                 st = St { types: st.types.insert(clone(name), variantNames), predeclared: st.predeclared.insert(name), ..st };

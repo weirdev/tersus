@@ -76,7 +76,7 @@ struct Builder {
     refTargets: List<RefTarget>, hasReturns: Bool, returns: Int, params: List<Int>, locals: List<LDecl>, nextLocal: Int,
     blocks: List<LBlock>, nextBlock: Int, hasOpen: Bool, openId: Int, openStmts: List<Int>,
     scopeNames: List<String>, scopeBinds: List<Binding>, scopeMarks: List<Int>, loops: List<LoopRec>,
-    hasPlace: Bool, line: Int, col: Int, packLoops: List<PackLoopRec>
+    hasPlace: Bool, line: Int, col: Int, packLoops: List<PackLoopRec>, lent: List<String>
 };
 impl Clone for Builder { };
 
@@ -124,7 +124,7 @@ struct LowSt {
     elab: List<Int>, nextElab: Int,
     stmts: List<Stmt>,
     types: HashMap<String, TDecl>, functions: HashMap<String, LFn>, fnKeys: HashSet<String>, names: HashSet<String>,
-    globals: HashMap<String, String>, globalsVersion: Int, assigned: HashSet<String>,
+    globals: HashMap<String, String>, globalsVersion: Int, assigned: HashSet<String>, topAssigned: HashSet<String>,
     generics: HashMap<String, GenericRec>, invariants: HashMap<String, Int>,
     bounded: HashMap<String, BoundedRec>, instances: HashMap<String, String>, packLoops: HashMap<String, List<PackLoopRec>>,
     copies: HashSet<String>, linears: HashSet<String>, externs: HashSet<String>, drops: HashSet<String>,
@@ -137,7 +137,9 @@ struct LowSt {
     bRefTargets: List<RefTarget>, bHasReturns: Bool, bReturns: Int, bParams: List<Int>, bLocals: List<LDecl>, bNextLocal: Int,
     bBlocks: List<LBlock>, bNextBlock: Int, bHasOpen: Bool, bOpenId: Int, bOpenStmts: List<Int>,
     bScopeNames: List<String>, bScopeBinds: List<Binding>, bScopeMarks: List<Int>, bLoops: List<LoopRec>,
-    bHasPlace: Bool, bLine: Int, bCol: Int, bPackLoops: List<PackLoopRec>,
+    bHasPlace: Bool, bLine: Int, bCol: Int, bPackLoops: List<PackLoopRec>, bLent: List<String>,
+    globalTys: HashMap<String, Int>, typeFields: HashMap<String, List<Int>>, variantFields: HashMap<String, List<Int>>, genericFields: HashMap<String, List<Int>>,
+    tyList: List<Int>, yes: Bool,
     ty: Int, op: Op, pend: Pend, root: Int, steps: List<Step>, name: String, id: Int, sig: Sig
 };
 
@@ -154,14 +156,14 @@ fn swapBuilder(ls: LowSt, b: Builder) -> Swapped ~ {
         params: ls.bParams, locals: ls.bLocals, nextLocal: ls.bNextLocal, blocks: ls.bBlocks, nextBlock: ls.bNextBlock,
         hasOpen: ls.bHasOpen, openId: ls.bOpenId, openStmts: ls.bOpenStmts, scopeNames: ls.bScopeNames,
         scopeBinds: ls.bScopeBinds, scopeMarks: ls.bScopeMarks, loops: ls.bLoops, hasPlace: ls.bHasPlace,
-        line: ls.bLine, col: ls.bCol, packLoops: ls.bPackLoops
+        line: ls.bLine, col: ls.bCol, packLoops: ls.bPackLoops, lent: ls.bLent
     };
     next = LowSt {
         bName: b.name, bIsMain: b.isMain, bSizes: b.sizes, bTypeParams: b.typeParams, bBorrowed: b.borrowed, bMutBorrowed: b.mutBorrowed,
         bRefTargets: b.refTargets, bHasReturns: b.hasReturns, bReturns: b.returns, bParams: b.params, bLocals: b.locals,
         bNextLocal: b.nextLocal, bBlocks: b.blocks, bNextBlock: b.nextBlock, bHasOpen: b.hasOpen, bOpenId: b.openId,
         bOpenStmts: b.openStmts, bScopeNames: b.scopeNames, bScopeBinds: b.scopeBinds, bScopeMarks: b.scopeMarks, bLoops: b.loops,
-        bHasPlace: b.hasPlace, bLine: b.line, bCol: b.col, bPackLoops: b.packLoops, visLow: 0, ..ls
+        bHasPlace: b.hasPlace, bLine: b.line, bCol: b.col, bPackLoops: b.packLoops, bLent: b.lent, visLow: 0, ..ls
     };
     return Swapped { ls: next, b: old };
 };
@@ -179,7 +181,7 @@ fn newBuilder(name: String, isMain: Bool, hasReturns: Bool, returns: Int) -> Bui
         name: name, isMain: isMain, sizes: [], typeParams: [], borrowed: [], mutBorrowed: [], refTargets: [],
         hasReturns: hasReturns, returns: returns, params: [], locals: locals, nextLocal: 1, blocks: [], nextBlock: 1,
         hasOpen: true, openId: 0, openStmts: [], scopeNames: [], scopeBinds: [], scopeMarks: push([], 0), loops: [],
-        hasPlace: false, line: 0, col: 0, packLoops: []
+        hasPlace: false, line: 0, col: 0, packLoops: [], lent: []
     };
 };
 
@@ -187,7 +189,7 @@ fn newLowSt(pbase: Int) -> LowSt ~ {
     return LowSt {
         ok: true, msg: "", listName: "List", boxName: "Box", copyName: "Copy", tys: [], tyIndex: HashMap::new(), defaulted: HashMap::new(), elab: [], nextElab: 0,
         stmts: [], types: HashMap::new(), functions: HashMap::new(), fnKeys: HashSet::new(), names: HashSet::new().insert("main"),
-        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
+        globals: HashMap::new(), globalsVersion: 0, assigned: HashSet::new(), topAssigned: HashSet::new(), generics: HashMap::new(), invariants: HashMap::new(), bounded: HashMap::new(), instances: HashMap::new(), packLoops: HashMap::new(),
         copies: HashSet::new(), linears: HashSet::new(), externs: HashSet::new(), drops: HashSet::new(),
         prereg: HashMap::new(), stubs: HashSet::new(), pn: [], pbase: pbase,
         envs: [], contents: [], contentKeys: HashMap::new(), contentTexts: HashMap::new(),
@@ -195,7 +197,9 @@ fn newLowSt(pbase: Int) -> LowSt ~ {
         bName: "main", bIsMain: true, bSizes: [], bTypeParams: [], bBorrowed: [], bMutBorrowed: [], bRefTargets: [],
         bHasReturns: false, bReturns: 0 - 1, bParams: [], bLocals: [], bNextLocal: 1, bBlocks: [], bNextBlock: 1,
         bHasOpen: true, bOpenId: 0, bOpenStmts: [], bScopeNames: [], bScopeBinds: [], bScopeMarks: push([], 0), bLoops: [],
-        bHasPlace: false, bLine: 0, bCol: 0, bPackLoops: [],
+        bHasPlace: false, bLine: 0, bCol: 0, bPackLoops: [], bLent: [],
+        globalTys: HashMap::new(), typeFields: HashMap::new(), variantFields: HashMap::new(), genericFields: HashMap::new(),
+        tyList: [], yes: false,
         ty: 0 - 1, op: noOp(), pend: noPend(), root: 0 - 1, steps: [], name: "", id: 0 - 1,
         sig: Sig { ptys: [], rty: 0 - 1, sizes: [], types: [], writes: [], froms: [] }
     };

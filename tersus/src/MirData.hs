@@ -459,7 +459,7 @@ loweredLines lowered = do
     invariants <- mapM invariantLine (Map.toList (progInvariants program))
     functions <- mapM (functionLines3 shared "function") (Map.elems (progFunctions program))
     mainLines <- functionLines3 shared "main" (progMain program)
-    assumes <- mapM (payload . S.ValidationStatement . S.Assume) (lowAssumes lowered)
+    assumes <- mapM (payload . either (S.ValidationStatement . S.Assume) S.Return) (lowAssumes lowered)
     pure
         ( "tersus-mir 3"
             : concatMap typeLines (Map.toList (progTypes program))
@@ -713,7 +713,8 @@ loweredFrom payloads records0 =
         | sort uses /= [0 .. Map.size payloads - 1] = Error "a payload is not referred to"
         | otherwise = Ok ()
     assumeOf stmt = case stmt of
-        S.ValidationStatement (S.Assume p) -> Just p
+        S.ValidationStatement (S.Assume p) -> Just (Left p)
+        S.Return call -> Just (Right call)
         _ -> Nothing
 
 recordsWhile :: ([Token] -> Maybe (Result a String)) -> [[Token]] -> Result ([a], [[Token]]) String

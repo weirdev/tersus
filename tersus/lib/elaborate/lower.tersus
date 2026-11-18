@@ -4,8 +4,8 @@ import elaborate::loweriface { stubFunction };
 import elaborate::records { codecSizeAt, codecTypeAt, listItems, nameText, nativeFn, nodeIn, signatureOf };
 import elaborate::state { intText };
 import elaborate::lowerstate { PackLoopRec, simpleType, lwMalformed, Swapped, swapBuilder, Binding, GenericRec, LBlock, LDecl, LFn, LoopRec, LowSt, BoundedRec, Rv, Stmt, TDecl, Term, argOf, claim, defaultTy, forNameOf, fromCodecTy, functionType, hasInt, hasText, intAt, isMutRefTy, isRefTy, lfail, lwCat, lwCat3, lwInstanceText, lwKind, lwBaseName, lwSort, lwTextAt, newBuilder, quote, renderTy, lwSizeTokens, lwSp, tyOf, tyText, typeNameOf, unrefTy, Sig };
-import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, tempLocal, validationReadsPack, assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, forgetRecorded, forgetRefTarget, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, opText, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv };
-import elaborate::lowerexpr { finishInto, lowerCondition, lowerLast, lowerOperand, rvPend };
+import elaborate::lowerbuild { binaryRv, copyOp, listRv, opText, packReadMark, tempLocal, validationReadsPack, assignStmt, bindName, bodyOf, borrowRv, constOp, definedFunction, emitAssign, emitStmt, emptyBlockPayload, enterScope, exprAt, fnConst, ghostHere, ghostStmt, gotoTerm, isFunct, isVarExpr, leaveScope, localBinding, lookupBinding, namesOf, newBlock, newLocal, openBlock, positionStmt, returnTerm, rvText, setDecl, setGlobal, stepsText, stmtAt, terminate, terminationPayload, textRv, uniqueName, unreachableTerm, useRv, valOf, validationsPayload, varNameOf, visibleEnv, forgetRecorded, forgetRefTarget };
+import elaborate::lowerexpr { finishInto, lentNames, lowerCondition, lowerLast, lowerOperand, rvPend };
 import elaborate::lowerplace { lowerDerefPlace };
 
 // The lowering of a checked module to the MIR: control flow becomes blocks that jump, nested
@@ -72,6 +72,16 @@ fn skipExpr(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
     ls = claim(ls);
     if !ls.ok { return ls; };
     x = exprAt(src, e);
+    if x is AstExpression::IfExpr {
+        branch = x as AstExpression::IfExpr;
+        return skipExpr(skipExpr(skipExpr(ls, src, branch.c), src, branch.a), src, branch.b);
+    };
+    if x is AstExpression::BlockExpr {
+        block = x as AstExpression::BlockExpr;
+        ls = skipStatements(ls, src, listItems(src, block.xs));
+        return skipExpr(ls, src, block.e);
+    };
+    if x is AstExpression::Ascribed { return lfail(ls, "An annotated expression reached the lowering"); };
     if !(x is AstExpression::F) { return ls; };
     funct = (x as AstExpression::F).f;
     headExpr = exprAt(src, funct);
@@ -187,16 +197,18 @@ fn lowerMarker(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
 fn fieldsTokens(ls: LowSt, src: &List<AstNode>, fs: Int) -> LowSt ~ {
     items = listItems(src, fs);
     text = intText(size(items));
+    tys = [];
     for f in &items {
         node = nodeIn(src, f);
         if node is AstNode::Field {
             fv = (node as AstNode::Field).value;
             tyc = codecTypeAt(src, fv.ty);
             ls = fromCodecTy(ls, &tyc);
+            tys = push(tys, ls.ty);
             text = lwSp(lwSp(text, quote(nameText(src, fv.n))), tyText(&ls, ls.ty));
         };
     };
-    return LowSt { name: text, ..ls };
+    return LowSt { name: text, tyList: tys, ..ls };
 };
 
 fn lowerTypeDef(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
@@ -212,6 +224,7 @@ fn lowerTypeDef(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
                 vv = (node as AstNode::Variant).value;
                 vname = nameText(src, vv.n);
                 ls = fieldsTokens(ls, src, vv.fs);
+                ls = variantMemberTypes(ls, &name, &vname);
                 line = lwSp(lwSp(line, quote(&vname)), &ls.name);
                 names = push(names, vname);
             };
@@ -224,6 +237,7 @@ fn lowerTypeDef(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
     sizes = namesOf(src, d.ps);
     ls = fieldsTokens(ls, src, d.fs);
     fields = clone(ls.name);
+    ls = structFieldTypes(ls, &name, size(sizes) > 0);
     if size(sizes) > 0 {
         line = lwSp(lwCat("generic ", quote(&name)), intText(size(sizes)));
         for s in &sizes { line = lwSp(line, quote(s)); };
@@ -233,6 +247,33 @@ fn lowerTypeDef(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
         ls = addType(ls, clone(name), TDecl { isStruct: true, fieldNames: [], fieldTypes: [], variants: [], line: lwSp(lwSp("struct", quote(&name)), &fields) });
     };
     return withInvariant(ls, src, name, d.vs);
+};
+
+// What the fields of a struct (ls.tyList) are, by its name, or by the base of its instances for one with sizes
+fn structFieldTypes(ls: LowSt, name: &String, withSizes: Bool) -> LowSt ~ {
+    tys = clone(ls.tyList);
+    if withSizes {
+        generics = ls.genericFields.insert(clone(name), tys);
+        return LowSt { genericFields: generics, ..ls };
+    };
+    fields = ls.typeFields.insert(clone(name), tys);
+    return LowSt { typeFields: fields, ..ls };
+};
+
+// What a variant of an enum holds (ls.tyList), by the variant's name and by its name under the enum's, and among
+// everything a value of the enum may hold
+fn variantMemberTypes(ls: LowSt, owner: &String, variant: &String) -> LowSt ~ {
+    tys = clone(ls.tyList);
+    whole = HashMap::lookup(&ls.typeFields, owner, []);
+    for t in &tys { whole = push(whole, t); };
+    alone = HashMap::lookup(&ls.variantFields, variant, []);
+    for t in &tys { alone = push(alone, t); };
+    qualified = lwCat3(clone(owner), "::", variant);
+    under = HashMap::lookup(&ls.variantFields, &qualified, []);
+    for t in &tys { under = push(under, t); };
+    variants = ls.variantFields.insert(clone(variant), alone).insert(qualified, under);
+    fields = ls.typeFields.insert(clone(owner), whole);
+    return LowSt { typeFields: fields, variantFields: variants, ..ls };
 };
 
 fn addType(ls: LowSt, name: String, d: TDecl) -> LowSt ~ {
@@ -275,26 +316,7 @@ fn lowerControl(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt ~ {
 };
 
 fn lowerReturn(ls: LowSt, src: &List<AstNode>, e: Int) -> LowSt ~ {
-    // (a reference parameter that is returned is returned as a reference to its place)
-    returns = ls.bReturns;
-    k = 0 - 1;
-    if ls.bHasReturns { k = lwKind(&ls, returns); };
-    viaRef = false;
-    if (k = 10 || k = 11) && isVarExpr(src, e) {
-        ls = claim(ls);
-        var = varNameOf(src, e);
-        found = lookupBinding(&ls, &var);
-        if found.found && found.b.isLocal {
-            l = found.b.local;
-            lent = (k = 10 && (hasInt(&ls.bBorrowed, l) || hasInt(&ls.bMutBorrowed, l))) || (k = 11 && hasInt(&ls.bMutBorrowed, l));
-            if lent {
-                rv = borrowRv(l, [], k = 11);
-                ls = LowSt { pend: rvPend(rv), ty: returns, ..ls };
-                viaRef = true;
-            };
-        };
-    };
-    if !viaRef { ls = lowerLast(ls, src, e); };
+    ls = lowerLast(ls, src, e);
     if !ls.ok { return ls; };
     pend = clone(ls.pend);
     t = ls.ty;
@@ -315,7 +337,7 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
     ls = newBlock(ls);
     joinB = ls.id;
     ls = lowerCondition(ls, src, cond, thenB, elseB);
-    before = clone(ls.bRefTargets);
+    targetsBefore = clone(ls.bRefTargets);
     ls = openBlock(ls, thenB);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &yes);
@@ -323,7 +345,7 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
     thenOpen = ls.bHasOpen;
     if thenOpen { ls = terminate(ls, gotoTerm(joinB)); };
     afterThen = clone(ls.bRefTargets);
-    ls = LowSt { bRefTargets: clone(before), ..ls };
+    ls = LowSt { bRefTargets: clone(targetsBefore), ..ls };
     ls = openBlock(ls, elseB);
     ls = enterScope(ls);
     ls = lowerStatements(ls, src, &no);
@@ -332,8 +354,8 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
     if elseOpen { ls = terminate(ls, gotoTerm(joinB)); };
     // (a borrow made in one branch is not what the local holds where the branches meet)
     afterElse = clone(ls.bRefTargets);
-    joined = size(before);
-    ls = LowSt { bRefTargets: before, ..ls };
+    joined = size(targetsBefore);
+    ls = LowSt { bRefTargets: targetsBefore, ..ls };
     ls = forgetRecorded(ls, &afterThen, joined);
     ls = forgetRecorded(ls, &afterElse, joined);
     // (when both branches returned nothing reaches the join)
@@ -342,7 +364,7 @@ fn lowerIf(ls: LowSt, src: &List<AstNode>, cond: Int, yes: List<Int>, no: List<I
 };
 
 fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: List<Int>) -> LowSt ~ {
-    ls = forgetAssigned(ls, src, &body);
+    ls = forgetAssigned(ls, src, cond, &body);
     entry = clone(ls.bRefTargets);
     ls = newBlock(ls);
     header = ls.id;
@@ -370,32 +392,16 @@ fn lowerWhile(ls: LowSt, src: &List<AstNode>, cond: Int, vs: Int, t: Int, body: 
     return openBlock(ls, exit);
 };
 
-// (a local the body of a loop assigns may hold something else at the loop's head and after it)
-fn forgetAssigned(ls: LowSt, src: &List<AstNode>, body: &List<Int>) -> LowSt ~ {
-    for name in assignedIn(src, body, []) {
+// (a local the body or the condition of a loop assigns, a statement's or an expression's, may hold something else at
+// the loop's head and after it)
+fn forgetAssigned(ls: LowSt, src: &List<AstNode>, cond: Int, body: &List<Int>) -> LowSt ~ {
+    start = [];
+    if cond >= 0 { start = expressionNamesAssigned(src, cond, true, []); };
+    for name in statementNamesAssigned(src, body, true, start) {
         found = lookupBinding(&ls, &name);
         if found.found && found.b.isLocal { ls = forgetRefTarget(ls, found.b.local); };
     };
     return ls;
-};
-
-fn assignedIn(src: &List<AstNode>, stmts: &List<Int>, out: List<String>) -> List<String> ~ {
-    for s in stmts {
-        if nodeIn(src, s) is AstNode::Statement {
-            st = stmtAt(src, s);
-            if st is AstStatement::Assign { out = push(out, nameText(src, (st as AstStatement::Assign).n)); };
-            if st is AstStatement::If {
-                yes = listItems(src, (st as AstStatement::If).a);
-                no = listItems(src, (st as AstStatement::If).b);
-                out = assignedIn(src, &yes, out);
-                out = assignedIn(src, &no, out);
-            };
-            if st is AstStatement::While { inner = listItems(src, (st as AstStatement::While).xs); out = assignedIn(src, &inner, out); };
-            if st is AstStatement::Block { inner = listItems(src, (st as AstStatement::Block).xs); out = assignedIn(src, &inner, out); };
-            if st is AstStatement::PackLoop { inner = listItems(src, (st as AstStatement::PackLoop).xs); out = assignedIn(src, &inner, out); };
-        };
-    };
-    return out;
 };
 
 // A loop over the pack of a variadic function, which no copy keeps: each unrolls it (MirPacks). It is
@@ -436,7 +442,7 @@ fn lowerPackLoop(ls: LowSt, src: &List<AstNode>, indexName: String, elementName:
         takeRv = useRv(copyOp(packLocal));
         ls = emitAssign(ls, taken, &takeRv);
     };
-    ls = forgetAssigned(ls, src, &body);
+    ls = forgetAssigned(ls, src, 0 - 1, &body);
     entry = clone(ls.bRefTargets);
     ls = newBlock(ls);
     header = ls.id;
@@ -520,6 +526,18 @@ fn readSig(ls: LowSt, src: &List<AstNode>, sigNode: Int) -> LowSt ~ {
     return LowSt { sig: Sig { ptys: ptys, rty: rty, sizes: namesOf(src, sig.ss), types: namesOf(src, sig.ps), writes: namesOf(src, sig.ws), froms: namesOf(src, sig.fs) }, ..ls };
 };
 
+// The type of a function with this signature (ls.ty)
+fn sigType(ls: LowSt, src: &List<AstNode>, sigNode: Int) -> LowSt ~ {
+    ls = readSig(ls, src, sigNode);
+    sig = clone(ls.sig);
+    return functionType(ls, clone(sig.sizes), clone(sig.types), clone(sig.ptys), sig.rty);
+};
+
+fn setGlobalTy(ls: LowSt, var: String, t: Int) -> LowSt ~ {
+    tys = ls.globalTys.insert(var, t);
+    return LowSt { globalTys: tys, ..ls };
+};
+
 struct FnParts { params: Int, ins: Int, outs: Int, sig: Int, term: Int, stmts: Int };
 
 fn fnParts(src: &List<AstNode>, v: Int) -> FnParts ~ {
@@ -561,7 +579,10 @@ fn defineFunction(ls: LowSt, src: &List<AstNode>, var: String, v: Int) -> LowSt 
     };
     // (a function with sizes is called by name: it has no value to put in a local)
     assigned = HashSet::contains(&ls.assigned, &var) && size(sig.sizes) = 0;
-    if atTop { ls = setGlobal(ls, clone(var), clone(name)); };
+    if atTop {
+        ls = setGlobal(ls, clone(var), clone(name));
+        ls = setGlobalTy(ls, clone(var), fnType0);
+    };
     top = "false";
     if atTop { top = "true"; };
     ls = ghostHere(ls, 3, 0 - 1, lwSp(lwSp(quote(&name), quote(&var)), top));
@@ -576,7 +597,7 @@ fn defineFunction(ls: LowSt, src: &List<AstNode>, var: String, v: Int) -> LowSt 
     };
     Swapped { ls: inner, b: outer } = swapBuilder(ls, newBuilder(clone(name), false, true, sig.rty));
     ls = inner;
-    ls = LowSt { bSizes: clone(sig.sizes), bTypeParams: clone(sig.types), ..ls };
+    ls = LowSt { bSizes: clone(sig.sizes), bTypeParams: clone(sig.types), bLent: lentNames(src, listItems(src, parts.stmts)), ..ls };
     ls = lowerParams(ls, namesOf(src, parts.params), &sig);
     ls = visibleEnv(ls);
     env = ls.id;
@@ -740,34 +761,86 @@ fn sortLoops(loops: List<LoopRec>) -> List<LoopRec> ~ {
 
 // The variables that statements assign (or bind with let), other than the names of the functions they define
 fn assignedNames(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
+    assigned = ls.assigned;
+    for name in statementNamesAssigned(src, stmts, true, []) { assigned = assigned.insert(clone(name)); };
+    ls = LowSt { assigned: assigned, ..ls };
+    // (a local of a function's body is not the top's variable: it does not stop a call before the definition finding the
+    // function at the top)
+    top = ls.topAssigned;
+    for name in statementNamesAssigned(src, stmts, false, []) { top = top.insert(clone(name)); };
+    return LowSt { topAssigned: top, ..ls };
+};
+
+// The variables statements assign or bind, also in their expressions' blocks, other than the names of the functions
+// they define (and, with bodies, also in those functions' bodies)
+fn statementNamesAssigned(src: &List<AstNode>, stmts: &List<Int>, bodies: Bool, out: List<String>) -> List<String> ~ {
     for s in stmts {
         stmt = stmtAt(src, s);
         f = definedFunction(src, clone(stmt));
-        if f >= 0 { ls = assignedNames(ls, src, bodyOf(src, f)); } else {
+        if f >= 0 {
+            if bodies { out = statementNamesAssigned(src, bodyOf(src, f), bodies, out); };
+        } else {
             if stmt is AstStatement::Assign {
-                a = ls.assigned.insert(nameText(src, (stmt as AstStatement::Assign).n));
-                ls = LowSt { assigned: a, ..ls };
+                a = stmt as AstStatement::Assign;
+                out = expressionNamesAssigned(src, a.e, bodies, push(out, nameText(src, a.n)));
             };
             if stmt is AstStatement::Let {
-                a = ls.assigned.insert(nameText(src, (stmt as AstStatement::Let).n));
-                ls = LowSt { assigned: a, ..ls };
+                l = stmt as AstStatement::Let;
+                out = expressionNamesAssigned(src, l.e, bodies, push(out, nameText(src, l.n)));
             };
-            if stmt is AstStatement::Block { ls = assignedNames(ls, src, listItems(src, (stmt as AstStatement::Block).xs)); };
+            if stmt is AstStatement::AssignDeref {
+                d = stmt as AstStatement::AssignDeref;
+                out = expressionNamesAssigned(src, d.b, bodies, expressionNamesAssigned(src, d.a, bodies, out));
+            };
+            if stmt is AstStatement::Return { out = expressionNamesAssigned(src, (stmt as AstStatement::Return).e, bodies, out); };
+            if stmt is AstStatement::Block { out = statementNamesAssigned(src, listItems(src, (stmt as AstStatement::Block).xs), bodies, out); };
             if stmt is AstStatement::If {
                 x = stmt as AstStatement::If;
-                ls = assignedNames(ls, src, listItems(src, x.a));
-                ls = assignedNames(ls, src, listItems(src, x.b));
+                out = expressionNamesAssigned(src, x.e, bodies, out);
+                out = statementNamesAssigned(src, listItems(src, x.a), bodies, out);
+                out = statementNamesAssigned(src, listItems(src, x.b), bodies, out);
             };
-            if stmt is AstStatement::While { ls = assignedNames(ls, src, listItems(src, (stmt as AstStatement::While).xs)); };
+            if stmt is AstStatement::While {
+                w = stmt as AstStatement::While;
+                out = expressionNamesAssigned(src, w.e, bodies, out);
+                out = statementNamesAssigned(src, listItems(src, w.xs), bodies, out);
+            };
             if stmt is AstStatement::PackLoop {
                 pl = stmt as AstStatement::PackLoop;
-                a = ls.assigned.insert(nameText(src, pl.i)).insert(nameText(src, pl.a));
-                ls = LowSt { assigned: a, ..ls };
-                ls = assignedNames(ls, src, listItems(src, pl.xs));
+                out = push(push(out, nameText(src, pl.i)), nameText(src, pl.a));
+                out = statementNamesAssigned(src, listItems(src, pl.xs), bodies, out);
             };
         };
     };
-    return ls;
+    return out;
+};
+
+fn expressionNamesAssigned(src: &List<AstNode>, e: Int, bodies: Bool, out: List<String>) -> List<String> ~ {
+    if !(nodeIn(src, e) is AstNode::Expression) { return out; };
+    x = exprAt(src, e);
+    if x is AstExpression::F {
+        call = x as AstExpression::F;
+        out = expressionNamesAssigned(src, call.f, bodies, out);
+        for a in listItems(src, call.xs) { out = expressionNamesAssigned(src, a, bodies, out); };
+        return out;
+    };
+    if x is AstExpression::IfExpr {
+        branch = x as AstExpression::IfExpr;
+        return expressionNamesAssigned(src, branch.b, bodies, expressionNamesAssigned(src, branch.a, bodies, expressionNamesAssigned(src, branch.c, bodies, out)));
+    };
+    if x is AstExpression::BlockExpr {
+        block = x as AstExpression::BlockExpr;
+        return expressionNamesAssigned(src, block.e, bodies, statementNamesAssigned(src, listItems(src, block.xs), bodies, out));
+    };
+    if x is AstExpression::Ascribed { return expressionNamesAssigned(src, (x as AstExpression::Ascribed).e, bodies, out); };
+    return out;
+};
+
+// The parameter types of a function a statement defines (ls.tyList)
+fn definedParamTypes(ls: LowSt, src: &List<AstNode>, f: Int) -> LowSt ~ {
+    ls = readSig(ls, src, fnParts(src, f).sig);
+    params = clone(ls.sig.ptys);
+    return LowSt { tyList: params, ..ls };
 };
 
 // Every function defined at the top gets its name before any body is lowered, in the order of the definitions
@@ -793,7 +866,7 @@ fn registerOne(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
     var = nameText(src, (stmt as AstStatement::Assign).n);
     parts = fnParts(src, f);
     sizes = namesOf(src, signatureOf(src, parts.sig).ss);
-    assigned = HashSet::contains(&ls.assigned, &var) && size(sizes) = 0;
+    assigned = HashSet::contains(&ls.topAssigned, &var) && size(sizes) = 0;
     base = clone(var);
     if HashSet::contains(&ls.externs, &var) { base = lwCat("extern ", &var); };
     ls = uniqueName(ls, base);
@@ -801,7 +874,12 @@ fn registerOne(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
     names = push(HashMap::lookup(&ls.prereg, &var, []), clone(name));
     prereg = ls.prereg.insert(clone(var), names);
     ls = LowSt { prereg: prereg, ..ls };
-    if !assigned { ls = setGlobal(ls, var, name); };
+    if !assigned {
+        ls = sigType(ls, src, parts.sig);
+        globalFnType = ls.ty;
+        ls = setGlobalTy(ls, clone(var), globalFnType);
+        ls = setGlobal(ls, var, name);
+    };
     return ls;
 };
 
@@ -817,6 +895,9 @@ fn registerInstance(ls: LowSt, src: &List<AstNode>, stmt: AstStatement) -> LowSt
     stubs = ls.stubs.insert(clone(name));
     ls = LowSt { names: names, stubs: stubs, ..ls };
     ls = setGlobal(ls, clone(name), clone(name));
+    ls = sigType(ls, src, inst.sig);
+    globalFnType = ls.ty;
+    ls = setGlobalTy(ls, clone(name), globalFnType);
     generic = nameText(src, inst.f);
     if size(generic.bytes) = 0 { return ls; };
     ls = argsTokens(ls, src, inst.args);
@@ -928,6 +1009,7 @@ fn lowerProgramStatement(ls: LowSt, src: &List<AstNode>, s: Int) -> LowSt ~ {
 
 fn lowerProgram(ls: LowSt, src: &List<AstNode>, stmts: &List<Int>) -> LowSt ~ {
     ls = assignedNames(ls, src, stmts);
+    ls = LowSt { bLent: lentNames(src, stmts), ..ls };
     ls = registerTopLevel(ls, src, stmts);
     for s in stmts { if ls.ok { ls = lowerProgramStatement(ls, src, s); }; };
     if !ls.ok { return ls; };

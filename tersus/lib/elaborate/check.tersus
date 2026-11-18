@@ -1,19 +1,317 @@
-import data::ast::ast { AstBody, AstExpression, AstNode, AstOptTermination, AstRule, AstSignature, AstStatement, AstTermination, AstValidation, AstValue };
+import data::ast::ast { AstBody, AstExpression, AstNode, AstOptTermination, AstProof, AstRule, AstSignature, AstStatement, AstTermination, AstValidation, AstValue };
 import data::codec::codec { catStrings };
-import elaborate::calls { assignVar, bindIn, bindInner, coerce, head, lookupVar, popScope, pushScope, scopeLookup, teHead, withType };
+import elaborate::calls { assignVar, bindIn, bindInner, coerce, head, lookupVar, popScope, pushScope, scopeLookup, teHead, typedChild, withType };
 import elaborate::core { checkFieldType, checkFinite, checkType, declareTypeWith, holdsRef, isBoxTy, isListTy, readField, registerCtors, unrefOf };
-import elaborate::expr { derefExpr, freshElementType, inferExpr, packIndexFolds };
-import elaborate::out { emit, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations };
+import elaborate::expr { derefExpr, freshElementType, inferExpected, inferExpr, packIndexFolds };
+import elaborate::out { emit, emitExpressions, emitName, emitNames, emitProofs, emitStatements, emitType, emitTypes, emitVal, emitValidations };
 import elaborate::proofs { inferProof, rewriteOldStatements };
-import elaborate::records { codecTypeAt, codecTypesAt, exprOf, mentionsVariable, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName };
-import elaborate::refs { derefRoot, exprRefOrigins, placeSteps, putRefResult, recordAlias, recordOrigins, resolveRefPlace, withinWrites, writesTarget, writesText };
-import elaborate::state { FnSig, Generic, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
+import elaborate::records { codecTypeAt, codecTypesAt, exprOf, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, isVar, listItems, nameText, namesText, nativeFn, nodeIn, signatureOf, varName, mentionsVariable };
+import elaborate::refs { declaredOrigin, refsOf, withRefs, derefRoot, derefSteps, exprRefOrigins, expressionPlaces, joinBranchReferences, namedReferences, ownParameterSources, parameterContents, placeSteps, putOrigins, putRefResult, recordAlias, recordOrigins, recordPlaceReferences, resetBranchReferences, resolveRefPlace, resolveRefPlaces, sameReferences, withinWrites, writesTarget, writesText };
+import elaborate::state { FnSig, Generic, NodeRewrite, Place, St, TE, Ty, addTy, isPackTypeName, resolve, argAt, copyState, expect, fail, fnTy, indexIn, intText, isSize, isTypeName, joinWith, kindOf, nth, oneScope, render, simpleTy, tyAt, typeError, typesChanged, zonk };
 import elaborate::traits { boundsOf, checkImplDef, checkTrait, declareTemplate, templateOf };
 
 fn stmtOf(st: &St, s: Int) -> AstStatement ~ {
     node = nodeIn(&st.nodes, s);
     if node is AstNode::Statement { return clone((node as AstNode::Statement).value); };
     return AstStatement::Mark { line: 0, col: 0 };
+};
+
+// Local declarations receive their identities before any type variables are allocated.
+fn localScopes(st: St, stmts: &List<Int>) -> St ~ {
+    out = [];
+    for s in stmts {
+        st = scopeStatement(st, s);
+        if st.status != 0 { return st; };
+        out = push(out, st.nid);
+    };
+    return emitStatements(st, &out);
+};
+
+fn scopeName(st: St, n: Int) -> St ~ {
+    name = nameText(&st.nodes, n);
+    if st.localNames.contains(&name) {
+        identity = HashMap::lookup(&st.localNames, &name, n);
+        return emitName(st, nameText(&st.nodes, identity));
+    };
+    return St { nid: n, ..st };
+};
+
+fn scopeStatement(st: St, s: Int) -> St ~ {
+    stmt = stmtOf(st, s);
+    if stmt is AstStatement::Let {
+        a = stmt as AstStatement::Let;
+        name = nameText(&st.nodes, a.n);
+        st = scopeExpression(st, a.e);
+        if st.status != 0 { return st; };
+        rhs = st.nid;
+        fresh = catStrings(catStrings(catStrings("$local ", intText(st.next)), " "), clone(name));
+        st = emitName(st, fresh);
+        n = st.nid;
+        st = St { next: st.next + 1, localNames: st.localNames.insert(name, n), ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::Let { n: n, e: rhs } });
+    };
+    if stmt is AstStatement::Assign {
+        a = stmt as AstStatement::Assign;
+        st = scopeExpression(st, a.e);
+        rhs = st.nid;
+        st = scopeName(st, a.n);
+        return emit(st, AstNode::Statement { value: AstStatement::Assign { n: st.nid, e: rhs } });
+    };
+    if stmt is AstStatement::AssignDeref {
+        a = stmt as AstStatement::AssignDeref;
+        st = scopeExpression(st, a.a);
+        lhs = st.nid;
+        st = scopeExpression(st, a.b);
+        return emit(st, AstNode::Statement { value: AstStatement::AssignDeref { a: lhs, b: st.nid } });
+    };
+    if stmt is AstStatement::Return {
+        st = scopeExpression(st, (stmt as AstStatement::Return).e);
+        return emit(st, AstNode::Statement { value: AstStatement::Return { e: st.nid } });
+    };
+    if stmt is AstStatement::ValidationStatement {
+        st = scopeValidation(st, (stmt as AstStatement::ValidationStatement).v);
+        return emit(st, AstNode::Statement { value: AstStatement::ValidationStatement { v: st.nid } });
+    };
+    if stmt is AstStatement::Block {
+        outer = clone(st.localNames);
+        body = listItems(&st.nodes, (stmt as AstStatement::Block).xs);
+        st = localScopes(st, &body);
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::Block { xs: st.nid } });
+    };
+    if stmt is AstStatement::If {
+        a = stmt as AstStatement::If;
+        outer = clone(st.localNames);
+        st = scopeExpression(st, a.e);
+        cond = st.nid;
+        yes = listItems(&st.nodes, a.a);
+        st = localScopes(st, &yes);
+        y = st.nid;
+        st = St { localNames: clone(outer), ..st };
+        no = listItems(&st.nodes, a.b);
+        st = localScopes(st, &no);
+        n = st.nid;
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::If { e: cond, a: y, b: n } });
+    };
+    if stmt is AstStatement::While {
+        a = stmt as AstStatement::While;
+        outer = clone(st.localNames);
+        st = scopeExpression(st, a.e);
+        cond = st.nid;
+        st = scopeValidations(st, a.vs);
+        vs = st.nid;
+        st = scopeOptTermination(st, a.t);
+        term = st.nid;
+        body = listItems(&st.nodes, a.xs);
+        st = localScopes(st, &body);
+        b = st.nid;
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::While { e: cond, vs: vs, t: term, xs: b } });
+    };
+    if stmt is AstStatement::ImplDef {
+        a = stmt as AstStatement::ImplDef;
+        outer = clone(st.localNames);
+        st = St { localNames: HashMap::new(), ..st };
+        body = listItems(&st.nodes, a.xs);
+        st = localScopes(st, &body);
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::ImplDef { traitName: a.traitName, args: a.args, n: a.n, ty: a.ty, bs: a.bs, xs: st.nid } });
+    };
+    if stmt is AstStatement::BoundedDef {
+        a = stmt as AstStatement::BoundedDef;
+        outer = clone(st.localNames);
+        st = scopeStatement(st, a.s);
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Statement { value: AstStatement::BoundedDef { bs: a.bs, s: st.nid } });
+    };
+    if stmt is AstStatement::Dissolve {
+        st = scopeName(st, (stmt as AstStatement::Dissolve).n);
+        return emit(st, AstNode::Statement { value: AstStatement::Dissolve { n: st.nid } });
+    };
+    return St { nid: s, ..st };
+};
+
+fn scopeExpression(st: St, e: Int) -> St ~ {
+    if st.status != 0 { return st; };
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr {
+        a = ex as AstExpression::IfExpr;
+        st = scopeExpression(st, a.c);
+        cond = st.nid;
+        st = scopeExpression(st, a.a);
+        yes = st.nid;
+        st = scopeExpression(st, a.b);
+        return emit(st, AstNode::Expression { value: AstExpression::IfExpr { c: cond, a: yes, b: st.nid } });
+    };
+    if ex is AstExpression::BlockExpr {
+        a = ex as AstExpression::BlockExpr;
+        outer = clone(st.localNames);
+        body = listItems(&st.nodes, a.xs);
+        st = localScopes(st, &body);
+        stmts = st.nid;
+        st = scopeExpression(st, a.e);
+        result = st.nid;
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Expression { value: AstExpression::BlockExpr { xs: stmts, e: result } });
+    };
+    if ex is AstExpression::Ascribed {
+        a = ex as AstExpression::Ascribed;
+        st = scopeExpression(st, a.e);
+        return emit(st, AstNode::Expression { value: AstExpression::Ascribed { e: st.nid, ty: a.ty } });
+    };
+    if ex is AstExpression::Var {
+        st = scopeName(st, (ex as AstExpression::Var).n);
+        return emit(st, AstNode::Expression { value: AstExpression::Var { n: st.nid } });
+    };
+    if ex is AstExpression::F {
+        a = ex as AstExpression::F;
+        st = scopeExpression(st, a.f);
+        f = st.nid;
+        args = [];
+        for x in listItems(&st.nodes, a.xs) {
+            st = scopeExpression(st, x);
+            if st.status != 0 { return st; };
+            args = push(args, st.nid);
+        };
+        st = emitExpressions(st, &args);
+        return emit(st, AstNode::Expression { value: AstExpression::F { f: f, xs: st.nid } });
+    };
+    if ex is AstExpression::Val {
+        v = (ex as AstExpression::Val).v;
+        node = nodeIn(&st.nodes, v);
+        if node is AstNode::Value && (node as AstNode::Value).value is AstValue::VFunct {
+            value = (node as AstNode::Value).value as AstValue::VFunct;
+            bodyNode = nodeIn(&st.nodes, value.body);
+            if bodyNode is AstNode::Body && (bodyNode as AstNode::Body).value is AstBody::NativeFunct {
+                body = (bodyNode as AstNode::Body).value as AstBody::NativeFunct;
+                outer = clone(st.localNames);
+                st = St { localNames: HashMap::new(), ..st };
+                stmts = listItems(&st.nodes, body.stmts);
+                st = localScopes(st, &stmts);
+                st = St { localNames: outer, ..st };
+                st = emit(st, AstNode::Body { value: AstBody::NativeFunct { sig: body.sig, term: body.term, stmts: st.nid } });
+                st = emit(st, AstNode::Value { value: AstValue::VFunct { ps: value.ps, ins: value.ins, outs: value.outs, body: st.nid, exports: value.exports } });
+                return emitVal(st, st.nid);
+            };
+        };
+    };
+    return St { nid: e, ..st };
+};
+
+fn scopeValidations(st: St, v: Int) -> St ~ {
+    out = [];
+    for p in listItems(&st.nodes, v) {
+        st = scopeValidation(st, p);
+        if st.status != 0 { return st; };
+        out = push(out, st.nid);
+    };
+    return emitValidations(st, &out);
+};
+
+fn scopeValidation(st: St, v: Int) -> St ~ {
+    node = nodeIn(&st.nodes, v);
+    if !(node is AstNode::Validation) { return St { nid: v, ..st }; };
+    a = (node as AstNode::Validation).value;
+    if a is AstValidation::ProofAssert {
+        st = scopeProof(st, (a as AstValidation::ProofAssert).p);
+        return emit(st, AstNode::Validation { value: AstValidation::ProofAssert { p: st.nid } });
+    };
+    if a is AstValidation::Assume {
+        st = scopeProof(st, (a as AstValidation::Assume).p);
+        return emit(st, AstNode::Validation { value: AstValidation::Assume { p: st.nid } });
+    };
+    if a is AstValidation::AssignProofVar {
+        x = a as AstValidation::AssignProofVar;
+        st = scopeName(st, x.n);
+        name = st.nid;
+        st = scopeExpression(st, x.e);
+        return emit(st, AstNode::Validation { value: AstValidation::AssignProofVar { n: name, e: st.nid } });
+    };
+    if a is AstValidation::Rewrite {
+        st = scopeRule(st, (a as AstValidation::Rewrite).r);
+        return emit(st, AstNode::Validation { value: AstValidation::Rewrite { r: st.nid } });
+    };
+    return St { nid: v, ..st };
+};
+
+fn scopeProofs(st: St, ps: Int) -> St ~ {
+    out = [];
+    for p in listItems(&st.nodes, ps) {
+        st = scopeProof(st, p);
+        out = push(out, st.nid);
+    };
+    return emitProofs(st, &out);
+};
+
+fn scopeProof(st: St, p: Int) -> St ~ {
+    node = nodeIn(&st.nodes, p);
+    if !(node is AstNode::Proof) { return St { nid: p, ..st }; };
+    a = (node as AstNode::Proof).value;
+    if a is AstProof::ATerm {
+        st = scopeName(st, (a as AstProof::ATerm).n);
+        return emit(st, AstNode::Proof { value: AstProof::ATerm { n: st.nid } });
+    };
+    if a is AstProof::FApp {
+        x = a as AstProof::FApp;
+        st = scopeProof(st, x.f);
+        f = st.nid;
+        st = scopeProofs(st, x.xs);
+        return emit(st, AstNode::Proof { value: AstProof::FApp { f: f, xs: st.nid } });
+    };
+    if a is AstProof::Forall {
+        x = a as AstProof::Forall;
+        name = nameText(&st.nodes, x.n);
+        outer = clone(st.localNames);
+        inner = HashMap::new();
+        for entry in outer.entries() { if entry.key != name { inner = inner.insert(clone(entry.key), entry.value); }; };
+        st = St { localNames: inner, ..st };
+        st = scopeProofs(st, x.gs);
+        gs = st.nid;
+        st = scopeProof(st, x.b);
+        b = st.nid;
+        st = St { localNames: outer, ..st };
+        return emit(st, AstNode::Proof { value: AstProof::Forall { n: x.n, gs: gs, b: b } });
+    };
+    return St { nid: p, ..st };
+};
+
+fn scopeRule(st: St, r: Int) -> St ~ {
+    node = nodeIn(&st.nodes, r);
+    if !(node is AstNode::Rule) { return St { nid: r, ..st }; };
+    a = (node as AstNode::Rule).value;
+    if a is AstRule::Eval { st = scopeName(st, (a as AstRule::Eval).n); return emit(st, AstNode::Rule { value: AstRule::Eval { n: st.nid } }); };
+    if a is AstRule::Refl { st = scopeProof(st, (a as AstRule::Refl).p); return emit(st, AstNode::Rule { value: AstRule::Refl { p: st.nid } }); };
+    if a is AstRule::CheckGtZero { st = scopeProof(st, (a as AstRule::CheckGtZero).p); return emit(st, AstNode::Rule { value: AstRule::CheckGtZero { p: st.nid } }); };
+    if a is AstRule::CheckRel { st = scopeProof(st, (a as AstRule::CheckRel).p); return emit(st, AstNode::Rule { value: AstRule::CheckRel { p: st.nid } }); };
+    if a is AstRule::UserRewrite {
+        x = a as AstRule::UserRewrite;
+        st = scopeProofs(st, x.xs);
+        return emit(st, AstNode::Rule { value: AstRule::UserRewrite { n: x.n, xs: st.nid } });
+    };
+    return St { nid: r, ..st };
+};
+
+fn scopeOptTermination(st: St, t: Int) -> St ~ {
+    node = nodeIn(&st.nodes, t);
+    if !(node is AstNode::OptTermination) { return St { nid: t, ..st }; };
+    a = (node as AstNode::OptTermination).value;
+    if a is AstOptTermination::SomeTermination {
+        st = scopeTermination(st, (a as AstOptTermination::SomeTermination).t);
+        return emit(st, AstNode::OptTermination { value: AstOptTermination::SomeTermination { t: st.nid } });
+    };
+    return St { nid: t, ..st };
+};
+
+fn scopeTermination(st: St, t: Int) -> St ~ {
+    node = nodeIn(&st.nodes, t);
+    if !(node is AstNode::Termination) { return St { nid: t, ..st }; };
+    a = (node as AstNode::Termination).value;
+    if a is AstTermination::Shrinks { st = scopeExpression(st, (a as AstTermination::Shrinks).e); return emit(st, AstNode::Termination { value: AstTermination::Shrinks { e: st.nid } }); };
+    if a is AstTermination::Counting { st = scopeExpression(st, (a as AstTermination::Counting).e); return emit(st, AstNode::Termination { value: AstTermination::Counting { e: st.nid } }); };
+    if a is AstTermination::Parts { st = scopeExpression(st, (a as AstTermination::Parts).e); return emit(st, AstNode::Termination { value: AstTermination::Parts { e: st.nid } }); };
+    if a is AstTermination::Recursing { st = scopeOptTermination(st, (a as AstTermination::Recursing).t); return emit(st, AstNode::Termination { value: AstTermination::Recursing { t: st.nid } }); };
+    return St { nid: t, ..st };
 };
 
 // Statements: each gives back the statement it stands for (st.nid) and the types of its code (st.te.types)
@@ -171,36 +469,26 @@ fn isTraitStub(name: &String) -> Bool ~ {
 };
 
 fn checkStatementReturn(st: St, s: Int, e: Int) -> St ~ {
-    st = inferExpr(st, e);
+    if st.ret >= 0 { st = inferExpected(st, "returned value", st.ret, e, true); } else { st = inferExpr(st, e); };
     if st.status != 0 { return st; };
     inferred = clone(st.te);
     if st.ret >= 0 {
         rty = st.ret;
-        // (a reference parameter returned is the reference to the caller's place)
-        rk = kindOf(st, rty);
-        if (rk = 10 || rk = 11) && isVar(st, e) {
-            v = varName(st, e);
-            st = zonk(st, head(&inferred.types));
-            tz = st.ty;
-            tk = kindOf(st, tz);
-            if tk = 10 || tk = 11 || indexIn(&st.readOnly, &v) >= 0 || indexIn(&st.mutParams, &v) >= 0 {
-                st = expect(st, "returned value", argAt(st, rty, 0), tz);
-                inferred = withType(&inferred, rty);
-            };
-        };
-        st = coerce(st, rty, inferred);
-        if st.status != 0 { return st; };
-        texpr = clone(st.te);
+        texpr = clone(inferred);
         st = expect(st, "returned value", rty, head(&texpr.types));
         if st.status != 0 { return st; };
         // (a trait's stub, traitStub, returns what the call through its bound does, and is never run)
         if size(st.resultFrom) > 0 && !isTraitStub(&st.current) {
-            st = exprRefOrigins(st, e);
+            own = ownParameterSources(st, &texpr);
+            if size(own) > 0 { return typeError(st, "a reference to a by-value parameter's own storage cannot escape the function"); };
+            st = exprRefOrigins(st, texpr.node);
             if st.status != 0 { return st; };
             allFrom = size(st.names) > 0;
-            for o in &st.names { if indexIn(&st.resultFrom, o) < 0 { allFrom = false; }; };
+            for o in &st.names { root = declaredOrigin(st, o); if indexIn(&st.resultFrom, &root) < 0 { allFrom = false; }; };
             if !allFrom {
-                return typeError(st, catStrings(catStrings("the value returned is not a reference from ", joinWith(&st.resultFrom, ", ")), ", which the signature names: return a reference to a place of one of them"));
+                functionName = clone(st.current);
+                if size(functionName.bytes) = 0 { functionName = "function"; };
+                return typeError(st, catStrings(catStrings(catStrings("the value returned is not a reference from ", joinWith(&st.resultFrom, ", ")), ", which the signature names: return a reference to a place of one of them"), catStrings(catStrings(" (in ", functionName), ")")));
             };
         };
         st = emit(st, AstNode::Statement { value: AstStatement::Return { e: texpr.node } });
@@ -294,18 +582,22 @@ fn checkStatementIf(st: St, e: Int, a: Int, b: Int) -> St ~ {
     cond = clone(st.te);
     st = simpleTy(st, 2);
     st = expect(st, "condition of if", st.ty, head(&cond.types));
+    beforeBranches = refsOf(&st);
     st = pushScope(st);
     thenStmts = listItems(&st.nodes, a);
     st = checkStatements(st, false, &thenStmts);
     st = popScope(st);
     if st.status != 0 { return st; };
     thenPart = clone(st.te);
+    leftReferences = refsOf(&st);
+    st = resetBranchReferences(st, &beforeBranches);
     st = pushScope(st);
     elseStmts = listItems(&st.nodes, b);
     st = checkStatements(st, false, &elseStmts);
     st = popScope(st);
     if st.status != 0 { return st; };
     elsePart = clone(st.te);
+    st = joinBranchReferences(st, &leftReferences);
     st = emit(st, AstNode::Statement { value: AstStatement::If { e: cond.node, a: thenPart.node, b: elsePart.node } });
     types = clone(cond.types);
     for t in &thenPart.types { types = push(types, t); };
@@ -314,6 +606,8 @@ fn checkStatementIf(st: St, e: Int, a: Int, b: Int) -> St ~ {
 };
 
 fn checkStatementWhile(st: St, e: Int, vs: Int, t: Int, xs: Int) -> St ~ {
+    st = prepareLoopReferences(st, e, xs);
+    if st.status != 0 { return st; };
     st = inferExpr(st, e);
     if st.status != 0 { return st; };
     cond = clone(st.te);
@@ -328,16 +622,70 @@ fn checkStatementWhile(st: St, e: Int, vs: Int, t: Int, xs: Int) -> St ~ {
     st = resolveTermination(st, t);
     if st.status != 0 { return st; };
     term = st.nid;
+    beforeLoopBody = refsOf(&st);
     st = pushScope(st);
     loopStmts = listItems(&st.nodes, xs);
     st = checkStatements(st, false, &loopStmts);
     st = popScope(st);
     if st.status != 0 { return st; };
     body = clone(st.te);
+    st = joinBranchReferences(st, &beforeLoopBody);
     st = emit(st, AstNode::Statement { value: AstStatement::While { e: cond.node, vs: invariant, t: term, xs: body.node } });
     types = clone(cond.types);
     for ty in &body.types { types = push(types, ty); };
     return St { te: TE { node: st.nid, types: types }, ..st };
+};
+
+fn prepareLoopReferences(st: St, cond: Int, xs: Int) -> St ~ {
+    entry = refsOf(&st);
+    known = refsOf(&st);
+    body = listItems(&st.nodes, xs);
+    count = 0;
+    while count <= 100 [{ affirm count >= 0; }] ~ {
+        // (a round lends the node and type arenas, as large as the whole input, to its copy of the state and takes back
+        // what they held before it, instead of copying them)
+        nodeMark = size(st.nodes);
+        tyMark = size(st.tys);
+        arena = st.nodes;
+        types = st.tys;
+        st = St { nodes: [], tys: [], ..st };
+        working = withRefs(copyState(&st), clone(known));
+        working = St { nodes: arena, tys: types, rewrittenNodes: [], trialRound: true, ..working };
+        working = inferExpr(working, cond);
+        if working.status != 0 { return working; };
+        working = pushScope(working);
+        working = checkStatements(working, false, &body);
+        if working.status != 0 { return working; };
+        working = joinBranchReferences(working, &known);
+        next = namedReferences(&working, &entry);
+        rewrites = working.rewrittenNodes;
+        arena = working.nodes;
+        types = working.tys;
+        st = St { nodes: restoreArena(arena, nodeMark, &rewrites), tys: truncateTypes(types, tyMark), ..st };
+        if sameReferences(&known, &next) { return withRefs(st, next); };
+        known = next;
+        count = count + 1;
+    };
+    return typeError(st, "reference aliases of this loop do not reach a bounded fixed point");
+};
+
+// The node arena as it was at mark: what was added after it dropped, and what was replaced in place put back, the
+// latest replacement undone first
+fn restoreArena(nodes: List<AstNode>, mark: Int, rewrites: &List<NodeRewrite>) -> List<AstNode> ~ {
+    while size(nodes) > mark && size(nodes) > 0 shrinks size(nodes) { nodes = pop(nodes); };
+    i = size(rewrites);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(rewrites); }] shrinks i {
+        i = i - 1;
+        at = get(rewrites, i).at;
+        if at >= 0 && at < size(nodes) { nodes = set(nodes, at, clone(get(rewrites, i).was)); };
+    };
+    return nodes;
+};
+
+// The type arena as it was at mark (types are only ever added to it)
+fn truncateTypes(tys: List<Ty>, mark: Int) -> List<Ty> ~ {
+    while size(tys) > mark && size(tys) > 0 shrinks size(tys) { tys = pop(tys); };
+    return tys;
 };
 
 // The value of a function definition, x = fn ...: the VFunct record with a native body (or -1)
@@ -561,6 +909,20 @@ fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: In
     outerOriginNames = clone(st.originNames);
     outerOriginRoots = clone(st.originRoots);
     st = St { readOnly: readOnly, mutParams: clone(mutParams), writes: clone(writes), aliasNames: [], aliasPlaces: [], resultFrom: clone(from), params: clone(params), originNames: [], originRoots: [], ..st };
+    i = 0;
+    while i < size(params) && i < size(ptys) [{ affirm i >= 0; }] ~ {
+        ty = get(ptys, i);
+        st = holdsRef(st, ty);
+        if st.status != 0 { return st; };
+        if st.ok {
+            param = get(params, i);
+            root = clone(param);
+            k = kindOf(st, ty);
+            if k != 10 && k != 11 { root = parameterContents(&param); };
+            st = putOrigins(st, &param, push([], root));
+        };
+        i = i + 1;
+    };
     // (writes(...) names update parameters, whole or by a field)
     for w in &writes {
         root = clone(w);
@@ -617,6 +979,18 @@ fn checkFunction(st: St, name: &String, fs: FnSig, ins: Int, outs: Int, term: In
     return St { outs: push(push(push(push([], insNode), outsNode), termNode), bodyTE.node), te: bodyTE, names: from, ..st };
 };
 
+fn proofExpression(st: &St, e: Int) -> Bool ~ {
+    ex = exprOf(st, e);
+    if ex is AstExpression::IfExpr || ex is AstExpression::BlockExpr { return false; };
+    if ex is AstExpression::Ascribed { return proofExpression(st, (ex as AstExpression::Ascribed).e); };
+    if ex is AstExpression::F {
+        a = ex as AstExpression::F;
+        if !proofExpression(st, a.f) { return false; };
+        for x in listItems(&st.nodes, a.xs) { if !proofExpression(st, x) { return false; }; };
+    };
+    return true;
+};
+
 // What shrinks is an Int, which counts down to 0, or a struct or enum value, which loses a field at a time (resolveTermination)
 fn resolveTermination(st: St, t: Int) -> St ~ {
     node = nodeIn(&st.nodes, t);
@@ -628,6 +1002,7 @@ fn resolveTermination(st: St, t: Int) -> St ~ {
     term = (termNode as AstNode::Termination).value;
     if !(term is AstTermination::Shrinks) { return St { nid: t, ..st }; };
     variant = (term as AstTermination::Shrinks).e;
+    if !proofExpression(st, variant) { return typeError(st, "a termination measure cannot contain expression control flow"); };
     st = inferExpr(st, variant);
     if st.status != 0 { return st; };
     st = derefExpr(st, clone(st.te));
@@ -768,11 +1143,11 @@ fn declareGeneric(st: St, name: &String, params: &List<String>, names: &List<Str
         i = i + 1;
     };
     if predeclared {
-        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), predeclared: st.predeclared.remove(name), ..st };
+        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), storeCache: HashMap::new(), predeclared: st.predeclared.remove(name), ..st };
         if !distinct { return typeError(st, catStrings(clone(name), " names a parameter twice")); };
     } else {
         if !distinct { return typeError(st, catStrings(clone(name), " names a parameter twice")); };
-        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), ..st };
+        st = St { generics: st.generics.insert(clone(name), Generic { params: clone(params), names: clone(names), types: clone(types) }), storeCache: HashMap::new(), ..st };
     };
     for t in types {
         if selfExpands(st, name, t) {
@@ -835,36 +1210,44 @@ fn indexOfByte(text: &String, b: Int) -> Int ~ {
 // *r = value; and (*r).field = value;: the place must be through an update reference, and the value is
 // evaluated before the replacement, so its types come first (checkStatement, AssignDeref)
 fn checkAssignDeref(st: St, lhs: Int, value: Int) -> St ~ {
+    beforeRefs = refsOf(&st);
+    st = inferExpr(st, lhs);
+    if st.status != 0 { return st; };
+    targetTy = teHead(&st.te);
+    st = withRefs(st, beforeRefs);
+    st = inferExpected(st, "expression result", targetTy, value, false);
+    if st.status != 0 { return st; };
+    exprT = clone(st.te);
     st = inferExpr(st, lhs);
     if st.status != 0 { return st; };
     lhsT = clone(st.te);
-    targetTy = head(&lhsT.types);
-    refExpr = derefRoot(st, lhs);
+    refExpr = derefRoot(st, lhsT.node);
     if refExpr < 0 { return fail(st, "Type error: assignment through a reference is written *r = value; or (*r).field = value;"); };
     mutable = false;
     refName = varName(st, refExpr);
     if isVar(st, refExpr) && indexIn(&st.mutParams, &refName) >= 0 {
         mutable = true;
     } else {
-        st = inferExpr(st, refExpr);
-        if st.status != 0 { return st; };
-        st = zonk(st, teHead(&st.te));
+        reference = typedChild(st, &lhsT, refExpr);
+        if reference.node < 0 || size(reference.types) = 0 { return typeError(st, "an assignment reference has no recorded expression type"); };
+        st = zonk(st, teHead(&reference));
         mutable = kindOf(st, st.ty) = 11;
     };
     if !mutable { return fail(st, "Type error: assignment is through a read reference (&T), which does not allow updating what it is to: borrow the place with &mut"); };
-    steps = placeSteps(st, lhs);
-    if steps.ok && size(st.writes) > 0 {
-        place = resolveRefPlace(st, clone(steps.root), clone(steps.steps));
-        if indexIn(&st.mutParams, &place.root) >= 0 && !withinWrites(&st.writes, &place) {
+    places = expressionPlaces(st, refExpr);
+    suffix = derefSteps(st, lhsT.node);
+    targets = [];
+    for beforePlace in &places {
+        path = clone(beforePlace.steps);
+        for step in &suffix { path = push(path, clone(step)); };
+        place = Place { steps: path, ..clone(beforePlace) };
+        if size(st.writes) > 0 && indexIn(&st.mutParams, &place.root) >= 0 && !withinWrites(&st.writes, &place) {
             return typeError(st, catStrings(catStrings(catStrings("this assignment changes ", writesTarget(&place)), ", which the writes clause of the function does not allow "), writesText(st)));
         };
+        targets = push(targets, place);
     };
-    st = inferExpr(st, value);
+    st = recordPlaceReferences(st, &targets, &exprT);
     if st.status != 0 { return st; };
-    inferred = clone(st.te);
-    st = coerce(st, targetTy, inferred);
-    if st.status != 0 { return st; };
-    exprT = clone(st.te);
     st = emit(st, AstNode::Statement { value: AstStatement::AssignDeref { a: lhsT.node, b: exprT.node } });
     types = clone(exprT.types);
     for t in &lhsT.types { types = push(types, t); };

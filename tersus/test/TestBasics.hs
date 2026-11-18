@@ -11,6 +11,8 @@ module TestBasics
     ) where
 
 import TestParserFragments
+import Data.List (isInfixOf)
+import ElaboratorTool (noVerdict)
 import MirEval (fromMirValue)
 import Pipeline (parseWithEquality, runStatements, validateStatements)
 import StdLib
@@ -600,7 +602,55 @@ testValidateWhile =
             "Could not prove"
         , -- A loop whose body returns is validated too
           parseValidProgramHelper "i = 0; while i < 3 shrinks 3 - i { return i; }; return 9;"
+        , -- A loop condition that is a call's own result, the body entered when it is true or (with !) false
+          parseValidProgramHelper (callLoop "while more(i, n)" ++ "return count(3);")
+        , parseValidProgramHelper (callLoop "while !done(i, n)" ++ "return count(3);")
+        , parseValidProgramHelper (callLoop "while more(i, n) = true" ++ "return count(3);")
+        , parseValidProgramHelper (callLoop "while done(i, n) != true" ++ "return count(3);")
+        , parseValidProgramHelper
+            ( callLoopFunctions
+                ++ "fn rows(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { i = 0;\
+                   \  while !done(i, n) [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { j = 0;\
+                   \    while !done(j, n) [{ affirm j >= 0; affirm j <= n; }] shrinks n - j { j = j + 1; };\
+                   \    i = i + 1; };\
+                   \  return i; };\
+                   \return rows(3);"
+            )
+        , -- and the loop proves no more than it should: not a wrong result, not a bound that fails on exit
+          proofRefused "return = n + 1 (in count)" (callLoopWith "affirm i <= n;" "n + 1" "while !done(i, n)" ++ "return count(3);")
+        , -- (a loop invariant is checked at the loop, its second check here; the refusal names that invariant)
+          proofRefused "the invariant i < n of the loop at block 1 (in count)" (callLoopWith "affirm i < n;" "n" "while !done(i, n)" ++ "return count(3);")
+        , -- a Boolean with nothing said of it gives the body nothing
+          proofRefused "the invariant i <= n of the loop at block 1 (in count)" (callLoopWith "affirm i <= n;" "n" "while flag(i, n)" ++ "return count(3);")
+        , -- and what the test gave is of i as it was tested, not as the body changes it
+          proofRefused "i < n (in count)" (callLoopFunctions ++ "fn count(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { i = 0; while more(i, n) [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; affirm i < n; }; return i; }; return count(3);")
         ]
+  where
+    -- (the validator could not prove exactly this obligation: not a parse, type, tool or internal failure, nor a part
+    -- it does not model, nor another obligation)
+    proofRefused obligation source =
+        case parseWithEquality source of
+            Left err -> Just ("Parse failed: " ++ err)
+            Right stmts -> case validateStatements stmts of
+                Ok _ -> Just "Validation passed when it should have failed"
+                Error e
+                    | noVerdict e || any (`isInfixOf` e) ["does not model yet", "internal compiler error", "Internal error"] -> Just ("No verdict: " ++ e)
+                    | ("Could not prove: " ++ obligation) `isInfixOf` e -> Nothing
+                    | otherwise -> Just ("Expected Could not prove: " ++ obligation ++ ", got: " ++ e)
+    callLoopFunctions =
+        "fn done(i: Int, n: Int) -> Bool [{ }] [{ affirm return = (i >= n); }] { return i >= n; };\
+        \fn more(i: Int, n: Int) -> Bool [{ }] [{ affirm return = (i < n); }] { return i < n; };\
+        \fn flag(i: Int, n: Int) -> Bool [{ }] [{ }] { return i < n; };"
+    callLoop = callLoopWith "affirm i <= n;" "n"
+    callLoopWith bound result header =
+        callLoopFunctions
+            ++ "fn count(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = "
+            ++ result
+            ++ "; }] { i = 0; "
+            ++ header
+            ++ " [{ affirm i >= 0; "
+            ++ bound
+            ++ " }] shrinks n - i { i = i + 1; }; return i; };"
 
 testEarlyReturn :: Test
 testEarlyReturn =

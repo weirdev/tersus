@@ -25,6 +25,8 @@ import TestBasics
 import TestValidation
 import TestProofs
 import TestControl
+import TestErgonomics (testErgonomics)
+import TestHeldReferences (testHeldReferences)
 import TestData
 import TestPipeline
 import TestNative
@@ -161,6 +163,8 @@ originalGroups =
     , testIntRange
     , testPipeline
     , testControlFlow
+    , testErgonomics
+    , testHeldReferences
     , testLists
     , testForallSyntax
     , testForallInstantiation
@@ -193,7 +197,7 @@ originalGroups =
     , testFunctionCalls
     , testCallsUseContracts
     , testNative
-    , testOwnership
+    , testNativeErgonomics    , testOwnership
     , testTraits
     , testClosures
     , testArrays
