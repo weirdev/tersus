@@ -1,4 +1,4 @@
-// A HashMap from the standard library (lib/map.tersus, which a program has when it mentions HashMap): the entries
+// A HashMap from the standard library (lib/std/map/map.tersus, which a program has when it mentions HashMap): the entries
 // with one key are in a bucket chosen by the hash of the key, and a key type needs an impl of Hash, which Int and
 // String have already. Insert and remove give a new map, lookup gives the value at a key or the fallback when there
 // is none, and size is how many keys there are.

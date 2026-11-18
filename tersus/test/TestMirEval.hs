@@ -10,7 +10,8 @@ import Compile (lowerSource)
 import qualified Mir as M
 import qualified MirEval as Eval
 import Syntax (Value (..))
-import Types (Type (..), pattern TList, pattern TBox)
+import Types (Type (..))
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import Utils
 

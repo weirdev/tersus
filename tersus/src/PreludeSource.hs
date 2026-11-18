@@ -1,7 +1,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 module PreludeSource
-    ( typesSource
+    ( ownershipSource
+    , typesSource
     , preludeSource
     , eqSource
     , cloneSource
@@ -13,7 +14,10 @@ module PreludeSource
     , threadSource
     , libModules
     , nativeStorageModules
+    , nativeHelperName
+    , libModuleOf
     , libPackageFiles
+    , stdPackageSource
     , mirPackageFiles
     , elaboratePackageFiles
     , parserPackageFiles
@@ -57,7 +61,7 @@ compilerSourceFiles =
 
 emitterSourceFiles :: [(FilePath, String)]
 emitterSourceFiles = compilerSourceFiles ++ toolPackageFiles ++ validationPackageFiles ++ elaboratePackageFiles
-    ++ [("lib/" ++ name ++ ".tersus", text) | (name, _, text) <- libModules]
+    ++ [("lib/" ++ path, text) | (path, text) <- libPackageFiles]
     ++ [("lib/stdlib.tersus", stdlibSource)]
     ++ $(do
         let paths = ["dev/emitter-seed/Main.hs", "package.yaml", "tersus.cabal"]
@@ -66,8 +70,9 @@ emitterSourceFiles = compilerSourceFiles ++ toolPackageFiles ++ validationPackag
 
 libModules :: [(String, String, String)]
 libModules =
-    [ ("types", "the list and Box types", typesSource)
-    , ("clone", "the clone library", cloneSource)
+    [ ("core/ownership", "the ownership protocols", ownershipSource)
+    , ("core/types", "the list and Box types", typesSource)
+    , ("core/clone", "the clone library", cloneSource)
     , ("eq", "the equality library", eqSource)
     , ("prelude", "the prelude", preludeSource)
     , ("string", "the string library", stringSource)
@@ -81,42 +86,72 @@ libModules =
 nativeStorageModules :: [String]
 nativeStorageModules = ["lists", "box"]
 
-libPackageFiles :: [(FilePath, String)]
-libPackageFiles = ("tersuslib/package.tersus", "") : [("tersuslib/" ++ name ++ "/" ++ name ++ ".tersus", text) | (name, _, text) <- libModules]
+-- The canonical name of a function of the native storage helpers that native list and Box operations call (`boxNew` and
+-- `boxUnbox` are of box, the others of lists), as the std package names a declaration of a module's one file
+nativeHelperName :: String -> String
+nativeHelperName local = let modu = if take 3 local == "box" then "box" else "lists" in "std$" ++ modu ++ "$" ++ modu ++ "$" ++ local
 
--- The text of lib/types.tersus: the structs List and Box, which every program has
+libPackageFiles :: [(FilePath, String)]
+libPackageFiles = ("std/package.tersus", stdPackageSource) : [("std/" ++ libFilePath name ++ ".tersus", text) | (name, _, text) <- libModules]
+  where
+    libFilePath name = case break (== '/') name of
+        (modu, '/' : file) -> modu ++ "/" ++ file
+        _ -> name ++ "/" ++ name
+
+-- The module of the std package a library source is a file of (`core/types` is a file of `core`)
+libModuleOf :: String -> String
+libModuleOf = takeWhile (/= '/')
+
+stdPackageSource :: String
+stdPackageSource =
+    $( do
+        addDependentFile "lib/std/package.tersus"
+        contents <- runIO (readFile "lib/std/package.tersus")
+        lift contents
+     )
+
+-- The text of lib/std/core/ownership.tersus: the traits Clone, Copy, Drop and Deref
+ownershipSource :: String
+ownershipSource =
+    $( do
+        addDependentFile "lib/std/core/ownership.tersus"
+        contents <- runIO (readFile "lib/std/core/ownership.tersus")
+        lift contents
+     )
+
+-- The text of lib/std/core/types.tersus: the structs List and Box, which every program has
 typesSource :: String
 typesSource =
     $( do
-        addDependentFile "lib/types.tersus"
-        contents <- runIO (readFile "lib/types.tersus")
+        addDependentFile "lib/std/core/types.tersus"
+        contents <- runIO (readFile "lib/std/core/types.tersus")
         lift contents
      )
 
--- The text of lib/prelude.tersus, read when this module is compiled
+-- The text of lib/std/prelude/prelude.tersus, read when this module is compiled
 preludeSource :: String
 preludeSource =
     $( do
-        addDependentFile "lib/prelude.tersus"
-        contents <- runIO (readFile "lib/prelude.tersus")
+        addDependentFile "lib/std/prelude/prelude.tersus"
+        contents <- runIO (readFile "lib/std/prelude/prelude.tersus")
         lift contents
      )
 
--- The text of lib/eq.tersus: the trait Eq, which `=` and `!=` call, and its impls for lists, arrays and Boxes
+-- The text of lib/std/eq/eq.tersus: the trait Eq, which `=` and `!=` call, and its impls for lists, arrays and Boxes
 eqSource :: String
 eqSource =
     $( do
-        addDependentFile "lib/eq.tersus"
-        contents <- runIO (readFile "lib/eq.tersus")
+        addDependentFile "lib/std/eq/eq.tersus"
+        contents <- runIO (readFile "lib/std/eq/eq.tersus")
         lift contents
      )
 
--- The text of lib/clone.tersus: the trait Clone, which clone calls, and its impls for lists, arrays and Boxes
+-- The text of lib/std/core/clone.tersus: the trait Clone, which clone calls, and its impls for lists, arrays and Boxes
 cloneSource :: String
 cloneSource =
     $( do
-        addDependentFile "lib/clone.tersus"
-        contents <- runIO (readFile "lib/clone.tersus")
+        addDependentFile "lib/std/core/clone.tersus"
+        contents <- runIO (readFile "lib/std/core/clone.tersus")
         lift contents
      )
 
@@ -129,57 +164,57 @@ stdlibSource =
         lift contents
      )
 
--- The text of lib/lists.tersus: the list that native code is made of (see MirLists)
+-- The text of lib/std/lists/lists.tersus: the list that native code is made of (see MirLists)
 listsSource :: String
 listsSource =
     $( do
-        addDependentFile "lib/lists.tersus"
-        contents <- runIO (readFile "lib/lists.tersus")
+        addDependentFile "lib/std/lists/lists.tersus"
+        contents <- runIO (readFile "lib/std/lists/lists.tersus")
         lift contents
      )
 
--- The text of lib/box.tersus: the Box that native code is made of (see MirLists)
+-- The text of lib/std/box/box.tersus: the Box that native code is made of (see MirLists)
 boxSource :: String
 boxSource =
     $( do
-        addDependentFile "lib/box.tersus"
-        contents <- runIO (readFile "lib/box.tersus")
+        addDependentFile "lib/std/box/box.tersus"
+        contents <- runIO (readFile "lib/std/box/box.tersus")
         lift contents
      )
 
--- The text of lib/string.tersus: the struct `String` that a string literal is a value of
+-- The text of lib/std/string/string.tersus: the struct `String` that a string literal is a value of
 stringSource :: String
 stringSource =
     $( do
-        addDependentFile "lib/string.tersus"
-        contents <- runIO (readFile "lib/string.tersus")
+        addDependentFile "lib/std/string/string.tersus"
+        contents <- runIO (readFile "lib/std/string/string.tersus")
         lift contents
      )
 
--- The text of lib/map.tersus: the HashMap a program has when it mentions one
+-- The text of lib/std/map/map.tersus: the HashMap a program has when it mentions one
 mapSource :: String
 mapSource =
     $( do
-        addDependentFile "lib/map.tersus"
-        contents <- runIO (readFile "lib/map.tersus")
+        addDependentFile "lib/std/map/map.tersus"
+        contents <- runIO (readFile "lib/std/map/map.tersus")
         lift contents
      )
 
--- The text of lib/set.tersus: the HashSet a program has when it mentions one
+-- The text of lib/std/set/set.tersus: the HashSet a program has when it mentions one
 setSource :: String
 setSource =
     $( do
-        addDependentFile "lib/set.tersus"
-        contents <- runIO (readFile "lib/set.tersus")
+        addDependentFile "lib/std/set/set.tersus"
+        contents <- runIO (readFile "lib/std/set/set.tersus")
         lift contents
      )
 
--- The text of lib/thread.tersus: the Thread a program has when it mentions one
+-- The text of lib/std/thread/thread.tersus: the Thread a program has when it mentions one
 threadSource :: String
 threadSource =
     $( do
-        addDependentFile "lib/thread.tersus"
-        contents <- runIO (readFile "lib/thread.tersus")
+        addDependentFile "lib/std/thread/thread.tersus"
+        contents <- runIO (readFile "lib/std/thread/thread.tersus")
         lift contents
      )
 

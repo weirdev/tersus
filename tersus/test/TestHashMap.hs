@@ -6,11 +6,11 @@ import Solver
 import TestHarness
 import Utils
 
--- HashMap: a map from keys to values in lib/map.tersus, its operations, and what its contracts do and do not say.
+-- HashMap: a map from keys to values in lib/std/map/map.tersus, its operations, and what its contracts do and do not say.
 -- The programs are read as the command line reads them (the map library is put in front by the pipeline, and the
 -- programs are validated as they run), so a lookup is asserted with lookup and a fallback: that an inserted key is
 -- found is true when a map runs, and these tests say so, but fetch after an insert asks a caller to prove it and
--- cannot be written here (see lib/map.tersus). fetch is tested where its precondition is a function's own.
+-- cannot be written here (see lib/std/map/map.tersus). fetch is tested where its precondition is a function's own.
 testHashMap :: Test
 testHashMap =
     TestList

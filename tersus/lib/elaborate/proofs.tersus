@@ -9,7 +9,7 @@ import elaborate::out { emit, emitName, emitProofs, emitVal, emitValidations };
 import elaborate::records { exprOf, listItems, nameText, namesText, nodeIn, varName };
 import elaborate::refs { callOf };
 import elaborate::state { stubTraitParameter, forwardInProofText, intText, St, TE, Ty, addTy, argAt, arrayTy, beginTry, builtinKindAt, endTry, expect, fail, firstText, freshVar, indexIn, instanceName, kindOf, listTy, namedTy, notModelled, nth, parameterOwner, render, simpleTy, sizeConst, tyAt, typeError, undoTry, zonk, builtinValueAt , protocolName };
-import elaborate::traits { builtinSequenceCall, emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
+import elaborate::traits { emptyTemplate, implFunctionName, ownerThroughTrait, resolveAssociated, templateCall, traitFnName, traitFnOf };
 
 fn proofOf(st: &St, p: Int) -> AstProof ~ {
     node = nodeIn(&st.nodes, p);
@@ -517,12 +517,6 @@ fn proofOrdinaryCall(st: St, funct: Int, name: String, args: &List<Int>) -> St ~
         path = pathOf(&name);
         function = functionOf(&name);
         if HashMap::contains(&st.traitFns, &path) {
-            // (the builtin of that name, as a proof writes it)
-            if size(argTys) > 0 && builtinSequenceCall(&st, &path, &function, nth(&argTys, 0)) {
-                value = builtinValueAt(st, HashMap::lookup(&st.methods, &function, 0 - 1));
-                st = emit(st, AstNode::Proof { value: AstProof::CTerm { v: value } });
-                return inferProofOther(st, st.nid, args);
-            };
             fns = HashMap::lookup(&st.traitFns, &path, []);
             st = ownerThroughTrait(st, &path, &fns, &function, &argTys);
             if st.status != 0 { return st; };

@@ -14,11 +14,11 @@ import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (insertOwnership, verifyProgram, toolProgram)
-import Compile (lowerStatements)
-import TestParserFragments (parseStatementBlock)
+import Compile (lowerParts, parseSourceParts)
 import Pipeline (compileSource, nativeProgram)
 import MirHousekeeping (storageProgram)
-import Types (Type (..), pattern TList, pattern TBox)
+import Types (Type (..))
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import TestHeldReferences (forwardedUpdateSource)
 import TestMirReader (sameText, programExecutable)
@@ -55,6 +55,9 @@ testMirVerify =
             , TestCase "a named type that starts with a builtin's name is accepted" (interpreted integerSource id True)
             , TestCase "an instance with another array size is refused" (interpreted holderSource wrongHolderArg False)
             , TestCase "an array of lists that does not fit in a frame is refused" (interpreted "xs = array(3000, 0); return get(xs, 0);" arrayOfLists False)
+            , TestCase "boxing an array whose size no use decided gives a Box of an array of any size" (rawInterpreted True (Ok (boxFixture "array int any" "array int v 7")))
+            , TestCase "but not of other elements" (rawRefusedWith " is not Array<Int, ?>" (boxFixture "array int any" "array bool v 7"))
+            , TestCase "nor a Box of an array of a size" (rawRefusedWith " is not Array<Int, 3>" (boxFixture "array int c 3" "array int v 7"))
             , TestCase "what is not the MIR is refused" refused
             ]
         , TestList "pre-erasure, interpreted"
@@ -395,9 +398,9 @@ functionCases =
   where
     sourceData name = case lookup name unvalidatedPrograms of
         Nothing -> Error ("no function program named " ++ name)
-        Just source -> case parseStatementBlock source of
-            Left e -> Error (show e)
-            Right stmts -> mapResult writeProgram (lowerStatements stmts `bindResult` nativeProgram `bindResult` insertOwnership)
+        Just source -> case parseSourceParts True source of
+            Error e -> Error e
+            Ok parts -> mapResult writeProgram (lowerParts parts `bindResult` nativeProgram `bindResult` insertOwnership)
     ordinary = ("fn(Int) -> Int", "fn 1 int int")
     borrowedArg = ("fn(&List<Int>) -> Int", "fn 1 ref list int int")
     namedArg = ("fn(Integer) -> Int", "fn 1 named \"Integer\" 0 int")
@@ -583,6 +586,38 @@ wrongHolderArg program = case localNamed (progMain program) "b" of
         block basic = basic{blockTerminator = case blockTerminator basic of
             Call callee@(Const (CFn "take2")) (_ : rest) dest next -> Call callee (Copy b : rest) dest next
             other -> other}
+
+-- A function that boxes its local 1 as its result, a Box of the array given
+boxFixture :: String -> String -> String
+boxFixture held operand = unlines
+    [ "tersus-mir 1"
+    , "storage \"List\" \"Box\""
+    , "function \"probe\" params 1 1 returns some " ++ box ++ " sizeparams 0 typeparams 0 borrowed 0"
+    , "local 0 none " ++ box
+    , "local 1 none " ++ operand
+    , "block 0"
+    , "assign 0 makebox move 1"
+    , "return"
+    , "end"
+    , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+    , "block 0"
+    , "return"
+    , "end"
+    ]
+  where
+    box = "named \"Box\" 1 type " ++ held
+
+-- A raw fixture the verifier refuses with the cause given
+rawRefusedWith :: String -> String -> IO TestResult
+rawRefusedWith cause text = do
+    verifier <- verifierProgram
+    pure $ case verifier of
+        Error e -> Just ("the verifier does not compile: " ++ e)
+        Ok checker -> case runProgramIn noWorld{worldInput = text} checker of
+            Error e -> Just e
+            Ok ((output, errors), _)
+                | output == "1" && cause `isInfixOf` errors -> Nothing
+                | otherwise -> Just ("expected a refusal with " ++ show cause ++ ", got output " ++ show output ++ " and errors " ++ show errors)
 
 arrayOfLists :: Program -> Program
 arrayOfLists program = case localNamed (progMain program) "xs" of

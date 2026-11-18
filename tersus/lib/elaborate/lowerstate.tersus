@@ -696,5 +696,13 @@ fn defaultNamed(ls: LowSt, x: LTy) -> LowSt ~ {
     for a in &x.args {
         if lwKind(&ls, a) = 20 { args = push(args, a); } else { ls = defaultTy(ls, a); args = push(args, ls.ty); };
     };
+    // (a Box of an array whose size no use decided holds an array of any size, as a Box of an unsized array does)
+    if x.name = clone(ls.boxName) && size(args) = 1 && lwKind(&ls, intAt(&args, 0)) = 6 {
+        held = tyOf(&ls, intAt(&args, 0));
+        if held.size is Size::SVar {
+            ls = arrayType(ls, intAt(&held.args, 0), Size::SAny);
+            args = push([], ls.ty);
+        };
+    };
     return namedType(ls, clone(x.name), args);
 };

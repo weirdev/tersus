@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module TestModules
     ( testModules
     , testPhase1Packages
@@ -9,6 +10,7 @@ module TestModules
     ) where
 
 import MirCopies (withoutGeneric)
+import TestStorage (pattern TList, pattern TBox)
 import Control.Exception (bracket, evaluate, finally, try, SomeException)
 import Control.Monad (when)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)

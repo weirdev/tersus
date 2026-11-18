@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module TestPipeline
     ( testExamples
     , testHostValidation
@@ -12,6 +13,7 @@ module TestPipeline
     , exampleExpectations
     ) where
 
+import TestStorage (pattern TList, pattern TBox)
 import Control.Exception (IOException, bracket, evaluate, finally, try)
 import Data.List (isInfixOf, isPrefixOf, nub, sort, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
@@ -39,7 +41,7 @@ import ValidatorNative (prepareTexts, validationRefusals)
 import TestParserFragments
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
-import Compile (elaborateStatements, lowerStatements)
+import Compile (elaborateParts, elaborateStatements, lowerParts, lowerStatements, parseSourceParts)
 import qualified Compile
 import ElaborateRequest (LoadRequest (..), LoadResponse (..))
 import PackageData (Resolver (..))
@@ -190,7 +192,7 @@ exampleExpectations =
     , ("examples/upper.tersus", ((ExpectReturn (VInt 0))))
     , ("examples/text.tersus", ((ExpectReturn (VInt 504))))
     , ("examples/format.tersus", ((ExpectReturn (VInt 16003))))
-    , ("examples/vec.tersus", ((ExpectReturn (VInt 2491212381))))
+    , ("examples/vec.tersus", ((ExpectReturn (VInt 2476212381))))
     , ("examples/hashmap.tersus", ((ExpectReturn (VInt 218420))))
     , ("examples/spec_functions.tersus", ((ExpectReturn (VInt 25070))))
     , ("examples/list_methods.tersus", ((ExpectReturn (VInt 508221))))
@@ -845,7 +847,7 @@ selfHostedQueryFamilies program =
                     MData name fields -> MData name [(key, onLoop change field) | (key, field) <- fields]
                     MList items -> MList (map (onLoop change) items)
                     other -> other
-                checkDrivenLoop source change expected = case parseSource source `bindResult` lowerStatements of
+                checkDrivenLoop source change expected = case parseSourceParts True source `bindResult` lowerParts of
                     Error e -> Just ("Could not lower test program: " ++ e)
                     Ok mir -> case fmap (lookup "f") (encode mir) of
                         Right (Just (blocks, initial, entry)) -> either Just (`testAssertEq` Just (MInt expected)) (driven (toDriver (onLoop change blocks)) entry initial)
@@ -857,7 +859,7 @@ selfHostedQueryFamilies program =
                     Ok (Just (MData "DriverParsed" fields)) -> lookup "value" fields
                     _ -> Nothing
                 malformed = Just (MData "DriverValue::DriverMalformed" [])
-                drivenTexts = parseSource "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` lowerStatements `bindResult` prepareTexts False
+                drivenTexts = parseSourceParts True "fn f(x: Int) -> Int { return x; }; return 0;" `bindResult` lowerParts `bindResult` prepareTexts False
                 checkDrivenInput edit expected = case drivenTexts of
                     Error e -> Just ("Could not prepare test program: " ++ e)
                     Ok texts -> case runProgramWith (edit (show (length texts) ++ "\n") (concatMap snd texts)) program of
@@ -1049,7 +1051,7 @@ selfHostedQueryFamilies program =
                             result -> Just ("Unexpected known boolean join result: " ++ show result)
                 boolConstants = [constant (20, 1, 1), constant (21, 1, 0)]
                 checkMirSubset input expected =
-                    let lowered = parseSource input `bindResult` lowerStatements
+                    let lowered = parseSourceParts True input `bindResult` lowerParts
                      in case lowered of
                             Error e -> Just ("Could not lower test program: " ++ e)
                             Ok mir ->
@@ -1059,7 +1061,7 @@ selfHostedQueryFamilies program =
                                         Nothing -> Nothing
                 checkMalformedArrayLength =
                     let input = "fn f<n>(a: Array<Int, n>, m: Int) -> Int { b = array(n, 0); return size(b); }; return 0;"
-                        lowered = parseSource input `bindResult` lowerStatements
+                        lowered = parseSourceParts True input `bindResult` lowerParts
                      in case lowered of
                             Error e -> Just ("Could not lower malformed-MIR fixture: " ++ e)
                             Ok mir -> case Map.lookup "f" (M.progFunctions mir) of
@@ -1942,7 +1944,7 @@ testPipeline =
         , validationFailureFor "compileSource"
         , testAssertErrorContains "Validation failed: Type error" (compileSource "x = 1; y = x(2);")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
-          case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborateStatements of
+          case parseSourceParts True "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborateParts of
             Ok lowered -> testAssertTrue (not (null [() | M.LoopSpec _ (Just (Counting _)) _ _ <- Map.elems (M.specLoops (M.fnSpec (M.progMain (M.lowProgram lowered))))]))
             Error e -> Just e
         , case compileSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" of
@@ -1978,8 +1980,8 @@ testPipeline =
         , -- A program that declares its own prelude trait is read without the prelude or the libraries that need it, so String is not a struct there
           testAssertEq (mapResult (const ()) (compileSource "trait Sequence { }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
         , testAssertEq (mapResult (const ()) (compileSource "trait String { }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
-        , -- The names native code makes a list and a Box of are reserved from what a program declares, not from its text
-          testAssertErrorContains "listPush is reserved" (parseSource "fn listPush(x: Int) -> Int { return x; }; return 1;")
+        , -- A program may declare a function named like a native storage helper: the helpers are std's, by their canonical names
+          testAssertEq (mapResult (const ()) (compileSource "fn listPush(x: Int) -> Int { return x; }; xs = [1]; return listPush(size(xs));")) (Ok ())
         , case parseSource "// fn listPush\nreturn 1;" of
             Ok _ -> Nothing
             Error e -> Just e

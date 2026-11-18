@@ -3,7 +3,7 @@
 // one to take: a list that is empty is refused where it is popped.
 //
 // The loop builds the squares by pushing, and says what it keeps with `size`. Native code makes each list of an array and a count
-// (lib/lists.tersus), which is why pushing is cheap.
+// (lib/std/lists/lists.tersus), which is why pushing is cheap.
 squares = [];
 i = 0;
 while i < 10 [{ affirm i >= 0; affirm i <= 10; affirm size(squares) = i; }] shrinks 10 - i {

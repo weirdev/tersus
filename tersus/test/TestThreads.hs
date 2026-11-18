@@ -4,7 +4,7 @@ import Syntax
 import TestHarness
 import TestNative (sameAsMir)
 
--- Threads: lib/thread.tersus, a closure started on a thread and joined for its result. The programs are read as the
+-- Threads: lib/std/thread/thread.tersus, a closure started on a thread and joined for its result. The programs are read as the
 -- command line reads them (the thread library is put in front of a program that mentions Thread). A thread shares
 -- nothing with the program that starts it, so `eval` runs it where it is started, and native code gives the same.
 testThreads :: Test

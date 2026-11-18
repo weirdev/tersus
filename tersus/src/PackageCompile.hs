@@ -19,7 +19,7 @@ import Types (OwnershipTransport (..))
 import ElaboratorTool (Loader, sourceLoader)
 import Interface (ModuleInterface (..))
 import LibPackage (LibPackage, libCatalog, libPackage, libUnit, stripDeclaredFromUnit)
-import Link (linkPrograms)
+import Link (linkWithLibraries)
 import qualified Modules as Mod
 import Lowering (lowerAccepted)
 import Mir (Lowered (..))
@@ -121,7 +121,7 @@ compileModulesLinked snapshot = compileModules snapshot `bindResult` lowerCompil
 
 -- Callers must validate the linked program before erasure or execution.
 lowerCompiledPackage :: CompiledPackage -> Result M.Program String
-lowerCompiledPackage compiled = packageLinkInputs compiled `bindResult` \(libraries, units) -> linkPrograms (libraries ++ units)
+lowerCompiledPackage compiled = packageLinkInputs compiled `bindResult` \(libraries, units) -> linkWithLibraries libraries units
 
 packageLinkInputs :: CompiledPackage -> Result ([(Mod.ModuleId, M.Program)], [(Mod.ModuleId, M.Program)]) String
 packageLinkInputs compiled =
