@@ -21,9 +21,10 @@ import Native (runWithInputFull)
 import Syntax (Termination (..))
 import qualified Syntax as S
 import TestHarness
-import TestNative (nativeExamples, nativeMirCase, unvalidatedPrograms, validatedPrograms)
+import TestNative (nativeExamples, nativeMirCase, ownRoleEntry, ownRolePrograms, unvalidatedPrograms, validatedPrograms)
 import Pipeline (compileSource)
-import Types (Arg (..), Size (..), Type (..), pattern TBox, pattern TList, instanceName)
+import Types (Arg (..), Size (..), Type (..), instanceName)
+import TestStorage (pattern TList, pattern TBox)
 import Utils
 
 restoreRoundTrip :: Program -> Result Program String
@@ -68,7 +69,7 @@ testOwnershipMetadata = TestList "testOwnershipMetadata"
 testMirOwnership :: Test
 testMirOwnership = TestList "testMirOwnership"
     [ TestList "examples own before list lowering" [TestCase path (do { text <- readFile path; compiled <- exampleProgram path; pure (ownedBeforeLowering text compiled) }) | path <- nativeExamples]
-    , TestList "source corpus owns before list lowering" [testCase name (ownedBeforeLowering source (lowerSource True source)) | (name, source) <- validatedPrograms ++ unvalidatedPrograms]
+    , TestList "source corpus owns before list lowering" ([testCase name (ownedBeforeLowering source (lowerSource True source)) | (name, source) <- validatedPrograms ++ unvalidatedPrograms] ++ [TestCase name (ownedBeforeLowering (concatMap snd files) <$> validatedFromFiles ownRoleEntry files) | (name, files) <- ownRolePrograms])
     , testCase "nested sequence writes retain each intermediate element type" nestedSequenceWrite
     , testCase "enum field writes retain unwritten sibling fields" enumFieldWrite
     , testCase "pre-mono expansion of a program with no reference write leaves it whole" (testAssertEq (expandRefWrites metadataFixture) (Ok metadataFixture))
@@ -354,15 +355,49 @@ nativeFixtures =
     , ("a write at an index of a lowered list through a reference releases the element", withoutListStructs loweredIndexWriteFixture)
     ]
   where
-    withoutListStructs p = p{progTypes = Map.filterWithKey (\name _ -> take 5 name /= "List<" && take 4 name /= "Box<") (progTypes p)}
+    withoutListStructs p = checkedStorage (stdNamed p{progTypes = Map.filterWithKey (\name _ -> take 5 name /= "List<" && take 4 name /= "Box<") (progTypes p)})
     -- (a parameter that is a reference is given by value, as the checker of native MIR wants it: a lent parameter has the
     -- type of what it is lent, which these fixtures write as the reference itself)
-    referencesByValue p = p{progFunctions = Map.map byValue (progFunctions p)}
+    referencesByValue p = checkedStorage p{progFunctions = Map.map byValue (progFunctions p)}
     byValue fn = fn{fnBorrowed = filter (not . reference fn) (fnBorrowed fn), fnMutBorrowed = filter (not . reference fn) (fnMutBorrowed fn)}
     reference fn l = case Map.lookup l (fnLocals fn) of
         Just (LocalDecl (TRef _) _) -> True
         Just (LocalDecl (TMutRef _) _) -> True
         _ -> False
+
+-- Native code is made with the checked std storage, so a fixture given to it is checked too: it is given the protocols, the facts and
+-- the std drops and clones the compiler gives a program of its types
+checkedStorage :: Program -> Program
+checkedStorage p = p
+    { progProtocols = progProtocols companion
+    , progOwnership = progOwnership companion
+    , progFunctions = Map.union (progFunctions p) (progFunctions companion)
+    , progTypes = Map.union (progTypes p) (progTypes companion)
+    }
+
+companion :: Program
+companion = case lowerSource True (concat
+        [ "struct Holder { xs: List<Int>, n: Int }; xs = [[7]]; h = Holder { xs: [7], n: 3 }; "
+        , "ys = [[8]]; rs = [&mut ys]; zs = [[9]]; b = Box::new(&mut zs); "
+        , "return size(xs) + size(h.xs) + size(rs) + size(*Box::unbox(b));"
+        ]) of
+    Ok p -> p
+    Error e -> error ("the checked storage companion does not compile: " ++ e)
+{-# NOINLINE companion #-}
+
+-- A lowered fixture's List and Box written as data names, as std's
+stdNamed :: Program -> Program
+stdNamed p = p{progMain = onFunction (progMain p), progFunctions = Map.map onFunction (progFunctions p)}
+  where
+    onFunction fn = fn{fnLocals = Map.map (\d -> d{localType = named (localType d)}) (fnLocals fn), fnReturns = named <$> fnReturns fn}
+    named ty = case ty of
+        TNamed "List" [ArgType t] -> TList (named t)
+        TNamed "Box" [ArgType t] -> TBox (named t)
+        TNamed n args -> TNamed n [case a of ArgType t -> ArgType (named t); _ -> a | a <- args]
+        TRef t -> TRef (named t)
+        TMutRef t -> TMutRef (named t)
+        TArrayOf t n -> TArrayOf (named t) n
+        _ -> ty
 
 -- One write at an index through a reference, as the ownership tool reads it: with the old `list` tokens, and with a list
 -- named as its struct, as lowering writes it
@@ -631,7 +666,7 @@ nestedSequenceWrite = case expandRefWrites input of
       where locals = fnLocals (progMain output)
   where
     list = TList TInt
-    input = wireEmpty{progMain = (progMain wireEmpty)
+    input = checkedStorage wireEmpty{progMain = (progMain wireEmpty)
         { fnReturns = Just (TList (TList list))
         , fnLocals = Map.fromList [(Local 0, LocalDecl (TList (TList list)) Nothing), (Local 1, LocalDecl (TList (TList list)) (Just "rows")), (Local 2, LocalDecl list (Just "replacement"))]
         , fnBlocks = Map.singleton (BlockId 0) (BasicBlock
@@ -676,6 +711,8 @@ metadataFixture = Program
     , progInvariants = Map.singleton "Packet" [S.AssignProofVar "invariant" (S.Val (S.VBool True))]
     , progBounded = Map.empty
     , progInstances = Map.empty
+    , progProtocols = Map.empty
+    , progOwnership = Nothing
     , progFunctions = Map.singleton "symbolic" symbolic
     , progMain = mainFn
     }
@@ -713,7 +750,7 @@ ownershipFixture = metadataFixture
     cloneFn = dropFn{fnName = "<Plain as Clone>::clone", fnReturns = Just (TNamed "Plain" []), fnLocals = Map.insert (Local 0) (LocalDecl (TNamed "Plain" []) Nothing) (fnLocals dropFn), fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (Use (Copy (Local 1)))] Return)}
 
 wireEmpty :: Program
-wireEmpty = Program Map.empty Map.empty (Function "main" [] Nothing Map.empty (Map.singleton (BlockId 0) (BasicBlock [] Return)) [] [] [] [] [] emptySpec) Map.empty Map.empty Map.empty Map.empty
+wireEmpty = Program Map.empty Map.empty (Function "main" [] Nothing Map.empty (Map.singleton (BlockId 0) (BasicBlock [] Return)) [] [] [] [] [] emptySpec) Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
 
 wireMain :: Statement -> Program
 wireMain statement = wireEmpty{progMain = (progMain wireEmpty){fnBlocks = Map.singleton (BlockId 0) (BasicBlock [statement] Return)}}

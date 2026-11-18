@@ -1,0 +1,31 @@
+// What makes a copy of a value explicit: the trait `Clone` that `clone(x)` and `x.clone()` call. A program has this library in
+// front of it unless it declares a trait `Clone` of its own (see Pipeline.libraries), as with Eq. A value is moved to where it is
+// wanted, and a program that needs it again says `clone(x)`, which has the value of x.
+//
+// A struct or an enum implements it with `impl Clone for T { };` (which clones the fields, of the same variant for an enum, each
+// with its own Clone) or with an impl that has a body, whose clone has the value of the value it clones, as the trait says. A word
+// (Int, Byte, Bool, a fixed-width integer, an address) and a function are their own copy, which clone itself says
+// (the elaborator's cloneCall), so they have no impl.
+trait Clone {
+    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }];
+};
+
+trait Copy { };
+
+// What is done when a value goes out of scope: `impl Drop for T { fn drop(self: Self) -> Int { ... }; };` is called by native code where a value
+// of T is freed (at the end of the scope of the local that holds it, when it is given another value, or when what holds it is freed), before
+// what its fields own is freed. It is how a type that holds a permission (POINTERS.md) frees the memory it is for, so such a type is not
+// linear: its drop is its use. A program does not call it, and a type with a drop is not Copy (a Clone of one is
+// the clone the type writes, which makes a value of its own to be dropped, as a list's does).
+trait Drop {
+    fn drop(self: Self) -> Int [{ }] [{ }];
+};
+
+// What a value that holds another is looked through to: `impl Deref<T> for W { fn deref(self: &Self) -> T { ... }; };` says that where a
+// struct or an enum is looked at (a field is read, `is`, `as`, a `match`, the base of an update, `shrinks`), a value of W is looked at
+// through the T its `deref` gives, as a Box is looked through to what it holds. The functions of T are not the functions of W: a method
+// is called on the value inside, as with a Box. A Box is the one Deref that no library can write, since what it holds is not a field of
+// it, so the language gives it itself (LANGUAGE.md, Box).
+trait Deref<T> {
+    fn deref(self: &Self) -> T [{ }] [{ }];
+};

@@ -61,6 +61,15 @@ impl Clone for FnSig { };
 struct Reference { f: String, types: List<Int>, sizes: List<Int>, sig: FnSig };
 impl Clone for Reference { };
 
+// A call of a generic function: where it is, what it calls, and the unknowns its sizes and types are (wireInstantiations)
+struct GenericCall { caller: String, callee: String, sizeNames: List<String>, typeNames: List<String>, vars: List<Int> };
+impl Clone for GenericCall { };
+
+// The functions on the way to a frame of a generic function, their type parameters, and the types the frame's function
+// is given in each one's parameters (wireInstantiations)
+struct Way { functions: List<String>, params: List<List<String>>, given: List<List<Int>> };
+impl Clone for Way { };
+
 // A place as the root it starts from and its steps: a field's name, or "" for an element
 struct Place { ok: Bool, root: String, steps: List<String> };
 impl Clone for Place { };
@@ -88,7 +97,7 @@ fn noBoundedParts() -> BoundedParts ~ { return BoundedParts { names: [], values:
 // expression types, references the copies the module names and boundStubs the functions bounds give (all given to the
 // program after it is checked); sequenceTraits holds the library's Sequence and Growable when the module has them, which lists, arrays and Boxes of
 // arrays implement with the builtins;
-// storageCopies is set for the native storage helpers (tersuslib's lists and box), whose clones are the copies native code
+// storageCopies is set for the native storage helpers (std's lists and box), whose clones are the copies native code
 // makes of a value of any type.
 // ty is the result of the last function that makes a type, ok of the last unify, te of the last inference.
 struct St {
@@ -103,6 +112,13 @@ struct St {
     localNames: HashMap<String, Int>,
     rewrittenNodes: List<NodeRewrite>,
     trialRound: Bool,
+    templateFacts: List<String>,
+    ordinaryFrames: List<String>,
+    ownTypes: HashSet<String>,
+    genericCalls: List<GenericCall>,
+    genericBodies: HashMap<String, List<Int>>,
+    genericNested: List<Int>,
+    way: Way,
     types: HashMap<String, List<String>>,
     ctors: HashMap<String, CtorInfo>,
     generics: HashMap<String, Generic>,
@@ -217,6 +233,13 @@ fn copyState(st: &St) -> St ~ {
         localNames: clone(st.localNames),
         rewrittenNodes: clone(st.rewrittenNodes),
         trialRound: st.trialRound,
+        templateFacts: clone(st.templateFacts),
+        ordinaryFrames: clone(st.ordinaryFrames),
+        ownTypes: clone(st.ownTypes),
+        genericCalls: clone(st.genericCalls),
+        genericBodies: clone(st.genericBodies),
+        genericNested: clone(st.genericNested),
+        way: clone(st.way),
         types: clone(st.types),
         ctors: clone(st.ctors),
         generics: clone(st.generics),

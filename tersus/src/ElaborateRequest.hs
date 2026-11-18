@@ -70,7 +70,7 @@ data Request = RequestData
 
 pattern Request :: ModuleId -> Bool -> Bool -> Extraction -> [ModuleInterface] -> [[ModuleInterface]] -> [Library] -> [[Statement]] -> Request
 pattern Request modu predeclaring library extraction interfaces definitions libraries statements <- RequestData modu predeclaring library extraction interfaces definitions libraries statements _
-  where Request modu predeclaring library extraction interfaces definitions libraries statements = RequestData modu predeclaring library extraction interfaces definitions libraries statements Nothing
+  where Request modu predeclaring library extraction interfaces definitions libraries statements = RequestData modu predeclaring library extraction interfaces definitions libraries statements (Just Map.empty)
 
 {-# COMPLETE Request #-}
 
@@ -430,7 +430,7 @@ data LoadRequest = LoadRequestData
 
 pattern LoadRequest :: LoadKind -> Bool -> Resolver -> Maybe (FilePath, Bool) -> [(String, Bool, String)] -> [Library] -> LoadRequest
 pattern LoadRequest kind reserving resolver entry sources libraries <- LoadRequestData kind reserving resolver entry sources libraries _
-  where LoadRequest kind reserving resolver entry sources libraries = LoadRequestData kind reserving resolver entry sources libraries Nothing
+  where LoadRequest kind reserving resolver entry sources libraries = LoadRequestData kind reserving resolver entry sources libraries (Just Map.empty)
 
 {-# COMPLETE LoadRequest #-}
 

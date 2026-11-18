@@ -7,7 +7,8 @@ import Control.Monad (when)
 import Data.List (isInfixOf, isPrefixOf)
 import ElaboratorTool (noVerdict)
 import Native (buildExecutableFast, readProcessOutput)
-import Pipeline (parseSource, validateStatements)
+import Compile (parseSourceParts)
+import Pipeline (validateParts)
 import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.IO (hClose)
@@ -23,7 +24,7 @@ heldPrograms =
     [ ("forwarded incoming update parameter", forwardedUpdateSource, 2)
     , ("overlapping read call arguments", "fn read(a: &Int, b: &Int) -> Int { return *a + *b; }; n = 3; return read(n, n);", 6)
     , ("disjoint mutable and read call arguments", "struct P { x: Int, y: Int }; fn step(a: &mut Int, b: &Int) -> Int writes(a) [{ affirm *a < 100; }] [{ affirm *a = old(*a) + 1; affirm return = *b; }] { *a = *a + 1; return *b; }; p = P { x: 1, y: 7 }; before = step(&mut p.x, &p.y); return p.x + before;", 9)
-    , ("cloned shared-reference holder", "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); return *t.r;", 1)
+    , ("cloned shared-reference holder", "struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); return *t.r;", 1)
     , ("reference carried by Box", "xs = [[7]]; t = get(xs, 0); r = &mut xs; b = Box::new(r); r2 = Box::unbox(b); *r2 = [[9]]; return size(t);", 1)
     , ("intermediate shared reference field", "struct W { r: &List<Int> }; xs = [7]; w = W { r: &xs }; z = &get(*w.r, 0); return *z;", 7)
     , ("readonly scalar holder", w ++ "fn mutate(w: &W) -> Int { *w.r = 4; return 0; }; n = 1; w = W { r: &mut n }; mutate(w); return n;", 4)
@@ -67,9 +68,9 @@ rejectedPrograms =
     w = "struct W { r: &mut Int }; "
 
 strictRejected :: String -> String -> TestResult
-strictRejected source expected = case parseSource source of
+strictRejected source expected = case parseSourceParts True source of
     Error err -> Just ("unexpected parse failure: " ++ err)
-    Ok statements -> case validateStatements statements of
+    Ok parts -> case validateParts parts of
         Error err | noVerdict err -> Just ("the elaborator gave no verdict: " ++ err)
         Error err | "Could not prove:" `isPrefixOf` err && expected `isInfixOf` err && not ("does not model yet" `isInfixOf` err) -> Nothing
         Error err -> Just ("wrong rejection: " ++ err)
