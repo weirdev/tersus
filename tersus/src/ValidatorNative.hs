@@ -108,11 +108,8 @@ refusalMessage physical program name (status, block, step) = case status of
 -- with the verdicts validateCompiled keeps on disk: what each function refused, or that the validator could not
 -- check it, in the program's order.
 --
--- A function's data is far larger as the text the validator reads than as the
--- MIR it is made from, so the texts are made and checked a batch at a time
--- rather than all at once (the elaborator's held about 15 GiB on a machine
--- with 16). Every function is still checked under the same verdicts and
--- namespace; one whose text another batch has checked is a verdict read back.
+-- Keeping every serialized proof text at once exhausted the Host runner.
+-- Complete each batch, including its lazy answers, before admitting another.
 validationRefusals :: M.Program -> IO (Result [String] String)
 validationRefusals program = case encode program of
     Left what -> pure (Error ("the program uses a feature the Tersus validator does not model yet: " ++ what))
@@ -139,9 +136,6 @@ validationRefusals program = case encode program of
         | status /= 0 = Just (refusalMessage False program name verdict)
         | otherwise = Nothing
 
--- Work done a batch at a time, in order, and what the batches answer joined.
--- A batch's answer is made before the next one starts: it is what the batch
--- holds that the size bounds, and a lazy answer would hold it all the same.
 inBatches :: Int -> ([a] -> IO (Result [String] String)) -> [a] -> IO (Result [String] String)
 inBatches size work items = go items []
   where

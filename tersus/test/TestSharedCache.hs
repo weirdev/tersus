@@ -1858,10 +1858,6 @@ parallelChecksForceTextsFirst = do
         , testAssertTrue (all (== caller) seen)
         ]
 
--- What the validator's own batches rest on: no more than the size at once,
--- each batch's answer made before the next one starts (a lazy answer would
--- hold the batch's texts to the end), the answers in order, and a batch that
--- fails the answer with none after it run.
 boundedBatches :: IO TestResult
 boundedBatches = do
     events <- newIORef []
