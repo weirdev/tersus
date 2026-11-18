@@ -156,7 +156,15 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
     [ TestCase "borrowed Fn contract, zero-field object and named wrapper" $ checked "fn-contract" 12 (lower fnContract)
     , TestCase "FnMut preserves updates through the borrowed receiver" $ checked "fn-mut" 1202 (lower (closureCounter ++ "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; c = Counter { count: 0 }; r = twice(&mut c); return r * 100 + c.count;"))
     , TestCase "FnOnce consumes the receiver and owning argument" $ checked "fn-once" 5 (lower fnOnce)
-    , TestCase "Fn shape bound and object cross module boundaries" $ checked "fn-modules" 15 package
+    , TestCase "unsupported cross-module Fn is refused before native passes" $ do
+        let forbidden = error "unsupported cross-module Fn acquired a native pass tool"
+            afterLowering run = case package of
+                Error e -> pure (Error e)
+                Ok p -> run forbidden p
+            expected = Error "in module app: Type error: apply needs F to implement Fn(...), and app$provider$provider$Adder does not" :: Result Program String
+        stagedResult <- afterLowering staged
+        fusedResult <- afterLowering monomorphizeOwnershipWith
+        pure (testAssertEq stagedResult expected <> testAssertEq fusedResult expected)
     ]
   where
     lower = lowerSourceUsing loader False True
