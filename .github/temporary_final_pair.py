@@ -64,7 +64,12 @@ def run(label, argv, cwd, env, bound=1800):
                  ended_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
     metrics = out / (label + '.time.json')
     if metrics.exists():
-        entry['time'] = json.loads(metrics.read_text())
+        raw_metrics = metrics.read_text()
+        entry['time_raw'] = raw_metrics
+        try:
+            entry['time'] = json.loads(next(line for line in raw_metrics.splitlines() if line.startswith('{')))
+        except (StopIteration, ValueError) as error:
+            entry['metrics_error'] = str(error)
     sampled = []
     for line in (out / (label + '.stderr')).read_text().splitlines():
         if line.startswith('[CI_RESOURCE] '):
@@ -76,6 +81,8 @@ def run(label, argv, cwd, env, bound=1800):
     save()
     if code:
         raise RuntimeError(label + ' failed or timed out, exit ' + str(code))
+    if 'time' not in entry:
+        raise RuntimeError(label + ' completed without valid timing metrics')
     return entry
 
 def inventory(cache):
@@ -104,7 +111,7 @@ try:
     env = dict(os.environ)
     env.pop('TERSUS_TEST_APPROVED_BUILD_IDENTITY', None)
     env.pop('TERSUS_EMITTER_BUILD_MANIFEST', None)
-    env.update(GHCRTS='-A16m -qg', TERSUS_TEST_RTS_STATS='1')
+    env.update(GHCRTS='-A16m', TERSUS_TEST_RTS_STATS='1')
     run('normal-toolchain-setup', ['stack', 'setup'], repo / 'tersus', env, 1800)
     version = subprocess.check_output(['stack', 'exec', '--', 'ghc', '--numeric-version'], cwd=repo / 'tersus', env=env, text=True).strip()
     record['actual_ghc_version'] = version
@@ -139,7 +146,7 @@ try:
         if side == 'final':
             run('final-profile-before', ['stack', 'run', 'emitter-seed', '--', 'profile'], root, side_env)
             certified = out / 'final-certified.pin'
-            run('final-gen-preparation', ['stack', 'run', 'emitter-seed', '--', 'certify', str(out / 'final-certified.ll'), str(certified)], root, side_env, 2400)
+            run('final-gen-preparation', ['stack', 'run', 'emitter-seed', '--', 'certify', str(out / 'final-certified.ll'), str(certified), '+RTS', '-qg', '-RTS'], root, side_env, 2400)
             fields = certified.read_text().split()
             if len(fields) != 2 or fields[0] != seeds['emitter']['sha256']:
                 raise RuntimeError('normal GEN did not certify the final published seed')
@@ -160,7 +167,7 @@ try:
         revision = record[side]['revision']
         record[side]['cold_cache_before'] = inventory(cache)
         memory_ready(side + '-before-cold')
-        run(side + '-cold', ['stack', 'run', 'tersus-exe', '--', 'llvm', 'examples/basics.tersus'], root, side_env, 1800)
+        run(side + '-cold', ['stack', 'run', 'tersus-exe', '--', 'llvm', 'examples/basics.tersus', '+RTS', '-qg', '-RTS'], root, side_env, 1800)
         record[side]['cold_cache_after'] = inventory(cache)
         emitters = [x['name'] for x in record[side]['cold_cache_after'] if x['name'].startswith('emitter-')]
         record[side]['source_emitter_cache_entries'] = emitters
@@ -174,7 +181,7 @@ try:
         if side == 'final' and (emitters or prepared_emit_results or not any(x['name'].startswith('seed-') for x in record[side]['cold_cache_after'])):
             raise RuntimeError('final ordinary CLI did not use the genuine known published route without SOURCE emitter preparation')
         memory_ready(side + '-before-suite')
-        run(side + '-suite', ['stack', 'test', '--test-arguments=-j 4 +RTS -N2 -RTS'], root, side_env, 6600)
+        run(side + '-suite', ['stack', 'test', '--test-arguments=-j 4 +RTS -N2 -qg -RTS'], root, side_env, 6600)
         text = (out / (side + '-suite.stdout')).read_text() + (out / (side + '-suite.stderr')).read_text()
         summaries = re.findall(r'Summary:\s*(\d+) passed,\s*(\d+) failed', text)
         if not summaries or int(summaries[-1][0]) == 0 or int(summaries[-1][1]) != 0 or '[CRASH]' in text or '[FAIL]' in text:
