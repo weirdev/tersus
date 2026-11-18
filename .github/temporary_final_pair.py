@@ -15,7 +15,6 @@ BASE = 'b1b837744410437694bd5b4f1002aed97ecb8bda'
 FINAL = 'cda67a0f977b45124d08d4ebaba6877f514bde5a'
 MODE = os.environ.get('TERSUS_PAIR_MODE', 'preparation-only')
 sides = {}
-BASE_CABAL_GENERATED_SHA256 = '94d48cb8eed32119a744d543bbe604eec1591f2aacf3db7d66a44d91fdaf1ce2'
 repo = Path.cwd()
 out = Path(os.environ['RUNNER_TEMP']) / 'tersus-final-pair'
 out.mkdir()
@@ -63,10 +62,14 @@ def source_snapshot(side, phase):
         permitted = side == 'final' and verified and manifest.get(pin, {}).get('sha256') == verified
         allowed = {pin} if permitted else set()
         cabal = 'tersus/tersus.cabal'
-        if side == 'baseline' and manifest.get(cabal, {}).get('sha256') == BASE_CABAL_GENERATED_SHA256:
-            allowed.add(cabal)
-            evidence['baseline_qualification'] = 'b1 plus exact normal hpack test-suite TestClosures discovery, already imported and executed'
-        evidence['violations'] = [path for path in changed if path not in allowed]
+        generated = record[side].get('generated_input_hashes')
+        if generated is not None:
+            if manifest.get(cabal) == generated.get(cabal):
+                allowed.add(cabal)
+            evidence['generated_input_drift'] = [path for path in sorted(set(generated) | set(manifest))
+                if path != pin and generated.get(path) != manifest.get(path)]
+        evidence['violations'] = sorted(set(path for path in changed if path not in allowed)
+                                        | set(evidence.get('generated_input_drift', [])))
         frozen = record[side].get('frozen_input_hashes')
         if frozen is not None:
             evidence['frozen_input_drift'] = [path for path in sorted(set(frozen) | set(manifest))
@@ -82,6 +85,57 @@ def check_source(side, phase):
     evidence = source_snapshot(side, phase)
     if evidence.get('violations') or evidence['inspection_errors']:
         raise RuntimeError(side + ' source drift at ' + phase + ': ' + str(evidence))
+
+
+def semantic_cabal(text):
+    result, component, declared_paths = [], None, False
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line == 'library' or line.startswith(('executable ', 'test-suite ')):
+            component, declared_paths = line, False
+        if line.strip() == 'Paths_tersus':
+            declared_paths = True
+        if line.strip() == 'autogen-modules:':
+            if not declared_paths or index + 1 >= len(lines) or lines[index + 1].strip() != 'Paths_tersus':
+                raise RuntimeError('unrecognized generated module classification in ' + str(component))
+            if index + 2 < len(lines) and lines[index + 2].startswith('      '):
+                raise RuntimeError('additional generated module classification')
+            index += 2
+            continue
+        if not line.startswith('--'):
+            result.append(line)
+        index += 1
+    return result
+
+
+def accept_generation(side):
+    root = sides[side][0].parent
+    revision = record[side]['revision']
+    evidence = source_snapshot(side, 'normal-generation')
+    if evidence['inspection_errors'] or any(p != 'tersus/tersus.cabal' for p in evidence['changed_paths']):
+        raise RuntimeError('generation changed non-Cabal inputs: ' + str(evidence))
+    old = subprocess.check_output(['git', 'show', revision + ':tersus/tersus.cabal'], cwd=root, text=True)
+    new = (root / 'tersus/tersus.cabal').read_text()
+    old_lines, new_lines = semantic_cabal(old), semantic_cabal(new)
+    if side == 'baseline' and '      TestClosures' not in old_lines:
+        runner = (root / 'tersus/test/TestTersus.hs').read_text()
+        if not (root / 'tersus/test/TestClosures.hs').is_file() or 'import TestClosures' not in runner or ', testClosures' not in runner:
+            raise RuntimeError('new test module was not already imported and registered')
+        position = old_lines.index('test-suite tersus-test')
+        anchor = old_lines.index('      TestBytes', position)
+        old_lines.insert(anchor + 1, '      TestClosures')
+    comparison = {'equal': old_lines == new_lines, 'original': old_lines, 'generated': new_lines,
+                  'checks': 'unchanged stanzas, flags, dependencies, module exposure and test selection; existing Paths_tersus autogen classification only'}
+    (out / (side + '-generation-semantics.json')).write_text(json.dumps(comparison, indent=2) + '\n')
+    if not comparison['equal']:
+        raise RuntimeError(side + ' normal generation changed semantic configuration')
+    manifest = json.loads((out / evidence['manifest_file']).read_text())
+    record[side]['generated_input_hashes'] = manifest
+    record[side]['generation_qualification'] = {'source': revision, 'cabal': manifest['tersus/tersus.cabal'],
+        'generator': record['toolchain'], 'semantic_configuration_equal': True}
+    check_source(side, 'generated-inputs-frozen')
 
 
 def run(label, argv, cwd, env, bound=1800):
@@ -171,6 +225,11 @@ try:
     env.pop('TERSUS_TEST_APPROVED_BUILD_IDENTITY', None)
     env.pop('TERSUS_EMITTER_BUILD_MANIFEST', None)
     env.update(GHCRTS='-A16m', TERSUS_TEST_RTS_STATS='1')
+    stack_version = subprocess.check_output(['stack', '--numeric-version'], env=env, text=True).strip()
+    hpack_version = subprocess.check_output(['stack', '--hpack-numeric-version'], env=env, text=True).strip()
+    record['toolchain'] = {'stack': stack_version, 'bundled_hpack': hpack_version, 'compiler': '9.6.5'}
+    if (stack_version, hpack_version) != ('3.11.1', '0.39.6'):
+        raise RuntimeError('the fixed normal Stack/Hpack generator is not selected')
     run('normal-toolchain-setup', ['stack', 'setup'], repo / 'tersus', env, 1800)
     version = subprocess.check_output(['stack', 'exec', '--', 'ghc', '--numeric-version'], cwd=repo / 'tersus', env=env, text=True).strip()
     record['actual_ghc_version'] = version
@@ -203,6 +262,13 @@ try:
             side_env['TERSUS_' + ('SEED_FILE' if stage == 'emitter' else stage.upper() + '_SEED_FILE')] = str(asset)
             seeds[stage] = {'pin': pin, 'bytes': asset.stat().st_size, 'sha256': digest}
         record[side]['seeds'] = seeds
+        run(side + '-normal-generation', ['stack', '--hpack-force', 'build', '--dry-run', '--test', '--no-run-tests'], root, side_env, 1200)
+        accept_generation(side)
+    for side in ['baseline', 'final']:
+        root, side_env, measured = sides[side]
+        prep = Path(side_env['XDG_CACHE_HOME'])
+        temporary = out / (side + '-measured-tmp')
+        seeds = record[side]['seeds']
         run(side + '-build', ['stack', 'build', '--test', '--no-run-tests'], root, side_env, 2400)
         check_source(side, 'after-build')
         if side == 'final':
@@ -221,13 +287,6 @@ try:
                 raise RuntimeError('metadata-only GEN pin changed actual common-library profile/construction')
             record['final']['measured_pin'] = fields
         check_source(side, 'after-preparation')
-        if side == 'baseline':
-            cabal_digest = hashlib.sha256((root / 'tersus.cabal').read_bytes()).hexdigest()
-            if cabal_digest != BASE_CABAL_GENERATED_SHA256:
-                raise RuntimeError('baseline normal build did not reproduce the exact qualified Cabal metadata')
-            record[side]['baseline_qualification'] = {'base_revision': BASE,
-                'generated_cabal_sha256': cabal_digest,
-                'change': 'test-suite other-modules adds already imported/executed TestClosures only'}
         snapshot = record[side]['source_snapshots'][-1]
         record[side]['frozen_input_hashes'] = json.loads((out / snapshot['manifest_file']).read_text())
         record[side]['preparation_cache'] = inventory(prep)

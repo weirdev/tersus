@@ -23,6 +23,13 @@ jobs:
           restore-keys: |
             stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}-
             stack-${{ runner.os }}-
+      - name: Select fixed normal Stack and bundled Hpack
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 300 https://github.com/commercialhaskell/stack/releases/download/v3.11.1/stack-3.11.1-linux-x86_64.tar.gz -o "$RUNNER_TEMP/stack.tar.gz"
+          echo "1fda71e657cd8d355625cc66b61b352699279dfee2664c014a392163bd19a952  $RUNNER_TEMP/stack.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/stack.tar.gz" -C "$RUNNER_TEMP" stack-3.11.1-linux-x86_64/stack
+          echo "$RUNNER_TEMP/stack-3.11.1-linux-x86_64" >> "$GITHUB_PATH"
       - name: Provide the runner's linker
         run: command -v ld.gold || sudo ln -s "$(command -v ld.bfd)" /usr/local/bin/ld.gold
       - name: Prepare exact frozen inputs and measure only when clean
