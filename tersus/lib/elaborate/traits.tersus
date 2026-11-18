@@ -780,6 +780,12 @@ fn wrapNamedArgs(st: St, tm: &Template, pts: &List<Int>, inferred: &List<TE>) ->
 // a struct of its captures, a body function of that struct, and an impl of a minted Fn trait per bound it meets
 
 struct ClosureCap { name: String, ty: Int, field: Int, updated: Bool, moved: Bool, linear: Bool };
+
+// The field a capture is stored in: a captured receiver goes under its own name, not the body's self
+fn closureFieldName(cap: &ClosureCap) -> String ~ {
+    if cap.name = "self" { return "$self"; };
+    return clone(cap.name);
+};
 impl Clone for ClosureCap { };
 
 fn closureMarker(st: &St, exports: Int, marker: &String) -> Bool ~ {
@@ -1032,7 +1038,7 @@ fn closureKindWord(rank: Int) -> String ~ {
 fn closureCaptureExpr(st: St, cap: &ClosureCap, raw: Bool) -> St ~ {
     st = emitVar(st, "self");
     selfNode = st.nid;
-    st = emitFieldValue(st, "", clone(cap.name));
+    st = emitFieldValue(st, "", closureFieldName(cap));
     st = emitVal(st, st.nid);
     args1 = push([], selfNode);
     st = emitCall(st, st.nid, &args1);
@@ -1047,7 +1053,7 @@ fn closureCaptureProof(st: St, cap: &ClosureCap, structName: &String) -> St ~ {
     st = emitName(st, "self");
     st = emit(st, AstNode::Proof { value: AstProof::ATerm { n: st.nid } });
     selfProof = st.nid;
-    st = emitFieldValue(st, clone(structName), clone(cap.name));
+    st = emitFieldValue(st, clone(structName), closureFieldName(cap));
     valueNode = st.nid;
     st = emit(st, AstNode::Proof { value: AstProof::CTerm { v: valueNode } });
     fProof = st.nid;
@@ -1100,7 +1106,7 @@ fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName
                                 oneArg = push([], selfNode);
                                 st = emitBuiltinCall(st, "DerefOf", &oneArg);
                                 derefNode = st.nid;
-                                st = emitFieldValue(st, "", clone(cap.name));
+                                st = emitFieldValue(st, "", closureFieldName(&cap));
                                 st = emitVal(st, st.nid);
                                 fv = st.nid;
                                 args1 = push([], derefNode);
@@ -1111,7 +1117,7 @@ fn closureRewrite(st: St, roots: &List<Int>, caps: &List<ClosureCap>, structName
                                 ctorNames = [];
                                 j = 0;
                                 for c2 in caps {
-                                    ctorNames = push(ctorNames, clone(c2.name));
+                                    ctorNames = push(ctorNames, closureFieldName(&c2));
                                     if c2.name = anm { ctorArgs = push(ctorArgs, a.e); } else { cap2 = nthCap(caps, j); st = closureCaptureExpr(st, &cap2, false); ctorArgs = push(ctorArgs, st.nid); };
                                     j = j + 1;
                                 };
@@ -1208,7 +1214,7 @@ fn closureStructValue(st: St, structName: &String, structTy: Int, structArgs: &L
         };
     };
     names = [];
-    for c in caps { names = push(names, clone(c.name)); };
+    for c in caps { names = push(names, closureFieldName(&c)); };
     st = emitCtorValue(st, clone(structName), structArgs, &names);
     st = emitVal(st, st.nid);
     st = emitCall(st, st.nid, &fieldExprs);
@@ -1413,7 +1419,7 @@ fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<
     for c in caps {
         st = emitVar(st, "self");
         selfNode = st.nid;
-        st = emitFieldValue(st, "", clone(c.name));
+        st = emitFieldValue(st, "", closureFieldName(&c));
         st = emitVal(st, st.nid);
         fv = st.nid;
         oneArg = push([], selfNode);
@@ -1433,7 +1439,7 @@ fn makeClosureCloneImpl(st: St, structName: &String, structTy: Int, caps: &List<
         bodyStmts = push(bodyStmts, st.nid);
         st = emitVar(st, clone(vname));
         fieldExprs = push(fieldExprs, st.nid);
-        cloneFieldNames = push(cloneFieldNames, clone(c.name));
+        cloneFieldNames = push(cloneFieldNames, closureFieldName(&c));
         j = j + 1;
     };
     st = emitCtorValue(st, clone(structName), &structArgs, &cloneFieldNames);
@@ -1563,7 +1569,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
     capNames = [];
     for id in ids {
         nm = closureNodeName(&st, id);
-        if size(nm.bytes) > 0 && indexIn(&boundNames, &nm) < 0 && indexIn(&capNames, &nm) < 0 && scopeLookup(&st, &nm) >= 0 && nm != "self" && nm != "return" && !nm.startsWith("$old ") { capNames = push(capNames, nm); };
+        if size(nm.bytes) > 0 && indexIn(&boundNames, &nm) < 0 && indexIn(&capNames, &nm) < 0 && scopeLookup(&st, &nm) >= 0 && nm != "return" && !nm.startsWith("$old ") { capNames = push(capNames, nm); };
     };
     // an assignment to an enclosing local is a capture too, though no variable expression reads it first
     for id in ids {
@@ -1659,7 +1665,7 @@ fn synthesizeClosure(st: St, v: Int, hasBound: Bool, b: BoundInfo, traitArgTys: 
     structPs = st.nid;
     fieldIds = [];
     for c in caps {
-        st = emitName(st, clone(c.name));
+        st = emitName(st, closureFieldName(&c));
         fnameNode = st.nid;
         st = emitType(st, c.field);
         st = emit(st, AstNode::Field { value: AstField { n: fnameNode, ty: st.nid } });
