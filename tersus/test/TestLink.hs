@@ -231,6 +231,22 @@ testLinkNative = TestList "testLinkNative"
                                     [ testAssertTrue (any (isPrefixOf "listNew") (Map.keys (M.progFunctions p)))
                                     , sameResult (Ok (Oracle.pruneProgram p)) (mapResult M.lowProgram actual)
                                     ])
+       , TestCase "native prune keeps ghost expression control-flow references" $ do
+            actual <- case programData expressionForms of
+                Error e -> pure (Error e)
+                Ok text -> nativeFull ("pass link\nprune\n" ++ text)
+            pure (firstFailure
+                [ sameResult (Ok (Oracle.pruneProgram expressionForms)) (mapResult M.lowProgram actual)
+                , inspect (mapResult M.lowProgram actual) expressionFormEffects
+                ])
+       , TestCase "native mixed assume and return payload round trip" $ case writeLowered mixedAssumes of
+            Error e -> pure (Just e)
+            Ok input -> do
+                result <- nativeFull input
+                pure $ inspect result $ \back -> firstFailure
+                    [ testAssertTrue (mixedAssumes == back && show mixedAssumes == show back)
+                    , testAssertEq (writeLowered back) (Ok input)
+                    ]
        , TestCase "full payload native round trip" $ case writeLowered everyRecord of
             Error e -> pure (Just e)
             Ok input -> do result <- nativeFull input; pure $ inspect result $ \back -> testAssertTrue (everyRecord == back && show everyRecord == show back)
@@ -396,6 +412,11 @@ linkCases =
     , ("bounded declaration collision", [(unitA, withBounded "n"), (unitB, withBounded "m")])
     , ("instance collision", [(unitA, withInstance TInt), (unitB, withInstance TBool)])
     , ("dependency ghosts precede root ghosts", [(unitA, ghostUnit 1), (unitB, ghostUnit 2)])
+    , ("identical ghost expression control flow from distinct units", [(unitA, ghostFunction blockExpression), (unitB, ghostFunction blockExpression)])
+    , ("conditional ghost expression branch collision", [(unitA, ghostFunction (S.IfExpr (S.Var "c") (S.Var "a") (S.Var "b"))), (unitB, ghostFunction (S.IfExpr (S.Var "c") (S.Var "a") (S.Var "other")))])
+    , ("block ghost expression statement collision", [(unitA, ghostFunction blockExpression), (unitB, ghostFunction (S.BlockExpr [] (S.Var "blockResultRef")))])
+    , ("ascription type child collision", [(unitA, ghostFunction (S.Ascribed (S.Var "x") TInt)), (unitB, ghostFunction (S.Ascribed (S.Var "x") TBool))])
+    , ("identical ascriptions of a recursive type", [(unitA, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt)))), (unitB, ghostFunction (S.Ascribed (S.Var "x") (TBox (TList TInt))))])
     , ("root spec and loop environments remain untouched", [(unitA, program [("extra", 1)]), (unitB, environments)])
     , ("the complete full metadata fixture", [(unitA, M.lowProgram everyRecord)])
     ]
@@ -451,6 +472,51 @@ reachable = withMain base
         , M.progInvariants = Map.fromList [("Child", [S.ProofAssert (S.ATerm "invariantRef")]), ("DeadType", [])]
         , M.progGenerics = Map.singleton "UnusedGeneric" (["n"], [("x", TArrayOf TInt (SizeParam "n"))])
         }
+
+ghostExpressionNames :: [String]
+ghostExpressionNames =
+    [ "condRef", "thenRef", "elseRef"
+    , "blockCallRef", "blockProofRef", "blockIfRef", "blockReturnRef", "blockElseRef", "blockResultRef"
+    , "ascribedRef"
+    ]
+
+blockExpression :: S.Expression
+blockExpression = S.BlockExpr
+    [ S.Let "t" (S.F (S.Var "blockCallRef") [S.Val (S.VInt 1)])
+    , S.ValidationStatement (S.ProofAssert (S.ATerm "blockProofRef"))
+    , S.If (S.Var "blockIfRef") [S.Return (S.Var "blockReturnRef")] [S.Block [S.Assign "t" (S.Var "blockElseRef")]]
+    ] (S.Var "blockResultRef")
+
+expressionForms :: M.Program
+expressionForms = withMain base
+    [ M.Ghost Map.empty (M.GhostValidation (S.AssignProofVar "a" (S.IfExpr (S.Var "condRef") (S.Var "thenRef") (S.Var "elseRef"))))
+    , M.Ghost Map.empty (M.GhostValidation (S.AssignProofVar "b" blockExpression))
+    , M.Ghost Map.empty (M.GhostValidation (S.AssignProofVar "c" (S.Ascribed (S.Var "ascribedRef") (TNamed "Carrier" []))))
+    ] M.Return
+  where
+    base = (program [(n, 1) | n <- "deadRef" : ghostExpressionNames]){M.progTypes = Map.singleton "Carrier" (M.StructDecl [("x", TInt)])}
+
+expressionFormEffects :: M.Program -> TestResult
+expressionFormEffects p = firstFailure
+    ([testAssertTrue (not (Map.member "deadRef" (M.progFunctions p)))]
+        ++ [maybe (Just ("pruning dropped " ++ n)) (const Nothing) (Map.lookup n (M.progFunctions p)) | n <- ghostExpressionNames])
+
+ghostFunction :: S.Expression -> M.Program
+ghostFunction expr = empty{M.progFunctions = Map.singleton "f" (function "f" 1)
+    {M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock
+        [ M.Ghost Map.empty (M.GhostValidation (S.AssignProofVar "p" expr))
+        , M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 1)))
+        ] M.Return)}}
+
+mixedAssumes :: M.Lowered
+mixedAssumes = (asUnit (program [("f", 1)]))
+    {M.lowAssumes =
+        [ Left (S.CTerm (S.VBool True))
+        , Right (S.Var "f")
+        , Left (S.ATerm "f")
+        , Right (S.Ascribed (S.F (S.Var "f") [S.Val (S.VInt 1)]) TInt)
+        , Right (S.IfExpr (S.Var "f") (S.Val (S.VFnRef "f")) blockExpression)
+        ]}
 
 malformed :: (String, String, [String] -> [String]) -> TestResult
 malformed (_, _, change) = inspect (writeLowered everyRecord) $ \good -> firstFailure
@@ -594,6 +660,12 @@ testLink = TestList "testLink"
     , testCase "every full record and builtin metadata round trip" (roundTrip everyRecord)
     , TestList "exact Haskell link differential" [testCase label (sameResult (Oracle.linkPrograms units) (linked units)) | (label, units) <- linkCases]
     , testCase "exact reachability including ghost/contract/invariant/impl references" (sameResult (Ok (Oracle.pruneProgram reachable)) (singlePass "prune" reachable))
+    , testCase "ghost conditional, block and ascribed expressions keep their nested references" $ firstFailure
+        [ sameResult (Ok (Oracle.pruneProgram expressionForms)) (singlePass "prune" expressionForms)
+        , inspect (singlePass "prune" expressionForms) expressionFormEffects
+        , expressionFormEffects (Oracle.pruneProgram expressionForms)
+        ]
+    , testCase "mixed assume and Block::assume return payloads round trip" (roundTrip mixedAssumes)
     , testCase "generic metadata survives pruning" (inspect (singlePass "prune" reachable) $ \p -> testAssertEq (M.progGenerics p) (M.progGenerics reachable))
     , testCase "environment completion is exact and idempotent" $ firstFailure
         [ sameResult (Ok (Oracle.completeSpecEnvs environments)) (singlePass "environments" environments)
@@ -618,6 +690,9 @@ testLink = TestList "testLink"
     , testCase "recursive List/Box aliases have semantic equality" (rawSemanticControl (valueProgram (S.VFunct [] [] [] (S.BuiltinFunct (Ctor "Holder" [ArgType (TBox (TList (TList TInt)))] ["value"])) [])) (map (\line -> if "Type " `isPrefixOf` line then replaceText "named \"List\" 1 type " "list " (replaceText "named \"Box\" 1 type " "box " line) else line)))
     , testCase "builtin metadata is retained while builtin equality ignores it" builtinMetadataControl
     , testCase "unknown binary operation refuses" (wireMutation (asUnit (program [("f", 1)])) (replaceFirst (isPrefixOf "assign 0 ") (const "assign 0 binary bogus const int 1 const int 2")))
+    , testCase "truncated conditional expression payload refuses" (wireMutation (asUnit (ghostFunction (S.IfExpr (S.Var "f") (S.Var "f") (S.Var "f")))) (replaceFirst (isPrefixOf "IfExpr ") (const "IfExpr 0 1")))
+    , testCase "an ascription whose child is not a type refuses" (wireMutation (asUnit (ghostFunction (S.Ascribed (S.Var "f") TInt))) (replaceFirst (isPrefixOf "Ascribed ") (\line -> unwords (take 2 (words line) ++ [head (drop 1 (words line))]))))
+    , testCase "a block expression result that is not an expression refuses" (wireMutation (asUnit (ghostFunction blockExpression)) (replaceFirst (isPrefixOf "BlockExpr ") (\line -> unwords (take 2 (words line) ++ [head (drop 1 (words line))]))))
     , testCase "quoted binary operation refuses" (wireMutation (asUnit (program [("f", 1)])) (replaceFirst (isPrefixOf "assign 0 ") (const "assign 0 binary \"add\" const int 1 const int 2")))
     , testCase "unknown list operation refuses" (wireMutation (asUnit (program [("f", 1)])) (replaceFirst (isPrefixOf "assign 0 ") (const "assign 0 listop bogus 0")))
     , testCase "quoted list operation refuses" (wireMutation (asUnit (program [("f", 1)])) (replaceFirst (isPrefixOf "assign 0 ") (const "assign 0 listop \"length\" 0")))

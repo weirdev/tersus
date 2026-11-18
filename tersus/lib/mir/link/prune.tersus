@@ -34,7 +34,43 @@ fn exprRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
     n = nodeAt(nodes, id); if !(n is AstNode::Expression) { return []; }; e = (n as AstNode::Expression).value;
     if e is AstExpression::Var { return push([], nameValue(nodes, (e as AstExpression::Var).n)); };
     if e is AstExpression::Val { return valueFnRef(nodes, (e as AstExpression::Val).v); };
+    if e is AstExpression::IfExpr {
+        c = e as AstExpression::IfExpr;
+        return addTexts(addTexts(exprRefs(nodes, c.c), exprRefs(nodes, c.a)), exprRefs(nodes, c.b));
+    };
+    if e is AstExpression::BlockExpr {
+        b = e as AstExpression::BlockExpr;
+        return addTexts(statementsRefs(nodes, b.xs), exprRefs(nodes, b.e));
+    };
+    // An ascription's second child is the type it is read at, not an expression.
+    if e is AstExpression::Ascribed { return exprRefs(nodes, (e as AstExpression::Ascribed).e); };
     v = e as AstExpression::F; out = exprRefs(nodes, v.f); for a in listIds(nodes, v.xs, 25) { out = addTexts(out, exprRefs(nodes, a)); }; return out;
+};
+fn statementsRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    out = []; for s in listIds(nodes, id, 24) { out = addTexts(out, statementRefs(nodes, s)); }; return out;
+};
+fn statementRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    s = statementAt(nodes, id);
+    if s is AstStatement::Assign { return exprRefs(nodes, (s as AstStatement::Assign).e); };
+    if s is AstStatement::AssignDeref { v = s as AstStatement::AssignDeref; return addTexts(exprRefs(nodes, v.a), exprRefs(nodes, v.b)); };
+    if s is AstStatement::Let { return exprRefs(nodes, (s as AstStatement::Let).e); };
+    if s is AstStatement::Return { return exprRefs(nodes, (s as AstStatement::Return).e); };
+    if s is AstStatement::ValidationStatement { return validationRefs(nodes, (s as AstStatement::ValidationStatement).v, true); };
+    if s is AstStatement::Block { return statementsRefs(nodes, (s as AstStatement::Block).xs); };
+    if s is AstStatement::If {
+        v = s as AstStatement::If;
+        return addTexts(addTexts(exprRefs(nodes, v.e), statementsRefs(nodes, v.a)), statementsRefs(nodes, v.b));
+    };
+    if s is AstStatement::While {
+        v = s as AstStatement::While;
+        return addTexts(addTexts(exprRefs(nodes, v.e), validationsRefs(nodes, v.vs, true)), statementsRefs(nodes, v.xs));
+    };
+    if s is AstStatement::PackLoop {
+        v = s as AstStatement::PackLoop;
+        return addTexts(addTexts(addTexts(exprRefs(nodes, v.lo), exprRefs(nodes, v.hi)), validationsRefs(nodes, v.inv, true)), statementsRefs(nodes, v.xs));
+    };
+    if s is AstStatement::AxiomDef || s is AstStatement::ProofDef { return payloadRefs(nodes, id, true); };
+    return [];
 };
 fn ruleRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
     n = nodeAt(nodes, id); if !(n is AstNode::Rule) { return []; }; r = (n as AstNode::Rule).value;
