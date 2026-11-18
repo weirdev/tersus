@@ -1,5 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
-module TestMirMono (testMirMono, testMirMonoUsing, monoFixtures, metadataProgram, genericProgram, legacyPackInput) where
+module TestMirMono (testMirMono, testMirMonoUsing, monoFixtures, metadataProgram, genericProgram, legacyPackInput, currentLoweredFixtures, testCurrentLoweredMetadataHost, testCurrentLoweredMetadataUsing) where
 
 import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
@@ -8,7 +8,8 @@ import System.Exit (ExitCode (..))
 
 import Compile (lowerSource)
 import Mir
-import MirData (readLowered, writeLowered)
+import MirData (readLowered, readProgram, writeProgramWithGhosts, writeLowered)
+import MirOwnershipData (ownershipInput, restoreOwnership)
 import MirHousekeeping (Tool (..), monomorphizeWith, ownershipTool, toolProgram, emitterEntry, eraseGhosts, nativeProgram)
 import MirMono (monomorphizeForValidation)
 import qualified MirMonoOracle as Oracle
@@ -75,6 +76,8 @@ testMirMonoUsing :: (Bool -> String -> Result Program String) -> Test
 testMirMonoUsing lower = TestList "testMirMono"
     [ TestList "source corpus" [TestCase label (sourceMono lower source) | (label, source) <- validatedPrograms ++ unvalidatedPrograms]
     , TestList "examples" [TestCase path (readFile path >>= sourceMono lower) | path <- nativeExamples]
+    , testCurrentLoweredMetadataHost
+    , testCurrentLoweredMetadataUsing ownershipTool
     , TestList "complete metadata and substitution" [TestCase label (compareWire p) | (label, p) <- monoFixtures]
     , TestList "validation adapter retains contracts and ghosts"
         [ testCase label (monoDifference (Oracle.monomorphizeForValidation p) (monomorphizeForValidation p)) | (label, p) <- monoFixtures ]
@@ -134,6 +137,114 @@ refusalFixtures =
     , ("an incomplete MIR 3 is refused", "pass mono\ntersus-mir 3\nnot-mir\n")
     , ("a bad payload count is refused", "pass mono\ntersus-mir 3\ndata 1\n")
     ]
+
+currentLoweredFixtures :: [(String, Lowered)]
+currentLoweredFixtures =
+    [ ("no generic keeps mixed ordered assumption payloads", lowered metadataProgram)
+    , ("generic specialization retains mixed program payloads", lowered genericProgram)
+    ]
+  where
+    lowered p = (unitOf (p{progInvariants = Map.singleton "Plain" [S.ProofAssert embedded]}))
+        { lowCopies = Set.singleton "Plain", lowLinear = Set.singleton "linear-λ"
+        , lowDrops = Set.singleton "Plain", lowDeclared = Set.fromList ["Plain", "declared-λ"]
+        , lowNested = Set.singleton "nested-é"
+        , lowAssumes =
+            [Left (S.CTerm (S.VBool False)), Right trustedCall
+            ,Left (S.CTerm (S.VInt (10 ^ (30 :: Int)))), Right (S.F (S.Var "otherTrustedCall") [S.Var "λ"])]
+        }
+    embedded = S.CTerm (S.VFunct [] [] [] (S.NativeFunct (Signature [] TInt [] [] [] []) Nothing [S.Return trustedCall]) [S.CTerm (S.VInt (10 ^ (30 :: Int)))])
+    trustedCall = S.F (S.Var "Block::assume")
+        [ S.IfExpr (S.Val (S.VBool True))
+            (S.BlockExpr [S.Let "branch-λ" (S.Val (S.VInt (10 ^ (30 :: Int)))), S.Return (S.Val (S.VInt 7))]
+                (S.Ascribed (S.Var "branch-λ") (TArrayOf (TNamed "Tuple2" [ArgType TInt, ArgType TBool]) (SizeConst 3))))
+            (S.Val (S.VInt 4))
+        , S.Ascribed (S.Val (S.VList [])) (TNamed "List" [ArgType TInt])
+        ]
+
+currentLoweredMutations :: String -> [(String, String)]
+currentLoweredMutations input =
+    [ ("an expression child cannot replace the Ascribed type child", change "Ascribed" (\_ xs -> [head xs, xs !! 1, xs !! 1]))
+    , ("an AST expression cannot be a Block statement list", change "BlockExpr" (\_ xs -> [head xs, last xs, last xs]))
+    , ("a forward expression reference is refused", change "IfExpr" (\index xs -> [head xs, show (index + 1), xs !! 2, xs !! 3]))
+    , ("an expression child may be used only once", change "IfExpr" (\_ xs -> [head xs, xs !! 1, xs !! 1, xs !! 3]))
+    , ("assumption payloads may be referred to only once", records "assumes" (\xs -> take 3 xs ++ [xs !! 2] ++ drop 4 xs))
+    , ("an assumption cannot use a specification payload kind", records "assumes" (\xs -> take 2 xs ++ ["0"] ++ drop 3 xs))
+    , ("the data count must consume exactly the payload block", records "data" (\xs -> [head xs, show ((read (xs !! 1) :: Integer) + 1)]))
+    , ("negative expression references are refused", change "IfExpr" (\_ xs -> [head xs, "-1", xs !! 2, xs !! 3]))
+    , ("a blank line does not hide trailing input", input ++ "\nunknown-suffix\n")
+    ]
+  where
+    rows = lines input
+    (prefix, payload) = break (== "tersus-ast 1 mir") rows
+    change tag edit = case break ((== tag) . head . words) (drop 1 payload) of
+        (before, row : after) -> unlines (prefix ++ [head payload] ++ before ++ unwords (edit (length before) (words row)) : after)
+        _ -> input
+    records tag edit = unlines [if take (length tag + 1) row == tag ++ " " then unwords (edit (words row)) else row | row <- rows]
+
+loweredRoundTrip :: Lowered -> TestResult
+loweredRoundTrip original = case writeLowered original of
+    Error e -> Just e
+    Ok wire -> case readLowered wire of
+        Error e -> Just e
+        Ok actual -> testAssertEq (show actual) (show original) <> testAssertEq (writeLowered actual) (Ok wire)
+
+currentMutationResult :: String -> String -> TestResult
+currentMutationResult original changed =
+    testAssertTrue (changed /= original)
+        <> testAssertTrue (case readLowered original of Ok _ -> True; _ -> False)
+        <> testAssertTrue (case readLowered changed of Error _ -> True; _ -> False)
+
+testCurrentLoweredMetadataHost :: Test
+testCurrentLoweredMetadataHost = TestList "current full Lowered metadata host"
+    [ TestList "canonical mixed payloads" [testCase label (loweredRoundTrip value) | (label,value) <- currentLoweredFixtures]
+    , testCase "validation specialization preserves the new program payloads" $
+        let original = lowProgram (snd (last currentLoweredFixtures))
+         in testAssertEq (show (monomorphizeForValidation original)) (show (Oracle.monomorphizeForValidation original))
+    , TestList "strict payload mutations" [testCase label (currentMutationResult wire changed)
+        | Ok wire <- [writeLowered (snd (head currentLoweredFixtures))], (label,changed) <- currentLoweredMutations wire]
+    ]
+
+testCurrentLoweredMetadataUsing :: IO Tool -> Test
+testCurrentLoweredMetadataUsing getTool = TestList "current full Lowered native metadata"
+    [ TestList "native canonical mixed payloads" [TestCase label (compareLowered value) | (label,value) <- currentLoweredFixtures]
+    , TestList "native strict payload mutations" [TestCase label (rejects wire changed)
+        | Ok wire <- [writeLowered (snd (head currentLoweredFixtures))], (label,changed) <- currentLoweredMutations wire]
+    ]
+  where
+    compareLowered original = case writeLowered original of
+        Error e -> pure (Just e)
+        Ok input -> do
+            tool <- getTool
+            case tool of
+                ToolNative exe -> do
+                    (code,out,err) <- runWithInputFull exe ("pass mono\n" ++ input)
+                    let expected = original{lowProgram = Oracle.monomorphize (lowProgram original)}
+                    case (code,err,readLowered out,writeLowered expected) of
+                        (ExitSuccess,"",Ok actual,Ok canonical) -> do
+                            owned@(ownCode,ownOut,ownErr) <- runWithInputFull exe ("pass ownership\n" ++ writeProgramWithGhosts (ownershipInput (lowProgram actual)))
+                            fused <- runWithInputFull exe ("pass mono-ownership\n" ++ input)
+                            pure (testAssertEq (show actual) (show expected) <> testAssertEq out canonical
+                                <> testAssertEq fused (ownCode,out ++ ownOut,ownErr)
+                                <> case (owned,readProgram ownOut) of
+                                    ((ExitSuccess,"1\n",errors),_) | not (null errors) -> Just "valid mixed metadata ownership was refused"
+                                    ((ExitSuccess,_,""),Ok runtime) -> case restoreOwnership (lowProgram expected) runtime of
+                                        Ok _ -> Nothing
+                                        Error e -> Just e
+                                    _ -> Just ("mixed metadata ownership failed: " ++ show (ownCode,take 200 ownOut,ownErr)))
+                        _ -> pure (Just ("current Lowered native transport failed: " ++ show (code,take 200 out,err)))
+                ToolFailed e -> pure (Just e)
+                _ -> pure (Just "current full metadata requires a native emitter")
+    rejects original changed = case currentMutationResult original changed of
+        Just e -> pure (Just e)
+        Nothing -> do
+            tool <- getTool
+            case tool of
+                ToolNative exe -> do
+                    mono@(code,out,err) <- runWithInputFull exe ("pass mono\n" ++ changed)
+                    fused <- runWithInputFull exe ("pass mono-ownership\n" ++ changed)
+                    pure (testAssertTrue (code == ExitSuccess && out == "1\n" && not (null err)) <> testAssertEq fused mono)
+                ToolFailed e -> pure (Just e)
+                _ -> pure (Just "current mutation controls require a native emitter")
 
 emptyFunction :: Function
 emptyFunction = Function "main" [] (Just TInt) (Map.singleton (Local 0) (LocalDecl TInt Nothing)) (Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (Use (Const (CInt 1)))] Return)) [] [] [] [] [] emptySpec
