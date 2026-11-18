@@ -520,7 +520,7 @@ fn isArray(t: &Type) -> Bool [{ }] [{ }] {
     return isSizedArray(t);
 };
 
-// A list of native code: the struct List of lib/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
+// A list of native code: the struct List of lib/std/lists/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
 // starts with
 fn isListStruct(st: &Storage, t: &Type) -> Bool [{ }] [{ }] {
     if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = st.listName; };
@@ -543,7 +543,7 @@ fn listElement(cx: &Ctx, t: &Type) -> Held ~ {
     return Held { ok: false, ty: Type::TInt };
 };
 
-// A Box of native code: the struct Box of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
+// A Box of native code: the struct Box of lib/std/box/box.tersus, whose one word is the address of what it holds, as a Box's is
 fn isBoxStruct(st: &Storage, t: &Type) -> Bool [{ }] [{ }] {
     if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = st.boxName; };
     return false;

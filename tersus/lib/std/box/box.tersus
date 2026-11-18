@@ -5,8 +5,7 @@
 //
 // The runtime and the emitter know this struct by its name and its field: `addr` is the only field that is there when the program runs, and
 // the runtime prints, compares and copies a Box as the value at it. It is freed by its drop.
-import tersuslib::types;
-import tersuslib::prelude;
+import std::core::types { Box };
 
 // Box::new(x): room for one value, with x in it
 fn boxNew<T>(x: T) -> Box<T> [{ }] [{ affirm at(return.blk, 0) = x; }] {
@@ -20,11 +19,4 @@ fn boxUnbox<T>(b: Box<T>) -> T [{ }] [{ affirm return = at(b.blk, 0); }] {
     (x, k2) = Addr::take(a, 0, k);
     done = Addr::free(a, k2);
     return x;
-};
-
-// A Box that goes out of scope drops the value it holds, and frees its room
-impl<T> Drop for Box<T> {
-    fn drop(self: Self) -> Int {
-        return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk));
-    };
 };

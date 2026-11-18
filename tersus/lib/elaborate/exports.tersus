@@ -240,7 +240,7 @@ fn breakOn(needle: &String, text: &String) -> Broken ~ {
 };
 
 // Which names are the module's own, and the rules of what its interface keeps (Interface.extractInterfaceWith)
-struct Scope { isLib: Bool, prefix: String, ownNames: List<String>, declaredImpls: List<String>, bounded: List<String>, declaredFns: List<String> };
+struct Scope { isLib: Bool, prefix: String, ownNames: List<String>, bounded: List<String>, declaredFns: List<String> };
 impl Clone for Scope { };
 
 fn inModule(sc: &Scope, name: &String) -> Bool ~ {
@@ -255,9 +255,8 @@ fn inModule(sc: &Scope, name: &String) -> Bool ~ {
 };
 
 fn implHere(sc: &Scope, tname: &String, ty: &String) -> Bool ~ {
-    pair = catStrings(catStrings(clone(tname), " "), clone(ty));
     base = baseNameOf(ty);
-    return indexIn(&sc.declaredImpls, &pair) >= 0 || indexIn(&sc.ownNames, tname) >= 0 || indexIn(&sc.ownNames, &base) >= 0;
+    return indexIn(&sc.ownNames, tname) >= 0 || indexIn(&sc.ownNames, &base) >= 0;
 };
 
 fn implVisible(sc: &Scope, tname: &String, ty: &String) -> Bool ~ {
@@ -342,8 +341,7 @@ fn nameSections(st: St, sc: &Scope, elaborated: &List<Int>) -> St ~ {
     st = emitSortedNames(st, &linearNames); out = push([], st.nid);
     drops = [];
     for n in HashSet::elements(&st.drops) {
-        dropPair = catStrings("Drop ", baseNameOf(&n));
-        if typeVisible(sc, &n) || (sc.isLib && indexIn(&sc.declaredImpls, &dropPair) >= 0) { drops = push(drops, clone(n)); };
+        if typeVisible(sc, &n) { drops = push(drops, clone(n)); };
     };
     st = emitSortedNames(st, &drops); out = push(out, st.nid);
     st = statementSections(st, elaborated);
@@ -377,7 +375,7 @@ fn scopeOf(st: &St, isLib: Bool, pkg: &String, modu: &String, hasModule: Bool, o
     if hasModule { prefix = catStrings(catStrings(prefix, clone(modu)), "$"); };
     declaredFns = [];
     for s in original { for n in declaredIn(st, s) { declaredFns = push(declaredFns, clone(n)); }; };
-    return Scope { isLib: isLib, prefix: prefix, ownNames: ownNamesOf(st, original), declaredImpls: storageImplsOf(st, pkg, modu, hasModule, original), bounded: boundedOf(st, original), declaredFns: declaredFns };
+    return Scope { isLib: isLib, prefix: prefix, ownNames: ownNamesOf(st, original), bounded: boundedOf(st, original), declaredFns: declaredFns };
 };
 
 fn boundedOf(st: &St, original: &List<Int>) -> List<String> ~ {
@@ -401,21 +399,6 @@ fn ownNamesOf(st: &St, original: &List<Int>) -> List<String> ~ {
         if (stmt is AstStatement::TraitDef) { ownNames = push(ownNames, nameText(&st.nodes, (stmt as AstStatement::TraitDef).n)); };
     };
     return ownNames;
-};
-
-// The impls a storage library module declares (PreludeSource.nativeStorageModules)
-fn storageImplsOf(st: &St, pkg: &String, modu: &String, hasModule: Bool, original: &List<Int>) -> List<String> ~ {
-    declaredImpls = [];
-    if !(pkg = "tersuslib") || !hasModule || !(modu = "lists" || modu = "box") { return declaredImpls; };
-    for s in original {
-        stmt = stmtOf(st, s);
-        if (stmt is AstStatement::ImplDef) {
-            d = stmt as AstStatement::ImplDef;
-            tn = optName(st, d.traitName);
-            if size(tn.bytes) > 0 { declaredImpls = push(declaredImpls, catStrings(catStrings(tn, " "), nameText(&st.nodes, d.n))); };
-        };
-    };
-    return declaredImpls;
 };
 
 // The types: a struct's entry wins over an enum's of the name, and within each a later declaration (Map.union of

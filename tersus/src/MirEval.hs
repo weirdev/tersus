@@ -27,7 +27,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Mir
-import Types (Name, Rel (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
+import Types (Name, Rel (..), Type (..), Variable, boxContent, instanceName, listElement)
 import Syntax (Value (..))
 import Utils
 
@@ -401,9 +401,9 @@ callHasReferences program fn = any parameter (fnParams fn) || maybe False (holds
     holds seen ty = case ty of
         TRef _ -> True
         TMutRef _ -> True
-        TList inner -> holds seen inner
+        _ | Just inner <- listElement (progStorage program) ty -> holds seen inner
         TArrayOf inner _ -> holds seen inner
-        TBox inner -> holds seen inner
+        _ | Just inner <- boxContent (progStorage program) ty -> holds seen inner
         TUninit inner -> holds seen inner
         TParam _ -> True
         TVar _ -> True
@@ -731,7 +731,7 @@ checked n
     | inIntRange n = Ok (MInt n)
     | otherwise = Error "Integer overflow"
 
--- Only words are compared: any other value is compared by its Eq, which the checker calls in its place (lib/eq.tersus)
+-- Only words are compared: any other value is compared by its Eq, which the checker calls in its place (lib/std/eq/eq.tersus)
 comparable :: MirValue -> MirValue -> Bool
 comparable (MInt _) (MInt _) = True
 comparable (MBool _) (MBool _) = True

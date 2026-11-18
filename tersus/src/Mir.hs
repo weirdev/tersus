@@ -3,6 +3,7 @@
 module Mir
     ( Local (..)
     , BlockId (..)
+    , constantType
     , Program (..)
     , BoundedFn (..)
     , PackLoop (..)
@@ -32,6 +33,12 @@ module Mir
     , slotsOf
     , dropFunction
     , isDropFunction
+    , progStorage
+    , roleIs
+    , dropOwner
+    , factsOf
+    , uncoveredInstances
+    , cloneFunction
     , layoutOf
     , sizeOf
     , alignOf
@@ -46,17 +53,17 @@ module Mir
     , renderRvalue
     ) where
 
-import Data.List (intercalate)
+import Data.List (intercalate, isInfixOf)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (isJust, listToMaybe)
 
 import Pretty (renderType, renderVarProof, renderExpression)
 import Text.ParserCombinators.ReadP (readS_to_P)
 import Text.ParserCombinators.ReadPrec (lift)
 import Text.Read (readPrec)
 import qualified Data.Set as Set
-import Types (Arg (..), Name, Rel (..), Type (..), Variable, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray, pattern TList, pattern TBox)
+import Types (Arg (..), Name, OwnershipFacts (..), Rel (..), Storage (..), Type (..), Variable, boxContent, instanceFields, instanceName, listElement, tupleGeneric, Size (..), pattern TArray)
 import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, VariableProof, exprToProof)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
@@ -92,6 +99,8 @@ data Program = Program
     , progInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets, by the name of the struct (not of an instance of it)
     , progBounded :: Map Name BoundedFn -- the functions with bounds, lowered once with their type parameters (MirCopies makes their copies)
     , progInstances :: Map Name (Name, [Arg]) -- what each name a reference to a copy is written with stands for: the function with bounds and its type and bounded size arguments
+    , progProtocols :: Map Name Name -- each ownership and storage role's checked provider in the build (one each, AST_DATA.md)
+    , progOwnership :: Maybe (Map Name OwnershipFacts) -- each type's checked ownership facts, by the canonical name of the type or instance (Nothing: data written without them)
     }
     deriving (Show, Eq, Read)
 
@@ -101,6 +110,7 @@ data BoundedFn = BoundedFn
     , boundedCopy :: [Variable] -- the type parameters bounded by Copy, whose values the check of moves copies
     , boundedLifted :: [Name] -- the functions lifted out of its body, copied with it
     , boundedPackLoops :: [PackLoop] -- the loops over its pack (a variadic function's), which each copy unrolls
+    , boundedFacts :: [(Type, OwnershipFacts)] -- the checked facts, under its bounds, of the types its body has that name its type parameters
     }
     deriving (Show, Eq, Read)
 
@@ -351,9 +361,7 @@ completeInstancesWith erased program
             ++ [t | EnumDecl variants <- Map.elems (progTypes program), (_, fields) <- variants, (_, t) <- fields]
     namedArgs ty = case ty of
         TNamed base args -> (base, args) : concat [namedArgs t | ArgType t <- args]
-        TList t -> namedArgs t
         TArrayOf t _ -> namedArgs t
-        TBox t -> namedArgs t
         TAddr t -> namedArgs t
         TBlock t -> namedArgs t
         TUninit t -> namedArgs t
@@ -385,9 +393,7 @@ completeInstancesWith erased program
         _ -> []
     typeNames ty = case ty of
         TNamed base args -> instanceName base args : concat [typeNames t | ArgType t <- args]
-        TList t -> typeNames t
         TArrayOf t _ -> typeNames t
-        TBox t -> typeNames t
         TAddr t -> typeNames t
         TBlock t -> typeNames t
         TUninit t -> typeNames t
@@ -448,14 +454,14 @@ layoutOf program = go (0 :: Int)
             TBool -> (1, 1)
             TWord _ bits -> (bits `div` 8, bits `div` 8)
             -- (a Box is laid out as native code holds it: a Box, the address of what it holds, and for an array a List, MirLists)
-            TBox TArrayOf{} -> (24, 8)
+            _ | Just TArrayOf{} <- boxContent (progStorage program) ty -> (24, 8)
+            -- (a list is laid out as the List that native code makes of it, MirLists: an address, a length and a capacity)
+            _ | Just _ <- listElement (progStorage program) ty -> (24, 8)
             TArray t n -> let (size, align) = go (depth + 1) t in (n * size, align)
             TNamed base args -> declared depth (instanceName base args)
             TVariant v -> maybe (8, 8) (declared depth) (ownerOf program v)
             TUninit t -> go (depth + 1) t
             TBlock _ -> (0, 1)
-            -- (a list is laid out as the List that native code makes of it, MirLists: an address, a length and a capacity)
-            TList _ -> (24, 8)
             _ -> (8, 8)
     declared depth n = case Map.lookup n (progTypes program) of
         Just (StructDecl fields) -> structLayout (map (go (depth + 1) . snd) fields)
@@ -503,15 +509,55 @@ fieldOffsets program name = case Map.lookup name (progTypes program) of
 slotsOf :: Program -> Type -> Integer
 slotsOf program ty = (sizeOf program ty + 7) `div` 8
 
--- The drop of a struct or an enum, when it has one (`impl Drop for T`, step 26 of the roadmap): the function `<T as Drop>::drop`, which MirMono
--- also names the copy of the drop of a struct with types for an instance so (`<Vec<Int> as Drop>::drop`)
-dropFunction :: Program -> Name -> Maybe Name
-dropFunction program n =
-    let f = "<" ++ n ++ " as Drop>::drop"
-     in if Map.member f (progFunctions program) then Just f else Nothing
+-- The declarations the build's lists and Boxes are: its checked List and Box providers
+progStorage :: Program -> Storage
+progStorage program = Storage (Map.findWithDefault "" "List" (progProtocols program)) (Map.findWithDefault "" "Box" (progProtocols program))
 
-isDropFunction :: Name -> Bool
-isDropFunction name = let suffix = " as Drop>::drop" in reverse suffix == take (length suffix) (reverse name)
+-- Whether a trait is the build's checked provider of a role
+roleIs :: Program -> Name -> Name -> Bool
+roleIs program role trait = Map.lookup role (progProtocols program) == Just trait
+
+-- The drop of a struct or an enum, when it has one (`impl Drop for T`, step 26 of the roadmap): the function its checked
+-- ownership facts select, which MirMono makes for an instance of a struct with types and records there
+dropFunction :: Program -> Name -> Maybe Name
+dropFunction program n = case factsOf program n >>= ownershipDrop of
+    Just (_, callee) | Map.member callee (progFunctions program) -> Just callee
+    _ -> Nothing
+
+-- Whether the function is the checked drop of a type
+isDropFunction :: Program -> Name -> Bool
+isDropFunction program name = isJust (dropOwner program name)
+
+-- The type a function is the checked drop of
+dropOwner :: Program -> Name -> Maybe Name
+dropOwner program name = listToMaybe [owner | (owner, facts) <- maybe [] Map.toList (progOwnership program), fmap snd (ownershipDrop facts) == Just name]
+
+-- The declared types with no checked facts of their own that are instances of a declaration whose facts give a
+-- capability (monomorphisation made them): which capabilities apply to such an instance is not known, so a program with
+-- one is refused rather than given none
+uncoveredInstances :: Program -> [Name]
+uncoveredInstances program = case progOwnership program of
+    Nothing -> []
+    Just facts ->
+        [ n
+        | n <- Map.keys (progTypes program)
+        , Map.notMember n facts
+        , let base = takeWhile (/= '<') n
+        , base /= n
+        , any (\(owner, f) -> takeWhile (/= '<') owner == base && capable f) (Map.toList facts)
+        ]
+  where
+    capable f = isJust (ownershipCopy f) || isJust (ownershipDrop f) || isJust (ownershipClone f) || isJust (ownershipDeref f)
+
+-- A type's checked ownership facts
+factsOf :: Program -> Name -> Maybe OwnershipFacts
+factsOf program n = progOwnership program >>= Map.lookup n
+
+-- The checked Clone function of a type, when the program has it
+cloneFunction :: Program -> Name -> Maybe Name
+cloneFunction program n = case factsOf program n >>= ownershipClone of
+    Just (_, callee) | Map.member callee (progFunctions program) || Map.member callee (progInstances program) -> Just callee
+    _ -> Nothing
 
 emptySpec :: FunctionSpec
 emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty [] [] []
@@ -724,6 +770,15 @@ constantFns c = case c of
     CArray cs -> concatMap constantFns cs
     CData _ fields -> concatMap (constantFns . snd) fields
     _ -> []
+
+-- The type of a constant, where it says it (a list that has an element has the type of the elements), as MirLists makes it
+constantType :: Storage -> Constant -> Maybe Type
+constantType st c = case c of
+    CInt _ -> Just TInt
+    CBool _ -> Just TBool
+    CList cs -> Just (TNamed (storageList st) [ArgType (maybe TInt id (listToMaybe [t | x <- cs, Just t <- [constantType st x]]))])
+    CData name _ -> Just (if "::" `isInfixOf` name then TVariant name else TNamed name [])
+    _ -> Nothing
 
 operandsOfRvalue :: Rvalue -> [Operand]
 operandsOfRvalue rv = case rv of

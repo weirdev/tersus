@@ -56,7 +56,7 @@ validateCompiled = validateWith False True
 validateCompiledUncached :: M.Program -> Result () String
 validateCompiledUncached = validateWith False False
 
--- The native storage library (lib/lists.tersus and lib/box.tersus, linked),
+-- The native storage library (lib/std/lists/lists.tersus and lib/std/box/box.tersus, linked),
 -- with a List and a Box as the structs they are (SelfHostedMir.encodeLibrary)
 validateLibrary :: M.Program -> Result () String
 validateLibrary = validateWith True True

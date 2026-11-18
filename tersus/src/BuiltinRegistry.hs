@@ -283,13 +283,13 @@ ghostly e = e{entryGhost = True}
 
 builtinRegistry :: [BuiltinEntry]
 builtinRegistry =
-    [ entry KSize [Size] [(StdName, "size", Size), (ProofName, "size", Size), (MethodName, "size", Size)] (params ["list"]) (sig [TRef (TList tp)] TInt) (parsed "size")
-    , entry KFirst [First] [(StdName, "first", First), (ProofName, "first", First), (MethodName, "first", First)] (params ["list"]) (sig [TRef (TList tp)] tp) (parsed "first")
-    , entry KLast [Last] [(StdName, "last", Last), (ProofName, "last", Last), (MethodName, "last", Last)] (params ["list"]) (sig [TRef (TList tp)] tp) (parsed "last")
-    , entry KGet [Get] [(StdName, "get", Get), (ProofName, "get", Get), (MethodName, "get", Get)] (params ["list", "index"]) (sig [TRef (TList tp), TInt] tp) (parsed "get")
-    , entry KPush [Push] [(StdName, "push", Push), (ProofName, "push", Push), (MethodName, "push", Push)] (params ["list", "x"]) (sig [TList tp, tp] (TList tp)) (parsed "push")
-    , entry KPop [Pop] [(StdName, "pop", Pop), (ProofName, "pop", Pop), (MethodName, "pop", Pop)] (params ["list"]) (sig [TList tp] (TList tp)) (parsed "pop")
-    , entry KSet [Set] [(StdName, "set", Set), (ProofName, "set", Set), (MethodName, "set", Set)] (params ["list", "index", "x"]) (sig [TList tp, TInt, tp] (TList tp)) (parsed "set")
+    [ entry KSize [Size] [(StdName, "size", Size), (ProofName, "size", Size), (MethodName, "size", Size)] (params ["list"]) (sig [TRef (SyntaxList tp)] TInt) (parsed "size")
+    , entry KFirst [First] [(StdName, "first", First), (ProofName, "first", First), (MethodName, "first", First)] (params ["list"]) (sig [TRef (SyntaxList tp)] tp) (parsed "first")
+    , entry KLast [Last] [(StdName, "last", Last), (ProofName, "last", Last), (MethodName, "last", Last)] (params ["list"]) (sig [TRef (SyntaxList tp)] tp) (parsed "last")
+    , entry KGet [Get] [(StdName, "get", Get), (ProofName, "get", Get), (MethodName, "get", Get)] (params ["list", "index"]) (sig [TRef (SyntaxList tp), TInt] tp) (parsed "get")
+    , entry KPush [Push] [(StdName, "push", Push), (ProofName, "push", Push), (MethodName, "push", Push)] (params ["list", "x"]) (sig [SyntaxList tp, tp] (SyntaxList tp)) (parsed "push")
+    , entry KPop [Pop] [(StdName, "pop", Pop), (ProofName, "pop", Pop), (MethodName, "pop", Pop)] (params ["list"]) (sig [SyntaxList tp] (SyntaxList tp)) (parsed "pop")
+    , entry KSet [Set] [(StdName, "set", Set), (ProofName, "set", Set), (MethodName, "set", Set)] (params ["list", "index", "x"]) (sig [SyntaxList tp, TInt, tp] (SyntaxList tp)) (parsed "set")
     , entry KPlus [Plus] [(StdName, "+", Plus)] (params ["a", "b"]) (sig [TInt, TInt] TInt) (parsed "plus")
     , entry KMinus [Minus] [(StdName, "-", Minus)] (params ["a", "b"]) (sig [TInt, TInt] TInt) (parsed "minus")
     , entry KTimes [Times] [(StdName, "*", Times)] (params ["a", "b"]) (sig [TInt, TInt] TInt) (parsed "times")
@@ -312,7 +312,7 @@ builtinRegistry =
     , readsW (entry KFileStore [FileStore] [(StdName, "fileStore", FileStore)] (params []) (sig [] TInt) (parsed "fileStore"))
     , entry KToByte [ToByte] [(StdName, "toByte", ToByte)] (params ["x"]) (sig [TInt] TByte) (parsed "toByte")
     , entry KFromByte [FromByte] [(StdName, "toInt", FromByte)] (params ["b"]) (sig [TByte] TInt) (parsed "toInt")
-    , entry KBytesFrom [BytesFrom] [] (params ["list"]) (sig [TRef (TList TInt)] (TList TByte)) (parsed "bytesFrom")
+    , entry KBytesFrom [BytesFrom] [] (params ["list"]) (sig [TRef (SyntaxList TInt)] (SyntaxList TByte)) (parsed "bytesFrom")
     , entry KUnsize [Unsize] [] (params ["box"]) (noSig "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value") (parsed "unsize")
     , entry KNewBox [NewBox] [(SyntaxName, "Box::new", NewBox)] (params ["value"]) (noSig "Type error: Box::new is called, as in Box::new(x), and cannot be used as a value") (parsed "boxNew")
     , entry KUnBox [UnBox] [(SyntaxName, "Box::unbox", UnBox)] (params ["box"]) (noSig "Type error: Box::unbox is called, as in Box::unbox(b), and cannot be used as a value") (parsed "boxUnbox")
@@ -348,8 +348,8 @@ builtinRegistry =
     , ghostly (entry KBlockCast [BlockCast] [(PointerName, "Block::cast", BlockCast)] (params ["b"]) (sig [TBlock tp] (TBlock tu)) (primitive primBlockCast))
     , ghostly (entry KBlockBase [BlockBase] [(GhostName, "base", BlockBase)] (params ["a1"]) (sig [TBlock tp] (TAddr tp)) none)
     , ghostly (entry KBlockCap [BlockCap] [(GhostName, "cap", BlockCap)] (params ["a1"]) (sig [TBlock tp] TInt) none)
-    , ghostly (entry KBlockFilled [BlockFilled] [(GhostName, "filled", BlockFilled)] (params ["a1"]) (sig [TBlock tp] (TList TBool)) none)
-    , ghostly (entry KBlockContents [BlockContents] [(GhostName, "at", BlockContents)] (params ["a1"]) (sig [TBlock tp] (TList tp)) none)
+    , ghostly (entry KBlockFilled [BlockFilled] [(GhostName, "filled", BlockFilled)] (params ["a1"]) (sig [TBlock tp] (SyntaxList TBool)) none)
+    , ghostly (entry KBlockContents [BlockContents] [(GhostName, "at", BlockContents)] (params ["a1"]) (sig [TBlock tp] (SyntaxList tp)) none)
     , ghostly (entry KBlockOrigin [BlockOrigin] [(GhostName, "origin", BlockOrigin)] (params ["a1"]) (sig [TBlock tp] TInt) none)
     , ghostly (entry KBlockStart [BlockStart] [(GhostName, "start", BlockStart)] (params ["a1"]) (sig [TBlock tp] TInt) none)
     , ghostly (entry KBlockExtent [BlockExtent] [(GhostName, "extent", BlockExtent)] (params ["a1"]) (sig [TInt] TInt) none)
@@ -368,7 +368,7 @@ builtinRegistry =
         (\b -> case b of
             ToWord signed bits -> primToWord signed bits
             _ -> NoContract)
-    , entry KReplace [Replace] [(PointerName, "replace", Replace)] (params ["list", "index", "x"]) (sig [TList tp, TInt, tp] (tupleType [TList tp, tp])) none
+    , entry KReplace [Replace] [(PointerName, "replace", Replace)] (params ["list", "index", "x"]) (sig [SyntaxList tp, TInt, tp] (tupleType [SyntaxList tp, tp])) none
     , entry KRel [Rel Eq, Rel NotEq, Rel Lt, Rel Gt, Rel LtEq, Rel GtEq]
         [(StdName, "=", Rel Eq), (StdName, "!=", Rel NotEq), (StdName, "<", Rel Lt), (StdName, ">", Rel Gt), (StdName, "<=", Rel LtEq), (StdName, ">=", Rel GtEq)]
         (params ["a", "b"])

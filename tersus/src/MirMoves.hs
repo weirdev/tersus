@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module MirMoves
     ( checkMoves
@@ -23,7 +24,7 @@ import qualified Data.Set as Set
 
 import FieldPaths (fieldPaths)
 import Mir
-import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
+import Types (Arg (..), Name, OwnershipFacts (..), Storage (..), Type (..), Variable, baseNameOf, boxContent, instanceName, listElement, tupleGeneric)
 import Utils (Result (..))
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
@@ -122,8 +123,8 @@ ownsHeap :: Program -> Type -> Bool
 ownsHeap program = go Set.empty
   where
     go seen ty = case ty of
-        TList _ -> True
-        TBox _ -> True
+        _ | Just _ <- listElement (progStorage program) ty -> True
+        _ | Just _ <- boxContent (progStorage program) ty -> True
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
         TNamed base args | Set.member (instanceName base args) seen -> False
@@ -142,6 +143,12 @@ ownsHeap program = go Set.empty
 -- one (taking it to be one refuses the elements of a variadic pack that a function reads into one name), so the copy of a generic
 -- function for such a type is checked by the ownership pass alone, which applies the same rule at the types native code is made
 -- of and refuses what this misses (testOwnership "the ownership pass's own refusals").
+-- (a checked List or Box drop frees storage, not a value of its own: one holds a drop only through its elements, as in the ownership pass)
+ownDrop :: Cx -> Name -> Bool
+ownDrop cx base = base `Set.member` cxDrops cx && base `notElem` [storageList storage, storageBox storage]
+  where
+    storage = progStorage (cxProgram cx)
+
 holdsDrop :: Cx -> Type -> Bool
 holdsDrop cx
     | Set.null (cxDrops cx) = const False
@@ -150,13 +157,13 @@ holdsDrop cx
     program = cxProgram cx
     -- (an instance has a Clone of its own when its type has one and none of its type arguments holds a value with a drop and no
     -- Clone, which a Clone bounded by Clone on that argument could not clone: dropHolders in lib/mir/ownership/common.tersus)
-    cloned seen base args = base `Set.member` cxCloned cx && not (any (go seen) [t | ArgType t <- args])
+    cloned seen base args = instanceName base args `Set.member` cxCloned cx && not (any (go seen) [t | ArgType t <- args])
     go seen ty = case ty of
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
         TAddr t -> go seen t
         TNamed base args | cloned seen base args -> False
-        TNamed base _ | base `Set.member` cxDrops cx -> True
+        TNamed base _ | ownDrop cx base -> True
         TNamed base args
             | instanceName base args `Set.member` seen -> False
             | otherwise -> case Map.lookup (instanceName base args) (progTypes program) of
@@ -165,7 +172,7 @@ holdsDrop cx
         TVariant v -> case ownerOf program v of
             -- (a variant of an instance with type arguments is taken to have no Clone of its own: its arguments are not at hand)
             Just n | baseNameOf n == n, cloned seen n [] -> False
-            Just n | baseNameOf n `Set.member` cxDrops cx -> True
+            Just n | ownDrop cx (baseNameOf n) -> True
             Just n | Just decl <- Map.lookup n (progTypes program), n `Set.notMember` seen -> declared (Set.insert n seen) decl
             _ -> False
         _ -> False
@@ -173,11 +180,17 @@ holdsDrop cx
         StructDecl fields -> any (go seen . snd) fields
         EnumDecl variants -> any (go seen . snd) (concatMap snd variants)
 
--- The structs and enums with a Clone of their own (`<T as Clone>::clone`), which a copy of them calls
+-- The structs, enums and instances with a Clone of their own, which a copy of them calls (by the instance: one instance of a type
+-- may have one where another has none, as ownClones in lib/mir/ownership/common.tersus finds them)
 cloneBases :: Program -> Set Name
-cloneBases program = Set.fromList [baseNameOf (takeWhile (/= ' ') (drop 1 name)) | name <- Map.keys (progFunctions program), " as Clone>::clone" `isInfixOf'` name, take 1 name == "<"]
+cloneBases program = case progOwnership program of
+    -- (with checked facts, the type's checked Clone, whose function or, before copies are made, whose template is in the program)
+    Just facts -> Set.fromList [n | (n, f) <- Map.toList facts, Just (_, callee) <- [ownershipClone f], present callee]
+    Nothing -> Set.fromList [instanceName base args | (name, fn) <- Map.toList (progFunctions program), " as Clone>::clone" `isInfixOf'` name, take 1 name == "<", not (null (fnParams fn)), Just (TNamed base args) <- [fnReturns fn]]
   where
     isInfixOf' needle hay = any (needle `isPrefixOf`) (tails hay)
+    present callee = any (`Map.member` progFunctions program) [callee, template callee] || Map.member callee (progInstances program) || Map.member (template callee) (progBounded program)
+    template = takeWhile (/= '[')
 
 -- The place changes while a live local looks at a part of it that holds a value with a drop: that look is made in place
 -- and cannot be copied
@@ -217,8 +230,8 @@ holdsReference program = go Set.empty
     go seen ty = case ty of
         TRef _ -> True
         TMutRef _ -> True
-        TList t -> go seen t
-        TBox t -> go seen t
+        _ | Just t <- listElement (progStorage program) ty -> go seen t
+        _ | Just t <- boxContent (progStorage program) ty -> go seen t
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
         TNamed base args | Set.member (instanceName base args) seen -> False
@@ -345,8 +358,8 @@ linearParts linear drops program = go (0 :: Int)
             TBlock _ -> [[]]
             -- (a list and a Box are structs of the prelude, but no value of one holds a permission: an element may
             -- not be one, so there is no linear part inside one for this pass to follow)
-            TList _ -> []
-            TBox _ -> []
+            _ | Just _ <- listElement (progStorage program) ty -> []
+            _ | Just _ <- boxContent (progStorage program) ty -> []
             TNamed base _ | base `Set.member` drops -> []
             TVariant v | Just n <- ownerOf program v, baseNameOf n `Set.member` drops -> []
             -- (an Uninit of a value that owns something is linear: what it holds is freed only by taking it out)
@@ -384,7 +397,7 @@ data Cx = Cx
     , cxLiveNow :: Set Local -- the locals live after the statement or terminator being checked
     , cxBorrowRefs :: Map Local [Local] -- the reference locals borrowed from each local
     , cxCallArgs :: Set Local -- the temporaries given to the call that ends the block being checked
-    , cxCloned :: Set Name -- the structs and enums with a Clone of their own (cloneBases), found once for the program
+    , cxCloned :: Set Name -- the structs, enums and instances with a Clone of their own (cloneBases), found once for the program
     }
 
 -- The locals a statement or a terminator reads, and the local it gives a value
@@ -492,10 +505,10 @@ parameterCopy p = "$param " ++ p
 checkFunction :: Set Name -> Set Name -> Set Name -> Set Name -> Program -> Function -> [String]
 checkFunction copies linear drops cloned program fn = nub (concat [snd (runBlock cx b st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
   where
-    -- (the drop of a type, `<T as Drop>::drop`, is given the value to free: it only reads what native code frees after it (its fields), and
+    -- (the checked drop of a type is given the value to free: it only reads what native code frees after it (its fields), and
     -- it has to use the permissions the value holds, which nothing else will)
-    dropOf = case (implOwner (fnName fn), fnParams fn) of
-        (Just owner, self : _) | " as Drop>::drop" `isSuffixOf'` fnName fn -> Just (owner, self)
+    dropOf = case (dropOwner program (fnName fn), fnParams fn) of
+        (Just owner, self : _) -> Just (baseNameOf owner, self)
         _ -> Nothing
     lent = Set.fromList (fnBorrowed fn ++ [self | Just (_, self) <- [dropOf]])
     (liveAfter, liveOut) = liveness fn
@@ -1011,7 +1024,7 @@ accessExcept except cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs +
     -- (a permission in the value that a drop is given is the drop's to use, once; one in any other value that is lent is not)
     dropsPermission q@(root, _) = permissionPlace q && Just root == cxDropSelf cx
     dropTypeOf root = case typeOf cx root of
-        TNamed base _ | base `Set.member` cxDrops cx -> Just base
+        TNamed base _ | ownDrop cx base -> Just base
         _ -> Nothing
     -- (the first value with a drop that the place is a field of, at any depth: a field of it moves only when it is taken apart, and a
     -- destructuring assignment takes apart its `$struct` local, which can also be a view of the value, as of `Box::unbox(b)`)
@@ -1024,9 +1037,9 @@ accessExcept except cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs +
     takenApart local = maybe False ("$struct " `isPrefixOf`) (localNameOf cx local)
     -- (a field read through a Box is a field of the value it holds)
     dropName ty = case ty of
-        TBox held -> dropName held
-        TNamed base _ | base `Set.member` cxDrops cx -> Just base
-        TVariant v | Just owner <- ownerOf (cxProgram cx) v, baseNameOf owner `Set.member` cxDrops cx -> Just (baseNameOf owner)
+        (boxContent (progStorage (cxProgram cx)) -> Just held) -> dropName held
+        TNamed base _ | ownDrop cx base -> Just base
+        TVariant v | Just owner <- ownerOf (cxProgram cx) v, ownDrop cx (baseNameOf owner) -> Just (baseNameOf owner)
         _ -> Nothing
     st'
         | taking =
@@ -1126,7 +1139,7 @@ exactCandidate cx target bounds = do
         [place] -> Just place
         _ -> Nothing
   where
-    candidates (root, []) | Map.member root (fnLocals (cxFn cx)) = map (\path -> (root, map (uncurry SField) path)) <$> fieldPaths True (progTypes (cxProgram cx)) target (typeOf cx root)
+    candidates (root, []) | Map.member root (fnLocals (cxFn cx)) = map (\path -> (root, map (uncurry SField) path)) <$> fieldPaths (progStorage (cxProgram cx)) True (progTypes (cxProgram cx)) target (typeOf cx root)
     candidates _ = Nothing
 
 -- The types a value of the type holds references to, through value fields and elements (Nothing when it cannot tell)
@@ -1137,8 +1150,8 @@ pointeeTypes cx = fmap nub . go Set.empty
     go seen ty = case ty of
         TRef inner -> Just [inner]
         TMutRef inner -> Just [inner]
-        TList element -> go seen element
-        TBox element -> go seen element
+        (listElement (progStorage (cxProgram cx)) -> Just element) -> go seen element
+        (boxContent (progStorage (cxProgram cx)) -> Just element) -> go seen element
         TArrayOf element _ -> go seen element
         TUninit element -> go seen element
         TInt -> Just []
@@ -1301,8 +1314,8 @@ writableSlots program = go Set.empty
     go seen ty = case ty of
         TRef u -> [(u, False)]
         TMutRef u -> (u, True) : go seen u
-        TList t -> go seen t
-        TBox t -> go seen t
+        (listElement (progStorage program) -> Just t) -> go seen t
+        (boxContent (progStorage program) -> Just t) -> go seen t
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
         TNamed base args | Set.member (instanceName base args) seen -> []
@@ -1322,8 +1335,8 @@ typesWithin program = go Set.empty
     go seen ty = ty : case ty of
         TRef u -> go seen u
         TMutRef u -> go seen u
-        TList t -> go seen t
-        TBox t -> go seen t
+        (listElement (progStorage program) -> Just t) -> go seen t
+        (boxContent (progStorage program) -> Just t) -> go seen t
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
         TNamed base args | Set.member (instanceName base args) seen -> []
@@ -1386,7 +1399,7 @@ returnedArgumentLoans cx initial callee args borrowed mutable = foldl' update in
         _ -> places
     -- (only a whole local the function declares is narrowed, to the places of its own storage that may be a U; what its
     -- references are to are other sources)
-    narrowTo pointees place@(root, []) | Map.member root (fnLocals (cxFn cx)) = case mapM (\pointee -> fieldPaths False (progTypes (cxProgram cx)) pointee (typeOf cx root)) pointees of
+    narrowTo pointees place@(root, []) | Map.member root (fnLocals (cxFn cx)) = case mapM (\pointee -> fieldPaths (progStorage (cxProgram cx)) False (progTypes (cxProgram cx)) pointee (typeOf cx root)) pointees of
         Just found -> nub [(root, map (uncurry SField) path) | path <- concat found]
         Nothing -> [place]
     narrowTo _ place = [place]
@@ -1397,8 +1410,8 @@ mutableReferenceReferents cx = go Set.empty
     go seen ty = case ty of
         TMutRef inner | referenceContents cx inner -> [inner]
         TRef inner -> go seen inner
-        TList inner -> go seen inner
-        TBox inner -> go seen inner
+        (listElement (progStorage (cxProgram cx)) -> Just inner) -> go seen inner
+        (boxContent (progStorage (cxProgram cx)) -> Just inner) -> go seen inner
         TArrayOf inner _ -> go seen inner
         TUninit inner -> go seen inner
         TNamed name args -> descend (instanceName name args) ty seen
@@ -1490,8 +1503,8 @@ referenceFields :: Cx -> Type -> [(Variable, Type)]
 referenceFields cx ty = case ty of
     TRef inner -> referenceFields cx inner
     TMutRef inner -> referenceFields cx inner
-    TList{} -> []
-    TBox{} -> []
+    (listElement (progStorage (cxProgram cx)) -> Just _) -> []
+    (boxContent (progStorage (cxProgram cx)) -> Just _) -> []
     TArrayOf{} -> []
     TNamed name tys -> case Map.lookup (instanceName name tys) (progTypes (cxProgram cx)) of Just (StructDecl fields) -> fields; Just (EnumDecl variants) -> concatMap snd variants; _ -> []
     TVariant name -> concat [fields | EnumDecl variants <- Map.elems (progTypes (cxProgram cx)), (variant, fields) <- variants, variant == name]
@@ -1503,8 +1516,8 @@ referenceQualifiers cx = go Set.empty
     go seen ty = case ty of
         TRef{} -> Set.singleton False
         TMutRef{} -> Set.singleton True
-        TList inner -> go seen inner
-        TBox inner -> go seen inner
+        (listElement (progStorage (cxProgram cx)) -> Just inner) -> go seen inner
+        (boxContent (progStorage (cxProgram cx)) -> Just inner) -> go seen inner
         TArrayOf inner _ -> go seen inner
         TUninit inner -> go seen inner
         TNamed name tys -> let key = instanceName name tys in if Set.member key seen then Set.empty else Set.unions [go (Set.insert key seen) fieldTy | (_, fieldTy) <- referenceFields cx ty]
@@ -1520,8 +1533,8 @@ referenceContentsBy mutableOnly cx = go Set.empty
     go seen ty = case ty of
         TRef inner -> not mutableOnly || go seen inner
         TMutRef{} -> True
-        TList inner -> go seen inner
-        TBox inner -> go seen inner
+        (listElement (progStorage (cxProgram cx)) -> Just inner) -> go seen inner
+        (boxContent (progStorage (cxProgram cx)) -> Just inner) -> go seen inner
         TArrayOf inner _ -> go seen inner
         TUninit inner -> go seen inner
         TNamed name tys -> let key = instanceName name tys in not (Set.member key seen) && any (go (Set.insert key seen) . snd) (referenceFields cx ty)
