@@ -14,7 +14,7 @@ import qualified Data.Set as Set
 import PreludeSource (nativeStorageModules)
 import qualified Mir as M
 import PackageData (ModuleId (..), renderModuleId)
-import MirCopies (makeCopies)
+import MirCopies (makeCopiesWith)
 import qualified Syntax
 import Syntax (Proof (..), ValidationStatement (..), VariableProof, Value (..))
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, baseNameOf)
@@ -30,9 +30,11 @@ import Utils (Result (..), bindResult)
 -- carries seeded from the interface it was lowered against) merges.
 linkPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
 linkPrograms units = linkProgramsBeforeCopies units `bindResult` \program ->
-    case makeCopies (M.completeInstances program) of
+    case makeCopiesWith library (M.completeInstances program) of
         Error e -> Error ("Validation failed: " ++ e)
         ok -> ok
+  where
+    library = Set.fromList [name | (ModuleId "tersuslib" _, unit) <- units, name <- Map.keys (M.progBounded unit)]
 
 linkProgramsBeforeCopies :: [(ModuleId, M.Program)] -> Result M.Program String
 linkProgramsBeforeCopies [] = Error "link error: no modules to link"

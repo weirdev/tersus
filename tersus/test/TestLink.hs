@@ -19,7 +19,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import DataCodec (quote)
 import qualified Mir as M
-import MirCopies (makeCopies)
+import MirCopies (makeCopies, makeCopiesWith, genericKey, coveredKey)
+import qualified Link as ProductionLink
 import qualified Compile
 import qualified MirLists
 import MirMoves (finishLowered)
@@ -132,9 +133,7 @@ nativeMerge units = case mergeInput units of
         result <- nativeFull input
         pure $ case result of
             Error message -> Error message
-            Ok raw -> case makeCopies (M.completeInstances (M.lowProgram raw)) of
-                Error e -> Error ("Validation failed: " ++ e)
-                ok -> ok
+            Ok raw -> copiesForUnits units (M.lowProgram raw)
 
 nativeMergeBeforeCopies :: [(ModuleId, M.Program)] -> IO (Result M.Program String)
 nativeMergeBeforeCopies units = case mergeInput units of
@@ -213,7 +212,8 @@ realInputDifferentials = do
 testLinkNative :: Test
 testLinkNative = TestList "testLinkNative"
     ([TestCase label $ sameResult (Oracle.linkPrograms units) <$> nativeMerge units | (label, units) <- linkCases]
-    ++ [ TestCase "actual prepared compiler/helper/generic inputs" realInputDifferentials
+    ++ [ TestCase "production Link validates only used compiler-library bounded templates" libraryBoundedRetention
+       , TestCase "actual prepared compiler/helper/generic inputs" realInputDifferentials
        , TestCase "native pruning matches the oracle on actual owned MIR" $ do
             seed <- cachedSeed
             case (seed, Housekeeping.toolProgram Housekeeping.mirVerifyEntry) of
@@ -347,10 +347,46 @@ mergeInput units = flatResultMap one units `bindResult` \texts -> Ok ("pass link
         ("unit " ++ quote pkg ++ " " ++ maybe "none" (\n -> "some " ++ quote n) modu ++ " " ++ show (length (lines text)) ++ "\n" ++ text)
 
 linked :: [(ModuleId, M.Program)] -> Result M.Program String
-linked units = mergeInput units `bindResult` responseProgram `bindResult` \program ->
-    case makeCopies (M.completeInstances program) of
+linked units = mergeInput units `bindResult` responseProgram `bindResult` copiesForUnits units
+
+copiesForUnits :: [(ModuleId, M.Program)] -> M.Program -> Result M.Program String
+copiesForUnits units program =
+    case makeCopiesWith library (M.completeInstances program) of
         Error e -> Error ("Validation failed: " ++ e)
         ok -> ok
+  where
+    library = Set.fromList [name | (ModuleId "tersuslib" _, unit) <- units, name <- Map.keys (M.progBounded unit)]
+
+libraryBoundedRetention :: IO TestResult
+libraryBoundedRetention = do
+    actual <- evaluate (ProductionLink.linkPrograms units)
+    reference <- evaluate (linked units)
+    native <- nativeMerge units
+    let expected = Oracle.linkPrograms units
+        check p = firstFailure
+            [ testAssertTrue (Map.member "libraryUsed" (M.progFunctions p))
+            , testAssertTrue (Map.member genericKey (M.specEnv (M.fnSpec (M.progFunctions p Map.! "libraryUsed"))))
+            , testAssertTrue (Map.member "libraryUsed[Int]" (M.progFunctions p))
+            , testAssertTrue (Map.member coveredKey (M.specEnv (M.fnSpec (M.progFunctions p Map.! "libraryUsed[Int]"))))
+            , testAssertTrue (Map.notMember "libraryUnused" (M.progFunctions p))
+            , testAssertTrue (Map.null (M.progBounded p))
+            ]
+    pure (firstFailure ([inspect result check | result <- [expected, reference, native, actual]]
+        ++ [sameResult expected result | result <- [reference, native, actual]]))
+  where
+    templates = ["libraryUsed", "libraryUnused"]
+    library = empty
+        { M.progFunctions = Map.fromList [(name, (function name 1){M.fnTypeParams = ["T"]}) | name <- templates]
+        , M.progBounded = Map.fromList [(name, M.BoundedFn [] [] [] []) | name <- templates]
+        }
+    root = empty
+        { M.progInstances = Map.singleton "libraryUsed[Int]" ("libraryUsed", [ArgType TInt])
+        , M.progMain = (M.progMain empty){M.fnLocals = Map.singleton (M.Local 0) (M.LocalDecl TInt Nothing), M.fnBlocks = Map.fromList
+            [ (M.BlockId 0, M.BasicBlock [] (M.Call (M.Const (M.CFn "libraryUsed[Int]")) [] (M.Local 0) (M.BlockId 1)))
+            , (M.BlockId 1, M.BasicBlock [] M.Return)
+            ]}
+        }
+    units = [(privateId, library), (unitB, root)]
 
 singlePass :: String -> M.Program -> Result M.Program String
 singlePass pass program = programData program `bindResult` \text -> responseProgram ("pass link\n" ++ pass ++ "\n" ++ text)
