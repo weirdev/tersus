@@ -75,6 +75,10 @@ testEmitterProvenance = TestList "testEmitterProvenance"
         pure (testAssertTrue (isJust (fmap fst before)
             && fmap fst changed /= fmap fst before && fmap fst added /= fmap fst changed
             && fmap fst root /= fmap fst added && fmap fst compiled == fmap fst root))
+    , TestCase "an uninspectable generated input leaves the build unknown" $ withTree $ \tree -> do
+        createFileLink (tree </> "missing-input") (tree </> "build/autogen/Missing.hs")
+        actual <- describeTree tree []
+        pure (testAssertEq actual Nothing)
     , TestCase "a build with no profile knows no construction" $ do
         actual <- constructionIdentityFor Nothing ["input"]
         pure (testAssertEq actual (Ok Nothing))

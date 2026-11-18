@@ -1,6 +1,6 @@
 module BuildOptions (describeBuildOptions) where
 
-import Control.Exception (evaluate)
+import Control.Exception (IOException, evaluate, try)
 import Data.Char (isDigit)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub, sort, stripPrefix)
 import qualified System.Directory as Directory
@@ -37,7 +37,17 @@ import Hash (fingerprint)
 -- this can describe, and neither is an invocation that is not an ordinary
 -- build of a configured package. Then there is no description at all.
 describeBuildOptions :: FilePath -> [FilePath] -> String -> [String] -> IO (Maybe ([String], [FilePath]))
-describeBuildOptions root captured compiled arguments
+describeBuildOptions root captured compiled arguments = do
+    observed <- try (do
+        value <- describeConfiguredBuild root captured compiled arguments
+        case value of
+            Just (shown, bound) -> mapM_ (evaluate . length) (shown ++ bound)
+            Nothing -> pure ()
+        pure value) :: IO (Either IOException (Maybe ([String], [FilePath])))
+    pure (either (const Nothing) id observed)
+
+describeConfiguredBuild :: FilePath -> [FilePath] -> String -> [String] -> IO (Maybe ([String], [FilePath]))
+describeConfiguredBuild root captured compiled arguments
     | not ("ghc" `isPrefixOf` compiled) || "iserv" `isInfixOf` compiled = pure Nothing
     | any (`elem` arguments) interpreted = pure Nothing
     | not (all (`elem` arguments) configured) = pure Nothing
