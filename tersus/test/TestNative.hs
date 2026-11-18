@@ -328,6 +328,85 @@ dataPrograms =
     , ("data parameter and result", "struct P { x: Int, y: Int }; fn swap(p: P) -> P { return P { x: p.y, y: p.x }; }; return swap(P { x: 1, y: 2 });")
     , ("data built in a loop", "struct P { x: Int }; l = []; i = 0; while i < 50 [{ affirm i >= 0; }] shrinks 50 - i { l = push(l, P { x: i }); i = i + 1; }; return size(l);")
     , ("a variant returned in a branch only", "enum S { A { r: Int }, C }; x = S::C; if x is S::A { return x; };")
+    ] ++ partialTakePrograms
+
+-- Values with a drop inside values without one, taken apart level by level, which is how a field of a value with a drop is moved out
+takenApartPrograms :: [(String, String)]
+takenApartPrograms =
+    [ ("a value with a drop in a struct, taken apart", "struct O { g: G, n: Int }; fn f(o: O) -> Int { O { g: gg, n: k } = o; G { addr: a, h: hh, blk: b } = gg; d = Addr::free(a, b); return eat(hh) + k + d; }; return f(O { g: G::new(), n: 1 });")
+    , ("a value with a drop in a tuple, taken apart", "fn f(t: (H, Int)) -> Int { (hh, k) = t; H { addr: a, xs: ys, blk: b } = hh; return Addr::free(a, b) + size(ys) + k; }; return f((H::new(), 1));")
+    , ("a value with a drop bound by a match, taken apart", "enum E { A { g: G }, B }; fn f(e: E) -> Int { match e { E::A { g: w } => { G { addr: a, h: hh, blk: b } = w; d = Addr::free(a, b); return eat(hh) + d; }, E::B => { return 0; } }; }; return f(E::A { g: G::new() }) + f(E::B);")
+    , ("a value with a drop in a Box, taken apart", "fn f(bx: Box<G>) -> Int { G { addr: a, h: hh, blk: b } = Box::unbox(bx); d = Addr::free(a, b); return eat(hh) + d; }; return f(Box::new(G::new()));")
+    , ("a value with a drop unboxed, then taken apart", "fn f(bx: Box<G>) -> Int { g = Box::unbox(bx); G { addr: a, h: hh, blk: b } = g; d = Addr::free(a, b); return eat(hh) + d; }; return f(Box::new(G::new()));")
+    , ("a value with a drop in a struct, dropped whole", "struct O { g: G, n: Int }; fn f(o: O) -> Int { return size(o.g.h.xs) + o.n; }; return f(O { g: G::new(), n: 1 });")
+    , ("a part of a value with a drop looked at in another block", "fn f(g: G, c: Bool) -> Int { h = g.h; t = 0; if c { t = size(h.xs); }; return t; }; return f(G::new(), true) + f(G::new(), false);")
+    , ("a part of a value with a drop looked at in a loop", "fn f(g: G) -> Int { h = g.h; t = 0; i = 0; while i < 3 [{ affirm i >= 0; }] shrinks 3 - i { t = t + size(h.xs); i = i + 1; }; return t; }; return f(G::new());")
+    , ("a nested part of a value with a drop looked at in another block", "struct O { g: G, n: Int }; fn f(o: O, c: Bool) -> Int { h = o.g.h; t = o.n; if c { t = t + size(h.xs); }; return t; }; return f(O { g: G::new(), n: 1 }, true);")
+    , ("a part of a match binding with a drop looked at in another block", "enum E { A { g: G }, B }; fn f(e: E, c: Bool) -> Int { match e { E::A { g: w } => { h = w.h; t = 0; if c { t = size(h.xs); }; return t; }, E::B => { return 0; } }; }; return f(E::A { g: G::new() }, true) + f(E::B, true);")
+    , ("a part of a Box with a drop looked at in another block", "fn f(bx: Box<G>, c: Bool) -> Int { h = bx.h; t = 0; if c { t = size(h.xs); }; return t; }; return f(Box::new(G::new()), true);")
+    , ("a part of a value with a drop looked at across a lent read of the value", "fn lenG(g: &G) -> Int { return size(g.h.xs); }; fn f(g: G) -> Int { h = g.h; n = size(h.xs) + lenG(g); if n > 0 { n = n + size(h.xs); }; return n; }; return f(G::new());")
+    , ("a value with a drop moved out of a part taken out", "struct P { v: H, n: Int }; struct O { p: P }; fn f(o: O) -> Int { p = o.p; v = p.v; return eat(v); }; return f(O { p: P { v: H::new(), n: 1 } });")
+    ]
+
+-- Looks at parts of values with a drop that MirMoves accepts: what they look at does not change while they are used (testPointers
+-- has the shapes it refuses). Each runs natively with the memory checks and under valgrind.
+lookPrograms :: [(String, String)]
+lookPrograms =
+    [ ("a look into a Box of a value with a drop, read only", nestedDrops ++ dropHolderL ++ "fn f(l: L, c: Bool) -> Int { v = l.bk; t = 0; if c { t = size(v.xs); }; return t; }; return f(L::new(), true);")
+    , ("a look into a list of values with a drop, read only", nestedDrops ++ dropHolderL ++ "fn f(l: L, c: Bool) -> Int { v = l.ks; t = 0; if c { t = tot(v); }; return t; }; return f(L::new(), true);")
+    , ("a look into a generic value with a drop, read only", nestedDrops ++ dropWrapperW ++ "fn f(w: W<H>, c: Bool) -> Int { v = w.x; t = 0; if c { t = v.sz(); }; return t; }; return f(W::new(H::new()), true);")
+    , ("a look into a tuple, read only", nestedDrops ++ "fn f(t: (G, Int)) -> Int { h = t.0.h; n = 0; if t.1 > 0 { n = size(h.xs); }; return n; }; return f((G::new(), 1));")
+    , ("a look that is dead when what it looks at changes", nestedDrops ++ "fn f(g: G, g2: G, c: Bool) -> Int { h = g.h; if c { g = g2; return 0; }; return size(h.xs); }; return f(G::new(), G::new(), true) + f(G::new(), G::new(), false);")
+    , ("a look made again in each turn of a loop", nestedDrops ++ "fn f(g: G) -> Int { t = 0; i = 0; while i < 3 [{ affirm i >= 0; }] shrinks 3 - i { h = g.h; t = t + size(h.xs); g = G::new(); i = i + 1; }; return t; }; return f(G::new());")
+    , ("a look lent to a call with what it looks at", nestedDrops ++ "fn both(g: &G, h: &H) -> Int { return size(g.h.xs) + size(h.xs); }; fn f(g: G) -> Int { h = g.h; return both(g, h); }; return f(G::new());")
+    , ("a look through a reference, read only", nestedDrops ++ dropWrapperW ++ "fn f(o: W<H>, c: Bool) -> Int { r = &o; v = (*r).x; t = 0; if c { t = v.sz(); }; return t; }; return f(W::new(H::new()), true);")
+    , ("a look through a call's reference result from two arguments, read only", nestedDrops ++ dropWrapperW ++ "fn pick(a: &W<H>, b: &W<H>, c: Bool) -> &H from (a, b) { if c { return &a.x; }; return &b.x; }; fn f(o: W<H>, p: W<H>) -> Int { r = pick(&o, &p, false); v = *r; return v.sz(); }; return f(W::new(H::new()), W::new(H::new()));")
+    , ("a look through a reference held in a struct, read only", nestedDrops ++ dropWrapperW ++ "struct R { r: &W<H> }; fn f(o: W<H>) -> Int { h = R { r: &o }; v = (*h.r).x; return v.sz(); }; return f(W::new(H::new()));")
+    , ("a look through a call's reference result, read only", nestedDrops ++ dropWrapperW ++ "fn xr(w: &W<H>) -> &H from w { return &w.x; }; fn f(o: W<H>, c: Bool) -> Int { r = xr(&o); v = *r; t = 0; if c { t = v.sz(); }; return t; }; return f(W::new(H::new()), true);")
+    , ("a look at an instance whose Clone needs its argument's", nestedDrops ++ dropWrapperW ++ "struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; " ++ "fn f(w: W<V<H>>, c: Bool) -> Int { v = w.x; t = 0; if c { t = v.n; }; return t + size(v.x.xs); }; k = clone(V { x: 1, n: 2 }); return f(W::new(V { x: H::new(), n: 3 }), true) + k.n;")
+    , ("a look at an instance of a type with a Clone that is not used", nestedDrops ++ dropWrapperW ++ "struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; " ++ "fn f(w: W<V<H>>, c: Bool) -> Int { v = w.x; t = 0; if c { t = v.n; }; return t + size(v.x.xs); }; return f(W::new(V { x: H::new(), n: 3 }), true);")
+    , ("a look into a list of instances whose Clone needs their argument's", nestedDrops ++ dropWrapperW ++ "struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; " ++ "fn f(w: W<List<V<H>>>, c: Bool) -> Int { v = w.x; t = 0; if c { t = size(v); }; return t + size(v); }; k = clone(V { x: 1, n: 2 }); return f(W::new(push([], V { x: H::new(), n: 3 })), true) + k.n;")
+    , ("a look at an instance with a Clone and no value with a drop", nestedDrops ++ dropWrapperW ++ "struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; " ++ "fn f(w: W<V<Int>>, w2: W<V<Int>>) -> Int { v = w.x; w = w2; return v.n + v.x; }; return f(W::new(V { x: 1, n: 3 }), W::new(V { x: 2, n: 4 }));")
+    , ("a look at a value with a drop nine Boxes deep", nestedDrops ++ dropWrapperW ++ "struct D { b: Box<Box<Box<Box<Box<Box<Box<Box<Box<H>>>>>>>>>, n: Int }; fn f(w: W<D>, c: Bool) -> Int { v = w.x; t = 0; if c { t = v.n; }; return t + v.n; }; return f(W::new(D { b: Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(H::new()))))))))), n: 2 }), true);")
+    , ("a look lent at a value with a drop nine lists deep", nestedDrops ++ dropWrapperW ++ "struct D { b: List<List<List<List<List<List<List<List<List<H>>>>>>>>>, n: Int }; fn g(d: &D) -> Int { return d.n; }; fn f(w: W<D>, c: Bool) -> Int { v = w.x; t = 0; if c { t = g(v); }; return t + g(v); }; return f(W::new(D { b: [], n: 2 }), true);")
+    , ("a look at a value with a drop and a Clone of its own is a copy", "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct C { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl C { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for C { fn clone(self: &Self) -> Self { return C::new(self.n); }; }; impl Drop for C { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; struct D { c: C, n: Int }; " ++ "fn f(d: D, d2: D) -> Int { c = d.c; d = d2; return c.n + d.n; }; return f(D { c: C::new(3), n: 1 }, D { c: C::new(4), n: 2 });")
+    ]
+
+-- L has a drop and holds a list and a Box of H, which has one
+dropHolderL :: String
+dropHolderL = "struct L { addr: Addr<Int>, ks: List<H>, bk: Box<H>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl Drop for L { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl L { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, ks: push(push([], H::new()), H::new()), bk: Box::new(H::new()), blk: b }; }; }; fn tot(ks: &List<H>) -> Int { return size(ks); }; "
+
+-- W has a drop for any T it holds
+dropWrapperW :: String
+dropWrapperW = "struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; trait Sz { fn sz(self: &Self) -> Int; }; impl Sz for H { fn sz(self: &Self) -> Int { return size(self.xs); }; }; "
+
+-- H and G have drops, and G holds an H
+nestedDrops :: String
+nestedDrops = concat
+    [ "struct H { addr: Addr<Int>, xs: List<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; "
+    , "impl Drop for H { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; "
+    , "impl H { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, xs: [1, 2], blk: b }; }; }; "
+    , "struct G { addr: Addr<Int>, h: H, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; "
+    , "impl Drop for G { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; "
+    , "impl G { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, h: H::new(), blk: b }; }; }; "
+    , "fn eat(h: H) -> Int { return size(h.xs); }; "
+    ]
+
+-- Values with some of their fields taken out: what is left is dropped field by field, under a flag where a field was taken on some
+-- paths only, and nothing is dropped twice (valgrindCases runs each under valgrind)
+partialTakePrograms :: [(String, String)]
+partialTakePrograms =
+    [ ("a field taken out and the other dropped", "struct P { a: List<Int>, b: List<Int> }; fn f(p: P) -> Int { x = p.a; return size(x); }; return f(P { a: [1], b: [2, 3] });")
+    , ("a field taken in one branch only", "struct P { a: List<Int>, b: List<Int> }; fn f(p: P, c: Bool) -> Int { n = size(p.b); if c { x = p.a; n = n + size(x); }; return n; }; return f(P { a: [1], b: [2, 3] }, true) * 10 + f(P { a: [1], b: [2, 3] }, false);")
+    , ("a field taken in some turns of a loop", "struct P { a: List<Int>, b: List<Int> }; t = 0; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { p = P { a: push([], i), b: push(push([], i), i) }; if i = 1 || i = 3 { x = p.a; t = t + size(x); }; t = t + size(p.b); i = i + 1; }; return t;")
+    , ("a field of a nested struct taken out", "struct Q { x: List<Int>, y: List<Int> }; struct P { q: Q, z: List<Int> }; fn f(p: P) -> Int { a = p.q.x; return size(a) + size(p.z); }; return f(P { q: Q { x: [1], y: [2] }, z: [3, 4] });")
+    , ("a payload left in a match", "enum E { A { x: List<Int>, y: List<Int> }, B { z: List<Int> } }; fn f(e: E) -> Int { return match e { E::A { x: x } => size(x), E::B { z: z } => size(z) * 10 }; }; return f(E::A { x: [1], y: [2, 3] }) + f(E::B { z: [4] });")
+    , ("a payload left in a match on a Box", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn left(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v } => v + left(l) }; }; return left(Box::new(T::Node { l: Box::new(T::Node { l: Box::new(T::Leaf), v: 2, r: Box::new(T::Leaf) }), v: 1, r: Box::new(T::Node { l: Box::new(T::Leaf), v: 5, r: Box::new(T::Leaf) }) }));")
+    , ("a loop walks down a tree and frees the rest", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn depth(t: Box<T>) -> Int { d = 0; while t is T::Node shrinks t { t = (t as T::Node).l; d = d + 1; }; return d; }; return depth(Box::new(T::Node { l: Box::new(T::Node { l: Box::new(T::Leaf), v: 2, r: Box::new(T::Leaf) }), v: 1, r: Box::new(T::Node { l: Box::new(T::Leaf), v: 5, r: Box::new(T::Leaf) }) }));")
+    , ("a tuple taken apart", "fn two() -> (List<Int>, List<Int>) { return ([1], [2, 3]); }; (a, b) = two(); return size(a) * 10 + size(b);")
+    , ("one part of a tuple kept", "fn two() -> (List<Int>, List<Int>) { return ([1], [2, 3]); }; t = two(); a = t.0; return size(a);")
+    ] ++ [(name, nestedDrops ++ body) | (name, body) <- takenApartPrograms] ++ lookPrograms ++
+    [ ("a struct updated with a field replaced", "struct S { n: Int, xs: List<Int>, ys: List<Int> }; s = S { n: 0, xs: [1], ys: [2] }; i = 0; while i < 3 [{ affirm i >= 0; }] shrinks 3 - i { s = S { xs: push(s.xs, i), ..s }; i = i + 1; }; return size(s.xs) * 10 + size(s.ys);")
     ]
 
 -- Function values. The validator cannot yet follow a call of a function that is a value, so these are lowered without
@@ -1083,7 +1162,7 @@ valgrindCases =
     , "examples/termination.tersus", "examples/packet_parser.tersus"
     , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
     , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
-    ] ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms ++ map fst lentPartPrograms
+    ] ++ map fst partialTakePrograms ++ map fst takenApartPrograms ++ map fst lookPrograms ++ [name | (name, _, _, _) <- boxedClonePrograms] ++ [name | (name, _, _) <- boxedArrayClonePrograms] ++ map fst referenceWritePrograms ++ map fst lentPartPrograms
 
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to

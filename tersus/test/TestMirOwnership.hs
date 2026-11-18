@@ -113,11 +113,13 @@ testMirOwnership = TestList "testMirOwnership"
         Ok raw -> case expandRefWrites raw of
             Error e -> Just e
             Ok expanded | not (any writesReference (statementsOf raw)) && expanded /= raw -> Just "the expansion changed a program with no reference write"
+            -- (a program with permissions is owned as native code is made of it, with its ghosts erased: before that the pass cannot
+            -- see a value taken apart, and a value with a drop is taken apart only that way)
+            Ok _ | usesArrays text || "Block" `isInfixOf` text -> case eraseGhosts raw `bindResult` nativeProgram `bindResult` insertOwnership `bindResult` verifyProgram of
+                Error e -> Just ("the lowered owned MIR is ill formed: " ++ e)
+                Ok () -> Nothing
             Ok expanded -> case insertOwnership expanded of
                 Error e -> Just e
-                Ok _ | usesArrays text || "Block" `isInfixOf` text -> case eraseGhosts raw `bindResult` nativeProgram `bindResult` insertOwnership `bindResult` verifyProgram of
-                    Error e -> Just ("the lowered owned MIR is ill formed: " ++ e)
-                    Ok () -> Nothing
                 Ok _ | not (any makesReference (statementsOf raw)) -> Nothing
                 Ok owned -> case (runOwned owned, runProgram raw) of
                     (Right a, Ok b) -> testAssertEq a b

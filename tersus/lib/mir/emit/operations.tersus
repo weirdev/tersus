@@ -333,7 +333,7 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         found = clone(g2.last);
         return ins(g2, "c", "icmp eq i32 ".then(found).then(", ").then(showInt(ctor.tag)));
     };
-    // the field is moved out of the value: what it held is left holding nothing
+    // the field is moved out of the value
     if rv is Rvalue::TakeField {
         name = (rv as Rvalue::TakeField).name;
         field = (rv as Rvalue::TakeField).field;
@@ -344,12 +344,7 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
         g1 = dataBase(k.g, cx, f, constructedType(cx, name), Operand::Copy { local: (rv as Rvalue::TakeField).local });
         base = clone(g1.last);
-        offset = fieldOffset(cx, ctor, i);
-        g2 = loadSlot(g1, get(ctor.fields, i).ty, base, offset);
-        taken = clone(g2.last);
-        g3 = ins(g2, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(offset)));
-        p = clone(g3.last);
-        return giving(emit(g3, "store i64 0, ptr ".then(p)), taken);
+        return loadSlot(g1, get(ctor.fields, i).ty, base, fieldOffset(cx, ctor, i));
     };
     return failG(g, "Native code makes this where it is held inline, not as a word");
 };
@@ -421,8 +416,8 @@ fn fillElements(g: Gen, cx: &Ctx, f: &Function, target: &String, elementTy: &Typ
 };
 
 // Copies a value that is part of another into the destination (when the destination owns something, through room of its own first, since the part can be a part of what the
-// destination held); the part is cleared when it is moved out
-fn fromPart(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int, address: &String, clear: Bool) -> Gen ~ {
+// destination held)
+fn fromPart(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int, address: &String) -> Gen ~ {
     bytes = bytesIn(cx, ty);
     owns = ownsIn(cx, ty);
     target = slot(dest);
@@ -430,14 +425,10 @@ fn fromPart(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int, address: &St
         g1 = entryTemp(g, (bytes + 7) / 8);
         room = clone(g1.last);
         g2 = copyWords(g1, room, address, bytes);
-        g3 = g2;
-        if clear { g3 = zeroWords(g3, address, bytes); };
-        g4 = dropSlot(g3, cx, ty, dest);
-        return copyWords(g4, target, room, bytes);
+        g3 = dropSlot(g2, cx, ty, dest);
+        return copyWords(g3, target, room, bytes);
     };
-    g1 = copyWords(g, target, address, bytes);
-    if clear { return zeroWords(g1, address, bytes); };
-    return g1;
+    return copyWords(g, target, address, bytes);
 };
 
 // Frees what the destination held, if it owns something (unless it only looks at a value, as a Peek does)
@@ -462,12 +453,12 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
     if rv is Rvalue::Use {
         g1 = operandAddress(g, cx, f, ty, (rv as Rvalue::Use).o);
         src = clone(g1.last);
-        return fromPart(g1, cx, dropsOld, ty, dest, src, false);
+        return fromPart(g1, cx, dropsOld, ty, dest, src);
     };
     if rv is Rvalue::Deref {
         g1 = operandPointer(g, cx, f, (rv as Rvalue::Deref).o);
         src = clone(g1.last);
-        return fromPart(g1, cx, dropsOld, ty, dest, src, false);
+        return fromPart(g1, cx, dropsOld, ty, dest, src);
     };
     if rv is Rvalue::ListOp {
         op = (rv as Rvalue::ListOp).op;
@@ -483,13 +474,13 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         if (op = 36 || op = 37 || op = 38) && n = 1 {
             g1 = operandAddress(g, cx, f, ty, get(args, 0));
             src = clone(g1.last);
-            return fromPart(g1, cx, dropsOld, ty, dest, src, false);
+            return fromPart(g1, cx, dropsOld, ty, dest, src);
         };
         // (the value held inline in a slot of memory, which is read or taken: the slot is empty after, which only the permission says)
         if (op = 28 || op = 30) && n = 2 {
             g1 = slotAddress(g, cx, f, get(args, 0), get(args, 1));
             at = clone(g1.last);
-            return fromPart(g1, cx, dropsOld, ty, dest, at, false);
+            return fromPart(g1, cx, dropsOld, ty, dest, at);
         };
         // Array::fromList: the elements of the list move into the array, and only the buffer of the list is freed
         if op = 45 && n = 1 && ty is Type::TArray && get(args, 0) is Operand::Move {
@@ -507,10 +498,9 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             p = clone(g4.last);
             g5 = ins(g4, "b", "mul i64 ".then(count).then(", ").then(showInt(elemBytes)));
             total = clone(g5.last);
-            g6 = zeroWords(g5, slot(l), 24);
-            g7 = freeOld(g6, cx, dropsOld, ty, dest);
-            g8 = emit(g7, "call void @llvm.memcpy.p0.p0.i64(ptr ".then(target).then(", ptr ").then(p).then(", i64 ").then(total).then(", i1 false)"));
-            return emit(g8, "call void @tersus_addr_free(i64 ".then(m).then(")"));
+            g6 = freeOld(g5, cx, dropsOld, ty, dest);
+            g7 = emit(g6, "call void @llvm.memcpy.p0.p0.i64(ptr ".then(target).then(", ptr ").then(p).then(", i64 ").then(total).then(", i1 false)"));
+            return emit(g7, "call void @tersus_addr_free(i64 ".then(m).then(")"));
         };
         if op = 7 && n = 2 && arr.ok {
             // (an array that owns something is made in room of its own, then what the destination held is freed and the elements move in)
@@ -542,12 +532,12 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             index = clone(g1.last);
             g2 = elementOf(g1, cx, f, ty, get(args, 0), index);
             p = clone(g2.last);
-            return fromPart(g2, cx, dropsOld, ty, dest, p, false);
+            return fromPart(g2, cx, dropsOld, ty, dest, p);
         };
         if op = 1 && n = 1 {
             g1 = elementOf(g, cx, f, ty, get(args, 0), "0");
             p = clone(g1.last);
-            return fromPart(g1, cx, dropsOld, ty, dest, p, false);
+            return fromPart(g1, cx, dropsOld, ty, dest, p);
         };
         if op = 2 && n = 1 {
             g1 = arrayLength(g, f, get(args, 0));
@@ -556,7 +546,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             index = clone(g2.last);
             g3 = elementOf(g2, cx, f, ty, get(args, 0), index);
             p = clone(g3.last);
-            return fromPart(g3, cx, dropsOld, ty, dest, p, false);
+            return fromPart(g3, cx, dropsOld, ty, dest, p);
         };
     };
     // a field that is held inline
@@ -572,9 +562,9 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         base = clone(g1.last);
         g2 = ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(fieldOffset(cx, ctor, i))));
         p = clone(g2.last);
-        return fromPart(g2, cx, dropsOld, ty, dest, p, false);
+        return fromPart(g2, cx, dropsOld, ty, dest, p);
     };
-    // the field is moved out of the value: what it held is left holding nothing
+    // the field is moved out of the value
     if rv is Rvalue::TakeField {
         name = (rv as Rvalue::TakeField).name;
         field = (rv as Rvalue::TakeField).field;
@@ -587,7 +577,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         base = clone(g1.last);
         g2 = ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(fieldOffset(cx, ctor, i))));
         p = clone(g2.last);
-        return fromPart(g2, cx, dropsOld, ty, dest, p, true);
+        return fromPart(g2, cx, dropsOld, ty, dest, p);
     };
     if rv is Rvalue::MakeData {
         name = (rv as Rvalue::MakeData).name;
@@ -616,8 +606,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         };
         return g2;
     };
-    // the same value, known to be that variant (a Box of the library that is cast is taken out of its room, which is freed with the value
-    // moved out, so that its drop has nothing to do)
+    // the same value, known to be that variant (a Box of the library that is moved and cast is taken out of its room, which is freed)
     if rv is Rvalue::AsVariant {
         o = (rv as Rvalue::AsVariant).o;
         held = operandLocalType(f, o);
@@ -628,10 +617,9 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             g1 = ins(g, "b", "load ptr, ptr ".then(slot(l)));
             block = clone(g1.last);
             if o is Operand::Move {
-                g2 = emit(g1, "store i64 0, ptr ".then(slot(l)));
-                g3 = freeOld(g2, cx, dropsOld, ty, dest);
-                g4 = copyWords(g3, target, block, bytes);
-                return emit(g4, "call void @tersus_box_free(ptr ".then(block).then(")"));
+                g2 = freeOld(g1, cx, dropsOld, ty, dest);
+                g3 = copyWords(g2, target, block, bytes);
+                return emit(g3, "call void @tersus_box_free(ptr ".then(block).then(")"));
             };
             g2 = freeOld(g1, cx, dropsOld, ty, dest);
             return copyWords(g2, target, block, bytes);
@@ -683,10 +671,9 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             m = clone(g1.last);
             g2 = ins(g1, "p", "inttoptr i64 ".then(m).then(" to ptr"));
             p = clone(g2.last);
-            g3 = zeroWords(g2, slot(l), 24);
-            g4 = freeOld(g3, cx, dropsOld, ty, dest);
-            g5 = copyWords(g4, target, p, bytes);
-            return emit(g5, "call void @tersus_addr_free(i64 ".then(m).then(")"));
+            g3 = freeOld(g2, cx, dropsOld, ty, dest);
+            g4 = copyWords(g3, target, p, bytes);
+            return emit(g4, "call void @tersus_addr_free(i64 ".then(m).then(")"));
         };
         g1 = ins(g, "p", "load ptr, ptr ".then(slot(l)));
         p = clone(g1.last);
@@ -782,6 +769,8 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
     lt = localTypeOf(f, dest);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(dest))); };
     returned = entry && dest = 0 && !peek;
+    // (a dissolve, told apart from Uninit::empty() as mir::ownership::common's dissolvedLocal says: what it takes apart is never read or dropped again)
+    if peek && rv is Rvalue::ListOp && (rv as Rvalue::ListOp).op = 35 && size((rv as Rvalue::ListOp).args) = 0 { return g; };
     if peek {
         if isAggregate(lt.ty) { return assignAggregate(g, cx, f, false, dest, lt.ty, rv); };
         g1 = rvalue(g, cx, f, lt.ty, rv);

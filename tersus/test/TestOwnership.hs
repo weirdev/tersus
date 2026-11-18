@@ -6,9 +6,11 @@ module TestOwnership
     , usesArrays
     ) where
 
+import Control.Monad (when)
 import Data.List (isInfixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 
 import Mir
 import MirEval (MirValue (..), runProgram)
@@ -119,6 +121,36 @@ freeTree v@(VS name fs) = do
     mapM_ (freeTree . snd) fs
 freeTree (VA values) = mapM_ freeTree values
 freeTree _ = return ()
+
+-- Whether the value still holds something to free: a value of the heap, or one with a drop (a value whose owning fields were all taken
+-- out holds nothing, and is not dropped)
+holdsSomething :: Program -> Val -> Bool
+holdsSomething _ VNull = False
+holdsSomething _ (VP _) = True
+holdsSomething program (VS name fs)
+    | isListStruct name || isBoxStruct name = True
+    | Just _ <- typeOfValue program name >>= dropFunction program = True
+    | otherwise = any (holdsSomething program . snd) fs
+holdsSomething program (VA values) = any (holdsSomething program) values
+holdsSomething _ _ = False
+
+-- Whether a part of the value, inline or on the heap, was moved out (native code drops a value whole, and frees nothing of a part
+-- that is not there)
+holdsMovedPart :: Val -> M Bool
+holdsMovedPart VNull = return True
+holdsMovedPart (VP a) = heapPart a
+holdsMovedPart (VS name fs)
+    | isListStruct name || isBoxStruct name, Just a <- listCell fs = heapPart a
+    | otherwise = or <$> mapM (holdsMovedPart . snd) fs
+holdsMovedPart (VA values) = or <$> mapM holdsMovedPart values
+holdsMovedPart _ = return False
+
+heapPart :: Int -> M Bool
+heapPart a = do
+    s <- getSt
+    case Map.lookup a (stHeap s) of
+        Nothing -> return False
+        Just c -> or <$> mapM holdsMovedPart (children (cellObject c))
 
 -- The struct or the enum that a value of a struct or of a variant is of
 typeOfValue :: Program -> Name -> Maybe Name
@@ -690,7 +722,11 @@ execStatement stmt = do
             case Map.lookup l (frameSlots f) of
                 Nothing -> return ()
                 Just (Slot _ (Just _)) -> failM (show l ++ " only looks at a value, and is dropped")
-                Just (Slot v Nothing) -> freeTree v >> putSlot l (Slot VNull Nothing)
+                Just (Slot VNull Nothing) -> failM (show l ++ " is dropped after it was moved from")
+                Just (Slot v Nothing) -> do
+                    moved <- holdsMovedPart v
+                    when moved (failM (show l ++ " is dropped with a part that was moved out of it"))
+                    freeTree v >> putSlot l (Slot VNull Nothing)
         Peek d rv -> do
             v <- evalRvalue rv
             -- (a local that only looks remembers how what it looks at was)
@@ -792,7 +828,7 @@ callFunction program fn args = do
         f : rest -> do
             -- (the value a drop is given is not freed by it: its fields are freed after it)
             let dropped l = isDropFunction (fnName fn) && take 1 (fnParams fn) == [l]
-                leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), v /= VNull, l /= Local 0, localHeap program f l, not (dropped l)]
+                leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), holdsSomething program v, l /= Local 0, localHeap program f l, not (dropped l)]
             if null leftover
                 then putSt s'{stFrames = rest}
                 else failM ("a function returns while it owns " ++ show leftover)
@@ -961,13 +997,22 @@ planTests =
     countCases =
         [ ("an array is not owned: no copy, no move, nothing to free", "a = array(3, 0); b = set(a, 0, 1); return get(b, 0) + get(a, 1) + size(a);", "", ["clone", "move", "drop", "peek"], [0, 0, 0, 0])
         , ("a list that is cloned for a push is copied once", "x = [1]; y = push(clone(x), 2); return size(x) + size(y);", "main", ["clone"], [1])
-        , ("a match takes the fields out of the value", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));", "sum", ["clone", "take "], [0, 2])
+        -- (two takes in the arm, and two more that drop the fields left at the join of the arms, each under its flag)
+        , ("a match takes the fields out of the value", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));", "sum", ["clone", "take ("], [0, 4])
         , ("a part that is only read is looked at", "rows = [[1], [2, 3]]; return size(get(rows, 1));", "main", ["clone", "peek Get"], [0, 1])
         , ("a call with a clone of an argument that is used after it copies the argument", "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(clone(l)) + n(l);", "main", ["clone"], [1])
         , ("a copy of a parameter is one copy", "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);", "f", ["clone"], [1])
         , ("a value that is overwritten is dropped before the assignment", "x = [1]; x = [1, 2]; return size(x);", "main", ["drop _1"], [2])
         , ("a struct taken apart is not dropped, and the field taken out is", "struct P { a: List<Int>, n: Int }; p = P { a: [1], n: 4 }; P { a: x, n: k } = p; return size(x) + k;", "main", ["peek UninitEmpty", "drop _"], [1, 1])
+        , ("a value with a field taken out is dropped as the field left", "struct P { a: List<Int>, b: List<Int> }; fn f(p: P) -> Int { x = p.a; return size(x); }; return f(P { a: [1], b: [2, 3] });", "f", ["take (_1 as P).b;", "drop _3;", "drop _1;"], [1, 1, 0])
+        , ("a value with every owning field taken out is not dropped", "struct P { a: List<Int>, b: List<Int>, n: Int }; fn f(p: P) -> Int { x = p.a; y = p.b; return size(x) + size(y) + p.n; }; return f(P { a: [1], b: [2, 3], n: 4 });", "f", ["drop _1;"], [0])
+        , ("a field taken on one path is dropped once, under its flag", "struct P { a: List<Int>, b: List<Int> }; fn f(p: P, c: Bool) -> Int { n = size(p.b); if c { x = p.a; n = n + size(x); }; return n; }; return f(P { a: [1], b: [2, 3] }, true) * 10 + f(P { a: [1], b: [2, 3] }, false);", "f", ["take (_1 as P).a;", "take (_1 as P).b;", "drop _1;"], [2, 1, 0])
+        , ("a payload left in a match is dropped on its own, under a test of the variant", "enum E { A { x: List<Int>, y: List<Int> }, B { z: List<Int> } }; fn f(e: E) -> Int { return match e { E::A { x: x } => size(x), E::B { z: z } => size(z) * 10 }; }; return f(E::A { x: [1], y: [2, 3] }) + f(E::B { z: [4] });", "f", ["as E::A).y;", "drop _3;"], [1, 0])
+        , ("a Box with a field of its value taken out frees its room and the field left", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn left(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v } => v + left(l) }; }; return left(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));", "left", ["move _3 as T::Node;", "as T::Node).r;", "drop _3;"], [1, 1, 1])
+        , ("a tuple taken apart is not dropped", "fn two() -> (List<Int>, List<Int>) { return ([1], [2, 3]); }; (a, b) = two(); return size(a) * 10 + size(b);", "main", ["drop _1;", "drop _2;", "drop _3;"], [0, 1, 1])
         ]
+        ++ [ ("the String " ++ helper ++ " takes apart is not dropped after", "s = \"ab\".concat(\"cd\"); s = s.push(toByte(101)); s = set(s, 0, toByte(65)); t = \"x = {}, ok = {}\\n\".format(1, true); return size(s) + size(t);", helper, ["drop _"], [0])
+           | helper <- ["<String>::concat", "<String as Growable>::push", "<String as Sequence>::set", "<String>::formatPart", "<Int as Format>::writeTo", "<Bool as Format>::writeTo", "<String>::formatInto[Int, Bool]"] ]
         ++ [ ("the list " ++ helper ++ " takes apart is not dropped after", "l = [1]; l = push(l, 2); l = set(l, 0, 3); l = pop(l); return size(l);", helper ++ "<Int>", ["drop"], [0])
            | helper <- ["listPush", "listSet", "listPop"] ]
     scopeText t "" = t
@@ -975,6 +1020,124 @@ planTests =
     withOwned source check = either Just check (ownedText source)
     orElseT Nothing b = b
     orElseT a _ = a
+
+-- No value that holds one with a drop of its own is ever copied (a CopyOf of it would be dropped twice, unless the type's Clone makes
+-- a value of its own): a part of one is looked at in place, and MirMoves sees that what it is a part of does not change while it is
+-- looked at
+noDropCopyTests :: [Test]
+noDropCopyTests =
+    [ TestCase name . pure $ case ownedSource source of
+        Error e -> Just e
+        Ok owned -> case [(fnName fn, d) | fn <- progMain owned : Map.elems (progFunctions owned), BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign d (CopyOf _) <- stmts, Just decl <- [Map.lookup d (fnLocals fn)], holdsDropOf owned (localType decl)] of
+            [] -> Nothing
+            copies -> Just ("copies of values with a drop: " ++ show copies)
+    | (name, source) <- validatedPrograms, "impl Drop" `isInfixOf` source
+    ]
+
+holdsDropOf :: Program -> Type -> Bool
+holdsDropOf program = go Set.empty
+  where
+    go seen ty = case ty of
+        TArrayOf t _ -> go seen t
+        TNamed base args
+            | isListStruct n || isBoxStruct n -> any (go seen) [t | ArgType t <- args]
+            | n `Set.member` seen -> False
+            | Just _ <- dropFunction program n -> not (ownClone n)
+            | otherwise -> case Map.lookup n (progTypes program) of
+                Just (StructDecl fields) -> any (go (Set.insert n seen) . snd) fields
+                Just (EnumDecl variants) -> any (go (Set.insert n seen) . snd) (concatMap snd variants)
+                Nothing -> any (go seen) [t | ArgType t <- args]
+          where
+            n = instanceName base args
+        TVariant v -> maybe False (\owner -> go seen (TNamed owner [])) (ownerOf program v)
+        _ -> False
+    -- (as the emitter finds a Clone: a function `<... as Clone>::clone` whose result is exactly the type)
+    ownClone n = or [True | fn <- Map.elems (progFunctions program), " as Clone>::clone" `isInfixOf` fnName fn, Just (TNamed b a) <- [fnReturns fn], instanceName b a == n]
+
+-- The ownership pass refuses, at the types native code is made of, what MirMoves refuses where the program says it: owned MIR given
+-- straight to the pass, which MirMoves never saw, and the copy of a generic function that MirMoves checks only in general
+passSafetyTests :: [Test]
+passSafetyTests =
+    [ testCase "the pass refuses a change to what a look at a value with a drop is a part of" $
+        refused [Assign (Local 3) (ReadField (Copy (Local 1)) "G" "h"), Assign (Local 1) (Use (Move (Local 2))), Assign (Local 0) (ReadField (Copy (Local 3)) "H" "n")]
+            "_1 is given another value while _3 still looks at a part of it that holds a value with a drop and cannot be copied"
+    , testCase "the pass refuses a copy of a value with a drop and no Clone" $
+        refused [Assign (Local 3) (CopyOf (Copy (Local 4))), Assign (Local 0) (ReadField (Copy (Local 3)) "H" "n")]
+            "_3 would be a copy of a value with a drop that has no Clone of its own"
+    , TestCase "the pass refuses the copy of a generic function that changes what a look is a part of" . pure $
+        case ownedSource generic of
+            Error e -> testAssertTrue ("w is given another value while v still looks at a part of it that holds a value with a drop" `isInfixOf` e) `orElse` Just e
+            Ok _ -> Just "the pass accepted it"
+    , testCase "the pass names the value that changes, not the first look it is through" $
+        case insertOwnership (holderProgram [Assign (Local 5) (ReadField (Copy (Local 6)) "O" "g"), Assign (Local 3) (ReadField (Copy (Local 5)) "G" "h"), Assign (Local 6) (Use (Move (Local 7))), Assign (Local 0) (ReadField (Copy (Local 3)) "H" "n")]) of
+            Error e -> testAssertTrue ("_6 is given another value while _3 still looks at" `isInfixOf` e) `orElse` Just e
+            Ok _ -> Just "the pass accepted it"
+    , TestCase "the pass refuses the copy of a generic function that changes what a look at an instance is a part of" . pure $
+        case ownedSource genericInstance of
+            Error e -> testAssertTrue ("w is given another value while v still looks at a part of it that holds a value with a drop" `isInfixOf` e) `orElse` Just e
+            Ok _ -> Just "the pass accepted it"
+    , TestCase "the pass refuses the copy of a generic function that changes what a look through a reference is a part of" . pure $
+        case ownedSource genericThroughReference of
+            Error e -> testAssertTrue ("o is given another value while v still looks at a part of it that holds a value with a drop" `isInfixOf` e) `orElse` Just e
+            Ok _ -> Just "the pass accepted it"
+    , testCase "the pass accepts a look whose owner does not change" $
+        case insertOwnership (holderProgram [Assign (Local 3) (ReadField (Copy (Local 1)) "G" "h"), Assign (Local 0) (ReadField (Copy (Local 3)) "H" "n")]) of
+            Error e -> Just e
+            Ok _ -> Nothing
+    ]
+  where
+    refused stmts expected = case insertOwnership (holderProgram stmts) of
+        Error e -> testAssertTrue (expected `isInfixOf` e) `orElse` Just e
+        Ok _ -> Just "the pass accepted it"
+    orElse Nothing _ = Nothing
+    orElse _ e = e
+    h = TNamed "H" []
+    g = TNamed "G" []
+    generic = "struct H { addr: Addr<Int>, xs: List<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl Drop for H { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl H { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, xs: [1, 2], blk: b }; }; }; struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; trait Sz { fn sz(self: &Self) -> Int; }; impl Sz for H { fn sz(self: &Self) -> Int { return size(self.xs); }; }; fn f<T: Sz>(w: W<T>, w2: W<T>) -> Int { v = w.x; w = w2; return v.sz(); }; return f(W::new(H::new()), W::new(H::new()));"
+    genericInstance = "struct H { addr: Addr<Int>, xs: List<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl Drop for H { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl H { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, xs: [1, 2], blk: b }; }; }; struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; fn keep<T>(x: &T) -> Int { return 1; }; fn f<T>(w: W<T>, w2: W<T>) -> Int { v = w.x; w = w2; return keep(v); }; k = clone(V { x: 1, n: 2 }); return f(W::new(V { x: H::new(), n: 3 }), W::new(V { x: H::new(), n: 4 })) + k.n;"
+    genericThroughReference = "struct H { addr: Addr<Int>, xs: List<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl Drop for H { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl H { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, xs: [1, 2], blk: b }; }; }; struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; fn keep<T>(x: &T) -> Int { return 1; }; fn f<T>(o: W<T>, o2: W<T>) -> Int { r = &o; v = (*r).x; o = o2; return keep(v); }; return f(W::new(H::new()), W::new(H::new()));"
+    holderProgram stmts =
+        let stub = progMain (mainProgram [] [])
+            fn = stub{fnName = "f", fnParams = [Local 1, Local 2, Local 4, Local 6, Local 7], fnReturns = Just TInt, fnLocals = Map.fromList [(Local 0, LocalDecl TInt Nothing), (Local 1, LocalDecl g Nothing), (Local 2, LocalDecl g Nothing), (Local 3, LocalDecl h Nothing), (Local 4, LocalDecl h Nothing), (Local 5, LocalDecl g Nothing), (Local 6, LocalDecl (TNamed "O" []) Nothing), (Local 7, LocalDecl (TNamed "O" []) Nothing)], fnBlocks = Map.singleton (BlockId 0) (BasicBlock stmts Return)}
+            dropOf ty = stub{fnParams = [Local 1], fnReturns = Just TInt, fnLocals = Map.fromList [(Local 0, LocalDecl TInt Nothing), (Local 1, LocalDecl ty Nothing)], fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (Use (Const (CInt 0)))] Return)}
+         in (mainProgram [] []){progTypes = Map.fromList [("H", StructDecl [("n", TInt), ("a", TAddr TInt)]), ("G", StructDecl [("h", h), ("m", TInt), ("a", TAddr TInt)]), ("O", StructDecl [("g", g), ("k", TInt), ("a", TAddr TInt)])], progFunctions = Map.fromList [("f", fn), ("<H as Drop>::drop", (dropOf h){fnName = "<H as Drop>::drop"}), ("<G as Drop>::drop", (dropOf g){fnName = "<G as Drop>::drop"}), ("<O as Drop>::drop", (dropOf (TNamed "O" [])){fnName = "<O as Drop>::drop"})]}
+
+-- MirMoves.holdsDrop and holdsOwnDrop in lib/mir/ownership/common.tersus are one predicate, at the types of the program as written and
+-- at the types native code is made of. For each shape, a look at a part of that shape whose owner changes is refused by MirMoves in a
+-- function with the shape written out, and by the ownership pass in the copy of a generic function for it (which MirMoves takes to
+-- hold no such value), exactly when the shape holds a value with a drop and no Clone; and accepted by both otherwise.
+agreementTests :: [Test]
+agreementTests =
+    [ TestCase (name ++ (if holder then " holds a value with a drop" else " holds none")) . pure $
+        firstFailure
+            [ verdict "MirMoves" holder ("Move error" `isInfixOf`) (ownedSource (prelude ++ "fn f(w: W<" ++ ty ++ ">, w2: W<" ++ ty ++ ">) -> Int { v = w.x; w = w2; return keep(v); }; return f(W::new(" ++ value ++ "), W::new(" ++ value ++ "));"))
+            , verdict "the ownership pass" holder ("still looks at a part of it that holds a value with a drop" `isInfixOf`) (ownedSource (prelude ++ "fn f<T>(w: W<T>, w2: W<T>) -> Int { v = w.x; w = w2; return keep(v); }; return f(W::new(" ++ value ++ "), W::new(" ++ value ++ "));"))
+            ]
+    | (name, prelude, ty, value, holder) <- shapes
+    ]
+  where
+    verdict who holder refusal result = case (holder, result) of
+        (True, Error e) | refusal e -> Nothing
+        (True, Error e) -> Just (who ++ " refused it for another reason: " ++ e)
+        (True, Ok _) -> Just (who ++ " accepted it")
+        (False, Ok _) -> Nothing
+        (False, Error e) -> Just (who ++ " refused it: " ++ e)
+    firstFailure = foldr (\r acc -> maybe acc Just r) Nothing
+    shapes =
+        [ ("a value with a drop", base, "H", "H::new()", True)
+        , ("a Box of one", base, "Box<H>", "Box::new(H::new())", True)
+        , ("a list of them", base, "List<H>", "push([], H::new())", True)
+        , ("one nine Boxes deep", base ++ "struct D { b: Box<Box<Box<Box<Box<Box<Box<Box<Box<H>>>>>>>>>, n: Int }; ", "D", "D { b: Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(Box::new(H::new()))))))))), n: 2 }", True)
+        , ("a tuple with one", base, "(H, Int)", "(H::new(), 1)", True)
+        , ("an enum with one", base ++ "enum E { A { h: H }, B }; ", "E", "E::A { h: H::new() }", True)
+        , ("an instance whose Clone needs its argument's", base ++ "struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; " ++ "fn used() -> Int { k = clone(V { x: 1, n: 2 }); return k.n; }; ", "V<H>", "V { x: H::new(), n: 3 }", True)
+        , ("an instance of a type with a Clone, with no value with a drop", base ++ "struct V<T> { x: T, n: Int }; impl<T: Clone> Clone for V<T> { }; ", "V<Int>", "V { x: 1, n: 3 }", False)
+        , ("a number", base, "Int", "1", False)
+        , ("a value with a drop and a Clone of its own", cloned, "C", "C::new(3)", False)
+        , ("an instance with a Clone over a value with a Clone of its own", cloned ++ "struct U<T> { x: T, n: Int }; impl<T: Clone> Clone for U<T> { fn clone(self: &Self) -> Self { return U { x: clone(self.x), n: self.n }; }; }; fn used() -> Int { k = clone(U { x: C::new(1), n: 2 }); return k.n; }; ", "U<C>", "U { x: C::new(3), n: 4 }", False)
+        ]
+    base = "struct H { addr: Addr<Int>, xs: List<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl Drop for H { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl H { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, xs: [1, 2], blk: b }; }; }; struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; fn keep<T>(x: &T) -> Int { return 1; }; "
+    cloned = "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct C { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl C { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for C { fn clone(self: &Self) -> Self { return C::new(self.n); }; }; impl Drop for C { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; fn keep<T>(x: &T) -> Int { return 1; }; "
 
 -- Owned MIR written by hand, with a mistake in each: the model has to see it
 mistakeTests :: [Test]
@@ -996,6 +1159,18 @@ mistakeTests =
         ]
     , mistake "a part of a value is assigned to a local that owns it" "assigned to a local that owns"
         [Assign (Local 1) (Use (Const (CList [CList [CInt 1]]))), Assign (Local 2) (ListOp Get [Copy (Local 1), Const (CInt 0)]), Drop (Local 1), Drop (Local 2)]
+    , mistake "a value is dropped after it is moved" "dropped after it was moved from"
+        [Assign (Local 1) (Use (Const (CList [CInt 1]))), Assign (Local 2) (Use (Move (Local 1))), Drop (Local 2), Drop (Local 1)]
+    , TestCase "a value is dropped with a field that was taken out of it" . pure $
+        let holder = mainProgram [(Local 1, TNamed "Holder" []), (Local 2, onHeap)]
+                [ Assign (Local 1) (Use (Const (CData "Holder" [("xs", CList [CInt 1]), ("ys", CList [CInt 2])])))
+                , Assign (Local 2) (TakeField (Local 1) "Holder" "xs")
+                , Drop (Local 2)
+                , Drop (Local 1)
+                ]
+         in case runOwned holder{progTypes = Map.singleton "Holder" (StructDecl [("xs", onHeap), ("ys", onHeap)])} of
+                Left e -> if "a part that was moved out" `isInfixOf` e then Nothing else Just ("expected a drop of a part that was moved out, got " ++ e)
+                Right _ -> Just "the model accepts it"
     ]
   where
     mistake name expected stmts =
@@ -1130,7 +1305,6 @@ referenceModelTests =
                     , Peek (Local 3) (ReadField (Copy (Local 2)) "Node" "n")
                     , Assign (Local 4) (BinaryOp Add (Copy (Local 3)) (Const (CInt 1)))
                     , Assign (Local 5) (TakeField (Local 2) "Node" "kids")
-                    , Drop (Local 2)
                     , Assign (Local 0) (MakeData "Node" [("n", Copy (Local 4)), ("kids", Move (Local 5))])
                     ] Return)
                 }
@@ -1304,6 +1478,9 @@ testOwnership =
         , TestList "lent parts" [TestCase name (onSource name source) | (name, source) <- lentPartPrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests
+        , TestList "no copy of a value with a drop" noDropCopyTests
+        , TestList "the ownership pass's own refusals" passSafetyTests
+        , TestList "MirMoves and the ownership pass agree on what holds a value with a drop" agreementTests
         , TestList "what a part may be read after" windowTests
         , TestList "reference heap model" referenceModelTests
         , TestList "borrowed roots" borrowedRootTests

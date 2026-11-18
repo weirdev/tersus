@@ -17,13 +17,13 @@ import Data.Char (isDigit)
 import Data.List (foldl', intercalate, isPrefixOf, nub, tails)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 
 import FieldPaths (fieldPaths)
 import Mir
-import Types (Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
+import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
 import Utils (Result (..))
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
@@ -134,6 +134,81 @@ ownsHeap program = go Set.empty
         Just (StructDecl fields) -> any (go seen . snd) fields
         Just (EnumDecl variants) -> any (go seen . snd) (concatMap snd variants)
         Nothing -> False
+
+-- Whether a copy of a value of the type would copy a value with a drop bitwise: it holds, at any depth (fields, variants, the
+-- elements of a list, a Box, an array or an address), a struct or an enum with a drop and no Clone of its own. A look at such a
+-- part is made in place (the ownership pass peeks it), so what it is a part of must not change before its last use. This is
+-- `holdsOwnDrop` of lib/mir/ownership/common.tersus at the types of the program as written. A type parameter is taken not to be
+-- one (taking it to be one refuses the elements of a variadic pack that a function reads into one name), so the copy of a generic
+-- function for such a type is checked by the ownership pass alone, which applies the same rule at the types native code is made
+-- of and refuses what this misses (testOwnership "the ownership pass's own refusals").
+holdsDrop :: Cx -> Type -> Bool
+holdsDrop cx
+    | Set.null (cxDrops cx) = const False
+    | otherwise = go Set.empty
+  where
+    program = cxProgram cx
+    -- (an instance has a Clone of its own when its type has one and none of its type arguments holds a value with a drop and no
+    -- Clone, which a Clone bounded by Clone on that argument could not clone: dropHolders in lib/mir/ownership/common.tersus)
+    cloned seen base args = base `Set.member` cxCloned cx && not (any (go seen) [t | ArgType t <- args])
+    go seen ty = case ty of
+        TArrayOf t _ -> go seen t
+        TUninit t -> go seen t
+        TAddr t -> go seen t
+        TNamed base args | cloned seen base args -> False
+        TNamed base _ | base `Set.member` cxDrops cx -> True
+        TNamed base args
+            | instanceName base args `Set.member` seen -> False
+            | otherwise -> case Map.lookup (instanceName base args) (progTypes program) of
+                Just decl -> declared (Set.insert (instanceName base args) seen) decl
+                Nothing -> any (go seen) [t | ArgType t <- args]
+        TVariant v -> case ownerOf program v of
+            -- (a variant of an instance with type arguments is taken to have no Clone of its own: its arguments are not at hand)
+            Just n | baseNameOf n == n, cloned seen n [] -> False
+            Just n | baseNameOf n `Set.member` cxDrops cx -> True
+            Just n | Just decl <- Map.lookup n (progTypes program), n `Set.notMember` seen -> declared (Set.insert n seen) decl
+            _ -> False
+        _ -> False
+    declared seen decl = case decl of
+        StructDecl fields -> any (go seen . snd) fields
+        EnumDecl variants -> any (go seen . snd) (concatMap snd variants)
+
+-- The structs and enums with a Clone of their own (`<T as Clone>::clone`), which a copy of them calls
+cloneBases :: Program -> Set Name
+cloneBases program = Set.fromList [baseNameOf (takeWhile (/= ' ') (drop 1 name)) | name <- Map.keys (progFunctions program), " as Clone>::clone" `isInfixOf'` name, take 1 name == "<"]
+  where
+    isInfixOf' needle hay = any (needle `isPrefixOf`) (tails hay)
+
+-- The place changes while a live local looks at a part of it that holds a value with a drop: that look is made in place
+-- and cannot be copied
+viewsDisturbed :: Cx -> Pos -> St -> [Local] -> String -> Place -> [String]
+viewsDisturbed cx pos st except how place =
+    [ message cx pos (describe cx place ++ " " ++ how ++ " here while " ++ describeLocal cx v ++ " still looks at " ++ describe cx (if overlaps place q then q else head ([owned o | o <- ownerPlaces q, overlaps place (owned o)] ++ [q])) ++ ", which holds a value with a drop and cannot be copied: use " ++ describeLocal cx v ++ " before that, or take the value apart")
+    | (v, ps) <- Map.toList (stViews st)
+    , v `notElem` except
+    , v `Set.member` cxLiveNow cx
+    , holdsDrop cx (typeOf cx v)
+    , q <- Set.toList ps
+    , overlaps place q || any (overlaps place . owned) (ownerPlaces q)
+    ]
+  where
+    -- (a view taken through a reference, `(*r).x` or the result of a call `from` an argument, is of what the reference is to, for as
+    -- long as the view is used, whether or not the reference still is: every place the reference may be to, its loan and the places
+    -- carried with it (a result from several arguments, a reference read out of a holder), followed through reborrows and views)
+    owned (root, steps) = (root, if isReference cx root then steps else filter (/= SDeref) steps)
+    ownerPlaces = go (8 :: Int) Set.empty
+      where
+        go 0 _ q = [q]
+        go n seen q@(root, steps)
+            | root `Set.member` seen = [q]
+            | isReference cx root, Just (target, _, _) <- Map.lookup root (stLoans st) =
+                q : concat [go (n - 1) (Set.insert root seen) (r2, s2 ++ steps) | (r2, s2) <- nub (target : Map.findWithDefault [] root (stExtraLoans st) ++ maybe [] pure (Map.lookup root (stExact st)))]
+            | Just vs <- Map.lookup root (stViews st), not (Set.null vs) = q : concat [go (n - 1) (Set.insert root seen) (r2, s2 ++ steps) | (r2, s2) <- Set.toList vs]
+            | otherwise = [q]
+
+-- How many statements give the local a value
+definitionsOf :: Function -> Local -> Int
+definitionsOf fn l = length ([() | l `elem` fnParams fn] ++ [() | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign d _ <- stmts, d == l] ++ [() | BasicBlock _ (Call _ _ d _) <- Map.elems (fnBlocks fn), d == l])
 
 -- Whether a value of the type may hold a reference, at any depth
 holdsReference :: Program -> Type -> Bool
@@ -309,6 +384,7 @@ data Cx = Cx
     , cxLiveNow :: Set Local -- the locals live after the statement or terminator being checked
     , cxBorrowRefs :: Map Local [Local] -- the reference locals borrowed from each local
     , cxCallArgs :: Set Local -- the temporaries given to the call that ends the block being checked
+    , cxCloned :: Set Name -- the structs and enums with a Clone of their own (cloneBases), found once for the program
     }
 
 -- The locals a statement or a terminator reads, and the local it gives a value
@@ -392,8 +468,9 @@ checkMoves copies linear drops program = checkMovesExcluding copies linear drops
 -- As checkMoves, but the named functions are not checked themselves: they stay in the program so that
 -- calls of them are still seen with their signatures (what they lend, and what a result is from).
 checkMovesExcluding :: Set Name -> Set Name -> Set Name -> Set Name -> Program -> [String]
-checkMovesExcluding copies linear drops excluded program = concatMap (\fn -> checkFunction (copiesIn fn) linear drops program fn) ([fn | fn <- Map.elems (progFunctions program), fnName fn `Set.notMember` excluded] ++ [progMain program])
+checkMovesExcluding copies linear drops excluded program = concatMap (\fn -> checkFunction (copiesIn fn) linear drops cloned program fn) ([fn | fn <- Map.elems (progFunctions program), fnName fn `Set.notMember` excluded] ++ [progMain program])
   where
+    cloned = cloneBases program
     -- (a type parameter of a function with bounds is Copy in its body, and in the functions lifted out of it that do not
     -- have a type parameter of that name of their own, when a bound says so)
     copiesIn fn = Set.union copies (Set.fromList [parameterCopy p | (name, bounded) <- Map.toList (progBounded program), p <- boundedCopy bounded, name == fnName fn || (fnName fn `elem` boundedLifted bounded && p `notElem` fnTypeParams fn)])
@@ -412,8 +489,8 @@ isPackRoot cx r = case typeOf cx r of
 parameterCopy :: Variable -> Name
 parameterCopy p = "$param " ++ p
 
-checkFunction :: Set Name -> Set Name -> Set Name -> Program -> Function -> [String]
-checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
+checkFunction :: Set Name -> Set Name -> Set Name -> Set Name -> Program -> Function -> [String]
+checkFunction copies linear drops cloned program fn = nub (concat [snd (runBlock cx b st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
   where
     -- (the drop of a type, `<T as Drop>::drop`, is given the value to free: it only reads what native code frees after it (its fields), and
     -- it has to use the permissions the value holds, which nothing else will)
@@ -422,7 +499,7 @@ checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b s
         _ -> Nothing
     lent = Set.fromList (fnBorrowed fn ++ [self | Just (_, self) <- [dropOf]])
     (liveAfter, liveOut) = liveness fn
-    cx = Cx program copies fn lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty (borrowRefsOf fn) Set.empty
+    cx = Cx program copies fn lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty (borrowRefsOf fn) Set.empty cloned
     -- (a permission given to the function, and not lent, is the function's to use)
     entry = emptySt{stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)]), stFieldLoans = incomingFields, stExtraLoans = incomingExtras}
     -- Incoming field pointees may alias, so they share one symbolic root.
@@ -520,7 +597,7 @@ placesOf st l = case Map.lookup l (stViews st) of
     _ -> [(l, [])]
 
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
-assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias', stParents = parents'', stThrough = through'', stReborrowedThrough = reborrowed', stExact = exact'}, errs ++ lost cx pos st1 d ++ loanErrs ++ readOutErrs ++ readThroughErrs ++ placeReadErrs)
+assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts'', stFnAlias = fnAlias', stParents = parents'', stThrough = through'', stReborrowedThrough = reborrowed', stExact = exact'}, errs ++ lost cx pos st1 d ++ loanErrs ++ readOutErrs ++ readThroughErrs ++ placeReadErrs ++ disturbErrs ++ lookErrs)
   where
     -- (the one place a reference is certainly to goes with a copy of it)
     exact' = case rv of
@@ -533,6 +610,12 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
         (Nothing, Use operand) | isRefType ty, Just src <- operandLocal operand, Just chain <- Map.lookup src (stReborrowedThrough st1) -> Map.insert d chain (stReborrowedThrough base)
         (Nothing, CopyOf operand) | isRefType ty, Just src <- operandLocal operand, Just chain <- Map.lookup src (stReborrowedThrough st1) -> Map.insert d chain (stReborrowedThrough base)
         _ -> stReborrowedThrough base
+    disturbErrs = take 1 (viewsDisturbed cx pos st1 [d] "is given another value" (d, []) ++ concat [viewsDisturbed cx pos st1 [d] "is lent for updating" place | Just (place, True) <- [borrowPlace]])
+    -- (a look at a value that holds one with a drop is made in place, never copied, so it is the only value its local is given)
+    lookErrs = case view of
+        q : _ | holdsDrop cx ty, definitionsOf (cxFn cx) d > 1 ->
+            [message cx pos (describeLocal cx d ++ " looks at " ++ describe cx q ++ ", which holds a value with a drop, and is given a value elsewhere too: a look at a value with a drop is made in place, so give it a name of its own")]
+        _ -> []
     through'' = case (view, rv) of
         ([], _) -> Map.delete d (stThrough base)
         (_, Deref o) | Just r <- operandLocal o, isReference cx r || r `Set.member` cxLent cx -> Map.insert d (Set.singleton r) (stThrough base)
@@ -763,7 +846,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
 -- An assignment through a reference: the root gets a new version, and no other live loan to the place may be
 -- there but those of the reference it goes through and of what that reference was taken from
 updatePlace :: Cx -> Pos -> St -> Local -> [RefStep] -> Rvalue -> (St, [String])
-updatePlace cx pos st0 root steps rv = (updated, errs ++ placeReads cx pos st1 [] [(l, ps, True) | (l, ps, role) <- accesses rv, role == Read || isCopy cx l] ++ conflicts)
+updatePlace cx pos st0 root steps rv = (updated, errs ++ placeReads cx pos st1 [] [(l, ps, True) | (l, ps, role) <- accesses rv, role == Read || isCopy cx l] ++ conflicts ++ take 1 (concatMap (viewsDisturbed cx pos st1 [] "is changed through a reference") targets))
   where
     -- (a write through root does not assign root: what it was reborrowed through stays)
     defined = (define cx st1 root []){stReborrowedThrough = stReborrowedThrough st1, stExact = stExact st1}
@@ -873,8 +956,11 @@ access = accessExcept (const False)
 
 -- An access that does not see the places the predicate gives: their moves and their loans
 accessExcept :: (Place -> Bool) -> Cx -> Pos -> (St, [String]) -> (Local, [Step], Role) -> (St, [String])
-accessExcept except cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++ loanErrs)
+accessExcept except cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++ loanErrs ++ disturbErrs)
   where
+    disturbErrs
+        | taking = take 1 (concatMap (viewsDisturbed cx pos st [l] "is moved") places)
+        | otherwise = []
     loanErrs
         | role == Consume && not (isCopy cx l) =
             [ message cx pos (describe cx q ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be moved while that borrow is live: the borrow ends at the last use of " ++ describeLocal cx ref)
@@ -915,6 +1001,8 @@ accessExcept except cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs +
         | [s | s@(SElem _) <- ps] /= [] = [message cx pos ("cannot move " ++ named q ++ " out of a list, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it")]
         | root `Set.member` cxLent cx, permissionPlace q, not (dropsPermission q) = [message cx pos (named q ++ " is a permission in a value that is lent (&T) to this function, which can lend it to an operation (Addr::get) but not use it up")]
         | root `Set.member` cxLent cx, not (dropsPermission q) = [message cx pos (describe cx q ++ " is lent (&T) to this function and can only be read: write clone(" ++ describe cx q ++ ") to get a value of its own")]
+        | root `Set.notMember` cxLent cx, Just (n, owner) <- droppedOwner q =
+            [message cx pos ("cannot move " ++ named q ++ " out of a value of " ++ n ++ ", whose drop is given the whole value: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it, or take the value apart, as in " ++ n ++ " { ... } = " ++ describe cx owner ++ ";")]
         | otherwise = []
     named q = maybe (describe cx q) (\v -> v ++ " (" ++ describe cx q ++ ")") (localSource cx l)
     permissionPlace q = case placeType cx q of
@@ -924,6 +1012,21 @@ accessExcept except cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs +
     dropsPermission q@(root, _) = permissionPlace q && Just root == cxDropSelf cx
     dropTypeOf root = case typeOf cx root of
         TNamed base _ | base `Set.member` cxDrops cx -> Just base
+        _ -> Nothing
+    -- (the first value with a drop that the place is a field of, at any depth: a field of it moves only when it is taken apart, and a
+    -- destructuring assignment takes apart its `$struct` local, which can also be a view of the value, as of `Box::unbox(b)`)
+    droppedOwner (root, ps) = listToMaybe
+        [ (n, (root, take k ps))
+        | (k, SField _ _) <- zip [0 :: Int ..] ps
+        , not ((k == 0 && takenApart root) || (k == length ps - length steps && takenApart l))
+        , Just n <- [placeType cx (root, take k ps) >>= dropName]
+        ]
+    takenApart local = maybe False ("$struct " `isPrefixOf`) (localNameOf cx local)
+    -- (a field read through a Box is a field of the value it holds)
+    dropName ty = case ty of
+        TBox held -> dropName held
+        TNamed base _ | base `Set.member` cxDrops cx -> Just base
+        TVariant v | Just owner <- ownerOf (cxProgram cx) v, baseNameOf owner `Set.member` cxDrops cx -> Just (baseNameOf owner)
         _ -> Nothing
     st'
         | taking =
@@ -1180,7 +1283,8 @@ terminator cx pos st term = case term of
                 TRef target | Just place <- exactCandidate cx target (resultFromPlaces cx returnedFields callee args) -> stored{stExact = Map.insert dest place (stExact stored)}
                 TMutRef target | Just place <- exactCandidate cx target (resultFromPlaces cx returnedFields callee args) -> stored{stExact = Map.insert dest place (stExact stored)}
                 _ -> stored
-         in (hold cx pos exactResult dest [], take 1 conflicts ++ take 1 readAndUpdated ++ errs ++ mutErrs ++ heldErrs ++ readErrs ++ lost cx pos st' dest)
+            disturbed = take 1 (viewsDisturbed cx pos st' [dest] "is given another value" (dest, []) ++ concatMap (\l -> concatMap (viewsDisturbed cx pos st' [dest] "is lent for updating") (argPlaces l)) mutLocals)
+         in (hold cx pos exactResult dest [], take 1 conflicts ++ take 1 readAndUpdated ++ errs ++ mutErrs ++ heldErrs ++ readErrs ++ disturbed ++ lost cx pos st' dest)
     -- (what a function returns is given to its caller, and a permission it has not used by then is lost)
     Return ->
         let (st', errs) = if Local 0 `Map.member` fnLocals (cxFn cx) then accessAll [(Local 0, [], Consume)] else (st, [])
