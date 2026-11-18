@@ -1,7 +1,7 @@
 import data::codec::codec { Type };
-import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, TypeDecl, Variant, Field };
+import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, TypeDecl, Variant, Field, isStorageBox };
 import mir::support::support { variantsOf, declName };
-import mir::ownership::common { Key, FieldName, Loan, LoanEntry, LocalKinds, whole, fieldKey, stringLess, keyLess, keySetAdd, keySetUnion, intSetHas, intSetAdd, intSetInsert, roles, operandLocal, successors, localTypeIn, hasDrop, needsDrop, concatStatements, loanLookup, sortBlocks, noOwnershipLocals, singleton, pair };
+import mir::ownership::common { Key, FieldName, Loan, LoanEntry, LocalKinds, whole, fieldKey, stringLess, keyLess, keySetAdd, keySetUnion, intSetHas, intSetAdd, intSetInsert, roles, operandLocal, successors, localTypeIn, hasDrop, needsDrop, concatStatements, loanLookup, sortBlocks, noOwnershipLocals, singleton, pair, dissolvedLocal, soleTypeArgument };
 import mir::ownership::analysis { loanEntries, loanStatement, blockSpan, localKinds };
 
 enum OwnState { Empty, Owned, MaybeOwned };
@@ -13,9 +13,10 @@ impl Eq for OwnPart { };
 struct OwnEntry { block: Int, parts: List<OwnPart> };
 impl Clone for OwnEntry { };
 impl Eq for OwnEntry { };
-struct DropVariant { name: String, fields: List<Field> };
+struct DropVariant { name: String, fields: List<Field>, held: Bool };
 impl Clone for DropVariant { };
-struct DropShape { variants: List<DropVariant>, hasDrop: Bool };
+// (boxed: the local is a library Box, and the variants are those of what it holds)
+struct DropShape { variants: List<DropVariant>, hasDrop: Bool, boxed: Bool };
 impl Clone for DropShape { };
 enum DropPlan { NoDrop, WholeDrop, FieldsDrop { variants: List<DropVariant> } };
 impl Clone for DropPlan { };
@@ -24,6 +25,7 @@ enum DropAct {
     SpliceAct { sub: List<DropAct> },
     GroupAct { key: Key, sub: List<DropAct> },
     VariantAct { local: Int, ctor: String, sub: List<DropAct> },
+    TestAct { flag: Int, sub: List<DropAct> },
 };
 impl Clone for DropAct { };
 struct LocalShape { local: Int, shape: DropShape };
@@ -140,25 +142,25 @@ fn ownConsume(tracked: &List<Int>, parts: List<OwnPart>, moved: &List<Int>) -> L
     for local in moved { out = ownSetState(tracked, ownClearFields(out, local), whole(local), OwnState::Empty); };
     return out;
 };
-// The local a statement leaves holding nothing, or -1: a drop, or a value taken apart (the erasure makes `dissolve L` this
-// clearing of L's bytes, and dropping cleared bytes would only test them for zero)
+// The local a statement leaves holding nothing, or -1: a drop, or a value taken apart
 fn emptiedLocal(st: &Statement) -> Int ~ {
     if st is Statement::Drop { return (st as Statement::Drop).local; };
-    if st is Statement::Peek {
-        p = st as Statement::Peek;
-        if p.rv is Rvalue::ListOp && (p.rv as Rvalue::ListOp).op = 35 && size((p.rv as Rvalue::ListOp).args) = 0 { return p.local; };
+    return dissolvedLocal(st);
+};
+// What a statement moves out, before it gives its destination a value (what is left of the destination is dropped there)
+fn ownTransferUses(dc: &DropCx, tracked: &List<Int>, parts: List<OwnPart>, st: &Statement) -> List<OwnPart> ~ {
+    consumed = ownConsume(tracked, parts, dropStatementMoved(st));
+    if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::TakeField {
+        take = (st as Statement::Assign).rv as Rvalue::TakeField;
+        return ownSetState(tracked, consumed, fieldKey(dc.names, take.local, take.name, take.field), OwnState::Empty);
     };
-    return 0 - 1;
+    return consumed;
 };
 fn ownTransferStatement(dc: &DropCx, tracked: &List<Int>, parts: List<OwnPart>, st: &Statement) -> List<OwnPart> ~ {
-    consumed = ownConsume(tracked, parts, dropStatementMoved(st));
+    consumed = ownTransferUses(dc, tracked, parts, st);
     if st is Statement::Assign {
-        assign = st as Statement::Assign;
-        if assign.rv is Rvalue::TakeField {
-            take = assign.rv as Rvalue::TakeField;
-            consumed = ownSetState(tracked, consumed, fieldKey(dc.names, take.local, take.name, take.field), OwnState::Empty);
-        };
-        return ownSetState(tracked, ownClearFields(consumed, assign.local), whole(assign.local), OwnState::Owned);
+        local = (st as Statement::Assign).local;
+        return ownSetState(tracked, ownClearFields(consumed, local), whole(local), OwnState::Owned);
     };
     emptied = emptiedLocal(st);
     if emptied >= 0 { return ownSetState(tracked, ownClearFields(consumed, emptied), whole(emptied), OwnState::Empty); };
@@ -252,6 +254,15 @@ fn enumsWithVariant(types: &List<TypeDecl>, name: &String) -> List<TypeDecl> ~ {
 };
 fn dropShape(p: &Program, locals: &List<LocalDecl>, local: Int) -> DropShape ~ {
     ty = localTypeIn(locals, local);
+    boxed = false;
+    if ty is Type::TNamed {
+        base = (ty as Type::TNamed).base;
+        held = soleTypeArgument(ty);
+        if isStorageBox(p, &base) && held.ok && held.value is Type::TNamed && size(variantsOf(p.types, (held.value as Type::TNamed).name)) > 0 {
+            ty = held.value;
+            boxed = true;
+        };
+    };
     variants = []; custom = false;
     if ty is Type::TNamed {
         name = (ty as Type::TNamed).name;
@@ -277,13 +288,17 @@ fn dropShape(p: &Program, locals: &List<LocalDecl>, local: Int) -> DropShape ~ {
     for v in variants {
         fields = [];
         for f in v.fields { if needsDrop(p, f.ty) { fields = push(fields, clone(f)); }; };
-        out = push(out, DropVariant { name: clone(v.name), fields: fields });
+        out = push(out, DropVariant { name: clone(v.name), fields: fields, held: true });
     };
-    return DropShape { variants: out, hasDrop: custom };
+    return DropShape { variants: out, hasDrop: custom, boxed: boxed };
 };
 fn shapeOf(dc: &DropCx, local: Int) -> DropShape ~ {
     for s in dc.shapes { if s.local = local { return clone(s.shape); }; };
-    return DropShape { variants: [], hasDrop: false };
+    return DropShape { variants: [], hasDrop: false, boxed: false };
+};
+// Whether the field still holds what it was given with the value: it was not taken out on any path
+fn fieldHeld(parts: &List<OwnPart>, key: &Key) -> Bool ~ {
+    return !ownPartHas(parts, key) || ownPartState(parts, key) = OwnState::Owned;
 };
 fn dropPlan(dc: &DropCx, p: &Program, locals: &List<LocalDecl>, tracked: &List<Int>, parts: &List<OwnPart>, local: Int) -> DropPlan ~ {
     if ownStateOf(tracked, parts, whole(local)) = OwnState::Empty { return DropPlan::NoDrop; };
@@ -291,18 +306,24 @@ fn dropPlan(dc: &DropCx, p: &Program, locals: &List<LocalDecl>, tracked: &List<I
     allHeld = true;
     for v in shape.variants {
         for f in v.fields {
-            if ownFieldStateOf(tracked, parts, fieldKey(dc.names, local, v.name, f.name)) != OwnState::Owned { allHeld = false; };
+            if !fieldHeld(parts, fieldKey(dc.names, local, v.name, f.name)) { allHeld = false; };
         };
     };
+    // (no field of a value with a drop of its own is taken unless the value is then taken apart, see takesField)
     if shape.hasDrop || size(shape.variants) = 0 || allHeld { return DropPlan::WholeDrop; };
-    out = [];
+    // A value without a drop of its own owns only what its fields own, so with some taken it is dropped as the fields that are left
+    // (and a Box frees its room too)
+    out = []; left = false;
     for v in shape.variants {
-        fields = [];
+        fields = []; held = true;
         for f in v.fields {
-            if ownFieldStateOf(tracked, parts, fieldKey(dc.names, local, v.name, f.name)) != OwnState::Empty { fields = push(fields, clone(f)); };
+            key = fieldKey(dc.names, local, v.name, f.name);
+            if ownFieldStateOf(tracked, parts, key) != OwnState::Empty { fields = push(fields, clone(f)); left = true; };
+            if !fieldHeld(parts, key) { held = false; };
         };
-        out = push(out, DropVariant { name: clone(v.name), fields: fields });
+        out = push(out, DropVariant { name: clone(v.name), fields: fields, held: held });
     };
+    if !left && !shape.boxed { return DropPlan::NoDrop; };
     return DropPlan::FieldsDrop { variants: out };
 };
 fn dropAssignNeeded(tracked: &List<Int>, parts: &List<OwnPart>, st: &Statement) -> Bool ~ {
@@ -340,7 +361,8 @@ fn dropDiscoverFlags(dc: &DropCx, p: &Program, locals: &List<LocalDecl>, tracked
         for st in block.stmts {
             if st is Statement::Assign && dropAssignNeeded(tracked, parts, st) {
                 local = (st as Statement::Assign).local;
-                out = keySetUnion(out, dropNeededKeys(dc, tracked, parts, local, dropPlan(dc, p, locals, tracked, parts, local)));
+                left = ownTransferUses(dc, tracked, clone(parts), st);
+                out = keySetUnion(out, dropNeededKeys(dc, tracked, left, local, dropPlan(dc, p, locals, tracked, left, local)));
             };
             parts = ownTransferStatement(dc, tracked, parts, st);
         };
@@ -410,22 +432,49 @@ fn dropLocalActs(dc: &DropCx, tracked: &List<Int>, parts: &List<OwnPart>, local:
     };
     if !(plan is DropPlan::FieldsDrop) { return BuiltActs { acc: acc, acts: out }; };
     shape = (plan as DropPlan::FieldsDrop).variants;
+    boxed = shapeOf(dc, local).boxed;
+    // (the variant of a Box's value is read before anything frees the Box)
+    tags = [];
+    if boxed && size(shape) > 1 {
+        tests = [];
+        for v in shape {
+            tag = acc.nextLocal;
+            acc = dropWithLocal(acc, Type::TBool);
+            tags = push(tags, tag);
+            tests = push(tests, Statement::Assign { local: tag, rv: Rvalue::IsVariant { o: Operand::Copy { local: local }, name: clone(v.name) } });
+        };
+        out = push(out, DropAct::Act { conditional: false, key: whole(local), stmts: tests });
+    };
+    index = 0;
     for v in shape {
         facts = [];
-        for f in v.fields {
-            temp = acc.nextLocal;
-            acc = dropWithLocal(acc, clone(f.ty));
-            key = fieldKey(dc.names, local, v.name, f.name);
-            conditional = ownFieldStateOf(tracked, parts, key) = OwnState::MaybeOwned;
-            stmts = pair(Statement::Assign { local: temp, rv: Rvalue::TakeField { local: local, name: clone(v.name), field: clone(f.name) } }, Statement::Drop { local: temp });
-            facts = push(facts, DropAct::Act { conditional: conditional, key: key, stmts: stmts });
+        source = local;
+        // (a Box whose value has all the fields of this variant is dropped whole; otherwise the value is moved out of its room, which
+        // that frees, and the fields left are dropped)
+        if boxed && v.held { facts = push(facts, DropAct::Act { conditional: false, key: whole(local), stmts: singleton(Statement::Drop { local: local }) }); };
+        if boxed && !v.held {
+            source = acc.nextLocal;
+            acc = dropWithLocal(acc, Type::TVariant { name: clone(v.name) });
+            unboxed = Statement::Assign { local: source, rv: Rvalue::AsVariant { o: Operand::Move { local: local }, name: clone(v.name) } };
+            facts = push(facts, DropAct::Act { conditional: false, key: whole(local), stmts: singleton(unboxed) });
+        };
+        if !boxed || !v.held {
+            for f in v.fields {
+                temp = acc.nextLocal;
+                acc = dropWithLocal(acc, clone(f.ty));
+                key = fieldKey(dc.names, local, v.name, f.name);
+                conditional = ownFieldStateOf(tracked, parts, key) = OwnState::MaybeOwned;
+                stmts = pair(Statement::Assign { local: temp, rv: Rvalue::TakeField { local: source, name: clone(v.name), field: clone(f.name) } }, Statement::Drop { local: temp });
+                facts = push(facts, DropAct::Act { conditional: conditional, key: key, stmts: stmts });
+            };
         };
         if size(facts) > 0 {
             if size(shape) = 1 { out = push(out, DropAct::SpliceAct { sub: facts }); }
+            else if index >= 0 && index < size(tags) { out = push(out, DropAct::TestAct { flag: get(tags, index), sub: facts }); }
             else { out = push(out, DropAct::VariantAct { local: local, ctor: clone(v.name), sub: facts }); };
         };
+        index = index + 1;
     };
-    out = push(out, DropAct::Act { conditional: false, key: whole(local), stmts: singleton(Statement::Drop { local: local }) });
     if maybeWhole { return BuiltActs { acc: acc, acts: singleton(DropAct::GroupAct { key: whole(local), sub: out }) }; };
     return BuiltActs { acc: acc, acts: out };
 };
@@ -455,6 +504,15 @@ fn dropBuildActs(acts: &List<DropAct>, index: Int, cont: Int, flags: &List<DropF
         test = acc.nextBlock;
         acc = dropWithBlock(acc);
         return dropAddBlock(acc, test, [], Terminator::Switch { cond: Operand::Copy { local: dropFlagLocal(flags, simple.key) }, yes: bid, no: rest });
+    };
+    if act is DropAct::TestAct {
+        tested = act as DropAct::TestAct;
+        inner = dropBuildActs(tested.sub, 0, rest, flags, acc);
+        sub = inner.block;
+        acc = inner.acc;
+        test = acc.nextBlock;
+        acc = dropWithBlock(acc);
+        return dropAddBlock(acc, test, [], Terminator::Switch { cond: Operand::Copy { local: tested.flag }, yes: sub, no: rest });
     };
     variant = act as DropAct::VariantAct;
     inner = dropBuildActs(variant.sub, 0, rest, flags, acc);
@@ -573,7 +631,9 @@ fn dropProcessBlock(dc: &DropCx, p: &Program, fn: &Function, kinds: &LocalKinds,
         } else {
             assign = st as Statement::Assign;
             dest = assign.local;
-            plan = dropPlan(dc, p, locals, tracked, parts, dest);
+            // (the statement can take a field out of its destination first, as `t = (t as T::Node).l` does)
+            left = ownTransferUses(dc, tracked, clone(parts), st);
+            plan = dropPlan(dc, p, locals, tracked, left, dest);
             if dropStatementRouted(aliases, st, dest) {
                 temp = acc.nextLocal;
                 acc = dropWithLocal(acc, localTypeIn(locals, dest));
@@ -582,7 +642,7 @@ fn dropProcessBlock(dc: &DropCx, p: &Program, fn: &Function, kinds: &LocalKinds,
                 segA = concatStatements(segA, dropTakeClear(dc, flags, st));
                 contBid = acc.nextBlock;
                 acc = dropWithBlock(acc);
-                made = dropLocalActs(dc, tracked, parts, dest, plan, acc);
+                made = dropLocalActs(dc, tracked, left, dest, plan, acc);
                 built = dropBuildActs(made.acts, 0, contBid, flags, made.acc);
                 entry = built.block;
                 acc = built.acc;
@@ -598,7 +658,7 @@ fn dropProcessBlock(dc: &DropCx, p: &Program, fn: &Function, kinds: &LocalKinds,
             } else {
                 contBid = acc.nextBlock;
                 acc = dropWithBlock(acc);
-                made = dropLocalActs(dc, tracked, parts, dest, plan, acc);
+                made = dropLocalActs(dc, tracked, left, dest, plan, acc);
                 built = dropBuildActs(made.acts, 0, contBid, flags, made.acc);
                 entry = built.block;
                 added = dropAddBlock(built.acc, bid, stmts, Terminator::Goto { block: entry });

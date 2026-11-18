@@ -1,6 +1,6 @@
 import data::codec::codec { Type };
 import mir::reader::reader { Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep };
-import mir::ownership::common { Context, Rewrite, Key, FieldName, fieldNames, blockIndex, Alias, Site, UseSite, RoleOperand, Count, getLocal, needsDrop, stepsType, forgetLocal, role, intSetHas, intSetAdd, intSetInsert, keySetHas, whole, fieldKey, operandLocal, roles, freshLocal, projectionSource, isProjection, concatStatements, blockIn, nextLocal, nextBlock, isDropFunction, singleton, noOwnershipLocals, localsOf, statementRoles };
+import mir::ownership::common { Context, Rewrite, Key, FieldName, fieldNames, blockIndex, Alias, Site, UseSite, RoleOperand, Count, getLocal, needsDrop, stepsType, forgetLocal, role, intSetHas, intSetAdd, intSetInsert, keySetHas, whole, fieldKey, operandLocal, roles, freshLocal, projectionSource, isProjection, concatStatements, blockIn, nextLocal, nextBlock, isDropFunction, singleton, noOwnershipLocals, localsOf, statementRoles, stmtDef, ownDrop, heldThrough, dissolvedLocal, holdsOwnDrop, dropHolders };
 import mir::ownership::analysis { countOf, countAdd, termUses, fuseCasts, definitions, liveness, livesAt, loanStates, reaches };
 import mir::ownership::drops { elaborateDrops };
 
@@ -38,14 +38,34 @@ fn borrowedArguments(p: &Program, cx: &Context, callee: &Operand, count: Int) ->
     if !found && count > 0 { for i in 0..count { out = push(out, BorrowArg { lent: false, hasType: false, ty: Type::TInt }); }; };
     return out;
 };
-fn takesField(p: &Program, cx: &Context, st: &Statement, after: &List<Key>) -> Bool ~ {
+// Whether the statements from `from` on only read fields of the local until one takes it apart
+fn dissolvedAfter(stmts: &List<Statement>, from: Int, local: Int) -> Bool ~ {
+    if from < 0 || from > size(stmts) { return false; };
+    for j in from..size(stmts) {
+        st = get(stmts, j);
+        if dissolvedLocal(st) = local { return true; };
+        readsField = false;
+        if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::ReadField { readsField = operandLocal(((st as Statement::Assign).rv as Rvalue::ReadField).o) = local; };
+        if !readsField {
+            if stmtDef(st) = local { return false; };
+            for ro in statementRoles(st) { if operandLocal(ro.operand) = local { return false; }; };
+        };
+    };
+    return false;
+};
+// (a field of a value with a drop of its own is taken only when the value is then taken apart: its drop is given the whole value)
+// (a part taken out of another value owns what it holds, so a field can be taken out of it in turn: `taken` are those found so far)
+fn takesField(p: &Program, cx: &Context, taken: &List<Int>, stmts: &List<Statement>, index: Int, after: &List<Key>) -> Bool ~ {
+    if index < 0 || index >= size(stmts) { return false; };
+    st = get(stmts, index);
     if !(st is Statement::Assign) { return false; };
     a = st as Statement::Assign;
     if !(a.rv is Rvalue::ReadField) || !((a.rv as Rvalue::ReadField).o is Operand::Copy) { return false; };
     r = a.rv as Rvalue::ReadField; s = operandLocal(r.o);
+    if ownDrop(p, heldThrough(p, getLocal(cx.function, s).ty)) && !dissolvedAfter(stmts, index + 1, s) { return false; };
     afters = forgetLocal(after, a.local);
     return needsDrop(p, getLocal(cx.function, a.local).ty)
-        && !intSetHas(cx.projected, s) && !intSetHas(cx.function.borrowed, s)
+        && (!intSetHas(cx.projected, s) || intSetHas(taken, s)) && !intSetHas(cx.function.borrowed, s)
         && !keySetHas(afters, whole(s)) && !keySetHas(afters, fieldKey(cx.names, s, r.name, r.field));
 };
 fn aliasSource(sources: &List<Alias>, local: Int) -> Alias ~ {
@@ -153,7 +173,8 @@ fn peekableIn(cx: &Context, block: Int, index: Int, temp: Int, source: Int, end:
 fn chainUndisturbed(cx: &Context, sources: &List<Alias>, block: Int, index: Int, dest: Int, end: Int, source: Int) -> Bool ~ {
     if !intSetHas(cx.projected, source) { return true; };
     s = aliasSource(sources, source);
-    return s.source >= 0 && s.block = block && undisturbed(cx, block, index + 1, end, s.source) && callLeaves(cx, block, dest, s.source) && chainUndisturbed(cx, sources, block, index, dest, end, s.source);
+    if s.source < 0 { return intSetHas(cx.taken, source); };
+    return s.block = block && undisturbed(cx, block, index + 1, end, s.source) && callLeaves(cx, block, dest, s.source) && chainUndisturbed(cx, sources, block, index, dest, end, s.source);
 };
 fn withOperands(rv: &Rvalue, os: &List<Operand>) -> Rvalue ~ {
     n = size(os);
@@ -213,6 +234,10 @@ fn rewriteAssign(p: &Program, cx: &Context, block: Int, index: Int, after: &List
         if rv is Rvalue::ReadField { sourceIsCopy = (rv as Rvalue::ReadField).o is Operand::Copy; };
         if rv is Rvalue::Deref { sourceIsCopy = (rv as Rvalue::Deref).o is Operand::Copy; };
         if rv is Rvalue::ListOp && size((rv as Rvalue::ListOp).args) > 0 { sourceIsCopy = get((rv as Rvalue::ListOp).args, 0) is Operand::Copy; };
+        // (a value that holds one with a drop is never copied: MirMoves sees that what it is a part of does not change while it is looked at)
+        if sourceIsCopy && source >= 0 && holdsOwnDrop(p, cx.holders, getLocal(cx.function, d).ty) && readOnlyEverywhere(p, cx, d) {
+            markAliasOf(&mut *r, d, block, source); return singleton(Statement::Peek { local: d, rv: clone(rv) });
+        };
         if sourceIsCopy && source >= 0 {
             end = peekEnd(p, cx, block, index, d);
             if (end.ok && peekableIn(cx, block, index, d, source, end.index) && chainUndisturbed(cx, r.sources, block, index, d, end.index, source))
@@ -302,7 +327,7 @@ fn borrowRootsOf(f: &Function) -> List<Int> ~ {
     }; };
     return out;
 };
-fn contextOf(p: &Program, names: &List<FieldName>, f: &Function) -> Context ~ {
+fn contextOf(p: &Program, names: &List<FieldName>, holders: &List<String>, f: &Function) -> Context ~ {
     loans = loanStates(p, names, f);
     projected = []; uses = []; afters = liveness(f, names, loans);
     for b in f.blocks { for i in 0..size(b.stmts) {
@@ -313,10 +338,15 @@ fn contextOf(p: &Program, names: &List<FieldName>, f: &Function) -> Context ~ {
         };
         for ro in statementRoles(st) { l = operandLocal(ro.operand); if l >= 0 { uses = push(uses, UseSite { local: l, block: b.id, index: i, consume: ro.consume }); }; };
     }; };
-    cx = Context { function: clone(f), names: clone(names), projected: projected, defs: definitions(f, true), uses: uses, afters: afters, takes: [], loans: loans, borrowRoots: borrowRootsOf(f) };
+    cx = Context { function: clone(f), names: clone(names), projected: projected, defs: definitions(f, true), uses: uses, afters: afters, takes: [], taken: [], loans: loans, borrowRoots: borrowRootsOf(f), holders: clone(holders) };
     takes = [];
-    for b in f.blocks { after = livesAt(cx.afters, b.id).afters; for i in 0..size(b.stmts) { if i < size(after) && takesField(p, cx, get(b.stmts, i), get(after, i)) { takes = push(takes, Site { block: b.id, index: i }); }; }; };
-    return Context { takes: takes, ..cx };
+    taken = [];
+    for b in f.blocks { after = livesAt(cx.afters, b.id).afters; for i in 0..size(b.stmts) { if i < size(after) && takesField(p, cx, taken, b.stmts, i, get(after, i)) {
+        takes = push(takes, Site { block: b.id, index: i });
+        d = stmtDef(get(b.stmts, i));
+        if countOf(cx.defs, d) = 1 { taken = intSetInsert(taken, d); };
+    }; }; };
+    return Context { takes: takes, taken: taken, ..cx };
 };
 fn sortLocals(locals: &List<LocalDecl>) -> List<LocalDecl> ~ {
     sorted = true;
@@ -324,8 +354,160 @@ fn sortLocals(locals: &List<LocalDecl>) -> List<LocalDecl> ~ {
     if sorted { return clone(locals); };
     out = noOwnershipLocals(); for d in locals { next = []; added = false; for x in out { if !added && x.id >= d.id { next = push(next, clone(d)); added = true; }; if x.id != d.id { next = push(next, clone(x)); }; }; if !added { next = push(next, clone(d)); }; out = next; }; return out;
 };
-fn ownFunction(p: &Program, names: &List<FieldName>, original: &Function) -> Function ~ {
-    f = fuseCasts(original); cx = contextOf(p, names, f);
+struct OwnedFunction { function: Function, errors: List<String> };
+impl Clone for OwnedFunction { };
+// The owned program, or what makes it unsafe: a part of a value with a drop that is looked at while what it is part of changes, or a
+// copy of a value with a drop. MirMoves refuses these where the program says them (`viewsDisturbed`, `holdsDrop`); this is the same rule
+// at the types native code is made of, so a case it misses is refused here rather than freed twice.
+struct OwnedProgram { program: Program, errors: List<String> };
+impl Clone for OwnedProgram { };
+fn localText(f: &Function, l: Int) -> String ~ {
+    d = getLocal(f, l);
+    if d.named && size(d.name.bytes) > 0 { return clone(d.name); };
+    return "_".concat(String::fromInt(l));
+};
+// What a view looks at, and the field it reads (or "" for an element or what a reference is to): the source of its peek, the source of
+// that one if it is a peek too, and through a reference what it borrows (`&o`, a copy of a reference, or the arguments of a call whose
+// result is a reference, which can be from any of them), so that a change of the value a reference is to is a change under the view
+struct ViewOwner { local: Int, field: String };
+impl Clone for ViewOwner { };
+fn viewOwners(f: &Function, sources: &List<Alias>, view: Int) -> List<ViewOwner> ~ {
+    out = [];
+    seen = singleton(view);
+    todo = singleton(view);
+    while size(todo) > 0 ~ {
+        l = get(todo, size(todo) - 1);
+        todo = pop(todo);
+        found = [];
+        for a in sources { if a.local = l && a.source >= 0 { found = push(found, a.source); }; };
+        for b in f.blocks {
+            for st in b.stmts {
+                if st is Statement::Assign && (st as Statement::Assign).local = l {
+                    rv = (st as Statement::Assign).rv;
+                    if rv is Rvalue::Borrow { found = push(found, (rv as Rvalue::Borrow).root); };
+                    if rv is Rvalue::Use && getLocal(f, l).ty is Type::TRef { r = operandLocal((rv as Rvalue::Use).o); if r >= 0 { found = push(found, r); }; };
+                };
+                if st is Statement::Peek && (st as Statement::Peek).local = l {
+                    p = projectionSource((st as Statement::Peek).rv);
+                    if p >= 0 { found = push(found, p); };
+                };
+            };
+            if b.term is Terminator::Call && (b.term as Terminator::Call).dest = l && (getLocal(f, l).ty is Type::TRef || getLocal(f, l).ty is Type::TMutRef) {
+                for o in (b.term as Terminator::Call).args { r = operandLocal(o); if r >= 0 { found = push(found, r); }; };
+            };
+        };
+        for src in found {
+            if !intSetHas(seen, src) {
+                seen = intSetAdd(seen, src);
+                field = "";
+                for b in f.blocks { for st in b.stmts {
+                    if st is Statement::Assign && (st as Statement::Assign).local = l && (st as Statement::Assign).rv is Rvalue::ReadField {
+                        field = clone(((st as Statement::Assign).rv as Rvalue::ReadField).field);
+                    };
+                    if st is Statement::Peek && (st as Statement::Peek).local = l && (st as Statement::Peek).rv is Rvalue::ReadField {
+                        field = clone(((st as Statement::Peek).rv as Rvalue::ReadField).field);
+                    };
+                }; };
+                out = push(out, ViewOwner { local: src, field: field });
+                todo = push(todo, src);
+            };
+        };
+    };
+    return out;
+};
+fn ownerIn(owners: &List<ViewOwner>, l: Int) -> Bool ~ {
+    for o in owners { if o.local = l { return true; }; };
+    return false;
+};
+fn keysName(keys: &List<Key>, l: Int) -> Bool ~ {
+    for k in keys { if k.local = l { return true; }; };
+    return false;
+};
+fn usesLocal(st: &Statement, l: Int) -> Bool ~ {
+    for ro in statementRoles(st) { if operandLocal(ro.operand) = l { return true; }; };
+    return false;
+};
+// How a statement changes one of the owners, and which (`owner` -1 when it changes none)
+struct Disturbed { how: String, owner: Int };
+impl Clone for Disturbed { };
+fn untouched() -> Disturbed { return Disturbed { how: "", owner: 0 - 1 }; };
+fn disturbance(cx: &Context, block: Int, index: Int, st: &Statement, owners: &List<ViewOwner>) -> Disturbed ~ {
+    d = stmtDef(st);
+    if d >= 0 && ownerIn(owners, d) { return Disturbed { how: "is given another value", owner: d }; };
+    if st is Statement::AssignRef && ownerIn(owners, (st as Statement::AssignRef).local) { return Disturbed { how: "is changed through a reference", owner: (st as Statement::AssignRef).local }; };
+    if st is Statement::Assign {
+        rv = (st as Statement::Assign).rv;
+        if rv is Rvalue::Borrow && (rv as Rvalue::Borrow).mutable && ownerIn(owners, (rv as Rvalue::Borrow).root) { return Disturbed { how: "is lent for updating", owner: (rv as Rvalue::Borrow).root }; };
+        if rv is Rvalue::ReadField && takesAt(cx, block, index) {
+            read = rv as Rvalue::ReadField;
+            for o in owners { if o.local = operandLocal(read.o) && o.field = read.field { return Disturbed { how: "has the part taken out", owner: o.local }; }; };
+        };
+        for ro in roles(rv) { if ro.consume && ownerIn(owners, operandLocal(ro.operand)) { return Disturbed { how: "is moved", owner: operandLocal(ro.operand) }; }; };
+    };
+    return untouched();
+};
+fn callDisturbance(p: &Program, cx: &Context, term: &Terminator, owners: &List<ViewOwner>) -> Disturbed ~ {
+    if !(term is Terminator::Call) { return untouched(); };
+    call = term as Terminator::Call;
+    if ownerIn(owners, call.dest) { return Disturbed { how: "is given another value", owner: call.dest }; };
+    args = borrowedArguments(p, cx, call.callee, size(call.args));
+    for i in 0..size(call.args) {
+        l = operandLocal(get(call.args, i));
+        if ownerIn(owners, l) && (i >= size(args) || !get(args, i).lent) { return Disturbed { how: "is moved", owner: l }; };
+    };
+    return untouched();
+};
+fn viewErrors(p: &Program, cx: &Context, sources: &List<Alias>) -> List<String> ~ {
+    out = [];
+    f = cx.function;
+    for a in sources {
+        if a.source >= 0 && holdsOwnDrop(p, cx.holders, getLocal(f, a.local).ty) {
+            owners = viewOwners(f, sources, a.local);
+            hit = untouched(); at = 0 - 1;
+            for b in f.blocks {
+                lives = livesAt(cx.afters, b.id);
+                for i in 0..size(b.stmts) {
+                    if hit.owner < 0 && i < size(lives.afters) {
+                        st = get(b.stmts, i);
+                        if keysName(get(lives.afters, i), a.local) || usesLocal(st, a.local) {
+                            found = disturbance(cx, b.id, i, st, owners);
+                            if found.owner >= 0 { hit = found; at = b.id; };
+                        };
+                    };
+                };
+                if hit.owner < 0 && b.term is Terminator::Call {
+                    call = b.term as Terminator::Call;
+                    passed = false;
+                    for o in call.args { if operandLocal(o) = a.local { passed = true; }; };
+                    if keysName(lives.out, a.local) || passed {
+                        found = callDisturbance(p, cx, b.term, owners);
+                        if found.owner >= 0 { hit = found; at = b.id; };
+                    };
+                };
+            };
+            if hit.owner >= 0 {
+                owner = localText(f, hit.owner);
+                view = localText(f, a.local);
+                out = push(out, "in ".concat(f.name).concat(", block ").concat(String::fromInt(at)).concat(": ").concat(owner).concat(" ").concat(hit.how).concat(" while ").concat(view).concat(" still looks at a part of it that holds a value with a drop and cannot be copied: use ").concat(view).concat(" before that, or take the value apart"));
+            };
+        };
+    };
+    return out;
+};
+fn copyErrors(p: &Program, holders: &List<String>, f: &Function) -> List<String> ~ {
+    out = [];
+    for b in f.blocks { for st in b.stmts {
+        if st is Statement::Assign && (st as Statement::Assign).rv is Rvalue::Copy {
+            d = (st as Statement::Assign).local;
+            if holdsOwnDrop(p, holders, getLocal(f, d).ty) {
+                out = push(out, "in ".concat(f.name).concat(", block ").concat(String::fromInt(b.id)).concat(": ").concat(localText(f, d)).concat(" would be a copy of a value with a drop that has no Clone of its own, which frees it twice"));
+            };
+        };
+    }; };
+    return out;
+};
+fn ownFunction(p: &Program, names: &List<FieldName>, holders: &List<String>, original: &Function) -> OwnedFunction ~ {
+    f = fuseCasts(original); cx = contextOf(p, names, holders, f);
     r = Rewrite { next: nextLocal(f.locals), locals: [], aliases: [], sources: [] };
     blocks = [];
     for b in f.blocks {
@@ -340,10 +522,24 @@ fn ownFunction(p: &Program, names: &List<FieldName>, original: &Function) -> Fun
         dropped = isDropFunction(p, &f.name) && size(f.params) > 0 && get(f.params, 0) = d.id;
         if needsDrop(p, d.ty) && d.id != 0 && !intSetHas(r.aliases, d.id) && !intSetHas(f.borrowed, d.id) && !dropped { owned = intSetInsert(owned, d.id); };
     };
-    return elaborateDrops(names, p, f, owned, locals, clone(blocks), r.next, nextBlock(blocks));
+    made = elaborateDrops(names, p, f, owned, locals, clone(blocks), r.next, nextBlock(blocks));
+    errors = [];
+    if size(holders) > 0 {
+        errors = viewErrors(p, cx, r.sources);
+        for e in copyErrors(p, holders, made) { errors = push(errors, clone(e)); };
+    };
+    return OwnedFunction { function: made, errors: errors };
 };
-fn insertOwnership(p: &Program) -> Program ~ {
+fn insertOwnership(p: &Program) -> OwnedProgram ~ {
     names = fieldNames(p);
-    functions = []; for f in p.functions { functions = push(functions, ownFunction(p, names, f)); };
-    return Program { functions: functions, entry: ownFunction(p, names, p.entry), types: clone(p.types), meta: clone(p.meta) };
+    holders = dropHolders(p);
+    functions = []; errors = [];
+    for f in p.functions {
+        o = ownFunction(p, names, holders, f);
+        for e in o.errors { errors = push(errors, clone(e)); };
+        functions = push(functions, o.function);
+    };
+    entry = ownFunction(p, names, holders, p.entry);
+    for e in entry.errors { errors = push(errors, clone(e)); };
+    return OwnedProgram { program: Program { functions: functions, entry: entry.function, types: clone(p.types), meta: clone(p.meta) }, errors: errors };
 };

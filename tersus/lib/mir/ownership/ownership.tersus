@@ -32,6 +32,11 @@ fn runOwnership(read: &List<List<Token>>) -> Bool ~ {
         "the ownership input has a negative block id, no block 0, or a jump to a block that is not there\n".printError();
         return false;
     };
-    printProgramWithGhosts(insertOwnership(program.value));
+    owned = insertOwnership(program.value);
+    if size(owned.errors) > 0 {
+        for e in owned.errors { clone(e).concat("\n").printError(); };
+        return false;
+    };
+    printProgramWithGhosts(owned.program);
     return true;
 };
