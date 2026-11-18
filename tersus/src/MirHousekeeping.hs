@@ -14,6 +14,7 @@ module MirHousekeeping
     , cachedSourceEmitter
     , emitterConstruction
     , emitterIdentity
+    , emitterIdentityAgainst
     , cachedEmitterContentKeyFor
     , guardEmitterDirectory
     , prepareValidatorFor
@@ -673,13 +674,21 @@ emitterKey :: IO (Result String String)
 emitterKey = mapResult (\(_, key, _) -> key) <$> emitterIdentity
 
 emitterIdentity :: IO (Result (Bool, String, FilePath) String)
-emitterIdentity = do
+emitterIdentity = emitterIdentityAgainst emitterSeedConstruction
+
+-- The published emitter is the one used when this build knows the association
+-- the pin carries and the source it was written for is the source here; an
+-- unknown build profile, another association or changed source all make it
+-- from source instead. (The association is the pin's second word; the tests
+-- give one of their own.)
+emitterIdentityAgainst :: String -> IO (Result (Bool, String, FilePath) String)
+emitterIdentityAgainst association = do
     ready <- prepareBootstrap
     case ready of
         Error e -> pure (Error e)
         Ok () -> do
             construction <- emitterConstruction
-            sourceMatches <- if matchesConstruction construction emitterSeedConstruction
+            sourceMatches <- if matchesConstruction construction association
                 then workingSourcesMatch emitterSourceFiles else pure False
             directory <- cacheDirectory
             case directory of

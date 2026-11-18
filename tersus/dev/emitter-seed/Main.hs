@@ -31,7 +31,7 @@ main = do
             current <- workingSourcesMatch emitterSourceFiles
             construction <- case before of
                 Ok (Just identity) | current -> pure identity
-                _ -> fail "certification needs an approved actual build and unchanged source"
+                _ -> fail "certification needs an ordinary configured build and unchanged source"
             inputs <- emitterInputs
             preflight <- checkEmitterOutputs inputs [output, association]
             case preflight of Error e -> fail e; Ok () -> pure ()

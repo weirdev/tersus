@@ -129,7 +129,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `testExamples` (see Testing Guidelines).
 - `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
   emitter is bootstrapped from; the seed itself is a GitHub release asset
-  (see Build, Test, and Development Commands).
+  (see Build, Test, and Development Commands). An optional second word is the
+  build association: an ordinary Stack or Cabal build that reaches it uses the
+  published seed instead of making the emitter from source (`STEP31.md`).
 - `tersus/bootstrap/parser.sha256`: the SHA-256 pin of the native parser LLVM
   seed; `TERSUS_PARSER_SEED_FILE` supplies verified local bytes before release.
 - `tersus/bootstrap/frontend.sha256`: the SHA-256 pin of the elaborator's LLVM

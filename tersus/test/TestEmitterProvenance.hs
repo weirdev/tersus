@@ -3,14 +3,17 @@ module TestEmitterProvenance (testEmitterProvenance) where
 import Control.Exception (bracket, evaluate)
 import Control.Concurrent (forkFinally)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar, withMVar)
+import Data.Char (isHexDigit)
 import Data.List (isPrefixOf)
+import Data.Maybe (isJust)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (createDirectory, createDirectoryIfMissing, getCurrentDirectory, getTemporaryDirectory,
     removeDirectoryRecursive, removeFile, setCurrentDirectory, createFileLink, listDirectory)
 import System.FilePath ((</>))
 import System.IO (hClose)
+import BuildOptions (describeBuildOptions)
 import CacheLock (openTempFileCloexec)
-import EmitterProvenance (approvedEmitterBuild, constructionIdentity, matchesConstruction, workingSourcesMatch, checkEmitterOutputs)
+import EmitterProvenance (constructionIdentity, constructionIdentityFor, matchesConstruction, ordinaryBuildProfile, workingSourcesMatch, checkEmitterOutputs)
 import PreludeSource (emitterConstructionOf)
 import MirHousekeeping (guardEmitterDirectory, cachedEmitterContentKeyFor)
 import Native (cacheDirectory, cacheLock, cachedProgramIfPresent)
@@ -27,9 +30,61 @@ testEmitterProvenance = TestList "testEmitterProvenance"
                 (Ok (Just digest), replicate 64 'b')])
     , TestCase "exact approved construction is a match" $ pure $
         testAssertTrue (matchesConstruction (Ok (Just digest)) digest)
-    , TestCase "unapproved construction has no inferred identity" $ case approvedEmitterBuild of
-        Just _ -> pure Nothing
-        Nothing -> constructionIdentity ["input"] >>= \actual -> pure (testAssertEq actual (Ok Nothing))
+    , TestCase "an ordinary configured build knows the construction it accepts" $ do
+        actual <- constructionIdentity ["input"]
+        pure $ case (ordinaryBuildProfile, actual) of
+            (Nothing, _) -> Just "this build has no configured profile: an ordinary Stack or Cabal build is configured and must know one"
+            (Just _, Ok (Just identity)) -> testAssertTrue
+                (length identity == 64 && all isHexDigit identity && matchesConstruction actual identity)
+            (Just _, other) -> Just ("a configured build reached no construction: " ++ show other)
+    , TestCase "an ordinary invocation is described and an unbound read is not" $ withTree $ \tree -> do
+        described <- describeTree tree []
+        unbound <- mapM (describeTree tree)
+            [["-I/usr/include"], ["-i/usr/share"], ["-L/usr/lib64"],
+                ["-package-env", tree </> "absent.env"], ["-i" ++ (tree </> "other")]]
+        pure (testAssertEq (fmap (const ()) described, map (fmap (const ())) unbound)
+            (Just (), replicate 5 Nothing))
+    , TestCase "an invocation that is not an ordinary build of a package is not described" $ withTree $ \tree -> do
+        refused <- mapM (\(compiled, arguments) -> describeBuildOptions tree ["src"] compiled arguments)
+            [ ("ghc", filter (/= "-fbuilding-cabal-package") (sampleArguments tree))
+            , ("ghc", filter (/= "--make") (sampleArguments tree))
+            , ("ghc", sampleArguments tree ++ ["--interactive"])
+            , ("ghc", sampleArguments tree ++ ["-fexternal-interpreter"])
+            , ("ghc-iserv", sampleArguments tree)
+            , ("tersus-exe", sampleArguments tree) ]
+        pure (testAssertEq (map (fmap (const ())) refused) (replicate 6 Nothing))
+    , TestCase "the same options in another tree describe the same build" $ do
+        here <- withTree (\tree -> describeTree tree [])
+        there <- withTree (\tree -> describeTree tree [])
+        pure (testAssertTrue (isJust (fmap fst here) && fmap fst there == fmap fst here))
+    , TestCase "an option the build command adds describes another build" $ withTree $ \tree -> do
+        ordinary <- describeTree tree []
+        overridden <- describeTree tree ["-O0"]
+        pure (testAssertTrue (isJust (fmap fst ordinary) && fmap fst overridden /= fmap fst ordinary))
+    , TestCase "a generated input changed under the same name describes another build" $ withTree $ \tree -> do
+        before <- describeTree tree []
+        writeFile (tree </> "build/autogen/cabal_macros.h") "#define VERSION_base \"4.18.2.1\""
+        changed <- describeTree tree []
+        writeFile (tree </> "build/autogen/Added.hs") "module Added where"
+        added <- describeTree tree []
+        -- (a generated module at the root of the output directory is read from there too)
+        writeFile (tree </> "build" </> "CacheLock.hs") "module CacheLock where\nlocked :: Bool\nlocked = True"
+        root <- describeTree tree []
+        writeFile (tree </> "build" </> "CacheLock.o") "compiled again"
+        compiled <- describeTree tree []
+        pure (testAssertTrue (isJust (fmap fst before)
+            && fmap fst changed /= fmap fst before && fmap fst added /= fmap fst changed
+            && fmap fst root /= fmap fst added && fmap fst compiled == fmap fst root))
+    , TestCase "a build with no profile knows no construction" $ do
+        actual <- constructionIdentityFor Nothing ["input"]
+        pure (testAssertEq actual (Ok Nothing))
+    , TestCase "another build profile reaches another construction" $ do
+        mine <- constructionIdentityFor (Just ["tersus-configured-build 1", "mine"]) ["input"]
+        other <- constructionIdentityFor (Just ["tersus-configured-build 1", "other"]) ["input"]
+        inputs <- constructionIdentityFor (Just ["tersus-configured-build 1", "mine"]) ["other input"]
+        pure $ case (mine, other, inputs) of
+            (Ok (Just a), Ok (Just b), Ok (Just c)) -> testAssertTrue (a /= b && a /= c && not (matchesConstruction other a))
+            _ -> Just ("the constructions are " ++ show (mine, other, inputs))
     , TestCase "working source matches captured content and module listings" $ inSource $ \files ->
         workingSourcesMatch files >>= \same -> pure (testAssertTrue same)
     , TestCase "changed source misses and a restored source can match again" $ inSource $ \files -> do
@@ -75,8 +130,41 @@ testEmitterProvenance = TestList "testEmitterProvenance"
   where
     digest = replicate 64 'a'
 
+-- (a tree laid out like a package's: captured source, and a directory the
+-- build generates under its own output)
+withTree :: (FilePath -> IO a) -> IO a
+withTree use = bracket temporaryDirectory removeDirectoryRecursive $ \tree -> do
+    mapM_ (createDirectoryIfMissing True) [tree </> "src", tree </> "build" </> "autogen", tree </> "other"]
+    writeFile (tree </> "src" </> "Provider.hs") "module Provider where"
+    writeFile (tree </> "build" </> "autogen" </> "cabal_macros.h") "#define VERSION_base \"4.14.3.0\""
+    -- (what hsc2hs writes at the root of the output directory, beside the objects)
+    writeFile (tree </> "build" </> "CacheLock.hs") "module CacheLock where"
+    writeFile (tree </> "build" </> "CacheLock.o") "compiled"
+    use tree
+
+describeTree :: FilePath -> [String] -> IO (Maybe ([String], [FilePath]))
+describeTree tree extra = describeBuildOptions tree ["src"] "ghc" (sampleArguments tree ++ extra)
+
+-- (an ordinary build's options, as Cabal and Stack give them, of a package at this root)
+sampleArguments :: FilePath -> [String]
+sampleArguments tree =
+    [ "--make", "-fbuilding-cabal-package", "-O", "-this-unit-id", "tersus-0.1.0.0-sample"
+    , "-odir", tree </> "build", "-i" ++ (tree </> "src"), "-i" ++ (tree </> "build")
+    , "-I" ++ (tree </> "build" </> "autogen")
+    , "-optP" ++ (tree </> "build" </> "autogen" </> "cabal_macros.h")
+    , "-package-id", "base-4.14.3.0", "EmitterProvenance" ]
+
+temporaryDirectory :: IO FilePath
+temporaryDirectory = do
+    parent <- getTemporaryDirectory
+    (path, handle) <- openTempFileCloexec parent "tersus-provenance-source.tmp"
+    hClose handle
+    removeFile path
+    createDirectory path
+    pure path
+
 inSource :: ([(FilePath, String)] -> IO TestResult) -> IO TestResult
-inSource use = bracket temporary removeDirectoryRecursive $ \directory -> do
+inSource use = bracket temporaryDirectory removeDirectoryRecursive $ \directory -> do
     original <- getCurrentDirectory
     bracket (setCurrentDirectory directory) (const (setCurrentDirectory original)) $ \_ -> do
         let files = [("package.yaml", "name: captured"), ("src/Provider.hs", "captured"),
@@ -86,14 +174,6 @@ inSource use = bracket temporary removeDirectoryRecursive $ \directory -> do
         createDirectoryIfMissing True "lib/mir/provider"
         mapM_ (uncurry writeFile) files
         use files
-  where
-    temporary = do
-        parent <- getTemporaryDirectory
-        (path, handle) <- openTempFileCloexec parent "tersus-provenance-source.tmp"
-        hClose handle
-        removeFile path
-        createDirectory path
-        pure path
 
 strictText :: FilePath -> IO String
 strictText path = do

@@ -125,6 +125,7 @@ library
   exposed-modules:
       AstData
       Bootstrap
+      BuildOptions
       BuiltinRegistry
       BuiltinTable
       CacheLock
