@@ -149,6 +149,7 @@ exampleExpectations =
     [ ("examples/basics.tersus", ((ExpectReturn (VInt 6))))
     , ("examples/functions.tersus", ((ExpectReturn (VInt 21))))
     , ("examples/closures.tersus", ((ExpectReturn (VInt 21130122))))
+    , ("examples/higher_order.tersus", ((ExpectReturn (VInt 187971457))))
     , ("examples/booleans.tersus", ((ExpectReturn (VBool True))))
     , ("examples/proofs.tersus", ExpectValid)
     , ("examples/rewrites.tersus", ExpectValid)
