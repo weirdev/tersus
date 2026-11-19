@@ -133,6 +133,7 @@ allGroups = concatMap registered originalGroups
     registered original
         | groupName original == "testParserBootstrap" = parserBootstrapGroups
         | groupName original == "testHostValidation" = hostValidationGroups
+        | groupName original == "testParity" = parityGroups
         | otherwise = case lookup (groupName original) [(groupName tree, split) | (tree, split) <- batchedGroups] of
             Just split -> split
             Nothing -> [original]
@@ -302,7 +303,9 @@ runInParallel jobs names = do
                     result <- try $ restore $ do
                         started <- getMonotonicTime
                         putStrLn ("[START] " ++ name)
-                        let arguments = [name, "--child", "+RTS"] ++ rtsOptions ++ ["-RTS"]
+                        -- (the compacting collector for the host's groups: the elaborator's holds 2 GiB of its program and
+                        -- that program's validator data at once, which a copying collection took 8 GiB to hold)
+                        let arguments = [name, "--child", "+RTS"] ++ rtsOptions ++ ["-c" | "testHostValidation:" `isPrefixOf` name] ++ ["-RTS"]
                         outcome <- try (readProcessOutput (proc self arguments){env = Just environment} "")
                         finished <- getMonotonicTime
                         putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))

@@ -256,6 +256,9 @@ Work from `tersus/`.
   `testParserBootstrap:2/2` for repair and fixpoint checks from independent
   private copies of the runner's ordinary tool cache. Ordinary preparation
   is counted in the latter group and never credited to the cold pair.
+  `testParity` registers `testParity:validation` (the compiled and the
+  interpreted validator compared over the corpus) and `testParity:mirReader`
+  (the Tersus MIR reader's round trips), which build none of the same programs.
   `testFrontendBootstrap` builds the elaborator seed F0 and the stages F1 and
   F2 and checks their fixpoint (`REPLACING_HASKELL.md`, "The frontend seed").
   CI reserves one runner for each of these four bootstrap groups; the
@@ -272,7 +275,9 @@ Work from `tersus/`.
   elaborator) in full: it registers one group per program
   (`testHostValidation:parser` through `testHostValidation:elaborator`), each
   checking every function of its program, several at once, and reporting every
-  function that does not validate. It runs only when named, and never in a
+  function that does not validate. Its groups run with the compacting collector
+  (`+RTS -c`), which holds the elaborator's program in half the memory a
+  copying collection needs. It runs only when named, and never in a
   shard (`TestScheduling.optInGroups`), as does `testElaborateMutant` (an
   elaborator whose unification is broken, which the differential against the
   compiler's elaborator has to catch; it builds an elaborator of its own). CI

@@ -52,6 +52,10 @@ fn runMonoOwnership(lines: &List<List<Token>>) -> Bool ~ {
         return false;
     };
     owned = insertOwnership(runtime.value);
-    printProgramWithGhosts(&owned);
+    if size(owned.errors) > 0 {
+        for e in owned.errors { clone(e).concat("\n").printError(); };
+        return false;
+    };
+    printProgramWithGhosts(&owned.program);
     return true;
 };

@@ -55,6 +55,14 @@ cross a change in what ownership writes. For that, first run
 pin: stage 1 owns and emits the emitter. Then pin the candidate and run `emit`
 from it; the result is the seed only if it equals the candidate byte for byte.
 
+`advance` builds the host's tools on the way, owned by stage 0 and emitted by
+stage 1. When the emitter as it is now relies on what the new ownership writes,
+the tools the old seed owns are wrong under it, and `advance` fails building
+them (removing the zero test before a drop was such a change: the old pass
+dropped values whose fields had been moved out). Cross it in two seeds: advance
+with the ownership change and the emitter as it was, pin that candidate and
+check it with `emit`, then advance from it with the emitter change.
+
 For a new candidate, put its digest in `bootstrap/emitter.sha256`, rebuild the
 host, and set `TERSUS_SEED_FILE` to its verified local bytes. Emit to another
 temporary file and require `cmp` to succeed against the candidate. Do not write

@@ -22,8 +22,8 @@ fn dropFieldLines(types: &List<TypeDecl>, p: &Program, variantIndex: Int, fields
     return out;
 };
 
-// The function that frees what a value of the type owns: the drop of the type first when it has one (not when the value
-// was taken apart, which cleared its bytes), then what its fields or its elements own
+// The function that frees what a value of the type owns: the drop of the type first when it has one, then what its fields
+// or its elements own. It is called only on a value that is whole: the ownership pass drops nothing that was moved out
 fn dropFunctionLines(types: &List<TypeDecl>, p: &Program, t: &Type) -> List<String> ~ {
     out = noStrings();
     out = push(out, "define internal void ".then(dropSymbol(types, t)).then("(ptr %slot) {"));
@@ -59,22 +59,7 @@ fn dropFunctionLines(types: &List<TypeDecl>, p: &Program, t: &Type) -> List<Stri
     start = 0;
     if isEnumKind { start = roundUp(4, payload); };
     if size(dropOf(p, n.text).bytes) > 0 {
-        size = layoutOf(types, t).size;
-        out = push(out, "    br label %zhead");
-        out = push(out, "zhead:");
-        out = push(out, "    %zi = phi i64 [0, %entry], [%znext, %zbody]");
-        out = push(out, "    %zcond = icmp eq i64 %zi, ".then(showInt(size)));
-        out = push(out, "    br i1 %zcond, label %fields, label %zbody");
-        out = push(out, "zbody:");
-        out = push(out, "    %zp = getelementptr i8, ptr %slot, i64 %zi");
-        out = push(out, "    %zb = load i8, ptr %zp");
-        out = push(out, "    %znz = icmp ne i8 %zb, 0");
-        out = push(out, "    %znext = add i64 %zi, 1");
-        out = push(out, "    br i1 %znz, label %znonzero, label %zhead");
-        out = push(out, "znonzero:");
         out = push(out, "    %dr = call i64 ".then(functionSymbol(dropOf(p, n.text))).then("(ptr %slot)"));
-        out = push(out, "    br label %fields");
-        out = push(out, "fields:");
     };
     if isEnumKind {
         out = push(out, "    %tag = load i32, ptr %slot");

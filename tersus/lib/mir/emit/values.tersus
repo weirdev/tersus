@@ -103,7 +103,7 @@ fn cloneValue(g: Gen, cx: &Ctx, current: &String, t: &Type, to: &String, from: &
     return emit(g1, "call void ".then(cloneSymbol(&cx.types, t)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
 };
 
-// Frees what the value a local holds owns (nothing, if it holds none), and leaves a Box it held holding nothing
+// Frees what the value a local holds owns (nothing, if it holds none)
 fn dropSlot(g: Gen, cx: &Ctx, t: &Type, l: Int) -> Gen ~ {
     g1 = descriptor(g, cx, t);
     return emit(g1, "call void ".then(dropSymbol(&cx.types, t)).then("(ptr ").then(slot(l)).then(")"));
@@ -119,7 +119,7 @@ fn copyWords(g: Gen, to: &String, from: &String, bytes: Int) -> Gen [{ }] [{ }] 
     return emit(g, memcpyText(to, from, bytes));
 };
 
-// Clears the words of a value that has been moved out
+// Clears the words of a value: an empty Uninit
 fn zeroWords(g: Gen, at: &String, bytes: Int) -> Gen [{ }] [{ }] {
     if bytes = 0 { return g; };
     return emit(g, "call void @llvm.memset.p0.i64(ptr ".then(at).then(", i8 0, i64 ").then(showInt(bytes)).then(", i1 false)"));
@@ -313,7 +313,7 @@ fn constantValue(g: Gen, cx: &Ctx, ty: &Type, c: &Constant) -> Gen ~ {
 };
 
 // The address of the words of a value held inline that an operand is, ready for something to take: a value that is moved out of a local and owns something is copied to room
-// of its own and the local is cleared, so that what takes it can copy it later with the local already empty. A constant is built in room of its own.
+// of its own, so that what takes it can copy it later even into that local. A constant is built in room of its own.
 fn operandAddress(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
     if o is Operand::Const { return constantAggregate(g, cx, ty, (o as Operand::Const).value); };
     if o is Operand::Copy { return giving(g, slot((o as Operand::Copy).local)); };
@@ -325,9 +325,7 @@ fn operandAddress(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen
             bytes = bytesIn(cx, lt.ty);
             g1 = entryTemp(g, (bytes + 7) / 8);
             room = clone(g1.last);
-            g2 = copyWords(g1, room, slot(l), bytes);
-            g3 = zeroWords(g2, slot(l), bytes);
-            return giving(g3, room);
+            return giving(copyWords(g1, room, slot(l), bytes), room);
         };
         return giving(g, slot(l));
     };
@@ -354,13 +352,7 @@ fn operandValue(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~
         if moved { return operandAddress(g1, cx, f, lt.ty, o); };
         return giving(g1, slot(l));
     };
-    g2 = ins(g1, "v", "load ".then(t).then(", ptr ").then(slot(l)));
-    if moved {
-        v = clone(g2.last);
-        g3 = emit(g2, "store ".then(t).then(" ").then(zeroOf(t)).then(", ptr ").then(slot(l)));
-        return giving(g3, v);
-    };
-    return g2;
+    return ins(g1, "v", "load ".then(t).then(", ptr ").then(slot(l)));
 };
 
 // The type of a local that an operand is

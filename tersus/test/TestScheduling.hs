@@ -284,7 +284,8 @@ measuredWeights =
     , ("testOwnershipCodec", 232)
     , ("testOwnershipInterpreted", 26)
     , ("testOwnershipMetadata", 1)
-    , ("testParity", 318)
+    , ("testParity:mirReader", 366)
+    , ("testParity:validation", 535)
     , ("testParse", 1)
     , ("testParseEval", 1)
     , ("testParseVal", 3)
@@ -329,13 +330,12 @@ measuredWeights =
 
 -- The budget leaves the OS and runner of the 16 GB CI machine about 3.6 GiB.
 -- The most each group's process reached on CI, from its [PEAK] lines with a tenth added (dev/ci_weights.py --peaks
--- prints these rows); the self-hosted batches share one cached program, about 9.5 GiB loaded, and the host's elaborator
--- group runs alone. Estimates for admission, not a limit the processes are held to: groups admitted at the 1024 MiB
--- default that each took 3 to 6 GiB ran together and the runner was shut down.
+-- prints these rows); the self-hosted batches share one cached program, about 9.5 GiB loaded. Estimates for admission,
+-- not a limit the processes are held to: groups admitted at the 1024 MiB default that each took 3 to 6 GiB ran
+-- together and the runner was shut down.
 estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
     | isSelfHosted name = 9728
-    | name == "testHostValidation:elaborator" = memoryBudgetMiB
     | otherwise = Map.findWithDefault 1024 name peakTable
 
 peakTable :: Map.Map String Int
@@ -352,9 +352,8 @@ measuredPeaksMiB =
     , ("testDataCodec", 2816)
     , ("testDifferential", 4096)
     , ("testFrontendBootstrap", 6912)
-    , ("testHostValidation:elaborator", 16384)
-    , ("testHostValidation:emitter", 1536)
-    , ("testHostValidation:parser", 2816)
+    , ("testHostValidation:elaborator", 4608)
+    , ("testHostValidation:parser", 1536)
     , ("testMirEmit:2/4", 6400)
     , ("testMirEmit:3/4", 9728)
     , ("testMirEmit:4/4", 9728)
@@ -383,7 +382,8 @@ measuredPeaksMiB =
     , ("testNativeStorageModules", 2816)
     , ("testOwnership", 3584)
     , ("testOwnershipCodec", 2816)
-    , ("testParity", 4864)
+    , ("testParity:mirReader", 1280)
+    , ("testParity:validation", 1792)
     , ("testParser:1/4", 6144)
     , ("testParser:2/4", 8448)
     , ("testParser:3/4", 14336)
@@ -641,7 +641,7 @@ testScheduling names batches = TestList "testScheduling"
     -- the measured values themselves.
     , testCase "batched and measured tail groups retain weights above the unprofiled fallback" $
         testAssertTrue (all (> 1) ([groupWeight (groupName batch) | (_, split) <- batches, batch <- split]
-                ++ map groupWeight ["testParity", "testMirData", "testOwnership", "testMirEmitPrograms"]
+                ++ map groupWeight ["testParity:validation", "testParity:mirReader", "testMirData", "testOwnership", "testMirEmitPrograms"]
                 ++ map (groupWeight . groupName) parserBootstrapGroups)
             && all (> 0) (map groupWeight names)
             && maximum loads - minimum loads <= 120)
@@ -735,8 +735,8 @@ testScheduling names batches = TestList "testScheduling"
             fmap (any isOptIn) (selectGroupNames (Arguments Nothing [] False (Just (index, count))) names) == Right False)
             [1 .. count]) [1, 3, 7])
     , testCase "the groups running at the shard 3 shutdown are not admitted together; a smaller group fills in instead" $
-        testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity", "testNative:2/4", "testCli"])
-            ["testMirSelfHosted:3/4", "testNative:2/4"]
+        testAssertEq (admitWhileRoom ["testMirSelfHosted:3/4", "testParser:3/4", "testParity:validation", "testNative:2/4", "testCli"])
+            ["testMirSelfHosted:3/4", "testParity:validation"]
     , testCase "a group estimated over the budget runs alone, and launch order is the self-hosted chain, then longest work first, with stable ties" $
         testAssertEq
             ( admitGroup 1000 snd 0 [("big", 4000 :: Int), ("small", 10)]

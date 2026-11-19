@@ -1,5 +1,5 @@
-import data::codec::codec { Type, Size, Token, Parsed, typeAt };
-import mir::reader::reader { dropOf, isDropOf, isStorageBox, isStorageList, Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep, Field, Variant, TypeDecl };
+import data::codec::codec { Type, Size, Token, Parsed, typeAt, wordAt, sizeAt };
+import mir::reader::reader { dropOf, cloneOf, isDropOf, isStorageBox, isStorageList, Program, Function, LocalDecl, MirBlock, Statement, Terminator, Operand, Constant, Rvalue, RefStep, Field, Variant, TypeDecl };
 import mir::support::support { ownerOf, lookupDecl, variantsOf, beforeAngle, declName };
 
 fn noOwnershipBlocks() -> List<MirBlock> { return []; };
@@ -50,7 +50,8 @@ fn emptyKeys() -> List<Key> { return []; };
 struct BlockLives { block: Int, entry: List<Key>, out: List<Key>, afters: List<List<Key>> };
 impl Clone for BlockLives { };
 impl Eq for BlockLives { };
-struct Context { function: Function, names: List<FieldName>, projected: List<Int>, defs: List<Count>, uses: List<UseSite>, afters: List<BlockLives>, takes: List<Site>, loans: List<BlockLoans>, borrowRoots: List<Int> };
+struct Context { function: Function, names: List<FieldName>, projected: List<Int>, defs: List<Count>, uses: List<UseSite>, afters: List<BlockLives>, takes: List<Site>, taken: List<Int>, loans: List<BlockLoans>, borrowRoots: List<Int>, holders: List<String> };
+// (taken: the locals given their only value by a field taken out of another value, which own what they hold)
 impl Clone for Context { };
 
 fn whole(l: Int) -> Key { return Key { local: l, kind: 0, name: 0 }; };
@@ -281,6 +282,144 @@ fn freshLocal(r: &mut Rewrite, ty: Type) -> Int ~ {
 };
 fn isDropFunction(p: &Program, name: &String) -> Bool ~ { return isDropOf(p, name); };
 fn hasDrop(p: &Program, name: &String) -> Bool ~ { return size(dropOf(p, name).bytes) > 0; };
+// Whether a value of the type is a struct or an enum with a drop of its own, which is given the whole value
+fn ownDrop(p: &Program, t: &Type) -> Bool ~ {
+    if t is Type::TNamed { return hasDrop(p, (t as Type::TNamed).name); };
+    if t is Type::TVariant { owner = ownerOf(p.types, (t as Type::TVariant).name); return owner.ok && hasDrop(p, owner.text); };
+    return false;
+};
+// Whether a copy of a value of the type would copy a value with a drop bitwise: it holds, through fields, variants and the elements of
+// a list, a Box, an array or an address, a struct or an enum with a drop that has no Clone of its own. A part of a value that is one is
+// looked at in place, never copied, and what it is part of must not change before the look's last use. MirMoves.holdsDrop is this
+// predicate at the types of the program as written, and rewrite.tersus (viewErrors, copyErrors) applies it here, at the types native
+// code is made of. `holders` are the declared types that hold one (dropHolders); a type is finite apart from its names, so the walk
+// below ends, and a recursive type is decided once, by name, in dropHolders.
+fn holdsOwnDrop(p: &Program, holders: &List<String>, t: &Type) -> Bool ~ {
+    if size(holders) = 0 { return false; };
+    if t is Type::TArray { return holdsOwnDrop(p, holders, Box::unbox((t as Type::TArray).elem)); };
+    if t is Type::TList { return holdsOwnDrop(p, holders, Box::unbox((t as Type::TList).elem)); };
+    if t is Type::TBox { return holdsOwnDrop(p, holders, Box::unbox((t as Type::TBox).inner)); };
+    if t is Type::TAddr { return holdsOwnDrop(p, holders, Box::unbox((t as Type::TAddr).inner)); };
+    if t is Type::TNamed {
+        base = (t as Type::TNamed).base;
+        if isStorageList(p, &base) || isStorageBox(p, &base) {
+            held = soleTypeArgument(t);
+            return held.ok && holdsOwnDrop(p, holders, held.value);
+        };
+        for h in holders { if h = (t as Type::TNamed).name { return true; }; };
+        return false;
+    };
+    if t is Type::TVariant {
+        owner = ownerOf(p.types, (t as Type::TVariant).name);
+        if owner.ok { for h in holders { if h = owner.text { return true; }; }; };
+    };
+    return false;
+};
+// The type arguments of a type written with them (`named "V" 1 type T`), sizes left out
+fn typeArguments(t: &Type) -> List<Type> ~ {
+    out = [];
+    if !(t is Type::TNamed) { return out; };
+    ts = (t as Type::TNamed).argTokens;
+    pos = 0;
+    while pos < size(ts) ~ {
+        w = wordAt(ts, pos);
+        if !w.ok || w.pos >= size(ts) { return out; };
+        if w.value = "size" {
+            sz = sizeAt(ts, w.pos);
+            if !sz.ok { return out; };
+            pos = sz.pos;
+        } else {
+            a = typeAt(ts, w.pos);
+            if !a.ok { return out; };
+            out = push(out, a.value);
+            pos = a.pos;
+        };
+    };
+    return out;
+};
+// A Clone of a type's own, as the emitter finds it: a function `<... as Clone>::clone` with a parameter whose result is exactly the type
+// (or, with checked facts, the type's checked Clone); `ty` is that result, whose arguments say which instance it is
+struct OwnClone { name: String, ty: Type };
+impl Clone for OwnClone { };
+fn ownClones(p: &Program) -> List<OwnClone> ~ {
+    out = [];
+    suffix = " as Clone>::clone";
+    if p.meta.checked {
+        for d in p.types {
+            callee = cloneOf(p, declName(d));
+            if size(callee.bytes) > 0 { for f in p.functions { if f.name = callee && f.returns is Type::TNamed { out = push(out, OwnClone { name: declName(d), ty: clone(f.returns) }); }; }; };
+        };
+        return out;
+    };
+    s = size(suffix.bytes);
+    for f in p.functions {
+        n = size(f.name.bytes);
+        if f.hasReturn && size(f.params) > 0 && n > s && f.returns is Type::TNamed {
+            at = f.name.find(toByte(32), 0);
+            if at > 0 && at + s <= n && f.name.slice(at, at + s) = suffix { out = push(out, OwnClone { name: clone((f.returns as Type::TNamed).name), ty: clone(f.returns) }); };
+        };
+    };
+    return out;
+};
+// The declared types whose values hold one with a drop and no Clone of its own, worked out once for a program. A type has a Clone of its
+// own only for an instance whose Clone is there (ownClones) and none of whose type arguments is one: a Clone with a bound on a type
+// parameter needs that parameter's Clone, which a value with a drop and no Clone has not, so it is taken not to have one whatever its
+// bounds say (MirMoves.holdsDrop takes the same). Holders are found from those with a drop, then those with a field that holds one,
+// and the instances whose arguments are holders lose their Clone, until nothing changes (the set only grows, so the loop ends).
+fn dropHolders(p: &Program) -> List<String> ~ {
+    dropped = false;
+    for d in p.types {
+        name = declName(d);
+        base = beforeAngle(name);
+        if !isStorageList(p, &base) && !isStorageBox(p, &base) && hasDrop(p, name) { dropped = true; };
+    };
+    if !dropped { return []; };
+    clones = ownClones(p);
+    holders = [];
+    changed = true;
+    while changed ~ {
+        cloned = [];
+        for c in clones {
+            clean = true;
+            for a in typeArguments(c.ty) { if holdsOwnDrop(p, holders, a) { clean = false; }; };
+            if clean { cloned = push(cloned, clone(c.name)); };
+        };
+        next = [];
+        for d in p.types {
+            name = declName(d);
+            base = beforeAngle(name);
+            own = false; for k in cloned { if k = name { own = true; }; };
+            if !isStorageList(p, &base) && !isStorageBox(p, &base) && !own {
+                holds = hasDrop(p, name);
+                if !holds {
+                    if d is TypeDecl::DStruct { for f in (d as TypeDecl::DStruct).fields { if holdsOwnDrop(p, holders, f.ty) { holds = true; }; }; }
+                    else { for v in (d as TypeDecl::DEnum).variants { for f in v.fields { if holdsOwnDrop(p, holders, f.ty) { holds = true; }; }; }; };
+                };
+                if holds { next = push(next, name); };
+            };
+        };
+        changed = size(next) != size(holders);
+        holders = next;
+    };
+    return holders;
+};
+// The type whose fields a value of the type has: what a library Box holds, or the type itself
+fn heldThrough(p: &Program, t: &Type) -> Type ~ {
+    if t is Type::TNamed {
+        base = (t as Type::TNamed).base;
+        held = soleTypeArgument(t);
+        if isStorageBox(p, &base) && held.ok { return held.value; };
+    };
+    return clone(t);
+};
+// The local a statement takes apart, or -1: the erasure writes `dissolve L` as a peek of UninitEmpty, and a program's Uninit::empty() is always assigned, never peeked (emitStatement relies on this too)
+fn dissolvedLocal(st: &Statement) -> Int ~ {
+    if st is Statement::Peek {
+        peek = st as Statement::Peek;
+        if peek.rv is Rvalue::ListOp && (peek.rv as Rvalue::ListOp).op = 35 && size((peek.rv as Rvalue::ListOp).args) = 0 { return peek.local; };
+    };
+    return 0 - 1;
+};
 // The type argument of a `named "B" 1 type T` (a List or a Box as the data writes them)
 fn soleTypeArgument(t: &Type) -> Parsed<Type> ~ {
     if t is Type::TNamed {
