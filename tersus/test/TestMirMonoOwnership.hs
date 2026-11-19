@@ -254,6 +254,10 @@ testMirMonoOwnershipUsing tool = TestList "testMirMonoOwnership"
     [ testMirMonoOwnershipFnShapesUsing bootstrapLoader tool
     , TestList "staged versus fused metadata and substitution" [TestCase label (compareAdapters tool p) | (label,p) <- monoFixtures]
     , TestList "raw existing codec receipts" [TestCase label (compareRaw tool p) | (label,p) <- monoFixtures]
+    , TestCase "landed ownership success preserves staged and fused metadata" $ do
+        adapted <- compareAdapters tool genericProgram
+        receipt <- compareRaw tool genericProgram
+        pure (adapted <> receipt)
     , TestCase "landed ownership errors retain the complete fused Mono receipt" (landedOwnershipReceipt tool)
     , TestCase "no generic keeps the ownership MIR2 writability domain" $ do
         let p = unwritableMetadata metadataProgram
