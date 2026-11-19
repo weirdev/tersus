@@ -115,15 +115,14 @@ jobs:
       # It loads examples/ relative to the package directory, so run from tersus/.
       - name: Test
         env:
-          # (sequential GC: the compiler's processes are mostly serial, and a parallel collector's threads only spin
-          # beside the other processes of the runner)
+          # Keep threaded collector options on the test executable, not Stack's tool subprocesses.
           GHCRTS: -A16m
           TERSUS_TEST_RTS_STATS: '1'
         run: |
           python3 dev/ci_resources.py
           # (a host run takes about 20 minutes with no verdicts cached; one that hangs leaves what it was waiting on)
           if [ '${{ matrix.shard }}' = host ]; then (sleep 1800; echo '[HANG DUMP]'; ps -eo pid,ppid,stat,etime,wchan:30,rss,args --forest | grep -v ' \[' | cut -c1-240; for pid in $(pgrep -f tersus); do echo "== $pid"; sudo cat /proc/$pid/stack; ls -l /proc/$pid/fd | cut -c40-; done) & fi
-          python3 dev/ci_resources.py -- /usr/bin/time -v stack test --test-arguments='-j 4 ${{ matrix.shard == 'host' && 'testHostValidation' || format('--shard {0}/10', matrix.shard) }} +RTS -N2 -qg -RTS'
+          python3 dev/ci_resources.py -- /usr/bin/time -v stack test --test-arguments='-j 4 ${{ matrix.shard == 'host' && 'testHostValidation' || format('--shard {0}/10', matrix.shard) }} +RTS -N2 -qg ${{ matrix.shard == 'host' && '-c' || '' }} -RTS'
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)
