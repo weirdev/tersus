@@ -74,6 +74,7 @@ struct St {
 impl Clone for St { };
 
 struct Checkpoint { state: St, nodeCount: Int, ctorCount: Int, fieldCount: Int, typeCount: Int, genericCount: Int };
+impl Clone for Checkpoint { };
 
 fn checkpoint(st: &St) -> Checkpoint ~ {
     saved = St { pos: st.pos, nodes: [], ctors: [], fieldsOf: [], types: [], generics: [],
@@ -2440,25 +2441,26 @@ fn nonInfixExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
         return withFieldsExpr(sourceText, resultPartspeState, resultPartspeValue);
     };
     if keywordAt(sourceText, s, "fn") {
-        fk = eatKeyword(sourceText, clone(s), "fn"); Res { st: resultPartsfkState, v: resultPartsfkValue, ok: resultPartsfkOk } = fk;
-        afterFn = skipWs(sourceText, clone(resultPartsfkState));
+        fnSave = checkpoint(s);
+        fk = eatKeyword(sourceText, s, "fn"); Res { st: resultPartsfkState, v: resultPartsfkValue, ok: resultPartsfkOk } = fk;
+        afterFn = skipWs(sourceText, resultPartsfkState);
         if byteAt(sourceText, afterFn, afterFn.pos) = 40 {
-            fnSave = checkpoint(s);
-            ce = closureExpr(sourceText, clone(s), false); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
+            ce = closureExpr(sourceText, restore(afterFn, clone(fnSave)), false); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
             if resultPartsceOk { return withFieldsExpr(sourceText, resultPartsceState, resultPartsceValue); };
             s = restore(resultPartsceState, fnSave);
-            c = byteAt(sourceText, s, s.pos);
-        };
+        } else { s = restore(afterFn, fnSave); };
+        c = byteAt(sourceText, s, s.pos);
     };
     if keywordAt(sourceText, s, "move") {
         save = checkpoint(s);
         mk = eatKeyword(sourceText, s, "move"); Res { st: resultPartsmkState, v: resultPartsmkValue, ok: resultPartsmkOk } = mk;
         afterMove = skipWs(sourceText, clone(resultPartsmkState));
         if keywordAt(sourceText, afterMove, "fn") {
-            fk2 = eatKeyword(sourceText, clone(afterMove), "fn"); Res { st: resultPartsfk2State, v: resultPartsfk2Value, ok: resultPartsfk2Ok } = fk2;
-            afterFn2 = skipWs(sourceText, clone(resultPartsfk2State));
+            mvSave = checkpoint(afterMove);
+            fk2 = eatKeyword(sourceText, afterMove, "fn"); Res { st: resultPartsfk2State, v: resultPartsfk2Value, ok: resultPartsfk2Ok } = fk2;
+            afterFn2 = skipWs(sourceText, resultPartsfk2State);
             if byteAt(sourceText, afterFn2, afterFn2.pos) = 40 {
-                ce = closureExpr(sourceText, afterMove, true); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
+                ce = closureExpr(sourceText, restore(afterFn2, mvSave), true); Res { st: resultPartsceState, v: resultPartsceValue, ok: resultPartsceOk } = ce;
                 if resultPartsceOk { return withFieldsExpr(sourceText, resultPartsceState, resultPartsceValue); };
             };
         };
