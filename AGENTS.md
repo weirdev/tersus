@@ -266,7 +266,9 @@ Work from `tersus/`.
   elaborator) in full: it registers one group per program
   (`testHostValidation:parser` through `testHostValidation:elaborator`), each
   checking every function of its program, several at once, and reporting every
-  function that does not validate. It runs only when named, and never in a
+  function that does not validate. Its groups run with the compacting collector
+  (`+RTS -c`), which holds the elaborator's program in half the memory a
+  copying collection needs. It runs only when named, and never in a
   shard (`TestScheduling.optInGroups`), as does `testElaborateMutant` (an
   elaborator whose unification is broken, which the differential against the
   compiler's elaborator has to catch; it builds an elaborator of its own). CI

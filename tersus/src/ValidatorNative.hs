@@ -14,7 +14,7 @@
 module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
-import Data.List (isSuffixOf, sortOn)
+import Data.List (foldl', isSuffixOf, sortOn)
 import Data.Char (isSpace)
 import Data.Ord (Down (..))
 import Control.Exception (IOException, bracket, evaluate, try)
@@ -67,10 +67,13 @@ validateWith physical caching program = unsafePerformIO (validateWithExe validat
 -- The same, run by the validator the first argument gives
 prepareTexts :: Bool -> M.Program -> Result [(String, String)] String
 prepareTexts physical program = case (if physical then encodeLibrary else encode) program of
-    Left what -> Error ("the program uses a feature the Tersus validator does not model yet: " ++ what)
+    Left what -> Error (unmodeledFeature what)
     Right functions -> case mapM (\(name, f) -> fmap (\text -> (name, text)) (serializeFunction f)) functions of
         Left e -> Error e
         Right texts -> Ok texts
+
+unmodeledFeature :: String -> String
+unmodeledFeature what = "the program uses a feature the Tersus validator does not model yet: " ++ what
 
 validateWithExe :: IO (Result FilePath String) -> Bool -> Bool -> M.Program -> IO (Result () String)
 validateWithExe exe physical caching program = case prepareTexts physical program of
@@ -106,21 +109,28 @@ refusalMessage physical program name (status, block, step) = case status of
 -- with the verdicts validateCompiled keeps on disk: what each function refused, or that the validator could not
 -- check it, in the program's order
 validationRefusals :: M.Program -> IO (Result [String] String)
-validationRefusals program = case prepareTexts False program of
-    Error e -> pure (Error e)
-    Ok texts -> do
+validationRefusals program = case encode program of
+    Left what -> pure (Error (unmodeledFeature what))
+    Right functions -> do
+        -- (each function's text is made by the worker that checks it, and dropped after: held at once, the texts of
+        -- a program as large as the elaborator took 4.3 GiB as Strings)
+        sized <- evaluate (forcedSizes [(name, function, functionSize function) | (name, function) <- functions])
         namespace <- validatorKey
         built <- validatorExecutable
         case (namespace, built) of
             (Error e, _) -> pure (Error e)
             (_, Error e) -> pure (Error e)
             (Ok key, Ok exe) -> do
-                let distinct = Map.keys (Map.fromList [(text, ()) | (_, text) <- texts])
                 _ <- evaluate (fullyEvaluated key `seq` fullyEvaluated exe)
-                checked <- inParallel (storedOrChecked key (pure (Ok exe))) distinct
-                let byText = Map.fromList (zip distinct checked)
-                pure (Ok [message | (name, text) <- texts, Just outcome <- [Map.lookup text byText], Just message <- [failure name outcome]])
+                let check (_, function, _) = case serializeFunction function of
+                        Left e -> pure (Left e)
+                        Right text -> Right <$> storedOrChecked key (pure (Ok exe)) text
+                checked <- inParallelBy (\(_, _, size) -> size) check sized
+                pure $ case [e | Left e <- checked] of
+                    e : _ -> Error e
+                    [] -> Ok [message | ((name, _, _), Right outcome) <- zip sized checked, Just message <- [failure name outcome]]
   where
+    forcedSizes items = foldr (\(_, _, size) rest -> size `seq` rest) () items `seq` items
     failure name (Error e) = Just ("the compiled validator could not check " ++ name ++ ": " ++ e)
     failure name (Ok verdict@(status, _, _))
         | status /= 0 = Just (refusalMessage False program name verdict)
@@ -219,27 +229,32 @@ withVerdictLock namespace text action = do
 -- Each text checked, as many at once as the machine has processors, the longest first
 inParallel :: (String -> IO (Result a String)) -> [String] -> IO [Result a String]
 inParallel check texts = do
+    _ <- evaluate (foldr (seq . fullyEvaluated) () texts)
+    inParallelBy length check texts
+
+-- The same for any items, the largest by the given size first. GHC 9.6's runtime can lose the wakeup of a thread
+-- blocked on a thunk that other threads force too (GHC #26324), so the items must have nothing left to evaluate.
+inParallelBy :: (t -> Int) -> (t -> IO b) -> [t] -> IO [b]
+inParallelBy size check items = do
     workers <- availableProcessors
-    -- GHC 9.6's runtime can lose the wakeup of a thread blocked on a thunk that other threads force too (GHC #26324),
-    -- so the workers are given a queue with nothing left to evaluate in it.
-    pending <- evaluate (forcedQueue (sortOn (Down . length . snd) (zip [0 :: Int ..] texts)))
-    queue <- newMVar pending
+    pending <- evaluate (forcedQueue (sortOn (Down . fst) [(size item, (index, item)) | (index, item) <- zip [0 :: Int ..] items]))
+    queue <- newMVar (map snd pending)
     found <- newMVar Map.empty
-    let next = modifyMVar queue $ \items -> pure $ case items of
+    let next = modifyMVar queue $ \queued -> pure $ case queued of
             [] -> ([], Nothing)
             item : rest -> (rest, Just item)
         worker = do
             item <- next
             case item of
                 Nothing -> pure ()
-                Just (index, text) -> do
-                    checked <- check text
+                Just (index, value) -> do
+                    checked <- check value
                     modifyMVar_ found (pure . Map.insert index checked)
                     worker
     _ <- parallelBuilds (replicate (max 1 workers) worker)
     Map.elems <$> takeMVar found
   where
-    forcedQueue items = foldr (\(index, text) rest -> index `seq` fullyEvaluated text `seq` rest) () items `seq` items
+    forcedQueue queued = foldr (\(itemSize, (index, _)) rest -> itemSize `seq` index `seq` rest) () queued `seq` queued
 
 fullyEvaluated :: String -> ()
 fullyEvaluated = foldr seq ()
@@ -292,6 +307,19 @@ serializeValue value = case value of
     MFn name -> Left ("a function value (" ++ name ++ ") in the data for the validator")
     MEmpty -> Left "an empty value in the data for the validator"
     MRef _ _ -> Left "a reference value in the data for the validator"
+
+-- How large the text of a function is, roughly, for the order the functions are checked in; it evaluates everything
+-- serializeFunction reads
+functionSize :: (MirValue, MirValue, Integer) -> Int
+functionSize (blocks, initial, entry) = entry `seq` valueSize blocks + valueSize initial
+
+valueSize :: MirValue -> Int
+valueSize value = case value of
+    MInt n -> n `seq` 1
+    MBool b -> b `seq` 1
+    MList values -> foldl' (\total v -> total + valueSize v) 1 values
+    MData name fields -> fullyEvaluated name `seq` foldl' (\total (_, v) -> total + valueSize v) (length name) fields
+    _ -> 1
 
 -- Overlap full validator self-validation with the other post-E1 tool builds.
 cachedBootstrapEmitter :: IO (Result FilePath String)

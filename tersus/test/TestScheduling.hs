@@ -329,13 +329,12 @@ measuredWeights =
 
 -- The budget leaves the OS and runner of the 16 GB CI machine about 3.6 GiB.
 -- The most each group's process reached on CI, from its [PEAK] lines with a tenth added (dev/ci_weights.py --peaks
--- prints these rows); the self-hosted batches share one cached program, about 9.5 GiB loaded, and the host's elaborator
--- group runs alone. Estimates for admission, not a limit the processes are held to: groups admitted at the 1024 MiB
--- default that each took 3 to 6 GiB ran together and the runner was shut down.
+-- prints these rows); the self-hosted batches share one cached program, about 9.5 GiB loaded. Estimates for admission,
+-- not a limit the processes are held to: groups admitted at the 1024 MiB default that each took 3 to 6 GiB ran
+-- together and the runner was shut down.
 estimatedPeakMiB :: String -> Int
 estimatedPeakMiB name
     | isSelfHosted name = 9728
-    | name == "testHostValidation:elaborator" = memoryBudgetMiB
     | otherwise = Map.findWithDefault 1024 name peakTable
 
 peakTable :: Map.Map String Int
@@ -352,9 +351,8 @@ measuredPeaksMiB =
     , ("testDataCodec", 2816)
     , ("testDifferential", 4096)
     , ("testFrontendBootstrap", 6912)
-    , ("testHostValidation:elaborator", 16384)
-    , ("testHostValidation:emitter", 1536)
-    , ("testHostValidation:parser", 2816)
+    , ("testHostValidation:elaborator", 4608)
+    , ("testHostValidation:parser", 1536)
     , ("testMirEmit:2/4", 6400)
     , ("testMirEmit:3/4", 9728)
     , ("testMirEmit:4/4", 9728)
