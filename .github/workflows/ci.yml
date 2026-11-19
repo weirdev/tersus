@@ -149,6 +149,8 @@ jobs:
           XDG_CACHE_HOME="$RUNNER_TEMP/emitter-known" stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/emitter-known.ll"
           test -n "$(compgen -G "$RUNNER_TEMP/emitter-known/tersus/seed-*")"
           test -z "$(compgen -G "$RUNNER_TEMP/emitter-known/tersus/emitter-*")"
+          XDG_CACHE_HOME="$RUNNER_TEMP/emitter-known" stack test --test-arguments='-j 1 testVerdictLocks +RTS -N1 -qg -RTS' | tee "$RUNNER_TEMP/validator-operation-pin.log"
+          grep -Fx '[VALIDATOR_OPERATION_MODE] PIN' "$RUNNER_TEMP/validator-operation-pin.log"
           stack run emitter-seed -- emit "$RUNNER_TEMP/emitter-forced-source.ll"
           cmp "$RUNNER_TEMP/emitter-certified.ll" "$RUNNER_TEMP/emitter-forced-source.ll"
           test -n "$(compgen -G "$RUNNER_TEMP/emitter-gen/tersus/emitter-*")"

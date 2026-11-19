@@ -1411,7 +1411,8 @@ validatorOperation = withToolsCacheHome $ \home -> do
     producer <- MirHousekeeping.emitterIdentity
     namespace <- ValidatorNative.validatorKey
     case (producer, namespace) of
-        (Ok selected, Ok key) -> do
+        (Ok selected@(pinned, _, _), Ok key) -> do
+            putStrLn ("[VALIDATOR_OPERATION_MODE] " ++ if pinned then "PIN" else "SOURCE")
             let file = home </> "tersus" </> ("validator-" ++ key)
                 wrongSeed = home </> "wrong-seed"
             writeFile wrongSeed "not the selected seed"
@@ -1458,7 +1459,9 @@ validatorOperation = withToolsCacheHome $ \home -> do
                 , testAssertTrue (pathsSame concurrent 9)
                 , testAssertEq lazyHit (Ok True)
                 , testAssertTrue (length refusedReplies == 2 && all refused refusedReplies)
-                , testAssertTrue (refused invalid && refused drift && refused seedDrift)
+                , testAssertTrue (refused invalid)
+                , testAssertTrue (if pinned then refused drift && refused seedDrift
+                    else drift == Ok () && seedDrift == Ok ())
                 , testAssertEq retried (Ok file)
                 ]
         other -> pure (Just ("could not select the current validator operation: " ++ show other))
