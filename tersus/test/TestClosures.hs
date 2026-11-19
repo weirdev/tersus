@@ -76,6 +76,12 @@ testClosures =
                 , testCase "a parameter named fn is a variable, not a closure" (runs "struct P { items: List<Int> }; fn count(fn: &P) -> Int { return size(fn.items); }; p = P { items: push(push([], 1), 2) }; return count(&p);" 2)
                 , testCase "a variable named fn used bare" (runs "fn len(fn: &List<Int>) -> Int { return size(fn); }; xs = push(push([], 7), 8); return len(&xs);" 2)
                 , testCase "a closure over a type parameter of the enclosing function" (runs "fn countOf<T>(xs: &List<T>, n: Int) -> Int { f = fn() -> Int => size(xs) + n; return f(); }; return countOf(push(push([], 1), 2), 10);" 12)
+                , TestCase "many functions with lets and fn parameters" $ do
+                    let defs = concat [ "fn f" ++ show i ++ "(fn: &List<Int>) -> Int { let a = size(fn); let b = a + " ++ show i ++ "; return b; }; " | i <- [1 .. 40 :: Int] ]
+                        calls = concat [ "f" ++ show i ++ "(&xs) + " | i <- [1 .. 40 :: Int] ]
+                        src = defs ++ "xs = push(push([], 1), 2); return " ++ calls ++ "0;"
+                        expected = sum [ 2 + i | i <- [1 .. 40 :: Int] ]
+                    pure (runs src expected)
                 , TestCase "a closure across modules" $ do
                     program <-
                         programFromFiles
