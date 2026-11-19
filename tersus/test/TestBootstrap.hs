@@ -2,7 +2,7 @@ module TestBootstrap (testBootstrap) where
 
 import Control.Exception (bracket)
 import Data.Char (isHexDigit)
-import Data.List (sort)
+import Data.List (isInfixOf, isPrefixOf, sort)
 import System.Directory (createDirectory, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, doesDirectoryExist, doesFileExist)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
@@ -17,7 +17,10 @@ import qualified TersusParser
 import Seed (frontendSeedHash, parserSeedHash, parserSeedSha256, parserSeedUrl)
 import Bootstrap
 import Cli (Command (..), makesIr)
-import MirData (writeProgram)
+import qualified Data.Map.Strict as Map
+import Mir (Program (..), progStorage)
+import MirData (writeOwnedProgram)
+import Types (Arg (..), OwnershipFacts (..), Storage (..), Type (..), instanceName)
 import Pipeline (ownedSource)
 import Hash (fingerprint)
 import MirHousekeeping (Tool (..), emitterEntry, emitterOwnedProgram, ownedToolWith, ownershipTool)
@@ -158,17 +161,39 @@ bootstrap = do
             (Ok owned0, Ok owned1)
                 | owned0 /= owned1 -> pure ["stage 0 and stage 1 own the emitter differently"]
                 | otherwise -> do
-                    irZero <- emitWith zero (writeProgram owned0)
-                    irOne <- emitWith one (writeProgram owned1)
+                    irZero <- emitOwned zero owned0
+                    irOne <- emitOwned one owned1
                     pinned <- case irOne of
                         Ok text -> isPinnedSeed text
                         Error _ -> pure True
-                    pure ([ "the emitter: stage 1 " ++ describe irOne irZero | not (sameIr irOne irZero) ] ++ [ "the emitter's IR is not the seed pinned by bootstrap/emitter.sha256" | not pinned ])
+                    pure ([ "the emitter: stage 1 " ++ describe irOne irZero | not (sameIr irOne irZero) ] ++ [ "the emitter's IR is not the seed pinned by bootstrap/emitter.sha256" | not pinned ]
+                        ++ [ e | Ok text <- [irOne], Just e <- [byteListDrop owned1 text] ])
         sameIr (Ok a) (Ok b) = a == b
         sameIr _ _ = False
         describe (Ok text) (Ok expected) = "wrote " ++ show (length text) ++ " bytes for " ++ show (length expected) ++ firstDifference text expected
         describe (Error e) _ = "failed: " ++ take 300 e
         describe _ (Error e) = "stage 0 failed: " ++ take 300 e
+
+-- The drop of the emitter's byte lists calls their checked Drop: an emitter given its owned MIR without the facts writes an empty
+-- one, and leaks every list it makes
+byteListDrop :: Program -> String -> Maybe String
+byteListDrop program ir = case progOwnership program >>= Map.lookup list >>= ownershipDrop of
+    Nothing -> Just ("the owned emitter has no checked Drop of " ++ list)
+    Just (_, f)
+        | not (Map.member f (progFunctions program)) -> Just ("the owned emitter has no function " ++ f ++ ", the checked Drop of " ++ list)
+        | otherwise -> case break (("define internal void @\"drop." ++ list ++ "\"(") `isPrefixOf`) (lines ir) of
+            (_, []) -> Just ("the emitter's IR has no drop of " ++ list)
+            (_, _ : body)
+                | any (("call i64 @\"fn." ++ f ++ "\"") `isInfixOf`) (takeWhile (/= "}") body) -> Nothing
+                | otherwise -> Just ("the emitter's drop of " ++ list ++ " does not call its checked Drop " ++ f)
+  where
+    list = instanceName (storageList (progStorage program)) [ArgType TByte]
+
+-- The IR an emitter writes for owned MIR, given with its checked ownership facts as Bootstrap gives it
+emitOwned :: FilePath -> Program -> IO (Result String String)
+emitOwned emitter program = case writeOwnedProgram program of
+    Error e -> pure (Error e)
+    Ok text -> emitWith emitter text
 
 isPinnedSeed :: String -> IO Bool
 isPinnedSeed ir = do
@@ -200,7 +225,7 @@ cache zero one = do
                     ir <- tersusLlvm source
                     expected <- case ownedSource source of
                         Error e -> pure (Error e)
-                        Ok owned -> emitWith one (writeProgram owned)
+                        Ok owned -> emitOwned one owned
                     afterNames <- sort <$> listDirectory directory
                     after <- mapM (getModificationTime . (directory </>)) names
                     pure $ case (ir, expected) of
