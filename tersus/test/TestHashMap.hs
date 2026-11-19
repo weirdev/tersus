@@ -62,4 +62,11 @@ testHashMap =
                 , testCase "a key type without Hash is refused" (pipelineRejected "struct Plain { x: Int }; impl Clone for Plain { }; m = HashMap::new().insert(Plain { x: 1 }, 2); return m.size();" "needs K to implement Hash")
                 , testCase "the count after insert is bounded" (pipelineValid "fn addOne(m: HashMap<Int, Int>, k: Int, v: Int) -> Int [{ }] [{ affirm return >= size(m); affirm return <= size(m) + 1; }] { return m.insert(k, v).size(); }; return 0;")
                 ]
+            , TestList
+                "higher-order functions"
+                [ testCase "fold sums the values" (pipelineRuns "m = HashMap::new().insert(1, 10).insert(2, 20).insert(3, 30); return hashMapFold(m, 0, fn(acc, k, v) => acc + (*v));" (VInt 60))
+                , testCase "fold over keys and values" (pipelineRuns "m = HashMap::new().insert(1, 10).insert(2, 20); return hashMapFold(m, 0, fn(acc, k, v) => acc + (*k) * 100 + (*v));" (VInt 330))
+                , testCase "forEach visits every entry" (pipelineRuns "m = HashMap::new().insert(1, 10).insert(2, 20); return hashMapForEach(m, fn(k, v) => 0) * 10 + m.size();" (VInt 22))
+                , testCase "retainIf keeps what passes" (pipelineRuns "m = HashMap::new().insert(1, 10).insert(2, 20).insert(3, 30); kept = hashMapRetainIf(m, fn(k, v) => (*v) > 15); return kept.size() * 1000 + hashMapFold(kept, 0, fn(acc, k, v) => acc + (*v));" (VInt 2050))
+                ]
             ]
