@@ -116,8 +116,9 @@ jobs:
       - name: Test
         env:
           # (sequential GC: the compiler's processes are mostly serial, and a parallel collector's threads only spin
-          # beside the other processes of the runner)
-          GHCRTS: -A16m -qg
+          # beside the other processes of the runner; the host runner also compacts the oldest generation in place,
+          # since copying it takes the elaborator's validation to about 17 GiB, more than the runner's 16 GB)
+          GHCRTS: ${{ matrix.shard == 'host' && '-A16m -qg -c' || '-A16m -qg' }}
           TERSUS_TEST_RTS_STATS: '1'
         run: |
           python3 dev/ci_resources.py
