@@ -31,7 +31,7 @@ import qualified Modules
 import PreludeSource (parserPackageFiles)
 import qualified Mir as M
 import MirEval
-import MirHousekeeping (verifyProgram, validationEntry)
+import MirHousekeeping (eraseGhosts, toolProgram, validationEntry, verifyProgram)
 import Pipeline
 import SelfHostedMir (encode, validateMirSubset, verdictProved)
 import PackageCompile (compileModulesLinked)
@@ -714,8 +714,7 @@ testStdlibInTersus =
 testMirSelfHosted :: Test
 testMirSelfHosted = TestList "testMirSelfHosted"
     [ TestList name
-        [ TestCase (show queryIndex) $ do
-            compiled <- bootstrapFromFile validationEntry
+        [ TestCase (show queryIndex) $
             pure $ case compiled of
                 Error e -> Just ("Could not compile the Tersus validator: " ++ e)
                 Ok program -> snd (selfHostedQueryFamilies program !! familyIndex) !! queryIndex
@@ -723,6 +722,9 @@ testMirSelfHosted = TestList "testMirSelfHosted"
         ]
     | (familyIndex, (name, count)) <- zip [0 ..] selfHostedFamilyManifest
     ]
+  where
+    -- The on-disk test cache does not preserve the validator's shared names.
+    compiled = toolProgram validationEntry `bindResult` eraseGhosts
 
 selfHostedFamilyManifest :: [(String, Int)]
 selfHostedFamilyManifest =

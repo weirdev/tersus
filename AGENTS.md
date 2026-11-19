@@ -243,8 +243,9 @@ Work from `tersus/`.
   samples without splitting package declaration contexts; all emitter
   helper files share one prepared-parser comparison.
   Selecting an original name selects all its batches; shard filters intersect
-  the full-suite assignment. Self-hosted batches share one shard and its full
-  validated-program cache; Native memory-limit cases stay ordered in one batch.
+  the full-suite assignment. Self-hosted batches stay on one shard, but build
+  the interpreted validator in each process to preserve sharing in its program.
+  Native memory-limit cases stay ordered in one batch.
   `testBootstrap` remains one private cold group. Parser bootstrap registers
   `testParserBootstrap:1/2` for the genuine cold/refusal/reuse checks and
   `testParserBootstrap:2/2` for repair and fixpoint checks from independent
