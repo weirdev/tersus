@@ -93,7 +93,7 @@ fn hashSetRetainIf<K: Hash + Eq + Clone, F: Fn(&K) -> Bool>(s: HashSet<K>, func:
         while i < size(bucket) [{ affirm i >= 0; affirm i <= size(bucket); }] shrinks size(bucket) - i {
             e = &get(bucket, i);
             k = &(*e).key;
-            if func(k) { out = out.insert(clone(*k)); };
+            if func(k) { out = out.insert((*k).clone()); };
             i = i + 1;
         };
         b = b + 1;

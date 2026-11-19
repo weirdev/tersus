@@ -182,7 +182,7 @@ fn hashMapRetainIf<K: Hash + Eq + Clone, V: Clone, F: Fn(&K, &V) -> Bool>(m: Has
         i = 0;
         while i < size(bucket) [{ affirm i >= 0; affirm i <= size(bucket); }] shrinks size(bucket) - i {
             e = &get(bucket, i);
-            if func(&(*e).key, &(*e).value) { out = out.insert(clone((*e).key), clone((*e).value)); };
+            if func(&(*e).key, &(*e).value) { out = out.insert((*e).key.clone(), (*e).value.clone()); };
             i = i + 1;
         };
         b = b + 1;
