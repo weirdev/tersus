@@ -113,8 +113,7 @@ refusalMessage physical program name (status, block, step) = case status of
 -- with the verdicts validateCompiled keeps on disk: what each function refused, or that the validator could not
 -- check it, in the program's order.
 --
--- Keeping every serialized proof text at once exhausted the Host runner.
--- Complete each batch, including its lazy answers, before admitting another.
+-- Each worker serializes and releases its function's proof text; keeping every text exhausted the Host runner.
 validationRefusals :: M.Program -> IO (Result [String] String)
 validationRefusals program = case encode program of
     Left what -> pure (Error (unmodeledFeature what))
