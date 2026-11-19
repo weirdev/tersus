@@ -19,11 +19,10 @@ validator, shared cache and lowered MIR tests are each split into four batches. 
 `--shard k/n` intersects these selections with the full-suite shard assignment.
 All original leaf actions and prefix labels are retained. Native memory-limit
 cases stay together because they execute one shared file. Self-hosted query
-families share `TestHarness.compileOnce`, which validates the full validator
-source and caches its lossless program across processes. Their four batches
-stay on one shard to avoid repeating that cold compilation on every runner;
-other batches remain individually shardable. The bootstrap test still runs as
-a single group with its own cold cache.
+batches stay on one shard. Each batch builds the interpreted validator in its
+own process to preserve sharing that the disk cache does not retain. Other
+batches remain individually shardable. The bootstrap test still runs as a
+single group with its own cold cache.
 
 Package test compilations use a lossless generic binary cache, retaining every
 contract, proof, ghost, invariant and generic field. Keys include the selected
