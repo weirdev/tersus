@@ -8,8 +8,9 @@ import Bootstrap (cachedSourceEmitter, cachedSeed, emitWith, seedSha256)
 import EmitterProvenance (ordinaryBuildProfile, emitterBuildDescription, emitterSourcesMatch, checkEmitterOutputs)
 import Seed (emitterSeedFile)
 import PreludeSource (emitterSourceFiles)
-import MirData (writeProgram)
+import MirData (writeOwnedProgram)
 import MirHousekeeping (emitterConstruction, emitterEntry, emitterOwnedProgram, ownedToolWith)
+import Mir (Program)
 import Utils
 
 main :: IO ()
@@ -28,7 +29,7 @@ main = do
                     owned <- ownedToolWith stageOne emitterEntry
                     case owned of
                         Error e -> fail ("stage 1 owning the emitter: " ++ e)
-                        Ok program -> emitWith stageOne (writeProgram program) >>= written output
+                        Ok program -> emitOwned stageOne program >>= written output
         ["emit", output] -> regenerate >>= written output
         ["certify", output, association] -> do
             before <- emitterConstruction
@@ -70,8 +71,8 @@ regenerate = do
                     | a /= b -> pure (Error "stage 0 and source stage 1 own the emitter differently")
                     | b /= c -> pure (Error "the owned emitter pipeline is not source stage 1's")
                     | otherwise -> do
-                        ir0 <- emitWith stageZero (writeProgram a)
-                        ir1 <- emitWith stageOne (writeProgram b)
+                        ir0 <- emitOwned stageZero a
+                        ir1 <- emitOwned stageOne b
                         pure $ case (ir0, ir1) of
                             (Error e, _) -> Error ("stage 0 emitting the emitter: " ++ e)
                             (_, Error e) -> Error ("source stage 1 emitting the emitter: " ++ e)
@@ -80,6 +81,13 @@ regenerate = do
                 (Error e, _, _) -> pure (Error ("stage 0 owning the emitter: " ++ e))
                 (_, Error e, _) -> pure (Error ("source stage 1 owning the emitter: " ++ e))
                 (_, _, Error e) -> pure (Error ("the owned emitter: " ++ e))
+
+-- (the owned emitter is given with its checked ownership facts, as Bootstrap.stageOne gives it: without them it has no drop
+-- for an instance of a checked type)
+emitOwned :: FilePath -> Program -> IO (Result String String)
+emitOwned stage program = case writeOwnedProgram program of
+    Error e -> pure (Error e)
+    Ok text -> emitWith stage text
 
 written :: FilePath -> Result String String -> IO ()
 written _ (Error e) = fail e
