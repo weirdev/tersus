@@ -727,6 +727,24 @@ return apply(&plusN, 5) * 100 + twice(&mut counter);    // 1512
 - **Contracts.** A clause of the closure's input contract that mentions only captured variables, not its parameters, is proved where the closure is made and assumed in its body (it is the closure struct's invariant, so for an `FnMut` closure it must hold again after each call). Clauses about parameters are checked against the bound's contract where the closure is given, as for a function object.
 - **Calling directly.** A closure held in a local is called as `f(args)`, with the receiver its kind says. The closure's struct is `Clone` when every capture is `Clone` and none is borrowed for updating, and `Copy` when every capture is `Copy`, so the same closure can be given to two calls.
 
+### Higher-order functions
+
+The library has higher-order functions over lists and arrays, as free functions in the way `size` and `get` are free functions (in `lib/clone.tersus`, which every program has unless it declares `Clone` itself). Each takes its closure through an `Fn` bound and clones each element out of the sequence to give to it, so the element type is `Clone`:
+
+```tersus
+fn map<T: Clone, U, F: Fn(T) -> U>(xs: &List<T>, f: &F) -> List<U> [{ }] [{ affirm size(return) = size(xs); }];
+fn filter<T: Clone, F: Fn(T) -> Bool>(xs: &List<T>, f: &F) -> List<T> [{ }] [{ affirm size(return) <= size(xs); }];
+fn fold<T: Clone, A, F: Fn(A, T) -> A>(xs: &List<T>, init: A, f: &F) -> A;
+fn any<T: Clone, F: Fn(T) -> Bool>(xs: &List<T>, f: &F) -> Bool;
+fn all<T: Clone, F: Fn(T) -> Bool>(xs: &List<T>, f: &F) -> Bool;
+fn find<T: Clone, F: Fn(T) -> Bool>(xs: &List<T>, f: &F) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(xs); }];
+fn sortBy<T: Clone, F: Fn(T, T) -> Bool>(xs: &List<T>, less: &F) -> List<T> [{ }] [{ affirm size(return) = size(xs); }];
+```
+
+What a caller can prove is said without calling the closure (a contract may not call one): `map` keeps the size, `filter` keeps at most the size, `find` gives the index of the first element that passes or -1, and `sortBy` (a bubble sort by the `less` closure) keeps the size. The array forms are named for the array, since a function name is defined once: `mapArray` and `sortArrayBy` give an `Array<U, n>` and an `Array<T, n>` of the same size, `filterArray` gives a `List<T>`, and `foldArray`, `anyArray`, `allArray` and `findArray` are the array forms of the rest, with the same contracts. See `examples/higher_order.tersus`.
+
+`HashMap` and `HashSet` have the same three as free functions in their libraries, in bucket order as `entries()` and `elements()` are: `hashMapForEach(map, f)` and `hashSetForEach(set, f)` take an `FnMut(&K, &V) -> Int` (for a set, `FnMut(&K) -> Int`) through `&mut`, call it on every entry or key and give the count; a read-only closure is given as one too. `hashMapFold(map, init, f)` and `hashSetFold(set, init, f)` take an `Fn(A, &K, &V) -> A` (for a set, `Fn(A, &K) -> A`) and give the fold of it from the initial value. `hashMapRetainIf(map, f)` and `hashSetRetainIf(set, f)` take an `Fn(&K, &V) -> Bool` (for a set, `Fn(&K) -> Bool`), take the map or set by value and give a new one of what passes; they promise no count, as `entries()` promises nothing of what a scan finds. They are free functions and not methods because a closure argument of a method does not take its types from the method's bounds, so a method form would make every caller write the closure's parameter types, and the entry type of a map cannot be written where a program is. An updating closure given to `hashMapForEach` or `hashSetForEach` is refused by the validator today (`an operation in hashMapForEach[...]` is not modelled yet), so `forEach` is for read-only closures until that is modelled; `hashMapFold` is the way to accumulate over a map.
+
 ### Variadic functions
 
 A function can take any number of trailing arguments, each of its own type, through a pack of types:
