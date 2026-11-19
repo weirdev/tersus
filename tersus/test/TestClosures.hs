@@ -92,4 +92,23 @@ testClosures =
                             ]
                     pure (testAssertEq (program `bindResult` MirEval.runProgram) (Ok (Just (MirEval.MInt 15))))
                 ]
+            , TestList
+                "higher-order library"
+                [ testCase "map doubles a list" (runs "xs = push(push(push([], 1), 2), 3); ys = map(xs, fn(x) => x * 2); return get(ys, 2) * 10 + size(ys);" 63)
+                , testCase "map with a capturing closure" (runs "factor = 3; xs = push(push([], 1), 2); ys = map(xs, fn(x) => x * factor); return get(ys, 1) * 10 + size(ys);" 62)
+                , testCase "map with a named function" (runs "fn double(x: Int) -> Int { return x * 2; }; xs = push(push([], 1), 2); ys = map(xs, double); return get(ys, 1) * 10 + size(ys);" 42)
+                , testCase "a caller proves with map's size contract" (runs "fn sameSize(xs: &List<Int>) -> Int [{ }] [{ affirm return = size(xs); }] { return size(map(xs, fn(x) => x * 2)); }; return sameSize(push(push([], 1), 2));" 2)
+                , testCase "filter keeps what passes" (runs "xs = push(push(push([], 1), 2), 3); ys = filter(xs, fn(x) => x > 1); return size(ys) * 10 + get(ys, 0);" 22)
+                , testCase "a caller proves with filter's size contract" (runs "fn keptAtMost(xs: &List<Int>) -> Int [{ }] [{ affirm return <= size(xs); }] { return size(filter(xs, fn(x) => x > 0)); }; return keptAtMost(push(push([], 1), 2));" 2)
+                , testCase "fold sums and multiplies" (runs "xs = push(push(push([], 1), 2), 3); return fold(xs, 0, fn(acc, x) => acc + x) * 10 + fold(xs, 1, fn(acc, x) => acc * x);" 66)
+                , testCase "fold over an empty list is the init" (runs "xs = []; return fold(xs, 41, fn(acc: Int, x: Int) => acc + x) + size(xs);" 41)
+                , testCase "any and all" (runs "xs = push(push(push([], 1), 2), 3); r = 0; if any(xs, fn(x) => x > 2) { r = r + 10; }; if all(xs, fn(x) => x > 0) { r = r + 1; }; if any(xs, fn(x) => x > 9) { r = r + 100; }; return r;" 11)
+                , testCase "find gives the index or -1" (runs "xs = push(push(push([], 1), 2), 3); return find(xs, fn(x) => x = 2) * 10 + find(xs, fn(x) => x > 9) + 1;" 10)
+                , testCase "sortBy sorts ascending and descending" (runs "xs = push(push(push([], 3), 1), 2); up = sortBy(xs, fn(a, b) => a < b); down = sortBy(xs, fn(a, b) => a > b); return get(up, 0) * 1000 + get(up, 2) * 100 + get(down, 0) * 10 + size(up);" 1333)
+                , testCase "an updating closure does not meet map's Fn bound" (rejected "xs = push([], 1); count = 0; ys = map(xs, fn(x) -> Int { count = count + 1; return x; }); return 0;" "is FnMut and cannot be given where Fn(...) is wanted")
+                , testCase "mapArray doubles an array" (runs "a = #[1, 2, 3]; doubled = mapArray(a, fn(x) => x * 2); return get(doubled, 2) * 10 + size(doubled);" 63)
+                , testCase "filterArray gives a list" (runs "a = #[1, 2, 3]; big = filterArray(a, fn(x) => x > 1); return size(big) * 10 + get(big, 0);" 22)
+                , testCase "foldArray, findArray, anyArray, allArray" (runs "a = #[1, 2, 3]; r = foldArray(a, 0, fn(acc, x) => acc + x) * 100 + findArray(a, fn(x) => x = 2) * 10; if anyArray(a, fn(x) => x > 2) { r = r + 2; }; if allArray(a, fn(x) => x > 0) { r = r + 1; }; return r;" 613)
+                , testCase "sortArrayBy sorts an array" (runs "a = #[3, 1, 2]; sorted = sortArrayBy(a, fn(x, y) => x < y); return get(sorted, 0) * 100 + get(sorted, 2) * 10 + size(sorted);" 133)
+                ]
             ]
