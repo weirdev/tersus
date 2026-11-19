@@ -11,7 +11,7 @@
 -- library it is built with. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
+module ValidatorNative (withValidatorOperation, validateCompiled, validateCompiledUncached, validationRefusals, inBatches, validateLibrary, validationCacheHits, withVerdictLock, inParallel, cachedBootstrapEmitter, cachedBootstrapSourceEmitter, validatorKey, certificateKey, prepareTexts, raiseStack) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, takeMVar, withMVar)
 import Data.List (isSuffixOf, sortOn)
@@ -35,6 +35,8 @@ import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, cachedSourceEmitter, cachedUncheckedValidatorFrom,
     emitterIdentity, guardEmitterDirectory, cachedEmitterContentKeyFor, prepareValidatorFor, nativeStorage, prepareBootstrap,
     cachedPreparedInput)
+import EmitterProvenance (workingSourcesMatch)
+import PreludeSource (emitterSourceFiles)
 import Native (cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, availableProcessors, parallelBuilds, runCommandWithInputFull, raiseStack)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
 import Syntax (parseImplCheckName)
@@ -172,11 +174,52 @@ verdicts exe False texts = do
     pure $ case [e | Error e <- checked] of
         e : _ -> Error e
         [] -> Ok [Just verdict | Ok verdict <- checked]
-verdicts exe True texts = do
-    namespace <- validatorKey
-    case namespace of
+verdicts _ True texts = do
+    selected <- emitterIdentity
+    case selected of
         Error e -> pure (Error e)
-        Ok key -> cachedVerdicts key exe texts
+        Ok producer -> do
+            namespace <- validatorKeyFor producer
+            case namespace of
+                Error e -> pure (Error e)
+                Ok key -> withValidatorOperation producer key (\exe -> cachedVerdicts key exe texts)
+
+-- Keep misses on one certified namespace; source drift must refuse, not mix producers.
+withValidatorOperation :: (Bool, String, FilePath) -> String -> (IO (Result FilePath String) -> IO (Result a String)) -> IO (Result a String)
+withValidatorOperation producer key use = guardEmitterDirectory producer $ do
+    saved <- newMVar Nothing
+    let current = do
+            let (pinned, _, _) = producer
+            same <- if pinned then workingSourcesMatch emitterSourceFiles else pure True
+            selected <- if same then emitterIdentity else pure (Error "validator source changed during validation")
+            case selected of
+                Error e -> pure (Error e)
+                Ok actual | actual /= producer -> pure (Error "validator producer changed during validation")
+                Ok _ -> do
+                    namespace <- validatorKeyFor producer
+                    pure $ case namespace of
+                        Ok actual | actual == key -> Ok ()
+                        Error e -> Error e
+                        _ -> Error "validator certificate changed during validation"
+        acquire = guardEmitterDirectory producer $ modifyMVar saved $ \previous -> do
+            present <- case previous of
+                Just exe -> doesFileExist exe
+                Nothing -> pure False
+            result <- case previous of
+                Just exe | present -> pure (Ok exe)
+                _ -> do
+                    fresh <- current
+                    case fresh of
+                        Error e -> pure (Error e)
+                        Ok () -> validatorExecutableFor producer
+            let keep = case result of Ok exe -> Just exe; Error _ -> Nothing
+            pure (keep, result)
+    result <- use acquire
+    case result of
+        Error e -> pure (Error e)
+        Ok answer -> do
+            fresh <- current
+            pure $ case fresh of Error e -> Error e; Ok () -> Ok answer
 
 cachedVerdicts :: String -> IO (Result FilePath String) -> [String] -> IO (Result [Maybe (Int, Int, Int)] String)
 cachedVerdicts namespace exe texts = do
@@ -407,16 +450,19 @@ validatorExecutable = do
     selected <- emitterIdentity
     case selected of
         Error e -> pure (Error e)
-        Ok producer -> guardEmitterDirectory producer $ do
-            key <- validatorKeyFor producer
-            case key of
+        Ok producer -> validatorExecutableFor producer
+
+validatorExecutableFor :: (Bool, String, FilePath) -> IO (Result FilePath String)
+validatorExecutableFor producer = guardEmitterDirectory producer $ do
+    key <- validatorKeyFor producer
+    case key of
+        Error e -> pure (Error e)
+        Ok identity -> do
+            existing <- cachedProgramIfPresent "validator" identity
+            case existing of
                 Error e -> pure (Error e)
-                Ok identity -> do
-                    existing <- cachedProgramIfPresent "validator" identity
-                    case existing of
-                        Error e -> pure (Error e)
-                        Ok (Just exe) -> pure (Ok exe)
-                        Ok Nothing -> buildCheckedValidatorFor producer
+                Ok (Just exe) -> pure (Ok exe)
+                Ok Nothing -> buildCheckedValidatorFor producer
 
 buildCheckedValidatorFor :: (Bool, String, FilePath) -> IO (Result FilePath String)
 buildCheckedValidatorFor producer = guardEmitterDirectory producer $ do

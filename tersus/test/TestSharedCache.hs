@@ -37,7 +37,7 @@ import GHC.Clock (getMonotonicTime)
 import qualified PackageCompile
 import qualified MirHousekeeping
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime, setPermissions, withCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, getCurrentDirectory, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setCurrentDirectory, setModificationTime, setPermissions, withCurrentDirectory)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
@@ -1406,6 +1406,63 @@ interactiveControlC = withNativeHome $ \home -> do
     (code, output, errors) <- runCommandWithInputFull "python3" [scriptPath, self, irPath] ""
     pure (if code == ExitSuccess then Nothing else Just (output ++ errors))
 
+validatorOperation :: IO TestResult
+validatorOperation = withToolsCacheHome $ \home -> do
+    producer <- MirHousekeeping.emitterIdentity
+    namespace <- ValidatorNative.validatorKey
+    case (producer, namespace) of
+        (Ok selected, Ok key) -> do
+            let file = home </> "tersus" </> ("validator-" ++ key)
+                wrongSeed = home </> "wrong-seed"
+            writeFile wrongSeed "not the selected seed"
+            first <- ValidatorNative.withValidatorOperation selected key $ \get -> do
+                one <- get
+                rest <- withCacheVariable "TERSUS_SEED_FILE" wrongSeed (sequence (replicate 2 get))
+                pure (Ok (one : rest))
+            concurrent <- ValidatorNative.withValidatorOperation selected key $ \get -> do
+                one <- get
+                paths <- withCacheVariable "TERSUS_SEED_FILE" wrongSeed (parallelBuilds (replicate 8 get))
+                pure (Ok (one : paths))
+            lazyHit <- bracket (renameFile file (file ++ ".held"))
+                (\_ -> renameFile (file ++ ".held") file) $ \_ -> do
+                    answer <- ValidatorNative.withValidatorOperation selected key (\_ -> pure (Ok ()))
+                    absent <- not <$> doesFileExist file
+                    pure (mapResult (const absent) answer)
+            invalidReplies <- newIORef []
+            invalid <- ValidatorNative.withValidatorOperation selected (key ++ "wrong") $ \get -> do
+                paths <- sequence (replicate 2 get)
+                writeIORef invalidReplies paths
+                pure (Ok ())
+            refusedReplies <- readIORef invalidReplies
+            let changed = home </> "changed-working-source"
+            createDirectoryIfMissing True (changed </> "src")
+            drift <- bracket getCurrentDirectory setCurrentDirectory $ \_ ->
+                ValidatorNative.withValidatorOperation selected key $ \get -> do
+                    path <- get
+                    setCurrentDirectory changed
+                    pure (mapResult (const ()) path)
+            writeFile (home </> "wrong-seed") "not the selected seed"
+            seedDrift <- bracket (lookupEnv "TERSUS_SEED_FILE")
+                (maybe (unsetEnv "TERSUS_SEED_FILE") (setEnv "TERSUS_SEED_FILE")) $ \_ ->
+                    ValidatorNative.withValidatorOperation selected key $ \get -> do
+                        path <- get
+                        setEnv "TERSUS_SEED_FILE" (home </> "wrong-seed")
+                        pure (mapResult (const ()) path)
+            retried <- ValidatorNative.withValidatorOperation selected key (\get -> get)
+            let pathsSame answer count = case answer of
+                    Ok paths -> length paths == count && all (== Ok file) paths
+                    _ -> False
+                refused answer = case answer of Error _ -> True; _ -> False
+            pure $ firstFailure
+                [ testAssertTrue (pathsSame first 3)
+                , testAssertTrue (pathsSame concurrent 9)
+                , testAssertEq lazyHit (Ok True)
+                , testAssertTrue (length refusedReplies == 2 && all refused refusedReplies)
+                , testAssertTrue (refused invalid && refused drift && refused seedDrift)
+                , testAssertEq retried (Ok file)
+                ]
+        other -> pure (Just ("could not select the current validator operation: " ++ show other))
+
 validatorFlagNamespace :: IO TestResult
 validatorFlagNamespace = withCacheHome $ \home -> do
     let hashes = [ValidatorNative.certificateKey (MirHousekeeping.ownedContentKey "emitter-producer" "owned-input" flags) ["library-check"] ["source-check"]
@@ -1841,6 +1898,7 @@ testVerdictLocks = TestList "testVerdictLocks"
     , TestCase "cancelling a lock holder releases the lock" verdictCancellation
     , TestCase "processes wait for the same verdict lock" verdictProcesses
     , TestCase "a killed process releases the verdict lock" verdictKilledProcess
+    , TestCase "one validation operation lazily shares only its certified executable" validatorOperation
     , TestCase "validator build flags isolate the verdict namespace" validatorFlagNamespace
     , TestCase "parallel checks force their texts before the workers start" parallelChecksForceTextsFirst
     , TestCase "work is admitted a bounded batch at a time, in order" boundedBatches
