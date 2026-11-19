@@ -41,4 +41,10 @@ testHashSet =
                 , testCase "a key type without Clone is refused" (pipelineRejected "struct Key { n: Int }; impl Eq for Key { }; impl Hash for Key { fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] { return 1; }; }; s = HashSet::new().insert(Key { n: 1 }); return size(s.elements());" "<HashSet>::insert needs K to implement Clone, and Key does not")
                 , testCase "the set cannot be moved while an elementRef is live" (pipelineRejected "fn bad(s: HashSet<Int>) -> Int [{ affirm size(s.map.buckets) >= 1; affirm findNth(s.map.buckets, 0).1 >= 0; }] [{ }] { k = s.elementRef(0); s = s.insert(9); return *k; }; return 0;" "cannot be moved while that borrow is live")
                 ]
+            , TestList
+                "higher-order functions"
+                [ testCase "fold sums the keys" (pipelineRuns "s = HashSet::new().insert(1).insert(2).insert(3); return hashSetFold(s, 0, fn(acc, k) => acc + (*k));" (VInt 6))
+                , testCase "forEach visits every key" (pipelineRuns "s = HashSet::new().insert(1).insert(2); return hashSetForEach(s, fn(k) => 0) * 10 + s.size();" (VInt 22))
+                , testCase "retainIf keeps what passes" (pipelineRuns "s = HashSet::new().insert(1).insert(2).insert(3); kept = hashSetRetainIf(s, fn(k) => (*k) > 1); r = kept.size() * 100 + hashSetFold(kept, 0, fn(acc, k) => acc + (*k)); return r;" (VInt 205))
+                ]
             ]

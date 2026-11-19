@@ -48,6 +48,57 @@ impl<K: Hash + Eq> HashSet<K> {
         e = &get(bucket, loc.1);
         return &(*e).key;
     };
+
+};
+
+// Higher-order functions over a set, as free functions (as the map ones are), in bucket order
+
+fn hashSetForEach<K: Hash + Eq, F: FnMut(&K) -> Int>(s: &HashSet<K>, func: &mut F) -> Int [{ }] [{ }] {
+    b = 0;
+    while b < size(s.map.buckets) [{ affirm b >= 0; affirm b <= size(s.map.buckets); }] shrinks size(s.map.buckets) - b {
+        bucket = &get(s.map.buckets, b);
+        i = 0;
+        while i < size(bucket) [{ affirm i >= 0; affirm i <= size(bucket); }] shrinks size(bucket) - i {
+            e = &get(bucket, i);
+            func(&(*e).key);
+            i = i + 1;
+        };
+        b = b + 1;
+    };
+    return s.map.count;
+};
+
+fn hashSetFold<K: Hash + Eq, A, F: Fn(A, &K) -> A>(s: &HashSet<K>, init: A, func: &F) -> A [{ }] [{ }] {
+    acc = init;
+    b = 0;
+    while b < size(s.map.buckets) [{ affirm b >= 0; affirm b <= size(s.map.buckets); }] shrinks size(s.map.buckets) - b {
+        bucket = &get(s.map.buckets, b);
+        i = 0;
+        while i < size(bucket) [{ affirm i >= 0; affirm i <= size(bucket); }] shrinks size(bucket) - i {
+            e = &get(bucket, i);
+            acc = func(acc, &(*e).key);
+            i = i + 1;
+        };
+        b = b + 1;
+    };
+    return acc;
+};
+
+fn hashSetRetainIf<K: Hash + Eq + Clone, F: Fn(&K) -> Bool>(s: HashSet<K>, func: &F) -> HashSet<K> [{ }] [{ }] {
+    out = HashSet::new();
+    b = 0;
+    while b < size(s.map.buckets) [{ affirm b >= 0; affirm b <= size(s.map.buckets); }] shrinks size(s.map.buckets) - b {
+        bucket = &get(s.map.buckets, b);
+        i = 0;
+        while i < size(bucket) [{ affirm i >= 0; affirm i <= size(bucket); }] shrinks size(bucket) - i {
+            e = &get(bucket, i);
+            k = &(*e).key;
+            if func(k) { out = out.insert(clone(*k)); };
+            i = i + 1;
+        };
+        b = b + 1;
+    };
+    return out;
 };
 
 impl<K: Hash + Eq + Clone> HashSet<K> {
@@ -64,6 +115,7 @@ impl<K: Hash + Eq + Clone> HashSet<K> {
     }] {
         return makeSet(self.map.insert(k, true));
     };
+
 
     // Every key of the set, in bucket order (which order that is says nothing about the keys)
     fn elements(self: &Self) -> List<K> [{ }] [{ }] {

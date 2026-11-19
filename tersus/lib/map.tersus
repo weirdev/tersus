@@ -139,6 +139,57 @@ fn makeMap<K, V>(buckets: List<List<Entry<K, V>>>, count: Int) -> HashMap<K, V> 
     return HashMap<K, V> { buckets: buckets, count: count };
 };
 
+// Higher-order functions over a map, as free functions: a closure argument of a method does not take
+// its types from the method's bounds, so these are written as the list ones are. Each is in bucket
+// order, as entries() is.
+
+fn hashMapForEach<K: Hash + Eq, V, F: FnMut(&K, &V) -> Int>(m: &HashMap<K, V>, func: &mut F) -> Int [{ }] [{ }] {
+    b = 0;
+    while b < size(m.buckets) [{ affirm b >= 0; affirm b <= size(m.buckets); }] shrinks size(m.buckets) - b {
+        bucket = &get(m.buckets, b);
+        i = 0;
+        while i < size(bucket) [{ affirm i >= 0; affirm i <= size(bucket); }] shrinks size(bucket) - i {
+            e = &get(bucket, i);
+            func(&(*e).key, &(*e).value);
+            i = i + 1;
+        };
+        b = b + 1;
+    };
+    return m.count;
+};
+
+fn hashMapFold<K: Hash + Eq, V, A, F: Fn(A, &K, &V) -> A>(m: &HashMap<K, V>, init: A, func: &F) -> A [{ }] [{ }] {
+    acc = init;
+    b = 0;
+    while b < size(m.buckets) [{ affirm b >= 0; affirm b <= size(m.buckets); }] shrinks size(m.buckets) - b {
+        bucket = &get(m.buckets, b);
+        i = 0;
+        while i < size(bucket) [{ affirm i >= 0; affirm i <= size(bucket); }] shrinks size(bucket) - i {
+            e = &get(bucket, i);
+            acc = func(acc, &(*e).key, &(*e).value);
+            i = i + 1;
+        };
+        b = b + 1;
+    };
+    return acc;
+};
+
+fn hashMapRetainIf<K: Hash + Eq + Clone, V: Clone, F: Fn(&K, &V) -> Bool>(m: HashMap<K, V>, func: &F) -> HashMap<K, V> [{ }] [{ }] {
+    out = HashMap::new();
+    b = 0;
+    while b < size(m.buckets) [{ affirm b >= 0; affirm b <= size(m.buckets); }] shrinks size(m.buckets) - b {
+        bucket = &get(m.buckets, b);
+        i = 0;
+        while i < size(bucket) [{ affirm i >= 0; affirm i <= size(bucket); }] shrinks size(bucket) - i {
+            e = &get(bucket, i);
+            if func(&(*e).key, &(*e).value) { out = out.insert(clone((*e).key), clone((*e).value)); };
+            i = i + 1;
+        };
+        b = b + 1;
+    };
+    return out;
+};
+
 // The bucket a key is in, of this many buckets
 fn indexFor<K: Hash>(buckets: Int, k: &K) -> Int [{ affirm buckets >= 1; }] [{ affirm return = Hash::hash(k) % buckets; affirm return >= 0; affirm return < buckets; }] {
     return Hash::hash(k) % buckets;
@@ -167,6 +218,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         bucket = &get(self.buckets, loc.0);
         return &get(bucket, loc.1);
     };
+
 };
 
 impl<K: Hash + Eq + Clone, V: Clone> HashMap<K, V> {
@@ -198,6 +250,7 @@ impl<K: Hash + Eq + Clone, V: Clone> HashMap<K, V> {
         r = self.lookupRef(k);
         return clone(*r);
     };
+
 
     // Every entry of the map, in bucket order (which order that is says nothing about the keys)
     fn entries(self: &Self) -> List<Entry<K, V>> [{ }] [{ }] {
