@@ -6,13 +6,13 @@ import Data.IORef (newIORef, modifyIORef', readIORef)
 import System.Directory (getTemporaryDirectory, removeFile, getPermissions, setPermissions, Permissions(..))
 import System.FilePath ((</>))
 import System.IO (openTempFile, hClose)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import System.Exit (ExitCode(..))
 import Mir
 import MirData (readLowered, readProgram, writeProgram, writeProgramWithGhosts, writeLowered)
-import MirHousekeeping (Tool(..), ownershipTool, monomorphizeWith, monomorphizeOwnershipWith)
+import MirHousekeeping (Tool(..), ownershipTool, monomorphizeWith, monomorphizeOwnershipWith, eraseGhosts, nativeProgram)
 import MirOwnershipData (ownershipInput, restoreOwnership)
 import Native (runWithInputFull)
 import qualified Syntax as S
@@ -223,6 +223,29 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
             ToolFailed e -> pure (Error e)
             ToolInterpreted _ -> pure (Error "Fn native output requires a native emitter")
 
+landedOwnershipReceipt :: IO Tool -> IO TestResult
+landedOwnershipReceipt tool = case lowerSourceUsing bootstrapLoader False True source `bindResult` eraseGhosts `bindResult` nativeProgram of
+    Error e -> pure (Just ("the landed generic refusal did not reach ownership: " ++ e))
+    Ok program -> do
+        raw <- compareRaw tool program
+        selected <- tool
+        case (selected, writeLowered (unit program)) of
+            (ToolNative exe, Ok input) -> do
+                (monoCode, monoText, monoErrors) <- runWithInputFull exe ("pass mono\n" ++ input)
+                (fusedCode, fusedText, fusedErrors) <- runWithInputFull exe ("pass mono-ownership\n" ++ input)
+                actual <- monomorphizeOwnershipWith tool program
+                pure (raw <> testAssertEq monoCode ExitSuccess <> testAssertEq monoErrors ""
+                    <> testAssertTrue (case readLowered monoText of Ok _ -> True; Error _ -> False)
+                    <> testAssertEq fusedCode ExitSuccess
+                    <> testAssertEq fusedText (monoText ++ "1\n")
+                    <> testAssertTrue ("still looks at a part of it that holds a value with a drop" `isInfixOf` fusedErrors)
+                    <> testAssertTrue (case actual of Error message -> "still looks at a part of it that holds a value with a drop" `isInfixOf` message; Ok _ -> False))
+            (ToolFailed e, _) -> pure (Just e)
+            (_, Error e) -> pure (Just e)
+            _ -> pure (Just "landed fused receipt requires a native tool")
+  where
+    source = "struct H { addr: Addr<Int>, xs: List<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl Drop for H { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl H { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, xs: [1, 2], blk: b }; }; }; struct W<T> { addr: Addr<Int>, x: T, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; affirm filled(blk, 0) = false; }]; impl<T> Drop for W<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> W<T> { fn new(x: T) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, x: x, blk: b }; }; }; trait Sz { fn sz(self: &Self) -> Int; }; impl Sz for H { fn sz(self: &Self) -> Int { return size(self.xs); }; }; fn f<T: Sz>(w: W<T>, w2: W<T>) -> Int { v = w.x; w = w2; return v.sz(); }; return f(W::new(H::new()), W::new(H::new()));"
+
 testMirMonoOwnership :: Test
 testMirMonoOwnership = testMirMonoOwnershipUsing ownershipTool
 
@@ -231,6 +254,7 @@ testMirMonoOwnershipUsing tool = TestList "testMirMonoOwnership"
     [ testMirMonoOwnershipFnShapesUsing bootstrapLoader tool
     , TestList "staged versus fused metadata and substitution" [TestCase label (compareAdapters tool p) | (label,p) <- monoFixtures]
     , TestList "raw existing codec receipts" [TestCase label (compareRaw tool p) | (label,p) <- monoFixtures]
+    , TestCase "landed ownership errors retain the complete fused Mono receipt" (landedOwnershipReceipt tool)
     , TestCase "no generic keeps the ownership MIR2 writability domain" $ do
         let p = unwritableMetadata metadataProgram
         expected <- staged tool p
