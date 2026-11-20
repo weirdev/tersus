@@ -6,7 +6,6 @@ import qualified Data.Map.Strict as Map
 import Control.Monad (forM)
 import Data.List (isInfixOf, nubBy)
 import Link (linkPrograms)
-import MirMoves (finishLowered)
 import System.Exit (ExitCode (..))
 import TestAstData (withAstReader)
 import TestNative (runExecutableBytes)
@@ -396,11 +395,8 @@ nativePrivateSmoke = withSourceElaborator $ \exe -> pure $
 -- it before the copy step; the units are first changed by `change`
 consumerLinked :: Package.CompiledPackage -> Name -> ([(ModuleId, M.Program)] -> [(ModuleId, M.Program)]) -> Result M.Program String
 consumerLinked pkg callee change =
-    let lowerOne m = mapResult (\p -> (Package.compiledModuleId m, p)) (Package.compiledLowered m `bindResult` finishLowered)
-        libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap Package.compiledLibUnits (Package.compiledModules pkg))
-        entry = Package.compiledEntryModule pkg
-     in flatResultMap lowerOne (Package.compiledModules pkg) `bindResult` \units ->
-            linkPrograms (libUnits ++ change [(m, if m == entry then withConsumer p else p) | (m, p) <- units])
+    Package.packageLinkInputs pkg `bindResult` \(libUnits, units) ->
+        linkPrograms (libUnits ++ change [(m, if m == Package.compiledEntryModule pkg then withConsumer p else p) | (m, p) <- units])
   where
     withConsumer p =
         let ty = case [M.localType d | d <- Map.elems (M.fnLocals (M.progMain p)), M.localName d == Just "x"] of t : _ -> t; [] -> TInt

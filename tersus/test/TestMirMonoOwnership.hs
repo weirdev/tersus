@@ -22,6 +22,7 @@ import TestMirMono (monoFixtures, metadataProgram, genericProgram, legacyPackInp
 import TestClosures (closureAdder, closureCounter, closureModuleFiles)
 import Compile (lowerSourceUsing)
 import ElaboratorTool (Loader, bootstrapLoader)
+import LibPackage (libPackage)
 import qualified PackageCompile as Package
 import qualified Modules as Mod
 import MirLists (lowerLists)
@@ -175,7 +176,7 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
         pure (testAssertEq stagedResult expected <> testAssertEq fusedResult expected)
     ]
   where
-    lower = lowerSourceUsing loader False True
+    lower = lowerSourceUsing loader libPackage False True
     package = Package.compileModulesWith loader (Mod.Snapshot (Mod.resolverFromFiles moduleFiles) "app/main.tersus" False) `bindResult` Package.lowerCompiledPackage
     moduleFiles = [(path,case path of
         "app/main.tersus" -> "import app::apply; import app::provider; fn hold<F>(f: &F) -> &F from f [{ }] [{ }] { return f; }; a = provider::Adder { n: 10 }; return apply::apply(hold(&a), 5);"
@@ -234,7 +235,7 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
             ToolInterpreted _ -> pure (Error "Fn native output requires a native emitter")
 
 landedOwnershipReceipt :: IO Tool -> IO TestResult
-landedOwnershipReceipt tool = case lowerSourceUsing bootstrapLoader False True source `bindResult` eraseGhosts `bindResult` nativeProgram of
+landedOwnershipReceipt tool = case lowerSourceUsing bootstrapLoader libPackage False True source `bindResult` eraseGhosts `bindResult` nativeProgram of
     Error e -> pure (Just ("the landed generic refusal did not reach ownership: " ++ e))
     Ok program -> do
         raw <- compareRaw tool program

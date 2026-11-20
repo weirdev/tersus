@@ -5,7 +5,7 @@ module Differential
     ( Unit (..)
     , Outcome (..)
     , Asked (..)
-    , Answers
+    , Answers (..)
     , Candidate
     , Frontend (..)
     , compilerFrontend
@@ -67,8 +67,14 @@ data Outcome
 data Asked = AskedModule Request | AskedLoad LoadRequest
     deriving (Show, Eq)
 
--- The elaborations an answer carries, each with the module it is of (a refused load is one refusal)
-type Answers = [(String, Response)]
+data Assembly = PackageAssembly Mod.ModuleId [(String, Mod.ModuleId)] | ProgramAssembly [String]
+    deriving (Eq, Show)
+
+-- A refused load counts as one refusal, with no assembly.
+data Answers = Answers {responses :: [(String, Response)], assembly :: Maybe Assembly}
+
+withoutAssembly :: [(String, Response)] -> Answers
+withoutAssembly rs = Answers rs Nothing
 
 type Candidate = Asked -> IO (Result Answers String)
 
@@ -82,17 +88,21 @@ bootstrapFrontend :: Frontend
 bootstrapFrontend = Frontend bootstrapElaborator bootstrapLoader
 
 askFrontend :: Frontend -> Asked -> Answers
-askFrontend (Frontend elaborator _) (AskedModule rq) = [(Mod.renderModuleId (rqModule rq), elaborator rq)]
+askFrontend (Frontend elaborator _) (AskedModule rq) = withoutAssembly [(Mod.renderModuleId (rqModule rq), elaborator rq)]
 askFrontend (Frontend _ loader) (AskedLoad rq) = answersOf (loader rq)
 
 answersOf :: LoadResponse -> Answers
 answersOf response = case response of
-    LoadedProgram r -> [("program", r)]
-    LoadedModules ms -> [(Mod.renderModuleId m, r) | (m, _, r) <- ms]
-    LoadedLibraries ls failure -> [(name, r) | LibraryAnswer name _ _ r <- ls] ++ [("libraries", Refused e) | Just e <- [failure]]
-    NotLoaded e -> [("load", Refused e)]
-    Unparsed e -> [("parse", Refused e)]
-    other -> [("load", Unresolved ("not an elaboration: " ++ take 200 (show other)))]
+    AssembledProgram names r -> Answers [("program", r)] (Just (ProgramAssembly names))
+    AssembledPackage entry rows ms -> Answers (modules ms) (Just (PackageAssembly entry rows))
+    LoadedProgram r -> withoutAssembly [("program", r)]
+    LoadedModules ms -> withoutAssembly (modules ms)
+    LoadedLibraries ls failure -> withoutAssembly ([(name, r) | LibraryAnswer name _ _ r <- ls] ++ [("libraries", Refused e) | Just e <- [failure]])
+    NotLoaded e -> withoutAssembly [("load", Refused e)]
+    Unparsed e -> withoutAssembly [("parse", Refused e)]
+    other -> withoutAssembly [("load", Unresolved ("not an elaboration: " ++ take 200 (show other)))]
+  where
+    modules ms = [(Mod.renderModuleId m, r) | (m, _, r) <- ms]
 
 corpusUnits :: IO [Unit]
 corpusUnits = (++ map EmbeddedPackage toolPackages) <$> suiteUnits
@@ -119,7 +129,7 @@ unitRequests frontend unit = do
     pure $ case (forced :: Either SomeException Int, outcome) of
         (Left e, _) -> Error (show e)
         (_, Error e) | null requests -> Error e
-        _ -> case [r | (_, answers) <- requests, (_, r) <- answers, noAnswer r] of
+        _ -> case [r | (_, answers) <- requests, (_, r) <- responses answers, noAnswer r] of
             r : _ -> Error ("the reference elaborator gave no answer: " ++ show r)
             [] -> Ok requests
   where
@@ -141,7 +151,7 @@ unitThrough deep (Frontend elaborator loader) given = pure given >>= \unit -> ca
         pure (package files entry)
     Libraries -> pure (measured (compileLibPackageWith loader))
   where
-    program source = measured (lowerSourceUsing loader False True source)
+    program source = measured (lowerSourceUsing loader libPackage False True source)
     package files entry = measured (Package.compileModulesUsing loader libPackage (Mod.Snapshot (Mod.resolverFromFiles files) entry False))
     measured r = mapResult (\lowered -> if deep then length (show lowered) else 0) r
     embeddedFiles entry
@@ -152,7 +162,7 @@ unitThrough deep (Frontend elaborator loader) given = pure given >>= \unit -> ca
 -- The frontend, with each request and its answers kept (in reverse order). The compiler takes each response apart as
 -- soon as it has it, so a request is kept when it is made.
 recording :: Frontend -> IORef [(Asked, Answers)] -> Frontend
-recording frontend ref = Frontend (\rq -> snd (head (keep (AskedModule rq) (askFrontend frontend (AskedModule rq))))) loader
+recording frontend ref = Frontend (\rq -> snd (head (responses (keep (AskedModule rq) (askFrontend frontend (AskedModule rq)))))) loader
   where
     Frontend _ given = frontend
     loader rq = keepLoad rq (given rq)
@@ -163,13 +173,14 @@ recording frontend ref = Frontend (\rq -> snd (head (keep (AskedModule rq) (askF
 
 -- The answers of two frontends to one request, module by module
 compareAnswers :: Answers -> Answers -> Outcome
-compareAnswers reference candidate
+compareAnswers (Answers reference refAssembly) (Answers candidate candidateAssembly)
     | map fst reference /= map fst candidate = case [o | (_, NotModelled what) <- candidate, let o = NotModelledBy what] of
         o : _ -> o
         [] -> Disagree ("the modules answered differ: " ++ unwords (map fst reference) ++ " / " ++ unwords (map fst candidate))
     | otherwise = case [o | ((_, a), (_, b)) <- zip reference candidate, let o = compareResponses a b, o /= Agree] of
         o : _ -> o
-        [] -> Agree
+        [] | refAssembly /= candidateAssembly -> Disagree ("assembly differs: " ++ show refAssembly ++ " / " ++ show candidateAssembly)
+           | otherwise -> Agree
 
 compareResponses :: Response -> Response -> Outcome
 compareResponses reference candidate = case (reference, candidate) of
@@ -208,7 +219,7 @@ throughText asked = pure $ case asked of
             readRequest text `bindResult` \rq' ->
                 if rq' /= rq
                     then Error "the request does not read back as written"
-                    else writeResponse (sourceElaborator rq') `bindResult` readResponse `bindResult` \response -> Ok [(Mod.renderModuleId (rqModule rq), response)]
+                    else writeResponse (sourceElaborator rq') `bindResult` readResponse `bindResult` \response -> Ok (withoutAssembly [(Mod.renderModuleId (rqModule rq), response)])
     AskedLoad rq -> Ok (answersOf (sourceLoader rq))
 
 -- The elaborator of lib/elaborate in the given package files, built unvalidated as the host builds its own tools
@@ -225,7 +236,7 @@ buildElaborator files out = case Mod.loadFromEntry (Mod.resolverFromFiles files)
 -- An elaborator executable: the request on its standard input, the response on its standard output
 executableCandidate :: FilePath -> Candidate
 executableCandidate exe asked = case asked of
-    AskedModule rq -> mapResult (\r -> [(Mod.renderModuleId (rqModule rq), r)]) <$> runElaborator exe rq
+    AskedModule rq -> mapResult (\r -> withoutAssembly [(Mod.renderModuleId (rqModule rq), r)]) <$> runElaborator exe rq
     AskedLoad rq -> mapResult answersOf <$> runLoader exe rq
 
 -- Each request of each unit, with the module it elaborates and how the candidate's response compares

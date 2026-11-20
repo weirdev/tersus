@@ -5,20 +5,20 @@ module PackageCompile
     , compileModulesWith
     , compileModulesUsing
     , lowerCompiledPackage
+    , packageLinkInputs
     , compileModulesLinked
     , assumptionsOfPackage
     , packageFailure
     ) where
 
-import Data.List (nubBy)
 import qualified Data.Set as Set
 import qualified Mir as M
-import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..), Response (..), acceptedOwnership)
+import ElaborateRequest (LoadKind (..), LoadRequest (..), LoadResponse (..), MirAnswer (..), Response (..), acceptedOwnership)
 import qualified Data.Map.Strict as Map
 import Types (OwnershipTransport (..))
 import ElaboratorTool (Loader, sourceLoader)
 import Interface (ModuleInterface (..))
-import LibPackage (LibPackage, libCatalog, libPackage, libSelection, stripDeclaredFromUnits)
+import LibPackage (LibPackage, libCatalog, libPackage, libUnit, stripDeclaredFromUnit)
 import Link (linkPrograms)
 import qualified Modules as Mod
 import Lowering (lowerAccepted)
@@ -31,7 +31,6 @@ import Utils
 data CompiledModule = CompiledModule
     { compiledModuleId :: Mod.ModuleId
     , compiledInterface :: ModuleInterface
-    , compiledLibUnits :: [(Mod.ModuleId, M.Program)] -- without what the module declares itself
     , compiledLowered :: Result Lowered String -- the unit the elaborator lowered the module to, or why it did not
     , compiledOwnership :: Maybe OwnershipTransport -- the checked ownership facts of a version 2 elaboration
     }
@@ -40,6 +39,7 @@ data CompiledModule = CompiledModule
 data CompiledPackage = CompiledPackage
     { compiledEntryModule :: Mod.ModuleId
     , compiledModules :: [CompiledModule]
+    , compiledLibUnits :: Result [(Mod.ModuleId, M.Program)] String
     }
     deriving (Show)
 
@@ -53,15 +53,26 @@ compileModulesWith loader = compileModulesUsing loader libPackage
 -- which names the interfaces each is lowered with. The libraries are a parameter so that the frontend seed's stages
 -- can give ones elaborated by the same elaborator; when they failed, the first module that is given them refuses.
 compileModulesUsing :: Loader -> Result LibPackage String -> Mod.Snapshot -> Result CompiledPackage String
-compileModulesUsing loader libraries snapshot = case loader ((Mod.loadRequest LoadPackage snapshot) {lrLibraries = either' [] libCatalog libraries}) of
-    LoadedModules answers -> go answers [] `bindResult` \modules ->
-        if any ((== entry) . compiledModuleId) modules
-            then Ok (CompiledPackage entry modules)
-            else Error ("internal: the loader did not answer for the entry module " ++ Mod.renderModuleId entry)
+compileModulesUsing loader libraries snapshot = case loader ((Mod.loadRequest (LoadPackageAssembly entry) snapshot) {lrLibraries = either' [] libCatalog libraries}) of
+    AssembledPackage root rows answers -> complete answers $ \modules ->
+        if root == entry
+            then Ok (CompiledPackage entry modules (assemble modules rows))
+            else Error "internal: the loader answered with the wrong assembly entry"
+    LoadedModules answers -> complete answers $ \modules ->
+        if any loweringRefused answers
+            then Ok (CompiledPackage entry modules (Error missingAssembly))
+            else Error missingAssembly
     NotLoaded err -> Error err
     _ -> Error "internal: the loader did not answer with the package's modules"
   where
     entry = Mod.entryModuleOf snapshot
+    missingAssembly = "internal: the loader did not answer with the package's assembly"
+    complete answers use = go answers [] `bindResult` \modules ->
+        if any ((== entry) . compiledModuleId) modules
+            then use modules
+            else Error ("internal: the loader did not answer for the entry module " ++ Mod.renderModuleId entry)
+    loweringRefused (_, _, Accepted _ _ MirRefused{}) = True
+    loweringRefused _ = False
     either' d f r = case r of
         Ok a -> f a
         Error _ -> d
@@ -72,15 +83,20 @@ compileModulesUsing loader libraries snapshot = case loader ((Mod.loadRequest Lo
     go [] done = Ok (reverse done)
     go ((moduId, _, response) : rest) done = case (libraries, response) of
         (Error err, _) | moduId `notElem` noPrelude -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
-        (_, Accepted (Just iface) selected _) ->
+        (_, Accepted (Just iface) _ _) ->
             let lowered = lowerAccepted response
-                declared = either' [] (Set.toList . lowDeclared) lowered
-                units = either' [] (`libSelection` selected) libraries
                 facts = acceptedOwnership response
              in case either' [] (uncoveredTypes facts) lowered of
-                    [] -> go rest (CompiledModule moduId iface (stripDeclaredFromUnits declared units) lowered facts : done)
+                    [] -> go rest (CompiledModule moduId iface lowered facts : done)
                     missing -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": the ownership facts omit the declared types " ++ unwords missing)
         _ -> Error (packageFailure moduId response)
+    assemble modules rows = flatResultMap unit rows
+      where
+        contributors = Map.fromList [(compiledModuleId m, compiledLowered m) | m <- modules]
+        unit (name, owner) = case Map.lookup owner contributors of
+            Nothing -> Error ("internal: no assembly contributor " ++ Mod.renderModuleId owner)
+            Just lowered -> lowered `bindResult` \l -> libraries `bindResult` \pkg ->
+                mapResult (stripDeclaredFromUnit (lowDeclared l)) (libUnit pkg name)
 
 -- The structs and enums a module declares that its checked ownership facts give no row for
 uncoveredTypes :: Maybe OwnershipTransport -> Lowered -> [String]
@@ -105,10 +121,14 @@ compileModulesLinked snapshot = compileModules snapshot `bindResult` lowerCompil
 
 -- Callers must validate the linked program before erasure or execution.
 lowerCompiledPackage :: CompiledPackage -> Result M.Program String
-lowerCompiledPackage compiled =
-    let lowerOne modu = mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (compiledLowered modu `bindResult` finishLowered))
-        libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
-     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
+lowerCompiledPackage compiled = packageLinkInputs compiled `bindResult` \(libraries, units) -> linkPrograms (libraries ++ units)
+
+packageLinkInputs :: CompiledPackage -> Result ([(Mod.ModuleId, M.Program)], [(Mod.ModuleId, M.Program)]) String
+packageLinkInputs compiled =
+    flatResultMap lowerOne (compiledModules compiled) `bindResult` \units ->
+        mapResult (\libraries -> (libraries, units)) (compiledLibUnits compiled)
+  where
+    lowerOne modu = mapResult ((,) (compiledModuleId modu)) (stage "Lowering failed: " (compiledLowered modu `bindResult` finishLowered))
 
 -- (a module's assumes are in the unit it was lowered to: one that did not lower has no list of them to give)
 assumptionsOfPackage :: CompiledPackage -> Result [String] String

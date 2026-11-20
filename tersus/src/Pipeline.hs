@@ -40,7 +40,7 @@ import qualified Data.Set as Set
 import qualified Mir as M
 import Compile (lowerSourceUsing, lowerStatements, parseSource, parseSourcePartsNoPrelude, parseWithEquality)
 import ElaboratorTool (Loader, sourceLoader)
-import LibPackage (compileLibPackageWith)
+import LibPackage (compileLibPackageWith, libPackage)
 import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked, compileModulesUsing, lowerCompiledPackage)
 import Link (pruneProgram)
 import qualified Modules as Mod
@@ -117,7 +117,7 @@ validatedSourceNoPrelude noPrelude = validatedSourceUsing sourceLoader noPrelude
 -- With the loader that reads and checks the source given (a test substitutes one)
 validatedSourceUsing :: Loader -> Bool -> String -> Result M.Program String
 validatedSourceUsing loader noPrelude source =
-    lowerSourceUsing loader noPrelude True source `bindResult` \program ->
+    lowerSourceUsing loader libPackage noPrelude True source `bindResult` \program ->
         checkedLowered program `bindResult` \checked ->
             stage "Validation failed: " (validateCompiled checked) `bindResult` \_ ->
                 Ok (withoutGeneric checked)

@@ -2117,15 +2117,15 @@ testPhase1Packages = TestList "testPhase1Packages"
         Right pkg -> case compileModules (packageSnapshot pkg) of
             Error err -> Just err
             Ok compiled -> testAssertEq (map loadedNoPrelude (packageModules pkg)) [True, False]
-                <> testAssertTrue (case compiledModules compiled of
-                    dependency : user : [] -> null (compiledLibUnits dependency) && not (null (compiledLibUnits user))
+                <> testAssertTrue (case compiledLibUnits compiled of
+                    Ok (_ : _) -> True
                     _ -> False)
     , testCase "no-prelude source files receive no implicit library declaration seed" $
         case loadFromEntry (resolverFromFiles (phase1Files phase1Program)){resolverOptions = phase1Options} phase1Entry of
                 Left err -> Just err
                 Right (PackageResult pkg) -> case compileModules (packageSnapshot pkg) of
                     Error err -> Just err
-                    Ok compiled -> testAssertTrue (all (null . compiledLibUnits) (compiledModules compiled))
+                    Ok compiled -> testAssertEq (compiledLibUnits compiled) (Ok [])
                 Right _ -> Just "expected package"
     , testCase "a no-prelude package file is read without the String library" $
         case phase1Load phase1Options (phase1Files "s = \"hi\"; return size(s.bytes);") of

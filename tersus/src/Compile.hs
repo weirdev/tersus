@@ -10,11 +10,11 @@ import qualified Data.Set as Set
 import qualified Mir as M
 import Lowering (finishProgram, finishProgramWith, lowerAccepted)
 import MirMoves (finishLowered)
-import LibPackage (libCatalog, libPackage, libSelection, libraryBoundedNames, stripDeclaredFromUnits)
+import LibPackage (LibPackage, libCatalog, libPackage, libUnit, libraryBoundedNames, stripDeclaredFromUnits)
 import Link (linkPrograms, completeSpecEnvs)
 import PackageData (ModuleId (..), LoadOptions (..), Resolver (..), defaultLoadOptions, resolverFromFiles)
 import Syntax (Statement)
-import ElaborateRequest (Elaborator, Extraction (..), Library, LoadKind (..), LoadRequest (..), LoadResponse (..), Request (..), Response (..), acceptedResponse)
+import ElaborateRequest (Elaborator, Extraction (..), Library, LoadKind (..), LoadRequest (..), LoadResponse (..), MirAnswer (..), Request (..), Response (..), acceptedResponse)
 import ElaboratorTool (Loader, sourceElaborator, sourceLoader)
 import Modules (librarySources)
 import Utils
@@ -57,27 +57,28 @@ lowerSource :: Bool -> String -> Result M.Program String
 lowerSource = lowerSourceNoPrelude False
 
 lowerSourceNoPrelude :: Bool -> Bool -> String -> Result M.Program String
-lowerSourceNoPrelude = lowerSourceUsing sourceLoader
+lowerSourceNoPrelude = lowerSourceUsing sourceLoader libPackage
 
--- A program read and checked by the loader, lowered with the libraries the elaborator selected, which are linked
-lowerSourceUsing :: Loader -> Bool -> Bool -> String -> Result M.Program String
-lowerSourceUsing loader noPrelude' reserving source = catalog `bindResult` \libraries -> case loader (sourceRequest LoadProgram noPrelude' reserving libraries source) of
+-- A program read and checked by the loader, lowered against the supplied compiled catalog.
+lowerSourceUsing :: Loader -> Result LibPackage String -> Bool -> Bool -> String -> Result M.Program String
+lowerSourceUsing loader libraries noPrelude' reserving source = catalog `bindResult` \available -> case loader (sourceRequest LoadProgramAssembly noPrelude' reserving available source) of
     Unparsed e -> Error e
     NotLoaded e -> Error e
     LoadedProgram (Unresolved err) -> Error err
     LoadedProgram response ->
+        stage "Validation failed: " (acceptedResponse response) `bindResult` \_ -> case response of
+            Accepted _ _ (MirRefused err) -> Error ("Lowering failed: " ++ err)
+            _ -> Error "internal: the loader did not answer with the program's assembly"
+    AssembledProgram names response ->
         stage "Validation failed: " (acceptedResponse response) `bindResult` \_ ->
-            selection (selectedOf response) `bindResult` \units ->
-                stage "Lowering failed: " (lowerAccepted response `bindResult` \lowered -> mapResult ((,) lowered) (finishLowered lowered)) `bindResult` \(lowered, entryProgram) ->
-                    linkPrograms (stripDeclaredFromUnits (ownNames lowered) units ++ [(mainModule, entryProgram)])
+            stage "Lowering failed: " (lowerAccepted response `bindResult` \lowered -> mapResult ((,) lowered) (finishLowered lowered)) `bindResult` \(lowered, entryProgram) ->
+                units names `bindResult` \selected -> linkPrograms (stripDeclaredFromUnits (ownNames lowered) selected ++ [(mainModule, entryProgram)])
     _ -> Error "internal: the loader did not answer with the program's elaboration"
   where
-    selectedOf response = case response of
-        Accepted _ selected _ -> selected
-        _ -> []
-    selection [] = Ok []
-    selection selected = mapResult (`libSelection` selected) libPackage
-    catalog = if noPrelude' then Ok [] else mapResult libCatalog libPackage
+    units [] = Ok []
+    units _ | noPrelude' = Error "internal: the loader selected assembly libraries without a catalog"
+    units names = libraries `bindResult` \pkg -> flatResultMap (libUnit pkg) names
+    catalog = if noPrelude' then Ok [] else mapResult libCatalog libraries
 
 -- The names a single file declares, wherever it declares them, which the library units linked with it do not declare
 -- again
