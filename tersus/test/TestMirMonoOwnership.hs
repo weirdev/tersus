@@ -160,7 +160,7 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
     , TestCase "a borrowed capture preserves its Fn body through fusion" $ checked "closure-borrow" 12 (lower "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; xs = [1, 2]; f = fn(x: Int) -> Int => x + size(xs); return apply(&f, 10);")
     , TestCase "an FnMut capture retains updates across both calls" $ checked "closure-mut" 1202 (lower "fn twice<F: FnMut() -> Int>(f: &mut F) -> Int { a = f(); b = f(); return a * 10 + b; }; count = 0; c = fn() -> Int { count = count + 1; return count; }; return twice(&mut c) * 100 + count;")
     , TestCase "an FnOnce capture retains ownership of its list" $ checked "closure-once" 2 (lower "fn useOnce<F: FnOnce() -> List<Int>>(f: F) -> Int { ys = f(); return size(ys); }; xs = [1, 2]; f = fn() -> List<Int> => xs; return useOnce(f);")
-    , TestCase "an inferred capturing closure crosses modules through fusion" $ checked "closure-modules" 15
+    , TestCase "an inferred cross-module capture keeps the no-generic ownership path" $ checkedWithGeneric False "closure-modules" 15
         (Package.compileModulesWith loader (Mod.Snapshot (Mod.resolverFromFiles
             [("app/package.tersus", ""), ("app/main.tersus", "import app::apply; n = 10; return apply::apply(fn(x) => x + n, 5);"), ("app/apply.tersus", "fn apply<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); };")]) "app/main.tersus" False)
             `bindResult` Package.lowerCompiledPackage)
@@ -184,16 +184,18 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
         ++ [("app/provider/provider.tersus", closureAdder)]
     fnContract = "struct Inc { }; impl Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] for Inc { fn call(self: &Self, x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + 1; }; }; fn inc(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return x + 1; }; fn useIt<F: Fn(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }]>(f: &F, x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return f(x); }; i = Inc { }; return useIt(&i, 5) + useIt(inc, 5);"
     fnOnce = "struct Once { xs: List<Int> }; impl FnOnce(x: List<Int>) -> Int for Once { fn call(self: Self, x: List<Int>) -> Int { return size(self.xs) + size(x); }; }; fn useOnce<F: FnOnce(x: List<Int>) -> Int>(f: F, x: List<Int>) -> Int { return f(x); }; o = Once { xs: [1, 2] }; return useOnce(o, [3, 4, 5]);"
-    checked label wanted lowered = case lowered of
+    checked = checkedWithGeneric True
+    checkedWithGeneric requireGeneric label wanted lowered = case lowered of
         Error e -> pure (Just (label ++ " lowering: " ++ e))
         Ok p -> do
             let generics program = [fnName fn | fn <- Map.elems (progFunctions program), not (null (fnTypeParams fn) && null (fnSizeParams fn))]
-            if null (generics p) then pure (Just (label ++ " does not retain generic functions before withoutGeneric")) else do
+                expectedRoute program = not (null (generics program)) == requireGeneric
+            if not (expectedRoute p) then pure (Just (label ++ " lowering selected the wrong generic route")) else do
                 expanded <- stagedOwnership tool "expand" p
                 library <- listLibrary
                 case expanded `bindResult` \value -> lowerLists library value of
                     Error e -> pure (Just (label ++ " native preparation: " ++ e))
-                    Ok native -> if null (generics native) then pure (Just (label ++ " native preparation dropped every generic template")) else do
+                    Ok native -> if not (expectedRoute native) then pure (Just (label ++ " native preparation changed the generic route")) else do
                         count <- newIORef (0 :: Int)
                         let getter = modifyIORef' count (+1) >> tool
                         expected <- staged getter native
@@ -205,8 +207,8 @@ testMirMonoOwnershipFnShapesUsing loader tool = TestList "current Fn shape fusio
                         case (expected, actual) of
                             (Ok reference, Ok fused) -> do
                                 emitted <- execute label fused
-                                putStrLn ("[FN_FUSION_ROUTE] " ++ label ++ " lowered=" ++ show (generics p) ++ " native=" ++ show (generics native) ++ " acquisitions=" ++ show (stagedCount,fusedCount) ++ " wire=" ++ show (wireHash native))
-                                pure (testAssertEq (stagedCount,fusedCount) (2,1)
+                                putStrLn ((if requireGeneric then "[FN_FUSION_ROUTE] " else "[FN_NO_GENERIC_ROUTE] ") ++ label ++ " lowered=" ++ show (generics p) ++ " native=" ++ show (generics native) ++ " acquisitions=" ++ show (stagedCount,fusedCount) ++ " wire=" ++ show (wireHash native))
+                                pure (testAssertEq (stagedCount,fusedCount) (if requireGeneric then (2,1) else (1,1))
                                     <> testAssertEq (show fused) (show reference)
                                     <> testAssertEq (writeLowered (unit fused)) (writeLowered (unit reference))
                                     <> raw <> testAssertEq (MirEval.runProgram p) (Ok (Just (MirEval.MInt wanted)))
