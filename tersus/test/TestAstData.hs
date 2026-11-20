@@ -42,7 +42,7 @@ import Syntax
 import TestHarness
 import TestNative (clangAvailable, runExecutableBytes)
 import Compile (elaborateStatements)
-import Mir (Lowered)
+import Mir (Lowered (..), Program (..))
 import MirData (readLowered, writeLowered)
 import ElaboratorTool (noVerdict)
 import Types
@@ -120,9 +120,10 @@ roundTrip ss =
                 | text /= dataParsed back -> Just "reserialization changed"
                 | otherwise -> Nothing
 
--- A unit the elaborator lowered, as `tersus-mir 3` (MirData), reads back as the same unit and writes the same text
+-- A unit the elaborator lowered, as `tersus-mir 3` (MirData), reads back as the same unit and writes the same text (its
+-- protocols and ownership facts are the response's checked transport, which Lowering.withFacts puts on the unit read)
 loweredRoundTrip :: Lowered -> TestResult
-loweredRoundTrip unit = case writeLowered unit of
+loweredRoundTrip unit0 = case writeLowered unit0 of
     Error err -> Just err
     Ok text -> case readLowered text of
         Error err -> Just err
@@ -130,6 +131,8 @@ loweredRoundTrip unit = case writeLowered unit of
             | back /= unit || show back /= show unit -> Just "the lowered unit or its builtin metadata changed"
             | writeLowered back /= Ok text -> Just "the lowered unit's reserialization changed"
             | otherwise -> Nothing
+  where
+    unit = unit0{lowProgram = (lowProgram unit0){progProtocols = Map.empty, progOwnership = Nothing}}
 
 knownParserRejection :: String -> String -> Bool
 knownParserRejection path message =
