@@ -196,6 +196,17 @@ bare emitter identities and the single module-local foreign `String.then` method
 `PreludeSource.mirPackageFiles` embeds all six files; cache keys include their paths
 and contents. The CLI entry, MIR protocol and runtime ABI are unchanged.
 
+## Linking host
+
+`lib/mir/link/` implements unit merging, extern canonicalization, environment
+completion and reachability pruning over the shared complete MIR3 codec.
+`Link.hs` only transports requests through the pinned emitter seed and retains
+`makeCopies (completeInstances ...)` at the existing stage. Dependency ghosts
+keep numeric block order; the root main's entire original specification,
+including loop environments, remains untouched while its ghosts are completed.
+Pruning processes each immutable function and type once through local sets.
+`TestLink` compares full metadata and canonical bytes against `LinkOracle`.
+
 ## Ownership host
 
 `lib/mir/mono/` specializes native generic functions over the lossless MIR3
@@ -206,7 +217,7 @@ sizes, follows reachable calls and instantiates implicit Drop functions.
 pre-native-stage MIR. The current host-validator group checks every function.
 The published matching seed supplies native monomorphization during cold
 bootstrap. Validation specialization and its proof metadata remain in Haskell.
-Linking remains the Haskell `Link` pass.
+Linking uses the native `Link` transport.
 
 `lib/mir/ownership/` implements ownership and reference-write expansion
 in Tersus. `MirHousekeeping.insertOwnership` first runs native Mono, then
@@ -416,7 +427,7 @@ Next steps, roughly in priority order:
 32. Allocators chosen by the code that calls
     The design is `ALLOCATORS.md`. A block `with a { ... }` makes `a` the allocator of what is made inside it, including what the functions it calls make. Where a value's memory comes from is a region in its type (`List<Token, arena>`), which the validator never sees; a region a program leaves out is the context, the region a function is called in (`System` at the top), decided at each call by unification; a borrow and `=` ignore regions, so `clone` copies into the region it is expected in; the context decides only where a value is made, and a value is grown and freed by the region in its type; and a value made in a local allocator cannot leave its `with` block, which drops it at every exit. Natively no container holds an allocator: a region is a hidden `&K` parameter, nothing for `System`, `MirMono` copies a function per kind of allocator and not per block, and a program that uses only `System` compiles to the IR of today. The library has `System`, `Arena`, `Checked` (the `TERSUS_CHECK` of step 30 (c) in Tersus) and `Fixed<n>`. It needs steps 25, 26, 29 and 30 (a)
 33. Replacing all Haskell with a fully Tersus native implementation
-    The current survey and priorities are in `REPLACING_HASKELL.md` (the pinned pre-replacement survey). The emitter, validator, MIR checker/eraser, parser, ownership, reference-write expansion, elaboration, lowering to MIR, package resolution and library selection are Tersus. Native monomorphization is Tersus; validation specialization remains Haskell. Reference-write expansion runs before list lowering, followed by native monomorphization and ownership. Linking and pruning remain Haskell. See Ownership host above for the transport and cold boundary.
+    The current survey and priorities are in `REPLACING_HASKELL.md` (the pinned pre-replacement survey). The emitter, validator, MIR checker/eraser, parser, ownership, reference-write expansion, elaboration, lowering to MIR, package resolution and library selection are Tersus. Native monomorphization is Tersus; validation specialization remains Haskell. Reference-write expansion runs before list lowering, followed by native monomorphization and ownership. Linking and pruning run through the native `Link` transport. See Linking host and Ownership host above for the transport and cold boundary.
 34. What equality in proofs means
     `=` in a proof is the validator's equality: structural, total over every type whether it implements Eq or not, and the meaning of `Eq::eq`'s contract (`return = (self = other)`), which is why an impl cannot compare in its own way (LANGUAGE.md, Equality). To revisit: whether a type that wants a coarser equality (a set kept as a list in any order, a value with a cache) should have `=` in its proofs mean its own Eq, whether `=` in a proof should be refused for a type without Eq, and how either would sit with the validator's congruence (equal arguments give equal results), which a coarser equality does not have for every function
 18. Validate calls of function values

@@ -1,6 +1,6 @@
 {-# LANGUAGE PatternSynonyms #-}
 
-module TestMirData (testMirData, testMirLowered) where
+module TestMirData (testMirData, testMirLowered, everyRecord, malformedLowered) where
 
 import Data.Char (isAscii)
 import Data.List (isInfixOf, isPrefixOf, sort)

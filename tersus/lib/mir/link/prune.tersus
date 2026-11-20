@@ -1,0 +1,232 @@
+import data::codec::codec { Token, catStrings };
+import data::ast::ast { AstNode, AstProof, AstExpression, AstValue, AstValidation, AstRule, AstStatement };
+import data::reader::reader { nodeKind, nodeRefs, nameValue };
+import mir::full::full { FullProgram, FullFunction, FullRecord, FullBlock };
+import mir::full::tokens { appendTokens, integerAt, intsEnd, intToken, name, numberAt, operandEnd, namesEnd, sliceTokens, textAt, typeEnd, wordIs, word, quotedAt };
+import mir::full::records { nodeAt, statementAt, envStart, envEnd, envEntries, envTokens, replaceEnv, EnvEntry };
+import mir::link::merge { rowIndex, fnIndex };
+import mir::full::environments { replaceEnvBase };
+
+fn listIds(nodes: &List<AstNode>, root: Int, kind: Int) -> List<Int> ~ {
+    out = []; at = root;
+    while at >= 0 && at < size(nodes) [{ }] ~ {
+        n = nodeAt(nodes, at); if nodeKind(&n) != kind { return out; };
+        refs = nodeRefs(&n); if size(refs) != 2 { return out; };
+        out = push(out, get(&refs, 0)); at = get(&refs, 1);
+    };
+    return out;
+};
+fn addTexts(a: List<String>, b: &List<String>) -> List<String> ~ { for n in b { a = push(a, clone(n)); }; return a; };
+fn proofRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Proof) { return []; }; p = (n as AstNode::Proof).value;
+    if p is AstProof::ATerm { return push([], nameValue(nodes, (p as AstProof::ATerm).n)); };
+    if p is AstProof::CTerm { return valueFnRef(nodes, (p as AstProof::CTerm).v); };
+    if p is AstProof::FApp { v = p as AstProof::FApp; return addTexts(proofRefs(nodes, v.f), proofListRefs(nodes, v.xs)); };
+    if p is AstProof::Forall { v = p as AstProof::Forall; return addTexts(proofListRefs(nodes, v.gs), proofRefs(nodes, v.b)); };
+    return [];
+};
+fn proofListRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ { out = []; for p in listIds(nodes, id, 27) { out = addTexts(out, proofRefs(nodes, p)); }; return out; };
+fn valueFnRef(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Value) { return []; }; v = (n as AstNode::Value).value;
+    if v is AstValue::VFnRef { return push([], nameValue(nodes, (v as AstValue::VFnRef).n)); }; return [];
+};
+fn exprRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Expression) { return []; }; e = (n as AstNode::Expression).value;
+    if e is AstExpression::Var { return push([], nameValue(nodes, (e as AstExpression::Var).n)); };
+    if e is AstExpression::Val { return valueFnRef(nodes, (e as AstExpression::Val).v); };
+    if e is AstExpression::IfExpr {
+        c = e as AstExpression::IfExpr;
+        return addTexts(addTexts(exprRefs(nodes, c.c), exprRefs(nodes, c.a)), exprRefs(nodes, c.b));
+    };
+    if e is AstExpression::BlockExpr {
+        b = e as AstExpression::BlockExpr;
+        return addTexts(statementsRefs(nodes, b.xs), exprRefs(nodes, b.e));
+    };
+    // An ascription's second child is the type it is read at, not an expression.
+    if e is AstExpression::Ascribed { return exprRefs(nodes, (e as AstExpression::Ascribed).e); };
+    v = e as AstExpression::F; out = exprRefs(nodes, v.f); for a in listIds(nodes, v.xs, 25) { out = addTexts(out, exprRefs(nodes, a)); }; return out;
+};
+fn statementsRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    out = []; for s in listIds(nodes, id, 24) { out = addTexts(out, statementRefs(nodes, s)); }; return out;
+};
+fn statementRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    s = statementAt(nodes, id);
+    if s is AstStatement::Assign { return exprRefs(nodes, (s as AstStatement::Assign).e); };
+    if s is AstStatement::AssignDeref { v = s as AstStatement::AssignDeref; return addTexts(exprRefs(nodes, v.a), exprRefs(nodes, v.b)); };
+    if s is AstStatement::Let { return exprRefs(nodes, (s as AstStatement::Let).e); };
+    if s is AstStatement::Return { return exprRefs(nodes, (s as AstStatement::Return).e); };
+    if s is AstStatement::ValidationStatement { return validationRefs(nodes, (s as AstStatement::ValidationStatement).v, true); };
+    if s is AstStatement::Block { return statementsRefs(nodes, (s as AstStatement::Block).xs); };
+    if s is AstStatement::If {
+        v = s as AstStatement::If;
+        return addTexts(addTexts(exprRefs(nodes, v.e), statementsRefs(nodes, v.a)), statementsRefs(nodes, v.b));
+    };
+    if s is AstStatement::While {
+        v = s as AstStatement::While;
+        return addTexts(addTexts(exprRefs(nodes, v.e), validationsRefs(nodes, v.vs, true)), statementsRefs(nodes, v.xs));
+    };
+    if s is AstStatement::PackLoop {
+        v = s as AstStatement::PackLoop;
+        return addTexts(addTexts(addTexts(exprRefs(nodes, v.lo), exprRefs(nodes, v.hi)), validationsRefs(nodes, v.inv, true)), statementsRefs(nodes, v.xs));
+    };
+    if s is AstStatement::AxiomDef || s is AstStatement::ProofDef { return payloadRefs(nodes, id, true); };
+    return [];
+};
+fn ruleRefs(nodes: &List<AstNode>, id: Int) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Rule) { return []; }; r = (n as AstNode::Rule).value;
+    if r is AstRule::UserRewrite { return proofListRefs(nodes, (r as AstRule::UserRewrite).xs); };
+    if r is AstRule::Refl { return proofRefs(nodes, (r as AstRule::Refl).p); };
+    if r is AstRule::CheckGtZero { return proofRefs(nodes, (r as AstRule::CheckGtZero).p); };
+    if r is AstRule::CheckRel { return proofRefs(nodes, (r as AstRule::CheckRel).p); };
+    return [];
+};
+fn validationRefs(nodes: &List<AstNode>, id: Int, full: Bool) -> List<String> ~ {
+    n = nodeAt(nodes, id); if !(n is AstNode::Validation) { return []; }; v = (n as AstNode::Validation).value;
+    if v is AstValidation::ProofAssert { return proofRefs(nodes, (v as AstValidation::ProofAssert).p); };
+    if v is AstValidation::Assume { return proofRefs(nodes, (v as AstValidation::Assume).p); };
+    if full {
+        if v is AstValidation::AssignProofVar { return exprRefs(nodes, (v as AstValidation::AssignProofVar).e); };
+        if v is AstValidation::Rewrite { return ruleRefs(nodes, (v as AstValidation::Rewrite).r); };
+    };
+    return [];
+};
+fn validationsRefs(nodes: &List<AstNode>, id: Int, full: Bool) -> List<String> ~ { out = []; for v in listIds(nodes, id, 26) { out = addTexts(out, validationRefs(nodes, v, full)); }; return out; };
+fn payloadRefs(nodes: &List<AstNode>, id: Int, full: Bool) -> List<String> ~ {
+    s = statementAt(nodes, id);
+    if s is AstStatement::ValidationStatement { return validationRefs(nodes, (s as AstStatement::ValidationStatement).v, full); };
+    if s is AstStatement::Block {
+        out = []; for v in listIds(nodes, (s as AstStatement::Block).xs, 24) { inner = statementAt(nodes, v); if inner is AstStatement::ValidationStatement { out = addTexts(out, validationRefs(nodes, (inner as AstStatement::ValidationStatement).v, full)); }; }; return out;
+    };
+    if s is AstStatement::AxiomDef { v = s as AstStatement::AxiomDef; return addTexts(validationsRefs(nodes, v.ins, true), validationsRefs(nodes, v.outs, true)); };
+    if s is AstStatement::ProofDef { v = s as AstStatement::ProofDef; return addTexts(addTexts(validationsRefs(nodes, v.ins, true), validationsRefs(nodes, v.outs, true)), validationsRefs(nodes, v.body, true)); };
+    return [];
+};
+fn runtimeRefs(ts: &List<Token>) -> List<String> ~ {
+    out = []; i = 0;
+    while i + 1 < size(ts) [{ affirm i >= 0; }] ~ { if wordIs(ts, i, "fn") && quotedAt(ts, i + 1) { out = push(out, textAt(ts, i + 1)); }; i = i + 1; };
+    return out;
+};
+fn functionRefs(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
+    out = [];
+    for b in &f.blocks { for row in &b.lines {
+        if wordIs(row, 0, "ghost") {
+            if wordIs(row, 1, "validation") || wordIs(row, 1, "axiom") || wordIs(row, 1, "proof") { out = addTexts(out, payloadRefs(&p.arena, integerAt(row, envEnd(row, 2)).value, true)); };
+        } else {
+            if wordIs(row, 0, "assign") || wordIs(row, 0, "peek") || wordIs(row, 0, "assignref") || wordIs(row, 0, "call") || wordIs(row, 0, "switch") { out = addTexts(out, runtimeRefs(row)); };
+        };
+    }; };
+    out = addTexts(out, payloadRefs(&p.arena, integerAt(&f.spec, 2).value, false)); out = addTexts(out, payloadRefs(&p.arena, integerAt(&f.spec, 4).value, false));
+    for loop in &f.loops { out = addTexts(out, payloadRefs(&p.arena, integerAt(&loop.tokens, 5).value, false)); };
+    found = []; for n in &out { if fnIndex(&p.functions, n) >= 0 { found = push(found, clone(n)); }; }; return found;
+};
+fn typeNames(ts: &List<Token>, pos: Int) -> List<String> ~ {
+    end = typeEnd(ts, pos); if pos < 0 || end < 0 { return []; };
+    out = []; i = pos;
+    while i < end [{ affirm i >= 0; }] ~ { if (wordIs(ts, i, "named") || wordIs(ts, i, "variant")) && quotedAt(ts, i + 1) { out = push(out, textAt(ts, i + 1)); }; i = i + 1; };
+    return out;
+};
+fn ownerNames(p: &FullProgram, ctor: &String) -> List<String> ~ {
+    if rowIndex(&p.types, ctor) >= 0 { return push([], clone(ctor)); };
+    for r in &p.types { if wordIs(&r.tokens, 0, "enum") {
+        n = numberAt(&r.tokens, 2); at = 3;
+        if n >= 0 { for i in 0..n { v = textAt(&r.tokens, at); if v = ctor { return push([], clone(r.name)); }; at = fieldsEnd(&r.tokens, at + 1); }; };
+    }; };
+    return [];
+};
+fn fieldsEnd(ts: &List<Token>, at: Int) -> Int ~ {
+    n = numberAt(ts, at); if n < 0 { return 0 - 1; }; p = at + 1;
+    for i in 0..n { p = typeEnd(ts, p + 1); if p < 0 { return p; }; }; return p;
+};
+fn functionTypes(p: &FullProgram, f: &FullFunction) -> List<String> ~ {
+    out = [];
+    for r in &f.locals { at = 3; if wordIs(&r.tokens, 2, "some") { at = 4; }; out = addTexts(out, typeNames(&r.tokens, at)); };
+    end = intsEnd(&f.header, 3); if wordIs(&f.header, end + 1, "some") { out = addTexts(out, typeNames(&f.header, end + 2)); };
+    for b in &f.blocks { for row in &b.lines {
+        if wordIs(row, 0, "assign") || wordIs(row, 0, "peek") {
+            ctor = "";
+            if wordIs(row, 2, "makedata") || wordIs(row, 2, "takefield") { ctor = textAt(row, 3); if wordIs(row, 2, "takefield") { ctor = textAt(row, 4); }; };
+            if wordIs(row, 2, "readfield") || wordIs(row, 2, "isvariant") || wordIs(row, 2, "asvariant") { ctor = textAt(row, operandEnd(row, 3)); };
+            if size(ctor.bytes) > 0 { out = addTexts(out, ownerNames(p, &ctor)); };
+        };
+    }; };
+    return out;
+};
+fn declarationTypes(r: &FullRecord) -> List<String> ~ {
+    out = []; ts = r.tokens;
+    // A declaration contains only names, field types and field counts.
+    i = 2; while i < size(ts) [{ affirm i >= 0; }] ~ { if (wordIs(&ts, i, "named") || wordIs(&ts, i, "variant")) && quotedAt(&ts, i + 1) { out = push(out, textAt(&ts, i + 1)); }; i = i + 1; };
+    return out;
+};
+fn baseName(n: &String) -> String ~ {
+    i = 0;
+    while i < size(n.bytes) && get(n.bytes, i) != toByte(60) [{ affirm i >= 0; }] ~ { i = i + 1; };
+    if i > size(n.bytes) { return clone(n); };
+    return n.slice(0, i);
+};
+fn addNames(set: HashSet<String>, ns: &List<String>) -> HashSet<String> ~ { for n in ns { set = set.insert(clone(n)); }; return set; };
+fn implRefs(p: &FullProgram, ty: &String) -> List<String> ~ {
+    prefix = catStrings(catStrings("<", clone(ty)), " as "); base = catStrings(catStrings("<", baseName(ty)), " as "); out = [];
+    for i in 0..size(p.functions) {
+        f = &get(p.functions, i); header = &(*f).header;
+        if size(header) > 1 {
+            n = &get(header, 1).text;
+            if (*n).startsWith(&prefix) || (*n).startsWith(&base) { out = push(out, clone(*n)); };
+        };
+    };
+    return out;
+};
+fn scrubEnv(row: List<Token>, kept: &HashSet<String>) -> List<Token> ~ {
+    at = envStart(&row); if at < 0 { return row; }; out = [];
+    for e in envEntries(&row, at) { if !(wordIs(&e.value, 0, "const") && wordIs(&e.value, 1, "fn") && !HashSet::contains(kept, textAt(&e.value, 2))) { out = push(out, clone(e)); }; };
+    if at >= 0 && at < size(row) { return replaceEnvBase(&row, clone(get(&row, at)), &out); };
+    return row;
+};
+fn scrubFunction(f: FullFunction, kept: &HashSet<String>) -> FullFunction ~ {
+    loops = []; blocks = [];
+    for r in &f.loops { loops = push(loops, FullRecord { name: clone(r.name), tokens: scrubEnv(clone(r.tokens), kept) }); };
+    for b in &f.blocks { rows = []; for row in &b.lines {
+        keep = true; if wordIs(row, 0, "ghost") && wordIs(row, 1, "function") { keep = HashSet::contains(kept, textAt(row, envEnd(row, 2))); };
+        if keep { rows = push(rows, scrubEnv(clone(row), kept)); };
+    }; blocks = push(blocks, FullBlock { lines: rows, ..b }); };
+    return FullFunction { env: scrubEnv(f.env, kept), loops: loops, blocks: blocks, ..f };
+};
+fn keptFunctions(functions: &List<FullFunction>, kept: &HashSet<String>) -> List<FullFunction> ~ {
+    out = [];
+    for i in 0..size(functions) {
+        f = &get(functions, i);
+        if HashSet::contains(kept, textAt(&(*f).header, 1)) { out = push(out, scrubFunction(clone(*f), kept)); };
+    };
+    return out;
+};
+fn pruneProgram(p: FullProgram) -> FullProgram ~ {
+    fns = addNames(HashSet::new(), functionRefs(&p, &p.entry)); types = addNames(HashSet::new(), functionTypes(&p, &p.entry)); changed = true;
+    processedFns = HashSet::new(); processedTypes = HashSet::new();
+    while changed ~ {
+        oldFns = fns.size(); oldTypes = types.size();
+        for n in fns.elements() {
+            if !HashSet::contains(&processedFns, n) {
+                processedFns = processedFns.insert(clone(n));
+                i = fnIndex(&p.functions, n);
+                if i >= 0 && i < size(p.functions) { fns = addNames(fns, functionRefs(&p, &get(p.functions, i))); types = addNames(types, functionTypes(&p, &get(p.functions, i))); };
+            };
+        };
+        for n in types.elements() {
+            if !HashSet::contains(&processedTypes, n) {
+                processedTypes = processedTypes.insert(clone(n));
+                fns = addNames(fns, implRefs(&p, n)); i = rowIndex(&p.invariants, n);
+                if i >= 0 && i < size(p.invariants) { refs = payloadRefs(&p.arena, integerAt(&get(p.invariants, i).tokens, 2).value, false); for f in &refs { if fnIndex(&p.functions, f) >= 0 { fns = fns.insert(clone(f)); }; }; };
+                i = rowIndex(&p.types, n); if i >= 0 && i < size(p.types) { types = addNames(types, declarationTypes(&get(p.types, i))); };
+            };
+        };
+        changed = oldFns != fns.size() || oldTypes != types.size();
+    };
+    functions = keptFunctions(&p.functions, &fns); decls = []; invariants = [];
+    for r in &p.types { if HashSet::contains(&types, &r.name) { decls = push(decls, clone(r)); }; };
+    for r in &p.invariants { keep = HashSet::contains(&types, &r.name); for ty in types.elements() { if baseName(ty) = r.name { keep = true; }; }; if keep { invariants = push(invariants, clone(r)); }; };
+    shared = [];
+    for table in &p.shared {
+        kept = []; for e in envEntries(table, 0) { if !(wordIs(&e.value, 0, "const") && wordIs(&e.value, 1, "fn") && !HashSet::contains(&fns, textAt(&e.value, 2))) { kept = push(kept, clone(e)); }; };
+        shared = push(shared, envTokens(&kept));
+    };
+    return FullProgram { shared: shared, functions: functions, types: decls, invariants: invariants, entry: scrubFunction(p.entry, &fns), ..p };
+};
