@@ -612,7 +612,7 @@ testSharedCacheCodec = TestList "testSharedCacheCodec" codecCases
 
 codecCases :: [Test]
 codecCases =
-    [ TestCase "binary framing preserves all 27 lossless and malformed controls" (withNativeHome (\home -> binaryChecks home >> pure Nothing))
+    [ TestCase "binary framing preserves all 29 lossless and malformed controls" (withNativeHome (\home -> binaryChecks home >> pure Nothing))
     , TestCase "binary disk reuse reaches no fallback in a fresh process" binaryProcesses
     , TestCase "changed source and stage actually reach the fallback" binaryKeyMisses
     , TestCase "invalid binary and legacy entries recompute without decoder fallback" binaryRejects

@@ -77,7 +77,7 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (IOException, SomeException, bracket, bracket_, bracketOnError, displayException, finally, mask, onException, throwIO, try)
-import Control.Monad (forM, when)
+import Control.Monad (forM, forM_, when)
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumCapabilities)
 import Data.Char (isHexDigit, isSpace, toLower)
@@ -104,6 +104,7 @@ import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory, readProcessOutput)
+import Seed (verifySeedFile)
 import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
@@ -663,10 +664,9 @@ sharedOnDisk identity stage source compute = do
                                                     _ <- Exception.evaluate (force program)
                                                     after <- cacheBuildScope
                                                     if after /= Just identity then pure (Ok program) else do
-                                                        written <- try (writeEntryAtomically dataDir path (ProgramBinary.encodeEntry entryKey program)) :: IO (Either IOException ())
-                                                        case written of
-                                                            Right () -> pure (Ok program)
-                                                            Left _ -> pure (Ok program)
+                                                        forM_ (ProgramBinary.encodeEntryWithin entryKey program) $ \entry ->
+                                                            try (writeEntryAtomically dataDir path entry) :: IO (Either IOException ())
+                                                        pure (Ok program)
                             locked <- withKernelLock path produce
                             case locked of
                                 Just result -> pure result
@@ -744,24 +744,30 @@ cacheBuildScope = do
         override <- lookupEnv variable
         selected <- case override of
             Just file -> pure (Just file)
-            Nothing -> firstExisting (if variable == "TERSUS_PARSER_SEED_FILE"
-                then ["bootstrap/parser.ll", "tersus/bootstrap/parser.ll"]
-                else ["bootstrap/emitter.ll", "tersus/bootstrap/emitter.ll"])
+            Nothing -> firstExisting [directory ++ seedName variable ++ ".ll" | directory <- ["bootstrap/", "tersus/bootstrap/"]]
         case selected of
             Nothing -> pure (Just (variable, Nothing))
             Just file -> do
                 absolute <- makeAbsolute file
                 digest <- verifiedSeedIdentity absolute expected
                 pure ((\value -> (variable, Just (absolute, value))) <$> digest)
+    seedName variable = case variable of
+        "TERSUS_PARSER_SEED_FILE" -> "parser"
+        "TERSUS_FRONTEND_SEED_FILE" -> "frontend"
+        _ -> "emitter"
     firstExisting [] = pure Nothing
     firstExisting (file : rest) = do
         exists <- doesFileExist file
         if exists then pure (Just file) else firstExisting rest
 
+-- (every shared program asks for the scope, so the seeds are checked as Seed checks them: bytes it already hashed to
+-- the pin are compared, not hashed again)
 verifiedSeedIdentity :: FilePath -> String -> IO (Maybe String)
 verifiedSeedIdentity file expected = do
-    digest <- executableDigest file
-    pure (if digest == Just expected then digest else Nothing)
+    verdict <- verifySeedFile "cache scope" expected file
+    pure $ case verdict of
+        Ok () -> Just expected
+        Error _ -> Nothing
 
 {-# NOINLINE buildIdentityCache #-}
 buildIdentityCache :: MVar (Maybe String)

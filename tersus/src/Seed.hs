@@ -15,6 +15,7 @@ module Seed
     , frontendSeedUrl
     , cachedFrontendSeed
     , frontendSeedFile
+    , verifySeedFile
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)

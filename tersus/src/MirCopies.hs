@@ -1001,7 +1001,7 @@ finish program named used roots main' made =
     copyEnv = Map.fromList [(n, Const (CFn n)) | n <- Set.toList names, n /= fnName main']
     -- (an environment keeps the functions there are: a name a unit gave a copy or a bound, which another unit's lowering
     -- does not have, is not one)
-    scrub = Map.filterWithKey (\k o -> Map.notMember k (progInstances program) && case o of Const (CFn n) -> n `Set.member` names; _ -> True)
+    present k o = Map.notMember k (progInstances program) && case o of Const (CFn n) -> n `Set.member` names; _ -> True
     -- (the markers of the functions with bounds that are not kept go, and each copy is defined where the program starts,
     -- wherever the function it is of was defined: a program linked from units and the same program lowered whole have the
     -- same copies)
@@ -1021,7 +1021,12 @@ finish program named used roots main' made =
     toCheck owner o = case o of
         Const (CFn n) | Just c <- companionOf n, Just (_, owner', _) <- parseImplCheckName c, owner' == owner, c `Set.member` names -> Const (CFn c)
         _ -> o
-    completeEnvs fn = mapEnvs (\e -> Map.union (scrub e) copyEnv) fn
+    -- (a function naming itself is in copyEnv when it is present at all, but for main: comparing the two names spares a
+    -- search of the program's functions for each entry of each environment)
+    completeEnvs fn = mapEnvs (\e -> Map.union (Map.filterWithKey beyondCopyEnv e) copyEnv) fn
+    beyondCopyEnv k o = case o of
+        Const (CFn n) | n == k -> k == fnName main' && present k o
+        _ -> present k o
     -- The functions with bounds validated generically, with the functions lifted out of them (but those that name what has no
     -- generic form: a call through a bound of a trait with no stub); and the stubs, which are not validated
     bounded = progBounded program
@@ -1337,7 +1342,8 @@ withoutGeneric program =
          in base /= name && maybe False (const True) (maybe (tupleGeneric base) Just (Map.lookup base (progGenerics program)))
     validatorOnly fn = Map.member genericKey (specEnv (fnSpec fn)) || isStubName (fnName fn) || fnName fn `elem` [packSliceName, packConsName]
     kept = Map.filter (not . validatorOnly) (progFunctions program)
-    gone n = Map.member n (progFunctions program) && Map.notMember n kept
+    goneNames = Map.keysSet (Map.filter validatorOnly (progFunctions program))
+    gone n = Set.member n goneNames
     strip fn = mapEnvs (Map.filterWithKey (\k o -> k /= coveredKey && case o of Const (CFn n) -> not (gone n); _ -> True)) fn{fnBlocks = Map.map block (fnBlocks fn)}
     block (BasicBlock ss t) = BasicBlock (filter (not . marker) ss) t
     marker st = case st of

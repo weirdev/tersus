@@ -273,6 +273,7 @@ testMirLowered =
             ]
         , testCase "a unit with every kind of record" (loweredRoundTrip everyRecord)
         , testCase "shared environments keep their first-seen IDs and exact names" sharedEnvironmentOrder
+        , testCase "environments that name the same functions share one part, whatever strings hold the names" sharedEnvironmentParts
         , TestList "malformed" [testCase label (refusedLowered expected broken) | (label, expected, broken) <- malformedLowered]
         , TestList
             "what the data cannot hold"
@@ -629,6 +630,29 @@ sharedEnvironmentOrder = case writeLowered fixture of
             , Ghost third (GhostPosition 3 1)
             , Ghost Map.empty (GhostPosition 4 1)
             ] Return)
+        }
+
+-- Two functions name the same functions with strings of their own, a third as many functions but not the same, and
+-- main none
+sharedEnvironmentParts :: TestResult
+sharedEnvironmentParts = case writeLowered lowered of
+    Error e -> Just e
+    Ok text -> firstLowering
+        [ testAssertEq [l | l <- lines text, "shared " `isPrefixOf` l]
+            ["shared 2 \"a\" const fn \"a\" \"b\" const fn \"b\"", "shared 2 \"a\" const fn \"a\" \"c\" const fn \"c\""]
+        , testAssertEq [take 2 (words l) | l <- lines text, "env " `isPrefixOf` l] [["env", "0"], ["env", "0"], ["env", "1"], ["env", "none"]]
+        , loweredRoundTrip lowered
+        ]
+  where
+    base = lowProgram everyRecord
+    f = progFunctions base Map.! "f"
+    -- (made from the function's name, so that no two functions' strings can be the same in memory)
+    apart name n = drop (length name) (name ++ n)
+    env name callees = Map.fromList ((apart name "n", Copy (Local 1)) : [(apart name n, Const (CFn (apart name n))) | n <- callees])
+    named name callees = f{fnName = name, fnSpec = (fnSpec f){specEnv = env name callees, specLoops = Map.empty}, fnBlocks = Map.map (\(BasicBlock _ term) -> BasicBlock [] term) (fnBlocks f)}
+    lowered = everyRecord
+        { lowProgram = base{progFunctions = Map.fromList [(name, named name callees) | (name, callees) <- [("f", ["a", "b"]), ("g", ["a", "b"]), ("h", ["a", "c"])]], progBounded = Map.empty, progInstances = Map.empty}
+        , lowStubs = Set.empty
         }
 
 refusedLowered :: String -> ([String] -> [String]) -> TestResult
