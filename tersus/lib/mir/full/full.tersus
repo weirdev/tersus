@@ -21,9 +21,14 @@ impl Clone for FullFunction { };
 
 // Payload tokens hold AST node IDs internally; only the wire uses payload ordinals.
 // Shared environments remain referenced until their canonical wire variants are written.
+// boundedFacts: a function with bounds' checked facts of a type its body names (`boundedfacts FUNCTION TYPE` and the seven
+// names of an owned row), named by the function; protocols: each role's checked provider (`protocol ROLE PROVIDER`); ownership: each owner's checked facts, as the owned
+// rows of MIR version 2 are (`owned OWNER COPY DROP-PROVIDER DROP-FUNCTION CLONE-PROVIDER CLONE-FUNCTION DEREF-PROVIDER
+// DEREF-FUNCTION`), after `ownership COUNT`; checked: the data has that table, if empty, rather than none
 struct FullProgram {
     types: List<FullRecord>, generics: List<FullRecord>, invariants: List<FullRecord>,
-    bounded: List<FullRecord>, instances: List<FullRecord>,
+    bounded: List<FullRecord>, boundedFacts: List<FullRecord>, instances: List<FullRecord>,
+    protocols: List<FullRecord>, ownership: List<FullRecord>, checked: Bool,
     functions: List<FullFunction>, entry: FullFunction,
     trailer: List<List<Token>>, arena: List<AstNode>, shared: List<List<Token>>
 };

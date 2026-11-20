@@ -300,6 +300,72 @@ testLinkNative = TestList "testLinkNative"
                             (_, answer, diagnostic) <- Native.runWithInputFull executable input
                             pure (firstFailure [testAssertEq answer "1\n", testAssertEq diagnostic "the input is not the MIR as data\n"])) ["", "\n"]
                         pure (firstFailure (suffix : quotes : legacy))
+       , TestCase "actual emitter Full entry keeps checked protocols and ownership exactly, and refuses malformed ones" $ case programData empty of
+            Error e -> pure (Just e)
+            Ok text -> do
+                tool <- actualEmitterTool
+                case tool of
+                    Error e -> pure (Just e)
+                    Ok executable -> do
+                        let environments input = Native.runWithInputFull executable ("pass link\nenvironments\n" ++ input)
+                            -- (the records come after the declarations and before the functions, in their written order)
+                            withRecords rows = unlines (takeWhile (not . isFunctionLine) (lines text) ++ rows ++ dropWhile (not . isFunctionLine) (lines text))
+                            isFunctionLine l = take 9 l == "function " || take 5 l == "main "
+                            protocols = ["protocol \"Box\" \"std$core$types$Box\"", "protocol \"List\" \"std$core$types$List\""]
+                            positive = "owned \"B\" \"std$core$ownership$Copy\" \"std$core$ownership$Drop\" \"<B as std$core$ownership$Drop>::drop\" \"\" \"\" \"\" \"\""
+                            negative = "owned \"A\" \"\" \"\" \"\" \"\" \"\" \"\" \"\""
+                            checked = withRecords (protocols ++ ["ownership 2", negative, positive])
+                            checkedEmpty = withRecords ["ownership 0"]
+                            refused input = do
+                                (_, out, errors) <- environments input
+                                pure (firstFailure [testAssertEq out "1\n", testAssertEq errors "the linking request contains unreadable MIR3\n"])
+                            kept input = do
+                                (status, out, errors) <- environments input
+                                pure (firstFailure [testAssertEq status ExitSuccess, testAssertEq errors "", testAssertEq out input])
+                        positives <- mapM kept [text, checked, checkedEmpty]
+                        -- (written in canonical order whatever order they are read in)
+                        reordered <- environments (withRecords (reverse protocols ++ ["ownership 2", positive, negative]))
+                        refusals <- mapM refused
+                            [ withRecords ["protocol \"Hash\" \"std$prelude$prelude$Hash\""]
+                            , withRecords (protocols ++ [last protocols])
+                            , withRecords ["protocol \"Box\" \"\""]
+                            , withRecords ["ownership 2", negative]
+                            , withRecords ["ownership 1", negative, positive]
+                            , withRecords [negative]
+                            , withRecords ["ownership 0", "ownership 0"]
+                            , withRecords ["ownership 1", "owned \"A\" \"\" \"std$core$ownership$Drop\" \"\" \"\" \"\" \"\" \"\""]
+                            , withRecords ["ownership 1", "owned \"A\" \"\" \"\" \"\" \"\" \"\" \"\""]
+                            , withRecords ["ownership 0", head protocols]
+                            , withRecords ["ownership 2", negative, negative]
+                            ]
+                        -- (a function with bounds' facts of the types its body names, after its bounded record)
+                        bounded <- case programData empty{M.progBounded = Map.singleton "f" (M.BoundedFn [] [] [] [])} of
+                            Error e -> pure (Just e)
+                            Ok boundedText -> do
+                                let withFacts rows = unlines (takeWhile (not . isFunctionLine) (lines boundedText) ++ rows ++ dropWhile (not . isFunctionLine) (lines boundedText))
+                                    facts ty = "boundedfacts \"f\" " ++ ty ++ " \"\" \"\" \"\" \"\" \"\" \"\" \"\""
+                                    copyFact = "boundedfacts \"f\" int \"std$core$ownership$Copy\" \"\" \"\" \"\" \"\" \"\" \"\""
+                                    twoTypes = withFacts [copyFact, facts "bool"]
+                                keptFacts <- kept twoTypes
+                                refusedFacts <- mapM refused
+                                    [ withFacts ["boundedfacts \"g\" int \"\" \"\" \"\" \"\" \"\" \"\" \"\""]
+                                    , withFacts [copyFact, facts "int"]
+                                    , withFacts ["boundedfacts \"f\" int \"\" \"std$core$ownership$Drop\" \"\" \"\" \"\" \"\" \"\""]
+                                    , withFacts ["boundedfacts \"f\" \"int\" \"\" \"\" \"\" \"\" \"\" \"\" \"\""]
+                                    , withFacts ["boundedfacts \"f\" int \"\" \"\" \"\" \"\" \"\" \"\""]
+                                    ]
+                                (_, factsPruneOut, factsPruneErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ twoTypes)
+                                pure (firstFailure (keptFacts : refusedFacts ++ [firstFailure [testAssertEq factsPruneOut "1\n", testAssertEq factsPruneErrors "link error: checked ownership records are not pruned yet\n"]]))
+                        -- (merging, pruning and specializing do not drop checked records: until they handle them, they refuse them)
+                        (_, pruneOut, pruneErrors) <- Native.runWithInputFull executable ("pass link\nprune\n" ++ checked)
+                        (_, mergeOut, mergeErrors) <- Native.runWithInputFull executable ("pass link\nmerge 1\nunit \"app\" none " ++ show (length (lines checked)) ++ "\n" ++ checked)
+                        (_, monoOut, monoErrors) <- Native.runWithInputFull executable ("pass mono\n" ++ checked)
+                        pure $ firstFailure (positives ++ refusals ++ [bounded] ++
+                            [ case reordered of (status, out, errors) -> firstFailure [testAssertEq status ExitSuccess, testAssertEq errors "", testAssertEq out checked]
+                            , firstFailure [testAssertEq pruneOut "1\n", testAssertEq pruneErrors "link error: checked ownership records are not pruned yet\n"]
+                            , firstFailure [testAssertEq mergeOut "1\n", testAssertEq mergeErrors "link error: checked protocol and ownership records are not merged yet\n"]
+                            , firstFailure [testAssertEq monoOut "1\n", testAssertEq monoErrors "checked ownership records are not specialized yet\n"]
+                            ])
        , TestCase "dependency main ghosts follow numeric block order despite wire permutation" $ do
             let dep = empty{M.progMain = (M.progMain empty){M.fnBlocks = Map.fromList
                     [(M.BlockId 2, M.BasicBlock [M.Ghost Map.empty (M.GhostPosition 2 1)] M.Return)
