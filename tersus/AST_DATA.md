@@ -230,6 +230,33 @@ is the table; `testAstData` checks that it is still `BuiltinTable`'s, and
 
 The expression tags also include `IfExpr CONDITION THEN ELSE`, `BlockExpr STATEMENTS RESULT` and `Ascribed EXPRESSION TYPE`. Conditional results remain syntax until CFG lowering; a block keeps its statements, lexical bindings and final result. An annotation is checked and erased during elaboration. The compiler's own code does not use these three tags (or `let`) yet: it is parsed by the pinned parser seed and elaborated by the pinned seed F0, which do not read them, so its text keeps to statement `match` and plain assignments until a seed that reads them is pinned. `Let NAME EXPRESSION` is both an explicit local declaration and the binding form used for patterns. The strict single-use and kind checks apply to every new child reference. Per-yield reference provenance is checker metadata, not another wire node; it is consumed during checking and the resulting syntax/type stream remains the lowering boundary.
 
+A contract-carrying function type is written `fnc`, beside the unchanged
+`fn` of a plain function type:
+
+```
+fnc N <arg type>... <return type> N <quoted parameter name>... <clauses> <clauses>
+clauses:  K <clause>...        (K clauses; input clauses, then output clauses)
+clause:   M <token>...         (M at least 1)
+token:    w <word> | q <quoted name>
+```
+
+The parameter-name count must equal the argument count (`""` names an
+unnamed parameter), a non-empty parameter name may not repeat, a clause
+may not be empty, and a clause token is only `w` or `q`; anything else is
+refused by every reader. A clause is a sequence of word and name tokens
+that this layer preserves exactly, as the Tersus codec preserves a named
+type's argument tokens: it does not interpret them. In Haskell the type is
+`TFnContract` with an `FnContract` of `FnClause` token lists in `Types`,
+deliberately not `Syntax`'s `ValidationStatement` (`Syntax` imports
+`Types`, so the contract side could not hold the syntax type without a
+cycle); the Tersus codec mirrors it as `Type::TFnContract` with an
+`FnContract` of token lists. No writer emits `fnc` for a plain `TFn`, and
+no user syntax produces one yet: the phase that gives function types
+contracts in the language assigns the clause token vocabulary and makes
+the parser and elaborator produce and read these types. Until then every
+reader accepts both forms and every existing program's `fn` data is
+byte-identical.
+
 `Type TYPE` and `Size SIZE` use the exact MIR recursive codecs and Tersus
 `Type`/`Size` enums, including the MIR `TNamed`'s preserved argument tokens.
 The builtin's `Arg` is structural even when its type contains such a named

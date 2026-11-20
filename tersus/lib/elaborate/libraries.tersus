@@ -149,6 +149,11 @@ fn probeType(p: Probe, t: &Type) -> Probe ~ {
             for a in args { p = probeType(p, a); };
             return p;
         },
+        Type::TFnContract { args: args, ret: r, contract: contract } => {
+            inner = Box::unbox(clone(r)); p = probeType(p, &inner);
+            for a in args { p = probeType(p, a); };
+            return p;
+        },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { return probeArgs(mentionParts(p, base), argTokens); },
         Type::TVariant { name: name } => { return mentionParts(p, name); },
         Type::TParam { name: name } => { return mentionRaw(p, name); },
@@ -344,6 +349,12 @@ fn typeNamesHave(t: &Type, typeName: &String) -> Bool ~ {
         Type::TRef { inner: e } => { inner = Box::unbox(clone(e)); return typeNamesHave(&inner, typeName); },
         Type::TMutRef { inner: e } => { inner = Box::unbox(clone(e)); return typeNamesHave(&inner, typeName); },
         Type::TFn { args: args, ret: r } => {
+            inner = Box::unbox(clone(r));
+            if typeNamesHave(&inner, typeName) { return true; };
+            for a in args { if typeNamesHave(a, typeName) { return true; }; };
+            return false;
+        },
+        Type::TFnContract { args: args, ret: r, contract: contract } => {
             inner = Box::unbox(clone(r));
             if typeNamesHave(&inner, typeName) { return true; };
             for a in args { if typeNamesHave(a, typeName) { return true; }; };

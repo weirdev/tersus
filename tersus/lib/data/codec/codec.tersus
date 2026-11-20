@@ -22,6 +22,11 @@ enum Size { SConst { n: Int }, SAny, SParam { name: String }, SVar { n: Int } };
 impl Clone for Size { };
 impl Eq for Size { };
 
+struct FnContract { names: List<String>, requires: List<List<Token>>, ensures: List<List<Token>> };
+
+impl Clone for FnContract { };
+impl Eq for FnContract { };
+
 enum Type {
     TInt,
     TByte,
@@ -41,6 +46,7 @@ enum Type {
     TBlock { inner: Box<Type> },
     TUninit { inner: Box<Type> },
     TWord { signed: Bool, bits: Int },
+    TFnContract { args: List<Type>, ret: Box<Type>, contract: Box<FnContract> },
 };
 
 impl Clone for Type { };
@@ -59,6 +65,14 @@ fn noNames() -> List<String> [{ }] [{ }] {
 };
 
 fn noInts() -> List<Int> [{ }] [{ }] {
+    return [];
+};
+
+fn noTokens() -> List<Token> [{ }] [{ }] {
+    return [];
+};
+
+fn noTokenLists() -> List<List<Token>> [{ }] [{ }] {
     return [];
 };
 
@@ -209,6 +223,48 @@ fn sizeAt(ts: &List<Token>, pos: Int) -> Parsed<Size> [{ affirm pos >= 0; affirm
     return bad;
 };
 
+fn fnClauseAt(ts: &List<Token>, pos: Int) -> Parsed<List<Token>> [{ affirm pos >= 0; affirm pos <= size(ts); }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    if pos >= size(ts) { return failed(noTokens(), ts); };
+    c = countAt(ts, pos);
+    if !c.ok || c.value = 0 { return failed(noTokens(), ts); };
+    tokens = [];
+    p = c.pos;
+    for i in 0..c.value [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noTokens(), ts); };
+        m = wordAt(ts, p);
+        if !m.ok { return failed(noTokens(), ts); };
+        if m.value != "w" && m.value != "q" { return failed(noTokens(), ts); };
+        if m.pos >= size(ts) { return failed(noTokens(), ts); };
+        if m.value = "w" {
+            v = wordAt(ts, m.pos);
+            if !v.ok { return failed(noTokens(), ts); };
+            tokens = push(tokens, Token { quoted: false, text: v.value });
+            p = v.pos;
+        } else {
+            v = nameAt(ts, m.pos);
+            if !v.ok { return failed(noTokens(), ts); };
+            tokens = push(tokens, Token { quoted: true, text: v.value });
+            p = v.pos;
+        };
+    };
+    return done(tokens, p);
+};
+
+fn fnClausesAt(ts: &List<Token>, pos: Int) -> Parsed<List<List<Token>>> [{ affirm pos >= 0; affirm pos <= size(ts); }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    if pos >= size(ts) { return failed(noTokenLists(), ts); };
+    c = countAt(ts, pos);
+    if !c.ok { return failed(noTokenLists(), ts); };
+    clauses = [];
+    p = c.pos;
+    for i in 0..c.value [{ affirm p >= pos; affirm p <= size(ts); }] {
+        clause = fnClauseAt(ts, p);
+        if !clause.ok { return failed(noTokenLists(), ts); };
+        clauses = push(clauses, clause.value);
+        p = clause.pos;
+    };
+    return done(clauses, p);
+};
+
 fn catStrings(a: &String, b: &String) -> String [{ }] [{ }] {
     out = clone(a);
     for i in 0..size(b.bytes) {
@@ -280,6 +336,21 @@ fn isBareLowerName(name: &String) -> Bool [{ }] [{ }] {
     return true;
 };
 
+fn renderFnClauses(clauses: &List<List<Token>>, fuel: Int) -> String [{ }] [{ }] {
+    if size(clauses) = 0 { return ""; };
+    out = " [{";
+    for i in 0..size(clauses) {
+        if i > 0 { out = catStrings(out, "; "); };
+        clause = get(clauses, i);
+        for j in 0..size(clause) {
+            if j > 0 { out = catStrings(out, " "); };
+            tok = get(clause, j);
+            if tok.quoted { out = catStrings(catStrings(catStrings(out, "\""), tok.text), "\""); } else { out = catStrings(out, tok.text); };
+        };
+    };
+    return catStrings(out, "}]");
+};
+
 fn renderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     if fuel <= 0 { return ""; };
     r = "";
@@ -307,6 +378,18 @@ fn renderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] [{ }
                 parts = catStrings(parts, renderTypeForName(get(args, i), fuel - 1));
             };
             r = catStrings(catStrings(parts, ") -> "), renderTypeForName(Box::unbox(ret), fuel - 1));
+        },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
+            c = Box::unbox(contract);
+            parts = "fn(";
+            for i in 0..size(args) {
+                if i > 0 { parts = catStrings(parts, ", "); };
+                if i < size(c.names) && size(get(c.names, i).bytes) > 0 { parts = catStrings(catStrings(parts, get(c.names, i)), ": "); };
+                parts = catStrings(parts, renderTypeForName(get(args, i), fuel - 1));
+            };
+            r = catStrings(catStrings(parts, ") -> "), renderTypeForName(Box::unbox(ret), fuel - 1));
+            r = catStrings(r, renderFnClauses(c.requires, fuel));
+            r = catStrings(r, renderFnClauses(c.ensures, fuel));
         },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             if isBareLowerName(name) { r = catStrings("`", clone(name)); } else { r = clone(name); };
@@ -421,6 +504,39 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
         if !r.ok { return bad; };
         return done(Type::TFn { args: args, ret: Box::new(r.value) }, r.pos);
     };
+    if kw = "fnc" {
+        c = countAt(ts, next);
+        if !c.ok { return bad; };
+        args = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            a = typeAt(ts, p);
+            if !a.ok { return bad; };
+            args = push(args, a.value);
+            p = a.pos;
+        };
+        if p >= size(ts) { return bad; };
+        r = typeAt(ts, p);
+        if !r.ok { return bad; };
+        if r.pos >= size(ts) { return bad; };
+        nc = countAt(ts, r.pos);
+        if !nc.ok || nc.value != count { return bad; };
+        names = namesAt(ts, nc.pos, nc.value);
+        if !names.ok { return bad; };
+        for i in 0..size(names.value) {
+            for j in 0..size(names.value) {
+                if i < j && size(get(names.value, i).bytes) > 0 && get(names.value, i) = get(names.value, j) { return bad; };
+            };
+        };
+        requires = fnClausesAt(ts, names.pos);
+        if !requires.ok { return bad; };
+        ensures = fnClausesAt(ts, requires.pos);
+        if !ensures.ok { return bad; };
+        contract = FnContract { names: names.value, requires: requires.value, ensures: ensures.value };
+        return done(Type::TFnContract { args: args, ret: Box::new(r.value), contract: Box::new(contract) }, ensures.pos);
+    };
     if kw = "forall" {
         c1 = countAt(ts, next);
         if !c1.ok { return bad; };
@@ -500,6 +616,21 @@ fn printSize(s: &Size) -> Int [{ }] [{ }] {
     };
 };
 
+fn printFnClauses(clauses: &List<List<Token>>) -> Int [{ }] [{ }] {
+    n = printInt(size(clauses));
+    for clause in &clauses {
+        n = n + printInt(size(clause));
+        for tok in &clause {
+            if tok.quoted {
+                n = n + printWord("q") + printName(&tok.text);
+            } else {
+                n = n + printWord("w") + printWord(&tok.text);
+            };
+        };
+    };
+    return n;
+};
+
 fn printType(t: &Type) -> Int ~ {
     return printTypeWith(t, false);
 };
@@ -529,6 +660,19 @@ fn printTypeWith(t: &Type, listTokens: Bool) -> Int ~ {
                 i = i + 1;
             };
             n = n + printTypeWith(Box::unbox(r), listTokens);
+        },
+        Type::TFnContract { args: args, ret: r, contract: contract } => {
+            c = Box::unbox(contract);
+            n = " fnc".print() + printInt(size(args));
+            i = 0;
+            while i < size(args) [{ affirm i >= 0; affirm i <= size(args); }] ~ {
+                n = n + printTypeWith(get(args, i), listTokens);
+                i = i + 1;
+            };
+            n = n + printTypeWith(Box::unbox(r), listTokens);
+            n = n + printNames(&c.names);
+            n = n + printFnClauses(&c.requires);
+            n = n + printFnClauses(&c.ensures);
         },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             n = " named".print() + printName(base) + printInt(argc);

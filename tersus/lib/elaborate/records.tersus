@@ -80,6 +80,13 @@ fn fromCodec(st: St, t: &Type) -> St ~ {
             st = fromCodec(st, &inner);
             return fnTy(st, params, st.ty);
         },
+        Type::TFnContract { args: args, ret: r, contract: contract } => {
+            params = [];
+            for a in args { st = fromCodec(st, a); params = push(params, st.ty); };
+            inner = Box::unbox(clone(r));
+            st = fromCodec(st, &inner);
+            return fnTy(st, params, st.ty);
+        },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             args = [];
             p = 0;

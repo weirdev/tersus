@@ -323,6 +323,11 @@ fn typeText(t: &Type) -> String ~ {
             for a in args { parts = push(parts, typeText(a)); };
             r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(typeText(Box::unbox(ret)));
         },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
+            parts = [];
+            for a in args { parts = push(parts, typeText(a)); };
+            r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(typeText(Box::unbox(ret)));
+        },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             r = clone(name);
             if bareLower(name) { r = "`".then(clone(name)); };
@@ -690,6 +695,11 @@ fn plainRendered(t: &Type) -> String ~ {
             for a in args { parts = push(parts, plainRendered(a)); };
             r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(plainRendered(Box::unbox(ret)));
         },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
+            parts = [];
+            for a in args { parts = push(parts, plainRendered(a)); };
+            r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(plainRendered(Box::unbox(ret)));
+        },
         Type::TVariant { name: name } => { r = clone(name); },
         Type::TParam { name: name } => { r = "'".then(clone(name)); },
         Type::TVar { n: n } => { r = "?".then(showInt(n)); },
@@ -731,6 +741,11 @@ fn plainType(t: &Type) -> Type ~ {
             na = [];
             for a in args { na = push(na, plainType(a)); };
             r = Type::TFn { args: na, ret: Box::new(plainType(Box::unbox(ret))) };
+        },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
+            na = [];
+            for a in args { na = push(na, plainType(a)); };
+            r = Type::TFnContract { args: na, ret: Box::new(plainType(Box::unbox(ret))), contract: clone(contract) };
         },
         Type::TForall { sizes: sizes, types: types, body: body } => { r = Type::TForall { sizes: clone(sizes), types: clone(types), body: Box::new(plainType(Box::unbox(body))) }; },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { r = Type::TNamed { name: plainName(name), base: clone(base), argc: argc, argTokens: plainArgTokens(argTokens) }; },
@@ -968,6 +983,7 @@ fn knownLayoutAt(types: &List<TypeDecl>, t: &Type, depth: Int) -> Bool ~ {
         Type::TByte => { },
         Type::TBool => { },
         Type::TFn { args: args, ret: ret } => { },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => { },
         Type::TVariant { name: name } => { },
         Type::TVar { n: n } => { },
         Type::TRef { inner: e } => { },
