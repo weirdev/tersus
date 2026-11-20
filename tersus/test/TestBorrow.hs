@@ -25,6 +25,11 @@ testBorrow =
         checks body expected = parseValidateEvalProgramHelper body (Just (VInt expected))
         holder = "struct H { r: &mut Int }; fn put(h: &mut H, r: &mut Int) -> Int { *h = H { r: &mut *r }; return 0; }; "
         rejected = parseValidateFailProgramHelper
+        readOnlyIn fn how = "Move error: in " ++ fn ++ ": the value in _2 may be reached through a shared reference or a parameter lent to be read (&T), so nothing can be changed through it: it cannot be " ++ how
+        readOnly fn local how = "Move error: in " ++ fn ++ ": " ++ local ++ " may be reached through a shared reference or a parameter lent to be read (&T), so nothing can be changed through it: it cannot be " ++ how
+        sharedHolder = "struct W { r: &mut Int }; "
+        pairHolder = "struct H { r: &mut Int, n: Int }; "
+        nestedHolder = "struct A { r: &mut Int, n: Int }; struct B { a: A, n: Int }; "
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
             _ -> Just ("Expected a parse error for: " ++ source)
@@ -234,7 +239,7 @@ testBorrow =
                 , testCase "to a field" (runs "struct P { a: Int, b: Int }; fn f(c: Int) -> Int { v = P { a: 1, b: 2 }; rs = push([], &mut v.b); p = get(rs, 0); *p = 41; return v.b; }; return f(1);" (VInt 41))
                 , testCase "returned by a call" (runs "fn id(r: &mut Int) -> &mut Int from r { return r; }; fn f(c: Int) -> Int { x = 1; rs = push([], id(&mut x)); p = get(rs, 0); *p = 41; return x; }; return f(1);" (VInt 41))
                 , testCase "to an update parameter" (runs "fn g(r: &mut Int) -> Int { rs = push([], &mut r); q = get(rs, 0); *q = 41; return 0; }; fn f(c: Int) -> Int { x = 1; y = g(&mut x); return x + y; }; return f(1);" (VInt 41))
-                , testCase "in a function the list is lent to" (runs "fn g(rs: &List<&mut Int>) -> Int [{ affirm size(rs) > 0; }] [{ }] { q = get(rs, 0); *q = 41; return 0; }; fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); y = g(rs); return x + y; }; return f(1);" (VInt 41))
+                , testCase "in a function the list is lent to for updating" (runs "fn g(rs: &mut List<&mut Int>) -> Int [{ affirm size(*rs) > 0; }] [{ }] { q = get(*rs, 0); *q = 41; return 0; }; fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); y = g(&mut rs); return x + y; }; return f(1);" (VInt 41))
                 , testCase "in a loop" (runs "fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { p = get(rs, 0); *p = *p + 1; i = i + 1; }; return x; }; return f(1);" (VInt 4))
                 , testCase "in one branch" (runs "fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); if c > 0 { p = get(rs, 0); *p = 41; } else { }; return x; }; return f(1) * 100 + f(0);" (VInt 4101))
                 , testCase "outside a function" (runs "x = 1; rs = push([], &mut x); p = get(rs, 0); *p = 41; return x;" (VInt 41))
@@ -437,6 +442,39 @@ testBorrow =
                 , testCase "a variable a closure borrows for updating cannot be read while the closure is live" (rejected "count = 0; f = fn() -> Int { count = count + 1; return count; }; a = count; b = f(); return a + b;" "cannot be read while that borrow is live")
                 , testCase "a borrowed capture can be used again after the closure's last use" (runs "xs = push(push([], 1), 2); f = fn() -> Int => size(xs); a = f(); xs = push(xs, 3); return a * 10 + size(xs);" (VInt 23))
                 ]
+            , TestList
+                "an update reference reached through a shared path is read-only"
+                [ testCase "in a function the list is lent to" (rejected "fn g(rs: &List<&mut Int>) -> Int [{ affirm size(rs) > 0; }] [{ }] { q = get(rs, 0); *q = 41; return 0; }; fn f(c: Int) -> Int { x = 1; rs = push([], &mut x); y = g(rs); return x + y; }; return f(1);" (readOnly "g" "q" "written through"))
+                , testCase "held by a holder lent to be read" (rejected (sharedHolder ++ "fn mutate(w: &W) -> Int { *w.r = 4; return 0; }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; n = mutate(w); return x; }; return f(0);") (readOnlyIn "mutate" "written through"))
+                , testCase "held by a receiver lent to a method" (rejected (sharedHolder ++ "impl W { fn bump(self: &Self) -> Int { p = self.r; *p = 5; return 0; }; }; fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; n = w.bump(); return x; }; return f(0);") (readOnly "<W>::bump" "p" "written through"))
+                , testCase "an element of a list lent to a for loop" (rejected "fn g(l: &List<&mut Int>) -> Int { for p in l { *p = 5; }; return 0; }; fn f(c: Int) -> Int { x = 0; l = push([], &mut x); n = g(l); return x; }; return f(0);" (readOnly "g" "p" "written through"))
+                , testCase "a payload of an enum lent to a match" (rejected "enum E { Some { r: &mut Int }, Nothing }; fn g(e: &E) -> Int { match e { E::Some { r: r } => { *r = 5; }, E::Nothing => { } }; return 0; }; fn f(c: Int) -> Int { x = 0; e = E::Some { r: &mut x }; n = g(e); return x; }; return f(0);" (readOnly "g" "r" "written through"))
+                , testCase "the value of a Box lent to be read" (rejected (sharedHolder ++ "fn g(b: &Box<W>) -> Int { u = Box::unbox(b); p = u.r; *p = 5; return 0; }; fn f(c: Int) -> Int { x = 0; b = Box::new(W { r: &mut x }); n = g(b); return x; }; return f(0);") (readOnly "g" "p" "written through"))
+                , testCase "read through a shared reference to a holder of the function's own" (rejected (sharedHolder ++ "fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; s = &w; p = (*s).r; *p = 5; return x; }; return f(0);") (readOnly "f" "p" "written through"))
+                , testCase "it cannot be reborrowed for updating" (rejected (sharedHolder ++ "fn g(w: &W) -> Int { p = w.r; q = &mut *p; *q = 5; return 0; }; fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; n = g(w); return x; }; return f(0);") (readOnly "g" "p" "lent for updating"))
+                , testCase "nor lent to an update parameter" (rejected (sharedHolder ++ "fn up(r: &mut Int) -> Int { *r = 5; return 0; }; fn g(w: &W) -> Int { p = w.r; return up(p); }; fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; n = g(w); return x; }; return f(0);") (readOnly "g" "p" "lent for updating"))
+                , testCase "nor put into a value given on" (rejected (sharedHolder ++ "fn wv(v: W) -> Int { *v.r = 5; return 0; }; fn g(w: &W) -> Int { p = w.r; return wv(W { r: p }); }; fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; n = g(w); return x; }; return f(0);") "Move error: in g: w.r is lent (&T) to this function and can only be read")
+                , testCase "nor given by value to a generic function" (rejected (sharedHolder ++ "fn keep<T>(v: T) -> Int { return 0; }; fn g(w: &W) -> Int { p = w.r; return keep(p); }; fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; n = g(w); return x; }; return f(0);") "Move error: in g: w.r is lent (&T) to this function and can only be read")
+                , testCase "nor given on when it is read out of a holder that may be shared" (rejected (pairHolder ++ "fn wv(v: H) -> Int { *v.r = 5; return 0; }; fn g(l: &List<H>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); if c { } else { h = H { r: &mut y, n: 0 }; }; p = h.r; return wv(H { r: p, n: 0 }); }; fn f(c: Int) -> Int { x = 1; l = push([], H { r: &mut x, n: 0 }); n = g(l, true); return x; }; return f(0);") (readOnly "g" "p" "given on"))
+                , testCase "nor captured for updating by a closure" (rejected (sharedHolder ++ "fn g(w: &W) -> Int { k = fn() -> Int { *w.r = 5; return 0; }; return k(); }; fn f(c: Int) -> Int { x = 0; w = W { r: &mut x }; n = g(w); return x; }; return f(0);") "w is lent (&T) to this function and can only be read, so it cannot be borrowed for updating")
+                , testCase "when the paths that meet give a shared holder on one" (rejected (pairHolder ++ "fn g(l: &List<H>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); if c { } else { h = H { r: &mut y, n: 0 }; }; p = h.r; *p = 5; return y; }; fn f(c: Int) -> Int { x = 1; l = push([], H { r: &mut x, n: 0 }); n = g(l, true); return x; }; return f(0);") (readOnly "g" "p" "written through"))
+                , testCase "whichever of the paths gives the shared holder" (rejected (pairHolder ++ "fn g(l: &List<H>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = H { r: &mut y, n: 0 }; if c { } else { h = get(l, 0); }; p = h.r; *p = 5; return y; }; fn f(c: Int) -> Int { x = 1; l = push([], H { r: &mut x, n: 0 }); n = g(l, false); return x; }; return f(0);") (readOnly "g" "p" "written through"))
+                , testCase "when a loop gives the shared holder on its way back" (rejected (pairHolder ++ "fn g(l: &List<H>) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = H { r: &mut y, n: 0 }; i = 0; while i < 2 [{ affirm i >= 0; affirm i <= 2; }] shrinks 2 - i { p = h.r; *p = 5; h = get(l, 0); i = i + 1; }; return y; }; fn f(c: Int) -> Int { x = 1; l = push([], H { r: &mut x, n: 0 }); n = g(l); return x; }; return f(0);") (readOnly "g" "p" "written through"))
+                , testCase "a part of a joined holder cannot be moved on" (rejected (nestedHolder ++ "fn g(l: &List<B>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); if c { } else { h = B { a: A { r: &mut y, n: 0 }, n: 0 }; }; t = h.a; u = t; return u.n; }; fn f(c: Int) -> Int { x = 1; l = push([], B { a: A { r: &mut x, n: 0 }, n: 0 }); n = g(l, true); return x; }; return f(0);") (readOnly "g" "t" "given on"))
+                , testCase "nor put into a value of the function's own" (rejected (nestedHolder ++ "fn g(l: &List<B>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); if c { } else { h = B { a: A { r: &mut y, n: 0 }, n: 0 }; }; t = h.a; v = B { a: t, n: 0 }; return v.n; }; fn f(c: Int) -> Int { x = 1; l = push([], B { a: A { r: &mut x, n: 0 }, n: 0 }); n = g(l, true); return x; }; return f(0);") (readOnly "g" "t" "given on"))
+                , testCase "and a payload of a joined value taken apart by a match is read-only" (rejected "struct A { r: &mut Int, n: Int }; enum F { Some { a: A }, Nothing }; fn g(l: &List<F>, c: Bool) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); if c { } else { h = F::Some { a: A { r: &mut y, n: 0 } }; }; n = match h { F::Some { a: t } => { q = &mut *t.r; 0 }, F::Nothing => 0, }; return n; }; fn f(c: Int) -> Int { x = 1; l = push([], F::Some { a: A { r: &mut x, n: 0 } }); n = g(l, true); return x; }; return f(0);" "so nothing can be changed through it: it cannot be lent for updating")
+                , testCase "nor cloned by a generic function, since an update reference is not Clone" (rejected "fn firstOf<T: Clone>(l: &List<T>) -> T [{ affirm size(l) > 0; }] [{ }] { return get(l, 0).clone(); }; fn g(l: &List<&mut Int>) -> Int [{ affirm size(l) > 0; }] [{ }] { p = firstOf(l); *p = 5; return 0; }; fn f(c: Int) -> Int { x = 1; l = push([], &mut x); n = g(l); return x; }; return f(0);" "firstOf needs T to implement Clone, and &mut Int does not")
+                , testCase "nor by its holder's Clone" (rejected (sharedHolder ++ "impl Clone for W { }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; v = clone(w); return 0; }; return f(0);") "Move error: in <W as Clone>::clone")
+                , testCase "a holder lent for updating can be written through" (runs (sharedHolder ++ "fn mutate(w: &mut W) -> Int { *w.r = 4; return 0; }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; n = mutate(&mut w); return x; }; return f(0);") (VInt 4))
+                , testCase "a holder given by value can be written through" (runs (sharedHolder ++ "fn mutate(w: W) -> Int { *w.r = 4; return 0; }; fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; n = mutate(w); return x; }; return f(0);") (VInt 4))
+                , testCase "a holder lent to be read can be read through and lent on to be read" (runs (sharedHolder ++ "fn peek(w: &W) -> Int { return *w.r; }; fn g(w: &W) -> Int { p = w.r; q = &*p; return *p + *q + peek(w); }; fn f(c: Int) -> Int { x = 2; w = W { r: &mut x }; return g(w); }; return f(0);") (VInt 6))
+                , testCase "holders of the function's own on every path can be written through" (runs (pairHolder ++ "fn g(c: Bool) -> Int { y = 0; z = 0; h = H { r: &mut y, n: 0 }; if c { } else { h = H { r: &mut z, n: 0 }; }; p = h.r; *p = 5; return y * 10 + z; }; return g(true) * 100 + g(false);") (VInt 5005))
+                , testCase "a part of a holder of the function's own can be moved on" (runs (nestedHolder ++ "fn g(c: Bool) -> Int { y = 0; z = 0; h = B { a: A { r: &mut z, n: 0 }, n: 0 }; if c { } else { h = B { a: A { r: &mut y, n: 0 }, n: 0 }; }; t = h.a; u = t; p = u.r; *p = 5; return y * 10 + z; }; return g(true) * 100 + g(false);") (VInt 550))
+                , testCase "a closure can write through a holder of the function's own" (runs (sharedHolder ++ "fn f(c: Int) -> Int { x = 1; w = W { r: &mut x }; k = fn() -> Int { *w.r = 7; return 0; }; n = k(); return x; }; return f(0);") (VInt 7))
+                , testCase "a holder given a value of the function's own after a shared one can be written through" (runs (pairHolder ++ "fn g(l: &List<H>) -> Int [{ affirm size(l) > 0; }] [{ }] { y = 0; h = get(l, 0); k = *h.r; h = H { r: &mut y, n: 0 }; p = h.r; *p = 5 + k; return y; }; fn f(c: Int) -> Int { x = 1; l = push([], H { r: &mut x, n: 0 }); return g(l); }; return f(0);") (VInt 6))
+                , testCase "a copy of a number lent to be read is a value of its own" (runs "fn g(n: &Int) -> Int { xs = [1, 2]; xs = set(xs, 0, n); ys = xs; return get(ys, 0) + size(ys); }; return g(5);" (VInt 7))
+                , testCase "a closure can read through a holder lent to be read" (runs (sharedHolder ++ "fn g(w: &W) -> Int { k = fn() -> Int => *w.r; return k(); }; fn f(c: Int) -> Int { x = 3; w = W { r: &mut x }; return g(w); }; return f(0);") (VInt 3))
+                ]
             ]
 
 -- (every type has its declaration once a program is lowered, so this one is taken out of the lowered program)
@@ -482,7 +520,7 @@ loanTableCases = TestList "MIR loan rules"
        ] ++ [testCase ("declared from: " ++ label ++ " / " ++ input) (declaredResult ty aggregate expected)
             | (label, ty, expected) <- [("nested reference-bearing Block", envelope r, True), ("nested scalar Block", envelope TInt, False), ("ordinary reference holder", holder, False)]
             , (input, aggregate) <- [("lent input", False), ("by-value reference holder", True)]
-            ])
+            ] ++ sharedPathCases)
   where
     l = M.Local
     cp = M.Copy . l
@@ -500,7 +538,7 @@ loanTableCases = TestList "MIR loan rules"
     end ss = [(b0, M.BasicBlock ss M.Unreachable)]
     locals = Map.fromList . map (\(n, ty) -> (l n, M.LocalDecl ty (Just (case n of 1 -> "owner"; 4 -> "result"; _ -> "v" ++ show n))))
     fn name params ret ls bs = M.Function name (map l params) ret (locals ls) (Map.fromList bs) [] [] [] [] [] M.emptySpec
-    types = Map.fromList [("LoanHolder", M.StructDecl [("ref", r)]), ("UpdateHolder", M.StructDecl [("ref", TMutRef TInt)]), ("Scalar", M.StructDecl [("n", TInt)]), ("Option", M.EnumDecl [("Option::Some", [("ref", r)])])]
+    types = Map.fromList [("LoanHolder", M.StructDecl [("ref", r)]), ("UpdateHolder", M.StructDecl [("ref", TMutRef TInt)]), ("Scalar", M.StructDecl [("n", TInt)]), ("Option", M.EnumDecl [("Option::Some", [("ref", r)])]), ("UpdateOption", M.EnumDecl [("UpdateOption::Some", [("ref", TMutRef TInt)])])]
     envelope t = TNamed "Envelope" [ArgType t]
     generics = Map.fromList
         [ ("Envelope", (["T"], [("ref", r), ("wrapped", TNamed "Slots" [ArgType (TParam "T")])]))
@@ -562,6 +600,112 @@ loanTableCases = TestList "MIR loan rules"
         check [] Map.empty [(0, block), (1, TInt), (2, r), (3, block)]
             [(b0, M.BasicBlock (borrow ++ [set 3 (op M.BlockNew [int 0, int 1])] ++ writeBlock ++ [set 0 (M.Use (mv 3))]) M.Return)]
     externName = "extern importSlots"
+    -- Rule 6 over the MIR forms: holder 3 in each state, update reference 5 derived from it by each alias-preserving
+    -- operation, then each use of 5. Mutating uses are refused exactly when 3 may be reached through a shared path.
+    sharedPathCases =
+        [ testCase ("shared path: " ++ sname ++ " / " ++ dname ++ " / " ++ uname) (expectShared shared (moving || consumes && not (null borrowed)) mutating consumes (sharedPathProgram params borrowed mutBorrowed setup derive use))
+        | (sname, shared, params, borrowed, mutBorrowed, setup) <- holderStates
+        , (dname, moving, derive) <- holderDerivations
+        , (uname, mutating, consumes, use) <- referenceUses
+        ] ++
+        [ testCase "shared path: a cast of an enum lent to be read" (expectShared True False True False (sharedPathProgram [15, 9] [15] [] [] [set 16 (M.AsVariant (cp 15) "UpdateOption::Some"), set 5 (M.ReadField (cp 16) "UpdateOption::Some" "ref")] writeThrough))
+        , testCase "shared path: a cast of an enum given by value" (expectShared False False True False (sharedPathProgram [15, 9] [] [] [] [set 16 (M.AsVariant (cp 15) "UpdateOption::Some"), set 5 (M.ReadField (cp 16) "UpdateOption::Some" "ref")] writeThrough))
+        , testCase "shared path: a store through a reference makes its target shared" (expectShared True False True False (sharedPathProgram [3, 9] [3] [] ownHolder4 storeCopy writeThrough))
+        , testCase "shared path: a store of an own value leaves its target writable" (expectShared False False True False (sharedPathProgram [3, 9] [] [] ownHolder4 storeCopy writeThrough))
+        , testCase "shared path: lent for updating through a function value" (expectShared True False True False (sharedPathProgram [3, 9, 23] [3] [] [] [set 5 (M.ReadField (cp 3) "UpdateHolder" "ref")] ([], Just (M.Call (cp 23) [cp 5] (l 7) b1))))
+        , testCase "shared path: a loop's back edge that changes only the mark is seen on the next turn" (testAssertEq ["in loans: p may be reached through a shared reference or a parameter lent to be read (&T), so nothing can be changed through it: it cannot be given on"] (markOnlyLoop True))
+        , testCase "shared path: the same loop over a parameter given by value stays writable" (testAssertEq [] (markOnlyLoop False))
+        , testCase "shared path: a drop writes through what it is given" (testAssertEq [] (checkMoves Set.empty Set.empty (Set.singleton "UpdateHolder") (M.Program declarations Map.empty dropFn generics Map.empty Map.empty Map.empty)))
+        ]
+    sharedNames = Map.fromList [(6, "$match"), (5, "p")]
+    -- (the holder is a clone, on entry of a parameter given by value and on the back edge of one lent to be read: clones have
+    -- no view, and the two parameters have the same loans and no parents, so only the shared-path mark tells the turns apart.
+    -- Each turn reads the update reference out and gives it to a call, after which the holder gets its next value.)
+    markOnlyLoop lentToRead =
+        let ls = [(3, updateHolder), (5, TMutRef TInt), (7, TInt), (9, TBool), (24, updateHolder), (25, updateHolder)]
+            decls = Map.fromList [(l n, M.LocalDecl ty (Just (Map.findWithDefault ("v" ++ show n) n sharedNames))) | (n, ty) <- ls]
+            giveOn next = M.Call (M.Const (M.CFn "keep")) [mv 5] (l 7) next
+            b5 = M.BlockId 5
+            blocks =
+                [ (b0, M.BasicBlock [set 3 (M.CopyOf (cp 25)), readRefOf 3] (giveOn b5))
+                , (b5, M.BasicBlock [set 3 (M.CopyOf (cp 25))] (M.Goto b2))
+                , (b2, M.BasicBlock [] (M.SwitchBool (cp 9) b3 b1))
+                , (b3, M.BasicBlock [readRefOf 3] (giveOn b4))
+                , (b4, M.BasicBlock [set 3 (M.CopyOf (cp 24))] (M.Goto b2))
+                , (b1, M.BasicBlock [] M.Unreachable)
+                ]
+            main = M.Function "loans" (map l [24, 25, 9]) Nothing decls (Map.fromList blocks) [] [] [l 24 | lentToRead] [] [] M.emptySpec
+         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty)
+    sharedLocals = [(1, TInt), (3, updateHolder), (4, updateHolder), (5, TMutRef TInt), (6, updateHolder), (7, TInt), (8, TRef updateHolder), (9, TBool), (10, TMutRef TInt), (11, TInt), (12, TMutRef TInt), (13, TList updateHolder), (14, TBox updateHolder), (15, updateOption), (16, TVariant "UpdateOption::Some"), (17, TUninit updateHolder), (18, TRef TInt), (19, TMutRef updateHolder), (21, TList updateHolder), (22, updateHolder), (23, TFn [TMutRef TInt] TInt)]
+    updateOption = TNamed "UpdateOption" []
+    calleeFns = Map.fromList
+        [ ("up", (fn "up" [1] (Just TInt) [(0, TInt), (1, TInt)] []){M.fnBorrowed = [l 1], M.fnMutBorrowed = [l 1], M.fnSpec = M.emptySpec{M.specMutParams = ["owner"]}})
+        , ("peek", (fn "peek" [1] (Just TInt) [(0, TInt), (1, TInt)] []){M.fnBorrowed = [l 1]})
+        , ("keep", fn "keep" [1] (Just TInt) [(0, TInt), (1, TMutRef TInt)] [])
+        ]
+    sharedPathProgram params borrowed mutBorrowed setup derive (useStmts, call) =
+        let decls = Map.fromList [(l n, M.LocalDecl ty (Just (Map.findWithDefault ("v" ++ show n) n sharedNames))) | (n, ty) <- sharedLocals]
+            final = derive ++ useStmts
+            joined = null setup && 13 `elem` params
+            looped = not (null setup) && 13 `elem` params
+            nextTurn (Just (M.Call f as d _)) = M.Call f as d b4
+            nextTurn _ = M.Goto b4
+            blocks
+                | looped = [(b0, M.BasicBlock setup (M.Goto b2)), (b2, M.BasicBlock [] (M.SwitchBool (cp 9) b3 b1)), (b3, M.BasicBlock final (nextTurn call)), (b4, M.BasicBlock [set 3 (op M.Get [cp 13, int 0])] (M.Goto b2))]
+                | joined = [(b0, M.BasicBlock [] (M.SwitchBool (cp 9) b2 b3)), (b2, M.BasicBlock [set 3 (op M.Get [cp 13, int 0])] (M.Goto b4)), (b3, M.BasicBlock ownHolder3 (M.Goto b4)), (b4, M.BasicBlock final (maybe M.Unreachable id call))]
+                | otherwise = [(b0, M.BasicBlock (setup ++ final) (maybe M.Unreachable id call))]
+            ends = [(b1, M.BasicBlock [] M.Unreachable)]
+            main = (M.Function "loans" (map l params) Nothing decls (Map.fromList (blocks ++ ends)) [] [] (map l borrowed) (map l mutBorrowed) [] M.emptySpec)
+         in checkMoves Set.empty Set.empty Set.empty (M.Program declarations calleeFns main generics Map.empty Map.empty Map.empty)
+    b2 = M.BlockId 2
+    b3 = M.BlockId 3
+    b4 = M.BlockId 4
+    ownHolder3 = [set 11 (M.Use (int 0)), set 12 (M.Borrow (l 11) [] True), set 3 (M.MakeData "UpdateHolder" [("ref", mv 12)])]
+    ownHolder4 = [set 1 (M.Use (int 0)), set 10 (M.Borrow (l 1) [] True), set 4 (M.MakeData "UpdateHolder" [("ref", mv 10)])]
+    holderStates =
+        [ ("lent to be read", True, [3, 9], [3], [], [])
+        , ("lent for updating", False, [3, 9], [3], [3], [])
+        , ("given by value", False, [3, 9], [], [], [])
+        , ("of the function's own", False, [9], [], [], ownHolder3)
+        , ("read through a shared reference", True, [9], [], [], ownHolder4 ++ [set 8 (M.Borrow (l 4) [] False), set 3 (M.Deref (cp 8))])
+        , ("lent on one path only", True, [9, 13], [13], [], [])
+        , ("lent on a later turn of a loop", True, [9, 13], [13], [], ownHolder3)
+        ]
+    readRefOf n = set 5 (M.ReadField (cp n) "UpdateHolder" "ref")
+    holderDerivations =
+        [ ("a field read", False, [readRefOf 3])
+        , ("a copy", False, [set 6 (M.CopyOf (cp 3)), readRefOf 6])
+        , ("a match on it", False, [set 6 (M.Use (cp 3)), readRefOf 6])
+        , ("a move", True, [set 22 (M.Use (mv 3)), readRefOf 22])
+        , ("a Box", True, [set 14 (M.MakeBox (mv 3)), set 22 (M.Unbox (cp 14)), readRefOf 22])
+        , ("a list", True, [set 21 (M.MakeList [mv 3]), set 22 (op M.Get [cp 21, int 0]), readRefOf 22])
+        , ("an Uninit", True, [set 17 (op M.UninitNew [mv 3]), set 22 (op M.UninitGet [cp 17]), readRefOf 22])
+        ]
+    writeThrough = ([M.AssignRef (l 5) [] (M.Use (int 7))], Nothing)
+    referenceUses =
+        [ ("written through", True, False, writeThrough)
+        , ("reborrowed for updating", True, False, ([set 10 (M.Borrow (l 5) [] True)], Nothing))
+        , ("lent to an update parameter", True, False, ([], Just (M.Call (M.Const (M.CFn "up")) [cp 5] (l 7) b1)))
+        , ("given to a call by value", True, True, ([], Just (M.Call (M.Const (M.CFn "keep")) [mv 5] (l 7) b1)))
+        , ("put into a value", True, True, ([set 22 (M.MakeData "UpdateHolder" [("ref", mv 5)])], Nothing))
+        , ("read through", False, False, ([set 7 (M.Deref (cp 5))], Nothing))
+        , ("reborrowed to be read", False, False, ([set 18 (M.Borrow (l 5) [] False)], Nothing))
+        , ("lent to a parameter lent to be read", False, False, ([], Just (M.Call (M.Const (M.CFn "peek")) [cp 5] (l 7) b1)))
+        ]
+    storeCopy = [set 19 (M.Borrow (l 4) [] True), M.AssignRef (l 19) [] (M.CopyOf (cp 3)), readRefOf 4]
+    readOnlyText = "so nothing can be changed through it"
+    -- (a move out of a lent parameter or a view of one is refused by the move rules whether or not it is shared; rule 6 adds
+    -- the refusal where they do not see the shared path, and the refusals of what does not move)
+    expectShared shared moving mutating consumes es
+        | shared && (moving || consumes) = if null es then Just "Expected a refusal of a move out of a shared path" else Nothing
+        | shared && mutating = requireError readOnlyText es
+        | any (isInfixOf readOnlyText) es = Just ("Unexpected rule 6 refusal: " ++ show es)
+        | moving = Nothing
+        | otherwise = testAssertEq [] es
+    dropFn =
+        let name = "<UpdateHolder as Drop>::drop"
+            decls = Map.fromList [(l 0, M.LocalDecl TInt Nothing), (l 1, M.LocalDecl updateHolder (Just "self")), (l 5, M.LocalDecl (TMutRef TInt) (Just "p"))]
+         in M.Function name [l 1] (Just TInt) decls (Map.fromList [(b0, M.BasicBlock [readRefOf 1, M.AssignRef (l 5) [] (M.Use (int 0)), set 0 (M.Use (int 0))] M.Unreachable)]) [] [] [] [] [] M.emptySpec
     foreignCase ret args expected =
         let foreignFn = fn externName (map fst args) (Just ret) ((0, ret) : args) []
             es = check (map fst args) (Map.singleton externName foreignFn) ((4, ret) : args)
