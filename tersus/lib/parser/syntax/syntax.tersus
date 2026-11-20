@@ -982,6 +982,11 @@ fn typeTokensOf(t: Type) -> List<Token> ~ {
             for a in args { for x in typeTokensOf(clone(a)) { out = push(out, clone(x)); }; };
             for x in typeTokensOf(Box::unbox(r)) { out = push(out, clone(x)); };
         },
+        Type::TFnContract { args: args, ret: r, contract: contract } => {
+            out = push(push([], wordTok("fn")), wordTok(String::fromInt(size(args))));
+            for a in args { for x in typeTokensOf(clone(a)) { out = push(out, clone(x)); }; };
+            for x in typeTokensOf(Box::unbox(r)) { out = push(out, clone(x)); };
+        },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
             out = push(push(push([], wordTok("named")), nameTok(base)), wordTok(String::fromInt(argc)));
             for x in argTokens { out = push(out, clone(x)); };
@@ -1025,6 +1030,12 @@ fn renderTypeName(t: Type) -> String ~ {
         Type::TMutRef { inner: e } => { r = catStrings("&mut ", renderTypeName(Box::unbox(e))); },
         Type::TArray { elem: e, size: s } => { r = catStrings(cat3("Array<", renderTypeName(Box::unbox(e)), ", "), catStrings(renderSizeName(s), ">")); },
         Type::TFn { args: args, ret: ret } => {
+            parts = "fn(";
+            i = 0;
+            for a in args { if i > 0 { parts = catStrings(parts, ", "); }; parts = catStrings(parts, renderTypeName(clone(a))); i = i + 1; };
+            r = cat3(catStrings(parts, ") -> "), renderTypeName(Box::unbox(ret)), "");
+        },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
             parts = "fn(";
             i = 0;
             for a in args { if i > 0 { parts = catStrings(parts, ", "); }; parts = catStrings(parts, renderTypeName(clone(a))); i = i + 1; };
@@ -1690,6 +1701,7 @@ fn ghostTypeOf(t: Type) -> Bool ~ {
         Type::TArray { elem: e, size: s } => { okGhost = false; },
         Type::TBox { inner: e } => { okGhost = false; },
         Type::TFn { args: a, ret: r } => { okGhost = false; },
+        Type::TFnContract { args: a, ret: r, contract: contract } => { okGhost = false; },
         Type::TNamed { name: n, base: b, argc: c, argTokens: ts } => { okGhost = false; },
         Type::TVariant { name: n } => { okGhost = false; },
         Type::TVar { n: n } => { okGhost = false; },
@@ -1772,6 +1784,7 @@ fn namedType(sourceText: &Input, st: St) -> Res<Type> ~ {
                     Type::TArray { elem: e, size: z } => { return ok( s, selfTyCopy); },
                     Type::TBox { inner: e } => { return ok( s, selfTyCopy); },
                     Type::TFn { args: a, ret: r } => { return ok( s, selfTyCopy); },
+                    Type::TFnContract { args: a, ret: r, contract: contract } => { return ok( s, selfTyCopy); },
                     Type::TVariant { name: n } => { return ok( s, selfTyCopy); },
                     Type::TVar { n: n } => { return ok( s, selfTyCopy); },
                     Type::TForall { sizes: a, types: b, body: c } => { return ok( s, selfTyCopy); },
@@ -4697,6 +4710,7 @@ fn cWordType(t: Type) -> Bool ~ {
         Type::TArray { elem: e, size: s } => { out = false; },
         Type::TBox { inner: e } => { out = false; },
         Type::TFn { args: a, ret: r } => { out = false; },
+        Type::TFnContract { args: a, ret: r, contract: contract } => { out = false; },
         Type::TNamed { name: a, base: b, argc: c, argTokens: d } => { out = false; },
         Type::TVariant { name: a } => { out = false; },
         Type::TVar { n: a } => { out = false; },
@@ -4720,6 +4734,7 @@ fn matchRefBlock(inner: Type) -> Bool ~ {
         Type::TArray { elem: x, size: s } => { out = false; },
         Type::TBox { inner: x } => { out = false; },
         Type::TFn { args: a, ret: r } => { out = false; },
+        Type::TFnContract { args: a, ret: r, contract: contract } => { out = false; },
         Type::TNamed { name: a, base: b, argc: c, argTokens: d } => { out = false; },
         Type::TVariant { name: a } => { out = false; },
         Type::TVar { n: a } => { out = false; },
@@ -6497,6 +6512,7 @@ fn collectTypeParams(t: Type, acc: List<String>) -> List<String> ~ {
         Type::TUninit { inner: e } => { out = collectTypeParams(Box::unbox(e), out); },
         Type::TArray { elem: e, size: s } => { out = collectTypeParams(Box::unbox(e), out); },
         Type::TFn { args: a, ret: r } => { for x in a { out = collectTypeParams(clone(x), out); }; out = collectTypeParams(Box::unbox(r), out); },
+        Type::TFnContract { args: a, ret: r, contract: contract } => { for x in a { out = collectTypeParams(clone(x), out); }; out = collectTypeParams(Box::unbox(r), out); },
         Type::TForall { sizes: a, types: b, body: c } => { out = collectTypeParams(Box::unbox(c), out); },
         Type::TInt => { },
         Type::TByte => { },
@@ -7387,6 +7403,7 @@ fn typeMentionsSelf(t: Type, self: &String) -> Bool ~ {
         Type::TByte => { out = false; },
         Type::TBool => { out = false; },
         Type::TFn { args: a, ret: r } => { out = false; },
+        Type::TFnContract { args: a, ret: r, contract: contract } => { out = false; },
         Type::TVariant { name: a } => { out = false; },
         Type::TVar { n: a } => { out = false; },
         Type::TForall { sizes: a, types: b, body: c } => { out = false; },
@@ -7412,6 +7429,7 @@ fn isSelfType(t: Type, self: &String) -> Bool ~ {
         Type::TArray { elem: e, size: s } => { out = false; },
         Type::TBox { inner: e } => { out = false; },
         Type::TFn { args: a, ret: r } => { out = false; },
+        Type::TFnContract { args: a, ret: r, contract: contract } => { out = false; },
         Type::TVariant { name: a } => { out = false; },
         Type::TVar { n: a } => { out = false; },
         Type::TForall { sizes: a, types: b, body: c } => { out = false; },
@@ -7472,6 +7490,7 @@ fn compareFieldText(st: &St, typeName: &String, n: Int, f: FieldInfo, a: &String
         Type::TArray { elem: e, size: s } => { isListSelf = false; },
         Type::TBox { inner: e } => { isListSelf = false; },
         Type::TFn { args: x, ret: r } => { isListSelf = false; },
+        Type::TFnContract { args: x, ret: r, contract: contract } => { isListSelf = false; },
         Type::TNamed { name: x, base: y, argc: c, argTokens: d } => { isListSelf = false; },
         Type::TVariant { name: x } => { isListSelf = false; },
         Type::TVar { n: x } => { isListSelf = false; },
@@ -7566,6 +7585,7 @@ fn fieldCloneText(st: &St, typeName: &String, n: Int, f: FieldInfo, src: &String
         Type::TByte => { kind = 0; },
         Type::TBool => { kind = 0; },
         Type::TFn { args: a, ret: r } => { kind = 0; },
+        Type::TFnContract { args: a, ret: r, contract: contract } => { kind = 0; },
         Type::TNamed { name: a, base: b, argc: c, argTokens: d } => { kind = 0; },
         Type::TVariant { name: a } => { kind = 0; },
         Type::TVar { n: a } => { kind = 0; },
@@ -7921,6 +7941,14 @@ fn fileRenderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] 
         Type::TParam { name: name } => { r = fileCatStrings("'", clone(name)); },
         Type::TForall { sizes: sizes, types: types, body: body } => { r = fileRenderTypeForName(Box::unbox(body), fuel - 1); },
         Type::TFn { args: args, ret: ret } => {
+            parts = "fn(";
+            for i in 0..size(args) {
+                if i > 0 { parts = fileCatStrings(parts, ", "); };
+                parts = fileCatStrings(parts, fileRenderTypeForName(get(args, i), fuel - 1));
+            };
+            r = fileCatStrings(fileCatStrings(parts, ") -> "), fileRenderTypeForName(Box::unbox(ret), fuel - 1));
+        },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
             parts = "fn(";
             for i in 0..size(args) {
                 if i > 0 { parts = fileCatStrings(parts, ", "); };

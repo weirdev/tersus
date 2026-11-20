@@ -102,6 +102,11 @@ fn renderType(t: &Type) -> String ~ {
             for a in args { parts = push(parts, renderType(a)); };
             r = catStrings(catStrings(catStrings("fn(", joinWith(", ", parts)), ") -> "), renderType(Box::unbox(ret)));
         },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
+            parts = noStrings();
+            for a in args { parts = push(parts, renderType(a)); };
+            r = catStrings(catStrings(catStrings("fn(", joinWith(", ", parts)), ") -> "), renderType(Box::unbox(ret)));
+        },
         Type::TNamed { name: name } => { r = withoutBackticks(name); },
         Type::TVariant { name: name } => { r = clone(name); },
         Type::TVar { n: n } => { r = "?"; },

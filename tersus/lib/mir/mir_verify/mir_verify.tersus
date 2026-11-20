@@ -264,6 +264,10 @@ fn isUnknown(t: &Type) -> Bool ~ {
             r = isUnknown(Box::unbox(ret));
             for a in args { if isUnknown(a) { r = true; }; };
         },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
+            r = isUnknown(Box::unbox(ret));
+            for a in args { if isUnknown(a) { r = true; }; };
+        },
         Type::TForall { sizes: sizes, types: types, body: body } => { r = isUnknown(Box::unbox(body)); },
         Type::TInt => { },
         Type::TByte => { },
@@ -1579,6 +1583,11 @@ fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
             na = [];
             for a in args { na = push(na, substSizes(a, names, sizes)); };
             r = Type::TFn { args: na, ret: Box::new(substSizes(Box::unbox(ret), names, sizes)) };
+        },
+        Type::TFnContract { args: args, ret: ret, contract: contract } => {
+            na = [];
+            for a in args { na = push(na, substSizes(a, names, sizes)); };
+            r = Type::TFnContract { args: na, ret: Box::new(substSizes(Box::unbox(ret), names, sizes)), contract: clone(contract) };
         },
         Type::TForall { sizes: sizes2, types: types, body: body } => {
             r = Type::TForall { sizes: clone(sizes2), types: clone(types), body: Box::new(substSizes(Box::unbox(body), names, sizes)) };

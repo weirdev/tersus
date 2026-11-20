@@ -336,6 +336,7 @@ fn hsShowType(t: Type, d: Int) -> String ~ {
         Type::TBox { inner: e } => hsParen(d, lwCat3("TNamed \"Box\" [ArgType ", hsShowType(Box::unbox(e), 11), "]")),
         Type::TArray { elem: e, size: s } => hsParen(d, lwCat3(lwCat("TArrayOf ", hsShowType(Box::unbox(e), 11)), " ", hsShowSize(&s, 11))),
         Type::TFn { args: args, ret: r } => hsParen(d, lwCat3(lwCat("TFn ", hsShowTypes(&args)), " ", hsShowType(Box::unbox(r), 11))),
+        Type::TFnContract { args: args, ret: r, contract: contract } => hsParen(d, lwCat3(lwCat("TFn ", hsShowTypes(&args)), " ", hsShowType(Box::unbox(r), 11))),
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => hsParen(d, lwCat3(lwCat("TNamed ", lwShow(&base)), " ", hsShowArgTokens(&argTokens))),
         Type::TVariant { name: name } => hsParen(d, lwCat("TVariant ", lwShow(&name))),
         Type::TVar { n: n } => hsParen(d, lwCat("TVar ", hsInt(n, 11))),

@@ -464,6 +464,7 @@ fn fromCodecTy(ls: LowSt, t: &Type) -> LowSt ~ {
         Type::TBox { inner: e } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); name = clone(ls.boxName); return namedType(ls, name, push([], ls.ty)); },
         Type::TArray { elem: e, size: s } => { inner = Box::unbox(clone(e)); ls = fromCodecTy(ls, &inner); return arrayType(ls, ls.ty, clone(s)); },
         Type::TFn { args: args, ret: r } => { return fromCodecFn(ls, args, r); },
+        Type::TFnContract { args: args, ret: r, contract: contract } => { return fromCodecFn(ls, args, r); },
         Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { return fromCodecNamed(ls, base, argTokens); },
         Type::TVariant { name: name } => { return variantType(ls, clone(name)); },
         Type::TVar { n: n } => { return varType(ls, n); },
