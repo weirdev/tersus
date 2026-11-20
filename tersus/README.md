@@ -205,7 +205,8 @@ completion and reachability pruning over the shared complete MIR3 codec.
 keep numeric block order; the root main's entire original specification,
 including loop environments, remains untouched while its ghosts are completed.
 Pruning processes each immutable function and type once through local sets.
-`TestLink` compares full metadata and canonical bytes against `LinkOracle`.
+`TestLink` checks canonical MIR3 fingerprints, exact refusals and metadata
+preservation on compiler inputs.
 
 ## Ownership host
 

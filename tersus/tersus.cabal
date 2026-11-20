@@ -330,7 +330,6 @@ test-suite tersus-test
   main-is: TestTersus.hs
   other-modules:
       Differential
-      LinkOracle
       MirMonoOracle
       TestArrays
       TestAstData
