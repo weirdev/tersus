@@ -2215,9 +2215,10 @@ typeContainsReferences :: Map.Map Name M.TypeDecl -> Type -> Bool
 typeContainsReferences types = go []
   where
     go _ ty | referenceType ty = True
-    -- (List and Box are named types: what they hold is their argument, whatever the library's own fields are)
-    go seen (TList inner) = go seen inner
-    go seen (TBox inner) = go seen inner
+    -- Primitive containers need no declaration; declared fields can add
+    -- reference-bearing storage independently of the element type.
+    go seen ty@(TList inner) = go seen inner || holdsRefStored types ty
+    go seen ty@(TBox inner) = go seen inner || holdsRefStored types ty
     go seen (TUninit inner) = go seen inner
     go seen (TArrayOf inner _) = go seen inner
     go seen ty | Just (ctor, fields) <- fieldsOf types ty = ctor `notElem` seen && any (go (ctor : seen) . snd) fields
@@ -2504,16 +2505,23 @@ candidatePlaces alias types functions fn = do
             pure (targets, members)
         else close held (count + 1) next
 
-invariantParents :: Aliasing -> Map.Map Name M.TypeDecl -> Map.Map Name M.Function -> M.Function -> Map.Map M.Local (Set.Set M.Local)
-invariantParents alias types functions fn = close Map.empty
+invariantParents :: Aliasing -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> M.Function -> Map.Map M.Local (Set.Set M.Local)
+invariantParents alias types invariants functions fn = close Map.empty
   where
+    takenPermissionTuple source dest = case Map.lookup source (M.fnLocals fn) of
+        Just decl | Just name <- M.localName decl, "$tuple " `isPrefixOf` name
+                  , ty@(TNamed base args) <- M.localType decl, Just [value, TBlock element] <- tupleParts ty ->
+            value == element && referenceType value && maybe False ((== value) . M.localType) (Map.lookup dest (M.fnLocals fn))
+                && all (null . (\n -> Map.findWithDefault [] n invariants)) [base, instanceName base args]
+        _ -> False
     tracked local = maybe False (\ty -> referenceType ty || typeContainsReferences types ty) (M.localType <$> Map.lookup local (M.fnLocals fn))
     holder local = maybe False (typeContainsReferences types . unref) (M.localType <$> Map.lookup local (M.fnLocals fn))
     owner parents local = Map.findWithDefault Set.empty local parents `Set.union` (if holder local then Set.singleton local else Set.empty)
     parentsOf parents local = Map.findWithDefault Set.empty local parents
     put parents dest sources = if tracked dest then Map.insertWith Set.union dest sources parents else parents
     transfer parents stmt = case stmt of
-        M.Assign dest (M.ReadField op _ _) | Just source <- operandLocal op -> put parents dest (owner parents source)
+        M.Assign dest (M.ReadField op _ _) | Just source <- operandLocal op ->
+            put parents dest (if takenPermissionTuple source dest then parentsOf parents source else owner parents source)
         M.Assign dest (M.Borrow source _ _) -> put parents dest (owner parents source)
         M.Assign dest (M.MakeData _ fields) -> put parents dest (Set.unions [parentsOf parents source | (_, op) <- fields, Just source <- [operandLocal op]])
         M.Assign dest rv | [op] <- case rv of M.Use value -> [value]; M.CopyOf value -> [value]; M.MakeBox value -> [value]; M.Unbox value -> [value]; M.Deref value -> [value]; M.AsVariant value _ -> [value]; _ -> [], Just source <- operandLocal op -> put parents dest (parentsOf parents source)
@@ -2632,8 +2640,8 @@ aliasingOf types functions fn = alias
         M.Peek d rv | canHold d -> [(l, []) | l <- rvalueLeaks rv]
         M.AssignRef root _ rv | storesRef root -> [(l, []) | l <- rvalueLeaks rv]
         _ -> []
-    canHold l = maybe True (holdsRef types . M.localType) (Map.lookup l (M.fnLocals fn))
-    storesRef l = maybe True (holdsRef types . referent . M.localType) (Map.lookup l (M.fnLocals fn))
+    canHold l = maybe True (holdsRefStored types . M.localType) (Map.lookup l (M.fnLocals fn))
+    storesRef l = maybe True (holdsRefStored types . referent . M.localType) (Map.lookup l (M.fnLocals fn))
     referent t = case t of
         TMutRef inner -> inner
         TRef inner -> inner
@@ -2678,30 +2686,44 @@ heldStale functions alias callee args
         M.Move l -> [l]
         M.Const _ -> []
 
+-- (a reference in a permission's slot escapes when it is written there, and a call given the permission may write
+-- through it; the permission is not a holder the bridge cannot place, holdsRef: its base, capacity and slot values
+-- stay what they are when what a slot's reference is to changes)
 holdsMutRef :: Map.Map Name M.TypeDecl -> Type -> Bool
-holdsMutRef = holdsWhere (const False)
+holdsMutRef = holdsWhere True (const False)
 
 -- (a shared reference is a view too: storage it is to can change under it)
 holdsRef :: Map.Map Name M.TypeDecl -> Type -> Bool
-holdsRef = holdsWhere (const True)
+holdsRef = holdsWhere False (const True)
 
-holdsWhere :: (Type -> Bool) -> Map.Map Name M.TypeDecl -> Type -> Bool
-holdsWhere shared types = go Set.empty
+holdsRefStored :: Map.Map Name M.TypeDecl -> Type -> Bool
+holdsRefStored = holdsWhere True (const True)
+
+holdsWhere :: Bool -> (Type -> Bool) -> Map.Map Name M.TypeDecl -> Type -> Bool
+holdsWhere inSlots shared types = go Set.empty
   where
     go seen t = case t of
         TMutRef _ -> True
         TRef inner -> shared inner || go seen inner
         TArrayOf inner _ -> go seen inner
         TUninit inner -> go seen inner
+        TBlock inner -> inSlots && go seen inner
+        -- List and Box may be primitive values with no declaration. When a
+        -- declaration is present, its fields can carry loans independently of T.
+        TNamed name [ArgType element] | name `elem` ["List", "Box"] ->
+            go seen element || maybe False (inDecl seen (instanceName name [ArgType element])) (Map.lookup (instanceName name [ArgType element]) types <|> Map.lookup name types)
+        TNamed name args | Map.member (instanceName name args) types -> declHolds seen (instanceName name args)
         TNamed name args -> any (go seen) [a | ArgType a <- args] || declHolds seen name
         TVariant name -> declHolds seen (takeWhile (/= ':') name)
         _ -> False
-    declHolds seen name
+    declHolds seen name = maybe True (inDecl seen name) (Map.lookup name types)
+    inDecl seen name decl
         | Set.member name seen = False
-        | otherwise = case Map.lookup name types of
-            Just (M.StructDecl fields) -> any (go (Set.insert name seen) . snd) fields
-            Just (M.EnumDecl variants) -> any (go (Set.insert name seen) . snd) (concatMap snd variants)
-            Nothing -> False
+        | otherwise = case decl of
+            M.StructDecl fields -> any (child . snd) fields
+            M.EnumDecl variants -> any (child . snd) (concatMap snd variants)
+      where
+        child = go (Set.insert name seen)
 
 -- The place a reference is to, as a place of the local its chain of borrows
 -- starts from: an owner, or a reference the bridge cannot place
@@ -2988,7 +3010,7 @@ block types invariants functions rules termInfo allowCalls fn predecessors regio
     pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (literalSteps ++ steps ++ extra)), ("end", ending)], b3)
   where
     alias = aliasingOf types functions fn
-    parentsOfLocals = invariantParents alias types functions fn
+    parentsOfLocals = invariantParents alias types invariants functions fn
     (liveAfterStatements, liveAtEnd) = validationLiveness types functions fn
     -- (an operation that writes or gives through a reference observes, whatever is live after it, that reference,
     -- every place it may be to, the holders of a reference into those, and the values whose invariants speak of any

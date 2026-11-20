@@ -876,6 +876,12 @@ controlPrograms =
 
 referencePrograms :: [(String, String)]
 referencePrograms =
+    [ ("shared reference copied out of a slot before freeing the block", "fn f(n: Int) -> Int { (p, b) = Addr::alloc(1); b = Addr::write(p, 0, &n, b); r = Addr::get(p, 0, b); b = Addr::dropValue(p, 0, b); d = Addr::free(p, b); return *r + d; }; return f(12);")
+    , ("update reference taken out of a slot before writing", "fn f(c: Int) -> Int { x = 3; (p, b) = Addr::alloc(1); b = Addr::write(p, 0, &mut x, b); (r, b) = Addr::take(p, 0, b); d = Addr::free(p, b); *r = 8; return x + d; }; return f(0);")
+    ] ++ referenceHolderPrograms
+
+referenceHolderPrograms :: [(String, String)]
+referenceHolderPrograms =
     [ ("a reference to a local is read", "x = 1; r = &x; return *r;")
     , ("a reference to a local is updated through", "x = 1; r = &mut x; *r = 41; return x;")
     , ("a reference is given on", "x = 1; r = &x; q = r; return *q;")
