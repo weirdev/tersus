@@ -592,33 +592,23 @@ fn sharedLine(ls: &LowSt, c: Int) -> String ~ {
 };
 
 fn keysOf(m: &HashMap<String, TDecl>) -> List<String> ~ {
-    out = [];
-    for e in m.entries() { out = push(out, clone(e.key)); };
-    return out;
+    return hashMapFold(m, [], fn(acc: List<String>, key: &String, ignored: &TDecl) -> List<String> { return push(acc, (*key).clone()); });
 };
 
 fn genericKeys(ls: &LowSt) -> List<String> ~ {
-    out = [];
-    for e in ls.generics.entries() { out = push(out, clone(e.key)); };
-    return out;
+    return hashMapFold(&ls.generics, [], fn(acc: List<String>, key: &String, ignored: &GenericRec) -> List<String> { return push(acc, (*key).clone()); });
 };
 
 fn invariantKeys(ls: &LowSt) -> List<String> ~ {
-    out = [];
-    for e in ls.invariants.entries() { out = push(out, clone(e.key)); };
-    return out;
+    return hashMapFold(&ls.invariants, [], fn(acc: List<String>, key: &String, ignored: &Int) -> List<String> { return push(acc, (*key).clone()); });
 };
 
 fn boundedKeys(ls: &LowSt) -> List<String> ~ {
-    out = [];
-    for e in ls.bounded.entries() { out = push(out, clone(e.key)); };
-    return out;
+    return hashMapFold(&ls.bounded, [], fn(acc: List<String>, key: &String, ignored: &BoundedRec) -> List<String> { return push(acc, (*key).clone()); });
 };
 
 fn instanceKeys(ls: &LowSt) -> List<String> ~ {
-    out = [];
-    for e in ls.instances.entries() { out = push(out, clone(e.key)); };
-    return out;
+    return hashMapFold(&ls.instances, [], fn(acc: List<String>, key: &String, ignored: &String) -> List<String> { return push(acc, (*key).clone()); });
 };
 
 fn countedNames(names: &List<String>) -> String ~ {

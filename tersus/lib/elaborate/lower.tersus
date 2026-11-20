@@ -745,18 +745,7 @@ fn noLoops() -> List<LoopRec> ~ { return []; };
 fn noPackLoops() -> List<PackLoopRec> ~ { return []; };
 
 fn sortLoops(loops: List<LoopRec>) -> List<LoopRec> ~ {
-    out = noLoops();
-    for l in loops {
-        placed = noLoops();
-        finished = false;
-        for m in &out {
-            if !finished && l.header < m.header { placed = push(placed, clone(l)); finished = true; };
-            placed = push(placed, clone(m));
-        };
-        if !finished { placed = push(placed, clone(l)); };
-        out = placed;
-    };
-    return out;
+    return sortBy(&loops, fn(a: LoopRec, b: LoopRec) => a.header < b.header);
 };
 
 // The variables that statements assign (or bind with let), other than the names of the functions they define
