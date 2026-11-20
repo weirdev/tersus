@@ -1,7 +1,9 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PatternSynonyms #-}
 
 module Types where
 
+import GHC.Generics (Generic)
 import qualified Data.Map.Strict as Map
 
 import Data.Char (isAlphaNum, isDigit, isLower, isUpper)
@@ -182,6 +184,27 @@ ghostBuiltin b = b `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, Blo
 -- look at them. TVar is the checker's own unknown and is never written by a program.
 -- TArrayOf element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
 -- or an element of a bigger array), with no pointer to it. The size is part of the type.
+-- One token of a contract clause carried by TFnContract: a bare word or a quoted name, kept in that
+-- distinction so the wire form round-trips exactly. The clause vocabulary is assigned by the phase
+-- that produces these types; this layer only preserves the token sequence (as the Tersus codec
+-- preserves a named type's argument tokens).
+data FnClauseToken = FnWord String | FnName String
+    deriving (Show, Eq, Ord, Read, Generic)
+
+newtype FnClause = FnClause [FnClauseToken]
+    deriving (Show, Eq, Ord, Read, Generic)
+
+-- The contract side of a contract-carrying function type: one name per parameter ("" where a
+-- parameter is unnamed), then the input and output clauses. It lives in this module rather than
+-- holding Syntax's ValidationStatement, which Syntax cannot do without a cycle (Syntax defines
+-- ValidationStatement over the Expression and Proof types that themselves mention Type).
+data FnContract = FnContract
+    { fnParamNames :: [Variable]
+    , fnRequires :: [FnClause]
+    , fnEnsures :: [FnClause]
+    }
+    deriving (Show, Eq, Ord, Read, Generic)
+
 data Type = TInt | TByte | TBool
     | -- A fixed-width integer (POINTERS.md, Layout): TWord signed bits is I8, I16, I32 (signed) or U16, U32. Arithmetic and order are on Int:
       -- toInt widens one, and I32::from(x) and the others narrow an Int with its range proved, as toByte does. Natively it is as many bytes in
@@ -207,6 +230,8 @@ data Type = TInt | TByte | TBool
     | -- A reference that may update its referent (REFERENCES.md): as a parameter it is lent exclusively, as a local it is
       -- made by `&mut place`. It is never a result, a field or an element in stages 1 to 3 (escaping references are stage 4).
       TMutRef Type
+    | -- A function type carrying a contract (last, so the constructors before it keep their order everywhere order is observed)
+      TFnContract [Type] Type FnContract
     deriving (Show, Eq, Ord, Read)
 
 -- The size argument of a type: a constant, or `?`, a size that the type does not say. A type with a `?` is unsized: its size is
@@ -271,6 +296,15 @@ renderTypeForName ty = case ty of
     TMutRef t -> "&mut " ++ renderTypeForName t
     TArrayOf t size -> "Array<" ++ renderTypeForName t ++ ", " ++ renderSizeForName size ++ ">"
     TFn args ret -> "fn(" ++ intercalate ", " (map renderTypeForName args) ++ ") -> " ++ renderTypeForName ret
+    TFnContract args ret contract ->
+        "fn(" ++ intercalate ", " (zipWith named (fnParamNames contract ++ repeat "") args) ++ ") -> "
+            ++ renderTypeForName ret ++ clauseList (fnRequires contract) ++ clauseList (fnEnsures contract)
+      where
+        named name arg = if null name then renderTypeForName arg else name ++ ": " ++ renderTypeForName arg
+        clauseList clauses = concat [" [{" ++ intercalate "; " (map clause clauses) ++ "}]" | not (null clauses)]
+        clause (FnClause tokens) = intercalate " " (map token tokens)
+        token (FnWord w) = w
+        token (FnName n) = "\"" ++ n ++ "\""
     -- (a name that starts with a small letter has a ` before it, so that it is not read as a size)
     TNamed base args -> if null args && bareLower base then '`' : base else instanceName base args
     TVariant name -> name
@@ -345,6 +379,7 @@ mentionsParameter ty = case ty of
     TMutRef t -> mentionsParameter t
     TArrayOf t size -> mentionsParameter t || sizeParam size
     TFn args ret -> any mentionsParameter (ret : args)
+    TFnContract args ret _ -> any mentionsParameter (ret : args)
     TNamed _ args -> any argParameter args
     _ -> False
   where
@@ -371,6 +406,7 @@ substitute sizes types = go
         TRef t -> TRef (go t)
         TMutRef t -> TMutRef (go t)
         TFn args ret -> TFn (map go args) (go ret)
+        TFnContract args ret contract -> TFnContract (map go args) (go ret) contract
         TParam name | Just t <- lookup name types -> t
         TForall ss ts t -> TForall ss ts (substitute [(n, s) | (n, s) <- sizes, n `notElem` ss] [(n, u) | (n, u) <- types, n `notElem` ts] t)
         TNamed base args -> TNamed base (map arg args)

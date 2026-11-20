@@ -88,6 +88,12 @@ instance NFData T.Rel
 deriving instance Generic T.BuiltinFunct
 instance Binary T.BuiltinFunct
 instance NFData T.BuiltinFunct
+instance Binary T.FnClauseToken
+instance NFData T.FnClauseToken
+instance Binary T.FnClause
+instance NFData T.FnClause
+instance Binary T.FnContract
+instance NFData T.FnContract
 deriving instance Generic T.Type
 instance Binary T.Type
 instance NFData T.Type

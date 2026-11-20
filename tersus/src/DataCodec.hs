@@ -2,7 +2,7 @@ module DataCodec
     ( Token (..), P (..), quote, tokenize, strictTokenize, strictTokenizeBytes, parseLine
     , word, name, expect, integer, int, itemCount, failP, typeTokens, sizeTokens, argTokens
     , strictTokenizeBytesAnyNumber
-    , typeP, sizeP, argP, decimal
+    , typeP, sizeP, argP, decimal, checkParamNames, clausesP
     ) where
 
 import Control.Monad (replicateM)
@@ -25,6 +25,15 @@ typeTokens ty = case ty of
     TUninit t -> "uninit" : typeTokens t
     TBlock t -> "block" : typeTokens t
     TFn args ret -> ["fn", show (length args)] ++ concatMap typeTokens (args ++ [ret])
+    TFnContract args ret contract ->
+        ["fnc", show (length args)] ++ concatMap typeTokens (args ++ [ret])
+            ++ [show (length (fnParamNames contract))] ++ map quote (fnParamNames contract)
+            ++ clauseListTokens (fnRequires contract) ++ clauseListTokens (fnEnsures contract)
+      where
+        clauseListTokens clauses = show (length clauses) : concatMap clauseTokens clauses
+        clauseTokens (FnClause tokens) = show (length tokens) : concatMap tokenTokens tokens
+        tokenTokens (FnWord w) = ["w", w]
+        tokenTokens (FnName n) = ["q", quote n]
     TVariant n -> ["variant", quote n]
     TVar i -> ["var", show i]
     TForall sizes types t -> ["forall", show (length sizes)] ++ map quote sizes ++ [show (length types)] ++ map quote types ++ typeTokens t
@@ -140,6 +149,15 @@ typeP = word >>= \w -> case w of
     "uninit" -> TUninit <$> typeP
     "block" -> TBlock <$> typeP
     "fn" -> itemCount >>= \n -> replicateM n typeP >>= \args -> TFn args <$> typeP
+    "fnc" -> do
+        n <- itemCount
+        args <- replicateM n typeP
+        ret <- typeP
+        names <- itemCount >>= \k -> if k == n then replicateM k name else failP "a contract function type's names do not match its parameters"
+        checkParamNames names
+        requires <- clausesP
+        ensures <- clausesP
+        pure (TFnContract args ret (FnContract names requires ensures))
     "named" -> name >>= \base -> itemCount >>= \n -> TNamed base <$> replicateM n argP
     "variant" -> TVariant <$> name
     "var" -> TVar <$> int
@@ -151,6 +169,26 @@ typeP = word >>= \w -> case w of
     "ref" -> TRef <$> typeP
     "mutref" -> TMutRef <$> typeP
     _ -> failP ("not a type: " ++ w)
+
+checkParamNames :: [String] -> P ()
+checkParamNames names =
+    let named = filter (not . null) names
+     in if length named == length (foldr (\x acc -> if x `elem` acc then acc else x : acc) [] named)
+            then pure ()
+            else failP "a contract function type's parameter names repeat"
+
+clausesP :: P [FnClause]
+clausesP = itemCount >>= \n -> replicateM n clauseP
+
+clauseP :: P FnClause
+clauseP = itemCount >>= \n ->
+    if n == 0 then failP "a contract clause with no tokens" else FnClause <$> replicateM n clauseTokenP
+
+clauseTokenP :: P FnClauseToken
+clauseTokenP = word >>= \w -> case w of
+    "w" -> FnWord <$> word
+    "q" -> FnName <$> name
+    _ -> failP ("not a contract clause token: " ++ w)
 
 argP :: P Arg
 argP = word >>= \w -> case w of
