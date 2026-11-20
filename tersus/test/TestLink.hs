@@ -12,7 +12,7 @@ import ValidatorNative (validateCompiled)
 import Pipeline (oneMarkerEach)
 import System.Exit (ExitCode(..))
 
-import Data.List (isInfixOf, isPrefixOf, nubBy)
+import Data.List (isPrefixOf)
 import qualified Data.ByteString.Char8 as B
 import AstData (readMirPayloadBytes, writeMirPayloadLines)
 import qualified Data.Map.Strict as Map
@@ -23,14 +23,13 @@ import MirCopies (makeCopies, makeCopiesWith, genericKey, coveredKey)
 import qualified Link as ProductionLink
 import qualified Compile
 import qualified MirLists
-import MirMoves (finishLowered)
 import MirData (readLowered, writeLowered)
 import qualified MirData
 import MirEval (RunEnv (..), Outcome (..), MirValue (..), runProgramEnv)
 import MirPass (programData)
 import ElaboratorTool (bootstrapLoader)
 import LibPackage (libPackage)
-import PackageCompile (CompiledModule (..), CompiledPackage (..), compileModulesUsing, lowerCompiledPackage)
+import PackageCompile (compileModulesUsing, lowerCompiledPackage, packageLinkInputs)
 import PackageData (ModuleId (..), Snapshot (..), resolverFromFiles)
 import PreludeSource (toolPackageFiles)
 import Hash (fingerprint)
@@ -147,9 +146,7 @@ positiveMerge units check = do
 
 retainedGenericUnits :: Result [(ModuleId, M.Program)] String
 retainedGenericUnits = compileModulesUsing bootstrapLoader libPackage snapshot `bindResult` \compiled ->
-    let lowerOne modu = mapResult ((,) (compiledModuleId modu)) (compiledLowered modu `bindResult` finishLowered)
-        libraries = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
-    in mapResult (libraries ++) (flatResultMap lowerOne (compiledModules compiled))
+    mapResult (uncurry (++)) (packageLinkInputs compiled)
   where
     snapshot = Snapshot (resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" False
     source = "struct Holder<T> { value: T }; fn bounded<T: Copy>(x: T) -> T [{ }] [{ affirm true; }] { affirm true; return x; }; fn generic<T>(xs: &List<T>) -> Int { return size(xs); }; xs = [1, 2]; h = Holder { value: xs }; return bounded(generic(&h.value));"
@@ -279,7 +276,7 @@ testLinkNative = TestList "testLinkNative"
             a <- case programData reachable of Error e -> pure (Error e); Ok t -> nativeFull ("pass link\nprune\n" ++ t)
             b <- case programData environments of Error e -> pure (Error e); Ok t -> nativeFull ("pass link\nenvironments\n" ++ t)
             pure $ firstFailure [checkLinked (Right "8e24846684e27bb1") (mapResult M.lowProgram a), checkLinked (Right "95fee80f9e8b2927") (mapResult M.lowProgram b), inspect (mapResult M.lowProgram b) environmentEffects]
-       , TestCase "native link keeps unused invalid functions until validation" $ case Compile.lowerSourceUsing bootstrapLoader False False "fn unused() -> Int [{ }] [{ affirm false; }] { return 0; }; return 0;" of
+       , TestCase "native link keeps unused invalid functions until validation" $ case Compile.lowerSourceUsing bootstrapLoader libPackage False False "fn unused() -> Int [{ }] [{ affirm false; }] { return 0; }; return 0;" of
             Error e -> pure (Just e)
             Ok p -> do
                 merged <- nativeMerge [(ModuleId "unpruned" Nothing,p)]

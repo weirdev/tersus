@@ -224,12 +224,13 @@ interfaces, builtin typing, trait resolution and diagnostics. The parser is done
 this is not a second parser rewrite. Keep occurrence typing and declaration
 ordering explicit (`AST_DATA.md`).
 
-Package loading and linking are also compiler work, not incidental CLI glue:
-`Modules`, `Interface`, `LibPackage`, `PackageCompile` and `Link` load the
-module graph, compile interfaces and library units, reject collisions, and
-retain reachable implementations; canonical names and library selection are
-the elaborator's ("Package resolution" below). Include the rest in the eventual
-frontend replacement instead of leaving it out of the roadmap.
+Package loading and linking are also compiler work, not incidental CLI glue.
+The host captures the filesystem snapshot and caches compiled libraries. The
+frontend resolves the graph, elaborates the units, and returns the library
+units to link in order, with the first contributor for each unit's declaration
+exclusions. The host finishes the returned MIR and applies those exclusions to
+the cached library units; native Link merges the ordered units and the existing
+copy and validation passes remain in place.
 
 #### Feasibility spike: findings
 

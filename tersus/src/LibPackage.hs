@@ -6,8 +6,9 @@ module LibPackage
     , nativeStorageUnitsWith
     , libModuleNames
     , libModuleId
-    , libSelection
+    , libUnit
     , libCatalog
+    , stripDeclaredFromUnit
     , stripDeclaredFromUnits
     , libraryBoundedNames
     ) where
@@ -121,7 +122,7 @@ libraryBoundedNames for = for `seq` unsafePerformIO (do
         Just Nothing -> names libPackage
         Just (Just (libraries, _)) -> names libraries)
   where
-    names (Ok pkg) = Set.fromList [name | (_, program) <- libSelection pkg libModuleNames, name <- Map.keys (M.progBounded program)]
+    names (Ok pkg) = Set.fromList [name | library <- libOrder pkg, name <- Map.keys (M.progBounded (libPrograms pkg Map.! library))]
     names (Error _) = Set.empty
 
 nativeStorageUnits :: Result NativeUnits String
@@ -134,39 +135,30 @@ nativeStorageUnits = snd bootstrapLibraries
 -- own declaration is the one the link must see, as it is the one the
 -- elaborator gave the program (lib/elaborate/libraries.tersus).
 stripDeclaredFromUnits :: [String] -> [(ModuleId, M.Program)] -> [(ModuleId, M.Program)]
-stripDeclaredFromUnits declared units = map strip units
+stripDeclaredFromUnits declared = map (stripDeclaredFromUnit (Set.fromList declared))
+
+stripDeclaredFromUnit :: Set.Set String -> (ModuleId, M.Program) -> (ModuleId, M.Program)
+stripDeclaredFromUnit declared (moduId, program) =
+    ( moduId
+    , program
+        { M.progTypes = Map.withoutKeys (M.progTypes program) declared
+        , M.progGenerics = Map.withoutKeys (M.progGenerics program) declared
+        , M.progInvariants = Map.withoutKeys (M.progInvariants program) declared
+        , M.progFunctions = Map.withoutKeys (M.progFunctions program) replacedBounded
+        , M.progBounded = Map.withoutKeys (M.progBounded program) declared
+        }
+    )
   where
-    declaredSet = Set.fromList declared
-    strip (moduId, program) =
-        ( moduId
-        , program
-            { M.progTypes = Map.withoutKeys (M.progTypes program) declaredSet
-            , M.progGenerics = Map.withoutKeys (M.progGenerics program) declaredSet
-            , M.progInvariants = Map.withoutKeys (M.progInvariants program) declaredSet
-            , M.progFunctions = Map.withoutKeys (M.progFunctions program) (replacedBounded program)
-            , M.progBounded = Map.withoutKeys (M.progBounded program) declaredSet
-            }
-        )
     -- (a function with bounds of the library that the module defines itself, as a replacement Eq's impls do, is the
     -- module's: a library's function with bounds is in its unit only to be copied, and the module's copies are of its own)
-    replacedBounded program =
-        Set.fromList (concat [name : M.boundedLifted bounded | (name, bounded) <- Map.toList (M.progBounded program), name `Set.member` declaredSet])
+    replacedBounded =
+        Set.fromList (concat [name : M.boundedLifted bounded | (name, bounded) <- Map.toList (M.progBounded program), name `Set.member` declared])
 
 libCatalog :: LibPackage -> [Library]
 libCatalog pkg = [Library name (Map.findWithDefault [] name (libImports pkg)) iface | name <- libOrder pkg, Just iface <- [Map.lookup name (libInterfaces pkg)]]
 
-libDependencyClosure :: LibPackage -> [String] -> [String]
-libDependencyClosure pkg pending = go pending []
-  where
-    go [] done = done
-    go (name : rest) done
-        | name `elem` done = go rest done
-        | otherwise = go (Map.findWithDefault [] name (libImports pkg) ++ rest) (done ++ [name])
-
--- The lowered units of the libraries selected for a module, closed over what they import (the list and Box types only
--- when selected), in the libraries' order, which the linked program's ghost statements follow
-libSelection :: LibPackage -> [String] -> [(ModuleId, M.Program)]
-libSelection pkg names =
-    let wanted = [name | name <- libDependencyClosure pkg names, name /= "types" || "types" `elem` names]
-     in [(libModuleId name, libPrograms pkg Map.! name) | name <- libOrder pkg, name `elem` wanted]
+libUnit :: LibPackage -> String -> Result (ModuleId, M.Program) String
+libUnit pkg name = case Map.lookup name (libPrograms pkg) of
+    Just program -> Ok (libModuleId name, program)
+    Nothing -> Error ("internal: no compiled unit for assembly library " ++ name)
 

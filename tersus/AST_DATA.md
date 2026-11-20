@@ -418,8 +418,10 @@ declarations and imports still shadow, and the libraries `types` and `clone` it 
 ## Opt-in assembly recipe
 
 `load package assembly` and `load program assembly` request the recipe in the
-same load. The modifier works with either ownership transport version. With no
-modifier, both request and response keep their existing form.
+same load. Production package and standalone compilation request it; parsing,
+graph, and library loads are unchanged. The modifier works with either
+ownership transport version. With no modifier, both request and response keep
+their existing form.
 
 After the package's `end`, a successful reply adds `assembly P M N` (the entry
 module, last in the module answers) and `N` lines of `library "NAME" P M`.

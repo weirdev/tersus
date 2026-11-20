@@ -372,16 +372,16 @@ directCalls (loaded, compiled, program) = firstFailure
         Just fn -> Set.fromList [callee | block <- Map.elems (M.fnBlocks fn), M.Call (M.Const (M.CFn callee)) _ _ _ <- [M.blockTerminator block]]
 
 supportUnitIdentity :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
-supportUnitIdentity (loaded, compiled, _) = inspect (lowerSupportUnit loaded compiled) $ \unit@(_, program) -> firstFailure
-    [ case (linkPrograms (libraries ++ [unit]), linkPrograms (libraries ++ [unit, unit])) of
+supportUnitIdentity (loaded, compiled, _) = inspect (libraries `bindResult` \libs -> mapResult ((,) libs) (lowerSupportUnit loaded compiled)) $ \(libs, unit@(_, program)) -> firstFailure
+    [ case (linkPrograms (libs ++ [unit]), linkPrograms (libs ++ [unit, unit])) of
         (Ok once, Ok twice) -> testAssertEq twice once
         (Error err, _) -> Just err
         (_, Error err) -> Just err
-    , testAssertErrorContains "inconsistent units" (linkPrograms (libraries ++ [unit, (supportId, program{M.progFunctions = Map.delete (supportName "lookupDecl") (M.progFunctions program)})]))
+    , testAssertErrorContains "inconsistent units" (linkPrograms (libs ++ [unit, (supportId, program{M.progFunctions = Map.delete (supportName "lookupDecl") (M.progFunctions program)})]))
     ]
   where
     -- (the copies of the libraries' functions with bounds that the unit calls are made from the libraries' units)
-    libraries = concat [Package.compiledLibUnits modu | modu <- Package.compiledModules compiled, Package.compiledModuleId modu == supportId]
+    libraries = Package.compiledLibUnits compiled
 
 lowerSupportUnit :: Mod.LoadedPackage -> Package.CompiledPackage -> Result (Mod.ModuleId, M.Program) String
 lowerSupportUnit loaded compiled =

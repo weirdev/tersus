@@ -18,14 +18,14 @@ import Lowering (lowerAccepted)
 import MirMoves (finishLowered)
 import ElaborateRequest (Extraction (..), Request (..), Response (..))
 import ElaboratorTool (sourceElaborator)
-import LibPackage (LibPackage (..), libPackage, libModuleId, libSelection, nativeStorageUnits)
+import LibPackage (LibPackage (..), libPackage, libModuleId, nativeStorageUnits, compileLibPackageWith, nativeStorageUnitsWith)
 import PreludeSource (libPackageFiles)
 import ElaborateRequest (LibraryAnswer (..), LoadKind (..), LoadRequest (..), LoadResponse (..))
 import ElaboratorTool (bootstrapLoader, sourceLoader)
 import Link (linkPrograms)
 import MirLists (lowerLists)
 import Types (Arg (..), Type (..), Size (..))
-import MirEval (fromMirValue, runProgram)
+import MirEval (fromMirValue, runProgram, MirValue (MInt))
 import Pipeline (compileModulesValidated, compileSource, ownedSource, erasedModuleProgram, ownedModuleProgram)
 import Syntax (Value (..))
 import TestHarness (Test (..), forceTestResult, testAssertEq, testAssertTrue, testCase)
@@ -104,7 +104,7 @@ testLibModules =
              [ testCase "compatible Eq keeps String equality" (runs (checkedSource (ownEq ++ "if \"a\" = \"a\" { return 1; }; return 0;")) (VInt 1))
              , testCase "suppressed eq helper is not exposed" (rejected (checkedSource (ownEq ++ "s = \"hi\"; a = Array::boxed(1, 1); return eqBoxedArrays(a, a);")) "eqBoxedArrays")
              , testCase "a replacement without cached Eq impls is unrestricted" (runs (checkedSource "trait Eq { }; return 7;") (VInt 7))
-             , testCase "supplied single-file AST is lowered without reparsing" (runs (Compile.lowerSourceUsing (\request -> sourceLoader request{lrResolver = (lrResolver request){Modules.resolverFiles = Map.fromList [("<source>", "return 9;")]}}) False True "@supplied-ast@") (VInt 9))
+             , testCase "supplied single-file AST is lowered without reparsing" (runs (Compile.lowerSourceUsing (\request -> sourceLoader request{lrResolver = (lrResolver request){Modules.resolverFiles = Map.fromList [("<source>", "return 9;")]}}) libPackage False True "@supplied-ast@") (VInt 9))
              , testCase "Drop source validates and retains its implementation" $ case checkedSource (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") of
                 Error err -> Just err
                 Ok program -> testAssertTrue (Map.member "<V as Drop>::drop" (M.progFunctions program))
@@ -202,9 +202,17 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     , testCase "implicit types expose no native Drop implementations" $ inspectPackage $ \pkg ->
         let iface = libInterfaces pkg Map.! "types"
          in testAssertTrue (Set.null (ifDrops iface) && Map.null (ifFunctions iface))
-    , testCase "implicit selection never reaches helper interfaces or units" $ inspectPackage $ \pkg ->
-        let units = libSelection pkg ["types", "prelude", "string", "map", "set"]
-         in testAssertTrue (all (\name -> libModuleId name `notElem` map fst units) ["lists", "box"])
+    , testCase "implicit selection never reaches helper interfaces or units" $
+        case Compile.lowerSourceUsing bootstrapLoader libPackage False False "s = \"a\"; return size(s.bytes);" of
+            Error err -> Just err
+            Ok p -> testAssertEq (runProgram p) (Ok (Just (MInt 1)))
+                <> testAssertTrue (all (`Map.notMember` M.progFunctions p) ["listNew", "boxNew"])
+    , testCase "a native helper failure does not fail the regular catalog" $
+        let loader rq = case bootstrapLoader rq of
+                LoadedLibraries answers _ -> LoadedLibraries (takeWhile ((/= "lists") . laName) answers) (Just "deliberate native storage failure")
+                other -> other
+         in testAssertEq (mapResult libOrder (compileLibPackageWith loader)) (mapResult libOrder libPackage)
+            <> testAssertEq (mapResult (const ()) (nativeStorageUnitsWith loader)) (Error "deliberate native storage failure")
     , testCase "each helper owns only its declared Drop implementation" $ inspectPackage $ \pkg ->
         testAssertEq [ifImpls (libInterfaces pkg Map.! name) | name <- ["lists", "box"]] [Set.singleton ("Drop", "List"), Set.singleton ("Drop", "Box")]
     , testCase "helper declarations use the authoritative type interfaces" $ inspectPackage $ \pkg ->

@@ -98,12 +98,15 @@ bootstrapLoader = withStageLoader 0
 {-# NOINLINE sourceLoader #-}
 sourceLoader :: Loader
 sourceLoader rq
-    | lrKind rq `elem` [LoadProgram, LoadPackage] = unsafePerformIO $ do
+    | needsTools (lrKind rq) = unsafePerformIO $ do
         ready <- sourceTools
         pure $ case ready of
             Error e -> NotLoaded e
             Ok () -> withStageLoader sourceStage rq
     | otherwise = withStageLoader sourceStage rq
+  where
+    needsTools (LoadPackageAssembly _) = True
+    needsTools kind = kind `elem` [LoadProgram, LoadProgramAssembly, LoadPackage]
 
 {-# NOINLINE sourceToolsReady #-}
 sourceToolsReady :: MVar Bool

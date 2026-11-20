@@ -1,21 +1,25 @@
-module TestDifferential (testDifferential, ergonomicsUnits, assemblyDifferentialWith) where
+module TestDifferential (testDifferential, ergonomicsUnits) where
 
 import AstData (writeBuiltinTable)
 import BuiltinTable (builtinTable)
+import CacheLock (openTempFileCloexec)
 import Compile (lowerSourceUsing, parseWithEquality, sourceRequest)
+import Control.Exception (bracket, evaluate)
 import Data.Char (ord)
-import Data.List (find, isInfixOf, isPrefixOf, isSuffixOf, nubBy)
+import Data.List (find, isInfixOf, isPrefixOf, isSuffixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import DataCodec (typeTokens)
-import LibPackage (LibPackage (..), compileLibPackageWith, libCatalog, libModuleId, libPackage, libSelection, stripDeclaredFromUnits)
+import LibPackage (LibPackage (..), compileLibPackageWith, libCatalog, libModuleId, libPackage)
 import Lowering (lowerAccepted)
 import qualified Mir as M
-import MirMoves (finishLowered)
 import MirEval (Outcome (..), RunEnv (..), runProgramEnv)
 import Modules (ModuleId (..))
 import qualified Modules as Mod
 import Numeric (showHex)
+import System.Directory (getTemporaryDirectory, removeFile)
+import System.IO (hClose)
+import System.Posix.Files (setFileMode)
 import qualified PackageCompile as Package
 import Pretty (renderType)
 import PreludeSource (elaboratePackageFiles)
@@ -27,7 +31,6 @@ import TestData (typeCheckSources)
 import TestHarness
 import qualified Data.ByteString.Char8 as B
 import ElaboratorTool (bootstrapLoader, frontendToolFailure, nativeLoader, runElaboratorRaw, sourceElaborator, sourceElaboratorExecutable)
-import PreludeSource (toolPackageFiles)
 import Utils
 
 ergonomicsUnits :: [Unit]
@@ -59,7 +62,7 @@ mutationControls = do
     let units = [SourceFile "examples/arithmetic.tersus", SourceFile "examples/rejected/type_argument_mismatch.tersus"]
     retyped <- runDifferential (perturbed retype) units
     reworded <- runDifferential (perturbed reword) units
-    unmodelled <- runDifferential (\asked -> mapResult (map (\(m, _) -> (m, NotModelled "everything"))) <$> throughText asked) units
+    unmodelled <- runDifferential (\asked -> mapResult (mapAnswers (const (NotModelled "everything"))) <$> throughText asked) units
     pure $ firstFailure
         [ expect "retyped" retyped (\o -> case o of Disagree _ -> True; _ -> o == Agree)
         , atLeastOne "retyped" retyped (\o -> case o of Disagree _ -> True; _ -> False)
@@ -68,7 +71,8 @@ mutationControls = do
         , expect "not modelled" unmodelled (\o -> case o of NotModelledBy _ -> True; _ -> False)
         ]
   where
-    perturbed change asked = mapResult (map (fmap change)) <$> throughText asked
+    perturbed change asked = mapResult (mapAnswers change) <$> throughText asked
+    mapAnswers change answer = answer{responses = map (fmap change) (responses answer)}
     retype response = case response of
         Accepted i ls (MirLowered unit) -> Accepted i ls (MirLowered (retypeFirst unit))
         other -> other
@@ -89,14 +93,14 @@ protocolRoundTrip = do
     requests <- mapM (unitRequests compilerFrontend) [SourceText name source | (name, source) <- take 8 typeCheckSources]
     case sequence (map resultList requests) of
         Left e -> pure (Just e)
-        Right exchanges -> case [(rq, r) | (AskedModule rq, answers) <- concat exchanges, (_, r) <- answers] of
+        Right exchanges -> case [(rq, r) | (AskedModule rq, answers) <- concat exchanges, (_, r) <- responses answers] of
             [] -> pure (Just "no requests")
             answered -> pure $ firstFailure (map (one . fst) answered ++ [malformed (fst (last answered))] ++ map verdict ([Refused "a \"refusal\"", RefusedInterface "in module p::m: no interface", Unresolved "in module p::m: unknown name q", NotModelled "what"] ++ withLibraries (map snd answered)))
   where
     resultList r = case r of
         Ok a -> Right a
         Error e -> Left e
-    withLibraries responses = take 1 [Accepted i ["types", "clone"] m | Accepted i _ m <- responses]
+    withLibraries answers = take 1 [Accepted i ["types", "clone"] m | Accepted i _ m <- answers]
     malformed rq = case (writeRequest rq, writeResponse (sourceElaborator rq)) of
         (Ok request, Ok response) ->
             let refused name r = case r of
@@ -316,47 +320,221 @@ checkedStatements = case parseWithEquality "trait Show { fn show(self: &Self) ->
                         Ok _ -> Just "accepted a checked count"
                 ]
 
-assemblyDifferential :: IO TestResult
-assemblyDifferential = sourceElaboratorExecutable >>= \exe -> case exe of
-    Ok path -> assemblyDifferentialWith path
-    Error e -> pure (Just e)
-
-assemblyDifferentialWith :: FilePath -> IO TestResult
-assemblyDifferentialWith path = case (libPackage, compileLibPackageWith (nativeLoader path)) of
-    (Ok pkg, Ok toolPkg) -> do
-        let tool = Mod.Snapshot (Mod.resolverFromFiles toolPackageFiles) "lib/mir/mir_erase/mir_erase.tersus" False
-            fixture = Mod.Snapshot (Mod.resolverFromFiles assemblyFiles) "assembly/main.tersus" False
-            checked = Mod.Snapshot (Mod.resolverFromFiles [("checked/package.tersus", ""), ("checked/main.tersus", "struct Cell { n: Int }; c = Cell { n: 2 }; xs = [c.n]; return size(xs);")]) "checked/main.tersus" False
-            pack catalog snap = (Mod.loadRequest LoadPackage snap){lrLibraries = libCatalog catalog}
-            program bare text = sourceRequest LoadProgram bare False (if bare then [] else libCatalog pkg) text
-            sourceCases =
-                [ (program False "xs = [1]; return size(xs);", ["types", "clone", "eq"], False)
-                , (program False "struct Box { n: Int }; b = Box { n: 2 }; s = \"hi\"; return b.n + size(s.bytes);", ["clone", "eq", "prelude", "string"], False)
-                , (program False "fn f() -> Int { struct Shape { n: Int }; return 3; }; s = \"hi\"; return f() + size(s.bytes);", ["types", "clone", "eq", "prelude", "string"], True)
-                , (program False "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; s = \"hi\"; return size(s.bytes);", ["types", "clone", "eq", "prelude", "string"], False)
-                , ((program True "struct Cell { n: Int }; c = Cell { n: 2 }; return c.n;"){lrProtocols = Just Map.empty}, [], False)
-                ]
-        toolCheck <- packageCheck path toolPkg tool (pack toolPkg tool) False
-        shadows <- packageCheck path pkg fixture (pack pkg fixture) True
-        checkedPackage <- case compileLibPackageWith (\rq -> nativeLoader path rq{lrProtocols = Just Map.empty}) of
-            Error e -> pure (Just ("checked catalog: " ++ e))
-            Ok checkedPkg -> packageCheck path checkedPkg checked ((pack checkedPkg checked){lrProtocols = Just Map.empty}) False
-        single <- mapM (\(request, names, nested) -> programCheck path pkg request names nested) sourceCases
-        refused <- packageRefusals path fixture (pack pkg fixture)
-        malformed <- malformedAssemblyRequests path (program False "return 1;") (program True "return 1;")
-        let denied = "return unknownVariable;"
-        programDenied <- assemblyExchange path (program True denied) LoadProgramAssembly
-        let deniedCheck = case programDenied of
-                Ok (old@LoadedProgram{}, optIn@LoadedProgram{}, _, []) -> check $
-                    let lower r = lowerSourceUsing (const r) True False denied
-                        expected = Error "Validation failed: Undefined variable: unknownVariable"
-                     in require (lower old == expected && lower optIn == expected) ("standalone refusal: " ++ show (lower optIn))
-                other -> Just ("expected a standalone refusal: " ++ take 250 (show other))
-        pure $ case [e | Just e <- toolCheck : shadows : checkedPackage : refused : malformed : deniedCheck : single] of
-            [] -> Nothing
-            failures -> Just (unlines failures)
+assemblyContract :: IO TestResult
+assemblyContract = sourceElaboratorExecutable >>= \exe -> case (exe, libPackage) of
     (Error e, _) -> pure (Just e)
     (_, Error e) -> pure (Just e)
+    (Ok path, Ok pkg) -> do
+        let program bare = sourceRequest LoadProgram bare False (if bare then [] else libCatalog pkg)
+        malformed <- malformedAssemblyRequests path (program False "return 1;") (program True "return 1;")
+        wire <- runAssembly path packageRequest{lrLibraries = libCatalog pkg}
+        checked <- checkedPackageAssembly
+        pure $ firstFailure
+            [ check (packageAssembly pkg)
+            , checked
+            , check packageDecoderRefusals
+            , check (standaloneAssembly pkg)
+            , check (assemblyRefusals pkg)
+            , check (checkMalformedAssembly packageRequest{lrLibraries = libCatalog pkg} wire)
+            , malformed
+            ]
+
+assemblyFiles :: [(FilePath, String)]
+assemblyFiles =
+    [ ("assembly/package.tersus", "")
+    , ("assembly/main.tersus", "import assembly::left { leftValue }; import assembly::right { rightValue }; import vendor::api { vendorValue }; struct Box { n: Int }; s = \"root\"; return size(s.bytes) + leftValue() + rightValue() + vendorValue();")
+    , ("assembly/left/left.tersus", "import assembly::leaf { leafValue }; fn leftValue() -> Int { return leafValue(); };")
+    , ("assembly/right/right.tersus", "import assembly::leaf { leafValue }; fn rightValue() -> Int { return leafValue(); };")
+    , ("assembly/leaf/leaf.tersus", "struct LeafShadow { n: Int }; fn leafValue() -> Int { s = \"leaf\"; return size(s.bytes) + LeafShadow { n: 1 }.n; };")
+    , ("vendor/package.tersus", "noPrelude = true;")
+    , ("vendor/api/api.tersus", "fn vendorValue() -> Int { return 2; };")
+    ]
+
+assemblySnapshot :: Mod.Snapshot
+assemblySnapshot = Mod.Snapshot (Mod.resolverFromFiles assemblyFiles) "assembly/main.tersus" False
+
+packageRequest :: LoadRequest
+packageRequest = Mod.loadRequest (LoadPackageAssembly (Mod.entryModuleOf assemblySnapshot)) assemblySnapshot
+
+packageAssembly :: LibPackage -> Either String ()
+packageAssembly pkg = do
+    let root = ModuleId "assembly" Nothing
+        leaf = ModuleId "assembly" (Just "leaf")
+        vendor = ModuleId "vendor" (Just "api")
+        names = ["types", "clone", "eq", "prelude", "string"]
+        request = packageRequest{lrLibraries = libCatalog pkg}
+        answer = bootstrapLoader request
+    case answer of
+        AssembledPackage entry rows answers -> do
+            require (entry == root && rows == [(name, leaf) | name <- names]) ("unexpected package recipe: " ++ show (entry, rows))
+            require ([selected | (m, _, Accepted _ selected _) <- answers, m == vendor] == [[]]) "the noPrelude dependency selected implicit libraries"
+        other -> Left ("expected package assembly: " ++ take 250 (show other))
+    let capture rq
+            | rq == request = answer
+            | otherwise = NotLoaded "wrong request for the stage catalog"
+    compiled <- resultEither (Package.compileModulesUsing capture (Ok pkg) assemblySnapshot)
+    leafLowered <- case [Package.compiledLowered m | m <- Package.compiledModules compiled, Package.compiledModuleId m == leaf] of
+        [found] -> resultEither found
+        _ -> Left "missing leaf"
+    private <- maybe (Left "missing canonical LeafShadow") Right (find ("$LeafShadow" `isSuffixOf`) (Set.toList (M.lowDeclared leafLowered)))
+    cached <- lookupOr "cached string unit" "string" (libPrograms pkg)
+    let sentinel = M.StructDecl []
+        withRootShadow = cached{M.progTypes = Map.insert "Box" sentinel (M.progTypes cached)}
+        withBoth = withRootShadow{M.progTypes = Map.insert private sentinel (M.progTypes withRootShadow)}
+        injected = pkg{libPrograms = Map.insert "string" withBoth (libPrograms pkg)}
+    cutover <- resultEither (Package.compileModulesUsing capture (Ok injected) assemblySnapshot)
+    (libraries, units) <- resultEither (Package.packageLinkInputs cutover)
+    expected <- traverse (\name -> (,) (libModuleId name) <$> if name == "string" then Right withRootShadow else lookupOr "cached unit" name (libPrograms pkg)) names
+    require (libraries == expected) "library units did not keep only the first contributor's exclusions"
+    require (map fst units == [leaf, ModuleId "assembly" (Just "left"), ModuleId "assembly" (Just "right"), vendor, root]) ("unexpected Link unit order: " ++ show (map fst units))
+
+packageDecoderRefusals :: Either String ()
+packageDecoderRefusals = do
+    let dep = ["module \"assembly\" \"leaf\"", "lowering 0"]
+        entry = ["module \"assembly\" none", "lowering 0", "refused \"later module refused\"", "end"]
+        refused = map B.pack (responseHeader : dep ++ ["refused \"earlier module refused\""] ++ entry)
+    case readLoadResponseBytes packageRequest refused of
+        Error "ElaborateRequest: expected end after a module refusal" -> pure ()
+        _ -> Left "the package decoder accepted another module after a terminal refusal"
+    earlier <- responseRecords (Accepted Nothing [] (MirRefused "deliberate lowering refusal"))
+    case readLoadResponseBytes packageRequest (map B.pack (responseHeader : dep ++ earlier ++ entry)) of
+        Ok (LoadedModules [(_, _, Accepted _ _ (MirRefused "deliberate lowering refusal")), (_, _, Refused "later module refused")]) -> pure ()
+        _ -> Left "the package decoder stopped at an accepted lowering refusal"
+
+checkedPackageAssembly :: IO TestResult
+checkedPackageAssembly = case fixture of
+    Left e -> pure (Just e)
+    Right (pkg, request, malformed) -> do
+        tmp <- getTemporaryDirectory
+        bracket (openTempFileCloexec tmp "tersus-assembly-reply") (removeFile . fst) $ \(exe, handle) -> do
+            B.hPutStr handle (B.unlines (map B.pack ["#!/bin/sh", "cat >/dev/null", "cat <<'ASSEMBLY_REPLY'"] ++ malformed ++ [B.pack "ASSEMBLY_REPLY"]))
+            hClose handle
+            setFileMode exe 0o700
+            evaluate $ case Package.compileModulesUsing (\rq -> nativeLoader exe rq{lrProtocols = lrProtocols request}) (Ok pkg) snapshot of
+                Error "Elaborator tool failure: AstData: unknown header" -> Nothing
+                other -> Just ("expected malformed checked ownership to fail as a tool: " ++ take 250 (show other))
+  where
+    loader rq = bootstrapLoader rq{lrProtocols = Just Map.empty}
+    snapshot = Mod.Snapshot (Mod.resolverFromFiles
+        [ ("checked/package.tersus", "")
+        , ("checked/dep/dep.tersus", "fn seed() -> Int { return 2; };")
+        , ("checked/main.tersus", "import checked::dep { seed }; struct Cell { n: Int }; c = Cell { n: seed() }; xs = [c.n]; return size(xs);")
+        ]) "checked/main.tersus" False
+    fixture = do
+        pkg <- resultEither (compileLibPackageWith loader)
+        let request = (Mod.loadRequest (LoadPackageAssembly (Mod.entryModuleOf snapshot)) snapshot){lrLibraries = libCatalog pkg, lrProtocols = Just Map.empty}
+        compiled <- resultEither (Package.compileModulesUsing loader (Ok pkg) snapshot)
+        (libraries, _) <- resultEither (Package.packageLinkInputs compiled)
+        require (not (null libraries) && all ((/= Nothing) . Package.compiledOwnership) (Package.compiledModules compiled))
+            "checked assembly discarded ownership facts or library units"
+        case loader request of
+            AssembledPackage _ _ [(_, _, AcceptedData depIface depLibs _ (Just depFacts)), (_, _, AcceptedData iface names mir (Just facts))] -> do
+                require (Map.member "Cell" (transportOwnership facts)) "checked fixture lacks a Cell ownership row"
+                dep <- responseRecords (AcceptedData depIface depLibs (MirRefused "earlier lowering refusal") (Just depFacts))
+                body <- responseRecords (AcceptedData iface names mir (Just facts{transportOwnership = Map.delete "Cell" (transportOwnership facts)}))
+                let start = [responseHeader, "module \"checked\" \"dep\"", "lowering 0"] ++ dep ++ ["module \"checked\" none", "lowering 1 \"checked\" \"dep\""]
+                    wire rows = map B.pack (start ++ rows ++ ["end"])
+                decoded <- resultEither (readLoadResponseBytes request (wire body) `bindResult` loadTransportMatches True)
+                case Package.compileModulesUsing (const decoded) (Ok pkg) snapshot `bindResult` Package.lowerCompiledPackage of
+                    Error "in module checked: the ownership facts omit the declared types Cell" -> pure ()
+                    other -> Left ("expected missing ownership to beat deferred lowering: " ++ take 250 (show other))
+                let header = "tersus-ast 2 ownership"
+                    malformed = wire [if line == header then "malformed ownership header" else line | line <- body]
+                case readLoadResponseBytes request malformed of
+                    Error "AstData: unknown header" -> Right (pkg, request, malformed)
+                    _ -> Left "the package decoder did not reject malformed ownership"
+            other -> Left ("expected two checked module answers: " ++ take 250 (show other))
+
+responseRecords :: Response -> Either String [String]
+responseRecords = fmap (drop 1 . lines) . resultEither . writeResponse
+
+standaloneAssembly :: LibPackage -> Either String ()
+standaloneAssembly pkg = do
+    mapM_ checkNames
+        [ ("xs = [1]; return size(xs);", ["types", "clone", "eq"])
+        , ("struct Box { n: Int }; b = Box { n: 2 }; s = \"hi\"; return b.n + size(s.bytes);", ["clone", "eq", "prelude", "string"])
+        , ("trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; s = \"hi\"; return size(s.bytes);", ["types", "clone", "eq", "prelude", "string"])
+        ]
+    cached <- lookupOr "cached string unit" "string" (libPrograms pkg)
+    let source = "fn f() -> Int { struct Shape { n: Int }; return 3; }; s = \"hi\"; return f() + size(s.bytes);"
+        marker = "AssemblyFixtureType"
+        sentinel = M.StructDecl []
+        conflicting = cached{M.progTypes = Map.insert marker sentinel (Map.insert "Shape" sentinel (M.progTypes cached))}
+        fixture = pkg{libPrograms = Map.insert "string" conflicting (libPrograms pkg)}
+        answer = bootstrapLoader (request source)
+    case answer of
+        AssembledProgram names response -> do
+            l <- resultEither (lowerAccepted response)
+            require ("string" `elem` names && Set.member "Shape" (M.lowNested l) && Set.notMember "Shape" (M.lowDeclared l)) "the standalone fixture needs a nested library shadow"
+        other -> Left ("expected standalone assembly: " ++ take 250 (show other))
+    base <- resultEither (lowerSourceUsing (const answer) (Ok pkg) False False source)
+    got <- resultEither (lowerSourceUsing (const answer) (Ok fixture) False False source)
+    require (got == base{M.progTypes = Map.insert marker sentinel (M.progTypes base)}) "standalone Link did not apply the nested shadow to the supplied cache"
+  where
+    request = sourceRequest LoadProgramAssembly False False (libCatalog pkg)
+    checkNames (source, expected) = case bootstrapLoader (request source) of
+        AssembledProgram names _ -> require (names == expected) ("unexpected standalone assembly: " ++ show names)
+        other -> Left ("expected standalone assembly: " ++ take 250 (show other))
+
+assemblyRefusals :: LibPackage -> Either String ()
+assemblyRefusals pkg = do
+    let broken = Mod.Snapshot (Mod.resolverFromFiles [(file, if file == "assembly/main.tersus" then "import assembly::leaf; return wrongName;" else source) | (file, source) <- assemblyFiles]) "assembly/main.tersus" False
+        err = Error "deliberate library failure"
+        noGraph rq | lrKind rq == LoadGraph = NotLoaded "graph unavailable"
+                   | otherwise = bootstrapLoader rq
+        refuse r expected = require (message r == Just expected) ("expected " ++ show expected ++ ", got " ++ show (message r))
+    refuse (Package.compileModulesUsing bootstrapLoader (Ok pkg) broken) "in module assembly: Undefined variable: wrongName"
+    refuse (Package.compileModulesUsing bootstrapLoader err broken) "in module assembly::leaf: deliberate library failure"
+    refuse (Package.compileModulesUsing noGraph err broken) "in module assembly::leaf: deliberate library failure"
+    let vendorFirst = Mod.Snapshot (Mod.resolverFromFiles [(file, if file == "assembly/main.tersus" then "import vendor::api; return wrongName;" else source) | (file, source) <- assemblyFiles]) "assembly/main.tersus" False
+    refuse (Package.compileModulesUsing bootstrapLoader err vendorFirst) "in module assembly: deliberate library failure"
+    refuse (Package.compileModulesUsing noGraph err vendorFirst) "in module vendor::api: deliberate library failure"
+    refuse (Package.compileModulesUsing bootstrapLoader err (assemblySnapshot{Mod.snapshotEntry = "unrelated/missing.tersus"})) "file not found: unrelated/missing.tersus"
+    let denied = "return unknownVariable;"
+    refuse (lowerSourceUsing bootstrapLoader err True False denied) "Validation failed: Undefined variable: unknownVariable"
+    case bootstrapLoader packageRequest{lrLibraries = libCatalog pkg} of
+        AssembledPackage root _ ((m, deps, Accepted iface selected _) : rest) -> do
+            let refused = (m, deps, Accepted iface selected (MirRefused "deliberate lowering refusal"))
+                lower answers = Package.compileModulesUsing (const (LoadedModules answers)) (Ok pkg) assemblySnapshot `bindResult` Package.lowerCompiledPackage
+            refuse (lower (refused : rest)) "Lowering failed: deliberate lowering refusal"
+            refuse (lower [refused, (root, [], Refused "later module refused")]) "in module assembly: later module refused"
+            refuse (lower [refused, (root, [], Accepted Nothing [] (MirRefused "unused"))]) "in module assembly: the elaborator gave no interface"
+        other -> Left ("expected complete package to mutate: " ++ take 250 (show other))
+  where
+    message (Error e) = Just e
+    message Ok{} = Nothing
+
+runAssembly :: FilePath -> LoadRequest -> IO (Result [B.ByteString] String)
+runAssembly path request = case writeLoadRequest request of
+    Error e -> pure (Error e)
+    Ok text -> runElaboratorRaw path text
+
+checkMalformedAssembly :: LoadRequest -> Result [B.ByteString] String -> Either String ()
+checkMalformedAssembly request wire = do
+    records <- resultEither wire
+    let (prefix, trailer) = break (B.pack "assembly " `B.isPrefixOf`) records
+        legacy = request{lrKind = LoadPackage}
+    case map B.unpack trailer of
+        header : a : b : more -> do
+            let mutateRow name p m = unwords ["library", show name, show p, m]
+                malformed =
+                    [ ("missing", [])
+                    , ("leading zero", unwords (init (words header) ++ ["0" ++ last (words header)]) : a : b : more)
+                    , ("overlong", header : a : b : more ++ ["extra"])
+                    , ("duplicate library", header : a : a : more)
+                    , ("catalog order", header : b : a : more)
+                    , ("unknown entry", ["assembly \"someone\" none 0"])
+                    , ("overlarge count", unwords (init (words header) ++ [show (toInteger (maxBound :: Int) + 1)]) : a : b : more)
+                    , ("unknown library", header : mutateRow "missing" "assembly" "\"leaf\"" : b : more)
+                    , ("unknown contributor", header : mutateRow "types" "missing" "none" : b : more)
+                    , ("contributor order", header : unwords (take 2 (words a) ++ ["\"assembly\"", "none"]) : b : more)
+                    ]
+            require (isError (readLoadResponseBytes legacy records)) "ordinary loader accepted an unsolicited recipe"
+            mapM_ (\(what, rows) -> require (isError (readLoadResponseBytes request (prefix ++ map B.pack rows))) ("accepted " ++ what ++ " assembly")) malformed
+        _ -> Left "assembly fixture did not give enough library rows"
+  where
+    isError Error{} = True
+    isError _ = False
 
 malformedAssemblyRequests :: FilePath -> LoadRequest -> LoadRequest -> IO TestResult
 malformedAssemblyRequests path full bare = case traverse (resultEither . writeLoadRequest) [full, bare, full{lrLibraries = take 1 (lrLibraries full) ++ lrLibraries full}] of
@@ -375,195 +553,6 @@ malformedAssemblyRequests path full bare = case traverse (resultEither . writeLo
         pure (firstFailure failures)
     Left e -> pure (Just e)
     _ -> pure (Just "missing malformed assembly request fixtures")
-
-assemblyFiles :: [(FilePath, String)]
-assemblyFiles =
-    [ ("assembly/package.tersus", "")
-    , ("assembly/main.tersus", "import assembly::left { leftValue }; import assembly::right { rightValue }; import vendor::api { vendorValue }; struct Box { n: Int }; s = \"root\"; return size(s.bytes) + leftValue() + rightValue() + vendorValue();")
-    , ("assembly/left/left.tersus", "import assembly::leaf { leafValue }; fn leftValue() -> Int { return leafValue(); };")
-    , ("assembly/right/right.tersus", "import assembly::leaf { leafValue }; fn rightValue() -> Int { return leafValue(); };")
-    , ("assembly/leaf/leaf.tersus", "struct LeafShadow { n: Int }; fn leafValue() -> Int { s = \"leaf\"; return size(s.bytes) + LeafShadow { n: 1 }.n; };")
-    , ("vendor/package.tersus", "noPrelude = true;")
-    , ("vendor/api/api.tersus", "fn vendorValue() -> Int { return 2; };")
-    ]
-
-assemblyExchange :: FilePath -> LoadRequest -> LoadKind -> IO (Result (LoadResponse, LoadResponse, [B.ByteString], [B.ByteString]) String)
-assemblyExchange path old kind = case (writeLoadRequest old, writeLoadRequest new) of
-    (Ok before, Ok after) -> do
-        a <- runElaboratorRaw path before
-        b <- runElaboratorRaw path after
-        pure $ a `bindResult` \legacy -> b `bindResult` \reply ->
-            case break (== '\n') before of
-                (header, '\n' : body)
-                    | let command = if lrKind old == LoadPackage then "load package" else "load program"
-                    , header == (if lrProtocols old == Nothing then "tersus-elaborate 1" else "tersus-elaborate 2")
-                    , takeWhile (/= '\n') body == command
-                    , after == header ++ "\n" ++ command ++ " assembly" ++ drop (length command) body
-                    , take (length legacy) reply == legacy ->
-                        decode old legacy `bindResult` \r0 -> decode new reply `bindResult` \r1 -> Ok (r0, r1, legacy, drop (length legacy) reply)
-                _ -> Error "assembly changed the legacy request or reply bytes"
-    (Error e, _) -> pure (Error e)
-    (_, Error e) -> pure (Error e)
-  where
-    new = old{lrKind = kind}
-    decode rq raw = readLoadResponseBytes rq raw `bindResult` loadTransportMatches (lrProtocols rq /= Nothing)
-
-packageCheck :: FilePath -> LibPackage -> Mod.Snapshot -> LoadRequest -> Bool -> IO TestResult
-packageCheck path pkg snap request shadows = do
-    exchanged <- assemblyExchange path request (LoadPackageAssembly entry)
-    pure $ case exchanged of
-        Ok (old@LoadedModules{}, AssembledPackage root rows answers, prefix, trailer) -> check $ do
-            compiled <- resultEither (Package.compileModulesUsing (const old) (Ok pkg) snap)
-            lowered <- traverse (\m -> (,) (Package.compiledModuleId m) <$> resultEither (Package.compiledLowered m)) (Package.compiledModules compiled)
-            let owners = Map.fromList lowered
-            usePkg <- if shadows then enrichShadowFixture pkg owners rows else Right pkg
-            oracle <- resultEither (Package.compileModulesUsing (const old) (Ok usePkg) snap)
-            users <- traverse (\(m, l) -> (,) m <$> resultEither (finishLowered l)) lowered
-            actual <- traverse (recipeUnit usePkg (fmap (Set.toList . M.lowDeclared) owners)) rows
-            let expected = nubBy (\a b -> fst a == fst b) (concatMap Package.compiledLibUnits (Package.compiledModules oracle)) ++ users
-            require (root == entry && map fst users == [m | (m, _, _) <- answers]) "package entry or module order changed"
-            require (actual ++ users == expected) "package recipe changed the full ordered inputs to Link"
-            case lrProtocols request of
-                Just _ -> require (not (null rows)) "checked package fixture selected no library units"
-                Nothing -> pure ()
-            if shadows then do
-                let vendor = ModuleId "vendor" (Just "api")
-                require ([selected | (m, _, Accepted _ selected _) <- answers, m == vendor] == [[]]) "the noPrelude dependency originally selected libraries"
-                require (all ((/= vendor) . snd) rows) "the noPrelude dependency contributed a library"
-                checkMalformedAssembly request prefix trailer
-            else pure ()
-        Ok (_, LoadedModules answers, _, _) -> Just ("package has no recipe: " ++ show [(m, verdict r) | (m, _, r) <- answers])
-        Error e -> Just e
-        Ok (_, other, _, _) -> Just ("expected successful package answer: " ++ take 300 (show other))
-  where
-    entry = Mod.entryModuleOf snap
-    verdict (Accepted _ _ MirLowered{}) = "lowered"
-    verdict (Accepted _ _ (MirRefused e)) = e
-    verdict r = show r
-
--- Non-entry declarations have canonical names. Seed the cached fixture with that exact
--- private type so both competing deletion sets change the same library in different ways.
-enrichShadowFixture :: LibPackage -> Map.Map ModuleId M.Lowered -> [(String, ModuleId)] -> Either String LibPackage
-enrichShadowFixture pkg owners rows = do
-    leaf <- lookupOr "leaf lowered unit" leafId owners
-    main <- lookupOr "main lowered unit" mainId owners
-    string <- lookupOr "cached string unit" "string" (libPrograms pkg)
-    private <- maybe (Left "no canonical LeafShadow declaration") Right (find ("$LeafShadow" `isSuffixOf`) (Set.toList (M.lowDeclared leaf)))
-    shape <- lookupOr "private fixture type" private (M.progTypes (M.lowProgram leaf))
-    let cached = string{M.progTypes = Map.insert private shape (M.progTypes string)}
-        stripped l = stripDeclaredFromUnits (Set.toList (M.lowDeclared l)) [(libModuleId "string", cached)]
-        both = stripDeclaredFromUnits (Set.toList (M.lowDeclared leaf <> M.lowDeclared main)) [(libModuleId "string", cached)]
-    require (lookup "string" rows == Just leafId) "the leaf did not contribute the first string unit"
-    require (stripped leaf /= stripped main && stripped leaf /= both && stripped main /= both) "shadow fixture does not distinguish first, last and union"
-    pure pkg{libPrograms = Map.insert "string" cached (libPrograms pkg)}
-  where
-    leafId = ModuleId "assembly" (Just "leaf")
-    mainId = ModuleId "assembly" Nothing
-
-recipeUnit :: LibPackage -> Map.Map ModuleId [String] -> (String, ModuleId) -> Either String (ModuleId, M.Program)
-recipeUnit pkg owners (name, owner) = do
-    cached <- lookupOr "cached library unit" name (libPrograms pkg)
-    declared <- lookupOr "exclusion owner" owner owners
-    case stripDeclaredFromUnits declared [(libModuleId name, cached)] of
-        [unit] -> Right unit
-        _ -> Left "the library edit did not retain the unit"
-
-programCheck :: FilePath -> LibPackage -> LoadRequest -> [String] -> Bool -> IO TestResult
-programCheck path pkg request names wantNested = do
-    exchanged <- assemblyExchange path request LoadProgramAssembly
-    pure $ case exchanged of
-        Ok (LoadedProgram r@(Accepted _ selected _), AssembledProgram recipe _, _, _) -> check $ do
-            l <- resultEither (lowerAccepted r)
-            user <- resultEither (finishLowered l)
-            let top = Set.toList (M.lowDeclared l)
-                declared = Set.toList (M.lowDeclared l <> M.lowNested l)
-            usePkg <- if wantNested then do
-                nested <- lookupOr "nested Shape declaration" "Shape" (M.progTypes (M.lowProgram l))
-                require (Set.member "Shape" (M.lowNested l) && not (Set.member "Shape" (M.lowDeclared l))) "the nested fixture did not isolate Shape"
-                string <- lookupOr "cached string unit" "string" (libPrograms pkg)
-                let cached = string{M.progTypes = Map.insert "Shape" nested (M.progTypes string)}
-                    fixture = pkg{libPrograms = Map.insert "string" cached (libPrograms pkg)}
-                    selectedUnits = libSelection fixture selected
-                require (stripDeclaredFromUnits top selectedUnits /= stripDeclaredFromUnits declared selectedUnits) "omitting nested declarations did not change a selected unit"
-                pure fixture
-                else pure pkg
-            let old = stripDeclaredFromUnits declared (libSelection usePkg selected) ++ [(owner, user)]
-            libs <- traverse (recipeUnit usePkg (Map.singleton owner declared) . (\name -> (name, owner))) recipe
-            require (recipe == names) ("unexpected standalone recipe: " ++ show recipe)
-            require (libs ++ [(owner, user)] == old) "standalone recipe changed the full ordered inputs to Link"
-        Error e -> Just e
-        other -> Just ("expected two successful program answers: " ++ take 300 (show other))
-  where
-    owner = ModuleId "main" Nothing
-
-packageRefusals :: FilePath -> Mod.Snapshot -> LoadRequest -> IO TestResult
-packageRefusals path fixture request = do
-    let entry = Mod.entryModuleOf fixture
-        broken = (Mod.resolverFromFiles [(file, if file == "assembly/main.tersus" then "import assembly::leaf; return wrongName;" else text) | (file, text) <- assemblyFiles])
-        badSnap = Mod.Snapshot broken "assembly/main.tersus" False
-        bad = request{lrResolver = broken}
-        failedLib rq = rq{lrLibraries = []}
-    partial <- assemblyExchange path bad (LoadPackageAssembly entry)
-    missing <- assemblyExchange path (request{lrEntry = Just ("unrelated/missing.tersus", False)}) (LoadPackageAssembly entry)
-    failed <- assemblyExchange path (failedLib bad) (LoadPackageAssembly entry)
-    pure $ check $ do
-        pkg <- resultEither libPackage
-        case partial of
-            Ok (old@(LoadedModules [(_, _, Accepted iface selected _), (lastId, _, _)]), optIn@LoadedModules{}, prefix, []) | lastId == entry -> do
-                let failure r = fmapError (Package.compileModulesUsing (const r) (Ok pkg) badSnap)
-                    expected = Just "in module assembly: Undefined variable: wrongName"
-                    extra = map B.pack ["module \"assembly\" \"extra\"", "lowering 0", "refused \"unexpected answer\"", "end"]
-                    mutated = init prefix ++ extra
-                    assembly = bad{lrKind = LoadPackageAssembly entry}
-                require (failure old == expected && failure optIn == expected) ("package partial refusal: " ++ show (failure optIn))
-                case readLoadResponseBytes bad mutated of
-                    Ok (LoadedModules [_, _, _]) -> pure ()
-                    _ -> Left "the legacy package decoder changed"
-                case readLoadResponseBytes assembly mutated of
-                    Error "ElaborateRequest: expected end after a module refusal" -> pure ()
-                    _ -> Left "an opt-in package accepted a module after its refusal"
-                mirRefusal <- resultEither (writeResponse (Accepted iface selected (MirRefused "deliberate lowering refusal")))
-                let continued = take 3 prefix ++ map B.pack (drop 1 (lines mirRefusal))
-                        ++ dropWhile (/= B.pack "module \"assembly\" none") prefix
-                case readLoadResponseBytes assembly continued of
-                    Ok (LoadedModules [(_, _, Accepted _ _ (MirRefused "deliberate lowering refusal")), (_, _, Refused _)]) -> pure ()
-                    _ -> Left "an accepted lowering refusal stopped a valid package prefix"
-            other -> Left ("expected partial package refusal: " ++ take 250 (show other))
-        case missing of
-            Ok (NotLoaded a, NotLoaded b, _, []) -> require (a == b && b == "file not found: unrelated/missing.tersus") ("terminal load refusal: " ++ b)
-            other -> Left ("expected terminal load refusal: " ++ take 250 (show other))
-        case failed of
-            Ok (old@LoadedModules{}, optIn@LoadedModules{}, _, []) ->
-                let failure r = fmapError (Package.compileModulesUsing (\rq -> if lrKind rq == LoadGraph then bootstrapLoader rq else r) (Error "deliberate library failure") badSnap)
-                 in require (failure old == failure optIn && failure optIn == Just "in module assembly::leaf: deliberate library failure") "library failure precedence changed"
-            other -> Left ("expected load answers without compiled libraries: " ++ take 250 (show other))
-  where
-    fmapError (Error e) = Just e
-    fmapError (Ok _) = Nothing
-
-checkMalformedAssembly :: LoadRequest -> [B.ByteString] -> [B.ByteString] -> Either String ()
-checkMalformedAssembly request prefix trailer = case map B.unpack trailer of
-    header : a : b : more -> do
-        let optIn = request{lrKind = LoadPackageAssembly (ModuleId "assembly" Nothing)}
-            mutateRow name p m = unwords ["library", show name, show p, m]
-            malformed =
-                [ ("missing", [])
-                , ("leading zero", unwords (init (words header) ++ ["0" ++ last (words header)]) : a : b : more)
-                , ("overlong", header : a : b : more ++ ["extra"])
-                , ("duplicate library", header : a : a : more)
-                , ("catalog order", header : b : a : more)
-                , ("unknown entry", ["assembly \"someone\" none 0"])
-                , ("overlarge count", unwords (init (words header) ++ [show (toInteger (maxBound :: Int) + 1)]) : a : b : more)
-                , ("unknown library", header : mutateRow "missing" "assembly" "\"leaf\"" : b : more)
-                , ("unknown contributor", header : mutateRow "types" "missing" "none" : b : more)
-                , ("contributor order", header : unwords (take 2 (words a) ++ ["\"assembly\"", "none"]) : b : more)
-                ]
-        require (isError (readLoadResponseBytes request (prefix ++ trailer))) "ordinary loader accepted an unsolicited recipe"
-        mapM_ (\(what, rows) -> require (isError (readLoadResponseBytes optIn (prefix ++ map B.pack rows))) ("accepted " ++ what ++ " assembly")) malformed
-    _ -> Left "assembly fixture did not give enough library rows"
-  where
-    isError Error{} = True
-    isError _ = False
 
 lookupOr :: Ord k => String -> k -> Map.Map k a -> Either String a
 lookupOr label key = maybe (Left ("missing " ++ label)) Right . Map.lookup key
@@ -588,7 +577,7 @@ testDifferential = TestList "testDifferential"
     , TestCase "a candidate's mistakes are not agreements" mutationControls
     , TestCase "the text protocol loses nothing" protocolAgreement
     , testCase "functions with bounds of the libraries in front of a program are checked too" checkedStatements
-    , TestCase "opt-in assembly preserves the exact ordered inputs to Link" assemblyDifferential
+    , TestCase "assembly preserves ordered Link inputs and refusals" assemblyContract
     , TestCase "malformed load requests are not answered" malformedLoads
     , testCase "the mir section reads back, and a unit that does not read is a tool failure" mirSection
     , TestCase "the elaborator's refusal words, arena checks and renumbering" elaboratorChecks
