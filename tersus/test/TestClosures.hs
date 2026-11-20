@@ -72,6 +72,13 @@ testClosures =
                 , testCase "a closure in a method reads the receiver" (runs "struct P { n: Int }; impl P { fn get(self: &Self) -> Int { f = fn() -> Int => self.n; return f(); }; }; p = P { n: 7 }; return p.get();" 7)
                 , testCase "a parameter named fn is a variable, not a closure" (runs "struct P { items: List<Int> }; fn count(fn: &P) -> Int { return size(fn.items); }; p = P { items: push(push([], 1), 2) }; return count(&p);" 2)
                 , testCase "a variable named fn used bare" (runs "fn len(fn: &List<Int>) -> Int { return size(fn); }; xs = push(push([], 7), 8); return len(&xs);" 2)
+                , testCase "a closure at the top calls a function of the program" (valid "fn inc(n: Int) -> Int { return n + 1; }; fn once<U, F: FnOnce() -> U>(f: F) -> U { return f(); }; return once(fn() -> Int => inc(1));")
+                , testCase "a closure at the top calls a function of the program, run" (runs "fn inc(n: Int) -> Int { return n + 1; }; fn apply<F: Fn(x: Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; g = fn(x: Int) -> Int => inc(x) * 10; return apply(&g, 1);" 20)
+                , testCase "a closure's call of a function is checked against its contract" (rejected "fn positive(n: Int) -> Int [{ affirm n > 0; }] [{ }] { return n; }; f = fn() -> Int => positive(0); return f();" "Could not prove: n > 0")
+                , testCase "a closure's contract follows from a function's" (valid "fn double(n: Int) -> Int [{ }] [{ affirm return = n * 2; }] { return n * 2; }; f = move fn(x: Int) -> Int [{ }] [{ affirm return = x * 2; }] => double(x); return f(3);")
+                , testCase "a closure in a function calls a function of the program" (valid "fn inc(n: Int) -> Int { return n + 1; }; fn go() -> Int { f = fn() -> Int => inc(1); return f(); }; return go();")
+                , testCase "map with a closure that calls a function of the program" (valid "fn double(x: Int) -> Int { return x * 2; }; xs = push(push([], 1), 2); ys = map(xs, fn(x) => double(x) + 1); return size(ys);")
+                , testCase "a local holding a function is still captured" (runs "fn inc(n: Int) -> Int { return n + 1; }; g = inc; f = fn() -> Int => g(1); return f();" 2)
                 , testCase "a closure over a type parameter of the enclosing function" (runs "fn countOf<T>(xs: &List<T>, n: Int) -> Int { f = fn() -> Int => size(xs) + n; return f(); }; return countOf(push(push([], 1), 2), 10);" 12)
                 , TestCase "many functions with lets and fn parameters" $ do
                     let defs = concat [ "fn f" ++ show i ++ "(fn: &List<Int>) -> Int { let a = size(fn); let b = a + " ++ show i ++ "; return b; }; " | i <- [1 .. 40 :: Integer] ]
