@@ -1,8 +1,9 @@
 module TestEmitterProvenance (testEmitterProvenance) where
 
-import Control.Exception (bracket, evaluate)
+import Control.Exception (bracket, bracket_, evaluate)
 import Control.Concurrent (forkFinally)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar, withMVar)
+import qualified Data.ByteString.Char8 as B
 import Data.Char (isHexDigit)
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust)
@@ -11,6 +12,7 @@ import System.Directory (createDirectory, createDirectoryIfMissing, getCurrentDi
     removeDirectoryRecursive, removeFile, setCurrentDirectory, createFileLink, listDirectory)
 import System.FilePath ((</>))
 import System.IO (hClose)
+import GHC.IO.Encoding (getLocaleEncoding, latin1, setLocaleEncoding, utf8)
 import BuildOptions (describeBuildOptions)
 import CacheLock (openTempFileCloexec)
 import EmitterProvenance (constructionIdentity, constructionIdentityFor, matchesConstruction, ordinaryBuildProfile, workingSourcesMatch, checkEmitterOutputs)
@@ -113,6 +115,29 @@ testEmitterProvenance = TestList "testEmitterProvenance"
         writeFile "lib/example.tersus" "return 4;"
         same <- workingSourcesMatch files
         pure (testAssertTrue same)
+    , TestCase "multibyte source matches only its exact encoding under the locale readFile uses" $ inSource $ \files -> do
+        let text = "captured \233 \10003 \128512"
+            captured = ("src/Provider.hs", text) : filter ((/= "src/Provider.hs") . fst) files
+            write bytes = B.writeFile "src/Provider.hs" (B.pack bytes)
+            encoded = "captured \xc3\xa9 \xe2\x9c\x93 \xf0\x9f\x98\x80"
+        original <- getLocaleEncoding
+        let under encoding = bracket_ (setLocaleEncoding encoding) (setLocaleEncoding original)
+        utf8Results <- under utf8 $ do
+            write encoded
+            exact <- workingSourcesMatch captured
+            write ("captured \xc3\xa8 \xe2\x9c\x93 \xf0\x9f\x98\x80")
+            sibling <- workingSourcesMatch captured
+            write (init encoded)
+            truncated <- workingSourcesMatch captured
+            write ("captured \xe0\x83\xa9 \xe2\x9c\x93 \xf0\x9f\x98\x80")
+            overlong <- workingSourcesMatch captured
+            write "\xed\xa0\x80"
+            surrogate <- workingSourcesMatch (("src/Provider.hs", "\xD800") : drop 1 captured)
+            pure (exact, sibling, truncated, overlong, surrogate)
+        write ("captured \xe9 \xe2\x9c\x93 \xf0\x9f\x98\x80")
+        latin <- under latin1 $
+            workingSourcesMatch (("src/Provider.hs", "captured \233 \226\156\147 \240\159\152\128") : drop 1 captured)
+        pure (testAssertEq (utf8Results, latin) ((True, False, False, False, False), True))
     , TestCase "deleting a checkout marker does not turn changed source into an installed binary" $ inSource $ \files -> do
         removeFile "package.yaml"
         writeFile "src/Provider.hs" "changed without marker"

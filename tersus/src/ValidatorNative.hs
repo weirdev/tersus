@@ -35,8 +35,7 @@ import MirEval (MirValue (..))
 import MirHousekeeping (cachedEmitter, cachedSourceEmitter, cachedUncheckedValidatorFrom,
     emitterIdentity, guardEmitterDirectory, cachedEmitterContentKeyFor, prepareValidatorFor, nativeStorage, prepareBootstrap,
     cachedPreparedInput)
-import EmitterProvenance (workingSourcesMatch)
-import PreludeSource (emitterSourceFiles)
+import EmitterProvenance (emitterSourcesMatch)
 import Native (cacheDirectory, cacheLock, cachedProgram, cachedProgramIfPresent, availableProcessors, parallelBuilds, runCommandWithInputFull, raiseStack)
 import SelfHostedMir (encode, encodeLibrary, obligationNote)
 import Syntax (parseImplCheckName)
@@ -192,7 +191,7 @@ withValidatorOperation producer key use = guardEmitterDirectory producer $ do
     saved <- newMVar Nothing
     let current = do
             let (pinned, _, _) = producer
-            same <- if pinned then workingSourcesMatch emitterSourceFiles else pure True
+            same <- if pinned then emitterSourcesMatch else pure True
             selected <- if same then emitterIdentity else pure (Error "validator source changed during validation")
             case selected of
                 Error e -> pure (Error e)
