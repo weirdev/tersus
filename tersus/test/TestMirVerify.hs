@@ -2,6 +2,8 @@
 
 module TestMirVerify (testMirVerify, testMirVerifyPrograms) where
 
+import Control.Concurrent.MVar (MVar, newMVar)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.List (isInfixOf)
 import ElaboratorTool (noVerdict)
 import qualified Data.Map.Strict as Map
@@ -19,8 +21,8 @@ import MirHousekeeping (storageProgram)
 import Types (Type (..), pattern TList, pattern TBox)
 import TestHarness
 import TestHeldReferences (forwardedUpdateSource)
-import TestMirReader (sameText, withProgram)
-import TestNative (nativeExamples, runExecutableBytes, unvalidatedPrograms, validatedPrograms)
+import TestMirReader (sameText, programExecutable)
+import TestNative (clangAvailable, nativeExamples, runExecutableBytes, unvalidatedPrograms, validatedPrograms)
 import Utils
 
 -- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (lib/mir/mir_verify/mir_verify.tersus): the check that a program
@@ -598,8 +600,19 @@ onEveryFunction change program =
         , progFunctions = Map.map change (progFunctions program)
         }
 
+{-# NOINLINE verifierExecutable #-}
+verifierExecutable :: MVar (Maybe FilePath)
+verifierExecutable = unsafePerformIO (newMVar Nothing)
+
 withVerifier :: (FilePath -> IO TestResult) -> IO TestResult
-withVerifier = withProgram "lib/mir/mir_verify/mir_verify.tersus" "mir-verify"
+withVerifier use = do
+    available <- clangAvailable
+    if not available then pure Nothing else do
+        built <- memoizedTestExecutable verifierExecutable
+            (programExecutable "lib/mir/mir_verify/mir_verify.tersus" "mir-verify")
+        case built of
+            Error e -> pure (Just e)
+            Ok exe -> use exe
 
 localExact :: String -> String -> String -> IO TestResult
 localExact input expected expectedErrors = do

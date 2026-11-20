@@ -163,7 +163,24 @@ fn main() -> Int {
 
 A program compiled from a package (LANGUAGE.md, Modules) reaches the MIR as one `Program`, exactly as a single-file program does; there is no module field in the MIR and no emitter, runtime or `MirData` change. What differs is the names. A declaration of the entry module keeps the bare name it has in a single-file program, so existing programs produce identical MIR. A declaration of any other module is renamed before lowering to its canonical name `package$module$file$Local` (the file segment is the file's stem, present even when the single-file collapse lets source spell it at module level): `modules$geo$shapes$Point` is the `Point` of `geo/shapes.tersus` in package `modules`, and an impl function of it is `<modules$geo$shapes$Point as Eq>::eq`. `$` cannot be written in a Tersus name, so a canonical name cannot collide with a name a program writes, and an import alias is purely a source spelling: it never changes a symbol. An `extern fn` is named `extern <C name>` in the MIR, in C's namespace, not its module's.
 
-Each module is lowered separately (by the elaborator, seeded with stub functions and type declarations from the interfaces of its direct imports, `Interface`), and `Link.linkPrograms` merges the units: type, generic-struct and invariant maps and the function map are keyed by canonical name, `progMain` is the entry module's, and the `GhostFunction` statements of the dependency units are prepended to the entry `progMain`, so the validator learns an imported function at a definition before the entry program that calls it. The same name defined by two units with different definitions is a link error naming both modules. Two copies of the same unit (a compiler-library unit selected by several modules) are deduplicated by unit identity; a definition identical to the one already linked merges, as does an `extern fn` whose signature and contract agree (compared by signature, not body). Compiler-library units keep their bare names (`String`, `HashMap`, `<String>::concat` and the like), so a user declaration colliding with a library name is such a link error. `Link.pruneProgram` then keeps only what the entry program reaches: functions and types named from `progMain` through calls (including function values), fields, locals and returns, the functions a kept contract names, and the drop and trait-impl functions of kept types. That is what a selective import links: visibility is limited at the import site, and linking is limited by reachability. The copy step (below) runs at the end of linking, and monomorphization (`MirMono`), validation, ghost erasure and the later passes run once on the linked program, unchanged.
+Each module is lowered separately (by the elaborator, seeded with stub functions and type declarations from the interfaces of its direct imports, `Interface`), and `Link.linkPrograms` merges the units: type, generic-struct and invariant maps and the function map are keyed by canonical name, `progMain` is the entry module's, and the `GhostFunction` statements of the dependency units are prepended to the entry `progMain`, so the validator learns an imported function at a definition before the entry program that calls it. The same name defined by two units with different definitions is a link error naming both modules. Two copies of the same unit (a compiler-library unit selected by several modules) are deduplicated by unit identity; a definition identical to the one already linked merges, as does an `extern fn` whose signature and contract agree (compared by signature, not body). Compiler-library units keep their bare names (`String`, `HashMap`, `<String>::concat` and the like), so a user declaration colliding with a library name is such a link error. `Link.pruneProgram` then keeps only what the entry program reaches: functions and types named from `progMain` through calls (including function values), fields, locals and returns, the functions a kept contract names, the functions a ghost expression reaches through a conditional's branches, a block expression's statements and result, and an ascribed expression (an ascription's type is not an expression), and the drop and trait-impl functions of kept types. That is what a selective import links: visibility is limited at the import site, and linking is limited by reachability. The copy step (below) runs at the end of linking, and monomorphization (`MirMono`), validation, ghost erasure and the later passes run once on the linked program, unchanged.
+
+## The native linking host
+
+`Link.hs` sends the merge, environment-completion and pruning requests to
+`lib/mir/link/` through the pinned emitter seed, avoiding a bootstrap cycle
+through stage 1. `pass link` is followed by `merge N` and N units, each
+`unit "package" none LINES` or `unit "package" some "module" LINES` followed
+by that many MIR3 lines, or by `prune` or `environments` and one MIR3 program.
+The answer is raw complete MIR3, or `1` with a refusal on stderr. The same
+emitter retains `pass mono`; there is no second carrier or metadata sidecar.
+
+The linker preserves the root main's entire original specification and loop
+environments while completing its ghosts. Dependency ghosts follow numeric
+block order. The host still runs `makeCopies (completeInstances ...)` after
+the merge, with the existing `Validation failed: ` error prefix. Pruning uses
+local processed-name sets to visit immutable function/type edge sources once,
+without changing reachability, implementation discovery or metadata scrubbing.
 
 ## The copy step (functions with bounds)
 
@@ -289,8 +306,8 @@ generic, bounded and instance metadata survive. The validation specialization
 path in `MirMono` retains its contracts, ghosts and cached named-type map.
 
 The emitter's `pass mono` entry reads strict, EOF-exact MIR3. The published
-matching seed runs this pass during cold builds; linking and pruning remain
-the Haskell `Link` pass. `TestMirMono` compares canonical raw bytes on raw and
+matching seed runs this pass during cold builds; linking and pruning use
+the native `Link` transport. `TestMirMono` compares canonical raw bytes on raw and
 pre-native-stage inputs, and the current host-validator group proves the pass.
 
 ## Moves
@@ -576,7 +593,7 @@ stack run tersus-exe -- check lib/mir/emit/emit.tersus              # prints OK
 | `mir/writer/writer.tersus` | Shared normalizing writer. `printProgram` writes MIR v1; `printProgramWithGhosts` writes MIR v2 with `ghost N` identities; `printProgramAsRead` writes MIR v1 with the `list` and `box` tokens of older data kept (the eraser's output). Structural type/size arguments and function metadata are retained |
 | `mir/ownership/ownership.tersus` | Declarations-only request dispatcher imported by the emitter. `pass ownership` or `pass expand` followed by MIR v2 produces MIR v2. `isOwnershipRequest` and `runOwnership` dispatch to the algorithms in `rewrite` and `refwrites`; `common`, `analysis` and `drops` provide their shared data and analyses. The host retains metadata sidecars; native monomorphization runs first through the full MIR3 codec |
 | `mir/mir_reader/mir_reader.tersus` | The round-trip entry: imports the shared reader and writer |
-| `mir/emit/emit.tersus` | Emitter entry and program assembly. It writes LLVM IR for MIR v1, dispatches `pass ownership` and `pass expand` over MIR v2, and runs `pass mono` over complete MIR3. The pinned emitter seed includes all three passes |
+| `mir/emit/emit.tersus` | Emitter entry and program assembly. It writes LLVM IR for MIR v1, dispatches `pass ownership` and `pass expand` over MIR v2, and runs `pass mono` and `pass link` over the shared complete MIR3 codec. The pinned emitter seed must contain both native-pass entries |
 | `mir/emit/types.tersus` | Emitter model, layouts, symbols, type closure and cached context; owns the module-local `String.then` |
 | `mir/emit/values.tersus` | Generation state, memory primitives, constants, operands and reference places |
 | `mir/emit/operations.tersus` | Arithmetic, array/address operations, rvalues, aggregate construction and statements |
