@@ -1,3 +1,4 @@
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PatternSynonyms #-}
 
 module MirData
@@ -11,14 +12,12 @@ module MirData
     ) where
 
 import Control.Monad (replicateM)
-import qualified Data.ByteString.Builder as Builder
-import qualified Data.ByteString.Builder.Prim as Prim
 import qualified Data.ByteString.Char8 as B
-import qualified Data.ByteString.Lazy as BL
-import Data.List (sort)
+import Data.List (mapAccumL, sort)
 import DataCodec
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import GHC.Exts (isTrue#, reallyUnsafePtrEquality#)
 
 import AstData (readMirPayloadBytes, writeMirPayloadLines)
 import Mir
@@ -434,7 +433,7 @@ bodyFrom (record : rest) stmts =
 -- Version 3: a lowered unit
 
 -- Shared environment IDs are assigned at their first reference, independently of payload IDs.
-data PayState = PayState Int [S.Statement] !(Map.Map B.ByteString Int) [Map.Map Variable Name]
+data PayState = PayState Int [S.Statement] !(Map.Map Part Int) [Part]
 
 newtype Pay a = Pay (PayState -> (a, PayState))
 
@@ -534,35 +533,43 @@ namesTokens names = show (length names) : map quote names
 envTokens :: Env -> [String]
 envTokens env = show (Map.size env) : concat [quote x : operandTokens o | (x, o) <- Map.toList env]
 
--- A separator outside the Char range makes this key exact, even for names containing NUL.
-sharedKey :: Map.Map Variable Name -> B.ByteString
-sharedKey = BL.toStrict . Builder.toLazyByteString . Map.foldrWithKey pair mempty
-  where
-    pair var name rest = chars var <> chars name <> rest
-    chars name = Prim.primMapListFixed (fromIntegral . fromEnum Prim.>$< Prim.word32LE) name <> Builder.word32LE 0x110000
+-- The functions an environment names, ordered as the list of its entries. Environments mostly hold the same strings for
+-- the names they share, and comparing those in place spares walking the long prefixes of the names over and over.
+newtype Part = Part [(Variable, Name)]
 
-sharedPart :: Env -> (Map.Map Variable Name, Env)
-sharedPart env = (Map.mapMaybe function env, Map.filter ((== Nothing) . function) env)
+instance Eq Part where
+    a == b = compare a b == EQ
+
+instance Ord Part where
+    compare (Part a) (Part b) = entries a b
+      where
+        entries ((x, n) : rest) ((y, m) : more) = string x y <> string n m <> entries rest more
+        entries [] [] = EQ
+        entries [] _ = LT
+        entries _ [] = GT
+        string s t = if isTrue# (reallyUnsafePtrEquality# s t) then EQ else compare s t
+
+sharedPart :: Env -> (Part, Env)
+sharedPart env = (Part [(x, n) | (x, Const (CFn n)) <- Map.toAscList env], Map.filter (not . function) env)
   where
     function o = case o of
-        Const (CFn n) -> Just n
-        _ -> Nothing
+        Const (CFn _) -> True
+        _ -> False
 
-sharedLine :: Map.Map Variable Name -> String
-sharedLine common = unwords ("shared" : envTokens (Map.map (Const . CFn) common))
+sharedLine :: Part -> String
+sharedLine (Part common) = unwords ("shared" : envTokens (Map.fromDistinctAscList [(x, Const (CFn n)) | (x, n) <- common]))
 
 envReference :: Env -> Pay [String]
 envReference env
-    | Map.null common = pure ("none" : envTokens own)
+    | null names = pure ("none" : envTokens own)
     | otherwise = Pay $ \state@(PayState n stmts ids commons) ->
-        let key = sharedKey common
-         in case Map.lookup key ids of
-                Just ident -> (show ident : envTokens own, state)
-                Nothing ->
-                    let ident = Map.size ids
-                     in (show ident : envTokens own, PayState n stmts (Map.insert key ident ids) (common : commons))
+        case Map.lookup common ids of
+            Just ident -> (show ident : envTokens own, state)
+            Nothing ->
+                let ident = Map.size ids
+                 in (show ident : envTokens own, PayState n stmts (Map.insert common ident ids) (common : commons))
   where
-    (common, own) = sharedPart env
+    (common@(Part names), own) = sharedPart env
 
 validationsPayload :: [S.ValidationStatement] -> S.Statement
 validationsPayload = S.Block . map S.ValidationStatement
@@ -652,7 +659,7 @@ loweredFrom payloads records0 =
                 recordsWhile boundedRecord r2' `bindResult` \(bounded, r2'') ->
                 recordsWhile instanceRecord r2'' `bindResult` \(instances, r3) ->
                 recordsWhile sharedRecord r3 `bindResult` \(shared, r3') ->
-                let tables = Tables payloads (Map.fromList (zip [0 ..] shared)) in
+                let tables = Tables payloads (Map.fromList (zip [0 ..] (internShared shared))) in
                 functionsFrom tables r3' `bindResult` \(fns, fnUses, r4) ->
                     mainFrom tables r4 `bindResult` \(mainFn, mainUses, r5) ->
                         trailer r5 `bindResult` \(copies, linear, drops, stubs, declared, nested, (assumes, assumeUses)) ->
@@ -826,6 +833,21 @@ envP (Tables _ shared) = word >>= \w -> base w >>= \common -> (`Map.union` commo
         | w == "none" = pure Map.empty
         | Just i <- decimal w, i >= 0, i < toInteger (Map.size shared), Just env <- Map.lookup (fromInteger i) shared = pure env
         | otherwise = failP ("no shared environment " ++ w)
+
+-- (the parts repeat nearly the same names: reading each name once lets every environment made of them hold the same
+-- strings, which the writer compares in place)
+internShared :: [Env] -> [Env]
+internShared = snd . mapAccumL part Map.empty
+  where
+    part seen env = fmap Map.fromDistinctAscList (mapAccumL entry seen (Map.toAscList env))
+    entry seen (x, o) =
+        let (seen', x') = intern seen x
+         in case o of
+                Const (CFn n) -> let (seen'', n') = intern seen' n in (seen'', (x', Const (CFn n')))
+                _ -> (seen', (x', o))
+    intern seen name = case Map.lookup name seen of
+        Just known -> (seen, known)
+        Nothing -> (Map.insert name name seen, name)
 
 entriesP :: P Env
 entriesP = itemCount >>= \n -> replicateM n ((,) <$> name <*> operandP) >>= \pairs ->
