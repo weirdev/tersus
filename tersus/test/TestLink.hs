@@ -35,7 +35,8 @@ import PreludeSource (toolPackageFiles)
 import Hash (fingerprint)
 import TestMirData (everyRecord, malformedLowered)
 import qualified Syntax as S
-import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), FnContract (..), FnClause (..), FnClauseToken (..), pattern TList, pattern TBox)
+import Types (Type (..), Arg (..), Size (..), BuiltinFunct (..), FnContract (..), FnClause (..), FnClauseToken (..), OwnershipFacts (..))
+import TestStorage (pattern TList, pattern TBox)
 import TestHarness
 import Utils
 
@@ -200,7 +201,7 @@ realInputChecks = do
         (_, Error e) -> pure (Just e)
         (Ok units, Ok prepared) -> do
             captured <- newIORef Nothing
-            let capture inputs = unsafePerformIO (writeIORef captured (Just inputs) >> pure (ProductionLink.linkPrograms inputs))
+            let capture libraries own = unsafePerformIO (writeIORef captured (Just (libraries ++ own)) >> pure (ProductionLink.linkWithLibraries libraries own))
                 aligned = Housekeeping.eraseGhosts prepared `bindResult` Housekeeping.expandRefWrites `bindResult` MirLists.lowerListsWith capture (Ok units)
             helperProgram <- evaluate aligned
             inputs <- readIORef captured
@@ -368,7 +369,7 @@ testLinkNative = TestList "testLinkNative"
                             , withRecords ["ownership 2", negative, negative]
                             ]
                         -- (a function with bounds' facts of the types its body names, after its bounded record)
-                        bounded <- case programData empty{M.progBounded = Map.singleton "f" (M.BoundedFn [] [] [] [])} of
+                        bounded <- case programData empty{M.progBounded = Map.singleton "f" (M.BoundedFn [] [] [] [] [])} of
                             Error e -> pure (Just e)
                             Ok boundedText -> do
                                 let withFacts rows = unlines (takeWhile (not . isFunctionLine) (lines boundedText) ++ rows ++ dropWhile (not . isFunctionLine) (lines boundedText))
@@ -461,6 +462,33 @@ testLinkNative = TestList "testLinkNative"
                     results <- mapM prune [boxedText, withStorage boxedText, constantText, withStorage constantText]
                     -- (without the checked protocols the program names no storage, and neither instance is kept)
                     pure $ testAssertEq results [("", []), ("", ["L<Int>"]), ("", []), ("", ["L<Int>"])]
+       , TestCase "host ownership keeps the checked receipt's facts of a held instance's copies and of an instance nothing holds" $ do
+            let w t = TNamed "W" [ArgType t]
+                v t = TNamed "V" [ArgType t]
+                local n t = (M.Local n, M.LocalDecl t Nothing)
+                template n self = (function n 0){M.fnParams = [M.Local 1], M.fnTypeParams = ["T"], M.fnLocals = Map.fromList [local 0 TInt, local 1 self], M.fnBorrowed = [M.Local 1 | n == "cloneW"]}
+                mainFn = (function "" 0){M.fnLocals = Map.fromList [local 0 TInt, local 1 (w TInt)], M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Assign (M.Local 1) (M.MakeData "W<Int>" [("x", M.Const (M.CInt 1))]), M.Assign (M.Local 0) (M.Use (M.Const (M.CInt 0)))] M.Return)}
+                facts = Map.fromList
+                    [ ("W<Int>", OwnershipFacts Nothing (Just ("D", "dropW")) (Just ("C", "cloneW")) Nothing)
+                    , ("V<Bool>", OwnershipFacts Nothing (Just ("D", "dropV")) Nothing Nothing)
+                    ]
+                program = empty
+                    { M.progGenerics = Map.fromList [("W", (["T"], [("x", TParam "T")])), ("V", (["T"], [("x", TParam "T")]))]
+                    , M.progFunctions = Map.fromList [("dropW", template "dropW" (w (TParam "T"))), ("cloneW", template "cloneW" (TRef (w (TParam "T")))), ("dropV", template "dropV" (v (TParam "T")))]
+                    , M.progMain = mainFn
+                    , M.progOwnership = Just facts
+                    }
+            pure $ case Housekeeping.insertOwnership program of
+                Error e -> Just e
+                Ok owned -> firstFailure
+                    -- (the held instance's facts name its copies; V<Bool>'s row, which nothing holds, is the receipt's as it was)
+                    [ testAssertEq (M.progOwnership owned) (Just (Map.fromList
+                        [ ("W<Int>", OwnershipFacts Nothing (Just ("D", "dropW<Int>")) (Just ("C", "cloneW<Int>")) Nothing)
+                        , ("V<Bool>", OwnershipFacts Nothing (Just ("D", "dropV")) Nothing Nothing)
+                        ]))
+                    , testAssertEq (Map.keys (M.progFunctions owned)) ["cloneW<Int>", "dropW<Int>"]
+                    , testAssertTrue (not (null [() | M.BasicBlock stmts _ <- Map.elems (M.fnBlocks (M.progMain owned)), M.Drop (M.Local 1) <- stmts]))
+                    ]
        , TestCase "actual emitter Mono and fused ownership make and free the copies a held instance's checked facts select" $ do
             let w t = TNamed "W" [ArgType t]
                 v t = TNamed "V" [ArgType t]
@@ -599,7 +627,7 @@ linked units = mergeInput units `bindResult` responseProgram `bindResult` copies
 
 copiesForUnits :: [(ModuleId, M.Program)] -> M.Program -> Result M.Program String
 copiesForUnits units program =
-    case makeCopiesWith library (M.completeInstances program) of
+    case makeCopiesWith library Nothing (M.completeInstances program) of
         Error e -> Error ("Validation failed: " ++ e)
         ok -> ok
   where
@@ -728,7 +756,7 @@ libraryBoundedRetention = do
     templates = ["libraryUsed", "libraryUnused"]
     library = empty
         { M.progFunctions = Map.fromList [(name, (function name 1){M.fnTypeParams = ["T"]}) | name <- templates]
-        , M.progBounded = Map.fromList [(name, M.BoundedFn [] [] [] []) | name <- templates]
+        , M.progBounded = Map.fromList [(name, M.BoundedFn [] [] [] [] []) | name <- templates]
         }
     root = empty
         { M.progInstances = Map.singleton "libraryUsed[Int]" ("libraryUsed", [ArgType TInt])
@@ -767,7 +795,7 @@ firstFailure (Just e : _) = Just e
 firstFailure (Nothing : rest) = firstFailure rest
 
 empty :: M.Program
-empty = M.Program Map.empty Map.empty (function "" 0){M.fnReturns = Nothing, M.fnLocals = Map.empty, M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)} Map.empty Map.empty Map.empty Map.empty
+empty = M.Program Map.empty Map.empty (function "" 0){M.fnReturns = Nothing, M.fnLocals = Map.empty, M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)} Map.empty Map.empty Map.empty Map.empty Map.empty Nothing
 
 function :: String -> Integer -> M.Function
 function n value = M.Function n [] (Just TInt) (Map.singleton (M.Local 0) (M.LocalDecl TInt Nothing))
@@ -817,7 +845,7 @@ linkCases =
     withType ty p = p{M.progTypes = Map.singleton "T" (M.StructDecl [("x", ty)])}
     withGeneric n = empty{M.progGenerics = Map.singleton "T" ([n], [("x", TArrayOf TInt (SizeParam n))])}
     withInvariant b = empty{M.progInvariants = Map.singleton "T" [S.ProofAssert (S.CTerm (S.VBool b))]}
-    withBounded n = empty{M.progBounded = Map.singleton "f" (M.BoundedFn [n] [] [] [])}
+    withBounded n = empty{M.progBounded = Map.singleton "f" (M.BoundedFn [n] [] [] [] [])}
     withInstance ty = empty{M.progInstances = Map.singleton "copy" ("f", [ArgType ty])}
     externContract b = (program [("extern package$puts", 1)]){M.progFunctions = Map.singleton "extern package$puts" (function "extern package$puts" 1){M.fnSpec = M.emptySpec{M.specRequires = [S.ProofAssert (S.CTerm (S.VBool b))]}}}
     ghostUnit n = withMain empty [M.Ghost Map.empty (M.GhostPosition n 1), M.Ghost Map.empty (M.GhostValidation (S.ProofAssert (S.CTerm (S.VInt (toInteger n)))))] M.Return
