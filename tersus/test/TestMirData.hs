@@ -272,6 +272,7 @@ testMirLowered =
             , TestCase "the stubs of imported functions are dropped" (pure finishedStubs)
             ]
         , testCase "a unit with every kind of record" (loweredRoundTrip everyRecord)
+        , testCase "shared environments keep their first-seen IDs and exact names" sharedEnvironmentOrder
         , TestList "malformed" [testCase label (refusedLowered expected broken) | (label, expected, broken) <- malformedLowered]
         , TestList
             "what the data cannot hold"
@@ -601,6 +602,34 @@ everyRecord =
             , fnFrom = []
             , fnSpec = emptySpec
             }
+
+sharedEnvironmentOrder :: TestResult
+sharedEnvironmentOrder = case writeLowered fixture of
+    Error e -> Just e
+    Ok text
+        | filter ("shared " `isPrefixOf`) (lines text) /= ["shared 1 \"z\" const fn \"a\\x00b\"", "shared 1 \"a\" const fn \"\\xC4\\x80\"", "shared 1 \"a\" const fn \"\\x00\""] -> Just ("shared rows differ: " ++ show (filter ("shared " `isPrefixOf`) (lines text)))
+        | filter (\line -> any (`isPrefixOf` line) ["env ", "ghost position "]) (lines text)
+            /= ["env 0 0", "ghost position 1 0 1 1", "ghost position 0 1 \"n\" copy 1 2 1", "ghost position 2 0 3 1", "ghost position none 0 4 1", "env 1 0"] -> Just "shared references or inline operands changed"
+        | otherwise -> loweredRoundTrip fixture
+  where
+    one var name = Map.singleton var (Const (CFn name))
+    first = one "z" "a\0b"
+    second = one "a" "\x100"
+    third = one "a" "\0"
+    original = lowProgram everyRecord
+    fixture = everyRecord{lowProgram = original
+        { progFunctions = Map.adjust change "f" (progFunctions original)
+        , progMain = (progMain original){fnSpec = emptySpec{specEnv = second}}
+        }}
+    change fn = fn
+        { fnSpec = emptySpec{specEnv = first}
+        , fnBlocks = Map.singleton (BlockId 0) (BasicBlock
+            [ Ghost second (GhostPosition 1 1)
+            , Ghost (Map.insert "n" (Copy (Local 1)) first) (GhostPosition 2 1)
+            , Ghost third (GhostPosition 3 1)
+            , Ghost Map.empty (GhostPosition 4 1)
+            ] Return)
+        }
 
 refusedLowered :: String -> ([String] -> [String]) -> TestResult
 refusedLowered expected broken = case writeLowered everyRecord of

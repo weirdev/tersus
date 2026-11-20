@@ -11,8 +11,11 @@ module MirData
     ) where
 
 import Control.Monad (replicateM)
+import qualified Data.ByteString.Builder as Builder
+import qualified Data.ByteString.Builder.Prim as Prim
 import qualified Data.ByteString.Char8 as B
-import Data.List (sort, sortOn)
+import qualified Data.ByteString.Lazy as BL
+import Data.List (sort)
 import DataCodec
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -430,8 +433,10 @@ bodyFrom (record : rest) stmts =
 
 -- Version 3: a lowered unit
 
--- The payloads met so far while writing, last first, and how many there are
-newtype Pay a = Pay ((Int, [S.Statement]) -> (a, (Int, [S.Statement])))
+-- Shared environment IDs are assigned at their first reference, independently of payload IDs.
+data PayState = PayState Int [S.Statement] !(Map.Map B.ByteString Int) [Map.Map Variable Name]
+
+newtype Pay a = Pay (PayState -> (a, PayState))
 
 instance Functor Pay where
     fmap f (Pay g) = Pay (\s -> let (a, s') = g s in (f a, s'))
@@ -444,21 +449,21 @@ instance Monad Pay where
     Pay g >>= f = Pay (\s -> let (a, s1) = g s; Pay h = f a in h s1)
 
 payload :: S.Statement -> Pay String
-payload stmt = Pay (\(n, stmts) -> (show n, (n + 1, stmt : stmts)))
+payload stmt = Pay (\(PayState n stmts ids commons) -> (show n, PayState (n + 1) (stmt : stmts) ids commons))
 
 writeLowered :: Lowered -> Result String String
 writeLowered lowered = case unwritable (lowProgram lowered) of
     problem : _ -> Error ("MirData: " ++ problem)
-    [] -> mapResult (\payloadLines -> unlines (mirLines ++ ("data " ++ show (length payloadLines)) : payloadLines)) (writeMirPayloadLines (reverse payloads))
+    [] -> mapResult (\payloadLines -> unlines (header ++ map sharedLine (reverse commons) ++ mirLines ++ ("data " ++ show (length payloadLines)) : payloadLines)) (writeMirPayloadLines (reverse payloads))
   where
     Pay run = loweredLines lowered
-    (mirLines, (_, payloads)) = run (0, [])
+    ((header, mirLines), PayState _ payloads _ commons) = run (PayState 0 [] Map.empty [])
 
-loweredLines :: Lowered -> Pay [String]
+loweredLines :: Lowered -> Pay ([String], [String])
 loweredLines lowered = do
     invariants <- mapM invariantLine (Map.toList (progInvariants program))
-    functions <- mapM (functionLines3 shared "function") (Map.elems (progFunctions program))
-    mainLines <- functionLines3 shared "main" (progMain program)
+    functions <- mapM (functionLines3 "function") (Map.elems (progFunctions program))
+    mainLines <- functionLines3 "main" (progMain program)
     assumes <- mapM (payload . either (S.ValidationStatement . S.Assume) S.Return) (lowAssumes lowered)
     pure
         ( "tersus-mir 3"
@@ -467,8 +472,7 @@ loweredLines lowered = do
             ++ invariants
             ++ map boundedLine (Map.toList (progBounded program))
             ++ map instanceLine (Map.toList (progInstances program))
-            ++ map (sharedLine . fst) (sortOn snd (Map.toList shared))
-            ++ concat functions
+        , concat functions
             ++ mainLines
             ++ [ namesLine "copies" (lowCopies lowered)
                , namesLine "linear" (lowLinear lowered)
@@ -481,7 +485,6 @@ loweredLines lowered = do
         )
   where
     program = lowProgram lowered
-    shared = sharedEnvironments program
     namesLine w names = unwords (w : namesTokens (Set.toList names))
     genericLine (n, (sizes, fields)) = unwords (["generic", quote n] ++ namesTokens sizes ++ [show (length fields)] ++ concatMap fieldTokens fields)
     boundedLine (n, BoundedFn sizes copy lifted loops) = unwords (["bounded", quote n] ++ namesTokens sizes ++ namesTokens copy ++ namesTokens lifted ++ [show (length loops)] ++ concatMap packLoopTokens loops)
@@ -531,19 +534,12 @@ namesTokens names = show (length names) : map quote names
 envTokens :: Env -> [String]
 envTokens env = show (Map.size env) : concat [quote x : operandTokens o | (x, o) <- Map.toList env]
 
--- The functions an environment names, which are the program's functions at the top and repeat in nearly every
--- environment: each such part is written once, numbered in the order it is met
-type Shared = Map.Map (Map.Map Variable Name) Int
-
-sharedEnvironments :: Program -> Shared
-sharedEnvironments program = foldl add Map.empty [common | env <- environments, let common = fst (sharedPart env), not (Map.null common)]
+-- A separator outside the Char range makes this key exact, even for names containing NUL.
+sharedKey :: Map.Map Variable Name -> B.ByteString
+sharedKey = BL.toStrict . Builder.toLazyByteString . Map.foldrWithKey pair mempty
   where
-    add table key = if Map.member key table then table else Map.insert key (Map.size table) table
-    environments =
-        concat
-            [ specEnv (fnSpec f) : map loopEnv (Map.elems (specLoops (fnSpec f))) ++ [env | BasicBlock stmts _ <- Map.elems (fnBlocks f), Ghost env _ <- stmts]
-            | f <- Map.elems (progFunctions program) ++ [progMain program]
-            ]
+    pair var name rest = chars var <> chars name <> rest
+    chars name = Prim.primMapListFixed (fromIntegral . fromEnum Prim.>$< Prim.word32LE) name <> Builder.word32LE 0x110000
 
 sharedPart :: Env -> (Map.Map Variable Name, Env)
 sharedPart env = (Map.mapMaybe function env, Map.filter ((== Nothing) . function) env)
@@ -555,10 +551,18 @@ sharedPart env = (Map.mapMaybe function env, Map.filter ((== Nothing) . function
 sharedLine :: Map.Map Variable Name -> String
 sharedLine common = unwords ("shared" : envTokens (Map.map (Const . CFn) common))
 
-envReference :: Shared -> Env -> [String]
-envReference shared env =
-    let (common, own) = sharedPart env
-     in maybe "none" show (Map.lookup common shared) : envTokens own
+envReference :: Env -> Pay [String]
+envReference env
+    | Map.null common = pure ("none" : envTokens own)
+    | otherwise = Pay $ \state@(PayState n stmts ids commons) ->
+        let key = sharedKey common
+         in case Map.lookup key ids of
+                Just ident -> (show ident : envTokens own, state)
+                Nothing ->
+                    let ident = Map.size ids
+                     in (show ident : envTokens own, PayState n stmts (Map.insert key ident ids) (common : commons))
+  where
+    (common, own) = sharedPart env
 
 validationsPayload :: [S.ValidationStatement] -> S.Statement
 validationsPayload = S.Block . map S.ValidationStatement
@@ -569,17 +573,18 @@ terminationTokens = maybe (pure "none") (\t -> payload (S.While alwaysTrue [] (J
 alwaysTrue :: S.Expression
 alwaysTrue = S.Val (S.VBool True)
 
-functionLines3 :: Shared -> String -> Function -> Pay [String]
-functionLines3 shared kind fn = do
+functionLines3 :: String -> Function -> Pay [String]
+functionLines3 kind fn = do
     requires <- payload (validationsPayload (specRequires spec))
     ensures <- payload (validationsPayload (specEnsures spec))
     termination <- terminationTokens (specTermination spec)
+    env <- envReference (specEnv spec)
     loops <- mapM loopLine (Map.toList (specLoops spec))
     blocks <- mapM blockLines (Map.toList (fnBlocks fn))
     pure
         ( headerText kind fn
             : unwords (["spec", "requires", requires, "ensures", ensures, "termination", termination, "writes"] ++ namesTokens (specWrites spec) ++ ["mutparams"] ++ namesTokens (specMutParams spec) ++ ["from"] ++ namesTokens (specFrom spec))
-            : unwords ("env" : envReference shared (specEnv spec))
+            : unwords ("env" : env)
             : localLines fn
             ++ loops
             ++ concat blocks
@@ -590,14 +595,17 @@ functionLines3 shared kind fn = do
     loopLine (header, LoopSpec invariant term env body) = do
         p <- payload (validationsPayload invariant)
         t <- terminationTokens term
-        pure (unwords (["loop", blockText header, "body", blockText body, "invariant", p, "termination", t, "env"] ++ envReference shared env))
+        ref <- envReference env
+        pure (unwords (["loop", blockText header, "body", blockText body, "invariant", p, "termination", t, "env"] ++ ref))
     blockLines (b, BasicBlock stmts term) = do
-        texts <- mapM (statementText3 shared) stmts
+        texts <- mapM statementText3 stmts
         pure (("block " ++ blockText b) : texts ++ [terminatorText term])
 
-statementText3 :: Shared -> Statement -> Pay String
-statementText3 shared s = case s of
-    Ghost env g -> unwords . ("ghost" :) <$> ghostTokens (envReference shared env) g
+statementText3 :: Statement -> Pay String
+statementText3 s = case s of
+    Ghost env g -> do
+        ref <- envReference env
+        unwords . ("ghost" :) <$> ghostTokens ref g
     _ -> pure (statementText s)
 
 ghostTokens :: [String] -> GhostStatement -> Pay [String]
