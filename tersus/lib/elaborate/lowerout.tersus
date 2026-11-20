@@ -17,7 +17,7 @@ fn noMir(msg: String) -> MirOut ~ { return MirOut { ok: false, msg: msg, lines: 
 
 // The lowering of an accepted module (its elaborated program, out) against the interfaces it is lowered with, in their
 // order
-fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, storage: &List<String>) -> MirOut ~ {
+fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, storage: &List<String>, unitKey: &String) -> MirOut ~ {
     problem = arenasProblem(out, ifaces, table);
     if size(problem.bytes) > 0 { return noMir(lwCat("Lowering: ", &problem)); };
     src = joinArena(out, ifaces, table);
@@ -25,7 +25,7 @@ fn lowerUnit(out: &AstProgram, ifaces: &List<AstProgram>, table: &AstProgram, st
     if !(root is AstNode::Elaborated) { return noMir("Lowering: the elaborated program is not one"); };
     e = (root as AstNode::Elaborated).value;
     stmts = listItems(&src.nodes, e.statements);
-    ls = newLowSt(size(src.nodes));
+    ls = newLowSt(size(src.nodes), clone(unitKey));
     if size(storage) = 3 { ls = LowSt { listName: clone(get(storage, 0)), boxName: clone(get(storage, 1)), copyName: clone(get(storage, 2)), ..ls }; };
     elab = [];
     for t in listItems(&src.nodes, e.types) {

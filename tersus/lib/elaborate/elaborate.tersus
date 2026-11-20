@@ -9,7 +9,7 @@ import elaborate::libraries { Catalog, Hide, Lib, Probe, declaredNames, localNam
 import elaborate::decls { fileDeclarations };
 import elaborate::resolve { Decl, Imp, Line, Maps, PFile, Pkg, countAt, finishPackage, mapsFor, moduleKey, noPackage, readLine, startsWithByte, wordIs };
 import elaborate::rewrite { Prepared, prepareModule };
-import elaborate::out { emit, emitStatements, emitTypes, hexByte, quotedName };
+import elaborate::out { emit, emitStatements, emitTypes, hexText, quotedName };
 import elaborate::records { codecTypeAt, codecTypesAt, fieldCodecTypes, fieldNames, fromCodec, fromCodecs, functionTypeFrom, listItems, nameText, namesText, nativeFn, nodeIn, sigData, signatureOf };
 import elaborate::refs { putRefResult, refResultIndex, traitResultFrom };
 import elaborate::state { CtorInfo, FnSig, Generic, ImplArgs, St, TE, Template, indexIn, intText, noBoundedParts, notModelled, oneScope , protocolName };
@@ -608,26 +608,17 @@ fn readProtocols() -> Protocols ~ {
 // status: St.status, or -1 when the request does not give a library it names
 // lowered: 0 when the module was not lowered, 1 when mir holds its MIR, 2 when the lowering refused it (mir.msg)
 // (storage: the checked List, Box and Copy providers, which the lowering gives the list and Box syntax and Copy bounds of declarations)
-struct Answer { status: Int, msg: String, out: AstProgram, iface: AstProgram, facts: AstProgram, extracting: Bool, selected: List<String>, storage: List<String>, lowered: Int, mir: MirOut };
+struct Answer { status: Int, msg: String, out: AstProgram, iface: AstProgram, facts: AstProgram, extracting: Bool, selected: List<String>, storage: List<String>, unitKey: String, lowered: Int, mir: MirOut };
 
 fn unitAnswer(st: &St, out: AstProgram, iface: AstProgram, facts: AstProgram, extracting: Bool, selected: List<String>) -> Answer ~ {
     storage = push(push(push([], protocolName(st, "List")), protocolName(st, "Box")), protocolName(st, "Copy"));
-    return Answer { status: st.status, msg: clone(st.msg), out: out, iface: iface, facts: facts, extracting: extracting, selected: selected, storage: storage, lowered: 0, mir: noMir("") };
+    return Answer { status: st.status, msg: clone(st.msg), out: out, iface: iface, facts: facts, extracting: extracting, selected: selected, storage: storage, unitKey: clone(st.unitKey), lowered: 0, mir: noMir("") };
 };
 
 fn noProgram(stage: String) -> AstProgram ~ { return AstProgram { stage: stage, nodes: [], root: 0 }; };
 
 fn malformedAnswer() -> Answer ~ {
-    return Answer { status: 0 - 1, msg: "", out: noProgram("elaborated"), iface: noProgram("interface"), facts: noProgram("ownership"), extracting: false, selected: [], storage: [], lowered: 0, mir: noMir("") };
-};
-
-fn generatedUnitKey(key: &String) -> String ~ {
-    bytes = [];
-    for b in &key.bytes {
-        c = toInt(b);
-        bytes = push(push(bytes, hexByte(c / 16)), hexByte(c % 16));
-    };
-    return String { bytes: bytes };
+    return Answer { status: 0 - 1, msg: "", out: noProgram("elaborated"), iface: noProgram("interface"), facts: noProgram("ownership"), extracting: false, selected: [], storage: [], unitKey: "", lowered: 0, mir: noMir("") };
 };
 
 fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, AstProgram>) -> Answer ~ {
@@ -651,7 +642,7 @@ fn elaborateUnit(table: &AstProgram, unit: Unit, seenBlocks: &HashMap<String, As
     preparing = withLibraryImports(&pkg, &unit.stdPkg, &chosen, &modKey, &unit.pkgName, &program.nodes, &raw);
     prepared = preparedProgram(program, raw, &preparing, &modKey);
     stmts = prepared.stmts;
-    st = St { nodes: prepared.nodes, unitKey: generatedUnitKey(&modKey), wireVersion: unit.wireVersion, wireProtocols: clone(unit.wireProtocols), storageCopies: unit.libExtract && (unit.pkgName = "std" || unit.pkgName = "tersuslib") && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
+    st = St { nodes: prepared.nodes, unitKey: hexText(&modKey), wireVersion: unit.wireVersion, wireProtocols: clone(unit.wireProtocols), storageCopies: unit.libExtract && (unit.pkgName = "std" || unit.pkgName = "tersuslib") && unit.hasModule && (unit.modu = "lists" || unit.modu = "box"), ..st };
     if unit.libExtract && unit.hasModule && (unit.pkgName = "std" || unit.pkgName = "tersuslib") && unit.modu = "prelude" {
         for s in &stmts {
             stmt = stmtOf(&st, s);
@@ -809,7 +800,7 @@ fn withMir(a: Answer, ifaces: &List<AstProgram>, table: &AstProgram) -> Answer ~
         root = nodeIn(&iface.nodes, iface.root);
         if root is AstNode::OwnershipInterface { plain = push(plain, reorderArena(&iface.nodes, (root as AstNode::OwnershipInterface).base, "interface")); } else { plain = push(plain, clone(iface)); };
     };
-    m = lowerUnit(&a.out, &plain, table, &a.storage);
+    m = lowerUnit(&a.out, &plain, table, &a.storage, &a.unitKey);
     lowered = 2;
     if m.ok { lowered = 1; };
     return Answer { lowered: lowered, mir: m, ..a };

@@ -1,10 +1,13 @@
 module TestClosures (testClosures, closureAdder, closureCounter, closureModuleFiles) where
 
+import Data.List (isPrefixOf)
+import qualified Data.Map.Strict as Map
+import qualified Mir
 import qualified MirEval
 import Pipeline (compileSource)
 import Syntax
 import TestHarness
-import Utils (Result (..), bindResult)
+import Utils (Result (..), bindResult, mapResult)
 
 -- Phase 1 of the closures plan: Fn/FnMut/FnOnce bounds, minted traits, function objects.
 -- Plan: ~/notes/users/wweirather/.claude/plans/tersus-closures-master-plan.md (Phase 1)
@@ -111,7 +114,15 @@ testClosures =
                 ]
             , TestList
                 "thin function contracts"
-                [ testCase "conversion checks weaker precondition and stronger postcondition with positional names"
+                [ testCase "a let shadow does not turn the outer contracted call into a function-value call"
+                    (checked (increment ++ "{ let step = 7; step = step + 1; affirm step = 8; }; return step(41);") 42)
+                , testCase "an assignment in another function does not reassign the contracted function"
+                    (checked (increment ++ "fn local(step: Int) -> Int { if step > 0 { step = step + 1; }; return step; }; ignored = local(40); return step(41);") 42)
+                , testCase "assigning the actual function binding in a nested block changes the call target"
+                    (checked "fn step(x: Int) -> Int { return x + 1; }; fn twice(x: Int) -> Int { return x * 2; }; if 1 > 0 { step = twice; }; return step(21);" 42)
+                , testCase "an assignment can initialize the binding before its function declaration"
+                    (checked "fn twice(x: Int) -> Int { return x * 2; }; step = twice; n = step(10); fn step(x: Int) -> Int { return x + 2; }; return n + step(20);" 42)
+                , testCase "conversion checks weaker precondition and stronger postcondition with positional names"
                     (checked (increment ++ "let f: " ++ positiveStep ++ " = step; r = f(41); affirm r > 41; return r;") 42)
                 , testCase "different argument names and positions are preserved at call"
                     (checked ("fn sub(a: Int, b: Int) -> Int [{ affirm a > b; }] [{ affirm return = a - b; }] { return a - b; }; let f: fn(x: Int, y: Int) -> Int [{ affirm x > y; }] [{ affirm return = x - y; }] = sub; r = f(43, 1); affirm r = 42; return r;") 42)
@@ -145,6 +156,19 @@ testClosures =
                     (rejects (increment ++ "fn use<F: Fn(Int) -> Int>(f: &F, x: Int) -> Int { return f(x); }; let g: " ++ positiveStep ++ " = step; return use(g, 41);") "Could not prove")
                 , testCase "a builtin through a pointer checks its declared input at the call"
                     (rejects "let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; let xs: List<Int> = []; return f(xs);" "size(xs) > 0")
+                , TestCase "builtin values with the same label link across packages and instantiations" $ do
+                    program <-
+                        programFromFiles
+                            "pkgs/app/main.tersus"
+                            [ ("pkgs/app/package.tersus", "")
+                            , ("pkgs/app/main.tersus", "import ints::heads as ints; import bools::heads as bools; if bools::headBool() { return ints::headInt() + bools::headInt(); }; return 0;")
+                            , ("pkgs/ints/package.tersus", "")
+                            , ("pkgs/ints/heads.tersus", "fn headInt() -> Int { let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; return f([20]); };")
+                            , ("pkgs/bools/package.tersus", "")
+                            , ("pkgs/bools/heads.tersus", "fn headBool() -> Bool { let f: fn(xs: &List<Bool>) -> Bool [{ affirm size(xs) > 0; }] = first; return f([true]); }; fn headInt() -> Int { let f: fn(xs: &List<Int>) -> Int [{ affirm size(xs) > 0; }] = first; return f([22]); };")
+                            ]
+                    let wrappers = mapResult (length . filter ("builtin::first#" `isPrefixOf`) . Map.keys . Mir.progFunctions) program
+                    pure (testAssertEq (wrappers, program `bindResult` MirEval.runProgram) (Ok 3, Ok (Just (MirEval.MInt 42))))
                 , testCase "a plain function value meets FnMut and FnOnce"
                     (checked "fn inc(x: Int) -> Int { return x + 1; }; fn mutate<F: FnMut(Int) -> Int>(f: &mut F) -> Int { return f(19); }; fn once<F: FnOnce(Int) -> Int>(f: F) -> Int { return f(21); }; p = inc; return mutate(p) + once(p);" 42)
                 , testCase "termination cannot be justified by hiding recursion through a callback"
