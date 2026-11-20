@@ -415,6 +415,29 @@ consecutive sources named `module/file`, and the modules are compiled as the pac
 (`std$core$types$List`); a program is then given its selected libraries as imports of the names it spells, which its own
 declarations and imports still shadow, and the libraries `types` and `clone` it would select are the module `core`.
 
+## Opt-in assembly recipe
+
+`load package assembly` and `load program assembly` request the recipe in the
+same load. The modifier works with either ownership transport version. With no
+modifier, both request and response keep their existing form.
+
+After the package's `end`, a successful reply adds `assembly P M N` (the entry
+module, last in the module answers) and `N` lines of `library "NAME" P M`.
+`NAME` identifies a unit from the request catalog; `P M` identifies the first
+module whose declaration exclusions apply to that unit. The order is module
+answer order, then catalog order within each contributor, skipping units already
+named by an earlier contributor. For a program, the successful reply adds only
+`assembly N "NAME"...` in catalog order; the single program is the contributor.
+Neither form repeats user units or transports library MIR. A refusal, lowering
+refusal, or a package answer with no entry has no recipe.
+
+The link selection walks the compiled catalog over the closure of the original
+library selection. `types` is eligible only when directly selected. This is not
+the lowering interface list: the latter also carries defining contexts and
+module dependencies and applies its own Eq filter. A module with effective
+`noPrelude` contributes no implicit libraries. The failed-library diagnostic's
+separate graph request is unchanged.
+
 ## Versioned ownership transport migration
 
 The compatibility prerequisite keeps `tersus-elaborate 1` and `tersus-ast 1`
