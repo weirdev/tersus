@@ -1,7 +1,7 @@
 import data::codec::codec { Token };
 import mir::full::full { FullProgram, fullAt };
 import mir::full::tokens { name, textAt, word, wordIs, intToken };
-import mir::full::write { FullOutput, outputFull, emitFull };
+import mir::full::write { FullOutput, outputFull, emitFull, sortRecords };
 import mir::mono::mono { monomorphize };
 import mir::mono::types { monoTuple };
 import mir::reader::reader { ghostProgramAt };
@@ -37,7 +37,8 @@ fn checkedMeta(p: &FullProgram) -> Meta ~ {
     rows = push([], push(push(push([], word("storage")), name(protocolOf(p, "List"))), name(protocolOf(p, "Box"))));
     rows = push(rows, push(push([], word("ownership")), intToken(size(p.types))));
     roles = push(push(push([], "Drop"), "Clone"), "Deref");
-    for d in &p.types {
+    // (in the order of the declarations the program as data writes, sorted by name)
+    for d in sortRecords(clone(p.types)) {
         at = 0 - 1;
         for i in 0..size(p.ownership) { if get(&p.ownership, i).name = d.name { at = i; }; };
         if at >= 0 && at < size(p.ownership) {
