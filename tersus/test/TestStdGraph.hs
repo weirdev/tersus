@@ -36,6 +36,11 @@ testStdGraph = TestList "testStdGraph"
     , testCase "a program's own Eq is its build's Eq, not std's" $
         runs [("app/package.tersus", "Eq = main::Eq;"), ("app/main.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; struct P { a: Int }; impl Eq for P { }; p = P { a: 1 }; if p = p { return 1; }; return 0;")] "1"
             <> providerIs [("app/package.tersus", "Eq = main::Eq;"), ("app/main.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; struct P { a: Int }; impl Eq for P { }; p = P { a: 1 }; if p = p { return 1; }; return 0;")] "Eq" "Eq"
+    , -- (the package's Eq, declared in one module, is the role in every module of the package, where std's is not given)
+      testCase "a package's own Eq in another module is the build's Eq" $
+        runs [("app/package.tersus", "Eq = own::Eq;"), ("app/own/own.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; struct P { a: Int }; impl Eq for P { };"), ("app/main.tersus", "import app::own { P }; p = P { a: 1 }; if p = p { return 1; }; return 0;")] "1"
+    , testCase "two visible providers of Eq are refused" $
+        refused [("app/package.tersus", "Eq = a::Eq;\nEq = b::Eq;"), ("app/a/a.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; };"), ("app/b/b.tersus", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; };"), ("app/main.tersus", "import app::a { Eq }; import app::b; return 0;")] "provider"
     , testCase "a package's own Clone provider clones its types" $
         runs (boundPackage "Clone = main::Clone;" "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct P { a: Int }; impl Clone for P { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { return P { a: self.a + 0 }; }; }; p = P { a: 7 }; q = p.clone(); return q.a;") "7"
     , testCase "two providers of one role in one build are refused" $

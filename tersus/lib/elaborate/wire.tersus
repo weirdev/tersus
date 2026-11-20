@@ -325,7 +325,8 @@ fn wireInstantiations(st: St) -> St ~ {
                         if e.key != clone(c.callee) && size(e.value) = 2 && get(e.value, 0) >= get(range, 0) && get(e.value, 1) <= get(range, 1) { inner = push(push(inner, get(e.value, 0)), get(e.value, 1)); };
                     };
                     t = get(range, 0);
-                    while t < get(range, 1) [{ affirm t >= 0; }] shrinks get(range, 1) - t {
+                    rangeEnd = get(range, 1);
+                    while t < rangeEnd [{ affirm t >= 0; }] shrinks rangeEnd - t {
                         nested = false;
                         m = 0;
                         while m + 1 < size(inner) [{ affirm m >= 0; }] shrinks size(inner) - m {
